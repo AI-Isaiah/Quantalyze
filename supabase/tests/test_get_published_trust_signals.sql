@@ -53,6 +53,22 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_get_published_trust_signals.sql
+--
+-- ⭐ RED-UNDER ANNOTATIONS (Phase 164.4). Each assertion below carries a prose
+-- `RED-UNDER:` naming the smallest production change that makes it fail, and a
+-- machine-readable `RED-UNDER-M:` twin the mutation runner applies on a
+-- throwaway pg-lane cluster to PROVE it reds on its own arm, then restores
+-- GREEN. Schema: scripts/mutation-runner/GRAMMAR.md. The line below declares
+-- what the lane applies before this gate.
+-- ⚠️ THE OBJECT UNDER TEST IS THE REAL SECDEF. Every twin mutates mig 135's own
+-- body — the published-gate predicate, the projection or the RETURNS TABLE
+-- allow-list. 18-fixture-trust-signals.sql adds only
+-- `strategy_verifications.created_at`, the recency axis of the function's
+-- DISTINCT ON; the gate seeds one verification per strategy, so no arm here can
+-- be decided by it.
+-- ⚠️ ASSERTION 5 CARRIES NO TWIN, and the reason is MEASURED, not an oversight
+-- — see the note above it.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","scripts/pg-lane/fixtures/18-fixture-trust-signals.sql","supabase/migrations/20260719140000_get_published_trust_signals.sql"]}
 
 -- --------------------------------------------------------------------------
 -- Defensive pre-clean (a prior aborted run may have committed synthetic rows).
@@ -106,6 +122,12 @@ BEGIN
   SET LOCAL ROLE anon;
 
   -- (1) published strategy's signal IS returned (positive control + harness proof)
+  -- RED-UNDER: point the published-gate at a status no row ever carries —
+  --            `s.status = 'published'` becomes `'published_never'` in mig 135's
+  --            body. The function then returns nothing at all and this positive
+  --            control, which is what makes assertion 2's zero MEAN something,
+  --            goes dark.
+  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"edit","file":"supabase/migrations/20260719140000_get_published_trust_signals.sql","find":"   WHERE s.status = 'published'\n     AND sv.strategy_id = ANY(p_strategy_ids)","replace":"   WHERE s.status = 'published_never'\n     AND sv.strategy_id = ANY(p_strategy_ids)","occurrences":1}]}
   SELECT count(*) INTO signal_count
     FROM get_published_trust_signals(ARRAY[strat_pub]);
   IF signal_count <> 1 THEN
@@ -114,6 +136,13 @@ BEGIN
   END IF;
 
   -- (2) ⭐ published-gate: UNPUBLISHED strategy's signal is NOT returned
+  -- RED-UNDER: delete the published-gate — drop `WHERE s.status = 'published'`
+  --            from mig 135's body, leaving only the id filter. THE LEAK ITSELF:
+  --            assertion 1 still passes (the published signal is still
+  --            returned), so this arm is the only thing between a
+  --            `CREATE OR REPLACE` and every unpublished trust signal going
+  --            public.
+  -- RED-UNDER-M: {"arm":"2","apply":[{"kind":"edit","file":"supabase/migrations/20260719140000_get_published_trust_signals.sql","find":"   WHERE s.status = 'published'\n     AND sv.strategy_id = ANY(p_strategy_ids)","replace":"   WHERE sv.strategy_id = ANY(p_strategy_ids)","occurrences":1}]}
   SELECT count(*) INTO signal_count
     FROM get_published_trust_signals(ARRAY[strat_priv]);
   IF signal_count <> 0 THEN
@@ -122,6 +151,11 @@ BEGIN
   END IF;
 
   -- (3) the returned trust_tier is the actual seeded value, not null/blank
+  -- RED-UNDER: blank the projection — `sv.trust_tier,` becomes `NULL::text,`
+  --            in mig 135's SELECT list. Row counts are unchanged, so
+  --            assertions 1 and 2 both still pass; only this arm notices that
+  --            the signal carries no signal.
+  -- RED-UNDER-M: {"arm":"3","apply":[{"kind":"edit","file":"supabase/migrations/20260719140000_get_published_trust_signals.sql","find":"         sv.trust_tier,","replace":"         NULL::text,","occurrences":1}]}
   SELECT trust_tier INTO tier_val
     FROM get_published_trust_signals(ARRAY[strat_pub]);
   IF tier_val IS DISTINCT FROM 'api_verified' THEN
@@ -134,6 +168,14 @@ BEGIN
   -- ----- Structural gates (as the test/service role) -----------------------
   -- (4) column allow-list: the result signature must stay exactly the 3-column
   -- shape. A widened RETURNS TABLE (leaking a verification internal) reddens here.
+  -- RED-UNDER: widen the allow-list — add `flow_type text` to mig 135's RETURNS
+  --            TABLE and `sv.flow_type` to its SELECT list. That is the shape of
+  --            an internal leak: RETURNS TABLE is the only thing making
+  --            verification internals structurally unreachable.
+  --            LAYERED because a RETURNS TABLE and its body must agree — the
+  --            second step is what makes the first one applicable, not a way
+  --            around a self-verify.
+  -- RED-UNDER-M: {"arm":"4","apply":[{"kind":"edit","file":"supabase/migrations/20260719140000_get_published_trust_signals.sql","find":"RETURNS TABLE (strategy_id uuid, trust_tier text, status text)","replace":"RETURNS TABLE (strategy_id uuid, trust_tier text, status text, flow_type text)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260719140000_get_published_trust_signals.sql","find":"         sv.status\n    FROM public.strategy_verifications sv","replace":"         sv.status,\n         sv.flow_type\n    FROM public.strategy_verifications sv","occurrences":1}]}
   SELECT pg_get_function_result(p.oid) INTO result_sig
     FROM pg_proc p
     WHERE p.proname = 'get_published_trust_signals'
@@ -143,6 +185,24 @@ BEGIN
   END IF;
 
   -- (5) anon holds EXECUTE (the public signal stays readable)
+  -- ⛔ NO RED-UNDER TWIN — MEASURED UNMUTATABLE, 2026-09-04, pg-lane.
+  --    The ONLY change that reddens this arm is anon losing EXECUTE, and the
+  --    only way to observe it here is to revoke it. Measured on a throwaway
+  --    cluster with exactly this file's RED-UNDER-SETUP list plus a
+  --    `REVOKE EXECUTE ON FUNCTION public.get_published_trust_signals(uuid[])
+  --    FROM anon` post-apply step: the run dies at assertion 1 with
+  --    `ERROR: 42501: permission denied for function get_published_trust_signals`
+  --    and emits NO `TEST FAILED (…)` at all — assertions 1-3 call the function
+  --    AS anon, 90 lines before this one is reached.
+  --    It cannot be routed around. `neuter` suppresses a gate RAISE, not a
+  --    PostgreSQL privilege error; and `has_function_privilege` is definitionally
+  --    the same check the call performs, so no mutation can make it FALSE while
+  --    leaving the call callable (PUBLIC grants, role membership and superuser
+  --    are all counted by both).
+  --    ⚠️ This is a WAIVER CANDIDATE — an arm that DOES bite but has no
+  --    first-failure mutation (GRAMMAR Shape 4) — and NOT a dead arm. Accepting
+  --    a waiver raises WAIVED_CEILING, which is a founder decision, so no waiver
+  --    twin is authored here. Do not add one without that decision.
   SELECT has_function_privilege('anon',
            'public.get_published_trust_signals(uuid[])', 'EXECUTE')
     INTO anon_can_exec;
