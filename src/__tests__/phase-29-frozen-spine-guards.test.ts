@@ -352,16 +352,49 @@ describe("Phase 29 frozen-spine exit-gate guards", () => {
   // path was NOT LOOSENED into an over-return leak — is preserved by pinning
   // the file's NEGATIVE content-by-field over-return guard regex as
   // still-present-and-unweakened, rather than the whole file's bytes. The
-  // `test_scenarios_rls.sql` byte-unchanged pin (a file this phase does NOT
-  // touch) stays intact.
-  it("exit gate (scenarios RLS untouched): test_scenarios_rls.sql is byte-unchanged", () => {
+  // `test_scenarios_rls.sql` pin stays intact but is TIGHTENED — see below.
+  //
+  // v0.77 Phase 164.4 (REDUNDER-BACKFILL) re-baseline, founder-decided
+  // 2026-09-04: this pin used to assert that the FILENAME never appears in the
+  // phase delta. That is a proxy for the thing Phase 29 actually wanted — the
+  // file's EXECUTABLE content frozen — and the proxy is both too coarse and
+  // too weak. Too coarse: Phase 164.4 adds whole-line `RED-UNDER` comments to
+  // every gate file so a mutation runner can prove each arm can actually fail,
+  // and a comment cannot loosen an RLS predicate. Too weak: a filename check
+  // says only WHERE nothing may change, never WHAT.
+  //
+  // So the pin now compares the file's NON-COMMENT lines against the baseline
+  // and requires them byte-identical. A loosened `scenarios` RLS predicate
+  // still fails this gate exactly as it did before; only whole-line comments
+  // may move. This is the same filter the phase's own audit runs each wave
+  // (added non-comment lines across `supabase/tests/` must be 0).
+  //
+  // ⚠️ The filter drops a line only when its FIRST non-whitespace characters
+  // are `--`, and keeps every other line WHOLE. It never strips mid-line, so a
+  // `--` inside a string literal (`RAISE EXCEPTION 'a -- b'`) is untouched and
+  // cannot be used to smuggle an executable change past the comparison.
+  it("exit gate (scenarios RLS untouched): test_scenarios_rls.sql is byte-unchanged in every NON-COMMENT line", () => {
+    // Trailing whitespace is normalised on BOTH sides before splitting: the
+    // `git()` helper trims its output, while `readFileSync` keeps the file's
+    // final newline, so an un-normalised compare reports a phantom one-line
+    // difference on every invocation. Symmetric, so it hides no real edit.
+    const executableLines = (sql: string): string[] =>
+      sql
+        .replace(/\s+$/, "")
+        .split("\n")
+        .filter((line) => !/^\s*--/.test(line));
+
+    const baseline = git(["show", `${BASE}:${RLS_SQL_SCENARIOS}`]);
+    const current = readFileSync(path.resolve(CWD, RLS_SQL_SCENARIOS), "utf8");
+
     expect(
-      CHANGED,
-      `Phase 29 exit gate VIOLATED — ${RLS_SQL_SCENARIOS} changed in the ` +
-        "phase delta. That file is the SOLE honesty proof the `scenarios` " +
-        "RLS predicate was not loosened (it FAILS SILENTLY otherwise). It " +
-        "must stay byte-unchanged this phase.",
-    ).not.toContain(RLS_SQL_SCENARIOS);
+      executableLines(current),
+      `Phase 29 exit gate VIOLATED — ${RLS_SQL_SCENARIOS} changed in a ` +
+        "NON-COMMENT line. That file is the SOLE honesty proof the " +
+        "`scenarios` RLS predicate was not loosened (it FAILS SILENTLY " +
+        "otherwise). Comment-only annotation is allowed; executable SQL is " +
+        "frozen.",
+    ).toEqual(executableLines(baseline));
   });
 
   it("exit gate (share SECDEF not loosened): the shares leak-scan's negative over-return guard is still present and unweakened", () => {

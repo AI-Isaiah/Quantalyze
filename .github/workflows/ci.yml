@@ -849,29 +849,44 @@ jobs:
     # TIMEOUT (threat T-164.3-20): the cost is one lane per annotated arm plus a
     # baseline and a restore leg; the run PRINTS its own `per-arm lane time:`
     # line, which is the number to re-read rather than a figure restated here.
-    # Measured 64s wall clock locally at 30 arms (2026-08-29) and 80s on this
-    # ubuntu runner at 32 lanes (run 33620169220, 2026-09-02); measured again
-    # locally at 45 arms x ~0.9s (2026-09-03, plan 164.4-02), at 86 arms x
-    # ~1.0s = 96s wall (2026-09-03, plan 164.4-04, plus 4 baseline and 4 restore
-    # legs) and at 134 arms x ~1.0s = 151s wall (2026-09-03, plan 164.4-05, plus
-    # 9 baseline and 9 restore legs) and at 163 arms x ~1.0s = 197s wall
-    # (2026-09-03, plan 164.4-06, plus 13 baseline and 13 restore legs) and at
-    # 189 arms x ~1.0s = 224s wall (2026-09-03, plan 164.4-07, plus 17 baseline
-    # and 17 restore legs). The ubuntu job took 119s at 45 arms
-    # (run 33751634051), 171s at 86 arms (run 33774615747), 232s at 134 arms
-    # (run 33785233457) and 278s at 163 arms (run 33794810067) — all four with
-    # `per-arm lane time: mean 1.0s`, the SAME per-lane cost this box measures.
-    # A linear fit over those FOUR points gives 1.35s per arm of JOB cost plus
-    # ~58s of fixed overhead (larger than the runner's own per-LANE mean, which
-    # excludes per-arm orchestration), so 189 arms projects to ~313s ≈ 5.2
-    # minutes on ubuntu and the phase's ~265-arm end state to ~416s ≈ 6.9
-    # minutes — both inside 15 without a raise, which is why this plan did not
-    # raise it. ⚠️ The 3-point fit UNDER-predicted the 163-arm run by 3% (269s
-    # projected, 278s measured); the 4-point refit above absorbs that. The per-lane cost — not the arm count alone — is what to project
-    # from. 15 minutes is an
-    # order of magnitude of headroom for a slower runner while still bounding a
-    # wedged cluster rather than burning the job's default 360. Raise it in the
-    # batch whose MEASURED run first approaches ~10 minutes, not before.
+    #
+    # ⛔ PROJECT FROM THE PER-LANE COST, AND FROM THE WORST ONE OBSERVED — never
+    # from the arm count alone. A linear fit over arm count is what stood here
+    # until 2026-09-03, and a measurement falsified it: it projected ~313s for
+    # 189 arms and the job took 458s, 46% over. The two per-lane observations,
+    # both dated, are the whole reason:
+    #   * mean 1.0s/lane — EVERY ubuntu run up to 163 arms (33751634051: 45 arms
+    #     / 119s; 33774615747: 86 / 171s; 33785233457: 134 / 232s;
+    #     33794810067: 163 / 278s) AND every local run on the authoring box,
+    #     including 219 arms / 266s wall (2026-09-04, plan 164.4-08).
+    #   * mean 1.7s/lane — ubuntu run 33804312706 (2026-09-03, plan 164.4-07,
+    #     189 arms, 458s wall). The SAME corpus measured 1.0s/lane locally, so
+    #     the cost is a property of that ubuntu run, not of the batch content.
+    # ONE observation cannot separate CI-host variance from a real ubuntu-only
+    # per-lane cost, so everything below projects from the WORST (1.7s) plus the
+    # fixed non-lane overhead that same run implies: 458 - 189 x 1.7 ~= 137s
+    # (checkout, node setup, cluster init, per-arm orchestration).
+    #
+    # WORST-CASE PROJECTIONS at 1.7s/lane + 137s fixed:
+    #   this batch, 219 arms:  219 x 1.7 + 137 ~= 509s ~= 8.5 min  [PROJECTION]
+    #   phase end,  ~265 arms: 265 x 1.7 + 137 ~= 587s ~= 9.8 min  [PROJECTION]
+    # ⬆ ONE-LINE SWAP: replace the 219-arm PROJECTION line with the MEASURED
+    #   ubuntu wall clock (run id + date) as soon as this PR's first
+    #   `sql-mutation` run lands, so this comment always cites a measurement for
+    #   the CURRENT corpus and a projection only for the future one.
+    #
+    # DECISION 2026-09-04 (plan 164.4-08): `timeout-minutes` STAYS 15, applying
+    # the rule literally — raise only when a MEASURED run reaches ~10 minutes.
+    # The largest MEASURED ubuntu run is 458s = 7.6 min, and even the worst-case
+    # projection for the PHASE END is 9.8 min. Both are under 10, so there is
+    # nothing to raise yet. 15 still leaves headroom for a slower runner while
+    # bounding a wedged cluster rather than burning the job's default 360.
+    # ⛔ 20 minutes is a CEILING, not the next rung. If a MEASURED ubuntu run
+    # reaches it, STOP — do not raise again. The locked decision
+    # (164.4-CONTEXT.md) is that PRs then run CHANGED gate files with a
+    # scheduled full run enforcing the floors, and the split is PRINTED, never
+    # silent. That is a separate plan (a runner subset mode plus ci.yml work),
+    # NOT a further timeout raise.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

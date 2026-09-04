@@ -62,13 +62,23 @@ when their credential is absent — neither ever skips.
 `45/45/0`, plan 04's `86/86/0`, plan 05's `134/134/0` and plan 06's `163/163/0`
 (the last two both confirmed on ubuntu — run 33785233457 at PR #735 head
 `f0d19bf7`, 232 s, and run 33794810067 at PR #736 head `ba6fe1e2`, 278 s).
-Phase 164.4 plan 07 annotated four NEW gate files — the csv-finalize atomic
-fold, the funding_fees RLS stack, the allocator derived-equity surface and the
-user_notes dashboard scope — 7 + 7 + 6 + 6 = 26 sections, so the measured
-corpus is now `coverage: files 17/71`, `arms: 189/189/0`, `biting: 189`,
-`lane-invocations: 189`, tallies agree, `FILES_FLOOR` is pinned at 17 and
-`ARMS_FLOOR` at 189, with `pending: 23` idiom files still to go. Read the run's
-own `coverage:` and `arms:` lines rather than any number restated in prose.
+Plan 07's `189/189/0` at `files 17/71` also stays as lineage — and so does its
+ubuntu wall clock, run 33804312706 at PR #737 head `4a9f33da`, **458 s**, which
+is the one run that reported `per-arm lane time: mean 1.7s` where every other
+ubuntu run and every local run measured 1.0 s. Phase 164.4 plan 08 then
+annotated six NEW gate files — the csv double-submit fold, the published
+trust-signal SECDEF, the verified-cohort rank gate, the F-4 memberKeyIds
+downgrade sweep, the scenarios owner-RLS stack and the strategy_analytics
+series-completeness carrier — 5 sections each, 30 in total, so the measured
+corpus is now `coverage: files 23/71`, `arms: 219/219/0`, `biting: 219`,
+`lane-invocations: 219`, tallies agree, `FILES_FLOOR` is pinned at 23 and
+`ARMS_FLOOR` at 219, with `pending: 17` idiom files still to go.
+`WAIVED_CEILING` is still 0: plan 08's one waiver candidate — that trust-signal
+gate's anon-EXECUTE assertion — was resolved by founder decision with a
+REORDER, putting the precondition ahead of the assertions that depend on it,
+rather than by booking an exception (TODOS `[REDUNDER-WAIVER-01]`). Read the
+run's own `coverage:` and `arms:` lines rather than any number restated in
+prose.
 VAC-04 and VAC-08 have still not run against their real credential; see entries
 25 and 26.
 
