@@ -1177,6 +1177,25 @@ true for 146 and half of 142–145, and **false for 141**.
       an earlier assertion consumes its precondition is an ORDERING defect, not a grammar limit.**
       Check assertion order before reaching for a waiver.
 
+- [ ] **`[CI-GDPR-TIMEOUT-01]` ⚠️ `gdpr-export-coverage-hook.test.ts` B10 #8 fails on SLOW CI
+      runners — a 30 s deadline around two `npx tsx` spawns.** MEASURED 2026-09-04: failed on three
+      consecutive runs of PR #738 (`Test timed out in 30000ms`), and **failed IDENTICALLY on a
+      CONTROL PR (#739) carrying main's tree UNCHANGED via an empty commit** (run 33856182272). So
+      it is NOT a regression from any branch — it is runner-speed dependence. The control's
+      `frontend-test (1)` shard took **714 s** where the same shard on PR #738 took **356 s**: a 2x
+      spread on identical work. The test (`src/__tests__/gdpr-export-coverage-hook.test.ts:256`)
+      `spawnSync`s `npx tsx scripts/check-gdpr-export-coverage.ts` inside a scratch repo, twice,
+      under a `30_000` ms timeout; on a slow runner the spawn alone eats it.
+      ⛔ It reddens `frontend-test` and therefore the `frontend` aggregator, so **main itself is in
+      this state** — every subsequent PR inherits an advisory-red board and a real failure could
+      hide behind the noise. **Fix:** raise that test's timeout to a value the slowest observed
+      runner clears (the assertions are unchanged — a longer deadline weakens nothing), or hoist the
+      `npx tsx` resolution out of the per-test path. Do it BEFORE Phase 164.4 wave 10 so the
+      remaining waves land on a clean board.
+      ⚠️ Diagnostic trap worth keeping: `gh run view --log` **truncates** and cut the two minutes
+      containing the `Failed Tests` block, so the first three investigations read this as a HANG
+      with no summary. Use `gh api repos/<owner>/<repo>/actions/jobs/<id>/logs` for the full text.
+
 - [ ] **`[REDUNDER-SWEEPCOPY]` `test_scenario_downgrade_sweep.sql` re-implements the sweep script
       it claims to prove, and nothing enforces they agree.** MEASURED 2026-09-04 (plan 164.4-08)
       while authoring its twins. The artifact under test is
