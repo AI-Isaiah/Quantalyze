@@ -57,6 +57,35 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_wizard_composite_fence.sql
+--
+-- ⭐ RED-UNDER ANNOTATIONS (Phase 164.4). Each assertion below carries a prose
+-- `RED-UNDER:` naming the smallest production change that makes it fail, and a
+-- machine-readable `RED-UNDER-M:` twin the mutation runner applies on a
+-- throwaway pg-lane cluster to PROVE it reds on its OWN arm, then restores
+-- GREEN. Schema: scripts/mutation-runner/GRAMMAR.md. The line below declares
+-- what the lane applies before this gate.
+--
+-- ⛔ 20260814120000 IS IN THE APPLY LIST ON PURPOSE, AND THE BASELINE PROVES IT.
+-- Three assertions in this file — Part 3a's `authenticated` negative, Part 3b-ii
+-- and Part 3c-ii — are ARMED on `v_b_live` / `v_b_live_k`, i.e. they run only on
+-- a database that carries Migration B. On a lane without it they emit
+-- `SKIP (…)` notices and the file still exits 0. A twin authored against a
+-- SKIPPED assertion would be un-falsifiable while the gate printed a pass — the
+-- exact vacuity this phase exists to refuse — so the apply list makes the arming
+-- condition TRUE and the baseline is checked for it rather than assumed.
+-- MEASURED on the lane 2026-09-04, on the list below: `grep -c 'SKIP'` over the
+-- whole baseline output is **0**, and the two summary notices are the no-skip
+-- variants — `Part 3a OK: … (ALL assertions …` and `test_wizard_composite_fence:
+-- ALL PASS (… refuses authenticated for BOTH matching and mismatched identities
+-- …)`, not `PASS WITH 1 SKIP` / `PASS WITH 3 SKIPS`.
+--
+-- ⚠️ 20260812083206_api_keys_venue_account_id.sql IS LOAD-BEARING, NOT PADDING.
+-- It is the only migration that DROPs the 11-argument create_wizard_strategy
+-- before the 12-argument one supersedes it. Without it BOTH overloads exist and
+-- every call site in this file dies at
+-- `42725 function public.create_wizard_strategy(…) is not unique` — an
+-- ambiguity, not a regression. Measured 2026-09-04.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260712120000_wizard_composite_members_invalidate_analytics.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql"]}
 
 -- ==========================================================================
 -- Part 3a — structural: NEITHER anon NOR authenticated may hold EXECUTE on the
@@ -186,6 +215,20 @@ BEGIN
   --      write, strictly worse than either migration alone.
   --  (c) GRANT REVOKED, BODY STILL MIGRATION A. A partial apply, or a later
   --      migration re-based a body onto a stale source.
+  -- RED-UNDER: re-GRANT `authenticated` EXECUTE on the SINGLE-KEY RPC on the
+  --            live database — `GRANT EXECUTE ON FUNCTION
+  --            public.create_wizard_strategy(…) TO authenticated`. Both bodies
+  --            stay narrowed, so 3a-2a (both-or-neither) and 3a-2c (grant gone,
+  --            body stale) both stay silent, and 3a-2b — half-state (b), the
+  --            worst one — is the first failure. ⚠️ It must be the SINGLE-KEY
+  --            grant: the composite grant is Part 3a's own arm below, and the
+  --            comment above 3a-2b says in as many words that this line is the
+  --            only place in the file that watches `authenticated` on
+  --            create_wizard_strategy. A `sql` step, not a migration edit,
+  --            because §3 of 20260814120000 pins the ACL exactly — editing the
+  --            REVOKE there would change what the gate asserts rather than
+  --            break it.
+  -- RED-UNDER-M: {"arm":"Part 3a-2b","apply":[{"kind":"sql","stmt":"GRANT EXECUTE ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text) TO authenticated"}]}
   IF v_b_live <> v_b_live_k THEN
     RAISE EXCEPTION 'TEST FAILED (Part 3a-2a): THE TWO WIZARD RPCs ARE IN DIFFERENT STATES. create_wizard_strategy narrowed=%, add_wizard_composite_key narrowed=% (read from each comment-stripped body''s v_auth_uid). Migration 20260814120000 rewrites BOTH bodies in one file, so they cannot legitimately disagree: a migration landed on one twin and not the other. That asymmetry is the instance-not-class defect Phase 153.6 was convened to end — the composite door standing open while the single-key door is shut is not a lesser bug, it is the same bug on the path nobody looked at. Change one, change both, in the same migration.', v_b_live, v_b_live_k;
   END IF;
@@ -214,6 +257,18 @@ BEGIN
   -- above and both `service_role` positives below stay UNCONDITIONAL — they hold
   -- under Migration A and Migration B alike — so Part 3a can never go inert, and
   -- Part 3a-2 has already reddened every incoherent state before this point.
+  -- RED-UNDER: re-GRANT `authenticated` EXECUTE on the COMPOSITE RPC on the
+  --            live database — `GRANT EXECUTE ON FUNCTION
+  --            public.add_wizard_composite_key(…) TO authenticated`. This is
+  --            the drift the arm names: a DROP + CREATE re-granting silently
+  --            via pg_default_acl re-opens the direct PostgREST door. The three
+  --            Part 3a-2 coherence checks all stay silent under it (3a-2b is
+  --            scoped to the single-key grant, deliberately, so that this arm is
+  --            reachable rather than pre-empted), so this assertion is the first
+  --            failure — which is exactly the reachability its own comment
+  --            claims, now proven rather than argued. A `sql` step for the same
+  --            reason as 3a-2b: §3 pins the ACL exactly.
+  -- RED-UNDER-M: {"arm":"Part 3a","apply":[{"kind":"sql","stmt":"GRANT EXECUTE ON FUNCTION public.add_wizard_composite_key(uuid,text,text,text,text,text,text,text,integer,text,uuid) TO authenticated"}]}
   IF v_b_live_k THEN
     IF v_auth_k THEN
       RAISE EXCEPTION 'TEST FAILED (Part 3a): authenticated HOLDS EXECUTE on add_wizard_composite_key — Phase 156 / CONNECT-01 withdrew it (migration 20260814120000). A re-GRANT re-opens the direct PostgREST door: any browser session holding an authenticated JWT can POST /rest/v1/rpc/add_wizard_composite_key and mint an attested_venue of its choosing. If no migration did this deliberately, a DROP + CREATE re-granted it silently via pg_default_acl — re-issue the REVOKE in that same migration.';
@@ -379,6 +434,20 @@ BEGIN
       uid_a, 'bybit', 'wizcomp key 2',
       'enc2', 'sec2', 'pass2', 'dek2', 'nonce2', 1, 'Composite draft A', session_a);
 
+  -- RED-UNDER: make the composite path LINK its latest key into the draft, the
+  --            way the single-key path does — an `UPDATE strategies SET
+  --            api_key_id = v_key_id` after the mint in migration 20260814120000.
+  --            LAYERED, and the layering is the honest half: with the fence's
+  --            `AND s.api_key_id IS NULL` clause still in place, the second call
+  --            would stop matching the now-linked draft, fall through to INSERT
+  --            and die on strategies_user_wizard_session_uniq with a raw 23505
+  --            that names no arm at all. Dropping that clause in the same
+  --            mutation is what a real regression of this shape WOULD look like:
+  --            the composite-detection invariant relaxed on both sides at once.
+  --            Part 1a then still passes (one draft), and Part 1b — the arm that
+  --            OWNS "a composite draft must keep api_key_id NULL" — is the first
+  --            failure.
+  -- RED-UNDER-M: {"arm":"Part 1b","apply":[{"kind":"edit","file":"supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","find":"     AND s.api_key_id IS NULL\n   LIMIT 1;","replace":"   LIMIT 1;","occurrences":1},{"kind":"insert-after","file":"supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","anchor":"    p_exchange\n  )\n  RETURNING id INTO v_key_id;","text":"\n\n  UPDATE strategies SET api_key_id = v_key_id WHERE id = v_strategy_id;","occurrences":1}]}
   -- Part 1a: SAME draft returned for both calls in the session (the fence).
   IF v_strat1 IS NULL OR v_strat1 <> v_strat2 THEN
     RAISE EXCEPTION 'TEST FAILED (Part 1a): the two composite adds returned DIFFERENT strategy ids (% vs %) — the (user, session) draft fence is broken', v_strat1, v_strat2;
@@ -399,6 +468,16 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (Part 1c): % strategies rows for (uid_a, session_a), expected exactly 1', row_cnt;
   END IF;
 
+  -- RED-UNDER: make the per-KEY add idempotent per USER in migration
+  --            20260814120000 — short-circuit the composite body's api_keys
+  --            INSERT and replay the user's existing key when one is present.
+  --            That is the pre-ONB-03 behaviour reintroduced: the draft fence
+  --            (Part 1) is untouched and still passes, so the ONLY thing that
+  --            notices is this arm. It is the regression the ONB-03 comment on
+  --            the INSERT — "ALWAYS mint a fresh encrypted api_keys row (this IS
+  --            the per-key add)" — exists to forbid, and per-KEY idempotency
+  --            belongs on the member, never on the session draft.
+  -- RED-UNDER-M: {"arm":"Part 2a","apply":[{"kind":"insert-after","file":"supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","anchor":"  -- ALWAYS mint a fresh encrypted api_keys row (this IS the per-key add).","text":"\n  IF EXISTS (SELECT 1 FROM api_keys k WHERE k.user_id = p_user_id) THEN\n    SELECT k.id INTO v_key_id FROM api_keys k WHERE k.user_id = p_user_id LIMIT 1;\n    RETURN QUERY SELECT v_strategy_id, v_key_id;\n    RETURN;\n  END IF;","occurrences":1}]}
   -- Part 2a: two DISTINCT api_keys rows — the 2nd KEY proceeded (ONB-03).
   IF v_key1 IS NULL OR v_key2 IS NULL OR v_key1 = v_key2 THEN
     RAISE EXCEPTION 'TEST FAILED (Part 2a): the 2nd composite add did NOT mint a distinct api_keys row (% vs %) — ONB-03 per-key add regressed', v_key1, v_key2;
@@ -731,6 +810,18 @@ BEGIN
   -- it exists to watch. `sub` is retained — see the Parts 1+2 claim for why the
   -- retention here and Part 3d's deliberate omission are complementary rather
   -- than contradictory.
+  -- RED-UNDER: stop LINKING the minted key into the single-key draft — write
+  --            `NULL` where `v_key_id` sits in create_wizard_strategy's
+  --            strategies INSERT in migration 20260814120000. This is the SC-4
+  --            canary's whole subject: the composite work reaching across and
+  --            altering the single-key path. Note which half survives — the RPC
+  --            still RETURNS the api_key_id it minted, so Part 4a's first check
+  --            (`returned a NULL api_key_id`) passes and Part 3d, which reads
+  --            the api_keys row back, is untouched; the row-vs-return
+  --            disagreement is caught only by Part 4a's second check, and only
+  --            because it compares the STORED column against the RETURNED id
+  --            rather than trusting either alone.
+  -- RED-UNDER-M: {"arm":"Part 4a","apply":[{"kind":"edit","file":"supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","find":"    p_user_id, v_key_id, p_placeholder_name, 'draft', 'wizard',","replace":"    p_user_id, NULL, p_placeholder_name, 'draft', 'wizard',","occurrences":1}]}
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_c::text, 'role', 'service_role')::text, true);
 
