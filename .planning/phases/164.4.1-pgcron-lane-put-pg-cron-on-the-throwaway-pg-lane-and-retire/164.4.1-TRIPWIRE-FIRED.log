@@ -83,3 +83,45 @@ Two readings of that run are NOT expected and each stops the phase:
     that is a regression in Step C/D, not the tripwire.
 A red `sql-mutation` whose ONLY defect kind is `lane-blocked-stale` IS the
 expected reading of that run, and must never be recorded as a regression.
+
+====================================================================
+## full-corpus confirmation (macOS, same box, AFTER the plan-01 edits)
+====================================================================
+DATE:    2026-09-04
+HEAD:    b59d2b1dedfa0090c4fa46fda65748359ed6ba3d (branch worktree-agent-a6b7676666dcd4667; tree clean before AND after the run, so the runner's global dirty-checkout assertion had nothing to report)
+COMMAND: node scripts/mutation-runner/run.mjs        # FULL corpus, not narrowed
+EXIT:    1
+
+This is the reading the narrowed run above could not give. A FULL corpus run exits
+0 when it is clean, so exit 1 here is attributable to the defect and to nothing
+else. EXACTLY ONE defect kind was raised -- lane-blocked-stale -- which is also
+the assertion that plan 01 introduced no regression: any OTHER kind would have
+been one, and there is none.
+
+-- verbatim ------------------------------------------------------------
+coverage: files 39/71
+lane-blocked: 4 file(s) probe pg_extension for pg_cron, which the pg-lane cannot host — test_derive_allocator_keys_fanout.sql test_reconcile_dropped_enqueue_sweep.sql test_retention_orphaned_running.sql test_strategy_analytics_stuck_computing_reaper.sql (deferred 2026-09-03, TODOS [REDUNDER-PGCRON])
+lane-probe: pg_cron AVAILABLE — lane-blocked class is STALE
+  pending: 1 idiom file(s) without RED-UNDER — test_compute_jobs_error_kind_copy_parity.sql
+arms: 262/262/0   (executed/annotated/waived)
+biting: 262   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)
+lane-invocations: 262   (arm lanes actually spawned — tallied inside runLane, independent of the 262 the verdict loop counted; plus 39 baseline / 39 restore leg(s))
+per-arm lane time: mean 1.0s over 262 arm run(s)
+❌ 1 defect(s):
+
+  KIND                  ARM                       FILE
+  --------------------  ------------------------  ----
+  lane-blocked-stale    -                         -
+      MEASURE_FAIL — the lane can host pg_cron but 4 idiom file(s) are still classified lane-blocked: test_derive_allocator_keys_fanout.sql test_reconcile_dropped_enqueue_sweep.sql test_retention_orphaned_running.sql test_strategy_analytics_stuck_computing_reaper.sql; annotate them (TODOS [REDUNDER-PGCRON]) — the deferral has expired
+-- end verbatim --------------------------------------------------------
+
+⭐ `per-arm lane time: mean 1.0s over 262 arm run(s)` -- IDENTICAL to every prior
+local full-corpus measurement taken WITHOUT the preload (ci.yml's own header
+records mean 1.0s/lane for every local run and every ubuntu run up to 163 arms).
+So the preload costs nothing measurable at CORPUS scale, not merely in the
+isolated A/B -- which is the form D-06 needed, since every arm pays lane startup.
+
+`coverage: files 39/71`, `arms: 262/262/0`, `biting: 262`, `lane-invocations: 262`
+(tallies agree) and `pending: 1` are all UNCHANGED from 164.4's end state, because
+this plan annotates nothing. It is substrate only; the ratchets belong to plans
+02-05.
