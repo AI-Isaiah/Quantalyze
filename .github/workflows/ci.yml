@@ -846,6 +846,33 @@ jobs:
     # node builtins. An install this job does not need is an install that can
     # fail and flake the gate.
     #
+    # ⭐ REVERSAL, 2026-09-04 (phase 164.4.1, PGCRON-LANE). This job now DOES
+    # install one thing — `postgresql-<major>-cron` — and the sentence above is
+    # the standard it has to clear, not a rule being quietly ignored. It clears
+    # it on all three counts:
+    #   * It is an install this job NEEDS. Five idiom gate files (~103 sections)
+    #     probe `pg_extension` for pg_cron, and THREE of them read
+    #     `cron.job.command` as an ORACLE for the deployed job body
+    #     (164.4.1-RESEARCH § Q3). Without the extension on the lane those files
+    #     cannot be annotated at all — they were DEFERRED as `lane-blocked:` for
+    #     exactly that reason, and retiring that deferral is this phase.
+    #     A shim was costed and REJECTED by measurement: it would have to
+    #     reimplement `cron.schedule()` faithfully enough to satisfy those
+    #     oracles, i.e. an oracle written by the same hand as the claim, while
+    #     the real extension measures +0.009 s/lane (RESEARCH § Q4).
+    #   * It cannot flake in the way that sentence guards against. It is a
+    #     distro/PGDG apt package on an ephemeral runner — no registry account,
+    #     no build, no network beyond apt's own signed chain — unlike an `npm
+    #     ci` resolving a live dependency graph.
+    #   * Its failure mode is LOUD and EARLY: the step ends with `ls -l` on the
+    #     `.so` and the `.control`, under `set -euo pipefail`, so a missing
+    #     artifact exits the step non-zero BEFORE any lane is spawned, instead
+    #     of surfacing later as an opaque per-lane start failure. (The lane
+    #     itself also refuses with a named diagnosis — `scripts/pg-lane/run.sh`,
+    #     the two pg_cron layers — so neither side degrades silently.)
+    # ⛔ This reversal licenses THIS install and no other. A second one must
+    # argue itself here on the same three counts.
+    #
     # TIMEOUT (threat T-164.3-20): the cost is one lane per annotated arm plus a
     # baseline and a restore leg; the run PRINTS its own `per-arm lane time:`
     # line, which is the number to re-read rather than a figure restated here.
@@ -929,6 +956,54 @@ jobs:
           # reads, saved on every miss, inside the wall-clock budget this gate
           # is measured against.
           node-version: 22
+
+      - name: Provision pg_cron for the lane's PostgreSQL (Phase 164.4.1)
+        # ⚠️ THIS STEP'S FIRST RUN IS THE MEASUREMENT. 164.4.1-RESEARCH assumption
+        # A1 ("`apt-get install postgresql-16-cron` succeeds on ubuntu-latest and
+        # yields a PG16-loadable .so") was INSPECTED, never executed — there was
+        # no ubuntu host in the research session. Everything below is written to
+        # PRINT rather than to assume, so the first job log settles it:
+        #   * the `apt-cache policy` block answers RESEARCH Open Question 1 —
+        #     does the runner's pg_cron come from PGDG or from noble `universe`?
+        #     Either is acceptable; which one won is a fact, not a guess.
+        #   * the `dpkg -s … Version:` line makes the macOS-1.6.7 / ubuntu-1.6.x
+        #     minor skew VISIBLE (RESEARCH A2) instead of inferred.
+        #   * the major print + hard refusal covers RESEARCH A5: `ubuntu-latest`
+        #     maps to 24.04 (PostgreSQL 16.15) TODAY. If it rolls to an image on
+        #     a different major, this job and the authoring box would measure
+        #     DIFFERENT corpora — the exact split success criterion 1 forbids —
+        #     so that is a MEASURE_FAIL here, never a silent adaptation.
+        # Read those four things in the log before trusting any downstream run.
+        #
+        # Shape copied from the only apt analog in this workflow, `sql-tests`'
+        # "Install psql client" step. The reversal of this job's no-install
+        # stance is argued in the job header above.
+        run: |
+          set -euo pipefail
+          # `|| true` is load-bearing, not defensive noise: under `set -euo
+          # pipefail` an EMPTY glob makes `ls` exit 1, the command substitution
+          # inherits it, and the step would die HERE with no `::error::` line at
+          # all — "could not measure" wearing the costume of a build failure.
+          # The empty case must reach the MEASURE_FAIL below and name itself.
+          major=$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | awk -F/ '{print $5}' | sort -n | tail -1 || true)
+          echo "PostgreSQL major under /usr/lib/postgresql: ${major:-(none found)}"
+          if [ "${major:-}" != "16" ]; then
+            echo "::error::MEASURE_FAIL: the runner's PostgreSQL major is '${major:-none}', not 16. 164.4.1-RESEARCH assumption A5 (ubuntu-latest => 24.04 => PostgreSQL 16.15) no longer holds, and criterion 1 (CI and the authoring box, which is 16.13, must measure the SAME corpus) is at risk: an extension .so built for another major will not load, and the five pg_cron gate files would be proven on a server the author never ran. Re-take the macOS/ubuntu major comparison before changing this line."
+            exit 1
+          fi
+          sudo apt-get update -y
+          echo "--- apt-cache policy postgresql-${major}-cron (which source wins) ---"
+          apt-cache policy "postgresql-${major}-cron"
+          sudo apt-get install -y --no-install-recommends "postgresql-${major}-cron"
+          echo "--- installed version ---"
+          dpkg -s "postgresql-${major}-cron" | grep -a '^Version'
+          echo "--- the two artifacts the lane needs ---"
+          # `ls` exiting non-zero under `set -e` IS the loud failure: the .so is
+          # what `shared_preload_libraries=pg_cron` loads at postmaster start,
+          # and the .control is what `CREATE EXTENSION pg_cron` reads (PG16 has
+          # no extension_control_path, so it must be in the server's sharedir).
+          ls -l "/usr/lib/postgresql/${major}/lib/pg_cron.so"
+          ls -l "/usr/share/postgresql/${major}/extension/pg_cron.control"
 
       - name: Probe - the runner image's PostgreSQL server binaries resolve
         # 164.3-RESEARCH assumption A1 ("ubuntu-latest ships PostgreSQL server

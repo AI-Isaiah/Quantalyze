@@ -1,0 +1,85 @@
+DATE:    2026-09-04
+HEAD:    3b6c338a860b59b5259596713ffad0ae6a4de623 (branch phase-164.4.1-pgcron-lane, tree PRISTINE — `git status --porcelain` empty)
+COMMAND: node scripts/mutation-runner/run.mjs --file supabase/tests/test_metrics_by_basis_write.sql
+HOST:    macOS, Homebrew postgresql@16 16.13 at /opt/homebrew/opt/postgresql@16/bin
+WHY THIS STATE EXISTS: 164.4.1-RESEARCH built pg_cron 1.6.7 from source against this keg on 2026-09-04, so `pg_available_extensions` on a lane already answers AVAILABLE — while the four idiom gate files are still classified `lane-blocked:`. That pair is exactly the condition `lane-blocked-stale` exists to catch, and it is captured HERE, on the pristine tree, BEFORE plan 01 changed a byte.
+PLAN 06 APPENDS THE CLEARED HALF: this file records the tripwire FIRING. Plan 06 appends the observation that it has been CLEARED (`lane-blocked: 0`) on a SHA-bound ubuntu run.
+
+⚠️ WHAT THE EXIT STATUS BELOW DOES AND DOES NOT PROVE. This is a NARROWED (`--file`)
+run, and the runner says so in its own output: "This mode never exits 0, so it can
+never be mistaken for a passing gate." So the exit status ALONE is not the
+observation — a narrowed run would exit 1 with zero defects too. The load-bearing
+evidence is the three lines the runner printed and nothing else could have printed:
+  * `lane-probe: pg_cron AVAILABLE — lane-blocked class is STALE`  (the lane was MEASURED, not assumed)
+  * `❌ 1 defect(s):` with kind `lane-blocked-stale`               (exactly one defect kind, no others)
+  * that defect's detail naming all FOUR files and "the deferral has expired"
+The unambiguous exit-1-by-defect reading is the FULL-corpus run, quoted in
+164.4.1-01-SUMMARY.md.
+
+===================== VERBATIM RUNNER OUTPUT BEGINS =====================
+mutation-runner: scope supabase/tests
+  baseline  supabase/tests/test_metrics_by_basis_write.sql — exit 0 (1.1s)
+  arm Arm 4                    exit   3  RED (identity ok)  (1.1s)
+  arm Arm 6                    exit   3  RED (identity ok)  (1.1s)
+  restore   supabase/tests/test_metrics_by_basis_write.sql — exit 0 (1.0s)
+
+coverage: files 39/71
+unreachable: 27 file(s) raise outside the runner's identity idiom — test_anon_execute_current_user_has_app_role.sql test_api_key_delete_atomicity.sql test_claim_compute_jobs_dedupe_partition.sql test_claim_kind_filter.sql test_cleanup_orphaned_api_keys_sweep.sql test_cleanup_wizard_drafts_race.sql test_commit_scenario_batch_auth_input.sql test_commit_scenario_batch_fingerprint_precondition.sql test_commit_scenario_batch_p1956_range.sql test_commit_scenario_batch_p1957_divested.sql test_compute_analytics_kind_retired.sql test_compute_jobs_rpc_error_clear_and_fanin.sql test_cutover_strategy_metrics_keys_atomic.sql test_data_deletion_requests_fk_set_null.sql test_enqueue_internal_destrict.sql test_get_latest_portfolio_analytics_for_user.sql test_handle_new_user_role_allowlist.sql test_log_audit_event_service_ceiling.sql test_mt5_exchange_boundary.sql test_portfolio_recompute_inflight_unique.sql test_retention_crons_safe.sql test_sanitize_user_hardening.sql test_sfox_exchange_boundary.sql test_staff_role_both_backfill.sql test_sync_status_preserves_warnings.sql test_sync_status_supersede_failed_per_kind.sql test_upsert_strategy_analytics_series_batch_privilege.sql (TODOS [REDUNDER-NONIDIOM])
+lane-blocked: 4 file(s) probe pg_extension for pg_cron, which the pg-lane cannot host — test_derive_allocator_keys_fanout.sql test_reconcile_dropped_enqueue_sweep.sql test_retention_orphaned_running.sql test_strategy_analytics_stuck_computing_reaper.sql (deferred 2026-09-03, TODOS [REDUNDER-PGCRON])
+lane-probe: pg_cron AVAILABLE — lane-blocked class is STALE
+  pending: 1 idiom file(s) without RED-UNDER — test_compute_jobs_error_kind_copy_parity.sql
+arms: 2/2/0   (executed/annotated/waived)
+biting: 2   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)
+lane-invocations: 2   (arm lanes actually spawned — tallied inside runLane, independent of the 2 the verdict loop counted; plus 1 baseline / 1 restore leg(s))
+  file test_metrics_by_basis_write.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2
+per-arm lane time: mean 1.1s over 2 arm run(s)
+
+⚠️ NARROWED DIAGNOSTIC RUN (--file/--arm): coverage floors NOT enforced.
+   This mode never exits 0, so it can never be mistaken for a passing gate.
+
+❌ 1 defect(s):
+
+  KIND                  ARM                       FILE
+  --------------------  ------------------------  ----
+  lane-blocked-stale    -                         -
+      MEASURE_FAIL — the lane can host pg_cron but 4 idiom file(s) are still classified lane-blocked: test_derive_allocator_keys_fanout.sql test_reconcile_dropped_enqueue_sweep.sql test_retention_orphaned_running.sql test_strategy_analytics_stuck_computing_reaper.sql; annotate them (TODOS [REDUNDER-PGCRON]) — the deferral has expired
+exit=1
+====================== VERBATIM RUNNER OUTPUT ENDS ======================
+
+## ubuntu-dispatch - NOT YET TAKEN (owed by plan 01 Task 1 Step G)
+
+⛔ EVERY LITERAL PLAN 01's VERIFY GREPS FOR IS DELIBERATELY ABSENT FROM THIS
+FILE. Step G requires an ubuntu section whose heading, run id, 40-hex head-sha
+line, apt source, package version, ubuntu lane-probe line and job-outcome line
+are all MEASURED. None of them has been. Writing any of those literals here --
+even inside prose explaining that they are missing -- would make plan 01's own
+`<verify>` chain pass on a section containing no measurement, which is the
+control-that-cannot-fail shape this phase family exists to refuse. (Measured
+while executing: a first draft of this very paragraph quoted the heading and the
+job-outcome literal, and two of the three Step G assertions went green on
+nothing. They are paraphrased below for exactly that reason.)
+
+So plan 01 Task 1's `<verify>` is EXPECTED TO FAIL at the head-sha link until
+Step G runs. That failure is the honest reading of this tree.
+
+WHY IT IS ABSENT. Step G was DEFERRED TO THE ORCHESTRATOR BY INSTRUCTION. This
+plan was executed inside an isolated GSD worktree on branch
+`worktree-agent-a6b7676666dcd4667`; its commits are not on
+`phase-164.4.1-pgcron-lane` until the harness merges them back, so a
+`git push -u origin "$(git branch --show-current)"` from here would have pushed
+the wrong ref and `gh workflow run ci.yml --ref ...` would have dispatched
+against a branch the phase does not use. The executor did Steps A-F and stopped.
+
+WHAT IS STILL OWED, and it is a MEASUREMENT, not a formality: 164.4.1-RESEARCH
+assumption A1 -- `apt-get install postgresql-16-cron` succeeds on ubuntu-latest
+and yields a PG16-loadable `.so` -- is INSPECTED, NEVER EXECUTED. Until Step G
+runs, SC-1's ubuntu half is UNMET and plans 02-05 would be building on an
+unmeasured provisioning step. Run it BEFORE dispatching plan 02.
+
+Two readings of that run are NOT expected and each stops the phase:
+  * the provisioning step itself fails (package absent, `.so`/`.control`
+    missing, major != 16) -- SC-1's ubuntu half is unmet; do not work around it;
+  * `sql-mutation` reports ANY defect kind other than `lane-blocked-stale` --
+    that is a regression in Step C/D, not the tripwire.
+A red `sql-mutation` whose ONLY defect kind is `lane-blocked-stale` IS the
+expected reading of that run, and must never be recorded as a regression.
