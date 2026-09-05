@@ -108,6 +108,29 @@ are printed by name on every run (27 `unreachable:` + 4 `lane-blocked:` +
 that 1 `pending:`). ⛔ `pending:` is NOT empty and must not be made to look
 empty — the parser test pins it as a one-name SET so an attestation of
 completeness cannot be shipped ahead of 164.4.1.
+⚠️ CURRENCY 2026-09-05: Phase **164.4.1 PGCRON-LANE** is now under way and the
+paragraph above is 164.4's dated end state, not the current reading. Plan 01 put
+pg_cron ON the pg-lane (`shared_preload_libraries` on the single `pg_ctl -o`
+start, +0.009 s/lane); plan 02 then annotated the two files that were blocked in
+the two DIFFERENT ways — `test_compute_jobs_error_kind_copy_parity.sql` (3
+sections, blocked only through its APPLY LIST) and
+`test_derive_allocator_keys_fanout.sql` (7 sections, blocked through its own
+text). MEASURED at plan 02: `coverage: files 41/71`, `arms: 272/272/0`,
+`biting: 272`, `lane-invocations: 272`, tallies agree, `FILES_FLOOR` 41 and
+`ARMS_FLOOR` 272, `WAIVED_CEILING` still 0 (nine arms moves, zero waivers).
+⛔ The `pending:` prohibition above is SUPERSEDED and its second clause is no
+longer true: `pending:` is now measured EMPTY, deliberately, as CONTEXT decision
+D-04's own task, and the parser test's pin is the empty set BESIDE an AIM (`it`
+title `pending AIM (D-04)`) that proves the class is still computed by
+classifying a stripped copy of a real gate. Do NOT "restore" the one-name pin.
+⚠️ **Every `node scripts/mutation-runner/run.mjs` in this interval EXITS 1** with
+exactly one defect, `lane-blocked-stale` — pg_cron is available while three
+files (`test_reconcile_dropped_enqueue_sweep.sql`,
+`test_retention_orphaned_running.sql`,
+`test_strategy_analytics_stuck_computing_reaper.sql`) are still classified
+`lane-blocked`. That is success criterion 3's tripwire doing its job, not a
+regression; it clears when plan 05 lands. A run showing any OTHER defect kind IS
+a regression.
 `WAIVED_CEILING` is still 0, now through TWO founder decisions that both took
 the root-cause fix over an exception: plan 08's trust-signal anon-EXECUTE
 assertion was resolved by a REORDER putting the precondition ahead of its
