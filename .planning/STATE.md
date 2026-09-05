@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4.1
 current_phase_name: PGCRON-LANE
 status: executing
-stopped_at: Phase 164.4.1 PLANNED — 6 sequential plans at 03462da8, plan-checker gate passed after one revision (2 blockers + 7 warnings all fixed). Awaiting founder go-ahead before /gsd-execute-phase 164.4.1. Phase 164.4 CLOSED and landed (PR
-last_updated: "2026-09-04T21:21:18.232Z"
+stopped_at: "Completed 164.4.1-02-PLAN.md (file move 1 — pending: is EMPTY, floors 41/272). Next: 164.4.1-03."
+last_updated: "2026-09-05T06:17:00.871Z"
 last_activity: 2026-09-04
 last_activity_desc: Phase 164.4.1 execution started
-state_head: 3b6c338a860b59b5259596713ffad0ae6a4de623
+state_head: 31fae2eaa121cacdbfafc92a3f653ecf92365ea3
 progress:
   total_phases: 16
   completed_phases: 4
   total_plans: 76
-  completed_plans: 66
+  completed_plans: 68
   percent: 25
 ---
 
@@ -167,10 +167,16 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 ## Current Position
 
 Phase: 164.4.1 (PGCRON-LANE) — EXECUTING
-Plan: 1 of 6
+Plan: 3 of 6
       class + lane probe + SCOPE AMENDMENT #2, 04-11 the eight annotation batches) —
       hand-maintained; `state.advance-plan` still REFUSES on this section
       (`ambiguous_position_phase`, see § Known Issues)
+      ⚠️ 2026-09-05: plans 01 (substrate + tripwire observed) and 02 (file move 1) are
+      DONE. Next is plan 03. Measured at 164.4.1-02: `coverage: files 41/71`,
+      `arms: 272/272/0`, `biting: 272`, `pending: 0`, `lane-blocked: 3`,
+      `FILES_FLOOR` 41, `ARMS_FLOOR` 272, `WAIVED_CEILING` still 0.
+      ⛔ Every `run.mjs` run in this interval EXITS 1 on ONE `lane-blocked-stale`
+      row — the tripwire, not a regression. It clears when plan 05 lands.
 Status: Executing Phase 164.4.1
       `arms: 262/262/0`, `biting: 262`, 0 waivers, exit 0. Next: land 164.4-11 as its own PR with
       `sql-mutation` GREEN on ubuntu SHA-bound to the head, then `/gsd-verify-work 164.4`.
@@ -620,7 +626,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███░░░░░░░] 31%
+Progress: [███░░░░░░░] 25%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -790,6 +796,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4 P09 | resumed session | 3 tasks | 9 files |
 | Phase 164.4 P10 | ~3h | 3 tasks | 9 files |
 | Phase 164.4 P11 | ~3h | 3 tasks | 23 files |
+| Phase 164.4.1 P02 | 68 min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -1015,6 +1022,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4]: 164.4-11: SCOPE AMENDMENT #2's 40 files / 255 sections is SUPERSEDED — measured end state 39 / 252 / 262 twins. Corrected in all seven ledger sites as an ARITHMETIC CORRECTION, not a new decision; it follows from plan 09's founder-decided pg_cron deferral.
 - [Phase 164.4]: 164.4-11: WAIVED_CEILING stays 0 — Phase 164.4 finished with ZERO waivers across all eight arms moves. Every shadowed arm was reached by mutating a layer its shadow does not observe.
 - [Phase 164.4]: 164.4-11: ci.yml's sql-mutation timeout projection counts LEGS (arms + 2 × annotated files), not arms — the job runs a baseline and a restore leg per FILE. Phase end 340 legs ≈ 494 s ≈ 8.2 min; timeout-minutes stays 15.
+- [Phase 164.4.1]: 164.4.1-02: D-04 pending pin moved to the MEASURED empty set, guarded by a pending AIM (D-04) arm that classifies a stripped copy of a real gate — the AIM proven able to fail by neutering classifyGateIdiom's pending branch
+- [Phase 164.4.1]: 164.4.1-02: FILES_FLOOR 39->41 and ARMS_FLOOR 262->272, read off the run's own coverage:/biting: lines; separation driven both ways on real lanes ((41,272) one lane-blocked-stale row only; (42,273) adds both floor regressions). WAIVED_CEILING UNEDITED at 0 — nine arms moves, zero waivers
+- [Phase 164.4.1]: 164.4.1-02: a gate assertion's genuine falsifier may be REJECTED when it kills an earlier assertion first as a raw driver error (derive assertion 5 narrows the coherence arm instead of deleting it); and a LAYERED twin can be forced by defence-in-depth, where removing either half alone is a measured no-red (derive assertion 2)
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1717,8 +1727,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-04T15:52:47.408Z
-**Stopped At:** Completed 164.4-11-PLAN.md (batch 8 — the seven mixed files; FILES_FLOOR 39, ARMS_FLOOR 262, 0 waivers). PR + SHA-bound ubuntu sql-mutation green still owed.
+**Last Date:** 2026-09-05T06:17:00.587Z
+**Stopped At:** Completed 164.4.1-02-PLAN.md (file move 1 — pending: is EMPTY, floors 41/272). Next: 164.4.1-03.
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
