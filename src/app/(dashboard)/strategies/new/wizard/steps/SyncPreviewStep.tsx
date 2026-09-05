@@ -575,7 +575,11 @@ export function SyncPreviewStep({
   // first crawl, and it is why the in-flight claim below stops being rendered
   // while it is up (that sentence is false once the status is terminal).
   const [seriesRecomputing, setSeriesRecomputing] = useState(false);
-  const [computationError, setComputationError] = useState<string | null>(null);
+  // `_computationError` is prefixed because nothing READS it — see the Phase 162
+  // note at the envelope below. The setter is still called (the write is the
+  // point: it re-renders), so the state stays; the underscore is what the
+  // `no-unused-vars` rule asks for on a deliberately-unread destructured slot.
+  const [_computationError, setComputationError] = useState<string | null>(null);
   // Composite discriminator (Finding-H / Pitfall 1): threaded from SERVER TRUTH
   // — the `/api/keys/sync` kickoff response's `composite` field (true ONLY when
   // the route took the `stitch_composite` branch). NEVER from a client

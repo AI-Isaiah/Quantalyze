@@ -125,3 +125,80 @@ isolated A/B -- which is the form D-06 needed, since every arm pays lane startup
 (tallies agree) and `pending: 1` are all UNCHANGED from 164.4's end state, because
 this plan annotates nothing. It is substrate only; the ratchets belong to plans
 02-05.
+
+## ubuntu-dispatch (EXPECTED RED)
+
+Dated 2026-09-05. Run by the ORCHESTRATOR, not the plan-01 executor: Step G pushes the
+branch and dispatches CI, and the executor ran in an `agent-*` worktree whose commits were
+not yet on the phase branch. Deferral was declared, not silently skipped.
+
+run id:      33938272686
+headSha:     f04ce51b39cc575133fa149f71aa64b7d37982ad
+host:        ubuntu-latest
+job:         sql-mutation (id 101230396626)
+started_at:  2026-09-05T02:09:37Z
+completed_at 2026-09-05T02:17:02Z
+wall clock:  445 s
+conclusion:  failure
+
+### SC-1's ubuntu half — MEASURED, and it PASSES
+
+RESEARCH assumption A1 (`postgresql-16-cron` reachable via apt on ubuntu-latest) was
+INSPECTED, never executed. This run executes it. Verbatim:
+
+    PostgreSQL major under /usr/lib/postgresql: 16
+    --- apt-cache policy postgresql-16-cron (which source wins) ---
+    postgresql-16-cron:
+      Candidate: 1.6.2-1
+    Get:2 http://azure.archive.ubuntu.com/ubuntu noble/universe amd64 postgresql-16-cron amd64 1.6.2-1 [107 kB]
+    Setting up postgresql-16-cron (1.6.2-1) ...
+    Version: 1.6.2-1
+    -rw-r--r-- 1 root root 76104 Oct 23  2023 /usr/lib/postgresql/16/lib/pg_cron.so
+    -rw-r--r--+ 1 root root  141 Oct 23  2023 /usr/share/postgresql/16/extension/pg_cron.control
+
+⭐ RESEARCH Open Question 1 is ANSWERED BY MEASUREMENT: **noble/universe wins, not PGDG.**
+The runner's major is 16, matching the authoring box's 16.13 — so CI and the author measure
+the SAME corpus, which is criterion 1. The version differs (ubuntu 1.6.2-1 vs macOS 1.6.7);
+both are pg_cron 1.6.x and both load against a PG16 server. Noted, not a blocker.
+
+### The tripwire, SHA-bound on ubuntu
+
+`sql-mutation` exited 1. **That is the EXPECTED reading of this run** — see 164.4.1-01-PLAN.md
+objective. It is the `lane-blocked-stale` tripwire firing because pg_cron is now AVAILABLE
+while four idiom files are still classified `lane-blocked`. Nobody may read it as a regression.
+
+The runner's own SELF-TEST 17/17 passed inside this job, including the arm that IS this rule:
+
+    === SELF-TEST 17/17: a lane that CAN host pg_cron while idiom files are still classified lane-blocked must exit 1 with `lane-blocked-stale` — and the same corpus with an absent probe must exit 0 ===
+      ok — AVAILABLE: exit code is 1 (got 1)
+      ok — the defect table carries a "lane-blocked-stale" defect NAMING the still-classified file
+      ok — the defect says the DEFERRAL HAS EXPIRED and points at TODOS [REDUNDER-PGCRON]
+      ok — exactly one defect on the AVAILABLE arm (got 1: ["lane-blocked-stale"])
+      ok — absent: the SAME corpus with an absent-marker probe exits 0 with no lane-blocked-stale defect
+
+⚠️ HONEST LIMIT OF THIS RECORD: the `gh api .../jobs/<id>/logs` response for this job came
+back TRUNCATED at 47 KB — it carries the provisioning step and the full self-test, but the
+final full-corpus `cat "$RUNNER_LOG"` output is cut off. So the *self-test* proof of the
+tripwire above is quoted from this ubuntu run verbatim, while the *full-corpus* defect table
+on ubuntu is NOT quoted here. The corpus defect table was measured on macOS (see the section
+above) and will be re-measured SHA-bound on ubuntu by plan 06's dispatch on the final tree.
+Do not read this section as claiming more than it shows.
+
+### Three other jobs were red in this run — adjudicated, none caused by plan 01
+
+- `frontend-test` (both shards) — REAL REGRESSION FROM WAVE 1, now fixed.
+  `drift-check-scripts.test.ts > SP-H01` pinned the literal `SELF-TEST PASSED (5/5)`; plan 01
+  legitimately added a sixth arm, so `indexOf` returned -1. The executor verified with
+  `floors.test.ts` and this assertion lives in a different file — the "file-scoped runs cannot
+  clear cross-cutting tests" trap. Fixed by matching `(N/N)` and REQUIRING the halves agree,
+  which is STRICTER than the literal it replaces (it catches a `6/5` mismatch the literal
+  never could). Proven able to fail: neutering run.sh to `(6/5)` produced
+  `the PASSED caption's halves disagree: SELF-TEST PASSED (6/5)`; restored, shasum matches.
+- `frontend-lint` — PRE-EXISTING. `computationError` unused at `SyncPreviewStep.tsx:578`.
+  Plan 01 touched ZERO TypeScript. A PR lints the diff; a dispatch lints the whole repo, which
+  is why #743 was green. Fixed by the underscore the rule asks for, and the adjacent Phase 162
+  comment claiming "the gate reads it" was corrected — nothing reads it.
+- `secret-scan` — PRE-EXISTING, scan-scope artifact. Every flagged commit is historical and
+  none is mine; every flagged file is a pre-existing test fixture. With `fetch-depth: 0` on a
+  non-PR event gitleaks scans FULL HISTORY, which a PR-scoped scan never does. Booked in
+  TODOS; the phase PR will be PR-scoped and is expected green, as #743 was.
