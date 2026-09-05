@@ -4,18 +4,18 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4.1
 current_phase_name: PGCRON-LANE
-status: planned
-stopped_at: Phase 164.4.1 PLANNED — 6 sequential plans at 03462da8, plan-checker gate passed after one revision (2 blockers + 7 warnings all fixed). Awaiting founder go-ahead before /gsd-execute-phase 164.4.1. Phase 164.4 CLOSED and landed (PR #743 -> 3ed6919e, v0.77.12.0).
-last_updated: "2026-09-04T17:38:02.554Z"
+status: executing
+stopped_at: Phase 164.4.1 PLANNED — 6 sequential plans at 03462da8, plan-checker gate passed after one revision (2 blockers + 7 warnings all fixed). Awaiting founder go-ahead before /gsd-execute-phase 164.4.1. Phase 164.4 CLOSED and landed (PR
+last_updated: "2026-09-04T21:21:18.232Z"
 last_activity: 2026-09-04
-last_activity_desc: Phase 164.4.1 planning complete, execution paused by founder
-state_head: aad356e9a5bcbb3560ca68328250c6701bb6c5d9
+last_activity_desc: Phase 164.4.1 execution started
+state_head: 3b6c338a860b59b5259596713ffad0ae6a4de623
 progress:
   total_phases: 16
-  completed_phases: 5
-  total_plans: 82
-  completed_plans: 78
-  percent: 31
+  completed_phases: 4
+  total_plans: 76
+  completed_plans: 66
+  percent: 25
 ---
 
 # Project State — Quantalyze
@@ -166,17 +166,17 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 164.4 (REDUNDER-BACKFILL) — EXECUTING
-Plan: 1 of 12
+Phase: 164.4.1 (PGCRON-LANE) — EXECUTING
+Plan: 1 of 6
       class + lane probe + SCOPE AMENDMENT #2, 04-11 the eight annotation batches) —
       hand-maintained; `state.advance-plan` still REFUSES on this section
       (`ambiguous_position_phase`, see § Known Issues)
-Status: Executing Phase 164.4
+Status: Executing Phase 164.4.1
       `arms: 262/262/0`, `biting: 262`, 0 waivers, exit 0. Next: land 164.4-11 as its own PR with
       `sql-mutation` GREEN on ubuntu SHA-bound to the head, then `/gsd-verify-work 164.4`.
       ⏳ Phase 164.4.1 PGCRON-LANE is still owed the 4 lane-blocked files plus the 1 `pending:`
       file (`test_compute_jobs_error_kind_copy_parity.sql`, ~100 sections).
-Last activity: 2026-09-04 — Phase 164.4 execution started
+Last activity: 2026-09-04 — Phase 164.4.1 execution started
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
       arms moves; `WAIVED_CEILING` unedited). Full corpus **exit 0**: `coverage: files 39/71`,
       `arms: 262/262/0`, `biting: 262`, `lane-invocations: 262` (tallies agree), `mean 1.0s`, 0
