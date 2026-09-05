@@ -766,24 +766,53 @@ BEGIN
 
   SELECT command INTO v_command
     FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep';
-  -- RED-UNDER: point THIS PART'S OWN oracle lookup at a jobname that does not exist.
-  --            ⚠️ A GATE-FILE EDIT, and deliberately so. This raise is a PRECONDITION
-  --            guard, not an independent production claim: Part 1 owns the production
-  --            claim (`1/JOB-04`, three raises: pg_cron absent, job not registered,
-  --            exactly-one-row) and Part 1 runs FIRST and UNGATED. MEASURED 2026-09-05 on
-  --            a real lane, in two steps: renaming the jobname in 20260819150000's
-  --            cron.schedule call does not even REACH the gate -- that migration's own
-  --            STEP 2 aborts the apply with `R3/JOB-04 verification failed: ...
-  --            carries a NULL command after re-registration`. With the WHOLE of STEP 2
-  --            short-circuited so the apply survives, the run REDs
-  --            `TEST FAILED (1/JOB-04): pg_cron IS installed but the
-  --            reconcile_dropped_enqueue_sweep job is NOT registered` -- Part 1's
-  --            registration arm -- and this arm is never reached. So no production
-  --            mutation can make this raise fire first,
-  --            and the honest falsifier is the one that breaks the precondition it asserts.
-  --            Same class as the S-2 seed-integrity precedent in
-  --            test_strategy_analytics_stuck_computing_reaper.sql (plan 164.4.1-04).
-  -- RED-UNDER-M: {"arm":"2/JOB-04","apply":[{"kind":"edit","file":"supabase/tests/test_reconcile_dropped_enqueue_sweep.sql","find":"    RAISE NOTICE 'SKIP Part 2: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only). Part 1 already reddened on this condition.';\n    RETURN;\n  END IF;\n\n  SELECT command INTO v_command\n    FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep';\n","replace":"    RAISE NOTICE 'SKIP Part 2: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only). Part 1 already reddened on this condition.';\n    RETURN;\n  END IF;\n\n  SELECT command INTO v_command\n    FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep__no_such_job';\n","occurrences":1}]}
+  -- RED-UNDER: unschedule the sweep on the live database -- the production change this
+  --            arm's OWN message names ("or the job was unscheduled out of band" is Part 1's
+  --            wording for the same event). ⚠️ DOMINATED BY DESIGN, and that is this file's
+  --            doctrine rather than a defect in the arm: Part 1 is DELIBERATELY UNGATED and
+  --            its registration arm is meant to be the free-standing RED, so under a real
+  --            unschedule `1/JOB-04` fires first every time. This arm exists so that Part 2
+  --            cannot silently RETURN instead, and it is reachable only with Part 1's own
+  --            dominators suppressed -- which is what `neuter` is for. The neuter list below
+  --            is MEASURED off the lane, not reasoned: entries were added ONE AT A TIME and
+  --            only after the runner reported that identity as the first failure, which is
+  --            why it names 5 of the 15 raises carrying `1/JOB-04` and not all 15 (the other
+  --            ten sit behind `IF v_command <op> ...` tests that are NULL, not TRUE, once the
+  --            job row is gone). Same shape, same primitives, as `2/JOB-05` in
+  --            test_retention_orphaned_running.sql:655.
+  --
+  --            ⛔ THIS TWIN WAS REFUTED AND REPLACED, 2026-09-05. Do not restore the old one.
+  --            WHO: the phase's gsd-code-reviewer, finding CR-01 of 164.4.1-REVIEW.md;
+  --            re-measured independently by the fixer before this edit was made.
+  --            WHAT IT USED TO BE: an `{"kind":"edit"}` step against THIS GATE FILE, pointing
+  --            this part's own oracle lookup at `..._sweep__no_such_job`. A gate-self
+  --            mutation with no production preimage.
+  --            WHAT JUSTIFIED IT: a recorded conclusion reading "So no production mutation
+  --            can make this raise fire first, and the honest falsifier is the one that
+  --            breaks the precondition it asserts."
+  --            WHY THAT WAS WRONG: the two routes it rested on did fail exactly as recorded
+  --            -- renaming the jobname in 20260819150000's cron.schedule call never reaches
+  --            the gate, because that migration's own STEP 2 aborts the apply with
+  --            `R3/JOB-04 verification failed: ... carries a NULL command after
+  --            re-registration`; and with the WHOLE of STEP 2 short-circuited the run REDs
+  --            `1/JOB-04` instead -- but the conclusion does not follow from them. Neither
+  --            route tried the THIRD one, which this corpus had already been using for three
+  --            plans: a live-DB `sql` step plus a `neuter` of the dominating Part 1 raises.
+  --            HOW IT WAS REFUTED: real pg-lane, PostgreSQL 16 + pg_cron, the file's own
+  --            RED-UNDER-SETUP apply list, 5 `1/JOB-04` raises neutered, and the one-statement
+  --            post-apply below. Lane exit 3, and the FIRST and ONLY failure is this arm,
+  --            raised from this DO body:
+  --                psql:<scratch>/gate.sql:1285: ERROR:  P0001: TEST FAILED (2/JOB-04): the
+  --                reconcile_dropped_enqueue_sweep cron job is missing while pg_cron is
+  --                installed. A missing sweep is a red gate, never a skip.
+  --            Under the runner the same twin scores `arm 2/JOB-04 exit 3 RED (identity ok)`.
+  --
+  --            ⛔ The refuted prose also cited "the S-2 seed-integrity precedent in
+  --            test_strategy_analytics_stuck_computing_reaper.sql (plan 164.4.1-04)" as the
+  --            same class. That citation was mistaken and is deleted rather than repaired:
+  --            `4a/seed`'s twin there mutates TWO MIGRATIONS -- 20260802120000 and
+  --            20260803120000 -- not the gate, so it was never a gate-self precedent at all.
+  -- RED-UNDER-M: {"arm":"2/JOB-04","apply":[{"kind":"sql","stmt":"DELETE FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep'"}],"neuter":[{"arm":"1/JOB-04"},{"arm":"1/JOB-04"},{"arm":"1/JOB-04"},{"arm":"1/JOB-04"},{"arm":"1/JOB-04"}]}
   IF v_command IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (2/JOB-04): the reconcile_dropped_enqueue_sweep cron job is missing while pg_cron is installed. A missing sweep is a red gate, never a skip.';
   END IF;
