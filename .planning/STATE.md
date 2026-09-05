@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.1
 current_phase_name: PROD-OBSERVABILITY
 status: in_progress
-stopped_at: Phase 164.1 planning RESUMED — credentials landed (ANALYTICS_SERVICE_KEY, RAILWAY_API_TOKEN; the third secret RAILWAY_SSH_PRIVATE_KEY was RETIRED by measurement). Pattern-mapper next, then planner.
-last_updated: "2026-09-05T21:19:23.990Z"
+stopped_at: "Completed 164.1-01-PLAN.md (prod-prober tracer: run.mjs + seams.mjs + pyapi06 arm, 13/13 self-test, live no-cred run exits 1)"
+last_updated: "2026-09-05T21:57:06.404Z"
 last_activity: 2026-09-05
 last_activity_desc: 164.3.1/164.4/164.4.1 records restored and closed; 164.1 discuss+research+validation landed; planning blocked on founder secrets
-state_head: 7da6e77ad2344828c056c799f9c7016b03417caf
+state_head: 950f1f28269154165884a48f7a9ab652a4534412
 progress:
   total_phases: 19
   completed_phases: 8
   total_plans: 107
-  completed_plans: 96
+  completed_plans: 97
   percent: 42
 ---
 
@@ -637,7 +637,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███░░░░░░░] 25%
+Progress: [████░░░░░░] 42%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -812,6 +812,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4.1 P04 | 118 min | 3 tasks | 7 files |
 | Phase 164.4.1 P05 | 175 min | 3 tasks | 6 files |
 | Phase 164.4.1 P06 | 35m | 2 tasks | 9 files |
+| Phase 164.1 P01 | 30 min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -1057,6 +1058,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4.1]: 164.4.1-05: FIVE arms use GATE-FILE falsifiers (3 oracle preconditions, 1 seed-integrity control, 1 sum-of-pinned-counts invariant), each with its domination measurement at the site. A gate-file falsifier is NOT a waiver — the arm still raises, names itself first and counts in biting. WAIVED_CEILING unedited at 0.
 - [Phase 164.4.1]: D-07 closed by DOCUMENTING the classifier's text-only boundary and pinning it with a hand-built test — the proposed apply-list widening was retired because it would classify UNANNOTATED files by a line only ANNOTATED files carry (dead code behind a passing test)
 - [Phase 164.4.1]: sql-mutation timeout-minutes STAYS 15 and ci.yml is byte-unchanged by plan 06: the DECISION rule accepts only a measured ubuntu run, and that measurement was scoped out of the executor (worktree branch is not the phase branch, so a dispatch would not be SHA-bound)
+- [Phase 164.1]: ARMS_FLOOR is the literal 4 while only ONE prober arm is registered — the live run exits 1 on '1 registered arm(s) < floor 4' until plans 03/04 land — A floor ratcheted up as arms land can only ever agree with reality, which is not a floor. An incomplete prober must be loud.
+- [Phase 164.1]: KIND_ASSERTIONS lives INSIDE selfTest() — a table-driven isolation loop asserting through a variable is invisible to the plan-05 source-scanning coverage extractor — MEASURED: with the map at module level the extractor reported pyapi06-absent-uncoded and pyapi06-wrong-key-accepted as UNCOVERED.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1759,8 +1762,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-05T10:46:00.442Z
-**Stopped At:** Completed 164.4.1-06-PLAN.md (ubuntu measurement DEFERRED to orchestrator)
+**Last Date:** 2026-09-05T21:56:54.279Z
+**Stopped At:** Completed 164.1-01-PLAN.md (prod-prober tracer: run.mjs + seams.mjs + pyapi06 arm, 13/13 self-test, live no-cred run exits 1)
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
