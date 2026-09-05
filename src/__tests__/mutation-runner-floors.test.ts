@@ -1348,7 +1348,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // reason. Synthetic basenames for the same reason as the line above — the
     // arms below mutate the COUNT against the NAMES, and a fixture carrying the
     // live four would have to move the day [REDUNDER-PGCRON] is closed.
-    "lane-blocked: 2 file(s) probe pg_extension for pg_cron, which the pg-lane cannot host — d.sql e.sql (deferred 2026-09-03, TODOS [REDUNDER-PGCRON])",
+    // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-06): the REASON half of this line was
+    // rewritten at the source — the old wording claimed the lane could not host
+    // pg_cron, which stopped being true when plan 01 put it there. The two
+    // synthetic basenames are DELIBERATELY unchanged: what the arms below mutate
+    // is the COUNT against the NAMES, and that cross-check is the contract, not
+    // the prose. This fixture carries the NON-EMPTY arm's wording, because a
+    // 0-file line would name nothing for those arms to disagree with.
+    "lane-blocked: 2 file(s) probe pg_extension for pg_cron and are NOT yet annotated — d.sql e.sql (the lane hosts pg_cron since Phase 164.4.1, so a non-empty class here is STALE — see the lane-probe line)",
     "lane-probe: pg_cron absent — lane-blocked class is current",
     // ⚠️ SYNTHETIC, like the two lines above, and deliberately NOT moved to the
     // live 36. The `pending:` line is the only summary line the count-recheck

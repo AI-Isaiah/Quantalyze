@@ -1764,6 +1764,69 @@ describe("classifyGateIdiom — the exclusion decision, over HAND-BUILT texts", 
     expect(classifyGateIdiom(nonIdiomProbe)).toBe("unreachable");
   });
 
+  it("D-07 boundary: a gate whose OWN text never probes pg_cron classifies pending even though its apply list would need a pg_cron-RAISEing migration — the classifier reads gate text only, by design", () => {
+    // ── THE DELIBERATE CLOSURE OF TODOS [REDUNDER-LANEBLOCKED-BLIND] ─────────
+    // (CONTEXT decision D-07, Phase 164.4.1 plan 06, 2026-09-05.)
+    //
+    // This is a LIMIT, asserted. It is NOT a bug left untested: the sibling
+    // assertion at the former BLIND tripwire below (the plan-02 flip on
+    // `test_compute_jobs_error_kind_copy_parity.sql`) records the OTHER half of
+    // the same closure — that file is now `annotated`, because the SUBSTRATE
+    // changed, not the classifier. The two read as one closure and neither
+    // stands alone: this arm says WHERE the boundary is, that one says WHY it
+    // stopped costing anything.
+    //
+    // ⛔ WHY `pending` IS THE CORRECT ANSWER HERE, not a miss to fix. TODOS
+    // proposed widening `gateNeedsPgCron` to read the gate's `RED-UNDER-SETUP`
+    // apply list. That fix cannot see its own subject: `classifyGateIdiom`
+    // classifies UNANNOTATED files, and an unannotated gate has no
+    // `RED-UNDER-SETUP` line — the real instance had none at the moment it was
+    // misclassified. A widened branch would be dead code behind a passing test,
+    // the "quietly become unreachable" shape this phase family refuses. So the
+    // fixture below deliberately carries the apply-list dependency as a PROSE
+    // `-- run AFTER …` note, which is what such a gate really looks like before
+    // anybody annotates it, and there is nothing structured for a classifier to
+    // read.
+    //
+    // ⭐ AND THE RESIDUAL FAILS LOUD. With pg_cron hosted (plans 164.4.1-02..05)
+    // both classes resolve identically — annotatable — so this boundary costs
+    // nothing today. If a future lane-blocking dependency ever lives ONLY in a
+    // migration, it surfaces as a named `baseline` defect the first time someone
+    // annotates that gate: exit 1 with the file named, never a silent miscount.
+    const applyListOnlyBlocked = [
+      "-- Gate: the error-kind copy path.",
+      "-- run AFTER 20260826140000_compute_jobs_error_kind_orphaned.sql",
+      "--   ⚠️ that migration hard-RAISEs 0A000 when the pg_cron extension is absent,",
+      "--   so this gate cannot reach a GREEN baseline on a lane without it — a fact",
+      "--   that lives in the APPLY LIST, not in the bytes below.",
+      "DO $$",
+      "BEGIN",
+      "  IF NOT EXISTS (SELECT 1 FROM compute_jobs WHERE error_kind = 'orphaned') THEN",
+      "    RAISE EXCEPTION 'TEST FAILED (1): error_kind orphaned was not admitted';",
+      "  END IF;",
+      "END $$;",
+    ].join("\n");
+
+    // Calibration, both directions, or the verdicts below prove nothing:
+    // the pg_cron dependency really IS present in the raw bytes (so this is not
+    // a fixture that simply forgot to mention it), and it is present ONLY in
+    // comment prose — the executable half never names the catalog at all.
+    expect(applyListOnlyBlocked, "the dependency must be visible in the raw bytes").toContain(
+      "pg_cron",
+    );
+    expect(
+      applyListOnlyBlocked,
+      "and it must NOT reach the catalog probe the classifier keys on",
+    ).not.toContain("pg_extension");
+    expect(applyListOnlyBlocked, "the file is idiom-shaped, or it would be `unreachable`").toContain(
+      IDENTITY_CARRIER,
+    );
+
+    // THE BOUNDARY.
+    expect(gateNeedsPgCron(applyListOnlyBlocked)).toBe(false);
+    expect(classifyGateIdiom(applyListOnlyBlocked)).toBe("pending");
+  });
+
   describe("WR-04: the SECOND reader is a real reader — calibrated before it is trusted", () => {
     // ⛔ An oracle nobody calibrated is not an oracle. If `naiveClassify` were
     // stuck on one verdict, or blind to comments, the corpus partition test
@@ -2279,6 +2342,14 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // RAISEs without pg_cron. The defect stops MATTERING once nothing is
     // lane-blocked; it does not stop being wrong. It is closed DELIBERATELY in
     // plan 164.4.1-06 — TODOS [REDUNDER-LANEBLOCKED-BLIND].
+    // ⭐ CLOSED 2026-09-05 (plan 164.4.1-06, D-07), and the closure's OTHER half
+    // is the `D-07 boundary` arm above in this same file. Read together: this
+    // assertion says the practical exposure is gone (the substrate changed, the
+    // file is annotated), that one says the classifier's text-only scope is a
+    // DOCUMENTED limit with a hand-built calibration, and `parse.mjs` records
+    // why the proposed "read the apply list" widening was retired rather than
+    // shipped — it would classify UNANNOTATED files by a line only ANNOTATED
+    // files carry, i.e. dead code behind a passing test.
     expect(corpus.annotatedFiles).toContain("test_compute_jobs_error_kind_copy_parity.sql");
     expect(corpus.pendingFiles).not.toContain("test_compute_jobs_error_kind_copy_parity.sql");
   });

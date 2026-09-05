@@ -1039,6 +1039,50 @@ export const PG_CRON_EXTENSION = "pg_cron";
  * of those 5 are idiom files. `test_wizard_composite_fence.sql:698` mentions
  * pg_cron only inside a `--` comment and is NOT a probe — the negative control
  * that proves this reads code, not prose.
+ *
+ * ⭐ 2026-09-05 (Phase 164.4.1). THE 2026-09-03 PARAGRAPH ABOVE IS LINEAGE: its
+ * mechanism table still describes these gates correctly, but its premise — "the
+ * founder decided NOT to install pg_cron there" — was RETIRED. **The pg-lane now
+ * HOSTS pg_cron.** `scripts/pg-lane/run.sh` carries `shared_preload_libraries`
+ * on its single `pg_ctl -o` start (measured cost +0.009 s/lane, plan 01), and
+ * each affected gate's `RED-UNDER-SETUP` apply list carries
+ * `supabase/migrations/20260513094906_enable_pg_cron.sql`, so the extension is
+ * present in the gate's own database. All five files are annotated; the
+ * `lane-blocked` class is measured EMPTY (plan 05: `coverage: files 44/71`,
+ * `arms: 363/363/0`, `lane-blocked: 0 file(s)`, `  pending: 0`).
+ *
+ * THIS FUNCTION DID NOT CHANGE, and it is still load-bearing: it is the input to
+ * the `lane-blocked-stale` tripwire (`run.mjs`, SELF-TEST 17/17), which is what
+ * makes the retirement above provable rather than asserted — the day a NEW
+ * unannotated gate probes for pg_cron, the class stops being empty and the
+ * tripwire has something to say about it.
+ *
+ * ⛔ THE BOUNDARY, PINNED RATHER THAN IMPLIED (D-07, TODOS
+ * `[REDUNDER-LANEBLOCKED-BLIND]`, closed 2026-09-05). This reads THE GATE'S OWN
+ * TEXT ONLY. A gate whose text never probes `pg_extension`, but whose apply list
+ * contains a migration that hard-RAISEs without pg_cron, is equally
+ * un-baselineable on a lane without the extension — and classifies `pending`,
+ * not `lane-blocked`. That was measured once, on
+ * `test_compute_jobs_error_kind_copy_parity.sql` (Phase 164.4 plan 09).
+ *
+ * TODOS proposed FIXING it by widening this function to read a gate's
+ * `RED-UNDER-SETUP` apply list. That fix was RETIRED, with reasons, rather than
+ * left open:
+ *   1. IT CANNOT SEE ITS OWN SUBJECT. Classification runs over UNANNOTATED files
+ *      (`classifyGateIdiom` — "which of four idiom classes an UNANNOTATED gate
+ *      file falls in"), and an unannotated gate has no `RED-UNDER-SETUP` line to
+ *      read. The measured instance had none at the moment it was misclassified.
+ *      A widened branch would be dead code behind a passing test — the exact
+ *      "quietly become unreachable" shape this phase exists to refuse.
+ *   2. THE SUBSTRATE CLOSED THE EXPOSURE. With pg_cron hosted, both the
+ *      own-text case and the apply-list case resolve identically: annotatable.
+ *      There is no verdict left for the widening to change.
+ *   3. THE RESIDUAL FAILS LOUD. A future lane-blocking dependency that lives
+ *      only in a migration surfaces as a `baseline` defect the first time
+ *      somebody annotates that gate — a named, exit-1 reading, not a silent
+ *      miscount.
+ * The boundary is asserted, not merely described: see the `D-07 boundary` arm in
+ * `src/__tests__/mutation-annotation-parser.test.ts`.
  */
 export function gateNeedsPgCron(text) {
   for (const stmt of tokenizeStatements(text)) {
@@ -1062,6 +1106,14 @@ export function gateNeedsPgCron(text) {
  *                  falsifiable on today's lane, so DEFERRED with its reason
  *                  printed — SCOPE AMENDMENT #2, founder 2026-09-03, TODOS
  *                  [REDUNDER-PGCRON].
+ *                  ⭐ CURRENCY 2026-09-05 (Phase 164.4.1): the row above is
+ *                  LINEAGE. The lane HOSTS pg_cron now, so this class is
+ *                  STRUCTURALLY EMPTY on it (measured `lane-blocked: 0
+ *                  file(s)`) and `[REDUNDER-PGCRON]` is retired. It stays
+ *                  DERIVED — never deleted, never hard-coded to `[]` — for
+ *                  exactly one reason: a future UNANNOTATED gate that probes
+ *                  for pg_cron must still land here, so the runner's
+ *                  `lane-blocked-stale` tripwire keeps an input to fire on.
  *   "unreachable"  code-level `RAISE EXCEPTION`, none of them carrying the
  *                  identity idiom. `attributeIdentities` has nothing to
  *                  attribute, so no arm of this file can be judged today.

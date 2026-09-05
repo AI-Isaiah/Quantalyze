@@ -173,6 +173,12 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 // the deferred fifth file is annotated, `pending:` is EMPTY and the measured
 // reading is `coverage: files 41/71` with 3 lane-blocked files left for plans
 // 03-05. The end state of THIS phase is not restated here — read the run.
+// ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-06): the `41/71` above is plan 02's dated
+// reading and stays as lineage; plans 03-05 then took the last three files. The
+// phase's END STATE, measured by plan 05 and re-measured by this plan, is
+// 44 annotated / 0 pending / 27 unreachable / 0 inert / 0 lane-blocked = 71 —
+// `FILES_FLOOR` 44, `ARMS_FLOOR` 363, `WAIVED_CEILING` still 0, and
+// [REDUNDER-PGCRON] RETIRED rather than deferred again. Still read the run.
 //
 // ⭐ RE-DERIVED 2026-09-03 (plan 164.4-04) — THE PHASE'S FIRST *FILE* MOVE. The
 // blocks above STAY as lineage: 1 was the whole annotated corpus while it was
@@ -3325,6 +3331,18 @@ export function absurdityViolations({
 // still `lane-blocked:` are plans 03-05 of this phase; until they land, every
 // run exits 1 on ONE `lane-blocked-stale` row, which is the tripwire working.
 // Read the run's own `coverage:` and `  pending:` lines, never this sentence.
+// ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-06) — SUPERSEDES the paragraph above as
+// the current reading; it stays as plan 02's dated lineage, including the
+// "every run exits 1" sentence, which describes an interval that is now OVER.
+// Plans 03-05 annotated the last three files. MEASURED at plan 05 and
+// re-measured by this plan over `supabase/tests/`: 44 annotated / 0 pending /
+// 27 unreachable / 0 inert / 0 lane-blocked = 71, `arms: 363/363/0`,
+// `biting: 363`, `lane-invocations: 363`, `✅ No defects`, EXIT 0.
+// ⛔ FROM HERE, A NON-ZERO EXIT IS A REGRESSION, not the tripwire. And the
+// printed reason for `lane-blocked:` is no longer "which the pg-lane cannot
+// host" in either state — see `logCorpusClassification`, where both the empty
+// and the non-empty wording were corrected at the source on this date
+// (PATTERNS § 6: a message that cannot be false is not a measurement).
 //
 // ⭐ AND THE REASON CAN EXPIRE. "which the pg-lane cannot host" is a claim
 // about the LANE, and nothing in the derivation measures the lane: fix
@@ -3335,6 +3353,15 @@ export function absurdityViolations({
 // through the real `laneRunner`, prints what it MEASURED on the lane as
 // `lane-probe:`, and raises `lane-blocked-stale` (exit 1) the day pg_cron is
 // available while the class is non-empty.
+// ⭐ CURRENCY 2026-09-05 (plan 164.4.1-06): IT DID EXPIRE, EXACTLY AS DESIGNED,
+// and the paragraph above is the dated record of why the mechanism was built.
+// Phase 164.4.1 fixed [REDUNDER-PGCRON] — and the tripwire FIRED on the
+// pre-annotation tree (`164.4.1-TRIPWIRE-FIRED.log`, plus SHA-bound on ubuntu
+// in run 33938272686), then CLEARED when the last file was annotated. The
+// probe leg, the derivation and the defect are UNCHANGED and stay live: they
+// are what a future unannotated pg_cron gate would trip. What changed is only
+// the two sentences the run PRINTS, which now distinguish the empty class from
+// a stale one instead of asserting "STALE" over a class with nothing in it.
 
 /**
  * The defect kinds that take an EXECUTED arm out of `biting`. Named once, so
@@ -3474,9 +3501,33 @@ export function logCorpusClassification(corpus, log, laneProbe = null) {
   // SINGLE-SPACE separated — a contract, not a style: ci.yml cross-checks the
   // claimed count against the `*.sql` tokens on this line, and the parser pin
   // asserts the exact set in this order.
+  //
+  // ⭐ MESSAGE HONESTY 2026-09-05 (plan 164.4.1-06, PATTERNS § 6). Until this
+  // date the reason asserted, UNCONDITIONALLY, that the pg-lane could not host
+  // the extension and that the class was "deferred 2026-09-03". That sentence
+  // became FALSE the moment plan 01 put pg_cron on the lane, and false-at-zero:
+  // at `lane-blocked: 0` it narrated a deferral that no longer exists, for a
+  // class with nothing in it. Both states are now spelled out separately and
+  // both are true readings of the same run.
+  //
+  // ⛔ THREE CONTRACTS CONSTRAIN THE WORDING, and none of them is style:
+  //   1. the prefix `lane-blocked: N file(s) ` is byte-identical in both arms —
+  //      ci.yml greps `^lane-blocked: [0-9]+ file\(s\) ` and MEASURE_FAILs on its
+  //      absence, so a "nothing to report, print nothing" branch would break the
+  //      gate rather than please it;
+  //   2. the EMPTY arm contains NO `*.sql` token, because ci.yml cross-checks the
+  //      claimed count against `[A-Za-z0-9_]+\.sql` matches on this line — a
+  //      filename quoted in the empty-case prose would claim 0 and name 1;
+  //   3. the count is printed unconditionally for the same reason (1) exists: an
+  //      absent line is a MEASURE_FAIL over there, not a tidy zero.
   log(
-    `lane-blocked: ${laneBlockedFiles.length} file(s) probe pg_extension for pg_cron, which the ` +
-      `pg-lane cannot host — ${laneBlockedFiles.join(" ")} (deferred 2026-09-03, TODOS [REDUNDER-PGCRON])`,
+    laneBlockedFiles.length > 0
+      ? `lane-blocked: ${laneBlockedFiles.length} file(s) probe pg_extension for pg_cron and are ` +
+          `NOT yet annotated — ${laneBlockedFiles.join(" ")} (the lane hosts pg_cron since Phase ` +
+          `164.4.1, so a non-empty class here is STALE — see the lane-probe line)`
+      : `lane-blocked: ${laneBlockedFiles.length} file(s) probe pg_extension for pg_cron and are ` +
+          `not yet annotated — (none; the lane hosts pg_cron since Phase 164.4.1, TODOS ` +
+          `[REDUNDER-PGCRON] retired 2026-09-05)`,
   );
   if (laneProbe !== null) {
     // What the LANE said, not what the classification assumed. `available: null`
@@ -3484,10 +3535,33 @@ export function logCorpusClassification(corpus, log, laneProbe = null) {
     // MEASURE_FAIL in-process, and printed here in a shape ci.yml's
     // `^lane-probe: pg_cron (absent|AVAILABLE)` grep deliberately does NOT
     // match, so the missing measurement fails there too.
+    //
+    // ⭐ 2026-09-05 (plan 164.4.1-06). Each arm below now says what it means for
+    // THIS run's class, empty or not. "lane-blocked class is STALE" printed
+    // beside `lane-blocked: 0` was the false reading plan 05 left behind: STALE
+    // is a claim about files that are still deferred, and there were none.
+    //
+    // ⛔ The two `(absent|AVAILABLE)` prefixes stay byte-identical — ci.yml's
+    // `^lane-probe: pg_cron (absent|AVAILABLE)` grep is what makes the third
+    // form (`UNREADABLE`) fail there as well as in-process.
+    //
+    // ⛔ `absent` + empty class is NOT a reassuring state and must not read like
+    // one: on a lane that HAS lost pg_cron, every one of the 44 annotated gates
+    // that needs it fails at baseline. That is why the empty/absent arm names
+    // the consequence rather than printing "class is current".
     if (laneProbe.available === true) {
-      log("lane-probe: pg_cron AVAILABLE — lane-blocked class is STALE");
+      log(
+        laneBlockedFiles.length > 0
+          ? "lane-probe: pg_cron AVAILABLE — lane-blocked class is STALE"
+          : "lane-probe: pg_cron AVAILABLE — lane-blocked class is empty, as a hosting lane requires",
+      );
     } else if (laneProbe.available === false) {
-      log("lane-probe: pg_cron absent — lane-blocked class is current");
+      log(
+        laneBlockedFiles.length > 0
+          ? "lane-probe: pg_cron absent — lane-blocked class is current"
+          : "lane-probe: pg_cron absent — lane-blocked class is empty; the lane LOST pg_cron " +
+              "(every annotated pg_cron gate will now fail at baseline)",
+      );
     } else {
       log(
         "lane-probe: UNREADABLE — the probe lane printed no LANE-PROBE marker, so pg_cron availability " +
@@ -3623,6 +3697,12 @@ export function runCorpus({
     // cannot host" — is a claim about the LANE, and the derivation never
     // measures the lane. Without this, fixing [REDUNDER-PGCRON] would leave
     // four files parked behind a line that keeps reading true.
+    // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-06): [REDUNDER-PGCRON] WAS fixed —
+    // the lane hosts pg_cron — and this probe is what stopped the four files
+    // from being parked. The quoted reason string is no longer what the run
+    // prints (`logCorpusClassification` was corrected on this date); the
+    // paragraph stays because the ARGUMENT for measuring the lane every run is
+    // unchanged and is now proven by an expiry that actually happened.
     //
     // ⚠️ WHEN. Every run that is going to spawn a lane anyway (`targets`
     // non-empty) — which is every real gate run and every `--file/--arm`

@@ -1239,7 +1239,7 @@ true for 146 and half of 142–145, and **false for 141**.
       still says WINDOWS entry 28 is CLOSED while row 28 reads `open`, and no batch can correct it
       until the frontmatter counters are reconciled with the rows.
 
-- [ ] **`[REDUNDER-PGCRON]` FOUR Phase-164.4 idiom gate files cannot be FALSIFIED on the pg-lane — the lane has no `pg_cron` (measured 2026-09-02, Plan 164.4-00; mechanism corrected and the set closed at four 2026-09-03, Plan 164.4-03).**
+- [x] **`[REDUNDER-PGCRON]` FOUR Phase-164.4 idiom gate files cannot be FALSIFIED on the pg-lane — the lane has no `pg_cron` (measured 2026-09-02, Plan 164.4-00; mechanism corrected and the set closed at four 2026-09-03, Plan 164.4-03).**
       `scripts/pg-lane/run.sh` boots a vanilla `initdb` cluster. Measured on it: `pg_available_extensions`
       has **0 rows** for `pg_cron`, and `CREATE EXTENSION pg_cron` fails `0A000 … Could not open extension
       control file ".../postgresql@16/share/postgresql@16/extension/pg_cron.control"`.
@@ -1286,6 +1286,48 @@ true for 146 and half of 142–145, and **false for 141**.
       **Needed before any batch containing those files.** Evidence:
       `.planning/phases/164.4-.../164.4-00-FIXTURE-STRATEGY.md` § "The largest idiom file cannot be
       baselined".
+      ✅ **CLOSED 2026-09-05 — Phase 164.4.1 PGCRON-LANE. RETIRED AT THE SUBSTRATE, not worked
+      around.** Everything above stays as the dated record of the deferral; this paragraph is what
+      ended it.
+      * **HOW.** `scripts/pg-lane/run.sh` now carries `shared_preload_libraries=pg_cron` (plus
+        `cron.database_name` and `cron.max_running_jobs=0` — the lane schedules nothing, it only
+        needs the catalog to exist) on its SINGLE `pg_ctl -o` start, and each affected gate's
+        `RED-UNDER-SETUP` apply list carries
+        `supabase/migrations/20260513094906_enable_pg_cron.sql`. No migration was edited. The
+        preload's cost was MEASURED, not assumed: **+0.009 s/lane** in the isolated A/B (plan 01),
+        and `per-arm lane time: mean 1.0s` at corpus scale — identical to every prior local
+        full-corpus run without it, which is the form the decision needed since every arm pays lane
+        startup.
+      * **WHAT IT BOUGHT.** All FIVE files are annotated — the four `lane-blocked:` ones plus
+        `test_compute_jobs_error_kind_copy_parity.sql`, the apply-list-blind fifth — for **103
+        sections** in total (this item owed 100 across the four; the fifth carried 3).
+        Per plan: 02 took the copy-parity file (3) and `test_derive_allocator_keys_fanout.sql` (7),
+        03 took `test_strategy_analytics_stuck_computing_reaper.sql`, 04
+        `test_retention_orphaned_running.sql`, 05 `test_reconcile_dropped_enqueue_sweep.sql` (39,
+        the largest file in the phase).
+      * **END STATE, read off the run and not counted here** (plan 05 at `b6b830cf`, re-measured by
+        plan 06): `coverage: files 44/71`, `lane-blocked: 0 file(s)`,
+        `lane-probe: pg_cron AVAILABLE`, `  pending: 0`, `arms: 363/363/0`, `biting: 363`,
+        `lane-invocations: 363` (tallies agree), `✅ No defects`, **exit 0**. `FILES_FLOOR` 44,
+        `ARMS_FLOOR` 363, `WAIVED_CEILING` still **0** — the whole phase moved nine files' worth of
+        arms and added ZERO waivers. 44 + 0 + 27 + 0 + 0 = 71; the 27 are `unreachable:`
+        (`[REDUNDER-NONIDIOM]`, still open).
+      * **THE DEFERRAL EXPIRED BY BEING CAUGHT, which is the point of having built it that way.**
+        The `lane-blocked-stale` tripwire FIRED on the pre-annotation tree — recorded verbatim in
+        `.planning/phases/164.4.1-.../164.4.1-TRIPWIRE-FIRED.log`, and SHA-bound on ubuntu in
+        workflow run 33938272686 (`f04ce51b`), whose provisioning step also answered RESEARCH's
+        open question by measurement: `postgresql-16-cron` **1.6.2-1 from noble/universe**, not
+        PGDG, with `pg_cron.so` and `pg_cron.control` present under
+        `/usr/lib/postgresql/16/`. It CLEARED when plan 05 annotated the last file: exit 0, class
+        empty. Nothing in the classifier, the probe fixture or the defect code was touched to
+        clear it — the class emptied BY ANNOTATION, and SELF-TEST 17/17 still proves the tripwire
+        on the synthetic corpus, so it stays live for any FUTURE unannotated pg_cron gate.
+      * ⚠️ **The runner no longer cites this id in the non-empty `lane-blocked:` arm** (plan 06
+        rewrote both arms of the reason at the source — the old wording said the pg-lane could not
+        host the extension, which stopped being true on 2026-09-05). The `lane-blocked-stale`
+        DEFECT message still names `[REDUNDER-PGCRON]`, deliberately: that string is asserted by
+        SELF-TEST 17/17, and a reader who hits it should land on this closed entry and its history
+        rather than on nothing.
 
 - [ ] **`[ANCHOR-QUOTE-01]` `verify-plan-anchors.mjs` binds a quote ACROSS an XML element boundary — false stales, masked only by element ORDER (booked 2026-09-03, Phase 164.4 plan-check iteration 3).**
       `scripts/verify-plan-anchors.mjs:279-292` (`boundQuote`): when an anchor is the last on its line
@@ -1329,7 +1371,7 @@ true for 146 and half of 142–145, and **false for 141**.
       because a hardcoded `RETURN FALSE` stub would make every admin-policy arm structurally
       unfalsifiable.
 
-- [ ] **`[REDUNDER-LANEBLOCKED-BLIND]` The `lane-blocked` classifier is APPLY-LIST-BLIND, so a gate deferred for `pg_cron` can be miscounted into `pending:` (measured 2026-09-04, Plan 164.4-09).**
+- [x] **`[REDUNDER-LANEBLOCKED-BLIND]` The `lane-blocked` classifier is APPLY-LIST-BLIND, so a gate deferred for `pg_cron` can be miscounted into `pending:` (measured 2026-09-04, Plan 164.4-09).**
       `gateNeedsPgCron` (`scripts/mutation-runner/parse.mjs:1043`) decides the class by scanning **the
       gate file's own executable text** for a `pg_extension` probe. A gate whose OWN text never
       mentions `pg_cron`, but whose `RED-UNDER-SETUP` apply list contains a migration that hard-RAISEs
@@ -1351,6 +1393,40 @@ true for 146 and half of 142–145, and **false for 141**.
       `src/__tests__/mutation-annotation-parser.test.ts` ("scanCorpus names the 4 lane-blocked files
       EXACTLY"), which asserts this file IS in `pendingFiles` and therefore flips the day either half
       is resolved.
+      ✅ **CLOSED 2026-09-05 DELIBERATELY — Phase 164.4.1 plan 06, CONTEXT decision D-07. The
+      classifier is STILL text-only; what changed is that the limit is now documented, calibrated
+      and reasoned, instead of booked as an unfixable defect.** The tripwire above DID flip, as
+      designed: plan 02 annotated the file, so it is `annotated` and not `pending`, and the
+      assertion was moved rather than deleted (the flip is recorded in place, with both exits it
+      named).
+      ⛔ **The proposed fix — widen `gateNeedsPgCron` to read a gate's `RED-UNDER-SETUP` apply
+      list — was RETIRED, not implemented, and the reason is structural, not effort.** It cannot
+      see its own subject. Classification runs over UNANNOTATED files (`classifyGateIdiom` is
+      literally "which of four idiom classes an UNANNOTATED gate file falls in"), and an
+      unannotated gate has no `RED-UNDER-SETUP` line to read — the measured instance had none at
+      the moment it was misclassified. The widened branch would therefore be **dead code behind a
+      passing test**, which is the exact "quietly become unreachable" shape this phase family
+      exists to refuse. Shipping it would have made the ledger look closed while adding an
+      unfalsifiable branch: a worse outcome than the miscount it targets.
+      **What actually closed the exposure was the SUBSTRATE** (`[REDUNDER-PGCRON]`, retired the
+      same day). With pg_cron hosted, the own-text case and the apply-list case resolve
+      identically — annotatable — so there is no verdict left for a widening to change. Measured
+      end state: `lane-blocked: 0`, `  pending: 0`, `coverage: files 44/71`, exit 0.
+      **Where the boundary is pinned, so a future reader finds it asserted rather than implied:**
+      * `scripts/mutation-runner/parse.mjs` — a dated paragraph above `gateNeedsPgCron` states the
+        scope (GATE TEXT ONLY), why an apply-list-only dependency is invisible before annotation,
+        and why the widening was retired;
+      * `src/__tests__/mutation-annotation-parser.test.ts` — the `D-07 boundary` arm, a HAND-BUILT
+        gate carrying a `TEST FAILED (…)` raise and a `-- run AFTER 20260826140000` note but no
+        `pg_extension` probe, asserting `gateNeedsPgCron` false and `classifyGateIdiom` `pending`,
+        with the reason it is the CORRECT answer. Proven able to fail 2026-09-05: replacing the
+        function's first line with a naive `text.includes('pg_cron')` turned it RED (4 failed /
+        104 passed, this arm named); restored, `shasum` identical.
+      ⭐ **THE RESIDUAL, stated rather than hidden.** A future lane-blocking dependency that lives
+      ONLY in a migration is still invisible to the classifier. It is no longer silent: it
+      surfaces as a named `baseline` defect the first time somebody annotates that gate — exit 1
+      with the file named — instead of sitting miscounted in `pending:`. That is the trade this
+      closure makes, and it is deliberate.
 
 - [ ] **`[REDUNDER-NONIDIOM]` The 27 non-idiom SQL gate files are excluded from Phase 164.4 and need their own phase (logged 2026-09-02, founder scope decision).**
       Phase 164.4's criterion 1 was NARROWED to the 44 `TEST FAILED (` idiom files. The other **27
@@ -2907,6 +2983,20 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   nothing about it. Today the class holds exactly one file
   (`test_compute_jobs_error_kind_copy_parity.sql`, owed to Phase 164.4.1) and its shape IS pinned
   against real runner output by a vitest arm on every push, so this is bounded, not open.
+  ⚠️ **CURRENCY 2026-09-05 (Phase 164.4.1 plan 06). Two of the sentences above have moved; the
+  paragraph stays as its dated record and the item stays OPEN.**
+  (a) `pending:` is now measured **`pending: 0`** — that one file was annotated by plan 02, so the
+  class is EMPTY, and it is pinned as the empty set BESIDE an AIM (`it` title `pending AIM (D-04)`)
+  that classifies a stripped copy of a real gate to prove the class is still COMPUTED. An empty-set
+  assertion standing alone would be the vacuity this file has already measured once; do NOT
+  "restore" the old one-name pin.
+  (b) The id `lane-blocked:` cites is now a **RETIRED** one: `[REDUNDER-PGCRON]` was closed the same
+  day, and plan 06 rewrote the printed reason so the NON-EMPTY arm cites no id at all (it points at
+  the `lane-probe:` line) while the EMPTY arm names the retirement explicitly. The `lane-blocked`
+  line's CI MEASURE_FAIL is unchanged.
+  ⛔ The item's own thesis is UNAFFECTED by both: `pending:` still cites nothing and CI still
+  asserts nothing about it, and an empty class is exactly when an unasserted one is easiest to stop
+  noticing. The honest fix below is still the fix.
   ⚠️ **Do NOT close it by hardcoding a TODO id into the line.** `pending:` is a GENERIC class —
   "idiom files that carry no RED-UNDER yet" — so a fixed id would be a lie the moment a second,
   unrelated file lands in it. The honest fix is a gate asserting that every file the runner names
