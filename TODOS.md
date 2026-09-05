@@ -2859,6 +2859,31 @@ unrelated to the dispatch. Close it by either scoping `secret-scan` with an `if:
 ⚠️ Note the scope limit this implies: "the allowlist now works" is true for the two **range-scan**
 paths (push, pull_request). The dispatch path scans differently and has never been clean.
 
+✅ **RECONFIRMED LIVE 2026-09-05 — still exactly 29, still only on dispatch.** Run **33985008239**
+on `main` at **`ce5d2983`**, event **`workflow_dispatch`**, job `secret-scan` FAILED:
+`gitleaks cmd: gitleaks detect --redact -v --exit-code=2 ... --log-level=debug` with **no
+`--log-opts`**, `2995 commits scanned`, `leaks found: 29`. The immediately preceding run
+**33979505776** at `e01cc2e6`, event **`push`**, passed with `--log-opts=-1`, `1 commits scanned`,
+`no leaks found`. Same scanner (`gitleaks version: 8.30.1`, cache hit), same config
+(`using gitleaks config from GITLEAKS_CONFIG env var: .gitleaks.toml`). ⛔ So the version pin and the
+array-form allowlist are BOTH working — this red is the dispatch-path scope difference this entry
+already describes, not a regression and not a new leak.
+
+SARIF breakdown of the 29 (artifact `gitleaks-results.sarif` on that run): **28 `generic-api-key`**
++ **1 `jwt`** (`src/app/api/verify-strategy/route.test.ts:539`), every one of them in a `*.test.ts` /
+`*.test.py` fixture path. ⚠️ The path list differs from the 2026-08-23 sample recorded above
+(`analytics-client.test.ts`, `ratelimit.test.ts`, `route.test.ts` under several API dirs …), so
+triage must be done against a FRESH scan, not against that sample.
+
+⚠️ **Why a `push` run is not as weak as "1 commit" sounds.** `--log-opts=-1` on `main` scans the
+squash commit, which carries the PR's whole diff — new code IS scanned. What is never re-scanned on
+either range path is OLD history, which is why these 29 pre-existing fixtures surface only under a
+full scan. State it that way; "the gate only scans one commit" overstates it.
+
+⛔ **Candidate for Phase 164.6 GATE-HYGIENE** (it is a gate defect, which is that phase's subject) —
+but it is NOT in 164.6's ROADMAP scope as written. Adding it is a founder scope call, not an
+agent one.
+
 ### `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` on `secret-scan` is now a no-op (raised 2026-08-23, PR #705 review)
 
 **Priority:** P4 — dead config, zero behavioral risk.
