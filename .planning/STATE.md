@@ -4,12 +4,12 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4.1
 current_phase_name: PGCRON-LANE
-status: executing
-stopped_at: Completed 164.4.1-06-PLAN.md (ubuntu measurement DEFERRED to orchestrator)
-last_updated: "2026-09-05T10:46:00.755Z"
-last_activity: 2026-09-04
-last_activity_desc: Phase 164.4.1 execution started
-state_head: 50567f38269f1405fd3cf824d6c96ea0064b98d2
+status: complete
+stopped_at: Phase 164.4.1 COMPLETE — verified, ubuntu-measured at run 33973362161
+last_updated: "2026-09-05T15:18:29.000Z"
+last_activity: 2026-09-05
+last_activity_desc: Phase 164.4.1 closed — 44 files, 361 arms, 0 waivers, lane-blocked retired
+state_head: d6142c94188ab013e1c2957cfe9643b7a1d5924d
 progress:
   total_phases: 16
   completed_phases: 4
