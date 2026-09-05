@@ -60,9 +60,9 @@
     }
   ],
   "next": {
-    "command": "/gsd:progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 164 of 16 · 25% · executing"
+    "command": "/gsd:progress",
+    "label": "Show progress",
+    "reason": "Unsure of state — showing progress"
   },
-  "updated_at": "2026-09-04T21:21:18.254Z"
+  "updated_at": "2026-09-05T17:24:18.965Z"
 }

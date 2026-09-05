@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.77.13.1] - 2026-09-05
+
+### chore(planning): 164-family re-partition — sound phase setups for what remains of v1.20
+
+No source, schema, CI or test change. Planning files only (`ROADMAP`, `REQUIREMENTS`, `STATE`,
+`WINDOWS`, `TODOS`). Founder-selected re-partition after auditing what 164.3 / 164.3.1 / 164.4 /
+164.4.1 actually closed against the code:
+
+- **164.1 → PROD-OBSERVABILITY.** One periodic prober, four targets (PYAPI-06 both halves,
+  CRON-OBS-01, CRON-DRIFT-01, MT5-WEDGE-OBS-01). Its gate-hygiene half LEFT: frozen-spine
+  retirement dropped, the rest re-owned below. Six criteria → five.
+- **164.2 CURATED-COPY** takes 161-ERRPREFIX (a sentence a user reads); WR-06-UTC is BOTH
+  bucketers; the already-satisfied wizardSessionId criterion is dropped. Criteria 6-8 added.
+- **NEW 164.5 BASELINE-SNAPSHOT** — `baseline.sql` becomes load-bearing; **DRIFT-04** (a PROD
+  `SECURITY DEFINER` credential-writing RPC under no migration, unowned since 2026-08-29) finally
+  has an owner; DRIFT-05 both directions; VAC08-LEDGER-32; VAC-07.
+- **NEW 164.6 GATE-HYGIENE** — OPS-08-F9/F8/TS/F2, composite-stamp twin (161.1-D13) TS half,
+  PROC-02, PROC-03 residual, H-0001 residual, WINDOWS 23.
+- **Order 164.6 → 166 → 165**: 165 DEPS stays in the milestone (no v1.21 exists to move it to)
+  and its "dependency churn lands last" invariant is restored by ordering, not membership.
+- **REQUIREMENTS re-sync**: VAC-01…06/08 Complete (164.3 shipped v0.77.0.0), VAC-07 → 164.5
+  Pending, HONEST-07 marked Deferred; the footer no longer claims 50/50 mapped while HONEST-07
+  sat Unassigned on the same page (49/50 + 1 deliberate).
+- **WINDOWS** 21, 28, 30, 31 closed with citations (SEC-02 checked; ubuntu run 33620169220;
+  Primitive-D rule BLOCKING since 164.3.1-08 at `self-referential-oracle.test.ts:21,43`). 29 → 25 open.
+- **TODOS**: 161-ERRPREFIX, PROC-02, PROC-03 entries written — the ROADMAP had cited all three
+  and none existed.
+
 ## [0.77.13.0] - 2026-09-05
 
 ### Phase 164.4.1 PGCRON-LANE — pg_cron on the throwaway lane, `[REDUNDER-PGCRON]` retired
