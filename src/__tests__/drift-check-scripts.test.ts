@@ -3256,14 +3256,30 @@ describe("IN-04 — the scratch directory does not survive a fail() path", () =>
     // The verdict subtracts, names the skips, and EXITS 1 — before the
     // "PASSED" line can be reached.
     const incompleteAt = body.indexOf("SELF-TEST INCOMPLETE");
-    const passedAt = body.indexOf("SELF-TEST PASSED (5/5)");
+    // ⚠️ The ARM COUNT is deliberately not pinned as a literal here. It was
+    // `(5/5)`, and a legitimate sixth arm (164.4.1-01, the pg_cron preload
+    // proof) made that literal unfindable — `indexOf` returned -1 and this arm
+    // failed for a reason that had nothing to do with what it tests. PATTERNS
+    // C2 had already flagged `N/5` as a literal repeated in nine places and
+    // pinned by nothing.
+    //
+    // Matching N/N is STRICTER than the old literal, not looser: it still
+    // requires the verdict to exist and to follow INCOMPLETE, and it ADDS a
+    // check the literal could never make — that the caption's two halves agree,
+    // so a `6/5` mismatch fails here instead of shipping.
+    const passedMatch = body.match(/SELF-TEST PASSED \((\d+)\/(\d+)\)/);
     expect(incompleteAt, "no INCOMPLETE verdict — a skipped arm would still read as a pass").toBeGreaterThan(-1);
+    expect(passedMatch, "no `SELF-TEST PASSED (N/N)` verdict found in self_test()").not.toBeNull();
+    const [passedCaption, ranArms, totalArms] = passedMatch!;
+    expect(ranArms, `the PASSED caption's halves disagree: ${passedCaption}`).toBe(totalArms);
+    const passedAt = body.indexOf(passedCaption);
     expect(passedAt).toBeGreaterThan(-1);
     expect(incompleteAt).toBeLessThan(passedAt);
     expect(body).toMatch(/if \[ "\$st_skipped" -ne 0 \]; then/);
     expect(body.slice(incompleteAt, passedAt)).toContain("exit 1");
-    // The count is DERIVED from the tally, not a caption.
-    expect(body).toContain("$((5 - st_skipped))/5 run");
+    // The count is DERIVED from the tally, not a caption — and the INCOMPLETE
+    // line must subtract against the SAME arm total the PASSED line claims.
+    expect(body).toContain(`$((${totalArms} - st_skipped))/${totalArms} run`);
   });
 });
 
