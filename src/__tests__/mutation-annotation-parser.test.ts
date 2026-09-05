@@ -764,12 +764,22 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     //     neuters — arm kept, -1 file step, +1 `sql` step.
     //   * `3/JOB-04` and `4/JOB-04` were RECLASSIFIED as named INVARIANTs and
     //     have no annotation at all now — -2 arms, -2 file steps.
-    // MEASURED over scanCorpus at this commit, not arithmetic over the line
-    // above: `arms=361 waivers=0 fileSteps=381 sqlSteps=102 totalSteps=483`.
-    // So `sql` steps went 101 -> 102 and total steps 485 -> 483; `stepsSeen`,
-    // which skips `sql`, went 384 -> 381.
+    // MEASURED over scanCorpus at that commit:
+    // `arms=361 waivers=0 fileSteps=381 sqlSteps=102 totalSteps=483`.
+    // ⚠️ RE-BLESSED 2026-09-05, one step LOWER, and deliberately not auto-bumped
+    // by the agent that broke it — this pin exists to force a conscious
+    // re-blessing, so bumping the number you just changed defeats it. The review
+    // then found TWO MORE arms of the CR-01 class (`2/whole-block/JOB-04` and
+    // `3/tick 1/JOB-04`) claiming in prose that no production mutation could
+    // reach them; both were REFUTED on real lanes and given production twins.
+    // `2/whole-block/JOB-04`'s old gate-self twin carried TWO `edit` steps
+    // (declare `v_g`; seed it and extend `v_seeded`); its production twin
+    // carries ONE. `3/tick 1/JOB-04` went 1 -> 1. ARMS ARE UNCHANGED at 361, so
+    // no floor moved — this is a step-count pin, not a floor.
+    // MEASURED at this commit: `arms=361 waivers=0 fileSteps=380 sqlSteps=102
+    // totalSteps=482`.
     expect(armsSeen).toBe(361);
-    expect(stepsSeen).toBe(381);
+    expect(stepsSeen).toBe(380);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1522,7 +1532,12 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // `4/JOB-04`'s (both arms reclassified as named INVARIANTs, so they have no
     // annotation at all). MEASURED over scanCorpus at this commit:
     // `arms=361 waivers=0 fileSteps=381 sqlSteps=102 totalSteps=483`.
-    expect(needles.length).toBe(381);
+    // ⚠️ RE-BLESSED 2026-09-05 to 380: a FOURTH needle left when
+    // `2/whole-block/JOB-04`'s gate-self twin (two `edit` steps) was replaced by
+    // a production twin (one `edit` step) after the review refuted its
+    // "no production mutation can reach this" prose on a lane. Arms unchanged at
+    // 361. MEASURED: `fileSteps=380 sqlSteps=102 totalSteps=482`.
+    expect(needles.length).toBe(380);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
