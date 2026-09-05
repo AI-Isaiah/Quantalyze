@@ -48,6 +48,44 @@
  * string is additionally passed through a scrubber that replaces any non-empty
  * `requiredEnv` VALUE with `<redacted>` before it reaches the log or a defect
  * row. This repository and its Actions logs are public (threat T-164.1-01).
+ *
+ * ============================================================================
+ * WHAT DEFECT CLASS THIS EXISTS FOR
+ * ============================================================================
+ * Four production outages, each MEASURED, each of which ran for days while
+ * every instrument anyone was looking at read green. They are not four
+ * unrelated bugs; they are one shape — a signal that was never actually
+ * observed, standing in for one that was.
+ *
+ * PYAPI-06 — the analytics service key. 2026-08-25: five consecutive 401s from
+ * the analytics service with ZERO mismatch lines anywhere. `/health` is
+ * unauthenticated, so it stayed green throughout and said nothing about the
+ * key; a 401 never trips the 140.2 breaker either. A trailing newline on a
+ * pasted secret is enough to produce it. Nothing measured the key end to end.
+ *
+ * CRON-OBS-01 — the async cron HTTP result. PROD `cron.job` jobid 1 answered
+ * 401 EVERY HOUR FOR SEVEN DAYS behind a completely green cron history.
+ * ⛔ THE STANDING RULE THIS BUYS: `cron.job_run_details.status` IS NOT
+ * EVIDENCE. `net.http_post` is ASYNC — the job row records that the request
+ * was ENQUEUED, and reads `succeeded` whether the far end answered 200, 401 or
+ * nothing at all. The only place the real answer lives is `net._http_response`,
+ * and before this prober nothing in this repository read it.
+ *
+ * CRON-DRIFT-01 — the inline key nobody compared. PROD's `cron.job` command
+ * can be OLDER than the repo's migration, or carry an inline credential that no
+ * migration ever contained, and no gate compared the two. The oracle is a
+ * COMMITTED manifest of the ACHIEVABLE Vault-backed command (D-13), not
+ * something derived from migrations: `20260408215026`'s GUC design returns
+ * 42501 on Supabase and could never have run here, so deriving from migrations
+ * would enshrine an unrunnable design as the standard PROD is judged against.
+ *
+ * MT5-WEDGE-OBS-01 — the modal dialog behind a healthy container. The MT5
+ * terminal wedged into a -10005 IPC timeout THREE TIMES IN ONE DAY while its
+ * container was healthy and its logs were quiet, because a modal login dialog
+ * was blocking the IPC bridge — and that dialog survives redeploys via the
+ * persistent volume. -10004 (bridge not attached) and -10005 (bridge attached,
+ * terminal not answering) have opposite remedies, so reporting them as one
+ * failure is not a shortcut, it is a wrong instruction to the operator.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -515,145 +553,198 @@ function fixtureFetch(data, env) {
 /** Deep-enough clone for fixture merging (fixtures are plain JSON). */
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
+/**
+ * THE PER-ARM ISOLATION TABLE. Plans 03 and 04 EXTEND this array; they do not
+ * re-invent the loop below it.
+ *
+ * Each entry declares one green fixture (which must produce zero defects) and
+ * one red fixture per defect kind the arm can raise (each of which must produce
+ * EXACTLY ONE defect, of exactly that kind, on exactly that arm, carrying that
+ * arm's remedy). A fixture named here and missing from disk is a SELF-TEST
+ * FAIL, never a skip — the same rule, for the same reason, as
+ * `scripts/lint-sql-gates.mjs:1307-1343`.
+ *
+ * ⚠️ `greenSeamCalls` is the arm's own request count, asserted on the green
+ * run. It is what would catch an arm that quietly stopped issuing one of its
+ * requests while still reporting no defects.
+ */
+const ARM_FIXTURE_TABLE = [
+  {
+    arm: PYAPI06_ARM,
+    fixtureDir: "pyapi06",
+    green: "ok.json",
+    greenSeamCalls: 4,
+    red: {
+      "keyed-401.json": "pyapi06-keyed-refused",
+      "absent-200.json": "pyapi06-absent-accepted",
+      "absent-401-uncoded.json": "pyapi06-absent-uncoded",
+      "wrong-key-200.json": "pyapi06-wrong-key-accepted",
+      "health-degraded.json": "pyapi06-health-degraded",
+    },
+  },
+];
+
 export async function selfTest() {
+  /**
+   * A BY-NAME assertion for every kind the table above can expect, spelled with a
+   * literal `kind === "<k>"`.
+   *
+   * Two jobs, and the second is why the map is MANDATORY rather than decorative:
+   *
+   *  1. The plan-05 coverage extractor reads `selfTest()`'s SOURCE for
+   *     `kind === "<k>"` and reports any `DEFECT_KINDS` entry it cannot find
+   *     there as UNCOVERED. The table loop asserts through a variable
+   *     (`d.kind === expected`), which the extractor cannot see, so a
+   *     table-driven harness would silently read as covering nothing.
+   *  2. The literal here is spelled INDEPENDENTLY of the table's mapping. The
+   *     loop asserts both, so a typo in one and not the other fails loudly
+   *     instead of quietly asserting on a kind that can never be reported.
+   *
+   * ⛔ The loop FAILS when a red fixture names a kind with no entry here. Adding
+   * a fixture without its by-name assertion is therefore impossible, rather than
+   * merely discouraged.
+   */
+  const KIND_ASSERTIONS = {
+    "pyapi06-keyed-refused": (d) => d.kind === "pyapi06-keyed-refused",
+    "pyapi06-absent-accepted": (d) => d.kind === "pyapi06-absent-accepted",
+    "pyapi06-absent-uncoded": (d) => d.kind === "pyapi06-absent-uncoded",
+    "pyapi06-wrong-key-accepted": (d) => d.kind === "pyapi06-wrong-key-accepted",
+    "pyapi06-health-degraded": (d) => d.kind === "pyapi06-health-degraded",
+  };
+
   const captured = [];
   const quiet = (line) => captured.push(line);
   let pass = true;
   let printed = 0;
-  const scenario = (n, title) => {
+  // Headers are AUTO-NUMBERED off the same counter the completeness assertion
+  // reads, so the printed `k/13` can never disagree with the number of
+  // scenarios that actually ran. Adding a scenario without bumping
+  // SELF_TEST_SCENARIOS fails the run at the tail of this function; that
+  // assertion is the control, the number in the header is the display.
+  const scenario = (title) => {
     printed += 1;
     console.log("");
-    console.log(`=== SELF-TEST ${n}/${SELF_TEST_SCENARIOS}: ${title} ===`);
+    console.log(`=== SELF-TEST ${printed}/${SELF_TEST_SCENARIOS}: ${title} ===`);
   };
 
   const green = loadFixture("pyapi06", "ok.json");
 
   // -------------------------------------------------------------------------
-  scenario(1, "pyapi06 GREEN fixture — the control");
+  // Scenarios 1-6 — THE PER-ARM ISOLATION LOOP over ARM_FIXTURE_TABLE.
+  //
+  // Green fixture: zero defects, the arm's FULL request count, the ✅ line, and
+  // a REMEDIES sanity check. Then one red fixture per kind: EXACTLY ONE defect,
+  // of that kind (asserted twice — once against the table, once by name through
+  // KIND_ASSERTIONS, which are spelled independently), on that arm, carrying
+  // that arm's remedy, and NOTHING of any other kind.
+  //
+  // Plans 03 and 04 add a table ENTRY and its KIND_ASSERTIONS; this loop does
+  // not change.
   // -------------------------------------------------------------------------
-  if (!green.ok) {
-    pass = expect(false, green.reason) && pass;
-  } else {
-    const lines = [];
-    const seams = createSeams({ fetchImpl: fixtureFetch(green.data, SELFTEST_ENV) });
-    const r = await runProber({
-      arms: [PYAPI06_ARM],
-      env: { ...SELFTEST_ENV },
-      seams,
-      armsFloor: 1,
-      log: (s) => lines.push(s),
-    });
-    pass =
-      expect(r.exitCode === 0, `green fixture exits 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
-      expect(r.armsExecuted === 1, `green fixture executed 1 arm (got ${r.armsExecuted})`) &&
-      expect(r.armsBlocked === 0, `green fixture blocked 0 arms (got ${r.armsBlocked})`) &&
-      expect(r.seamInvocationsByKind.fetch === 4, `the arm issued exactly 4 fetches (got ${r.seamInvocationsByKind.fetch})`) &&
-      expect(r.tallyByArm.pyapi06 === 4, `all 4 fetches are attributed to pyapi06 (got ${r.tallyByArm.pyapi06})`) &&
-      expect(
-        lines.includes("✅ No defects. Every registered arm ran and measured."),
-        "the green run prints the ✅ no-defects line",
-      ) &&
-      pass;
-    console.log(`  [recorded] ${lines.find((l) => l.startsWith("arms: "))}`);
-    console.log(`  [recorded] ${lines.find((l) => l.startsWith("seam-invocations: "))}`);
-  }
+  for (const entry of ARM_FIXTURE_TABLE) {
+    const arm = entry.arm;
+    const armKinds = DEFECT_KINDS.filter((k) => k.startsWith(`${arm.name}-`));
 
-  // -------------------------------------------------------------------------
-  // Scenarios 2-6: one red fixture per pyapi06 kind. Each must fire EXACTLY
-  // ONE defect, of its own kind, on its own arm, carrying its own remedy.
-  // -------------------------------------------------------------------------
-  const runRed = async (fixture) => {
-    const fx = loadFixture("pyapi06", fixture);
-    if (!fx.ok) return { fx };
-    const seams = createSeams({ fetchImpl: fixtureFetch(fx.data, SELFTEST_ENV) });
-    const r = await runProber({
-      arms: [PYAPI06_ARM],
-      env: { ...SELFTEST_ENV },
-      seams,
-      armsFloor: 1,
-      log: quiet,
-    });
-    return { fx, r };
-  };
-
-  scenario(2, "pyapi06-keyed-refused fires on keyed-401.json, and nothing else does");
-  {
-    const { fx, r } = await runRed("keyed-401.json");
-    if (!fx.ok) pass = expect(false, fx.reason) && pass;
-    else {
-      const d = r.defects[0] || {};
+    scenario(`${arm.name} GREEN fixture (${entry.green}) — the control`);
+    const g = loadFixture(entry.fixtureDir, entry.green);
+    if (!g.ok) {
+      pass = expect(false, g.reason) && pass;
+    } else {
+      const lines = [];
+      const seams = createSeams({ fetchImpl: fixtureFetch(g.data, SELFTEST_ENV) });
+      const r = await runProber({
+        arms: [arm],
+        env: { ...SELFTEST_ENV },
+        seams,
+        armsFloor: 1,
+        log: (s) => lines.push(s),
+      });
+      const remedies = armKinds.map((k) => (arm.REMEDIES || {})[k]);
       pass =
-        expect(r.exitCode === 1, `keyed-401.json exits 1 (got ${r.exitCode})`) &&
-        expect(r.defects.length === 1, `keyed-401.json isolates exactly one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
-        expect(d.kind === "pyapi06-keyed-refused", `the defect kind is pyapi06-keyed-refused (got ${d.kind})`) &&
-        expect(d.arm === "pyapi06", `the defect is attributed to pyapi06 (got ${d.arm})`) &&
-        expect(d.remedy === PYAPI06_ARM.REMEDIES["pyapi06-keyed-refused"], "the defect carries its REMEDIES entry") &&
+        expect(r.exitCode === 0, `${entry.green} exits 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
+        expect(r.defects.length === 0, `${entry.green} produces ZERO defects (got ${r.defects.length})`) &&
+        expect(r.armsExecuted === 1, `the green run executed ${arm.name} (armsExecuted ${r.armsExecuted})`) &&
+        expect(r.armsBlocked === 0, `nothing was credential-blocked (armsBlocked ${r.armsBlocked})`) &&
+        expect(
+          r.seamInvocations === entry.greenSeamCalls,
+          `the arm issued all ${entry.greenSeamCalls} of its requests (got ${r.seamInvocations}) — an arm that quietly stopped issuing one would still report no defects`,
+        ) &&
+        expect(
+          r.tallyByArm[arm.name] === entry.greenSeamCalls,
+          `and all ${entry.greenSeamCalls} are attributed to ${arm.name} (got ${r.tallyByArm[arm.name]})`,
+        ) &&
+        expect(
+          lines.includes("✅ No defects. Every registered arm ran and measured."),
+          "the green run prints the ✅ no-defects line",
+        ) &&
+        expect(
+          armKinds.length === Object.keys(entry.red).length,
+          `every ${arm.name}- kind in DEFECT_KINDS has a red fixture (${armKinds.length} kind(s) vs ${Object.keys(entry.red).length} fixture(s))`,
+        ) &&
+        expect(
+          remedies.every((s) => typeof s === "string" && s.length >= 40),
+          `every ${arm.name}- kind carries a REMEDIES entry of at least 40 chars — a defect row that says what broke but not what to do is an alert nobody acts on`,
+        ) &&
+        expect(
+          new Set(remedies).size === remedies.length,
+          `no two ${arm.name} remedies are the same string — two kinds with one remedy is two kinds pretending to be one`,
+        ) &&
         pass;
+      console.log(`  [recorded] ${lines.find((l) => l.startsWith("arms: "))}`);
+      console.log(`  [recorded] ${lines.find((l) => l.startsWith("seam-invocations: "))}`);
     }
-  }
 
-  scenario(3, "pyapi06-absent-accepted fires on absent-200.json, and nothing else does");
-  {
-    const { fx, r } = await runRed("absent-200.json");
-    if (!fx.ok) pass = expect(false, fx.reason) && pass;
-    else {
+    for (const [fixture, expectedKind] of Object.entries(entry.red)) {
+      scenario(`${expectedKind} fires on ${fixture}, and NOTHING else does`);
+      const byName = KIND_ASSERTIONS[expectedKind];
+      if (!byName) {
+        pass =
+          expect(
+            false,
+            `no by-name assertion is registered in KIND_ASSERTIONS for ${expectedKind} — the plan-05 coverage extractor reads literal kind comparisons out of this function's source and would report it UNCOVERED`,
+          ) && pass;
+        continue;
+      }
+      const fx = loadFixture(entry.fixtureDir, fixture);
+      if (!fx.ok) {
+        pass = expect(false, fx.reason) && pass;
+        continue;
+      }
+      const seams = createSeams({ fetchImpl: fixtureFetch(fx.data, SELFTEST_ENV) });
+      const r = await runProber({
+        arms: [arm],
+        env: { ...SELFTEST_ENV },
+        seams,
+        armsFloor: 1,
+        log: quiet,
+      });
       const d = r.defects[0] || {};
       pass =
-        expect(r.exitCode === 1, `absent-200.json exits 1 (got ${r.exitCode})`) &&
-        expect(r.defects.length === 1, `absent-200.json isolates exactly one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
-        expect(d.kind === "pyapi06-absent-accepted", `the defect kind is pyapi06-absent-accepted (got ${d.kind})`) &&
-        expect(d.remedy === PYAPI06_ARM.REMEDIES["pyapi06-absent-accepted"], "the defect carries its REMEDIES entry") &&
-        pass;
-    }
-  }
-
-  scenario(4, "pyapi06-absent-uncoded fires on absent-401-uncoded.json, and nothing else does");
-  {
-    const { fx, r } = await runRed("absent-401-uncoded.json");
-    if (!fx.ok) pass = expect(false, fx.reason) && pass;
-    else {
-      const d = r.defects[0] || {};
-      pass =
-        expect(r.exitCode === 1, `absent-401-uncoded.json exits 1 (got ${r.exitCode})`) &&
-        expect(r.defects.length === 1, `absent-401-uncoded.json isolates exactly one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
-        expect(d.kind === "pyapi06-absent-uncoded", `the defect kind is pyapi06-absent-uncoded (got ${d.kind})`) &&
-        expect(d.remedy === PYAPI06_ARM.REMEDIES["pyapi06-absent-uncoded"], "the defect carries its REMEDIES entry") &&
-        pass;
-    }
-  }
-
-  scenario(5, "pyapi06-wrong-key-accepted fires on wrong-key-200.json, and nothing else does");
-  {
-    const { fx, r } = await runRed("wrong-key-200.json");
-    if (!fx.ok) pass = expect(false, fx.reason) && pass;
-    else {
-      const d = r.defects[0] || {};
-      pass =
-        expect(r.exitCode === 1, `wrong-key-200.json exits 1 (got ${r.exitCode})`) &&
-        expect(r.defects.length === 1, `wrong-key-200.json isolates exactly one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
-        expect(d.kind === "pyapi06-wrong-key-accepted", `the defect kind is pyapi06-wrong-key-accepted (got ${d.kind})`) &&
-        expect(d.remedy === PYAPI06_ARM.REMEDIES["pyapi06-wrong-key-accepted"], "the defect carries its REMEDIES entry") &&
-        pass;
-    }
-  }
-
-  scenario(6, "pyapi06-health-degraded fires on health-degraded.json, and nothing else does");
-  {
-    const { fx, r } = await runRed("health-degraded.json");
-    if (!fx.ok) pass = expect(false, fx.reason) && pass;
-    else {
-      const d = r.defects[0] || {};
-      pass =
-        expect(r.exitCode === 1, `health-degraded.json exits 1 (got ${r.exitCode})`) &&
-        expect(r.defects.length === 1, `health-degraded.json isolates exactly one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
-        expect(d.kind === "pyapi06-health-degraded", `the defect kind is pyapi06-health-degraded (got ${d.kind})`) &&
-        expect(d.remedy === PYAPI06_ARM.REMEDIES["pyapi06-health-degraded"], "the defect carries its REMEDIES entry") &&
+        expect(r.exitCode === 1, `${fixture} exits 1 (got ${r.exitCode})`) &&
+        expect(
+          r.defects.length === 1,
+          `${fixture} ISOLATES exactly one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`,
+        ) &&
+        expect(d.kind === expectedKind, `the defect kind is ${expectedKind} (got ${d.kind})`) &&
+        expect(
+          byName(d),
+          `the independently spelled KIND_ASSERTIONS entry for ${expectedKind} agrees — a typo in one spelling and not the other fails here`,
+        ) &&
+        expect(d.arm === arm.name, `the defect is attributed to ${arm.name} (got ${d.arm})`) &&
+        expect(
+          typeof d.remedy === "string" && d.remedy.length > 0 && d.remedy === arm.REMEDIES[expectedKind],
+          `the defect carries ${arm.name}.REMEDIES[${JSON.stringify(expectedKind)}]`,
+        ) &&
+        expect(
+          noDefectOfKind(r.defects, DEFECT_KINDS.filter((k) => k !== expectedKind)),
+          `ABSENCE calibration: nothing of the other ${DEFECT_KINDS.length - 1} kinds fired — spelled through the kind LIST so the extractor cannot credit it as coverage`,
+        ) &&
         pass;
     }
   }
 
   // -------------------------------------------------------------------------
-  scenario(7, "TWO faults in ONE run both reach the table (D-04; OPS-08-F8 not reproduced)");
+  scenario("TWO faults in ONE run both reach the table (D-04; OPS-08-F8 not reproduced)");
   // -------------------------------------------------------------------------
   {
     const a = loadFixture("pyapi06", "absent-200.json");
@@ -682,7 +773,7 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
-  scenario(8, "credential-absent fires PER NAME, blocks the arm, and is never a skip (D-06)");
+  scenario("credential-absent fires PER NAME, blocks the arm, and is never a skip (D-06)");
   // -------------------------------------------------------------------------
   {
     if (!green.ok) {
@@ -720,7 +811,7 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
-  scenario(9, "the ARMS_FLOOR mechanism fires at the SHIPPING default (D-08)");
+  scenario("the ARMS_FLOOR mechanism fires at the SHIPPING default (D-08)");
   // -------------------------------------------------------------------------
   {
     if (!green.ok) {
@@ -748,7 +839,7 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
-  scenario(10, "absurdity fires when the verdict loop and the seam tally disagree");
+  scenario("absurdity fires when the verdict loop and the seam tally disagree");
   // -------------------------------------------------------------------------
   {
     if (!green.ok) {
@@ -781,7 +872,7 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
-  scenario(11, "measure-fail is DISTINCT from a verdict — a dead transport is not a green key");
+  scenario("measure-fail is DISTINCT from a verdict — a dead transport is not a green key");
   // -------------------------------------------------------------------------
   {
     if (!green.ok) {
@@ -811,7 +902,7 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
-  scenario(12, "no env VALUE reaches the log or a defect row (threat T-164.1-01)");
+  scenario("no env VALUE reaches the log or a defect row (threat T-164.1-01)");
   // -------------------------------------------------------------------------
   {
     const fx = loadFixture("pyapi06", "keyed-401.json");
@@ -856,7 +947,7 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
-  scenario(13, "a narrowed --arm run exits 2 even when it is GREEN");
+  scenario("a narrowed --arm run exits 2 even when it is GREEN");
   // -------------------------------------------------------------------------
   {
     if (!green.ok) {
