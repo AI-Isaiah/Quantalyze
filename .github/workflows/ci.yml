@@ -993,7 +993,12 @@ jobs:
         #     arms actually run on rather than for a second, divergent guess.
         #   * the `PGBIN the lane will boot:` line makes that resolution VISIBLE,
         #     which is what lets a two-major image be diagnosed from the log.
-        # Read those five things in the log before trusting any downstream run.
+        #   * a bindir with pg_ctl and NO pg_config gets its own named refusal,
+        #     because run.sh treats pg_config as optional and would still run
+        #     there; reporting that as `major is 'none', not 16` blamed A5 for
+        #     a missing package. Likewise an unresolvable PGBIN now REPRINTS
+        #     run.sh's own stderr instead of telling the reader to go rerun it.
+        # Read those in the log before trusting any downstream run.
         #
         # Shape copied from the only apt analog in this workflow, `sql-tests`'
         # "Install psql client" step. The reversal of this job's no-install
@@ -1013,15 +1018,43 @@ jobs:
           # reach the MEASURE_FAIL below and NAME itself, rather than dying here
           # with no `::error::` line — "could not measure" wearing the costume
           # of a build failure.
-          pgbin=$(bash scripts/pg-lane/run.sh --print-pgbin 2>/dev/null || true)
+          # stderr goes to a FILE, not to /dev/null. `--print-pgbin` writes the
+          # resolved dir on stdout and its refusal on stderr, so discarding
+          # stderr threw away the only diagnosis this step has. MEASURED
+          # 2026-09-05 with PGBIN=/tmp: run.sh prints `ERROR: PGBIN=/tmp has no
+          # executable pg_ctl` and CI showed none of it, while the MEASURE_FAIL
+          # told the reader to "run it directly" — not an instruction anyone can
+          # follow on a hosted runner that no longer exists.
+          pgbin_err="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/pgbin.err"
+          pgbin=$(bash scripts/pg-lane/run.sh --print-pgbin 2>"$pgbin_err" || true)
           echo "PGBIN the lane will boot: ${pgbin:-(unresolved)}"
           if [ -z "$pgbin" ]; then
-            echo "::error::MEASURE_FAIL: scripts/pg-lane/run.sh --print-pgbin could not resolve any PostgreSQL server binaries on this runner, so this step cannot know which major to provision pg_cron for. Run it directly to see the lane's own four-step diagnosis."
+            echo "--- scripts/pg-lane/run.sh --print-pgbin said (stderr) ---" >&2
+            cat "$pgbin_err" >&2 || true
+            echo "--- end of the lane's own diagnosis ---" >&2
+            echo "::error::MEASURE_FAIL: scripts/pg-lane/run.sh --print-pgbin could not resolve any PostgreSQL server binaries on this runner, so this step cannot know which major to provision pg_cron for. The lane's own four-step diagnosis is printed on stderr immediately above this line."
             exit 1
           fi
           # Keyed off the resolved binaries' OWN pg_config, not off the path
           # spelling, so the major and the artifact paths below cannot come from
           # two different servers.
+          #
+          # ⭐ AN ABSENT pg_config IS ITS OWN DIAGNOSIS, not a wrong major.
+          # scripts/pg-lane/run.sh treats pg_config as OPTIONAL: its pre-start
+          # pg_cron check is `if [ -x "$PGBIN/pg_config" ]` ("layer 1 … runs
+          # only where pg_config can name the two directories; layer 2 covers
+          # the hosts where it cannot"), and `--print-pgbin` requires only
+          # pg_ctl. So a bindir carrying pg_ctl and no pg_config is a host the
+          # LANE runs on and this step cannot — and folding it into the `!= 16`
+          # refusal below MISATTRIBUTED it: measured against exactly such a
+          # bindir, the step emitted `the runner's PostgreSQL major is 'none',
+          # not 16 … A5 … no longer holds`, sending the reader to re-take a
+          # macOS/ubuntu major comparison over a missing PACKAGE. Two causes,
+          # two messages.
+          if [ ! -x "$pgbin/pg_config" ]; then
+            echo "::error::MEASURE_FAIL: $pgbin has an executable pg_ctl but no executable pg_config, so the PostgreSQL major cannot be read off the binaries the lane boots. This is NOT the assumption-A5 major mismatch below and needs no macOS/ubuntu re-measurement: scripts/pg-lane/run.sh treats pg_config as OPTIONAL (its layer-1 pre-start check is skipped and layer 2 covers the host), so the LANE would run here and this step cannot. Provision postgresql-client-<major> so pg_config sits beside pg_ctl, or key this step off the path spelling again."
+            exit 1
+          fi
           major=$("$pgbin/pg_config" --version | awk '{print $2}' | cut -d. -f1 || true)
           echo "PostgreSQL major reported by $pgbin/pg_config: ${major:-(none found)}"
           if [ "${major:-}" != "16" ]; then
