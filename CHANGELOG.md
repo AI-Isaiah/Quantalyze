@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.77.13.0] - 2026-09-05
+
+### Phase 164.4.1 PGCRON-LANE — pg_cron on the throwaway lane, `[REDUNDER-PGCRON]` retired
+
+No production source change, no schema change, no migration: `0` files under
+`supabase/migrations/`, `0` non-test `src/` files beyond one comment correction, `0`
+`analytics-service` files. The lane, the mutation runner, five SQL gate files and CI.
+
+Phase 164.4 deferred four gate files (100 sections) because the throwaway pg-lane could
+not host pg_cron; a fifth then hit the same wall. Rather than grow the deferral, pg_cron
+went **on** the lane. End state, measured identically on macOS and ubuntu:
+
+```
+coverage: files 44/71
+lane-blocked: 0 file(s)      lane-probe: pg_cron AVAILABLE      pending: 0
+arms: 361/361/0   biting: 361   lane-invocations: 361
+No defects. Every annotated arm bit its own arm first.
+```
+
+`FILES_FLOOR` 44 · `ARMS_FLOOR` 361 · `WAIVED_CEILING` **0**, zero waivers corpus-wide.
+
+- **The tripwire was retired by annotation, not by weakening it.** `lane-blocked` reaches 0
+  while the probe still reports AVAILABLE; `parse.mjs` carries zero non-comment changes and
+  the probe fixture is untouched.
+- **`ARMS_FLOOR` moved DOWN twice, 363 -> 361.** Review found arms counting toward the floor
+  on gate-self mutations where a production mutation actually reached them. Three arms with
+  no first-failure mutation were *reclassified* as named INVARIANTs after being measured on
+  real lanes — never waived.
+- **A data-destruction bug was found and fixed on the way out.** `scripts/pg-lane/run.sh`
+  adopted a pre-existing `pgd/` tree via `mkdir -p` and then deleted it from the EXIT trap;
+  a seeded sentinel was measured destroyed. It now refuses. The comment that claimed
+  "cleanup can never remove a cluster this run did not create" was false and was corrected.
+- **`timeout-minutes` 15 -> 20**, the one raise its own rule allows, on a measured 10.8 min
+  ubuntu run. 20 is the ceiling; the next escalation is a subset split
+  (`[REDUNDER-SUBSET-SPLIT]`).
+
 ## [0.77.12.0] - 2026-09-04
 
 ### Phase 164.4 close — batch 8, and every review and verification finding
