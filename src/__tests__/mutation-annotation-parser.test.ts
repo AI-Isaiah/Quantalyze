@@ -744,8 +744,18 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // and `1/re-base` needs FOUR steps because a `pg_get_functiondef` anchor is
     // also satisfied by a COMMENT inside the body (deferred-items D-164.4.1-04-1).
     // Corpus-wide `sql` steps: 101 of 432 total steps.
-    expect(armsSeen).toBe(324);
-    expect(stepsSeen).toBe(331);
+    // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-05): 363 arms / 384 file steps,
+    // MEASURED and RUN. The reconcile-sweep gate added 39 twins, all non-waiver,
+    // carrying 53 file steps and NO `sql` step. That is 14 more steps than arms,
+    // the widest gap any batch has had, and the cause is named once and applies
+    // to all of them: migration 20260819150000 SELF-VERIFIES nearly every text
+    // anchor the gate's Part 1 makes, so THIRTEEN of the 39 twins are LAYERED --
+    // a single-step body mutation aborts the apply instead of reddening the arm
+    // (one of them needs THREE steps, because that STEP 2 pins the readmit
+    // ceiling twice over: once as a literal and once as a shape). Corpus-wide
+    // `sql` steps: still 101, of 485 total steps.
+    expect(armsSeen).toBe(363);
+    expect(stepsSeen).toBe(384);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1487,7 +1497,7 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // reaper gate contributed 39 needles from 28 biting arms; its one `sql`
     // step (the `2` unschedule) carries no needle. 101 of the corpus's 432
     // steps are `sql`, one more than the 100 at plan 03.
-    expect(needles.length).toBe(331);
+    expect(needles.length).toBe(384);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -1969,7 +1979,15 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // pg_cron is present — so its apply list is sized to print ZERO gate-owned
     // skip lines, and that zero is what makes its twins falsifiable. The
     // plan-03 paragraph above stays as the dated record of the 42-file corpus.
-    expect(corpus.filesAnnotated).toBe(43);
+    // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-05, the FOURTH and LAST file move):
+    // MEASURED `files 44/71`, and the other 27 are now ALL `unreachable:` —
+    // `lane-blocked:` and `pending:` are both measured 0, so this is Phase
+    // 164.4.1's END STATE for the annotated corpus. The one added is
+    // test_reconcile_dropped_enqueue_sweep.sql, the 39-section gate whose Parts
+    // 2-4 EXECUTE the deployed cron.job.command as their oracle; its apply list
+    // is sized so the three `SKIP Part` notices never fire. The plan-04
+    // paragraph above stays as the dated record of the 43-file corpus.
+    expect(corpus.filesAnnotated).toBe(44);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -1995,6 +2013,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_ledger_refresh_staleness.sql",
       "test_metrics_by_basis_write.sql",
       "test_profiles_privileged_columns_locked.sql",
+      "test_reconcile_dropped_enqueue_sweep.sql",
       "test_resync_retry_single_job.sql",
       "test_retention_orphaned_running.sql",
       "test_scenario_downgrade_sweep.sql",
@@ -2176,14 +2195,66 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
   // any route OTHER than annotating that file — teaching the classifier to
   // ignore pg_cron, or deleting the pin — is the opposite move and must fail
   // here.
-  const LANE_BLOCKED_1 = ["test_reconcile_dropped_enqueue_sweep.sql"];
+  //
+  // ⛔ CURRENCY 2026-09-05 (plan 164.4.1-05): the set is now MEASURED EMPTY, and
+  // `LANE_BLOCKED_1` is RETIRED. The FULL four-name lineage, retired one file at
+  // a time and every time BY ANNOTATION — never by a classifier change:
+  //   LANE_BLOCKED_4 (164.4 end state, deferred 2026-09-03):
+  //     test_derive_allocator_keys_fanout.sql            -> annotated, plan 02
+  //     test_reconcile_dropped_enqueue_sweep.sql         -> annotated, plan 05
+  //     test_retention_orphaned_running.sql              -> annotated, plan 03
+  //     test_strategy_analytics_stuck_computing_reaper.sql -> annotated, plan 04
+  // `gateNeedsPgCron` (parse.mjs:1043) still returns true for all four texts and
+  // `classifyGateIdiom`'s order (inert → unreachable → lane-blocked | pending)
+  // is byte-identical to what it was on 2026-09-03; what moved is that each file
+  // now carries line-start RED-UNDER markers, so `classifyGateIdiom` reaches
+  // `annotated` before either later branch. That is the whole retirement of
+  // [REDUNDER-PGCRON] (D-01).
+  //
+  // ⛔ THE EMPTY SET IS ASSERTED ONLY BESIDE AN AIM (D-04), for the reason the
+  // `pending` pin below spells out at length: `toEqual([])` on a class that
+  // stopped being computed passes identically to `toEqual([])` on a class that
+  // is genuinely empty — measured once already in this file at :1445/:1504. The
+  // AIM here is the SELF-TEST fixture PAIR, whose two files differ only in
+  // whether the pg_cron probe is executable or commented out, so it also pins
+  // the classifier's discrimination and not merely its existence.
 
-  it("scanCorpus names the 1 lane-blocked file EXACTLY — the deferral is a measured set, not a hand list", () => {
+  it("scanCorpus names ZERO lane-blocked files — MEASURED empty, beside proof the class is still computed", () => {
+    // (a) THE AIM, FIRST. The selftest fixture pair must still classify
+    // `lane-blocked` for exactly the file whose pg_cron probe is EXECUTABLE, and
+    // NOT for its comment-only sibling. A classifier that stopped producing
+    // `lane-blocked` at all, or that stopped discriminating comment from code,
+    // fails HERE — before the live corpus is asserted to be empty of the class.
+    const fixtureDir = join(
+      REPO_ROOT,
+      "scripts",
+      "mutation-runner",
+      "fixtures",
+      "selftest",
+      "lane-blocked",
+    );
+    const probe = scanCorpus(fixtureDir);
+    expect(probe.laneBlockedFiles).toEqual(["lane-blocked-gate.sql"]);
+    expect(probe.pendingFiles).toEqual(["lane-blocked-comment-only-gate.sql"]);
+
+    // (b) AND ONLY THEN the live corpus. MEASURED 2026-09-05 (plan 164.4.1-05),
+    // `node scripts/mutation-runner/run.mjs` exiting 0 and printing
+    // `lane-blocked: 0 file(s) …` beside `lane-probe: pg_cron AVAILABLE`.
     const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
-    expect(corpus.laneBlockedFiles).toEqual(LANE_BLOCKED_1);
-    // Non-vacuity in the other direction: it may not ALSO be sitting in
-    // `pending`, which is what "the pending line no longer lists them" means.
-    for (const f of LANE_BLOCKED_1) expect(corpus.pendingFiles).not.toContain(f);
+    expect(corpus.laneBlockedFiles).toEqual([]);
+    // Non-vacuity in the other direction, kept from the four-name pin: none of
+    // the four retired names may have fallen into `pending` instead of
+    // `annotated` — an empty `lane-blocked` bought by a reclassification rather
+    // than by annotation would satisfy the line above and fail here.
+    for (const f of [
+      "test_derive_allocator_keys_fanout.sql",
+      "test_reconcile_dropped_enqueue_sweep.sql",
+      "test_retention_orphaned_running.sql",
+      "test_strategy_analytics_stuck_computing_reaper.sql",
+    ]) {
+      expect(corpus.annotatedFiles).toContain(f);
+      expect(corpus.pendingFiles).not.toContain(f);
+    }
     // And the negative controls stay where they were.
     expect(corpus.unreachableFiles).toContain("test_retention_crons_safe.sql");
     // ⭐ test_wizard_composite_fence.sql mentions pg_cron at :698 in a COMMENT
@@ -2296,12 +2367,20 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // annotated 42 + pending 0 + unreachable 27 + inert 0 + lane-blocked 2 = 71.
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-04), read off `--parse-only`:
     // annotated 43 + pending 0 + unreachable 27 + inert 0 + lane-blocked 1 = 71.
+    // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-05), read off `--parse-only`:
+    // annotated 44 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 71.
+    // That is PHASE 164.4.1's END STATE: two of the five classes are measured
+    // empty and this arithmetic is what says so in a form a future drift breaks.
     expect(corpus.filesTotal).toBe(71);
-    expect(corpus.laneBlockedFiles).toHaveLength(1);
-    // ⛔ A LENGTH beside an EXACT SET, not instead of one: `toHaveLength(1)` is
-    // satisfied by any ONE name, which is exactly how a silently-substituted
-    // file would pass. The set is the assertion; the length is the arithmetic.
-    expect(corpus.laneBlockedFiles).toEqual(LANE_BLOCKED_1);
+    expect(corpus.laneBlockedFiles).toHaveLength(0);
+    // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
+    // that stopped being computed is indistinguishable from `toHaveLength(0)` on
+    // a genuinely empty one — the same vacuity `inertFiles` demonstrated at
+    // :1445/:1504. The AIM lives in "scanCorpus names ZERO lane-blocked files"
+    // above (the selftest fixture PAIR, which must still classify exactly
+    // `lane-blocked-gate.sql` and NOT its comment-only sibling), and the
+    // set-for-set PARTITION check below is the second independent guard.
+    expect(corpus.annotatedFiles).toHaveLength(44);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {
