@@ -749,7 +749,7 @@ rather than grown — five gate files and ~100 sections become provable, and the
 **Depends on:** Phase 164.4 (must COMPLETE first — 164.4's floors ratchet sequentially
 across its remaining waves, and pg_cron changes lane startup cost for EVERY arm)
 **Mode:** RESEARCH-FIRST
-**Plans:** 3/6 plans executed
+**Plans:** 4/6 plans executed
 
 ### Why this is a phase and not a plan inside 164.4
 
@@ -805,7 +805,7 @@ Plans:
 - [x] 164.4.1-01-PLAN.md — Substrate: pg_cron preloaded on the lane's single `pg_ctl -o` start (+ `cron.max_running_jobs=0`), fail-loud when absent, scripted macOS build, ubuntu apt provisioning step, `--self-test` 6/6, and the `lane-blocked-stale` tripwire OBSERVED firing on the real corpus (committed log)
 - [x] 164.4.1-02-PLAN.md — File move 1: `test_compute_jobs_error_kind_copy_parity.sql` (3) + `test_derive_allocator_keys_fanout.sql` (7) annotated and proven; floors ratcheted to the printed values; the one-name `pending:` pin re-measured as its own task
 - [x] 164.4.1-03-PLAN.md — File move 2: `test_retention_orphaned_running.sql` (25); floors; lane-blocked pinned at 2
-- [ ] 164.4.1-04-PLAN.md — File move 3: `test_strategy_analytics_stuck_computing_reaper.sql` (29, NOTICE-skip shape — zero skip lines measured); floors; lane-blocked pinned at 1
+- [x] 164.4.1-04-PLAN.md — File move 3: `test_strategy_analytics_stuck_computing_reaper.sql` (29, NOTICE-skip shape — zero skip lines measured); floors; lane-blocked pinned at 1
 - [ ] 164.4.1-05-PLAN.md — File move 4: `test_reconcile_dropped_enqueue_sweep.sql` (39); `lane-blocked: 0`, tripwire CLEARED (full run exit 0 with probe AVAILABLE); end-state floors; empty sets pinned with AIMs
 - [ ] 164.4.1-06-PLAN.md — Closure: `[REDUNDER-LANEBLOCKED-BLIND]` closed deliberately (text-only classifier documented + calibrated), honest runner prints, ubuntu measurement via `workflow_dispatch` (apt source, version, wall clock), ci.yml DECISION block updated by the MEASURED rule, docs currency
 
