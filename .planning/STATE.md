@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.4.1
-current_phase_name: PGCRON-LANE
-status: complete
-stopped_at: Phase 164.4.1 COMPLETE — verified, ubuntu-measured at run 33973362161
+current_phase: 164.1
+current_phase_name: PROD-OBSERVABILITY
+status: blocked_on_founder
+stopped_at: Phase 164.1 planning BLOCKED — discuss + research + validation done; planner NOT spawned. Awaiting three GitHub Actions secrets (ANALYTICS_SERVICE_KEY, RAILWAY_API_TOKEN workspace-scoped, RAILWAY_SSH_PRIVATE_KEY). Resume: /gsd-plan-phase 164.1
 last_updated: "2026-09-05T17:36:34.047Z"
 last_activity: 2026-09-05
-last_activity_desc: Phase 164.4.1 closed — 44 files, 361 arms, 0 waivers, lane-blocked retired
+last_activity_desc: 164.3.1/164.4/164.4.1 records restored and closed; 164.1 discuss+research+validation landed; planning blocked on founder secrets
 state_head: e01cc2e6b47f0a5d4804ac23d63634ecfb057c91
 progress:
   total_phases: 18
