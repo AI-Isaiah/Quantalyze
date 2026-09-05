@@ -2016,7 +2016,14 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     }
   });
 
-  it("scanCorpus reports 42 of 71 files annotated", () => {
+  // ⛔ THE TITLE IS PART OF THE CONTRACT. `scripts/mutation-runner/parse.mjs:1177`
+  // and `:1196` cite this test as `scanCorpus reports N of 71 files annotated`,
+  // so the N here must be the number the assertion below actually pins. It drifted
+  // once already — the title was bumped 39 -> 42 in the plan-03 wave and then left
+  // behind at 43 and at 44 while `expect(corpus.filesAnnotated)` moved, so a reader
+  // following the parse.mjs citation met a green test claiming a number two lower
+  // than the corpus (review WR-07 of 164.4.1-REVIEW.md). Bump BOTH or neither.
+  it("scanCorpus reports 44 of 71 files annotated", () => {
     const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
     // ⛔ The DENOMINATOR stays 71 — every `.sql` in the directory. Phase 164.4
     // reached ITS end state at `files 39/71` (plan 164.4-11, 2026-09-04) with
