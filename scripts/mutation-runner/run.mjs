@@ -568,7 +568,68 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 // (test_compute_jobs_error_kind_copy_parity.sql) is annotated, which is the
 // retirement of [REDUNDER-PGCRON] the founder chose over widening it. The
 // 2026-09-04 block above stays as the dated record of the 39-file corpus.
-export const FILES_FLOOR = 41;
+//
+// ⭐ RE-DERIVED 2026-09-05 (plan 164.4.1-03) — the SECOND file move of Phase
+// 164.4.1 PGCRON-LANE. The blocks above STAY as lineage.
+//
+//   VALUE        42 — read off the run's own `coverage:` line, not counted here.
+//   DATE         2026-09-05, at HEAD 65c506cd.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 1
+//                  coverage: files 42/71
+//                  arms: 296/297/1   (executed/annotated/waived)
+//                  biting: 296
+//                  lane-invocations: 296
+//                  per-arm lane time: mean 1.0s over 296 arm run(s)
+//                ⚠️ exit 1 on TWO defects in this interval, and both are
+//                deliberate rather than a regression. The first is plan 01's
+//                tripwire, `lane-blocked-stale` — pg_cron is AVAILABLE while
+//                two files are still classified `lane-blocked` — and it clears
+//                at plan 05. The second is a `floor` defect reading
+//                `WAIVED_CEILING exceeded: 1 waived arm(s) > ceiling 0`: this
+//                batch met an arm with NO first-failure mutation and left it
+//                loud instead of raising the ceiling, which is a founder call.
+//                See the WAIVED_CEILING block below and the RED-UNDER prose at
+//                `3/JOB-05` in the gate. Every arm that EXECUTED scored
+//                `RED (identity ok)`.
+//   SAMPLE SIZE  296 arms executed, all 296 `RED (identity ok)`, no defect of
+//                any OTHER kind. The two independent tallies AGREE: `arms:`
+//                executed 296 and `lane-invocations:` 296. 42 baseline and 42
+//                restore legs beside the 296 arm lanes. The 42 per-file
+//                `biting` counts SUM to 296.
+//   COVERAGE     42 annotated gate files of 71. The one added this batch is
+//                supabase/tests/test_retention_orphaned_running.sql
+//                  (25 sections — the RAISE-on-absent-pg_cron spelling
+//                   PATTERNS C1 calls "the one to follow", and the first file
+//                   in the corpus whose Parts 2 and 3 read the DEPLOYED
+//                   cron.job.command as their ORACLE and EXECUTE it).
+//                The EXACT 42-name list is pinned in
+//                src/__tests__/mutation-annotation-parser.test.ts.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({scopeDir:"supabase/tests", filesFloor,
+//                armsFloor, log:()=>{}})`), 2026-09-05:
+//                  filesFloor=42 armsFloor=296  defects=2  kinds=
+//                    ["lane-blocked-stale","floor"]               (396.2 s)
+//                  filesFloor=43 armsFloor=297  defects=4  kinds=
+//                    ["lane-blocked-stale","floor","floor","floor"] ->
+//                    `FILES_FLOOR regression: 42 annotated file(s) < floor 43`
+//                    `ARMS_FLOOR regression: 296 biting arm(s) < floor 297`
+//                                                                 (396.5 s)
+//                So 42/296 is exactly the separation point, not a value below
+//                it. ⭐ BOTH pre-existing rows — the tripwire AND the
+//                waiver-ceiling breach — are present in BOTH directions, which
+//                is what proves neither of them is what makes the second run
+//                fire.
+//   RECORD       .planning/phases/164.4.1-pgcron-lane-put-pg-cron-on-the-
+//                throwaway-pg-lane-and-retire/164.4.1-03-SUMMARY.md
+//
+// CURRENCY, stated where the VALUE is: RE-DERIVED 2026-09-05 by measurement
+// (plan 164.4.1-03). Measured coverage 42 of 71 — value RAISED from 41. The
+// remaining 29 of the 71 are still printed by name on every run: 27
+// `unreachable:` (out of scope by founder decision, TODOS [REDUNDER-NONIDIOM])
+// and 2 `lane-blocked:`, which plans 04 and 05 of this phase take. `pending:`
+// stays EMPTY, measured. The 2026-09-05 plan-02 block above stays as the dated
+// record of the 41-file corpus.
+export const FILES_FLOOR = 42;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -1119,7 +1180,62 @@ export const FILES_FLOOR = 41;
 // Measured biting 272 — value RAISED from 262. The 2026-09-04 block above stays
 // as the dated record of Phase 164.4's 262-arm end state; the next arms move is
 // plan 03 of this phase.
-export const ARMS_FLOOR = 272;
+//
+// ⭐ RE-DERIVED 2026-09-05 (plan 164.4.1-03, the SECOND file move of Phase
+// 164.4.1 PGCRON-LANE). The blocks above STAY as lineage.
+//
+//   VALUE        296 — read off the run's own `biting:` line, not counted here.
+//                ⚠️ It is NOT the twin count. The corpus declares 297 twins and
+//                ONE of them is a waiver, so a run bites 296. Those two numbers
+//                diverged for the first time in this phase family here, and the
+//                divergence is the point: see WAIVED_CEILING below.
+//   DATE         2026-09-05, at HEAD 65c506cd.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 1
+//                  arms: 296/297/1   (executed/annotated/waived)
+//                  biting: 296
+//                  lane-invocations: 296
+//   SAMPLE SIZE  296 arm lanes, all 296 `RED (identity ok)`; 42 baseline and 42
+//                restore legs; the 42 per-file `biting` counts SUM to 296; the
+//                two independent tallies (`arms:` executed and
+//                `lane-invocations:`) AGREE.
+//   COVERAGE     +25 sections over plan 02, all from
+//                supabase/tests/test_retention_orphaned_running.sql — 8 in
+//                Part 1's structural body scan, 14 in Part 2's directional
+//                arms and 3 in Part 3's executed bound. 24 bite; the 25th,
+//                `3/JOB-05`, is the waiver.
+//                ⚠️ SHAPES MET HERE, recorded because they constrain the next
+//                file: three twins are LAYERED because migration
+//                20260826140000 self-verifies the body it deploys (its STEP 5
+//                (d) counts 'orphaned' and ORPHANED_RUNNING_REAPED), one is
+//                layered because the status scope is enforced TWICE and a
+//                single-step mutation was MEASURED to be a `no-red`, and two
+//                use `neuter` because the arm is dominated by this file's own
+//                design (Part 1 is deliberately the free-standing RED).
+//                ⛔ EVERY body twin targets 20260826140000, the LAST migration
+//                to call cron.schedule for this jobname. cron.schedule upserts
+//                by name, so an edit to 20260817120000's cron body is
+//                OVERWRITTEN by the later call and comes back `no-red` — a
+//                wrong target, never a reason for a waiver.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes, 2026-09-05:
+//                  armsFloor=296  biting=296  defects=2  kinds=
+//                    ["lane-blocked-stale","floor"]               (396.2 s)
+//                  armsFloor=297  biting=296  defects=4  kinds=
+//                    ["lane-blocked-stale","floor","floor","floor"] ->
+//                    `ARMS_FLOOR regression: 296 biting arm(s) < floor 297`
+//                    (beside the paired FILES_FLOOR regression, and beside the
+//                     two rows present in BOTH directions)        (396.5 s)
+//                So 296 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4.1-pgcron-lane-put-pg-cron-on-the-
+//                throwaway-pg-lane-and-retire/164.4.1-03-SUMMARY.md
+//
+// CURRENCY, stated where the VALUE is — derivation, sample size, coverage and
+// separation in the block immediately above; record in 164.4.1-03-SUMMARY.md:
+// RE-DERIVED 2026-09-05 by measurement (plan 164.4.1-03). Measured biting 296 —
+// value RAISED from 272. ⚠️ Read the run's own `biting:` line, not this
+// constant and not the `arms:` annotated field: they are no longer the same
+// number. The next arms move is plan 04 of this phase.
+export const ARMS_FLOOR = 296;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
@@ -1169,6 +1285,33 @@ export const ARMS_FLOOR = 272;
 // gate's assertion 3 was wrapped in the exception idiom assertion 4 in the SAME
 // FILE already used, so an unhandled 23514 that named no arm became a
 // `TEST FAILED (3)` that does. The measurement lines above stay as lineage.
+//
+// ⛔ CURRENCY 2026-09-05 (plan 164.4.1-03, the second file move of Phase
+// 164.4.1): STILL 0, and the value is UNEDITED — but for the first time in this
+// phase family the corpus BREACHES it, on purpose and loudly. The run reports
+// `arms: 296/297/1` and a `floor` defect reading `WAIVED_CEILING exceeded: 1
+// waived arm(s) > ceiling 0`.
+// The waived arm is `3/JOB-05` in
+// supabase/tests/test_retention_orphaned_running.sql, and the refusal is
+// MEASURED rather than argued. That file carries THREE copies of one
+// registration guard — Part 1's, then `2/JOB-05`, then this one — each
+// dominated by the one before it. For the third to be the FIRST failure, Part 2
+// must PASS (so cron.job.command was non-NULL when it read) while Part 3 reads
+// NULL, which needs cron.job to change between two reads separated only by a
+// transaction Part 2 rolls back. Two routes were driven on real lanes and both
+// failed in ways worth recording: suppressing `2/JOB-05` with `neuter` does not
+// work because it is Part 2's PRECONDITION rather than a duplicate raise (the
+// lane then exits 3 on `22004: query string argument of EXECUTE is null`, which
+// names no arm), and a cron body that unschedules ITSELF does not work because
+// the unschedule is transactional (Part 3 reads the row back and dies on
+// `XX000: could not find valid entry for job`). Adding a `RETURN` after Part 2's
+// RAISE to fix the control flow is refused by this runner itself, deliberately
+// (`neuterArm` will not neuter a branch carrying a statement after its RAISE).
+// ⛔ SO THE CEILING WAS LEFT AT 0. Raising it to 1 and restructuring the gate's
+// three-deep guard are both founder calls (164.4.1-CONTEXT decision 3: "a plan
+// that needs a waiver is a plan that needs a checkpoint"), and neither is this
+// plan's to make. Cumulative waivers across the phase family's TEN arms moves:
+// 1, all of it here. The measurement lines above stay as lineage.
 export const WAIVED_CEILING = 0;
 
 /**
