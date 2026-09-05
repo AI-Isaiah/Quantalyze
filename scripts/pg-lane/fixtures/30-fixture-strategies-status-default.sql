@@ -5,7 +5,16 @@
 -- Production declares it in
 -- 20260405061911_initial_schema.sql:63 as
 -- `status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft',
--- 'pending_review', 'published', 'archived'))`, reproduced below.
+-- 'pending_review', 'published', 'archived'))`, and then WIDENS the CHECK in
+-- 20260716130000_strategies_status_private.sql:57-61 (CONTRIB-02, Phase 110,
+-- 2026-07-16), which DROPs `strategies_status_check` and re-adds it with a
+-- FIFTH value, 'private'. The five-value form is what is reproduced below.
+-- ⛔ Reproduce the CURRENT declaration, never the initial one: this file
+-- unconditionally DROPs the constraint and re-adds it, so writing the
+-- superseded four-value form does not merely model a stale schema, it NARROWS
+-- a correct one in any apply list that also carries 20260716130000 — and an
+-- arm exercising the owner-only 'private' status would then fail 23514 for a
+-- reason that has nothing to do with the object under test.
 --
 -- ⛔ WHY THIS IS LOAD-BEARING AND NOT COSMETIC. MEASURED on the lane
 -- 2026-09-05: without it, `test_reconcile_dropped_enqueue_sweep.sql` Part 2
@@ -46,4 +55,4 @@ ALTER TABLE public.strategies
 
 ALTER TABLE public.strategies
   ADD CONSTRAINT strategies_status_check
-    CHECK (status IN ('draft', 'pending_review', 'published', 'archived'));
+    CHECK (status IN ('draft', 'pending_review', 'published', 'archived', 'private'));
