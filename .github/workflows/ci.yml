@@ -943,6 +943,23 @@ jobs:
     # ⚠️ SUPERSEDED 2026-09-05 by the phase review: that run measured the 363-arm tree and stays
     # as the dated ubuntu measurement. The corpus is now 361 arms / **449 legs** (361 + 44 + 44)
     # after CR-02 reclassified two unfalsifiable arms. Two fewer legs does not move the DECISION.
+    #
+    # ⛔ TRIGGER REACHED — MEASURED 2026-09-05, run **33973362161** at head sha
+    # **ab0d56445b91bae8ac0460cb35cde12aaefce3dc** (the first ubuntu run of the SHIPPING tree; the
+    # 567 s run above measured a superseded 363-arm tree AND the previous provisioning step).
+    # `sql-mutation` SUCCESS in **646 s = 10.8 min** — 14:58:0xZ -> 15:08:4xZ. Corpus identical to
+    # the authoring box: coverage: files 44/71, arms: 361/361/0, biting: 361, lane-invocations: 361,
+    # lane-blocked: 0, pending: 0, lane-probe AVAILABLE, no defects. The rewritten selector worked:
+    # `PGBIN the lane will boot: /usr/lib/postgresql/16/bin`, major 16, pg_cron 1.6.2-1.
+    # 449 legs, so ~1.15 s/leg + overhead — SLOWER per leg than the 567 s run at MORE arms, which
+    # is runner variance, not a corpus change. That is the point: the variance alone is ~80 s.
+    #
+    # ⚖️ THE RULE FIRES. It says raise only when a MEASURED run REACHES ~10 minutes; 10.8 min does.
+    # `timeout-minutes` 15 -> **20**, and this is the ONE raise the rule allows.
+    # ⛔ 20 IS THE CEILING. If a MEASURED ubuntu run reaches it, STOP — do NOT raise again. The
+    # locked decision (164.4-CONTEXT.md) is that PRs then run CHANGED gate files with a scheduled
+    # full run enforcing the floors, and the split is PRINTED, never silent. That is a separate
+    # plan (a runner subset mode plus ci.yml work), booked as [REDUNDER-SUBSET-SPLIT].
     # ⚖️ RULE APPLIED LITERALLY: 9.45 min does NOT reach the ~10 min trigger, so
     # `timeout-minutes` STAYS 15 — this is the closest a measured run has come
     # (previous high 464 s / 7.7 min, run 33882082307), and the next file-count
@@ -962,7 +979,7 @@ jobs:
     # silent. That is a separate plan (a runner subset mode plus ci.yml work),
     # NOT a further timeout raise.
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:

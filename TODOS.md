@@ -1486,6 +1486,23 @@ true for 146 and half of 142–145, and **false for 141**.
       `TEST FAILED (…)` and scores NO-IDENTITY — concrete evidence for the rename this item
       proposes.
 
+- [ ] **`[REDUNDER-SUBSET-SPLIT]` `sql-mutation`'s ubuntu wall clock reached the ~10 min trigger, so `timeout-minutes` has taken its ONE allowed raise to 20. The next escalation is a subset split, NOT another raise (booked 2026-09-05, Phase 164.4.1).**
+      MEASURED on ubuntu, SHA-bound, both runs of this branch:
+        * run 33961609382 @ `1aa8bb70` — 363 arms / 451 legs — **567 s** (9.45 min), under the trigger.
+        * run 33973362161 @ `ab0d5644` — 361 arms / 449 legs — **646 s** (10.8 min), OVER it.
+      ⚠️ FEWER legs, SLOWER run: ~1.15 s/leg vs ~1.10. The ~80 s swing is RUNNER VARIANCE, not
+      corpus growth, and that is precisely why the headroom matters — the corpus did not grow and
+      the job still got 14% slower.
+      `ci.yml` applied its own documented rule (raise only when a MEASURED run REACHES ~10 min)
+      and went 15 -> 20. ⛔ **20 IS THE CEILING.** If a MEASURED ubuntu run reaches 20 minutes,
+      STOP — do not raise again. The locked decision (`164.4-CONTEXT.md`) is that PRs then run only
+      CHANGED gate files, with a scheduled full run enforcing `FILES_FLOOR`/`ARMS_FLOOR`, and the
+      split must be PRINTED on every run, never silent — a subset that does not say it is a subset
+      is the same defect class as a gate that reports PASS having measured nothing.
+      OWED: a runner subset mode (`--changed` against a base ref) plus the ci.yml wiring and a
+      scheduled full-corpus job. Not started; this entry exists so the ceiling is not discovered
+      by a red build.
+
 - [ ] **`[REDUNDER-GATESELF-UNBOUNDED]` The "mutate the gate's own setup" twin class has NO ceiling, while waivers have `WAIVED_CEILING = 0` — and Phase 164.4.1 more than doubled it (booked 2026-09-05, Phase 164.4.1 code review IN-03).**
       ⛔ **BOOKED, NOT FIXED — deliberately, and the reason is the point.** Introducing a ceiling is
       a DESIGN decision about what the corpus's headline number means, and `164.4-CONTEXT.md`
