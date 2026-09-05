@@ -391,6 +391,17 @@ BEGIN
   -- src/__tests__/reconcile-dropped-enqueue-sweep.test.ts) moved in the SAME
   -- commit as the migration.
   v_jobs := (length(upper(v_command)) - length(replace(upper(v_command), 'PUBLIC.COMPUTE_JOBS', ''))) / length('PUBLIC.COMPUTE_JOBS');
+  -- RED-UNDER: schema-unqualify the ceiling subquery's FROM in the LAST writer
+  --            (20260819150000), so the deployed body names PUBLIC.COMPUTE_JOBS twice
+  --            instead of three times. That is exactly the drift this counter exists to
+  --            catch: an unqualified name resolves through the cron session search_path
+  --            and could bind to another schema entirely, and the count -- not a bare
+  --            presence gate -- is what notices, because the INSERT target alone would
+  --            satisfy `NOT ILIKE '%public.compute_jobs%'` by itself.
+  --            LAYERED: that migration's STEP 2 self-verify carries the SAME v_jobs <> 3
+  --            check (20260819150000:552), so a single-step mutation ABORTS the apply
+  --            instead of reddening this arm. MEASURED: step 1 alone -> baseline abort.
+  -- RED-UNDER-M: {"arm":"1/JOB-04/D-02/R3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                   FROM public.compute_jobs cjc\n","replace":"                   FROM compute_jobs cjc\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_jobs <> 3 THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   IF v_jobs <> 3 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/D-02/R3): the deployed body names public.compute_jobs % times, expected 3 (the zero-jobs NOT EXISTS conjunct + the readmit-ceiling subquery + the INSERT target). Two means ONE of the two predicates is gone: without the zero-jobs conjunct every strategy holding a healthy in-flight chain -- a running derive_broker_dailies mid-chain, most of all -- is re-enqueued on the next tick; without the ceiling subquery a strategy whose input reliably kills its worker rides the reap-readmit cycle forever. One means only the INSERT target survives and it is satisfying this gate by itself. Zero means the sweep no longer writes at all.', v_jobs;
   END IF;
@@ -413,6 +424,15 @@ BEGIN
   -- gated at 20260817120000:741, so marker drift REDs upstream before it could
   -- silently un-key either clause here.
   v_marker := (length(upper(v_stripped)) - length(replace(upper(v_stripped), 'ORPHANED_RUNNING_REAPED', ''))) / length('ORPHANED_RUNNING_REAPED');
+  -- RED-UNDER: replace the ceiling subquery's marker LIKE with a bare IS NOT NULL in
+  --            the last writer, so the deployed body carries the terminalizer audit
+  --            literal ONCE instead of twice. A ceiling that counts every failed_final
+  --            row rather than the marked ones excludes healthy strategies that merely
+  --            have failure history, and the count gate is the only thing that sees it.
+  --            LAYERED (three steps): 20260819150000's STEP 2 re-checks both the ceiling
+  --            SHAPE (:508) and the marker count (:518), so both are re-based or the
+  --            apply aborts. MEASURED: step 1 alone -> baseline abort at :508.
+  -- RED-UNDER-M: {"arm":"1/JOB-04/B4/R3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                    AND cjc.last_error LIKE 'orphaned_running_reaped:%'\n","replace":"                    AND cjc.last_error IS NOT NULL\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_stripped !~* 'count\\(\\*\\)[^;]*orphaned_running_reaped[^;]*<[[:space:]]*\\m3\\M' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_marker <> 2 THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   IF v_marker <> 2 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/B4/R3): the deployed body carries the terminalizer audit marker % times in EXECUTABLE code, expected exactly 2 (the B4 readmit exemption + the R3 attempt ceiling). One means one of the pair is gone. Without the exemption, a chain-mid orphan that 144 terminalized for its audit trail once again excludes its own strategy from this sweep FOREVER -- dailies present, no analytics row, recovered by nobody and with no user surface once the wizard 15-minute amber backstop has passed. Without the ceiling, those readmissions are unbounded: worker dies, row is reaped at 4h, sweep readmits, forever. Zero means both are gone. More than two means a clause was duplicated, or the marker leaked into a third clause nothing else gates.', v_marker;
   END IF;
@@ -422,6 +442,14 @@ BEGIN
   -- a bound nobody ratified. \m and \M also reject '<= 3', which quietly buys a
   -- fourth cycle. MEASURED 2026-08-19 on a throwaway postgres:16 against this
   -- migration's own STEP 2: the '< 30' body REDs, the '< 3' body passes.
+  -- RED-UNDER: widen the readmit ceiling from `< 3` to `< 30` in the last writer. This
+  --            is the exact widening the word-bounded pattern exists to refuse: '30'
+  --            CONTAINS the digit 3, so the substring gate this pin replaced would have
+  --            accepted a bound nobody ratified and a strategy whose input reliably kills
+  --            its worker would ride the reap-readmit cycle ten times over.
+  --            LAYERED: STEP 2 carries the same literal pin (:498) and the same shape pin
+  --            (:508). MEASURED: step 1 alone -> baseline abort at :498.
+  -- RED-UNDER-M: {"arm":"1/JOB-04/R3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                    AND cjc.last_error LIKE 'orphaned_running_reaped:%'\n               ) < 3\n","replace":"                    AND cjc.last_error LIKE 'orphaned_running_reaped:%'\n               ) < 30\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_stripped !~ '<[[:space:]]*\\m3\\M' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_stripped !~* 'count\\(\\*\\)[^;]*orphaned_running_reaped[^;]*<[[:space:]]*\\m3\\M' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   IF v_stripped !~ '<[[:space:]]*\m3\M' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/R3): the deployed body does not carry a word-bounded readmit ceiling of < 3. Either the bound is gone -- and a strategy whose input reliably kills its worker rides the reap-readmit cycle FOREVER at one worker slot every ~5 hours, which is the unbounded retry loop arms C2/C2b/C3 and B4 own header keep naming -- or it has been widened to a value that merely STARTS with 3, or relaxed to <= 3. Part 2 arms C5 and C5b are the behavioural half of this pin.';
   END IF;
@@ -434,21 +462,51 @@ BEGIN
   IF v_stripped !~* 'count\(\*\)[^;]*orphaned_running_reaped[^;]*<[[:space:]]*\m3\M' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/R3): the deployed body does not compare a COUNT OF TERMINALIZER-MARKED ROWS against the ceiling. A bound that counts something else is not this bound: counting all compute_jobs rows would exclude healthy strategies that merely have history, and comparing a constant to nothing is a bound that cannot bind. The marker count is the attempt counter precisely because 144 terminalizes IN PLACE and this sweep INSERTs anew, so it rises by exactly one per cycle.';
   END IF;
+  -- RED-UNDER: drop the IS TRUE wrapper from the B4 exemption in the last writer. The
+  --            unwrapped form evaluates to NULL for a failed_final row with no error
+  --            text, that row drops out of the NOT EXISTS subquery, and a GENUINE
+  --            permanent failure is HEALED hourly forever. Part 2 arm C2b is the
+  --            behavioural half of this pin.
+  --            LAYERED: STEP 2 re-checks `%IS TRUE%` at :531.
+  -- RED-UNDER-M: {"arm":"1/JOB-04/B4","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                              AND cj.last_error LIKE 'orphaned_running_reaped:%') IS TRUE)\n","replace":"                              AND cj.last_error LIKE 'orphaned_running_reaped:%'))\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_stripped NOT ILIKE '%IS TRUE%' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   IF v_stripped NOT ILIKE '%IS TRUE%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/B4): the deployed body carries the terminalizer-marker exemption WITHOUT its IS TRUE wrapper. last_error is NULLABLE and NULL LIKE ''x%%'' is NULL, not FALSE, so the unwrapped form evaluates to NULL for a failed_final row with no error text, that row drops out of the NOT EXISTS subquery, and a GENUINE permanent failure is HEALED -- an hourly retry loop with no attempt ceiling, which is the arm-C2 failure mode this exemption was written not to cause. Part 2 arm C2b is the behavioural half of this pin.';
   END IF;
   IF v_command NOT ILIKE '%public.strategy_analytics%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04): the deployed body does not reference public.strategy_analytics. That conjunct is the ONLY protection for healthy retention-aged strategies (retention_compute_jobs_done DELETEs done rows at 30 days), so its absence is a mass re-enqueue of the entire historical corpus on the next tick.';
   END IF;
+  -- RED-UNDER: schema-unqualify the composite-exclusion subquery's FROM in the last
+  --            writer. The composite exclusion is the money-surface guard: enqueueing
+  --            compute_analytics_from_csv on a composite overwrites a correct composite
+  --            headline with the single-key computation its own handler abandoned, and an
+  --            unqualified strategy_keys can bind through the cron session search_path.
+  --            LAYERED: STEP 2 re-checks `%public.strategy_keys%` at :561.
+  -- RED-UNDER-M: {"arm":"1/JOB-04/DX-05","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                   FROM public.strategy_keys sk\n","replace":"                   FROM strategy_keys sk\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_command NOT ILIKE '%public.strategy_keys%' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   IF v_command NOT ILIKE '%public.strategy_keys%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/DX-05): the deployed body does not exclude composites via public.strategy_keys. Enqueueing compute_analytics_from_csv on a composite overwrites a correct composite headline with the divergent single-key computation its own handler deliberately abandoned -- silent corruption of a CORRECT row on a money surface.';
   END IF;
 
   -- The FOUR excluded terminal/racing statuses, each quoted so 'complete' cannot
   -- be satisfied by the substring inside 'complete_with_warnings'.
+  -- RED-UNDER: delete 'computing' from the terminal-analytics exclusion list in the last
+  --            writer. That value is Phase 142's reaper's own row: the split by
+  --            computation_status is what keeps the two mechanisms from racing the same
+  --            strategy. SINGLE-STEP by MEASUREMENT: 20260819150000's STEP 2 pins only
+  --            complete_with_warnings out of the four (:558), so this one needs no
+  --            re-base -- unlike its D-03 sibling directly below, which also does not.
+  -- RED-UNDER-M: {"arm":"1/JOB-04/D-04","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                    AND sa.computation_status IN ('computing', 'complete', 'complete_with_warnings', 'failed')\n","replace":"                    AND sa.computation_status IN ('complete', 'complete_with_warnings', 'failed')\n","occurrences":1}]}
   IF v_command NOT ILIKE '%''computing''%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/D-04): the deployed body no longer excludes computation_status computing. That is 142 reaper own row: the split by computation_status is what keeps the two mechanisms from racing the same strategy, and without it this sweep re-enqueues a row the reaper is mid-way through terminalizing.';
   END IF;
+  -- RED-UNDER: delete 'complete' from the exclusion list in the last writer. This is THE
+  --            MASS-RE-ENQUEUE INCIDENT: retention deletes done job rows at 30 days, so
+  --            every healthy 31-day-old strategy already matches dailies-present-and-
+  --            zero-jobs, and this conjunct is the only thing between the first tick and a
+  --            re-enqueue of the entire historical corpus. The `%''complete''%` spelling is
+  --            quoted on both sides precisely so 'complete_with_warnings' cannot satisfy
+  --            it -- MEASURED here: with 'complete' removed and the warnings value left in
+  --            place, this arm still REDs.
+  -- RED-UNDER-M: {"arm":"1/JOB-04/D-03","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                    AND sa.computation_status IN ('computing', 'complete', 'complete_with_warnings', 'failed')\n","replace":"                    AND sa.computation_status IN ('computing', 'complete_with_warnings', 'failed')\n","occurrences":1}]}
   IF v_command NOT ILIKE '%''complete''%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/D-03): the deployed body no longer excludes computation_status complete. With retention deleting done compute_jobs rows at 30 days, EVERY healthy 31-day-old strategy matches dailies-present-and-zero-jobs, so this conjunct is the only thing standing between the first tick and a re-enqueue of the entire historical corpus -- the mass-re-enqueue incident. Measured on PROD at authoring time: 4 of the 4 zero-job strategies with dailies are excluded SOLELY by this conjunct.';
   END IF;
@@ -463,6 +521,13 @@ BEGIN
   IF v_command NOT ILIKE '%compute_analytics_from_csv%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04): the deployed body does not enqueue the compute_analytics_from_csv kind, so nothing it inserts would ever be dispatched to the analytics handler.';
   END IF;
+  -- RED-UNDER: change the metadata source literal from 'reconcile-sweep' to
+  --            'reconcile_sweep' in the last writer. analytics-service/main_worker.py reads
+  --            the EXACT hyphenated value on claim to fire its Sentry event, so this drift
+  --            heals the strategy SILENTLY: SC#1's alert half becomes false while both
+  --            halves' own unit tests stay green.
+  --            LAYERED: STEP 2 re-checks `%reconcile-sweep%` at :567.
+  -- RED-UNDER-M: {"arm":"1/JOB-04/D-11","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"             jsonb_build_object('source', 'reconcile-sweep', 'detected_at', now())\n","replace":"             jsonb_build_object('source', 'reconcile_sweep', 'detected_at', now())\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_command NOT ILIKE '%reconcile-sweep%' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   IF v_command NOT ILIKE '%reconcile-sweep%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/D-11): the deployed body does not stamp the reconcile-sweep metadata marker. analytics-service/main_worker.py reads that EXACT value on claim to fire its Sentry event, so without it a dropped enqueue is healed SILENTLY -- SC#1 alert half becomes false while both halves own unit tests stay green.';
   END IF;
@@ -478,18 +543,49 @@ BEGIN
   -- this suite exists to hold, so it must be pinned by a pattern that a WIDER
   -- limit fails. ([^0-9]|$) -- the `|$` arm matters: without it a body ending
   -- exactly at 'LIMIT 25' would false-RED.
+  -- RED-UNDER: widen the per-tick bound to LIMIT 250 in the last writer -- a 10x blast
+  --            radius that still CONTAINS the literal substring 'LIMIT 25', which is
+  --            exactly why this pin is a word-bounded regex and not `NOT ILIKE '%LIMIT
+  --            25%'`. Part 4 is the behavioural bound proof; this is its text half.
+  --            LAYERED: STEP 2 carries the same word-bounded pattern at :594.
+  -- RED-UNDER-M: {"arm":"1/JOB-04/D-08","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"         LIMIT 25\n         FOR UPDATE SKIP LOCKED\n","replace":"         LIMIT 250\n         FOR UPDATE SKIP LOCKED\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_command !~ 'LIMIT[[:space:]]+25([^0-9]|$)' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   IF v_command !~ 'LIMIT[[:space:]]+25([^0-9]|$)' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/D-08): the deployed body does not carry a word-bounded LIMIT 25. Either the bound is gone -- an unbounded sweep is exactly the blast radius the cap exists to hold, and a single tick could enqueue the whole candidate population at once -- or it has been widened to LIMIT 25<digits>, which multiplies that blast radius while still containing the literal substring the old substring gate tested for.';
   END IF;
   IF v_command NOT ILIKE '%FOR UPDATE SKIP LOCKED%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04): the deployed body dropped FOR UPDATE SKIP LOCKED. Measured in Plan 02 at READ COMMITTED: an INSERT into compute_jobs takes an FK KEY SHARE lock on its parent strategies row, so this clause is what makes the sweep SKIP a strategy the live enqueue path is mid-insert on. Without it the sweep BLOCKS on that lock instead.';
   END IF;
+  -- RED-UNDER: delete ON CONFLICT DO NOTHING from the INSERT in the last writer. Measured
+  --            in Phase 143 Plan 02 at READ COMMITTED: with SKIP LOCKED removed the sweep
+  --            blocks on the FK lock, meets the committed row on release, and this clause
+  --            is what absorbs it; remove BOTH and the tick dies on 23505, losing the
+  --            healed count and skipping every remaining candidate in the batch.
+  --            LAYERED: STEP 2 re-checks the clause at :573.
+  -- RED-UNDER-M: {"arm":"1/JOB-04/SC#2","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"        FROM batch b\n      ON CONFLICT DO NOTHING;\n","replace":"        FROM batch b;\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_command NOT ILIKE '%ON CONFLICT DO NOTHING%' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   IF v_command NOT ILIKE '%ON CONFLICT DO NOTHING%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/SC#2): the deployed body lost ON CONFLICT DO NOTHING. Measured in Plan 02: with SKIP LOCKED removed the sweep blocks on the FK lock, meets the committed row on release, and this clause is what absorbs it; remove BOTH and the tick dies on 23505, losing the healed count and skipping every remaining candidate in the batch.';
   END IF;
+  -- RED-UNDER: shrink the grace window from one hour to thirty minutes in the last writer.
+  --            Without a grace window wide enough to outlast the live after() enqueue this
+  --            sweep exists to backstop, the sweep RACES it and inserts duplicate work on
+  --            the NORMAL path -- it would fire on every healthy CSV finalize.
+  --            ⚠️ THIS TWIN CARRIES THE WHOLE `1/JOB-04` SECTION, which fifteen separate
+  --            RAISEs in this part share. The section's first three raises (pg_cron absent,
+  --            job not registered, exactly-one-row) are NOT independently falsifiable on a
+  --            lane: an unregistered job aborts 20260819150000's own STEP 2 at apply time,
+  --            and an absent pg_cron aborts 20260513094906. Section coverage is what the
+  --            runner counts and it is complete; per-RAISE coverage is not claimed.
+  --            LAYERED: STEP 2 re-checks the grace literal at :579.
+  -- RED-UNDER-M: {"arm":"1/JOB-04","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"               ) < now() - interval '1 hour'\n","replace":"               ) < now() - interval '30 minutes'\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_command NOT ILIKE '%interval ''1 hour''%' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   IF v_command NOT ILIKE '%interval ''1 hour''%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04): the deployed body does not carry the 1-hour grace literal. Without a grace window the sweep RACES the live after() enqueue it exists to backstop and inserts duplicate work on the NORMAL path.';
   END IF;
+  -- RED-UNDER: replace the archived-status exclusion with a vacuous IS NOT NULL in the
+  --            last writer. Archived strategies would then consume worker slots computing
+  --            analytics nobody reads. Note 'draft' is DELIBERATELY included by contrast --
+  --            a drop victim may sit pre-terminal precisely because nothing advanced it.
+  --            LAYERED: STEP 2 re-checks `%archived%` at :582.
+  -- RED-UNDER-M: {"arm":"1/JOB-04/DX-06","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"         WHERE s.status <> 'archived'\n","replace":"         WHERE s.status IS NOT NULL\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_command NOT ILIKE '%archived%' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   IF v_command NOT ILIKE '%archived%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/DX-06): the deployed body lost the archived-status exclusion, so archived strategies would consume worker slots computing analytics nobody reads.';
   END IF;
@@ -511,6 +607,14 @@ BEGIN
   -- locking CTE. The bound is proven ONLY by Part 4, which executes the body
   -- against LIMIT+1 real rows. Never let a green here be read as a bound proof.
   v_mat := (length(upper(v_command)) - length(replace(upper(v_command), 'AS MATERIALIZED', ''))) / length('AS MATERIALIZED');
+  -- RED-UNDER: drop the explicit MATERIALIZED fence from the batch CTE in the last writer.
+  --            This is SHAPE enforcement and this file says so twice: Plan 02 measured that
+  --            removing the keyword changes neither plan nor result TODAY, because the CTE
+  --            carries a locking clause. The fence is what keeps the bound safe against a
+  --            future edit that drops FOR UPDATE and makes the CTE inlinable, at which
+  --            point the LIMIT would be re-applied per outer row.
+  --            LAYERED: STEP 2 re-checks the MATERIALIZED count at :613.
+  -- RED-UNDER-M: {"arm":"1/JOB-04/D-19","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"      WITH batch AS MATERIALIZED (\n","replace":"      WITH batch AS (\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_mat <> 1 THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   IF v_mat <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/D-19): the deployed body carries % MATERIALIZED batch CTEs, expected exactly 1. The explicit fence is what keeps the bound safe against a future edit that drops FOR UPDATE and makes the CTE inlinable -- at which point the LIMIT would be re-applied per outer row and the per-tick blast radius would silently become unbounded. This is shape enforcement; Part 4 is the bound proof.', v_mat;
   END IF;
@@ -662,6 +766,19 @@ BEGIN
 
   SELECT command INTO v_command
     FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep';
+  -- RED-UNDER: point THIS PART'S OWN oracle lookup at a jobname that does not exist.
+  --            ⚠️ A GATE-FILE EDIT, and deliberately so. This raise is a PRECONDITION
+  --            guard, not an independent production claim: Part 1 owns the production
+  --            claim (`1/JOB-04`, three raises: pg_cron absent, job not registered,
+  --            exactly-one-row) and Part 1 runs FIRST and UNGATED. MEASURED 2026-09-05 on
+  --            a real lane: renaming the jobname in 20260819150000's cron.schedule call
+  --            (with that migration's STEP 2 count check re-based so the apply survives)
+  --            REDs `TEST FAILED (1/JOB-04)` -- Part 1's registration arm -- and this arm
+  --            is never reached. So no production mutation can make this raise fire first,
+  --            and the honest falsifier is the one that breaks the precondition it asserts.
+  --            Same class as the S-2 seed-integrity precedent in
+  --            test_strategy_analytics_stuck_computing_reaper.sql (plan 164.4.1-04).
+  -- RED-UNDER-M: {"arm":"2/JOB-04","apply":[{"kind":"edit","file":"supabase/tests/test_reconcile_dropped_enqueue_sweep.sql","find":"    RAISE NOTICE 'SKIP Part 2: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only). Part 1 already reddened on this condition.';\n    RETURN;\n  END IF;\n\n  SELECT command INTO v_command\n    FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep';\n","replace":"    RAISE NOTICE 'SKIP Part 2: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only). Part 1 already reddened on this condition.';\n    RETURN;\n  END IF;\n\n  SELECT command INTO v_command\n    FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep__no_such_job';\n","occurrences":1}]}
   IF v_command IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (2/JOB-04): the reconcile_dropped_enqueue_sweep cron job is missing while pg_cron is installed. A missing sweep is a red gate, never a skip.';
   END IF;
@@ -839,6 +956,15 @@ BEGIN
   -- ----- arm A: the heal, on all four observable properties -------------
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs WHERE strategy_id = v_a;
+  -- RED-UNDER: flip the grace comparison from `<` to `>` in the last writer's body, so the
+  --            sweep heals only strategies whose dailies are NEWER than the grace window --
+  --            the exact inversion of the population it exists for. Every text anchor in
+  --            Part 1 survives it (`interval '1 hour'` is still there, so STEP 2 :579 and
+  --            Part 1's grace pin both stay green), which is precisely why this arm has to
+  --            EXECUTE the deployed body instead of grepping it.
+  --            SINGLE-STEP by MEASUREMENT: no self-verify in the apply list reads the
+  --            operator.
+  -- RED-UNDER-M: {"arm":"2/arm A/JOB-04/SC#1","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"               ) < now() - interval '1 hour'\n","replace":"               ) > now() - interval '1 hour'\n","occurrences":1}]}
   IF v_cnt <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-04/SC#1): a strategy with dailies past the grace window, ZERO compute_jobs rows and NO strategy_analytics row got % compute_jobs rows from one tick, expected exactly 1. Zero means the sweep does not detect the dropped-enqueue population at all and the hole this phase exists to close is still open; more than one means the bounded batch is inserting duplicates.', v_cnt;
   END IF;
@@ -847,15 +973,36 @@ BEGIN
     INTO v_status, v_kind, v_source, v_detected
     FROM public.compute_jobs WHERE strategy_id = v_a;
 
+  -- RED-UNDER: have the last writer's INSERT stamp status='running' instead of letting the
+  --            column default to 'pending'. The strategy is then 'healed' into a row no
+  --            worker will ever claim -- indistinguishable from the hole the sweep was
+  --            meant to close, and invisible to every text anchor in Part 1 (the body still
+  --            names public.compute_jobs exactly three times).
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm A/JOB-04","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"      INSERT INTO public.compute_jobs (strategy_id, kind, metadata)\n      SELECT b.id,\n             'compute_analytics_from_csv',\n             jsonb_build_object('source', 'reconcile-sweep', 'detected_at', now())\n        FROM batch b\n","replace":"      INSERT INTO public.compute_jobs (strategy_id, kind, metadata, status)\n      SELECT b.id,\n             'compute_analytics_from_csv',\n             jsonb_build_object('source', 'reconcile-sweep', 'detected_at', now()),\n             'running'\n        FROM batch b\n","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'pending' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-04): the healed job landed at status % and not pending, so no worker will ever claim it. A job the sweep inserts but nobody claims is indistinguishable from the hole it was meant to close.', v_status;
   END IF;
   IF v_kind IS DISTINCT FROM 'compute_analytics_from_csv' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-04): the healed job carries kind % and not compute_analytics_from_csv, so it would be dispatched to the wrong handler -- or to none at all.', v_kind;
   END IF;
+  -- RED-UNDER: drift the metadata source to 'reconcile-sweep-x' in the last writer. ⭐ The
+  --            value still CONTAINS 'reconcile-sweep', so Part 1's presence anchor and
+  --            20260819150000's STEP 2 (:567) both stay green -- the cross-language marker
+  --            contract main_worker.py reads is broken and only an equality check on the
+  --            written row can see it. That asymmetry is the whole reason this arm exists
+  --            beside Part 1's token pin.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm A/JOB-04/D-11/SC#1","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"             jsonb_build_object('source', 'reconcile-sweep', 'detected_at', now())\n","replace":"             jsonb_build_object('source', 'reconcile-sweep-x', 'detected_at', now())\n","occurrences":1}]}
   IF v_source IS DISTINCT FROM 'reconcile-sweep' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-04/D-11/SC#1): the healed job metadata source is % and not reconcile-sweep. analytics-service/main_worker.py reads that EXACT literal on claim to fire the Sentry alert, so this drift heals the strategy SILENTLY -- the alert half of SC#1 becomes false while both halves own unit tests stay green.', v_source;
   END IF;
+  -- RED-UNDER: stamp a JSON null for detected_at in the last writer. The KEY is still
+  --            present, so Part 1's `%detected_at%` anchor and STEP 2 (:570) both stay
+  --            green while the Sentry event has no timestamp for when the drop was observed
+  --            and an operator cannot tell a fresh drop from a month-old one.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm A/JOB-04/D-11","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"             jsonb_build_object('source', 'reconcile-sweep', 'detected_at', now())\n","replace":"             jsonb_build_object('source', 'reconcile-sweep', 'detected_at', NULL)\n","occurrences":1}]}
   IF v_detected IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-04/D-11): the healed job carries no detected_at. It is the other half of the cross-language marker contract; the Sentry event has no timestamp for when the drop was observed, so an operator cannot tell a fresh drop from a month-old one.';
   END IF;
@@ -864,6 +1011,13 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_a2 AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: add 'pending' to the terminal-analytics exclusion list in the last writer.
+  --            'pending' means nothing ever advanced the row -- which IS the dropped-enqueue
+  --            signature -- so excluding it excises a large part of the population this
+  --            sweep exists to heal. All four ratified values stay in the list, so every
+  --            Part 1 token pin and STEP 2 :558 remain green.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm A2/JOB-04/D-04","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                    AND sa.computation_status IN ('computing', 'complete', 'complete_with_warnings', 'failed')\n","replace":"                    AND sa.computation_status IN ('computing', 'complete', 'complete_with_warnings', 'failed', 'pending')\n","occurrences":1}]}
   IF v_cnt <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A2/JOB-04/D-04): a strategy whose strategy_analytics row sits at pending got % sweep-marked jobs, expected 1. pending means nothing ever advanced the row -- which is precisely the dropped-enqueue signature -- so excluding it would excise a large part of the population this sweep exists to heal.', v_cnt;
   END IF;
@@ -872,6 +1026,13 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_b AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: move the grace boundary from `now() - interval '1 hour'` to
+  --            `now() + interval '1 hour'` in the last writer, so a strategy whose dailies
+  --            landed THIS INSTANT is already past grace. The literal `interval '1 hour'`
+  --            is untouched, so Part 1's anchor and STEP 2 :579 stay green; only executing
+  --            the deployed body against a freshly-stamped seed sees it.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm B/JOB-04/SC#3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"               ) < now() - interval '1 hour'\n","replace":"               ) < now() + interval '1 hour'\n","occurrences":1}]}
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm B/JOB-04/SC#3): a strategy whose dailies landed THIS INSTANT was healed (% sweep-marked jobs). The grace window is gone or the anchor is wrong, so the sweep now RACES the live after() enqueue it exists to backstop and inserts duplicate work on the NORMAL path -- it would fire on every healthy CSV finalize.', v_cnt;
   END IF;
@@ -880,6 +1041,13 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_c1 AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: kind-scope the zero-jobs conjunct in the last writer. derive_broker_dailies
+  --            upserts the dailies and only THEN enqueues its follow-on, both inside the
+  --            still-running parent job, so kind-scoping re-enqueues a HEALTHY IN-FLIGHT
+  --            CHAIN and races the chain against itself. The kind literal is already in the
+  --            body (the INSERT writes it), so no Part 1 token moves.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm C1/JOB-04/D-02/SC#3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                  WHERE cj.strategy_id = s.id\n                    AND NOT ((cj.status = 'failed_final'\n","replace":"                  WHERE cj.strategy_id = s.id\n                    AND cj.kind = 'compute_analytics_from_csv'\n                    AND NOT ((cj.status = 'failed_final'\n","occurrences":1}]}
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm C1/JOB-04/D-02/SC#3): a strategy with a RUNNING derive_broker_dailies job was healed (% sweep-marked jobs). The zero-jobs conjunct has been kind-scoped. derive_broker_dailies upserts the dailies and only THEN enqueues its follow-on, both inside the still-running parent, so kind-scoping re-enqueues a HEALTHY IN-FLIGHT CHAIN and races the chain against itself.', v_cnt;
   END IF;
@@ -890,18 +1058,41 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_c2 AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: invert the exemption's marker test in the last writer (LIKE -> NOT LIKE
+  --            against an unreachable prefix), so EVERY failed_final row carrying error
+  --            text is readmitted rather than only the terminalizer-produced ones. A
+  --            settled permanent failure then becomes an hourly retry loop. ⭐ The marker
+  --            literal is still spelled twice in executable code, so Part 1's
+  --            `1/JOB-04/B4/R3` counter and STEP 2 :518 both stay green -- which is exactly
+  --            why C2 must be behavioural.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm C2/JOB-04/SC#3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                              AND cj.last_error LIKE 'orphaned_running_reaped:%') IS TRUE)\n","replace":"                              AND cj.last_error NOT LIKE 'orphaned_running_reaped:zzz%') IS TRUE)\n","occurrences":1}]}
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm C2/JOB-04/SC#3): a strategy whose only compute_jobs row is failed_final was healed (% sweep-marked jobs). A settled permanent failure belongs to nobody; re-enqueueing it turns it into an hourly retry loop with no attempt ceiling, and the partial unique index does not cover failed_final so nothing downstream stops it.', v_cnt;
   END IF;
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_c2b AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: admit a NULL last_error into the exemption in the last writer, WITHOUT
+  --            touching the IS TRUE wrapper. This reaches the same three-valued-logic hole
+  --            the wrapper closes -- a genuine permanent failure carrying no error text is
+  --            healed hourly -- while `%IS TRUE%` stays present, so Part 1's `1/JOB-04/B4`
+  --            pin and STEP 2 :531 remain green. The text pin and this arm are not
+  --            redundant: they catch different spellings of the same defect.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm C2b/JOB-04/B4/SC#3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                    AND NOT ((cj.status = 'failed_final'\n                              AND cj.last_error LIKE 'orphaned_running_reaped:%') IS TRUE)\n","replace":"                    AND NOT ((cj.status = 'failed_final'\n                              AND (cj.last_error IS NULL OR cj.last_error LIKE 'orphaned_running_reaped:%')) IS TRUE)\n","occurrences":1}]}
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm C2b/JOB-04/B4/SC#3): a strategy whose only compute_jobs row is a failed_final carrying a NULL last_error was healed (% sweep-marked jobs). This is the THREE-VALUED-LOGIC hole: NULL LIKE ''x%%'' is NULL, not FALSE, so a marker exemption written without an explicit IS TRUE wrapper evaluates to NULL for this row, the row drops out of the NOT EXISTS subquery, and a GENUINE permanent failure with no error text becomes an hourly retry loop with no attempt ceiling -- arm C2 failure mode arriving through the back door. Restore the IS TRUE wrapper on the exemption in the deployed body; do NOT relax this arm.', v_cnt;
   END IF;
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_c3 AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: make the zero-jobs conjunct ignore 'done' rows in the last writer. The
+  --            partial unique index does not cover 'done', so nothing downstream stops the
+  --            re-insert: this is a straight duplicate enqueue of work that already
+  --            completed. No token Part 1 reads changes.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm C3/JOB-04/SC#3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                  WHERE cj.strategy_id = s.id\n                    AND NOT ((cj.status = 'failed_final'\n","replace":"                  WHERE cj.strategy_id = s.id\n                    AND cj.status <> 'done'\n                    AND NOT ((cj.status = 'failed_final'\n","occurrences":1}]}
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm C3/JOB-04/SC#3): a strategy whose only compute_jobs row is done was healed (% sweep-marked jobs). The partial unique index does not cover done either, so this is a straight duplicate enqueue of work that already completed.', v_cnt;
   END IF;
@@ -912,6 +1103,14 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_c4 AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: narrow the exemption's marker prefix to one the terminalizer never writes
+  --            ('orphaned_running_reaped:zzz%') in the last writer, so a terminalizer-
+  --            produced orphan is once again excluded FOREVER: 144 terminalizes a chain-mid
+  --            orphan for the audit trail, that row trips this sweep's any-status conjunct,
+  --            and the strategy is recovered by nobody. ⭐ The marker literal still appears
+  --            twice in executable code, so Part 1's count pin cannot see this at all.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm C4/JOB-04/SC#3/B4","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                              AND cj.last_error LIKE 'orphaned_running_reaped:%') IS TRUE)\n","replace":"                              AND cj.last_error LIKE 'orphaned_running_reaped:zzz%') IS TRUE)\n","occurrences":1}]}
   IF v_cnt <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm C4/JOB-04/SC#3/B4): a strategy whose only compute_jobs row is a TERMINALIZER-PRODUCED orphan -- failed_final carrying the fixed orphaned_running_reaped audit literal Phase 144 cron body stamps -- got % sweep-marked jobs, expected exactly 1. Zero means migration 20260819130500 exemption is missing from the deployed body, or was written without its IS TRUE wrapper, and the two mechanisms do not compose: 144 terminalizes a chain-mid orphan for the AUDIT TRAIL, that row then trips this sweep ANY-status conjunct, and the strategy is recovered by NOBODY -- not the worker (the job is terminal), not the sweep (this conjunct), and not the user (no surface at all once the wizard 15-minute amber backstop has passed). A lost-worker row is not a handler verdict. More than one means the bounded batch is inserting duplicates.', v_cnt;
   END IF;
@@ -922,6 +1121,15 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_c5 AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: point the ceiling's status test at a value no row carries
+  --            ('zzz_failed_final') in the last writer, so the attempt counter always reads
+  --            zero and the ceiling never binds. A strategy already reaped and readmitted to
+  --            exhaustion is readmitted again -- forever, at one worker slot every ~5 hours.
+  --            ⭐ Both of Part 1's R3 pins survive: the word-bounded `< 3` is untouched and
+  --            the shape regex still matches, so only executing the body sees it.
+  --            SINGLE-STEP by MEASUREMENT (STEP 2 :528 reads `%failed_final%`, which
+  --            'zzz_failed_final' contains).
+  -- RED-UNDER-M: {"arm":"2/arm C5/JOB-04/R3/SC#3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                    AND cjc.status = 'failed_final'\n","replace":"                    AND cjc.status = 'zzz_failed_final'\n","occurrences":1}]}
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm C5/JOB-04/R3/SC#3): a strategy already carrying THREE terminalizer-produced marker rows -- i.e. one that has already been reaped and readmitted to exhaustion -- was readmitted AGAIN (% sweep-marked jobs), expected 0. The readmit attempt ceiling is missing from the deployed body. B4 opened this readmission path and named "an hourly retry loop with no attempt ceiling" three times as the mode it must not cause, but bounded only the NULL-last_error way in; without the ceiling the cycle is: sweep readmits, a worker claims it and dies, 144 reaps the row at 4h and stamps the marker, the sweep readmits again -- forever, at one worker slot every ~5 hours, for a strategy whose input reliably kills its worker. Nothing else in the system counts those cycles: compute_jobs.attempts is per-JOB and returns to its default on every sweep INSERT. Restore the ceiling; do NOT relax this arm.', v_cnt;
   END IF;
@@ -935,6 +1143,14 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_c5b AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: bias the ceiling by one (`) + 1 < 3`) in the last writer, tightening it to
+  --            an effective 2 while leaving the ratified literal `< 3` in place. A strategy
+  --            that lost its worker twice to a transient outage is then stranded with
+  --            dailies, no analytics and nobody to recover it -- and stranded SILENTLY,
+  --            because arm C5 stays green in that state. This is the OVER-TIGHT half of the
+  --            C5/C5b pair, and no text pin in Part 1 or in STEP 2 can express it.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm C5b/JOB-04/R3/SC#3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                    AND cjc.last_error LIKE 'orphaned_running_reaped:%'\n               ) < 3\n","replace":"                    AND cjc.last_error LIKE 'orphaned_running_reaped:%'\n               ) + 1 < 3\n","occurrences":1}]}
   IF v_cnt <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm C5b/JOB-04/R3/SC#3): a strategy carrying TWO terminalizer-produced marker rows -- one BELOW the ratified ceiling of 3 -- got % sweep-marked jobs, expected exactly 1. Zero means the ceiling is OVER-TIGHT (tightened below 3, or the B4 exemption was lost so no marked orphan is readmitted at all): a strategy that lost its worker twice to a transient outage is then stranded with dailies, no analytics and nobody to recover it, which is the very hole B4 exists to close -- and it would be stranded SILENTLY, because arm C5 stays green in that state. More than one means the bounded batch is inserting duplicates. C5 and C5b are a MATCHED PAIR; do not relax either alone.', v_cnt;
   END IF;
@@ -943,6 +1159,12 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_d1 AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: break the 'complete' comparison by concatenation (`'complete' || 'X'`) in
+  --            the last writer. ⭐ The quoted literal is STILL PRESENT in the body, so Part
+  --            1's `%''complete''%` pin and STEP 2 stay green while the conjunct no longer
+  --            excludes anything -- the mass-re-enqueue incident behind a green text gate.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm D1/JOB-04/D-03/SC#3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                    AND sa.computation_status IN ('computing', 'complete', 'complete_with_warnings', 'failed')\n","replace":"                    AND sa.computation_status IN ('computing', 'complete' || 'X', 'complete_with_warnings', 'failed')\n","occurrences":1}]}
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm D1/JOB-04/D-03/SC#3): a strategy with a COMPLETE strategy_analytics row was healed (% sweep-marked jobs). This is THE MASS-RE-ENQUEUE INCIDENT. retention_compute_jobs_done DELETEs done job rows at 30 days, so every healthy 31-day-old strategy already matches dailies-present-and-zero-jobs; the terminal-analytics conjunct is the ONLY thing between the first tick and a re-enqueue of the ENTIRE HISTORICAL CORPUS, and the number grows monotonically as the corpus ages. Measured on PROD at authoring time: 4 of 4 zero-job strategies with dailies are excluded solely by this conjunct.', v_cnt;
   END IF;
@@ -951,12 +1173,24 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_d2 AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: same concatenation break, applied to 'complete_with_warnings' in the last
+  --            writer -- the mass-re-enqueue incident, partial edition: a correct headline
+  --            recomputed for no reason on a money surface. STEP 2 :558 reads
+  --            `%complete_with_warnings%` and stays green.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm D2/JOB-04/D-03/SC#3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                    AND sa.computation_status IN ('computing', 'complete', 'complete_with_warnings', 'failed')\n","replace":"                    AND sa.computation_status IN ('computing', 'complete', 'complete_with_warnings' || 'X', 'failed')\n","occurrences":1}]}
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm D2/JOB-04/D-03/SC#3): a strategy at complete_with_warnings was healed (% sweep-marked jobs) -- the mass-re-enqueue incident, partial edition. Its correct headline would be recomputed for no reason on a money surface.', v_cnt;
   END IF;
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_d3 AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: same concatenation break, applied to 'failed' in the last writer. A terminal
+  --            analytics failure belongs to nobody; re-enqueueing it hourly is an unbounded
+  --            retry loop that no attempt ceiling governs (the R3 ceiling counts marker
+  --            rows, not analytics failures).
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm D3/JOB-04/D-03/SC#3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                    AND sa.computation_status IN ('computing', 'complete', 'complete_with_warnings', 'failed')\n","replace":"                    AND sa.computation_status IN ('computing', 'complete', 'complete_with_warnings', 'failed' || 'X')\n","occurrences":1}]}
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm D3/JOB-04/D-03/SC#3): a strategy whose analytics are terminally failed was healed (% sweep-marked jobs). A terminal failure belongs to nobody, and re-enqueueing it hourly is an unbounded retry loop that no attempt ceiling governs.', v_cnt;
   END IF;
@@ -965,6 +1199,13 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_d4 AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: same concatenation break, applied to 'computing' in the last writer. That
+  --            row belongs to Phase 142's reaper, which terminalizes it after 16 hours; the
+  --            split by computation_status is the only thing keeping the two mechanisms from
+  --            racing the same row. Part 1's `1/JOB-04/D-04` token pin cannot see a literal
+  --            that is present but no longer compared.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm D4/JOB-04/D-04/SC#3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                    AND sa.computation_status IN ('computing', 'complete', 'complete_with_warnings', 'failed')\n","replace":"                    AND sa.computation_status IN ('computing' || 'X', 'complete', 'complete_with_warnings', 'failed')\n","occurrences":1}]}
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm D4/JOB-04/D-04/SC#3): a strategy sitting at computation_status computing was healed (% sweep-marked jobs). That row belongs to Phase 142 stuck-computing reaper (20260802120000), which terminalizes it after 16 hours. The split by computation_status is the ONLY thing keeping the two mechanisms from racing the same row: absent and pending are this sweep, computing is the reaper, the three terminal values are nobody. Without it a strategy can be re-enqueued by one mechanism while the other is terminalizing it.', v_cnt;
   END IF;
@@ -973,6 +1214,14 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_e AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: neutralise the composite-exclusion subquery with `AND FALSE` in the last
+  --            writer, leaving `public.strategy_keys` in the body so Part 1's anchor and
+  --            STEP 2 :561 both stay green. Enqueueing compute_analytics_from_csv on a
+  --            composite hands the composite headline to the single-key computation its own
+  --            handler deliberately abandoned: silent corruption of a CORRECT row on a money
+  --            surface, strictly worse than the un-healed hole this file guards.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm E/JOB-04/DX-05/SC#3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"                   FROM public.strategy_keys sk\n                  WHERE sk.strategy_id = s.id\n","replace":"                   FROM public.strategy_keys sk\n                  WHERE sk.strategy_id = s.id AND FALSE\n","occurrences":1}]}
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm E/JOB-04/DX-05/SC#3): a COMPOSITE strategy -- one carrying strategy_keys member rows -- was healed (% sweep-marked jobs). Enqueueing compute_analytics_from_csv on a composite hands the composite headline to the SINGLE-KEY computation its own handler deliberately abandoned: a sqrt(252)-vs-sqrt(365) annualization divergence plus a 0.0 gap-fill that fabricates flat performance (job_worker.py:6808-6822). That is SILENT CORRUPTION OF A CORRECT ROW ON A MONEY SURFACE, strictly worse than the un-healed hole this file guards. A composite needs stitch_composite re-run, which is a different mechanism with a different predicate.', v_cnt;
   END IF;
@@ -981,6 +1230,12 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_f AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: compare the status against 'archived_zzz' in the last writer. The substring
+  --            'archived' is still in the body, so Part 1's `1/JOB-04/DX-06` pin and STEP 2
+  --            :582 stay green while archived strategies once again consume worker slots
+  --            computing analytics nobody reads.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"2/arm F/JOB-04/DX-06/SC#3","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"         WHERE s.status <> 'archived'\n","replace":"         WHERE s.status <> 'archived_zzz'\n","occurrences":1}]}
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm F/JOB-04/DX-06/SC#3): an ARCHIVED strategy was healed (% sweep-marked jobs). Archived strategies consume worker slots computing analytics nobody reads. Note that draft is DELIBERATELY included by contrast -- a drop victim may sit pre-terminal precisely because nothing advanced it.', v_cnt;
   END IF;
@@ -997,6 +1252,17 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = ANY (v_seeded) AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: seed a SEVENTEENTH healable strategy that no per-arm assertion names.
+  --            ⚠️ A GATE-FILE EDIT, and it is the literal scenario this invariant's own
+  --            comment names -- 'a future arm added without its own check'. It has to be:
+  --            every one of the sixteen seeds has its sweep-marked count pinned exactly
+  --            (four at 1, twelve at 0, and arm A additionally by a TOTAL row count), so
+  --            the sum this raise compares against is the sum of sixteen already-pinned
+  --            numbers and CANNOT diverge from 4 unless one of them diverges first. No
+  --            production mutation can reach this raise ahead of a per-arm raise; only a
+  --            new un-asserted seed can. MEASURED: with v_g added the block heals 5.
+  --            Same class as the S-2 seed-integrity precedent (plan 164.4.1-04).
+  -- RED-UNDER-M: {"arm":"2/whole-block/JOB-04","apply":[{"kind":"edit","file":"supabase/tests/test_reconcile_dropped_enqueue_sweep.sql","find":"  v_f        uuid;   -- skip: archived\n","replace":"  v_f        uuid;   -- skip: archived\n  v_g        uuid;   -- an un-asserted healable seed (RED-UNDER twin only)\n","occurrences":1},{"kind":"edit","file":"supabase/tests/test_reconcile_dropped_enqueue_sweep.sql","find":"  v_seeded := ARRAY[v_a, v_a2, v_b, v_c1, v_c2, v_c2b, v_c3, v_c4, v_c5, v_c5b, v_d1, v_d2, v_d3, v_d4, v_e, v_f];\n","replace":"  INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-g') RETURNING id INTO v_g;\n  INSERT INTO public.csv_daily_returns (strategy_id, date, daily_return, created_at)\n    VALUES (v_g, DATE '2026-01-02', 0.001, v_old);\n\n  v_seeded := ARRAY[v_a, v_a2, v_b, v_c1, v_c2, v_c2b, v_c3, v_c4, v_c5, v_c5b, v_d1, v_d2, v_d3, v_d4, v_e, v_f, v_g];\n","occurrences":1}]}
   IF v_cnt <> 4 THEN
     RAISE EXCEPTION 'TEST FAILED (2/whole-block/JOB-04): one tick produced % sweep-marked jobs across MY sixteen seeded strategies, expected exactly 4 (arms A, A2, C4 and C5b). Every other arm is a documented false-positive guard, so any other number means a guard fell or a heal was lost -- and the per-arm assertions above should name which.', v_cnt;
   END IF;
@@ -1067,6 +1333,11 @@ BEGIN
 
   SELECT command INTO v_command
     FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep';
+  -- RED-UNDER: point THIS PART'S OWN oracle lookup at a jobname that does not exist.
+  --            ⚠️ A GATE-FILE EDIT, for the reason recorded on `2/JOB-04` above: Part 1
+  --            owns the production claim and runs first, so no production mutation can
+  --            reach this precondition guard ahead of `1/JOB-04`.
+  -- RED-UNDER-M: {"arm":"3/JOB-04","apply":[{"kind":"edit","file":"supabase/tests/test_reconcile_dropped_enqueue_sweep.sql","find":"    RAISE NOTICE 'SKIP Part 3: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only).';\n    RETURN;\n  END IF;\n\n  SELECT command INTO v_command\n    FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep';\n","replace":"    RAISE NOTICE 'SKIP Part 3: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only).';\n    RETURN;\n  END IF;\n\n  SELECT command INTO v_command\n    FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep__no_such_job';\n","occurrences":1}]}
   IF v_command IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (3/JOB-04): the reconcile_dropped_enqueue_sweep cron job is missing while pg_cron is installed.';
   END IF;
@@ -1087,6 +1358,15 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_strat AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: stamp this part's seed INSIDE the grace window instead of a century back.
+  --            ⚠️ A GATE-FILE EDIT, and the honest one: this raise says of itself that it is
+  --            a SEED-INTEGRITY CONTROL -- it makes no claim about production, so no
+  --            production mutation can falsify it. Any production change that stopped the
+  --            heal REDs Part 2 arm A first (`2/arm A/JOB-04/SC#1`), which runs earlier in
+  --            the same file. Breaking the seed is what makes the raise fire, and the
+  --            raise's own message names a broken fixture. Precedent: the S-2 control in
+  --            test_strategy_analytics_stuck_computing_reaper.sql (plan 164.4.1-04).
+  -- RED-UNDER-M: {"arm":"3/tick 1/JOB-04","apply":[{"kind":"edit","file":"supabase/tests/test_reconcile_dropped_enqueue_sweep.sql","find":"    VALUES (v_strat, DATE '2026-01-02', 0.001, v_fresh - interval '100 years');\n","replace":"    VALUES (v_strat, DATE '2026-01-02', 0.001, v_fresh);\n","occurrences":1}]}
   IF v_cnt <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (3/tick 1/JOB-04): the first tick produced % sweep-marked jobs for my seeded orphan, expected exactly 1. This is a seed-integrity control: if tick 1 did not heal, the re-run assertion below would be vacuous and this part would prove nothing about idempotency.', v_cnt;
   END IF;
@@ -1100,6 +1380,17 @@ BEGIN
 
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs WHERE strategy_id = v_strat;
+  -- RED-UNDER: prepend a DELETE of every pending sweep-marked job to the deployed body in
+  --            the last writer, turning the second tick into a delete-and-reinsert. The
+  --            COUNT stays at one, so this arm's first raise cannot see it -- only the
+  --            ROW-IDENTITY comparison does, which is exactly why that comparison exists:
+  --            a delete-and-reinsert resets attempts, claim_token and created_at, so a job
+  --            a worker is mid-claim on is silently pulled out from under it.
+  --            ⚠️ The DELETE names compute_jobs UNQUALIFIED on purpose, so the body still
+  --            spells PUBLIC.COMPUTE_JOBS exactly three times and Part 1's `D-02/R3` counter
+  --            and STEP 2 :552 both stay green.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"3/tick 2/JOB-04/SC#2","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"    BEGIN\n      WITH batch AS MATERIALIZED (\n","replace":"    BEGIN\n      DELETE FROM compute_jobs cjd\n       WHERE cjd.metadata->>'source' = 'reconcile-sweep'\n         AND cjd.status = 'pending';\n      WITH batch AS MATERIALIZED (\n","occurrences":1}]}
   IF v_cnt <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (3/tick 2/JOB-04/SC#2): after a SECOND tick my seeded strategy holds % compute_jobs rows, expected still exactly 1. A sweep that re-enqueues on every tick turns one dropped enqueue into 24 duplicate analytics jobs a day, each recomputing the same headline and each competing for the same worker slots.', v_cnt;
   END IF;
@@ -1157,6 +1448,9 @@ BEGIN
 
   SELECT command INTO v_command
     FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep';
+  -- RED-UNDER: point THIS PART'S OWN oracle lookup at a jobname that does not exist.
+  --            ⚠️ A GATE-FILE EDIT, for the reason recorded on `2/JOB-04` above.
+  -- RED-UNDER-M: {"arm":"4/JOB-04","apply":[{"kind":"edit","file":"supabase/tests/test_reconcile_dropped_enqueue_sweep.sql","find":"    RAISE NOTICE 'SKIP Part 4: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only).';\n    RETURN;\n  END IF;\n\n  SELECT command INTO v_command\n    FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep';\n","replace":"    RAISE NOTICE 'SKIP Part 4: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only).';\n    RETURN;\n  END IF;\n\n  SELECT command INTO v_command\n    FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep__no_such_job';\n","occurrences":1}]}
   IF v_command IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (4/JOB-04): the reconcile_dropped_enqueue_sweep cron job is missing while pg_cron is installed.';
   END IF;
@@ -1189,6 +1483,15 @@ BEGIN
    WHERE strategy_id = ANY (v_seeded)
      AND strategy_id <> v_youngest
      AND metadata->>'source' = 'reconcile-sweep';
+  -- RED-UNDER: widen the effective bound to 35 by ARITHMETIC (`LIMIT 25 + 10`) in the last
+  --            writer. ⭐ This is the one mutation the whole D-08 family is built around:
+  --            the word-bounded regex in Part 1 and in STEP 2 :594 both still match, the
+  --            MATERIALIZED counter is untouched, and NO amount of grepping detects it --
+  --            only executing the deployed body against LIMIT+1 real rows does. On a corpus
+  --            whose candidate count grows as done job rows age past the 30-day retention
+  --            window, an unbounded tick is an unbounded write burst against compute_jobs.
+  --            SINGLE-STEP by MEASUREMENT.
+  -- RED-UNDER-M: {"arm":"4/JOB-04/D-08","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"         LIMIT 25\n         FOR UPDATE SKIP LOCKED\n","replace":"         LIMIT 25 + 10\n         FOR UPDATE SKIP LOCKED\n","occurrences":1}]}
   IF v_cnt <> 25 THEN
     RAISE EXCEPTION 'TEST FAILED (4/JOB-04/D-08): after ONE tick only % of MY 25 oldest seeded orphans were healed, expected all 25. Either the sweep is not draining its batch, or a foreign row older than the century-back seed epoch crowded a seed out of the LIMIT-25 budget (see the RESIDUAL ASSUMPTION in this file header).', v_cnt;
   END IF;
