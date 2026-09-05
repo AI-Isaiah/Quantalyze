@@ -45,14 +45,40 @@ Environment overrides: `PGBIN` (server-binaries dir) and `PORT` (pin a port
 instead of auto-allocating). `PGD` is **not** overridable — it is derived from
 `--workdir` so cleanup owns exactly what this run made.
 
-## The other three entry points
+## The other entry points
 
 ```bash
 bash scripts/pg-lane/run.sh                 # legacy demo — fixtures + the two
                                             # Phase 164 migrations + the 103-arm gate
 bash scripts/pg-lane/run.sh --self-test     # prove the guard and the cleanup CAN fail
 bash scripts/pg-lane/run.sh --tracer-proof  # SHAPE 1c: mutate -> RED -> pristine -> GREEN
+bash scripts/pg-lane/run.sh --print-pgbin   # name the binaries this lane would boot
+bash scripts/pg-lane/run.sh --help          # print run.sh's own header block
 ```
+
+### `--print-pgbin`
+
+Prints the server-binaries directory `resolve_pgbin` settles on — honouring
+`PGBIN` exactly as a real run does — and exits. It boots nothing, initdb's
+nothing and creates no scratch dir. The resolved dir goes to **stdout**; a
+refusal (`no executable pg_ctl`, or the four-step chain coming up empty) goes to
+**stderr**, so a caller that captures stdout must not discard stderr or it keeps
+the failure with none of the diagnosis.
+
+It exists so there is **one** selector, not two. `.github/workflows/ci.yml`'s
+`Provision pg_cron` step needs the PostgreSQL major to `apt-get install
+postgresql-<major>-cron`, and it used to pick that major with its own rule
+(`ls -d /usr/lib/postgresql/*/bin | sort -n | tail -1`, the HIGHEST) while
+`resolve_pgbin` prefers `pg_ctl` on PATH and otherwise takes the FIRST glob match
+(the LOWEST). On an image carrying both 16 and 17 those two disagree, and CI
+would provision for a server the lane never boots. Asking the lane removes the
+second opinion rather than trying to keep it in sync.
+
+⚠️ The mode is **additive** — it is a new `case` arm ahead of the argument loop
+and changes nothing about a normal run — but it is still part of the CLI
+contract above, so it is documented here and in `run.sh`'s header block. Added
+2026-09-05 in `85d4f22c` (Phase 164.4.1); this documentation is the follow-up
+that closed the drift, since the arm shipped in neither place first.
 
 ### `--tracer-proof`
 

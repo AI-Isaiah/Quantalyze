@@ -25,6 +25,16 @@
 #                                               # Phase 164 migrations + the gate
 #   bash scripts/pg-lane/run.sh --self-test     # prove the guard and the cleanup
 #   bash scripts/pg-lane/run.sh --tracer-proof  # SHAPE 1c mutate->RED->pristine->GREEN
+#   bash scripts/pg-lane/run.sh --print-pgbin   # print the server-binaries dir this
+#                                               # lane would boot, and exit. Added
+#                                               # 2026-09-05 so ci.yml's `Provision
+#                                               # pg_cron` step asks the lane which
+#                                               # binaries it uses instead of keeping
+#                                               # a second, divergent opinion. Writes
+#                                               # the dir on STDOUT and its refusal on
+#                                               # STDERR; honours PGBIN exactly as a
+#                                               # real run does. It boots nothing.
+#   bash scripts/pg-lane/run.sh --help          # print this header block
 #
 # Semantics: boot a throwaway cluster under <scratch-dir>/pgd, apply the --apply
 # files in order, run the optional --post-apply file (the hook for the runner's
