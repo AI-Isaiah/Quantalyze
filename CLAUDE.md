@@ -131,6 +131,20 @@ files (`test_reconcile_dropped_enqueue_sweep.sql`,
 `lane-blocked`. That is success criterion 3's tripwire doing its job, not a
 regression; it clears when plan 05 lands. A run showing any OTHER defect kind IS
 a regression.
+✅ **CURRENCY 2026-09-05: THAT INTERVAL IS OVER — plan 05 landed and the full
+corpus EXITS 0.** The paragraph above stays as the dated record of plans 01-04.
+Measured at `b6b830cf`: `coverage: files 44/71`, `lane-blocked: 0 file(s)`,
+`lane-probe: pg_cron AVAILABLE`, `  pending: 0`, `arms: 363/363/0`,
+`biting: 363`, `lane-invocations: 363`, tallies agree, `✅ No defects`.
+`FILES_FLOOR` is pinned at 44 and `ARMS_FLOOR` at 363 (not the 365 the plan
+projected — 324 + 39, read off the run). The last file was
+`test_reconcile_dropped_enqueue_sweep.sql`, 39 sections, all 39 biting on the
+first proof run. The class was emptied BY ANNOTATION: `parse.mjs`, the probe
+fixture and the probe/defect code in `run.mjs` are untouched and SELF-TEST 17/17
+still passes, so the tripwire stays live for any future unannotated pg_cron gate.
+⚠️ The runner still PRINTS `lane-probe: pg_cron AVAILABLE — lane-blocked class is
+STALE` while the class is empty; that sentence is now false-reading and plan 06
+corrects it at the source. From here, a run that exits NON-ZERO is a regression.
 `WAIVED_CEILING` is still 0, now through TWO founder decisions that both took
 the root-cause fix over an exception: plan 08's trust-signal anon-EXECUTE
 assertion was resolved by a REORDER putting the precondition ahead of its
