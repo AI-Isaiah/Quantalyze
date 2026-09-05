@@ -6,10 +6,10 @@ current_phase: 164.1
 current_phase_name: PROD-OBSERVABILITY
 status: in_progress
 stopped_at: Phase 164.1 planning RESUMED — credentials landed (ANALYTICS_SERVICE_KEY, RAILWAY_API_TOKEN; the third secret RAILWAY_SSH_PRIVATE_KEY was RETIRED by measurement). Pattern-mapper next, then planner.
-last_updated: "2026-09-05T20:42:25.621Z"
+last_updated: "2026-09-05T20:52:22.426Z"
 last_activity: 2026-09-05
 last_activity_desc: 164.3.1/164.4/164.4.1 records restored and closed; 164.1 discuss+research+validation landed; planning blocked on founder secrets
-state_head: 2f9065ed7af7c720e0ae8e31a566b60f05201b32
+state_head: d5225c308377f9577bf7a11f9588905803013f20
 progress:
   total_phases: 18
   completed_phases: 8
@@ -848,6 +848,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.5 edited: added item (7) CRON-DRIFT-01-REPAIR + criterion 7; title 'the one'->'the two production objects'; requirements +CRON-DRIFT-01 (repair half); depends_on +164.1
 - Phase 164.2 edited: added in-scope item 5 (public uncomputed-factsheet placeholder speaks to a developer on the anonymous prod path) + success criterion 9; found 2026-09-05 while re-measuring Phase 159 item 2 in a live browser
 - Phase 164.6 edited: requirements +VAC08-COUNT-SPM01 (test-ledger-drift-check.sh:372-373 false-clean; booked 2026-09-05)
+- Phase 164.6 edited: requirements +MT5-VERDICT-SINK-01 (MT5 capability verdict has no durable sink; routed here not 164.1 because 164.1's ledger and ARMS_FLOOR are already pinned)
 
 ### Decisions
 
