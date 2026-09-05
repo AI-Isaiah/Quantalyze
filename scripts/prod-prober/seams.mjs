@@ -231,8 +231,11 @@ export function realSqlRunner(env) {
  *        INJECTABLE. `--self-test` passes a fixture-backed implementation; the
  *        CLI never does.
  * @param {((query: string, opts?: object) => object)|null} [opts.sqlRunner]
- *        wired by plan 03 — the CLI passes `realSqlRunner(process.env)`, the
- *        self-test passes a fixture-backed renderer.
+ *        wired by plan 03 — the CLI builds it from the real environment (see
+ *        `liveSeams` in run.mjs), the self-test passes a fixture-backed
+ *        renderer. Spelled without the literal accessor on purpose: this file
+ *        must stay at ZERO hits for it, and a downstream grep cannot tell a
+ *        docblock from a read.
  * @param {((argv: string[], opts: object) => Promise<object>)|null} [opts.sshRunner] wired by plan 04
  * @param {() => Date} [opts.clock] INJECTABLE clock (plan 03's cron arm needs a stable "now")
  */
