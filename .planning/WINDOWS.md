@@ -1,9 +1,9 @@
 ---
 schema_version: 1
-open_count: 26
+open_count: 29
 waived_count: 0
 fixed_count: 2
-total_count: 28
+total_count: 31
 last_updated: 2026-08-29T09:24:22.877Z
 ---
 
@@ -43,6 +43,9 @@ last_updated: 2026-08-29T09:24:22.877Z
 | 26 | 164.3 | unrun-verify | scripts/test-ledger-drift-check.sh |  | VAC-08's first real-TEST execution pends the next CI run of this branch; the name-joined schema_migrations query and pg_get_functiondef read are stub-proven only (this plan may not write to the shared TEST database) | open |  | 2026-08-29T02:11:06.140Z |  |
 | 27 | 164.3 | unmet-truth | scripts/mutation-runner/run.mjs | 123 | ARMS_FLOOR ships at 0 and therefore cannot fire; plan 164.3-08 must pin it from the first full-corpus measurement | fixed |  | 2026-08-29T02:54:49.352Z | 2026-08-29T08:58:19.520Z |
 | 28 | 164.3 | unrun-verify | .github/workflows/ci.yml |  | sql-mutation's first ubuntu execution pends the first CI run of this branch: RESEARCH assumption A1 (PostgreSQL 16 server binaries under /usr/lib/postgresql/<major>/bin) has never been measured — the lane, the runner and the job were all built on macOS, where the probe reports no such glob. A red first run names a real portability defect. | open |  | 2026-08-29T09:24:22.877Z |  |
+| 29 | 164.3 | unmet-truth | supabase/schema/baseline.sql |  | supabase/schema/baseline.sql is committed with NO staleness gate AND NO consumer. sql-function-snapshot.yml gates supabase/schema/functions/; nothing gates this file, so production can drift from it silently. CORRECTED 2026-08-29 (WR-04/G1): this entry previously said 'the lane would keep loading stale bytes as if current', which described a wiring that does not exist — scripts/local-stack/run.sh:50 reads the gitignored scripts/local-stack/baseline.sql, so `run.sh up` exits 1 FATAL and reads nothing. Phase 164.5 owns all three together: repoint run.sh, drop .gitignore:138, and build the --check gate (including a sha256 assertion against BASELINE.md's recorded hash). Mind the 2.84.2-vs-2.98.2 pg_dump formatting skew when doing so. | open |  | 2026-08-29T11:35:00.000Z |  |
+| 30 | 164.3.1 | unmet-truth | src/__tests__/self-referential-oracle.test.ts |  | The Primitive-D self-referential-oracle AST gate ships REPORT-ONLY in plan 164.3.1-02 and blocks NOTHING until plan 164.3.1-08 flips it. Until that flip lands, a new self-referential assertion can enter the tree and the gate will print a finding without failing the suite. SC-5's calibration half is met (the rule was observed flagging src/__tests__/lint-sql-gates.test.ts:183-184 at HEAD before the site was fixed); the enforcing half is 08's. | open |  | 2026-09-01T18:30:00.000Z |  |
+| 31 | 164.3.1 | unmet-truth | src/__tests__/self-referential-oracle.test.ts |  | MEASURED at HEAD by plan 164.3.1-02: the rule reports 23 findings across 14 files of 128 scanned, and 19 of those are one shared false-positive mechanism - the accumulator idiom (const offenders: string[] = [] -> loop pushes -> expect(offenders).toEqual([])), which CAN fail and is not a primitive-D instance. 2 are the real target and 2 are type-level contracts in types-design-tests.test.ts that genuinely cannot fail at runtime. The rule was deliberately NOT narrowed after the count was seen - tuning a detector to produce a comfortable number is itself the self-referential move this phase exists to stop. Plan 164.3.1-08 must decide explicitly: teach mutation-awareness and re-measure and re-run the fire proof, OR allowlist the 19 by their shared mechanism with the measurement recorded. Detail in 164.3.1-02-CALIBRATION.md section III.a. | open |  | 2026-09-01T18:30:00.000Z |  |
 
 ````json
 [
