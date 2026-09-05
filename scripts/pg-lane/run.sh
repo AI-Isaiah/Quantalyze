@@ -126,8 +126,16 @@ alloc_port() {
 # Defect fix 3 (D-04): the harness had NO pg_ctl stop, NO trap and NO rm — it
 # never stopped what it started. Measured consequence 2026-08-28: 27 orphaned
 # Postgres volumes (904 MB) and a container up 10 days, contributing to a
-# disk-exhaustion incident. CREATED is set only AFTER this run makes its own
-# data dir, so cleanup can never remove a cluster this run did not create.
+# disk-exhaustion incident. CREATED is set only after this run makes its own
+# data dir.
+# ⛔ CORRECTED 2026-09-05 (Phase 164.4.1 security audit, F-164.4.1-A). This block
+# used to claim "cleanup can never remove a cluster this run did not create".
+# That was FALSE and was MEASURED false: `mkdir -p "$PGD"` succeeds silently on an
+# EXISTING directory, so CREATED was set for a tree this run had not made; initdb
+# then refused ("exists but is not empty"), `set -e` fired, and the EXIT trap
+# deleted the pre-existing tree. A seeded sentinel under pgd/data was destroyed.
+# The refusal below is what now makes the sentence true, so the guard performs the
+# property the comment claims rather than the comment over-claiming the guard.
 # ---------------------------------------------------------------------------
 PGD=""
 CREATED=""
@@ -338,6 +346,14 @@ run_lane() {
     fi
   fi
 
+  # ⛔ REFUSE a pre-existing pgd/ rather than adopting it (F-164.4.1-A). `mkdir -p`
+  #    is silent on an existing dir, and CREATED=1 then licenses the EXIT trap to
+  #    `rm -rf` a tree this run did not create. Every shipped caller passes a fresh
+  #    mktemp slot (run.mjs `nextSlot()` -> slot-N/lane), so this refuses only the
+  #    case that would destroy data. It also closes F-164.4.1-B: a repo-relative
+  #    --workdir reused twice now fails loudly instead of leaving a cluster in the
+  #    checkout for secret-scan and planning-hygiene to walk.
+  [ ! -e "$PGD" ] || fail "--workdir already contains $PGD, and this lane would DELETE it on exit. Pass an empty workdir (every caller in this repo passes a fresh mktemp slot)."
   mkdir -p "$PGD"
   CREATED=1
   initdb -D "$PGD/data" -U postgres --auth=trust -E UTF8 >/dev/null
