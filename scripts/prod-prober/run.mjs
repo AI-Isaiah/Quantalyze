@@ -1859,7 +1859,7 @@ export async function selfTest() {
  * those ten rules. A reviewer may still withhold any row to sha-only afterwards
  * — see the withhold procedure at the top of `arms/cron-drift.mjs`.
  *
- * @returns {Promise<number>} process exit code
+ * @returns {Promise<number>} the CLI exit code (0 captured / 1 refused on hygiene / 3 refused on usage or an unidentified database)
  */
 export async function captureManifest({ seams, outPath, log = (s) => console.log(s) }) {
   if (!outPath) {
