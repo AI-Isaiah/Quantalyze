@@ -1510,6 +1510,46 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(r.out).not.toContain("two tallies agree");
   });
 
+  it("GREEN: the EMPTY deferred class — the state the repo is now permanently in — survives the real CI parser", () => {
+    // ⛔ THE GAP THIS CLOSES (plan 164.4.1-06). Every arm above drives the CI
+    // step over a NON-EMPTY `lane-blocked:` line, because that was the only
+    // state the corpus could produce while [REDUNDER-PGCRON] was open. Phase
+    // 164.4.1 emptied the class, so the line the gate now sees on EVERY real run
+    // — count 0, no `*.sql` token anywhere in the reason — was exercised by
+    // nothing. That is the shape ci.yml's own `|| true` comment predicted in
+    // advance ("an EMPTY deferred set … the state this phase's successor
+    // reaches"): under `set -euo pipefail` the `grep -o` matches nothing and
+    // exits 1, which without that guard would abort the step with NO
+    // `::error::` at all and leave the numeric comparison unreachable. A step
+    // that dies silently on the ONE state it will now always be handed is worse
+    // than one that fails loudly, and nothing was proving it does not.
+    //
+    // The line below is the runner's real empty-case output, copied from
+    // `node scripts/mutation-runner/run.mjs --parse-only` at this commit, so a
+    // future reword of the reason that reintroduces a filename (claimed 0,
+    // named 1) fails here.
+    const emptyClass = GREEN_LOG.replace(
+      /^lane-blocked: .*$/m,
+      "lane-blocked: 0 file(s) probe pg_extension for pg_cron and are not yet annotated — " +
+        "(none; the lane hosts pg_cron since Phase 164.4.1, TODOS [REDUNDER-PGCRON] retired 2026-09-05)",
+    );
+    // Non-vacuity of the fixture, both directions: the substitution really
+    // happened, and the reason really carries no filename for the cross-check
+    // to count against a claimed 0.
+    expect(emptyClass, "the substitution must actually change the log").not.toBe(GREEN_LOG);
+    expect(emptyClass).toMatch(/^lane-blocked: 0 file\(s\) /m);
+    const reason = emptyClass.split("\n").find((l) => l.startsWith("lane-blocked: "))!;
+    expect(reason.match(/[A-Za-z0-9_]+\.sql/), "the empty reason must name no gate file").toBeNull();
+
+    const r = runCountRecheck(emptyClass);
+    expect(r.status, r.out).toBe(0);
+    // It did not merely avoid dying — it reached the END of the step. The
+    // agreement line is printed after every parse, so its presence is what
+    // distinguishes "ran through" from "exited quietly at the `grep -o`".
+    expect(r.out).toContain("two tallies agree");
+    expect(r.out).not.toContain("MEASURE_FAIL");
+  });
+
   // ── 164.4-03, threat T-164.4-11: the reason must have been MEASURED ─────
   // The lane-blocked class is derived from the corpus; its printed reason is a
   // claim about the LANE. A run that stopped probing would keep printing four
