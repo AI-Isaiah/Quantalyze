@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4.1
 current_phase_name: PGCRON-LANE
 status: executing
-stopped_at: Completed 164.4.1-04-PLAN.md
-last_updated: "2026-09-05T08:42:27.059Z"
+stopped_at: Completed 164.4.1-05-PLAN.md — tripwire CLEARED, corpus exit 0
+last_updated: "2026-09-05T09:59:03.718Z"
 last_activity: 2026-09-04
 last_activity_desc: Phase 164.4.1 execution started
-state_head: 232c608b011e1ee852dc668fb30ded02276f3242
+state_head: 258937357bfc58ab630e2269286bd9a66ea18052
 progress:
   total_phases: 16
   completed_phases: 4
   total_plans: 76
-  completed_plans: 69
+  completed_plans: 70
   percent: 25
 ---
 
@@ -167,7 +167,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 ## Current Position
 
 Phase: 164.4.1 (PGCRON-LANE) — EXECUTING
-Plan: 3 of 6
+Plan: 5 of 6
       class + lane probe + SCOPE AMENDMENT #2, 04-11 the eight annotation batches) —
       hand-maintained; `state.advance-plan` still REFUSES on this section
       (`ambiguous_position_phase`, see § Known Issues)
@@ -177,6 +177,17 @@ Plan: 3 of 6
       `FILES_FLOOR` 41, `ARMS_FLOOR` 272, `WAIVED_CEILING` still 0.
       ⛔ Every `run.mjs` run in this interval EXITS 1 on ONE `lane-blocked-stale`
       row — the tripwire, not a regression. It clears when plan 05 lands.
+      ✅ 2026-09-05, SUPERSEDING the two lines above (kept as the dated record of
+      the 01-04 interval): plans 03, 04 and 05 are DONE and **the tripwire is
+      CLEARED**. Measured at 164.4.1-05 (HEAD b6b830cf), `node
+      scripts/mutation-runner/run.mjs` exiting **0**: `coverage: files 44/71`,
+      `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, `  pending: 0`,
+      `arms: 363/363/0`, `biting: 363`, `lane-invocations: 363` (tallies agree),
+      `mean 1.1s`, `✅ No defects`. `FILES_FLOOR` 44, `ARMS_FLOOR` 363,
+      `WAIVED_CEILING` still 0 — fifteen arms moves, zero waivers. From here a
+      NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
+      `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
+      prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
 Status: Executing Phase 164.4.1
       `arms: 262/262/0`, `biting: 262`, 0 waivers, exit 0. Next: land 164.4-11 as its own PR with
       `sql-mutation` GREEN on ubuntu SHA-bound to the head, then `/gsd-verify-work 164.4`.
@@ -799,6 +810,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4.1 P02 | 68 min | 3 tasks | 7 files |
 | Phase 164.4.1 P03 | 92 min | 3 tasks | 4 files |
 | Phase 164.4.1 P04 | 118 min | 3 tasks | 7 files |
+| Phase 164.4.1 P05 | 175 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -1029,6 +1041,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4.1]: 164.4.1-02: a gate assertion's genuine falsifier may be REJECTED when it kills an earlier assertion first as a raw driver error (derive assertion 5 narrows the coherence arm instead of deleting it); and a LAYERED twin can be forced by defence-in-depth, where removing either half alone is a measured no-red (derive assertion 2)
 - [Phase 164.4.1]: 164.4.1-04: section 3 of the reaper gate RECLASSIFIED (identity removed), not waived — second use of the fcbc0159 precedent; WAIVED_CEILING stays 0 across 11 arms moves
 - [Phase 164.4.1]: 164.4.1-04: FILES_FLOOR 43 / ARMS_FLOOR 324, measured and separated both ways; new stand-in fixture 29-fixture-compute-jobs-priority.sql because migration 20260428120836 cannot coexist with 20260515114555 on one lane (42725)
+- [Phase 164.4.1]: 164.4.1-05: ARMS_FLOOR is 363, not the plan's projected 365 (324+39). Floors are set to what the run PRINTS.
+- [Phase 164.4.1]: 164.4.1-05: the lane-blocked-stale tripwire is CLEARED BY ANNOTATION — parse.mjs, the probe fixture and the probe/defect code are untouched (0 non-comment changed lines matching lane-blocked-stale|pg_available_extensions) and SELF-TEST 17/17 still fires.
+- [Phase 164.4.1]: 164.4.1-05: FIVE arms use GATE-FILE falsifiers (3 oracle preconditions, 1 seed-integrity control, 1 sum-of-pinned-counts invariant), each with its domination measurement at the site. A gate-file falsifier is NOT a waiver — the arm still raises, names itself first and counts in biting. WAIVED_CEILING unedited at 0.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1731,8 +1746,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-05T08:42:26.769Z
-**Stopped At:** Completed 164.4.1-04-PLAN.md
+**Last Date:** 2026-09-05T09:59:03.413Z
+**Stopped At:** Completed 164.4.1-05-PLAN.md — tripwire CLEARED, corpus exit 0
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
