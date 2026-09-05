@@ -5205,6 +5205,27 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   the next session doesn't re-derive this. Never widen the gate in the same commit as a
   behavior change.
 
+- [ ] **`[MYPY-MAINPY-01]` the `mypy --strict` gate's own comment claims running-service
+  coverage it does not have — `main.py` is outside it (logged 2026-09-06, Phase 164.1-02).**
+  `ci.yml:3209-3216` states the strict floor "now covers ALL running-service code —
+  `services/` (part g), `routers/` (part h), and `models/` (part i)". `analytics-service/main.py`
+  is 930 lines and IS the running service (`uvicorn main:app`); nothing under those three
+  packages imports it, so `--follow-imports=silent` never reaches it. MEASURED both sides of
+  Phase 164.1-02 (identical five errors, one line shifted by that plan's +34 lines):
+  `:255` `lifespan(_app: FastAPI)` no return type; `:309` `_crash_handler` missing `Task[None]`;
+  `:741` ×2 `verify_service_key(request, call_next)` no return type and no param types;
+  `:891` `health()` no return type. ⚠️ Two of the five are on the service-key middleware
+  Phase 164.1 hardened for PYAPI-06 and one on the `/health` endpoint 164.1's prober arm polls.
+  ⭐ The FALSE COMMENT is the defect, not the five annotations: a gate asserting complete
+  coverage while blind to the service's entry module is the same class as the gate-integrity
+  items 164.6 already owns. **OWNER 2026-09-06: Phase 164.6 GATE-HYGIENE item (9)**, success
+  criterion 6, which requires the widened gate be PROVEN able to fail (remove one annotation,
+  observe RED, restore byte-identically) — widening it without that proof is the defect
+  Phase 164.3 exists to remove. ⛔ The `analytics-service/tests/` question directly above, and
+  its duplicate at `:3263`, are DELIBERATELY NOT carried with it: 5,439 errors across 182 files
+  is a milestone-sized policy decision, and merging it into a hygiene item would hide it.
+  Source: `.planning/phases/164.1-prod-observability-…/deferred-items.md`.
+
 ## Phase 146.2 — recorded deferrals (logged 2026-08-19)
 
 *The founder rule: an item ABSORBED into a phase is deleted from this file, but an item the

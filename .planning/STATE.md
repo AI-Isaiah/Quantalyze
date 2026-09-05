@@ -6,10 +6,10 @@ current_phase: 164.1
 current_phase_name: PROD-OBSERVABILITY
 status: in_progress
 stopped_at: Completed 164.1-03-PLAN.md
-last_updated: "2026-09-05T22:56:53.193Z"
+last_updated: "2026-09-05T23:00:03.899Z"
 last_activity: 2026-09-05
 last_activity_desc: 164.3.1/164.4/164.4.1 records restored and closed; 164.1 discuss+research+validation landed; planning blocked on founder secrets
-state_head: 2187879426ab29838cfd5b0d1dce8b3c314b3eb8
+state_head: ebf6869390e31bfbfb9d66c7c87bec820f5932dc
 progress:
   total_phases: 19
   completed_phases: 8
@@ -854,6 +854,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.6 edited: requirements +MT5-VERDICT-SINK-01 (MT5 capability verdict has no durable sink; routed here not 164.1 because 164.1's ledger and ARMS_FLOOR are already pinned)
 - Phase 164.7 inserted after Phase 164: APPSETTINGS — app.* GUCs are unsettable on Supabase (ALTER DATABASE and ALTER ROLE both 42501, measured on PROD 2026-09-05); 12 read sites across 4 settings; blocks 161.1 activation. Founder rejected the in-cron-command workaround in favour of the proper fix. MUST precede 164.5. (URGENT)
 - Phase 164.7 edited: carried in VAC04-ARMS-OBSERVE (observation half of [VAC04-ARMS-UNRUN]) — goal paragraph, success criterion 7, requirements line; [VAC-04-ROLE] deliberately excluded
+- Phase 164.6 edited: carried in MYPY-MAINPY-01 from 164.1-02 deferred-items — goal item (9), success criterion 6, requirements entry; analytics-service/tests/ policy question deliberately excluded
 
 ### Decisions
 
