@@ -1302,12 +1302,27 @@ true for 146 and half of 142–145, and **false for 141**.
         and the ubuntu run below); the 1.0 → 1.1 step tracks the 101 arms added after plan 01, not
         the preload, which is why the like-for-like A/B is the number that carries the decision.
       * **WHAT IT BOUGHT.** All FIVE files are annotated — the four `lane-blocked:` ones plus
-        `test_compute_jobs_error_kind_copy_parity.sql`, the apply-list-blind fifth — for **103
-        sections** in total (this item owed 100 across the four; the fifth carried 3).
-        Per plan: 02 took the copy-parity file (3) and `test_derive_allocator_keys_fanout.sql` (7),
-        03 took `test_retention_orphaned_running.sql` (`905b2aa6`, 25 sections), 04
-        `test_strategy_analytics_stuck_computing_reaper.sql` (`95197d28`, 28 sections), 05
-        `test_reconcile_dropped_enqueue_sweep.sql` (39, the largest file in the phase).
+        `test_compute_jobs_error_kind_copy_parity.sql`, the apply-list-blind fifth. ⚠️ Every figure
+        below is re-derived from **the RUN, not from the commits that wrote it**: the per-file
+        `sections` lines printed by `node scripts/mutation-runner/run.mjs --parse-only` at
+        `6f9c5172`. An earlier draft of this paragraph quoted as-annotated commit numbers and did
+        not reconcile — it claimed 103 total over a breakdown summing to 102 while the runner
+        printed 101.
+        Per plan, as the runner prints them today: 02 took the copy-parity file (**3**) and
+        `test_derive_allocator_keys_fanout.sql` (**7**); 03 `test_retention_orphaned_running.sql`
+        (**24**); 04 `test_strategy_analytics_stuck_computing_reaper.sql` (`95197d28`, **28**); 05
+        `test_reconcile_dropped_enqueue_sweep.sql` (**39**, the largest file in the phase).
+        3 + 7 + 24 + 28 + 39 = **101 sections**, which is exactly the `ARMS_FLOOR` delta this phase
+        ratcheted (262 -> 363) — an independent second reading of the same number.
+        ⚠️ **Why 24 and not 25 for the retention gate.** `905b2aa6` annotated **25** sections there
+        (24 biting + 1 MEASURED waiver); `fcbc0159` then reclassified `3/JOB-05` — the
+        unfalsifiable dominated guard — out of section-hood rather than raising `WAIVED_CEILING`,
+        and the runner has printed `sections 24` for that file ever since. 25 is the as-annotated
+        count at one commit; 24 is the count after the reclassification and the only one a reader
+        can reproduce. That is also why this item's own **"100 sections are owed"** line above does
+        not foot to the delivery: 100 was the 2026-09-04 estimate made BEFORE those four files were
+        annotated, and the four measure **98** (7 + 24 + 28 + 39). The estimate stays as the dated
+        record; 98 + 3 = 101 is what shipped.
         ⚠️ That 03/04 order is load-bearing, not bookkeeping: the two reclassification precedents
         for an unfalsifiable dominated guard are `3/JOB-05` in the RETENTION gate (plan 03,
         `fcbc0159`) and Part 3 in the REAPER gate (plan 04, `95197d28`/`ca4ad558`), and a reader
@@ -3041,6 +3056,56 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   — by design, since a first version of SP-H01 matched `SELF-TEST PASSED (5/5)` inside the very
   comment explaining its own fix. A stale number in those two comments is a docs drift, not a
   self-consistent lie about the arm count, which is what this item was raised for.
+
+- **`[PGLANE-SELFTEST-NUMERATOR-UNPINNED]` The new self-test caption pin constrains the arm COUNT
+  and the DENOMINATOR, never the NUMERATORS (raised 2026-09-05, review of the 164.4.1 fix pass,
+  IN-A).** `src/__tests__/drift-check-scripts.test.ts:3289-3300` — the pin
+  `[PGLANE-SELFTEST-COUNT-UNPINNED]` above asked for and got — does two things: it counts the
+  `=== SELF-TEST n/N:` captions and requires that count to equal the verdict's `N`, and it requires
+  each caption to match `=== SELF-TEST [0-9]+/N`. The numerator is `[0-9]+`. Nothing requires the
+  numerators to be 1..N, to be distinct, or to be in order.
+  ⚠️ MEASURED at `6f9c5172` + this fix pass, by renumbering `scripts/pg-lane/run.sh:703` from
+  `=== SELF-TEST 6/6:` to `=== SELF-TEST 7/6:` and running the whole file: **342/342 passed**, both
+  new assertions included (`7/6` still matches `[0-9]+/6`, and there are still 6 captions).
+  Restored from a byte backup and confirmed by `shasum` equality — deliberately not by a VCS
+  restore, which would have taken the pass's uncommitted edits with it.
+  So the surviving hole is duplicated or skipped numerators: captions reading `1,2,3,3,5,6` or
+  `1,2,3,4,5,7` beside `PASSED (6/6)` print a self-consistent-looking sequence that no arm reads.
+  That is smaller than the class the parent item was raised for — the COUNT is now pinned, so an
+  arm cannot be added or dropped silently — but it is the same shape.
+  **Fix** = extend the same loop to collect the numerators and assert they are exactly the set
+  `1..N`. No new mechanism, no new fixture.
+  ⛔ NOT fixed in this pass ON PURPOSE: the brief that raised it books it explicitly and forbids
+  introducing enforcement, and a pin added in the same pass that measures it would be a pin nobody
+  has yet seen fail on real drift.
+
+- **`[PGCRON-INSTALL-GUARD-STRINGCMP]` The macOS pg_cron installer's agreement guard compares path
+  SPELLINGS, so a symlinked `pg_ctl` false-refuses (raised 2026-09-05, review of the 164.4.1 fix
+  pass, IN-C; PRE-EXISTING and untouched by that pass).**
+  `scripts/pg-lane/install-pg-cron-macos.sh:107` is `if [ "$path_bin" != "$PGBIN" ]`, where
+  `path_bin` is `dirname "$(command -v pg_ctl)"`. Homebrew's `brew link` puts `pg_ctl` and
+  `pg_config` in a shared bin dir as SYMLINKS into the keg, so the two spellings differ while
+  naming the same binary — and the guard refuses.
+  ⚠️ MEASURED at `6f9c5172` + this fix pass, with PGBIN unset and a scratch dir first on PATH whose
+  `pg_ctl` and `pg_config` are symlinks into `/opt/homebrew/opt/postgresql@16/bin`:
+
+  ```
+  PATH pg_ctl        : <scratch>/linkbin/pg_ctl
+  resolves to        : /opt/homebrew/Cellar/postgresql@16/16.13/bin/pg_ctl
+  keg pg_ctl resolves: /opt/homebrew/Cellar/postgresql@16/16.13/bin/pg_ctl
+  ERROR: the lane and this script would resolve DIFFERENT PostgreSQL binaries:   (exit 1)
+  ```
+
+  Same real binary on both sides, refused anyway. The blast radius is bounded — the refusal is
+  LOUD, its remediation text is correct, and `export PGBIN=<keg>` clears it in one command — so
+  this costs an operator one confusing message, never a wrong install. It is a false NEGATIVE, not
+  a silent degrade, which is why it is booked rather than blocking.
+  **Fix** = compare the resolved binaries rather than the directory strings: `readlink -f` (or
+  `realpath`) both `pg_ctl` paths and refuse only when THOSE differ; keep printing the two original
+  spellings in the message so a genuine mismatch stays legible. ⚠️ macOS `readlink` gained `-f`
+  only in Ventura — check before relying on it, or resolve with `cd "$d" && pwd -P`.
+  ⛔ Booked, not fixed: the fix-pass brief that raised it scoped it to booking, and loosening a
+  safety guard is not a change to make beside four unrelated documentation fixes.
 
 - **`[PGLANE-SELFTEST-NOT-IN-CI]` No CI step runs the pg-lane's OWN self-test — its six arms are
   proven only on the authoring box (raised 2026-09-04, Phase 164.4.1 plan 01 Task 3).**
