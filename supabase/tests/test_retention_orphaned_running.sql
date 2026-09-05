@@ -176,6 +176,97 @@
 --
 -- Run order: AFTER migration 20260817120000 is applied to the project. Before
 -- that, Part 1 REDs by design.
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4.1, PGCRON-LANE). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+--
+-- ⛔ ORACLE SCOPE ON THE LANE -- read this before reading any twin below.
+-- Parts 2 and 3 read the deployed body out of cron.job.command and EXECUTE it.
+-- On the TEST project that body was written by a DEPLOYMENT, so those arms
+-- detect DRIFT between this repo and that project. ON THE PG-LANE the body is
+-- written by the apply list on the line below, so they CANNOT detect drift
+-- there and no green run of this file's twins may be read as evidence that
+-- there is none. What the lane proves is FALSIFIABILITY: that every assertion
+-- has a production change under which it fires FIRST and names itself. Repo
+-- vs. TEST drift is judged by VAC-08 in the sql-tests job, and repo vs. PROD by
+-- VAC-04 in migration-drift-check; neither is this file's job.
+-- ⚠️ FOUR migrations (re)schedule retention_compute_jobs_orphaned_running --
+-- 20260719120000:95, 20260720120000:64, 20260817120000:602 and
+-- 20260826140000:220 -- and cron.schedule UPSERTS BY NAME, so the row's body is
+-- the LAST one applied. All four are in the list, in chronological order, so
+-- the lane's cron.job.command is 20260826140000's body, which is the body TEST
+-- holds. ⛔ CONSEQUENCE FOR EVERY BODY-TOKEN TWIN: the falsifier must edit
+-- 20260826140000. An edit to 20260817120000's cron body is OVERWRITTEN by the
+-- later cron.schedule and comes back `no-red` -- a wrong TARGET, never a reason
+-- for a waiver.
+--
+-- ⚠️ THE APPLY LIST BELOW IS MEASURED, ENTRY BY ENTRY, BY ONE-OUT ABLATION on
+-- real lanes (2026-09-05, `bash scripts/pg-lane/run.sh --workdir <scratch
+-- OUTSIDE the repo> --apply <this list> --gate <this file>`; baseline exit 0,
+-- all three Parts print their OK line). Seventeen of the twenty entries are
+-- REQUIRED and each one's first error was read off the lane:
+--   * 01/02/03-fixture -- the base schema chain (auth.users, profiles,
+--     api_keys, portfolios, and api_keys' PK/label/api_key_encrypted).
+--   * 20260513094906_enable_pg_cron -- FIRST among the cron migrations because
+--     three of them RAISE on an absent extension. Without it the apply aborts
+--     at 20260719120000:107 with `0A000: WORKER-04: pg_cron extension is NOT
+--     installed` (20260817120000:558-565 and 20260826140000:206-209 raise the
+--     same way, later).
+--   * 20260411144407 -- compute_jobs itself; without it 20260418194206:87 dies
+--     on `relation "compute_jobs" does not exist`.
+--   * 15-fixture-auth-role -- 20260420073003:720, `auth.role() does not exist`.
+--   * 21-fixture-api-keys-credential-columns -- 20260420073003:999, `column
+--     "dek_encrypted" of relation "api_keys" does not exist`.
+--   * 20-fixture-app-role-helper -- 20260420073003:711,
+--     `current_user_has_app_role(text[]) does not exist`.
+--   * 24-fixture-enqueue-compute-job-chain -- 20260420073003:315, `column
+--     "sync_error" of relation "api_keys" does not exist`.
+--   * 20260418194206 -- 20260420073003:253, `column "allocator_id" does not
+--     exist`.
+--   * 20260420073003 -- without it 20260614120000:92 dies on `column
+--     "api_key_id" does not exist`, and it is ALSO the migration that widens
+--     compute_jobs_target_xor to the 4-way form these api_key-scoped seeds
+--     need (its own self-verify (d) at :786-792 pins that).
+--   * 20260515114555 -- 20260516104201:976, mark_compute_job_done missing its
+--     NOT EXISTS set-back arm.
+--   * 20260516104201 -- 20260826140000:377, `42P13: cannot change return type
+--     of existing function` on get_user_compute_jobs.
+--   * 20260614120000 -- the derive_broker_dailies REGISTRY ROW. Without it the
+--     gate's own seed dies at :652 on `23503 compute_jobs_kind_fkey`.
+--   * 20260624120100 -- the api_key-scoped derive_broker_dailies coherence arm.
+--     Without it the same seed dies at :652 on `23514
+--     compute_jobs_kind_target_coherence`; the seeds are api_key-scoped because
+--     that is the shape of the 396 real arm-A rows measured on TEST.
+--   * 20260826120000 -- 20260826140000:622, `42883: computation_error_copy
+--     (unknown) does not exist`.
+--   * 20260826140000 -- without it the deployed body is 20260817120000's, which
+--     carries no canary, and Part 1 reds at :428 with `TEST FAILED (1/V-1)`.
+-- THREE entries are individually REMOVABLE and are here ON PURPOSE:
+-- 20260719120000, 20260720120000 and 20260817120000. Because cron.schedule
+-- upserts by name, dropping any one of them still leaves 20260826140000's body
+-- deployed, which is why one-out calls them removable. They stay because the
+-- CHAIN is what makes "the lane's oracle is the body TEST holds" a measured
+-- property rather than a coincidence -- and because 20260513094906's own
+-- necessity is measured against 20260719120000's raise, above.
+--
+-- ⚠️ THIS FILE'S PART-2/3 SKIP ARMS ARE UNREACHABLE BY CONSTRUCTION, which is
+-- worth stating rather than reporting "zero skips" as if it were evidence.
+-- Part 1's 1/JOB-05 arm RAISEs on the same absent-pg_cron condition and runs
+-- FIRST, so a lane without the extension never reaches the `SKIP Part 2` /
+-- `SKIP Part 3` branches. MEASURED 2026-09-05 with this list: the gate prints
+-- ZERO NOTICE lines whose message BEGINS with SKIP, and all three Parts print
+-- their OK line. ⚠️ Two coarser spellings of that count are WRONG here and both
+-- were measured: over the whole lane transcript `SKIP|skipping` matches 24
+-- (PostgreSQL's own `does not exist, skipping` DDL notices, which no gate
+-- controls -- plan 164.4.1-02 measured 15 of them on an already-green reference
+-- file), and the gate-prefixed form matches 1, because Part 1's own OK NOTICE
+-- contains the words SKIP LOCKED. Only the message-begins-with-SKIP form means
+-- anything, and it was calibrated against the exact line the Part 2 branch
+-- would print (it matches).
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260516104201_compute_jobs_audit_2026_05_07_residual.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260624120100_derive_broker_dailies_api_key_coherence.sql","supabase/migrations/20260719120000_retention_orphaned_running_compute_jobs.sql","supabase/migrations/20260720120000_retention_orphaned_running_window_4h.sql","supabase/migrations/20260817120000_retention_orphaned_running_terminalize.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql"]}
 
 -- ==========================================================================
 -- Part 1 -- STRUCTURAL, UNGATED, ZERO SIDE EFFECTS. This is the part that must
