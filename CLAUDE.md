@@ -203,12 +203,24 @@ Every paragraph above stays as dated lineage; this one is the current state.**
   proposed fix would have classified UNANNOTATED files by a line only ANNOTATED
   files carry, i.e. dead code behind a passing test, so the limit is documented
   and pinned by a hand-built calibration instead.
-* ⚠️ **NOT MEASURED, and owed:** no SHA-bound ubuntu run of the FINISHED tree
-  exists yet, so there is no ubuntu wall clock for the 44-file / 363-arm corpus
-  and `sql-mutation`'s `timeout-minutes` stays at **15**, unchanged — a raise
-  requires a measured run and 20 is the ceiling. The 445 s of run 33938272686
-  is the PRE-annotation tree at 262 arms and must not be read as a figure for
-  363. ⛔ From here, a run that exits NON-ZERO is a regression, not the tripwire.
+* ⭐ **MEASURED 2026-09-05 — the SHA-bound ubuntu run of the FINISHED tree
+  exists.** workflow_dispatch run **33961609382**, head sha
+  **1aa8bb7088e978320041b6a97d187b8247b8fe3d**, `sql-mutation` **success in
+  567 s (9.45 min)**. Ubuntu read IDENTICAL to the authoring box:
+  `coverage: files 44/71`, `arms: 363/363/0`, `biting: 363`,
+  `lane-invocations: 363`, `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`,
+  `✅ No defects`, `per-arm lane time: mean 1.1s`; pg_cron came from
+  noble/universe at **1.6.2-1**. LEGS: 363 arms + 44 baseline + 44 restore =
+  **451 legs**. `sql-mutation`'s `timeout-minutes` therefore **stays 15** by
+  applying the rule literally — 9.45 min does not reach the ~10 min trigger,
+  and when it is crossed the raise is to 20 ONCE (`ci.yml:933-953` carries this
+  derivation). The 445 s of run 33938272686 is the PRE-annotation tree at 262
+  arms and must not be read as a figure for this corpus.
+  ⚠️ Every arm/file count in this bullet is that run's DATED reading at
+  `1aa8bb70`, not a live constant: read `FILES_FLOOR` and `ARMS_FLOOR` off
+  `scripts/mutation-runner/run.mjs` itself, since an arm reclassified after
+  this date moves the floor without moving this paragraph.
+  ⛔ From here, a run that exits NON-ZERO is a regression, not the tripwire.
 Read the run's own `coverage:` and `arms:` lines rather than any number
 restated in prose.
 VAC-04 and VAC-08 have still not run against their real credential; see entries
