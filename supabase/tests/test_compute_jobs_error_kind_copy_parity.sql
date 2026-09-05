@@ -40,6 +40,44 @@
 -- `psql -v ON_ERROR_STOP=1`. Run order: AFTER migrations 20260826120000 and
 -- 20260826140000. Zero side effects — no seeding, no writes, safe on a shared
 -- test project.
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4.1, PGCRON-LANE). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+--
+-- ⚠️ THIS FILE WAS THE CORPUS'S LAST `pending:` FILE, and it was blocked only
+-- through its APPLY LIST — never through its own text, which names pg_cron
+-- nowhere. Migration 20260826140000 is the ONLY migration that widens
+-- compute_jobs_error_kind_check to admit 'orphaned' (Parts 1 and 3 both depend
+-- on that), and it hard-RAISEs `0A000 / feature_not_supported` at :206-209 when
+-- `pg_extension` has no pg_cron — so the whole apply aborted before this gate
+-- could run at all. That is why 20260513094906_enable_pg_cron.sql is listed
+-- AHEAD of both 20260817120000 and 20260826140000: both RAISE on that same
+-- condition, 20260817120000 first. MEASURED 2026-09-05 on the lane: with the
+-- enabling migration in place neither RAISE fires and the baseline exits 0.
+-- ⚠️ The other non-obvious entries, each with its MEASURED reason:
+--   * 20260516104201 — without it 20260826140000:377 aborts with
+--     `42P13 cannot change return type of existing function` on
+--     get_user_compute_jobs. It is the migration that last re-based that
+--     function's OUT columns, and 20260826140000 re-bases it again.
+--   * 20260529180000 — 20260826140000's self-verify arm (c) calls
+--     mark_compute_job_failed and asserts it still REFUSES 'orphaned'.
+--   * 20260826120000 — defines computation_error_copy, which all three Parts
+--     call; 20260826140000's arm (e) reads it too and names the ordering.
+--   * 27-fixture-strategy-analytics-computation-error.sql — the stand-in for
+--     strategy_analytics.computation_error that the 20260825150000 /
+--     20260826120000 bridge re-base writes.
+-- This file has NO conditional skip of its own, so there is no skip line to
+-- silence: the count of skip lines carrying its own `psql:supabase/tests/…`
+-- prefix is 0. (The 10 `does not exist, skipping` NOTICEs in the lane's
+-- transcript are PostgreSQL's own DDL chatter from the apply phase.)
+--
+-- ⚠️ THREE sections, one per Part: `1/A-3`, `2/A-3`, `3/F-3`. Several raises
+-- inside a Part all carry that Part's identity, so a Part is ONE arm with
+-- several identities — the arm-unit rule, not an under-count.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260516104201_compute_jobs_audit_2026_05_07_residual.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260529180000_fix_mark_compute_job_failed_error_kind_column.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260817120000_retention_orphaned_running_terminalize.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql"]}
 
 -- ==========================================================================
 -- Part 1 — CHECK ⊆ CASE. Every admitted kind has its own modelled sentence.
