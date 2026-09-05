@@ -140,7 +140,10 @@ async def test_an_absent_service_key_header_logs_nothing_at_all(
         resp = await client.post(_GUARDED_PATH, json={})  # no header at all
 
     assert resp.status_code == 401
-    assert resp.json() == {"detail": "Unauthorized"}
+    # 164.1-02 / PYAPI-06 (D-10): the absent case now carries its own machine
+    # code. ⛔ The ZERO-EVENT assertion below is what this file exists for and
+    # is UNCHANGED — naming the fault on the wire must not start logging it.
+    assert resp.json()["detail"]["code"] == "SERVICE_KEY_ABSENT"
 
     events = _service_key_events(auth_events)
     assert events == [], (

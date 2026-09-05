@@ -636,6 +636,23 @@ function deriveEmitterSites(
  * mechanism was never wrong; its REACH was. The boundary is now the one the
  * phase locked: every code that can reach a user-facing surface.
  *
+ * ── ⭐ 37 → 38 (2026-09-06, Phase 164.1-02 / PYAPI-06) ─────────────────────
+ *
+ * `SERVICE_KEY_ABSENT` arrived. `verify_service_key` used to answer an ABSENT
+ * `X-Service-Key` with the same opaque `{"detail": "Unauthorized"}` a WRONG key
+ * gets, so no instrument could separate "our client sent nothing" from "our
+ * client sent the wrong key" — two faults with OPPOSITE remedies. It is a
+ * SHAPE 2 arrival — a `service_error_response` call whose positional slot 1
+ * carries the code — so it is the 38th distinct code and the 43rd call site,
+ * and it is dispositioned as an EXEMPTION rather than a verdict row: see
+ * `VENUE_WIRE_CODES_WITHOUT_VERDICT` in `wizardErrors.ts` for why a verdict
+ * would be false-by-construction.
+ *
+ * ⭐ This roster is HAND-TYPED for exactly this moment. The arrival reddened
+ * the member-for-member assertion below BEFORE this line was added — observed,
+ * not assumed — which is what makes the green that follows a design and not an
+ * accident. `DERIVED_FLOOR` is unchanged: 0.6 × 38 = 22.8, still floored to 22.
+ *
  * MEASURED at 153.7-01 under the predicate above: 37 distinct codes, from 30
  * assignment sites and 42 call sites. ⭐ The root move contributed ZERO new
  * codes — both `error_code =` assignments outside `services/` are literal-less
@@ -678,6 +695,7 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   "RATE_LIMITED",
   "ROLE_CHECK_UNAVAILABLE",
   "SCORING_FAILED",
+  "SERVICE_KEY_ABSENT",
   "SERVICE_KEY_UNCONFIGURED",
   "SIMULATION_FAILED",
   "TRADE_SCOPE",
