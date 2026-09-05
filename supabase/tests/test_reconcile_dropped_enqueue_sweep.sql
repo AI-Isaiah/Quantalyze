@@ -245,8 +245,8 @@
 -- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
 -- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
 --
--- ⚠️ THE APPLY LIST BELOW IS SIZED BY THE THREE `SKIP Part` NOTICES AT :659,
--- :1064 AND :1154, NOT BY THIS HEADER. Parts 2, 3 and 4 each `RAISE NOTICE
+-- ⚠️ THE APPLY LIST BELOW IS SIZED BY THE THREE `SKIP Part` NOTICES AT :763,
+-- :1335 AND :1450, NOT BY THIS HEADER. Parts 2, 3 and 4 each `RAISE NOTICE
 -- 'SKIP Part …' … RETURN` when pg_cron is absent, so on a lane without the
 -- extension THIRTY-SEVEN of this file's thirty-nine sections are un-falsifiable:
 -- their twins come back `no-red` naming no cause, and a silently-ineffective
@@ -771,10 +771,15 @@ BEGIN
   --            guard, not an independent production claim: Part 1 owns the production
   --            claim (`1/JOB-04`, three raises: pg_cron absent, job not registered,
   --            exactly-one-row) and Part 1 runs FIRST and UNGATED. MEASURED 2026-09-05 on
-  --            a real lane: renaming the jobname in 20260819150000's cron.schedule call
-  --            (with that migration's STEP 2 count check re-based so the apply survives)
-  --            REDs `TEST FAILED (1/JOB-04)` -- Part 1's registration arm -- and this arm
-  --            is never reached. So no production mutation can make this raise fire first,
+  --            a real lane, in two steps: renaming the jobname in 20260819150000's
+  --            cron.schedule call does not even REACH the gate -- that migration's own
+  --            STEP 2 aborts the apply with `R3/JOB-04 verification failed: ...
+  --            carries a NULL command after re-registration`. With the WHOLE of STEP 2
+  --            short-circuited so the apply survives, the run REDs
+  --            `TEST FAILED (1/JOB-04): pg_cron IS installed but the
+  --            reconcile_dropped_enqueue_sweep job is NOT registered` -- Part 1's
+  --            registration arm -- and this arm is never reached. So no production
+  --            mutation can make this raise fire first,
   --            and the honest falsifier is the one that breaks the precondition it asserts.
   --            Same class as the S-2 seed-integrity precedent in
   --            test_strategy_analytics_stuck_computing_reaper.sql (plan 164.4.1-04).
