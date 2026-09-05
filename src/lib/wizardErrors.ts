@@ -4322,6 +4322,23 @@ export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
         "the 'broker server' branch, pinned byte-identically.",
     ],
     [
+      "SERVICE_KEY_ABSENT",
+      "164.1-02 / PYAPI-06 (D-10). Emitted by verify_service_key to a caller " +
+        "that sent NO X-Service-Key header at all — 401, detail 'Unauthorized', " +
+        "retryable false. It reaches NO user-facing surface, and after " +
+        "PYAPI-06's TypeScript half analytics-client.ts REFUSES before the " +
+        "fetch when ANALYTICS_SERVICE_KEY is empty, so this code cannot arrive " +
+        "from our own client at all: the only callers that can see it are " +
+        "unauthenticated probers on the public internet, which read the code " +
+        "and never the wizard. A verdict row would manufacture a diagnosis for " +
+        "a request we do not send, and the obvious candidate is actively " +
+        "WRONG: SEAM_MISCONFIGURED's copy tells the user nothing was " +
+        "submitted, which is false by construction here — a request WAS sent, " +
+        "it simply carried no credential. Its sibling SERVICE_KEY_UNCONFIGURED " +
+        "keeps its verdict row because THAT one is our own deploy fault on a " +
+        "request the user really did make.",
+    ],
+    [
       "CSV_TOO_LARGE",
       "CSV-surface code. It never reaches classifyKeyValidationError at all — " +
         "the CSV branch renders through the route's own vocabulary and " +

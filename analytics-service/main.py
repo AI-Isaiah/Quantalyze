@@ -812,6 +812,40 @@ async def verify_service_key(request: Request, call_next):
         )
 
     provided = request.headers.get("X-Service-Key", "")
+
+    if not provided:
+        # PYAPI-06 site 6 (164.1-02 / D-10) — the ABSENT header, given its own
+        # machine code. It used to fall into the mismatch arm below and answer
+        # the same opaque `{"detail": "Unauthorized"}` a WRONG key gets, so no
+        # instrument could tell "our client sent nothing" from "our client sent
+        # the wrong key" — the two faults have OPPOSITE remedies (deploy the
+        # secret vs re-copy it) and only one of them was ours.
+        #
+        # 401, NOT 400. The public contract for an unauthenticated caller does
+        # not change: absent stays 401, and the wrong-key body below stays
+        # byte-identical. This is a new CODE on an unchanged status.
+        #
+        # NO `_auth_log` AND NO `_capture_secret_misconfig` HERE, deliberately
+        # (D-11). An absent header is an unauthenticated prober — internet
+        # background noise arriving continuously on any public host — and
+        # logging or capturing it buries the real signal exactly the way C-11
+        # was buried. The zero-event pin in
+        # tests/test_service_key_log_companion.py and the exact
+        # `faults == ["unset", "mismatched"]` list in
+        # tests/test_secret_misconfig_signal.py are the mechanical checks.
+        # Emitting a code costs nothing: it is read by the caller, not by us.
+        #
+        # WHY THIS IS SAFE TO NAME NOW. After PYAPI-06's TypeScript half
+        # (src/lib/analytics-client.ts) our own client REFUSES before the fetch
+        # when ANALYTICS_SERVICE_KEY is empty, so an absent header can no longer
+        # be us. It can be distinguished loudly without paging anyone.
+        return service_error_response(
+            401,
+            "SERVICE_KEY_ABSENT",
+            retryable=False,
+            detail="Unauthorized",
+        )
+
     if not secrets.compare_digest(provided, SERVICE_KEY):
         # PYAPI-06 site 5 — C-11's HEADLINE, seen from the receiving end. A
         # stale `ANALYTICS_SERVICE_KEY` on Vercel produces exactly this 401,
