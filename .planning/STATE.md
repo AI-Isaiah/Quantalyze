@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.1
 current_phase_name: PROD-OBSERVABILITY
 status: in_progress
-stopped_at: "Completed 164.1-01-PLAN.md (prod-prober tracer: run.mjs + seams.mjs + pyapi06 arm, 13/13 self-test, live no-cred run exits 1)"
-last_updated: "2026-09-05T21:59:33.518Z"
+stopped_at: Completed 164.1-02-PLAN.md
+last_updated: "2026-09-05T22:22:28.725Z"
 last_activity: 2026-09-05
 last_activity_desc: 164.3.1/164.4/164.4.1 records restored and closed; 164.1 discuss+research+validation landed; planning blocked on founder secrets
-state_head: 26be5fa66daf631f41e4da2fa27311204092f32b
+state_head: d8a03cba197b62c0fa8f4c2c4ef9d553df5df3a3
 progress:
   total_phases: 19
   completed_phases: 8
   total_plans: 107
-  completed_plans: 97
+  completed_plans: 98
   percent: 42
 ---
 
@@ -813,6 +813,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4.1 P05 | 175 min | 3 tasks | 6 files |
 | Phase 164.4.1 P06 | 35m | 2 tasks | 9 files |
 | Phase 164.1 P01 | 30 min | 2 tasks | 9 files |
+| Phase 164.1 P02 | 25 min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -1061,6 +1062,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4.1]: sql-mutation timeout-minutes STAYS 15 and ci.yml is byte-unchanged by plan 06: the DECISION rule accepts only a measured ubuntu run, and that measurement was scoped out of the executor (worktree branch is not the phase branch, so a dispatch would not be SHA-bound)
 - [Phase 164.1]: ARMS_FLOOR is the literal 4 while only ONE prober arm is registered — the live run exits 1 on '1 registered arm(s) < floor 4' until plans 03/04 land — A floor ratcheted up as arms land can only ever agree with reality, which is not a floor. An incomplete prober must be loud.
 - [Phase 164.1]: KIND_ASSERTIONS lives INSIDE selfTest() — a table-driven isolation loop asserting through a variable is invisible to the plan-05 source-scanning coverage extractor — MEASURED: with the map at module level the extractor reported pyapi06-absent-uncoded and pyapi06-wrong-key-accepted as UNCOVERED.
+- [Phase 164.1]: PYAPI-06 closed at BOTH halves: analytics-client.ts throws a named SeamConfigError above the try when ANALYTICS_SERVICE_KEY is empty (and X-Service-Key is now unconditional), and verify_service_key answers an absent header with its own 401 code SERVICE_KEY_ABSENT. — The truthiness-guarded header spread was TODOS 0.04: with the secret absent every wrapper sent an anonymous request, the service answered 401, a 401 never trips the 140.2 breaker, and the seam ran dark for seven days behind a green board. Absent and wrong had identical bodies, so two faults with opposite remedies were indistinguishable.
+- [Phase 164.1]: SERVICE_KEY_ABSENT is dispositioned as a reasoned EXEMPTION in VENUE_WIRE_CODES_WITHOUT_VERDICT, never a verdict row — the hand-typed roster was OBSERVED going red before the row was typed. — SEAM_MISCONFIGURED's user copy says nothing was submitted, which is false by construction here: a request WAS sent, it simply carried no credential. After the TypeScript half the code cannot arrive from our own client at all, so it reaches no user-facing surface.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1763,8 +1766,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-05T21:56:54.279Z
-**Stopped At:** Completed 164.1-01-PLAN.md (prod-prober tracer: run.mjs + seams.mjs + pyapi06 arm, 13/13 self-test, live no-cred run exits 1)
+**Last Date:** 2026-09-05T22:21:43.440Z
+**Stopped At:** Completed 164.1-02-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
