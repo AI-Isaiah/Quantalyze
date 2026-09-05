@@ -1295,16 +1295,38 @@ true for 146 and half of 142–145, and **false for 141**.
         `RED-UNDER-SETUP` apply list carries
         `supabase/migrations/20260513094906_enable_pg_cron.sql`. No migration was edited. The
         preload's cost was MEASURED, not assumed: **+0.009 s/lane** in the isolated A/B (plan 01),
-        and `per-arm lane time: mean 1.0s` at corpus scale — identical to every prior local
-        full-corpus run without it, which is the form the decision needed since every arm pays lane
-        startup.
+        and `per-arm lane time: mean 1.0s over 262 arm run(s)` on the SAME corpus with the preload
+        on — identical to every prior local full-corpus run without it, which is the form the
+        decision needed since every arm pays lane startup. At the phase's END-STATE corpus the
+        printed line is `per-arm lane time: mean 1.1s over 363 arm run(s)` (plans 05/06 locally,
+        and the ubuntu run below); the 1.0 → 1.1 step tracks the 101 arms added after plan 01, not
+        the preload, which is why the like-for-like A/B is the number that carries the decision.
       * **WHAT IT BOUGHT.** All FIVE files are annotated — the four `lane-blocked:` ones plus
-        `test_compute_jobs_error_kind_copy_parity.sql`, the apply-list-blind fifth — for **103
-        sections** in total (this item owed 100 across the four; the fifth carried 3).
-        Per plan: 02 took the copy-parity file (3) and `test_derive_allocator_keys_fanout.sql` (7),
-        03 took `test_strategy_analytics_stuck_computing_reaper.sql`, 04
-        `test_retention_orphaned_running.sql`, 05 `test_reconcile_dropped_enqueue_sweep.sql` (39,
-        the largest file in the phase).
+        `test_compute_jobs_error_kind_copy_parity.sql`, the apply-list-blind fifth. ⚠️ Every figure
+        below is re-derived from **the RUN, not from the commits that wrote it**: the per-file
+        `sections` lines printed by `node scripts/mutation-runner/run.mjs --parse-only` at
+        `6f9c5172`. An earlier draft of this paragraph quoted as-annotated commit numbers and did
+        not reconcile — it claimed 103 total over a breakdown summing to 102 while the runner
+        printed 101.
+        Per plan, as the runner prints them today: 02 took the copy-parity file (**3**) and
+        `test_derive_allocator_keys_fanout.sql` (**7**); 03 `test_retention_orphaned_running.sql`
+        (**24**); 04 `test_strategy_analytics_stuck_computing_reaper.sql` (`95197d28`, **28**); 05
+        `test_reconcile_dropped_enqueue_sweep.sql` (**39**, the largest file in the phase).
+        3 + 7 + 24 + 28 + 39 = **101 sections**, which is exactly the `ARMS_FLOOR` delta this phase
+        ratcheted (262 -> 363) — an independent second reading of the same number.
+        ⚠️ **Why 24 and not 25 for the retention gate.** `905b2aa6` annotated **25** sections there
+        (24 biting + 1 MEASURED waiver); `fcbc0159` then reclassified `3/JOB-05` — the
+        unfalsifiable dominated guard — out of section-hood rather than raising `WAIVED_CEILING`,
+        and the runner has printed `sections 24` for that file ever since. 25 is the as-annotated
+        count at one commit; 24 is the count after the reclassification and the only one a reader
+        can reproduce. That is also why this item's own **"100 sections are owed"** line above does
+        not foot to the delivery: 100 was the 2026-09-04 estimate made BEFORE those four files were
+        annotated, and the four measure **98** (7 + 24 + 28 + 39). The estimate stays as the dated
+        record; 98 + 3 = 101 is what shipped.
+        ⚠️ That 03/04 order is load-bearing, not bookkeeping: the two reclassification precedents
+        for an unfalsifiable dominated guard are `3/JOB-05` in the RETENTION gate (plan 03,
+        `fcbc0159`) and Part 3 in the REAPER gate (plan 04, `95197d28`/`ca4ad558`), and a reader
+        chasing that precedent lands on the wrong SUMMARY if the two names are swapped.
       * **END STATE, read off the run and not counted here** (plan 05 at `b6b830cf`, re-measured by
         plan 06): `coverage: files 44/71`, `lane-blocked: 0 file(s)`,
         `lane-probe: pg_cron AVAILABLE`, `  pending: 0`, `arms: 363/363/0`, `biting: 363`,
@@ -1460,6 +1482,67 @@ true for 146 and half of 142–145, and **false for 141**.
       typically a PRIVILEGE abort (`permission denied for table …`), which carries no
       `TEST FAILED (…)` and scores NO-IDENTITY — concrete evidence for the rename this item
       proposes.
+
+- [ ] **`[REDUNDER-GATESELF-UNBOUNDED]` The "mutate the gate's own setup" twin class has NO ceiling, while waivers have `WAIVED_CEILING = 0` — and Phase 164.4.1 more than doubled it (booked 2026-09-05, Phase 164.4.1 code review IN-03).**
+      ⛔ **BOOKED, NOT FIXED — deliberately, and the reason is the point.** Introducing a ceiling is
+      a DESIGN decision about what the corpus's headline number means, and `164.4-CONTEXT.md`
+      reserves exactly that class of decision to the founder (it is what reserves `WAIVED_CEILING`
+      +1 to them). Adding a second pinned census as a review fix would set the threshold by
+      executor convenience — at whatever today's count happens to be — which is the same move the
+      ceiling is supposed to prevent. So this records the measurement and the choice, and asks.
+
+      **MEASURED at `ea766c0e`** by parsing every `RED-UNDER-M:` annotation in `supabase/tests/*.sql`
+      and selecting the twins whose EVERY `apply` step targets a file under `supabase/tests/**`:
+
+      ```
+      twins parsed:        363
+      gate-self twins:     19
+        test_api_keys_exchange_not_user_writable.sql :: 5c scrub half
+        test_capital_ownership_allocation_guard.sql :: 7i setup
+        test_create_wizard_strategy_for_key.sql :: D
+        test_reconcile_dropped_enqueue_sweep.sql :: 2/JOB-04, 2/whole-block/JOB-04, 3/JOB-04,
+                                                    3/tick 1/JOB-04, 4/JOB-04
+        test_scenario_downgrade_sweep.sql :: Assertion 1, 2, 3, 4, post-condition
+        test_scenarios_rls.sql :: sanity
+        test_strategy_analytics_stuck_computing_reaper.sql :: 6/seed A/D-18, 6/seed B/D-18,
+                                                             6a/G1, 6b/G1, 6c/G1
+      ```
+
+      **TEN of the 19 were added by this phase** — the five in `test_reconcile_dropped_enqueue_sweep
+      .sql` (plan 05) and the five in `test_strategy_analytics_stuck_computing_reaper.sql` (plan 04).
+      The class went 9 -> 19 in one phase and nothing printed, counted or refused it.
+
+      **THE TWO ESCAPE VALVES, both unbounded today.** An author facing an arm they cannot prove has
+      two documented precedents that point in OPPOSITE directions, and may pick either:
+      1. **RECLASSIFICATION** — drop the `TEST FAILED (` identity and keep the raise as a named
+         `RAISE EXCEPTION 'INVARIANT (…)'`. The arm leaves the denominator entirely. Precedents:
+         `3/JOB-05` in `test_retention_orphaned_running.sql` (plan 03, `fcbc0159`) and Part 3 in
+         `test_strategy_analytics_stuck_computing_reaper.sql` (plan 04, `95197d28`/`ca4ad558`).
+         Corpus-wide count today: **2**.
+      2. **GATE-SELF MUTATION** — keep the identity and twin it by mutating the GATE'S OWN lookup
+         rather than any production object. The arm stays in the denominator and `ARMS_FLOOR` goes
+         UP. Corpus-wide count today: **19 of 363**.
+      Valve 1 lowers the number, valve 2 raises it, neither is capped, and the choice between them
+      is currently unreviewable. `WAIVED_CEILING = 0` bounds the third valve (waivers) precisely
+      because that asymmetry was judged dangerous — the same argument applies here.
+
+      ⚠️ **Why this is not merely bookkeeping.** `ARMS_FLOOR` is the ratchet that is supposed to
+      mean "this many arms have been PROVEN to react to a production regression". A gate-self twin
+      never touches the production object the arm defends, so it demonstrates only that the arm
+      reacts to the test breaking itself. `GRAMMAR` rule 4 already REFUSES twins targeting
+      `scripts/pg-lane/fixtures/` for exactly this reason; the rule stops at fixtures and does not
+      reach the gate file itself.
+      ⚠️ Not all 19 are illegitimate — a conservation arm such as `2/whole-block/JOB-04` is
+      CORRECTLY falsified by adding an unseeded row to the gate's own setup, because the seeded set
+      IS its subject. The item is the absence of a boundary, not a verdict on the members.
+
+      **Proposed shape when taken (founder to rule):** print a census line the way waivers are
+      printed — a count of gate-self twins and a count of `RAISE EXCEPTION 'INVARIANT (` sites —
+      and pin each with a ceiling. Then a phase that grows either has to say so in review.
+      ⚠️ Take the numbers from a fresh run, NOT from this entry: the same review's CR-01 and CR-02
+      change several of these members directly (CR-01 replaces `2/JOB-04`'s gate-self twin with a
+      production-shaped one, CR-02 reclassifies `3/JOB-04` and `4/JOB-04`), so 19/363 is a dated
+      reading at `ea766c0e` and both counts move when those land.
 
 - [ ] **`[WINDOWS-STALE]` `.planning/WINDOWS.md` entries 25, 26 and 28 read `open` but have all executed (logged 2026-09-02).**
       `CLAUDE.md:53` already claims entry 28 is closed while `.planning/WINDOWS.md:45` still records
@@ -2957,6 +3040,72 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   ⛔ Not fixed in 164.4.1 plan 01 ON PURPOSE (PATTERNS C2): the arm-6 edit follows the local
   convention, and inventing a counting scheme mid-phase would mix a new mechanism into a substrate
   change. Book it, then build it.
+  ✅ **BUILT 2026-09-05 (Phase 164.4.1 code review, IN-02).** `src/__tests__/drift-check-scripts
+  .test.ts`'s SP-H01 arm now counts the `=== SELF-TEST n/N:` captions in the comment-stripped
+  `self_test()` body and requires that count to equal the `PASSED (N/N)` denominator, requires each
+  caption's OWN denominator to match it, and (as before) requires the
+  `$((N - st_skipped))/N` arithmetic to use the same N — the three independently-typed numbers this
+  item asked to be forced to agree. The interim `PASSED \((\d+)\/(\d+)\)` halves-agree check was
+  SELF-CONSISTENT only: `totalArms` was read out of the caption, so six arms captioned `(7/7)`
+  passed. PROVEN ABLE TO FAIL by neutering exactly that case — `self_test() contains 6 numbered arm
+  captions but the verdict claims 7 … expected 6 to be 7` — then restored and confirmed by hash. An
+  in-test calibration also proves the caption predicate matches something, so agreement cannot come
+  from a regex that matches nothing.
+  ⚠️ RESIDUAL, deliberately not pinned: two of the original nine sites are PROSE (the SP-H01 history
+  comment at `run.sh:558` and the denominator comment), and the test strips comments before reading
+  — by design, since a first version of SP-H01 matched `SELF-TEST PASSED (5/5)` inside the very
+  comment explaining its own fix. A stale number in those two comments is a docs drift, not a
+  self-consistent lie about the arm count, which is what this item was raised for.
+
+- **`[PGLANE-SELFTEST-NUMERATOR-UNPINNED]` The new self-test caption pin constrains the arm COUNT
+  and the DENOMINATOR, never the NUMERATORS (raised 2026-09-05, review of the 164.4.1 fix pass,
+  IN-A).** `src/__tests__/drift-check-scripts.test.ts:3289-3300` — the pin
+  `[PGLANE-SELFTEST-COUNT-UNPINNED]` above asked for and got — does two things: it counts the
+  `=== SELF-TEST n/N:` captions and requires that count to equal the verdict's `N`, and it requires
+  each caption to match `=== SELF-TEST [0-9]+/N`. The numerator is `[0-9]+`. Nothing requires the
+  numerators to be 1..N, to be distinct, or to be in order.
+  ⚠️ MEASURED at `6f9c5172` + this fix pass, by renumbering `scripts/pg-lane/run.sh:703` from
+  `=== SELF-TEST 6/6:` to `=== SELF-TEST 7/6:` and running the whole file: **342/342 passed**, both
+  new assertions included (`7/6` still matches `[0-9]+/6`, and there are still 6 captions).
+  Restored from a byte backup and confirmed by `shasum` equality — deliberately not by a VCS
+  restore, which would have taken the pass's uncommitted edits with it.
+  So the surviving hole is duplicated or skipped numerators: captions reading `1,2,3,3,5,6` or
+  `1,2,3,4,5,7` beside `PASSED (6/6)` print a self-consistent-looking sequence that no arm reads.
+  That is smaller than the class the parent item was raised for — the COUNT is now pinned, so an
+  arm cannot be added or dropped silently — but it is the same shape.
+  **Fix** = extend the same loop to collect the numerators and assert they are exactly the set
+  `1..N`. No new mechanism, no new fixture.
+  ⛔ NOT fixed in this pass ON PURPOSE: the brief that raised it books it explicitly and forbids
+  introducing enforcement, and a pin added in the same pass that measures it would be a pin nobody
+  has yet seen fail on real drift.
+
+- **`[PGCRON-INSTALL-GUARD-STRINGCMP]` The macOS pg_cron installer's agreement guard compares path
+  SPELLINGS, so a symlinked `pg_ctl` false-refuses (raised 2026-09-05, review of the 164.4.1 fix
+  pass, IN-C; PRE-EXISTING and untouched by that pass).**
+  `scripts/pg-lane/install-pg-cron-macos.sh:107` is `if [ "$path_bin" != "$PGBIN" ]`, where
+  `path_bin` is `dirname "$(command -v pg_ctl)"`. Homebrew's `brew link` puts `pg_ctl` and
+  `pg_config` in a shared bin dir as SYMLINKS into the keg, so the two spellings differ while
+  naming the same binary — and the guard refuses.
+  ⚠️ MEASURED at `6f9c5172` + this fix pass, with PGBIN unset and a scratch dir first on PATH whose
+  `pg_ctl` and `pg_config` are symlinks into `/opt/homebrew/opt/postgresql@16/bin`:
+
+  ```
+  PATH pg_ctl        : <scratch>/linkbin/pg_ctl
+  resolves to        : /opt/homebrew/Cellar/postgresql@16/16.13/bin/pg_ctl
+  keg pg_ctl resolves: /opt/homebrew/Cellar/postgresql@16/16.13/bin/pg_ctl
+  ERROR: the lane and this script would resolve DIFFERENT PostgreSQL binaries:   (exit 1)
+  ```
+
+  Same real binary on both sides, refused anyway. The blast radius is bounded — the refusal is
+  LOUD, its remediation text is correct, and `export PGBIN=<keg>` clears it in one command — so
+  this costs an operator one confusing message, never a wrong install. It is a false NEGATIVE, not
+  a silent degrade, which is why it is booked rather than blocking.
+  **Fix** = compare the resolved binaries rather than the directory strings: `readlink -f` (or
+  `realpath`) both `pg_ctl` paths and refuse only when THOSE differ; keep printing the two original
+  spellings in the message so a genuine mismatch stays legible. ⚠️ macOS `readlink` gained `-f`
+  only in Ventura — check before relying on it, or resolve with `cd "$d" && pwd -P`.
+  ⛔ Booked, not fixed: the fix-pass brief that raised it scoped it to booking, and loosening a
+  safety guard is not a change to make beside four unrelated documentation fixes.
 
 - **`[PGLANE-SELFTEST-NOT-IN-CI]` No CI step runs the pg-lane's OWN self-test — its six arms are
   proven only on the authoring box (raised 2026-09-04, Phase 164.4.1 plan 01 Task 3).**

@@ -25,6 +25,16 @@
 #                                               # Phase 164 migrations + the gate
 #   bash scripts/pg-lane/run.sh --self-test     # prove the guard and the cleanup
 #   bash scripts/pg-lane/run.sh --tracer-proof  # SHAPE 1c mutate->RED->pristine->GREEN
+#   bash scripts/pg-lane/run.sh --print-pgbin   # print the server-binaries dir this
+#                                               # lane would boot, and exit. Added
+#                                               # 2026-09-05 so ci.yml's `Provision
+#                                               # pg_cron` step asks the lane which
+#                                               # binaries it uses instead of keeping
+#                                               # a second, divergent opinion. Writes
+#                                               # the dir on STDOUT and its refusal on
+#                                               # STDERR; honours PGBIN exactly as a
+#                                               # real run does. It boots nothing.
+#   bash scripts/pg-lane/run.sh --help          # print this header block
 #
 # Semantics: boot a throwaway cluster under <scratch-dir>/pgd, apply the --apply
 # files in order, run the optional --post-apply file (the hook for the runner's
@@ -778,11 +788,30 @@ main() {
   case "$1" in
     --self-test)    self_test; return ;;
     --tracer-proof) tracer_proof; return ;;
-    # 2,59 rather than the former 2,45: the header gained the phase-164.4.1
-    # pg_cron paragraph (14 lines), and this range is a byte offset into this
-    # file, not a semantic one. Re-point it whenever the header grows or --help
-    # silently stops printing the paragraphs below the cut.
-    -h|--help)      sed -n '2,59p' "$0"; return ;;
+    # ⭐ ONE selector, not two. ci.yml's `Provision pg_cron` step used to pick
+    # the PostgreSQL major with its own rule — `ls -d /usr/lib/postgresql/*/bin
+    # | sort -n | tail -1`, the HIGHEST — while resolve_pgbin below takes the
+    # FIRST glob match (lexical, i.e. the LOWEST) and prefers `pg_ctl` on PATH
+    # over the glob entirely. On a runner image carrying both 16 and 17 those
+    # two disagree: CI would provision postgresql-17-cron and MEASURE_FAIL on
+    # `!= 16` while the lane would have booted 16. Rather than maintain a second
+    # opinion about which binaries the lane uses, CI now asks the lane. Honours
+    # PGBIN exactly as run_lane does, so it answers for the run that follows it.
+    --print-pgbin)
+      if [ -z "${PGBIN:-}" ]; then PGBIN=$(resolve_pgbin) || exit 1; fi
+      [ -x "$PGBIN/pg_ctl" ] || fail "PGBIN=$PGBIN has no executable pg_ctl"
+      echo "$PGBIN"
+      return ;;
+    # ⭐ The range is DERIVED, not a pinned byte offset. It was `2,45`, then
+    # `2,59` when the header gained the phase-164.4.1 pg_cron paragraph, and
+    # BOTH landed three lines into the 8-line "WHAT IT DOES AND DOES NOT PROVE"
+    # paragraph — so `--help` had always ended mid-sentence at "…the columns the
+    # migrations' FKs, policies, RPCs". A hand-maintained number silently
+    # truncates every time the header grows, and nothing tests the output, so
+    # print from line 2 until the first NON-comment line instead. The header is
+    # the contiguous `#` block ending at `set -euo pipefail`; this needs no
+    # maintenance when it grows.
+    -h|--help)      awk 'NR > 1 { if (!/^#/) exit; print }' "$0"; return ;;
   esac
 
   while [ "$#" -gt 0 ]; do
