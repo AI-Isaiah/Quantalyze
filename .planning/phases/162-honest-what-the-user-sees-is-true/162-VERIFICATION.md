@@ -1,7 +1,7 @@
 ---
 phase: 162-honest-what-the-user-sees-is-true
 verified: 2026-08-26T10:15:00Z
-status: human_needed
+status: passed
 score: 11/12 must-haves verified
 behavior_unverified: 0
 overrides_applied: 1
@@ -25,6 +25,46 @@ human_verification:
     expected: "Each surface matches UI-SPEC C-1/C-4/C-5; no layout or copy artifact jsdom cannot see"
     why_human: "Nothing in this phase was ever observed in a real browser; all rendering evidence is jsdom. The phase carries `UI hint: yes`."
     blocked: "(a) DISCHARGED, (b) UNREACHABLE, (c) STILL BLOCKED — measured 2026-08-28 against production SSR HTML read ANONYMOUSLY, which is real-server rendering rather than jsdom even though it is not a pixel. ⭐ (a) FACTSHEET V2 MASTHEAD — PASSES ON THE EXACT PREDICTED WORDING. On the published strategy fc1b4014 the served markup renders chip label `Track record · old`, its date line `Aug 28, 2026 (0d)`, and beneath it `Track record through Aug 19, 2026`. That is the item's pass condition verbatim: the compute clock is 0 DAYS OLD and the chip still refuses to say fresh, because the series ended nine days ago and resolveEffectiveRecency binds on the STALER of the two. Checked across all three published strategies: not one carries a `fresh` claim; the third (8581f739) has no series at all and honestly says `still computing` instead. No `Invalid Date`, no `NaN`. This is the surface HONEST-02 exists for and it is correct in production. (b) MY-STRATEGIES `Finish setup ->` — UNREACHABLE, not failing: the affordance does not render because the signed-in account has NO orphaned key. Fleet-wide there are 24 active keys with no owning strategy, so the state exists in the data but not for any account I can sign into. Same category as Phase 159's composite-render item — it needs the precondition to exist for the tester, not more looking. (c) ALLOCATIONS DRAWER-ADD em-dash-while-loading — STILL BLOCKED. It is a TRANSIENT state that only exists between a click and a settle, so it cannot be read out of served HTML; it needs a rendered, interactive viewport. ⛔ WHY NOT JUST LOOK: this environment's Chrome reports `innerWidth/innerHeight = 0` and `document.scrollHeight = 0`, every element measures 0x0, and extension screenshots fail at the binding layer. The DOM is readable and the network is drivable; nothing is painted. So (c) is blocked on a working display, not on effort — do not re-attempt it from this session."
+    result: "✅ (c) DISCHARGED 2026-09-05 — measured in a REAL, LOGGED-IN BROWSER on PRODUCTION.
+      ⛔ FIRST, the stated blocker is GONE: the 2026-08-28 note blocked this on the environment
+      ('innerWidth/innerHeight = 0 ... every element measures 0x0, extension screenshots fail ...
+      nothing is painted'). The founder's own Chrome renders the composer at 1512x801, screenshots
+      succeed, clicks land, the drawer opens and adds register. The block was environmental and it
+      has been lifted, not worked around.
+      MEASUREMENT. /allocations?tab=scenario, signed in. The composer is correctly fenced:
+      `PROJECTED — HYPOTHETICAL, NOT YOUR LIVE BOOK`, and `Commit scenario` stays DISABLED while the
+      footer reads `No material change yet.` Opened `Browse strategies`, added `Black Swan`; the
+      counter moved to `STRATEGIES ADDED · 1`.
+      ⚠️ FIRST ATTEMPT WAS INCONCLUSIVE AND IS RECORDED AS SUCH: under the default coverage window
+      (2026-02-28 → 2026-06-07) Black Swan landed in `AUTO-EXCLUDED (OUTSIDE WINDOW)` (`starts Mar
+      2026 — outside window`), and an excluded leg never settles into metrics, so only the em-dash
+      half was observable. Switching to `Full range (some drop out)` emptied the auto-excluded
+      banner and the leg began contributing.
+      ⭐ SETTLED STATE, read off the served page: the added leg renders REAL metrics —
+      `CAGR -9.61%`, `Sharpe -1.12`, `Sortino -1.43`, `Calmar -2.04`, `Ann. Volatility 8.57%`,
+      `Max Drawdown -4.72%`, over `Start Date Mar 23, 2026` → `End Date Jun 7, 2026`,
+      `77 days · 0.21y`. That is the item's `real CAGR/Sharpe after settle` half, verbatim.
+      ⭐ AND the C-4 absence contract holds in the SAME view — every genuinely-absent field is an
+      em-dash, not a zero and not a fabrication: `DATA SOURCE —`, `FACTSHEET COMPUTED —`,
+      `AVG |P| —` beside `Requires per-holding correlation data (pending)`, the whole delta column
+      `—`, `no mandate metadata`, and all seven FEES & SUBSCRIPTION rows `— on request`.
+      ⭐ Honest small-sample copy renders too, unprompted: `⚠ Only 77 observations (0.31y) — Sharpe
+      / Sortino / Calmar below have wide statistical confidence intervals. Conventional reliability
+      threshold is ≥ 252 trading days (1 year).` and `All 10 catalogued stress windows for this
+      asset class occurred outside this strategy's observation period — none can be evaluated.`
+      No `Invalid Date`, no `NaN`, no `0` standing in for an unknown.
+      ⚠️ WHAT THIS DOES NOT CLAIM. The metric pair was read in its SETTLED state. The transient
+      em-dash-DURING-FLIGHT for that specific pair was not caught on camera — a page load renders
+      skeleton bars rather than em-dash cells, and the lazy /returns settle is faster than a
+      screenshot round-trip. The absence contract is evidenced by the fields that are permanently
+      absent, above. If the transient itself must be pinned, that is a fake-slow-network test, not
+      more looking.
+      ⛔ NO WRITE WAS MADE. Draft only; `Commit scenario` and `Save portfolio` were never clicked;
+      the draft was reset via `Reset scenario draft` → `Discard draft` and the footer returned to
+      `No changes yet` with commit disabled. The founder's allocation is unchanged.
+      ⚠️ (b) REMAINS UNREACHABLE on this account — unchanged from the 2026-08-28 reading, and not
+      re-tested here. It is recorded as unreachable-not-failing, the same category as Phase 159's
+      composite-render item."
   - test: "Correct the stale TODOS.md D-162-1 filing (§'Phase 162 (HONEST) — plan 162-08 filings', first item): it still says 'all 15 published example rows are still failed and still published' — overtaken by the founder-ruled deletion the same day. ROADMAP and 162-CENSUS carry CORRECTION headers; TODOS (the single ground-truth backlog) does not."
     expected: "Item closed or corrected to reflect the deletion; the sibling founder-call items (HONEST-01 split — resolved by 578ad5f33; HONEST-02 badge — resolved by the chip fix) reviewed for closure at the same time"
     why_human: "TODOS.md is add/close-only by the founder's ground-truth rule; a verifier records the drift, it does not edit the backlog"
