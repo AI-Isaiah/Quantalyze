@@ -3546,9 +3546,32 @@ export function logCorpusClassification(corpus, log, laneProbe = null) {
     // form (`UNREADABLE`) fail there as well as in-process.
     //
     // ⛔ `absent` + empty class is NOT a reassuring state and must not read like
-    // one: on a lane that HAS lost pg_cron, every one of the 44 annotated gates
-    // that needs it fails at baseline. That is why the empty/absent arm names
-    // the consequence rather than printing "class is current".
+    // one: every annotated gate that needs pg_cron fails at baseline on a lane
+    // that cannot offer it. That is why the empty/absent arm names the
+    // consequence rather than printing "class is current".
+    //
+    // ⛔ …BUT IT MUST NOT NAME THE WRONG CAUSE EITHER (review WR-05, 2026-09-05).
+    // The `absent` arms describe the narrowest state in this file, and the
+    // message used to say "the lane LOST pg_cron", which is the ONE cause that
+    // cannot reach here. TRACED through the substrate, 2026-09-05:
+    //   * `available` is read from the probe gate
+    //     (fixture-corpus/lane-probe/pg-cron-probe.sql), which asks
+    //     `pg_available_extensions` — i.e. what the BOOTED postmaster could
+    //     install — so reaching `false` at all requires a lane that BOOTED.
+    //   * `scripts/pg-lane/run.sh:351-355` starts every lane with
+    //     `-c shared_preload_libraries=pg_cron`. A host missing the LIBRARY
+    //     cannot boot: `pg_ctl … start` fails, `run.sh` `fail`s with its named
+    //     diagnosis, the probe leg prints no marker, and `laneProbe.available`
+    //     is `null`, not `false` — the `lane-unrunnable` MEASURE_FAIL below.
+    //   * `run.sh:311-328` refuses BEFORE initdb, on either a missing library or
+    //     a missing `pg_cron.control`, on every host where `$PGBIN/pg_config` is
+    //     executable — which is both measured hosts (macOS keg, ubuntu
+    //     /usr/lib/postgresql/16/bin).
+    // What is LEFT is exactly one corner: library present (so the postmaster
+    // boots), `pg_cron.control` missing (so `pg_available_extensions` has no
+    // row), AND `pg_config` unavailable (so the pre-start refusal was skipped).
+    // The message below says that, and names the dominant path so a reader who
+    // arrived here from a lane that would not start is sent to the right place.
     if (laneProbe.available === true) {
       log(
         laneBlockedFiles.length > 0
@@ -3559,8 +3582,12 @@ export function logCorpusClassification(corpus, log, laneProbe = null) {
       log(
         laneBlockedFiles.length > 0
           ? "lane-probe: pg_cron absent — lane-blocked class is current"
-          : "lane-probe: pg_cron absent — lane-blocked class is empty; the lane LOST pg_cron " +
-              "(every annotated pg_cron gate will now fail at baseline)",
+          : "lane-probe: pg_cron absent — lane-blocked class is empty, so every annotated pg_cron gate " +
+              "will now fail at baseline. The lane BOOTED with the library and pg_available_extensions " +
+              "still has no pg_cron row: a missing pg_cron.control on a host where pg_config was not " +
+              "executable, so run.sh's pre-start refusal was skipped. A missing LIBRARY cannot print " +
+              "this line — the shared_preload_libraries=pg_cron start makes the postmaster refuse, " +
+              "which surfaces as lane-unrunnable.",
       );
     } else {
       log(
