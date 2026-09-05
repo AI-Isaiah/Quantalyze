@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 26
+open_count: 29
 waived_count: 0
 fixed_count: 7
-total_count: 33
-last_updated: 2026-09-05T21:56:43.339Z
+total_count: 36
+last_updated: 2026-09-05T22:53:36.531Z
 ---
 
 # Broken Windows Ledger
@@ -48,6 +48,9 @@ last_updated: 2026-09-05T21:56:43.339Z
 | 31 | 164.3.1 | unmet-truth | src/__tests__/self-referential-oracle.test.ts |  | MEASURED at HEAD by plan 164.3.1-02: the rule reports 23 findings across 14 files of 128 scanned, and 19 of those are one shared false-positive mechanism - the accumulator idiom (const offenders: string[] = [] -> loop pushes -> expect(offenders).toEqual([])), which CAN fail and is not a primitive-D instance. 2 are the real target and 2 are type-level contracts in types-design-tests.test.ts that genuinely cannot fail at runtime. The rule was deliberately NOT narrowed after the count was seen - tuning a detector to produce a comfortable number is itself the self-referential move this phase exists to stop. Plan 164.3.1-08 must decide explicitly: teach mutation-awareness and re-measure and re-run the fire proof, OR allowlist the 19 by their shared mechanism with the measurement recorded. Detail in 164.3.1-02-CALIBRATION.md section III.a. | fixed |  | 2026-09-01T18:30:00.000Z | 2026-09-05T17:36:27.843Z |
 | 32 | 164.4.1 | deviation | supabase/tests/test_reconcile_dropped_enqueue_sweep.sql |  | 5 of 39 sections use GATE-FILE falsifiers (3 oracle preconditions dominated by Part 1, 1 seed-integrity control dominated by Part 2 arm A, 1 sum-of-pinned-counts whole-block invariant); each carries its domination measurement at the site | fixed |  | 2026-09-05T10:00:09.888Z | 2026-09-05T14:57:19.045Z |
 | 33 | 164.1 | todo | scripts/prod-prober/arms/pyapi06.mjs |  | PYAPI-06 arm does not classify a 401 carrying SERVICE_KEY_ABSENT in response to a PRESENT-but-wrong key (the service conflating absent with mismatched); it needs a 21st defect kind and DEFECT_KINDS is pinned at 20 by the plan-05 wiring test. Limit is documented in the arm header; plan 02's Python-half neuter test is the control. | open |  | 2026-09-05T21:56:43.339Z |  |
+| 34 | 164.1 | deviation | scripts/prod-prober/arms/cron-obs.mjs |  | cron-obs: an UNPARSABLE (non-null, non-empty) pg_net.ttl falls back to the documented 6h default with a printed note, rather than being a measure-fail — so a malformed TTL leaves the 3h scan window unclamped in the one direction that under-reports (pruned responses read as missing). Deliberate fail-open with a loud print; revisit if a real TTL ever fails to parse. | open |  | 2026-09-05T22:52:35.873Z |  |
+| 35 | 164.1 | deviation | scripts/prod-prober/arms/cron-drift.mjs |  | cron-drift: hygieneViolations never runs on a WITHHELD manifest row (command_withheld: true), by design — the row was read by a human at capture time. The gap is that a reviewer could withhold a row precisely to keep a dirty command out of the gate's reach; nothing mechanical prevents that. captureManifest still refuses to WRITE a dirty row, so the gap only opens if someone hand-edits the committed manifest. | open |  | 2026-09-05T22:52:35.974Z |  |
+| 36 | 164.1 | deviation | scripts/prod-prober/run.mjs |  | makeScrubber (plan 01) replaces EVERY occurrence of a requiredEnv VALUE anywhere in the output, with no minimum length. MEASURED during plan 03: with a one-character SUPABASE_DB_PASSWORD ('z') the log line 'cron-drift: database marker = quantalyze-fixture-db' printed as 'quantaly<redacted>e-fixture-db'. Fail-SAFE (it over-redacts, never under-redacts) and unreachable with a realistic credential, but it can mangle unrelated text. Out of plan 03's task scope (plan 01 owns the scrubber); recorded rather than fixed. | open |  | 2026-09-05T22:53:36.531Z |  |
 
 ````json
 [
@@ -445,6 +448,42 @@ last_updated: 2026-09-05T21:56:43.339Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-05T21:56:43.339Z",
+    "resolved_at": null
+  },
+  {
+    "id": 34,
+    "kind": "deviation",
+    "phase": "164.1",
+    "file": "scripts/prod-prober/arms/cron-obs.mjs",
+    "line": null,
+    "description": "cron-obs: an UNPARSABLE (non-null, non-empty) pg_net.ttl falls back to the documented 6h default with a printed note, rather than being a measure-fail — so a malformed TTL leaves the 3h scan window unclamped in the one direction that under-reports (pruned responses read as missing). Deliberate fail-open with a loud print; revisit if a real TTL ever fails to parse.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T22:52:35.873Z",
+    "resolved_at": null
+  },
+  {
+    "id": 35,
+    "kind": "deviation",
+    "phase": "164.1",
+    "file": "scripts/prod-prober/arms/cron-drift.mjs",
+    "line": null,
+    "description": "cron-drift: hygieneViolations never runs on a WITHHELD manifest row (command_withheld: true), by design — the row was read by a human at capture time. The gap is that a reviewer could withhold a row precisely to keep a dirty command out of the gate's reach; nothing mechanical prevents that. captureManifest still refuses to WRITE a dirty row, so the gap only opens if someone hand-edits the committed manifest.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T22:52:35.974Z",
+    "resolved_at": null
+  },
+  {
+    "id": 36,
+    "kind": "deviation",
+    "phase": "164.1",
+    "file": "scripts/prod-prober/run.mjs",
+    "line": null,
+    "description": "makeScrubber (plan 01) replaces EVERY occurrence of a requiredEnv VALUE anywhere in the output, with no minimum length. MEASURED during plan 03: with a one-character SUPABASE_DB_PASSWORD ('z') the log line 'cron-drift: database marker = quantalyze-fixture-db' printed as 'quantaly<redacted>e-fixture-db'. Fail-SAFE (it over-redacts, never under-redacts) and unreachable with a realistic credential, but it can mangle unrelated text. Out of plan 03's task scope (plan 01 owns the scrubber); recorded rather than fixed.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T22:53:36.531Z",
     "resolved_at": null
   }
 ]
