@@ -401,9 +401,10 @@ BEGIN
   --    deployed command and requires TWO of each, so step 1 ALONE aborts the
   --    APPLY -- the gate never runs and no arm can be the first failure.
   --    Steps 2 and 3 re-base those two guards to the one-arm body, and
-  --    nothing else. MEASURED: with step 1 alone the lane exits 3 at
-  --    20260826140000 with `F-3 verification failed: the deployed reaper body
-  --    classifies as 'orphaned' 1 times, expected 2`.
+  --    nothing else. MEASURED 2026-09-05 on a real lane, not argued: with step 1
+  --    ALONE the lane exits 3 at 20260826140000:603 with `P0001: F-3
+  --    verification failed: the deployed reaper body classifies as 'orphaned' 1
+  --    times, expected 2 (one per arm)`.
   -- RED-UNDER-M: {"arm":"1/JOB-05/D-08","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"\n\n      WITH batch AS MATERIALIZED (\n        SELECT id\n          FROM public.compute_jobs\n         WHERE status = 'running'\n           AND claimed_at IS NULL\n           AND created_at < now() - interval '48 hours'\n         ORDER BY created_at ASC\n         LIMIT 100\n         FOR UPDATE SKIP LOCKED\n      )\n      UPDATE public.compute_jobs cj\n         SET status          = 'failed_final',\n             next_attempt_at = now(),\n             error_kind      = 'orphaned',\n             last_error      = 'orphaned_running_reaped: running with no claim stamp (invariant violation) older than 48h'\n        FROM batch b\n       WHERE cj.id = b.id\n         AND cj.status = 'running';","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"  IF v_kind <> 2 THEN","replace":"  IF v_kind <> 1 THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"  IF v_reason <> 2 THEN","replace":"  IF v_reason <> 1 THEN","occurrences":1}]}
   IF v_jobs <> 4 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-08): the deployed body names public.compute_jobs % times, expected 4 (arm A batch + arm A UPDATE target + arm B batch + arm B UPDATE target). Two usually means a WHOLE ARM IS GONE -- if it is arm B, NULL-claim running rows become immortal again exactly as they were for 14 days on TEST; if it is arm A, no claimed orphan is ever terminalized. Zero means the janitor no longer touches the table at all.', v_jobs;
@@ -464,9 +465,10 @@ BEGIN
   --            help.
   -- ⚠️ LAYERED: 20260826140000's STEP 5 (d) counts 'orphaned' in the deployed
   --    command and requires 2, so step 1 alone ABORTS THE APPLY. Step 2
-  --    re-bases that one guard to 1 and touches nothing else. MEASURED: step
-  --    1 alone exits 3 with `F-3 verification failed: the deployed reaper body
-  --    classifies as 'orphaned' 1 times, expected 2`.
+  --    re-bases that one guard to 1 and touches nothing else. MEASURED 2026-09-05
+  --    on a real lane: step 1 ALONE exits 3 at 20260826140000:622 with `P0001:
+  --    F-3 verification failed: the deployed reaper body classifies as 'orphaned'
+  --    1 times, expected 2 (one per arm)`.
   -- RED-UNDER-M: {"arm":"1/F-3","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"             error_kind      = 'orphaned',","replace":"             error_kind      = 'unknown',","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"  IF v_kind <> 2 THEN","replace":"  IF v_kind <> 1 THEN","occurrences":1}]}
   IF v_kindcount <> 2 THEN
     RAISE EXCEPTION 'TEST FAILED (1/F-3): the deployed body classifies as ''orphaned'' % times, expected 2 (one per arm). Arm A reaps claims older than the 4h window, arm B reaps never-claimed running rows older than 48h -- BOTH are worker deaths and both are retryable. A missing conversion leaves that arm''s users reading copy that tells them retrying will not help.', v_kindcount;
@@ -840,6 +842,8 @@ BEGIN
   --    compare-and-set fence on the UPDATE -- so a single-step mutation is a
   --    `no-red`: with only the predicate widened the fence still refuses the
   --    done row, and with only the fence widened the batch never selects it.
+  --    MEASURED 2026-09-05, each half driven ALONE on a real lane: BOTH exit 0.
+  --    The gate simply passes, with no arm to name.
   --    Both halves are spelled `status = 'running' OR status = 'done'` rather
   --    than an IN list, deliberately: Part 1 counts the exact single-spaced
   --    `status = 'running'` FOUR times, and an IN list would drop that count
