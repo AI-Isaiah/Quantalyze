@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.1
 current_phase_name: PROD-OBSERVABILITY
 status: in_progress
-stopped_at: Completed 164.1-03-PLAN.md
-last_updated: "2026-09-05T23:00:03.899Z"
+stopped_at: Completed 164.1-04-PLAN.md
+last_updated: "2026-09-05T23:27:10.808Z"
 last_activity: 2026-09-05
 last_activity_desc: 164.3.1/164.4/164.4.1 records restored and closed; 164.1 discuss+research+validation landed; planning blocked on founder secrets
-state_head: ebf6869390e31bfbfb9d66c7c87bec820f5932dc
+state_head: c66099c731da05c27d7f65c43b6758245d75d230
 progress:
   total_phases: 19
   completed_phases: 8
   total_plans: 107
-  completed_plans: 99
+  completed_plans: 100
   percent: 42
 ---
 
@@ -815,6 +815,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.1 P01 | 30 min | 2 tasks | 9 files |
 | Phase 164.1 P02 | 25 min | 2 tasks | 10 files |
 | Phase 164.1 P03 | 22 min | 2 tasks | 24 files |
+| Phase 164.1 P04 | 24 min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -1066,6 +1067,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.1]: KIND_ASSERTIONS lives INSIDE selfTest() — a table-driven isolation loop asserting through a variable is invisible to the plan-05 source-scanning coverage extractor — MEASURED: with the map at module level the extractor reported pyapi06-absent-uncoded and pyapi06-wrong-key-accepted as UNCOVERED.
 - [Phase 164.1]: PYAPI-06 closed at BOTH halves: analytics-client.ts throws a named SeamConfigError above the try when ANALYTICS_SERVICE_KEY is empty (and X-Service-Key is now unconditional), and verify_service_key answers an absent header with its own 401 code SERVICE_KEY_ABSENT. — The truthiness-guarded header spread was TODOS 0.04: with the secret absent every wrapper sent an anonymous request, the service answered 401, a 401 never trips the 140.2 breaker, and the seam ran dark for seven days behind a green board. Absent and wrong had identical bodies, so two faults with opposite remedies were indistinguishable.
 - [Phase 164.1]: SERVICE_KEY_ABSENT is dispositioned as a reasoned EXEMPTION in VENUE_WIRE_CODES_WITHOUT_VERDICT, never a verdict row — the hand-typed roster was OBSERVED going red before the row was typed. — SEAM_MISCONFIGURED's user copy says nothing was submitted, which is false by construction here: a request WAS sent, it simply carried no credential. After the TypeScript half the code cannot arrive from our own client at all, so it reaches no user-facing surface.
+- [Phase 164.1]: 164.1-04: MT5_PROBE_PY emits terminal_info in BOTH branches — the healthy reading must be a positive marker, not the absence of a key
+- [Phase 164.1]: 164.1-04: a non-zero railway ssh exit is DATA, not a measure-fail — a CLI exiting 255 while the terminal answered -10004 still gets the REDEPLOY remedy (proven by a positive control)
+- [Phase 164.1]: 164.1-04: the two IPC remedies are asserted different on the DEFECT ROWS, not on the REMEDIES table — the rows are what an operator reads
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1768,8 +1772,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-05T22:56:52.790Z
-**Stopped At:** Completed 164.1-03-PLAN.md
+**Last Date:** 2026-09-05T23:26:56.121Z
+**Stopped At:** Completed 164.1-04-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
