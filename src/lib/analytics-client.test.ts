@@ -42,6 +42,23 @@ const UUID_V4_RE =
 const TENANT = { userId: "user-under-test" } as const;
 const INTERNAL_TOKEN_FOR_TESTS = "internal-token-under-test";
 
+/**
+ * 164.1-02 / PYAPI-06 — the service-key sentinel every block that drives the
+ * REAL seam now needs.
+ *
+ * ⚠️ `analyticsRequest` REFUSES with a `SeamConfigError` when
+ * `ANALYTICS_SERVICE_KEY` is absent (D-09), so a suite whose subject is
+ * something else entirely would otherwise fail on the refusal rather than on
+ * its own assertion. `SERVICE_KEY` is captured at MODULE SCOPE in
+ * `analytics-client.ts`, so this must be assigned BEFORE the dynamic import in
+ * each block — the same ordering hazard the [140.2-09] block documents at
+ * length below.
+ *
+ * ⛔ Obviously fake, and it is asserted ABSENT from the refusal message by the
+ * [164.1-02 / PYAPI-06] block: the error names the env var, never its value.
+ */
+const SERVICE_KEY_FOR_TESTS = "analytics-service-key-under-test";
+
 describe("Phase 16 / OBSERV-01 correlation_id propagation", () => {
   beforeEach(() => {
     headersGetMock.mockReset();
@@ -50,6 +67,10 @@ describe("Phase 16 / OBSERV-01 correlation_id propagation", () => {
     // 140.2-09 / TS-04: the mint reads INTERNAL_API_TOKEN at CALL time and
     // REFUSES on absence, so every call through the real client needs one.
     process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+    // 164.1-02 / PYAPI-06: `analyticsRequest` refuses before the fetch when
+    // ANALYTICS_SERVICE_KEY is absent, and SERVICE_KEY is read at MODULE
+    // scope — so it is set here, before this block's dynamic import.
+    process.env.ANALYTICS_SERVICE_KEY = SERVICE_KEY_FOR_TESTS;
   });
 
   afterEach(() => {
@@ -243,6 +264,10 @@ describe("AnalyticsUpstreamError", () => {
     // 140.2-09 / TS-04: the mint reads INTERNAL_API_TOKEN at CALL time and
     // REFUSES on absence, so every call through the real client needs one.
     process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+    // 164.1-02 / PYAPI-06: `analyticsRequest` refuses before the fetch when
+    // ANALYTICS_SERVICE_KEY is absent, and SERVICE_KEY is read at MODULE
+    // scope — so it is set here, before this block's dynamic import.
+    process.env.ANALYTICS_SERVICE_KEY = SERVICE_KEY_FOR_TESTS;
   });
 
   afterEach(() => {
@@ -449,6 +474,10 @@ describe("[SEAMCORE-02] analytics-client maps a body-read failure onto its own t
     // 140.2-09 / TS-04: the mint reads INTERNAL_API_TOKEN at CALL time and
     // REFUSES on absence, so every call through the real client needs one.
     process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+    // 164.1-02 / PYAPI-06: `analyticsRequest` refuses before the fetch when
+    // ANALYTICS_SERVICE_KEY is absent, and SERVICE_KEY is read at MODULE
+    // scope — so it is set here, before this block's dynamic import.
+    process.env.ANALYTICS_SERVICE_KEY = SERVICE_KEY_FOR_TESTS;
   });
 
   afterEach(() => {
@@ -578,6 +607,10 @@ describe("DOGFOOD credential trim — validateKey/encryptKey strip pasted whites
     // 140.2-09 / TS-04: the mint reads INTERNAL_API_TOKEN at CALL time and
     // REFUSES on absence, so every call through the real client needs one.
     process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+    // 164.1-02 / PYAPI-06: `analyticsRequest` refuses before the fetch when
+    // ANALYTICS_SERVICE_KEY is absent, and SERVICE_KEY is read at MODULE
+    // scope — so it is set here, before this block's dynamic import.
+    process.env.ANALYTICS_SERVICE_KEY = SERVICE_KEY_FOR_TESTS;
   });
   afterEach(() => vi.restoreAllMocks());
 
@@ -680,6 +713,10 @@ describe("Phase 140 / SEAM-01 — analyticsRequest delegates to the resilience c
     // REFUSES on absence, so every call through the real client needs one. Set
     // per-describe rather than globally, so the absence case stays observable.
     process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+    // 164.1-02 / PYAPI-06: `analyticsRequest` refuses before the fetch when
+    // ANALYTICS_SERVICE_KEY is absent, and SERVICE_KEY is read at MODULE
+    // scope — so it is set here, before this block's dynamic import.
+    process.env.ANALYTICS_SERVICE_KEY = SERVICE_KEY_FOR_TESTS;
   });
 
   afterEach(() => {
@@ -1427,6 +1464,10 @@ describe("[SEAMCORE-11 / A-27] analytics-client: ONE defined outcome for an ambi
   beforeEach(() => {
     vi.resetModules();
     process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+    // 164.1-02 / PYAPI-06: `analyticsRequest` refuses before the fetch when
+    // ANALYTICS_SERVICE_KEY is absent, and SERVICE_KEY is read at MODULE
+    // scope — so it is set here, before this block's dynamic import.
+    process.env.ANALYTICS_SERVICE_KEY = SERVICE_KEY_FOR_TESTS;
   });
 
   afterEach(() => {
@@ -1695,6 +1736,10 @@ describe("[140.3-01 / TS-05] analytics-client reads the seam error body through 
   beforeEach(() => {
     vi.resetModules();
     process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+    // 164.1-02 / PYAPI-06: `analyticsRequest` refuses before the fetch when
+    // ANALYTICS_SERVICE_KEY is absent, and SERVICE_KEY is read at MODULE
+    // scope — so it is set here, before this block's dynamic import.
+    process.env.ANALYTICS_SERVICE_KEY = SERVICE_KEY_FOR_TESTS;
   });
 
   afterEach(() => {
@@ -1946,6 +1991,10 @@ describe("[140.4-09 / SEAMRIM-06] parseResponse's THROWN message is scrubbed, li
 
   beforeEach(() => {
     process.env.INTERNAL_API_TOKEN = TOKEN;
+    // 164.1-02 / PYAPI-06: `analyticsRequest` refuses before the fetch when
+    // ANALYTICS_SERVICE_KEY is absent, and SERVICE_KEY is read at MODULE
+    // scope — so it is set here, before this block's dynamic import.
+    process.env.ANALYTICS_SERVICE_KEY = SERVICE_KEY_FOR_TESTS;
   });
   afterEach(() => {
     vi.restoreAllMocks();
@@ -2019,6 +2068,10 @@ describe("[140.5-02 / B-02] our own transport failures carry a machine marker, n
   beforeEach(() => {
     vi.resetModules();
     process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+    // 164.1-02 / PYAPI-06: `analyticsRequest` refuses before the fetch when
+    // ANALYTICS_SERVICE_KEY is absent, and SERVICE_KEY is read at MODULE
+    // scope — so it is set here, before this block's dynamic import.
+    process.env.ANALYTICS_SERVICE_KEY = SERVICE_KEY_FOR_TESTS;
   });
 
   afterEach(() => {
@@ -2161,6 +2214,10 @@ describe("Phase 153.4-02 / WIZFORM-05 — budgetKeyFor selects the validate budg
   beforeEach(() => {
     vi.resetModules();
     process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+    // 164.1-02 / PYAPI-06: `analyticsRequest` refuses before the fetch when
+    // ANALYTICS_SERVICE_KEY is absent, and SERVICE_KEY is read at MODULE
+    // scope — so it is set here, before this block's dynamic import.
+    process.env.ANALYTICS_SERVICE_KEY = SERVICE_KEY_FOR_TESTS;
   });
 
   afterEach(() => {
@@ -2390,6 +2447,10 @@ describe("[161-06 / WIZERR-05] the advertised wait crosses the seam", () => {
   beforeEach(() => {
     vi.resetModules();
     process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+    // 164.1-02 / PYAPI-06: `analyticsRequest` refuses before the fetch when
+    // ANALYTICS_SERVICE_KEY is absent, and SERVICE_KEY is read at MODULE
+    // scope — so it is set here, before this block's dynamic import.
+    process.env.ANALYTICS_SERVICE_KEY = SERVICE_KEY_FOR_TESTS;
   });
 
   afterEach(() => {
@@ -2552,5 +2613,123 @@ describe("[161-06 / WIZERR-05] the advertised wait crosses the seam", () => {
       new mod.AnalyticsUpstreamError("m", 503, "SEAM_CODE", "mt5-gateway", 30)
         .retryAfterSeconds,
     ).toBe(30);
+  });
+});
+
+// ===========================================================================
+// Phase 164.1-02 / PYAPI-06 (D-09) — the client REFUSES rather than sending an
+// unauthenticated guarded request
+// ===========================================================================
+
+/**
+ * ⭐ THE DEFECT THIS BLOCK EXISTS FOR, measured in production (TODOS 0.04).
+ *
+ * The header was assembled with a conditional spread,
+ * `...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY })`. With
+ * `ANALYTICS_SERVICE_KEY` absent or empty on Vercel the header simply VANISHED:
+ * every one of the nine analytics wrappers issued an ANONYMOUS request, the
+ * service answered 401, a 401 never trips the 140.2 breaker, and no log, alert
+ * or /health signal said anything. The seam ran 401 for seven days behind a
+ * green board.
+ *
+ * ⚠️ NEUTER PROOF (D-12), and it is what makes this block worth its bytes.
+ * DELETE the `if (!SERVICE_KEY) { throw new SeamConfigError(...) }` statement in
+ * `analytics-client.ts` and Test A goes RED on `rejects.toThrow` — no error is
+ * thrown at all, because the wrapper happily proceeds to the transport. Restore
+ * from a byte backup (`cp`, never `git checkout --`) and it is green again. The
+ * observed RED line and the identical pre/post sha256 are recorded in
+ * `164.1-02-SUMMARY.md`.
+ *
+ * ⛔ Test A also pins the PRIVACY half (T-164.1-06): the message names the env
+ * VAR and must never carry its VALUE. `ANALYTICS_SERVICE_KEY` is on
+ * `seam-redaction.ts`'s denylist precisely because this secret must not reach a
+ * log line, and an Error message is a log line.
+ */
+describe("[164.1-02 / PYAPI-06] refuses before the fetch when ANALYTICS_SERVICE_KEY is absent", () => {
+  const ORIGINAL_ENV = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /** Stub the transport, load the module fresh, drive one wrapper. */
+  async function driveWithFetchStub(): Promise<{
+    fetchMock: ReturnType<typeof vi.fn>;
+    call: () => Promise<unknown>;
+  }> {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await import("./analytics-client");
+    return {
+      fetchMock,
+      call: () =>
+        mod.optimizeScenarioWeights({}, "min_vol", {
+          userId: "user-under-test",
+        }),
+    };
+  }
+
+  it("Test A — rejects with a named SeamConfigError and never reaches the transport", async () => {
+    vi.resetModules();
+    // ⚠️ ORDERING. SERVICE_KEY is captured at MODULE SCOPE, so the delete must
+    // precede the dynamic import inside `driveWithFetchStub`.
+    delete process.env.ANALYTICS_SERVICE_KEY;
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+
+    const { fetchMock, call } = await driveWithFetchStub();
+
+    const err = (await call().then(
+      () => {
+        throw new Error(
+          "the wrapper RESOLVED with no ANALYTICS_SERVICE_KEY — the refusal is " +
+            "gone and every analytics call is going out anonymously again",
+        );
+      },
+      (e: unknown) => e,
+    )) as Error;
+
+    expect(
+      err.name,
+      "the refusal must be a SeamConfigError — the ME-01 class that separates a " +
+        "deploy fault on OUR side from a dead upstream. A plain Error takes the " +
+        "generic 'analytics service is not reachable' arm and points ops at Railway.",
+    ).toBe("SeamConfigError");
+    expect(err.message).toContain("ANALYTICS_SERVICE_KEY");
+    expect(err.message).toContain("[analytics-client]");
+    expect(
+      err.message,
+      "the message must name the env VAR and never its VALUE (T-164.1-06)",
+    ).not.toContain(SERVICE_KEY_FOR_TESTS);
+    expect(
+      fetchMock,
+      "the request LEFT THE PROCESS unauthenticated — the refusal has to sit " +
+        "before the transport, not after it",
+    ).toHaveBeenCalledTimes(0);
+  });
+
+  it("Test B — with the key set the X-Service-Key header is emitted unconditionally", async () => {
+    vi.resetModules();
+    process.env.ANALYTICS_SERVICE_KEY = SERVICE_KEY_FOR_TESTS;
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+
+    const { fetchMock, call } = await driveWithFetchStub();
+    // The stub body satisfies no Zod response schema, so the wrapper rejects in
+    // parseResponse — strictly AFTER header assembly, which is all this asserts.
+    await call().then(
+      () => undefined,
+      () => undefined,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const headers = (fetchMock.mock.calls[0][1] as RequestInit)
+      .headers as Record<string, string>;
+    expect(headers["X-Service-Key"]).toBe(SERVICE_KEY_FOR_TESTS);
   });
 });
