@@ -1367,13 +1367,60 @@ BEGIN
 
   SELECT command INTO v_command
     FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep';
-  -- RED-UNDER: point THIS PART'S OWN oracle lookup at a jobname that does not exist.
-  --            ⚠️ A GATE-FILE EDIT, for the reason recorded on `2/JOB-04` above: Part 1
-  --            owns the production claim and runs first, so no production mutation can
-  --            reach this precondition guard ahead of `1/JOB-04`.
-  -- RED-UNDER-M: {"arm":"3/JOB-04","apply":[{"kind":"edit","file":"supabase/tests/test_reconcile_dropped_enqueue_sweep.sql","find":"    RAISE NOTICE 'SKIP Part 3: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only).';\n    RETURN;\n  END IF;\n\n  SELECT command INTO v_command\n    FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep';\n","replace":"    RAISE NOTICE 'SKIP Part 3: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only).';\n    RETURN;\n  END IF;\n\n  SELECT command INTO v_command\n    FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep__no_such_job';\n","occurrences":1}]}
+  -- ⛔ NOT AN ARM, AND DELIBERATELY NOT ONE. This guard carries no
+  --    `TEST FAILED (` identity, so the runner does not count it as a section
+  --    (parse.mjs:993 IDENTITY_CARRIER, and the classification comment at
+  --    parse.mjs:1057). That is the honest classification, not a way to dodge
+  --    a twin.
+  --
+  --    ⛔ RECLASSIFIED 2026-09-05, after review finding CR-02 of
+  --    164.4.1-REVIEW.md. It USED TO carry `TEST FAILED (3/JOB-04)` plus a
+  --    twin that mutated THIS GATE FILE'S own oracle lookup, and so counted
+  --    +1 toward `biting` and toward `ARMS_FLOOR`. It is the THIRD copy of one
+  --    registration guard (Part 1's `1/JOB-04`, then `2/JOB-04`, then this) and
+  --    each copy is dominated by the one before it. For it to fail FIRST, Parts
+  --    1 and 2 must both pass -- meaning cron.job.command was non-NULL when
+  --    Part 2 read it -- while Part 3 reads NULL. Nothing can change cron.job
+  --    between those two reads: everything Part 2 does is inside the
+  --    transaction rolled back at the `ROLLBACK;` closing Part 2.
+  --
+  --    MEASURED by the fixer on a real pg-lane, 2026-09-05, before this edit --
+  --    the reviewer's finding was re-derived, not taken on trust. Both escape
+  --    routes were driven and both failed:
+  --      * 5 `1/JOB-04` raises AND `2/JOB-04` neutered, with the same
+  --        `DELETE FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep'`
+  --        post-apply that `2/JOB-04` now uses: Part 2 reaches its oracle call
+  --        and the lane exits 3 on
+  --            psql:<scratch>/gate.sql:1286: ERROR:  22004: query string argument of EXECUTE is null
+  --        naming no arm. This guard is never reached.
+  --      * a deployed body that unschedules ITSELF (a `PERFORM
+  --        cron.unschedule('reconcile_dropped_enqueue_sweep');` spliced into
+  --        20260819150000's command string, in a scratch copy -- the repo's
+  --        migrations were not touched): Parts 1 and 2 stay green, this guard
+  --        reads the row BACK because Part 2's unschedule was rolled back with
+  --        the rest of Part 2, and the lane dies further down at
+  --            psql:<scratch>/gate.sql:1413: ERROR:  XX000: could not find valid entry for job 'reconcile_dropped_enqueue_sweep'
+  --        -- again not this guard.
+  --
+  --    A raise that cannot be made to fire is not a falsifiable assertion about
+  --    production, and the founder rule is that a test which CANNOT FAIL is
+  --    worse than none. So it stops CLAIMING to be one. It is kept, rather than
+  --    deleted, for the one thing it still does: if a future refactor ever
+  --    makes this reachable it fails with a named invariant instead of a raw
+  --    22004 out of the EXECUTE below. The registration ASSERTION lives in
+  --    Part 1 and in `2/JOB-04`, both of which bite.
+  --
+  --    ⚠️ Do NOT restore the identity spelling for 3/JOB-04, and do NOT give it
+  --    back a gate-self twin. Either move re-adds an unfalsifiable section, and
+  --    the only way to make the corpus green again would be a waiver -- which
+  --    is exactly what WAIVED_CEILING 0 refuses (164.4.1-CONTEXT D-03). This is
+  --    the same treatment `3/JOB-05` (test_retention_orphaned_running.sql:1011,
+  --    commit fcbc0159) and the reaper's Part 3 guard
+  --    (test_strategy_analytics_stuck_computing_reaper.sql:765, commit 95197d28)
+  --    already carry; CR-02's point was that this file resolved the identical
+  --    shape the opposite way.
   IF v_command IS NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (3/JOB-04): the reconcile_dropped_enqueue_sweep cron job is missing while pg_cron is installed.';
+    RAISE EXCEPTION 'INVARIANT (Part 3 precondition): the reconcile_dropped_enqueue_sweep cron job is missing while pg_cron is installed, but Part 1 and Part 2 both passed. That is supposed to be unreachable -- see the note above. The registration assertions are Part 1 (1/JOB-04) and Part 2 (2/JOB-04).';
   END IF;
 
   INSERT INTO auth.users (id, email)
@@ -1482,11 +1529,29 @@ BEGIN
 
   SELECT command INTO v_command
     FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep';
-  -- RED-UNDER: point THIS PART'S OWN oracle lookup at a jobname that does not exist.
-  --            ⚠️ A GATE-FILE EDIT, for the reason recorded on `2/JOB-04` above.
-  -- RED-UNDER-M: {"arm":"4/JOB-04","apply":[{"kind":"edit","file":"supabase/tests/test_reconcile_dropped_enqueue_sweep.sql","find":"    RAISE NOTICE 'SKIP Part 4: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only).';\n    RETURN;\n  END IF;\n\n  SELECT command INTO v_command\n    FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep';\n","replace":"    RAISE NOTICE 'SKIP Part 4: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only).';\n    RETURN;\n  END IF;\n\n  SELECT command INTO v_command\n    FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep__no_such_job';\n","occurrences":1}]}
+  -- ⛔ NOT AN ARM, AND DELIBERATELY NOT ONE -- the FOURTH copy of the same
+  --    registration guard, one link further down the chain than Part 3's.
+  --    RECLASSIFIED 2026-09-05 with it, after review finding CR-02 of
+  --    164.4.1-REVIEW.md; it too used to carry a `TEST FAILED (4/JOB-04)`
+  --    identity and a twin that mutated THIS GATE FILE'S own oracle lookup.
+  --
+  --    The domination is strictly stronger here than at Part 3: for this guard
+  --    to fail FIRST, Parts 1, 2 AND 3 must all have passed. The measurement
+  --    recorded on the Part 3 guard above therefore covers this one a fortiori
+  --    -- with the Part 1 and Part 2 raises neutered and the job row deleted,
+  --    the lane dies inside PART 2 on `22004: query string argument of EXECUTE
+  --    is null`, so Part 4 is never entered at all. Read that note for the two
+  --    escape routes and their measured outcomes.
+  --
+  --    Kept, not deleted, for the same single reason: a future refactor that
+  --    somehow made this reachable gets a named invariant instead of a raw
+  --    22004 out of the EXECUTE below. The registration ASSERTION lives in
+  --    Part 1 (`1/JOB-04`) and Part 2 (`2/JOB-04`), both of which bite.
+  --
+  --    ⚠️ Do NOT restore the identity spelling for 4/JOB-04, and do NOT give it
+  --    back a gate-self twin. See the Part 3 note.
   IF v_command IS NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (4/JOB-04): the reconcile_dropped_enqueue_sweep cron job is missing while pg_cron is installed.';
+    RAISE EXCEPTION 'INVARIANT (Part 4 precondition): the reconcile_dropped_enqueue_sweep cron job is missing while pg_cron is installed, but Parts 1, 2 and 3 all passed. That is supposed to be unreachable -- see the note above. The registration assertions are Part 1 (1/JOB-04) and Part 2 (2/JOB-04).';
   END IF;
 
   INSERT INTO auth.users (id, email)
