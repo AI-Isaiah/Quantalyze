@@ -973,36 +973,42 @@ BEGIN
 
   SELECT command INTO v_command
     FROM cron.job WHERE jobname = 'retention_compute_jobs_orphaned_running';
-  -- RED-UNDER: none -- and this is a MEASURED refusal, not an unexamined one. This
-  --            arm is the THIRD copy of one registration guard (Part 1's, then
-  --            2/JOB-05, then this), and each copy is dominated by the one before it.
-  --            For this raise to be the FIRST failure, Part 1 and Part 2 must both
-  --            pass -- which means cron.job.command was non-NULL when Part 2 read it --
-  --            while Part 3 reads NULL. Something must therefore change cron.job
-  --            BETWEEN those two reads, and nothing can: everything Part 2 does happens
-  --            inside the transaction it rolls back. MEASURED 2026-09-05 on the lane,
-  --            twice, rather than argued:
-  --              * suppressing 2/JOB-05 with `neuter` does not work -- it is not a
-  --                duplicate raise, it is Part 2's precondition. With it neutered and
-  --                the job row deleted, Part 2 reaches its oracle call and the lane
-  --                exits 3 on `22004: query string argument of EXECUTE is null`, a raw
-  --                driver error that names no arm and scores NO-IDENTITY. (Adding a
-  --                RETURN after that RAISE to fix the control flow is refused by the
-  --                runner itself, deliberately: run.mjs:1658-1674 will not neuter a
-  --                branch carrying a statement after its RAISE.)
-  --              * a cron body that unschedules ITSELF also does not work: Part 2 goes
-  --                fully green, but the unschedule is transactional, so Part 3 reads
-  --                the row back and its second tick dies on `XX000: could not find
-  --                valid entry for job` instead.
-  --            ⛔ SO THIS IS A WAIVER, AND A WAIVER IS NOT FREE: `WAIVED_CEILING` is 0
-  --            by founder decision (164.4.1-CONTEXT D-03), so this annotation makes the
-  --            corpus run report a SECOND defect on purpose. It is left loud rather
-  --            than made to look green: the choice between raising the ceiling to 1 and
-  --            restructuring this file's three-deep guard is a founder call, not this
-  --            plan's.
-  -- RED-UNDER-M: {"arm":"3/JOB-05","waiver":"no first-failure mutation exists. The production change this arm names (the job is missing while pg_cron is installed) is caught by Part 1's registration arm and then by 2/JOB-05, and 2/JOB-05 cannot be neutered out of the way because it is not a duplicate raise but Part 2's PRECONDITION: MEASURED on the lane 2026-09-05, with it neutered Part 2 dies at its EXECUTE with a raw 22004 that names no arm. Nothing can change cron.job between Part 2's read and Part 3's, because everything Part 2 does is inside a transaction it rolls back (a self-unschedule in the cron body was MEASURED and comes back). Owed to a founder decision on WAIVED_CEILING."}
+  -- ⛔ NOT AN ARM, AND DELIBERATELY NOT ONE. This guard carries no
+  --    `TEST FAILED (` identity, so the runner does not count it as a section
+  --    (parse.mjs:993 IDENTITY_CARRIER, and the classification comment at
+  --    parse.mjs:1057). That is the honest classification, not a way to dodge
+  --    a twin.
+  --
+  --    Plan 164.4.1-03 MEASURED, on the lane, twice, that this raise has no
+  --    first-failure mutation. It is the THIRD copy of one registration guard
+  --    (Part 1's, then 2/JOB-05, then this) and each copy is dominated by the
+  --    one before it. For it to fail FIRST, Part 1 and Part 2 must both pass --
+  --    meaning cron.job.command was non-NULL when Part 2 read it -- while Part
+  --    3 reads NULL. Nothing can change cron.job between those two reads:
+  --    everything Part 2 does is inside a transaction it rolls back. Both
+  --    escape routes were driven on real lanes and both failed:
+  --      * neutering 2/JOB-05 does not clear the way -- it is not a duplicate
+  --        raise but Part 2's PRECONDITION; with it neutered and the job row
+  --        deleted, Part 2 reaches its oracle call and the lane exits 3 on
+  --        22004: query string argument of EXECUTE is null, naming no arm.
+  --      * a cron body that unschedules ITSELF leaves Part 2 green, but the
+  --        unschedule is transactional and Part 3 reads the row back, dying on
+  --        XX000: could not find valid entry for job.
+  --
+  --    A raise that cannot be made to fire is not a falsifiable assertion about
+  --    production, and the founder rule is that a test which CANNOT FAIL is
+  --    worse than none. So it stops CLAIMING to be one. It is kept, rather than
+  --    deleted, for the one thing it still does: if a future refactor ever
+  --    makes this reachable it fails with a named invariant instead of a raw
+  --    22004 out of the EXECUTE below. The registration ASSERTION lives in
+  --    Part 1 and in 2/JOB-05, both of which bite.
+  --
+  --    ⚠️ Do NOT restore the identity spelling for 3/JOB-05. Doing so re-adds
+  --    an unfalsifiable section, and the only way to make the corpus green
+  --    again would be a waiver -- which is exactly what WAIVED_CEILING 0
+  --    refuses (164.4.1-CONTEXT D-03).
   IF v_command IS NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (3/JOB-05): the retention_compute_jobs_orphaned_running cron job is missing while pg_cron is installed.';
+    RAISE EXCEPTION 'INVARIANT (Part 3 precondition): the retention_compute_jobs_orphaned_running cron job is missing while pg_cron is installed, but Part 1 and Part 2 both passed. That is supposed to be unreachable -- see the note above. The registration assertions are Part 1 and 2/JOB-05.';
   END IF;
 
   v_ancient := v_fresh - interval '100 years';

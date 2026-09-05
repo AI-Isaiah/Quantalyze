@@ -320,23 +320,27 @@ describe("corpus re-derivation", () => {
       // 01's substrate is complete. `pending:` is now EMPTY, measured; the
       // 3 files still `lane-blocked:` are plans 03-05.
       // RE-MEASURED 2026-09-05 (plan 164.4.1-03, the SECOND file move of Phase
-      // 164.4.1 — test_retention_orphaned_running.sql, 25 sections: 8 in
-      // Part 1's structural body scan, 14 in Part 2's directional arms and 3 in
-      // Part 3's executed bound): 297 anchored, across FORTY-TWO annotated
-      // files. ⚠️ 297 anchored is NOT the biting count. ONE of the 25 is a
-      // WAIVER — `3/JOB-05`, a registration guard with no first-failure
-      // mutation — so a run bites 296 and reports `arms: 296/297/1`. That
-      // divergence is the first in this phase family, it breaches
-      // WAIVED_CEILING 0 on purpose, and the WAIVER CREEP arm below is meant to
-      // be RED until a founder decides between raising the ceiling and
-      // restructuring the gate's three-deep guard (164.4.1-CONTEXT D-03).
+      // 164.4.1 — test_retention_orphaned_running.sql): 296 anchored, across
+      // FORTY-TWO annotated files, and `arms: 296/296/0` — anchored, biting and
+      // executed are the SAME number again, with ZERO waivers.
+      // ⚠️ The file ships 24 sections, not 25. A 25th registration raise exists
+      // in Part 3 and was MEASURED to have no first-failure mutation: it is the
+      // third copy of one guard, each copy dominated by the one before it, and
+      // both escape routes (neutering 2/JOB-05; a self-unscheduling cron body)
+      // were driven on real lanes and failed. It was NOT waived and NOT deleted.
+      // It was reclassified: the raise no longer carries the `TEST FAILED (`
+      // identity, so it is not a section at all — an unfalsifiable raise stops
+      // claiming to be a falsifiable assertion, which is the founder rule that a
+      // test which cannot fail is worse than none. WAIVED_CEILING therefore
+      // stays 0, unbroken, through a THIRD root-cause fix rather than a first
+      // exception. See the note at that guard in the gate file.
       expect(
         naive,
         `${file.name}: the naive substring count (${naive}) is not STRICTLY above the parser's anchored count (${parsed}). Either the parser stopped anchoring, or this file no longer carries the inflated shapes the anchor exists to exclude.`,
       ).toBeGreaterThan(parsed);
     }
     const totalAnchored = annotated.reduce((n, f) => n + f.prose, 0);
-    expect(totalAnchored).toBe(297);
+    expect(totalAnchored).toBe(296);
   });
 });
 
