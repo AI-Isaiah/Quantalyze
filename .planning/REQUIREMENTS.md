@@ -154,14 +154,14 @@ Derived from ROADMAP §Phase 164.3 success criteria 1-6 plus the decisions locke
 `164.3-CONTEXT.md`. The ROADMAP line previously read `TBD (run /gsd-discuss-phase 164.3)`;
 discuss ran 2026-08-28 and these are its output.
 
-- [ ] **VAC-01**: A mutation runner runs IN CI over every arm carrying a `RED-UNDER` annotation — applies the named mutation, asserts the file goes RED, restores, asserts GREEN. It prints coverage as `files_annotated / files_total` on every run. Both failure modes exit 1: an annotation whose mutation does not redden its arm, and coverage below a ratchet floor pinned at the measured value (1/71 at HEAD; fails on REGRESSION, never "until 71/71").
-- [ ] **VAC-02**: The disposable-PostgreSQL lane is real — ONE script with identical semantics locally and in a CI job that hosts its own throwaway cluster. It MUST stop and remove every cluster it starts, including on failure and on interrupt. ⛔ It may not use the shared TEST database: a mutation run deliberately breaks and restores arms, and TEST sits behind an advisory-lock mutex shared with other CI.
-- [ ] **VAC-03**: A static linter rejects the **four statically-decidable** measured vacuity shapes on new gate files (mechanisms 1, 2, 4 and a narrow 3), so a further mechanism of those kinds is a lint failure rather than a red-team finding. ⛔ Mechanism 5 — an arm made unreachable by an earlier arm covering the same state — is **not statically decidable in SQL text** and is deliberately DELEGATED to the mutation runner's first-failure identity discipline (D-16). Shipping a fifth rule to round the count up would be a lint rule that cannot fire, which is this phase's own named defect. The delegation is machine-pinned by the linter's `DELEGATED_MECHANISMS` export. *(Corrected 2026-08-29, verification gap G3: this sentence still gave the pre-D-16 count after D-16 narrowed the scope — the shipped artifact was right and the requirement over-claimed it. Pinned by machine in `src/__tests__/lint-sql-gates.test.ts`.)* ⭐ **UPDATE 2026-09-04 (Phase 164.4, review finding WR-03):** the linter now ships **seven** rules, not four — R5/R6/R7 close a SIXTH mechanism (a pg-lane stand-in that SHADOWS the object under test) found by hand twice during the 164.4 backfill. ⛔ This does NOT touch the mechanism-5 delegation above, and R5/R6/R7 are not "a fifth rule to round the count up": mechanism 5 is still delegated to first-failure identity, and each new rule was proven to make live contact with the real corpus by DISABLING its repair escape and counting the reds (R5=1, R6=3, R7=5 real gate files), pinned as a per-rule floor.
-- [ ] **VAC-04**: No whole-body `CREATE OR REPLACE` merges without a repo-vs-PROD body diff (`DRIFT-02b`), run as a step in the existing `pull_request`-triggered `migration-drift-check.yml` (which already reaches PROD), diffing against the committed `supabase/schema/functions/` snapshot as the canonical left-hand side. ⛔ PR-triggered, NOT main-push: a red main board makes Railway skip analytics deploys. Swapping to a zero-table-grant role is booked as `[VAC-04-ROLE]`, not required here. ⚠️ It MUST strip `--` comments before matching — `pg_get_functiondef` returns them, and matching a comment is mechanism 2 on this phase's own list. When the credential is absent it exits 1 with an explicit error; it NEVER skips and never exits 0 (a skip would be this phase committing `SKIP-01`).
-- [ ] **VAC-05**: A PLAN.md's claims about the tree are verified, not trusted — every `file:line` anchor and named symbol is re-resolved at execute time and a miss fails loud.
-- [ ] **VAC-06**: Each of the five historical mechanisms is re-introduced against the phase-164 corpus and demonstrated caught. All five live in `supabase/tests/test_strategy_shares_rls.sql`, the only annotated file, so this is reachable without 164.4.
+- [x] **VAC-01**: A mutation runner runs IN CI over every arm carrying a `RED-UNDER` annotation — applies the named mutation, asserts the file goes RED, restores, asserts GREEN. It prints coverage as `files_annotated / files_total` on every run. Both failure modes exit 1: an annotation whose mutation does not redden its arm, and coverage below a ratchet floor pinned at the measured value (1/71 at HEAD; fails on REGRESSION, never "until 71/71").
+- [x] **VAC-02**: The disposable-PostgreSQL lane is real — ONE script with identical semantics locally and in a CI job that hosts its own throwaway cluster. It MUST stop and remove every cluster it starts, including on failure and on interrupt. ⛔ It may not use the shared TEST database: a mutation run deliberately breaks and restores arms, and TEST sits behind an advisory-lock mutex shared with other CI.
+- [x] **VAC-03**: A static linter rejects the **four statically-decidable** measured vacuity shapes on new gate files (mechanisms 1, 2, 4 and a narrow 3), so a further mechanism of those kinds is a lint failure rather than a red-team finding. ⛔ Mechanism 5 — an arm made unreachable by an earlier arm covering the same state — is **not statically decidable in SQL text** and is deliberately DELEGATED to the mutation runner's first-failure identity discipline (D-16). Shipping a fifth rule to round the count up would be a lint rule that cannot fire, which is this phase's own named defect. The delegation is machine-pinned by the linter's `DELEGATED_MECHANISMS` export. *(Corrected 2026-08-29, verification gap G3: this sentence still gave the pre-D-16 count after D-16 narrowed the scope — the shipped artifact was right and the requirement over-claimed it. Pinned by machine in `src/__tests__/lint-sql-gates.test.ts`.)* ⭐ **UPDATE 2026-09-04 (Phase 164.4, review finding WR-03):** the linter now ships **seven** rules, not four — R5/R6/R7 close a SIXTH mechanism (a pg-lane stand-in that SHADOWS the object under test) found by hand twice during the 164.4 backfill. ⛔ This does NOT touch the mechanism-5 delegation above, and R5/R6/R7 are not "a fifth rule to round the count up": mechanism 5 is still delegated to first-failure identity, and each new rule was proven to make live contact with the real corpus by DISABLING its repair escape and counting the reds (R5=1, R6=3, R7=5 real gate files), pinned as a per-rule floor.
+- [x] **VAC-04**: No whole-body `CREATE OR REPLACE` merges without a repo-vs-PROD body diff (`DRIFT-02b`), run as a step in the existing `pull_request`-triggered `migration-drift-check.yml` (which already reaches PROD), diffing against the committed `supabase/schema/functions/` snapshot as the canonical left-hand side. ⛔ PR-triggered, NOT main-push: a red main board makes Railway skip analytics deploys. Swapping to a zero-table-grant role is booked as `[VAC-04-ROLE]`, not required here. ⚠️ It MUST strip `--` comments before matching — `pg_get_functiondef` returns them, and matching a comment is mechanism 2 on this phase's own list. When the credential is absent it exits 1 with an explicit error; it NEVER skips and never exits 0 (a skip would be this phase committing `SKIP-01`).
+- [x] **VAC-05**: A PLAN.md's claims about the tree are verified, not trusted — every `file:line` anchor and named symbol is re-resolved at execute time and a miss fails loud.
+- [x] **VAC-06**: Each of the five historical mechanisms is re-introduced against the phase-164 corpus and demonstrated caught. All five live in `supabase/tests/test_strategy_shares_rls.sql`, the only annotated file, so this is reachable without 164.4.
 - [ ] **VAC-07**: Phase 159's two blocked items close on the new lane as ONE spec — two concurrent `csv-finalize` POSTs on one never-classified `wizard_session_id`; exactly one 2xx applied receipt, one honest raced refusal, `category_id` holds the winner. Bounded to one spec, no production code changes.
-- [ ] **VAC-08**: The repo-vs-TEST drift check (`DRIFT-01` / `SKIP-01`) joins `supabase_migrations.schema_migrations` on **`name`**, not `version`. ⛔ MEASURED 2026-08-28: the ledger re-stamps `version` at apply time while preserving the repo filename in `name`; joining on `version` reports 12 of 12 recent migrations missing when all 12 are present. A check that joins on `version` is itself a vacuous control. Pairs with a body-level assertion — presence in the ledger is not evidence the deployed body matches.
+- [x] **VAC-08**: The repo-vs-TEST drift check (`DRIFT-01` / `SKIP-01`) joins `supabase_migrations.schema_migrations` on **`name`**, not `version`. ⛔ MEASURED 2026-08-28: the ledger re-stamps `version` at apply time while preserving the repo filename in `name`; joining on `version` reports 12 of 12 recent migrations missing when all 12 are present. A check that joins on `version` is itself a vacuous control. Pairs with a body-level assertion — presence in the ledger is not evidence the deployed body matches.
 
 
 ## Future Requirements (deferred, stay in TODOS.md)
@@ -198,14 +198,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | RANK-08 | Phase 159 | Complete |
 | RANK-09 | Phase 159 | Complete |
 | SHARE-01 | Phase 164 | Complete |
-| VAC-01 | Phase 164.3 | Pending |
-| VAC-02 | Phase 164.3 | Pending |
-| VAC-03 | Phase 164.3 | Pending |
-| VAC-04 | Phase 164.3 | Pending |
-| VAC-05 | Phase 164.3 | Pending |
-| VAC-06 | Phase 164.3 | Pending |
-| VAC-07 | Phase 164.3 | Pending |
-| VAC-08 | Phase 164.3 | Pending |
+| VAC-01 | Phase 164.3 | Complete |
+| VAC-02 | Phase 164.3 | Complete |
+| VAC-03 | Phase 164.3 | Complete |
+| VAC-04 | Phase 164.3 | Complete |
+| VAC-05 | Phase 164.3 | Complete |
+| VAC-06 | Phase 164.3 | Complete |
+| VAC-07 | Phase 164.5 | Pending — DEFERRED from 164.3 plan 07 by founder decision 2026-08-29 (`[VAC-07-DEFER]`); scores only when the concurrent csv-finalize spec is observed RED-then-GREEN on the pg-lane |
+| VAC-08 | Phase 164.3 | Complete |
 | SHARE-02 | Phase 164 | Complete |
 | SHARE-03 | Phase 164 | Complete |
 | SHARE-04 | Phase 164 | Complete |
@@ -227,7 +227,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | LEDGER-03 | Phase 161.1 | Complete |
 | LEDGER-04 | Phase 161.1 | Complete |
 | HONEST-01 | Phase 162 | Complete |
-| HONEST-07 | Unassigned | Pending |
+| HONEST-07 | Unassigned | Deferred — retired job kind, no site at HEAD, no traceback; reassess at the v1.20 milestone audit rather than carry as Pending |
 | HONEST-08 | Phase 163 | Complete |
 | HONEST-02 | Phase 162 | Complete |
 | HONEST-03 | Phase 162 | Complete |
@@ -256,12 +256,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 **Coverage:**
 
 - v1.20 requirements: 50 total
-- Mapped to phases: 50 (Phases 158–165; roadmap created 2026-08-20)
-- Unmapped: 0 ✓
+- Mapped to phases: 49 (Phases 158–166 incl. 164.3/164.5; roadmap created 2026-08-20, VAC-* added 2026-08-28)
+- Unmapped: 1 — HONEST-07, deliberately (see its row). ⚠️ This line read "50 / Unmapped: 0" from 2026-08-20 to 2026-09-05 while HONEST-07 sat `Unassigned` on the same page.
 
 ---
 *Requirements defined: 2026-08-20*
-*Last updated: 2026-08-20 after roadmap creation — 50/50 requirements mapped to Phases 158–165*
+*Last updated: 2026-09-05 — 164-family re-partition: VAC-01…06/08 Complete (164.3 shipped v0.77.0.0), VAC-07 → 164.5 Pending, HONEST-07 marked Deferred; 49/50 mapped, 1 deliberately unassigned*
 
 ## Parked Milestone v1.18 requirements (NOT v1.20 scope — restored verbatim 2026-08-20)
 

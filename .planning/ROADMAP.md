@@ -835,20 +835,21 @@ that exact sentence was refuted three times here.
 
 ⚠️ Execution shape (planner, 2026-09-04): plans run strictly sequentially (one wave each — the floors ratchet). Between plan 01's commit and plan 05's, every full runner invocation on a pg_cron-equipped host exits 1 with exactly one defect, `lane-blocked-stale` — that IS success criterion 3's tripwire firing, each such commit carries a `TRIPWIRE-RED:` line, and the branch must not be pushed or shipped until plan 05 lands (main only receives the squash-merged PR head). `CREATE EXTENSION pg_cron` comes from the real migration `20260513094906_enable_pg_cron.sql` in each gate's apply list, never from a fixture or a lane bootstrap. Section counts above are the runner's own derivation (103 total); every floor is written from the run's printed lines, never from these numbers.
 
-### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items (WIZFORM-02's code:UNKNOWN class MOVED to 164.2 in the 2026-08-28 dedup), plus the Phase 163 carry-overs — headed by SKIP-01 (nothing applies migrations to TEST, so the OPS-08 SQL gate SKIPs permanently and the deployed body is tested nowhere), then OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-revision drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
+### Phase 164.1: PROD-OBSERVABILITY — one periodic prober, four targets: the analytics service-key mismatch (PYAPI-06), the async cron HTTP result (CRON-OBS-01), PROD cron-job drift (CRON-DRIFT-01) and the MT5 round-trip (MT5-WEDGE-OBS-01) — every silent production failure in scope becomes loud (INSERTED)
 
-**Goal:** Every guard in this phase's scope either bites or is gone, and every silent production failure in it becomes loud. Two halves. (a) **Gate hygiene** — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, and land the Phase 163 carry-overs. (b) **Production observability** — one periodic prober covering the three places where production can be broken while every instrument reads green: PYAPI-06 (service-key mismatch), CRON-OBS-01 (`net._http_response`), MT5-WEDGE-OBS-01 (MT5 round-trip). A probe that SKIPs on an absent credential is the defect, not the fix.
+**Goal:** One periodic prober that fails loud on the four places production has been MEASURED broken while every instrument read green. (1) PYAPI-06, BOTH halves: `src/lib/analytics-client.ts:466` omits the service-key header silently when the env var is absent, and `analytics-service/main.py:825` discards the absent-header case instead of rejecting it — a production key mismatch ran with every guarded route refusing and nothing alarming. (2) CRON-OBS-01: `net.http_post` is ASYNC, so `cron.job_run_details` reads `succeeded` for ENQUEUING; PROD jobid 1 returned 401 hourly for 7 days behind a green history. The result lives in `net._http_response` and nothing reads it. (3) CRON-DRIFT-01: nothing compares PROD `cron.job` against the repo; the oracle must be what is ACHIEVABLE on Supabase (Vault), not the `20260408215026` GUC design, which returns 42501 and could never have run here. (4) MT5-WEDGE-OBS-01: a probe that round-trips MT5 (not a port check, not `/health`) and distinguishes `-10004` (bridge not attached) from `-10005` (bridge attached, terminal not answering — the modal-dialog wedge that survives redeploys via the persistent volume). One mechanism, four targets; plan it as one prober, not four slices. A probe that SKIPs on an absent credential is the defect, not the fix.
+
+⛔ RE-PARTITION 2026-09-05 (founder-selected, `.planning/164-FAMILY-REPARTITION.md`): this phase LOST its gate-hygiene half. Frozen-spine gate retirement is DROPPED (the 164-02 `/scenario/i` narrowing is the done slice). The advisory-lock concurrency test → **164.5 BASELINE-SNAPSHOT** (it is VAC-07's spec on the new lane). Composite-stamp twin (TS half), OPS-08-TS, OPS-08-F2, OPS-08-F8, OPS-08-F9, PROC-02, PROC-03 residual, H-0001 residual → **164.6 GATE-HYGIENE**. 161-ERRPREFIX → **164.2 CURATED-COPY** (it is a sentence a user reads). PROC-01 and PII-01 are closed/decided and leave the roadmap. SKIP-01, DRIFT-01 were 164.3's and shipped there. The DEDUP tables and carried-in item statements below are retained as dated lineage; the owner column above supersedes them where they disagree.
 
 **Success Criteria**:
 
-1. No gate is retired on inspection alone. Every gate removed in (a) is first neutered and observed NOT to redden, with that observation recorded in the phase artifact. A gate that still bites is kept.
-2. The advisory lock has a concurrency test that FAILS when the lock is removed — proven by neuter, observe RED, restore. A test that passes with the lock gone does not count.
-3. One prober covers all three observability targets and fails loud on non-2xx, `-10004`, and `-10005`. Proven per arm by removing that arm's credential and observing a NON-ZERO exit — never a SKIP (`SKIP-01`'s discipline).
-4. The MT5 arm distinguishes "bridge not attached" (`-10004`) from "bridge attached, terminal not answering" (`-10005`). The two have different remedies and the code alone identifies neither; an arm that reports them as one failure has not met this.
-5. CRON-DRIFT-01 compares PROD `cron.job` against what is ACHIEVABLE on Supabase (Vault), not against the GUC design in `20260408215026`, which returns 42501 and could never have run here. Drift fails loud.
-6. Every item in this phase's carried-in list is closed with measured evidence or explicitly re-routed to a named owning phase. No item is silently dropped.
+1. ONE prober covers all four targets and exits NON-ZERO on: a missing or mismatched analytics service key (PYAPI-06), a non-2xx row in `net._http_response` for a pg_cron-issued request (CRON-OBS-01), PROD `cron.job` drift from the repo's achievable configuration (CRON-DRIFT-01), and MT5 `-10004` or `-10005` (MT5-WEDGE-OBS-01). Proven PER ARM by removing that arm's credential or injecting that arm's fault and observing the non-zero exit — never a SKIP. A SKIP on an absent credential fails the criterion.
+2. PYAPI-06 is closed at BOTH halves, each with a test that fails when its guard is removed: `analytics-client.ts` refuses to send a guarded request without the header (loud, not silent omission), and `main.py` rejects an absent header with a code distinct from a wrong header.
+3. The MT5 arm reports `-10004` and `-10005` as DIFFERENT failures with different remedies, tested per state. An arm that reports them as one failure has not met this.
+4. CRON-DRIFT-01's oracle is what is achievable on Supabase (Vault-backed `cron.job` command), not the 42501 GUC design; drift fails loud; the comparison is recorded so the next reader knows which side moved.
+5. No item that was listed in this phase before 2026-09-05 is silently dropped: each is either closed here with measured evidence or named in the re-partition block above with its new owning phase (164.2 / 164.5 / 164.6) or its DROPPED reason.
 
-**Requirements**: TBD (original scope) + carry-overs OPS-08-TS, OPS-08-F2 + ADDED 2026-09-01: CRON-OBS-01, MT5-WEDGE-OBS-01
+**Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries PYAPI-06, CRON-OBS-01, CRON-DRIFT-01, MT5-WEDGE-OBS-01 — read each entry before planning, do not re-derive
 **Depends on:** Phase 164, and now **Phase 164.3** (see DEDUP below — 164.3 builds the substrate this phase's gate work is tested on)
 **Plans:** 0 plans
 
@@ -1078,35 +1079,20 @@ it lived outside that fixer's files — named, not silently dropped:
 164.1's title no longer claims them (amended 2026-09-03; the dedup had updated 164.1's DEDUP table
 and this section's Absorbed line, but left 164.1's title and this note contradicting both).
 
+⛔ RE-PARTITION 2026-09-05 (founder-selected, `.planning/164-FAMILY-REPARTITION.md`): **161-ERRPREFIX moves here from 164.1** — `KeyPermissionBadge.tsx:140` renders a sentence a user reads, which is this phase's subject, not gate integrity. WR-06-UTC is BOTH bucketers, not one: `src/lib/freshness.ts:207-213` has only a 5-MINUTE clock-skew allowance (not day granularity) and `FactsheetView.tsx:1108-1115` has none. The provenance column of criterion 2 is still OWED WORK — `20260826120000:907` records it and no later migration adds it. The stale-`wizardSessionId` root cause (old criterion 6) is DROPPED from scope: already satisfied, verify by reading the preselect path rather than re-planning it.
+
 **Success Criteria**:
 
-1. A computation failure shows the sentence its WRITER produced, on every path where a
-   `compute_jobs` row transitions — proven by a test that performs the transition and asserts the
-   curated sentence survives it. Inspection of the bridge is not evidence.
+1. A computation failure shows the sentence its WRITER produced, on every path where a `compute_jobs` row transitions — proven by a test that performs the transition and asserts the curated sentence survives it. Inspection of the bridge is not evidence.
+2. `computation_error` carries writer/generation provenance and `sync_strategy_analytics_status` respects it. A SQL-only fix is NOT accepted as closing this — the column cannot today tell a curated sentence from a stale one, and that debt is recorded as owed in migration `20260826120000`'s header.
+3. WIZFORM-02 is closed by MEASUREMENT, not inspection: for every server-classified error code the wizard can surface, a test asserts the rendered surface shows THAT code and never `code: UNKNOWN`. The test must be shown to fail when the classification is neutered. Phase 153's span verification FAILED on 2026-08-13 — inspection is why this was believed closed once already.
+4. No refusal blames a party that did not cause the failure. `KEY_RATE_LIMIT` stops attributing `userActionLimiter`'s 429 to the exchange, and `KEY_MISSING_REQUIRED_FIELD` stops wearing a credential-shaped title on the preselect screen where there are no fields.
+5. `DRAFT_ALREADY_EXISTS`'s cause is SPLIT, not replaced — it stays true on the TOCTOU and credential arms while telling the truth on the stale-session path, where the collision is on `(user_id, wizard_session_id, source)` and not on the key.
+6. 161-ERRPREFIX per the 2026-08-26 founder ruling — SPLIT: `KeyPermissionBadge.tsx:140` renders prose only to the user (no `CODE: ` prefix), while the structured `err.code` goes to the log and the Sentry breadcrumb so support-ticket greppability (the reason the prefix existed, `:137-138`) is preserved. CLASS change, not one string: the same site emits `PROBE_BACKEND_UNAVAILABLE` and others, so the branch covers every code. Proven by a rendering test that fails when the prefix returns AND a test that fails when the code stops reaching the log.
+7. WR-06-UTC: BOTH bucketers — `freshness.ts` and `FactsheetView.tsx` — carry a day-granularity allowance for a future-dated `series_end`, each proven by a test that fails with the allowance removed; fixing one bucketer does not close this.
+8. HONEST-08-RESIDUAL: the sync arm of the staler-of-two badge is PROVEN to still render — `FreshnessChip` shown binding to the sync copy on a published row whose series is fresh (one exists off the `crypto-sma` cohort) — so "correct staler-of-two" and "always binds to series" are distinguished by measurement, not inspection.
 
-2. `computation_error` carries writer/generation provenance and `sync_strategy_analytics_status`
-   respects it. A SQL-only fix is NOT accepted as closing this — the column cannot today tell a
-   curated sentence from a stale one, and that debt is recorded as owed in migration
-   `20260826120000`'s header.
-
-3. WIZFORM-02 is closed by MEASUREMENT, not inspection: for every server-classified error code the
-   wizard can surface, a test asserts the rendered surface shows THAT code and never
-   `code: UNKNOWN`. The test must be shown to fail when the classification is neutered. Phase 153's
-   span verification FAILED on 2026-08-13 — inspection is why this was believed closed once already.
-
-4. No refusal blames a party that did not cause the failure. `KEY_RATE_LIMIT` stops attributing
-   `userActionLimiter`'s 429 to the exchange, and `KEY_MISSING_REQUIRED_FIELD` stops wearing a
-   credential-shaped title on the preselect screen where there are no fields.
-
-5. `DRAFT_ALREADY_EXISTS`'s cause is SPLIT, not replaced — it stays true on the TOCTOU and
-   credential arms while telling the truth on the stale-session path, where the collision is on
-   `(user_id, wizard_session_id, source)` and not on the key.
-
-6. The stale-`wizardSessionId` dead end is REMOVED, not just described honestly: a preselect for
-   key B no longer inherits an abandoned draft's session id for key A. Phase 162 shipped accurate
-   copy for this dead end without removing it; accurate copy is not a fix.
-
-**Requirements**: TBD
+**Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries WIZFORM-02, WR-06-UTC, HONEST-08-RESIDUAL, 161-ERRPREFIX — read each entry before planning, do not re-derive
 **Depends on:** Phase 164 (ordered AFTER 164.1 — no dependency between them, numeric order only)
 **Absorbed from 164.1 in the 2026-08-28 dedup:** WR-06-UTC, HONEST-08-RESIDUAL, and WIZFORM-02's
 `code: UNKNOWN` class — all three are sentences a user reads, which is this phase's subject.
@@ -1116,56 +1102,46 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.2 to break down)
 
-### Phase 165: DEPS — The 9-PR dependabot campaign
+### Phase 164.5: BASELINE-SNAPSHOT — the committed PROD schema baseline becomes the local stack's source and a gate, and the one production object no migration owns is dropped under review (INSERTED)
 
-**Goal**: All 9 open dependabot PRs are RESOLVED — landed or deliberately closed — in the research-verified order with the full suite green between each, and production pandas is never downgraded
-**Depends on**: Phase 158 (⛔ HARD: OPS-01 — nine CI runs against the unfixed group guarantees a silently-skipped Railway deploy, and #685 is 100% `analytics-service/`). LAST phase of the milestone — dependency churn lands after the correctness work, never before
-**Requirements**: DEPS-01
-**Success Criteria** (what must be TRUE):
+**Goal:** `supabase/schema/baseline.sql` (committed 2026-08-29, WR-04) becomes load-bearing instead of decorative, in this order: (1) repoint `scripts/local-stack/run.sh:50` at `supabase/schema/baseline.sql` and drop the `.gitignore:138` exclusion (`REPLAY-SPIKE.md:135` records that the current path makes `run.sh up` exit FATAL); (2) a baseline STALENESS gate — sha256 of the file against the hash recorded in `BASELINE.md`, failing loud on mismatch (WINDOWS 29: "committed with NO staleness gate AND NO consumer"); (3) **DRIFT-04** — `create_allocator_connected_strategy` exists in PROD under NO migration, is `SECURITY DEFINER` with `GRANT ALL … TO authenticated`, and writes encrypted credential material. FOUNDER DECISION 2026-08-29: DROP it — `DROP FUNCTION public.create_allocator_connected_strategy(<exact 11 arg types>)` with **NO `IF EXISTS` and NO `CASCADE`**, pre-flight asserting (a) live body == `baseline.sql`, (b) zero dependents, (c) `pg_stat_statements` read for call evidence and ABORT when it is unavailable — never infer zero calls from an absent measurement. Three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) before any apply; the drop is production DDL on a credential surface. (4) **DRIFT-05** as TWO gates, not conflated: (a) hermetic name-set diff, both directions, `baseline.sql` vs `supabase/schema/functions/*.sql`, a third assertion inside `dump-sql-functions.ts --check`; (b) baseline-vs-LIVE staleness on the credentialed job VAC-04 already rides. (5) **VAC08-LEDGER-32** — 32 repo migrations have no TEST ledger row; disposition each by name. (6) **VAC-07** — Phase 159's two blocked items as ONE spec on the pg-lane: two concurrent `csv-finalize` POSTs on one never-classified `wizard_session_id`; this is also where the advisory-lock concurrency test that left 164.1 lives. ⚠️ VAC-07 stays `Pending` in REQUIREMENTS until its spec is observed RED with the fence removed and GREEN with it — `[VAC-07-DEFER]` forbids scoring it earlier. Substrate: the pg-lane with pg_cron (164.4.1); nothing here touches shared TEST or PROD except the reviewed DRIFT-04 migration.
 
-  1. A prerequisite commit on `main` (not a PR) fixes `requirements.in` `pandas==2.2.3` → `3.0.3` with its comment corrected and `requirements.txt` untouched, BEFORE #685 is touched at all; #685 then lands rebased with pandas OUT of its diff and `make lock` re-run — production pandas stays 3.0.3. ⚠️ A green pytest is NOT proof of safety here; the pin itself is the assertion.
-  2. PRs land ONE at a time in the verified order — #643 → (#627, #626) → #612 ALONE (validated on `migration-drift-check.yml` first, `supabase --version` == 2.98.2 confirmed in the plan-job log; it rides the PROD auto-migrate workflows) → #685 → #686 (rebased + `npm install`, ⚠️ never bisected — its nine reds are ONE mis-materialised lockfile) → #645 @ 7.0.1 → #646 @ jsdom 30.0.1 not 30.0.0 (⚠️ jsdom 30's `engines` excludes local Node 25; decide CI-Node-22-as-authority vs `PATH=/opt/homebrew/opt/node@22/bin` explicitly, don't discover it as a flake) — full local suite between each, every merge asserted `conclusion == "success"`, never "not failure" (with no branch protection, a grey run merges).
-  3. #614 (TypeScript 7) and #606 are CLOSED with reasons written on the PRs (the `exports`-map read + the typescript-eslint `<6.1.0` peer range; #606's stale claims) so the next Dependabot reopen is pre-answered; the `fast-uri` override is bumped `^3.1.4` → `^3.1.5`; NO audit-allowlist file is added.
-  4. Zero dependabot PRs remain open at phase close, and no Railway deploy was silently skipped across the campaign (the Phase-158 watcher observed quiet or loud, never grey).
+**Success Criteria**:
 
-**Plans**: TBD
+1. `scripts/local-stack/run.sh up` boots from `supabase/schema/baseline.sql`; the old path is gone from the script and `.gitignore` no longer excludes the file. Proven by running it.
+2. The staleness gate FAILS on a one-byte change to `baseline.sql` without a matching `BASELINE.md` update, and passes when both move — proven by mutation, not inspection.
+3. DRIFT-04: the DROP migration reaches PROD only after all three pre-flight assertions pass and PRINT their measurements; a signature mismatch, a dependent object, or an unavailable `pg_stat_statements` ABORTS the deploy. Afterwards the function is absent in PROD and `database.types.ts` is regenerated without it.
+4. DRIFT-05 (a) is a hermetic assertion in `dump-sql-functions.ts --check` that fails when a function name is present on one side and not the other — proven with a red fixture in each direction; (b) runs on the credentialed job and exits 1 when its credential is absent, never skips.
+5. VAC08-LEDGER-32: every one of the 32 unledgered migrations is applied to TEST or dispositioned by name; VAC-08 reports zero unledgered migrations on its next credentialed run.
+6. VAC-07: the concurrent csv-finalize spec exists on the pg-lane, was observed RED with the advisory lock removed and GREEN with it restored, and only then does REQUIREMENTS flip VAC-07 to Complete.
 
-**Research note:** STACK.md is effectively the plan — every verdict registry- or log-measured. ⚠️ The whole campaign is predicted, not executed: no PR was rebased, no lock regenerated, no suite run. Run `mypy --strict` before shipping any `analytics-service/` change (the GSD flow runs pytest only). If #686 stays red after a clean `npm ci`, `knip` (6.25 → 6.32, seven minors, changelogs unread) is the prime suspect and its findings may be LEGITIMATE, not regressions. Update each action's SHA AND its version comment together (C-0293).
+**Requirements**: VAC-07 (deferred here from 164.3) + TODOS entries DRIFT-04, DRIFT-05, VAC08-LEDGER-32, `[VAC-07-DEFER]` — read each before planning, do not re-derive
+**Depends on:** Phase 164.4.1 (the pg-lane with pg_cron is the substrate), Phase 164.3 (VAC-04/VAC-08 credentialed jobs that (4b) and (5) ride)
+**Plans:** 0 plans
 
-### v1.20 Progress
+Plans:
 
-| Phase | Plans Complete | Status | Completed |
-|-------|----------------|--------|-----------|
-| 158. OPS-CI merge=deploy | 6/6 | Complete    | 2026-08-21 |
-| 159. RANK ranking integrity | 6/7 | Complete | v0.70.0.0 |
-| 160. PROVENANCE venue/annualization | 7/7 | 🟡 Arm proven, 1/3 surfaces | Persist arm smoked via ApiKeyManager 2026-08-25; StrategyForm un-smoked, AllocatorExchangeManager unmounted |
-| 161. WIZERR honest errors | 10/10 | Complete | v0.72.0.0 |
-| 161.1 LEDGER-REFRESH (shipped dormant) | 5/5 | Complete | v0.73.0.0 |
-| 162. HONEST visible truth | 9/9 | Complete | v0.74.0.0 |
-| 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
-| 164. SHARE revocable links | 7/7 | Complete | v0.76.0.0 |
-| 164.1 HARDEN-GUARDS (spine gates, OPS-08-TS/F2, PYAPI-06) | 0/? | Queued 2nd (deduped 2026-08-28) | - |
-| 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC, HONEST-08-RESIDUAL) | 0/? | Queued 3rd (deduped 2026-08-28) | - |
-| 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8, H-0001) | 0/? | ◆ RUNS FIRST (resequenced 2026-08-28) | - |
-| 164.4 REDUNDER-BACKFILL (39 reachable idiom files + 4 lane-blocked + 1 pending (SCOPE AMENDMENT #2, ARITHMETIC CORRECTION 2026-09-04); scope narrowed to the idiom corpus 2026-09-02, 27 non-idiom files printed-and-excluded) | 0/13 | Planned 2026-09-02 — 13 plans (spike, Wave 0 runner/CI, reference file, 10 file-batches landed one PR at a time with sql-mutation GREEN on ubuntu between); 164.3.1 HARD dep CLOSED 2026-09-02 | - |
-| 164.4.1 PGCRON-LANE (pg_cron on the lane; 5 deferred gates annotated; lane-blocked retired to 0) | 6/6 | Complete — verified, ubuntu-measured @ `ab0d5644` | 2026-09-05 |
-| 165. DEPS dependabot campaign | 0/? | Not started | - |
+- [ ] TBD (run /gsd-plan-phase 164.5 to break down)
 
-### Requirement Coverage (v1.20)
+### Phase 164.6: GATE-HYGIENE — every gate-hygiene item that left 164.1: the OPS-08 residue, the composite-stamp twin, the reviewer execution-status rule, the RED-UNDER convention's discoverability and the audit allowlist (INSERTED)
 
-| Phase | Requirements |
-|-------|--------------|
-| 158 | OPS-01, OPS-02, OPS-03, OPS-04, OPS-11 |
-| 159 | RANK-01, RANK-02, RANK-05, RANK-06, RANK-07, RANK-08, RANK-09 |
-| 160 | RANK-03, RANK-04 |
-| 161 | WIZERR-01, WIZERR-02, WIZERR-03, WIZERR-04, WIZERR-05, WIZERR-06, WIZERR-07, WIZERR-08, WIZERR-09, WIZERR-10, WIZERR-11, WIZERR-12, WIZERR-13 |
-| 162 | HONEST-01, HONEST-02, HONEST-03, HONEST-04, HONEST-05, HONEST-06 |
-| 163 | OPS-05, OPS-06, OPS-07, OPS-08, OPS-09, OPS-10, SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, SEC-06, HONEST-08 |
-| 164 | SHARE-01, SHARE-02, SHARE-03, SHARE-04 |
-| 165 | DEPS-01 |
+**Goal:** Close the gate-hygiene half that the 2026-09-05 re-partition removed from 164.1, each with a test that is observed to fail when its guard is neutered. (1) **OPS-08-F9**: `test_enqueue_internal_destrict.sql` gets its `ALL N ARMS EXECUTED` sentinel AND the two `ci.yml` integers (`SENTINEL_FLOOR`, `ARMS_FLOOR` — read the LIVE values off `ci.yml`; the `7→8` / `63→68` in the TODOS entry are 2026-08 figures) move in ONE diff with the per-file derivation entry `ci-anti-skip-gate.contract.test.ts` reads. (2) **OPS-08-F8**: the `sql-tests` loop stops exiting on first failure — every file runs, every red file is named, exit is non-zero once. (3) **OPS-08-TS**: nothing in `src/` retries a 40001 — `csv-finalize/route.ts:2044` is a COPY branch, not a retry, and `allocator/holdings/sync/route.ts:73-86` has no 40001 arm; add the retry at BOTH call sites. (4) **OPS-08-F2**: both pg_cron fan-out paths catch `WHEN OTHERS` and report success; record the failed target id and surface a non-zero failure count from the tick. (5) **Composite-stamp twin (161.1-D13), TS half**: Python honours the marker (`long_fetch.py:66`); the two TS enqueue sites have zero `retract`. (6) **PROC-02**: reviewers declare execution status and UNEXECUTED blocks — one agent-prompt field, the cheapest item in the corpus. (7) **PROC-03 residual**: the per-arm `RED-UNDER` convention SHIPPED in 164.4/164.4.1; what remains is discoverability — `scripts/mutation-runner/GRAMMAR.md` is referenced by nothing a newcomer reads. (8) **H-0001 residual**: shrink the `H_0001_UNCOVERED_ALLOWLIST` — it has SEVEN entries while both ledgers still say six; fix the count and the routes. Also carries WINDOWS 23 (the FALSE "Referrer-Policy does not strip" claim still at `gone/route.ts:93` and `route.test.ts:66` — a one-line correction pass).
 
-**50/50 v1.20 requirement IDs mapped, each to exactly one phase. No orphans, no duplicates.**
-(Per-requirement traceability: `.planning/REQUIREMENTS.md` § Traceability.)
+**Success Criteria**:
+
+1. OPS-08-F9 + F8: the sentinel is present, both integers moved in the same commit and the contract test passes; `sql-tests` runs every file and names every red one in a single run — proven with two deliberately red fixtures in one invocation.
+2. OPS-08-TS: both TS call sites retry on 40001, each with a test that fails when that site's retry is removed. A test that passes with the retry gone at either site does not count.
+3. OPS-08-F2: a failed fan-out target produces a non-zero failure count from the tick, proven on the pg-lane with one target forced to raise.
+4. The composite-stamp twin's TS half is closed with a test that fails when the `retract` is removed at either enqueue site.
+5. PROC-02, PROC-03, H-0001: the reviewer prompt carries an execution-status field and a review of an unexecuted change is BLOCKED by it (proven once on a fixture); `GRAMMAR.md` is linked from a file a newcomer actually reads (`supabase/tests/README` or `CLAUDE.md`'s SQL-gate section); the allowlist is ≤ 6 entries and both ledgers state the same number.
+
+**Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries OPS-08-F9, OPS-08-F8, OPS-08-TS, OPS-08-F2, PROC-02, PROC-03, H-0001, 161.1-D13 — read each before planning, do not re-derive
+**Depends on:** Phase 164.5 (ordering — the substrate work lands first), Phase 164.4.1 (pg-lane with pg_cron)
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.6 to break down)
 
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
@@ -1174,7 +1150,7 @@ price-detection heuristic misreading a return series as prices. RANK-05 (Phase 1
 heuristic in `compute_all_metrics` only; this phase closes the rest of the surface and settles
 whether the library stays.
 
-**Depends on:** Phase 165 (ordering only — no code dependency). ⚠️ **RESEARCH-FIRST phase:** the
+**Depends on:** Phase 164.6 (ordering only — no code dependency). ⭐ RE-ORDERED 2026-09-05: this phase now runs BEFORE 165, restoring 165's own "dependency churn lands last, never before" invariant that appending 166 after it had broken. ⚠️ **RESEARCH-FIRST phase:** the
 shape of the work is not decidable from the codebase alone (see criterion 1), so `/gsd-plan-phase 166`
 must run its research step, and the discuss step must not be skipped.
 
@@ -1237,6 +1213,64 @@ Plans:
 - [ ] TBD (run /gsd-plan-phase 166 to break down)
 
 ---
+
+### Phase 165: DEPS — The 9-PR dependabot campaign
+
+**Goal**: All 9 open dependabot PRs are RESOLVED — landed or deliberately closed — in the research-verified order with the full suite green between each, and production pandas is never downgraded
+**Depends on**: Phase 158 (⛔ HARD: OPS-01 — nine CI runs against the unfixed group guarantees a silently-skipped Railway deploy, and #685 is 100% `analytics-service/`). LAST phase of the milestone — dependency churn lands after the correctness work, never before
+**Requirements**: DEPS-01
+**Ordering (2026-09-05):** runs AFTER Phase 166 — dependency churn lands LAST in the milestone. Carried decision: when v1.21 is created and 165 is still open, it moves there.
+**Success Criteria** (what must be TRUE):
+
+  1. A prerequisite commit on `main` (not a PR) fixes `requirements.in` `pandas==2.2.3` → `3.0.3` with its comment corrected and `requirements.txt` untouched, BEFORE #685 is touched at all; #685 then lands rebased with pandas OUT of its diff and `make lock` re-run — production pandas stays 3.0.3. ⚠️ A green pytest is NOT proof of safety here; the pin itself is the assertion.
+  2. PRs land ONE at a time in the verified order — #643 → (#627, #626) → #612 ALONE (validated on `migration-drift-check.yml` first, `supabase --version` == 2.98.2 confirmed in the plan-job log; it rides the PROD auto-migrate workflows) → #685 → #686 (rebased + `npm install`, ⚠️ never bisected — its nine reds are ONE mis-materialised lockfile) → #645 @ 7.0.1 → #646 @ jsdom 30.0.1 not 30.0.0 (⚠️ jsdom 30's `engines` excludes local Node 25; decide CI-Node-22-as-authority vs `PATH=/opt/homebrew/opt/node@22/bin` explicitly, don't discover it as a flake) — full local suite between each, every merge asserted `conclusion == "success"`, never "not failure" (with no branch protection, a grey run merges).
+  3. #614 (TypeScript 7) and #606 are CLOSED with reasons written on the PRs (the `exports`-map read + the typescript-eslint `<6.1.0` peer range; #606's stale claims) so the next Dependabot reopen is pre-answered; the `fast-uri` override is bumped `^3.1.4` → `^3.1.5`; NO audit-allowlist file is added.
+  4. Zero dependabot PRs remain open at phase close, and no Railway deploy was silently skipped across the campaign (the Phase-158 watcher observed quiet or loud, never grey).
+
+**Plans**: TBD
+
+**Research note:** STACK.md is effectively the plan — every verdict registry- or log-measured. ⚠️ The whole campaign is predicted, not executed: no PR was rebased, no lock regenerated, no suite run. Run `mypy --strict` before shipping any `analytics-service/` change (the GSD flow runs pytest only). If #686 stays red after a clean `npm ci`, `knip` (6.25 → 6.32, seven minors, changelogs unread) is the prime suspect and its findings may be LEGITIMATE, not regressions. Update each action's SHA AND its version comment together (C-0293).
+
+### v1.20 Progress
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 158. OPS-CI merge=deploy | 6/6 | Complete    | 2026-08-21 |
+| 159. RANK ranking integrity | 6/7 | Complete | v0.70.0.0 |
+| 160. PROVENANCE venue/annualization | 7/7 | 🟡 Arm proven, 1/3 surfaces | Persist arm smoked via ApiKeyManager 2026-08-25; StrategyForm un-smoked, AllocatorExchangeManager unmounted |
+| 161. WIZERR honest errors | 10/10 | Complete | v0.72.0.0 |
+| 161.1 LEDGER-REFRESH (shipped dormant) | 5/5 | Complete | v0.73.0.0 |
+| 162. HONEST visible truth | 9/9 | Complete | v0.74.0.0 |
+| 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
+| 164. SHARE revocable links | 7/7 | Complete | v0.76.0.0 |
+| 164.1 PROD-OBSERVABILITY (one prober: PYAPI-06, CRON-OBS-01, CRON-DRIFT-01, MT5-WEDGE-OBS-01) | 0/? | Queued NEXT (re-partitioned 2026-09-05 from HARDEN-GUARDS) | - |
+| 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC both bucketers, HONEST-08-RESIDUAL, 161-ERRPREFIX) | 0/? | Queued 2nd | - |
+| 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8 routed on, H-0001 routed on) | 9/10 | Complete — plan 07 (VAC-07) DEFERRED to 164.5 by founder decision 2026-08-29, stays unchecked | v0.77.0.0 |
+| 164.3.1 SOUND-PRIMITIVES (four cycling primitives) | 13/13 | Complete | v0.77.1.x |
+| 164.4 REDUNDER-BACKFILL (39 idiom files annotated; 5 pg_cron-blocked files handed to 164.4.1) | 12/12 | Complete | v0.77.12.0 |
+| 164.4.1 PGCRON-LANE (pg_cron on the lane; 5 deferred gates annotated; lane-blocked 0; ARMS_FLOOR 361) | 6/6 | Complete — PR #744 merged `e01cc2e6`, ubuntu-measured | v0.77.13.0 |
+| 164.5 BASELINE-SNAPSHOT (baseline.sql load-bearing, DRIFT-04 drop, DRIFT-05, VAC08-LEDGER-32, VAC-07) | 0/? | Queued 3rd (created 2026-09-05) | - |
+| 164.6 GATE-HYGIENE (OPS-08 residue, composite-stamp twin, PROC-02/03, H-0001) | 0/? | Queued 4th (created 2026-09-05) | - |
+| 166. QSTATS-TRUTH | 0/? | Queued 5th (re-ordered ahead of 165, 2026-09-05) | - |
+| 165. DEPS dependabot campaign | 0/? | Queued LAST (after 166 — dependency churn lands last) | - |
+
+### Requirement Coverage (v1.20)
+
+| Phase | Requirements |
+|-------|--------------|
+| 158 | OPS-01, OPS-02, OPS-03, OPS-04, OPS-11 |
+| 159 | RANK-01, RANK-02, RANK-05, RANK-06, RANK-07, RANK-08, RANK-09 |
+| 160 | RANK-03, RANK-04 |
+| 161 | WIZERR-01, WIZERR-02, WIZERR-03, WIZERR-04, WIZERR-05, WIZERR-06, WIZERR-07, WIZERR-08, WIZERR-09, WIZERR-10, WIZERR-11, WIZERR-12, WIZERR-13 |
+| 162 | HONEST-01, HONEST-02, HONEST-03, HONEST-04, HONEST-05, HONEST-06 |
+| 163 | OPS-05, OPS-06, OPS-07, OPS-08, OPS-09, OPS-10, SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, SEC-06, HONEST-08 |
+| 164 | SHARE-01, SHARE-02, SHARE-03, SHARE-04 |
+| 164.3 | VAC-01, VAC-02, VAC-03, VAC-04, VAC-05, VAC-06, VAC-08 |
+| 164.5 | VAC-07 (deferred from 164.3, `[VAC-07-DEFER]`) |
+| 165 | DEPS-01 |
+
+**49/50 v1.20 requirement IDs mapped, each to exactly one phase. ONE deliberately unassigned: HONEST-07 (root cause of a retired job kind with no site at HEAD — REQUIREMENTS marks it Deferred, reassess at the milestone audit; it is not silently counted as mapped). The eight VAC-* IDs were added 2026-08-28 and were missing from this table until 2026-09-05.**
+(Per-requirement traceability: `.planning/REQUIREMENTS.md` § Traceability.)
 
 ## Parked Milestone: v1.18 MT5-VERIFY & founder confirmations (Phases 155, 157) — founder-gated
 

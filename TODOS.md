@@ -1766,7 +1766,7 @@ Two gaps remain, and neither is closed by that fix:
   `net._http_response`, counted and surfaced (⚠️ not a silent skip — that is `SKIP-01`).
 
 
-➡️ **ROUTED 2026-09-01 to Phase 164.1 (HARDEN-GUARDS).** That phase already owns this class — its
+➡️ **ROUTED 2026-09-01 to Phase 164.1 (HARDEN-GUARDS — renamed PROD-OBSERVABILITY in the 2026-09-05 re-partition; the gate-hygiene half moved to 164.5/164.6).** That phase already owns this class — its
 title names the PYAPI-06 blind spot that let a production service-key mismatch run silently. NOT
 164.3/164.3.1: those own gate integrity (a control that cannot fail), this is production
 observability (a service down while every instrument reads green). ⭐ `CRON-OBS-01` and
@@ -2354,6 +2354,17 @@ That is why the phase-163 fixer deliberately stopped here rather than half-fixin
 - **[WR-06-UTC] Give both bucketers a day-granularity allowance for future-dated series ends**,
   in one commit, with a test that renders both surfaces from one row and asserts they agree.
 
+- **[161-ERRPREFIX] `KeyPermissionBadge.tsx:140` shows the user the raw error code as a prefix** — it
+  renders `err.code ? `${err.code}: ${message}` : message`, so a founder with a broken key reads
+  `KEY_UNDECRYPTABLE: This stored key can no longer be decrypted…`. FOUNDER RULING 2026-08-26:
+  **split** — prose to the user, structured code to the log and the Sentry breadcrumb. ⚠️ CLASS
+  change, not one string: the same site emits other codes (`PROBE_BACKEND_UNAVAILABLE`, …), so branch
+  the class. The prefix was deliberate (comment at `:137-138`, support-ticket greppability) — keep
+  that property in the logs. Two tests: one fails when the prefix returns to the render, one fails when
+  the code stops reaching the log. **Owner: Phase 164.2 CURATED-COPY** (moved from 164.1 in the
+  2026-09-05 re-partition — it is a sentence a user reads). Booked 2026-09-05; this entry did not
+  exist while the ROADMAP told planners to read it.
+
 **Net effect today:** for those ~3 hours a day, a non-UTC reporter's strategy renders a muted
 grey "Track record ends in the future" on both the discovery badge and the factsheet chip.
 Honest and self-consistent — no longer a contradiction, and no longer amber — but still a
@@ -2577,6 +2588,23 @@ there is nothing to strip, so:
   applies to PROD;
 - removing the block-comment pass (added to close a demonstrated `/* */` evasion) changes
   **zero** TEST results. CI cannot detect the removal of the mechanism CI depends on.
+
+
+- **[PROC-02] Reviewers must declare execution status, and UNEXECUTED blocks.** `gsd-code-reviewer`
+  is read-only by construction, and nothing in the loop says so — three clean reviews of a
+  never-executed migration read exactly like three clean reviews of a tested one. One agent-prompt
+  field; the cheapest item in the corpus, and the one that would have surfaced PROC-01 at review time
+  instead of red-team time. Routed from Phase 164's red-team 2026-08-27. **Owner: Phase 164.6
+  GATE-HYGIENE** (2026-09-05 re-partition). Booked 2026-09-05; the ROADMAP had cited a TODOS entry
+  that did not exist.
+
+- **[PROC-03] Per-arm `RED-UNDER` annotation — the CONVENTION shipped, its discoverability did not.**
+  Phases 164.4 and 164.4.1 annotated every idiom gate file the pg-lane can reach (`files 44/71`,
+  `ARMS_FLOOR` 361) and the runner proves each arm bites. What remains: `scripts/mutation-runner/
+  GRAMMAR.md` is referenced by nothing a newcomer reads, so the next gate file is not born with the
+  convention unless its author already knows it. Link it from `supabase/tests/README` or `CLAUDE.md`'s
+  SQL-gate section and add the sql-gate-lint rule that a NEW gate file without `RED-UNDER` is red.
+  **Owner: Phase 164.6 GATE-HYGIENE.** Booked 2026-09-05; same missing-entry defect as PROC-02.
 
 - **[DRIFT-01] Re-align TEST's `_enqueue_compute_job_internal` with the repo definition**, or
   record deliberately that TEST is an older mirror. Until then, no CI run can exercise the

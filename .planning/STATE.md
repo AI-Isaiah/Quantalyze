@@ -6,16 +6,16 @@ current_phase: 164.4.1
 current_phase_name: PGCRON-LANE
 status: complete
 stopped_at: Phase 164.4.1 COMPLETE — verified, ubuntu-measured at run 33973362161
-last_updated: "2026-09-05T15:18:29.000Z"
+last_updated: "2026-09-05T17:36:34.047Z"
 last_activity: 2026-09-05
 last_activity_desc: Phase 164.4.1 closed — 44 files, 361 arms, 0 waivers, lane-blocked retired
-state_head: d6142c94188ab013e1c2957cfe9643b7a1d5924d
+state_head: e01cc2e6b47f0a5d4804ac23d63634ecfb057c91
 progress:
-  total_phases: 16
+  total_phases: 18
   completed_phases: 4
-  total_plans: 76
-  completed_plans: 71
-  percent: 25
+  total_plans: 70
+  completed_plans: 66
+  percent: 22
 ---
 
 # Project State — Quantalyze
@@ -188,7 +188,7 @@ Plan: 5 of 6
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 164.4.1
+Status: Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0), Railway on `e01cc2e6`. 164-family RE-PARTITIONED 2026-09-05 (164.1 → PROD-OBSERVABILITY, 164.2 CURATED-COPY +161-ERRPREFIX, NEW 164.5 BASELINE-SNAPSHOT, NEW 164.6 GATE-HYGIENE, order 164.6 → 166 → 165). Next: `/gsd-autonomous --only 164.1`.
       `arms: 262/262/0`, `biting: 262`, 0 waivers, exit 0. Next: land 164.4-11 as its own PR with
       `sql-mutation` GREEN on ubuntu SHA-bound to the head, then `/gsd-verify-work 164.4`.
       ⏳ Phase 164.4.1 PGCRON-LANE is still owed the 4 lane-blocked files plus the 1 `pending:`
@@ -840,6 +840,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.1 edited: edited fields: goal, success_criteria — scope ADDED 2026-09-01: CRON-OBS-01, MT5-WEDGE-OBS-01 (production observability; routed here not to 164.3/164.3.1 which own gate integrity)
 - Phase 164.2 edited: added Success Criteria (6, was 0): pins WIZFORM-02 code:UNKNOWN to measurement-not-inspection after Phase 153 span verification failed 2026-08-13; also resolved the 164.1-vs-164.2 WIZFORM-02 ownership contradiction left by the 2026-08-28 dedup
 - Phase 166 added at the END of milestone v1.20 (after 165): QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given. ⚠️ RESEARCH-FIRST + discuss REQUIRED; the upgrade-vs-inline-mirror shape is not decidable from the codebase. Closes the RANK-05 price-detection residual recorded in `.planning/WINDOWS.md` entries 5 and 9 (both `open`), which persisted MEASURED-wrong scalars (`ulcer_index=0.9947`, `upi=2.9999`, `serenity_index=0.3204`, `recovery_factor=2.0737`, `common_sense_ratio=0.0`) into `metrics_json` for a series whose `max_drawdown` correctly read 0.0. ⛔ Also fixes the RANK-05 region gate, which matches LINES and is therefore structurally blind to the `getattr(qs.stats, attr)` dispatch at `metrics.py:1826` and to `_rolling_alpha_beta` (`:2071`, feeds RENDERED chart series) — it reports clean over the exact surface still open, a 164.3-class control that cannot fail. Carries TODOS 0f `[159-SIMPLIFY-DEFER]`. ⭐ Routing decision (founder asked 2026-09-03 whether it belonged in 164.1 or 164.2): NEITHER — 164.1 is gate hygiene + production observability, 164.2 is the failure SENTENCE a user reads. A wrong Sharpe is not an error surface, it is a confident lie, so the thesis is Phase 162's (HONEST) and it earns its own phase.
+- Phase 164.1 edited: re-partition 2026-09-05: edited fields title, goal, requirements, success_criteria (HARDEN-GUARDS -> PROD-OBSERVABILITY; gate-hygiene half moved to 164.5/164.6, 161-ERRPREFIX to 164.2)
+- Phase 164.2 edited: re-partition 2026-09-05: edited fields requirements, success_criteria (+RE-PARTITION block: 161-ERRPREFIX moved in from 164.1, WR-06-UTC both bucketers, HONEST-08-RESIDUAL; old criterion 6 wizardSessionId dropped as already satisfied)
+- Phase 164.5 inserted: BASELINE-SNAPSHOT created 2026-09-05 by the 164-family re-partition: baseline.sql load-bearing, DRIFT-04 drop, DRIFT-05 both directions, VAC08-LEDGER-32, VAC-07 (deferred from 164.3)
+- Phase 164.6 inserted: GATE-HYGIENE created 2026-09-05: OPS-08-F9/F8/TS/F2, composite-stamp twin (161.1-D13) TS half, PROC-02, PROC-03 residual, H-0001 residual, WINDOWS 23
+- Phase 166 reordered: moved ahead of 165 on 2026-09-05 so dependency churn lands LAST; 166 depends_on 164.6 (ordering only)
 
 ### Decisions
 
