@@ -1423,11 +1423,20 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_profiles_privileged_columns_locked.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
     "  file test_reconcile_dropped_enqueue_sweep.sql: sections 39 / judged 39 / annotated 39 / waived 0 / biting 39",
     "  file test_resync_retry_single_job.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
-    // ⚠️ The one row where `judged` and `annotated` are below `sections`: the
-    // 25th section, `3/JOB-05`, is the waiver. Shown here in the same W = 0
-    // projection as the aggregate above, for the reason stated there; the live
-    // run prints `annotated 25 / waived 1` for this file.
-    "  file test_retention_orphaned_running.sql: sections 25 / judged 24 / annotated 24 / waived 0 / biting 24",
+    // ⛔ CORRECTED 2026-09-05 (review finding WR-01 of 164.4.1-REVIEW.md).
+    // This row USED TO read `sections 25 / judged 24`, a leftover from the one
+    // commit where `3/JOB-05` was a WAIVER. Commit fcbc0159 RECLASSIFIED that
+    // raise instead — it no longer carries a `TEST FAILED (` identity, so it is
+    // not a section at all — and the sibling reaper row was corrected to 28
+    // while this one was left behind, contradicting the comment ~1100 lines
+    // above ("⚠️ The file ships 24 sections, not 25"). MEASURED at HEAD:
+    //   `node scripts/mutation-runner/run.mjs --parse-only`
+    //     supabase/tests/test_retention_orphaned_running.sql: 24 prose / 24 twin(s) / 0 waiver(s)
+    //     file test_retention_orphaned_running.sql: sections 24 / judged 0 / annotated 24 / waived 0 / biting 24
+    // ⛔ This fixture's whole value is that it is the runner's OWN printed
+    // format; a row the runner never prints cannot catch a parser that stops
+    // reading a field. Every row here is now `sections == judged == annotated`.
+    "  file test_retention_orphaned_running.sql: sections 24 / judged 24 / annotated 24 / waived 0 / biting 24",
     "  file test_scenario_downgrade_sweep.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_scenario_shares_rls.sql: sections 9 / judged 9 / annotated 9 / waived 0 / biting 9",
     "  file test_scenarios_rls.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
