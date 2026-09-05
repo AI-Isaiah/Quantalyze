@@ -16,6 +16,14 @@
 #   bash scripts/pg-lane/install-pg-cron-macos.sh --force      # rebuild even when already installed
 #   bash scripts/pg-lane/install-pg-cron-macos.sh --uninstall  # remove exactly what this script writes
 #
+# ENV: PGBIN=<dir containing pg_config> names the server binaries explicitly,
+# exactly as the lane honours it (scripts/pg-lane/run.sh:252 takes PGBIN over
+# its own resolve_pgbin). Set it when a pg_ctl on PATH belongs to a different
+# keg than the one the lane should boot. Setting it ALSO skips the PATH-vs-keg
+# agreement refusal below — with PGBIN exported the lane and this script agree
+# by construction, so there is nothing left to disagree about. It must still
+# name a major-16 keg; that check is not skippable and has no env-var bypass.
+#
 # ⛔ NOT VIA HOMEBREW'S pg_cron FORMULA. Its `depends_on` names postgresql@17
 # and postgresql@18 only, so it emits no @16 artifact; an extension library
 # built for another server major cannot load into 16.13, and the resulting
@@ -70,6 +78,12 @@ resolve_pgbin() {
   return 1
 }
 
+# Record whether PGBIN came from the CALLER before resolve_pgbin overwrites it.
+# The agreement guard below reasons only about the case where this script had to
+# GUESS which keg to use; an explicitly-set PGBIN is not a guess, and run.sh:252
+# honours the same variable first, so the two cannot disagree once it is set.
+if [ -n "${PGBIN:-}" ]; then PGBIN_EXPLICIT=1; else PGBIN_EXPLICIT=""; fi
+
 PGBIN=$(resolve_pgbin) || exit 1
 PGC="$PGBIN/pg_config"
 [ -x "$PGC" ] || fail "PGBIN=$PGBIN has no executable pg_config"
@@ -78,16 +92,30 @@ PGC="$PGBIN/pg_config"
 # those disagree, this script would install next to binaries the lane never
 # boots — an install that succeeds and buys nothing, which is the silent-degrade
 # shape phase 164.4.1 exists to remove. Refuse instead of guessing.
-if [ -z "${PGBIN_CHECKED:-}" ] && command -v pg_ctl >/dev/null 2>&1; then
+#
+# ⚠️ Scoped to the GUESSING case only. run.sh:252 is `if [ -z "${PGBIN:-} ]; then
+# PGBIN=$(resolve_pgbin)`, so an exported PGBIN wins in BOTH programs and the
+# disagreement this guard describes cannot exist — firing it there refused the
+# operator who did the correct thing (naming the @16 keg on a box whose PATH
+# pg_ctl is @18) and sent them, via the old remediation text, straight into the
+# REQUIRED_MAJOR refusal below. There is deliberately no env-var kill switch:
+# the previous `PGBIN_CHECKED` bypass was set nowhere in the repo, documented
+# nowhere, and silently disabled a safety guard. PGBIN is the documented
+# override, and it is one the lane honours identically.
+if [ -z "$PGBIN_EXPLICIT" ] && command -v pg_ctl >/dev/null 2>&1; then
   path_bin=$(dirname "$(command -v pg_ctl)")
   if [ "$path_bin" != "$PGBIN" ]; then
     fail "$(printf '%s\n' \
       "the lane and this script would resolve DIFFERENT PostgreSQL binaries:" \
       "  scripts/pg-lane/run.sh would boot: $path_bin  (pg_ctl on PATH wins there)" \
       "  this script would install into:    $PGBIN" \
-      "Installing pg_cron for the second would leave the first without it. Set" \
-      "PGBIN=$path_bin to build against the keg the lane actually boots, or take" \
-      "that pg_ctl off PATH.")"
+      "Installing pg_cron for the second would leave the first without it." \
+      "Export PGBIN to name ONE keg for both — this guard then has nothing to" \
+      "compare and is skipped:" \
+      "  PGBIN=$path_bin   # if that is the major-$REQUIRED_MAJOR keg you want the lane on" \
+      "  PGBIN=$PGBIN   # if it is not; the lane will honour this too" \
+      "Whichever you pick must be major $REQUIRED_MAJOR or the next check refuses" \
+      "it. Taking the stray pg_ctl off PATH also works.")"
   fi
 fi
 
@@ -282,7 +310,9 @@ while [ "$#" -gt 0 ]; do
     --install)   MODE="install";   shift ;;
     --uninstall) MODE="uninstall"; shift ;;
     --force)     MODE="${MODE:-install}"; FORCE=1; shift ;;
-    -h|--help)   sed -n '2,30p' "$0"; exit 0 ;;
+    # Derived, not a pinned offset — same reason as run.sh's --help: a
+    # hand-maintained line number truncates the header the next time it grows.
+    -h|--help)   awk 'NR > 1 { if (!/^#/) exit; print }' "$0"; exit 0 ;;
     *) fail "unknown argument: $1 (see --help)" ;;
   esac
 done
