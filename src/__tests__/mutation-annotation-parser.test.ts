@@ -754,8 +754,22 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // (one of them needs THREE steps, because that STEP 2 pins the readmit
     // ceiling twice over: once as a literal and once as a shape). Corpus-wide
     // `sql` steps: still 101, of 485 total steps.
-    expect(armsSeen).toBe(363);
-    expect(stepsSeen).toBe(384);
+    // ⛔ RE-MEASURED 2026-09-05 (review findings CR-01/CR-02 of
+    // 164.4.1-REVIEW.md): 361 arms / 381 file steps. BOTH numbers were RUN, not
+    // derived from the pair above. The reconcile-sweep gate lost THREE `edit`
+    // steps and gained ONE `sql` step, in one move:
+    //   * `2/JOB-04` traded its gate-self `edit` for a live-DB `sql` step
+    //     (`DELETE FROM cron.job WHERE jobname =
+    //     'reconcile_dropped_enqueue_sweep'`) plus 5 measured `1/JOB-04`
+    //     neuters — arm kept, -1 file step, +1 `sql` step.
+    //   * `3/JOB-04` and `4/JOB-04` were RECLASSIFIED as named INVARIANTs and
+    //     have no annotation at all now — -2 arms, -2 file steps.
+    // MEASURED over scanCorpus at this commit, not arithmetic over the line
+    // above: `arms=361 waivers=0 fileSteps=381 sqlSteps=102 totalSteps=483`.
+    // So `sql` steps went 101 -> 102 and total steps 485 -> 483; `stepsSeen`,
+    // which skips `sql`, went 384 -> 381.
+    expect(armsSeen).toBe(361);
+    expect(stepsSeen).toBe(381);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1497,7 +1511,18 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // reaper gate contributed 39 needles from 28 biting arms; its one `sql`
     // step (the `2` unschedule) carries no needle. 101 of the corpus's 432
     // steps are `sql`, one more than the 100 at plan 03.
-    expect(needles.length).toBe(384);
+    // RE-MEASURED 2026-09-05 (review findings CR-01/CR-02 of
+    // 164.4.1-REVIEW.md): 381 needles across 361 non-waiver arms, still zero
+    // waivers. ⛔ RUN, not reasoned about, and run SEPARATELY from `stepsSeen`
+    // — they agree at 381 on this tree only because every remaining file step in
+    // the reconcile-sweep gate is an `edit` carrying a `find`, the same
+    // coincidence recorded at plan 04. The three needles that left are the three
+    // gate-self `find` strings the review refuted: `2/JOB-04`'s (its `edit` step
+    // became a live-DB `sql` step, which carries no needle) and `3/JOB-04`'s and
+    // `4/JOB-04`'s (both arms reclassified as named INVARIANTs, so they have no
+    // annotation at all). MEASURED over scanCorpus at this commit:
+    // `arms=361 waivers=0 fileSteps=381 sqlSteps=102 totalSteps=483`.
+    expect(needles.length).toBe(381);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

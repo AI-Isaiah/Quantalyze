@@ -764,6 +764,23 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 // and every one of them is printed by name on every run. 44 + 0 + 27 + 0 + 0 =
 // 71. The 2026-09-05 plan-04 block above stays as the dated record of the
 // 43-file corpus.
+//
+// ⭐ RE-MEASURED 2026-09-05 (review fix, findings CR-01/CR-02 of
+// 164.4.1-REVIEW.md). Value UNCHANGED at 44 — the reclassification of
+// `3/JOB-04` and `4/JOB-04` removed two SECTIONS from
+// test_reconcile_dropped_enqueue_sweep.sql (39 -> 37) but no FILE left the
+// annotated set, so `coverage:` is still 44/71. Read off the run's own line:
+//   `node scripts/mutation-runner/run.mjs`
+//     coverage: files 44/71
+//     lane-blocked: 0 file(s) …
+//     lane-probe: pg_cron AVAILABLE — lane-blocked class is empty, as a hosting lane requires
+//       pending: 0 idiom file(s) without RED-UNDER —
+//     arms: 361/361/0   (executed/annotated/waived)
+//     biting: 361
+//     lane-invocations: 361
+//     per-arm lane time: mean 1.1s over 361 arm run(s)
+// The paired ARMS_FLOOR move (363 -> 361) and its own separation measurement
+// are in the block below.
 export const FILES_FLOOR = 44;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
@@ -1496,7 +1513,64 @@ export const FILES_FLOOR = 44;
 // are both measured 0, so there is no known idiom gate file left for the lane to
 // reach. `WAIVED_CEILING` has not moved through any of the four arms moves of
 // this phase, nor through the eleven of 164.4 — see its own block below.
-export const ARMS_FLOOR = 363;
+//
+// ⛔ RE-DERIVED 2026-09-05 — a LOWERING, and the first one this constant has
+// ever taken. The block above STAYS as the dated record of the 363-arm corpus.
+//
+//   VALUE        361 — read off the run's own `biting:` line, not counted here.
+//                ⚠️ It went DOWN by 2, and that is the POINT rather than a
+//                regression to be worked around: review findings CR-01 and
+//                CR-02 of 164.4.1-REVIEW.md established that three of the 363
+//                arms in test_reconcile_dropped_enqueue_sweep.sql were being
+//                falsified by mutations of THE GATE FILE'S OWN oracle lookup —
+//                a mutation with no production preimage — rather than by
+//                anything a migration could do.
+//                  * `2/JOB-04` KEPT its identity and got a REAL production
+//                    mutation instead (`DELETE FROM cron.job WHERE jobname =
+//                    'reconcile_dropped_enqueue_sweep'` as a live-DB `sql`
+//                    step, with 5 measured `1/JOB-04` neuters). Net 0.
+//                  * `3/JOB-04` and `4/JOB-04` were RECLASSIFIED as named
+//                    INVARIANTs — the same treatment `3/JOB-05`
+//                    (test_retention_orphaned_running.sql, commit fcbc0159) and
+//                    the reaper's Part 3 (commit 95197d28) already carry — after
+//                    the domination was re-measured on a real lane by the fixer:
+//                    with the Part 1 and Part 2 raises neutered and the job row
+//                    deleted, the lane dies inside PART 2 on `22004: query
+//                    string argument of EXECUTE is null`, naming no arm, so
+//                    neither guard is reachable by any production mutation.
+//                    Net -2. `WAIVED_CEILING` stays 0 — this is not a waiver.
+//                A floor is a count of arms PROVEN to react to a production
+//                regression. Holding it at 363 would have required keeping two
+//                arms that provably do not, which is the ratchet buying a number
+//                with evidence it does not have.
+//   DATE         2026-09-05, on the 164.4.1 review-fix branch.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 44/71
+//                  lane-blocked: 0 file(s) …
+//                  lane-probe: pg_cron AVAILABLE — lane-blocked class is empty, as a hosting lane requires
+//                    pending: 0 idiom file(s) without RED-UNDER —
+//                  arms: 361/361/0   (executed/annotated/waived)
+//                  biting: 361
+//                  lane-invocations: 361
+//                  per-arm lane time: mean 1.1s over 361 arm run(s)
+//                  ✅ No defects. Every annotated arm bit its own arm first.
+//   SAMPLE SIZE  361 arms executed, all 361 `RED (identity ok)`. The two
+//                independent tallies AGREE: `arms:` executed 361 and
+//                `lane-invocations:` 361, beside 44 baseline and 44 restore
+//                legs. The 44 per-file `biting` counts SUM to 361; the only row
+//                that moved is test_reconcile_dropped_enqueue_sweep.sql,
+//                39 -> 37.
+//   SEPARATION   Measured in BOTH directions on real lanes, same tree:
+//                  ARMS_FLOOR=363 (the stale value) -> 1 defect ->
+//                    `ARMS_FLOOR regression: 361 biting arm(s) < floor 363`
+//                  ARMS_FLOOR=362 (one higher)      -> 1 defect ->
+//                    `ARMS_FLOOR regression: 361 biting arm(s) < floor 362`
+//                  ARMS_FLOOR=361 (this value)      -> 0 defects, EXIT 0
+//                So 361 is exactly the separation point, not a value below it.
+//   RECORD       164.4.1-REVIEW.md findings CR-01 and CR-02, and the measured
+//                refutation recorded at each arm's own site in
+//                supabase/tests/test_reconcile_dropped_enqueue_sweep.sql.
+export const ARMS_FLOOR = 361;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
