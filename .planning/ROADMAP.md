@@ -893,7 +893,7 @@ that exact sentence was refuted three times here.
 
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries PYAPI-06, CRON-OBS-01, CRON-DRIFT-01, MT5-WEDGE-OBS-01 — read each entry before planning, do not re-derive
 **Depends on:** Phase 164, and now **Phase 164.3** (see DEDUP below — 164.3 builds the substrate this phase's gate work is tested on)
-**Plans:** 4/6 plans executed
+**Plans:** 5/6 plans executed
 
 ⛔ **DEDUP 2026-08-28 — five carry-overs LEFT this phase, three MOVED to 164.2, one DECIDED inline.**
 Founder-approved. Before this, ten items were listed here and five of them were ALSO claimed by
@@ -1063,7 +1063,7 @@ Plans:
 - [x] 164.1-02-PLAN.md — PYAPI-06 both halves: SeamConfigError before the fetch (TS) + SERVICE_KEY_ABSENT 401 (Python), vocabulary disposition, neuter→RED→restore proofs (wave 1)
 - [x] 164.1-03-PLAN.md — CRON-OBS-01 + CRON-DRIFT-01 arms: psql seam, net._http_response time-window join, committed-manifest compare with both readings, --capture-manifest, --self-test 32/32 (wave 2)
 - [x] 164.1-04-PLAN.md — MT5-WEDGE-OBS-01 arm: railway ssh seam, committed read-only probe, -10004 ≠ -10005 with distinct remedies, floor met at 4/4, --self-test 42/42 (wave 3)
-- [ ] 164.1-05-PLAN.md — prod-prober.yml (hourly, own workflow, hard-fail credentials, self-test-then-live, pinned Railway CLI, dedup'd issue, capture-manifest mode) + vitest wiring pin (wave 4)
+- [x] 164.1-05-PLAN.md — prod-prober.yml (hourly, own workflow, hard-fail credentials, self-test-then-live, pinned Railway CLI, dedup'd issue, capture-manifest mode) + vitest wiring pin (wave 4)
 - [ ] 164.1-06-PLAN.md — SHA-bound dispatches: capture + commit the PROD cron manifest, live four-arm read, D-20/D-18 measurements, TODOS closure, criterion-5 ledger, founder posture decision (wave 5, checkpoints)
 
 ### Phase 164.2: CURATED-COPY — the curated failure sentence must reach the user (INSERTED)
