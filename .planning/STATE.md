@@ -188,7 +188,7 @@ Plan: 5 of 6
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0), Railway on `e01cc2e6`. 164-family RE-PARTITIONED 2026-09-05 (164.1 → PROD-OBSERVABILITY, 164.2 CURATED-COPY +161-ERRPREFIX, NEW 164.5 BASELINE-SNAPSHOT, NEW 164.6 GATE-HYGIENE, order 164.6 → 166 → 165). Next: `/gsd-autonomous --only 164.1`.
+Status: 164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition, v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0), Railway on `e01cc2e6`. 164-family RE-PARTITIONED 2026-09-05 (164.1 → PROD-OBSERVABILITY, 164.2 CURATED-COPY +161-ERRPREFIX, NEW 164.5 BASELINE-SNAPSHOT, NEW 164.6 GATE-HYGIENE, order 164.6 → 166 → 165). Next: `/gsd-autonomous --only 164.1`.
       `arms: 262/262/0`, `biting: 262`, 0 waivers, exit 0. Next: land 164.4-11 as its own PR with
       `sql-mutation` GREEN on ubuntu SHA-bound to the head, then `/gsd-verify-work 164.4`.
       ⏳ Phase 164.4.1 PGCRON-LANE is still owed the 4 lane-blocked files plus the 1 `pending:`
