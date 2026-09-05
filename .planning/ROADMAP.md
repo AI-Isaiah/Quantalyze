@@ -446,6 +446,48 @@ moves. The three residuals accepted rather than closed (`SHARE-RES-R4`, `SHARE-R
 
 **Research note:** the payload-builder seam is the one un-measured integration (extracting the build half of `fetchAndBuildPayload` touches the composite arm AND the single-key basis arm — MEDIUM confidence, wider than it looks). Budget a research pass at plan time; don't discover it. Token-leak channels: Sentry `beforeSend` scrub verified against a REAL captured event, `Referrer-Policy: no-referrer` per-route, generic metadata (link-unfurl dullness accepted explicitly — a private link SHOULD be dull in a chat preview). *(Planning update 2026-08-26: the seam measurement is now done — the composite/basis arms moved to `src/lib/factsheet/` in July, so the extraction in 164-01 is a one-function verbatim move per the founder's final D-06 ruling.)*
 
+### Phase 164.7: APPSETTINGS — every app.* GUC reader moves to a mechanism this platform actually grants, because ALTER DATABASE and ALTER ROLE both return 42501 here (INSERTED)
+
+**Goal:** Every `current_setting('app.…')` reader in `supabase/migrations/**` moves to a configuration mechanism this platform actually grants, and a machine stops the next one being written. ⛔ **MEASURED ON PROD 2026-09-05, not inferred from docs** — all three forms, in the Supabase SQL editor as `postgres`:
+
+| Form | Result |
+|---|---|
+| `ALTER DATABASE postgres SET app.ledger_refresh_enabled = 'true'` | **`ERROR: 42501: permission denied to set parameter`** |
+| `ALTER ROLE postgres SET app.ledger_refresh_enabled = 'true'` | **`ERROR: 42501: permission denied to set parameter`** |
+| `SET app.ledger_refresh_enabled = 'true'` (session) | ✅ returns `true` |
+
+So the value can only be set per-session, which no out-of-band operator action can do. **12 read sites across 4 settings depend on a mechanism that cannot be configured here**, in five migrations: `20260407164606_perfect_match.sql:31` (`app.admin_email`), `20260408113029_cron_heartbeat.sql:144,145,167,170` and `20260408215026_schedule_match_cron_hourly.sql:45,46,70,73` (`app.analytics_service_url` ×4, `app.analytics_service_key` ×5), and `20260825130000_ledger_refresh_fanout_dormant.sql:275` + `20260825140000_ledger_refresh_composite_arm.sql:220` (`app.ledger_refresh_enabled` ×2).
+
+⭐ **This is a THIRD independent discovery of one defect.** `CRON-DRIFT-01` found it in the match-engine cron (booked, PROD hand-fixed onto Vault 2026-09-01, repo never updated — Phase 164.5 item (7) repairs that ONE job). Phase 161.1 then shipped an entire fail-closed activation switch on the same mechanism and it was never exercised, because the phase shipped dormant by design — so the switch has never once been thrown and **cannot be**. Two phases independently designed operator controls on a Postgres feature this platform does not grant, a year apart, and neither found out until someone tried. The pattern, not the instance, is this phase's subject.
+
+⛔ **The blast radius is a shipped, blocked deliverable.** Phase 161.1 LEDGER-REFRESH is complete, verified 4/4, merged as v0.73.0.0, and **cannot be turned on**. Four PROD mt5 strategies carry `strategy_analytics` days stale against okx at hours, which is the exact gap 161.1 was built to close.
+
+⛔ **The available workaround is REJECTED, and the rejection is the point.** Setting the flag inside the cron command (`$$SET app.… = 'true'; SELECT enqueue_…();$$`) works and was offered to the founder on 2026-09-05. **Founder chose the proper fix over shipping it.** It would hold a fail-closed guard permanently open by its own caller, and it would silently invalidate `docs/runbooks/ledger-refresh-go-live.md`'s FAST rollback ("reset the activation setting; the schedule keeps firing, the function returns 0") — a documented incident procedure that would then succeed while changing nothing. A kill switch that reports success and does not stop the thing is worse than no kill switch.
+
+**Two mechanisms, chosen per setting rather than one-size-fits-all:** `app.analytics_service_key` is a SECRET and belongs in Vault (`vault.decrypted_secrets` — the mechanism PROD's jobid 1 was hand-repaired onto and the only one PROVEN working here); `app.analytics_service_url`, `app.admin_email` and `app.ledger_refresh_enabled` are non-secret configuration and belong in a table an operator can UPDATE, which restores the out-of-band kill switch 161.1's design depends on.
+
+⛔ **SCOPE FENCE vs Phase 164.5 item (7).** 164.5 repairs the LIVE `match_engine_cron` `cron.job` row to match a committed manifest. THIS phase changes what the MIGRATIONS READ. They are not the same act and must not be merged: 164.5 fixes one production row, 164.7 fixes the class. 164.7 runs FIRST so 164.5's repair migration is written against the settled mechanism rather than inventing a second answer to the same question.
+
+⭐ **CARRIED IN 2026-09-05 — `VAC04-ARMS-OBSERVE`, an OBSERVATION obligation, not a work item.** `[VAC04-ARMS-UNRUN]` (TODOS.md) records that VAC-04's three behavioural arms have never executed against the real PROD credential: the D-13 legitimate-zero branch (`scripts/prod-body-drift-check.sh:448`), the normal compare verdict, and the absurdity floor (`:608+`). PR #730 carried the credential but changed no `supabase/migrations/**` file, so the script exited at its EARLIEST short-circuit (`:198`, *"this PR changes no migration files — nothing to compare against PROD"*). ⛔ That entry FORBIDS manufacturing a migration PR to tick this off, which is why the obligation had no owner. This phase writes a genuine forward migration anyway, and in the queued order (164.1 → 164.2 → **164.7** → 164.5 → 164.6) its PR is the FIRST real chance for those arms to fire — so the obligation is to READ the result, not to create the occasion. ⚠️ If this phase's migration turns out not to change a function BODY (it may touch only cron rows and GUC readers), that is a legitimate outcome: say so explicitly and ROLL THE OBLIGATION FORWARD to Phase 164.5, whose DRIFT-04 `DROP FUNCTION` and CRON-DRIFT-01-REPAIR migrations are the backstop. Either way `.planning/WINDOWS.md` entry 25 gets its disposition from a MEASUREMENT, never an assertion. ⛔ NOT in scope: `[VAC-04-ROLE]` (the zero-grant credential swap) stays unowned in TODOS by its own instruction — it changes WHICH credential is used, not whether the control works, and its entry says not to let it gate a phase.
+
+**Success Criteria**:
+
+1. Zero `current_setting('app.` occurrences remain in `supabase/migrations/**` outside a dated, commented lineage block — proven by a grep in CI, with a RED fixture showing the gate fires when one is reintroduced. A gate that cannot fire is this milestone's named defect.
+2. Each of the 4 settings is dispositioned BY NAME with its chosen mechanism and a migration that moves it: `analytics_service_key` → Vault, `analytics_service_url` / `admin_email` / `ledger_refresh_enabled` → the settings table. No setting is silently dropped, and `app.admin_email` (1 site, possibly dead) is either migrated or DELETED with the evidence that nothing reads it.
+3. ⭐ **The 161.1 activation switch is THROWN on PROD and observed working** — this phase is not done when the code changes, it is done when `enqueue_ledger_refresh_for_strategies` returns a non-zero count on a real tick and `ledger_refresh_staleness.days_since_last_return` goes DOWN for the mt5 cohort. ⚠️ A green `compute_jobs` row is NOT success: the defect 161.1 fixes wore a green badge for weeks (`process_key_long` returns DONE and leaves `strategy_analytics` untouched). Check the view, not the job.
+4. The out-of-band kill switch is REAL and proven by measurement: with the schedule still registered and firing, flipping the setting makes the next tick enqueue 0 — observed, not asserted. This is the property the rejected workaround would have destroyed.
+5. `docs/runbooks/ledger-refresh-go-live.md` is corrected at every step whose privilege claim was falsified — Step 1a/1b/1c and the Rollback section — and records the 2026-09-05 measurement that closes its own open question OQ-3. ⚠️ The runbook currently instructs an operator to run two statements that BOTH 42501, then verify in a new session; anyone following it today stalls at step one.
+6. Three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) before any migration applies, per project rule. Merging `supabase/migrations/**` to `main` auto-applies to PROD.
+7. `VAC04-ARMS-OBSERVE`: the SUMMARY quotes the `VAC-04 — repo-vs-PROD function body drift` step's OWN output from this phase's migration PR verbatim and names, by line reference, which branch it took. If that branch was again the `:198` short-circuit, the SUMMARY says exactly that and records the roll-forward to Phase 164.5 — it does NOT claim the arms ran. ⚠️ A green `migration-drift-check` job is not evidence: the whole point of `[VAC04-ARMS-UNRUN]` is that the job was green while the arms never executed.
+
+**Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries CRON-DRIFT-01 (the GUC half only — the LIVE-row repair is 164.5 item 7), `VAC04-ARMS-UNRUN` (the OBSERVATION half only — the credential swap `[VAC-04-ROLE]` is NOT this phase's), and the 161.1 ACTIVATION human-verification item in `161.1-VERIFICATION.md`, which this phase exists to unblock — read each before planning, do not re-derive
+**Depends on:** Phase 164. ⛔ **MUST run BEFORE Phase 164.5**, whose item (7) writes a `cron.job` repair migration that should consume this phase's settled mechanism rather than inventing a parallel one.
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.7 to break down)
+
 ### Phase 164.3: VACUITY — a control that cannot fail must be caught by machine, not by red team (INSERTED)
 
 **Goal**: A control that cannot fail is detected by a machine, on every push, instead of by a six-team red team once per milestone.
@@ -1136,7 +1178,7 @@ Plans:
 7. CRON-DRIFT-01-REPAIR: after the migration applies, Phase 164.1's cron-drift arm reports ZERO drift for `match_engine_cron` against the committed manifest, and `grep -rn decrypted_secrets supabase/migrations/` returns the new migration. The pre-flight ABORTS non-zero WITHOUT writing when the live jobid 1 command does not match the manifest — proven by running it against a deliberately mismatched manifest, not by inspection.
 
 **Requirements**: VAC-07 (deferred here from 164.3) + TODOS entries DRIFT-04, DRIFT-05, VAC08-LEDGER-32, CRON-DRIFT-01 (the REPAIR half only — the DETECT half is Phase 164.1's), `[VAC-07-DEFER]` — read each before planning, do not re-derive
-**Depends on:** Phase 164.4.1 (the pg-lane with pg_cron is the substrate), Phase 164.3 (VAC-04/VAC-08 credentialed jobs that (4b) and (5) ride), Phase 164.1 (its committed cron manifest is (7)'s oracle — (7) cannot be written before it exists)
+**Depends on:** Phase 164.4.1 (the pg-lane with pg_cron is the substrate), Phase 164.3 (VAC-04/VAC-08 credentialed jobs that (4b) and (5) ride), Phase 164.1 (its committed cron manifest is (7)'s oracle — (7) cannot be written before it exists), **Phase 164.7** (item (7) must consume 164.7's settled `app.*` replacement mechanism, not invent a second answer — the `20260408215026` GUC design is exactly what 164.7 retires)
 **Plans:** 0 plans
 
 Plans:

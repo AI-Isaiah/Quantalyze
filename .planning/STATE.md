@@ -6,10 +6,10 @@ current_phase: 164.1
 current_phase_name: PROD-OBSERVABILITY
 status: in_progress
 stopped_at: "Completed 164.1-01-PLAN.md (prod-prober tracer: run.mjs + seams.mjs + pyapi06 arm, 13/13 self-test, live no-cred run exits 1)"
-last_updated: "2026-09-05T21:57:06.404Z"
+last_updated: "2026-09-05T21:59:33.518Z"
 last_activity: 2026-09-05
 last_activity_desc: 164.3.1/164.4/164.4.1 records restored and closed; 164.1 discuss+research+validation landed; planning blocked on founder secrets
-state_head: 950f1f28269154165884a48f7a9ab652a4534412
+state_head: 26be5fa66daf631f41e4da2fa27311204092f32b
 progress:
   total_phases: 19
   completed_phases: 8
@@ -851,6 +851,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.6 edited: requirements +VAC08-COUNT-SPM01 (test-ledger-drift-check.sh:372-373 false-clean; booked 2026-09-05)
 - Phase 164.6 edited: requirements +MT5-VERDICT-SINK-01 (MT5 capability verdict has no durable sink; routed here not 164.1 because 164.1's ledger and ARMS_FLOOR are already pinned)
 - Phase 164.7 inserted after Phase 164: APPSETTINGS — app.* GUCs are unsettable on Supabase (ALTER DATABASE and ALTER ROLE both 42501, measured on PROD 2026-09-05); 12 read sites across 4 settings; blocks 161.1 activation. Founder rejected the in-cron-command workaround in favour of the proper fix. MUST precede 164.5. (URGENT)
+- Phase 164.7 edited: carried in VAC04-ARMS-OBSERVE (observation half of [VAC04-ARMS-UNRUN]) — goal paragraph, success criterion 7, requirements line; [VAC-04-ROLE] deliberately excluded
 
 ### Decisions
 
