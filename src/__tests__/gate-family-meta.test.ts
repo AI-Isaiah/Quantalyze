@@ -861,7 +861,7 @@ export const KNOWN_THRESHOLD_SITES: readonly string[] = [
   "scripts/test-ledger-drift-check.sh :: ledger_rows -ge 50", //  VAC-08 absurdity floor: 'scored' + 2026-08-29
   "scripts/prod-body-drift-check.sh :: SNAPSHOT_MIN=50", //         VAC-04 absurdity floor: 'measured' + 2026-09-01
   "scripts/mutation-runner/run.mjs :: FILES_FLOOR=44", //           coverage ratchet: MEASURED + 2026-09-05 (Phase 164.4.1 end state, plan 164.4.1-05: 39 -> 44 as pg_cron on the lane unblocked the 5 deferred gates)
-  "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=363", //           biting ratchet: MEASURED + 2026-09-05 (plan 164.4.1-05: 262 -> 363, all 363 biting, WAIVED_CEILING still 0)
+  "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=361", //           biting ratchet: MEASURED + 2026-09-05 (262 -> 363 at plan 164.4.1-05, then 363 -> 361 when the 164.4.1 review found 3/JOB-04 and 4/JOB-04 unfalsifiable and they were reclassified, not waived; WAIVED_CEILING still 0)
   // The family's only UPPER bound. Invisible to this arm until the name class
   // widened past FLOOR|MIN on 2026-09-02 — registered here on the run that
   // first saw it, with its measurement at run.mjs:201-227 and the constant
