@@ -5,11 +5,11 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4.1
 current_phase_name: PGCRON-LANE
 status: executing
-stopped_at: "Completed 164.4.1-02-PLAN.md (file move 1 — pending: is EMPTY, floors 41/272). Next: 164.4.1-03."
-last_updated: "2026-09-05T06:17:00.871Z"
+stopped_at: 164.4.1-03 BLOCKED at Task 2 arm 3/JOB-05 — founder decision on WAIVED_CEILING
+last_updated: "2026-09-05T07:28:48.855Z"
 last_activity: 2026-09-04
 last_activity_desc: Phase 164.4.1 execution started
-state_head: 31fae2eaa121cacdbfafc92a3f653ecf92365ea3
+state_head: fc884ca62a8a03c7c518597a819c11974a7deaf6
 progress:
   total_phases: 16
   completed_phases: 4
@@ -797,6 +797,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4 P10 | ~3h | 3 tasks | 9 files |
 | Phase 164.4 P11 | ~3h | 3 tasks | 23 files |
 | Phase 164.4.1 P02 | 68 min | 3 tasks | 7 files |
+| Phase 164.4.1 P03 | 92 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -1727,8 +1728,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-05T06:17:00.587Z
-**Stopped At:** Completed 164.4.1-02-PLAN.md (file move 1 — pending: is EMPTY, floors 41/272). Next: 164.4.1-03.
+**Last Date:** 2026-09-05T07:28:48.577Z
+**Stopped At:** 164.4.1-03 BLOCKED at Task 2 arm 3/JOB-05 — founder decision on WAIVED_CEILING
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1737,7 +1738,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 **Stopped At:** Completed 162-09-PLAN.md
 **Last Date:** 2026-08-25T23:19:36.303Z
 **Stopped At:** Completed 162-02-PLAN.md
-**Resume File:** None
+**Resume File:** .planning/phases/164.4.1-pgcron-lane-put-pg-cron-on-the-throwaway-pg-lane-and-retire/164.4.1-03-SUMMARY.md
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
@@ -1809,6 +1810,7 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - ⚠️ TOOLING TRAP measured 2026-09-04: `gh run view --log` TRUNCATES — it cut the two minutes holding the `Failed Tests` block, so a clean assertion failure read as a HANG with no summary for three investigations. Use `gh api repos/<owner>/<repo>/actions/jobs/<id>/logs`.
 - ⛔⏱️ THE TIMING MODEL BROKE ON WAVE 8 AND THE TIMEOUT MARGIN IS NO LONGER COMFORTABLE. Run 33804312706 took **458 s** against a 313 s projection (46% over). The cause is in the job's OWN log: `per-arm lane time: mean 1.7s over 189 arm run(s)`. Every earlier ubuntu run reported **1.0s**, and the orchestrator's LOCAL run of the identical corpus also measured 1.0s — so this is NOT arm count and NOT the batch's content; the ubuntu lanes ran ~70% slower. One observation cannot separate CI-host variance from a real per-lane cost this batch's longer apply lists impose only on the ubuntu build. ⚠️ At the WORST observed 1.7 s/arm the ~265-arm end state projects to roughly **11 minutes** against `timeout-minutes: 15`. The earlier 6.9-min projection assumed 1.0 s and is now superseded. **Plan 164.4-08 must re-justify the timeout against the WORST observed per-lane cost, not the mean, and should treat raising it as the likely correct answer** — the trigger its own ci.yml comment names is 'a measured run approaching ~10 minutes'.
 - ⛔ ORCHESTRATOR TRAP, measured wave 6: editing ANY tracked file while `run.mjs` is in flight fails the run with a `dirty-checkout` defect (a version bump did it), and `RUNNER_EXIT=1` then reads exactly like a broken batch. Read the defect KIND before concluding — `dirty-checkout` with no arm and no file named is the orchestrator's own hand, not the corpus. Serialise: clean tree -> run -> then bump.
+- 164.4.1-03 BLOCKED on a founder decision: the retention gate's 3/JOB-05 section has NO first-failure mutation (measured twice on real lanes), so the corpus carries 1 waiver against WAIVED_CEILING 0. The full mutation-runner run now exits 1 on TWO defects and mutation-runner-floors.test.ts's WAIVER CREEP arm is RED, both deliberately. Decide: raise WAIVED_CEILING to 1, or restructure the gate's three-deep registration guard. See 164.4.1-03-SUMMARY.md.
 
 ## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions
 
