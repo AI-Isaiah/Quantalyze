@@ -1654,6 +1654,15 @@ true for 146 and half of 142–145, and **false for 141**.
       `wizard_session_id`; exactly one 2xx applied receipt, one honest raced refusal, `category_id`
       holds the winner.
       Full record: `.planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-DEFERRED.md`.
+      ⭐ **OWNER 2026-09-05: the OBSERVATION half is Phase 164.7's**, the first migration-bearing
+      phase in the queued order (164.1 → 164.2 → **164.7** → 164.5 → 164.6), rolling forward to
+      **Phase 164.5** (DRIFT-04's `DROP FUNCTION`, CRON-DRIFT-01-REPAIR) if 164.7's migration does
+      not change a function BODY. Booked as 164.7 success criterion 7. ⛔ The prohibition above
+      STANDS and is the reason this was unowned until now: no PR is manufactured for it — the
+      observation rides a migration PR that phase writes anyway, and the obligation is to READ the
+      VAC-04 step's output and name the branch it took, not to create the occasion. `[VAC-04-ROLE]`
+      below is deliberately NOT carried with it: it changes WHICH credential is used, not whether
+      the control works, and its own entry says not to let it gate a phase.
 
 - [ ] **`[VAC-04-ROLE]` Swap Phase 164.3's repo-vs-PROD body diff onto a zero-table-grant role.**
       Booked 2026-08-29 as the deferred half of a founder ruling, so it is not lost.
