@@ -1,0 +1,10 @@
+{
+  "_comment": "GREEN boundary calibration. One answered run, plus a run started 60s ago whose response has not landed yet. Inside the 120s in-flight grace, so it is EXCLUDED, not reported — without this rule the arm would fire on the top of every hour.",
+  "now": "2026-09-05T12:00:00Z",
+  "ttl": "6 hours",
+  "jobCount": 1,
+  "rows": [
+    ["901005", "2026-09-05T11:59:00Z", "", "", "", "", "", ""],
+    ["901003", "2026-09-05T11:30:00Z", "70003", "200", "f", "", "2026-09-05T11:30:04Z", "{\"ok\":true}"]
+  ]
+}

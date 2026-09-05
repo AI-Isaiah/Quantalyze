@@ -1,0 +1,9 @@
+{
+  "_comment": "RED — cron-transport-error. The request left the database; the far end did not answer inside the job's own 60s budget. Different remedy from a 401, so a different kind.",
+  "now": "2026-09-05T12:00:00Z",
+  "ttl": "6 hours",
+  "jobCount": 1,
+  "rows": [
+    ["901003", "2026-09-05T11:30:00Z", "70003", "", "t", "Timeout was reached", "2026-09-05T11:31:00Z", ""]
+  ]
+}

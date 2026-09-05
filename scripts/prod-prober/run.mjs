@@ -92,11 +92,24 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createSeams, realFetch } from "./seams.mjs";
+import { createSeams, realFetch, realSqlRunner } from "./seams.mjs";
 import { ARM as PYAPI06_ARM } from "./arms/pyapi06.mjs";
+// Namespace imports: the SQL-read-only self-test scenario ranges over every
+// exported `*_SQL` constant of every SQL arm, which needs the whole namespace
+// rather than the ARM alone.
+import * as CRON_OBS_MOD from "./arms/cron-obs.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT = join(HERE, "fixtures");
+
+/**
+ * The arm modules that issue SQL. Their exported `*_SQL` constants are asserted
+ * READ-ONLY by a self-test scenario — the assertion ranges over this list, so an
+ * arm added without being listed here is caught by the same scenario's
+ * "every SQL arm contributes at least two constants" leg rather than silently
+ * escaping the check.
+ */
+const SQL_ARM_MODULES = [{ name: "cron-obs", module: CRON_OBS_MOD }];
 
 /**
  * The committed cron oracle plan 03's `cron-drift` arm compares PROD against
@@ -118,7 +131,7 @@ export const MANIFEST_PATH = join(HERE, "cron-manifest.json");
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 13;
+export const SELF_TEST_SCENARIOS = 22;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -158,8 +171,8 @@ export const DEFECT_KINDS = [
   "absurdity",
 ];
 
-/** The registered arms. Plans 03 and 04 append; nothing else changes. */
-export const ARMS = [PYAPI06_ARM];
+/** The registered arms. Plan 04 appends `mt5`; nothing else changes. */
+export const ARMS = [PYAPI06_ARM, CRON_OBS_MOD.ARM];
 
 /**
  * Per-NAME remedy for `credential-absent`. Names only — these strings are
@@ -170,6 +183,10 @@ const CREDENTIAL_REMEDIES = {
     "Set the repo variable ANALYTICS_BASE_URL to the public analytics base URL (the same default .github/workflows/analytics-deploy-verify.yml carries).",
   ANALYTICS_SERVICE_KEY:
     "Set the GitHub Actions secret ANALYTICS_SERVICE_KEY from Railway's SERVICE_KEY, through a trimming pipe — Railway is the source of truth, copy Railway → GitHub, never the reverse.",
+  PROBER_POOLER_URL:
+    "Set PROBER_POOLER_URL to the PROD Supabase SESSION POOLER URL (port 5432, IPv4) WITHOUT a password in it — the password travels separately as PGPASSWORD. The workflow must add-mask it before any step can print it.",
+  SUPABASE_DB_PASSWORD:
+    "Set the existing GitHub Actions secret SUPABASE_DB_PASSWORD on the prod-prober workflow's job. It is passed to psql as PGPASSWORD in the child environment only, never inside the URL.",
 };
 
 const DEFAULT_CREDENTIAL_REMEDY =
@@ -457,10 +474,11 @@ export async function runProber({
 // --self-test: prove every defect kind fires on its own fixture, and nowhere
 // else, THROUGH the real `runProber` above.
 //
-// ⚠️ The `k/13` scenario headers are a COUNTED set. Before adding or removing a
-// scenario, renumber every `k/13` spelling AND `SELF_TEST_SCENARIOS` in ONE
-// edit — a stale count makes this self-test lie about its own coverage. The
-// count is asserted against the number of headers actually printed.
+// ⚠️ The `k/N` scenario headers are a COUNTED set. Before adding or removing a
+// scenario, bump `SELF_TEST_SCENARIOS` in the SAME edit — a stale count makes
+// this self-test lie about its own coverage. The count is asserted against the
+// number of headers actually printed, and the headers are auto-numbered off
+// that same counter, so the two can never disagree silently.
 // ---------------------------------------------------------------------------
 
 function expect(condition, message) {
@@ -493,10 +511,42 @@ function noDefectOfKind(defects, kinds, where = () => true) {
 /** Every pyapi06 kind — the absence list scenarios 8 and 11 assert against. */
 const PYAPI06_KINDS = DEFECT_KINDS.filter((k) => k.startsWith("pyapi06-"));
 
+/**
+ * Every kind that is a VERDICT ABOUT PRODUCTION, as opposed to a finding about
+ * the instrument (`credential-absent`, `measure-fail`, `floor`, `absurdity`).
+ * The credential scenario asserts a BLOCKED arm produces none of these: a
+ * blocked arm must not merely be quiet, it must be incapable of a verdict.
+ */
+const VERDICT_KINDS = DEFECT_KINDS.filter(
+  (k) => !["credential-absent", "measure-fail", "floor", "absurdity"].includes(k),
+);
+
+/**
+ * The whole environment a self-test scenario holds in its hand. Every value is
+ * OBVIOUSLY synthetic and points at `.invalid`, the reserved TLD that can never
+ * resolve — nothing here is a credential, and the scrubber scenario proves none
+ * of these VALUES reaches a log line or a defect row.
+ */
 const SELFTEST_ENV = {
   ANALYTICS_BASE_URL: "https://analytics.selftest.invalid",
   ANALYTICS_SERVICE_KEY: "selftest-fixture-key-not-a-credential",
+  PROBER_POOLER_URL: "postgresql://prober@pooler.selftest.invalid:5432/postgres",
+  SUPABASE_DB_PASSWORD: "selftest-fixture-password-not-a-credential",
 };
+
+/** The hand-set `COMMENT ON DATABASE` marker the fixture SQL seam answers with. */
+const FIXTURE_DB_MARKER = "quantalyze-fixture-db";
+
+/**
+ * The cron-drift FIXTURE manifest, used by every multi-arm scenario.
+ *
+ * ⛔ NOT `MANIFEST_PATH`. The real oracle at `scripts/prod-prober/cron-manifest.json`
+ * is captured from PROD in plan 06 and does not exist yet; pointing the
+ * self-test at it would make the harness depend on a file the repository is
+ * deliberately without, and would make a real capture silently change what the
+ * self-test measures.
+ */
+const SELFTEST_MANIFEST_PATH = join(FIXTURE_ROOT, "cron-drift", "manifest.json");
 
 /**
  * Load a fixture. A MISSING fixture is a SELF-TEST FAIL, never a skip
@@ -553,6 +603,84 @@ function fixtureFetch(data, env) {
 /** Deep-enough clone for fixture merging (fixtures are plain JSON). */
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
+/** A psql-shaped OK answer. */
+const sqlOk = (stdout) => ({ status: 0, stdout, stderr: "", timedOut: false, measureFail: null });
+
+/**
+ * A SQL runner backed by fixtures.
+ *
+ * ⚠️ IT RENDERS THE ANSWER THE WAY `psql` WOULD, with the SAME separators the
+ * calling arm asked the real seam for — NULL as the empty string, one record per
+ * separator. That is deliberate: it makes the fixture exercise the arm's PARSER
+ * as well as its judgement, so a parser that silently desyncs on an empty field
+ * or a multi-line command fails the self-test rather than being discovered in
+ * production.
+ *
+ * The query is resolved by the TABLE it reads, not by a caller-supplied label,
+ * so a scenario cannot accidentally answer the wrong question.
+ *
+ * @param {object} data
+ * @param {{jobCount:number, rows:Array<Array<string>>}} [data.cronObs]
+ * @param {string} [data.ttl]                 answer for TTL_SQL ("" = NULL/unset)
+ * @param {Array<object>} [data.cronJobRows]  answer for CRON_JOB_SQL
+ * @param {string|null} [data.marker]         answer for DB_MARKER_SQL
+ */
+function fixtureSql(data) {
+  return (query, opts = {}) => {
+    const fieldSep = typeof opts.fieldSep === "string" ? opts.fieldSep : "\t";
+    const recordSep = typeof opts.recordSep === "string" ? opts.recordSep : "\n";
+    const q = String(query);
+
+    if (q.includes("pg_net.ttl")) {
+      return sqlOk(`${data.ttl === undefined ? "6 hours" : data.ttl}\n`);
+    }
+
+    if (q.includes("shobj_description")) {
+      const marker = data.marker === undefined ? FIXTURE_DB_MARKER : data.marker;
+      return sqlOk(marker === null ? "\n" : `${marker}\n`);
+    }
+
+    if (q.includes("net._http_response")) {
+      const spec = data.cronObs || { jobCount: 0, rows: [] };
+      const lines = [];
+      if (!spec.rows || spec.rows.length === 0) {
+        // The `probe` CTE guarantees ONE row even with no runs, carrying the
+        // job count — that is what makes "not scheduled" distinguishable from
+        // "scheduled and silent".
+        lines.push([String(spec.jobCount), "", "", "", "", "", "", "", ""].join(fieldSep));
+      } else {
+        for (const row of spec.rows) lines.push([String(spec.jobCount), ...row].join(fieldSep));
+      }
+      return sqlOk(`${lines.join("\n")}\n`);
+    }
+
+    if (q.includes("cron.job")) {
+      const rows = data.cronJobRows || [];
+      const rendered = rows.map((r) =>
+        [
+          String(r.jobid),
+          r.jobname,
+          r.schedule,
+          r.active === true || r.active === "t" ? "t" : "f",
+          r.database,
+          r.username,
+          r.command,
+        ].join(fieldSep),
+      );
+      // psql prints the record separator AFTER every record, last one included.
+      return sqlOk(rendered.length === 0 ? "" : `${rendered.join(recordSep)}${recordSep}`);
+    }
+
+    return {
+      status: null,
+      stdout: "",
+      stderr: "",
+      timedOut: false,
+      measureFail: `self-test: fixtureSql has no answer for this query`,
+    };
+  };
+}
+
 /**
  * THE PER-ARM ISOLATION TABLE. Plans 03 and 04 EXTEND this array; they do not
  * re-invent the loop below it.
@@ -567,6 +695,18 @@ const clone = (o) => JSON.parse(JSON.stringify(o));
  * ⚠️ `greenSeamCalls` is the arm's own request count, asserted on the green
  * run. It is what would catch an arm that quietly stopped issuing one of its
  * requests while still reporting no defects.
+ *
+ * ⚠️ `kinds` is the SET of defect kinds this entry's red fixtures must cover,
+ * asserted as a SET rather than a count — one kind may need two red fixtures
+ * (cron-obs raises `cron-no-observation` from two different causes) and one
+ * fixture never covers two kinds. It is declared PER ENTRY because defect kinds
+ * are NOT arm-name-prefixed outside pyapi06: `cron-no-observation` belongs to
+ * `cron-obs`, and no prefix rule can know that. When omitted it defaults to the
+ * `<arm>-` prefix filter, which is what pyapi06 uses.
+ *
+ * ⚠️ `makeSeams` is per entry because the arms do not share a transport: pyapi06
+ * is four HTTP GETs, the cron arms are psql. Each entry builds the seam bundle
+ * its own fixture drives, so the loop below stays transport-agnostic.
  */
 const ARM_FIXTURE_TABLE = [
   {
@@ -574,6 +714,7 @@ const ARM_FIXTURE_TABLE = [
     fixtureDir: "pyapi06",
     green: "ok.json",
     greenSeamCalls: 4,
+    makeSeams: (data) => createSeams({ fetchImpl: fixtureFetch(data, SELFTEST_ENV) }),
     red: {
       "keyed-401.json": "pyapi06-keyed-refused",
       "absent-200.json": "pyapi06-absent-accepted",
@@ -582,7 +723,64 @@ const ARM_FIXTURE_TABLE = [
       "health-degraded.json": "pyapi06-health-degraded",
     },
   },
+  {
+    arm: CRON_OBS_MOD.ARM,
+    fixtureDir: "cron-obs",
+    green: "ok.json",
+    // TTL_SQL + CRON_OBS_SQL. The TTL read is not optional decoration: it is
+    // what clamps the scan window, so an arm that stopped issuing it would
+    // silently stop honouring pg_net's pruning.
+    greenSeamCalls: 2,
+    kinds: ["cron-no-observation", "cron-non-2xx", "cron-transport-error"],
+    makeSeams: (data) =>
+      createSeams({
+        sqlRunner: fixtureSql({ cronObs: data, ttl: data.ttl }),
+        clock: () => new Date(data.now),
+      }),
+    red: {
+      "401.json": "cron-non-2xx",
+      // TWO fixtures, ONE kind, two DIFFERENT causes: a run whose response row
+      // is absent, and a window with no run at all. Both are "nothing was
+      // observed", and both must fire — the second is the one a `count(*) > 0`
+      // style check would miss entirely.
+      "no-response.json": "cron-no-observation",
+      "no-runs.json": "cron-no-observation",
+      "timed-out.json": "cron-transport-error",
+    },
+  },
 ];
+
+/** The kinds an entry's red fixtures must cover. See the table's docblock. */
+function entryKinds(entry) {
+  return entry.kinds || DEFECT_KINDS.filter((k) => k.startsWith(`${entry.arm.name}-`));
+}
+
+/**
+ * Seams that answer EVERY registered arm's green fixture at once.
+ *
+ * Needed by the credential scenario, which must run the WHOLE registry with one
+ * name removed and then assert that the OTHER arms still executed and still
+ * measured. Without a multi-arm seam bundle that scenario could only ever prove
+ * "the blocked arm was blocked", never "and nothing else was".
+ *
+ * @returns {{ok: true, seams: object}|{ok: false, reason: string}}
+ */
+function allGreenSeams() {
+  const pyapi06 = loadFixture("pyapi06", "ok.json");
+  if (!pyapi06.ok) return pyapi06;
+  const cronObs = loadFixture("cron-obs", "ok.json");
+  if (!cronObs.ok) return cronObs;
+
+  const sqlData = { cronObs: cronObs.data, ttl: cronObs.data.ttl };
+  return {
+    ok: true,
+    seams: createSeams({
+      fetchImpl: fixtureFetch(pyapi06.data, SELFTEST_ENV),
+      sqlRunner: fixtureSql(sqlData),
+      clock: () => new Date(cronObs.data.now),
+    }),
+  };
+}
 
 export async function selfTest() {
   /**
@@ -610,6 +808,9 @@ export async function selfTest() {
     "pyapi06-absent-uncoded": (d) => d.kind === "pyapi06-absent-uncoded",
     "pyapi06-wrong-key-accepted": (d) => d.kind === "pyapi06-wrong-key-accepted",
     "pyapi06-health-degraded": (d) => d.kind === "pyapi06-health-degraded",
+    "cron-no-observation": (d) => d.kind === "cron-no-observation",
+    "cron-non-2xx": (d) => d.kind === "cron-non-2xx",
+    "cron-transport-error": (d) => d.kind === "cron-transport-error",
   };
 
   const captured = [];
@@ -617,7 +818,7 @@ export async function selfTest() {
   let pass = true;
   let printed = 0;
   // Headers are AUTO-NUMBERED off the same counter the completeness assertion
-  // reads, so the printed `k/13` can never disagree with the number of
+  // reads, so the printed `k/N` can never disagree with the number of
   // scenarios that actually ran. Adding a scenario without bumping
   // SELF_TEST_SCENARIOS fails the run at the tail of this function; that
   // assertion is the control, the number in the header is the display.
@@ -643,7 +844,7 @@ export async function selfTest() {
   // -------------------------------------------------------------------------
   for (const entry of ARM_FIXTURE_TABLE) {
     const arm = entry.arm;
-    const armKinds = DEFECT_KINDS.filter((k) => k.startsWith(`${arm.name}-`));
+    const armKinds = entryKinds(entry);
 
     scenario(`${arm.name} GREEN fixture (${entry.green}) — the control`);
     const g = loadFixture(entry.fixtureDir, entry.green);
@@ -651,12 +852,13 @@ export async function selfTest() {
       pass = expect(false, g.reason) && pass;
     } else {
       const lines = [];
-      const seams = createSeams({ fetchImpl: fixtureFetch(g.data, SELFTEST_ENV) });
+      const seams = entry.makeSeams(g.data);
       const r = await runProber({
         arms: [arm],
         env: { ...SELFTEST_ENV },
         seams,
         armsFloor: 1,
+        manifestPath: entry.manifestPath,
         log: (s) => lines.push(s),
       });
       const remedies = armKinds.map((k) => (arm.REMEDIES || {})[k]);
@@ -678,8 +880,16 @@ export async function selfTest() {
           "the green run prints the ✅ no-defects line",
         ) &&
         expect(
-          armKinds.length === Object.keys(entry.red).length,
-          `every ${arm.name}- kind in DEFECT_KINDS has a red fixture (${armKinds.length} kind(s) vs ${Object.keys(entry.red).length} fixture(s))`,
+          (() => {
+            // SET equality, not counts: one kind may legitimately need two red
+            // fixtures (two different causes), but a kind with NO red fixture,
+            // or a red fixture naming a kind the entry does not declare, is the
+            // defect this asserts against.
+            const declared = [...new Set(armKinds)].sort();
+            const covered = [...new Set(Object.values(entry.red))].sort();
+            return JSON.stringify(declared) === JSON.stringify(covered);
+          })(),
+          `every kind this entry declares has a red fixture and every red fixture names a declared kind (declared [${armKinds.join(", ")}] vs covered [${[...new Set(Object.values(entry.red))].join(", ")}])`,
         ) &&
         expect(
           remedies.every((s) => typeof s === "string" && s.length >= 40),
@@ -710,12 +920,13 @@ export async function selfTest() {
         pass = expect(false, fx.reason) && pass;
         continue;
       }
-      const seams = createSeams({ fetchImpl: fixtureFetch(fx.data, SELFTEST_ENV) });
+      const seams = entry.makeSeams(fx.data);
       const r = await runProber({
         arms: [arm],
         env: { ...SELFTEST_ENV },
         seams,
         armsFloor: 1,
+        manifestPath: entry.manifestPath,
         log: quiet,
       });
       const d = r.defects[0] || {};
@@ -773,40 +984,72 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
-  scenario("credential-absent fires PER NAME, blocks the arm, and is never a skip (D-06)");
+  scenario("credential-absent fires PER NAME across EVERY arm, blocks only its own arm(s), never a skip (D-06)");
   // -------------------------------------------------------------------------
   {
-    if (!green.ok) {
-      pass = expect(false, green.reason) && pass;
-    } else {
-      for (const name of PYAPI06_ARM.requiredEnv) {
-        const env = { ...SELFTEST_ENV };
-        delete env[name];
-        const lines = [];
-        const seams = createSeams({ fetchImpl: fixtureFetch(green.data, SELFTEST_ENV) });
-        const r = await runProber({
-          arms: [PYAPI06_ARM],
-          env,
-          seams,
-          armsFloor: 1,
-          log: (s) => lines.push(s),
-        });
-        const creds = r.defects.filter((x) => x.kind === "credential-absent");
-        pass =
-          expect(r.exitCode === 1, `an absent ${name} exits 1, never 0 (got ${r.exitCode})`) &&
-          expect(creds.length === 1, `an absent ${name} raises exactly one credential-absent defect (got ${creds.length})`) &&
-          expect((creds[0] || {}).subject === name, `the defect names ${name} as its subject (got ${(creds[0] || {}).subject})`) &&
-          expect(String((creds[0] || {}).detail).includes(name), `the detail names ${name}`) &&
-          expect(lines.includes(`credential: ${name} ABSENT`), `the log carries "credential: ${name} ABSENT"`) &&
-          expect(r.armsBlocked === 1, `the arm is BLOCKED, not run (armsBlocked ${r.armsBlocked})`) &&
-          expect(r.armsExecuted === 0, `the blocked arm did not execute (armsExecuted ${r.armsExecuted})`) &&
-          expect(r.seamInvocations === 0, `a blocked arm performs no I/O (seam-invocations ${r.seamInvocations})`) &&
-          expect(
-            noDefectOfKind(r.defects, PYAPI06_KINDS),
-            `a blocked arm reports no pyapi06 verdict of any kind (absent ${name})`,
-          ) &&
-          pass;
+    // ⚠️ A LOOP EXTENSION, not new counted headers: one scenario that ranges
+    // over every registered arm's every required NAME. It runs the WHOLE
+    // registry each time, so it asserts both halves of D-06 — the arm that
+    // needs the missing name is blocked and produces no verdict, AND every
+    // other arm still ran and still measured. A credential gate that quietly
+    // blocked the whole run would pass the first half and fail here.
+    const allNames = [...new Set(ARMS.flatMap((a) => a.requiredEnv))].sort();
+    for (const name of allNames) {
+      const built = allGreenSeams();
+      if (!built.ok) {
+        pass = expect(false, built.reason) && pass;
+        break;
       }
+      const env = { ...SELFTEST_ENV };
+      delete env[name];
+      const usingName = ARMS.filter((a) => a.requiredEnv.includes(name));
+      const lines = [];
+      const r = await runProber({
+        arms: ARMS,
+        env,
+        seams: built.seams,
+        armsFloor: 1,
+        manifestPath: SELFTEST_MANIFEST_PATH,
+        log: (s) => lines.push(s),
+      });
+      const creds = r.defects.filter((x) => x.kind === "credential-absent");
+      const blockedNames = usingName.map((a) => a.name);
+      pass =
+        expect(r.exitCode === 1, `an absent ${name} exits 1, never 0 (got ${r.exitCode})`) &&
+        expect(
+          creds.length === usingName.length,
+          `an absent ${name} raises one credential-absent defect per arm that needs it (${usingName.length} expected, got ${creds.length})`,
+        ) &&
+        expect(
+          creds.every((c) => c.subject === name),
+          `every credential-absent defect names ${name} as its subject`,
+        ) &&
+        expect(
+          creds.every((c) => String(c.detail).includes(name)),
+          `every detail names ${name}`,
+        ) &&
+        expect(lines.includes(`credential: ${name} ABSENT`), `the log carries "credential: ${name} ABSENT"`) &&
+        expect(
+          r.armsBlocked === usingName.length,
+          `exactly the ${usingName.length} arm(s) needing ${name} are BLOCKED [${blockedNames.join(", ")}] (armsBlocked ${r.armsBlocked})`,
+        ) &&
+        expect(
+          r.armsExecuted === ARMS.length - usingName.length,
+          `the OTHER ${ARMS.length - usingName.length} arm(s) still executed — one absent name does not silence the whole run (armsExecuted ${r.armsExecuted})`,
+        ) &&
+        expect(
+          blockedNames.every((n) => (r.tallyByArm[n] || 0) === 0),
+          `a blocked arm performs no I/O of its own (per-arm tally ${JSON.stringify(r.tallyByArm)})`,
+        ) &&
+        expect(
+          r.seamInvocations >= ARMS.length - usingName.length,
+          `and the arms that did run actually measured (seam-invocations ${r.seamInvocations})`,
+        ) &&
+        expect(
+          noDefectOfKind(r.defects, VERDICT_KINDS),
+          `no arm reported a verdict about production on this run (absent ${name}) — a blocked arm must be incapable of one, and the green fixtures give the others nothing to report`,
+        ) &&
+        pass;
     }
   }
 
@@ -902,6 +1145,176 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
+  scenario("cron-obs BOUNDARY: a 60s-old run with no response yet is GREEN (recent-run-pending.json)");
+  // -------------------------------------------------------------------------
+  {
+    // The other half of the 120 s in-flight rule. `no-response.json` (121 s
+    // old, RED, in the table above) and this fixture (60 s old, GREEN) are a
+    // PAIR: together they prove 120 s is a boundary rather than a blanket
+    // excuse. Either one alone would be satisfied by an arm that always fires
+    // or an arm that never does.
+    const fx = loadFixture("cron-obs", "recent-run-pending.json");
+    if (!fx.ok) {
+      pass = expect(false, fx.reason) && pass;
+    } else {
+      const lines = [];
+      const seams = createSeams({
+        sqlRunner: fixtureSql({ cronObs: fx.data, ttl: fx.data.ttl }),
+        clock: () => new Date(fx.data.now),
+      });
+      const r = await runProber({
+        arms: [CRON_OBS_MOD.ARM],
+        env: { ...SELFTEST_ENV },
+        seams,
+        armsFloor: 1,
+        log: (s) => lines.push(s),
+      });
+      pass =
+        expect(r.exitCode === 0, `a run inside the 120s in-flight grace exits 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
+        expect(
+          noDefectOfKind(r.defects, ["cron-no-observation", "cron-non-2xx", "cron-transport-error"]),
+          "an in-flight run raises NO cron verdict — its missing response is not evidence yet",
+        ) &&
+        expect(
+          lines.some((l) => l.includes("excluded — younger than the 120s in-flight grace")),
+          "and the run SAYS it excluded it, rather than silently dropping a row",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("a psql failure is a measure-fail on the SQL arm, never a cron verdict");
+  // -------------------------------------------------------------------------
+  {
+    // The CRON-OBS-01 anti-vacuity risk named in RESEARCH Finding 7: "the query
+    // must error (not return 0) if the table is unreadable — check psql's exit
+    // status, never parse an empty stdout as zero". A `permission denied` and a
+    // healthy hour of 200s must not share a code path.
+    const seams = createSeams({
+      sqlRunner: () => ({
+        status: 1,
+        stdout: "",
+        stderr: "permission denied for schema net",
+        timedOut: false,
+        measureFail: "psql exited 1: permission denied for schema net",
+      }),
+      clock: () => new Date("2026-09-05T12:00:00Z"),
+    });
+    const r = await runProber({
+      arms: [CRON_OBS_MOD.ARM],
+      env: { ...SELFTEST_ENV },
+      seams,
+      armsFloor: 1,
+      log: quiet,
+    });
+    const mf = r.defects.filter((x) => x.kind === "measure-fail");
+    pass =
+      expect(r.exitCode === 1, `a failing psql exits 1, never 0 (got ${r.exitCode})`) &&
+      expect(mf.length === 1, `exactly one measure-fail defect (got ${mf.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
+      expect((mf[0] || {}).arm === "cron-obs", `attributed to cron-obs (got ${(mf[0] || {}).arm})`) &&
+      expect(
+        noDefectOfKind(r.defects, ["cron-no-observation", "cron-non-2xx", "cron-transport-error"]),
+        "and NO cron verdict of any kind — an empty stdout from a failed psql is not zero problems",
+      ) &&
+      pass;
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("the scan window SHRINKS to pg_net.ttl, so a PRUNED response is not reported as missing");
+  // -------------------------------------------------------------------------
+  {
+    const g = loadFixture("cron-obs", "ok.json");
+    if (!g.ok) {
+      pass = expect(false, g.reason) && pass;
+    } else {
+      // ok.json's runs are at 11:30 / 10:30 / 09:30 against now = 12:00. Add a
+      // run at 09:45 whose response row is GONE. With the default 6h TTL the
+      // 3h window covers it and it would be a defect; with a 2h TTL pg_net has
+      // PRUNED that response, so its absence says nothing about production and
+      // the window must shrink rather than blame it.
+      const data = clone(g.data);
+      data.rows.push(["901000", "2026-09-05T09:45:00Z", "", "", "", "", "", ""]);
+      data.ttl = "2 hours";
+      const lines = [];
+      const seams = createSeams({
+        sqlRunner: fixtureSql({ cronObs: data, ttl: data.ttl }),
+        clock: () => new Date(data.now),
+      });
+      const r = await runProber({
+        arms: [CRON_OBS_MOD.ARM],
+        env: { ...SELFTEST_ENV },
+        seams,
+        armsFloor: 1,
+        log: (s) => lines.push(s),
+      });
+
+      // The control: the SAME fixture with the default TTL must be RED, or the
+      // green above would be proving nothing.
+      const wide = clone(data);
+      wide.ttl = "6 hours";
+      const seamsWide = createSeams({
+        sqlRunner: fixtureSql({ cronObs: wide, ttl: wide.ttl }),
+        clock: () => new Date(wide.now),
+      });
+      const rWide = await runProber({
+        arms: [CRON_OBS_MOD.ARM],
+        env: { ...SELFTEST_ENV },
+        seams: seamsWide,
+        armsFloor: 1,
+        log: quiet,
+      });
+
+      pass =
+        expect(r.exitCode === 0, `with pg_net.ttl = 2 hours the pruned run is out of window and the run exits 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
+        expect(
+          lines.some((l) => l.includes("cron-obs: window shrunk to 2h because pg_net.ttl is shorter than 3h")),
+          "the SHRINK is printed — a window that silently moved would be an unexplained change in what the alert means",
+        ) &&
+        expect(
+          lines.some((l) => l.startsWith("cron-obs: pg_net.ttl = 2 hours (7200 s)")),
+          "and the TTL itself is printed every run",
+        ) &&
+        expect(
+          rWide.defects.filter((x) => x.kind === "cron-no-observation").length === 1,
+          `CONTROL: the SAME fixture with the default 6h TTL is RED (got ${rWide.defects.map((x) => x.kind).join(", ") || "no defects"}) — without this the green above could be an arm that never fires`,
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("every exported *_SQL constant of every arm is a single read-only SELECT (T-164.1-13)");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ The mechanical form of the standing rule. A write token, the `headers`
+    // column, or `job_run_details.status` reaching ANY arm's query text fails
+    // here rather than in production.
+    const WRITE_TOKENS = /\b(INSERT|UPDATE|DELETE|ALTER|CREATE|DROP|TRUNCATE|GRANT|REVOKE|COPY)\b/i;
+    const problems = [];
+    let constantCount = 0;
+    for (const { name, module } of SQL_ARM_MODULES) {
+      const constants = Object.entries(module).filter(([k, v]) => k.endsWith("_SQL") && typeof v === "string");
+      if (constants.length < 2) {
+        problems.push(`${name} exports ${constants.length} *_SQL constant(s); every SQL arm must export at least 2`);
+      }
+      for (const [key, sql] of constants) {
+        constantCount += 1;
+        if (!/^\s*(SELECT|WITH)\b/i.test(sql)) problems.push(`${name}.${key} does not begin with SELECT or WITH`);
+        if (WRITE_TOKENS.test(sql)) problems.push(`${name}.${key} carries a WRITE token`);
+        if (/\bheaders\b/.test(sql)) problems.push(`${name}.${key} selects the headers column — response headers carry the very key this project already leaked once`);
+        if (/job_run_details\.status\b/.test(sql)) problems.push(`${name}.${key} reads job_run_details.status, which records ENQUEUEING and is not evidence of anything`);
+        if (sql.includes(";")) problems.push(`${name}.${key} contains a statement separator — every constant must be exactly ONE statement`);
+      }
+    }
+    pass =
+      expect(SQL_ARM_MODULES.length >= 1, `at least one SQL arm is registered (got ${SQL_ARM_MODULES.length})`) &&
+      expect(constantCount >= SQL_ARM_MODULES.length * 2, `every SQL arm contributed its constants (${constantCount} across ${SQL_ARM_MODULES.length} arm(s))`) &&
+      expect(problems.length === 0, `every *_SQL constant is one read-only statement (${problems.join("; ") || "no problems"})`) &&
+      pass;
+  }
+
+  // -------------------------------------------------------------------------
   scenario("no env VALUE reaches the log or a defect row (threat T-164.1-01)");
   // -------------------------------------------------------------------------
   {
@@ -985,7 +1398,7 @@ export async function selfTest() {
   console.log("");
   if (pass) {
     console.log(
-      `=== SELF-TEST PASSED: ${SELF_TEST_SCENARIOS}/${SELF_TEST_SCENARIOS} scenarios, every pyapi06 kind fired on its own fixture and nowhere else ===`,
+      `=== SELF-TEST PASSED: ${SELF_TEST_SCENARIOS}/${SELF_TEST_SCENARIOS} scenarios, every arm's kinds fired on their own fixtures and nowhere else ===`,
     );
     return 0;
   }
@@ -1002,10 +1415,19 @@ export async function selfTest() {
  * which needs `main`'s own argument parsing and exit-code mapping under test
  * without touching the network. The CLI never calls the setter.
  */
-let seamsFactory = () => createSeams({ fetchImpl: realFetch });
+const liveSeams = () =>
+  createSeams({
+    fetchImpl: realFetch,
+    // `process.env` is read HERE, at factory-call time, and nowhere else in this
+    // file's arm/seam layer — so a self-test scenario can still hold the whole
+    // environment in its hand.
+    sqlRunner: realSqlRunner(process.env),
+  });
+
+let seamsFactory = liveSeams;
 
 export function setSeamsFactoryForTests(factory) {
-  seamsFactory = factory || (() => createSeams({ fetchImpl: realFetch }));
+  seamsFactory = factory || liveSeams;
 }
 
 export async function main(argv) {
