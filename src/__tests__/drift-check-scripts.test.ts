@@ -3280,6 +3280,39 @@ describe("IN-04 — the scratch directory does not survive a fail() path", () =>
     // The count is DERIVED from the tally, not a caption — and the INCOMPLETE
     // line must subtract against the SAME arm total the PASSED line claims.
     expect(body).toContain(`$((${totalArms} - st_skipped))/${totalArms} run`);
+
+    // ⛔ IN-02 — PIN THE TOTAL TO REALITY, not to itself. Everything above is
+    // SELF-CONSISTENT: `totalArms` is read out of the caption, so a script that
+    // grew a seventh arm but still captioned `(6/6)` — or one captioned `(7/7)`
+    // with only six arms present — satisfied every assertion above. Both halves
+    // agreeing is a property of the CAPTION; it says nothing about how many arms
+    // the function actually contains. Count the arm headers themselves and
+    // require the caption to match that.
+    const armCaptions = body.split("\n").filter((l) => /^\s*echo "=== SELF-TEST [0-9]+\//.test(l));
+    expect(
+      armCaptions.length,
+      `self_test() contains ${armCaptions.length} numbered arm captions but the verdict claims ` +
+        `${totalArms}. Adding an arm without bumping the verdict (or bumping the verdict without ` +
+        `adding the arm) makes "SELF-TEST PASSED" a count of nothing.`,
+    ).toBe(Number(totalArms));
+
+    // Each caption must also be numbered N/<total> against the SAME total, so
+    // an arm carrying a stale denominator (`3/5` beside `PASSED (6/6)`) is
+    // caught rather than read past.
+    for (const caption of armCaptions) {
+      expect(caption, `an arm caption's denominator disagrees with the verdict's ${totalArms}`).toMatch(
+        new RegExp(`=== SELF-TEST [0-9]+/${totalArms}\\b`),
+      );
+    }
+
+    // Calibration — the predicate above is shown to be able to FAIL, so a
+    // matching count is evidence and not an artefact of a regex that matches
+    // nothing. Delete one arm caption and the count must drop by exactly one.
+    const withoutOneArm = body.replace(/^\s*echo "=== SELF-TEST [0-9]+\/.*$/m, "");
+    const recount = withoutOneArm.split("\n").filter((l) => /^\s*echo "=== SELF-TEST [0-9]+\//.test(l)).length;
+    expect(recount, "the arm-caption predicate matched nothing, so its count could never disagree").toBe(
+      armCaptions.length - 1,
+    );
   });
 });
 
