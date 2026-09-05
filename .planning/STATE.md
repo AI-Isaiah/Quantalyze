@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4.1
 current_phase_name: PGCRON-LANE
 status: executing
-stopped_at: Completed 164.4.1-05-PLAN.md — tripwire CLEARED, corpus exit 0
-last_updated: "2026-09-05T09:59:03.718Z"
+stopped_at: Completed 164.4.1-06-PLAN.md (ubuntu measurement DEFERRED to orchestrator)
+last_updated: "2026-09-05T10:46:00.755Z"
 last_activity: 2026-09-04
 last_activity_desc: Phase 164.4.1 execution started
-state_head: 258937357bfc58ab630e2269286bd9a66ea18052
+state_head: 50567f38269f1405fd3cf824d6c96ea0064b98d2
 progress:
   total_phases: 16
   completed_phases: 4
   total_plans: 76
-  completed_plans: 70
+  completed_plans: 71
   percent: 25
 ---
 
@@ -811,6 +811,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4.1 P03 | 92 min | 3 tasks | 4 files |
 | Phase 164.4.1 P04 | 118 min | 3 tasks | 7 files |
 | Phase 164.4.1 P05 | 175 min | 3 tasks | 6 files |
+| Phase 164.4.1 P06 | 35m | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -1044,6 +1045,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4.1]: 164.4.1-05: ARMS_FLOOR is 363, not the plan's projected 365 (324+39). Floors are set to what the run PRINTS.
 - [Phase 164.4.1]: 164.4.1-05: the lane-blocked-stale tripwire is CLEARED BY ANNOTATION — parse.mjs, the probe fixture and the probe/defect code are untouched (0 non-comment changed lines matching lane-blocked-stale|pg_available_extensions) and SELF-TEST 17/17 still fires.
 - [Phase 164.4.1]: 164.4.1-05: FIVE arms use GATE-FILE falsifiers (3 oracle preconditions, 1 seed-integrity control, 1 sum-of-pinned-counts invariant), each with its domination measurement at the site. A gate-file falsifier is NOT a waiver — the arm still raises, names itself first and counts in biting. WAIVED_CEILING unedited at 0.
+- [Phase 164.4.1]: D-07 closed by DOCUMENTING the classifier's text-only boundary and pinning it with a hand-built test — the proposed apply-list widening was retired because it would classify UNANNOTATED files by a line only ANNOTATED files carry (dead code behind a passing test)
+- [Phase 164.4.1]: sql-mutation timeout-minutes STAYS 15 and ci.yml is byte-unchanged by plan 06: the DECISION rule accepts only a measured ubuntu run, and that measurement was scoped out of the executor (worktree branch is not the phase branch, so a dispatch would not be SHA-bound)
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1746,8 +1749,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-05T09:59:03.413Z
-**Stopped At:** Completed 164.4.1-05-PLAN.md — tripwire CLEARED, corpus exit 0
+**Last Date:** 2026-09-05T10:46:00.442Z
+**Stopped At:** Completed 164.4.1-06-PLAN.md (ubuntu measurement DEFERRED to orchestrator)
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1829,6 +1832,8 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - ⛔⏱️ THE TIMING MODEL BROKE ON WAVE 8 AND THE TIMEOUT MARGIN IS NO LONGER COMFORTABLE. Run 33804312706 took **458 s** against a 313 s projection (46% over). The cause is in the job's OWN log: `per-arm lane time: mean 1.7s over 189 arm run(s)`. Every earlier ubuntu run reported **1.0s**, and the orchestrator's LOCAL run of the identical corpus also measured 1.0s — so this is NOT arm count and NOT the batch's content; the ubuntu lanes ran ~70% slower. One observation cannot separate CI-host variance from a real per-lane cost this batch's longer apply lists impose only on the ubuntu build. ⚠️ At the WORST observed 1.7 s/arm the ~265-arm end state projects to roughly **11 minutes** against `timeout-minutes: 15`. The earlier 6.9-min projection assumed 1.0 s and is now superseded. **Plan 164.4-08 must re-justify the timeout against the WORST observed per-lane cost, not the mean, and should treat raising it as the likely correct answer** — the trigger its own ci.yml comment names is 'a measured run approaching ~10 minutes'.
 - ⛔ ORCHESTRATOR TRAP, measured wave 6: editing ANY tracked file while `run.mjs` is in flight fails the run with a `dirty-checkout` defect (a version bump did it), and `RUNNER_EXIT=1` then reads exactly like a broken batch. Read the defect KIND before concluding — `dirty-checkout` with no arm and no file named is the orchestrator's own hand, not the corpus. Serialise: clean tree -> run -> then bump.
 - 164.4.1-03 BLOCKED on a founder decision: the retention gate's 3/JOB-05 section has NO first-failure mutation (measured twice on real lanes), so the corpus carries 1 waiver against WAIVED_CEILING 0. The full mutation-runner run now exits 1 on TWO defects and mutation-runner-floors.test.ts's WAIVER CREEP arm is RED, both deliberately. Decide: raise WAIVED_CEILING to 1, or restructure the gate's three-deep registration guard. See 164.4.1-03-SUMMARY.md.
+- SC-1's ubuntu half and SC-3's ubuntu cleared half are UNMEASURED at 164.4.1-06: no SHA-bound workflow_dispatch of the finished 44-file/363-arm tree exists, so there is no ubuntu wall clock, no ubuntu per-arm lane time, and ci.yml's TIMEOUT DECISION block carries no number from this phase. Owed to the orchestrator after merge.
+- Plan 164.4.1-06 Task 2's CLEARED grep over 164.4.1-TRIPWIRE-FIRED.log ALREADY returns 1 at base ddfd55d3, satisfied by plan 01's own header sentence — a green there proves nothing. Booked as deferred-items D-164.4.1-06-1; repair belongs in the assertion (bind to run id + 40-hex sha), not the document.
 
 ## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions
 
