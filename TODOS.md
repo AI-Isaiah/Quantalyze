@@ -1239,7 +1239,7 @@ true for 146 and half of 142–145, and **false for 141**.
       still says WINDOWS entry 28 is CLOSED while row 28 reads `open`, and no batch can correct it
       until the frontmatter counters are reconciled with the rows.
 
-- [ ] **`[REDUNDER-PGCRON]` FOUR Phase-164.4 idiom gate files cannot be FALSIFIED on the pg-lane — the lane has no `pg_cron` (measured 2026-09-02, Plan 164.4-00; mechanism corrected and the set closed at four 2026-09-03, Plan 164.4-03).**
+- [x] **`[REDUNDER-PGCRON]` FOUR Phase-164.4 idiom gate files cannot be FALSIFIED on the pg-lane — the lane has no `pg_cron` (measured 2026-09-02, Plan 164.4-00; mechanism corrected and the set closed at four 2026-09-03, Plan 164.4-03).**
       `scripts/pg-lane/run.sh` boots a vanilla `initdb` cluster. Measured on it: `pg_available_extensions`
       has **0 rows** for `pg_cron`, and `CREATE EXTENSION pg_cron` fails `0A000 … Could not open extension
       control file ".../postgresql@16/share/postgresql@16/extension/pg_cron.control"`.
@@ -1286,6 +1286,73 @@ true for 146 and half of 142–145, and **false for 141**.
       **Needed before any batch containing those files.** Evidence:
       `.planning/phases/164.4-.../164.4-00-FIXTURE-STRATEGY.md` § "The largest idiom file cannot be
       baselined".
+      ✅ **CLOSED 2026-09-05 — Phase 164.4.1 PGCRON-LANE. RETIRED AT THE SUBSTRATE, not worked
+      around.** Everything above stays as the dated record of the deferral; this paragraph is what
+      ended it.
+      * **HOW.** `scripts/pg-lane/run.sh` now carries `shared_preload_libraries=pg_cron` (plus
+        `cron.database_name` and `cron.max_running_jobs=0` — the lane schedules nothing, it only
+        needs the catalog to exist) on its SINGLE `pg_ctl -o` start, and each affected gate's
+        `RED-UNDER-SETUP` apply list carries
+        `supabase/migrations/20260513094906_enable_pg_cron.sql`. No migration was edited. The
+        preload's cost was MEASURED, not assumed: **+0.009 s/lane** in the isolated A/B (plan 01),
+        and `per-arm lane time: mean 1.0s over 262 arm run(s)` on the SAME corpus with the preload
+        on — identical to every prior local full-corpus run without it, which is the form the
+        decision needed since every arm pays lane startup. At the phase's END-STATE corpus the
+        printed line is `per-arm lane time: mean 1.1s over 363 arm run(s)` (plans 05/06 locally,
+        and the ubuntu run below); the 1.0 → 1.1 step tracks the 101 arms added after plan 01, not
+        the preload, which is why the like-for-like A/B is the number that carries the decision.
+      * **WHAT IT BOUGHT.** All FIVE files are annotated — the four `lane-blocked:` ones plus
+        `test_compute_jobs_error_kind_copy_parity.sql`, the apply-list-blind fifth. ⚠️ Every figure
+        below is re-derived from **the RUN, not from the commits that wrote it**: the per-file
+        `sections` lines printed by `node scripts/mutation-runner/run.mjs --parse-only` at
+        `6f9c5172`. An earlier draft of this paragraph quoted as-annotated commit numbers and did
+        not reconcile — it claimed 103 total over a breakdown summing to 102 while the runner
+        printed 101.
+        Per plan, as the runner prints them today: 02 took the copy-parity file (**3**) and
+        `test_derive_allocator_keys_fanout.sql` (**7**); 03 `test_retention_orphaned_running.sql`
+        (**24**); 04 `test_strategy_analytics_stuck_computing_reaper.sql` (`95197d28`, **28**); 05
+        `test_reconcile_dropped_enqueue_sweep.sql` (**39**, the largest file in the phase).
+        3 + 7 + 24 + 28 + 39 = **101 sections**, which is exactly the `ARMS_FLOOR` delta this phase
+        ratcheted (262 -> 363) — an independent second reading of the same number.
+        ⚠️ **Why 24 and not 25 for the retention gate.** `905b2aa6` annotated **25** sections there
+        (24 biting + 1 MEASURED waiver); `fcbc0159` then reclassified `3/JOB-05` — the
+        unfalsifiable dominated guard — out of section-hood rather than raising `WAIVED_CEILING`,
+        and the runner has printed `sections 24` for that file ever since. 25 is the as-annotated
+        count at one commit; 24 is the count after the reclassification and the only one a reader
+        can reproduce. That is also why this item's own **"100 sections are owed"** line above does
+        not foot to the delivery: 100 was the 2026-09-04 estimate made BEFORE those four files were
+        annotated, and the four measure **98** (7 + 24 + 28 + 39). The estimate stays as the dated
+        record; 98 + 3 = 101 is what shipped.
+        ⚠️ That 03/04 order is load-bearing, not bookkeeping: the two reclassification precedents
+        for an unfalsifiable dominated guard are `3/JOB-05` in the RETENTION gate (plan 03,
+        `fcbc0159`) and Part 3 in the REAPER gate (plan 04, `95197d28`/`ca4ad558`), and a reader
+        chasing that precedent lands on the wrong SUMMARY if the two names are swapped.
+      * **END STATE, read off the run and not counted here** (plan 05 at `b6b830cf`, re-measured by
+        plan 06): `coverage: files 44/71`, `lane-blocked: 0 file(s)`,
+        `lane-probe: pg_cron AVAILABLE`, `  pending: 0`, `arms: 363/363/0`, `biting: 363`,
+        `lane-invocations: 363` (tallies agree), `✅ No defects`, **exit 0**. `FILES_FLOOR` 44,
+        `ARMS_FLOOR` 363, `WAIVED_CEILING` still **0** — the whole phase moved nine files' worth of
+        ⚠️ SUPERSEDED 2026-09-05 by the phase review: `ARMS_FLOOR` is **361**. CR-01/CR-02 found
+        three arms of `test_reconcile_dropped_enqueue_sweep.sql` unfalsifiable or gate-self mutated;
+        two were reclassified as INVARIANTs, not waived. `WAIVED_CEILING` still 0, `FILES_FLOOR` 44.
+        arms and added ZERO waivers. 44 + 0 + 27 + 0 + 0 = 71; the 27 are `unreachable:`
+        (`[REDUNDER-NONIDIOM]`, still open).
+      * **THE DEFERRAL EXPIRED BY BEING CAUGHT, which is the point of having built it that way.**
+        The `lane-blocked-stale` tripwire FIRED on the pre-annotation tree — recorded verbatim in
+        `.planning/phases/164.4.1-.../164.4.1-TRIPWIRE-FIRED.log`, and SHA-bound on ubuntu in
+        workflow run 33938272686 (`f04ce51b`), whose provisioning step also answered RESEARCH's
+        open question by measurement: `postgresql-16-cron` **1.6.2-1 from noble/universe**, not
+        PGDG, with `pg_cron.so` and `pg_cron.control` present under
+        `/usr/lib/postgresql/16/`. It CLEARED when plan 05 annotated the last file: exit 0, class
+        empty. Nothing in the classifier, the probe fixture or the defect code was touched to
+        clear it — the class emptied BY ANNOTATION, and SELF-TEST 17/17 still proves the tripwire
+        on the synthetic corpus, so it stays live for any FUTURE unannotated pg_cron gate.
+      * ⚠️ **The runner no longer cites this id in the non-empty `lane-blocked:` arm** (plan 06
+        rewrote both arms of the reason at the source — the old wording said the pg-lane could not
+        host the extension, which stopped being true on 2026-09-05). The `lane-blocked-stale`
+        DEFECT message still names `[REDUNDER-PGCRON]`, deliberately: that string is asserted by
+        SELF-TEST 17/17, and a reader who hits it should land on this closed entry and its history
+        rather than on nothing.
 
 - [ ] **`[ANCHOR-QUOTE-01]` `verify-plan-anchors.mjs` binds a quote ACROSS an XML element boundary — false stales, masked only by element ORDER (booked 2026-09-03, Phase 164.4 plan-check iteration 3).**
       `scripts/verify-plan-anchors.mjs:279-292` (`boundQuote`): when an anchor is the last on its line
@@ -1329,8 +1396,8 @@ true for 146 and half of 142–145, and **false for 141**.
       because a hardcoded `RETURN FALSE` stub would make every admin-policy arm structurally
       unfalsifiable.
 
-- [ ] **`[REDUNDER-LANEBLOCKED-BLIND]` The `lane-blocked` classifier is APPLY-LIST-BLIND, so a gate deferred for `pg_cron` can be miscounted into `pending:` (measured 2026-09-04, Plan 164.4-09).**
-      `gateNeedsPgCron` (`scripts/mutation-runner/parse.mjs:996`) decides the class by scanning **the
+- [x] **`[REDUNDER-LANEBLOCKED-BLIND]` The `lane-blocked` classifier is APPLY-LIST-BLIND, so a gate deferred for `pg_cron` can be miscounted into `pending:` (measured 2026-09-04, Plan 164.4-09).**
+      `gateNeedsPgCron` (`scripts/mutation-runner/parse.mjs:1043`) decides the class by scanning **the
       gate file's own executable text** for a `pg_extension` probe. A gate whose OWN text never
       mentions `pg_cron`, but whose `RED-UNDER-SETUP` apply list contains a migration that hard-RAISEs
       without the extension, is equally un-baselineable on the lane — and is classified `pending`.
@@ -1351,6 +1418,40 @@ true for 146 and half of 142–145, and **false for 141**.
       `src/__tests__/mutation-annotation-parser.test.ts` ("scanCorpus names the 4 lane-blocked files
       EXACTLY"), which asserts this file IS in `pendingFiles` and therefore flips the day either half
       is resolved.
+      ✅ **CLOSED 2026-09-05 DELIBERATELY — Phase 164.4.1 plan 06, CONTEXT decision D-07. The
+      classifier is STILL text-only; what changed is that the limit is now documented, calibrated
+      and reasoned, instead of booked as an unfixable defect.** The tripwire above DID flip, as
+      designed: plan 02 annotated the file, so it is `annotated` and not `pending`, and the
+      assertion was moved rather than deleted (the flip is recorded in place, with both exits it
+      named).
+      ⛔ **The proposed fix — widen `gateNeedsPgCron` to read a gate's `RED-UNDER-SETUP` apply
+      list — was RETIRED, not implemented, and the reason is structural, not effort.** It cannot
+      see its own subject. Classification runs over UNANNOTATED files (`classifyGateIdiom` is
+      literally "which of four idiom classes an UNANNOTATED gate file falls in"), and an
+      unannotated gate has no `RED-UNDER-SETUP` line to read — the measured instance had none at
+      the moment it was misclassified. The widened branch would therefore be **dead code behind a
+      passing test**, which is the exact "quietly become unreachable" shape this phase family
+      exists to refuse. Shipping it would have made the ledger look closed while adding an
+      unfalsifiable branch: a worse outcome than the miscount it targets.
+      **What actually closed the exposure was the SUBSTRATE** (`[REDUNDER-PGCRON]`, retired the
+      same day). With pg_cron hosted, the own-text case and the apply-list case resolve
+      identically — annotatable — so there is no verdict left for a widening to change. Measured
+      end state: `lane-blocked: 0`, `  pending: 0`, `coverage: files 44/71`, exit 0.
+      **Where the boundary is pinned, so a future reader finds it asserted rather than implied:**
+      * `scripts/mutation-runner/parse.mjs` — a dated paragraph above `gateNeedsPgCron` states the
+        scope (GATE TEXT ONLY), why an apply-list-only dependency is invisible before annotation,
+        and why the widening was retired;
+      * `src/__tests__/mutation-annotation-parser.test.ts` — the `D-07 boundary` arm, a HAND-BUILT
+        gate carrying a `TEST FAILED (…)` raise and a `-- run AFTER 20260826140000` note but no
+        `pg_extension` probe, asserting `gateNeedsPgCron` false and `classifyGateIdiom` `pending`,
+        with the reason it is the CORRECT answer. Proven able to fail 2026-09-05: replacing the
+        function's first line with a naive `text.includes('pg_cron')` turned it RED (4 failed /
+        104 passed, this arm named); restored, `shasum` identical.
+      ⭐ **THE RESIDUAL, stated rather than hidden.** A future lane-blocking dependency that lives
+      ONLY in a migration is still invisible to the classifier. It is no longer silent: it
+      surfaces as a named `baseline` defect the first time somebody annotates that gate — exit 1
+      with the file named — instead of sitting miscounted in `pending:`. That is the trade this
+      closure makes, and it is deliberate.
 
 - [ ] **`[REDUNDER-NONIDIOM]` The 27 non-idiom SQL gate files are excluded from Phase 164.4 and need their own phase (logged 2026-09-02, founder scope decision).**
       Phase 164.4's criterion 1 was NARROWED to the 44 `TEST FAILED (` idiom files. The other **27
@@ -1384,6 +1485,84 @@ true for 146 and half of 142–145, and **false for 141**.
       typically a PRIVILEGE abort (`permission denied for table …`), which carries no
       `TEST FAILED (…)` and scores NO-IDENTITY — concrete evidence for the rename this item
       proposes.
+
+- [ ] **`[REDUNDER-SUBSET-SPLIT]` `sql-mutation`'s ubuntu wall clock reached the ~10 min trigger, so `timeout-minutes` has taken its ONE allowed raise to 20. The next escalation is a subset split, NOT another raise (booked 2026-09-05, Phase 164.4.1).**
+      MEASURED on ubuntu, SHA-bound, both runs of this branch:
+        * run 33961609382 @ `1aa8bb70` — 363 arms / 451 legs — **567 s** (9.45 min), under the trigger.
+        * run 33973362161 @ `ab0d5644` — 361 arms / 449 legs — **646 s** (10.8 min), OVER it.
+      ⚠️ FEWER legs, SLOWER run: ~1.15 s/leg vs ~1.10. The ~80 s swing is RUNNER VARIANCE, not
+      corpus growth, and that is precisely why the headroom matters — the corpus did not grow and
+      the job still got 14% slower.
+      `ci.yml` applied its own documented rule (raise only when a MEASURED run REACHES ~10 min)
+      and went 15 -> 20. ⛔ **20 IS THE CEILING.** If a MEASURED ubuntu run reaches 20 minutes,
+      STOP — do not raise again. The locked decision (`164.4-CONTEXT.md`) is that PRs then run only
+      CHANGED gate files, with a scheduled full run enforcing `FILES_FLOOR`/`ARMS_FLOOR`, and the
+      split must be PRINTED on every run, never silent — a subset that does not say it is a subset
+      is the same defect class as a gate that reports PASS having measured nothing.
+      OWED: a runner subset mode (`--changed` against a base ref) plus the ci.yml wiring and a
+      scheduled full-corpus job. Not started; this entry exists so the ceiling is not discovered
+      by a red build.
+
+- [ ] **`[REDUNDER-GATESELF-UNBOUNDED]` The "mutate the gate's own setup" twin class has NO ceiling, while waivers have `WAIVED_CEILING = 0` — and Phase 164.4.1 more than doubled it (booked 2026-09-05, Phase 164.4.1 code review IN-03).**
+      ⛔ **BOOKED, NOT FIXED — deliberately, and the reason is the point.** Introducing a ceiling is
+      a DESIGN decision about what the corpus's headline number means, and `164.4-CONTEXT.md`
+      reserves exactly that class of decision to the founder (it is what reserves `WAIVED_CEILING`
+      +1 to them). Adding a second pinned census as a review fix would set the threshold by
+      executor convenience — at whatever today's count happens to be — which is the same move the
+      ceiling is supposed to prevent. So this records the measurement and the choice, and asks.
+
+      **MEASURED at `ea766c0e`** by parsing every `RED-UNDER-M:` annotation in `supabase/tests/*.sql`
+      and selecting the twins whose EVERY `apply` step targets a file under `supabase/tests/**`:
+
+      ```
+      twins parsed:        363
+      gate-self twins:     19
+        test_api_keys_exchange_not_user_writable.sql :: 5c scrub half
+        test_capital_ownership_allocation_guard.sql :: 7i setup
+        test_create_wizard_strategy_for_key.sql :: D
+        test_reconcile_dropped_enqueue_sweep.sql :: 2/JOB-04, 2/whole-block/JOB-04, 3/JOB-04,
+                                                    3/tick 1/JOB-04, 4/JOB-04
+        test_scenario_downgrade_sweep.sql :: Assertion 1, 2, 3, 4, post-condition
+        test_scenarios_rls.sql :: sanity
+        test_strategy_analytics_stuck_computing_reaper.sql :: 6/seed A/D-18, 6/seed B/D-18,
+                                                             6a/G1, 6b/G1, 6c/G1
+      ```
+
+      **TEN of the 19 were added by this phase** — the five in `test_reconcile_dropped_enqueue_sweep
+      .sql` (plan 05) and the five in `test_strategy_analytics_stuck_computing_reaper.sql` (plan 04).
+      The class went 9 -> 19 in one phase and nothing printed, counted or refused it.
+
+      **THE TWO ESCAPE VALVES, both unbounded today.** An author facing an arm they cannot prove has
+      two documented precedents that point in OPPOSITE directions, and may pick either:
+      1. **RECLASSIFICATION** — drop the `TEST FAILED (` identity and keep the raise as a named
+         `RAISE EXCEPTION 'INVARIANT (…)'`. The arm leaves the denominator entirely. Precedents:
+         `3/JOB-05` in `test_retention_orphaned_running.sql` (plan 03, `fcbc0159`) and Part 3 in
+         `test_strategy_analytics_stuck_computing_reaper.sql` (plan 04, `95197d28`/`ca4ad558`).
+         Corpus-wide count today: **2**.
+      2. **GATE-SELF MUTATION** — keep the identity and twin it by mutating the GATE'S OWN lookup
+         rather than any production object. The arm stays in the denominator and `ARMS_FLOOR` goes
+         UP. Corpus-wide count today: **19 of 363**.
+      Valve 1 lowers the number, valve 2 raises it, neither is capped, and the choice between them
+      is currently unreviewable. `WAIVED_CEILING = 0` bounds the third valve (waivers) precisely
+      because that asymmetry was judged dangerous — the same argument applies here.
+
+      ⚠️ **Why this is not merely bookkeeping.** `ARMS_FLOOR` is the ratchet that is supposed to
+      mean "this many arms have been PROVEN to react to a production regression". A gate-self twin
+      never touches the production object the arm defends, so it demonstrates only that the arm
+      reacts to the test breaking itself. `GRAMMAR` rule 4 already REFUSES twins targeting
+      `scripts/pg-lane/fixtures/` for exactly this reason; the rule stops at fixtures and does not
+      reach the gate file itself.
+      ⚠️ Not all 19 are illegitimate — a conservation arm such as `2/whole-block/JOB-04` is
+      CORRECTLY falsified by adding an unseeded row to the gate's own setup, because the seeded set
+      IS its subject. The item is the absence of a boundary, not a verdict on the members.
+
+      **Proposed shape when taken (founder to rule):** print a census line the way waivers are
+      printed — a count of gate-self twins and a count of `RAISE EXCEPTION 'INVARIANT (` sites —
+      and pin each with a ceiling. Then a phase that grows either has to say so in review.
+      ⚠️ Take the numbers from a fresh run, NOT from this entry: the same review's CR-01 and CR-02
+      change several of these members directly (CR-01 replaces `2/JOB-04`'s gate-self twin with a
+      production-shaped one, CR-02 reclassifies `3/JOB-04` and `4/JOB-04`), so 19/363 is a dated
+      reading at `ea766c0e` and both counts move when those land.
 
 - [ ] **`[WINDOWS-STALE]` `.planning/WINDOWS.md` entries 25, 26 and 28 read `open` but have all executed (logged 2026-09-02).**
       `CLAUDE.md:53` already claims entry 28 is closed while `.planning/WINDOWS.md:45` still records
@@ -2861,6 +3040,111 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
 
 ### CI / test-infra ratchet
 
+- **`[PGLANE-SELFTEST-COUNT-UNPINNED]` The pg-lane self-test's `N/6` denominator is a hand-typed
+  literal in NINE places and NOTHING pins it (raised 2026-09-04, Phase 164.4.1 plan 01 Task 3).**
+  `scripts/pg-lane/run.sh` spells its arm count at the SP-H01 history comment, the five
+  `=== SELF-TEST n/6:` captions, the SP-H01 denominator comment, the `$((6 - st_skipped))/6`
+  arithmetic and the final `PASSED (6/6)`. MEASURED at HEAD: adding arm 6 required editing all
+  nine by hand, and zero vitest arms read `run.sh`'s captions — so a seventh arm whose caption
+  said `7/7` while `PASSED (6/6)` stayed put would print a self-consistent-looking lie, and a
+  caption that silently drifted BELOW the real arm count would let a dropped arm read as a full
+  run. That is the same class SP-H01 itself was raised for; SP-H01 fixed the SKIP tally, not the
+  denominator.
+  ⚠️ Contrast `scripts/mutation-runner/run.mjs`, which also uses literal captions (`17/17`) but
+  whose coverage is DERIVED and enforced: `src/__tests__/mutation-runner-floors.test.ts:579-605`
+  ranges over `DEFECT_KINDS` and fails BY NAME on an unexercised kind. The `run.mjs` side is more
+  recent and more tested; the lane side is the laggard.
+  **Fix** = a vitest arm that counts the `=== SELF-TEST n/6:` captions in the lane script's bytes
+  and asserts the count equals the denominator in the `PASSED (N/N)` literal and in the
+  `$((N - st_skipped))/N` arithmetic — three independently-typed numbers forced to agree.
+  ⛔ Not fixed in 164.4.1 plan 01 ON PURPOSE (PATTERNS C2): the arm-6 edit follows the local
+  convention, and inventing a counting scheme mid-phase would mix a new mechanism into a substrate
+  change. Book it, then build it.
+  ✅ **BUILT 2026-09-05 (Phase 164.4.1 code review, IN-02).** `src/__tests__/drift-check-scripts
+  .test.ts`'s SP-H01 arm now counts the `=== SELF-TEST n/N:` captions in the comment-stripped
+  `self_test()` body and requires that count to equal the `PASSED (N/N)` denominator, requires each
+  caption's OWN denominator to match it, and (as before) requires the
+  `$((N - st_skipped))/N` arithmetic to use the same N — the three independently-typed numbers this
+  item asked to be forced to agree. The interim `PASSED \((\d+)\/(\d+)\)` halves-agree check was
+  SELF-CONSISTENT only: `totalArms` was read out of the caption, so six arms captioned `(7/7)`
+  passed. PROVEN ABLE TO FAIL by neutering exactly that case — `self_test() contains 6 numbered arm
+  captions but the verdict claims 7 … expected 6 to be 7` — then restored and confirmed by hash. An
+  in-test calibration also proves the caption predicate matches something, so agreement cannot come
+  from a regex that matches nothing.
+  ⚠️ RESIDUAL, deliberately not pinned: two of the original nine sites are PROSE (the SP-H01 history
+  comment at `run.sh:558` and the denominator comment), and the test strips comments before reading
+  — by design, since a first version of SP-H01 matched `SELF-TEST PASSED (5/5)` inside the very
+  comment explaining its own fix. A stale number in those two comments is a docs drift, not a
+  self-consistent lie about the arm count, which is what this item was raised for.
+
+- **`[PGLANE-SELFTEST-NUMERATOR-UNPINNED]` The new self-test caption pin constrains the arm COUNT
+  and the DENOMINATOR, never the NUMERATORS (raised 2026-09-05, review of the 164.4.1 fix pass,
+  IN-A).** `src/__tests__/drift-check-scripts.test.ts:3289-3300` — the pin
+  `[PGLANE-SELFTEST-COUNT-UNPINNED]` above asked for and got — does two things: it counts the
+  `=== SELF-TEST n/N:` captions and requires that count to equal the verdict's `N`, and it requires
+  each caption to match `=== SELF-TEST [0-9]+/N`. The numerator is `[0-9]+`. Nothing requires the
+  numerators to be 1..N, to be distinct, or to be in order.
+  ⚠️ MEASURED at `6f9c5172` + this fix pass, by renumbering `scripts/pg-lane/run.sh:703` from
+  `=== SELF-TEST 6/6:` to `=== SELF-TEST 7/6:` and running the whole file: **342/342 passed**, both
+  new assertions included (`7/6` still matches `[0-9]+/6`, and there are still 6 captions).
+  Restored from a byte backup and confirmed by `shasum` equality — deliberately not by a VCS
+  restore, which would have taken the pass's uncommitted edits with it.
+  So the surviving hole is duplicated or skipped numerators: captions reading `1,2,3,3,5,6` or
+  `1,2,3,4,5,7` beside `PASSED (6/6)` print a self-consistent-looking sequence that no arm reads.
+  That is smaller than the class the parent item was raised for — the COUNT is now pinned, so an
+  arm cannot be added or dropped silently — but it is the same shape.
+  **Fix** = extend the same loop to collect the numerators and assert they are exactly the set
+  `1..N`. No new mechanism, no new fixture.
+  ⛔ NOT fixed in this pass ON PURPOSE: the brief that raised it books it explicitly and forbids
+  introducing enforcement, and a pin added in the same pass that measures it would be a pin nobody
+  has yet seen fail on real drift.
+
+- **`[PGCRON-INSTALL-GUARD-STRINGCMP]` The macOS pg_cron installer's agreement guard compares path
+  SPELLINGS, so a symlinked `pg_ctl` false-refuses (raised 2026-09-05, review of the 164.4.1 fix
+  pass, IN-C; PRE-EXISTING and untouched by that pass).**
+  `scripts/pg-lane/install-pg-cron-macos.sh:107` is `if [ "$path_bin" != "$PGBIN" ]`, where
+  `path_bin` is `dirname "$(command -v pg_ctl)"`. Homebrew's `brew link` puts `pg_ctl` and
+  `pg_config` in a shared bin dir as SYMLINKS into the keg, so the two spellings differ while
+  naming the same binary — and the guard refuses.
+  ⚠️ MEASURED at `6f9c5172` + this fix pass, with PGBIN unset and a scratch dir first on PATH whose
+  `pg_ctl` and `pg_config` are symlinks into `/opt/homebrew/opt/postgresql@16/bin`:
+
+  ```
+  PATH pg_ctl        : <scratch>/linkbin/pg_ctl
+  resolves to        : /opt/homebrew/Cellar/postgresql@16/16.13/bin/pg_ctl
+  keg pg_ctl resolves: /opt/homebrew/Cellar/postgresql@16/16.13/bin/pg_ctl
+  ERROR: the lane and this script would resolve DIFFERENT PostgreSQL binaries:   (exit 1)
+  ```
+
+  Same real binary on both sides, refused anyway. The blast radius is bounded — the refusal is
+  LOUD, its remediation text is correct, and `export PGBIN=<keg>` clears it in one command — so
+  this costs an operator one confusing message, never a wrong install. It is a false NEGATIVE, not
+  a silent degrade, which is why it is booked rather than blocking.
+  **Fix** = compare the resolved binaries rather than the directory strings: `readlink -f` (or
+  `realpath`) both `pg_ctl` paths and refuse only when THOSE differ; keep printing the two original
+  spellings in the message so a genuine mismatch stays legible. ⚠️ macOS `readlink` gained `-f`
+  only in Ventura — check before relying on it, or resolve with `cd "$d" && pwd -P`.
+  ⛔ Booked, not fixed: the fix-pass brief that raised it scoped it to booking, and loosening a
+  safety guard is not a change to make beside four unrelated documentation fixes.
+
+- **`[PGLANE-SELFTEST-NOT-IN-CI]` No CI step runs the pg-lane's OWN self-test — its six arms are
+  proven only on the authoring box (raised 2026-09-04, Phase 164.4.1 plan 01 Task 3).**
+  MEASURED at HEAD: `.github/workflows/ci.yml`'s `sql-mutation` job runs the RUNNER's self-test
+  (`node scripts/mutation-runner/run.mjs --self-test`) before the corpus run, but ZERO steps in the
+  whole workflow invoke `bash scripts/pg-lane/run.sh --self-test`.
+  So the lane's collision guard (arms 1-2), its orphan-cleanup contract (arms 3-5, the D-04 defect
+  that cost 27 orphaned clusters and a disk-exhaustion incident) and now its pg_cron preload
+  (arm 6) are asserted on macOS and nowhere else — while every one of them is a property of the
+  substrate that CI's throwaway clusters depend on, and ubuntu is the host where the preload's
+  provisioning is newest and least measured.
+  ⚠️ The cost is real, not hypothetical: arm 6's control half spawns lanes, and arms 3-5 wait on
+  signalled runs (~39 s locally before arm 6). A CI step must carry its own measured wall clock
+  against the job's `timeout-minutes`, so this is a sized piece of work rather than a one-line add.
+  **Fix** = a step in `sql-mutation` (or a job of its own) running the lane self-test, with the
+  measured ubuntu wall clock recorded in the same comment. Not fixed in 164.4.1 plan 01: that plan
+  pins `timeout-minutes: 15` unchanged, and adding ~40 s of lanes to the job is exactly the kind of
+  unmeasured spend that pin exists to prevent.
+
 - **`[REDUNDER-PENDING-UNBOOKED]` The runner's `pending:` class is the only one of five printed
   without a TODO id or a CI assertion (raised 2026-09-04 by the Phase 164.4 verifier, WR-V3).**
   `unreachable:` cites `[REDUNDER-NONIDIOM]`, `lane-blocked:` cites `[REDUNDER-PGCRON]` and is
@@ -2868,6 +3152,20 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   nothing about it. Today the class holds exactly one file
   (`test_compute_jobs_error_kind_copy_parity.sql`, owed to Phase 164.4.1) and its shape IS pinned
   against real runner output by a vitest arm on every push, so this is bounded, not open.
+  ⚠️ **CURRENCY 2026-09-05 (Phase 164.4.1 plan 06). Two of the sentences above have moved; the
+  paragraph stays as its dated record and the item stays OPEN.**
+  (a) `pending:` is now measured **`pending: 0`** — that one file was annotated by plan 02, so the
+  class is EMPTY, and it is pinned as the empty set BESIDE an AIM (`it` title `pending AIM (D-04)`)
+  that classifies a stripped copy of a real gate to prove the class is still COMPUTED. An empty-set
+  assertion standing alone would be the vacuity this file has already measured once; do NOT
+  "restore" the old one-name pin.
+  (b) The id `lane-blocked:` cites is now a **RETIRED** one: `[REDUNDER-PGCRON]` was closed the same
+  day, and plan 06 rewrote the printed reason so the NON-EMPTY arm cites no id at all (it points at
+  the `lane-probe:` line) while the EMPTY arm names the retirement explicitly. The `lane-blocked`
+  line's CI MEASURE_FAIL is unchanged.
+  ⛔ The item's own thesis is UNAFFECTED by both: `pending:` still cites nothing and CI still
+  asserts nothing about it, and an empty class is exactly when an unasserted one is easiest to stop
+  noticing. The honest fix below is still the fix.
   ⚠️ **Do NOT close it by hardcoding a TODO id into the line.** `pending:` is a GENERIC class —
   "idiom files that carry no RED-UNDER yet" — so a fixed id would be a lie the moment a second,
   unrelated file lands in it. The honest fix is a gate asserting that every file the runner names
@@ -5580,3 +5878,28 @@ expires. Close them when 164.3.1 closes, not before.
 - [ ] **[VAC08-LEDGER-32] 32 repo migrations have no TEST ledger row — measured, baselined, and NOT yet applied** — surfaced 2026-08-30 by VAC-08's first working run (CI 33277829284, PR #724). The count fell 253 → 56 → 53 → 32 as each of four ledger naming conventions was found by the gate's own shape diagnostic; the enumeration is now closed (a basename is `<ts>_<desc>` and `name` has held the whole thing, the description, the timestamp, or nothing — there is no fifth substring), so **32 is real drift, not a join bug**. Arithmetic closes in both directions: 237 of 239 ledger rows now match a repo file and 230 of 262 repo files match a ledger row, leaving no spare rows to explain the 32. They are carried in `scripts/vac08-ledger-baseline.txt` as a dated RATCHET — the gate still fails loud on any *new* migration that misses TEST, and a baselined entry that later turns up present is a hard failure ("delete this line"), so the file can only shrink. ⚠️ **LEDGER ABSENCE IS NOT OBJECT ABSENCE.** These have no `schema_migrations` row; whether their objects exist in TEST (hand-applied, or installed by a later migration) is a different question this gate does not answer, and the body half of VAC-08 reports all four checked function bodies MATCHING the committed snapshot. Do not read the list as "TEST is missing 32 features". ⚠️ **Four are security migrations** — `20260529150000_lock_profile_privileged_columns`, `20260814120000_wizard_rpcs_revoke_authenticated`, `20260715120000_grant_anon_execute_current_user_has_app_role`, `20260823120000_revoke_api_keys_insert` — so any RLS/SQL test asserting those grants may be asserting them against a schema that never received them; worth a targeted object-level probe before trusting those tests. ⛔ `20260823120000_revoke_api_keys_insert` refuses BY DESIGN on a database it cannot identify and may never be applicable to TEST. ⛔ **Do NOT hand-apply these to TEST to shorten the list** — TEST is shared with other people's CI; that is a founder decision, not an agent one. Owner: Phase 164.5 (which already owns the drift-gate family), or a founder call to apply them.
 
 - [ ] **[SQLTEST-GLOBALPRE-01] `test_ledger_refresh_fanout.sql` asserts a GLOBAL precondition on the SHARED test database, so anyone's leftover row reds it** — measured 2026-08-30 on PR #724 CI run 33278937294: `psql:supabase/tests/test_ledger_refresh_fanout.sql:595: ERROR: TEST PRECONDITION FAILED: 1 committed strategy/strategies on this database are already stale, live and ledger-backed... Park or clean them in the test project`. **Not caused by that branch** — it never touched the file (only `test_strategy_shares_rls.sql`), and main was green 2026-08-28. The file's reasoning is sound in isolation: a competing stale strategy would fight its fixtures for the global per-tick LIMIT and make arms G1/G2 measure the wrong thing, and it correctly refuses to touch rows it did not seed (its own D-05 note: shared project, concurrent PRs). But refusing to run is still a red board, and the precondition is a statement about **the whole database**, not about its own fixtures — which is exactly the anti-pattern already fixed for the e2e specs in PR #654 (⭐"e2e specs assert their OWN seed invariant, NOT global empty-state"). On a database shared with other people's CI this arm reds for reasons no author controls, and the standing remedy — "park or clean them in the test project" — is a WRITE to shared TEST, i.e. a founder action, not an agent one. **Two candidate fixes, both out of Phase 164.3's scope:** (a) scope the per-tick LIMIT contention check to strategies this file seeded (tag its fixtures and compare within the tag), so the arm measures its own invariant like the e2e specs now do; or (b) keep the global check but downgrade it from a hard precondition to a SKIP-WITH-REASON that is counted and reported, so a polluted shared DB is visible without being indistinguishable from a real fan-out defect. ⚠️ (b) needs care: an uncounted skip that exits 0 is `SKIP-01`, this repo's own named defect — the skip must be tallied and surfaced, never silent. ⭐ **ROOT-CAUSED + cleared 2026-09-01.** The offending row was a leaked e2e seed: `e2e-sfox-verified-*`, owner `@example.test`, created 2026-08-25, `stale_reason='series_behind'`, last return 2026-08-24. **Leakage is structural, not a one-off** — `e2e/helpers/seed-test-project.ts:1347` seeds the strategy `published` with a deterministic 120d series ending the day before the seed, which the view's own verdict reads stale after 4 days, and teardown is the caller's `afterAll` (`cleanupSfoxVerifiedStrategy:1443` -> `cleanupStrategiesByNamePrefix:345`). ANY aborted or crashed e2e run therefore leaves one behind permanently; the seeder's own comment at `:335-343` already concedes it ("cleanup is the caller's responsibility and no caller cleans", 5,153 published rows as of 2026-07-02). So this WILL recur on the next leaked sfox / deribit / mt5 seed. Cleared by hand for 2026-09-01 only: deleted scoped to a single `id` (never to the predicate — D-05), after confirming `public.strategies` carries no `BEFORE DELETE` trigger and that a plain delete is exactly what the missing `afterAll` would have done (`strategy_analytics` cascades via FK); verified in a fresh session, `offending_rows = 0`, and `sql-tests` then passed. The orphaned `api_keys` row and two `auth.users` were left — neither enters `ledger_refresh_staleness`, which starts `FROM strategies`. ⚠️ Fix (a) is harder than it reads: arms G1/G2 deliberately measure a GLOBAL bound (the per-tick `LIMIT` and per-venue cap are global), so id-scoping alone does not give them the exclusivity they need — do NOT resolve it by widening a tolerance to a magic number. Owner: unassigned; raise with the shared-test-db runbook (`docs/runbooks/shared-test-db-mutex.md`), which already documents the queue-depth vs wedged-holder distinction for the sibling failure mode.
+
+### [SECRETSCAN-FULLHISTORY-01] gitleaks full-history scan surfaces fixture secrets a PR scan never sees
+
+**Measured 2026-09-05** on `workflow_dispatch` run 33938272686 (branch `phase-164.4.1-pgcron-lane`,
+head `f04ce51b`). `secret-scan` FAILED with findings in ~15 pre-existing files —
+`analytics-service/tests/test_*.py`, `scripts/backfill_funding.py`, several
+`src/**/route.test.ts` — flagging `SERVICE_KEY`, `EXCHANGE_SECRET`, `api_key`,
+`_SERVICE_KEY_CANARY`, `investor_password` literals in test fixtures.
+
+**Why it was green on every PR:** the job checks out with `fetch-depth: 0`, and on a non-PR
+event `gitleaks-action` scans the WHOLE HISTORY; on a `pull_request` event it scans only the
+PR's commits. Every flagged commit is historical — none belongs to the branch under test.
+
+**Why this is booked, not fixed here:** it is pre-existing, it is not user-facing, and a
+pg_cron lane phase is the wrong provenance for a repo-wide fixture-secret sweep (same
+reasoning as `[REDUNDER-WINDOWS-COUNTS]` below). It is also NOT nothing: it means a real
+secret committed historically would be invisible to the PR gate that everyone reads as
+authoritative.
+
+**What to do:** decide whether these fixtures should carry obviously-fake values, be covered
+by a reviewed `.gitleaks.toml` allowlist (⚠️ an allowlist is a permanent blind spot — prefer
+changing the fixtures), and whether a scheduled full-history scan should run so the gap is
+visible on a cadence rather than only when someone dispatches CI by hand.
+⚠️ Pin `GITLEAKS_VERSION` when touching this: 8.24.3 silently drops `[[allowlists]]`, and
+gitleaks auto-loads `.gitleaks.toml` from cwd, so omitting `-c` tests nothing.

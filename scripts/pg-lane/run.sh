@@ -25,6 +25,16 @@
 #                                               # Phase 164 migrations + the gate
 #   bash scripts/pg-lane/run.sh --self-test     # prove the guard and the cleanup
 #   bash scripts/pg-lane/run.sh --tracer-proof  # SHAPE 1c mutate->RED->pristine->GREEN
+#   bash scripts/pg-lane/run.sh --print-pgbin   # print the server-binaries dir this
+#                                               # lane would boot, and exit. Added
+#                                               # 2026-09-05 so ci.yml's `Provision
+#                                               # pg_cron` step asks the lane which
+#                                               # binaries it uses instead of keeping
+#                                               # a second, divergent opinion. Writes
+#                                               # the dir on STDOUT and its refusal on
+#                                               # STDERR; honours PGBIN exactly as a
+#                                               # real run does. It boots nothing.
+#   bash scripts/pg-lane/run.sh --help          # print this header block
 #
 # Semantics: boot a throwaway cluster under <scratch-dir>/pgd, apply the --apply
 # files in order, run the optional --post-apply file (the hook for the runner's
@@ -39,6 +49,20 @@
 #
 # ⛔ It never touches TEST or PROD. It initdb's a fresh cluster and listens on
 # 127.0.0.1 only.
+#
+# ⚙️ pg_cron IS PRELOADED ON EVERY LANE (phase 164.4.1). The single `pg_ctl -o`
+# start below carries `shared_preload_libraries=pg_cron` alongside
+# `cron.database_name=postgres` and `cron.max_running_jobs=0`, because five SQL
+# gate files probe `pg_extension` for pg_cron and three of them read
+# `cron.job.command` as an ORACLE. MEASURED 2026-09-04: +0.009 s/lane, ranges
+# overlapping (RESEARCH § Q4) — the preload is free. The lane does NOT run
+# `CREATE EXTENSION`: a gate declares that need itself by listing
+# supabase/migrations/20260513094906_enable_pg_cron.sql in its RED-UNDER-SETUP.
+# ⛔ When the pg_cron binary is ABSENT this lane FAILS with a named diagnosis
+# carrying both install routes. It never degrades silently — a lane that
+# quietly ran without the extension would report those five gates' withheld
+# Parts as passing — and it never installs anything itself: provisioning is the
+# host's job (ubuntu apt in ci.yml, scripts/pg-lane/install-pg-cron-macos.sh).
 #
 # ⚠️ WHAT IT DOES AND DOES NOT PROVE. EVERY file under fixtures/ is a STAND-IN —
 # the DIRECTORY, not a fixed list, so a fixture added later is covered on the day
@@ -102,8 +126,16 @@ alloc_port() {
 # Defect fix 3 (D-04): the harness had NO pg_ctl stop, NO trap and NO rm — it
 # never stopped what it started. Measured consequence 2026-08-28: 27 orphaned
 # Postgres volumes (904 MB) and a container up 10 days, contributing to a
-# disk-exhaustion incident. CREATED is set only AFTER this run makes its own
-# data dir, so cleanup can never remove a cluster this run did not create.
+# disk-exhaustion incident. CREATED is set only after this run makes its own
+# data dir.
+# ⛔ CORRECTED 2026-09-05 (Phase 164.4.1 security audit, F-164.4.1-A). This block
+# used to claim "cleanup can never remove a cluster this run did not create".
+# That was FALSE and was MEASURED false: `mkdir -p "$PGD"` succeeds silently on an
+# EXISTING directory, so CREATED was set for a tree this run had not made; initdb
+# then refused ("exists but is not empty"), `set -e` fired, and the EXIT trap
+# deleted the pre-existing tree. A seeded sentinel under pgd/data was destroyed.
+# The refusal below is what now makes the sentence true, so the guard performs the
+# property the comment claims rather than the comment over-claiming the guard.
 # ---------------------------------------------------------------------------
 PGD=""
 CREATED=""
@@ -174,6 +206,50 @@ trap 'exit 143' TERM
 # apply/post-apply legs run `-q`, so the extra noise is a `LOCATION:` line per
 # message they were already printing, and those legs emit nothing on success.
 psqlq() { psql -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 -v VERBOSITY=verbose "$@"; }
+
+# ---------------------------------------------------------------------------
+# pg_cron presence (phase 164.4.1). `shared_preload_libraries=pg_cron` names a
+# library the postmaster loads AT START; when that library is not on the box the
+# start FAILS, and the failure surfaces as this script's opaque "cluster never
+# became ready" with the real cause buried in pg.log. RESEARCH Pitfall 6: the
+# lane must fail LOUD with a NAMED diagnosis.
+#
+# ⛔ The lane never installs anything. Making the binary present is the HOST's
+# job (RESEARCH Architectural Responsibility Map): apt in the ci.yml
+# provisioning step, scripts/pg-lane/install-pg-cron-macos.sh on this box. A
+# lane that repaired its own host would make "the extension is present"
+# untestable — it could never be observed absent.
+#
+# TWO layers, because neither covers the other's host:
+#   1. pre-start, needs `pg_config` — reads pkglibdir/sharedir and refuses
+#      BEFORE initdb, so no cluster is built for a start that cannot succeed.
+#      An ubuntu runner that resolved pg_ctl off PATH may have no pg_config.
+#   2. post-start, needs nothing — greps the postmaster's own pg.log line.
+# ONE message for both, so a reader never has to decide which wording is
+# authoritative.
+# ---------------------------------------------------------------------------
+pg_cron_missing_msg() {
+  printf '%s\n' \
+    "pg_cron is NOT available to the PostgreSQL server binaries this lane booted." \
+    "  missing:         $1" \
+    "  server binaries: ${PGBIN:-<unresolved>}" \
+    "This lane preloads pg_cron on its single pg_ctl start (phase 164.4.1): five SQL" \
+    "gate files probe pg_extension for pg_cron and three read cron.job.command as an" \
+    "oracle, so a lane without it cannot falsify them. Install it on the HOST — this" \
+    "script never installs anything itself:" \
+    "  ubuntu: sudo apt-get install -y postgresql-\$(pg_config --version | awk '{print \$2}' | cut -d. -f1)-cron   # 16 on ubuntu-latest" \
+    "  macOS:  bash scripts/pg-lane/install-pg-cron-macos.sh"
+}
+
+# Layer 2's reader. Called on a failed start AND before the readiness-loop's own
+# refusal, because pg_ctl -w can report either shape depending on how far the
+# postmaster got before it gave up on the preload.
+pg_cron_diagnose_log() {
+  if [ -n "$PGD" ] && [ -f "$PGD/pg.log" ] \
+     && grep -a -q 'could not access file "pg_cron"' "$PGD/pg.log"; then
+    fail "$(pg_cron_missing_msg "the postmaster REFUSED TO START — $PGD/pg.log says: could not access file \"pg_cron\"")"
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # run_lane <workdir> <gate> [--post <file>] -- <apply files...>
@@ -247,19 +323,70 @@ run_lane() {
   # leaked 27 clusters, and a trap registered after argument validation leaked
   # the scratch dir on every early `fail` (IN-04).
 
+  # pg_cron layer 1 — pre-start, and BEFORE initdb so a host that cannot start
+  # this lane never gets a data dir built for it. Runs only where pg_config can
+  # name the two directories; layer 2 covers the hosts where it cannot.
+  if [ -x "$PGBIN/pg_config" ]; then
+    local pkglibdir sharedir cron_lib
+    pkglibdir=$("$PGBIN/pg_config" --pkglibdir)
+    sharedir=$("$PGBIN/pg_config" --sharedir)
+    cron_lib=""
+    if [ -f "$pkglibdir/pg_cron.so" ]; then cron_lib="$pkglibdir/pg_cron.so"; fi
+    if [ -z "$cron_lib" ] && [ -f "$pkglibdir/pg_cron.dylib" ]; then cron_lib="$pkglibdir/pg_cron.dylib"; fi
+    if [ -z "$cron_lib" ]; then
+      fail "$(pg_cron_missing_msg "$pkglibdir/pg_cron.so (and pg_cron.dylib) — neither exists")"
+    fi
+    # ⛔ The library alone is not enough: PostgreSQL 16 has no
+    # extension_control_path (that is PG18), so `CREATE EXTENSION pg_cron` can
+    # only find the control file in the server's OWN sharedir. A lane with the
+    # .so and no .control preloads fine and then fails every gate at CREATE
+    # EXTENSION — the silent-degrade shape this check exists to refuse.
+    if [ ! -f "$sharedir/extension/pg_cron.control" ]; then
+      fail "$(pg_cron_missing_msg "$sharedir/extension/pg_cron.control (the library at $cron_lib IS present)")"
+    fi
+  fi
+
+  # ⛔ REFUSE a pre-existing pgd/ rather than adopting it (F-164.4.1-A). `mkdir -p`
+  #    is silent on an existing dir, and CREATED=1 then licenses the EXIT trap to
+  #    `rm -rf` a tree this run did not create. Every shipped caller passes a fresh
+  #    mktemp slot (run.mjs `nextSlot()` -> slot-N/lane), so this refuses only the
+  #    case that would destroy data. It also closes F-164.4.1-B: a repo-relative
+  #    --workdir reused twice now fails loudly instead of leaving a cluster in the
+  #    checkout for secret-scan and planning-hygiene to walk.
+  [ ! -e "$PGD" ] || fail "--workdir already contains $PGD, and this lane would DELETE it on exit. Pass an empty workdir (every caller in this repo passes a fresh mktemp slot)."
   mkdir -p "$PGD"
   CREATED=1
   initdb -D "$PGD/data" -U postgres --auth=trust -E UTF8 >/dev/null
   # -k '' => TCP only. A unix socket under a scratch path blows the 103-byte limit.
   # -w waits for startup; the harness's `sleep 2` here was a measured race.
-  pg_ctl -D "$PGD/data" -o "-p $PORT -c listen_addresses=127.0.0.1 -k ''" \
-         -l "$PGD/pg.log" -w start >/dev/null
+  # -c shared_preload_libraries=pg_cron => pg_cron refuses to load outside
+  #    shared_preload_libraries, and this is the ONLY start this lane ever
+  #    makes, so `-o` needs no restart and no postgresql.conf edit. MEASURED
+  #    2026-09-04: +0.009 s/lane, ranges overlapping (RESEARCH § Q4).
+  # -c cron.database_name=postgres => the lane's database IS postgres, which is
+  #    also pg_cron's default; stated rather than defaulted, per D-06's refusal
+  #    of silent defaults (a default that changes upstream would move the
+  #    worker's target with nothing here to notice).
+  # -c cron.max_running_jobs=0 => the GUC's minimum is 0 in pg_cron 1.6.7, and
+  #    at 0 the launcher never starts a job. Without it a lane whose apply list
+  #    schedules a `*/15 * * * *` reaper and happens to straddle :00/:15/:30/:45
+  #    would run that job body concurrently with the gate. The gates read
+  #    cron.job ROWS; no gate needs a tick (RESEARCH § Q3), so this deletes a
+  #    per-lane nondeterminism for free.
+  if ! pg_ctl -D "$PGD/data" \
+       -o "-p $PORT -c listen_addresses=127.0.0.1 -k '' -c shared_preload_libraries=pg_cron -c cron.database_name=postgres -c cron.max_running_jobs=0" \
+       -l "$PGD/pg.log" -w start >/dev/null; then
+    pg_cron_diagnose_log
+    fail "pg_ctl could not start the lane cluster on 127.0.0.1:$PORT (see $PGD/pg.log)"
+  fi
   for i in $(seq 1 60); do
     if pg_isready -h 127.0.0.1 -p "$PORT" -q 2>/dev/null; then break; fi
     sleep 0.25
   done
-  pg_isready -h 127.0.0.1 -p "$PORT" -q 2>/dev/null \
-    || fail "cluster on 127.0.0.1:$PORT never became ready (see $PGD/pg.log)"
+  if ! pg_isready -h 127.0.0.1 -p "$PORT" -q 2>/dev/null; then
+    pg_cron_diagnose_log
+    fail "cluster on 127.0.0.1:$PORT never became ready (see $PGD/pg.log)"
+  fi
 
   psqlq -q -c "CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN; CREATE ROLE service_role NOLOGIN BYPASSRLS;"
 
@@ -452,7 +579,10 @@ self_test() {
 
   # ⛔ SP-H01. Arm 2 says "Not a pass" when its prerequisite is missing and then
   # NOTHING ACTS ON IT: the arm was silently dropped from the count and the run
-  # still printed "SELF-TEST PASSED (5/5)" and exited 0. The dropped arm is
+  # still printed a PASSED caption naming the FULL arm count and exited 0. (That
+  # caption is quoted by shape rather than by digits on purpose: the denominator
+  # is a hand-maintained literal — TODOS [PGLANE-SELFTEST-COUNT-UNPINNED] — and a
+  # dated history line that restates it goes stale on the next arm.) The dropped arm is
   # precisely the one proving the collision guard is as WIDE as its message
   # (IN-07) — so a `node`-less machine reported the broad property proven while
   # only the narrow one had been checked. That is the SKIP-01 shape this branch
@@ -462,7 +592,7 @@ self_test() {
   local st_skipped=0
   local st_skips=""
 
-  echo "=== SELF-TEST 1/5: occupied-port refusal (the collision guard bites) ==="
+  echo "=== SELF-TEST 1/6: occupied-port refusal (the collision guard bites) ==="
   # The squatter is a REAL cluster held by a first lane run — the measured
   # scenario (two agents on one fixed port), not a stand-in TCP listener that
   # pg_isready would never recognise.
@@ -503,7 +633,7 @@ self_test() {
   rm -rf "$squat_wd"
   echo "  ok  refused an occupied port with exit 2 (against a real cluster)"
 
-  echo "=== SELF-TEST 2/5: refusal against a NON-postgres listener (IN-07) ==="
+  echo "=== SELF-TEST 2/6: refusal against a NON-postgres listener (IN-07) ==="
   # IN-07: the same refusal against a NON-postgres listener. The old
   # `pg_isready` guard could not see this at all — it exits non-zero for
   # anything that is not a PostgreSQL server accepting connections — while the
@@ -552,11 +682,11 @@ self_test() {
     st_skips="${st_skips}${st_skips:+, }arm 2 (non-postgres listener): node absent"
   fi
 
-  echo "=== SELF-TEST 3/5: kill mid-run leaves NO orphan (D-04: on interrupt) ==="
+  echo "=== SELF-TEST 3/6: kill mid-run leaves NO orphan (D-04: on interrupt) ==="
   kill_check TERM "SIGTERM mid-run"
   kill_check INT  "SIGINT mid-run"
 
-  echo "=== SELF-TEST 4/5: failure-path cleanup ==="
+  echo "=== SELF-TEST 4/6: failure-path cleanup ==="
   wd=$(mktemp -d)
   gate="$wd/failing-gate.sql"
   printf "DO \$\$ BEGIN RAISE EXCEPTION 'TEST FAILED (SELF-TEST): deliberate'; END \$\$;\n" >"$gate"
@@ -571,7 +701,7 @@ self_test() {
   rm -rf "$wd"
   echo "  ok  failing gate exited $rc and cleaned up"
 
-  echo "=== SELF-TEST 5/5: success-path cleanup ==="
+  echo "=== SELF-TEST 5/6: success-path cleanup ==="
   wd=$(mktemp -d)
   gate="$wd/passing-gate.sql"
   printf 'SELECT 1;\n' >"$gate"
@@ -586,16 +716,81 @@ self_test() {
   rm -rf "$wd"
   echo "  ok  passing gate exited 0 and cleaned up"
 
-  # ⛔ SP-H01: "5/5" must be a COUNT, not a caption. An arm that did not run is
+  echo "=== SELF-TEST 6/6: the preload took effect — CREATE EXTENSION pg_cron succeeds, cron.schedule writes a cron.job row, and the SAME gate is RED when it asks for an extension that is not there ==="
+  # ⛔ TWO HALVES, and the second is what makes the first mean anything. A gate
+  # that only asserts pg_cron IS present passes on every lane where it is — it
+  # cannot tell "the preload took effect" apart from "this gate cannot fail".
+  # The control below is the SAME gate bytes with ONE identifier changed, so its
+  # RED is a RED from this arm's own machinery, not from a different program.
+  #
+  # ⚠️ The control asserts the FAILURE TEXT, not merely a non-zero exit. A lane
+  # that died of anything else — a port collision, a broken apply — also exits
+  # non-zero, and accepting that would let this arm report the assertion bit
+  # when the lane merely broke.
+  local cron_mig gate2 port2 rc2 ver
+  cron_mig="$REPO/supabase/migrations/20260513094906_enable_pg_cron.sql"
+  # A missing migration is a FIXTURE failure, and this arm must not report a
+  # guard failure for it (the R2-I04 lesson from arm 2 above).
+  [ -f "$cron_mig" ] || st_fail "the pg_cron enabling migration is not at $cron_mig, so no lane could CREATE the extension. That is a FIXTURE failure: this arm has proven NOTHING about the preload and must not report that it has."
+  wd=$(mktemp -d)
+  gate="$wd/pgcron-gate.sql"
+  # A heredoc rather than the one-line printf arms 4 and 5 use: this gate is multi-line,
+  # DO block, and the quoted delimiter keeps every $ and % verbatim.
+  cat >"$gate" <<'SQL'
+DO $$
+DECLARE v_id bigint; v_cmd text; v_ver text;
+BEGIN
+  SELECT extversion INTO v_ver FROM pg_extension WHERE extname = 'pg_cron';
+  IF v_ver IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (SELF-TEST 6): pg_extension has no pg_cron row after the apply list ran 20260513094906_enable_pg_cron.sql. Either the postmaster did not preload pg_cron, or CREATE EXTENSION could not find its control file.';
+  END IF;
+  SELECT cron.schedule('selftest-6', '35 * * * *', 'SELECT 1') INTO v_id;
+  SELECT command INTO v_cmd FROM cron.job WHERE jobname = 'selftest-6';
+  IF v_cmd IS DISTINCT FROM 'SELECT 1' THEN
+    RAISE EXCEPTION 'TEST FAILED (SELF-TEST 6): cron.job holds command % for jobname selftest-6, expected SELECT 1. Three gate files read cron.job.command as an ORACLE, so a cron.schedule that does not persist the body verbatim would make those arms assert against a value nothing wrote.', COALESCE(v_cmd, '<no row at all>');
+  END IF;
+  RAISE NOTICE 'SELF-TEST 6 OK: pg_cron % loaded, cron.job row written (jobid %)', v_ver, v_id;
+END $$;
+SQL
+  port=$(alloc_port)
+  set +e
+  PORT="$port" bash "$0" --workdir "$wd" \
+    --apply "$FIXTURES/01-fixture-core.sql" "$cron_mig" --gate "$gate" >"$wd/out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { cat "$wd/out" >&2; st_fail "the pg_cron gate exited $rc — the preload did not take effect, or CREATE EXTENSION / cron.schedule failed"; }
+  grep -a -q 'SELF-TEST 6 OK' "$wd/out" || { cat "$wd/out" >&2; st_fail "the pg_cron gate exited 0 but printed no 'SELF-TEST 6 OK' line — an exit status without the marker is not a measurement"; }
+  no_orphan "$port" "$wd/pgd" "pg_cron preload"
+  ver=$(sed -n 's/.*SELF-TEST 6 OK: pg_cron \([^ ]*\) loaded.*/\1/p' "$wd/out" | head -1)
+  echo "  ok  pg_cron ${ver:-<version unread>} loaded on a real lane; CREATE EXTENSION succeeded and cron.job holds the scheduled row"
+
+  gate2="$wd/pgcron-gate-control.sql"
+  sed "s/extname = 'pg_cron'/extname = 'pg_cron_not_installed_here'/" "$gate" >"$gate2"
+  grep -a -q "pg_cron_not_installed_here" "$gate2" \
+    || st_fail "the CONTROL gate was not produced (the sed target moved). That is a FIXTURE failure — the shown-to-fail half has not run, so the half above is unproven."
+  port2=$(alloc_port)
+  set +e
+  PORT="$port2" bash "$0" --workdir "$wd/control" \
+    --apply "$FIXTURES/01-fixture-core.sql" "$cron_mig" --gate "$gate2" >"$wd/out2" 2>&1
+  rc2=$?
+  set -e
+  [ "$rc2" -ne 0 ] || { cat "$wd/out2" >&2; st_fail "the CONTROL gate — the same bytes asking for an extension that is NOT installed — exited 0. This arm cannot fail, which makes the success half above worth nothing"; }
+  grep -a -q 'TEST FAILED (SELF-TEST 6)' "$wd/out2" \
+    || { cat "$wd/out2" >&2; st_fail "the CONTROL gate exited $rc2 but printed no 'TEST FAILED (SELF-TEST 6)' line. A non-zero exit carrying a raw driver error proves the LANE broke, not that this arm's assertion bit."; }
+  no_orphan "$port2" "$wd/control/pgd" "pg_cron preload control"
+  rm -rf "$wd"
+  echo "  ok  the same gate went RED naming SELF-TEST 6 against an absent extension — the half above is shown to be able to fail"
+
+  # ⛔ SP-H01: the denominator must be a COUNT, not a caption. An arm that did not run is
   # subtracted, named, and turned into exit 1 — "could not check" and "checked,
   # no problem" do not share an exit code here.
   if [ "$st_skipped" -ne 0 ]; then
-    echo "=== SELF-TEST INCOMPLETE ($((5 - st_skipped))/5 run, ${st_skipped} skipped: ${st_skips}) ===" >&2
+    echo "=== SELF-TEST INCOMPLETE ($((6 - st_skipped))/6 run, ${st_skipped} skipped: ${st_skips}) ===" >&2
     echo "A self-test that could not run an arm has not proven that arm. Install the" >&2
     echo "missing prerequisite and re-run; this is a hard failure, not a pass." >&2
     exit 1
   fi
-  echo "=== SELF-TEST PASSED (5/5) ==="
+  echo "=== SELF-TEST PASSED (6/6) ==="
 }
 
 # ---------------------------------------------------------------------------
@@ -609,7 +804,30 @@ main() {
   case "$1" in
     --self-test)    self_test; return ;;
     --tracer-proof) tracer_proof; return ;;
-    -h|--help)      sed -n '2,45p' "$0"; return ;;
+    # ⭐ ONE selector, not two. ci.yml's `Provision pg_cron` step used to pick
+    # the PostgreSQL major with its own rule — `ls -d /usr/lib/postgresql/*/bin
+    # | sort -n | tail -1`, the HIGHEST — while resolve_pgbin below takes the
+    # FIRST glob match (lexical, i.e. the LOWEST) and prefers `pg_ctl` on PATH
+    # over the glob entirely. On a runner image carrying both 16 and 17 those
+    # two disagree: CI would provision postgresql-17-cron and MEASURE_FAIL on
+    # `!= 16` while the lane would have booted 16. Rather than maintain a second
+    # opinion about which binaries the lane uses, CI now asks the lane. Honours
+    # PGBIN exactly as run_lane does, so it answers for the run that follows it.
+    --print-pgbin)
+      if [ -z "${PGBIN:-}" ]; then PGBIN=$(resolve_pgbin) || exit 1; fi
+      [ -x "$PGBIN/pg_ctl" ] || fail "PGBIN=$PGBIN has no executable pg_ctl"
+      echo "$PGBIN"
+      return ;;
+    # ⭐ The range is DERIVED, not a pinned byte offset. It was `2,45`, then
+    # `2,59` when the header gained the phase-164.4.1 pg_cron paragraph, and
+    # BOTH landed three lines into the 8-line "WHAT IT DOES AND DOES NOT PROVE"
+    # paragraph — so `--help` had always ended mid-sentence at "…the columns the
+    # migrations' FKs, policies, RPCs". A hand-maintained number silently
+    # truncates every time the header grows, and nothing tests the output, so
+    # print from line 2 until the first NON-comment line instead. The header is
+    # the contiguous `#` block ending at `set -euo pipefail`; this needs no
+    # maintenance when it grows.
+    -h|--help)      awk 'NR > 1 { if (!/^#/) exit; print }' "$0"; return ;;
   esac
 
   while [ "$#" -gt 0 ]; do

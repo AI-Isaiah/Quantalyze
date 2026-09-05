@@ -575,7 +575,21 @@ export function SyncPreviewStep({
   // first crawl, and it is why the in-flight claim below stops being rendered
   // while it is up (that sentence is false once the status is terminal).
   const [seriesRecomputing, setSeriesRecomputing] = useState(false);
-  const [computationError, setComputationError] = useState<string | null>(null);
+  // `_computationError` is prefixed because nothing READS it — measured, not
+  // assumed: the only other mentions in this file are the setter at the poller's
+  // `onStatus` and the envelope note below. In particular `checkStrategyGate` is
+  // passed `computationError: nextError`, the poller callback's ARGUMENT, so the
+  // gate does not read this state either (the envelope comment used to claim it
+  // did; that claim is deleted there).
+  // ⚠️ The setter is still called, so the only remaining effect of this state is
+  // a RE-RENDER on the ticks where the error TEXT changes but the status does
+  // not — every other tick already re-renders via `setComputationStatus`, which
+  // IS read. Nothing has been shown to depend on that extra render, so this is
+  // a candidate for deletion, not a documented requirement; deleting it is a
+  // behaviour change (one fewer render) and wants its own change with the
+  // wizard tests, not a drive-by. The underscore is what `no-unused-vars` asks
+  // for on a deliberately-unread destructured slot until then.
+  const [_computationError, setComputationError] = useState<string | null>(null);
   // Composite discriminator (Finding-H / Pitfall 1): threaded from SERVER TRUTH
   // — the `/api/keys/sync` kickoff response's `composite` field (true ONLY when
   // the route took the `stitch_composite` branch). NEVER from a client
@@ -1933,10 +1947,15 @@ export function SyncPreviewStep({
         trades: gateResult?.detail?.trades as number | undefined,
         days: gateResult?.detail?.days as number | undefined,
         // ⛔ `computationError` is NOT threaded here any more (Phase 162 /
-        // HONEST-01, UI-SPEC C-2). The state is still tracked — the gate reads
-        // it (`checkStrategyGate`, above) to decide WHICH code we are in — but
-        // its text has no path into the envelope body. The field is gone from
-        // WizardErrorContext too, so this is a typed absence, not a habit.
+        // HONEST-01, UI-SPEC C-2): its text has no path into the envelope body.
+        // The field is gone from WizardErrorContext too, so this is a typed
+        // absence, not a habit.
+        // ⚠️ This note used to add "the gate reads it (`checkStrategyGate`,
+        // above) to decide WHICH code we are in". That was FALSE and is deleted:
+        // the `checkStrategyGate` call passes `computationError: nextError` —
+        // the poller callback's own argument — never the state. Nothing reads
+        // the state at all; see the `_computationError` declaration for what it
+        // is still there for and why it is underscore-prefixed.
         // 140.3-10 — `?? undefined` because ABSENCE IS NOT ZERO. `null` would
         // be carried into the envelope slot and a `0` there is a wait we were
         // never told about.

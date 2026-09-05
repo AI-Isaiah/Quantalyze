@@ -40,10 +40,65 @@
 -- `psql -v ON_ERROR_STOP=1`. Run order: AFTER migrations 20260826120000 and
 -- 20260826140000. Zero side effects — no seeding, no writes, safe on a shared
 -- test project.
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4.1, PGCRON-LANE). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+--
+-- ⚠️ THIS FILE WAS THE CORPUS'S LAST `pending:` FILE, and it was blocked only
+-- through its APPLY LIST — never through its own text, which names pg_cron
+-- nowhere. Migration 20260826140000 is the ONLY migration that widens
+-- compute_jobs_error_kind_check to admit 'orphaned' (Parts 1 and 3 both depend
+-- on that), and it hard-RAISEs `0A000 / feature_not_supported` at :206-209 when
+-- `pg_extension` has no pg_cron — so the whole apply aborted before this gate
+-- could run at all. That is why 20260513094906_enable_pg_cron.sql is listed
+-- AHEAD of both 20260817120000 and 20260826140000: both RAISE on that same
+-- condition, 20260817120000 first. MEASURED 2026-09-05 on the lane: with the
+-- enabling migration in place neither RAISE fires and the baseline exits 0.
+-- ⚠️ The other non-obvious entries, each with its MEASURED reason:
+--   * 20260516104201 — without it 20260826140000:377 aborts with
+--     `42P13 cannot change return type of existing function` on
+--     get_user_compute_jobs. It is the migration that last re-based that
+--     function's OUT columns, and 20260826140000 re-bases it again.
+--   * 20260529180000 — 20260826140000's self-verify arm (c) calls
+--     mark_compute_job_failed and asserts it still REFUSES 'orphaned'.
+--   * 20260826120000 — defines computation_error_copy, which all three Parts
+--     call; 20260826140000's arm (e) reads it too and names the ordering.
+--   * 27-fixture-strategy-analytics-computation-error.sql — the stand-in for
+--     strategy_analytics.computation_error that the 20260825150000 /
+--     20260826120000 bridge re-base writes.
+-- This file has NO conditional skip of its own, so there is no skip line to
+-- silence: the count of skip lines carrying its own `psql:supabase/tests/…`
+-- prefix is 0. (The 10 `does not exist, skipping` NOTICEs in the lane's
+-- transcript are PostgreSQL's own DDL chatter from the apply phase.)
+--
+-- ⚠️ THREE sections, one per Part: `1/A-3`, `2/A-3`, `3/F-3`. Several raises
+-- inside a Part all carry that Part's identity, so a Part is ONE arm with
+-- several identities — the arm-unit rule, not an under-count.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260516104201_compute_jobs_audit_2026_05_07_residual.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260529180000_fix_mark_compute_job_failed_error_kind_column.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260817120000_retention_orphaned_running_terminalize.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql"]}
 
 -- ==========================================================================
 -- Part 1 — CHECK ⊆ CASE. Every admitted kind has its own modelled sentence.
 -- ==========================================================================
+-- RED-UNDER: widen compute_jobs_error_kind_check in migration 20260826140000
+--            with a FIFTH kind — `IN ('transient', 'permanent', 'unknown',
+--            'orphaned', 'stalled')` — without adding a WHEN arm for it to
+--            computation_error_copy. That is the exact carry-forward this Part
+--            exists to refuse, and it is SILENT in the strongest sense the
+--            codebase has: computation_error_copy is `LANGUAGE sql` and
+--            `IMMUTABLE`, so it cannot RAISE; the unmodelled kind falls to the
+--            ELSE arm and the user reads the cautious default — no log line, no
+--            Sentry event, no failing query, and a sentence indistinguishable
+--            from the one a NULL kind gets.
+-- ⚠️ The mutated CHECK applies PERFECTLY CLEAN, which is the whole reason this
+--    Part has to exist. That migration's own self-verify arm (a) round-trips
+--    only the four kinds it knows (:498-506) and arm (b) only proves the
+--    constraint still REJECTS `a_kind_added_after_20260826` (:508-515) — a
+--    widened-by-one set satisfies both. Nothing between the constraint and the
+--    user's screen looks at the pair.
+-- RED-UNDER-M: {"arm":"1/A-3","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"  CHECK (error_kind IN ('transient', 'permanent', 'unknown', 'orphaned'));","replace":"  CHECK (error_kind IN ('transient', 'permanent', 'unknown', 'orphaned', 'stalled'));","occurrences":1}]}
 DO $$
 DECLARE
   v_condef  TEXT;
@@ -99,6 +154,25 @@ END $$;
 -- ==========================================================================
 -- Part 2 — CASE ⊆ CHECK. No arm branches on an impossible kind.
 -- ==========================================================================
+-- RED-UNDER: add a `WHEN 'stalled' THEN` arm to computation_error_copy in
+--            migration 20260826120000 without adding 'stalled' to
+--            compute_jobs_error_kind_check. The arm is then DEAD CODE, and
+--            dead code here is worse than an absent arm: it reads as coverage
+--            for a class the column can never hold, so the next person to widen
+--            the CHECK sees a WHEN for their kind, assumes it is handled, and
+--            ships — which lands them straight in the Part 1 defect.
+-- ⚠️ Placed INSIDE the CASE, immediately after the 'orphaned' arm's sentence
+--    and before the ELSE, via `insert-after` — the anchor is that sentence
+--    line, which is where the CASE's last real arm ends. It is deliberately
+--    written as code, not as a comment: Part 2 strips comments out of
+--    pg_get_functiondef before matching, so a commented WHEN would prove
+--    nothing about the extraction.
+-- ⚠️ The mutated function applies clean. That migration's own arm (H5)
+--    (:1338-1341) counts DISTINCT sentences over exactly {permanent,
+--    transient, unknown, orphaned, NULL, a_kind_added_after_20260826} and
+--    requires 4 — 'stalled' is in none of those, so the count is unchanged, and
+--    no other arm of either migration enumerates the CASE's WHEN literals.
+-- RED-UNDER-M: {"arm":"2/A-3","apply":[{"kind":"insert-after","file":"supabase/migrations/20260826120000_computation_error_curated_copy.sql","anchor":"      'Analytics stopped before it finished because the process running it went away. Nothing is wrong with this strategy — retry the sync.'","text":"\n    WHEN 'stalled' THEN\n      'Analytics stopped part-way through. Retry the sync.'","occurrences":1}]}
 DO $$
 DECLARE
   v_def     TEXT := pg_get_functiondef('computation_error_copy(text)'::regprocedure);
@@ -164,6 +238,29 @@ END $$;
 -- kind. Swapping the 'orphaned' and 'permanent' bodies leaves both green while
 -- restoring the exact user-facing lie F-3 fixed, so the direction is asserted
 -- directly.
+-- RED-UNDER: strip the affirmative retry instruction off the 'orphaned' arm of
+--            computation_error_copy in migration 20260826120000 — end the
+--            sentence at "Nothing is wrong with this strategy." and drop the
+--            "— retry the sync." clause. That is the HALF-swap: it adds no
+--            false claim, so Parts 1 and 2 and the sibling `orphaned` ≠
+--            `permanent` arm all stay green, and yet the user whose worker died
+--            mid-claim is never told to do the one thing that computes their
+--            strategy. Nothing readmits a reaped orphan on the live-API path
+--            (the 20260819130500 sweep is csv-only and self-blocks once the
+--            bridge writes computation_status = 'failed'), so silence here is
+--            not neutral — it is the strategy staying uncomputed forever.
+-- ⚠️ LAYERED (GRAMMAR Shape 3). MEASURED 2026-09-05: step 1 ALONE aborts the
+--    apply — migration 20260826120000's own arm (H5b) at :1364-1366 asserts
+--    `computation_error_copy('orphaned') NOT ILIKE '%retry the sync%'` and
+--    RAISEs `HONEST-01/F-3 verification failed: … does not carry the
+--    affirmative instruction to retry`, so the gate never runs and no arm can
+--    be the first failure. Step 2 re-points that arm's needle at a phrase the
+--    shortened sentence still contains, which is what a real author doing this
+--    edit "properly" would do to their own guard. ⛔ The layering is not a way
+--    around the migration's check — it is the measurement that this gate is the
+--    SECOND line of defence for a claim the migration also makes, and the one
+--    that survives a re-based guard.
+-- RED-UNDER-M: {"arm":"3/F-3","apply":[{"kind":"edit","file":"supabase/migrations/20260826120000_computation_error_curated_copy.sql","find":"      'Analytics stopped before it finished because the process running it went away. Nothing is wrong with this strategy — retry the sync.'","replace":"      'Analytics stopped before it finished because the process running it went away. Nothing is wrong with this strategy.'","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260826120000_computation_error_curated_copy.sql","find":"IF computation_error_copy('orphaned') NOT ILIKE '%retry the sync%' THEN","replace":"IF computation_error_copy('orphaned') NOT ILIKE '%went away%' THEN","occurrences":1}]}
 DO $$
 DECLARE
   v_orphaned  TEXT := computation_error_copy('orphaned');

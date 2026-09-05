@@ -846,6 +846,33 @@ jobs:
     # node builtins. An install this job does not need is an install that can
     # fail and flake the gate.
     #
+    # ⭐ REVERSAL, 2026-09-04 (phase 164.4.1, PGCRON-LANE). This job now DOES
+    # install one thing — `postgresql-<major>-cron` — and the sentence above is
+    # the standard it has to clear, not a rule being quietly ignored. It clears
+    # it on all three counts:
+    #   * It is an install this job NEEDS. Five idiom gate files (~103 sections)
+    #     probe `pg_extension` for pg_cron, and THREE of them read
+    #     `cron.job.command` as an ORACLE for the deployed job body
+    #     (164.4.1-RESEARCH § Q3). Without the extension on the lane those files
+    #     cannot be annotated at all — they were DEFERRED as `lane-blocked:` for
+    #     exactly that reason, and retiring that deferral is this phase.
+    #     A shim was costed and REJECTED by measurement: it would have to
+    #     reimplement `cron.schedule()` faithfully enough to satisfy those
+    #     oracles, i.e. an oracle written by the same hand as the claim, while
+    #     the real extension measures +0.009 s/lane (RESEARCH § Q4).
+    #   * It cannot flake in the way that sentence guards against. It is a
+    #     distro/PGDG apt package on an ephemeral runner — no registry account,
+    #     no build, no network beyond apt's own signed chain — unlike an `npm
+    #     ci` resolving a live dependency graph.
+    #   * Its failure mode is LOUD and EARLY: the step ends with `ls -l` on the
+    #     `.so` and the `.control`, under `set -euo pipefail`, so a missing
+    #     artifact exits the step non-zero BEFORE any lane is spawned, instead
+    #     of surfacing later as an opaque per-lane start failure. (The lane
+    #     itself also refuses with a named diagnosis — `scripts/pg-lane/run.sh`,
+    #     the two pg_cron layers — so neither side degrades silently.)
+    # ⛔ This reversal licenses THIS install and no other. A second one must
+    # argue itself here on the same three counts.
+    #
     # TIMEOUT (threat T-164.3-20): the cost is one lane per annotated arm plus a
     # baseline and a restore leg; the run PRINTS its own `per-arm lane time:`
     # line, which is the number to re-read rather than a figure restated here.
@@ -903,6 +930,41 @@ jobs:
     #   Replace it with the MEASURED ubuntu wall clock of the plan-164.4-11 PR as
     #   soon as that run exists, and re-derive from legs, never from arms.
     #
+    # ⭐ MEASURED 2026-09-05 (Phase 164.4.1 END STATE, plan 06's deferred half, taken
+    # by the orchestrator because a worktree executor cannot produce a SHA-bound run):
+    # workflow_dispatch run **33961609382**, head sha
+    # **1aa8bb7088e978320041b6a97d187b8247b8fe3d**, sql-mutation **success in 567 s
+    # (9.45 min)** — 10:47:54Z -> 10:57:21Z. Corpus on ubuntu is IDENTICAL to the
+    # authoring box: coverage: files 44/71, arms: 363/363/0, biting: 363,
+    # lane-invocations: 363, lane-blocked: 0, lane-probe AVAILABLE, no defects,
+    # per-arm lane time mean 1.1s. pg_cron came from noble/universe at 1.6.2-1.
+    # LEGS: 363 arms + 44 baseline + 44 restore = **451 legs**; at the measured
+    # 1.1 s/leg that is ~496 s of lane time plus ~71 s of job overhead.
+    # ⚠️ SUPERSEDED 2026-09-05 by the phase review: that run measured the 363-arm tree and stays
+    # as the dated ubuntu measurement. The corpus is now 361 arms / **449 legs** (361 + 44 + 44)
+    # after CR-02 reclassified two unfalsifiable arms. Two fewer legs does not move the DECISION.
+    #
+    # ⛔ TRIGGER REACHED — MEASURED 2026-09-05, run **33973362161** at head sha
+    # **ab0d56445b91bae8ac0460cb35cde12aaefce3dc** (the first ubuntu run of the SHIPPING tree; the
+    # 567 s run above measured a superseded 363-arm tree AND the previous provisioning step).
+    # `sql-mutation` SUCCESS in **646 s = 10.8 min** — 14:58:0xZ -> 15:08:4xZ. Corpus identical to
+    # the authoring box: coverage: files 44/71, arms: 361/361/0, biting: 361, lane-invocations: 361,
+    # lane-blocked: 0, pending: 0, lane-probe AVAILABLE, no defects. The rewritten selector worked:
+    # `PGBIN the lane will boot: /usr/lib/postgresql/16/bin`, major 16, pg_cron 1.6.2-1.
+    # 449 legs, so ~1.15 s/leg + overhead — SLOWER per leg than the 567 s run at MORE arms, which
+    # is runner variance, not a corpus change. That is the point: the variance alone is ~80 s.
+    #
+    # ⚖️ THE RULE FIRES. It says raise only when a MEASURED run REACHES ~10 minutes; 10.8 min does.
+    # `timeout-minutes` 15 -> **20**, and this is the ONE raise the rule allows.
+    # ⛔ 20 IS THE CEILING. If a MEASURED ubuntu run reaches it, STOP — do NOT raise again. The
+    # locked decision (164.4-CONTEXT.md) is that PRs then run CHANGED gate files with a scheduled
+    # full run enforcing the floors, and the split is PRINTED, never silent. That is a separate
+    # plan (a runner subset mode plus ci.yml work), booked as [REDUNDER-SUBSET-SPLIT].
+    # ⚖️ RULE APPLIED LITERALLY: 9.45 min does NOT reach the ~10 min trigger, so
+    # `timeout-minutes` STAYS 15 — this is the closest a measured run has come
+    # (previous high 464 s / 7.7 min, run 33882082307), and the next file-count
+    # ratchet is likely to cross it. When it does, the raise is to 20 ONCE.
+    #
     # DECISION 2026-09-04 (plan 164.4-08, RE-AFFIRMED by plan 164.4-11 on the
     # corrected legs model): `timeout-minutes` STAYS 15, applying the rule
     # literally — raise only when a MEASURED run reaches ~10 minutes. The
@@ -917,7 +979,7 @@ jobs:
     # silent. That is a separate plan (a runner subset mode plus ci.yml work),
     # NOT a further timeout raise.
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -929,6 +991,111 @@ jobs:
           # reads, saved on every miss, inside the wall-clock budget this gate
           # is measured against.
           node-version: 22
+
+      - name: Provision pg_cron for the lane's PostgreSQL (Phase 164.4.1)
+        # ⚠️ THIS STEP'S FIRST RUN IS THE MEASUREMENT. 164.4.1-RESEARCH assumption
+        # A1 ("`apt-get install postgresql-16-cron` succeeds on ubuntu-latest and
+        # yields a PG16-loadable .so") was INSPECTED, never executed — there was
+        # no ubuntu host in the research session. Everything below is written to
+        # PRINT rather than to assume, so the first job log settles it:
+        #   * the `apt-cache policy` block answers RESEARCH Open Question 1 —
+        #     does the runner's pg_cron come from PGDG or from noble `universe`?
+        #     Either is acceptable; which one won is a fact, not a guess.
+        #   * the `dpkg -s … Version:` line makes the macOS-1.6.7 / ubuntu-1.6.x
+        #     minor skew VISIBLE (RESEARCH A2) instead of inferred.
+        #   * the major print + hard refusal covers RESEARCH A5: `ubuntu-latest`
+        #     maps to 24.04 (PostgreSQL 16.15) TODAY. If it rolls to an image on
+        #     a different major, this job and the authoring box would measure
+        #     DIFFERENT corpora — the exact split success criterion 1 forbids —
+        #     so that is a MEASURE_FAIL here, never a silent adaptation. Since
+        #     2026-09-05 that major is read off the binaries `run.sh
+        #     --print-pgbin` resolves, so the refusal answers for the server the
+        #     arms actually run on rather than for a second, divergent guess.
+        #   * the `PGBIN the lane will boot:` line makes that resolution VISIBLE,
+        #     which is what lets a two-major image be diagnosed from the log.
+        #   * a bindir with pg_ctl and NO pg_config gets its own named refusal,
+        #     because run.sh treats pg_config as optional and would still run
+        #     there; reporting that as `major is 'none', not 16` blamed A5 for
+        #     a missing package. Likewise an unresolvable PGBIN now REPRINTS
+        #     run.sh's own stderr instead of telling the reader to go rerun it.
+        # Read those in the log before trusting any downstream run.
+        #
+        # Shape copied from the only apt analog in this workflow, `sql-tests`'
+        # "Install psql client" step. The reversal of this job's no-install
+        # stance is argued in the job header above.
+        run: |
+          set -euo pipefail
+          # ⭐ ASK THE LANE, do not re-derive. This step used to pick the major
+          # with `ls -d /usr/lib/postgresql/*/bin | sort -n | tail -1` — the
+          # HIGHEST — while scripts/pg-lane/run.sh's resolve_pgbin prefers
+          # `pg_ctl` on PATH and otherwise takes the FIRST glob match (lexical,
+          # the LOWEST). On an image carrying both 16 and 17 the two disagree:
+          # this step would install postgresql-17-cron and then MEASURE_FAIL on
+          # `!= 16`, while the lane would have booted 16 and found no extension.
+          # `--print-pgbin` runs the lane's OWN chain, so whatever it names is
+          # the server the arms actually run against — one selector, not two.
+          # `|| true` is load-bearing, not defensive noise: an empty answer must
+          # reach the MEASURE_FAIL below and NAME itself, rather than dying here
+          # with no `::error::` line — "could not measure" wearing the costume
+          # of a build failure.
+          # stderr goes to a FILE, not to /dev/null. `--print-pgbin` writes the
+          # resolved dir on stdout and its refusal on stderr, so discarding
+          # stderr threw away the only diagnosis this step has. MEASURED
+          # 2026-09-05 with PGBIN=/tmp: run.sh prints `ERROR: PGBIN=/tmp has no
+          # executable pg_ctl` and CI showed none of it, while the MEASURE_FAIL
+          # told the reader to "run it directly" — not an instruction anyone can
+          # follow on a hosted runner that no longer exists.
+          pgbin_err="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/pgbin.err"
+          pgbin=$(bash scripts/pg-lane/run.sh --print-pgbin 2>"$pgbin_err" || true)
+          echo "PGBIN the lane will boot: ${pgbin:-(unresolved)}"
+          if [ -z "$pgbin" ]; then
+            echo "--- scripts/pg-lane/run.sh --print-pgbin said (stderr) ---" >&2
+            cat "$pgbin_err" >&2 || true
+            echo "--- end of the lane's own diagnosis ---" >&2
+            echo "::error::MEASURE_FAIL: scripts/pg-lane/run.sh --print-pgbin could not resolve any PostgreSQL server binaries on this runner, so this step cannot know which major to provision pg_cron for. The lane's own four-step diagnosis is printed on stderr immediately above this line."
+            exit 1
+          fi
+          # Keyed off the resolved binaries' OWN pg_config, not off the path
+          # spelling, so the major and the artifact paths below cannot come from
+          # two different servers.
+          #
+          # ⭐ AN ABSENT pg_config IS ITS OWN DIAGNOSIS, not a wrong major.
+          # scripts/pg-lane/run.sh treats pg_config as OPTIONAL: its pre-start
+          # pg_cron check is `if [ -x "$PGBIN/pg_config" ]` ("layer 1 … runs
+          # only where pg_config can name the two directories; layer 2 covers
+          # the hosts where it cannot"), and `--print-pgbin` requires only
+          # pg_ctl. So a bindir carrying pg_ctl and no pg_config is a host the
+          # LANE runs on and this step cannot — and folding it into the `!= 16`
+          # refusal below MISATTRIBUTED it: measured against exactly such a
+          # bindir, the step emitted `the runner's PostgreSQL major is 'none',
+          # not 16 … A5 … no longer holds`, sending the reader to re-take a
+          # macOS/ubuntu major comparison over a missing PACKAGE. Two causes,
+          # two messages.
+          if [ ! -x "$pgbin/pg_config" ]; then
+            echo "::error::MEASURE_FAIL: $pgbin has an executable pg_ctl but no executable pg_config, so the PostgreSQL major cannot be read off the binaries the lane boots. This is NOT the assumption-A5 major mismatch below and needs no macOS/ubuntu re-measurement: scripts/pg-lane/run.sh treats pg_config as OPTIONAL (its layer-1 pre-start check is skipped and layer 2 covers the host), so the LANE would run here and this step cannot. Provision postgresql-client-<major> so pg_config sits beside pg_ctl, or key this step off the path spelling again."
+            exit 1
+          fi
+          major=$("$pgbin/pg_config" --version | awk '{print $2}' | cut -d. -f1 || true)
+          echo "PostgreSQL major reported by $pgbin/pg_config: ${major:-(none found)}"
+          if [ "${major:-}" != "16" ]; then
+            echo "::error::MEASURE_FAIL: the runner's PostgreSQL major is '${major:-none}', not 16. 164.4.1-RESEARCH assumption A5 (ubuntu-latest => 24.04 => PostgreSQL 16.15) no longer holds, and criterion 1 (CI and the authoring box, which is 16.13, must measure the SAME corpus) is at risk: an extension .so built for another major will not load, and the five pg_cron gate files would be proven on a server the author never ran. Re-take the macOS/ubuntu major comparison before changing this line."
+            exit 1
+          fi
+          sudo apt-get update -y
+          echo "--- apt-cache policy postgresql-${major}-cron (which source wins) ---"
+          apt-cache policy "postgresql-${major}-cron"
+          sudo apt-get install -y --no-install-recommends "postgresql-${major}-cron"
+          echo "--- installed version ---"
+          dpkg -s "postgresql-${major}-cron" | grep -a '^Version'
+          echo "--- the two artifacts the lane needs ---"
+          # `ls` exiting non-zero under `set -e` IS the loud failure: the .so is
+          # what `shared_preload_libraries=pg_cron` loads at postmaster start,
+          # and the .control is what `CREATE EXTENSION pg_cron` reads (PG16 has
+          # no extension_control_path, so it must be in the server's sharedir).
+          # Both paths come from the SAME pg_config the major came from, so this
+          # cannot check a debian-layout path while the lane boots another tree.
+          ls -l "$("$pgbin/pg_config" --pkglibdir)/pg_cron.so"
+          ls -l "$("$pgbin/pg_config" --sharedir)/extension/pg_cron.control"
 
       - name: Probe - the runner image's PostgreSQL server binaries resolve
         # 164.3-RESEARCH assumption A1 ("ubuntu-latest ships PostgreSQL server

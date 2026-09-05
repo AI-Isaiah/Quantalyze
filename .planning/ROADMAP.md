@@ -737,7 +737,7 @@ Plans:
 - [x] 164.4-08-PLAN.md — Batch 5: six five-section files (30); FILES_FLOOR → 23, ARMS_FLOOR → ≈219; sql-mutation timeout re-justified from measured ubuntu wall clocks
 - [x] 164.4-09-PLAN.md — Batch 6: six files (23); FILES_FLOOR → 29, ARMS_FLOOR → ≈242
 - [x] 164.4-10-PLAN.md — Batch 7: the last four non-mixed files (8); FILES_FLOOR → **32**, ARMS_FLOOR → **247** (MEASURED 2026-09-04, exit 0, `arms: 247/247/0`, 0 waivers); `pending:` names **8** files — the 7 mixed ones plus test_compute_jobs_error_kind_copy_parity.sql, deferred to Phase 164.4.1. ⚠️ The 33 / ≈250 / 7 this row used to project came from an assumed six-file wave 10 that landed five. ✅ LANDED PR #742 → `75e58cb1` (v0.77.11.0), **23/23 SHA-bound green** at head `4591b17d`, `sql-mutation` run 33882082307 **464 s** on ubuntu. ⏱️ That wall clock confirms the LEGS model and not the arms model: 247 arms but 311 legs (247 + 32 baseline + 32 restore), so ≈334 s of lane time at ≈1.07 s/leg plus ≈130 s job overhead. Projected phase end — 262 arms / 340 legs ≈ **470 s ≈ 7.8 min**, inside `timeout-minutes: 15`. Plan 11 owes ci.yml the corrected formula (legs, not arms).
-- [x] 164.4-11-PLAN.md — Batch 8: the seven ⚠️ mixed files (15), waivers only via founder checkpoint; end state FILES_FLOOR **39**, ARMS_FLOOR **262** (MEASURED 2026-09-04, exit 0, `coverage: files 39/71`, `arms: 262/262/0`, `biting: 262`, tallies agree, **0 waivers** — cumulative 0 across all eight arms moves), `pending: 1` naming exactly test_compute_jobs_error_kind_copy_parity.sql, 27 non-idiom + 4 lane-blocked files printed by name, final prose sweep done. ⚠️ 39 / 262 / 1, NOT the 40 / ≈265 / 0 of SCOPE AMENDMENT #2 — that predates plan 09's founder-decided pg_cron deferral, and the amendment is now corrected in ROADMAP+STATE. ci.yml's timeout projection re-derived on a LEGS model (arms + 2 × files); `timeout-minutes` stays 15. ⏳ Not yet landed: PR + SHA-bound ubuntu `sql-mutation` green still owed.
+- [x] 164.4-11-PLAN.md — Batch 8: the seven ⚠️ mixed files (15), waivers only via founder checkpoint; end state FILES_FLOOR **39**, ARMS_FLOOR **262** (MEASURED 2026-09-04, exit 0, `coverage: files 39/71`, `arms: 262/262/0`, `biting: 262`, tallies agree, **0 waivers** — cumulative 0 across all eight arms moves), `pending: 1` naming exactly test_compute_jobs_error_kind_copy_parity.sql, 27 non-idiom + 4 lane-blocked files printed by name, final prose sweep done. ⚠️ 39 / 262 / 1, NOT the 40 / ≈265 / 0 of SCOPE AMENDMENT #2 — that predates plan 09's founder-decided pg_cron deferral, and the amendment is now corrected in ROADMAP+STATE. ci.yml's timeout projection re-derived on a LEGS model (arms + 2 × files); `timeout-minutes` stays 15. ✅ LANDED PR #743 → `3ed6919e` (v0.77.12.0), **24/24 SHA-bound green** at head `e0d05068` (`frontend`, `secret-scan`, `sql-mutation`, `sql-gate-lint`, `plan-anchor-verify` all success). Merged 2026-09-04T19:50:39Z via `/land-and-deploy`.
 
 ### Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral (INSERTED)
 
@@ -745,11 +745,11 @@ Plans:
 rather than grown — five gate files and ~100 sections become provable, and the runner's
 `lane-blocked:` class goes to 0.
 
-**Requirements**: TBD (run /gsd-plan-phase 164.4.1)
+**Requirements**: SC-1, SC-2, SC-3, SC-4, SC-5 — the five success criteria below stand in for requirement IDs (no `REQUIREMENTS.md` IDs exist for this inserted phase, same convention as 164.4). Planned 2026-09-04 (`164.4.1-CONTEXT.md`, `164.4.1-RESEARCH.md`, `164.4.1-PATTERNS.md`).
 **Depends on:** Phase 164.4 (must COMPLETE first — 164.4's floors ratchet sequentially
 across its remaining waves, and pg_cron changes lane startup cost for EVERY arm)
 **Mode:** RESEARCH-FIRST
-**Plans:** 0 plans
+**Plans:** 6/6 plans executed
 
 ### Why this is a phase and not a plan inside 164.4
 
@@ -781,7 +781,7 @@ needs its own research (below) and perturbs a timing model that was only just st
    while files remain classified — so making pg_cron available is exactly the condition
    that must be shown to fire and then be cleared.
 4. `[REDUNDER-LANEBLOCKED-BLIND]` is closed deliberately. `gateNeedsPgCron`
-   (`scripts/mutation-runner/parse.mjs:996`) reads a gate file's executable text and is
+   (`scripts/mutation-runner/parse.mjs:1043`) reads a gate file's executable text and is
    blind to its `RED-UNDER-SETUP` apply list. The defect stops MATTERING once nothing is
    lane-blocked, but the classifier is still wrong; its tripwire test must be resolved on
    purpose rather than allowed to lapse.
@@ -802,7 +802,38 @@ needs its own research (below) and perturbs a timing model that was only just st
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.4.1 to break down)
+- [x] 164.4.1-01-PLAN.md — Substrate: pg_cron preloaded on the lane's single `pg_ctl -o` start (+ `cron.max_running_jobs=0`), fail-loud when absent, scripted macOS build, ubuntu apt provisioning step, `--self-test` 6/6, and the `lane-blocked-stale` tripwire OBSERVED firing on the real corpus (committed log)
+- [x] 164.4.1-02-PLAN.md — File move 1: `test_compute_jobs_error_kind_copy_parity.sql` (3) + `test_derive_allocator_keys_fanout.sql` (7) annotated and proven; floors ratcheted to the printed values; the one-name `pending:` pin re-measured as its own task
+- [x] 164.4.1-03-PLAN.md — File move 2: `test_retention_orphaned_running.sql` (25); floors; lane-blocked pinned at 2
+- [x] 164.4.1-04-PLAN.md — File move 3: `test_strategy_analytics_stuck_computing_reaper.sql` (29, NOTICE-skip shape — zero skip lines measured); floors; lane-blocked pinned at 1
+- [x] 164.4.1-05-PLAN.md — File move 4: `test_reconcile_dropped_enqueue_sweep.sql` (39); `lane-blocked: 0`, tripwire CLEARED (full run exit 0 with probe AVAILABLE); end-state floors; empty sets pinned with AIMs
+- [x] 164.4.1-06-PLAN.md — Closure: `[REDUNDER-LANEBLOCKED-BLIND]` closed deliberately (text-only classifier documented + calibrated), honest runner prints, ubuntu measurement via `workflow_dispatch` (apt source, version, wall clock), ci.yml DECISION block updated by the MEASURED rule, docs currency
+
+✅ **PHASE COMPLETE 2026-09-05.** End state MEASURED on BOTH platforms, identically:
+`coverage: files 44/71`, `arms: 361/361/0`, `biting: 361`, `lane-invocations: 361`
+(the two independent tallies agree), `pending: 0`, `lane-blocked: 0`,
+`lane-probe: pg_cron AVAILABLE`, `No defects`, exit 0. `FILES_FLOOR` 44, `ARMS_FLOOR` 361,
+`WAIVED_CEILING` **0** with ZERO waivers corpus-wide — the record survived four separate
+opportunities to break it. ubuntu proof: run **33973362161** @ `ab0d5644`, `sql-mutation`
+success in 646 s, `PGBIN the lane will boot: /usr/lib/postgresql/16/bin`, pg_cron 1.6.2-1 from
+noble/universe. Verification: PARTIAL -> PASS once SC-1 was re-measured at the shipping tree
+(`164.4.1-VERIFICATION.md`).
+
+⚠️ **THE SECTION COUNTS IN THE PLAN ROWS ABOVE ARE THE AS-PLANNED FIGURES AND ARE NOW WRONG.**
+Measured at close: plan 03's file is **24** sections (not 25), plan 04's **28** (not 29), plan 05's
+**37** (not 39). The rows stay as dated lineage. Three arms were RECLASSIFIED — their
+`TEST FAILED (` identity removed, kept as named INVARIANTs — after being MEASURED to have no
+first-failure mutation, and two more had gate-self twins replaced by production ones. None was
+waived. `ARMS_FLOOR` therefore moved DOWN twice, 363 -> 361, because those arms were never
+proven against a production regression.
+
+⚠️ **`test_reconcile_dropped_enqueue_sweep.sql` is the most contested file in the phase** — its
+twins were revised in THREE successive review rounds, each finding real defects in the previous
+round's work (one Critical, then two more arms of the same class, then a step-count pin). Treat any
+"no production mutation can reach this" sentence in a gate as UNPROVEN until a lane says otherwise;
+that exact sentence was refuted three times here.
+
+⚠️ Execution shape (planner, 2026-09-04): plans run strictly sequentially (one wave each — the floors ratchet). Between plan 01's commit and plan 05's, every full runner invocation on a pg_cron-equipped host exits 1 with exactly one defect, `lane-blocked-stale` — that IS success criterion 3's tripwire firing, each such commit carries a `TRIPWIRE-RED:` line, and the branch must not be pushed or shipped until plan 05 lands (main only receives the squash-merged PR head). `CREATE EXTENSION pg_cron` comes from the real migration `20260513094906_enable_pg_cron.sql` in each gate's apply list, never from a fixture or a lane bootstrap. Section counts above are the runner's own derivation (103 total); every floor is written from the run's printed lines, never from these numbers.
 
 ### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items (WIZFORM-02's code:UNKNOWN class MOVED to 164.2 in the 2026-08-28 dedup), plus the Phase 163 carry-overs — headed by SKIP-01 (nothing applies migrations to TEST, so the OPS-08 SQL gate SKIPs permanently and the deployed body is tested nowhere), then OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-revision drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
 
@@ -1117,6 +1148,7 @@ Plans:
 | 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC, HONEST-08-RESIDUAL) | 0/? | Queued 3rd (deduped 2026-08-28) | - |
 | 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8, H-0001) | 0/? | ◆ RUNS FIRST (resequenced 2026-08-28) | - |
 | 164.4 REDUNDER-BACKFILL (39 reachable idiom files + 4 lane-blocked + 1 pending (SCOPE AMENDMENT #2, ARITHMETIC CORRECTION 2026-09-04); scope narrowed to the idiom corpus 2026-09-02, 27 non-idiom files printed-and-excluded) | 0/13 | Planned 2026-09-02 — 13 plans (spike, Wave 0 runner/CI, reference file, 10 file-batches landed one PR at a time with sql-mutation GREEN on ubuntu between); 164.3.1 HARD dep CLOSED 2026-09-02 | - |
+| 164.4.1 PGCRON-LANE (pg_cron on the lane; 5 deferred gates annotated; lane-blocked retired to 0) | 6/6 | Complete — verified, ubuntu-measured @ `ab0d5644` | 2026-09-05 |
 | 165. DEPS dependabot campaign | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.20)

@@ -176,6 +176,97 @@
 --
 -- Run order: AFTER migration 20260817120000 is applied to the project. Before
 -- that, Part 1 REDs by design.
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4.1, PGCRON-LANE). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+--
+-- ⛔ ORACLE SCOPE ON THE LANE -- read this before reading any twin below.
+-- Parts 2 and 3 read the deployed body out of cron.job.command and EXECUTE it.
+-- On the TEST project that body was written by a DEPLOYMENT, so those arms
+-- detect DRIFT between this repo and that project. ON THE PG-LANE the body is
+-- written by the apply list on the line below, so they CANNOT detect drift
+-- there and no green run of this file's twins may be read as evidence that
+-- there is none. What the lane proves is FALSIFIABILITY: that every assertion
+-- has a production change under which it fires FIRST and names itself. Repo
+-- vs. TEST drift is judged by VAC-08 in the sql-tests job, and repo vs. PROD by
+-- VAC-04 in migration-drift-check; neither is this file's job.
+-- ⚠️ FOUR migrations (re)schedule retention_compute_jobs_orphaned_running --
+-- 20260719120000:95, 20260720120000:64, 20260817120000:602 and
+-- 20260826140000:220 -- and cron.schedule UPSERTS BY NAME, so the row's body is
+-- the LAST one applied. All four are in the list, in chronological order, so
+-- the lane's cron.job.command is 20260826140000's body, which is the body TEST
+-- holds. ⛔ CONSEQUENCE FOR EVERY BODY-TOKEN TWIN: the falsifier must edit
+-- 20260826140000. An edit to 20260817120000's cron body is OVERWRITTEN by the
+-- later cron.schedule and comes back `no-red` -- a wrong TARGET, never a reason
+-- for a waiver.
+--
+-- ⚠️ THE APPLY LIST BELOW IS MEASURED, ENTRY BY ENTRY, BY ONE-OUT ABLATION on
+-- real lanes (2026-09-05, `bash scripts/pg-lane/run.sh --workdir <scratch
+-- OUTSIDE the repo> --apply <this list> --gate <this file>`; baseline exit 0,
+-- all three Parts print their OK line). Seventeen of the twenty entries are
+-- REQUIRED and each one's first error was read off the lane:
+--   * 01/02/03-fixture -- the base schema chain (auth.users, profiles,
+--     api_keys, portfolios, and api_keys' PK/label/api_key_encrypted).
+--   * 20260513094906_enable_pg_cron -- FIRST among the cron migrations because
+--     three of them RAISE on an absent extension. Without it the apply aborts
+--     at 20260719120000:107 with `0A000: WORKER-04: pg_cron extension is NOT
+--     installed` (20260817120000:558-565 and 20260826140000:206-209 raise the
+--     same way, later).
+--   * 20260411144407 -- compute_jobs itself; without it 20260418194206:87 dies
+--     on `relation "compute_jobs" does not exist`.
+--   * 15-fixture-auth-role -- 20260420073003:720, `auth.role() does not exist`.
+--   * 21-fixture-api-keys-credential-columns -- 20260420073003:999, `column
+--     "dek_encrypted" of relation "api_keys" does not exist`.
+--   * 20-fixture-app-role-helper -- 20260420073003:711,
+--     `current_user_has_app_role(text[]) does not exist`.
+--   * 24-fixture-enqueue-compute-job-chain -- 20260420073003:315, `column
+--     "sync_error" of relation "api_keys" does not exist`.
+--   * 20260418194206 -- 20260420073003:253, `column "allocator_id" does not
+--     exist`.
+--   * 20260420073003 -- without it 20260614120000:92 dies on `column
+--     "api_key_id" does not exist`, and it is ALSO the migration that widens
+--     compute_jobs_target_xor to the 4-way form these api_key-scoped seeds
+--     need (its own self-verify (d) at :786-792 pins that).
+--   * 20260515114555 -- 20260516104201:976, mark_compute_job_done missing its
+--     NOT EXISTS set-back arm.
+--   * 20260516104201 -- 20260826140000:377, `42P13: cannot change return type
+--     of existing function` on get_user_compute_jobs.
+--   * 20260614120000 -- the derive_broker_dailies REGISTRY ROW. Without it the
+--     gate's own seed dies at :652 on `23503 compute_jobs_kind_fkey`.
+--   * 20260624120100 -- the api_key-scoped derive_broker_dailies coherence arm.
+--     Without it the same seed dies at :652 on `23514
+--     compute_jobs_kind_target_coherence`; the seeds are api_key-scoped because
+--     that is the shape of the 396 real arm-A rows measured on TEST.
+--   * 20260826120000 -- 20260826140000:622, `42883: computation_error_copy
+--     (unknown) does not exist`.
+--   * 20260826140000 -- without it the deployed body is 20260817120000's, which
+--     carries no canary, and Part 1 reds at :428 with `TEST FAILED (1/V-1)`.
+-- THREE entries are individually REMOVABLE and are here ON PURPOSE:
+-- 20260719120000, 20260720120000 and 20260817120000. Because cron.schedule
+-- upserts by name, dropping any one of them still leaves 20260826140000's body
+-- deployed, which is why one-out calls them removable. They stay because the
+-- CHAIN is what makes "the lane's oracle is the body TEST holds" a measured
+-- property rather than a coincidence -- and because 20260513094906's own
+-- necessity is measured against 20260719120000's raise, above.
+--
+-- ⚠️ THIS FILE'S PART-2/3 SKIP ARMS ARE UNREACHABLE BY CONSTRUCTION, which is
+-- worth stating rather than reporting "zero skips" as if it were evidence.
+-- Part 1's 1/JOB-05 arm RAISEs on the same absent-pg_cron condition and runs
+-- FIRST, so a lane without the extension never reaches the `SKIP Part 2` /
+-- `SKIP Part 3` branches. MEASURED 2026-09-05 with this list: the gate prints
+-- ZERO NOTICE lines whose message BEGINS with SKIP, and all three Parts print
+-- their OK line. ⚠️ Two coarser spellings of that count are WRONG here and both
+-- were measured: over the whole lane transcript `SKIP|skipping` matches 24
+-- (PostgreSQL's own `does not exist, skipping` DDL notices, which no gate
+-- controls -- plan 164.4.1-02 measured 15 of them on an already-green reference
+-- file), and the gate-prefixed form matches 1, because Part 1's own OK NOTICE
+-- contains the words SKIP LOCKED. Only the message-begins-with-SKIP form means
+-- anything, and it was calibrated against the exact line the Part 2 branch
+-- would print (it matches).
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260516104201_compute_jobs_audit_2026_05_07_residual.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260624120100_derive_broker_dailies_api_key_coherence.sql","supabase/migrations/20260719120000_retention_orphaned_running_compute_jobs.sql","supabase/migrations/20260720120000_retention_orphaned_running_window_4h.sql","supabase/migrations/20260817120000_retention_orphaned_running_terminalize.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql"]}
 
 -- ==========================================================================
 -- Part 1 -- STRUCTURAL, UNGATED, ZERO SIDE EFFECTS. This is the part that must
@@ -257,6 +348,13 @@ BEGIN
   -- 20260826140000, STEP 2) and NOWHERE in its code. Without it, "the stripper
   -- worked" and "there was nothing to strip" are the same observation, and every
   -- assertion below would silently lose its only evidence that it reads CODE.
+  -- RED-UNDER: rename the prose-only canary in the cron body's comment (migration
+  --            20260826140000 STEP 2) so the token this part looks for is no longer
+  --            in the RAW deployed command. That is the F-5 shape the migration's own
+  --            comment warns about: without the canary, "the stripper worked" and
+  --            "there was nothing to strip" become the same observation and every
+  --            count below silently loses its evidence that it reads CODE.
+  -- RED-UNDER-M: {"arm":"1/V-1","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"CANARY_162_V1_PROSE_ONLY — a prose-only token","replace":"CANARY_162_V1_RETIRED — a prose-only token","occurrences":1}]}
   IF position('CANARY_162_V1_PROSE_ONLY' IN v_command) = 0 THEN
     RAISE EXCEPTION 'TEST FAILED (1/V-1): the prose-only canary CANARY_162_V1_PROSE_ONLY is absent from the RAW deployed command, so this part cannot tell "the comment stripper worked" from "there was nothing to strip" — and every count and negative check below loses its evidence that it is reading CODE rather than COMMENTARY. Restore the canary comment in the cron body (migration 20260826140000, STEP 2); do NOT delete the stripper to compensate.';
   END IF;
@@ -270,6 +368,16 @@ BEGIN
   -- literal asterisk, and casting that raises 22P02 -- a hard, opaque CI failure
   -- instead of a named assertion. The safe-hour band is meaningless for a job that
   -- runs every hour anyway. Do not reintroduce a per-field cast in any form.
+  -- RED-UNDER: move the cadence in migration 20260826140000's cron.schedule call
+  --            from the hourly '50 * * * *' to a daily '0 3 * * *'. That is the
+  --            operator-plausible edit this arm exists to refuse: it puts
+  --            post-threshold detection latency back at ~24h and drops the janitor
+  --            onto the :00 stack the minute-50 slot was chosen to avoid. 20260826140000
+  --            is the LAST migration to schedule this job, so it is the one whose
+  --            cadence the deployed row carries; neither its own self-verify nor
+  --            20260817120000's reads the schedule, so the mutated cadence applies
+  --            perfectly clean and only this arm notices.
+  -- RED-UNDER-M: {"arm":"1/JOB-05","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"    '50 * * * *',","replace":"    '0 3 * * *',","occurrences":1}]}
   IF v_schedule IS DISTINCT FROM '50 * * * *' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed cadence is % and not the expected 50 * * * *. Minute 50 is what keeps this janitor off 142 reaper quarter-hour grid, off 143 sweep at :35, and 10 minutes clear of the :00 stack; a daily cadence would also put post-threshold detection latency back at ~24h.', v_schedule;
   END IF;
@@ -283,6 +391,21 @@ BEGIN
   -- satisfies it, so deleting a whole arm would pass unnoticed. That exact defect
   -- was MEASURED in Phase 143 on this very table name.
   v_jobs := (length(upper(v_bare)) - length(replace(upper(v_bare), 'PUBLIC.COMPUTE_JOBS', ''))) / length('PUBLIC.COMPUTE_JOBS');
+  -- RED-UNDER: DELETE ARM B outright from the cron body in migration 20260826140000 --
+  --            the whole `claimed_at IS NULL` batch CTE and its UPDATE. That is
+  --            literally the failure this counter names ("Two usually means a WHOLE ARM
+  --            IS GONE"): NULL-claim running rows become immortal again, exactly as six
+  --            of them were for 14 days on TEST.
+  -- ⚠️ LAYERED, and the layering is the finding. Migration 20260826140000's
+  --    own STEP 5 (d) counts 'orphaned' and ORPHANED_RUNNING_REAPED in the
+  --    deployed command and requires TWO of each, so step 1 ALONE aborts the
+  --    APPLY -- the gate never runs and no arm can be the first failure.
+  --    Steps 2 and 3 re-base those two guards to the one-arm body, and
+  --    nothing else. MEASURED 2026-09-05 on a real lane, not argued: with step 1
+  --    ALONE the lane exits 3 at 20260826140000:603 with `P0001: F-3
+  --    verification failed: the deployed reaper body classifies as 'orphaned' 1
+  --    times, expected 2 (one per arm)`.
+  -- RED-UNDER-M: {"arm":"1/JOB-05/D-08","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"\n\n      WITH batch AS MATERIALIZED (\n        SELECT id\n          FROM public.compute_jobs\n         WHERE status = 'running'\n           AND claimed_at IS NULL\n           AND created_at < now() - interval '48 hours'\n         ORDER BY created_at ASC\n         LIMIT 100\n         FOR UPDATE SKIP LOCKED\n      )\n      UPDATE public.compute_jobs cj\n         SET status          = 'failed_final',\n             next_attempt_at = now(),\n             error_kind      = 'orphaned',\n             last_error      = 'orphaned_running_reaped: running with no claim stamp (invariant violation) older than 48h'\n        FROM batch b\n       WHERE cj.id = b.id\n         AND cj.status = 'running';","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"  IF v_kind <> 2 THEN","replace":"  IF v_kind <> 1 THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"  IF v_reason <> 2 THEN","replace":"  IF v_reason <> 1 THEN","occurrences":1}]}
   IF v_jobs <> 4 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-08): the deployed body names public.compute_jobs % times, expected 4 (arm A batch + arm A UPDATE target + arm B batch + arm B UPDATE target). Two usually means a WHOLE ARM IS GONE -- if it is arm B, NULL-claim running rows become immortal again exactly as they were for 14 days on TEST; if it is arm A, no claimed orphan is ever terminalized. Zero means the janitor no longer touches the table at all.', v_jobs;
   END IF;
@@ -301,6 +424,14 @@ BEGIN
 
   -- 2 = B3, one per SET list.
   v_next := (length(upper(v_bare)) - length(replace(upper(v_bare), 'NEXT_ATTEMPT_AT', ''))) / length('NEXT_ATTEMPT_AT');
+  -- RED-UNDER: drop `next_attempt_at = now(),` from ARM B's SET list in migration
+  --            20260826140000, leaving arm A's in place. The status flip still happens,
+  --            so nothing upstream notices -- but retention_compute_jobs_failed deletes
+  --            on COALESCE(next_attempt_at, created_at) older than 90 days, and a
+  --            century-old NULL-claim orphan whose clock was never advanced is eligible
+  --            on the very next 03:30 tick. The count, not a presence test, is what
+  --            catches ONE arm losing it.
+  -- RED-UNDER-M: {"arm":"1/JOB-05/B3","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"             next_attempt_at = now(),\n","replace":"","occurrences":2,"nth":2}]}
   IF v_next <> 2 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/B3): the deployed body writes next_attempt_at % times, expected 2 (one per SET list). retention_compute_jobs_failed deletes on COALESCE(next_attempt_at, created_at) older than 90 days (20260515210200:255-259) and the claim RPC never advances that column, so a status-only flip lets an old orphan be collected on the very NEXT 03:30 tick -- terminalized at 04:50, gone by 03:30, and the audit trail this cron exists to preserve lasts eleven hours instead of ninety days.', v_next;
   END IF;
@@ -326,6 +457,19 @@ BEGIN
   -- because the class still mislabelled is now invisible to anyone looking for
   -- the fix.
   v_kindcount := (length(v_bare) - length(replace(v_bare, '''orphaned''', ''))) / length('''orphaned''');
+  -- RED-UNDER: half-convert the reaper: leave arm A writing 'orphaned' and put arm B
+  --            back on an unmodelled kind in migration 20260826140000. That is the
+  --            precise state this COUNT exists to refuse -- a presence test is satisfied
+  --            by either arm surviving, so a half-converted body would pass unnoticed
+  --            while never-claimed orphans keep reading copy that says retrying will not
+  --            help.
+  -- ⚠️ LAYERED: 20260826140000's STEP 5 (d) counts 'orphaned' in the deployed
+  --    command and requires 2, so step 1 alone ABORTS THE APPLY. Step 2
+  --    re-bases that one guard to 1 and touches nothing else. MEASURED 2026-09-05
+  --    on a real lane: step 1 ALONE exits 3 at 20260826140000:622 with `P0001:
+  --    F-3 verification failed: the deployed reaper body classifies as 'orphaned'
+  --    1 times, expected 2 (one per arm)`.
+  -- RED-UNDER-M: {"arm":"1/F-3","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"             error_kind      = 'orphaned',","replace":"             error_kind      = 'unknown',","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"  IF v_kind <> 2 THEN","replace":"  IF v_kind <> 1 THEN","occurrences":1}]}
   IF v_kindcount <> 2 THEN
     RAISE EXCEPTION 'TEST FAILED (1/F-3): the deployed body classifies as ''orphaned'' % times, expected 2 (one per arm). Arm A reaps claims older than the 4h window, arm B reaps never-claimed running rows older than 48h -- BOTH are worker deaths and both are retryable. A missing conversion leaves that arm''s users reading copy that tells them retrying will not help.', v_kindcount;
   END IF;
@@ -341,6 +485,13 @@ BEGIN
 
   -- 1 = arm A only. SC#2: the RT-01 window is UNCHANGED by Phase 144.
   v_win_a := (length(upper(v_bare)) - length(replace(upper(v_bare), 'INTERVAL ''4 HOURS''', ''))) / length('INTERVAL ''4 HOURS''');
+  -- RED-UNDER: put arm A's claim window back to the OLD 2 hours that migration
+  --            20260720120000 corrected away. A full batch of 5 claimed jobs shares one
+  --            claim stamp and dispatches sequentially at up to 30 min each, so a HEALTHY
+  --            worker legitimately holds a 2.5h-old claim; under a 2-hour window it is
+  --            terminalized while still running. The count goes to 0 and this arm fires
+  --            before the file's explicit 2-hour ban, which carries the same section id.
+  -- RED-UNDER-M: {"arm":"1/JOB-05/RT-01","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"           AND claimed_at < now() - interval '4 hours'","replace":"           AND claimed_at < now() - interval '2 hours'","occurrences":1}]}
   IF v_win_a <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/RT-01): the deployed body carries the 4-hour claim window % times, expected exactly 1 (arm A). Zero means the RT-01-corrected threshold is gone: a full batch of 5 jobs shares one claim stamp and dispatches sequentially at up to 30 min each, so a HEALTHY worker legitimately holds a 2.5h-old claim and a narrower window would terminalize a live in-flight job out from under it. More than one means a second arm has imported a threshold derived for a different mechanism.', v_win_a;
   END IF;
@@ -371,6 +522,13 @@ BEGIN
   -- that drops FOR UPDATE, at which point the CTE would become inlinable. Part 3
   -- is the bound proof; never let a green here stand in for it.
   v_mat := (length(upper(v_bare)) - length(replace(upper(v_bare), 'AS MATERIALIZED', ''))) / length('AS MATERIALIZED');
+  -- RED-UNDER: drop the explicit MATERIALIZED fence from arm A's batch CTE in migration
+  --            20260826140000. Phase 143 MEASURED that this changes neither plan nor
+  --            result today, because Postgres does not inline a CTE that locks rows --
+  --            which is exactly why the SHAPE gate is here: it survives a future edit
+  --            that drops FOR UPDATE, at which point the LIMIT would be re-applied per
+  --            outer row and the per-tick blast radius would silently become unbounded.
+  -- RED-UNDER-M: {"arm":"1/JOB-05/D-19","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"      WITH batch AS MATERIALIZED (","replace":"      WITH batch AS (","occurrences":2,"nth":1}]}
   IF v_mat <> 2 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-19): the deployed body carries % MATERIALIZED batch CTEs, expected exactly 2 (one per arm). The explicit fence is what keeps each bound safe against a future edit that drops FOR UPDATE and makes the CTE inlinable -- at which point the LIMIT would be re-applied per outer row and the per-tick blast radius would silently become unbounded. This is shape enforcement; Part 3 is the bound proof.', v_mat;
   END IF;
@@ -402,6 +560,13 @@ BEGIN
   -- behaviourally. This file's superseded version asserted the OPPOSITE (that the
   -- orphan row was gone); that assertion is what would have reddened the moment
   -- the correct migration reached TEST.
+  -- RED-UNDER: give the janitor a row-removal statement -- here the innocuous-looking
+  --            "tidy my own run log" edit, appended to the cron body in migration
+  --            20260826140000. It is deliberately NOT a removal from compute_jobs: a
+  --            removal there would change the `public.compute_jobs` count and fire the
+  --            D-08 arm first, so this proves the KEYWORD ban itself, which is the half
+  --            of D-01 that Part 2's count conservation cannot see.
+  -- RED-UNDER-M: {"arm":"1/JOB-05/WR-02","apply":[{"kind":"insert-after","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","anchor":"         AND cj.status = 'running';","text":"\n\n      DELETE FROM cron.job_run_details WHERE runid < 0;","occurrences":2,"nth":2}]}
   IF v_bare ILIKE '%DELETE%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/WR-02): the deployed body contains a row-removal statement. This janitor must TERMINALIZE and never remove: a removed row gives the wizard poller no outcome to break out on, destroys the only audit record that a worker was down past its claim window, and on PROD discards a genuine in-flight one-shot job that nothing will re-enqueue.';
   END IF;
@@ -478,6 +643,16 @@ BEGIN
 
   SELECT command INTO v_command
     FROM cron.job WHERE jobname = 'retention_compute_jobs_orphaned_running';
+  -- RED-UNDER: unschedule the janitor on the live database -- the production change this
+  --            arm names in its own message. ⚠️ DOMINATED BY DESIGN, and that is this
+  --            file's doctrine rather than a defect in the arm: Part 1 is DELIBERATELY
+  --            UNGATED and its registration arm is meant to be the free-standing RED, so
+  --            under a real unschedule Part 1 fires first every time. This arm exists so
+  --            that Part 2 cannot silently RETURN instead, and it is reachable only with
+  --            Part 1's own dominators suppressed -- which is what `neuter` is for. The
+  --            neuter list below is MEASURED off the lane, not reasoned: each entry was
+  --            added only after the runner reported that identity as the first failure.
+  -- RED-UNDER-M: {"arm":"2/JOB-05","apply":[{"kind":"sql","stmt":"DELETE FROM cron.job WHERE jobname = 'retention_compute_jobs_orphaned_running'"}],"neuter":[{"arm":"1/JOB-05"},{"arm":"1/JOB-05"},{"arm":"1/JOB-05"},{"arm":"1/JOB-05"},{"arm":"1/JOB-05"},{"arm":"1/JOB-05/D-19"},{"arm":"1/JOB-05/D-19"},{"arm":"1/JOB-05/D-19"}]}
   IF v_command IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (2/JOB-05): the retention_compute_jobs_orphaned_running cron job is missing while pg_cron is installed. A missing janitor is a red gate, never a skip.';
   END IF;
@@ -554,6 +729,12 @@ BEGIN
   -- headline invariant is the first thing observed, and every per-arm read below
   -- can rely on its row existing. Do not move it back.
   SELECT count(*) INTO v_cnt FROM public.compute_jobs WHERE id = ANY (v_seeded);
+  -- RED-UNDER: make the janitor remove rows WITHOUT using the keyword Part 1 greps for:
+  --            a TRUNCATE appended to the cron body in migration 20260826140000. This is
+  --            the assertion's own stated reason for existing -- "a rewritten removal
+  --            that avoids that keyword would still be caught here" -- and it is checked
+  --            FIRST after the tick precisely so a per-arm read cannot fire ahead of it.
+  -- RED-UNDER-M: {"arm":"2/conservation/JOB-05/WR-02/SC#1","apply":[{"kind":"insert-after","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","anchor":"         AND cj.status = 'running';","text":"\n\n      TRUNCATE compute_jobs;","occurrences":2,"nth":2}]}
   IF v_cnt <> 6 THEN
     RAISE EXCEPTION 'TEST FAILED (2/conservation/JOB-05/WR-02/SC#1): % of my 6 seeded rows survive the tick, expected all 6. The janitor REMOVED rows. That is the shipped behaviour Phase 144 exists to replace: a removed row leaves the wizard poller with no outcome to break out on, destroys the audit record that a worker was down past its claim window, and on PROD discards a genuine in-flight one-shot job that nothing will re-enqueue. This is checked BEHAVIOURALLY rather than only by grepping the body for a removal keyword -- a rewritten removal that avoids that keyword would still be caught here.', v_cnt;
   END IF;
@@ -565,9 +746,23 @@ BEGIN
     INTO v_status, v_kind, v_err, v_next, v_claimed
     FROM public.compute_jobs WHERE id = id_a;
 
+  -- RED-UNDER: invert arm A's claim-presence guard in migration 20260826140000 from
+  --            `claimed_at IS NOT NULL` to `claimed_at IS NULL`. Arm A then matches
+  --            nothing at all (a NULL claim stamp can never also be older than the
+  --            window), so no claimed orphan is ever terminalized: the poller never
+  --            breaks out and Phase 142's reaper stays blocked. Part 1 stays green
+  --            because it only tests that `claimed_at IS NULL` is PRESENT somewhere in
+  --            the body, which is exactly the hole this behavioural arm covers.
+  -- RED-UNDER-M: {"arm":"2/arm A/JOB-05/SC#1","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"           AND claimed_at IS NOT NULL","replace":"           AND claimed_at IS NULL","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'failed_final' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05/SC#1): an orphan claimed past the 4-hour window sits at status % after one tick, expected failed_final. At running the poller never breaks out (isJobInFlight is true for every status outside FINISHED_JOB_STATUSES) and Phase 142 reaper stays blocked from writing the user-facing analytics failure, because failed_final is the only terminal-failure value outside its exclusion set.', v_status;
   END IF;
+  -- RED-UNDER: carry the claim stamp forward instead of advancing the retention clock:
+  --            arm A's `next_attempt_at = now()` becomes `next_attempt_at = claimed_at`.
+  --            The TEXT count Part 1 makes is unchanged -- the token still appears twice
+  --            -- so only a real tick against a real row can catch it, and the row is
+  --            then eligible for the 90-day collector on the next 03:30 tick.
+  -- RED-UNDER-M: {"arm":"2/arm A/JOB-05/B3","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"             next_attempt_at = now(),","replace":"             next_attempt_at = claimed_at,","occurrences":2,"nth":1}]}
   IF v_next <= v_ancient THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05/B3): the terminalized row next_attempt_at is still at its century-backdated seed value (%), so the janitor did not advance it. retention_compute_jobs_failed deletes failed rows on COALESCE(next_attempt_at, created_at) older than 90 days, so this row is eligible for removal on the very NEXT 03:30 tick -- the audit trail this cron promises would last hours instead of ninety days.', v_next;
   END IF;
@@ -576,9 +771,24 @@ BEGIN
   -- deployed TEXT says orphaned, this proves a real tick actually WROTE it, so a
   -- CHECK that silently rejected the value -- which would abort the whole pg_cron
   -- block and leave the row running -- cannot pass both.
+  -- RED-UNDER: make arm A WRITE a kind other than the one the deployed text says it
+  --            writes, by branching the SET expression so that 'orphaned' survives in
+  --            the body verbatim while the value stored is 'unknown'. This is the exact
+  --            gap this arm's own comment describes: Part 1 proves the deployed TEXT says
+  --            orphaned, and only a real tick proves a real write did. At an unmodelled
+  --            kind both user-facing readers fall back to the cautious default.
+  -- RED-UNDER-M: {"arm":"2/arm A/F-3","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"             error_kind      = 'orphaned',","replace":"             error_kind      = CASE WHEN TRUE THEN 'unknown' ELSE 'orphaned' END,","occurrences":2,"nth":1}]}
   IF v_kind IS DISTINCT FROM 'orphaned' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/F-3): the terminalized row error_kind is % and not orphaned. Both user-facing readers derive their copy from (status, error_kind): at ''permanent'' the user is told retrying will not resolve it, and at anything unmodelled they get the cautious default. This row''s worker DIED holding the claim -- the job never reached a verdict -- so it is retryable, and retrying is the only mechanism that computes it (the 20260819130500 readmit sweep is csv-only and is blocked once computation_status reads failed).', v_kind;
   END IF;
+  -- RED-UNDER: same shape as the arm above, applied to the audit literal: arm A's
+  --            last_error becomes a branch that keeps the fixed
+  --            `orphaned_running_reaped:` sentence in the body -- so Part 1's count of 2
+  --            and migration 20260826140000's own STEP 5 (d) count both stay satisfied --
+  --            while the row is written with a NULL last_error. That column is the ONLY
+  --            operator-visible record of why a row was terminalized, and it is
+  --            hard-redacted from users, so nothing else in the system would notice.
+  -- RED-UNDER-M: {"arm":"2/arm A/JOB-05","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"             last_error      = 'orphaned_running_reaped: no worker completed this job within the 4h claim window'","replace":"             last_error      = CASE WHEN TRUE THEN NULL ELSE 'orphaned_running_reaped: no worker completed this job within the 4h claim window' END","occurrences":1}]}
   IF v_err IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05): the terminalized row carries no last_error. That column is the ONLY operator-visible record of WHY the row was terminalized (it is hard-redacted from users at the RPC and zod layers), so without it an operator cannot tell a reaped orphan from a genuine handler failure.';
   END IF;
@@ -588,6 +798,14 @@ BEGIN
 
   -- ----- (B) RT-01: the 3h batch tail is UNTOUCHED (SC#2) ----------------
   SELECT status INTO v_status FROM public.compute_jobs WHERE id = id_b;
+  -- RED-UNDER: narrow arm A's window arithmetic to a quarter of itself
+  --            (`interval '4 hours' / 4`) in migration 20260826140000. The literal
+  --            `interval '4 hours'` is still there exactly once, so Part 1's RT-01 count
+  --            is satisfied and only a seeded row at the threshold can tell: the 3h batch
+  --            tail -- a LIVE job on a healthy worker -- is marked permanently failed,
+  --            its side effects land against a row that has left the in-flight set, and a
+  --            duplicate job can be enqueued alongside it.
+  -- RED-UNDER-M: {"arm":"2/arm B/JOB-05/RT-01/SC#2","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"           AND claimed_at < now() - interval '4 hours'","replace":"           AND claimed_at < now() - interval '4 hours' / 4","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'running' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm B/JOB-05/RT-01/SC#2): a running row claimed only 3 hours ago is at status % after one tick, expected still running. The window has been narrowed below the RT-01 basis: a full batch of 5 claimed jobs shares ONE claim stamp and dispatches sequentially at up to 30 min each, so a HEALTHY worker legitimately holds a 2.5h-old claim. Terminalizing it marks a LIVE job permanently failed, its side effects then land against a row that has left the in-flight set, and a duplicate job can be enqueued alongside it -- the exact double-compute the claim fence exists to prevent.', v_status;
   END IF;
@@ -601,12 +819,36 @@ BEGIN
   -- explicit boundary marker of what the threshold means, not as independent
   -- evidence. Do not count it twice when reasoning about coverage.
   SELECT status INTO v_status FROM public.compute_jobs WHERE id = id_c;
+  -- RED-UNDER: OR a second disjunct onto arm A's predicate so it ALSO takes
+  --            just-claimed rows (`claimed_at > now() - interval '1 minute'`). ⚠️ This
+  --            twin is what makes this file's own HONESTY note above checkable: the note
+  --            says arm C is dominated by arm B for any MONOTONE threshold and that a
+  --            body taking C but not B must be age-INVERTED, which fails arm A first. A
+  --            NON-monotone predicate is the third possibility, and it is the one that
+  --            lands the failure here -- the century-old claim and the 3h tail both
+  --            behave, and only the row claimed this instant moves.
+  -- RED-UNDER-M: {"arm":"2/arm C/JOB-05","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"           AND claimed_at < now() - interval '4 hours'","replace":"           AND (claimed_at < now() - interval '4 hours' OR claimed_at > now() - interval '1 minute')","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'running' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm C/JOB-05): a row claimed THIS INSTANT is at status % after one tick, expected still running. There is no threshold left at all -- the janitor would terminalize every job the worker claims, on every tick.', v_status;
   END IF;
 
   -- ----- (D) aged NON-running row is UNTOUCHED --------------------------
   SELECT status INTO v_status FROM public.compute_jobs WHERE id = id_d;
+  -- RED-UNDER: widen arm A's status scope to also sweep completed work, in migration
+  --            20260826140000. The janitor then rewrites finished jobs as permanently
+  --            failed and resets their retention clocks at the same time.
+  -- ⚠️ LAYERED, and the layering is the finding, not an obstacle. The scope is
+  --    enforced TWICE -- once in the batch CTE's predicate and once in the
+  --    compare-and-set fence on the UPDATE -- so a single-step mutation is a
+  --    `no-red`: with only the predicate widened the fence still refuses the
+  --    done row, and with only the fence widened the batch never selects it.
+  --    MEASURED 2026-09-05, each half driven ALONE on a real lane: BOTH exit 0.
+  --    The gate simply passes, with no arm to name.
+  --    Both halves are spelled `status = 'running' OR status = 'done'` rather
+  --    than an IN list, deliberately: Part 1 counts the exact single-spaced
+  --    `status = 'running'` FOUR times, and an IN list would drop that count
+  --    and fire Part 1 instead of this arm.
+  -- RED-UNDER-M: {"arm":"2/arm D/JOB-05","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"         WHERE status = 'running'\n           AND claimed_at IS NOT NULL","replace":"         WHERE (status = 'running' OR status = 'done')\n           AND claimed_at IS NOT NULL","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"         AND cj.status = 'running';\n\n      WITH batch","replace":"         AND (cj.status = 'running' OR cj.status = 'done');\n\n      WITH batch","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'done' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm D/JOB-05): an aged DONE row is at status % after one tick, expected still done. The status scope is broken, so the janitor rewrites completed work as permanently failed -- and because it also stamps next_attempt_at, it resets those rows retention clocks at the same time.', v_status;
   END IF;
@@ -615,18 +857,41 @@ BEGIN
   SELECT status, error_kind, last_error, next_attempt_at
     INTO v_status, v_kind, v_err, v_next
     FROM public.compute_jobs WHERE id = id_e;
+  -- RED-UNDER: flip the comparison operator in arm B's age predicate in migration
+  --            20260826140000, so it reaps NULL-claim rows that are YOUNGER than 48h and
+  --            leaves the old ones alone. Part 1 is unmoved -- the 48-hour literal still
+  --            appears exactly once -- and the row shape that is immortal without arm B
+  --            is immortal again.
+  -- RED-UNDER-M: {"arm":"2/arm E/JOB-05/D-08","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"           AND created_at < now() - interval '48 hours'","replace":"           AND created_at > now() - interval '48 hours'","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'failed_final' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm E/JOB-05/D-08): a running row with claimed_at NULL, created a century ago, is at status % after one tick, expected failed_final. Arm B is gone or broken. That row shape is IMMORTAL without it: the superseded body excluded NULL claims by name, and NULL < x is never TRUE anyway, so nothing else in the system can ever clear it -- six such rows sat on TEST for up to 14 days.', v_status;
   END IF;
+  -- RED-UNDER: the arm-A B3 twin's mirror image, on arm B: `next_attempt_at = now()`
+  --            becomes `next_attempt_at = created_at`. created_at rather than claimed_at
+  --            because arm B's rows have no claim stamp at all -- that is what makes them
+  --            arm B's -- so this is the copy-forward a real edit would make here. Same
+  --            consequence: the 90-day audit trail is collected on the next nightly tick.
+  -- RED-UNDER-M: {"arm":"2/arm E/JOB-05/B3","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"             next_attempt_at = now(),","replace":"             next_attempt_at = created_at,","occurrences":2,"nth":2}]}
   IF v_next <= v_ancient THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm E/JOB-05/B3): the arm-B terminalized row next_attempt_at is still at its century-backdated seed value (%). Same consequence as arm A: retention_compute_jobs_failed collects it on the next nightly tick and the audit trail is voided.', v_next;
   END IF;
+  -- RED-UNDER: the arm-A F-3 twin applied to arm B: the body still spells 'orphaned'
+  --            twice, so both Part 1 and migration 20260826140000's STEP 5 (d) stay
+  --            green, while arm B actually writes 'unknown'. That is the HALF DONE state
+  --            this arm's own ⚠️ names -- never-claimed orphans still being classified
+  --            differently from claimed ones.
+  -- RED-UNDER-M: {"arm":"2/arm E/F-3","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"             error_kind      = 'orphaned',","replace":"             error_kind      = CASE WHEN TRUE THEN 'unknown' ELSE 'orphaned' END,","occurrences":2,"nth":2}]}
   IF v_kind IS DISTINCT FROM 'orphaned' OR v_err IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm E/F-3): the arm-B terminalized row carries error_kind % and last_error %, expected orphaned and a non-null fixed audit literal. The two arms must terminalize IDENTICALLY apart from the reason text; a divergence here means one arm writes a row the operator channel or the user-facing copy synthesis cannot read. ⚠️ If this arm says permanent while arm A says orphaned, the conversion is HALF DONE -- never-claimed orphans are still being told that retrying will not help.', v_kind, v_err;
   END IF;
 
   -- ----- (F) arm-B negative: 12h is inside the 48h window ----------------
   SELECT status INTO v_status FROM public.compute_jobs WHERE id = id_f;
+  -- RED-UNDER: collapse arm B's threshold to a forty-eighth of itself
+  --            (`interval '48 hours' / 48`). The literal is untouched so Part 1's D-08
+  --            count still reads 1, and only the 12h seed can tell: a row the next daily
+  --            fan-out has not even had a chance to supersede is already called orphaned.
+  -- RED-UNDER-M: {"arm":"2/arm F/JOB-05/D-08","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"           AND created_at < now() - interval '48 hours'","replace":"           AND created_at < now() - interval '48 hours' / 48","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'running' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm F/JOB-05/D-08): a NULL-claim running row only 12 hours old is at status % after one tick, expected still running. Arm B threshold has collapsed below its derivation (24h enqueue cadence + 2.5h max batch wall-clock, rounded up to 48h), so a row that the next daily fan-out has not even had a chance to supersede is already being called orphaned.', v_status;
   END IF;
@@ -640,6 +905,16 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE id = ANY (v_seeded) AND status = 'failed_final';
+  -- RED-UNDER: the arm-D scope widening above, with arm D's own named check neutered.
+  -- ⚠️ This arm is LOGICALLY dominated and this file already says so: it is a
+  --            catch-all for an arm added later without its own assertion, and the 144-01
+  --            neuter matrix could not redden it. The reason is arithmetic -- if every
+  --            named per-seed check passes then exactly A and E are terminal and the
+  --            count is exactly 2 -- so the only way to observe it failing is to suppress
+  --            the named check that fires first. `neuter` is the grammar's field for
+  --            exactly that, and one entry is enough because 2/arm D/JOB-05 has a single
+  --            raise site.
+  -- RED-UNDER-M: {"arm":"2/whole-block/JOB-05","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"         WHERE status = 'running'\n           AND claimed_at IS NOT NULL","replace":"         WHERE (status = 'running' OR status = 'done')\n           AND claimed_at IS NOT NULL","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"         AND cj.status = 'running';\n\n      WITH batch","replace":"         AND (cj.status = 'running' OR cj.status = 'done');\n\n      WITH batch","occurrences":1}],"neuter":[{"arm":"2/arm D/JOB-05"}]}
   IF v_cnt <> 2 THEN
     RAISE EXCEPTION 'TEST FAILED (2/whole-block/JOB-05): one tick terminalized % of my six seeded rows, expected exactly 2 (arms A and E). Every other seed is a documented false-positive guard, so any other number means a guard fell or a terminalization was lost -- and the per-arm assertions above should name which.', v_cnt;
   END IF;
@@ -698,8 +973,42 @@ BEGIN
 
   SELECT command INTO v_command
     FROM cron.job WHERE jobname = 'retention_compute_jobs_orphaned_running';
+  -- ⛔ NOT AN ARM, AND DELIBERATELY NOT ONE. This guard carries no
+  --    `TEST FAILED (` identity, so the runner does not count it as a section
+  --    (parse.mjs:993 IDENTITY_CARRIER, and the classification comment at
+  --    parse.mjs:1057). That is the honest classification, not a way to dodge
+  --    a twin.
+  --
+  --    Plan 164.4.1-03 MEASURED, on the lane, twice, that this raise has no
+  --    first-failure mutation. It is the THIRD copy of one registration guard
+  --    (Part 1's, then 2/JOB-05, then this) and each copy is dominated by the
+  --    one before it. For it to fail FIRST, Part 1 and Part 2 must both pass --
+  --    meaning cron.job.command was non-NULL when Part 2 read it -- while Part
+  --    3 reads NULL. Nothing can change cron.job between those two reads:
+  --    everything Part 2 does is inside a transaction it rolls back. Both
+  --    escape routes were driven on real lanes and both failed:
+  --      * neutering 2/JOB-05 does not clear the way -- it is not a duplicate
+  --        raise but Part 2's PRECONDITION; with it neutered and the job row
+  --        deleted, Part 2 reaches its oracle call and the lane exits 3 on
+  --        22004: query string argument of EXECUTE is null, naming no arm.
+  --      * a cron body that unschedules ITSELF leaves Part 2 green, but the
+  --        unschedule is transactional and Part 3 reads the row back, dying on
+  --        XX000: could not find valid entry for job.
+  --
+  --    A raise that cannot be made to fire is not a falsifiable assertion about
+  --    production, and the founder rule is that a test which CANNOT FAIL is
+  --    worse than none. So it stops CLAIMING to be one. It is kept, rather than
+  --    deleted, for the one thing it still does: if a future refactor ever
+  --    makes this reachable it fails with a named invariant instead of a raw
+  --    22004 out of the EXECUTE below. The registration ASSERTION lives in
+  --    Part 1 and in 2/JOB-05, both of which bite.
+  --
+  --    ⚠️ Do NOT restore the identity spelling for 3/JOB-05. Doing so re-adds
+  --    an unfalsifiable section, and the only way to make the corpus green
+  --    again would be a waiver -- which is exactly what WAIVED_CEILING 0
+  --    refuses (164.4.1-CONTEXT D-03).
   IF v_command IS NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (3/JOB-05): the retention_compute_jobs_orphaned_running cron job is missing while pg_cron is installed.';
+    RAISE EXCEPTION 'INVARIANT (Part 3 precondition): the retention_compute_jobs_orphaned_running cron job is missing while pg_cron is installed, but Part 1 and Part 2 both passed. That is supposed to be unreachable -- see the note above. The registration assertions are Part 1 and 2/JOB-05.';
   END IF;
 
   v_ancient := v_fresh - interval '100 years';
@@ -732,6 +1041,15 @@ BEGIN
    WHERE id = ANY (v_seeded)
      AND id <> v_youngest
      AND status = 'failed_final';
+  -- RED-UNDER: widen arm A's per-tick bound to `LIMIT 100 + 1000` in migration
+  --            20260826140000 -- the operator edit that drains a backlog faster. ⛔ Part 1
+  --            cannot see it: the word-bounded pattern still matches `LIMIT 100 ` and the
+  --            regexp count still reads 2, which is exactly what this part's header means
+  --            by "NO amount of grepping for AS MATERIALIZED can detect it -- only this
+  --            execution can". One tick then takes all 101 seeds, so the arm that catches
+  --            it is the 101st-row assertion: the youngest, which a correct tick must
+  --            leave, is terminalized on tick 1.
+  -- RED-UNDER-M: {"arm":"3/JOB-05/D-19","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"         LIMIT 100","replace":"         LIMIT 100 + 1000","occurrences":2,"nth":1}]}
   IF v_cnt <> 100 THEN
     RAISE EXCEPTION 'TEST FAILED (3/JOB-05/D-19): after ONE tick only % of MY 100 oldest seeded orphans were terminalized, expected all 100. Either the janitor is not draining its batch, or a foreign row with a claim stamp older than the century-back seed epoch crowded a seed out of the 100-row budget (see the RESIDUAL note in this file header).', v_cnt;
   END IF;
@@ -763,6 +1081,20 @@ BEGIN
 
   -- Conservation again, over the bound population: two ticks, zero rows removed.
   SELECT count(*) INTO v_cnt FROM public.compute_jobs WHERE id = ANY (v_seeded);
+  -- RED-UNDER: make the janitor RE-KEY the rows it has already terminalized -- a removal
+  --            that carries no removal keyword, so Part 1's ban cannot see it and the row
+  --            the wizard poller and the operator hold an id for is gone. The predicate
+  --            is written so nothing is re-keyed on the first tick of either part (no
+  --            seed is terminal when the body starts), which is what keeps Part 2 green;
+  --            on Part 3's SECOND tick the 100 rows terminalized by the first are
+  --            re-keyed and leave the seeded set.
+  -- ⚠️ Dominated by the D-19 arm above, necessarily: a row that has been
+  --    removed is also not terminal, so `all 101 are terminal` fires before
+  --    `all 101 survive` under EVERY removal. The four neuter entries walk
+  --    that identity's four raise sites in order to reach the fourth; the
+  --    first three do not fire under this mutation and neutering them changes
+  --    nothing observable.
+  -- RED-UNDER-M: {"arm":"3/conservation/JOB-05/WR-02","apply":[{"kind":"insert-after","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","anchor":"    DO $sweep$\n    BEGIN","text":"\n      UPDATE compute_jobs SET id = gen_random_uuid() WHERE status <> 'running' AND status <> 'done';","occurrences":1}],"neuter":[{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"}]}
   IF v_cnt <> 101 THEN
     RAISE EXCEPTION 'TEST FAILED (3/conservation/JOB-05/WR-02): % of my 101 seeded rows survive two ticks, expected all 101. The janitor removed rows.', v_cnt;
   END IF;

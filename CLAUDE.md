@@ -44,6 +44,13 @@ a failure fails the aggregate rather than passing quietly:
   #2) because the lane has no pg_cron — beside a `lane-probe:` line measured on
   the lane itself, which is what lets the deferral expire: pg_cron AVAILABLE
   with a non-empty lane-blocked class raises `lane-blocked-stale` and exits 1.
+  ⚠️ **CURRENCY 2026-09-05: the clause "because the lane has no pg_cron" is no
+  longer true and the deferral it describes is RETIRED.** Phase 164.4.1 put
+  pg_cron ON the lane; the four files (and an apply-list-blind fifth) are
+  annotated, and the line now reads `lane-blocked: 0 file(s)` with a reason that
+  says so. Both prints, the probe leg and the `lane-blocked-stale` defect are
+  UNCHANGED and stay live for any future unannotated pg_cron gate — see the
+  dated paragraph at the end of this section.
 - **`sql-gate-lint`** — four static rules over `supabase/tests`, each shipped
   with a red and a green fixture proving the rule can fire.
 - **`plan-anchor-verify`** — re-resolves every `file:line` anchor and named
@@ -108,6 +115,49 @@ are printed by name on every run (27 `unreachable:` + 4 `lane-blocked:` +
 that 1 `pending:`). ⛔ `pending:` is NOT empty and must not be made to look
 empty — the parser test pins it as a one-name SET so an attestation of
 completeness cannot be shipped ahead of 164.4.1.
+⚠️ CURRENCY 2026-09-05: Phase **164.4.1 PGCRON-LANE** is now under way and the
+paragraph above is 164.4's dated end state, not the current reading. Plan 01 put
+pg_cron ON the pg-lane (`shared_preload_libraries` on the single `pg_ctl -o`
+start, +0.009 s/lane); plan 02 then annotated the two files that were blocked in
+the two DIFFERENT ways — `test_compute_jobs_error_kind_copy_parity.sql` (3
+sections, blocked only through its APPLY LIST) and
+`test_derive_allocator_keys_fanout.sql` (7 sections, blocked through its own
+text). MEASURED at plan 02: `coverage: files 41/71`, `arms: 272/272/0`,
+`biting: 272`, `lane-invocations: 272`, tallies agree, `FILES_FLOOR` 41 and
+`ARMS_FLOOR` 272, `WAIVED_CEILING` still 0 (nine arms moves, zero waivers).
+⛔ The `pending:` prohibition above is SUPERSEDED and its second clause is no
+longer true: `pending:` is now measured EMPTY, deliberately, as CONTEXT decision
+D-04's own task, and the parser test's pin is the empty set BESIDE an AIM (`it`
+title `pending AIM (D-04)`) that proves the class is still computed by
+classifying a stripped copy of a real gate. Do NOT "restore" the one-name pin.
+⚠️ **Every `node scripts/mutation-runner/run.mjs` in this interval EXITS 1** with
+exactly one defect, `lane-blocked-stale` — pg_cron is available while three
+files (`test_reconcile_dropped_enqueue_sweep.sql`,
+`test_retention_orphaned_running.sql`,
+`test_strategy_analytics_stuck_computing_reaper.sql`) are still classified
+`lane-blocked`. That is success criterion 3's tripwire doing its job, not a
+regression; it clears when plan 05 lands. A run showing any OTHER defect kind IS
+a regression.
+✅ **CURRENCY 2026-09-05: THAT INTERVAL IS OVER — plan 05 landed and the full
+corpus EXITS 0.** The paragraph above stays as the dated record of plans 01-04.
+Measured at `b6b830cf`: `coverage: files 44/71`, `lane-blocked: 0 file(s)`,
+`lane-probe: pg_cron AVAILABLE`, `  pending: 0`, `arms: 363/363/0`,
+`biting: 363`, `lane-invocations: 363`, tallies agree, `✅ No defects`.
+`FILES_FLOOR` is pinned at 44 and `ARMS_FLOOR` at 363 (not the 365 the plan
+⚠️ SUPERSEDED 2026-09-05 by the phase REVIEW (`164.4.1-REVIEW.md`, CR-01/CR-02): `ARMS_FLOOR`
+is **361**, not 363. Three arms of `test_reconcile_dropped_enqueue_sweep.sql` were found either
+unfalsifiable or mutating the gate's own text where a production mutation reaches them; two were
+reclassified as named INVARIANTs (never waived). `FILES_FLOOR` stays 44 and `WAIVED_CEILING`
+stays 0. The floor moved DOWN because two arms had never been proven against a production
+regression — read `run.mjs` for the live constants, never a number restated in prose.
+projected — 324 + 39, read off the run). The last file was
+`test_reconcile_dropped_enqueue_sweep.sql`, 39 sections, all 39 biting on the
+first proof run. The class was emptied BY ANNOTATION: `parse.mjs`, the probe
+fixture and the probe/defect code in `run.mjs` are untouched and SELF-TEST 17/17
+still passes, so the tripwire stays live for any future unannotated pg_cron gate.
+⚠️ The runner still PRINTS `lane-probe: pg_cron AVAILABLE — lane-blocked class is
+STALE` while the class is empty; that sentence is now false-reading and plan 06
+corrects it at the source. From here, a run that exits NON-ZERO is a regression.
 `WAIVED_CEILING` is still 0, now through TWO founder decisions that both took
 the root-cause fix over an exception: plan 08's trust-signal anon-EXECUTE
 assertion was resolved by a REORDER putting the precondition ahead of its
@@ -116,6 +166,69 @@ dependants (TODOS `[REDUNDER-WAIVER-01]`), and plan 09's resync-retry assertion
 that a narrowed unique index reports `TEST FAILED (b)` instead of a raw 23505
 naming no arm. Read the run's own `coverage:` and `arms:` lines rather than any
 number restated in prose.
+✅ **CURRENCY 2026-09-05 (Phase 164.4.1 plan 06) — THE PHASE'S CLOSING READING.
+Every paragraph above stays as dated lineage; this one is the current state.**
+* **HOW pg_cron got onto the lane.** `scripts/pg-lane/run.sh` carries
+  `shared_preload_libraries=pg_cron` (with `cron.database_name` and
+  `cron.max_running_jobs=0` — the lane schedules nothing, it needs the catalog
+  to exist) on its SINGLE `pg_ctl -o` start, and each affected gate's
+  `RED-UNDER-SETUP` apply list carries migration
+  `20260513094906_enable_pg_cron.sql`. **No migration was edited anywhere in
+  this phase.** Cost measured, not assumed: +0.009 s/lane isolated,
+  `per-arm lane time: mean 1.1s` at corpus scale.
+* **What was annotated: five files, 103 sections** — the four that were
+  `lane-blocked:` plus `test_compute_jobs_error_kind_copy_parity.sql`, the
+  apply-list-blind fifth that had been sitting in `pending:`.
+* **END STATE, read off the run:** `coverage: files 44/71`,
+  `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, `  pending: 0`,
+  `arms: 363/363/0`, `biting: 363`, `lane-invocations: 363` (tallies agree),
+  `✅ No defects`, **exit 0**. `FILES_FLOOR` 44, `ARMS_FLOOR` 363,
+  `WAIVED_CEILING` still **0** — nine files' worth of arms moved, zero waivers
+  added. 44 + 0 + 27 + 0 + 0 = 71; the 27 are `unreachable:`
+  (`[REDUNDER-NONIDIOM]`, still open and still printed by name every run).
+* ⛔ **Both `lane-blocked: 0` and `pending: 0` are pinned as MEASURED EMPTY SETS
+  BESIDE AIMs, never as bare empty assertions.** The `pending` pin has
+  `it("pending AIM (D-04)…")`, which classifies a stripped copy of a real gate
+  to prove the class is still computed; the `lane-blocked` class stays DERIVED
+  and its tripwire is proven by SELF-TEST 17/17 on a synthetic corpus. This
+  **SUPERSEDES the ⛔ `pending:` is NOT empty sentence above** — do not "restore"
+  the old one-name pin, and do not replace either AIM with a bare `toEqual([])`.
+* **The tripwire fired and cleared, both observed.** FIRED on the
+  pre-annotation tree (`164.4.1-TRIPWIRE-FIRED.log`), and SHA-bound on ubuntu in
+  workflow run 33938272686 at `f04ce51b`, whose provisioning step answered
+  RESEARCH's open question by measurement: `postgresql-16-cron` comes from
+  **noble/universe, not PGDG**, major 16, `.so` and `.control` both present.
+  CLEARED locally at plan 05 — exit 0, class empty — with nothing in the
+  classifier, the probe fixture or the defect code touched to clear it.
+* **Message honesty, plan 06:** the runner used to print "which the pg-lane
+  cannot host … (deferred 2026-09-03)" unconditionally and "lane-blocked class
+  is STALE" over an EMPTY class. Both were corrected at the source; each arm now
+  says what it means for that run, and the grep prefixes ci.yml depends on are
+  byte-identical. `[REDUNDER-PGCRON]` and `[REDUNDER-LANEBLOCKED-BLIND]` are
+  both closed in `TODOS.md` with their reasoning — the second DELIBERATELY: its
+  proposed fix would have classified UNANNOTATED files by a line only ANNOTATED
+  files carry, i.e. dead code behind a passing test, so the limit is documented
+  and pinned by a hand-built calibration instead.
+* ⭐ **MEASURED 2026-09-05 — the SHA-bound ubuntu run of the FINISHED tree
+  exists.** workflow_dispatch run **33961609382**, head sha
+  **1aa8bb7088e978320041b6a97d187b8247b8fe3d**, `sql-mutation` **success in
+  567 s (9.45 min)**. Ubuntu read IDENTICAL to the authoring box:
+  `coverage: files 44/71`, `arms: 363/363/0`, `biting: 363`,
+  `lane-invocations: 363`, `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`,
+  `✅ No defects`, `per-arm lane time: mean 1.1s`; pg_cron came from
+  noble/universe at **1.6.2-1**. LEGS: 363 arms + 44 baseline + 44 restore =
+  **451 legs**. `sql-mutation`'s `timeout-minutes` therefore **stays 15** by
+  applying the rule literally — 9.45 min does not reach the ~10 min trigger,
+  and when it is crossed the raise is to 20 ONCE (`ci.yml:933-953` carries this
+  derivation). The 445 s of run 33938272686 is the PRE-annotation tree at 262
+  arms and must not be read as a figure for this corpus.
+  ⚠️ Every arm/file count in this bullet is that run's DATED reading at
+  `1aa8bb70`, not a live constant: read `FILES_FLOOR` and `ARMS_FLOOR` off
+  `scripts/mutation-runner/run.mjs` itself, since an arm reclassified after
+  this date moves the floor without moving this paragraph.
+  ⛔ From here, a run that exits NON-ZERO is a regression, not the tripwire.
+Read the run's own `coverage:` and `arms:` lines rather than any number
+restated in prose.
 VAC-04 and VAC-08 have still not run against their real credential; see entries
 25 and 26.
 

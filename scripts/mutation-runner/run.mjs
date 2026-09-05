@@ -167,6 +167,23 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 // (TODOS [REDUNDER-LANEBLOCKED-BLIND]). Founder decision, plan 09: it is owed to
 // Phase 164.4.1 PGCRON-LANE rather than worked around. The paragraph above stays
 // as the dated record of the amendment; this line is its correction.
+// ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-02, measured): 164.4's `39/71` end state
+// stands as its own dated record and is now HISTORY. Phase 164.4.1 put pg_cron
+// on the lane, so the SCOPE AMENDMENT #2 denominator no longer binds anything:
+// the deferred fifth file is annotated, `pending:` is EMPTY and the measured
+// reading is `coverage: files 41/71` with 3 lane-blocked files left for plans
+// 03-05. The end state of THIS phase is not restated here — read the run.
+// ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-06): the `41/71` above is plan 02's dated
+// reading and stays as lineage; plans 03-05 then took the last three files. The
+// phase's END STATE, measured by plan 05 and re-measured by this plan, is
+// 44 annotated / 0 pending / 27 unreachable / 0 inert / 0 lane-blocked = 71 —
+// `FILES_FLOOR` 44, `ARMS_FLOOR` 363, `WAIVED_CEILING` still 0, and
+// [REDUNDER-PGCRON] RETIRED rather than deferred again. Still read the run.
+// ⚠️ SUPERSEDED 2026-09-05 (phase review, after plan 06): `ARMS_FLOOR` is **361**, not
+// 363. CR-01/CR-02 found three arms of test_reconcile_dropped_enqueue_sweep.sql either
+// unfalsifiable or mutating the gate's own text; two were reclassified as named INVARIANTs.
+// `FILES_FLOOR` stays 44 and `WAIVED_CEILING` stays 0 — the floor moved DOWN because two arms
+// were never proven against a production regression. See the ARMS_FLOOR block below.
 //
 // ⭐ RE-DERIVED 2026-09-03 (plan 164.4-04) — THE PHASE'S FIRST *FILE* MOVE. The
 // blocks above STAY as lineage: 1 was the whole annotated corpus while it was
@@ -503,19 +520,273 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
 //                gets-a-red-under-annota/164.4-11-SUMMARY.md
 //
-// CURRENCY, stated where the VALUE is: RE-DERIVED 2026-09-04 by measurement
-// (plan 164.4-11). Measured coverage 39 of 71 — value RAISED from 32, and this
-// is the END STATE of Phase 164.4: every idiom gate file the pg-lane can reach
-// is annotated and proven. The remaining 32 of the 71 are NOT silently dropped
-// — the runner prints all of them by name on every run: 27 `unreachable:` (they
-// raise outside the identity idiom; out of scope by founder decision, TODOS
-// [REDUNDER-NONIDIOM]), 4 `lane-blocked:` (they probe pg_extension for pg_cron,
-// which this lane cannot host, TODOS [REDUNDER-PGCRON]), and exactly ONE
-// `pending:` — test_compute_jobs_error_kind_copy_parity.sql, which needs
-// migration 20260826140000 and is owed to Phase 164.4.1 PGCRON-LANE by founder
-// decision in plan 09. ⚠️ 39, NOT the 40 of SCOPE AMENDMENT #2: that amendment
-// predates the deferral.
-export const FILES_FLOOR = 39;
+// ⭐ RE-DERIVED 2026-09-05 (plan 164.4.1-02) — the FIRST file move of Phase
+// 164.4.1 PGCRON-LANE, on a pg-lane that now PRELOADS pg_cron (plan 01). The
+// blocks above STAY as lineage.
+//
+//   VALUE        41 — read off the run's own `coverage:` line, not counted here.
+//   DATE         2026-09-05, at HEAD f1311fbf.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 1
+//                  coverage: files 41/71
+//                  arms: 272/272/0   (executed/annotated/waived)
+//                  biting: 272
+//                  lane-invocations: 272
+//                  per-arm lane time: mean 1.0s over 272 arm run(s)
+//                ⚠️ exit 1, and that is EXPECTED in this interval, not a
+//                regression: the run carries EXACTLY ONE defect,
+//                `lane-blocked-stale`, because plan 01 made pg_cron available
+//                while three files are still classified `lane-blocked`. That is
+//                the tripwire of success criterion 3 doing its job; it clears at
+//                plan 05. Every arm still scored `RED (identity ok)`.
+//   SAMPLE SIZE  272 arms executed, all 272 `RED (identity ok)`, no defect of
+//                any OTHER kind. The two independent tallies AGREE: `arms:`
+//                executed 272 and `lane-invocations:` 272. 371 s wall clock, 41
+//                baseline and 41 restore legs beside the 272 arm lanes. The 41
+//                per-file `biting` counts SUM to 272.
+//   COVERAGE     41 annotated gate files of 71. The two added this batch are
+//                supabase/tests/test_compute_jobs_error_kind_copy_parity.sql
+//                  (3 sections — the corpus's LAST `pending:` file, blocked
+//                   only through its APPLY LIST) and
+//                supabase/tests/test_derive_allocator_keys_fanout.sql
+//                  (7 sections — blocked through its OWN TEXT, a
+//                   pg_cron-conditional RAISE NOTICE at :169).
+//                Proving BOTH shapes was the point of taking these two first:
+//                they are the cheapest possible check that plan 01's substrate
+//                is complete in both directions. The EXACT 41-name list is
+//                pinned in src/__tests__/mutation-annotation-parser.test.ts.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({filesFloor, armsFloor})`), 2026-09-05:
+//                  filesFloor=41 armsFloor=272  defects=1  kinds=
+//                    ["lane-blocked-stale"]                       (367.9 s)
+//                  filesFloor=42 armsFloor=273  defects=3  kinds=
+//                    ["lane-blocked-stale","floor","floor"] ->
+//                    `FILES_FLOOR regression: 41 annotated file(s) < floor 42`
+//                    `ARMS_FLOOR regression: 272 biting arm(s) < floor 273`
+//                                                                 (368.7 s)
+//                So 41/272 is exactly the separation point, not a value below
+//                it — the tripwire row is present in BOTH directions and is
+//                therefore not what makes the second run fire.
+//   RECORD       .planning/phases/164.4.1-pgcron-lane-put-pg-cron-on-the-
+//                throwaway-pg-lane-and-retire/164.4.1-02-SUMMARY.md
+//
+// CURRENCY, stated where the VALUE is: RE-DERIVED 2026-09-05 by measurement
+// (plan 164.4.1-02). Measured coverage 41 of 71 — value RAISED from 39. The
+// remaining 30 of the 71 are NOT silently dropped: the runner prints all of
+// them by name on every run — 27 `unreachable:` (they raise outside the
+// identity idiom; out of scope by founder decision, TODOS [REDUNDER-NONIDIOM])
+// and 3 `lane-blocked:`, which plans 03-05 of this phase take. `pending:` is
+// now EMPTY, measured: the one name it carried
+// (test_compute_jobs_error_kind_copy_parity.sql) is annotated, which is the
+// retirement of [REDUNDER-PGCRON] the founder chose over widening it. The
+// 2026-09-04 block above stays as the dated record of the 39-file corpus.
+//
+// ⭐ RE-DERIVED 2026-09-05 (plan 164.4.1-03) — the SECOND file move of Phase
+// 164.4.1 PGCRON-LANE. The blocks above STAY as lineage.
+//
+//   VALUE        42 — read off the run's own `coverage:` line, not counted here.
+//   DATE         2026-09-05, at HEAD 65c506cd.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 1
+//                  coverage: files 42/71
+//                  arms: 296/297/1   (executed/annotated/waived)
+//                  biting: 296
+//                  lane-invocations: 296
+//                  per-arm lane time: mean 1.0s over 296 arm run(s)
+//                ⚠️ exit 1 on TWO defects in this interval, and both are
+//                deliberate rather than a regression. The first is plan 01's
+//                tripwire, `lane-blocked-stale` — pg_cron is AVAILABLE while
+//                two files are still classified `lane-blocked` — and it clears
+//                at plan 05. The second is a `floor` defect reading
+//                `WAIVED_CEILING exceeded: 1 waived arm(s) > ceiling 0`: this
+//                batch met an arm with NO first-failure mutation and left it
+//                loud instead of raising the ceiling, which is a founder call.
+//                See the WAIVED_CEILING block below and the RED-UNDER prose at
+//                `3/JOB-05` in the gate. Every arm that EXECUTED scored
+//                `RED (identity ok)`.
+//   SAMPLE SIZE  296 arms executed, all 296 `RED (identity ok)`, no defect of
+//                any OTHER kind. The two independent tallies AGREE: `arms:`
+//                executed 296 and `lane-invocations:` 296. 42 baseline and 42
+//                restore legs beside the 296 arm lanes. The 42 per-file
+//                `biting` counts SUM to 296.
+//   COVERAGE     42 annotated gate files of 71. The one added this batch is
+//                supabase/tests/test_retention_orphaned_running.sql
+//                  (25 sections — the RAISE-on-absent-pg_cron spelling
+//                   PATTERNS C1 calls "the one to follow", and the first file
+//                   in the corpus whose Parts 2 and 3 read the DEPLOYED
+//                   cron.job.command as their ORACLE and EXECUTE it).
+//                The EXACT 42-name list is pinned in
+//                src/__tests__/mutation-annotation-parser.test.ts.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({scopeDir:"supabase/tests", filesFloor,
+//                armsFloor, log:()=>{}})`), 2026-09-05:
+//                  filesFloor=42 armsFloor=296  defects=2  kinds=
+//                    ["lane-blocked-stale","floor"]               (396.2 s)
+//                  filesFloor=43 armsFloor=297  defects=4  kinds=
+//                    ["lane-blocked-stale","floor","floor","floor"] ->
+//                    `FILES_FLOOR regression: 42 annotated file(s) < floor 43`
+//                    `ARMS_FLOOR regression: 296 biting arm(s) < floor 297`
+//                                                                 (396.5 s)
+//                So 42/296 is exactly the separation point, not a value below
+//                it. ⭐ BOTH pre-existing rows — the tripwire AND the
+//                waiver-ceiling breach — are present in BOTH directions, which
+//                is what proves neither of them is what makes the second run
+//                fire.
+//   RECORD       .planning/phases/164.4.1-pgcron-lane-put-pg-cron-on-the-
+//                throwaway-pg-lane-and-retire/164.4.1-03-SUMMARY.md
+//
+// CURRENCY, stated where the VALUE is: RE-DERIVED 2026-09-05 by measurement
+// (plan 164.4.1-03). Measured coverage 42 of 71 — value RAISED from 41. The
+// remaining 29 of the 71 are still printed by name on every run: 27
+// `unreachable:` (out of scope by founder decision, TODOS [REDUNDER-NONIDIOM])
+// and 2 `lane-blocked:`, which plans 04 and 05 of this phase take. `pending:`
+// stays EMPTY, measured. The 2026-09-05 plan-02 block above stays as the dated
+// record of the 41-file corpus.
+//
+// ⭐ RE-DERIVED 2026-09-05 (plan 164.4.1-04) — the THIRD file move of Phase
+// 164.4.1 PGCRON-LANE. The blocks above STAY as lineage.
+//
+//   VALUE        43 — read off the run's own `coverage:` line, not counted here.
+//   DATE         2026-09-05, at HEAD fcbc0159 plus this plan's working tree.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 1
+//                  coverage: files 43/71
+//                  arms: 324/324/0   (executed/annotated/waived)
+//                  biting: 324
+//                  lane-invocations: 324
+//                  per-arm lane time: mean 1.1s over 324 arm run(s)
+//                ⚠️ exit 1 on exactly ONE defect, and it is plan 01's tripwire:
+//                `lane-blocked-stale` — pg_cron is AVAILABLE while ONE file
+//                (test_reconcile_dropped_enqueue_sweep.sql) is still classified
+//                `lane-blocked`. It clears at plan 05. Any OTHER defect kind in
+//                this interval is a regression. ⭐ The `floor` defect plan 03's
+//                block above records is GONE: `arms:` and `biting:` are the
+//                same number again and W is back to 0, because commit fcbc0159
+//                RECLASSIFIED the retention gate's unfalsifiable `3/JOB-05`
+//                instead of waiving it.
+//   SAMPLE SIZE  324 arms executed, all 324 `RED (identity ok)`, no defect of
+//                any OTHER kind. The two independent tallies AGREE: `arms:`
+//                executed 324 and `lane-invocations:` 324. 43 baseline and 43
+//                restore legs beside the 324 arm lanes. The 43 per-file
+//                `biting` counts SUM to 324.
+//   COVERAGE     43 annotated gate files of 71. The one added this batch is
+//                supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql
+//                  (28 sections — the RAISE NOTICE 'SKIP' spelling PATTERNS C1
+//                   calls the older of the two, and the largest file in the
+//                   corpus whose withheld Parts would have baselined GREEN
+//                   either way. Its apply list is SIZED so the baseline prints
+//                   ZERO gate-owned skip lines, which is the measurement that
+//                   makes its twins falsifiable at all.)
+//                The EXACT 43-name list is pinned in
+//                src/__tests__/mutation-annotation-parser.test.ts.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({scopeDir:"supabase/tests", filesFloor,
+//                armsFloor, log:()=>{}})`), 2026-09-05:
+//                  filesFloor=43 armsFloor=324  defects=1  kinds=
+//                    ["lane-blocked-stale"]                       (442.3 s)
+//                  filesFloor=44 armsFloor=325  defects=3  kinds=
+//                    ["lane-blocked-stale","floor","floor"] ->
+//                    `FILES_FLOOR regression: 43 annotated file(s) < floor 44`
+//                    `ARMS_FLOOR regression: 324 biting arm(s) < floor 325`
+//                                                                 (441.3 s)
+//                So 43/324 is exactly the separation point, not a value below
+//                it. ⭐ The tripwire row is present in BOTH directions, which is
+//                what proves it is not what makes the second run fire.
+//   RECORD       .planning/phases/164.4.1-pgcron-lane-put-pg-cron-on-the-
+//                throwaway-pg-lane-and-retire/164.4.1-04-SUMMARY.md
+//
+// CURRENCY, stated where the VALUE is: RE-DERIVED 2026-09-05 by measurement
+// (plan 164.4.1-04). Measured coverage 43 of 71 — value RAISED from 42. The
+// remaining 28 of the 71 are still printed by name on every run: 27
+// `unreachable:` (out of scope by founder decision, TODOS [REDUNDER-NONIDIOM])
+// and 1 `lane-blocked:`, which plan 05 of this phase takes. `pending:` stays
+// EMPTY, measured. The 2026-09-05 plan-03 block above stays as the dated record
+// of the 42-file corpus.
+//
+// ⭐ RE-DERIVED 2026-09-05 (plan 164.4.1-05) — the FOURTH and LAST file move of
+// Phase 164.4.1 PGCRON-LANE, and the run that CLEARS the tripwire. The blocks
+// above STAY as lineage.
+//
+//   VALUE        44 — read off the run's own `coverage:` line, not counted here.
+//   DATE         2026-09-05, at HEAD b3e13011.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 44/71
+//                  lane-blocked: 0 file(s) …
+//                  lane-probe: pg_cron AVAILABLE — lane-blocked class is STALE
+//                    pending: 0 idiom file(s) without RED-UNDER —
+//                  arms: 363/363/0   (executed/annotated/waived)
+//                  biting: 363
+//                  lane-invocations: 363
+//                  per-arm lane time: mean 1.1s over 363 arm run(s)
+//                  ✅ No defects. Every annotated arm bit its own arm first.
+//                ⭐ EXIT 0. This is the first run since plan 01 that does NOT
+//                carry `lane-blocked-stale`: the class is EMPTY because the
+//                fourth and last file left it BY ANNOTATION. Nothing in the
+//                classifier (`parse.mjs gateNeedsPgCron`), in the probe fixture
+//                or in the probe/defect code here was touched — the defect at
+//                the probe leg is gated on `laneBlockedFiles.length > 0` and
+//                simply does not fire. The tripwire stays live for any FUTURE
+//                unannotated pg_cron gate, and SELF-TEST 17/17 still proves it
+//                on the synthetic corpus.
+//                ⚠️ The `lane-probe:` sentence still reads "lane-blocked class
+//                is STALE" while the class is empty. That wording is now
+//                false-reading and plan 06 corrects it AT THE SOURCE; it is
+//                deliberately NOT touched here, because changing what the
+//                tripwire says in the same commit that clears it is exactly the
+//                move this phase exists to refuse.
+//   SAMPLE SIZE  363 arms executed, all 363 `RED (identity ok)`, no defect of
+//                any kind. The two independent tallies AGREE: `arms:` executed
+//                363 and `lane-invocations:` 363. 44 baseline and 44 restore
+//                legs beside the 363 arm lanes. The 44 per-file `biting` counts
+//                SUM to 363.
+//   COVERAGE     44 annotated gate files of 71. The one added this batch is
+//                supabase/tests/test_reconcile_dropped_enqueue_sweep.sql
+//                  (39 sections — the largest file in the phase. Its Parts 2-4
+//                   read the DEPLOYED cron.job.command and EXECUTE it, so the
+//                   arms are behavioural rather than textual; every body twin
+//                   targets 20260819150000, the LAST writer, because
+//                   cron.schedule upserts by NAME and an edit to either earlier
+//                   scheduling migration is overwritten. MEASURED by ablation.)
+//                The EXACT 44-name list is pinned in
+//                src/__tests__/mutation-annotation-parser.test.ts.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({scopeDir:"supabase/tests", filesFloor,
+//                armsFloor, log:()=>{}})`), 2026-09-05:
+//                  filesFloor=44 armsFloor=363  defects=0  SILENT  (486.4 s)
+//                  filesFloor=45 armsFloor=364  defects=2  kinds=
+//                    ["floor","floor"] ->
+//                    `FILES_FLOOR regression: 44 annotated file(s) < floor 45`
+//                    `ARMS_FLOOR regression: 363 biting arm(s) < floor 364`
+//                                                                 (490.4 s)
+//                So 44/363 is exactly the separation point, not a value below
+//                it. ⭐ Unlike every block since plan 01, the FIRST direction is
+//                now defect-FREE: there is no tripwire row left to subtract.
+//   RECORD       .planning/phases/164.4.1-pgcron-lane-put-pg-cron-on-the-
+//                throwaway-pg-lane-and-retire/164.4.1-05-SUMMARY.md
+//
+// CURRENCY, stated where the VALUE is: RE-DERIVED 2026-09-05 by measurement
+// (plan 164.4.1-05). Measured coverage 44 of 71 — value RAISED from 43. This is
+// PHASE 164.4.1's END STATE for the annotated corpus: `lane-blocked:` is 0 and
+// `pending:` is 0, both measured, so the remaining 27 of the 71 are ALL
+// `unreachable:` (out of scope by founder decision, TODOS [REDUNDER-NONIDIOM])
+// and every one of them is printed by name on every run. 44 + 0 + 27 + 0 + 0 =
+// 71. The 2026-09-05 plan-04 block above stays as the dated record of the
+// 43-file corpus.
+//
+// ⭐ RE-MEASURED 2026-09-05 (review fix, findings CR-01/CR-02 of
+// 164.4.1-REVIEW.md). Value UNCHANGED at 44 — the reclassification of
+// `3/JOB-04` and `4/JOB-04` removed two SECTIONS from
+// test_reconcile_dropped_enqueue_sweep.sql (39 -> 37) but no FILE left the
+// annotated set, so `coverage:` is still 44/71. Read off the run's own line:
+//   `node scripts/mutation-runner/run.mjs`
+//     coverage: files 44/71
+//     lane-blocked: 0 file(s) …
+//     lane-probe: pg_cron AVAILABLE — lane-blocked class is empty, as a hosting lane requires
+//       pending: 0 idiom file(s) without RED-UNDER —
+//     arms: 361/361/0   (executed/annotated/waived)
+//     biting: 361
+//     lane-invocations: 361
+//     per-arm lane time: mean 1.1s over 361 arm run(s)
+// The paired ARMS_FLOOR move (363 -> 361) and its own separation measurement
+// are in the block below.
+export const FILES_FLOOR = 44;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -997,13 +1268,314 @@ export const FILES_FLOOR = 39;
 //   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
 //                gets-a-red-under-annota/164.4-11-SUMMARY.md
 //
+// ⭐ RE-DERIVED 2026-09-05 (plan 164.4.1-02) — the FIRST arms move of Phase
+// 164.4.1 PGCRON-LANE. The blocks above STAY as lineage.
+//
+//   VALUE        272 — read off the run's own `biting:` line, not counted here.
+//   DATE         2026-09-05, at HEAD f1311fbf.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 1
+//                  coverage: files 41/71
+//                  arms: 272/272/0   (executed/annotated/waived)
+//                  biting: 272
+//                  lane-invocations: 272
+//                  per-arm lane time: mean 1.0s over 272 arm run(s)
+//                ⚠️ exit 1 is the EXPECTED interval state, not a regression —
+//                one `lane-blocked-stale` row, the plan-01 tripwire, which
+//                clears at plan 05. See the FILES_FLOOR block above.
+//   SAMPLE SIZE  272 arms executed, all 272 `RED (identity ok)`, no defect of
+//                any other kind. Both tallies AGREE (executed 272,
+//                lane-invocations 272). 371 s wall clock, 41 baseline and 41
+//                restore legs. The 41 per-file `biting` counts SUM to 272.
+//   COVERAGE     41 annotated gate files of 71 (see the FILES_FLOOR block). 10
+//                of the 272 arms are new this batch — 3 + 7; 0 waivers were
+//                added, so WAIVED_CEILING is untouched at 0. Cumulative waivers
+//                across all NINE arms moves of this phase family: 0.
+//   ⭐ TWO OF THE 10 ARE LAYERED, each proven layered rather than assumed.
+//                `test_derive_allocator_keys_fanout.sql` arm 2: in-flight dedup
+//                for api_key jobs is defence in depth — the optimistic look-up
+//                in `_enqueue_compute_job_internal` (20260420073003:392-398)
+//                AND the partial unique index (:288-291). MEASURED: removing
+//                EITHER alone leaves the assertion GREEN, so a single-step
+//                mutation there is a `no-red`, not a falsifier. The index step
+//                is scoped `kind <> 'derive_broker_dailies'` because that
+//                migration's own Category-D probe (:1050-1057) still needs a
+//                raw duplicate poll_allocator_positions INSERT to trip it.
+//                `test_compute_jobs_error_kind_copy_parity.sql` arm 3/F-3: step
+//                1 alone was RUN on the lane and measured to ABORT the apply at
+//                20260826120000:1391 (`HONEST-01/F-3 verification failed: …
+//                does not carry the affirmative instruction to retry`); step 2
+//                re-points that one guard's needle and nothing else.
+//   ⭐ ONE ARM NEEDED THE GATE'S OWN EXCEPTION IDIOM, not a waiver.
+//                `test_derive_allocator_keys_fanout.sql` assertion 3 asserts a
+//                coherence arm ADMITS a shape; the falsifier makes the INSERT
+//                raise, and an unhandled 23514 aborts psql with a raw driver
+//                error naming no arm. It was wrapped in the nested
+//                `BEGIN … EXCEPTION WHEN check_violation` idiom assertion 4
+//                already used — the mirror-image reason, and the same
+//                root-cause-over-exception move plan 164.4-09 made.
+//   ⭐ ONE ARM IS A `sql` STEP AND THAT IS FORCED, NOT PREFERRED.
+//                Assertion 6 reads cron.job; 20260717233529's own STEP 6 arm
+//                (g) pins `schedule = '30 5 * * *'` EXACTLY, so editing STEP 5
+//                aborts the apply. The lane's --post-apply hook is where drift
+//                that happens AFTER a migration self-verifies belongs — which
+//                is also how a cron schedule drifts in production.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({filesFloor, armsFloor})`), 2026-09-05:
+//                  armsFloor=272  biting=272  defects=1  kinds=
+//                    ["lane-blocked-stale"]                       (367.9 s)
+//                  armsFloor=273  biting=272  defects=3  kinds=
+//                    ["lane-blocked-stale","floor","floor"] ->
+//                    `ARMS_FLOOR regression: 272 biting arm(s) < floor 273`
+//                    (beside the paired FILES_FLOOR regression)   (368.7 s)
+//                So 272 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4.1-pgcron-lane-put-pg-cron-on-the-
+//                throwaway-pg-lane-and-retire/164.4.1-02-SUMMARY.md
+//
 // CURRENCY, stated where the VALUE is — derivation, sample size, coverage and
-// separation in the block immediately above; record in 164.4-11-SUMMARY.md:
-// RE-DERIVED 2026-09-04 by measurement (plan 164.4-11).
-// Measured biting 262 — value RAISED from 247. This is Phase 164.4's END STATE
-// on today's lane; the next move is Phase 164.4.1 PGCRON-LANE, which unblocks
-// the five pg_cron files.
-export const ARMS_FLOOR = 262;
+// separation in the block immediately above; record in 164.4.1-02-SUMMARY.md:
+// RE-DERIVED 2026-09-05 by measurement (plan 164.4.1-02).
+// Measured biting 272 — value RAISED from 262. The 2026-09-04 block above stays
+// as the dated record of Phase 164.4's 262-arm end state; the next arms move is
+// plan 03 of this phase.
+//
+// ⭐ RE-DERIVED 2026-09-05 (plan 164.4.1-03, the SECOND file move of Phase
+// 164.4.1 PGCRON-LANE). The blocks above STAY as lineage.
+//
+//   VALUE        296 — read off the run's own `biting:` line, not counted here.
+//                ⚠️ It is NOT the twin count. The corpus declares 297 twins and
+//                ONE of them is a waiver, so a run bites 296. Those two numbers
+//                diverged for the first time in this phase family here, and the
+//                divergence is the point: see WAIVED_CEILING below.
+//   DATE         2026-09-05, at HEAD 65c506cd.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 1
+//                  arms: 296/297/1   (executed/annotated/waived)
+//                  biting: 296
+//                  lane-invocations: 296
+//   SAMPLE SIZE  296 arm lanes, all 296 `RED (identity ok)`; 42 baseline and 42
+//                restore legs; the 42 per-file `biting` counts SUM to 296; the
+//                two independent tallies (`arms:` executed and
+//                `lane-invocations:`) AGREE.
+//   COVERAGE     +25 sections over plan 02, all from
+//                supabase/tests/test_retention_orphaned_running.sql — 8 in
+//                Part 1's structural body scan, 14 in Part 2's directional
+//                arms and 3 in Part 3's executed bound. 24 bite; the 25th,
+//                `3/JOB-05`, is the waiver.
+//                ⚠️ SHAPES MET HERE, recorded because they constrain the next
+//                file: three twins are LAYERED because migration
+//                20260826140000 self-verifies the body it deploys (its STEP 5
+//                (d) counts 'orphaned' and ORPHANED_RUNNING_REAPED), one is
+//                layered because the status scope is enforced TWICE and a
+//                single-step mutation was MEASURED to be a `no-red`, and two
+//                use `neuter` because the arm is dominated by this file's own
+//                design (Part 1 is deliberately the free-standing RED).
+//                ⛔ EVERY body twin targets 20260826140000, the LAST migration
+//                to call cron.schedule for this jobname. cron.schedule upserts
+//                by name, so an edit to 20260817120000's cron body is
+//                OVERWRITTEN by the later call and comes back `no-red` — a
+//                wrong target, never a reason for a waiver.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes, 2026-09-05:
+//                  armsFloor=296  biting=296  defects=2  kinds=
+//                    ["lane-blocked-stale","floor"]               (396.2 s)
+//                  armsFloor=297  biting=296  defects=4  kinds=
+//                    ["lane-blocked-stale","floor","floor","floor"] ->
+//                    `ARMS_FLOOR regression: 296 biting arm(s) < floor 297`
+//                    (beside the paired FILES_FLOOR regression, and beside the
+//                     two rows present in BOTH directions)        (396.5 s)
+//                So 296 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4.1-pgcron-lane-put-pg-cron-on-the-
+//                throwaway-pg-lane-and-retire/164.4.1-03-SUMMARY.md
+//
+// CURRENCY, stated where the VALUE is — derivation, sample size, coverage and
+// separation in the block immediately above; record in 164.4.1-03-SUMMARY.md:
+// RE-DERIVED 2026-09-05 by measurement (plan 164.4.1-03). Measured biting 296 —
+// value RAISED from 272. ⚠️ Read the run's own `biting:` line, not this
+// constant and not the `arms:` annotated field: they are no longer the same
+// number. The next arms move is plan 04 of this phase.
+//
+// ⭐ RE-DERIVED 2026-09-05 (plan 164.4.1-04) — the THIRD file move of Phase
+// 164.4.1 PGCRON-LANE. The blocks above STAY as lineage.
+//
+//   VALUE        324 — read off the run's own `biting:` line. ⭐ `arms:`
+//                annotated, `biting:` and `lane-invocations:` are all 324
+//                again: the divergence plan 03's block records was closed by
+//                commit fcbc0159, which RECLASSIFIED the unfalsifiable
+//                `3/JOB-05` rather than waiving it, and this batch adds no
+//                waiver of its own.
+//   DATE         2026-09-05, at HEAD fcbc0159 plus this plan's working tree.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 1
+//                  arms: 324/324/0   (executed/annotated/waived)
+//                  biting: 324
+//                  lane-invocations: 324
+//   SAMPLE SIZE  324 arm lanes, all 324 `RED (identity ok)`; 43 baseline and 43
+//                restore legs; the 43 per-file `biting` counts SUM to 324; the
+//                two independent tallies (`arms:` executed and
+//                `lane-invocations:`) AGREE.
+//   COVERAGE     +28 sections over plan 03, all from
+//                supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql
+//                — 5 in Part 1's structural body scan, 8 in Part 2's four
+//                directional reap arms, 1 in Part 3's executed LIMIT bound, 4
+//                across Part 4's stamp-transition chain, 2 in Part 5's failed
+//                exit and 8 in Part 6's stamp-trigger sentinel.
+//                ⚠️ SHAPES MET HERE, recorded because they constrain plan 05:
+//                (a) FOUR twins are LAYERED because 20260803130000 self-verifies
+//                the very body it deploys, and one more is layered because the
+//                gate's own Part 1 anchor duplicates the migration's STEP 7;
+//                (b) SIX twins mutate TWO migrations at once — the deployed cron
+//                body or the bridge AND the stamp trigger — because those are
+//                two INDEPENDENT defences of one invariant and a single-step
+//                mutation is silently repaired by the other (MEASURED, and it is
+//                the executable form of what the Part 4 header calls
+//                defence-in-depth); (c) FIVE twins edit the GATE's own seeds and
+//                drivers, which is grammar-legal and is the only honest falsifier
+//                for an S-2 seed-integrity control — such an arm makes no claim
+//                about production, so a production mutation cannot falsify it.
+//                ⛔ EVERY Parts 2/3 body twin targets 20260803130000, the LAST
+//                migration to call cron.schedule for this jobname; an edit to
+//                20260802120000's or 20260803120000's cron body is OVERWRITTEN
+//                and comes back `no-red`.
+//                ⛔ AND ONE MEASURED BLIND SPOT, worth more than the count: a
+//                `v_fn ~*` anchor reads pg_get_functiondef, which returns the
+//                function's SOURCE INCLUDING COMMENTS. `1/re-base` came back
+//                `no-red` on its first drive because 20260802120000:353 carries
+//                the conjunct's name in a comment INSIDE the body. The twin now
+//                rewrites that comment too; the residual weakness is booked in
+//                the phase's deferred-items.md.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes, 2026-09-05:
+//                  armsFloor=324  biting=324  defects=1  kinds=
+//                    ["lane-blocked-stale"]                       (442.3 s)
+//                  armsFloor=325  biting=324  defects=3  kinds=
+//                    ["lane-blocked-stale","floor","floor"] ->
+//                    `ARMS_FLOOR regression: 324 biting arm(s) < floor 325`
+//                    (beside the paired FILES_FLOOR regression, and beside the
+//                     tripwire row present in BOTH directions)    (441.3 s)
+//                So 324 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4.1-pgcron-lane-put-pg-cron-on-the-
+//                throwaway-pg-lane-and-retire/164.4.1-04-SUMMARY.md
+//
+// CURRENCY, stated where the VALUE is — derivation, sample size, coverage and
+// separation in the block immediately above; record in 164.4.1-04-SUMMARY.md:
+// RE-DERIVED 2026-09-05 by measurement (plan 164.4.1-04). Measured biting 324 —
+// value RAISED from 296. ⚠️ Read the run's own `biting:` line, not this
+// constant. At THIS commit `arms:` annotated and `biting:` agree again, but that
+// is a measurement of today's corpus and not an invariant. The next arms move is
+// plan 05 of this phase, which takes the last `lane-blocked:` file.
+//
+// ⭐ RE-DERIVED 2026-09-05 (plan 164.4.1-05) — the FOURTH and LAST arms move of
+// Phase 164.4.1 PGCRON-LANE, and the run that CLEARS the tripwire. The blocks
+// above STAY as lineage.
+//
+//   VALUE        363 — read off the run's own `biting:` line, not counted here.
+//                ⚠️ The plan PROJECTED 365. The measured number is 363, because
+//                a projection is arithmetic over a reading of the file and the
+//                floor is what the run printed. 324 + 39 = 363.
+//   DATE         2026-09-05, at HEAD b3e13011.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 44/71
+//                  lane-blocked: 0 file(s) …
+//                  lane-probe: pg_cron AVAILABLE — lane-blocked class is STALE
+//                    pending: 0 idiom file(s) without RED-UNDER —
+//                  arms: 363/363/0   (executed/annotated/waived)
+//                  biting: 363
+//                  lane-invocations: 363
+//                  per-arm lane time: mean 1.1s over 363 arm run(s)
+//                  ✅ No defects. Every annotated arm bit its own arm first.
+//   SAMPLE SIZE  363 arms executed, all 363 `RED (identity ok)`. The two
+//                independent tallies AGREE. The 44 per-file `biting` counts SUM
+//                to 363. NO defect of any kind — the `lane-blocked-stale` row
+//                that every run since plan 01 carried is GONE, cleared by
+//                annotating the last file rather than by touching the
+//                classifier, the probe fixture or the defect's own gate.
+//   COVERAGE     The 39 new arms are the whole of
+//                supabase/tests/test_reconcile_dropped_enqueue_sweep.sql.
+//                THIRTEEN of them are LAYERED: 20260819150000's own STEP 2
+//                self-verify re-checks nearly every text anchor Part 1 makes,
+//                so a single-step body mutation ABORTS THE APPLY instead of
+//                reddening the arm — measured, per twin, at its site. FIVE are
+//                falsified by GATE-FILE edits, each with the domination
+//                measurement recorded beside it (three `IS NULL` oracle
+//                preconditions Part 1 dominates, one seed-integrity control Part
+//                2 dominates, and the whole-block invariant, whose value is the
+//                sum of sixteen already-pinned per-arm counts).
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({scopeDir:"supabase/tests", filesFloor,
+//                armsFloor, log:()=>{}})`), 2026-09-05:
+//                  armsFloor=363  biting=363  defects=0  SILENT   (486.4 s)
+//                  armsFloor=364  biting=363  defects=2  kinds=
+//                    ["floor","floor"] ->
+//                    `ARMS_FLOOR regression: 363 biting arm(s) < floor 364`
+//                    (beside the paired FILES_FLOOR regression) (490.4 s)
+//                So 363 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4.1-pgcron-lane-put-pg-cron-on-the-
+//                throwaway-pg-lane-and-retire/164.4.1-05-SUMMARY.md
+//
+// CURRENCY, stated where the VALUE is — derivation, sample size, coverage and
+// separation in the block immediately above; record in 164.4.1-05-SUMMARY.md:
+// RE-DERIVED 2026-09-05 by measurement (plan 164.4.1-05). Measured biting 363 —
+// value RAISED from 324. ⚠️ Read the run's own `biting:` line, not this
+// constant. This is PHASE 164.4.1's END STATE: `lane-blocked:` and `pending:`
+// are both measured 0, so there is no known idiom gate file left for the lane to
+// reach. `WAIVED_CEILING` has not moved through any of the four arms moves of
+// this phase, nor through the eleven of 164.4 — see its own block below.
+//
+// ⛔ RE-DERIVED 2026-09-05 — a LOWERING, and the first one this constant has
+// ever taken. The block above STAYS as the dated record of the 363-arm corpus.
+//
+//   VALUE        361 — read off the run's own `biting:` line, not counted here.
+//                ⚠️ It went DOWN by 2, and that is the POINT rather than a
+//                regression to be worked around: review findings CR-01 and
+//                CR-02 of 164.4.1-REVIEW.md established that three of the 363
+//                arms in test_reconcile_dropped_enqueue_sweep.sql were being
+//                falsified by mutations of THE GATE FILE'S OWN oracle lookup —
+//                a mutation with no production preimage — rather than by
+//                anything a migration could do.
+//                  * `2/JOB-04` KEPT its identity and got a REAL production
+//                    mutation instead (`DELETE FROM cron.job WHERE jobname =
+//                    'reconcile_dropped_enqueue_sweep'` as a live-DB `sql`
+//                    step, with 5 measured `1/JOB-04` neuters). Net 0.
+//                  * `3/JOB-04` and `4/JOB-04` were RECLASSIFIED as named
+//                    INVARIANTs — the same treatment `3/JOB-05`
+//                    (test_retention_orphaned_running.sql, commit fcbc0159) and
+//                    the reaper's Part 3 (commit 95197d28) already carry — after
+//                    the domination was re-measured on a real lane by the fixer:
+//                    with the Part 1 and Part 2 raises neutered and the job row
+//                    deleted, the lane dies inside PART 2 on `22004: query
+//                    string argument of EXECUTE is null`, naming no arm, so
+//                    neither guard is reachable by any production mutation.
+//                    Net -2. `WAIVED_CEILING` stays 0 — this is not a waiver.
+//                A floor is a count of arms PROVEN to react to a production
+//                regression. Holding it at 363 would have required keeping two
+//                arms that provably do not, which is the ratchet buying a number
+//                with evidence it does not have.
+//   DATE         2026-09-05, on the 164.4.1 review-fix branch.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 44/71
+//                  lane-blocked: 0 file(s) …
+//                  lane-probe: pg_cron AVAILABLE — lane-blocked class is empty, as a hosting lane requires
+//                    pending: 0 idiom file(s) without RED-UNDER —
+//                  arms: 361/361/0   (executed/annotated/waived)
+//                  biting: 361
+//                  lane-invocations: 361
+//                  per-arm lane time: mean 1.1s over 361 arm run(s)
+//                  ✅ No defects. Every annotated arm bit its own arm first.
+//   SAMPLE SIZE  361 arms executed, all 361 `RED (identity ok)`. The two
+//                independent tallies AGREE: `arms:` executed 361 and
+//                `lane-invocations:` 361, beside 44 baseline and 44 restore
+//                legs. The 44 per-file `biting` counts SUM to 361; the only row
+//                that moved is test_reconcile_dropped_enqueue_sweep.sql,
+//                39 -> 37.
+//   SEPARATION   Measured in BOTH directions on real lanes, same tree:
+//                  ARMS_FLOOR=363 (the stale value) -> 1 defect ->
+//                    `ARMS_FLOOR regression: 361 biting arm(s) < floor 363`
+//                  ARMS_FLOOR=362 (one higher)      -> 1 defect ->
+//                    `ARMS_FLOOR regression: 361 biting arm(s) < floor 362`
+//                  ARMS_FLOOR=361 (this value)      -> 0 defects, EXIT 0
+//                So 361 is exactly the separation point, not a value below it.
+//   RECORD       164.4.1-REVIEW.md findings CR-01 and CR-02, and the measured
+//                refutation recorded at each arm's own site in
+//                supabase/tests/test_reconcile_dropped_enqueue_sweep.sql.
+export const ARMS_FLOOR = 361;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
@@ -1044,6 +1616,79 @@ export const ARMS_FLOOR = 262;
 // assertion (b) by wrapping its INSERT in the exception idiom the same file
 // already used. Read the run's own `arms:` W field, never this constant, for
 // what the corpus actually carries.
+//
+// ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-02, the first file move of Phase
+// 164.4.1): still 0, and the value is UNEDITED. The corpus is now 272 arms
+// across 41 files and the run's own `arms: 272/272/0` still reports W = 0.
+// Cumulative waivers across all NINE arms moves: 0. This batch came close once
+// and it was closed by a root-cause fix rather than an exception — the derive
+// gate's assertion 3 was wrapped in the exception idiom assertion 4 in the SAME
+// FILE already used, so an unhandled 23514 that named no arm became a
+// `TEST FAILED (3)` that does. The measurement lines above stay as lineage.
+//
+// ⛔ CURRENCY 2026-09-05 (plan 164.4.1-03, the second file move of Phase
+// 164.4.1): STILL 0, and the value is UNEDITED — but for the first time in this
+// phase family the corpus BREACHES it, on purpose and loudly. The run reports
+// `arms: 296/297/1` and a `floor` defect reading `WAIVED_CEILING exceeded: 1
+// waived arm(s) > ceiling 0`.
+// The waived arm is `3/JOB-05` in
+// supabase/tests/test_retention_orphaned_running.sql, and the refusal is
+// MEASURED rather than argued. That file carries THREE copies of one
+// registration guard — Part 1's, then `2/JOB-05`, then this one — each
+// dominated by the one before it. For the third to be the FIRST failure, Part 2
+// must PASS (so cron.job.command was non-NULL when it read) while Part 3 reads
+// NULL, which needs cron.job to change between two reads separated only by a
+// transaction Part 2 rolls back. Two routes were driven on real lanes and both
+// failed in ways worth recording: suppressing `2/JOB-05` with `neuter` does not
+// work because it is Part 2's PRECONDITION rather than a duplicate raise (the
+// lane then exits 3 on `22004: query string argument of EXECUTE is null`, which
+// names no arm), and a cron body that unschedules ITSELF does not work because
+// the unschedule is transactional (Part 3 reads the row back and dies on
+// `XX000: could not find valid entry for job`). Adding a `RETURN` after Part 2's
+// RAISE to fix the control flow is refused by this runner itself, deliberately
+// (`neuterArm` will not neuter a branch carrying a statement after its RAISE).
+// ⛔ SO THE CEILING WAS LEFT AT 0. Raising it to 1 and restructuring the gate's
+// three-deep guard are both founder calls (164.4.1-CONTEXT decision 3: "a plan
+// that needs a waiver is a plan that needs a checkpoint"), and neither is this
+// plan's to make. Cumulative waivers across the phase family's TEN arms moves:
+// 1, all of it here. The measurement lines above stay as lineage.
+//
+// ⛔ CURRENCY 2026-09-05 (plan 164.4.1-04, the third file move): STILL 0, the
+// value is STILL UNEDITED, and the breach the block above records is GONE. The
+// run reports `arms: 324/324/0` and NO `floor` defect. The founder call the
+// plan-03 block escalated was answered by commit fcbc0159 with a THIRD option
+// neither side of the question offered: `3/JOB-05` was RECLASSIFIED — its
+// `TEST FAILED (` identity was removed, so an unfalsifiable raise stops
+// claiming to be a falsifiable assertion and is not a section at all — rather
+// than waived or deleted. Nothing was loosened.
+// ⭐ THIS PLAN MET THE SAME SHAPE AGAIN and took the same route, which is what
+// makes it a precedent rather than a one-off. Section `3` of
+// supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql is the
+// third copy of that file's registration guard, dominated by Part 1b's
+// `1/JOB-02` and then by Part 2's `2`. Both escape routes were driven on real
+// lanes on 2026-09-05 and both failed, in the SAME two ways the retention gate
+// did: unschedule post-apply with the dominators neutered leaves Part 2 dying
+// at its EXECUTE on `22004: query string argument of EXECUTE is null`
+// (CONTEXT: inline_code_block line 103 at EXECUTE), and a self-unscheduling
+// cron body leaves Parts 1a/1b/2 all printing OK while Part 3's SECOND tick
+// dies on `XX000: could not find valid entry for job
+// 'reap_strategy_analytics_stuck_computing'`. Neither error carries a
+// `TEST FAILED (…)`. The guard was reclassified in place, with the measurement
+// written beside it. Cumulative waivers across the phase family's ELEVEN arms
+// moves: ZERO, through THREE root-cause fixes (a REORDER, an exception-idiom
+// wrap, and now twice a reclassification) and no exception. The measurement
+// lines above stay as lineage.
+// ⭐ CURRENCY 2026-09-05 (plan 164.4.1-05, the LAST arms move of this phase).
+// Still 0, and this time WITHOUT a reclassification: all THIRTY-NINE sections of
+// supabase/tests/test_reconcile_dropped_enqueue_sweep.sql bit their own arm
+// first on the FIRST proof run (`arms: 39/39/0`, `biting: 39`). Five of them
+// needed a GATE-FILE falsifier rather than a production one — the three `IS
+// NULL` oracle preconditions, the Part 3 seed-integrity control and the
+// whole-block invariant — and each carries the measurement showing WHY no
+// production mutation can reach it ahead of its dominator. ⛔ A gate-file
+// falsifier is not a waiver and must not be read as one: the arm still RAISES,
+// still names itself FIRST, and is still counted in `biting`. Cumulative waivers
+// across the phase family's FIFTEEN arms moves: ZERO.
 export const WAIVED_CEILING = 0;
 
 /**
@@ -2755,7 +3400,31 @@ export function absurdityViolations({
 // TODOS [REDUNDER-LANEBLOCKED-BLIND]). MEASURED at this commit over
 // `supabase/tests/` via `--parse-only`: 39 annotated / 1 pending /
 // 27 unreachable / 0 inert / 4 lane-blocked = 71.
+// ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-02) — SUPERSEDES every reading above as
+// the current one; they all stay as lineage. Phase 164.4.1 put pg_cron ON the
+// lane (plan 01), so "which the pg-lane cannot host" is no longer true and the
+// deferral is being RETIRED rather than grown. MEASURED at this commit over
+// `supabase/tests/`: 41 annotated / 0 pending / 27 unreachable / 0 inert /
+// 3 lane-blocked = 71. `pending:` is EMPTY for the first time — its one name
+// was test_compute_jobs_error_kind_copy_parity.sql, now annotated. The three
+// still `lane-blocked:` are plans 03-05 of this phase; until they land, every
+// run exits 1 on ONE `lane-blocked-stale` row, which is the tripwire working.
 // Read the run's own `coverage:` and `  pending:` lines, never this sentence.
+// ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-06) — SUPERSEDES the paragraph above as
+// the current reading; it stays as plan 02's dated lineage, including the
+// "every run exits 1" sentence, which describes an interval that is now OVER.
+// Plans 03-05 annotated the last three files. MEASURED at plan 05 and
+// re-measured by this plan over `supabase/tests/`: 44 annotated / 0 pending /
+// 27 unreachable / 0 inert / 0 lane-blocked = 71, `arms: 363/363/0`,
+// `biting: 363`, `lane-invocations: 363`, `✅ No defects`, EXIT 0.
+// ⚠️ SUPERSEDED 2026-09-05 by the phase review: the file count and the verdict hold, but the
+// arm count is now `arms: 361/361/0`, `biting: 361`, `lane-invocations: 361` — CR-02
+// reclassified two unfalsifiable arms. The 363 above stays as plan 06's dated reading.
+// ⛔ FROM HERE, A NON-ZERO EXIT IS A REGRESSION, not the tripwire. And the
+// printed reason for `lane-blocked:` is no longer "which the pg-lane cannot
+// host" in either state — see `logCorpusClassification`, where both the empty
+// and the non-empty wording were corrected at the source on this date
+// (PATTERNS § 6: a message that cannot be false is not a measurement).
 //
 // ⭐ AND THE REASON CAN EXPIRE. "which the pg-lane cannot host" is a claim
 // about the LANE, and nothing in the derivation measures the lane: fix
@@ -2766,6 +3435,15 @@ export function absurdityViolations({
 // through the real `laneRunner`, prints what it MEASURED on the lane as
 // `lane-probe:`, and raises `lane-blocked-stale` (exit 1) the day pg_cron is
 // available while the class is non-empty.
+// ⭐ CURRENCY 2026-09-05 (plan 164.4.1-06): IT DID EXPIRE, EXACTLY AS DESIGNED,
+// and the paragraph above is the dated record of why the mechanism was built.
+// Phase 164.4.1 fixed [REDUNDER-PGCRON] — and the tripwire FIRED on the
+// pre-annotation tree (`164.4.1-TRIPWIRE-FIRED.log`, plus SHA-bound on ubuntu
+// in run 33938272686), then CLEARED when the last file was annotated. The
+// probe leg, the derivation and the defect are UNCHANGED and stay live: they
+// are what a future unannotated pg_cron gate would trip. What changed is only
+// the two sentences the run PRINTS, which now distinguish the empty class from
+// a stale one instead of asserting "STALE" over a class with nothing in it.
 
 /**
  * The defect kinds that take an EXECUTED arm out of `biting`. Named once, so
@@ -2905,9 +3583,33 @@ export function logCorpusClassification(corpus, log, laneProbe = null) {
   // SINGLE-SPACE separated — a contract, not a style: ci.yml cross-checks the
   // claimed count against the `*.sql` tokens on this line, and the parser pin
   // asserts the exact set in this order.
+  //
+  // ⭐ MESSAGE HONESTY 2026-09-05 (plan 164.4.1-06, PATTERNS § 6). Until this
+  // date the reason asserted, UNCONDITIONALLY, that the pg-lane could not host
+  // the extension and that the class was "deferred 2026-09-03". That sentence
+  // became FALSE the moment plan 01 put pg_cron on the lane, and false-at-zero:
+  // at `lane-blocked: 0` it narrated a deferral that no longer exists, for a
+  // class with nothing in it. Both states are now spelled out separately and
+  // both are true readings of the same run.
+  //
+  // ⛔ THREE CONTRACTS CONSTRAIN THE WORDING, and none of them is style:
+  //   1. the prefix `lane-blocked: N file(s) ` is byte-identical in both arms —
+  //      ci.yml greps `^lane-blocked: [0-9]+ file\(s\) ` and MEASURE_FAILs on its
+  //      absence, so a "nothing to report, print nothing" branch would break the
+  //      gate rather than please it;
+  //   2. the EMPTY arm contains NO `*.sql` token, because ci.yml cross-checks the
+  //      claimed count against `[A-Za-z0-9_]+\.sql` matches on this line — a
+  //      filename quoted in the empty-case prose would claim 0 and name 1;
+  //   3. the count is printed unconditionally for the same reason (1) exists: an
+  //      absent line is a MEASURE_FAIL over there, not a tidy zero.
   log(
-    `lane-blocked: ${laneBlockedFiles.length} file(s) probe pg_extension for pg_cron, which the ` +
-      `pg-lane cannot host — ${laneBlockedFiles.join(" ")} (deferred 2026-09-03, TODOS [REDUNDER-PGCRON])`,
+    laneBlockedFiles.length > 0
+      ? `lane-blocked: ${laneBlockedFiles.length} file(s) probe pg_extension for pg_cron and are ` +
+          `NOT yet annotated — ${laneBlockedFiles.join(" ")} (the lane hosts pg_cron since Phase ` +
+          `164.4.1, so a non-empty class here is STALE — see the lane-probe line)`
+      : `lane-blocked: ${laneBlockedFiles.length} file(s) probe pg_extension for pg_cron and are ` +
+          `not yet annotated — (none; the lane hosts pg_cron since Phase 164.4.1, TODOS ` +
+          `[REDUNDER-PGCRON] retired 2026-09-05)`,
   );
   if (laneProbe !== null) {
     // What the LANE said, not what the classification assumed. `available: null`
@@ -2915,10 +3617,60 @@ export function logCorpusClassification(corpus, log, laneProbe = null) {
     // MEASURE_FAIL in-process, and printed here in a shape ci.yml's
     // `^lane-probe: pg_cron (absent|AVAILABLE)` grep deliberately does NOT
     // match, so the missing measurement fails there too.
+    //
+    // ⭐ 2026-09-05 (plan 164.4.1-06). Each arm below now says what it means for
+    // THIS run's class, empty or not. "lane-blocked class is STALE" printed
+    // beside `lane-blocked: 0` was the false reading plan 05 left behind: STALE
+    // is a claim about files that are still deferred, and there were none.
+    //
+    // ⛔ The two `(absent|AVAILABLE)` prefixes stay byte-identical — ci.yml's
+    // `^lane-probe: pg_cron (absent|AVAILABLE)` grep is what makes the third
+    // form (`UNREADABLE`) fail there as well as in-process.
+    //
+    // ⛔ `absent` + empty class is NOT a reassuring state and must not read like
+    // one: every annotated gate that needs pg_cron fails at baseline on a lane
+    // that cannot offer it. That is why the empty/absent arm names the
+    // consequence rather than printing "class is current".
+    //
+    // ⛔ …BUT IT MUST NOT NAME THE WRONG CAUSE EITHER (review WR-05, 2026-09-05).
+    // The `absent` arms describe the narrowest state in this file, and the
+    // message used to say "the lane LOST pg_cron", which is the ONE cause that
+    // cannot reach here. TRACED through the substrate, 2026-09-05:
+    //   * `available` is read from the probe gate
+    //     (scripts/mutation-runner/fixtures/lane-probe/pg-cron-probe.sql), which asks
+    //     `pg_available_extensions` — i.e. what the BOOTED postmaster could
+    //     install — so reaching `false` at all requires a lane that BOOTED.
+    //   * `scripts/pg-lane/run.sh:351-355` starts every lane with
+    //     `-c shared_preload_libraries=pg_cron`. A host missing the LIBRARY
+    //     cannot boot: `pg_ctl … start` fails, `run.sh` `fail`s with its named
+    //     diagnosis, the probe leg prints no marker, and `laneProbe.available`
+    //     is `null`, not `false` — the `lane-unrunnable` MEASURE_FAIL below.
+    //   * `run.sh:311-328` refuses BEFORE initdb, on either a missing library or
+    //     a missing `pg_cron.control`, on every host where `$PGBIN/pg_config` is
+    //     executable — which is both measured hosts (macOS keg, ubuntu
+    //     /usr/lib/postgresql/16/bin).
+    // What is LEFT is exactly one corner: library present (so the postmaster
+    // boots), `pg_cron.control` missing (so `pg_available_extensions` has no
+    // row), AND `pg_config` unavailable (so the pre-start refusal was skipped).
+    // The message below says that, and names the dominant path so a reader who
+    // arrived here from a lane that would not start is sent to the right place.
     if (laneProbe.available === true) {
-      log("lane-probe: pg_cron AVAILABLE — lane-blocked class is STALE");
+      log(
+        laneBlockedFiles.length > 0
+          ? "lane-probe: pg_cron AVAILABLE — lane-blocked class is STALE"
+          : "lane-probe: pg_cron AVAILABLE — lane-blocked class is empty, as a hosting lane requires",
+      );
     } else if (laneProbe.available === false) {
-      log("lane-probe: pg_cron absent — lane-blocked class is current");
+      log(
+        laneBlockedFiles.length > 0
+          ? "lane-probe: pg_cron absent — lane-blocked class is current"
+          : "lane-probe: pg_cron absent — lane-blocked class is empty, so every annotated pg_cron gate " +
+              "will now fail at baseline. The lane BOOTED with the library and pg_available_extensions " +
+              "still has no pg_cron row: a missing pg_cron.control on a host where pg_config was not " +
+              "executable, so run.sh's pre-start refusal was skipped. A missing LIBRARY cannot print " +
+              "this line — the shared_preload_libraries=pg_cron start makes the postmaster refuse, " +
+              "which surfaces as lane-unrunnable.",
+      );
     } else {
       log(
         "lane-probe: UNREADABLE — the probe lane printed no LANE-PROBE marker, so pg_cron availability " +
@@ -3054,6 +3806,12 @@ export function runCorpus({
     // cannot host" — is a claim about the LANE, and the derivation never
     // measures the lane. Without this, fixing [REDUNDER-PGCRON] would leave
     // four files parked behind a line that keeps reading true.
+    // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-06): [REDUNDER-PGCRON] WAS fixed —
+    // the lane hosts pg_cron — and this probe is what stopped the four files
+    // from being parked. The quoted reason string is no longer what the run
+    // prints (`logCorpusClassification` was corrected on this date); the
+    // paragraph stays because the ARGUMENT for measuring the lane every run is
+    // unchanged and is now proven by an expiry that actually happened.
     //
     // ⚠️ WHEN. Every run that is going to spawn a lane anyway (`targets`
     // non-empty) — which is every real gate run and every `--file/--arm`

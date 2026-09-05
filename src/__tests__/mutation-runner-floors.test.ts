@@ -309,13 +309,103 @@ describe("corpus re-derivation", () => {
       // of Phase 164.4 on today's lane: exactly ONE idiom file is still
       // `pending:`, test_compute_jobs_error_kind_copy_parity.sql, owed to
       // Phase 164.4.1 PGCRON-LANE.
+      // RE-MEASURED 2026-09-05 (plan 164.4.1-02, the FIRST file move of Phase
+      // 164.4.1 PGCRON-LANE, on a lane that now preloads pg_cron — the
+      // pg_cron-deferred test_compute_jobs_error_kind_copy_parity.sql and the
+      // smallest lane-blocked file test_derive_allocator_keys_fanout.sql,
+      // 3 + 7 sections): 272 anchored, across FORTY-ONE annotated files. Those
+      // two were taken first because they are blocked in the two DIFFERENT ways
+      // pg_cron blocks a gate — one only through its APPLY LIST, one only
+      // through its own text — so proving both is the cheapest check that plan
+      // 01's substrate is complete. `pending:` is now EMPTY, measured; the
+      // 3 files still `lane-blocked:` are plans 03-05.
+      // RE-MEASURED 2026-09-05 (plan 164.4.1-03, the SECOND file move of Phase
+      // 164.4.1 — test_retention_orphaned_running.sql): 296 anchored, across
+      // FORTY-TWO annotated files, and `arms: 296/296/0` — anchored, biting and
+      // executed are the SAME number again, with ZERO waivers.
+      // ⚠️ The file ships 24 sections, not 25. A 25th registration raise exists
+      // in Part 3 and was MEASURED to have no first-failure mutation: it is the
+      // third copy of one guard, each copy dominated by the one before it, and
+      // both escape routes (neutering 2/JOB-05; a self-unscheduling cron body)
+      // were driven on real lanes and failed. It was NOT waived and NOT deleted.
+      // It was reclassified: the raise no longer carries the `TEST FAILED (`
+      // identity, so it is not a section at all — an unfalsifiable raise stops
+      // claiming to be a falsifiable assertion, which is the founder rule that a
+      // test which cannot fail is worse than none. WAIVED_CEILING therefore
+      // stays 0, unbroken, through a THIRD root-cause fix rather than a first
+      // exception. See the note at that guard in the gate file.
+      // RE-MEASURED 2026-09-05 (plan 164.4.1-04, the THIRD file move of Phase
+      // 164.4.1 — test_strategy_analytics_stuck_computing_reaper.sql): 324
+      // anchored, across FORTY-THREE annotated files, and `arms: 324/324/0`.
+      // ⚠️ The file ships 28 sections, not the 29 `gateSectionCount` read before
+      // this plan. The 29th was Part 3's `TEST FAILED (3)` registration guard,
+      // and it met the SAME fate as `3/JOB-05` above, for the same measured
+      // reason and by the same route: it is the third copy of one guard, each
+      // copy dominated by the one before it, and both escape routes were driven
+      // on real lanes — unschedule post-apply with the two dominating raises
+      // neutered leaves Part 2 dying at its EXECUTE on `22004: query string
+      // argument of EXECUTE is null`, and a self-unscheduling cron body leaves
+      // Parts 1a/1b/2 green while Part 3's SECOND tick dies on `XX000: could
+      // not find valid entry for job`. Neither carries a `TEST FAILED (…)`. It
+      // was RECLASSIFIED, not waived and not deleted. WAIVED_CEILING therefore
+      // stays 0 across ELEVEN arms moves, now through a SECOND reclassification.
+      // ⚠️ Also measured here, and worth more than the count: `1/re-base` came
+      // back `no-red` on its first drive because a `v_fn ~*` anchor reads
+      // pg_get_functiondef, which returns the function SOURCE INCLUDING
+      // COMMENTS — a comment naming `d.kind = f.kind` kept the anchor satisfied
+      // after both real conjuncts were deleted. Booked in the phase's
+      // deferred-items.md; the twin now rewrites that comment too.
+      // RE-MEASURED 2026-09-05 (plan 164.4.1-05, the FOURTH and LAST file move
+      // of Phase 164.4.1 — test_reconcile_dropped_enqueue_sweep.sql): 363
+      // anchored, across FORTY-FOUR annotated files, and `arms: 363/363/0`.
+      // ⚠️ ALL THIRTY-NINE of that file's sections bit on the FIRST proof run —
+      // no reclassification, no waiver, no reduction from the planned count.
+      // The plan PROJECTED 365 arms; the measured number is 363 (324 + 39),
+      // because a projection is arithmetic over a reading and the floor is what
+      // the run printed.
+      // ⚠️ Worth more than the count, and new to this file: FIVE of the 39 are
+      // falsified by GATE-FILE edits rather than production ones, each with the
+      // domination measurement recorded at its site. Three are the `IS NULL`
+      // oracle-precondition guards at the head of Parts 2/3/4 — Part 1 makes the
+      // same claim, runs FIRST and UNGATED, and MEASURED on a real lane the
+      // production route (rename the jobname in 20260819150000 and short-circuit
+      // its whole STEP 2 so the apply survives) REDs `TEST FAILED (1/JOB-04)`,
+      // never reaching them. One is Part 3's self-declared seed-integrity
+      // control, dominated by Part 2 arm A. The last is the whole-block
+      // invariant, whose value is the SUM of sixteen already-pinned per-arm
+      // counts and so cannot diverge unless one of them diverges first; its
+      // falsifier adds the seventeenth un-asserted seed the raise's own comment
+      // names. ⛔ A gate-file falsifier is not a waiver: the arm still RAISES,
+      // still names itself FIRST, and is still counted in `biting`.
+      // ⛔ RE-MEASURED 2026-09-05 (review findings CR-01/CR-02 of
+      // 164.4.1-REVIEW.md): **361**, DOWN from 363, across the same FORTY-FOUR
+      // files. The paragraph above stays as the dated record of the 363-arm
+      // corpus, but its last two sentences are exactly what the review refuted:
+      // three of those FIVE gate-file falsifiers were on the SAME `IS NULL`
+      // oracle precondition in Parts 2/3/4, and the recorded "no production
+      // mutation can make this raise fire first" was measured FALSE for Part 2.
+      //   * `2/JOB-04` now carries a REAL production mutation — a live-DB
+      //     `DELETE FROM cron.job WHERE jobname =
+      //     'reconcile_dropped_enqueue_sweep'` with 5 measured `1/JOB-04`
+      //     neuters, the same `sql`+`neuter` shape `2/JOB-05` had been using in
+      //     test_retention_orphaned_running.sql for three plans. Net 0.
+      //   * `3/JOB-04` and `4/JOB-04` ARE unfalsifiable and were RECLASSIFIED as
+      //     named INVARIANTs, the treatment `3/JOB-05` and the reaper's Part 3
+      //     already carry. Re-measured before the edit: with the Part 1 and Part
+      //     2 raises neutered and the job row deleted, the lane dies inside PART
+      //     2 on `22004: query string argument of EXECUTE is null`, naming no
+      //     arm; and a self-unscheduling cron body dies at `XX000: could not
+      //     find valid entry for job` with the guard still green. Net -2.
+      // ⛔ WAIVED_CEILING stays 0 — a reclassification is not a waiver, and a
+      // floor that would have to keep two provably-unfalsifiable arms to stay at
+      // 363 is a floor buying a number with evidence it does not have.
       expect(
         naive,
         `${file.name}: the naive substring count (${naive}) is not STRICTLY above the parser's anchored count (${parsed}). Either the parser stopped anchoring, or this file no longer carries the inflated shapes the anchor exists to exclude.`,
       ).toBeGreaterThan(parsed);
     }
     const totalAnchored = annotated.reduce((n, f) => n + f.prose, 0);
-    expect(totalAnchored).toBe(262);
+    expect(totalAnchored).toBe(361);
   });
 });
 
@@ -1271,7 +1361,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  arm SHAPE 1                  exit   3  RED (identity ok)  (1.7s)",
     "  restore   supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
     "",
-    "coverage: files 39/71",
+    "coverage: files 44/71",
     // 164.4-01: the exclusion, named. Two synthetic basenames rather than the
     // real 27 — the arms below mutate the COUNT against the NAMES, and a
     // fixture carrying the live corpus would have to move on every batch.
@@ -1280,7 +1370,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // reason. Synthetic basenames for the same reason as the line above — the
     // arms below mutate the COUNT against the NAMES, and a fixture carrying the
     // live four would have to move the day [REDUNDER-PGCRON] is closed.
-    "lane-blocked: 2 file(s) probe pg_extension for pg_cron, which the pg-lane cannot host — d.sql e.sql (deferred 2026-09-03, TODOS [REDUNDER-PGCRON])",
+    // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-06): the REASON half of this line was
+    // rewritten at the source — the old wording claimed the lane could not host
+    // pg_cron, which stopped being true when plan 01 put it there. The two
+    // synthetic basenames are DELIBERATELY unchanged: what the arms below mutate
+    // is the COUNT against the NAMES, and that cross-check is the contract, not
+    // the prose. This fixture carries the NON-EMPTY arm's wording, because a
+    // 0-file line would name nothing for those arms to disagree with.
+    "lane-blocked: 2 file(s) probe pg_extension for pg_cron and are NOT yet annotated — d.sql e.sql (the lane hosts pg_cron since Phase 164.4.1, so a non-empty class here is STALE — see the lane-probe line)",
     "lane-probe: pg_cron absent — lane-blocked class is current",
     // ⚠️ SYNTHETIC, like the two lines above, and deliberately NOT moved to the
     // live 36. The `pending:` line is the only summary line the count-recheck
@@ -1289,16 +1386,48 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // claiming 36 while naming one file would be internally inconsistent for
     // no gain — and would have to move on every batch.
     "  pending: 1 idiom file(s) without RED-UNDER — c.sql",
-    "arms: 262/262/0   (executed/annotated/waived)",
-    "biting: 262   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
-    "lane-invocations: 262   (arm lanes actually spawned — tallied inside runLane, independent of the 262 the verdict loop counted; plus 39 baseline / 39 restore leg(s))",
-    // 164.4-01: the per-file breakdown. These THIRTY-NINE rows are the real,
-    // measured shape at plan 164.4-11, which annotated the SEVEN ⚠️ mixed files
-    // (api_keys-exchange 4 / strategy-keys-publish-integrity 4 /
-    // api_keys-insert 3 / sync-status-marked-refresh 1 / guard-wizard-draft 1 /
-    // profiles-privileged-columns 1 / wizard-session-idempotency 1): their
-    // `biting` column must SUM to the aggregate `biting:` above (6 + 2 + 4 + 3 + 7 + 10 + 7 + 9 + 7 + 7 + 3 + 5 + 2 + 7 + 5 + 5 + 1 + 15 + 15 + 11 + 2 + 1 + 3 + 5 + 9 + 5 + 2 + 8 + 5 + 4 + 9 + 45 + 5 + 1 + 6 + 4 + 5 + 11 + 1 =
-    // 262) and their COUNT must equal the `coverage:` numerator (39), both of
+    // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03), and a DELIBERATE divergence from
+    // the live corpus that must not be quietly "corrected" back. The real run at
+    // this commit prints `arms: 296/297/1` — the retention gate's `3/JOB-05` is
+    // a waiver — and the retention row below really reads
+    // `annotated 25 / waived 1`. This fixture carries the W = 0 PROJECTION of
+    // that corpus because it is the count-recheck step's GREEN input, and that
+    // step reads the W field FIRST: at W = 1 it exits on the ceiling before it
+    // ever reaches the tallies these arms exist to exercise. The W > ceiling
+    // path is not lost — it has its own RED arm below ("a waived count above
+    // WAIVED_CEILING fails naming both numbers").
+    // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-04): the paragraph above describes a
+    // divergence that NO LONGER EXISTS at HEAD, and it is kept because it is a
+    // dated record of a run that happened. Commit fcbc0159 reclassified the
+    // retention gate's `3/JOB-05` instead of waiving it, so the real run now
+    // prints `arms: 324/324/0` with W = 0 — the fixture's W = 0 is no longer a
+    // projection, it is the measurement. The retention row below reads
+    // `annotated 24 / waived 0` for the same reason. Keep W = 0 here regardless:
+    // the count-recheck step reads W FIRST and would exit on the ceiling before
+    // reaching the tallies these arms exist to exercise.
+    // ⚠️ CURRENCY 2026-09-05 (review fix, CR-01/CR-02): 363 -> 361. The
+    // reclassification of `3/JOB-04` and `4/JOB-04` in
+    // test_reconcile_dropped_enqueue_sweep.sql removed two SECTIONS (39 -> 37);
+    // no file left the annotated set, so `coverage: files 44/71` is unchanged.
+    // W is still 0 — a reclassification is not a waiver.
+    "arms: 361/361/0   (executed/annotated/waived)",
+    "biting: 361   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "lane-invocations: 361   (arm lanes actually spawned — tallied inside runLane, independent of the 361 the verdict loop counted; plus 44 baseline / 44 restore leg(s))",
+    // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
+    // rows are the real, measured shape at plan 164.4.1-05, which annotated
+    // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
+    // the 164.4.1-04 FORTY-THREE-row shape summing to 324 is the lineage this
+    // replaces, and the 164.4.1-03 FORTY-TWO-row shape summing to 296 the
+    // lineage THAT replaced. The retention row still reads 24/24 after the
+    // fcbc0159 reclassification.
+    // ⚠️ CURRENCY 2026-09-05 (review fix, CR-01/CR-02): the reconcile-sweep row
+    // now reads 37, not the 39 the sentence above records — `3/JOB-04` and
+    // `4/JOB-04` were reclassified as named INVARIANTs and are no longer
+    // sections. The paragraph above stays as the dated plan-05 lineage. Sum
+    // moves 363 -> 361; the row COUNT is unchanged at 44.
+    // Their `biting` column must SUM to the aggregate `biting:` above
+    // (6 + 2 + 4 + 3 + 7 + 10 + 7 + 3 + 9 + 7 + 7 + 3 + 5 + 7 + 2 + 7 + 5 + 5 + 1 + 15 + 15 + 11 + 2 + 1 + 37 + 3 + 24 + 5 + 9 + 5 + 2 + 8 + 5 + 28 + 4 + 9 + 45 + 5 + 1 + 6 + 4 + 5 + 11 + 1 =
+    // 361) and their COUNT must equal the `coverage:` numerator (44), both of
     // which the count-recheck step asserts.
     "  file test_allocator_equity_derived_rls.sql: sections 6 / judged 6 / annotated 6 / waived 0 / biting 6",
     "  file test_allocator_equity_pre_terminus_flag.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
@@ -1307,11 +1436,13 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_api_keys_venue_identity_uniq.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
     "  file test_capital_ownership_allocation_guard.sql: sections 10 / judged 10 / annotated 10 / waived 0 / biting 10",
     "  file test_capital_ownership_column.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
+    "  file test_compute_jobs_error_kind_copy_parity.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
     "  file test_create_wizard_strategy_for_key.sql: sections 9 / judged 9 / annotated 9 / waived 0 / biting 9",
     "  file test_csv_daily_returns_perkey_rls.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
     "  file test_csv_finalize_atomic_fold.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
     "  file test_csv_finalize_auth_guard.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
     "  file test_csv_finalize_double_submit.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
+    "  file test_derive_allocator_keys_fanout.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
     "  file test_enqueue_compute_job_dedupe_non_terminal.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
     "  file test_funding_fees_rls.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
     "  file test_get_published_trust_signals.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
@@ -1322,13 +1453,29 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_ledger_refresh_staleness.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
     "  file test_metrics_by_basis_write.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
     "  file test_profiles_privileged_columns_locked.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
+    "  file test_reconcile_dropped_enqueue_sweep.sql: sections 37 / judged 37 / annotated 37 / waived 0 / biting 37",
     "  file test_resync_retry_single_job.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
+    // ⛔ CORRECTED 2026-09-05 (review finding WR-01 of 164.4.1-REVIEW.md).
+    // This row USED TO read `sections 25 / judged 24`, a leftover from the one
+    // commit where `3/JOB-05` was a WAIVER. Commit fcbc0159 RECLASSIFIED that
+    // raise instead — it no longer carries a `TEST FAILED (` identity, so it is
+    // not a section at all — and the sibling reaper row was corrected to 28
+    // while this one was left behind, contradicting the comment ~1100 lines
+    // above ("⚠️ The file ships 24 sections, not 25"). MEASURED at HEAD:
+    //   `node scripts/mutation-runner/run.mjs --parse-only`
+    //     supabase/tests/test_retention_orphaned_running.sql: 24 prose / 24 twin(s) / 0 waiver(s)
+    //     file test_retention_orphaned_running.sql: sections 24 / judged 0 / annotated 24 / waived 0 / biting 24
+    // ⛔ This fixture's whole value is that it is the runner's OWN printed
+    // format; a row the runner never prints cannot catch a parser that stops
+    // reading a field. Every row here is now `sections == judged == annotated`.
+    "  file test_retention_orphaned_running.sql: sections 24 / judged 24 / annotated 24 / waived 0 / biting 24",
     "  file test_scenario_downgrade_sweep.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_scenario_shares_rls.sql: sections 9 / judged 9 / annotated 9 / waived 0 / biting 9",
     "  file test_scenarios_rls.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_set_compute_job_progress.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
     "  file test_strategies_private_owner_isolation.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8",
     "  file test_strategy_analytics_series_completeness.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
+    "  file test_strategy_analytics_stuck_computing_reaper.sql: sections 28 / judged 28 / annotated 28 / waived 0 / biting 28",
     "  file test_strategy_keys_publish_integrity.sql: sections 4 / judged 4 / annotated 4 / waived 0 / biting 4",
     "  file test_strategy_keys_rls.sql: sections 9 / judged 9 / annotated 9 / waived 0 / biting 9",
     "  file test_strategy_shares_rls.sql: sections 35 / judged 45 / annotated 45 / waived 0 / biting 45",
@@ -1339,7 +1486,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_wizard_composite_fence.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_wizard_composite_members.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
     "  file test_wizard_session_idempotency.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
-    "per-arm lane time: mean 1.0s over 262 arm run(s)",
+    "per-arm lane time: mean 1.1s over 361 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -1349,7 +1496,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     const r = runCountRecheck(GREEN_LOG);
     expect(r.status, r.out).toBe(0);
     expect(r.out).toContain("the runner's two tallies agree");
-    expect(r.out).toContain("262 arm lane(s) spawned");
+    expect(r.out).toContain("361 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -1402,6 +1549,46 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(r.out).toContain("MEASURE_FAIL");
     expect(r.out).toContain("CLAIMS 3 deferred file(s) but NAMES 2");
     expect(r.out).not.toContain("two tallies agree");
+  });
+
+  it("GREEN: the EMPTY deferred class — the state the repo is now permanently in — survives the real CI parser", () => {
+    // ⛔ THE GAP THIS CLOSES (plan 164.4.1-06). Every arm above drives the CI
+    // step over a NON-EMPTY `lane-blocked:` line, because that was the only
+    // state the corpus could produce while [REDUNDER-PGCRON] was open. Phase
+    // 164.4.1 emptied the class, so the line the gate now sees on EVERY real run
+    // — count 0, no `*.sql` token anywhere in the reason — was exercised by
+    // nothing. That is the shape ci.yml's own `|| true` comment predicted in
+    // advance ("an EMPTY deferred set … the state this phase's successor
+    // reaches"): under `set -euo pipefail` the `grep -o` matches nothing and
+    // exits 1, which without that guard would abort the step with NO
+    // `::error::` at all and leave the numeric comparison unreachable. A step
+    // that dies silently on the ONE state it will now always be handed is worse
+    // than one that fails loudly, and nothing was proving it does not.
+    //
+    // The line below is the runner's real empty-case output, copied from
+    // `node scripts/mutation-runner/run.mjs --parse-only` at this commit, so a
+    // future reword of the reason that reintroduces a filename (claimed 0,
+    // named 1) fails here.
+    const emptyClass = GREEN_LOG.replace(
+      /^lane-blocked: .*$/m,
+      "lane-blocked: 0 file(s) probe pg_extension for pg_cron and are not yet annotated — " +
+        "(none; the lane hosts pg_cron since Phase 164.4.1, TODOS [REDUNDER-PGCRON] retired 2026-09-05)",
+    );
+    // Non-vacuity of the fixture, both directions: the substitution really
+    // happened, and the reason really carries no filename for the cross-check
+    // to count against a claimed 0.
+    expect(emptyClass, "the substitution must actually change the log").not.toBe(GREEN_LOG);
+    expect(emptyClass).toMatch(/^lane-blocked: 0 file\(s\) /m);
+    const reason = emptyClass.split("\n").find((l) => l.startsWith("lane-blocked: "))!;
+    expect(reason.match(/[A-Za-z0-9_]+\.sql/), "the empty reason must name no gate file").toBeNull();
+
+    const r = runCountRecheck(emptyClass);
+    expect(r.status, r.out).toBe(0);
+    // It did not merely avoid dying — it reached the END of the step. The
+    // agreement line is printed after every parse, so its presence is what
+    // distinguishes "ran through" from "exited quietly at the `grep -o`".
+    expect(r.out).toContain("two tallies agree");
+    expect(r.out).not.toContain("MEASURE_FAIL");
   });
 
   // ── 164.4-03, threat T-164.4-11: the reason must have been MEASURED ─────
@@ -1497,12 +1684,12 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     const extra = GREEN_LOG.replace(
       /^ {2}file test_strategy_shares_rls\.sql: .*$/m,
       (line) =>
-        `${line}\n  file test_a_fortieth_annotated_gate.sql: sections 15 / judged 0 / annotated 0 / waived 0 / biting 0`,
+        `${line}\n  file test_a_forty_fourth_annotated_gate.sql: sections 15 / judged 0 / annotated 0 / waived 0 / biting 0`,
     );
     expect(extra).not.toBe(GREEN_LOG);
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("printed 40 per-file row(s) but reported 39 annotated file(s)");
+    expect(r.out).toContain("printed 45 per-file row(s) but reported 44 annotated file(s)");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -1511,8 +1698,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(short, "the mutation must actually change the log").not.toBe(GREEN_LOG);
     const r = runCountRecheck(short);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("rows sum to 261 biting arm(s) but the aggregate");
-    expect(r.out).toContain("reports 262");
+    expect(r.out).toContain("rows sum to 360 biting arm(s) but the aggregate");
+    expect(r.out).toContain("reports 361");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -1526,25 +1713,25 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(r.out).not.toContain("two tallies agree");
   });
 
-  it("RED: the parse-only shape — 262 executed claimed, 0 lanes counted — fails naming all three numbers", () => {
-    const severed = GREEN_LOG.replace(/^lane-invocations: 262 /m, "lane-invocations: 0 ");
+  it("RED: the parse-only shape — 361 executed claimed, 0 lanes counted — fails naming all three numbers", () => {
+    const severed = GREEN_LOG.replace(/^lane-invocations: 361 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
     expect(r.out).toContain("GATE failing, not the corpus");
-    expect(r.out).toContain("executed=262 lane-invocations=0 biting=262");
+    expect(r.out).toContain("executed=361 lane-invocations=0 biting=361");
     expect(r.out).not.toContain("two tallies agree");
   });
 
   it("RED: a single unaccounted lane also fails — the relation is exact", () => {
-    const extra = GREEN_LOG.replace(/^lane-invocations: 262 /m, "lane-invocations: 263 ");
+    const extra = GREEN_LOG.replace(/^lane-invocations: 361 /m, "lane-invocations: 362 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("executed=262 lane-invocations=263 biting=262");
+    expect(r.out).toContain("executed=361 lane-invocations=362 biting=361");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 262 /m, "lane-invocations: abc ");
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 361 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -1554,10 +1741,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
   });
 
   it("RED: a waived count above WAIVED_CEILING fails naming both numbers — the W field is read, not ignored", () => {
-    // The GREEN log carries `arms: 262/262/0`; one waiver against a ceiling read
+    // The GREEN log carries `arms: 361/361/0`; one waiver against a ceiling read
     // out of run.mjs (0 today) must fail. The executed and biting counts are
     // untouched, so nothing else in the step can be what fired.
-    const waived = GREEN_LOG.replace(/^arms: 262\/262\/0 /m, `arms: 262/262/${WAIVED_CEILING + 1} `);
+    const waived = GREEN_LOG.replace(/^arms: 361\/361\/0 /m, `arms: 361/361/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -1571,14 +1758,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // Calibration for the extract-and-run harness itself: if the extraction
     // returned an empty or truncated block, these established arms would not
     // fire either, and the GREEN arm above would be passing on nothing.
-    const zero = GREEN_LOG.replace(/^arms: 262\/262\/0 /m, "arms: 0/262/0 ");
+    const zero = GREEN_LOG.replace(/^arms: 361\/361\/0 /m, "arms: 0/361/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
-    const spliced = GREEN_LOG.replace(/^biting: 262 /m, "biting: 263 ");
+    const spliced = GREEN_LOG.replace(/^biting: 361 /m, "biting: 362 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
-    expect(s.out).toContain("biting (263) exceeds executed (262)");
+    expect(s.out).toContain("biting (362) exceeds executed (361)");
   });
 });
 

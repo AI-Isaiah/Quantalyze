@@ -139,6 +139,53 @@
 --
 -- Run order: AFTER migrations 20260802120000 AND 20260803120000 are applied to
 -- the project.
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4.1, PGCRON-LANE). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+--
+-- ⚠️ THE APPLY LIST BELOW IS SIZED BY THE THREE `SKIP` NOTICES, NOT BY THE
+-- HEADER. This file baselines GREEN with or without pg_cron -- lines 282, 326
+-- and 483 withhold Part 1b and the whole of Parts 2 and 3 behind
+-- `RAISE NOTICE 'SKIP …'` rather than an exception (the older of the two
+-- spellings this corpus carries; converting it would be a behaviour change to a
+-- gate and is out of this phase's scope). A section behind a still-firing SKIP
+-- is UN-FALSIFIABLE: its twin comes back `no-red` naming no cause, and a
+-- silently-ineffective pg_cron preload would be invisible. So the list must
+-- carry 20260513094906 (the CREATE EXTENSION the three skips key on) before the
+-- first cron-touching migration. MEASURED 2026-09-05 on the lane: with this
+-- list the baseline exits 0 in 1 s and prints ZERO gate-owned SKIP lines --
+-- `grep -a -c -iE '^psql:[^ ]*test_strategy_analytics_stuck_computing_reaper\.sql:[0-9]+: NOTICE:.*SKIP'`
+-- -> 0 -- and all SEVEN `Part … OK` notices (1a, 1b, 2, 3, 4, 5, 6) print.
+-- ⛔ Do NOT read that zero off an unscoped `grep -i SKIP`: Postgres itself emits
+-- `… does not exist, skipping` NOTICEs from the `DROP … IF EXISTS` statements in
+-- five of the applied migrations (12 such lines on this list, MEASURED), and
+-- none of them is this file's.
+--
+-- ⚠️ ORACLE SCOPE, stated honestly. The lane's `cron.job.command` oracle is the
+-- body of the LAST writer in the list, 20260803130000 (the MATERIALIZED-CTE
+-- delta) -- 20260802120000 registers the job and 20260803120000 re-registers it
+-- with the clock-start arm, and `cron.schedule` upserts by NAME, so only the
+-- last one's bytes survive. That is the same body TEST holds, and it is why
+-- every Parts 2/3 twin below targets 20260803130000: an edit to either earlier
+-- migration's cron body is overwritten and comes back `no-red`.
+--
+-- ⚠️ WHAT THE LANE CANNOT FALSIFY HERE, MEASURED rather than assumed. The lane's
+-- `strategy_analytics` is the stand-in built by
+-- scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql:42-47, and that fixture
+-- already declares `computing_started_at TIMESTAMPTZ`. So STEP 1 of
+-- 20260802120000 applies as a no-op -- the lane prints
+-- `column "computing_started_at" of relation "strategy_analytics" already
+-- exists, skipping` -- and the FOUR column-shape raises at the head of Part 1a
+-- cannot be reddened by mutating that migration. The fixture is NOT edited to
+-- fix this (GRAMMAR rule 4 refuses twins on stand-ins, and
+-- test_sync_status_marked_refresh_protected.sql reads the same column off the
+-- same fixture without applying 20260802120000). `1/JOB-01` is instead twinned
+-- through its BRIDGE-BODY half, which reads the real deployed function; the
+-- section is proven, the DDL half is not, and this note is the record of which.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","scripts/pg-lane/fixtures/29-fixture-compute-jobs-priority.sql","supabase/migrations/20260412094454_sync_strategy_analytics_status.sql","supabase/migrations/20260505115047_mark_compute_job_atomic_status_bridge.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260516104201_compute_jobs_audit_2026_05_07_residual.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260528183100_mark_compute_job_strict_claim_token.sql","supabase/migrations/20260529180000_fix_mark_compute_job_failed_error_kind_column.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260707120000_sync_status_preserve_warnings.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260710150000_sync_status_supersede_failed_per_kind.sql","supabase/migrations/20260802120000_strategy_analytics_stuck_computing_reaper.sql","supabase/migrations/20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql","supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql"]}
 
 -- ==========================================================================
 -- Part 1 -- STRUCTURAL, UNGATED, ZERO SIDE EFFECTS. This is the part that must
@@ -195,6 +242,35 @@ BEGIN
   END IF;
   -- Retained 20260710150000 anchors: the re-base must not silently revert
   -- F-3/PUB-02 or the SI-02 marker reads. A bad re-base reddens HERE too.
+  -- RED-UNDER: revert F-3/PUB-02 in the 20260802120000 re-base -- delete the
+  --            `AND d.kind = f.kind` conjunct from BOTH supersession subqueries
+  --            in branch (b), which is exactly the cross-kind-blind shape that
+  --            killed held PR 229d80fa: a later `done` of a DIFFERENT kind would
+  --            then mask a real permanent failure.
+  --            ⚠️ LAYERED (GRAMMAR Shape 3). The migration SELF-VERIFIES the same
+  --            anchor in its STEP 7, so the two-step deletion alone aborts the
+  --            apply with `JOB-01 re-base failed: branch (b) lost the per-kind
+  --            supersession scope` and this file never runs. The third step
+  --            re-bases that check to `IF FALSE THEN`, which is what a careless
+  --            real revert would also have to do -- and is the same spelling the
+  --            layered twin at test_resync_retry_single_job.sql:234 uses.
+  --            The conjunct occurs TWICE (the count subquery and the
+  --            latest-error subquery), so it takes two edits; leaving either
+  --            behind keeps the regex satisfied and this arm no-red.
+  --            ⛔ AND A FOURTH STEP, which is a FINDING about this anchor rather
+  --            than bookkeeping. MEASURED on the lane 2026-09-05: with both
+  --            conjuncts deleted and STEP 7 re-based, the gate still went GREEN
+  --            (`no-red`). pg_get_functiondef returns the function's SOURCE,
+  --            COMMENTS INCLUDED, and 20260802120000:353 carries the line
+  --            `-- PER-KIND (d.kind = f.kind): a later done of a DIFFERENT kind
+  --            …` INSIDE the body -- so the regex kept matching a comment about
+  --            the conjunct after the conjunct itself was gone. Every `v_fn ~*`
+  --            anchor in Part 1a shares that blind spot. The fourth step
+  --            rewrites that comment, which is what a real revert would do to
+  --            it; the residual weakness is booked in this phase's
+  --            deferred-items.md rather than fixed here, because changing an
+  --            assertion is out of this plan's scope.
+  -- RED-UNDER-M: {"arm":"1/re-base","apply":[{"kind":"edit","file":"supabase/migrations/20260802120000_strategy_analytics_stuck_computing_reaper.sql","find":"          AND d.kind = f.kind\n","replace":"","occurrences":2},{"kind":"edit","file":"supabase/migrations/20260802120000_strategy_analytics_stuck_computing_reaper.sql","find":"          AND d.kind = f.kind\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260802120000_strategy_analytics_stuck_computing_reaper.sql","find":"  -- PER-KIND (d.kind = f.kind): a later done of a DIFFERENT kind can NEVER mask a","replace":"  -- PER-KIND scoping was REMOVED here (cross-kind supersession restored).","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260802120000_strategy_analytics_stuck_computing_reaper.sql","find":"IF v_fn !~* 'd\\.kind\\s*=\\s*f\\.kind' THEN","replace":"IF FALSE THEN","occurrences":1}]}
   IF v_fn !~* 'd\.kind\s*=\s*f\.kind' THEN
     RAISE EXCEPTION 'TEST FAILED (1/re-base): branch (b) lost the per-(strategy,kind) supersession scope (F-3/PUB-02 reverted by the 20260802120000 re-base).';
   END IF;
@@ -212,6 +288,27 @@ BEGIN
   END IF;
   -- Branch (b)/(c) exit clears. Part 4 proves branch (c) behaviorally and Part 5
   -- proves branch (b) behaviorally; these anchors are the cheap structural twin.
+  -- RED-UNDER: delete the exit clear from BOTH branches of the re-based bridge in
+  --            migration 20260802120000 -- spell branch (b)'s and branch (c)'s
+  --            `computing_started_at = NULL` as `= CAST(NULL AS timestamptz)`.
+  --            The VALUE written is identical, so nothing behavioural moves and
+  --            Parts 4c and 5 stay green; what changes is that the deployed
+  --            functiondef no longer carries the byte sequence this anchor and
+  --            the migration's own STEP 7 read. That is the point: this arm is
+  --            the cheap STRUCTURAL twin of two behavioural exits, and a
+  --            structural anchor is falsified by the text going away.
+  --            ⚠️ TWO steps, and the ORDER is load-bearing: branch (b)'s line is
+  --            indented 11 spaces and branch (c)'s 9, so the 9-space needle is a
+  --            SUBSTRING of the 11-space line and matches twice until (b) is
+  --            rewritten first. Both must go -- the anchor is a regex over the
+  --            WHOLE functiondef, so one surviving occurrence keeps it green.
+  --            ⚠️ This section's other seven raises are NOT the falsifier here.
+  --            Four are the column-shape reads, which the lane cannot falsify at
+  --            all (the stand-in fixture already declares the column -- see the
+  --            header note), and three are mirrored byte-for-byte by STEP 7 of
+  --            the same migration, which would ABORT THE APPLY before this file
+  --            ran. The exit-clear anchor is the one STEP 7 does not duplicate.
+  -- RED-UNDER-M: {"arm":"1/JOB-01","apply":[{"kind":"edit","file":"supabase/migrations/20260802120000_strategy_analytics_stuck_computing_reaper.sql","find":"           computing_started_at = NULL,","replace":"           computing_started_at = CAST(NULL AS timestamptz),","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260802120000_strategy_analytics_stuck_computing_reaper.sql","find":"         computing_started_at = NULL,","replace":"         computing_started_at = CAST(NULL AS timestamptz),","occurrences":1}]}
   IF v_fn !~* 'computing_started_at\s*=\s*NULL' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-01): no branch clears computing_started_at to NULL on exit; a stale stamp on a terminal row could re-trigger the reaper.';
   END IF;
@@ -236,6 +333,21 @@ BEGIN
     -- STRING equality, never a ::INT cast on a schedule field: the hour field
     -- here is '*' and casting it would error (the hour-band idiom from
     -- test_retention_orphaned_running.sql does not transfer to a */15 cadence).
+    -- RED-UNDER: change the cadence in the LAST writer of this job,
+    --            20260803130000, from `*/15 * * * *` to `*/30 * * * *`. The
+    --            threshold is 16 hours and the cadence is POST-THRESHOLD
+    --            DETECTION LATENCY (see this file's header), so halving the tick
+    --            rate doubles the worst-case spinner tail beyond the advertised
+    --            bound while every body anchor below still passes.
+    --            ⚠️ The edit targets 20260803130000 and not 20260802120000:
+    --            cron.schedule upserts by NAME, so only the last writer's
+    --            schedule survives and an edit to either earlier migration comes
+    --            back no-red. That migration's own STEP 2 self-verify checks the
+    --            body but never the cadence, so no layering is needed.
+    --            The needle carries its four-space indent and trailing comma
+    --            precisely to miss the prose mention of the same cadence in the
+    --            migration's header at :83.
+    -- RED-UNDER-M: {"arm":"1/JOB-02","apply":[{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"    '*/15 * * * *',","replace":"    '*/30 * * * *',","occurrences":1}]}
     IF v_schedule IS DISTINCT FROM '*/15 * * * *' THEN
       RAISE EXCEPTION 'TEST FAILED (1/JOB-02): reaper cadence is not the expected */15 * * * * (got %)', v_schedule;
     END IF;
@@ -247,6 +359,22 @@ BEGIN
     IF v_command NOT ILIKE '%computing_started_at%' THEN
       RAISE EXCEPTION 'TEST FAILED (1/JOB-02): reaper body does not key on computing_started_at. command was: %', v_command;
     END IF;
+    -- RED-UNDER: delete the `computation_warned = FALSE` column from the reap
+    --            arm's four-column SET in 20260803130000. A reap that terminalizes
+    --            to 'failed' but leaves the runner-owned warning marker standing is
+    --            laundered by the status bridge's branch (c) into
+    --            complete_with_warnings on its next call -- a FALSE SUCCESS on a
+    --            money surface, strictly worse than the permanent spinner the
+    --            reaper replaces.
+    --            ⚠️ LAYERED: 20260803130000 self-verifies this exact token in its
+    --            own STEP 2 (`D-19/SI-02 verification failed`), so the deletion
+    --            aborts the apply unless that check is re-based in the same twin.
+    --            ⛔ This is the STRUCTURAL half. The BEHAVIOURAL half is
+    --            2/arm A/SI-02 below, which keeps the token and writes TRUE --
+    --            deliberately a different mutation, because deleting the token
+    --            makes THIS anchor the first failure and the behavioural arm
+    --            unreachable.
+    -- RED-UNDER-M: {"arm":"1/JOB-02/SI-02","apply":[{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"           computation_warned   = FALSE,\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"IF v_command NOT ILIKE '%computation_warned%' THEN","replace":"IF FALSE THEN","occurrences":1}]}
     IF v_command NOT ILIKE '%computation_warned%' THEN
       RAISE EXCEPTION 'TEST FAILED (1/JOB-02/SI-02): reaper body does not clear computation_warned, so the status bridge would launder the reap into complete_with_warnings -- a FALSE SUCCESS on a money surface, strictly worse than the spinner it replaces. command was: %', v_command;
     END IF;
@@ -262,6 +390,19 @@ BEGIN
     -- The threshold is pinned here as a LITERAL EXPECTATION typed into the test,
     -- not read from the implementation. SQL<->Python equality is a separate gate
     -- (test_main_worker.py::TestReaperThresholdDriftGate).
+    -- RED-UNDER: drift the staleness threshold in the deployed body from
+    --            `interval '16 hours'` to `interval '12 hours'`. The threshold is
+    --            pinned here as a LITERAL EXPECTATION typed into the test rather
+    --            than read from the implementation, so a drift away from the
+    --            canonical Python value
+    --            (services/job_worker.py STRATEGY_ANALYTICS_REAP_THRESHOLD) is
+    --            visible on this side even when both sides move together.
+    --            ⚠️ LAYERED for the same reason as 1/JOB-02/SI-02: STEP 2 of
+    --            20260803130000 carries the identical literal check
+    --            (`D-11/JOB-03 verification failed` in 20260803120000 checks the
+    --            body that migration registered, which is superseded here, so only
+    --            the LAST writer's own check needs re-basing).
+    -- RED-UNDER-M: {"arm":"1/JOB-03","apply":[{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"AND s.computing_started_at < now() - interval '16 hours'","replace":"AND s.computing_started_at < now() - interval '12 hours'","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"IF v_command NOT ILIKE '%interval ''16 hours''%' THEN","replace":"IF FALSE THEN","occurrences":1}]}
     IF v_command NOT ILIKE '%interval ''16 hours''%' THEN
       RAISE EXCEPTION 'TEST FAILED (1/JOB-03): reaper body does not carry the 16-hour staleness threshold. command was: %', v_command;
     END IF;
@@ -329,6 +470,19 @@ BEGIN
 
   SELECT command INTO v_command
     FROM cron.job WHERE jobname = 'reap_strategy_analytics_stuck_computing';
+  -- RED-UNDER: unschedule the job on the live lane database while leaving the
+  --            pg_cron EXTENSION installed -- the state this arm exists to name
+  --            (`the job was unscheduled`), reached through the lane's
+  --            --post-apply hook because no migration edit produces it.
+  --            ⚠️ TWO neuters, and the count is MEASURED rather than reasoned.
+  --            Part 1b's registration guard sees the same NULL and would be the
+  --            first failure, so it is suppressed -- but suppressing only the
+  --            `v_command IS NULL` raise is not enough: the very next check is
+  --            `v_schedule IS DISTINCT FROM '*/15 * * * *'`, and a NULL schedule
+  --            IS DISTINCT FROM any literal, so that copy of 1/JOB-02 fires too.
+  --            The seven ILIKE checks after it do NOT need neutering: `NULL NOT
+  --            ILIKE '…'` is NULL, and `IF NULL THEN` does not take the branch.
+  -- RED-UNDER-M: {"arm":"2","apply":[{"kind":"sql","stmt":"SELECT cron.unschedule('reap_strategy_analytics_stuck_computing')"}],"neuter":[{"arm":"1/JOB-02"},{"arm":"1/JOB-02"}]}
   IF v_command IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (2): reap_strategy_analytics_stuck_computing cron job is missing while pg_cron is installed.';
   END IF;
@@ -403,15 +557,50 @@ BEGIN
     INTO v_status, v_warned, v_error, v_stamp
     FROM public.strategy_analytics WHERE strategy_id = v_a;
 
+  -- RED-UNDER: narrow the reap UPDATE's own WHERE in 20260803130000 from
+  --            `sa.computation_status = 'computing'` to a status no row holds, so
+  --            the bounded batch is still selected and locked but nothing is
+  --            terminalized. The stranded spinner becomes permanent -- which is
+  --            the whole harm this file exists to detect -- while every TEXTUAL
+  --            anchor in Part 1b still passes, because the body still names
+  --            public.strategy_analytics, computing_started_at,
+  --            computation_warned, done_pending_children, SKIP LOCKED, LIMIT and
+  --            the 16-hour interval. A source scan cannot see rows; only
+  --            EXECUTEing the deployed body against real ones falsifies this.
+  --            The needle carries its trailing semicolon, which is what
+  --            distinguishes the reap UPDATE's final predicate from the
+  --            clock-start UPDATE's identical-looking one.
+  -- RED-UNDER-M: {"arm":"2/arm A/JOB-02","apply":[{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"AND sa.computation_status = 'computing';","replace":"AND sa.computation_status = 'reaper-disabled';","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'failed' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-02): a stranded computing row with no active compute_jobs was not terminalized to failed (got %). The spinner is permanent.', v_status;
   END IF;
+  -- RED-UNDER: write `computation_warned = TRUE` instead of FALSE in the reap
+  --            arm's SET. The token stays, so Part 1b's structural SI-02 anchor
+  --            and the migration's own STEP 2 check both still pass -- and that
+  --            is exactly why this behavioural arm has to exist separately from
+  --            1/JOB-02/SI-02: a reap that SETS the marker instead of clearing it
+  --            satisfies every grep for the word and still hands the status
+  --            bridge a reap it will launder into complete_with_warnings.
+  -- RED-UNDER-M: {"arm":"2/arm A/SI-02","apply":[{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"           computation_warned   = FALSE,","replace":"           computation_warned   = TRUE,","occurrences":1}]}
   IF v_warned IS DISTINCT FROM FALSE THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/SI-02): the reap did not clear computation_warned (got %). The status bridge will launder this failure into complete_with_warnings on its next call -- a FALSE SUCCESS on a money surface.', v_warned;
   END IF;
   IF v_error IS DISTINCT FROM 'Analytics was interrupted before it could finish and did not recover. Retry the sync.' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-02): computation_error is not the shipped reaper message (got %). It renders to the USER — the portfolio-side and strategy-side surfaces read this column directly — so it must not re-attribute fault or claim how much work completed. (It no longer renders as a Details line under GATE_ANALYTICS_FAILED: Phase 162 / UI-SPEC C-2 removed that appendix from the wizard envelope. The copy requirement is unchanged; only the surface named here was stale.)', v_error;
   END IF;
+  -- RED-UNDER: make the reaper disobey its own clear-on-exit rule -- write
+  --            `computing_started_at = now()` instead of NULL in the reap SET, so
+  --            a row it just terminalized keeps a live reaper key.
+  --            ⚠️ LAYERED across TWO migrations, and the second step is the
+  --            interesting one: the stamp TRIGGER from 20260803120000 is bound
+  --            BEFORE UPDATE and its arm (d) clears the key unconditionally on
+  --            every exit from computing, so the cron-body edit ALONE is
+  --            invisible -- the trigger repairs it and this arm stays green. Arm
+  --            (d) is therefore neutralised in the same twin. That pair is the
+  --            finding: the deployed body and the table trigger are two
+  --            independent defences of one invariant, and only breaking both
+  --            makes the invariant observable here.
+  -- RED-UNDER-M: {"arm":"2/arm A/JOB-01","apply":[{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"           computing_started_at = NULL","replace":"           computing_started_at = now()","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql","find":"    NEW.computing_started_at := NULL;","replace":"    NULL;","occurrences":1}]}
   IF v_stamp IS NOT NULL THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-01): the reap left computing_started_at set (got %). The reaper is itself an exit transition and must obey the clear-on-exit rule, or a stale stamp can re-trigger it.', v_stamp;
   END IF;
@@ -419,6 +608,17 @@ BEGIN
   -- arm B: SC#2 direction 2 -- an OLD computed_at must NOT drag a healthy row in.
   SELECT computation_status INTO v_status
     FROM public.strategy_analytics WHERE strategy_id = v_b;
+  -- RED-UNDER: widen the reap arm's staleness predicate to
+  --            `(s.computing_started_at < now() - interval '16 hours' OR TRUE)`,
+  --            the shape any predicate that stops keying on the stamp collapses
+  --            to. Arm A is still reaped, so every assertion above stays green;
+  --            arm B -- a HEALTHY row whose stamp is fresh -- is taken as well,
+  --            and a live computation is terminalized under the user.
+  --            ⚠️ The 16-hour literal is deliberately KEPT rather than replaced.
+  --            Removing it would fire 1/JOB-03 and the migration's STEP 2 first,
+  --            and this arm would never be reached: SC#2 direction 2 is about the
+  --            predicate's KEY, not about its threshold value.
+  -- RED-UNDER-M: {"arm":"2/arm B/SC#2","apply":[{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"         AND s.computing_started_at < now() - interval '16 hours'","replace":"         AND (s.computing_started_at < now() - interval '16 hours' OR TRUE)","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'computing' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm B/SC#2): a row with a FRESH computing_started_at but a 100-day-old computed_at was reaped (got %). The predicate is keyed on computed_at, which the Python entry upsert omits, so it holds the PRIOR run value -- every fresh computation would be reaped instantly.', v_status;
   END IF;
@@ -426,6 +626,17 @@ BEGIN
   -- arm C: the safety conjunct.
   SELECT computation_status INTO v_status
     FROM public.strategy_analytics WHERE strategy_id = v_c;
+  -- RED-UNDER: drop `'running'` from the non-terminal status list in the REAP
+  --            arm's NOT EXISTS conjunct (nth 2 -- the clock-start arm carries a
+  --            byte-identical list and is left alone, which is what keeps arm D
+  --            and Part 3 unmoved). The safety conjunct then stops seeing the one
+  --            status a live in-flight chain actually holds, and a healthy
+  --            computation with a claimed job is reaped.
+  --            ⚠️ `done_pending_children` survives the edit on purpose: Part 1b's
+  --            list anchor and STEP 2 both grep for that token alone, so a status
+  --            list that has quietly lost 'running' passes every structural check
+  --            in the corpus. This arm is the only thing that sees it.
+  -- RED-UNDER-M: {"arm":"2/arm C/JOB-02","apply":[{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"                  AND cj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')","replace":"                  AND cj.status IN ('pending', 'done_pending_children', 'failed_retry')","occurrences":2,"nth":2}]}
   IF v_status IS DISTINCT FROM 'computing' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm C/JOB-02): a row with an ACTIVE compute_jobs row was reaped (got %). A healthy in-flight chain always has a non-terminal job row; reaping it fails a live computation.', v_status;
   END IF;
@@ -435,9 +646,33 @@ BEGIN
   -- nothing) AND the stamp must now be set (the arm actually ran).
   SELECT computation_status, computing_started_at INTO v_status, v_stamp
     FROM public.strategy_analytics WHERE strategy_id = v_d;
+  -- RED-UNDER: back-date what the clock-start arm writes -- `SET
+  --            computing_started_at = now() - interval '100 years'` instead of
+  --            now(). The arm still runs, still stamps, and still passes every
+  --            anchor; but the row it just clocked is instantly older than the
+  --            16-hour threshold, so the reap arm -- which runs SECOND in the same
+  --            tick, by design -- terminalizes it on the spot. A NULL stamp is a
+  --            WRITER bug, not a stranded job, and this converts that bug into
+  --            user-visible data loss in one tick.
+  --            ⚠️ Deleting the arm instead would redden 2/arm D/D-11 (the stamp
+  --            stays NULL) rather than this one: the two halves of the
+  --            non-destructive property need two different mutations, which is
+  --            why both assertions are load-bearing.
+  -- RED-UNDER-M: {"arm":"2/arm D/JOB-02","apply":[{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"       SET computing_started_at = now()","replace":"       SET computing_started_at = now() - interval '100 years'","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'computing' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm D/JOB-02): a computing row with a NULL computing_started_at was reaped (got %). A NULL stamp is a WRITER bug, not a stranded job; the clock-start arm must START its clock, never terminalize it -- that would convert a bug into user-visible data loss.', v_status;
   END IF;
+  -- RED-UNDER: invert the clock-start UPDATE's own final predicate in
+  --            20260803130000 -- `AND sa.computing_started_at IS NOT NULL` -- so
+  --            the arm matches no unclocked row and the (computing, NULL stamp, no
+  --            active job) population is never clocked at all.
+  --            ⚠️ The CTE's `AND s.computing_started_at IS NULL` is left intact, so
+  --            the migration's own STEP 2 anchor (`the clock-start arm was lost in
+  --            the rewrite`) still finds its token and the apply completes. That
+  --            is the point: an arm can be present in the deployed text and
+  --            reach zero rows, and no static check in this corpus can tell the
+  --            difference -- a source scan cannot see rows.
+  -- RED-UNDER-M: {"arm":"2/arm D/D-11","apply":[{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"       AND sa.computing_started_at IS NULL;","replace":"       AND sa.computing_started_at IS NOT NULL;","occurrences":1}]}
   IF v_stamp IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm D/D-11): the clock-start arm did not start the clock on a (computing, NULL stamp, no active job) row -- the stamp is still NULL. Such a row is invisible to the reap arm forever, and no STATIC gate can ever see it (a source scan cannot see rows). Either the clock-start arm is missing from the deployed body, or 25+ foreign rows in the same condition consumed its budget (see this arm''s DETERMINISM note above).';
   END IF;
@@ -486,8 +721,48 @@ BEGIN
 
   SELECT command INTO v_command
     FROM cron.job WHERE jobname = 'reap_strategy_analytics_stuck_computing';
+  -- ⛔ NOT AN ARM, AND DELIBERATELY NOT ONE. This guard carries no
+  --    `TEST FAILED (` identity, so the runner does not count it as a section
+  --    (scripts/mutation-runner/parse.mjs IDENTITY_CARRIER). That is the honest
+  --    classification, not a way to dodge a twin -- and it follows the precedent
+  --    the SAME question set in test_retention_orphaned_running.sql's `3/JOB-05`
+  --    (phase 164.4.1, commit fcbc0159): reclassify, never waive.
+  --
+  --    MEASURED on the lane 2026-09-05, twice, rather than argued. This raise is
+  --    the THIRD copy of one registration guard -- Part 1b's, then Part 2's,
+  --    then this -- and each copy is dominated by the one before it. For it to
+  --    fail FIRST, Parts 1 and 2 must both pass (so cron.job.command was
+  --    non-NULL when Part 2 read it) while Part 3 reads NULL, and nothing can
+  --    change cron.job between those two reads: everything Part 2 does happens
+  --    inside the transaction it rolls back. Both escape routes were driven on
+  --    real lanes and both failed:
+  --      * unschedule post-apply and neuter the dominators (two copies of
+  --        1/JOB-02 -- the second is needed because a NULL schedule IS DISTINCT
+  --        FROM the cadence literal -- plus Part 2's `2`): Part 2 then reaches
+  --        its oracle call and the lane exits 3 on
+  --        `22004: query string argument of EXECUTE is null`
+  --        (CONTEXT: inline_code_block line 103 at EXECUTE), a raw driver error
+  --        that names no arm and scores NO-IDENTITY.
+  --      * a cron body that unschedules ITSELF: Parts 1a, 1b and 2 all print OK,
+  --        but the unschedule is transactional, Part 3 reads the row back, and
+  --        its SECOND tick dies on
+  --        `XX000: could not find valid entry for job
+  --        'reap_strategy_analytics_stuck_computing'` -- again naming no arm.
+  --
+  --    A raise that cannot be made to fire is not a falsifiable assertion about
+  --    production, and the founder rule is that a test which CANNOT FAIL is
+  --    worse than none. So it stops CLAIMING to be one. It is KEPT, rather than
+  --    deleted, for the one thing it still does: if a future refactor ever makes
+  --    this reachable it fails with a named invariant instead of a raw 22004 out
+  --    of the EXECUTE below. The registration ASSERTION lives in Part 1b's
+  --    1/JOB-02 and in Part 2's `2`, and BOTH of those bite.
+  --
+  --    ⚠️ Do NOT restore the identity spelling for `3`. Doing so re-adds an
+  --    unfalsifiable section, and the only way to make the corpus green again
+  --    would be a waiver -- which is exactly what WAIVED_CEILING 0 refuses
+  --    (164.4.1-CONTEXT D-03).
   IF v_command IS NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (3): reap_strategy_analytics_stuck_computing cron job is missing while pg_cron is installed.';
+    RAISE EXCEPTION 'INVARIANT (Part 3 precondition): the reap_strategy_analytics_stuck_computing cron job is missing while pg_cron is installed, but Part 1b and Part 2 both passed. That is supposed to be unreachable -- see the note above. The registration assertions are Part 1b (1/JOB-02) and Part 2 (2).';
   END IF;
 
   INSERT INTO auth.users (id, email)
@@ -523,6 +798,19 @@ BEGIN
    WHERE strategy_id = ANY (v_seeded)
      AND strategy_id <> v_youngest
      AND computation_status = 'failed';
+  -- RED-UNDER: raise the REAP arm's bound from `LIMIT 25` to `LIMIT 26` (the
+  --            needle takes the ORDER BY line with it, which is what picks the
+  --            reap arm out of the two byte-identical `LIMIT 25` lines and the
+  --            two more in the migration's own header prose). Tick 1 then takes
+  --            all 26 seeds: the first assertion still counts 25 of my 25 oldest
+  --            and passes, and the second one -- my YOUNGEST seed, the row a
+  --            correctly bounded tick must leave behind -- reddens.
+  --            ⚠️ This is the D-19 defect's own shape re-introduced by a different
+  --            route. Every gate in phases 142 and 142.1 greps for the PRESENCE of
+  --            LIMIT and passed while the bound did not exist; naming WHICH row
+  --            must survive, rather than counting how many moved, is what makes
+  --            the bound falsifiable at all.
+  -- RED-UNDER-M: {"arm":"3/arm E/JOB-02","apply":[{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"       ORDER BY s.computing_started_at ASC\n       LIMIT 25","replace":"       ORDER BY s.computing_started_at ASC\n       LIMIT 26","occurrences":1}]}
   IF v_cnt <> 25 THEN
     RAISE EXCEPTION 'TEST FAILED (3/arm E/JOB-02): after one tick only % of MY 25 oldest seeded stranded rows are failed, expected all 25. Either the run is not draining, or a foreign row older than the century-old seed epoch crowded a seed out of the LIMIT-25 budget (see the header RESIDUAL ASSUMPTION).', v_cnt;
   END IF;
@@ -655,6 +943,23 @@ BEGIN
   -- S-2 SEED-INTEGRITY CONTROL, not a behavioural proof (see the Part 4 header):
   -- the row was seeded WITH a stamp, so this can only fail if the seed itself is
   -- broken -- which would make every assertion below vacuous.
+  -- RED-UNDER: make the mid-chain bridge hop DESTROY the stamp -- change branch
+  --            (a)'s CASE Arm 3 from `ELSE strategy_analytics.computing_started_at`
+  --            to `ELSE NULL` -- and neutralise the two trigger arms that would
+  --            otherwise repair it. THREE steps, and each was needed:
+  --              * the bridge edit alone is invisible because trigger arm (a)
+  --                restores OLD.computing_started_at on an already-clocked
+  --                computing row;
+  --              * with arm (a) gone the write arrives unclocked and trigger arm
+  --                (b) stamps now() instead, so the stamp is non-NULL again.
+  --            Only with both arms silent does the row reach this read with no
+  --            stamp. ⛔ This arm is an S-2 SEED-INTEGRITY CONTROL, and the
+  --            mutation is chosen to match what it CLAIMS: it does not report a
+  --            finding about the bridge, it reports that 4b below would be
+  --            comparing against nothing. The three-deep defence this twin has to
+  --            strip is itself the measurement -- it is why the Part 4 header
+  --            calls 4b defence-in-depth rather than a single-mutation observable.
+  -- RED-UNDER-M: {"arm":"4a/seed","apply":[{"kind":"edit","file":"supabase/migrations/20260802120000_strategy_analytics_stuck_computing_reaper.sql","find":"             ELSE strategy_analytics.computing_started_at","replace":"             ELSE NULL","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql","find":"      NEW.computing_started_at := OLD.computing_started_at;","replace":"      NULL;","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql","find":"      NEW.computing_started_at := now();","replace":"      NULL;","occurrences":1}]}
   IF v_stamp IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (4a/seed): the seeded computing_started_at is gone before the SC-2b arm even runs, so 4b would compare against nothing. This is a broken fixture, not a finding about the bridge.';
   END IF;
@@ -675,6 +980,20 @@ BEGIN
   IF v_status IS DISTINCT FROM 'computing' THEN
     RAISE EXCEPTION 'TEST FAILED (4b): the row left computing while a sibling job was still in flight (got %); the SC-2b arm would be vacuous.', v_status;
   END IF;
+  -- RED-UNDER: re-implement the Phase 106 janitor bug in this column -- change
+  --            branch (a)'s CASE Arm 3 to `ELSE now()`, so a second bridge call on
+  --            an ALREADY-computing row advances the clock, and neutralise trigger
+  --            arm (a), the second mechanism that preserves it.
+  --            ⚠️ BOTH steps are required and that is the arm's own documented
+  --            weakness made executable: the Part 4 header states that two
+  --            independent mechanisms defend this value and that breaking either
+  --            ALONE leaves this arm green. This twin is the measurement behind
+  --            that sentence.
+  --            ⚠️ `ELSE now()` does NOT trip the negative anchor at Part 1a or the
+  --            migration's own STEP 7: both read `computing_started_at\s*=\s*now\(\)`,
+  --            and inside a CASE the column name and the call are not adjacent.
+  --            MEASURED, not assumed -- the apply completes and Part 1a passes.
+  -- RED-UNDER-M: {"arm":"4b/SC-2b/JOB-01","apply":[{"kind":"edit","file":"supabase/migrations/20260802120000_strategy_analytics_stuck_computing_reaper.sql","find":"             ELSE strategy_analytics.computing_started_at","replace":"             ELSE now()","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql","find":"      NEW.computing_started_at := OLD.computing_started_at;","replace":"      NULL;","occurrences":1}]}
   IF v_stamp IS DISTINCT FROM v_sentinel THEN
     RAISE EXCEPTION 'TEST FAILED (4b/SC-2b/JOB-01): a second bridge call on an ALREADY-computing row ADVANCED computing_started_at (expected the sentinel %, got %). The bridge is PERFORMed in-RPC on every job transition, so every hop of a multi-hop chain would push the stamp forward and the reaper could never fire -- the Phase 106 janitor bug re-implemented in a new column, and a naive writer-sets-the-stamp gate stays green through it.', v_sentinel, v_stamp;
   END IF;
@@ -684,9 +1003,37 @@ BEGIN
 
   SELECT computation_status, computing_started_at INTO v_status, v_stamp
     FROM public.strategy_analytics WHERE strategy_id = v_strat;
+  -- RED-UNDER: change branch (c)'s fall-through resolution in the 20260802120000
+  --            re-base from `ELSE 'complete'` to `ELSE 'complete_with_warnings'`,
+  --            so an all-done chain with NO warning marker still resolves to the
+  --            warned sub-state. That is the launder direction the SI-02 work
+  --            exists to keep closed, in reverse: a clean run reported as one that
+  --            had problems.
+  --            ⚠️ The SECTION here is `4`: the runner's suffix rule folds the
+  --            bare identities 4a / 4b / 4c into one section, so ONE twin covers
+  --            all three, and it is 4c's status check that fires -- 4a and 4b
+  --            both pass first, untouched, which is what proves the mutation
+  --            reaches this far. The twin's `arm` is nonetheless spelled `4c`,
+  --            not `4`, and that is MEASURED: `arm` is matched against the
+  --            literal inside `TEST FAILED (…)`, and no raise in this file is
+  --            named `4`. Spelled `4`, the run reports `WRONG-ARM(4c)` (observed
+  --            2026-09-05). Section folding applies to the DENOMINATOR the
+  --            runner counts, never to the identity it reads.
+  -- RED-UNDER-M: {"arm":"4c","apply":[{"kind":"edit","file":"supabase/migrations/20260802120000_strategy_analytics_stuck_computing_reaper.sql","find":"           ELSE 'complete'","replace":"           ELSE 'complete_with_warnings'","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'complete' THEN
     RAISE EXCEPTION 'TEST FAILED (4c): all jobs done did not resolve to complete (got %).', v_status;
   END IF;
+  -- RED-UNDER: leave a live reaper key on a TERMINAL row -- write
+  --            `computing_started_at = clock_timestamp()` in branch (c)'s exit
+  --            (nth 2; nth 1 is branch (b)'s 11-space line, which Part 5 owns) --
+  --            and neutralise trigger arm (d), which clears the key on every exit
+  --            and would otherwise repair the branch silently.
+  --            ⚠️ `clock_timestamp()` rather than `now()` deliberately: `= now()`
+  --            is the byte sequence Part 1a's negative anchor and STEP 7 both
+  --            refuse, so it would fire 1/JOB-01 first and never reach Part 4.
+  --            Branch (b) keeps its own `= NULL`, so 1/JOB-01's positive anchor
+  --            still finds a match and stays green.
+  -- RED-UNDER-M: {"arm":"4c/JOB-01","apply":[{"kind":"edit","file":"supabase/migrations/20260802120000_strategy_analytics_stuck_computing_reaper.sql","find":"         computing_started_at = NULL,","replace":"         computing_started_at = clock_timestamp(),","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql","find":"    NEW.computing_started_at := NULL;","replace":"    NULL;","occurrences":1}]}
   IF v_stamp IS NOT NULL THEN
     RAISE EXCEPTION 'TEST FAILED (4c/JOB-01): branch (c) left computing_started_at set on a TERMINAL row (got %). A stale stamp on a terminal row is exactly what the reaper could later re-fire on.', v_stamp;
   END IF;
@@ -736,9 +1083,30 @@ BEGIN
 
   SELECT computation_status, computing_started_at INTO v_status, v_stamp
     FROM public.strategy_analytics WHERE strategy_id = v_strat;
+  -- RED-UNDER: make branch (b) resolve a NON-SUPERSEDED failed_final to
+  --            'complete' -- replace `SET computation_status =
+  --            EXCLUDED.computation_status` with the literal in the 20260802120000
+  --            re-base. A permanent failure then renders as a clean success on
+  --            every surface that reads computation_status, which is the
+  --            false-success class this file's SI-02 arms exist to refuse, reached
+  --            through the OTHER exit branch.
+  --            ⚠️ Branch (b) is the only one of the three that writes EXCLUDED
+  --            rather than a CASE, so the needle is unique and Parts 2, 3 and 4
+  --            (which never take branch (b)) all stay green.
+  -- RED-UNDER-M: {"arm":"5","apply":[{"kind":"edit","file":"supabase/migrations/20260802120000_strategy_analytics_stuck_computing_reaper.sql","find":"       SET computation_status = EXCLUDED.computation_status,","replace":"       SET computation_status = 'complete',","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'failed' THEN
     RAISE EXCEPTION 'TEST FAILED (5): a non-superseded failed_final did not resolve the strategy to failed (got %).', v_status;
   END IF;
+  -- RED-UNDER: the branch-(b) mirror of 4c/JOB-01 -- write
+  --            `computing_started_at = clock_timestamp()` in branch (b)'s exit
+  --            (nth 1, the 11-space line) and neutralise trigger arm (d). A
+  --            terminal 'failed' row then keeps the key the reaper fires on, so
+  --            the next tick can re-terminalize a row it already terminalized.
+  --            ⚠️ Branch (c) keeps its `= NULL`, which is what leaves Part 4c green
+  --            and Part 1a's positive anchor satisfied -- the two exit branches
+  --            are twinned separately on purpose, because a single anchor over the
+  --            whole functiondef cannot tell which one lost the clear.
+  -- RED-UNDER-M: {"arm":"5/JOB-01","apply":[{"kind":"edit","file":"supabase/migrations/20260802120000_strategy_analytics_stuck_computing_reaper.sql","find":"           computing_started_at = NULL,","replace":"           computing_started_at = clock_timestamp(),","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql","find":"    NEW.computing_started_at := NULL;","replace":"    NULL;","occurrences":1}]}
   IF v_stamp IS NOT NULL THEN
     RAISE EXCEPTION 'TEST FAILED (5/JOB-01): branch (b) left computing_started_at set on a TERMINAL failed row (got %). Every exit from computing must clear the stamp, or the reaper can re-fire on a row it already terminalized.', v_stamp;
   END IF;
@@ -842,12 +1210,39 @@ BEGIN
   -- because every assertion below is a comparison against the seeded state.
   SELECT computation_status, computing_started_at INTO v_status, v_stamp
     FROM public.strategy_analytics WHERE strategy_id = v_strat_a;
+  -- RED-UNDER: break the seed this control guards -- move row A's INSERT stamp
+  --            from `now() - interval '3 hours'` to `now() - interval '4 hours'`,
+  --            so it no longer equals v_sentinel.
+  --            ⛔ The mutation targets the GATE, not a migration, and that is the
+  --            honest falsifier rather than a shortcut: this arm makes no claim
+  --            about production. It exists because the FROZEN-CLOCK note above
+  --            writes the three-hour offset TWICE -- once in this seed and once in
+  --            v_sentinel -- specifically so the control compares two
+  --            INDEPENDENTLY WRITTEN expressions instead of a value against
+  --            itself. A divergence between those two literals is precisely the
+  --            broken fixture the raise names, and 6a and 6c below would be
+  --            vacuous under it. Gate-file steps are grammar-legal (rule 3b still
+  --            forbids touching any failure branch, and this needle is a seed).
+  -- RED-UNDER-M: {"arm":"6/seed A/D-18","apply":[{"kind":"edit","file":"supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql","find":"computing_started_at)\n  VALUES (v_strat_a, 'computing', FALSE, now() - interval '3 hours');","replace":"computing_started_at)\n  VALUES (v_strat_a, 'computing', FALSE, now() - interval '4 hours');","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'computing' OR v_stamp IS DISTINCT FROM v_sentinel THEN
     RAISE EXCEPTION 'TEST FAILED (6/seed A/D-18): row A did not land at computing with the three-hour-old sentinel (got status %, stamp %, expected sentinel %). The trigger fires on UPDATE only, so this INSERT must land verbatim; if it did not, 6a and 6c below would be vacuous. This is a broken fixture, not a finding about the trigger.', v_status, v_stamp, v_sentinel;
   END IF;
 
   SELECT computation_status, computing_started_at INTO v_status, v_stamp
     FROM public.strategy_analytics WHERE strategy_id = v_strat_b;
+  -- RED-UNDER: seed row B WITH a clock -- `now()` instead of NULL -- so the
+  --            (computing, no clock) state 6b needs is never established.
+  --            ⛔ A gate-file step for the same reason as 6/seed A/D-18: the raise
+  --            claims the state was not reachable at INSERT, and the only thing
+  --            that can make that true is an INSERT that supplies a stamp. The
+  --            production reading of the same failure -- a trigger that fired on
+  --            the insert path after all -- is NOT reachable as a mutation here:
+  --            widening the trigger to INSERT makes PL/pgSQL raise `record "old"
+  --            is not assigned yet` on its first OLD read, a raw driver error that
+  --            names no arm, and STEP 3 of 20260803120000 aborts the apply on the
+  --            tgtype before that. The seed edit is what remains, and it is what
+  --            the arm actually asserts.
+  -- RED-UNDER-M: {"arm":"6/seed B/D-18","apply":[{"kind":"edit","file":"supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql","find":"computing_started_at)\n  VALUES (v_strat_b, 'computing', FALSE, NULL);","replace":"computing_started_at)\n  VALUES (v_strat_b, 'computing', FALSE, now());","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'computing' OR v_stamp IS NOT NULL THEN
     RAISE EXCEPTION 'TEST FAILED (6/seed B/D-18): row B did not land at computing with no clock (got status %, stamp %). That state must be reachable at INSERT -- it is the whole reason the trigger is bound to UPDATE only -- or 6b below proves nothing.', v_status, v_stamp;
   END IF;
@@ -865,9 +1260,35 @@ BEGIN
 
   SELECT computation_status, computing_started_at INTO v_status, v_stamp
     FROM public.strategy_analytics WHERE strategy_id = v_strat_a;
+  -- RED-UNDER: have 6a's driver name a status other than computing -- `SET
+  --            computation_status = 'failed'` in the row-A UPDATE above.
+  --            ⛔ A gate-file step, and again the arm's own claim is what forces
+  --            it: this raise is not about the trigger, it is about whether the
+  --            DRIVER established the precondition the never-advance assertion
+  --            needs. A driver that names a terminal status is exactly that
+  --            failure. The production route -- a trigger arm that writes
+  --            NEW.computation_status -- was rejected on measurement, not taste:
+  --            it is arm (a), so it fires on Part 4's mid-chain bridge hop first
+  --            and reddens section 4 instead, and clearing the way needs a
+  --            cascade of neuters through 4a, 4b and 4b/SC-2b that would make
+  --            this arm's verdict depend on five suppressions.
+  -- RED-UNDER-M: {"arm":"6a/G1","apply":[{"kind":"edit","file":"supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql","find":"     SET computation_status = 'computing',\n         computing_started_at = now()\n   WHERE strategy_id = v_strat_a;","replace":"     SET computation_status = 'failed',\n         computing_started_at = now()\n   WHERE strategy_id = v_strat_a;","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'computing' THEN
     RAISE EXCEPTION 'TEST FAILED (6a/G1): row A left computing under a driver that named computing (got %); the never-advance assertion below would be vacuous.', v_status;
   END IF;
+  -- RED-UNDER: delete trigger arm (a) -- replace `NEW.computing_started_at :=
+  --            OLD.computing_started_at;` in 20260803120000 with a no-op. The
+  --            Python-writer-shaped UPDATE then advances the clock on a row that
+  --            was already computing and already clocked, so the clock measures
+  --            the last hop instead of the whole chain, the reaper's 16-hour
+  --            threshold is pushed forward on every hop, and the worst-case
+  --            stranded spinner runs about 1.75x the advertised bound.
+  --            ⚠️ This is a SINGLE-step twin where 4b's is two, and the asymmetry
+  --            is the point: Part 4b is defended by the bridge's Arm 3 as well, so
+  --            deleting arm (a) alone leaves 4b green and lets this arm be the
+  --            first failure. MEASURED, and it is what makes 6a the
+  --            single-mutation observable the Part 4 header says 4b is not.
+  -- RED-UNDER-M: {"arm":"6a/G1/D-01/SC-17-01","apply":[{"kind":"edit","file":"supabase/migrations/20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql","find":"      NEW.computing_started_at := OLD.computing_started_at;","replace":"      NULL;","occurrences":1}]}
   IF v_stamp IS DISTINCT FROM v_sentinel THEN
     RAISE EXCEPTION 'TEST FAILED (6a/G1/D-01/SC-17-01): a direct write ADVANCED computing_started_at on a row that was ALREADY computing and ALREADY clocked (expected the sentinel %, got %). The clock must measure the WHOLE job chain, not its last hop: otherwise every hop pushes it forward, the reaper can never fire, and the worst-case stranded spinner runs about 1.75x the advertised bound. No per-writer rule can hold this -- it binds a writer only if it lives on the table.', v_sentinel, v_stamp;
   END IF;
@@ -887,9 +1308,25 @@ BEGIN
 
   SELECT computation_status, computing_started_at INTO v_status, v_stamp
     FROM public.strategy_analytics WHERE strategy_id = v_strat_b;
+  -- RED-UNDER: the row-B mirror of 6a/G1 -- have 6b's driver name 'failed'
+  --            instead of 'computing', so the clock-start assertion below would be
+  --            asserting about a row that is not computing at all. Gate-file step,
+  --            same reasoning as 6a/G1; 6a's own arms are untouched and pass
+  --            first, which is what proves this mutation is scoped to row B.
+  -- RED-UNDER-M: {"arm":"6b/G1","apply":[{"kind":"edit","file":"supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql","find":"     SET computation_status = 'computing'\n   WHERE strategy_id = v_strat_b;","replace":"     SET computation_status = 'failed'\n   WHERE strategy_id = v_strat_b;","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'computing' THEN
     RAISE EXCEPTION 'TEST FAILED (6b/G1): row B left computing under a driver that named computing (got %); the clock-start assertion below would be vacuous.', v_status;
   END IF;
+  -- RED-UNDER: delete trigger arm (b) -- replace `NEW.computing_started_at :=
+  --            now();` with a no-op -- so an UPDATE that leaves a computing row
+  --            unclocked is allowed to. Such a row is invisible to the reap arm
+  --            forever AND to every static gate, because a source scan cannot see
+  --            rows: its spinner is permanent and silent.
+  --            ⚠️ Arm (b) is genuinely unreached by everything before Part 6 --
+  --            Part 2's clock-start UPDATE and Part 4's bridge hop both arrive
+  --            with a non-NULL NEW stamp -- so this single step reddens here and
+  --            nowhere earlier. MEASURED.
+  -- RED-UNDER-M: {"arm":"6b/G1/D-11","apply":[{"kind":"edit","file":"supabase/migrations/20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql","find":"      NEW.computing_started_at := now();","replace":"      NULL;","occurrences":1}]}
   IF v_stamp IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (6b/G1/D-11): a write left a computing row with NO computing_started_at and the trigger did not start its clock. That row is invisible to the reap arm forever AND to every static gate, so its spinner is permanent and silent -- the exact population this phase exists to make detectable.';
   END IF;
@@ -910,9 +1347,29 @@ BEGIN
 
   SELECT computation_status, computing_started_at INTO v_status, v_stamp
     FROM public.strategy_analytics WHERE strategy_id = v_strat_a;
+  -- RED-UNDER: have 6c's driver stay at 'computing' instead of making the
+  --            terminal transition, so the exit-clear assertion below would never
+  --            see an exit. Gate-file step, same class as 6a/G1 and 6b/G1: the
+  --            raise is about whether the driver landed, not about the trigger.
+  --            ⚠️ Under this mutation row A is still carrying its sentinel from 6a,
+  --            and trigger arm (a) restores it -- so the arm reddens on the STATUS
+  --            it names rather than incidentally on the stamp.
+  -- RED-UNDER-M: {"arm":"6c/G1","apply":[{"kind":"edit","file":"supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql","find":"     SET computation_status = 'failed',\n         computing_started_at = now() - interval '1 hour'\n   WHERE strategy_id = v_strat_a;","replace":"     SET computation_status = 'computing',\n         computing_started_at = now() - interval '1 hour'\n   WHERE strategy_id = v_strat_a;","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'failed' THEN
     RAISE EXCEPTION 'TEST FAILED (6c/G1): the terminal driver did not land on row A (got %); the exit-clear assertion below would be vacuous.', v_status;
   END IF;
+  -- RED-UNDER: delete trigger arm (d) -- replace `NEW.computing_started_at :=
+  --            NULL;` with a no-op -- so the stale clock 6c's driver deliberately
+  --            supplies on the way out SURVIVES on a terminal row. That is the
+  --            one case no per-writer rule can cover, and it is exactly what the
+  --            reaper could later re-fire on.
+  --            ⚠️ A single step reaches this arm even though 2/arm A/JOB-01, 4c and
+  --            5 all also depend on arm (d): each of those three has its OWN
+  --            explicit `computing_started_at = NULL` in the cron body or the
+  --            bridge, so with arm (d) silent they still write NULL and stay
+  --            green. 6c is the only place where the WRITER supplies a non-NULL
+  --            clock and nothing else clears it. MEASURED.
+  -- RED-UNDER-M: {"arm":"6c/G1/JOB-01","apply":[{"kind":"edit","file":"supabase/migrations/20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql","find":"    NEW.computing_started_at := NULL;","replace":"    NULL;","occurrences":1}]}
   IF v_stamp IS NOT NULL THEN
     RAISE EXCEPTION 'TEST FAILED (6c/G1/JOB-01): a row LEAVING computing kept the computing_started_at its writer supplied (got %). Every exit must clear the reaper key at the table, or the reaper re-fires on a row it already terminalized -- and a writer that supplies a stale clock on the way out is the one case no per-writer rule can cover.', v_stamp;
   END IF;

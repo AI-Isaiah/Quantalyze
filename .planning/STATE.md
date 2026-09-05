@@ -2,20 +2,20 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.4
-current_phase_name: REDUNDER-BACKFILL
-status: executing
-stopped_at: Completed 164.4-11-PLAN.md (batch 8 — the seven mixed files; FILES_FLOOR 39, ARMS_FLOOR 262, 0 waivers). PR + SHA-bound ubuntu sql-mutation green still owed.
-last_updated: "2026-09-04T17:38:02.554Z"
-last_activity: 2026-09-04
-last_activity_desc: Phase 164.4 execution started
-state_head: aad356e9a5bcbb3560ca68328250c6701bb6c5d9
+current_phase: 164.4.1
+current_phase_name: PGCRON-LANE
+status: complete
+stopped_at: Phase 164.4.1 COMPLETE — verified, ubuntu-measured at run 33973362161
+last_updated: "2026-09-05T15:18:29.000Z"
+last_activity: 2026-09-05
+last_activity_desc: Phase 164.4.1 closed — 44 files, 361 arms, 0 waivers, lane-blocked retired
+state_head: d6142c94188ab013e1c2957cfe9643b7a1d5924d
 progress:
   total_phases: 16
-  completed_phases: 5
-  total_plans: 82
-  completed_plans: 78
-  percent: 31
+  completed_phases: 4
+  total_plans: 76
+  completed_plans: 71
+  percent: 25
 ---
 
 # Project State — Quantalyze
@@ -166,17 +166,34 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 164.4 (REDUNDER-BACKFILL) — EXECUTING
-Plan: 1 of 12
+Phase: 164.4.1 (PGCRON-LANE) — EXECUTING
+Plan: 5 of 6
       class + lane probe + SCOPE AMENDMENT #2, 04-11 the eight annotation batches) —
       hand-maintained; `state.advance-plan` still REFUSES on this section
       (`ambiguous_position_phase`, see § Known Issues)
-Status: Executing Phase 164.4
+      ⚠️ 2026-09-05: plans 01 (substrate + tripwire observed) and 02 (file move 1) are
+      DONE. Next is plan 03. Measured at 164.4.1-02: `coverage: files 41/71`,
+      `arms: 272/272/0`, `biting: 272`, `pending: 0`, `lane-blocked: 3`,
+      `FILES_FLOOR` 41, `ARMS_FLOOR` 272, `WAIVED_CEILING` still 0.
+      ⛔ Every `run.mjs` run in this interval EXITS 1 on ONE `lane-blocked-stale`
+      row — the tripwire, not a regression. It clears when plan 05 lands.
+      ✅ 2026-09-05, SUPERSEDING the two lines above (kept as the dated record of
+      the 01-04 interval): plans 03, 04 and 05 are DONE and **the tripwire is
+      CLEARED**. Measured at 164.4.1-05 (HEAD b6b830cf), `node
+      scripts/mutation-runner/run.mjs` exiting **0**: `coverage: files 44/71`,
+      `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, `  pending: 0`,
+      `arms: 363/363/0`, `biting: 363`, `lane-invocations: 363` (tallies agree),
+      `mean 1.1s`, `✅ No defects`. `FILES_FLOOR` 44, `ARMS_FLOOR` 363,
+      `WAIVED_CEILING` still 0 — fifteen arms moves, zero waivers. From here a
+      NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
+      `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
+      prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
+Status: Executing Phase 164.4.1
       `arms: 262/262/0`, `biting: 262`, 0 waivers, exit 0. Next: land 164.4-11 as its own PR with
       `sql-mutation` GREEN on ubuntu SHA-bound to the head, then `/gsd-verify-work 164.4`.
       ⏳ Phase 164.4.1 PGCRON-LANE is still owed the 4 lane-blocked files plus the 1 `pending:`
       file (`test_compute_jobs_error_kind_copy_parity.sql`, ~100 sections).
-Last activity: 2026-09-04 — Phase 164.4 execution started
+Last activity: 2026-09-04 — Phase 164.4.1 execution started
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
       arms moves; `WAIVED_CEILING` unedited). Full corpus **exit 0**: `coverage: files 39/71`,
       `arms: 262/262/0`, `biting: 262`, `lane-invocations: 262` (tallies agree), `mean 1.0s`, 0
@@ -620,7 +637,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███░░░░░░░] 31%
+Progress: [███░░░░░░░] 25%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -790,6 +807,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4 P09 | resumed session | 3 tasks | 9 files |
 | Phase 164.4 P10 | ~3h | 3 tasks | 9 files |
 | Phase 164.4 P11 | ~3h | 3 tasks | 23 files |
+| Phase 164.4.1 P02 | 68 min | 3 tasks | 7 files |
+| Phase 164.4.1 P03 | 92 min | 3 tasks | 4 files |
+| Phase 164.4.1 P04 | 118 min | 3 tasks | 7 files |
+| Phase 164.4.1 P05 | 175 min | 3 tasks | 6 files |
+| Phase 164.4.1 P06 | 35m | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -1015,6 +1037,16 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4]: 164.4-11: SCOPE AMENDMENT #2's 40 files / 255 sections is SUPERSEDED — measured end state 39 / 252 / 262 twins. Corrected in all seven ledger sites as an ARITHMETIC CORRECTION, not a new decision; it follows from plan 09's founder-decided pg_cron deferral.
 - [Phase 164.4]: 164.4-11: WAIVED_CEILING stays 0 — Phase 164.4 finished with ZERO waivers across all eight arms moves. Every shadowed arm was reached by mutating a layer its shadow does not observe.
 - [Phase 164.4]: 164.4-11: ci.yml's sql-mutation timeout projection counts LEGS (arms + 2 × annotated files), not arms — the job runs a baseline and a restore leg per FILE. Phase end 340 legs ≈ 494 s ≈ 8.2 min; timeout-minutes stays 15.
+- [Phase 164.4.1]: 164.4.1-02: D-04 pending pin moved to the MEASURED empty set, guarded by a pending AIM (D-04) arm that classifies a stripped copy of a real gate — the AIM proven able to fail by neutering classifyGateIdiom's pending branch
+- [Phase 164.4.1]: 164.4.1-02: FILES_FLOOR 39->41 and ARMS_FLOOR 262->272, read off the run's own coverage:/biting: lines; separation driven both ways on real lanes ((41,272) one lane-blocked-stale row only; (42,273) adds both floor regressions). WAIVED_CEILING UNEDITED at 0 — nine arms moves, zero waivers
+- [Phase 164.4.1]: 164.4.1-02: a gate assertion's genuine falsifier may be REJECTED when it kills an earlier assertion first as a raw driver error (derive assertion 5 narrows the coherence arm instead of deleting it); and a LAYERED twin can be forced by defence-in-depth, where removing either half alone is a measured no-red (derive assertion 2)
+- [Phase 164.4.1]: 164.4.1-04: section 3 of the reaper gate RECLASSIFIED (identity removed), not waived — second use of the fcbc0159 precedent; WAIVED_CEILING stays 0 across 11 arms moves
+- [Phase 164.4.1]: 164.4.1-04: FILES_FLOOR 43 / ARMS_FLOOR 324, measured and separated both ways; new stand-in fixture 29-fixture-compute-jobs-priority.sql because migration 20260428120836 cannot coexist with 20260515114555 on one lane (42725)
+- [Phase 164.4.1]: 164.4.1-05: ARMS_FLOOR is 363, not the plan's projected 365 (324+39). Floors are set to what the run PRINTS.
+- [Phase 164.4.1]: 164.4.1-05: the lane-blocked-stale tripwire is CLEARED BY ANNOTATION — parse.mjs, the probe fixture and the probe/defect code are untouched (0 non-comment changed lines matching lane-blocked-stale|pg_available_extensions) and SELF-TEST 17/17 still fires.
+- [Phase 164.4.1]: 164.4.1-05: FIVE arms use GATE-FILE falsifiers (3 oracle preconditions, 1 seed-integrity control, 1 sum-of-pinned-counts invariant), each with its domination measurement at the site. A gate-file falsifier is NOT a waiver — the arm still raises, names itself first and counts in biting. WAIVED_CEILING unedited at 0.
+- [Phase 164.4.1]: D-07 closed by DOCUMENTING the classifier's text-only boundary and pinning it with a hand-built test — the proposed apply-list widening was retired because it would classify UNANNOTATED files by a line only ANNOTATED files carry (dead code behind a passing test)
+- [Phase 164.4.1]: sql-mutation timeout-minutes STAYS 15 and ci.yml is byte-unchanged by plan 06: the DECISION rule accepts only a measured ubuntu run, and that measurement was scoped out of the executor (worktree branch is not the phase branch, so a dispatch would not be SHA-bound)
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1717,8 +1749,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-04T15:52:47.408Z
-**Stopped At:** Completed 164.4-11-PLAN.md (batch 8 — the seven mixed files; FILES_FLOOR 39, ARMS_FLOOR 262, 0 waivers). PR + SHA-bound ubuntu sql-mutation green still owed.
+**Last Date:** 2026-09-05T10:46:00.442Z
+**Stopped At:** Completed 164.4.1-06-PLAN.md (ubuntu measurement DEFERRED to orchestrator)
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1799,6 +1831,9 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - ⚠️ TOOLING TRAP measured 2026-09-04: `gh run view --log` TRUNCATES — it cut the two minutes holding the `Failed Tests` block, so a clean assertion failure read as a HANG with no summary for three investigations. Use `gh api repos/<owner>/<repo>/actions/jobs/<id>/logs`.
 - ⛔⏱️ THE TIMING MODEL BROKE ON WAVE 8 AND THE TIMEOUT MARGIN IS NO LONGER COMFORTABLE. Run 33804312706 took **458 s** against a 313 s projection (46% over). The cause is in the job's OWN log: `per-arm lane time: mean 1.7s over 189 arm run(s)`. Every earlier ubuntu run reported **1.0s**, and the orchestrator's LOCAL run of the identical corpus also measured 1.0s — so this is NOT arm count and NOT the batch's content; the ubuntu lanes ran ~70% slower. One observation cannot separate CI-host variance from a real per-lane cost this batch's longer apply lists impose only on the ubuntu build. ⚠️ At the WORST observed 1.7 s/arm the ~265-arm end state projects to roughly **11 minutes** against `timeout-minutes: 15`. The earlier 6.9-min projection assumed 1.0 s and is now superseded. **Plan 164.4-08 must re-justify the timeout against the WORST observed per-lane cost, not the mean, and should treat raising it as the likely correct answer** — the trigger its own ci.yml comment names is 'a measured run approaching ~10 minutes'.
 - ⛔ ORCHESTRATOR TRAP, measured wave 6: editing ANY tracked file while `run.mjs` is in flight fails the run with a `dirty-checkout` defect (a version bump did it), and `RUNNER_EXIT=1` then reads exactly like a broken batch. Read the defect KIND before concluding — `dirty-checkout` with no arm and no file named is the orchestrator's own hand, not the corpus. Serialise: clean tree -> run -> then bump.
+- 164.4.1-03 BLOCKED on a founder decision: the retention gate's 3/JOB-05 section has NO first-failure mutation (measured twice on real lanes), so the corpus carries 1 waiver against WAIVED_CEILING 0. The full mutation-runner run now exits 1 on TWO defects and mutation-runner-floors.test.ts's WAIVER CREEP arm is RED, both deliberately. Decide: raise WAIVED_CEILING to 1, or restructure the gate's three-deep registration guard. See 164.4.1-03-SUMMARY.md.
+- SC-1's ubuntu half and SC-3's ubuntu cleared half are UNMEASURED at 164.4.1-06: no SHA-bound workflow_dispatch of the finished 44-file/363-arm tree exists, so there is no ubuntu wall clock, no ubuntu per-arm lane time, and ci.yml's TIMEOUT DECISION block carries no number from this phase. Owed to the orchestrator after merge.
+- Plan 164.4.1-06 Task 2's CLEARED grep over 164.4.1-TRIPWIRE-FIRED.log ALREADY returns 1 at base ddfd55d3, satisfied by plan 01's own header sentence — a green there proves nothing. Booked as deferred-items D-164.4.1-06-1; repair belongs in the assertion (bind to run id + 40-hex sha), not the document.
 
 ## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions
 
