@@ -167,6 +167,12 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 // (TODOS [REDUNDER-LANEBLOCKED-BLIND]). Founder decision, plan 09: it is owed to
 // Phase 164.4.1 PGCRON-LANE rather than worked around. The paragraph above stays
 // as the dated record of the amendment; this line is its correction.
+// ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-02, measured): 164.4's `39/71` end state
+// stands as its own dated record and is now HISTORY. Phase 164.4.1 put pg_cron
+// on the lane, so the SCOPE AMENDMENT #2 denominator no longer binds anything:
+// the deferred fifth file is annotated, `pending:` is EMPTY and the measured
+// reading is `coverage: files 41/71` with 3 lane-blocked files left for plans
+// 03-05. The end state of THIS phase is not restated here — read the run.
 //
 // ⭐ RE-DERIVED 2026-09-03 (plan 164.4-04) — THE PHASE'S FIRST *FILE* MOVE. The
 // blocks above STAY as lineage: 1 was the whole annotated corpus while it was
@@ -503,19 +509,66 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
 //                gets-a-red-under-annota/164.4-11-SUMMARY.md
 //
-// CURRENCY, stated where the VALUE is: RE-DERIVED 2026-09-04 by measurement
-// (plan 164.4-11). Measured coverage 39 of 71 — value RAISED from 32, and this
-// is the END STATE of Phase 164.4: every idiom gate file the pg-lane can reach
-// is annotated and proven. The remaining 32 of the 71 are NOT silently dropped
-// — the runner prints all of them by name on every run: 27 `unreachable:` (they
-// raise outside the identity idiom; out of scope by founder decision, TODOS
-// [REDUNDER-NONIDIOM]), 4 `lane-blocked:` (they probe pg_extension for pg_cron,
-// which this lane cannot host, TODOS [REDUNDER-PGCRON]), and exactly ONE
-// `pending:` — test_compute_jobs_error_kind_copy_parity.sql, which needs
-// migration 20260826140000 and is owed to Phase 164.4.1 PGCRON-LANE by founder
-// decision in plan 09. ⚠️ 39, NOT the 40 of SCOPE AMENDMENT #2: that amendment
-// predates the deferral.
-export const FILES_FLOOR = 39;
+// ⭐ RE-DERIVED 2026-09-05 (plan 164.4.1-02) — the FIRST file move of Phase
+// 164.4.1 PGCRON-LANE, on a pg-lane that now PRELOADS pg_cron (plan 01). The
+// blocks above STAY as lineage.
+//
+//   VALUE        41 — read off the run's own `coverage:` line, not counted here.
+//   DATE         2026-09-05, at HEAD f1311fbf.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 1
+//                  coverage: files 41/71
+//                  arms: 272/272/0   (executed/annotated/waived)
+//                  biting: 272
+//                  lane-invocations: 272
+//                  per-arm lane time: mean 1.0s over 272 arm run(s)
+//                ⚠️ exit 1, and that is EXPECTED in this interval, not a
+//                regression: the run carries EXACTLY ONE defect,
+//                `lane-blocked-stale`, because plan 01 made pg_cron available
+//                while three files are still classified `lane-blocked`. That is
+//                the tripwire of success criterion 3 doing its job; it clears at
+//                plan 05. Every arm still scored `RED (identity ok)`.
+//   SAMPLE SIZE  272 arms executed, all 272 `RED (identity ok)`, no defect of
+//                any OTHER kind. The two independent tallies AGREE: `arms:`
+//                executed 272 and `lane-invocations:` 272. 371 s wall clock, 41
+//                baseline and 41 restore legs beside the 272 arm lanes. The 41
+//                per-file `biting` counts SUM to 272.
+//   COVERAGE     41 annotated gate files of 71. The two added this batch are
+//                supabase/tests/test_compute_jobs_error_kind_copy_parity.sql
+//                  (3 sections — the corpus's LAST `pending:` file, blocked
+//                   only through its APPLY LIST) and
+//                supabase/tests/test_derive_allocator_keys_fanout.sql
+//                  (7 sections — blocked through its OWN TEXT, a
+//                   pg_cron-conditional RAISE NOTICE at :169).
+//                Proving BOTH shapes was the point of taking these two first:
+//                they are the cheapest possible check that plan 01's substrate
+//                is complete in both directions. The EXACT 41-name list is
+//                pinned in src/__tests__/mutation-annotation-parser.test.ts.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({filesFloor, armsFloor})`), 2026-09-05:
+//                  filesFloor=41 armsFloor=272  defects=1  kinds=
+//                    ["lane-blocked-stale"]                       (367.9 s)
+//                  filesFloor=42 armsFloor=273  defects=3  kinds=
+//                    ["lane-blocked-stale","floor","floor"] ->
+//                    `FILES_FLOOR regression: 41 annotated file(s) < floor 42`
+//                    `ARMS_FLOOR regression: 272 biting arm(s) < floor 273`
+//                                                                 (368.7 s)
+//                So 41/272 is exactly the separation point, not a value below
+//                it — the tripwire row is present in BOTH directions and is
+//                therefore not what makes the second run fire.
+//   RECORD       .planning/phases/164.4.1-pgcron-lane-put-pg-cron-on-the-
+//                throwaway-pg-lane-and-retire/164.4.1-02-SUMMARY.md
+//
+// CURRENCY, stated where the VALUE is: RE-DERIVED 2026-09-05 by measurement
+// (plan 164.4.1-02). Measured coverage 41 of 71 — value RAISED from 39. The
+// remaining 30 of the 71 are NOT silently dropped: the runner prints all of
+// them by name on every run — 27 `unreachable:` (they raise outside the
+// identity idiom; out of scope by founder decision, TODOS [REDUNDER-NONIDIOM])
+// and 3 `lane-blocked:`, which plans 03-05 of this phase take. `pending:` is
+// now EMPTY, measured: the one name it carried
+// (test_compute_jobs_error_kind_copy_parity.sql) is annotated, which is the
+// retirement of [REDUNDER-PGCRON] the founder chose over widening it. The
+// 2026-09-04 block above stays as the dated record of the 39-file corpus.
+export const FILES_FLOOR = 41;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -997,13 +1050,76 @@ export const FILES_FLOOR = 39;
 //   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
 //                gets-a-red-under-annota/164.4-11-SUMMARY.md
 //
+// ⭐ RE-DERIVED 2026-09-05 (plan 164.4.1-02) — the FIRST arms move of Phase
+// 164.4.1 PGCRON-LANE. The blocks above STAY as lineage.
+//
+//   VALUE        272 — read off the run's own `biting:` line, not counted here.
+//   DATE         2026-09-05, at HEAD f1311fbf.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 1
+//                  coverage: files 41/71
+//                  arms: 272/272/0   (executed/annotated/waived)
+//                  biting: 272
+//                  lane-invocations: 272
+//                  per-arm lane time: mean 1.0s over 272 arm run(s)
+//                ⚠️ exit 1 is the EXPECTED interval state, not a regression —
+//                one `lane-blocked-stale` row, the plan-01 tripwire, which
+//                clears at plan 05. See the FILES_FLOOR block above.
+//   SAMPLE SIZE  272 arms executed, all 272 `RED (identity ok)`, no defect of
+//                any other kind. Both tallies AGREE (executed 272,
+//                lane-invocations 272). 371 s wall clock, 41 baseline and 41
+//                restore legs. The 41 per-file `biting` counts SUM to 272.
+//   COVERAGE     41 annotated gate files of 71 (see the FILES_FLOOR block). 10
+//                of the 272 arms are new this batch — 3 + 7; 0 waivers were
+//                added, so WAIVED_CEILING is untouched at 0. Cumulative waivers
+//                across all NINE arms moves of this phase family: 0.
+//   ⭐ TWO OF THE 10 ARE LAYERED, each proven layered rather than assumed.
+//                `test_derive_allocator_keys_fanout.sql` arm 2: in-flight dedup
+//                for api_key jobs is defence in depth — the optimistic look-up
+//                in `_enqueue_compute_job_internal` (20260420073003:392-398)
+//                AND the partial unique index (:288-291). MEASURED: removing
+//                EITHER alone leaves the assertion GREEN, so a single-step
+//                mutation there is a `no-red`, not a falsifier. The index step
+//                is scoped `kind <> 'derive_broker_dailies'` because that
+//                migration's own Category-D probe (:1050-1057) still needs a
+//                raw duplicate poll_allocator_positions INSERT to trip it.
+//                `test_compute_jobs_error_kind_copy_parity.sql` arm 3/F-3: step
+//                1 alone was RUN on the lane and measured to ABORT the apply at
+//                20260826120000:1391 (`HONEST-01/F-3 verification failed: …
+//                does not carry the affirmative instruction to retry`); step 2
+//                re-points that one guard's needle and nothing else.
+//   ⭐ ONE ARM NEEDED THE GATE'S OWN EXCEPTION IDIOM, not a waiver.
+//                `test_derive_allocator_keys_fanout.sql` assertion 3 asserts a
+//                coherence arm ADMITS a shape; the falsifier makes the INSERT
+//                raise, and an unhandled 23514 aborts psql with a raw driver
+//                error naming no arm. It was wrapped in the nested
+//                `BEGIN … EXCEPTION WHEN check_violation` idiom assertion 4
+//                already used — the mirror-image reason, and the same
+//                root-cause-over-exception move plan 164.4-09 made.
+//   ⭐ ONE ARM IS A `sql` STEP AND THAT IS FORCED, NOT PREFERRED.
+//                Assertion 6 reads cron.job; 20260717233529's own STEP 6 arm
+//                (g) pins `schedule = '30 5 * * *'` EXACTLY, so editing STEP 5
+//                aborts the apply. The lane's --post-apply hook is where drift
+//                that happens AFTER a migration self-verifies belongs — which
+//                is also how a cron schedule drifts in production.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({filesFloor, armsFloor})`), 2026-09-05:
+//                  armsFloor=272  biting=272  defects=1  kinds=
+//                    ["lane-blocked-stale"]                       (367.9 s)
+//                  armsFloor=273  biting=272  defects=3  kinds=
+//                    ["lane-blocked-stale","floor","floor"] ->
+//                    `ARMS_FLOOR regression: 272 biting arm(s) < floor 273`
+//                    (beside the paired FILES_FLOOR regression)   (368.7 s)
+//                So 272 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4.1-pgcron-lane-put-pg-cron-on-the-
+//                throwaway-pg-lane-and-retire/164.4.1-02-SUMMARY.md
+//
 // CURRENCY, stated where the VALUE is — derivation, sample size, coverage and
-// separation in the block immediately above; record in 164.4-11-SUMMARY.md:
-// RE-DERIVED 2026-09-04 by measurement (plan 164.4-11).
-// Measured biting 262 — value RAISED from 247. This is Phase 164.4's END STATE
-// on today's lane; the next move is Phase 164.4.1 PGCRON-LANE, which unblocks
-// the five pg_cron files.
-export const ARMS_FLOOR = 262;
+// separation in the block immediately above; record in 164.4.1-02-SUMMARY.md:
+// RE-DERIVED 2026-09-05 by measurement (plan 164.4.1-02).
+// Measured biting 272 — value RAISED from 262. The 2026-09-04 block above stays
+// as the dated record of Phase 164.4's 262-arm end state; the next arms move is
+// plan 03 of this phase.
+export const ARMS_FLOOR = 272;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
@@ -1044,6 +1160,15 @@ export const ARMS_FLOOR = 262;
 // assertion (b) by wrapping its INSERT in the exception idiom the same file
 // already used. Read the run's own `arms:` W field, never this constant, for
 // what the corpus actually carries.
+//
+// ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-02, the first file move of Phase
+// 164.4.1): still 0, and the value is UNEDITED. The corpus is now 272 arms
+// across 41 files and the run's own `arms: 272/272/0` still reports W = 0.
+// Cumulative waivers across all NINE arms moves: 0. This batch came close once
+// and it was closed by a root-cause fix rather than an exception — the derive
+// gate's assertion 3 was wrapped in the exception idiom assertion 4 in the SAME
+// FILE already used, so an unhandled 23514 that named no arm became a
+// `TEST FAILED (3)` that does. The measurement lines above stay as lineage.
 export const WAIVED_CEILING = 0;
 
 /**
@@ -2755,6 +2880,15 @@ export function absurdityViolations({
 // TODOS [REDUNDER-LANEBLOCKED-BLIND]). MEASURED at this commit over
 // `supabase/tests/` via `--parse-only`: 39 annotated / 1 pending /
 // 27 unreachable / 0 inert / 4 lane-blocked = 71.
+// ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-02) — SUPERSEDES every reading above as
+// the current one; they all stay as lineage. Phase 164.4.1 put pg_cron ON the
+// lane (plan 01), so "which the pg-lane cannot host" is no longer true and the
+// deferral is being RETIRED rather than grown. MEASURED at this commit over
+// `supabase/tests/`: 41 annotated / 0 pending / 27 unreachable / 0 inert /
+// 3 lane-blocked = 71. `pending:` is EMPTY for the first time — its one name
+// was test_compute_jobs_error_kind_copy_parity.sql, now annotated. The three
+// still `lane-blocked:` are plans 03-05 of this phase; until they land, every
+// run exits 1 on ONE `lane-blocked-stale` row, which is the tripwire working.
 // Read the run's own `coverage:` and `  pending:` lines, never this sentence.
 //
 // ⭐ AND THE REASON CAN EXPIRE. "which the pg-lane cannot host" is a claim

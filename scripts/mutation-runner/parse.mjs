@@ -1136,6 +1136,12 @@ export function classifyGateIdiom(text) {
  * test_compute_jobs_error_kind_copy_parity.sql to Phase 164.4.1 PGCRON-LANE.
  * The backfill reached 39/71 and the run prints the other 32 as 27
  * `unreachable:` + 4 `lane-blocked:` + 1 `pending:`.
+ * ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-02, measured): Phase 164.4's 39/71 above
+ * is its dated end state and stays. Phase 164.4.1 put pg_cron on the pg-lane, so
+ * the reading is now `files 41/71` with the other 30 printed as 27
+ * `unreachable:` + 3 `lane-blocked:` + 0 `pending:`. No integer here is a
+ * pin — the live ones are FILES_FLOOR in run.mjs and the parser test's
+ * `scanCorpus reports N of 71 files annotated`.
  *
  * ⭐ 2026-09-03, plan 164.4-03: a FIFTH partition class, `laneBlockedFiles`.
  * The partition is `annotated + pending + unreachable + inert + lane-blocked
