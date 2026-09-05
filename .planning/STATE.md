@@ -5,11 +5,11 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.1
 current_phase_name: PROD-OBSERVABILITY
 status: in_progress
-stopped_at: Completed 164.1-04-PLAN.md
-last_updated: "2026-09-05T23:27:10.808Z"
+stopped_at: Completed 164.1-05-PLAN.md
+last_updated: "2026-09-05T23:44:44.501Z"
 last_activity: 2026-09-05
 last_activity_desc: 164.3.1/164.4/164.4.1 records restored and closed; 164.1 discuss+research+validation landed; planning blocked on founder secrets
-state_head: c66099c731da05c27d7f65c43b6758245d75d230
+state_head: 71bff33bc7fcc949ff5576acf23ee83b455d9b11
 progress:
   total_phases: 19
   completed_phases: 8
@@ -816,6 +816,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.1 P02 | 25 min | 2 tasks | 10 files |
 | Phase 164.1 P03 | 22 min | 2 tasks | 24 files |
 | Phase 164.1 P04 | 24 min | 2 tasks | 9 files |
+| Phase 164.1 P05 | 17 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -1070,6 +1071,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.1]: 164.1-04: MT5_PROBE_PY emits terminal_info in BOTH branches — the healthy reading must be a positive marker, not the absence of a key
 - [Phase 164.1]: 164.1-04: a non-zero railway ssh exit is DATA, not a measure-fail — a CLI exiting 255 while the terminal answered -10004 still gets the REDEPLOY remedy (proven by a positive control)
 - [Phase 164.1]: 164.1-04: the two IPC remedies are asserted different on the DEFECT ROWS, not on the REMEDIES table — the rows are what an operator reads
+- [Phase 164.1]: 164.1-05: the prober ships as its OWN hourly workflow (prod-prober.yml) with mode identity to the script — the two bare commands, self-test first, status captured on the next line — and a vitest pin whose every predicate is calibrated on a mutated copy. — A script proven by its own self-test proves nothing about a CI invocation that wraps it. ci.yml carries zero references (D-18) so a red prober can never make Railway skip the analytics deploy that would fix it.
+- [Phase 164.1]: 164.1-05: the self-test scenario count is pinned by EXECUTING the runner and counting the headers it prints, not by scraping literals from its source. — The runner auto-numbers its headers at runtime off the same counter its completeness assertion reads, so there is no 'k/50' literal in the source to count; the plan's stated source-grep would have matched zero headers and read as a passing pin.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1772,8 +1775,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-05T23:26:56.121Z
-**Stopped At:** Completed 164.1-04-PLAN.md
+**Last Date:** 2026-09-05T23:44:44.086Z
+**Stopped At:** Completed 164.1-05-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z

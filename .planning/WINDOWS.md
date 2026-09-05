@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 30
+open_count: 31
 waived_count: 0
 fixed_count: 7
-total_count: 37
-last_updated: 2026-09-05T23:24:29.360Z
+total_count: 38
+last_updated: 2026-09-05T23:44:43.987Z
 ---
 
 # Broken Windows Ledger
@@ -52,6 +52,7 @@ last_updated: 2026-09-05T23:24:29.360Z
 | 35 | 164.1 | deviation | scripts/prod-prober/arms/cron-drift.mjs |  | cron-drift: hygieneViolations never runs on a WITHHELD manifest row (command_withheld: true), by design — the row was read by a human at capture time. The gap is that a reviewer could withhold a row precisely to keep a dirty command out of the gate's reach; nothing mechanical prevents that. captureManifest still refuses to WRITE a dirty row, so the gap only opens if someone hand-edits the committed manifest. | open |  | 2026-09-05T22:52:35.974Z |  |
 | 36 | 164.1 | deviation | scripts/prod-prober/run.mjs |  | makeScrubber (plan 01) replaces EVERY occurrence of a requiredEnv VALUE anywhere in the output, with no minimum length. MEASURED during plan 03: with a one-character SUPABASE_DB_PASSWORD ('z') the log line 'cron-drift: database marker = quantalyze-fixture-db' printed as 'quantaly<redacted>e-fixture-db'. Fail-SAFE (it over-redacts, never under-redacts) and unreachable with a realistic credential, but it can mangle unrelated text. Out of plan 03's task scope (plan 01 owns the scrubber); recorded rather than fixed. | open |  | 2026-09-05T22:53:36.531Z |  |
 | 37 | 164.1 | deviation | scripts/prod-prober/run.mjs |  | makeScrubber over the mt5 arm's requiredEnv redacts ORDINARY WORDS in a live run. The mt5 arm must declare RAILWAY_PROJECT_ID / RAILWAY_MT5_SERVICE / RAILWAY_ENVIRONMENT as requiredEnv (D-06: an absent one is credential-absent, and they are 3 of the 10 slots the live run reports), but their LIVE values are 'production' and 'mt5-gateway' — short, common strings. MEASURED at plan 04: a defect detail carrying the CLI's stderr printed as 'the <redacted> relay refused the <redacted> session'. Fail-SAFE (over-redacts, never under-redacts) but it degrades the mt5-ssh-transport diagnostic, which is the one row an operator reads when the transport is broken. Extends WINDOWS entry 36 (plan 03's one-char case) with a value that is realistic rather than pathological. Not fixed here: the scrubber is plan 01's and classifying names as secret-vs-identifier is a change to a security control, out of this plan's task scope. | open |  | 2026-09-05T23:24:29.360Z |  |
+| 38 | 164.1 | unrun-verify | .github/workflows/prod-prober.yml |  | prod-prober.yml has NEVER been dispatched: plan 05 was instructed not to touch live infrastructure, so the credential-assert step, the supabase link + masked pooler export, the checksum-verified Railway CLI install and all four live arms are unexecuted on a GitHub-hosted runner. Whether the stored workspace-scoped RAILWAY_API_TOKEN authenticates railway ssh non-interactively from a hosted runner is likewise unmeasured (CONTEXT's own open question). Plan 164.1-06 owns the single first dispatch. | open |  | 2026-09-05T23:44:43.987Z |  |
 
 ````json
 [
@@ -497,6 +498,18 @@ last_updated: 2026-09-05T23:24:29.360Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-05T23:24:29.360Z",
+    "resolved_at": null
+  },
+  {
+    "id": 38,
+    "kind": "unrun-verify",
+    "phase": "164.1",
+    "file": ".github/workflows/prod-prober.yml",
+    "line": null,
+    "description": "prod-prober.yml has NEVER been dispatched: plan 05 was instructed not to touch live infrastructure, so the credential-assert step, the supabase link + masked pooler export, the checksum-verified Railway CLI install and all four live arms are unexecuted on a GitHub-hosted runner. Whether the stored workspace-scoped RAILWAY_API_TOKEN authenticates railway ssh non-interactively from a hosted runner is likewise unmeasured (CONTEXT's own open question). Plan 164.1-06 owns the single first dispatch.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T23:44:43.987Z",
     "resolved_at": null
   }
 ]
