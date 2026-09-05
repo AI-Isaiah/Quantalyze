@@ -4,8 +4,8 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.1
 current_phase_name: PROD-OBSERVABILITY
-status: blocked_on_founder
-stopped_at: Phase 164.1 planning BLOCKED — discuss + research + validation done; planner NOT spawned. Awaiting three GitHub Actions secrets (ANALYTICS_SERVICE_KEY, RAILWAY_API_TOKEN workspace-scoped, RAILWAY_SSH_PRIVATE_KEY). Resume: /gsd-plan-phase 164.1
+status: in_progress
+stopped_at: Phase 164.1 planning RESUMED — credentials landed (ANALYTICS_SERVICE_KEY, RAILWAY_API_TOKEN; the third secret RAILWAY_SSH_PRIVATE_KEY was RETIRED by measurement). Pattern-mapper next, then planner.
 last_updated: "2026-09-05T17:36:34.047Z"
 last_activity: 2026-09-05
 last_activity_desc: 164.3.1/164.4/164.4.1 records restored and closed; 164.1 discuss+research+validation landed; planning blocked on founder secrets
