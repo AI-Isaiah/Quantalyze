@@ -35,3 +35,46 @@ the plan's verify grep) and `164.4.1-01-SUMMARY.md` (Deviations + Deferred Issue
 
 **Fix** = decide which side is authoritative by reading the rows, then recompute the
 frontmatter counts from them in a commit that says which three entries were the drift.
+
+## D-164.4.1-04-1 — a `pg_get_functiondef` text anchor is satisfied by a COMMENT inside the function body
+
+**Found during:** plan 04 Task 2, the first drive of the `1/re-base` twin.
+
+**Measured 2026-09-05 on a real lane.** The twin deleted BOTH
+`AND d.kind = f.kind` conjuncts from the re-based bridge in
+`supabase/migrations/20260802120000_strategy_analytics_stuck_computing_reaper.sql`
+and re-based that migration's own STEP 7 check. The runner reported:
+
+```
+  no-red                1/re-base                 supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql
+      the mutation applied (occurrence count verified) but the gate still passed — this arm cannot fail
+```
+
+Reproduced by hand on scratch copies: `rc=0`, all seven `Part … OK` notices printed.
+The cause is that `pg_get_functiondef` returns the function's SOURCE, comments
+included, and `20260802120000:353` carries
+
+```sql
+  -- PER-KIND (d.kind = f.kind): a later done of a DIFFERENT kind can NEVER mask a
+```
+
+INSIDE the body — so `v_fn !~* 'd\.kind\s*=\s*f\.kind'` kept matching a comment
+ABOUT the conjunct after the conjunct itself was gone.
+
+**Scope of the weakness:** every `v_fn ~*` / `v_fn !~*` anchor in this file's Part 1a,
+and by construction every anchor of that shape anywhere in the corpus. A revert that
+removes the code and leaves the explanatory comment is invisible to all of them. The
+two NEGATIVE anchors are worse in the other direction: a comment that merely MENTIONS
+`computing_started_at = now()` would fire them on a correct body.
+
+**Why it was NOT fixed here.** Fixing it means editing assertions — either stripping
+comments before the regex (`regexp_replace(v_fn, '--[^\n]*', '', 'g')`) or narrowing
+each anchor. Plan 04's action explicitly says *"No spelling conversion, no assertion
+edits"*, and the same shape lives in `20260802120000`'s STEP 7 and in
+`20260803120000`'s STEP 4, i.e. in migrations this phase must not touch at all. The
+twin was instead made HONEST about it: `1/re-base` now carries a fourth step that
+rewrites the comment, which is what a real revert would do to it, and the twin's prose
+states the residual.
+
+**Fix** = strip SQL line comments from `v_fn` once, at the top of Part 1a, and re-run
+the `1/re-base` twin without its fourth step to prove the strip is load-bearing.
