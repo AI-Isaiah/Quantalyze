@@ -802,16 +802,38 @@ BEGIN
   --            RED-UNDER-SETUP apply list, 5 `1/JOB-04` raises neutered, and the one-statement
   --            post-apply below. Lane exit 3, and the FIRST and ONLY failure is this arm,
   --            raised from this DO body:
-  --                psql:<scratch>/gate.sql:1285: ERROR:  P0001: TEST FAILED (2/JOB-04): the
+  --                psql:<scratch>/gate.sql:1366: ERROR:  P0001: TEST FAILED (2/JOB-04): the
   --                reconcile_dropped_enqueue_sweep cron job is missing while pg_cron is
   --                installed. A missing sweep is a red gate, never a skip.
   --            Under the runner the same twin scores `arm 2/JOB-04 exit 3 RED (identity ok)`.
+  --            ⚠️ That anchor is RE-MEASURED at HEAD, 2026-09-05, and was `:1285` when this
+  --            record was first written. It had ALREADY gone stale before it was re-read:
+  --            psql reports the line where it finished reading the DO STATEMENT, not the
+  --            line of the RAISE, so the number moves whenever prose is added above it --
+  --            including by the WR-A and WR-C records below. Re-derive it on a lane if it
+  --            is ever needed; never transcribe it, and never treat a mismatch here as a
+  --            finding about the arm.
   --
   --            ⛔ The refuted prose also cited "the S-2 seed-integrity precedent in
   --            test_strategy_analytics_stuck_computing_reaper.sql (plan 164.4.1-04)" as the
-  --            same class. That citation was mistaken and is deleted rather than repaired:
-  --            `4a/seed`'s twin there mutates TWO MIGRATIONS -- 20260802120000 and
-  --            20260803120000 -- not the gate, so it was never a gate-self precedent at all.
+  --            same class. The citation is deleted -- but NOT for the reason first recorded
+  --            here, and that reason is corrected rather than quietly dropped.
+  --            ⚠️ THE FIRST CORRECTION WAS ITSELF FALSE. It read: "`4a/seed`'s twin there
+  --            mutates TWO MIGRATIONS -- 20260802120000 and 20260803120000 -- not the gate,
+  --            so it was never a gate-self precedent at all." Its first clause is true of
+  --            `4a/seed` (reaper file :962, three edit steps across those two migrations),
+  --            and the conclusion does not follow from it. That file's S-2 seed-integrity
+  --            controls `6/seed A/D-18` (:1226) and `6/seed B/D-18` (:1245) DO mutate the
+  --            gate's own text -- both twins name the reaper gate file as their edit target
+  --            -- and their prose calls that "the honest falsifier rather than a shortcut"
+  --            (:1217). The gate-self precedent exists. `4a/seed` was simply the wrong arm
+  --            to have cited for it. VERIFIED at HEAD before this sentence was written.
+  --            ⭐ THE VALID REASON the precedent does not reach `2/JOB-04`: those two reaper
+  --            arms assert that a SEED LANDED, and say so in the raise -- "This is a broken
+  --            fixture, not a finding about the trigger." `2/JOB-04` asserts a PRODUCTION
+  --            fact, that the sweep is registered while pg_cron is installed, and its own
+  --            message calls a missing sweep "a red gate, never a skip". A precedent about
+  --            seed-integrity controls cannot license a gate-self twin on a production claim.
   -- RED-UNDER-M: {"arm":"2/JOB-04","apply":[{"kind":"sql","stmt":"DELETE FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep'"}],"neuter":[{"arm":"1/JOB-04"},{"arm":"1/JOB-04"},{"arm":"1/JOB-04"},{"arm":"1/JOB-04"},{"arm":"1/JOB-04"}]}
   IF v_command IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (2/JOB-04): the reconcile_dropped_enqueue_sweep cron job is missing while pg_cron is installed. A missing sweep is a red gate, never a skip.';
@@ -1286,17 +1308,47 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = ANY (v_seeded) AND metadata->>'source' = 'reconcile-sweep';
-  -- RED-UNDER: seed a SEVENTEENTH healable strategy that no per-arm assertion names.
-  --            ⚠️ A GATE-FILE EDIT, and it is the literal scenario this invariant's own
-  --            comment names -- 'a future arm added without its own check'. It has to be:
-  --            every one of the sixteen seeds has its sweep-marked count pinned exactly
-  --            (four at 1, twelve at 0, and arm A additionally by a TOTAL row count), so
-  --            the sum this raise compares against is the sum of sixteen already-pinned
-  --            numbers and CANNOT diverge from 4 unless one of them diverges first. No
-  --            production mutation can reach this raise ahead of a per-arm raise; only a
-  --            new un-asserted seed can. MEASURED: with v_g added the block heals 5.
-  --            Same class as the S-2 seed-integrity precedent (plan 164.4.1-04).
-  -- RED-UNDER-M: {"arm":"2/whole-block/JOB-04","apply":[{"kind":"edit","file":"supabase/tests/test_reconcile_dropped_enqueue_sweep.sql","find":"  v_f        uuid;   -- skip: archived\n","replace":"  v_f        uuid;   -- skip: archived\n  v_g        uuid;   -- an un-asserted healable seed (RED-UNDER twin only)\n","occurrences":1},{"kind":"edit","file":"supabase/tests/test_reconcile_dropped_enqueue_sweep.sql","find":"  v_seeded := ARRAY[v_a, v_a2, v_b, v_c1, v_c2, v_c2b, v_c3, v_c4, v_c5, v_c5b, v_d1, v_d2, v_d3, v_d4, v_e, v_f];\n","replace":"  INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-g') RETURNING id INTO v_g;\n  INSERT INTO public.csv_daily_returns (strategy_id, date, daily_return, created_at)\n    VALUES (v_g, DATE '2026-01-02', 0.001, v_old);\n\n  v_seeded := ARRAY[v_a, v_a2, v_b, v_c1, v_c2, v_c2b, v_c3, v_c4, v_c5, v_c5b, v_d1, v_d2, v_d3, v_d4, v_e, v_f, v_g];\n","occurrences":1}]}
+  -- RED-UNDER: break the archived-strategy exclusion in the DEPLOYED sweep body -- the same
+  --            one-line production edit `2/arm F/JOB-04/DX-06/SC#3` uses -- and neuter arm
+  --            F's own assertion, the single raise that dominates this one under that edit.
+  --            The sweep then heals the archived seed as well, so the block's total goes
+  --            4 -> 5 and this invariant is what reports it.
+  --
+  --            ⛔ THIS TWIN WAS REFUTED AND REPLACED, 2026-09-05. Do not restore the old one.
+  --            WHO: the phase's gsd-code-reviewer, finding WR-A of the fix-pass review;
+  --            re-derived independently on real lanes by the fixer before this edit was made.
+  --            WHAT IT USED TO BE: a `{"kind":"edit"}` step against THIS GATE FILE, seeding a
+  --            SEVENTEENTH healable strategy `v_g` that no per-arm assertion names. A
+  --            gate-self mutation with no production preimage.
+  --            WHAT JUSTIFIED IT: a recorded conclusion reading "No production mutation can
+  --            reach this raise ahead of a per-arm raise; only a new un-asserted seed can."
+  --            WHY THAT WAS WRONG: its premise is TRUE and its conclusion does not follow.
+  --            Every one of the sixteen seeds does have its sweep-marked count pinned exactly
+  --            (four at 1, twelve at 0, and arm A additionally by a TOTAL row count), so this
+  --            sum cannot diverge from 4 unless a per-arm number diverges first -- but that
+  --            is a statement about ORDER, not about reachability. `neuter` is the corpus
+  --            primitive for precisely that distinction: it suppresses the dominating raise
+  --            so the dominated one can be measured. The old prose reasoned as though a
+  --            dominator made this raise unreachable, which is the same step the CR-01 record
+  --            above got wrong, on `2/JOB-04`, earlier in this same file.
+  --            HOW IT WAS REFUTED: real pg-lane, PostgreSQL 16 + pg_cron, the file's own
+  --            RED-UNDER-SETUP apply list, arm F's production migration edit applied to the
+  --            COPY, and exactly ONE neuter -- arm F's assertion, found by running the
+  --            mutation with no neuters at all and reading the arm the runner named
+  --            (`WRONG-ARM(2/arm F/JOB-04/DX-06/SC#3)`), never assumed. Lane exit 3, and the
+  --            FIRST and ONLY failure is this arm, raised from this DO body:
+  --                psql:<scratch>/gate.sql:1362: ERROR:  P0001: TEST FAILED
+  --                (2/whole-block/JOB-04): one tick produced 5 sweep-marked jobs across MY
+  --                sixteen seeded strategies, expected exactly 4 (arms A, A2, C4 and C5b).
+  --            Under the runner the same twin scores `arm 2/whole-block/JOB-04 exit 3 RED
+  --            (identity ok)`.
+  --            ⚠️ Note what this raise's OWN message claims: that any other number "means a
+  --            guard fell or a heal was lost". That is a production claim, so a gate-self
+  --            twin was never the honest falsifier for it. The un-asserted-seventeenth-seed
+  --            scenario its comment names above is a real second route -- but it is not the
+  --            only one, and it is not the one that proves this arm reacts to a PRODUCTION
+  --            regression, which is what ARMS_FLOOR counts.
+  -- RED-UNDER-M: {"arm":"2/whole-block/JOB-04","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"         WHERE s.status <> 'archived'\n","replace":"         WHERE s.status <> 'archived_zzz'\n","occurrences":1}],"neuter":[{"arm":"2/arm F/JOB-04/DX-06/SC#3"}]}
   IF v_cnt <> 4 THEN
     RAISE EXCEPTION 'TEST FAILED (2/whole-block/JOB-04): one tick produced % sweep-marked jobs across MY sixteen seeded strategies, expected exactly 4 (arms A, A2, C4 and C5b). Every other arm is a documented false-positive guard, so any other number means a guard fell or a heal was lost -- and the per-arm assertions above should name which.', v_cnt;
   END IF;
@@ -1401,6 +1453,13 @@ BEGIN
   --        the rest of Part 2, and the lane dies further down at
   --            psql:<scratch>/gate.sql:1413: ERROR:  XX000: could not find valid entry for job 'reconcile_dropped_enqueue_sweep'
   --        -- again not this guard.
+  --    ⚠️ The two `gate.sql:NNNN` numbers just above are NOT re-measured and are
+  --    known STALE: psql reports the line where it finished reading the DO
+  --    statement, so they move whenever prose is added above them (the WR-A/WR-B/
+  --    WR-C records of 2026-09-05 added ~50 lines). The ERROR CODES and the
+  --    conclusion -- 22004 and XX000, neither naming an arm -- are what the record
+  --    rests on and both were measured. Re-drive the two routes if a line number
+  --    is ever needed; do not transcribe these.
   --
   --    A raise that cannot be made to fire is not a falsifiable assertion about
   --    production, and the founder rule is that a test which CANNOT FAIL is
@@ -1439,15 +1498,46 @@ BEGIN
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_strat AND metadata->>'source' = 'reconcile-sweep';
-  -- RED-UNDER: stamp this part's seed INSIDE the grace window instead of a century back.
-  --            ⚠️ A GATE-FILE EDIT, and the honest one: this raise says of itself that it is
-  --            a SEED-INTEGRITY CONTROL -- it makes no claim about production, so no
-  --            production mutation can falsify it. Any production change that stopped the
-  --            heal REDs Part 2 arm A first (`2/arm A/JOB-04/SC#1`), which runs earlier in
-  --            the same file. Breaking the seed is what makes the raise fire, and the
-  --            raise's own message names a broken fixture. Precedent: the S-2 control in
-  --            test_strategy_analytics_stuck_computing_reaper.sql (plan 164.4.1-04).
-  -- RED-UNDER-M: {"arm":"3/tick 1/JOB-04","apply":[{"kind":"edit","file":"supabase/tests/test_reconcile_dropped_enqueue_sweep.sql","find":"    VALUES (v_strat, DATE '2026-01-02', 0.001, v_fresh - interval '100 years');\n","replace":"    VALUES (v_strat, DATE '2026-01-02', 0.001, v_fresh);\n","occurrences":1}]}
+  -- RED-UNDER: flip the grace-window comparison in the DEPLOYED sweep body from `<` to `>`
+  --            -- the same one-line production edit `2/arm A/JOB-04/SC#1` uses -- so this
+  --            part's century-back anchor stops qualifying and tick 1 heals nothing.
+  --
+  --            ⛔ THIS TWIN WAS REFUTED AND REPLACED, 2026-09-05. Do not restore the old one.
+  --            WHO: the phase's gsd-code-reviewer, finding WR-B of the fix-pass review;
+  --            re-derived independently on real lanes by the fixer before this edit was made.
+  --            WHAT IT USED TO BE: a `{"kind":"edit"}` step against THIS GATE FILE, stamping
+  --            this part's seed INSIDE the grace window instead of a century back. A
+  --            gate-self mutation with no production preimage.
+  --            WHAT JUSTIFIED IT: a recorded conclusion reading "it makes no claim about
+  --            production, so no production mutation can falsify it. Any production change
+  --            that stopped the heal REDs Part 2 arm A first (`2/arm A/JOB-04/SC#1`)."
+  --            WHY THAT WAS WRONG: two errors, one of order and one of self-description.
+  --            (1) Arm A does RED first -- and so do NINE further Part 2 raises -- but
+  --            "another arm fires first" is DOMINATION, not unreachability, and `neuter`
+  --            exists to lift exactly that. (2) "SEED-INTEGRITY CONTROL" is only half true.
+  --            The raise's precondition -- that one tick of the deployed sweep heals one
+  --            seeded orphan -- is a PRODUCTION fact, not a fixture fact, and it stops
+  --            holding when the sweep's grace window breaks. A broken seed is one way to
+  --            reach this raise; a broken sweep is another, and it is the one ARMS_FLOOR
+  --            counts.
+  --            HOW IT WAS REFUTED: real pg-lane, PostgreSQL 16 + pg_cron, the file's own
+  --            RED-UNDER-SETUP apply list, arm A's production migration edit applied to the
+  --            COPY, and TEN dominating raises neutered. ⭐ The ten were DISCOVERED ONE AT A
+  --            TIME, never assumed: install the annotation, run the arm, read the arm the
+  --            runner names in `WRONG-ARM(...)`, append that one, repeat. Eleven rounds; the
+  --            eleventh is green. `2/arm A/JOB-04` appears TWICE in the list because that arm
+  --            raises twice and each `neuter` entry suppresses one raise. Lane exit 3, and
+  --            the FIRST and ONLY failure is this arm, raised from this DO body:
+  --                psql:<scratch>/gate.sql:1589: ERROR:  P0001: TEST FAILED (3/tick
+  --                1/JOB-04): the first tick produced 0 sweep-marked jobs for my seeded
+  --                orphan, expected exactly 1.
+  --            Under the runner the same twin scores `arm 3/tick 1/JOB-04 exit 3 RED
+  --            (identity ok)`.
+  --            ⚠️ The seed-integrity READING of this raise survives and is still true -- if
+  --            tick 1 did not heal, the re-run assertion below is vacuous. What changed is
+  --            the falsifier: the twin now breaks the sweep rather than the fixture, so a
+  --            production regression is what this arm is proven to react to.
+  -- RED-UNDER-M: {"arm":"3/tick 1/JOB-04","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"               ) < now() - interval '1 hour'\n","replace":"               ) > now() - interval '1 hour'\n","occurrences":1}],"neuter":[{"arm":"2/arm A/JOB-04/SC#1"},{"arm":"2/arm A/JOB-04"},{"arm":"2/arm A/JOB-04"},{"arm":"2/arm A/JOB-04/D-11/SC#1"},{"arm":"2/arm A/JOB-04/D-11"},{"arm":"2/arm A2/JOB-04/D-04"},{"arm":"2/arm B/JOB-04/SC#3"},{"arm":"2/arm C4/JOB-04/SC#3/B4"},{"arm":"2/arm C5b/JOB-04/R3/SC#3"},{"arm":"2/whole-block/JOB-04"}]}
   IF v_cnt <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (3/tick 1/JOB-04): the first tick produced % sweep-marked jobs for my seeded orphan, expected exactly 1. This is a seed-integrity control: if tick 1 did not heal, the re-run assertion below would be vacuous and this part would prove nothing about idempotency.', v_cnt;
   END IF;
