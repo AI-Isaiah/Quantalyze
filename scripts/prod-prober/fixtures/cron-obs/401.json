@@ -1,0 +1,9 @@
+{
+  "_comment": "RED — cron-non-2xx. The SEVEN-DAY outage, reproduced: cron.job_run_details would read 'succeeded' for this exact run.",
+  "now": "2026-09-05T12:00:00Z",
+  "ttl": "6 hours",
+  "jobCount": 1,
+  "rows": [
+    ["901003", "2026-09-05T11:30:00Z", "70003", "401", "f", "", "2026-09-05T11:30:04Z", "{\"detail\":\"Unauthorized\"}"]
+  ]
+}
