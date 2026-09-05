@@ -4,18 +4,18 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.1
 current_phase_name: PROD-OBSERVABILITY
-status: blocked_on_founder
-stopped_at: Phase 164.1 planning BLOCKED — discuss + research + validation done; planner NOT spawned. Awaiting three GitHub Actions secrets (ANALYTICS_SERVICE_KEY, RAILWAY_API_TOKEN workspace-scoped, RAILWAY_SSH_PRIVATE_KEY). Resume: /gsd-plan-phase 164.1
-last_updated: "2026-09-05T17:36:34.047Z"
+status: in_progress
+stopped_at: Phase 164.1 planning RESUMED — credentials landed (ANALYTICS_SERVICE_KEY, RAILWAY_API_TOKEN; the third secret RAILWAY_SSH_PRIVATE_KEY was RETIRED by measurement). Pattern-mapper next, then planner.
+last_updated: "2026-09-05T20:42:25.621Z"
 last_activity: 2026-09-05
 last_activity_desc: 164.3.1/164.4/164.4.1 records restored and closed; 164.1 discuss+research+validation landed; planning blocked on founder secrets
-state_head: e01cc2e6b47f0a5d4804ac23d63634ecfb057c91
+state_head: 2f9065ed7af7c720e0ae8e31a566b60f05201b32
 progress:
   total_phases: 18
-  completed_phases: 4
-  total_plans: 70
-  completed_plans: 66
-  percent: 22
+  completed_phases: 8
+  total_plans: 107
+  completed_plans: 96
+  percent: 44
 ---
 
 # Project State — Quantalyze
@@ -845,6 +845,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.5 inserted: BASELINE-SNAPSHOT created 2026-09-05 by the 164-family re-partition: baseline.sql load-bearing, DRIFT-04 drop, DRIFT-05 both directions, VAC08-LEDGER-32, VAC-07 (deferred from 164.3)
 - Phase 164.6 inserted: GATE-HYGIENE created 2026-09-05: OPS-08-F9/F8/TS/F2, composite-stamp twin (161.1-D13) TS half, PROC-02, PROC-03 residual, H-0001 residual, WINDOWS 23
 - Phase 166 reordered: moved ahead of 165 on 2026-09-05 so dependency churn lands LAST; 166 depends_on 164.6 (ordering only)
+- Phase 164.5 edited: added item (7) CRON-DRIFT-01-REPAIR + criterion 7; title 'the one'->'the two production objects'; requirements +CRON-DRIFT-01 (repair half); depends_on +164.1
+- Phase 164.2 edited: added in-scope item 5 (public uncomputed-factsheet placeholder speaks to a developer on the anonymous prod path) + success criterion 9; found 2026-09-05 while re-measuring Phase 159 item 2 in a live browser
+- Phase 164.6 edited: requirements +VAC08-COUNT-SPM01 (test-ledger-drift-check.sh:372-373 false-clean; booked 2026-09-05)
 
 ### Decisions
 
