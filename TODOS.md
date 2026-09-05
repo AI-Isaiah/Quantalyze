@@ -1332,6 +1332,9 @@ true for 146 and half of 142–145, and **false for 141**.
         `lane-probe: pg_cron AVAILABLE`, `  pending: 0`, `arms: 363/363/0`, `biting: 363`,
         `lane-invocations: 363` (tallies agree), `✅ No defects`, **exit 0**. `FILES_FLOOR` 44,
         `ARMS_FLOOR` 363, `WAIVED_CEILING` still **0** — the whole phase moved nine files' worth of
+        ⚠️ SUPERSEDED 2026-09-05 by the phase review: `ARMS_FLOOR` is **361**. CR-01/CR-02 found
+        three arms of `test_reconcile_dropped_enqueue_sweep.sql` unfalsifiable or gate-self mutated;
+        two were reclassified as INVARIANTs, not waived. `WAIVED_CEILING` still 0, `FILES_FLOOR` 44.
         arms and added ZERO waivers. 44 + 0 + 27 + 0 + 0 = 71; the 27 are `unreachable:`
         (`[REDUNDER-NONIDIOM]`, still open).
       * **THE DEFERRAL EXPIRED BY BEING CAUGHT, which is the point of having built it that way.**

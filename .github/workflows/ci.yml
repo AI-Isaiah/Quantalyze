@@ -940,6 +940,9 @@ jobs:
     # per-arm lane time mean 1.1s. pg_cron came from noble/universe at 1.6.2-1.
     # LEGS: 363 arms + 44 baseline + 44 restore = **451 legs**; at the measured
     # 1.1 s/leg that is ~496 s of lane time plus ~71 s of job overhead.
+    # ⚠️ SUPERSEDED 2026-09-05 by the phase review: that run measured the 363-arm tree and stays
+    # as the dated ubuntu measurement. The corpus is now 361 arms / **449 legs** (361 + 44 + 44)
+    # after CR-02 reclassified two unfalsifiable arms. Two fewer legs does not move the DECISION.
     # ⚖️ RULE APPLIED LITERALLY: 9.45 min does NOT reach the ~10 min trigger, so
     # `timeout-minutes` STAYS 15 — this is the closest a measured run has come
     # (previous high 464 s / 7.7 min, run 33882082307), and the next file-count
