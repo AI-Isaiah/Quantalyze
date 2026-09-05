@@ -3025,6 +3025,22 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   ⛔ Not fixed in 164.4.1 plan 01 ON PURPOSE (PATTERNS C2): the arm-6 edit follows the local
   convention, and inventing a counting scheme mid-phase would mix a new mechanism into a substrate
   change. Book it, then build it.
+  ✅ **BUILT 2026-09-05 (Phase 164.4.1 code review, IN-02).** `src/__tests__/drift-check-scripts
+  .test.ts`'s SP-H01 arm now counts the `=== SELF-TEST n/N:` captions in the comment-stripped
+  `self_test()` body and requires that count to equal the `PASSED (N/N)` denominator, requires each
+  caption's OWN denominator to match it, and (as before) requires the
+  `$((N - st_skipped))/N` arithmetic to use the same N — the three independently-typed numbers this
+  item asked to be forced to agree. The interim `PASSED \((\d+)\/(\d+)\)` halves-agree check was
+  SELF-CONSISTENT only: `totalArms` was read out of the caption, so six arms captioned `(7/7)`
+  passed. PROVEN ABLE TO FAIL by neutering exactly that case — `self_test() contains 6 numbered arm
+  captions but the verdict claims 7 … expected 6 to be 7` — then restored and confirmed by hash. An
+  in-test calibration also proves the caption predicate matches something, so agreement cannot come
+  from a regex that matches nothing.
+  ⚠️ RESIDUAL, deliberately not pinned: two of the original nine sites are PROSE (the SP-H01 history
+  comment at `run.sh:558` and the denominator comment), and the test strips comments before reading
+  — by design, since a first version of SP-H01 matched `SELF-TEST PASSED (5/5)` inside the very
+  comment explaining its own fix. A stale number in those two comments is a docs drift, not a
+  self-consistent lie about the arm count, which is what this item was raised for.
 
 - **`[PGLANE-SELFTEST-NOT-IN-CI]` No CI step runs the pg-lane's OWN self-test — its six arms are
   proven only on the authoring box (raised 2026-09-04, Phase 164.4.1 plan 01 Task 3).**
