@@ -20,9 +20,17 @@
 # exactly as the lane honours it (scripts/pg-lane/run.sh:252 takes PGBIN over
 # its own resolve_pgbin). Set it when a pg_ctl on PATH belongs to a different
 # keg than the one the lane should boot. Setting it ALSO skips the PATH-vs-keg
-# agreement refusal below — with PGBIN exported the lane and this script agree
-# by construction, so there is nothing left to disagree about. It must still
-# name a major-16 keg; that check is not skippable and has no env-var bypass.
+# agreement refusal below — the two programs read the SAME variable, so they
+# agree FOR AS LONG AS PGBIN STAYS IN THE ENVIRONMENT. It must still name a
+# major-16 keg; that check is not skippable and has no env-var bypass.
+#
+# ⛔ EXPORT it. `PGBIN=… bash scripts/pg-lane/install-pg-cron-macos.sh` — the
+# natural shape, and the one the usage lines above are un-prefixed for — is a
+# ONE-SHOT assignment scoped to that single command. It does not reach a LATER
+# `bash scripts/pg-lane/run.sh` in the same shell, and that is a real failure,
+# not a pedantic one: install into the @16 keg via a one-shot PGBIN, then run
+# the lane with PGBIN unset, and resolve_pgbin takes `pg_ctl` on PATH, boots
+# @18, and finds no pg_cron there. Use `export PGBIN=<dir>` once, then run both.
 #
 # ⛔ NOT VIA HOMEBREW'S pg_cron FORMULA. Its `depends_on` names postgresql@17
 # and postgresql@18 only, so it emits no @16 artifact; an extension library
@@ -81,7 +89,12 @@ resolve_pgbin() {
 # Record whether PGBIN came from the CALLER before resolve_pgbin overwrites it.
 # The agreement guard below reasons only about the case where this script had to
 # GUESS which keg to use; an explicitly-set PGBIN is not a guess, and run.sh:252
-# honours the same variable first, so the two cannot disagree once it is set.
+# honours the same variable first, so the two cannot disagree FOR AS LONG AS
+# PGBIN STAYS IN THE ENVIRONMENT. ⚠️ That proviso is the whole of the guarantee,
+# and a one-shot `PGBIN=… bash …/install-pg-cron-macos.sh` does not satisfy it:
+# the variable is gone by the next command, so a later lane run resolves afresh
+# and can boot a different keg than the one just installed into. Skipping the
+# guard here is therefore trust in the CALLER's environment, not a proof.
 if [ -n "${PGBIN:-}" ]; then PGBIN_EXPLICIT=1; else PGBIN_EXPLICIT=""; fi
 
 PGBIN=$(resolve_pgbin) || exit 1
@@ -94,11 +107,14 @@ PGC="$PGBIN/pg_config"
 # shape phase 164.4.1 exists to remove. Refuse instead of guessing.
 #
 # ⚠️ Scoped to the GUESSING case only. run.sh:252 is `if [ -z "${PGBIN:-} ]; then
-# PGBIN=$(resolve_pgbin)`, so an exported PGBIN wins in BOTH programs and the
-# disagreement this guard describes cannot exist — firing it there refused the
-# operator who did the correct thing (naming the @16 keg on a box whose PATH
-# pg_ctl is @18) and sent them, via the old remediation text, straight into the
-# REQUIRED_MAJOR refusal below. There is deliberately no env-var kill switch:
+# PGBIN=$(resolve_pgbin)`, so an EXPORTED PGBIN wins in BOTH programs and the
+# disagreement this guard describes cannot arise while it is set — firing it
+# there refused the operator who did the correct thing (naming the @16 keg on a
+# box whose PATH pg_ctl is @18) and sent them, via the old remediation text,
+# straight into the REQUIRED_MAJOR refusal below. ⛔ What the skip does NOT buy
+# is agreement with a lane run that no longer sees PGBIN: a one-shot prefix on
+# THIS command is scoped to this command, so the guard is being traded for the
+# caller keeping the variable exported. The remediation text below says so. There is deliberately no env-var kill switch:
 # the previous `PGBIN_CHECKED` bypass was set nowhere in the repo, documented
 # nowhere, and silently disabled a safety guard. PGBIN is the documented
 # override, and it is one the lane honours identically.
@@ -110,10 +126,14 @@ if [ -z "$PGBIN_EXPLICIT" ] && command -v pg_ctl >/dev/null 2>&1; then
       "  scripts/pg-lane/run.sh would boot: $path_bin  (pg_ctl on PATH wins there)" \
       "  this script would install into:    $PGBIN" \
       "Installing pg_cron for the second would leave the first without it." \
-      "Export PGBIN to name ONE keg for both — this guard then has nothing to" \
+      "EXPORT PGBIN to name ONE keg for both — this guard then has nothing to" \
       "compare and is skipped:" \
-      "  PGBIN=$path_bin   # if that is the major-$REQUIRED_MAJOR keg you want the lane on" \
-      "  PGBIN=$PGBIN   # if it is not; the lane will honour this too" \
+      "  export PGBIN=$path_bin   # if that is the major-$REQUIRED_MAJOR keg you want the lane on" \
+      "  export PGBIN=$PGBIN   # if it is not; the lane will honour this too" \
+      "⛔ It must be EXPORTED, not one-shot. A \`PGBIN=... bash $0\` prefix is" \
+      "scoped to that single command and is GONE by the time you run" \
+      "scripts/pg-lane/run.sh, which then resolves afresh and can boot the keg" \
+      "you did not install into — an install that succeeds and buys nothing." \
       "Whichever you pick must be major $REQUIRED_MAJOR or the next check refuses" \
       "it. Taking the stray pg_ctl off PATH also works.")"
   fi
