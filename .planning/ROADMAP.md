@@ -851,7 +851,7 @@ that exact sentence was refuted three times here.
 
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries PYAPI-06, CRON-OBS-01, CRON-DRIFT-01, MT5-WEDGE-OBS-01 — read each entry before planning, do not re-derive
 **Depends on:** Phase 164, and now **Phase 164.3** (see DEDUP below — 164.3 builds the substrate this phase's gate work is tested on)
-**Plans:** 6 plans
+**Plans:** 1/6 plans executed
 
 ⛔ **DEDUP 2026-08-28 — five carry-overs LEFT this phase, three MOVED to 164.2, one DECIDED inline.**
 Founder-approved. Before this, ten items were listed here and five of them were ALSO claimed by
@@ -1017,7 +1017,7 @@ start from `SYNTHESIS.md` §6 remedy 2.
 
 Plans:
 
-- [ ] 164.1-01-PLAN.md — TRACER: prober skeleton (run.mjs + seams.mjs), ARMS_FLOOR=4, credential-absent gate, absurdity floor, PYAPI-06 arm, --self-test 13/13 (wave 1)
+- [x] 164.1-01-PLAN.md — TRACER: prober skeleton (run.mjs + seams.mjs), ARMS_FLOOR=4, credential-absent gate, absurdity floor, PYAPI-06 arm, --self-test 13/13 (wave 1)
 - [ ] 164.1-02-PLAN.md — PYAPI-06 both halves: SeamConfigError before the fetch (TS) + SERVICE_KEY_ABSENT 401 (Python), vocabulary disposition, neuter→RED→restore proofs (wave 1)
 - [ ] 164.1-03-PLAN.md — CRON-OBS-01 + CRON-DRIFT-01 arms: psql seam, net._http_response time-window join, committed-manifest compare with both readings, --capture-manifest, --self-test 32/32 (wave 2)
 - [ ] 164.1-04-PLAN.md — MT5-WEDGE-OBS-01 arm: railway ssh seam, committed read-only probe, -10004 ≠ -10005 with distinct remedies, floor met at 4/4, --self-test 42/42 (wave 3)

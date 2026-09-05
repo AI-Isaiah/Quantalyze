@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 25
+open_count: 26
 waived_count: 0
 fixed_count: 7
-total_count: 32
-last_updated: 2026-09-05T17:36:27.843Z
+total_count: 33
+last_updated: 2026-09-05T21:56:43.339Z
 ---
 
 # Broken Windows Ledger
@@ -47,6 +47,7 @@ last_updated: 2026-09-05T17:36:27.843Z
 | 30 | 164.3.1 | unmet-truth | src/__tests__/self-referential-oracle.test.ts |  | The Primitive-D self-referential-oracle AST gate ships REPORT-ONLY in plan 164.3.1-02 and blocks NOTHING until plan 164.3.1-08 flips it. Until that flip lands, a new self-referential assertion can enter the tree and the gate will print a finding without failing the suite. SC-5's calibration half is met (the rule was observed flagging src/__tests__/lint-sql-gates.test.ts:183-184 at HEAD before the site was fixed); the enforcing half is 08's. | fixed |  | 2026-09-01T18:30:00.000Z | 2026-09-05T17:36:27.743Z |
 | 31 | 164.3.1 | unmet-truth | src/__tests__/self-referential-oracle.test.ts |  | MEASURED at HEAD by plan 164.3.1-02: the rule reports 23 findings across 14 files of 128 scanned, and 19 of those are one shared false-positive mechanism - the accumulator idiom (const offenders: string[] = [] -> loop pushes -> expect(offenders).toEqual([])), which CAN fail and is not a primitive-D instance. 2 are the real target and 2 are type-level contracts in types-design-tests.test.ts that genuinely cannot fail at runtime. The rule was deliberately NOT narrowed after the count was seen - tuning a detector to produce a comfortable number is itself the self-referential move this phase exists to stop. Plan 164.3.1-08 must decide explicitly: teach mutation-awareness and re-measure and re-run the fire proof, OR allowlist the 19 by their shared mechanism with the measurement recorded. Detail in 164.3.1-02-CALIBRATION.md section III.a. | fixed |  | 2026-09-01T18:30:00.000Z | 2026-09-05T17:36:27.843Z |
 | 32 | 164.4.1 | deviation | supabase/tests/test_reconcile_dropped_enqueue_sweep.sql |  | 5 of 39 sections use GATE-FILE falsifiers (3 oracle preconditions dominated by Part 1, 1 seed-integrity control dominated by Part 2 arm A, 1 sum-of-pinned-counts whole-block invariant); each carries its domination measurement at the site | fixed |  | 2026-09-05T10:00:09.888Z | 2026-09-05T14:57:19.045Z |
+| 33 | 164.1 | todo | scripts/prod-prober/arms/pyapi06.mjs |  | PYAPI-06 arm does not classify a 401 carrying SERVICE_KEY_ABSENT in response to a PRESENT-but-wrong key (the service conflating absent with mismatched); it needs a 21st defect kind and DEFECT_KINDS is pinned at 20 by the plan-05 wiring test. Limit is documented in the arm header; plan 02's Python-half neuter test is the control. | open |  | 2026-09-05T21:56:43.339Z |  |
 
 ````json
 [
@@ -433,6 +434,18 @@ last_updated: 2026-09-05T17:36:27.843Z
     "reason": "",
     "recorded_at": "2026-09-05T10:00:09.888Z",
     "resolved_at": "2026-09-05T14:57:19.045Z"
+  },
+  {
+    "id": 33,
+    "kind": "todo",
+    "phase": "164.1",
+    "file": "scripts/prod-prober/arms/pyapi06.mjs",
+    "line": null,
+    "description": "PYAPI-06 arm does not classify a 401 carrying SERVICE_KEY_ABSENT in response to a PRESENT-but-wrong key (the service conflating absent with mismatched); it needs a 21st defect kind and DEFECT_KINDS is pinned at 20 by the plan-05 wiring test. Limit is documented in the arm header; plan 02's Python-half neuter test is the control.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T21:56:43.339Z",
+    "resolved_at": null
   }
 ]
 ````
