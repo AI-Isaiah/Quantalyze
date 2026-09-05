@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "normalization": "ws-collapse-v1",
+  "captured_at": "2026-09-05T00:00:00Z",
+  "database_marker": "quantalyze-fixture-db",
+  "jobs": [
+    {
+      "jobid": 1,
+      "jobname": "match_engine_cron",
+      "schedule": "0 * * * *",
+      "active": true,
+      "database": "postgres",
+      "username": "postgres",
+      "command_sha256": "dadebb9293f39d43d3eb3f7ab86c728a3c6180176f0b922918d818fe61a28fb3",
+      "command_withheld": true,
+      "withheld_reason": "fixture: reviewer withheld the jobid-1 body"
+    },
+    {
+      "jobid": 2,
+      "jobname": "audit_log_cold_purge",
+      "schedule": "17 3 * * *",
+      "active": true,
+      "database": "postgres",
+      "username": "postgres",
+      "command_sha256": "b96f6061862a76cd3198951532153e7e5ba9e65596ec3b6515e91cc5b23dd06d",
+      "command": "SELECT purge_audit_log_cold(interval '90 days')"
+    },
+    {
+      "jobid": 3,
+      "jobname": "retention_compute_jobs_done",
+      "schedule": "23 4 * * *",
+      "active": true,
+      "database": "postgres",
+      "username": "postgres",
+      "command_sha256": "8958b60ac1e025e8d021bd20017902b372ee90b247fc35228ae482f0d0cccb8c",
+      "command": "SELECT retention_sweep('compute_jobs_done', interval '30 days')"
+    }
+  ]
+}

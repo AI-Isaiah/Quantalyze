@@ -88,7 +88,8 @@
  * failure is not a shortcut, it is a wrong instruction to the operator.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -98,6 +99,7 @@ import { ARM as PYAPI06_ARM } from "./arms/pyapi06.mjs";
 // exported `*_SQL` constant of every SQL arm, which needs the whole namespace
 // rather than the ARM alone.
 import * as CRON_OBS_MOD from "./arms/cron-obs.mjs";
+import * as CRON_DRIFT_MOD from "./arms/cron-drift.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT = join(HERE, "fixtures");
@@ -109,14 +111,17 @@ const FIXTURE_ROOT = join(HERE, "fixtures");
  * "every SQL arm contributes at least two constants" leg rather than silently
  * escaping the check.
  */
-const SQL_ARM_MODULES = [{ name: "cron-obs", module: CRON_OBS_MOD }];
+const SQL_ARM_MODULES = [
+  { name: "cron-obs", module: CRON_OBS_MOD },
+  { name: "cron-drift", module: CRON_DRIFT_MOD },
+];
 
 /**
- * The committed cron oracle plan 03's `cron-drift` arm compares PROD against
- * (D-13). Declared here so the path is one string in one place; plan 06
- * captures the file itself from PROD.
+ * The committed cron oracle the `cron-drift` arm compares PROD against (D-13).
+ * RE-EXPORTED from the arm that owns it, so the path is one string in one
+ * place; plan 06 captures the file itself from PROD.
  */
-export const MANIFEST_PATH = join(HERE, "cron-manifest.json");
+export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 
 /**
  * D-08 — the pinned arm floor. FOUR: pyapi06, cron-obs, cron-drift, mt5.
@@ -131,7 +136,7 @@ export const MANIFEST_PATH = join(HERE, "cron-manifest.json");
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 22;
+export const SELF_TEST_SCENARIOS = 39;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -172,7 +177,7 @@ export const DEFECT_KINDS = [
 ];
 
 /** The registered arms. Plan 04 appends `mt5`; nothing else changes. */
-export const ARMS = [PYAPI06_ARM, CRON_OBS_MOD.ARM];
+export const ARMS = [PYAPI06_ARM, CRON_OBS_MOD.ARM, CRON_DRIFT_MOD.ARM];
 
 /**
  * Per-NAME remedy for `credential-absent`. Names only — these strings are
@@ -748,6 +753,32 @@ const ARM_FIXTURE_TABLE = [
       "timed-out.json": "cron-transport-error",
     },
   },
+  {
+    arm: CRON_DRIFT_MOD.ARM,
+    fixtureDir: "cron-drift",
+    green: "prod-ok.json",
+    // DB_MARKER_SQL + CRON_JOB_SQL. The marker read is not decoration: it is
+    // the ONLY thing that establishes which database this reading came from,
+    // since current_database() is `postgres` on every Supabase project.
+    greenSeamCalls: 2,
+    kinds: ["cron-drift"],
+    manifestPath: SELFTEST_MANIFEST_PATH,
+    makeSeams: (data) => createSeams({ sqlRunner: fixtureSql({ cronJobRows: data }) }),
+    red: {
+      // SIX fixtures, ONE kind, six DIFFERENT causes. `cron-drift` is not six
+      // kinds pretending to be one: every one of them has the same two
+      // readings and the same remedy pair, and splitting them would multiply
+      // the defect vocabulary without changing what an operator does. What
+      // must NOT collapse is the DETAIL, so the extra/missing pair is asserted
+      // to name its job below.
+      "prod-extra-job.json": "cron-drift",
+      "prod-missing-job.json": "cron-drift",
+      "prod-schedule-moved.json": "cron-drift",
+      "prod-active-flipped.json": "cron-drift",
+      "prod-zero-rows.json": "cron-drift",
+      "prod-duplicate-jobname.json": "cron-drift",
+    },
+  },
 ];
 
 /** The kinds an entry's red fixtures must cover. See the table's docblock. */
@@ -771,7 +802,10 @@ function allGreenSeams() {
   const cronObs = loadFixture("cron-obs", "ok.json");
   if (!cronObs.ok) return cronObs;
 
-  const sqlData = { cronObs: cronObs.data, ttl: cronObs.data.ttl };
+  const cronJob = loadFixture("cron-drift", "prod-ok.json");
+  if (!cronJob.ok) return cronJob;
+
+  const sqlData = { cronObs: cronObs.data, ttl: cronObs.data.ttl, cronJobRows: cronJob.data };
   return {
     ok: true,
     seams: createSeams({
@@ -811,6 +845,9 @@ export async function selfTest() {
     "cron-no-observation": (d) => d.kind === "cron-no-observation",
     "cron-non-2xx": (d) => d.kind === "cron-non-2xx",
     "cron-transport-error": (d) => d.kind === "cron-transport-error",
+    "cron-drift": (d) => d.kind === "cron-drift",
+    "cron-secret-in-command": (d) => d.kind === "cron-secret-in-command",
+    "manifest-invalid": (d) => d.kind === "manifest-invalid",
   };
 
   const captured = [];
@@ -861,7 +898,11 @@ export async function selfTest() {
         manifestPath: entry.manifestPath,
         log: (s) => lines.push(s),
       });
-      const remedies = armKinds.map((k) => (arm.REMEDIES || {})[k]);
+      // Over EVERY key of the arm's REMEDIES, not just the kinds this entry's
+      // red fixtures cover — a kind whose remedy is missing or duplicated is a
+      // defect whether or not this table happens to exercise it.
+      const remedyKinds = Object.keys(arm.REMEDIES || {});
+      const remedies = remedyKinds.map((k) => arm.REMEDIES[k]);
       pass =
         expect(r.exitCode === 0, `${entry.green} exits 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
         expect(r.defects.length === 0, `${entry.green} produces ZERO defects (got ${r.defects.length})`) &&
@@ -892,8 +933,12 @@ export async function selfTest() {
           `every kind this entry declares has a red fixture and every red fixture names a declared kind (declared [${armKinds.join(", ")}] vs covered [${[...new Set(Object.values(entry.red))].join(", ")}])`,
         ) &&
         expect(
-          remedies.every((s) => typeof s === "string" && s.length >= 40),
-          `every ${arm.name}- kind carries a REMEDIES entry of at least 40 chars — a defect row that says what broke but not what to do is an alert nobody acts on`,
+          remedyKinds.every((k) => DEFECT_KINDS.includes(k)),
+          `every key of ${arm.name}.REMEDIES is a registered DEFECT_KIND (${remedyKinds.join(", ")})`,
+        ) &&
+        expect(
+          remedies.length > 0 && remedies.every((s) => typeof s === "string" && s.length >= 40),
+          `every ${arm.name} kind carries a REMEDIES entry of at least 40 chars — a defect row that says what broke but not what to do is an alert nobody acts on`,
         ) &&
         expect(
           new Set(remedies).size === remedies.length,
@@ -1315,6 +1360,389 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
+  // The cron-drift scenarios the ARM_FIXTURE_TABLE cannot express: they need a
+  // DIFFERENT manifest, an absent manifest, or no verdict loop at all.
+  // -------------------------------------------------------------------------
+  const driftRun = async (prodRows, manifestPath, log) => {
+    const seams = createSeams({ sqlRunner: fixtureSql({ cronJobRows: prodRows }) });
+    return runProber({
+      arms: [CRON_DRIFT_MOD.ARM],
+      env: { ...SELFTEST_ENV },
+      seams,
+      armsFloor: 1,
+      manifestPath,
+      log,
+    });
+  };
+  const driftFixturePath = (name) => join(FIXTURE_ROOT, "cron-drift", name);
+
+  // -------------------------------------------------------------------------
+  scenario("cron-secret-in-command fires on an inline key whose sha MATCHES the manifest");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE POINT OF THE WHOLE ORACLE DESIGN. The manifest and PROD agree byte
+    // for byte here — sha equality is ASSERTED below, so this scenario cannot
+    // be satisfied by a difference — and it is STILL a defect, because the
+    // configuration they agree on is not achievable. An oracle that only asked
+    // "does PROD match what we captured?" would have blessed the inline key
+    // that sat in jobid 1 for months.
+    const prod = loadFixture("cron-drift", "prod-inline-key.json");
+    const man = loadFixture("cron-drift", "manifest-inline-key.json");
+    if (!prod.ok || !man.ok) {
+      pass = expect(false, prod.ok ? man.reason : prod.reason) && pass;
+    } else {
+      const prodRow = prod.data.find((r) => r.jobname === "match_engine_cron");
+      const manRow = man.data.jobs.find((j) => j.jobname === "match_engine_cron");
+      const prodSha = CRON_DRIFT_MOD.sha256Hex(CRON_DRIFT_MOD.normalizeCommand(prodRow.command));
+      const r = await driftRun(prod.data, driftFixturePath("manifest-inline-key.json"), quiet);
+      const secrets = r.defects.filter((x) => x.kind === "cron-secret-in-command");
+      pass =
+        expect(
+          prodSha === manRow.command_sha256,
+          `PRECONDITION: the two sides' shas are EQUAL (${prodSha.slice(0, 12)} vs ${String(manRow.command_sha256).slice(0, 12)}) — without this the assertion below could be satisfied by mere inequality`,
+        ) &&
+        expect(r.exitCode === 1, `an inline key exits 1 even with matching shas (got ${r.exitCode})`) &&
+        expect(
+          secrets.length === 2,
+          `BOTH sides are flagged — the PROD row and the committed manifest row (got ${secrets.length}: ${secrets.map((x) => x.subject).join(", ")})`,
+        ) &&
+        expect(
+          secrets.some((x) => x.subject === "prod:match_engine_cron"),
+          "the PROD side is named",
+        ) &&
+        expect(
+          secrets.some((x) => x.subject === "manifest:match_engine_cron"),
+          "and so is the committed manifest — a manifest captured from a dirty state is itself a finding",
+        ) &&
+        expect(
+          secrets.every((x) => String(x.detail).includes("[x-service-key-literal]")),
+          "the rule id is named in the detail",
+        ) &&
+        expect(
+          secrets.every((x) => String(x.detail).includes("FAKE-inline-key") === false),
+          "and the OFFENDING TEXT is never quoted — a hygiene report that printed what it found would be the leak it exists to prevent",
+        ) &&
+        expect(
+          noDefectOfKind(r.defects, ["cron-drift"]),
+          "and NO cron-drift is reported, because the two sides genuinely agree",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("row ORDER, CRLF line endings and re-indentation are NOT drift (ws-collapse-v1)");
+  // -------------------------------------------------------------------------
+  {
+    const prod = loadFixture("cron-drift", "prod-ok-shuffled-crlf.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const lines = [];
+      const r = await driftRun(prod.data, driftFixturePath("manifest.json"), (x) => lines.push(x));
+      pass =
+        expect(r.exitCode === 0, `reversed rows with CRLF and doubled spaces exit 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
+        expect(
+          noDefectOfKind(r.defects, ["cron-drift", "cron-secret-in-command", "manifest-invalid"]),
+          "nothing at all is reported — the comparison is a jobname MAP lookup, so PROD row order is irrelevant by construction",
+        ) &&
+        expect(
+          lines.some((l) => l.includes("3 PROD job(s) vs 3 manifest job(s), 0 differing")),
+          "and the run still SAYS what it compared, rather than being silently green",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("an ABSENT manifest is manifest-invalid, never 'no drift' (the SKIP-01 shape)");
+  // -------------------------------------------------------------------------
+  {
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const missing = driftFixturePath("manifest-THIS-FILE-DOES-NOT-EXIST.json");
+      const r = await driftRun(prod.data, missing, quiet);
+      const invalid = r.defects.filter((x) => x.kind === "manifest-invalid");
+      pass =
+        expect(r.exitCode === 1, `an absent oracle exits 1, never 0 (got ${r.exitCode})`) &&
+        expect(invalid.length === 1, `exactly one manifest-invalid defect (got ${invalid.length})`) &&
+        expect(
+          typeof (invalid[0] || {}).remedy === "string" && (invalid[0] || {}).remedy === CRON_DRIFT_MOD.REMEDIES["manifest-invalid"],
+          "carrying the manifest-invalid remedy",
+        ) &&
+        expect(
+          noDefectOfKind(r.defects, ["cron-drift", "cron-secret-in-command"]),
+          "and NO drift or hygiene verdict — with no oracle nothing was compared, and a comparison that did not happen is not a comparison that passed",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("a drift defect RECORDS both readings and both shas (D-15 — which side moved)");
+  // -------------------------------------------------------------------------
+  {
+    const prod = loadFixture("cron-drift", "prod-schedule-moved.json");
+    const man = loadFixture("cron-drift", "manifest.json");
+    if (!prod.ok || !man.ok) {
+      pass = expect(false, prod.ok ? man.reason : prod.reason) && pass;
+    } else {
+      const r = await driftRun(prod.data, driftFixturePath("manifest.json"), quiet);
+      const d = r.defects.find((x) => x.kind === "cron-drift") || {};
+      const detail = String(d.detail || "");
+      pass =
+        expect(r.defects.length === 1 && d.kind === "cron-drift", `exactly one cron-drift (got ${r.defects.map((x) => x.kind).join(", ")})`) &&
+        expect(detail.includes(`manifest captured ${man.data.captured_at}`), "the detail carries the manifest's captured_at — cron.job has no updated_at, so this is the only ordering evidence that exists") &&
+        expect(detail.includes(`(marker ${man.data.database_marker})`), "and the database marker the capture came from") &&
+        expect(detail.includes("PROD now sha "), "and PROD's current sha beside the manifest's") &&
+        expect(detail.includes("changed: schedule"), "and WHICH field moved") &&
+        expect(detail.includes("(schedule 0 * * * * → 5 * * * *)"), "spelled out both ways round") &&
+        expect(
+          detail.includes("reading 1: PROD moved after the capture"),
+          "READING 1 verbatim — the report never guesses which side moved",
+        ) &&
+        expect(
+          detail.includes("reading 2: the manifest was updated ahead of PROD"),
+          "READING 2 verbatim, with its own remedy",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("hygiene RED: all ten rules fire on their own fixture row, and the id sets match exactly");
+  // -------------------------------------------------------------------------
+  {
+    const red = loadFixture("cron-drift", "hygiene-red.json");
+    if (!red.ok) {
+      pass = expect(false, red.reason) && pass;
+    } else {
+      const missed = [];
+      const overlapping = [];
+      for (const row of red.data) {
+        const v = CRON_DRIFT_MOD.hygieneViolations(row.jobname, row.command);
+        const ids = v.map((x) => x.slice(1, x.indexOf("]")));
+        if (!ids.includes(row.rule)) missed.push(row.rule);
+        if (ids.length !== 1) overlapping.push(`${row.rule}->[${ids.join(",")}]`);
+        if (v.some((x) => x.includes(row.command))) missed.push(`${row.rule} (QUOTED THE COMMAND)`);
+      }
+      const fixtureIds = [...new Set(red.data.map((x) => x.rule))].sort();
+      const armIds = [...CRON_DRIFT_MOD.HYGIENE_RULE_IDS].sort();
+      pass =
+        expect(missed.length === 0, `every red row fires the rule it names (${missed.join(", ") || "all ten fired"})`) &&
+        expect(
+          overlapping.length === 0,
+          `and fires ONLY that rule — red-fixture ISOLATION, the lint-sql-gates idiom (${overlapping.join(" ") || "each row isolates one rule"})`,
+        ) &&
+        expect(red.data.length === 10, `the fixture has exactly ten rows (got ${red.data.length})`) &&
+        expect(
+          JSON.stringify(fixtureIds) === JSON.stringify(armIds),
+          `the fixture's rule ids are EXACTLY the arm's HYGIENE_RULE_IDS — a rule added without a red row, or a red row whose rule was deleted, fails here (fixture [${fixtureIds.join(", ")}] vs arm [${armIds.join(", ")}])`,
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("hygiene GREEN: every ACHIEVABLE Vault-backed shape produces ZERO violations");
+  // -------------------------------------------------------------------------
+  {
+    // The false-positive calibration, and it is not a formality: a rule that
+    // fires on the configuration we want people to adopt is worse than no rule,
+    // because it teaches the reader to ignore the whole class. The
+    // `'Bearer ' || <expr>` control below is the one that forced the header
+    // rules to test the LITERAL'S LENGTH rather than merely its presence.
+    const green = loadFixture("cron-drift", "hygiene-green.json");
+    if (!green.ok) {
+      pass = expect(false, green.reason) && pass;
+    } else {
+      const flagged = green.data
+        .map((g) => ({ jobname: g.jobname, v: CRON_DRIFT_MOD.hygieneViolations(g.jobname, g.command) }))
+        .filter((x) => x.v.length > 0);
+      pass =
+        expect(green.data.length >= 5, `at least five green controls (got ${green.data.length})`) &&
+        expect(
+          green.data.some((g) => g.jobname === "match_engine_cron" && g.command.includes("vault.decrypted_secrets")),
+          "including the Vault-backed match_engine_cron body itself — the exact shape jobid 1 was re-scheduled onto on 2026-09-01",
+        ) &&
+        expect(
+          green.data.some((g) => g.command.includes("'Bearer ' ||")),
+          "and the 'Bearer ' || <expr> concatenation, which a presence-only Authorization rule would have flagged",
+        ) &&
+        expect(
+          flagged.length === 0,
+          `no achievable shape is flagged (${flagged.map((x) => `${x.jobname}: ${x.v.join(" ")}`).join(" | ") || "all clean"})`,
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("a sha-only manifest row still detects drift, and its text is never printed");
+  // -------------------------------------------------------------------------
+  {
+    const ok = loadFixture("cron-drift", "prod-ok.json");
+    const moved = loadFixture("cron-drift", "prod-schedule-moved.json");
+    if (!ok.ok || !moved.ok) {
+      pass = expect(false, ok.ok ? moved.reason : ok.reason) && pass;
+    } else {
+      const shaOnly = driftFixturePath("manifest-sha-only.json");
+      const rGreen = await driftRun(ok.data, shaOnly, quiet);
+
+      const lines = [];
+      const rRed = await driftRun(moved.data, shaOnly, (x) => lines.push(x));
+      const d = rRed.defects.find((x) => x.kind === "cron-drift") || {};
+
+      // CONTROL: the SAME comparison with a FULL manifest row DOES print the
+      // diff. Without it, "no diff line" would also be satisfied by an arm that
+      // never diffs anything.
+      const changedCommand = clone(ok.data).map((r) =>
+        r.jobname === "match_engine_cron"
+          ? { ...r, command: r.command.replace("/api/match/cron-recompute", "/api/match/cron-recompute-v2") }
+          : r,
+      );
+      const controlLines = [];
+      const rControl = await driftRun(changedCommand, driftFixturePath("manifest.json"), (x) => controlLines.push(x));
+
+      const isDiffLine = (l) => /^[+-] /.test(l);
+      pass =
+        expect(rGreen.exitCode === 0, `a sha-only row that MATCHES exits 0 (got ${rGreen.exitCode}; defects ${JSON.stringify(rGreen.defects)})`) &&
+        expect(rRed.defects.length === 1 && d.kind === "cron-drift", `a sha-only row that DIFFERS reports exactly one cron-drift (got ${rRed.defects.map((x) => x.kind).join(", ")})`) &&
+        expect(
+          String(d.detail).includes("command text withheld: manifest row is sha-only"),
+          "and SAYS why no text is shown",
+        ) &&
+        expect(
+          String(d.detail).includes("fixture: reviewer withheld the jobid-1 body"),
+          "naming the reviewer's own withheld_reason",
+        ) &&
+        expect(lines.every((l) => isDiffLine(l) === false), `no diff line was printed for the withheld row (${lines.filter(isDiffLine).join(" | ") || "none"})`) &&
+        expect(
+          rControl.defects.filter((x) => x.kind === "cron-drift").length === 1,
+          `CONTROL: a FULL manifest row with a changed command is drift (got ${rControl.defects.map((x) => x.kind).join(", ")})`,
+        ) &&
+        expect(
+          controlLines.filter(isDiffLine).length === 2,
+          `CONTROL: and it DOES print the two-line unified diff (got ${controlLines.filter(isDiffLine).length}) — so "no diff line" above is a real absence, not an arm that never diffs`,
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("captureManifest REFUSES a configuration that fails hygiene, and writes nothing");
+  // -------------------------------------------------------------------------
+  {
+    const prod = loadFixture("cron-drift", "prod-inline-key.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
+      const outPath = join(dir, "cron-manifest.json");
+      const lines = [];
+      try {
+        const code = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: prod.data }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath,
+          log: (x) => lines.push(x),
+        });
+        pass =
+          expect(code === 1, `the capture returns 1 (got ${code})`) &&
+          expect(existsSync(outPath) === false, "and the out path DOES NOT EXIST afterwards — the oracle can never be captured into a non-achievable state") &&
+          expect(lines.some((l) => l.startsWith("REFUSED:")), "the refusal is explicit") &&
+          expect(lines.some((l) => l.includes("match_engine_cron: [x-service-key-literal]")), "naming the job and the rule ids") &&
+          expect(lines.every((l) => l.includes("FAKE-inline-key") === false), "and never the offending text") &&
+          pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("captureManifest writes a schema-1 manifest whose shas match the committed fixture");
+  // -------------------------------------------------------------------------
+  {
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    const man = loadFixture("cron-drift", "manifest.json");
+    if (!prod.ok || !man.ok) {
+      pass = expect(false, prod.ok ? man.reason : prod.reason) && pass;
+    } else {
+      const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
+      const outPath = join(dir, "cron-manifest.json");
+      const lines = [];
+      try {
+        const code = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: prod.data }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath,
+          log: (x) => lines.push(x),
+        });
+        const written = existsSync(outPath) ? JSON.parse(readFileSync(outPath, "utf8")) : null;
+        // Sorted PAIRS, not objects: the capture sorts by jobname and the
+        // committed fixture does not, so comparing key ORDER would fail on a
+        // difference that is not a difference.
+        const shaPairs = (jobs) => JSON.stringify(jobs.map((j) => [j.jobname, j.command_sha256]).sort());
+        const wantShas = shaPairs(man.data.jobs);
+        const gotShas = written ? shaPairs(written.jobs) : "[]";
+        pass =
+          expect(code === 0, `a clean configuration captures with 0 (got ${code}; log ${lines.join(" | ")})`) &&
+          expect(written !== null, "the file was written") &&
+          expect((written || {}).schema_version === 1 && (written || {}).normalization === "ws-collapse-v1", `schema 1 / ws-collapse-v1 (got ${(written || {}).schema_version} / ${(written || {}).normalization})`) &&
+          expect((written || {}).database_marker === FIXTURE_DB_MARKER, `the database marker is recorded (got ${(written || {}).database_marker})`) &&
+          expect((written || {}).captured_at === "2026-09-05T12:00:00.000Z", `captured_at comes from the INJECTED clock (got ${(written || {}).captured_at})`) &&
+          expect(((written || {}).jobs || []).length === 3, `three jobs (got ${((written || {}).jobs || []).length})`) &&
+          expect(
+            gotShas === wantShas,
+            `and every sha equals the committed fixture's — the capture and the comparison compute the SAME hash, or the oracle could never match itself (got ${gotShas})`,
+          ) &&
+          expect(
+            ((written || {}).jobs || []).map((j) => j.jobname).join(",") === "audit_log_cold_purge,match_engine_cron,retention_compute_jobs_done",
+            "sorted by jobname, so two captures of the same state are byte-identical",
+          ) &&
+          pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("captureManifest REFUSES when the database has no COMMENT ON DATABASE marker");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ CLAUDE.md's standing rule made mechanical. `current_database()` is
+    // `postgres` on PROD and on TEST, so a capture from an unlabelled database
+    // is a file that cannot say where it came from.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
+      const outPath = join(dir, "cron-manifest.json");
+      const lines = [];
+      try {
+        const code = await captureManifest({
+          seams: createSeams({
+            sqlRunner: fixtureSql({ cronJobRows: prod.data, marker: null }),
+            clock: () => new Date("2026-09-05T12:00:00Z"),
+          }),
+          outPath,
+          log: (x) => lines.push(x),
+        });
+        pass =
+          expect(code === 3, `a NULL marker returns 3 (got ${code})`) &&
+          expect(existsSync(outPath) === false, "and nothing is written") &&
+          expect(lines.some((l) => l.includes("COMMENT ON DATABASE")), "the refusal names the marker") &&
+          pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   scenario("no env VALUE reaches the log or a defect row (threat T-164.1-01)");
   // -------------------------------------------------------------------------
   {
@@ -1407,6 +1835,106 @@ export async function selfTest() {
 }
 
 // ---------------------------------------------------------------------------
+// --capture-manifest: produce the cron oracle FROM PROD, read-only
+// ---------------------------------------------------------------------------
+
+/**
+ * Capture `cron.job` into a manifest file.
+ *
+ * ⛔ THREE REFUSALS, and each of them writes NOTHING:
+ *
+ *   3 — no `--out` path. The destination is REQUIRED and is never defaulted to
+ *       `MANIFEST_PATH`, so a capture is always a reviewed file MOVE rather
+ *       than a script silently rewriting the oracle it is judged against.
+ *   3 — the database has no `COMMENT ON DATABASE` marker, or the read failed.
+ *       An unlabelled database is one whose identity was never established;
+ *       `current_database()` is `postgres` on every Supabase project.
+ *   1 — ANY row fails ANY of the ten hygiene rules. This is what makes the
+ *       manifest an oracle of the ACHIEVABLE configuration rather than a
+ *       photograph of whatever PROD has: it CANNOT be captured into a state
+ *       that carries a credential. The refusal prints the jobname and the rule
+ *       ids, never the offending text.
+ *
+ * The command TEXT is written on success precisely because every row passed
+ * those ten rules. A reviewer may still withhold any row to sha-only afterwards
+ * — see the withhold procedure at the top of `arms/cron-drift.mjs`.
+ *
+ * @returns {Promise<number>} process exit code
+ */
+export async function captureManifest({ seams, outPath, log = (s) => console.log(s) }) {
+  if (!outPath) {
+    log("ERROR: --capture-manifest requires --out <path>. The destination is never defaulted to the committed oracle — a capture is a reviewed file move.");
+    return 3;
+  }
+
+  const markerRes = await seams.sql("cron-drift", CRON_DRIFT_MOD.DB_MARKER_SQL);
+  if (markerRes.measureFail) {
+    log(`ERROR: the database marker could not be read: ${markerRes.measureFail}. Nothing was written.`);
+    return 3;
+  }
+  const marker = String(markerRes.stdout || "").trim();
+  if (marker.length === 0) {
+    log("ERROR: the database has no COMMENT ON DATABASE marker, so which database this capture came from cannot be established. Re-set the marker before capturing. Nothing was written.");
+    return 3;
+  }
+
+  const res = await seams.sql("cron-drift", CRON_DRIFT_MOD.CRON_JOB_SQL, CRON_DRIFT_MOD.CRON_JOB_SEPARATORS);
+  if (res.measureFail) {
+    log(`ERROR: cron.job could not be read: ${res.measureFail}. Nothing was written.`);
+    return 3;
+  }
+  const rows = CRON_DRIFT_MOD.parseCronJobRows(res.stdout);
+
+  const dirty = [];
+  for (const r of rows) {
+    const v = CRON_DRIFT_MOD.hygieneViolations(r.jobname, r.command);
+    if (v.length > 0) dirty.push({ jobname: r.jobname, rules: v.map((x) => x.slice(0, x.indexOf("]") + 1)) });
+  }
+  if (dirty.length > 0) {
+    log(`REFUSED: ${dirty.length} cron.job row(s) fail secret hygiene, so this configuration cannot become the oracle. Nothing was written.`);
+    for (const d of dirty) log(`  ${d.jobname}: ${d.rules.join(" ")}`);
+    log("Rotate the exposed secret, re-schedule that job onto a vault.decrypted_secrets body, then capture again.");
+    return 1;
+  }
+
+  const capturedAt = seams.now().toISOString();
+  const jobs = rows
+    .map((r) => ({
+      jobid: Number.parseInt(r.jobid, 10),
+      jobname: r.jobname,
+      schedule: r.schedule,
+      active: r.active,
+      database: r.database,
+      username: r.username,
+      command_sha256: CRON_DRIFT_MOD.sha256Hex(CRON_DRIFT_MOD.normalizeCommand(r.command)),
+      command: CRON_DRIFT_MOD.normalizeCommand(r.command),
+    }))
+    .sort((a, b) => (a.jobname < b.jobname ? -1 : a.jobname > b.jobname ? 1 : 0));
+
+  writeFileSync(
+    outPath,
+    `${JSON.stringify(
+      {
+        schema_version: CRON_DRIFT_MOD.MANIFEST_SCHEMA_VERSION,
+        normalization: CRON_DRIFT_MOD.NORMALIZATION,
+        captured_at: capturedAt,
+        database_marker: marker,
+        jobs,
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+
+  log(`captured ${jobs.length} job(s) from database "${marker}" at ${capturedAt}`);
+  for (const j of jobs) {
+    log(`  ${j.jobname} ${j.schedule} active=${j.active} sha ${j.command_sha256.slice(0, 12)}`);
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -1432,7 +1960,8 @@ export function setSeamsFactoryForTests(factory) {
 
 export async function main(argv) {
   let onlyArm = null;
-  let captureManifest = false;
+  let wantCapture = false;
+  let outPath = null;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -1444,9 +1973,13 @@ export async function main(argv) {
         return 3;
       }
     } else if (arg === "--capture-manifest") {
-      captureManifest = true;
+      wantCapture = true;
     } else if (arg === "--out") {
-      i += 1;
+      outPath = argv[++i];
+      if (!outPath) {
+        console.error("ERROR: --out needs a path");
+        return 3;
+      }
     } else {
       console.error(`ERROR: unknown argument ${JSON.stringify(arg)}`);
       console.error(
@@ -1456,11 +1989,10 @@ export async function main(argv) {
     }
   }
 
-  if (captureManifest) {
-    console.error(
-      "ERROR: --capture-manifest is reserved for phase 164.1 plan 03 (the cron-drift oracle) and is not implemented yet.",
-    );
-    return 3;
+  if (wantCapture) {
+    // ⛔ Refuses without --out, and never defaults to MANIFEST_PATH: the
+    // capture writes an ARTIFACT a human reviews and moves into place.
+    return captureManifest({ seams: seamsFactory(), outPath, log: (s) => console.log(s) });
   }
 
   console.log(
