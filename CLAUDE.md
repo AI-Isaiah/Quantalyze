@@ -44,6 +44,13 @@ a failure fails the aggregate rather than passing quietly:
   #2) because the lane has no pg_cron — beside a `lane-probe:` line measured on
   the lane itself, which is what lets the deferral expire: pg_cron AVAILABLE
   with a non-empty lane-blocked class raises `lane-blocked-stale` and exits 1.
+  ⚠️ **CURRENCY 2026-09-05: the clause "because the lane has no pg_cron" is no
+  longer true and the deferral it describes is RETIRED.** Phase 164.4.1 put
+  pg_cron ON the lane; the four files (and an apply-list-blind fifth) are
+  annotated, and the line now reads `lane-blocked: 0 file(s)` with a reason that
+  says so. Both prints, the probe leg and the `lane-blocked-stale` defect are
+  UNCHANGED and stay live for any future unannotated pg_cron gate — see the
+  dated paragraph at the end of this section.
 - **`sql-gate-lint`** — four static rules over `supabase/tests`, each shipped
   with a red and a green fixture proving the rule can fire.
 - **`plan-anchor-verify`** — re-resolves every `file:line` anchor and named
@@ -153,6 +160,57 @@ dependants (TODOS `[REDUNDER-WAIVER-01]`), and plan 09's resync-retry assertion
 that a narrowed unique index reports `TEST FAILED (b)` instead of a raw 23505
 naming no arm. Read the run's own `coverage:` and `arms:` lines rather than any
 number restated in prose.
+✅ **CURRENCY 2026-09-05 (Phase 164.4.1 plan 06) — THE PHASE'S CLOSING READING.
+Every paragraph above stays as dated lineage; this one is the current state.**
+* **HOW pg_cron got onto the lane.** `scripts/pg-lane/run.sh` carries
+  `shared_preload_libraries=pg_cron` (with `cron.database_name` and
+  `cron.max_running_jobs=0` — the lane schedules nothing, it needs the catalog
+  to exist) on its SINGLE `pg_ctl -o` start, and each affected gate's
+  `RED-UNDER-SETUP` apply list carries migration
+  `20260513094906_enable_pg_cron.sql`. **No migration was edited anywhere in
+  this phase.** Cost measured, not assumed: +0.009 s/lane isolated,
+  `per-arm lane time: mean 1.1s` at corpus scale.
+* **What was annotated: five files, 103 sections** — the four that were
+  `lane-blocked:` plus `test_compute_jobs_error_kind_copy_parity.sql`, the
+  apply-list-blind fifth that had been sitting in `pending:`.
+* **END STATE, read off the run:** `coverage: files 44/71`,
+  `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, `  pending: 0`,
+  `arms: 363/363/0`, `biting: 363`, `lane-invocations: 363` (tallies agree),
+  `✅ No defects`, **exit 0**. `FILES_FLOOR` 44, `ARMS_FLOOR` 363,
+  `WAIVED_CEILING` still **0** — nine files' worth of arms moved, zero waivers
+  added. 44 + 0 + 27 + 0 + 0 = 71; the 27 are `unreachable:`
+  (`[REDUNDER-NONIDIOM]`, still open and still printed by name every run).
+* ⛔ **Both `lane-blocked: 0` and `pending: 0` are pinned as MEASURED EMPTY SETS
+  BESIDE AIMs, never as bare empty assertions.** The `pending` pin has
+  `it("pending AIM (D-04)…")`, which classifies a stripped copy of a real gate
+  to prove the class is still computed; the `lane-blocked` class stays DERIVED
+  and its tripwire is proven by SELF-TEST 17/17 on a synthetic corpus. This
+  **SUPERSEDES the ⛔ `pending:` is NOT empty sentence above** — do not "restore"
+  the old one-name pin, and do not replace either AIM with a bare `toEqual([])`.
+* **The tripwire fired and cleared, both observed.** FIRED on the
+  pre-annotation tree (`164.4.1-TRIPWIRE-FIRED.log`), and SHA-bound on ubuntu in
+  workflow run 33938272686 at `f04ce51b`, whose provisioning step answered
+  RESEARCH's open question by measurement: `postgresql-16-cron` comes from
+  **noble/universe, not PGDG**, major 16, `.so` and `.control` both present.
+  CLEARED locally at plan 05 — exit 0, class empty — with nothing in the
+  classifier, the probe fixture or the defect code touched to clear it.
+* **Message honesty, plan 06:** the runner used to print "which the pg-lane
+  cannot host … (deferred 2026-09-03)" unconditionally and "lane-blocked class
+  is STALE" over an EMPTY class. Both were corrected at the source; each arm now
+  says what it means for that run, and the grep prefixes ci.yml depends on are
+  byte-identical. `[REDUNDER-PGCRON]` and `[REDUNDER-LANEBLOCKED-BLIND]` are
+  both closed in `TODOS.md` with their reasoning — the second DELIBERATELY: its
+  proposed fix would have classified UNANNOTATED files by a line only ANNOTATED
+  files carry, i.e. dead code behind a passing test, so the limit is documented
+  and pinned by a hand-built calibration instead.
+* ⚠️ **NOT MEASURED, and owed:** no SHA-bound ubuntu run of the FINISHED tree
+  exists yet, so there is no ubuntu wall clock for the 44-file / 363-arm corpus
+  and `sql-mutation`'s `timeout-minutes` stays at **15**, unchanged — a raise
+  requires a measured run and 20 is the ceiling. The 445 s of run 33938272686
+  is the PRE-annotation tree at 262 arms and must not be read as a figure for
+  363. ⛔ From here, a run that exits NON-ZERO is a regression, not the tripwire.
+Read the run's own `coverage:` and `arms:` lines rather than any number
+restated in prose.
 VAC-04 and VAC-08 have still not run against their real credential; see entries
 25 and 26.
 

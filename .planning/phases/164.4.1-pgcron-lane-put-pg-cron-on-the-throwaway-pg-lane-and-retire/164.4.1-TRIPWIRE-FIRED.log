@@ -202,3 +202,72 @@ Do not read this section as claiming more than it shows.
   none is mine; every flagged file is a pre-existing test fixture. With `fetch-depth: 0` on a
   non-PR event gitleaks scans FULL HISTORY, which a PR-scoped scan never does. Booked in
   TODOS; the phase PR will be PR-scoped and is expected green, as #743 was.
+
+====================================================================
+## the second half of SC-3 — RECORDED LOCALLY, ubuntu half STILL OWED
+====================================================================
+DATE:   2026-09-05 (plan 164.4.1-06, executed in GSD worktree
+        worktree-agent-a329eb1c58a93391a at base ddfd55d3)
+
+⛔ THE LITERAL THIS FILE'S OWN HEADER PROMISES FOR THIS SECTION IS DELIBERATELY
+ABSENT, and so are the ubuntu run id and its 40-hex head-sha. Plan 06 Task 2's
+`<verify>` greps this file for that literal. Writing it here on the strength of a
+LOCAL run would turn that assertion green on a section containing no ubuntu
+measurement -- the same control-that-cannot-fail shape the `ubuntu-dispatch - NOT
+YET TAKEN` section above refuses, and for the same measured reason (a first draft
+of that paragraph quoted its own trigger literals and two Step G assertions went
+green on nothing). So plan 06 Task 2's verify is EXPECTED TO FAIL at that grep
+until the orchestrator dispatches. That failure is the honest reading of this
+tree.
+
+⛔ EXCEPT IT DOES NOT FAIL, AND THAT IS A DEFECT IN THE VERIFY, FOUND 2026-09-05.
+Plan 06 Task 2 asserts `grep -a -c 'CLEARED' <this file> | grep -v '^0$'`. That
+grep ALREADY RETURNS 1 at plan 06's base commit ddfd55d3 -- satisfied by line 6
+of this file, the plan-01 header sentence PROMISING that plan 06 will append a
+cleared half. So the assertion passes on a file containing no such half, on a
+tree where no ubuntu run has happened. It is a bare-substring assertion over a
+document that talks about itself, which is the same class of trap the paragraph
+above describes, arrived at from the other direction: plan 01 wrote the trigger
+literal into its own prose while explaining that it must not.
+⛔ IT IS NOT REPAIRED BY DELETING OR REWORDING LINE 6. That line is a dated
+record of what plan 01 decided; rewriting it to make a later grep behave is the
+worse defect. The repair belongs in the ASSERTION, which must bind the literal
+to the MEASUREMENT rather than to the file -- e.g. require the ubuntu run id and
+a 40-hex sha on the same section, the shape Step G's own assertions use. Booked
+here, where the next reader of this file will hit it, and reported to the
+orchestrator rather than worked around.
+
+WHY IT IS ABSENT. The ubuntu `workflow_dispatch` measurement was SCOPED OUT of
+plan 06's executor run by instruction, for the reason plan 01 Step G was: this
+plan executed inside an isolated GSD worktree on branch
+`worktree-agent-a329eb1c58a93391a`, whose commits are not on
+`phase-164.4.1-pgcron-lane` until the harness merges them back. A
+`git push -u origin "$(git branch --show-current)"` from here targets the wrong
+ref, and any run dispatched against it would not be SHA-bound to the phase
+branch -- which is the whole point of the measurement. Deferral declared, not
+silently skipped.
+
+WHAT IS STILL OWED, and it is a MEASUREMENT:
+  * a SHA-bound ubuntu run of the FINISHED tree (44 files / 363 arms), giving
+    the corpus defect table on ubuntu -- run 33938272686 could not, both because
+    it predates the annotations and because its log came back truncated before
+    the summary;
+  * that run's `sql-mutation` wall clock, legs and s/leg, which is the ONLY
+    input the ci.yml TIMEOUT DECISION rule accepts. `timeout-minutes` is
+    therefore left at 15 by plan 06, untouched, and the DECISION block carries no
+    number from this plan.
+
+WHAT WAS MEASURED HERE, on this box, and is not a substitute for the above:
+
+-- verbatim ------------------------------------------------------------
+HOST:    macOS, Homebrew postgresql@16 16.13, pg_cron 1.6.7 built from source
+COMMAND: node scripts/mutation-runner/run.mjs        # FULL corpus, not narrowed
+(runner output quoted in 164.4.1-06-SUMMARY.md)
+-- end verbatim --------------------------------------------------------
+
+The plan-05 record already carries the corresponding local exit-0 corpus run at
+b6b830cf; what plan 06 adds locally is that the same exit-0 reading survives the
+message-honesty rewrite of `logCorpusClassification`, i.e. that correcting the
+two false-reading sentences changed no verdict. The runner's SELF-TEST is
+17/17 at this commit, including the arm that IS the stale-deferral rule, so the
+tripwire remains able to fire with the class empty.

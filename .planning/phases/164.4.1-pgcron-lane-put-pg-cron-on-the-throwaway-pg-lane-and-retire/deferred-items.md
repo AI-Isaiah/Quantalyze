@@ -78,3 +78,38 @@ states the residual.
 
 **Fix** = strip SQL line comments from `v_fn` once, at the top of Part 1a, and re-run
 the `1/re-base` twin without its fourth step to prove the strip is load-bearing.
+
+## D-164.4.1-06-1 — plan 06 Task 2's `CLEARED` assertion passes at its own base commit
+
+**Found during:** plan 06 Task 3, while appending to `164.4.1-TRIPWIRE-FIRED.log`.
+
+**Measured 2026-09-05 at base `ddfd55d3`, before any plan-06 edit to that file:**
+
+    $ grep -a -c 'CLEARED' .planning/phases/164.4.1-.../164.4.1-TRIPWIRE-FIRED.log
+    1
+    $ grep -an 'CLEARED' .planning/phases/164.4.1-.../164.4.1-TRIPWIRE-FIRED.log
+    6:PLAN 06 APPENDS THE CLEARED HALF: this file records the tripwire FIRING. Plan 06
+      appends the observation that it has been CLEARED (`lane-blocked: 0`) on a
+      SHA-bound ubuntu run.
+
+Plan 06 Task 2's `<verify>` runs
+`grep -a -c 'CLEARED' <that file> | grep -v '^0$'`, whose stated `fails_when` is
+"the `CLEARED` count in the evidence log is `0` (the ubuntu cleared half was not
+appended)". It returns 1 on a tree where no ubuntu run has happened and no such
+half exists — satisfied by plan 01's own header sentence PROMISING that plan 06
+would append one. The assertion binds a bare substring to a document that talks
+about itself, so it cannot distinguish the measurement from the plan to take it.
+
+**Why it is logged and not fixed here.** The repair is to the ASSERTION, not the
+document: line 6 is a dated record of plan 01's decision, and editing it so a
+later grep behaves is the worse defect (the same rule that keeps every superseded
+CURRENCY paragraph in place). The correct shape already exists in this phase —
+plan 01 Step G binds its literals to a run id and a 40-hex head-sha on the same
+section — and applying it to Task 2 is a plan edit, which an executor may not
+make to its own verify.
+
+**Consequence for reading plan 06:** a green on that one grep proves nothing.
+The ubuntu half of SC-1/SC-3 is unmeasured in this executor's run and is owed to
+the orchestrator; see the section plan 06 appended to the evidence log, which
+deliberately withholds the ubuntu run id and head-sha rather than paraphrase them
+into existence.

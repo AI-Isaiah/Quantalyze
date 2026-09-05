@@ -241,6 +241,36 @@ independently.
 another server major fails to load with a message byte-identical to "not
 installed at all".
 
+### ⭐ The ubuntu route, MEASURED (2026-09-05)
+
+The ubuntu row above was INSPECTED when it was written, never executed —
+164.4.1-RESEARCH assumption A1. It has now been run, on `ubuntu-latest`, in
+workflow run **33938272686** (head `f04ce51b`, `sql-mutation` job
+101230396626). The provisioning step's own prints are quoted verbatim in
+`.planning/phases/164.4.1-pgcron-lane-put-pg-cron-on-the-throwaway-pg-lane-and-retire/164.4.1-TRIPWIRE-FIRED.log`.
+What it settles:
+
+- **Which apt source wins: `noble/universe`, not PGDG.** That was RESEARCH's
+  Open Question 1 and it is now answered by `apt-cache policy`, not by
+  reasoning. No PGDG repository has to be added to the runner.
+- **The runner's PostgreSQL major is 16**, matching the authoring box's 16.13 —
+  so CI and the author measure the SAME corpus, which is the property the table
+  above says matters.
+- **`pg_cron.so` and `pg_cron.control` are both present** under
+  `/usr/lib/postgresql/16/lib/` and `/usr/share/postgresql/16/extension/`.
+- The apt-served version differs from the macOS source build, exactly as the
+  skew warning above predicts. ⭐ It is deliberately NOT restated here — read it
+  from the step's own `dpkg -s … Version:` print, per the rule two paragraphs
+  up. The evidence log quotes the one that run measured.
+
+⚠️ **Two ubuntu figures are NOT in this file, and their absence is deliberate.**
+Run 33938272686 was taken on the PRE-annotation tree (its `sql-mutation` was
+EXPECTED RED — the `lane-blocked-stale` tripwire firing), and the `gh api
+…/jobs/<id>/logs` response for it came back truncated before the corpus
+summary. So neither an ubuntu `per-arm lane time:` for this phase nor an ubuntu
+wall clock for the finished 44-file / 363-arm corpus has been measured. The
+macOS figures below are what exists. Read them as macOS.
+
 **Measured preload cost (2026-09-04, this box, macOS 16.13, `run.sh` end to end,
 3 samples each side):**
 
@@ -270,3 +300,13 @@ leg on top of the arms. No arm COUNT is restated here on purpose: the runner
 prints `per-arm lane time: mean <t>s over <n> arm run(s)` on every run and that
 line is the current measurement. Minutes, not hours — measured 0.9 s/arm over
 45 arms on 2026-09-03 (plan 164.4-02).
+
+⚠️ **CURRENCY 2026-09-05 (Phase 164.4.1, macOS, WITH the pg_cron preload).** The
+full corpus is now 44 annotated files / 363 arms, and the runner printed
+`per-arm lane time: mean 1.1s over 363 arm run(s)` at plan 05 — so the preload
+costs nothing measurable at corpus scale, which is the form the decision needed
+since every arm pays lane startup. The separation runs that re-derived the
+floors took **486.4 s** and **490.4 s** end to end on this box; that is the
+number to budget against, and it is macOS. ⛔ No ubuntu wall clock for this
+corpus exists yet — the one ubuntu run this phase has (33938272686, 445 s) was
+the pre-annotation tree at 262 arms. Do not read 445 s as a figure for 363.
