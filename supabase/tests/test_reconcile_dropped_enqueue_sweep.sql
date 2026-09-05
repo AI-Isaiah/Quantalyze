@@ -238,6 +238,75 @@
 -- B4 marker anchor and Part 2's arm C4 RED -- also by design, and that is this
 -- commit's TDD RED: it arrives on the PR's FIRST sql-tests run, before Plan
 -- 146.1-08 applies the new migration to the TEST project.
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4.1, PGCRON-LANE). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+--
+-- ⚠️ THE APPLY LIST BELOW IS SIZED BY THE THREE `SKIP Part` NOTICES AT :659,
+-- :1064 AND :1154, NOT BY THIS HEADER. Parts 2, 3 and 4 each `RAISE NOTICE
+-- 'SKIP Part …' … RETURN` when pg_cron is absent, so on a lane without the
+-- extension THIRTY-SEVEN of this file's thirty-nine sections are un-falsifiable:
+-- their twins come back `no-red` naming no cause, and a silently-ineffective
+-- pg_cron preload would be invisible. (Part 1 does not skip -- its `1/JOB-04`
+-- guard at :337-339 RAISEs instead, which is the newer of the two spellings
+-- this corpus carries.) So the list carries 20260513094906 -- the
+-- `CREATE EXTENSION pg_cron` those three skips key on -- before every
+-- cron-touching migration.
+--
+-- MEASURED 2026-09-05 on the lane, with this list: the baseline exits 0, prints
+-- ZERO gate-owned SKIP lines and all FOUR `Part … OK` notices.
+--   scoped count:
+--     `grep -a -cE '^psql:[^ ]*test_reconcile_dropped_enqueue_sweep\.sql:[0-9]+: NOTICE:.*SKIP Part'`
+--     -> 0
+-- ⛔ Do NOT read that zero off an unscoped `grep -i SKIP`, and do NOT read it
+-- off the prefix-scoped-but-token-only form either. BOTH over-count here:
+--   * Postgres itself emits `… does not exist, skipping` NOTICEs from the
+--     `DROP … IF EXISTS` statements inside the applied migrations (17 such
+--     lines on this list, MEASURED), and none of them is this file's;
+--   * this file's OWN Part 1 OK notice contains the words `SKIP LOCKED` -- it
+--     is one of the anchors Part 1 asserts -- so the prefix-scoped form
+--     WITHOUT the `Part` token counts 1 and can never reach 0 while the gate
+--     is green (MEASURED: that exact form returned 1 on a fully green run).
+-- The load-bearing token is `SKIP Part`, which is the literal all three of this
+-- file's skip arms use and which no anchor prose contains.
+--
+-- ⚠️ ORACLE SCOPE, stated honestly, and it is narrower than the guarded-
+-- migrations list at the top of this file. The lane's `cron.job.command` oracle
+-- is the body of the LAST writer in the apply list, 20260819150000 (the R3
+-- readmit attempt ceiling). 20260816140000 registers the job and 20260819130500
+-- re-registers it with the B4 exemption, but `cron.schedule` upserts by NAME,
+-- so only the last one's bytes survive. MEASURED by one-out ablation on real
+-- lanes 2026-09-05: dropping EITHER 20260816140000 or 20260819130500 leaves the
+-- whole file GREEN (rc=0), while dropping 20260819150000 REDs Part 1 with
+-- `TEST FAILED (1/JOB-04/D-02/R3)`. Both are kept in the list anyway -- they are
+-- the chain a real project applies, and their own STEP 2 self-verifies run --
+-- but EVERY body-oracle twin below targets 20260819150000. A twin that edited
+-- an earlier migration's cron body would be overwritten and come back `no-red`.
+--
+-- ⚠️ WHAT THE LANE CANNOT FALSIFY HERE, MEASURED rather than assumed. Two
+-- assertions in Part 1 are dominated on this lane and are NOT proven by a twin
+-- of their own; each is recorded at its site:
+--   * the `v_count = 0` "job not registered" arm and the `v_count <> 1` "exactly
+--     one row" arm share the section `1/JOB-04` with fifteen other raises, so the
+--     section is proven through a different, non-dominated raise;
+--   * every `IF v_command IS NULL` guard at the head of Parts 2/3/4 is
+--     unreachable while the job exists, for the same reason.
+-- Section coverage is what the runner counts, and it is complete; per-RAISE
+-- coverage is not claimed by this note or anywhere else.
+--
+-- ⚠️ `scripts/pg-lane/fixtures/30-fixture-strategies-status-default.sql` is in
+-- the list for a reason that is easy to misread as cosmetic and is not.
+-- 01-fixture-core.sql declares `status TEXT` bare-nullable; production declares
+-- it `NOT NULL DEFAULT 'draft'` (20260405061911:63). The deployed body's FIRST
+-- conjunct is `s.status <> 'archived'`, and `NULL <> 'archived'` is NULL, so
+-- without the stand-in EVERY seed in Parts 2/3/4 drops out of the batch CTE and
+-- the heal arms RED for a reason that has nothing to do with the predicate under
+-- test. MEASURED by ablation: without it the file REDs
+-- `TEST FAILED (2/arm A/JOB-04/SC#1) … got 0 compute_jobs rows`.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/30-fixture-strategies-status-default.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/12-fixture-profiles-is-admin.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","scripts/pg-lane/fixtures/29-fixture-compute-jobs-priority.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260522111839_csv_daily_returns.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260816140000_reconcile_dropped_enqueue_sweep.sql","supabase/migrations/20260819130500_reconcile_sweep_readmit_terminalized_orphans.sql","supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql"]}
 
 -- ==========================================================================
 -- Part 1 -- STRUCTURAL, UNGATED, ZERO SIDE EFFECTS. This is the part that must
