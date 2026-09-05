@@ -33,6 +33,48 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_derive_allocator_keys_fanout.sql
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4.1, PGCRON-LANE). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+--
+-- ⚠️ THE APPLY LIST BELOW IS SIZED BY THE TWO SKIPS, NOT BY THIS HEADER. A
+-- section behind a still-firing skip is un-falsifiable, so the list carries
+-- every file those two skips key on:
+--   * `:56` (fan-out fn absent) keys on 20260717233529 — which needs the whole
+--     compute_jobs chain beneath it: 20260411144407 (queue + kinds registry),
+--     20260418194206 (compute_jobs.allocator_id), 20260420073003 (the api_key
+--     target column, enqueue_compute_job's api_key mode and the in-flight
+--     partial unique index) and 20260614120000. MEASURED 2026-09-05: without
+--     that last one assertion 1's fan-out dies on compute_jobs_kind_fkey — the
+--     derive_broker_dailies REGISTRY ROW, not the gate, is what is missing.
+--   * `:169` (pg_cron absent) keys on 20260513094906_enable_pg_cron.sql, which
+--     is listed AHEAD of every migration that probes `pg_extension` or calls
+--     `cron.schedule` (20260420073003 STEP 8 and 20260717233529 STEP 5 both do).
+--     The pg-lane PRELOADS the pg_cron library (phase 164.4.1 plan 01) but
+--     never runs CREATE EXTENSION itself: a gate declares that need by listing
+--     this migration, so what the lane installs is the repo's own DDL.
+-- MEASURED 2026-09-05 on the lane: with this list the baseline exits 0 and this
+-- gate prints ZERO `SKIP` / `skipping` lines of its own, so assertion 6 RUNS and
+-- is falsified rather than withheld. ⚠️ Count the skip lines carrying THIS
+-- file's `psql:supabase/tests/…` prefix, not every skip line in the transcript:
+-- PostgreSQL emits its own `does not exist, skipping` DDL chatter during the
+-- apply (28 lines here; the already-annotated reference file
+-- test_metrics_by_basis_write.sql prints 15 on a GREEN baseline), and no gate
+-- controls those.
+--
+-- ⚠️ ORACLE SCOPE for assertion 6 on a lane. `cron.job` holds whatever THIS
+-- apply list just scheduled, so the lane proves the assertion is FALSIFIABLE.
+-- It cannot prove anything about deployment drift on PROD, where that row is
+-- the product of every migration ever applied. Stated here because assertion 6
+-- reads a CATALOG rather than a constraint, which makes the scope easy to
+-- overread in the other direction.
+--
+-- ⚠️ Assertions 1-7 are ALL sections: every one of them raises, so every one is
+-- twinned. There is no positive-path-only arm in this file.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql"]}
 
 BEGIN;
 
