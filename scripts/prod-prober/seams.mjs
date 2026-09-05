@@ -39,6 +39,8 @@ import { spawnSync } from "node:child_process";
 
 const FETCH_TIMEOUT_MS = 15000;
 const SQL_TIMEOUT_MS = 60000;
+/** Fallback only — `arms/mt5.mjs` owns the budget and passes it per call. */
+const DEFAULT_SSH_TIMEOUT_MS = 120000;
 
 /**
  * The module-level invocation tally. MONOTONIC — read as a DELTA across a
@@ -217,6 +219,99 @@ export function realSqlRunner(env) {
 }
 
 /**
+ * The real `railway ssh` seam (phase 164.1 plan 04, D-19).
+ *
+ * Spawns the Railway CLI to execute ONE command inside the `mt5-gateway`
+ * container. Five properties are load-bearing:
+ *
+ *   1. THE TOKEN TRAVELS AS `RAILWAY_API_TOKEN` IN THE CHILD ENV ONLY. That is
+ *      the CLI's WORKSPACE/ACCOUNT credential slot. ⛔ Do NOT rename it to the
+ *      CLI's other, shorter credential variable — the PROJECT slot. They are
+ *      NOT aliases: `railway ssh` REFUSES a project-scoped token (RESEARCH F4;
+ *      the CLI's own docs say SSH key management is unsupported with it), so a
+ *      renamed variable would make every live run report `mt5-ssh-transport`
+ *      for a self-inflicted reason. The project slot's NAME must not appear
+ *      anywhere under `scripts/prod-prober/` — not in code, not in a comment,
+ *      not in a fixture — so this file says "the project slot" in prose and
+ *      an acceptance grep (and the plan-05 wiring test) pins the absence.
+ *   2. THE CHILD ENV IS BUILT FROM SCRATCH — `PATH`, `HOME` (the CLI reads its
+ *      own config dir from it), `RAILWAY_API_TOKEN` and `CI=1`. Nothing else in
+ *      the runner's environment is handed to the CLI.
+ *   3. `input: ""` CLOSES STDIN. Piped input runs without a PTY, so the CLI
+ *      cannot prompt and cannot allocate a terminal (docs.railway.com/cli/ssh).
+ *      A prober that can block on a prompt is a prober that hangs a workflow.
+ *   4. ssh's OWN EXIT STATUS AND STDOUT ARE CAPTURED SEPARATELY, and a non-zero
+ *      exit is NOT a `measureFail`. `scripts/mt5-diag.sh:45-46` pipes into
+ *      `grep '^PROBE '` and lets the PIPE decide the exit — which throws away
+ *      the CLI's own status and conflates "the transport failed" with "the
+ *      probe answered something unexpected". Here both readings survive to the
+ *      arm, and `classifyProbe` decides. Only ENOENT, a spawn error and the
+ *      TIMEOUT are `measureFail` — states in which nothing was measured at all.
+ *   5. STDERR IS REDACTED AND TRUNCATED TO ITS FIRST LINE. The CLI echoes its
+ *      own token in some Unauthorized messages; this repository and its Actions
+ *      logs are public (T-164.1-18/19).
+ *
+ * @param {Record<string,string|undefined>} env  needs `RAILWAY_API_TOKEN`, `PATH`,
+ *        and `HOME`. Read ONCE, at factory time.
+ * @returns {(argv: string[], opts?: {timeoutMs?: number}) => object}
+ */
+export function realSshRunner(env) {
+  const token = env.RAILWAY_API_TOKEN;
+
+  /** The CLI's stderr is the ONE channel that can echo the token. One line, redacted. */
+  const redact = (text) => {
+    const firstLine = String(text || "").split("\n")[0].trim();
+    if (!token) return firstLine;
+    return firstLine.split(token).join("<redacted>");
+  };
+
+  // Built once, and only from names that exist — an `undefined` value in a
+  // spawn env object becomes the literal string "undefined" in the child.
+  const childEnv = {};
+  for (const [name, value] of Object.entries({
+    PATH: env.PATH,
+    HOME: env.HOME,
+    RAILWAY_API_TOKEN: token,
+    CI: "1",
+  })) {
+    if (typeof value === "string") childEnv[name] = value;
+  }
+
+  return (argv, opts = {}) => {
+    const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : DEFAULT_SSH_TIMEOUT_MS;
+
+    const child = spawnSync("railway", argv, {
+      encoding: "utf8",
+      input: "",
+      timeout: timeoutMs,
+      env: childEnv,
+    });
+
+    const base = { status: null, stdout: "", stderr: "", timedOut: false, measureFail: null };
+
+    if (child.error && child.error.code === "ENOENT") {
+      return { ...base, measureFail: "railway CLI not found on PATH" };
+    }
+    if (child.signal || (child.error && child.error.code === "ETIMEDOUT")) {
+      return { ...base, timedOut: true, measureFail: `railway ssh exceeded ${timeoutMs} ms` };
+    }
+    if (child.error) {
+      return { ...base, measureFail: `railway ssh could not be spawned: ${redact(child.error.message)}` };
+    }
+    // ⛔ NOT a measureFail on a non-zero status. See property 4 above: a CLI
+    // that exited non-zero may still have printed the PROBE line, and one that
+    // exited 0 without a PROBE line is a finding the ARM must classify.
+    return {
+      status: child.status,
+      stdout: child.stdout || "",
+      stderr: redact(child.stderr),
+      timedOut: false,
+      measureFail: null,
+    };
+  };
+}
+
+/**
  * Build the seam bundle handed to every arm.
  *
  * Seam result shapes are a FIXED CONTRACT — plans 03 (cron-obs, cron-drift)
@@ -236,7 +331,10 @@ export function realSqlRunner(env) {
  *        renderer. Spelled without the literal accessor on purpose: this file
  *        must stay at ZERO hits for it, and a downstream grep cannot tell a
  *        docblock from a read.
- * @param {((argv: string[], opts: object) => Promise<object>)|null} [opts.sshRunner] wired by plan 04
+ * @param {((argv: string[], opts: object) => object)|null} [opts.sshRunner]
+ *        wired by plan 04 — the CLI builds it from the real environment
+ *        (`liveSeams` in run.mjs), the self-test passes a fixture-backed runner
+ *        that answers with a committed `railway ssh` stdout transcript.
  * @param {() => Date} [opts.clock] INJECTABLE clock (plan 03's cron arm needs a stable "now")
  */
 export function createSeams({
