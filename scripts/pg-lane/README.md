@@ -328,7 +328,8 @@ line is the current measurement. Minutes, not hours — measured 0.9 s/arm over
 45 arms on 2026-09-03 (plan 164.4-02).
 
 ⚠️ **CURRENCY 2026-09-05 (Phase 164.4.1, macOS, WITH the pg_cron preload).** The
-full corpus is now 44 annotated files / 363 arms, and the runner printed
+full corpus is now 44 annotated files / 361 arms (363 at plan 05; the phase
+review reclassified two unfalsifiable arms on 2026-09-05), and the runner printed
 `per-arm lane time: mean 1.1s over 363 arm run(s)` at plan 05 — so the preload
 costs nothing measurable at corpus scale, which is the form the decision needed
 since every arm pays lane startup. The separation runs that re-derived the

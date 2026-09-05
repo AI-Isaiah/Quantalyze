@@ -144,6 +144,12 @@ Measured at `b6b830cf`: `coverage: files 44/71`, `lane-blocked: 0 file(s)`,
 `lane-probe: pg_cron AVAILABLE`, `  pending: 0`, `arms: 363/363/0`,
 `biting: 363`, `lane-invocations: 363`, tallies agree, `✅ No defects`.
 `FILES_FLOOR` is pinned at 44 and `ARMS_FLOOR` at 363 (not the 365 the plan
+⚠️ SUPERSEDED 2026-09-05 by the phase REVIEW (`164.4.1-REVIEW.md`, CR-01/CR-02): `ARMS_FLOOR`
+is **361**, not 363. Three arms of `test_reconcile_dropped_enqueue_sweep.sql` were found either
+unfalsifiable or mutating the gate's own text where a production mutation reaches them; two were
+reclassified as named INVARIANTs (never waived). `FILES_FLOOR` stays 44 and `WAIVED_CEILING`
+stays 0. The floor moved DOWN because two arms had never been proven against a production
+regression — read `run.mjs` for the live constants, never a number restated in prose.
 projected — 324 + 39, read off the run). The last file was
 `test_reconcile_dropped_enqueue_sweep.sql`, 39 sections, all 39 biting on the
 first proof run. The class was emptied BY ANNOTATION: `parse.mjs`, the probe

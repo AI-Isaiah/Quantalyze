@@ -179,6 +179,11 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 // 44 annotated / 0 pending / 27 unreachable / 0 inert / 0 lane-blocked = 71 —
 // `FILES_FLOOR` 44, `ARMS_FLOOR` 363, `WAIVED_CEILING` still 0, and
 // [REDUNDER-PGCRON] RETIRED rather than deferred again. Still read the run.
+// ⚠️ SUPERSEDED 2026-09-05 (phase review, after plan 06): `ARMS_FLOOR` is **361**, not
+// 363. CR-01/CR-02 found three arms of test_reconcile_dropped_enqueue_sweep.sql either
+// unfalsifiable or mutating the gate's own text; two were reclassified as named INVARIANTs.
+// `FILES_FLOOR` stays 44 and `WAIVED_CEILING` stays 0 — the floor moved DOWN because two arms
+// were never proven against a production regression. See the ARMS_FLOOR block below.
 //
 // ⭐ RE-DERIVED 2026-09-03 (plan 164.4-04) — THE PHASE'S FIRST *FILE* MOVE. The
 // blocks above STAY as lineage: 1 was the whole annotated corpus while it was
@@ -3412,6 +3417,9 @@ export function absurdityViolations({
 // re-measured by this plan over `supabase/tests/`: 44 annotated / 0 pending /
 // 27 unreachable / 0 inert / 0 lane-blocked = 71, `arms: 363/363/0`,
 // `biting: 363`, `lane-invocations: 363`, `✅ No defects`, EXIT 0.
+// ⚠️ SUPERSEDED 2026-09-05 by the phase review: the file count and the verdict hold, but the
+// arm count is now `arms: 361/361/0`, `biting: 361`, `lane-invocations: 361` — CR-02
+// reclassified two unfalsifiable arms. The 363 above stays as plan 06's dated reading.
 // ⛔ FROM HERE, A NON-ZERO EXIT IS A REGRESSION, not the tripwire. And the
 // printed reason for `lane-blocked:` is no longer "which the pg-lane cannot
 // host" in either state — see `logCorpusClassification`, where both the empty
@@ -3629,7 +3637,7 @@ export function logCorpusClassification(corpus, log, laneProbe = null) {
     // message used to say "the lane LOST pg_cron", which is the ONE cause that
     // cannot reach here. TRACED through the substrate, 2026-09-05:
     //   * `available` is read from the probe gate
-    //     (fixture-corpus/lane-probe/pg-cron-probe.sql), which asks
+    //     (scripts/mutation-runner/fixtures/lane-probe/pg-cron-probe.sql), which asks
     //     `pg_available_extensions` — i.e. what the BOOTED postmaster could
     //     install — so reaching `false` at all requires a lane that BOOTED.
     //   * `scripts/pg-lane/run.sh:351-355` starts every lane with

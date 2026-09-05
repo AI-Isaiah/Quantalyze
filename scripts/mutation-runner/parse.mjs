@@ -1050,6 +1050,10 @@ export const PG_CRON_EXTENSION = "pg_cron";
  * present in the gate's own database. All five files are annotated; the
  * `lane-blocked` class is measured EMPTY (plan 05: `coverage: files 44/71`,
  * `arms: 363/363/0`, `lane-blocked: 0 file(s)`, `  pending: 0`).
+ * ⚠️ SUPERSEDED 2026-09-05 by the phase review — the `lane-blocked: 0` and `pending: 0`
+ * halves hold, but the arm count is now `arms: 361/361/0` (CR-02 reclassified two
+ * unfalsifiable arms of test_reconcile_dropped_enqueue_sweep.sql). This function still did
+ * not change.
  *
  * THIS FUNCTION DID NOT CHANGE, and it is still load-bearing: it is the input to
  * the `lane-blocked-stale` tripwire (`run.mjs`, SELF-TEST 17/17), which is what
