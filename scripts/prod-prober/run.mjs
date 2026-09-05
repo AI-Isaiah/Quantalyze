@@ -9,12 +9,16 @@
  *   node scripts/prod-prober/run.mjs                              # live run, ALL arms
  *   node scripts/prod-prober/run.mjs --self-test                  # fixtures only, NO network
  *   node scripts/prod-prober/run.mjs --arm <name>                 # narrowed DIAGNOSTIC (never exits 0)
- *   node scripts/prod-prober/run.mjs --capture-manifest --out <p> # reserved for plan 03
+ *   node scripts/prod-prober/run.mjs --capture-manifest --out <p> # capture the cron oracle FROM PROD
+ *
+ * Registered arms (FOUR, equal to ARMS_FLOOR): pyapi06, cron-obs, cron-drift, mt5.
  *
  * Exit codes:
  *   0  live run, every registered arm executed and measured, no defects, floors held
  *   1  at least one defect, a floor regression, or an ABSURDITY — the prober's
- *      two independent tallies of its own work disagree
+ *      two independent tallies of its own work disagree.
+ *      ⚠️ The floor is now MET BY THE REGISTRY (4 arms / floor 4), so a `floor`
+ *      defect no longer means "not finished yet" — it means AN ARM WAS REMOVED.
  *   2  NARROWED DIAGNOSTIC RUN that found no defects. Deliberately NOT 0: a run
  *      that executed a subset of arms must never be mistakable for a passing
  *      gate. That mistake — a partial check reading as a full PASS — is the
@@ -93,8 +97,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createSeams, realFetch, realSqlRunner } from "./seams.mjs";
+import { createSeams, realFetch, realSqlRunner, realSshRunner } from "./seams.mjs";
 import { ARM as PYAPI06_ARM } from "./arms/pyapi06.mjs";
+// Namespace import: the mt5 scenarios assert against the COMMITTED probe
+// constant and the argv builder as well as the ARM.
+import * as MT5_MOD from "./arms/mt5.mjs";
 // Namespace imports: the SQL-read-only self-test scenario ranges over every
 // exported `*_SQL` constant of every SQL arm, which needs the whole namespace
 // rather than the ARM alone.
@@ -126,27 +133,30 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 /**
  * D-08 — the pinned arm floor. FOUR: pyapi06, cron-obs, cron-drift, mt5.
  *
- * ⚠️ THIS IS 4 WHILE ONLY ONE ARM IS REGISTERED, ON PURPOSE. A live run today
- * reports `floor` (`1 registered arm(s) < floor 4`) and exits 1. That is the
- * tripwire working, not a bug: an incomplete prober must be LOUD until plans 03
- * and 04 register the other three arms. The alternative — ratcheting the floor
- * up as arms land — is a floor that can only ever agree with reality, which is
- * not a floor. Lowering this number is how an arm disappears quietly.
+ * ✅ MET as of plan 04: the registry is exactly four, so a live run no longer
+ * reports `floor`. From here a `floor` defect means an arm was REMOVED.
+ *
+ * ⚠️ This number was pinned at 4 while only ONE arm existed, on purpose: for
+ * two plans a live run reported `1 registered arm(s) < floor 4` and exited 1,
+ * because an incomplete prober must be LOUD. The alternative — ratcheting the
+ * floor up as arms land — is a floor that can only ever agree with reality,
+ * which is not a floor. Lowering this number is how an arm disappears quietly.
  */
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 39;
+export const SELF_TEST_SCENARIOS = 50;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
  * range over it rather than restating it — a list restated in a test is a
  * second thing to drift; a list the implementation owns is not.
  *
- * ⚠️ ALL TWENTY KINDS ARE REGISTERED NOW, including the cron and mt5 kinds no
- * arm raises yet. Plans 03 and 04 then add SCENARIOS, not kinds, and the
- * wiring test's `EXPECTED_DEFECT_KINDS` pin never has to move for an arm that
- * was always going to land.
+ * ⚠️ ALL TWENTY KINDS WERE REGISTERED UP FRONT in plan 01, including the cron
+ * and mt5 kinds no arm raised yet. Plans 03 and 04 then added SCENARIOS, not
+ * kinds, and the wiring test's `EXPECTED_DEFECT_KINDS` pin never had to move
+ * for an arm that was always going to land. ✅ Every one of the twenty is now
+ * raised by a registered arm and asserted BY NAME in `selfTest`.
  */
 export const DEFECT_KINDS = [
   // harness-wide
@@ -176,8 +186,11 @@ export const DEFECT_KINDS = [
   "absurdity",
 ];
 
-/** The registered arms. Plan 04 appends `mt5`; nothing else changes. */
-export const ARMS = [PYAPI06_ARM, CRON_OBS_MOD.ARM, CRON_DRIFT_MOD.ARM];
+/**
+ * The registered arms — FOUR, equal to `ARMS_FLOOR`. Removing one is a `floor`
+ * defect on the next run, which is the point.
+ */
+export const ARMS = [PYAPI06_ARM, CRON_OBS_MOD.ARM, CRON_DRIFT_MOD.ARM, MT5_MOD.ARM];
 
 /**
  * Per-NAME remedy for `credential-absent`. Names only — these strings are
@@ -192,6 +205,14 @@ const CREDENTIAL_REMEDIES = {
     "Set PROBER_POOLER_URL to the PROD Supabase SESSION POOLER URL (port 5432, IPv4) WITHOUT a password in it — the password travels separately as PGPASSWORD. The workflow must add-mask it before any step can print it.",
   SUPABASE_DB_PASSWORD:
     "Set the existing GitHub Actions secret SUPABASE_DB_PASSWORD on the prod-prober workflow's job. It is passed to psql as PGPASSWORD in the child environment only, never inside the URL.",
+  RAILWAY_API_TOKEN:
+    "Set the GitHub Actions secret RAILWAY_API_TOKEN to a WORKSPACE- or ACCOUNT-scoped Railway token. ⛔ The CLI's other, shorter credential variable — the PROJECT slot — is a DIFFERENT slot and `railway ssh` refuses it, so a project-scoped token would make every run report mt5-ssh-transport for a self-inflicted reason.",
+  RAILWAY_PROJECT_ID:
+    "Set the repo variable RAILWAY_PROJECT_ID to the Railway project id that hosts the mt5-gateway service. It is a repo VARIABLE, not a secret, and reaches the CLI only as the -p flag.",
+  RAILWAY_MT5_SERVICE:
+    "Set the repo variable RAILWAY_MT5_SERVICE to the gateway service name (mt5-gateway). It is a repo VARIABLE, not a secret, and reaches the CLI only as the -s flag.",
+  RAILWAY_ENVIRONMENT:
+    "Set the repo variable RAILWAY_ENVIRONMENT to the Railway environment the gateway runs in (production). It is a repo VARIABLE, not a secret, and reaches the CLI only as the -e flag.",
 };
 
 const DEFAULT_CREDENTIAL_REMEDY =
@@ -537,6 +558,14 @@ const SELFTEST_ENV = {
   ANALYTICS_SERVICE_KEY: "selftest-fixture-key-not-a-credential",
   PROBER_POOLER_URL: "postgresql://prober@pooler.selftest.invalid:5432/postgres",
   SUPABASE_DB_PASSWORD: "selftest-fixture-password-not-a-credential",
+  RAILWAY_API_TOKEN: "selftest-fixture-railway-token-not-a-credential",
+  // ⚠️ The three Railway identifiers are OBVIOUSLY synthetic AND deliberately
+  // unlike the real ones, because `makeScrubber` replaces every requiredEnv
+  // VALUE wherever it appears: a self-test environment naming itself
+  // "production" would redact that word out of every line the scenarios read.
+  RAILWAY_PROJECT_ID: "00000000-0000-4000-8000-000000000000",
+  RAILWAY_MT5_SERVICE: "mt5-gateway-selftest",
+  RAILWAY_ENVIRONMENT: "selftest-environment",
 };
 
 /** The hand-set `COMMENT ON DATABASE` marker the fixture SQL seam answers with. */
@@ -605,8 +634,47 @@ function fixtureFetch(data, env) {
   };
 }
 
+/**
+ * Load a fixture that is RAW TEXT rather than JSON.
+ *
+ * The mt5 fixtures are `railway ssh` stdout transcripts — a connection banner
+ * followed by the `PROBE {...}` line — because that is exactly what the seam
+ * hands the arm. Storing them as JSON would pre-parse the very thing the arm's
+ * line-scanner exists to do, and the banner is what proves the scanner does not
+ * assume line 1. Same MISSING-is-a-FAIL rule as `loadFixture`.
+ */
+function loadFixtureText(dir, name) {
+  const path = join(FIXTURE_ROOT, dir, name);
+  if (!existsSync(path)) {
+    return {
+      ok: false,
+      reason: `${dir} fixture ${name} is MISSING at scripts/prod-prober/fixtures/${dir}/${name} — a missing fixture is a FAIL, never a skip`,
+    };
+  }
+  return { ok: true, data: readFileSync(path, "utf8") };
+}
+
 /** Deep-enough clone for fixture merging (fixtures are plain JSON). */
 const clone = (o) => JSON.parse(JSON.stringify(o));
+
+/**
+ * An ssh runner backed by a committed `railway ssh` stdout transcript.
+ *
+ * ⚠️ The seam-level states — a non-zero CLI exit, and the prober's OWN timeout
+ * — are OVERRIDES rather than fixtures on disk, because neither is a thing the
+ * CLI printed: `status` and `timedOut` are properties of the SPAWN. Keeping
+ * them here rather than inventing a fixture file for each is what stops a
+ * "fixture" from being a fiction about what a transcript can contain.
+ *
+ * `capture`, when given, records the argv the arm actually built — which is how
+ * the no-interpolation scenario proves what was SENT equals what is COMMITTED.
+ */
+function fixtureSsh({ stdout = "", status = 0, stderr = "", timedOut = false, measureFail = null, capture = null } = {}) {
+  return async (argv) => {
+    if (capture) capture.push(argv);
+    return { status, stdout, stderr, timedOut, measureFail };
+  };
+}
 
 /** A psql-shaped OK answer. */
 const sqlOk = (stdout) => ({ status: 0, stdout, stderr: "", timedOut: false, measureFail: null });
@@ -710,8 +778,12 @@ function fixtureSql(data) {
  * `<arm>-` prefix filter, which is what pyapi06 uses.
  *
  * ⚠️ `makeSeams` is per entry because the arms do not share a transport: pyapi06
- * is four HTTP GETs, the cron arms are psql. Each entry builds the seam bundle
- * its own fixture drives, so the loop below stays transport-agnostic.
+ * is four HTTP GETs, the cron arms are psql, mt5 is one `railway ssh`. Each
+ * entry builds the seam bundle its own fixture drives, so the loop below stays
+ * transport-agnostic.
+ *
+ * ⚠️ `load` is per entry for the same reason one layer down: the mt5 fixtures
+ * are RAW TEXT transcripts, not JSON. It defaults to `loadFixture`.
  */
 const ARM_FIXTURE_TABLE = [
   {
@@ -779,6 +851,36 @@ const ARM_FIXTURE_TABLE = [
       "prod-duplicate-jobname.json": "cron-drift",
     },
   },
+  {
+    arm: MT5_MOD.ARM,
+    fixtureDir: "mt5",
+    green: "ok.txt",
+    // ONE railway ssh spawn. The whole probe is a single round-trip by design:
+    // every extra call into the container is another thing that can wedge the
+    // terminal this arm exists to observe.
+    greenSeamCalls: 1,
+    // ⚠️ FOUR kinds, not five. `mt5-probe-timeout` is deliberately NOT in this
+    // table: it is a property of the SPAWN (the prober's own 120 s budget
+    // elapsed), so there is no stdout a transcript could contain that would
+    // produce it. It gets its own scenario below, with its own by-name
+    // assertion and an explicit absence check against the terminal's -10005 —
+    // which is the boundary MT5-WEDGE-OBS-01 turns on.
+    kinds: ["mt5-no-ipc", "mt5-ipc-timeout", "mt5-ssh-transport", "mt5-terminal-error"],
+    load: loadFixtureText,
+    makeSeams: (text) => createSeams({ sshRunner: fixtureSsh({ stdout: text }) }),
+    red: {
+      "10004.txt": "mt5-no-ipc",
+      "10005.txt": "mt5-ipc-timeout",
+      "no-probe-line.txt": "mt5-ssh-transport",
+      // TWO fixtures, ONE kind, two different causes on the same side of the
+      // bridge: initialize() failing with a NON-IPC code, and initialize()
+      // succeeding while terminal_info() returns null. Both mean "the bridge
+      // answered and the terminal is the problem", so both carry the same
+      // remedy — and neither may be reported as an IPC state.
+      "init-false-other.txt": "mt5-terminal-error",
+      "terminal-info-null.txt": "mt5-terminal-error",
+    },
+  },
 ];
 
 /** The kinds an entry's red fixtures must cover. See the table's docblock. */
@@ -805,12 +907,16 @@ function allGreenSeams() {
   const cronJob = loadFixture("cron-drift", "prod-ok.json");
   if (!cronJob.ok) return cronJob;
 
+  const mt5 = loadFixtureText("mt5", "ok.txt");
+  if (!mt5.ok) return mt5;
+
   const sqlData = { cronObs: cronObs.data, ttl: cronObs.data.ttl, cronJobRows: cronJob.data };
   return {
     ok: true,
     seams: createSeams({
       fetchImpl: fixtureFetch(pyapi06.data, SELFTEST_ENV),
       sqlRunner: fixtureSql(sqlData),
+      sshRunner: fixtureSsh({ stdout: mt5.data }),
       clock: () => new Date(cronObs.data.now),
     }),
   };
@@ -848,6 +954,15 @@ export async function selfTest() {
     "cron-drift": (d) => d.kind === "cron-drift",
     "cron-secret-in-command": (d) => d.kind === "cron-secret-in-command",
     "manifest-invalid": (d) => d.kind === "manifest-invalid",
+    "mt5-no-ipc": (d) => d.kind === "mt5-no-ipc",
+    "mt5-ipc-timeout": (d) => d.kind === "mt5-ipc-timeout",
+    "mt5-ssh-transport": (d) => d.kind === "mt5-ssh-transport",
+    "mt5-terminal-error": (d) => d.kind === "mt5-terminal-error",
+    // ⚠️ Not reachable from the fixture table (see the mt5 entry's `kinds`
+    // note) — its scenario applies this entry by hand, for the same reason the
+    // table-driven ones do: the plan-05 coverage extractor reads THIS source
+    // for literal `kind === "<k>"` comparisons and can see nothing else.
+    "mt5-probe-timeout": (d) => d.kind === "mt5-probe-timeout",
   };
 
   const captured = [];
@@ -883,8 +998,11 @@ export async function selfTest() {
     const arm = entry.arm;
     const armKinds = entryKinds(entry);
 
+    // JSON by default; the mt5 entry declares the raw-text loader.
+    const load = entry.load || loadFixture;
+
     scenario(`${arm.name} GREEN fixture (${entry.green}) — the control`);
-    const g = loadFixture(entry.fixtureDir, entry.green);
+    const g = load(entry.fixtureDir, entry.green);
     if (!g.ok) {
       pass = expect(false, g.reason) && pass;
     } else {
@@ -960,7 +1078,7 @@ export async function selfTest() {
           ) && pass;
         continue;
       }
-      const fx = loadFixture(entry.fixtureDir, fixture);
+      const fx = load(entry.fixtureDir, fixture);
       if (!fx.ok) {
         pass = expect(false, fx.reason) && pass;
         continue;
@@ -1788,6 +1906,352 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
+  scenario("a railway ssh that exits 255 with no PROBE line is mt5-ssh-transport, and the exit status is REPORTED not obeyed");
+  // -------------------------------------------------------------------------
+  {
+    const fx = loadFixtureText("mt5", "no-probe-line.txt");
+    if (!fx.ok) {
+      pass = expect(false, fx.reason) && pass;
+    } else {
+      const seams = createSeams({
+        sshRunner: fixtureSsh({
+          stdout: fx.data,
+          status: 255,
+          stderr: "kex_exchange_identification: connection closed by remote host",
+        }),
+      });
+      const r = await runProber({
+        arms: [MT5_MOD.ARM],
+        env: { ...SELFTEST_ENV },
+        seams,
+        armsFloor: 1,
+        log: quiet,
+      });
+      const d = r.defects[0] || {};
+      pass =
+        expect(r.exitCode === 1, `a 255 with no PROBE line exits 1 (got ${r.exitCode})`) &&
+        expect(r.defects.length === 1, `it ISOLATES one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
+        expect(d.kind === "mt5-ssh-transport", `the kind is mt5-ssh-transport (got ${d.kind})`) &&
+        expect(
+          String(d.detail).includes("railway ssh exit 255"),
+          `the detail REPORTS the CLI's own exit status (${JSON.stringify(d.detail)}) — mt5-diag.sh:45-46 pipes into grep and throws that status away`,
+        ) &&
+        expect(
+          String(d.detail).includes("connection closed by remote host"),
+          "and carries the first redacted stderr line, which is the only part of stderr that may be printed",
+        ) &&
+        expect(
+          !String(d.detail).includes("python3: command not found"),
+          "and does NOT echo raw ssh stdout — only the PROBE line and one stderr line may leave this arm",
+        ) &&
+        expect(
+          noDefectOfKind(r.defects, ["mt5-no-ipc", "mt5-ipc-timeout", "mt5-probe-timeout", "mt5-terminal-error"]),
+          "a transport failure is NOT reported as any statement about the terminal — nothing was measured about MT5 at all",
+        ) &&
+        pass;
+
+      // ⛔ THE POSITIVE CONTROL FOR THE SAME PROPERTY, and the more dangerous
+      // direction. `scripts/mt5-diag.sh:45-46` pipes ssh into `grep '^PROBE '`,
+      // so the PIPE decides the exit and the CLI's own status is lost. Here the
+      // two readings are independent — which must mean a CLI that exited
+      // NON-ZERO while the terminal DID answer -10004 is still reported as
+      // -10004, with its redeploy remedy, rather than downgraded to
+      // "transport" and its check-your-token remedy. Without this leg the
+      // scenario above would also pass an arm that treated any non-zero exit
+      // as transport and never looked at stdout at all.
+      const answered = loadFixtureText("mt5", "10004.txt");
+      if (!answered.ok) {
+        pass = expect(false, answered.reason) && pass;
+      } else {
+        const r2 = await runProber({
+          arms: [MT5_MOD.ARM],
+          env: { ...SELFTEST_ENV },
+          seams: createSeams({
+            sshRunner: fixtureSsh({ stdout: answered.data, status: 255, stderr: "connection closed" }),
+          }),
+          armsFloor: 1,
+          log: quiet,
+        });
+        const d2 = r2.defects[0] || {};
+        pass =
+          expect(r2.defects.length === 1, `the non-zero-exit-WITH-a-PROBE-line run ISOLATES one defect (got ${r2.defects.length})`) &&
+          expect(
+            d2.kind === "mt5-no-ipc",
+            `and it is the TERMINAL's verdict (${d2.kind}), not the transport's — the CLI exited 255 and the PROBE line was still read`,
+          ) &&
+          expect(
+            d2.remedy === MT5_MOD.REMEDIES["mt5-no-ipc"],
+            "so the operator gets the REDEPLOY remedy, not the check-your-token one a status-driven arm would have printed",
+          ) &&
+          pass;
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("THE BOUNDARY: the PROBER's own timeout is mt5-probe-timeout and is NEVER read as the terminal's -10005");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ The one confusion this arm exists to prevent, in its most tempting
+    // form: both states are "a timeout", and collapsing them would tell an
+    // operator to go clear a modal dialog on a terminal that was never reached.
+    const seams = createSeams({
+      sshRunner: fixtureSsh({
+        stdout: "",
+        status: null,
+        timedOut: true,
+        measureFail: `railway ssh exceeded ${MT5_MOD.SSH_TIMEOUT_MS} ms`,
+      }),
+    });
+    const r = await runProber({
+      arms: [MT5_MOD.ARM],
+      env: { ...SELFTEST_ENV },
+      seams,
+      armsFloor: 1,
+      log: quiet,
+    });
+    const d = r.defects[0] || {};
+    const byName = KIND_ASSERTIONS["mt5-probe-timeout"];
+    pass =
+      expect(r.exitCode === 1, `a timed-out spawn exits 1 (got ${r.exitCode})`) &&
+      expect(r.defects.length === 1, `it ISOLATES one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
+      expect(d.kind === "mt5-probe-timeout", `the kind is mt5-probe-timeout (got ${d.kind})`) &&
+      expect(byName(d), "the independently spelled KIND_ASSERTIONS entry for mt5-probe-timeout agrees") &&
+      expect(d.arm === "mt5", `the defect is attributed to mt5 (got ${d.arm})`) &&
+      expect(
+        d.remedy === MT5_MOD.REMEDIES["mt5-probe-timeout"],
+        "it carries the mt5-probe-timeout remedy, which says this is OUR instrument's budget",
+      ) &&
+      expect(
+        String(d.detail).includes("-10005") && String(d.detail).includes("NOT"),
+        `the detail says in words that this is NOT the terminal's -10005 (${JSON.stringify(d.detail)})`,
+      ) &&
+      expect(
+        noDefectOfKind(r.defects, ["mt5-ipc-timeout", "mt5-no-ipc", "mt5-ssh-transport"]),
+        "and NONE of the three states that would send an operator to the gateway fired — the prober blamed itself, correctly",
+      ) &&
+      expect(
+        MT5_MOD.REMEDIES["mt5-probe-timeout"] !== MT5_MOD.REMEDIES["mt5-ipc-timeout"],
+        "the two 'timeout' remedies are different strings",
+      ) &&
+      pass;
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("the COMMITTED probe reaches the container byte-for-byte, and the two IPC remedies are different (D-16, D-17)");
+  // -------------------------------------------------------------------------
+  {
+    // Two claims, both machine-checked rather than argued:
+    //   (a) T-164.1-16/17 — what was SENT decodes to exactly what is COMMITTED,
+    //       and what is committed calls nothing but the three read-only methods.
+    //   (b) success criterion 3 — the -10004 and -10005 DEFECT ROWS carry
+    //       different remedy text. Not the table; the rows an operator reads.
+    const py = MT5_MOD.MT5_PROBE_PY;
+    const FORBIDDEN = [
+      "login",
+      "order_send",
+      "order_check",
+      "shutdown",
+      "account_info",
+      "history_deals",
+      "positions_get",
+      "symbol_select",
+    ];
+    const capture = [];
+    const g = loadFixtureText("mt5", "ok.txt");
+    if (!g.ok) {
+      pass = expect(false, g.reason) && pass;
+    } else {
+      const r = await runProber({
+        arms: [MT5_MOD.ARM],
+        env: { ...SELFTEST_ENV },
+        seams: createSeams({ sshRunner: fixtureSsh({ stdout: g.data, capture }) }),
+        armsFloor: 1,
+        log: quiet,
+      });
+      const argv = capture[0] || [];
+      const dashC = argv[argv.indexOf("-c") + 1] || "";
+      const b64 = (dashC.match(/b64decode\('([^']*)'\)/) || [])[1] || "";
+      const sent = b64 ? Buffer.from(b64, "base64").toString("utf8") : "";
+
+      // The two IPC rows, produced by the SHIPPING path on their own fixtures.
+      const rowFor = async (fixture) => {
+        const fx = loadFixtureText("mt5", fixture);
+        if (!fx.ok) return null;
+        const rr = await runProber({
+          arms: [MT5_MOD.ARM],
+          env: { ...SELFTEST_ENV },
+          seams: createSeams({ sshRunner: fixtureSsh({ stdout: fx.data }) }),
+          armsFloor: 1,
+          log: quiet,
+        });
+        return rr.defects[0] || null;
+      };
+      const row4 = await rowFor("10004.txt");
+      const row5 = await rowFor("10005.txt");
+
+      pass =
+        expect(r.exitCode === 0, `the probe ran green against ok.txt (got ${r.exitCode})`) &&
+        expect(capture.length === 1, `exactly ONE railway ssh spawn (got ${capture.length}) — every extra call into the container is another chance to wedge the terminal`) &&
+        expect(
+          argv[0] === "ssh" && argv[argv.indexOf("--") + 1] === "python3",
+          `the argv is a single ssh exec of python3 (${JSON.stringify(argv.slice(0, 9))})`,
+        ) &&
+        expect(
+          argv[argv.indexOf("-p") + 1] === SELFTEST_ENV.RAILWAY_PROJECT_ID &&
+            argv[argv.indexOf("-e") + 1] === SELFTEST_ENV.RAILWAY_ENVIRONMENT &&
+            argv[argv.indexOf("-s") + 1] === SELFTEST_ENV.RAILWAY_MT5_SERVICE,
+          "the ONLY variables that reach the CLI are the -p / -e / -s flags, which it consumes itself and never passes into the container",
+        ) &&
+        expect(
+          sent === py,
+          "and the base64 payload decodes to MT5_PROBE_PY BYTE-FOR-BYTE — no run-time interpolation reached the container (T-164.1-16)",
+        ) &&
+        expect(
+          argv.every((a) => !String(a).includes(SELFTEST_ENV.RAILWAY_API_TOKEN)),
+          "the token is in NO argv element — it travels only in the child env (T-164.1-18)",
+        ) &&
+        expect(
+          FORBIDDEN.every((t) => !py.includes(t)) && !py.includes("${"),
+          `the committed body contains none of [${FORBIDDEN.join(", ")}] and no interpolation marker — the mt5-diag.sh rule, machine-checked (T-164.1-17)`,
+        ) &&
+        expect(
+          py.includes("initialize()") && py.includes("last_error()") && py.includes("terminal_info()"),
+          "and it DOES call all three read-only methods — a body that stopped calling terminal_info() would measure nothing while still passing the forbidden-call check",
+        ) &&
+        expect(
+          py.includes(`host="${MT5_MOD.RPYC_HOST}"`) && py.includes(`port=${MT5_MOD.RPYC_PORT}`),
+          `the rpyc coordinates are LITERALS in the constant and agree with the exported RPYC_HOST/RPYC_PORT (${MT5_MOD.RPYC_HOST}:${MT5_MOD.RPYC_PORT})`,
+        ) &&
+        expect(
+          row4 !== null && row5 !== null && row4.kind === "mt5-no-ipc" && row5.kind === "mt5-ipc-timeout",
+          `the two IPC fixtures produce the two IPC kinds (${row4 && row4.kind} / ${row5 && row5.kind})`,
+        ) &&
+        expect(
+          row4.remedy !== row5.remedy && row4.remedy.length >= 40 && row5.remedy.length >= 40,
+          "⛔ SUCCESS CRITERION 3: the -10004 and -10005 DEFECT ROWS carry DIFFERENT remedy text, each substantial",
+        ) &&
+        expect(
+          row4.remedy.includes("redeploy") && row5.remedy.includes("VNC") && row5.remedy.includes("does NOT fix"),
+          "and they say OPPOSITE things: -10004 says redeploy, -10005 says the VNC console because a redeploy does NOT fix it (the Wine prefix is on the persistent volume)",
+        ) &&
+        expect(
+          row4.subject === "-10004" && row5.subject === "-10005",
+          `each row names its own code as the subject (${row4.subject} / ${row5.subject})`,
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("FULL GREEN: all FOUR registered arms run at the SHIPPING floor and the run exits 0 (D-08 met)");
+  // -------------------------------------------------------------------------
+  {
+    const built = allGreenSeams();
+    if (!built.ok) {
+      pass = expect(false, built.reason) && pass;
+    } else {
+      const lines = [];
+      // ⚠️ NO `armsFloor` override — this scenario inherits the SHIPPING
+      // default, because "the floor is met" is the claim under test.
+      const r = await runProber({
+        arms: ARMS,
+        env: { ...SELFTEST_ENV },
+        seams: built.seams,
+        manifestPath: SELFTEST_MANIFEST_PATH,
+        log: (s) => lines.push(s),
+      });
+      const slots = ARMS.reduce((n, a) => n + a.requiredEnv.length, 0);
+      const names = [...new Set(ARMS.flatMap((a) => a.requiredEnv))];
+      pass =
+        expect(ARMS.length === ARMS_FLOOR, `the registry equals the pinned floor (${ARMS.length} arms, floor ${ARMS_FLOOR})`) &&
+        expect(
+          slots === 10 && names.length === 8,
+          `the four arms declare ${slots} credential SLOTS across ${names.length} distinct NAMES — the live no-credential run's ten credential-absent rows are these slots, not eight names double-counted`,
+        ) &&
+        expect(
+          names.every((n) => typeof SELFTEST_ENV[n] === "string" && SELFTEST_ENV[n].length > 0),
+          `every one of the ${names.length} names is set in this scenario's environment [${names.sort().join(", ")}]`,
+        ) &&
+        expect(r.exitCode === 0, `the all-green four-arm run exits 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
+        expect(r.defects.length === 0, `ZERO defects (got ${r.defects.length})`) &&
+        expect(r.armsExecuted === 4, `all four arms executed (got ${r.armsExecuted})`) &&
+        expect(r.armsBlocked === 0, `nothing was credential-blocked (got ${r.armsBlocked})`) &&
+        expect(
+          lines.some((l) => l.startsWith("arms: 4/4/0")),
+          `the log prints "arms: 4/4/0" (got ${JSON.stringify(lines.find((l) => l.startsWith("arms: ")))})`,
+        ) &&
+        expect(
+          ARMS.every((a) => (r.tallyByArm[a.name] || 0) >= 1),
+          `every arm made at least one seam call of its own — an arm can be "executed" and measure nothing (per-arm tally ${JSON.stringify(r.tallyByArm)})`,
+        ) &&
+        expect(
+          noDefectOfKind(r.defects, ["floor", "absurdity"]),
+          "no floor and no absurdity at the shipping default — the instrument agrees with itself and the registry is complete",
+        ) &&
+        pass;
+      console.log(`  [recorded] ${lines.find((l) => l.startsWith("arms: "))}`);
+      console.log(`  [recorded] ${lines.find((l) => l.startsWith("seam-invocations: "))}`);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("CROSS-ARM: a pyapi06 fault and an mt5 fault in ONE run both reach the table, and all four arms still ran (D-04)");
+  // -------------------------------------------------------------------------
+  {
+    // The D-04 scenario above proves aggregation WITHIN one arm. This proves it
+    // ACROSS arms and ACROSS transports — an HTTP fault and an ssh fault in the
+    // same run, with the two SQL arms green. A first-failure exit (OPS-08-F8)
+    // would report whichever came first and hide the other outage until the
+    // first was fixed.
+    const py = loadFixture("pyapi06", "absent-200.json");
+    const cronObs = loadFixture("cron-obs", "ok.json");
+    const cronJob = loadFixture("cron-drift", "prod-ok.json");
+    const mt5 = loadFixtureText("mt5", "10005.txt");
+    const bad = [py, cronObs, cronJob, mt5].find((x) => !x.ok);
+    if (bad) {
+      pass = expect(false, bad.reason) && pass;
+    } else {
+      const lines = [];
+      const seams = createSeams({
+        fetchImpl: fixtureFetch(py.data, SELFTEST_ENV),
+        sqlRunner: fixtureSql({ cronObs: cronObs.data, ttl: cronObs.data.ttl, cronJobRows: cronJob.data }),
+        sshRunner: fixtureSsh({ stdout: mt5.data }),
+        clock: () => new Date(cronObs.data.now),
+      });
+      const r = await runProber({
+        arms: ARMS,
+        env: { ...SELFTEST_ENV },
+        seams,
+        manifestPath: SELFTEST_MANIFEST_PATH,
+        log: (s) => lines.push(s),
+      });
+      const kinds = r.defects.map((x) => x.kind).sort();
+      pass =
+        expect(r.exitCode === 1, `the cross-arm two-fault run exits 1 (got ${r.exitCode})`) &&
+        expect(r.defects.length === 2, `EXACTLY the two injected faults are reported (got ${r.defects.length}: ${kinds.join(", ")})`) &&
+        expect(
+          r.defects.some((x) => x.kind === "pyapi06-absent-accepted" && x.arm === "pyapi06"),
+          "the HTTP fault is in the table",
+        ) &&
+        expect(
+          r.defects.some((x) => x.kind === "mt5-ipc-timeout" && x.arm === "mt5"),
+          "the ssh fault is in the table too — the run did not stop at the first, and it did not stop at the first TRANSPORT either",
+        ) &&
+        expect(r.armsExecuted === 4, `all four arms still ran (got ${r.armsExecuted})`) &&
+        expect(
+          lines.some((l) => l.startsWith("arms: 4/4/0")),
+          `the log still prints "arms: 4/4/0" under two faults (got ${JSON.stringify(lines.find((l) => l.startsWith("arms: ")))})`,
+        ) &&
+        expect(
+          new Set(r.defects.map((x) => x.remedy)).size === 2,
+          "and the two rows carry two DIFFERENT remedies — two outages, two instructions",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
   scenario("a narrowed --arm run exits 2 even when it is GREEN");
   // -------------------------------------------------------------------------
   {
@@ -1950,6 +2414,7 @@ const liveSeams = () =>
     // file's arm/seam layer — so a self-test scenario can still hold the whole
     // environment in its hand.
     sqlRunner: realSqlRunner(process.env),
+    sshRunner: realSshRunner(process.env),
   });
 
 let seamsFactory = liveSeams;
