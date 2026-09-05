@@ -723,8 +723,15 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // gate's 3/F-3 must stand down the migration's own H5b post-verify beside
     // the sentence it shortens. One of the 10 is a `sql` step and carries no
     // needle at all, which is why 10 arms did not add 10 of each.
-    expect(armsSeen).toBe(272);
-    expect(stepsSeen).toBe(264);
+    // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03): 296 arms / 292 file steps,
+    // MEASURED. The retention gate added 25 twins of which ONE is a waiver — so
+    // it added 24 to `armsSeen`, which skips waivers, and 28 file steps. More
+    // steps than arms again, and from three named causes: three twins are
+    // LAYERED because migration 20260826140000 self-verifies the body it
+    // deploys, one is layered because the status scope is enforced twice over,
+    // and one twin is a `sql` step carrying no needle at all.
+    expect(armsSeen).toBe(296);
+    expect(stepsSeen).toBe(292);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1450,7 +1457,13 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // than the 98 above, the derive gate's assertion-6 cron re-schedule, which
     // IS a live-DB drift arm and the first this family has added since
     // 164.4-06.
-    expect(needles.length).toBe(264);
+    // RE-MEASURED 2026-09-05 (plan 164.4.1-03, the second file move): 292
+    // needles across 296 non-waiver arms. ⛔ RUN, not reasoned about, and run
+    // SEPARATELY from `stepsSeen` for the reason stated above. The retention
+    // gate contributed 28 needles from 24 biting arms; its one `sql` step (the
+    // `2/JOB-05` unschedule) carries no needle, and its waived `3/JOB-05` is
+    // skipped entirely.
+    expect(needles.length).toBe(292);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -1906,7 +1919,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     }
   });
 
-  it("scanCorpus reports 41 of 71 files annotated", () => {
+  it("scanCorpus reports 42 of 71 files annotated", () => {
     const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
     // ⛔ The DENOMINATOR stays 71 — every `.sql` in the directory. Phase 164.4
     // reached ITS end state at `files 39/71` (plan 164.4-11, 2026-09-04) with
@@ -1918,7 +1931,13 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // singleton SCOPE AMENDMENT #2's 40 was written before — and
     // test_derive_allocator_keys_fanout.sql, the smallest lane-blocked file.
     expect(corpus.filesTotal).toBe(71);
-    expect(corpus.filesAnnotated).toBe(41);
+    // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
+    // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
+    // `lane-blocked:` 2). The one added is
+    // test_retention_orphaned_running.sql, the 25-section gate whose Parts 2
+    // and 3 read the deployed cron.job.command as their oracle. The 2026-09-05
+    // plan-02 paragraph above stays as the dated record of the 41-file corpus.
+    expect(corpus.filesAnnotated).toBe(42);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -1945,6 +1964,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_metrics_by_basis_write.sql",
       "test_profiles_privileged_columns_locked.sql",
       "test_resync_retry_single_job.sql",
+      "test_retention_orphaned_running.sql",
       "test_scenario_downgrade_sweep.sql",
       "test_scenario_shares_rls.sql",
       "test_scenarios_rls.sql",
@@ -2096,18 +2116,29 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
   // carries RED-UNDER markers, so it is `annotated` before either branch is
   // reached. A future edit that empties this set by teaching the classifier to
   // ignore pg_cron would be the opposite move and must fail here.
-  const LANE_BLOCKED_3 = [
+  // ⛔ CURRENCY 2026-09-05 (plan 164.4.1-03): test_retention_orphaned_running.sql
+  // LEFT this set, by ANNOTATION and not by any change to the classifier. Its
+  // `1/JOB-05` arm still RAISEs on an absent pg_cron and `gateNeedsPgCron`
+  // still returns true for that text; what moved is that the file now carries
+  // line-start RED-UNDER markers, so `classifyGateIdiom` reaches `annotated`
+  // before either of the two later branches. The prior list is kept here as
+  // lineage: LANE_BLOCKED_2 was
+  //   test_reconcile_dropped_enqueue_sweep.sql,
+  //   test_retention_orphaned_running.sql,
+  //   test_strategy_analytics_stuck_computing_reaper.sql.
+  // A future edit that empties this set by teaching the classifier to ignore
+  // pg_cron would be the opposite move and must fail here.
+  const LANE_BLOCKED_2 = [
     "test_reconcile_dropped_enqueue_sweep.sql",
-    "test_retention_orphaned_running.sql",
     "test_strategy_analytics_stuck_computing_reaper.sql",
   ];
 
-  it("scanCorpus names the 3 lane-blocked files EXACTLY — the deferral is a measured set, not a hand list", () => {
+  it("scanCorpus names the 2 lane-blocked files EXACTLY — the deferral is a measured set, not a hand list", () => {
     const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
-    expect(corpus.laneBlockedFiles).toEqual(LANE_BLOCKED_3);
+    expect(corpus.laneBlockedFiles).toEqual(LANE_BLOCKED_2);
     // Non-vacuity in the other direction: none of the three may ALSO be sitting
     // in `pending`, which is what "the pending line no longer lists them" means.
-    for (const f of LANE_BLOCKED_3) expect(corpus.pendingFiles).not.toContain(f);
+    for (const f of LANE_BLOCKED_2) expect(corpus.pendingFiles).not.toContain(f);
     // And the negative controls stay where they were.
     expect(corpus.unreachableFiles).toContain("test_retention_crons_safe.sql");
     // ⭐ test_wizard_composite_fence.sql mentions pg_cron at :698 in a COMMENT
@@ -2216,12 +2247,14 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // happened, and rewriting a dated measurement is the worse defect.
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-02), read off `--parse-only`:
     // annotated 41 + pending 0 + unreachable 27 + inert 0 + lane-blocked 3 = 71.
+    // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03), read off `--parse-only`:
+    // annotated 42 + pending 0 + unreachable 27 + inert 0 + lane-blocked 2 = 71.
     expect(corpus.filesTotal).toBe(71);
-    expect(corpus.laneBlockedFiles).toHaveLength(3);
-    // ⛔ A LENGTH beside an EXACT SET, not instead of one: `toHaveLength(3)` is
-    // satisfied by any three names, which is exactly how a silently-substituted
+    expect(corpus.laneBlockedFiles).toHaveLength(2);
+    // ⛔ A LENGTH beside an EXACT SET, not instead of one: `toHaveLength(2)` is
+    // satisfied by any two names, which is exactly how a silently-substituted
     // file would pass. The set is the assertion; the length is the arithmetic.
-    expect(corpus.laneBlockedFiles).toEqual(LANE_BLOCKED_3);
+    expect(corpus.laneBlockedFiles).toEqual(LANE_BLOCKED_2);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {
