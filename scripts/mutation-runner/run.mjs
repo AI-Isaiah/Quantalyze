@@ -1592,11 +1592,18 @@ export const FILES_FLOOR = 45;
 //                that moved is test_reconcile_dropped_enqueue_sweep.sql,
 //                39 -> 37.
 //   SEPARATION   Measured in BOTH directions on real lanes, same tree:
-//                  ARMS_FLOOR=363 (the stale value) -> 1 defect ->
+//                  ARMS_FLOOR=363 (a stale value)  -> 1 defect ->
 //                    `ARMS_FLOOR regression: 361 biting arm(s) < floor 363`
 //                  ARMS_FLOOR=362 (one higher)      -> 1 defect ->
 //                    `ARMS_FLOOR regression: 361 biting arm(s) < floor 362`
-//                  ARMS_FLOOR=361 (this value)      -> 0 defects, EXIT 0
+//                  ARMS_FLOOR=361                   -> 0 defects, EXIT 0
+//                ⚠️ DATED: the three lines above are the 2026-09-05 separation
+//                probe at 361 arms, kept as the record that the floor was proven
+//                to bite in both directions. They are NOT the live value. Phase
+//                164.2 raised the corpus to 369 (one new gate file, eight twins)
+//                and re-separated it on real lanes: 46/370 -> two regressions,
+//                exit 1; 45/369 -> exit 0. ⛔ Read FILES_FLOOR and ARMS_FLOOR off
+//                the constants themselves, never off this comment.
 //                So 361 is exactly the separation point, not a value below it.
 //   RECORD       164.4.1-REVIEW.md findings CR-01 and CR-02, and the measured
 //                refutation recorded at each arm's own site in

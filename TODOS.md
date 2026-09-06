@@ -1170,6 +1170,15 @@ true for 146 and half of 142–145, and **false for 141**.
 - [ ] **`[PROV-WRITER-23514]` The provenance markers sit on the FAILURE-RECORDING path, so a
       writer bug must cost the provenance and NOT the failure record (booked 2026-09-06,
       Phase 164.2 plan 06 three-reviewer gate, silent-failure-hunter).**
+      ⭐ **STATUS 2026-09-06: IMPLEMENTED by Phase 164.2 plan 08, deliberately still OPEN.**
+      `upsert_or_drop_provenance` (`analytics-service/services/strategy_analytics_provenance.py`)
+      carries the degrade at all ten stamped sites, narrowed by constraint NAME at the review's
+      WR-03, and plan 08 made a half-stamp inexpressible by deriving both markers from one
+      `provenance_source(job_id)` expression. It stays OPEN because **implemented ≠ proven**: the
+      retry arm is unreachable from today's writers and is exercised only against a mocked
+      `APIError`, so it is defence for a future constraint rather than a path any live writer
+      takes. Close it when a real writer can reach it. See `164.2-10-SUMMARY.md`
+      (`## Code review fixes`) and `164.2-08-SUMMARY.md`.
       `supabase/migrations/20260906120000_computation_error_provenance.sql` puts TWO CHECK
       constraints on `strategy_analytics`: `..._computation_error_source_check` narrows the
       source column to the single value `'writer'`, and `..._computation_error_markers_together_check`
