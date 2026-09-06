@@ -6,10 +6,10 @@ current_phase: 164.2
 current_phase_name: CURATED-COPY
 status: shipped
 stopped_at: "164.2 SHIPPED — PR #749 (from the filtered branch phase-164.2-curated-copy-pr). Ship review by 11 reviewers found 2 assertions that could NOT fail (one of them the pin the criterion-3 override rested on) and 4 user-facing/data-integrity defects; all fixed with observed-RED proofs. Founder cleared the copy gate and authorised land-and-deploy. Migration 20260906120000 applies to PROD on merge."
-last_updated: "2026-09-06T21:40:00.000Z"
+last_updated: "2026-09-06T21:21:45.008Z"
 last_activity: 2026-09-06
 last_activity_desc: "164.2 shipped as PR #749. Version bumped 0.77.15.0 -> 0.77.16.0 with a CHANGELOG entry (nothing in GSD or CI enforces either). Ship review: security auditor + 10 diff-scoped specialists; 5 file-disjoint fixers. TWO VACUITIES: the roster-render poster census compared a hand-typed length to a hand-typed literal while claiming to scan src/ (it read no files) — and that was the pin the founder's criterion-3 override explicitly rested on; and the PGRST204 assertion passed on the format string's static tail. Three more found while fixing: C-10's 400-day fixture could not detect the arm-swap it guarded, the provenance census's Rule C ran only on stamped sites, and a fixer caught its own draft assertion passing for the wrong reason. FOUR user-facing/data-integrity: the two SUCCESS writers sat outside the PGRST204 degrade while the docstring claimed full coverage (a succeeded compute was recorded failed, cash series heal-deleted, retry burned); durable writer sentences had made an internal table name + raw uuid and a Python exception class name reach user copy; validate-and-encrypt showed OUR stale service key as 'Unauthorized' on a key-connect form; the post-23505 read discarded both failure channels. Fixing stale anchors introduced 3 bare file:line cites that [SEAMPROSE-01] bans for going stale — caught by the full suite. Gates re-run by the orchestrator: vitest 14180/0 (Node 22), pytest 5430, mypy --strict 79 files, tsc clean, corpus 369 arms no defects. SECURITY.md added: 21/21 closed, threats_open 0, HIGH proven non-vacuous by three lane mutants that each abort the apply."
-state_head: 22a5fe962953f30c012b7ff4c223fcbf87c766d0
+state_head: 05994f1d2950f0a78b414cc63fd71ccb559e5ace
 
 # ⚠️ progress: HAND-SET 2026-09-06 against `origin/main`, NOT derived from this checkout.
 
@@ -51,12 +51,48 @@ state_head: 22a5fe962953f30c012b7ff4c223fcbf87c766d0
 
 # Merge origin/main first; then a handler-derived recount is trustworthy.
 
+# ⛔ RE-SET 2026-09-06 (second time today). `state.add-roadmap-evolution` — run for the
+
+# Phase 164.8 insertion — ALSO recomputed this block from local disk as an undocumented
+
+# side effect, writing 21/7/101/96/33. The ⛔ above names `state.update-progress` and
+
+# `state.begin-phase`; add-roadmap-evolution belongs on that list. Its numbers were wrong
+
+# for the reason this whole block exists: PR #749 shipped from the FILTERED branch, so
+
+# `origin/main` carries only `.gitkeep` for `164.2-curated-copy-*` and a disk census
+
+# cannot see that phase's plans at all until /gsd-complete-milestone archives them.
+
+# Delta applied on top of the 2026-09-06 census above, MEASURED not assumed with
+
+# `git ls-tree -r --name-only origin/phase-164.2-curated-copy .planning/phases/`:
+
+#   164.2 = 10 PLAN.md + 10 SUMMARY.md  (the census predates the phase and read "none yet")
+
+#   total_plans     107 + 10 = 117
+
+#   completed_plans 104 + 10 = 114
+
+#   completed_phases 10 + 1  = 11   (164.2: plans>0 AND summaries==plans)
+
+#   total_phases     20 + 1  = 21   (Phase 164.8 TESTPREPROD inserted 2026-09-06)
+
+#   percent 52 = 11/21 phase-weighted, the convention this file fixed at 156-10
+
+# ⚠️ 164.2's plan files live ONLY on `origin/phase-164.2-curated-copy` (pushed as the
+
+# audit copy) until milestone archival moves them to main. A census against origin/main
+
+# alone will keep under-reporting by 10 plans / 1 phase until then.
+
 progress:
-  total_phases: 20
-  completed_phases: 10
-  total_plans: 107
-  completed_plans: 104
-  percent: 50
+  total_phases: 21
+  completed_phases: 11
+  total_plans: 117
+  completed_plans: 114
+  percent: 52
 ---
 
 # Project State — Quantalyze
@@ -1019,6 +1055,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.6 edited: carried in MYPY-MAINPY-01 from 164.1-02 deferred-items — goal item (9), success criterion 6, requirements entry; analytics-service/tests/ policy question deliberately excluded
 - Phase 164.2.1 inserted after Phase 164.2: SESSIONID-FENCE — stale wizardSessionId root cause; the 2026-09-05 re-partition dropped it from 164.2 as already satisfied, measured FALSE 2026-09-06 (URGENT)
 - Phase 164.6 edited: carried in PROBER-CALIBRATION-01 (commit `61aa8cf0`, 2026-09-06) — goal item (10), success criterion 7, requirements entry. Found BY HAND at the PR #748 merge gate, not by a gate: the arm named `CALIBRATION: an UNGUARDED exit 0 on the probe path is still caught` (`src/__tests__/prod-prober-wiring.test.ts:292`, shipped in PR #748 / v0.77.15.0) mutates the schedule guard and then asserts only that the text changed — it never re-runs the `guardAt`/`exitZeroAt` check at `:279-281` against the mutant, so it passes with `:279-281` deleted outright. NOT vacuous in effect (removing the guard IS caught by the `toContain` at `:277`), but the arm's name promises a proof it does not perform. Non-blocking by the stopping rule — neither user-facing nor data-integrity — so #748 landed at v0.77.15.0 with this booked rather than fixed. ⚠️ `61aa8cf0` touched ROADMAP.md ALONE; this STATE entry was added 2026-09-06 during the STATE reconciliation, because a scope amendment touching one file is incomplete.
+- Phase 164.8 inserted after Phase 164.6: TESTPREPROD — TEST becomes a real pre-prod. Founder decision 2026-09-06: bring the shared TEST project current, then apply migrations to TEST on merge BEFORE PROD. Closes the class where sql-tests goes red on migration PRs purely because the migration never reached TEST (nothing applies migrations to TEST today, so pre-apply gate SKIPs are permanent). Queued LAST in the 164.x series, after 164.6 — accepted cost: 164.7 and 164.5 each write forward migrations and will each hit the hand-apply path first. Current Phase pointer deliberately NOT moved (scheduled, not urgent-next; same precedent as the 164.1 insertion).
+- Phase 164.6 edited: carried in CI-DOCSPATH-01 (2026-09-06, at the PR #750 merge gate) — goal item (12), success criterion 9, requirements entry, and a TODOS entry. MEASURED on PR #750 itself, not estimated: a four-file `.planning/`-only diff ran 21 jobs / ~3,001 job-seconds (~50 min), excluding `e2e-seeded` and `sql-tests` which were still running at census time; `sql-mutation` 559s, `python` 494s, `e2e` 405s. The mutex cost is the real one — `e2e-seeded` and `sql-tests` each take the shared-TEST-DB advisory lock, so a roadmap edit delays real code PRs on a database shared with other people's CI. ⛔ Booked in 164.6 rather than left in TODOS because a job-skipping path filter has the shape of a gate silently not running, which is this milestone's defect class: criterion 9 requires proof on a CODE push that everything still executes, not merely proof that a docs push got fast. ⚠️ STATE entry written BY HAND: `state.add-roadmap-evolution` recomputes the `progress:` block from local disk as an undocumented side effect (observed earlier the same day on the 164.8 insertion), and this checkout cannot see the filtered 164.2 plans.
 
 ### Decisions
 
