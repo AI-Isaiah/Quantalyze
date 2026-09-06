@@ -1157,11 +1157,20 @@ and this section's Absorbed line, but left 164.1's title and this note contradic
 **Depends on:** Phase 164 (ordered AFTER 164.1 — no dependency between them, numeric order only)
 **Absorbed from 164.1 in the 2026-08-28 dedup:** WR-06-UTC, HONEST-08-RESIDUAL, and WIZFORM-02's
 `code: UNKNOWN` class — all three are sentences a user reads, which is this phase's subject.
-**Plans:** 0 plans
+**Plans:** 10 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.2 to break down)
+- [ ] 164.2-01-PLAN.md — 161-ERRPREFIX split: KeyPermissionBadge renders prose, code goes to console.error + Sentry breadcrumb (wave 1)
+- [ ] 164.2-02-PLAN.md — WR-06-UTC one constant for both bucketers + joint two-surface test; HONEST-08-RESIDUAL FreshnessChip twin + live observation (wave 1)
+- [ ] 164.2-03-PLAN.md — anonymous factsheet placeholder addresses its reader; V2b test over the anonymous render (wave 1)
+- [ ] 164.2-04-PLAN.md — mint PRESELECT_REQUEST_INVALID + DRAFT_SESSION_COLLISION, create-with-key emitters, RATE_LIMITED on its limiter arms, five roster laws (wave 1)
+- [ ] 164.2-05-PLAN.md — RATE_LIMITED across the other three userActionLimiter routes + rosters; bare-upstream-status map on validate-and-encrypt (wave 2)
+- [ ] 164.2-06-PLAN.md — provenance columns + re-based sync_strategy_analytics_status, three-reviewer gate, human checkpoint (wave 2)
+- [ ] 164.2-07-PLAN.md — pg-lane gate that performs the transition through the RPC, RED-UNDER-M twins, coupled apply lists, floors, runner to No defects (wave 3)
+- [ ] 164.2-08-PLAN.md — Python writers stamp provenance in the same statement; AST census (wave 3)
+- [ ] 164.2-09-PLAN.md — WIZFORM-02 roster-driven render test over every server-classified code, observed RED under neuter (wave 3)
+- [ ] 164.2-10-PLAN.md — TODOS closes by citation, gate marker down, serial full-suite run (wave 4)
 
 ### Phase 164.2.1: SESSIONID-FENCE — the stale wizardSessionId root cause: a preselect for key B must never inherit an abandoned draft's idempotency token from key A (INSERTED)
 
