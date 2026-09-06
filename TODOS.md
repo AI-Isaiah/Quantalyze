@@ -1076,6 +1076,52 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[PROV-WRITER-23514]` The provenance markers sit on the FAILURE-RECORDING path, so a
+      writer bug must cost the provenance and NOT the failure record (booked 2026-09-06,
+      Phase 164.2 plan 06 three-reviewer gate, silent-failure-hunter).**
+      `supabase/migrations/20260906120000_computation_error_provenance.sql` puts TWO CHECK
+      constraints on `strategy_analytics`: `..._computation_error_source_check` narrows the
+      source column to the single value `'writer'`, and `..._computation_error_markers_together_check`
+      requires `(source IS NULL) = (job_id IS NULL)`. Both are correct and both are deliberate —
+      the first is the T-164.2-11 tampering mitigation, the second turns a half-stamped marker
+      into a loud 23514 at the writer instead of a silent fall to the per-kind generic at the
+      reader. ⚠️ **But the statement they can reject is the one that RECORDS A FAILURE.**
+      `analytics-service/services/job_worker.py`'s `_upsert_error_only` (and the composite
+      handler's twin) writes `computation_error` on the path where a job has just failed; when
+      the writer plan starts sending the two marker keys, a bug in either of them — an unexpected
+      source string, a `None` job id — makes that upsert raise 23514 and the failure is not
+      recorded AT ALL: no sentence, no status, nothing for the user or the operator.
+      **The writer must catch a constraint violation on the marker keys and retry the SAME
+      upsert WITHOUT them**, so a provenance bug degrades to today's behaviour (NULL markers →
+      the bridge writes the per-kind generic, exactly as it does now) rather than to a missing
+      failure record. That is a property of the WRITER and cannot be fixed in the migration; it
+      belongs to the Python half (Phase 164.2 plan 08, which already carries a P11 minimal-key
+      fallback for the PostgREST schema-cache miss — this is the SECOND fallback that path
+      needs, on a different error class). ⛔ Do NOT "fix" this by widening or dropping either
+      CHECK: the narrowness is the mitigation, and a marker that can carry an arbitrary
+      attribution string is the tampering surface the constraint exists to close.
+
+- [ ] **`[PROV-COMMENT-STALE]` `sync_strategy_analytics_status`'s `COMMENT ON FUNCTION` now
+      contradicts the deployed behaviour, and the snapshot cannot carry the correction
+      (booked 2026-09-06, Phase 164.2 plan 06 three-reviewer gate, migration-reviewer W1).**
+      `20260906120000` deliberately does NOT reissue `COMMENT ON FUNCTION` — `CREATE OR REPLACE`
+      keeps the function's oid and therefore its `pg_description` row, and that comment is the
+      applied-ness KEY for arms `0a`/`0b` of
+      `supabase/tests/test_sync_status_marked_refresh_protected.sql`, whose `RED-UNDER-M` twin
+      EDITS the ids inside `20260826120000`'s comment text. Reissuing it here would overwrite
+      that mutation later in the same apply list and the twin would stop biting. The migration
+      asserts the comment SURVIVED instead (assumption A1, measured at apply time).
+      **The cost, which is real:** the surviving comment is `20260826120000`'s, and it records
+      the provenance fix as OWED WORK. That is now false — the debt is paid in `20260906120000`.
+      A reader of `\df+` or of `supabase/schema/functions/sync_strategy_analytics_status.sql`
+      (the generated snapshot carries no `COMMENT` statement at all) is told the opposite of what
+      the deployed body does, and every future re-base widens the gap. **Options, neither free:**
+      (i) take option (ii) from `20260906120000`'s A1 arm — reissue the comment with the full
+      migration roll-call AND re-point arm `0a`'s `RED-UNDER-M` twin at the new file in the same
+      commit; or (ii) make `scripts/dump-sql-functions.ts` replay `COMMENT ON FUNCTION` into the
+      snapshot so at least the repo-side reader sees the current text. Small, non-user-facing,
+      and coupled to a mutation twin — which is why it is booked rather than done inline.
+
 - [ ] **`[PGLANE-HELP-TRUNCATED]` `scripts/pg-lane/run.sh --help` cuts the stand-in disclaimer off mid-sentence (measured 2026-09-02, Phase 164.4 ship review).**
       `run.sh:612` is `-h|--help) sed -n '2,45p' "$0"`, a hardcoded end line. The
       ⚠️ WHAT IT DOES AND DOES NOT PROVE disclaimer occupies lines 43-50, so `--help`
