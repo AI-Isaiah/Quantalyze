@@ -262,8 +262,37 @@ jobs:
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
-          # POSTURE LINE — the job's status IS the script's. Plan 164.1-06 measures
-          # the deploy-skip hazard and may flip exactly this line; nothing else.
+          # POSTURE LINE — MEASURED and FLIPPED by plan 164.1-06 on 2026-09-06.
+          #
+          # The hazard D-18 anticipated is REAL, and it was measured, not argued:
+          # run 34018874984 put a check-run named `probe` with conclusion
+          # `failure` on its commit. This workflow's PRIMARY trigger is
+          # `schedule:` (hourly), and scheduled runs execute against the DEFAULT
+          # branch — so an hourly red prober lands a red check-run on main's HEAD.
+          #
+          # Railway's "wait for CI" reads the whole check-suite on that commit.
+          # analytics-deploy-verify.yml:17-24 records what follows, from an
+          # incident rather than from reasoning: on 2026-06-21 a red check on the
+          # merge SHA made Railway SKIP the deploy, prod never converged, and the
+          # check stayed red — a self-defeating deadlock. That probe runs 6-hourly
+          # and exits 0 for exactly this reason. This one runs HOURLY.
+          #
+          # A red prober must never block the deploy that fixes it. So on the
+          # SCHEDULED path the step exits 0 and the dedup'd P1 issue is the loud
+          # signal — the same trade analytics-deploy-verify already makes, and the
+          # issue carries the run's own defect table verbatim, so nothing is lost.
+          #
+          # ⛔ A MANUAL dispatch still exits with the script's status: it lands on
+          # no scheduled deploy path, and a human who asked for a reading deserves
+          # a truthful exit code. The SELF-TEST step above is untouched and still
+          # hard-fails — a BROKEN prober stays loud in CI; only a prober reporting
+          # a real PRODUCTION defect goes quiet at the check-suite level.
+          if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]; then
+            if [ "$status" -ne 0 ]; then
+              echo "::warning::prod-prober reported $status-status defect(s); the P1 issue is the signal. Exiting 0 so Railway's wait-for-CI does not skip the deploy (see the POSTURE LINE comment)."
+            fi
+            exit 0
+          fi
           exit $status
 
       - name: Capture the cron manifest (read-only; artifact, never a commit)
