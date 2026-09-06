@@ -345,6 +345,60 @@ describe(".gitleaks.toml — real scanner behavior (H-0017)", () => {
     60_000,
   );
 
+  it.skipIf(!HAS_GITLEAKS)(
+    "Phase 164.1: prod-prober fixture shapes are suppressed, but a REAL secret in the SAME directory is still caught",
+    () => {
+      // The cron-drift arm's ten secret-hygiene rules each ship a RED
+      // fixture proving the rule fires, so those fixtures MUST look like
+      // credentials. What keeps that allowlist from becoming a blanket
+      // path exemption is its `regexes` list — MEASURED 2026-09-06:
+      // deleting `regexes` while keeping `paths` makes this arm RED
+      // ("expected 0 to be greater than 0"). Flipping condition
+      // "AND"->"OR" changed nothing in gitleaks 8.30.1, so `condition`
+      // is belt-and-braces, NOT the mechanism. This arm pins the
+      // mechanism that is actually load-bearing.
+      //
+      // ⚠️ The obvious probe is WRONG: AKIAIOSFODNN7EXAMPLE and its
+      // partner are AWS's own documentation examples and are suppressed
+      // by gitleaks' DEFAULT ruleset, so planting them proves nothing
+      // about this repo's config. Measured 2026-09-06 — the first
+      // calibration attempt returned "no leaks found" for exactly that
+      // reason. Use an unaffiliated high-entropy value instead.
+      const scratch = mkdtempSync(join(tmpdir(), "gitleaks-prober-"));
+      const proberDir = join(scratch, "scripts", "prod-prober");
+      mkdirSync(join(proberDir, "fixtures", "cron-drift"), { recursive: true });
+
+      // Allowlisted BY SHAPE: a defect-kind identifier, the self-test
+      // sentinel, and the FAKE-typ JWT header segment.
+      writeFileSync(
+        join(proberDir, "run.mjs"),
+        'const KINDS = ["pyapi06-wrong-key-accepted"];\n' +
+          'const SENTINEL_KEY = "SENTINEL-KEY-9f3a";\n',
+      );
+      writeFileSync(
+        join(proberDir, "fixtures", "cron-drift", "hygiene-red.json"),
+        '{ "command": "...token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkZBS0UifQ\'" }\n',
+      );
+      // NOT allowlisted: same directory, but a shape no regex covers.
+      writeFileSync(
+        join(proberDir, "leaky.json"),
+        '{ "api_key": "a3f9c2e81b74d05f6a9e3c7b2d18f40e5c6a7b98" }\n',
+      );
+
+      const findings = runGitleaks(scratch);
+
+      // THE LOAD-BEARING ASSERTION: the allowlist is scoped by shape, not
+      // by path. A real credential under scripts/prod-prober/ still fails.
+      expect(findings.filter((f) => f.File.endsWith("leaky.json")).length)
+        .toBeGreaterThan(0);
+
+      // And the fixture shapes that made the gate red on PR #746 are quiet.
+      expect(findings.filter((f) => f.File.endsWith("run.mjs"))).toEqual([]);
+      expect(findings.filter((f) => f.File.endsWith("hygiene-red.json"))).toEqual([]);
+    },
+    60_000,
+  );
+
   it.skipIf(HAS_GITLEAKS)(
     "advertises skip reason when the gitleaks binary is unavailable",
     () => {
