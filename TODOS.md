@@ -1076,6 +1076,24 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[WIZFORM-02-VE-CODECHANNEL]` `keys/validate-and-encrypt` has no code→copy render path,
+      so criterion 3's fifth surface cannot be rendered (booked 2026-09-06, Phase 164.2 plan 09,
+      FOUNDER DECISION at the plan-06 gate: accept 4-of-5 and book the wiring).**
+      Measured at HEAD by reading all three consumers: `ApiKeyManager.tsx`, `StrategyForm.tsx` and
+      `AllocatorExchangeManager.tsx` each read `err.error` / `result.error` — the PROSE — and
+      **none reads `code`**. So a row for that surface in `src/lib/wizardErrors.roster-render.test.tsx`
+      could only pass by feeding the expected title in as wire prose and reading it back, which is the
+      tautology plan 09 forbids. It is recorded as PLANNING INCONCLUSIVE under
+      `## Surfaces not rendered` in `164.2-09-SUMMARY.md`, with two live assertions that go RED the
+      day a consumer starts reading `code`.
+      ⛔ **WIZFORM-02 therefore does NOT close on Phase 164.2** and the `GATED ON WIZFORM-02 CLOSING`
+      marker stays down — plan 10's W4 precondition checks for exactly that section's absence, and it
+      is present. This is the guard added in revision round 2 working as designed, not a shortfall.
+      **The work:** wire the three consumers onto the code channel (roster + `WIZARD_ERROR_COPY`
+      lookup, as `ConnectKeyStep.tsx:463-468` does), then add the fifth surface to the render sweep
+      and raise `EXPECTED_POPULATION_MIN` off the new measurement. Touches live components, not just
+      tests — which is why it is its own item rather than a stretch of 164.2.
+
 - [ ] **`[PROV-WRITER-23514]` The provenance markers sit on the FAILURE-RECORDING path, so a
       writer bug must cost the provenance and NOT the failure record (booked 2026-09-06,
       Phase 164.2 plan 06 three-reviewer gate, silent-failure-hunter).**
