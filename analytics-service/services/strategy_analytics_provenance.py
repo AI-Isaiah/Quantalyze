@@ -80,6 +80,42 @@ PROVENANCE_JOB_ID_KEY: Final[str] = "computation_error_job_id"
 # ``code`` (it is not one of the PGRST* codes, which are PostgREST's own).
 _PG_CHECK_VIOLATION: Final[str] = "23514"
 
+# 164.2-REVIEW WR-03. The SQLSTATE alone is NOT enough to conclude "the database
+# refused MY markers". ``strategy_analytics`` carries other CHECK constraints
+# today and will gain more; any of them firing on a marker-bearing payload used
+# to take the arm below, which cost one wasted round trip and — the part that
+# matters — logged an ERROR naming the marker pair for a constraint that has
+# nothing to do with it. That log line is, by this module's own docblock, "the
+# only place that bug becomes visible", so a wrong diagnosis there sends the
+# next operator after the wrong constraint.
+#
+# ⚠️ A PREFIX, not the two exact constraint names, and that is deliberate. The
+# whole point of this helper (TODOS ``[PROV-WRITER-23514]``) is to survive "a
+# constraint this module does not know about, a future migration narrowing the
+# domain further" — matching the two names known on 2026-09-06 would defeat it
+# on exactly the constraint it was written for. PostgreSQL's default naming for
+# a column CHECK is ``<table>_<column>_check``, so every present and future
+# CHECK over ``computation_error_source`` / ``computation_error_job_id`` carries
+# this prefix, and no constraint over another column can.
+#   * ``strategy_analytics_computation_error_source_check`` (the domain)
+#   * ``strategy_analytics_computation_error_markers_together_check`` (pairing)
+# Both are declared in 20260906120000_computation_error_provenance.sql:317,:349.
+_MARKER_CONSTRAINT_FRAGMENT: Final[str] = "strategy_analytics_computation_error_"
+
+
+def _refuses_a_marker(exc: APIError) -> bool:
+    """Is ``exc`` the database refusing THESE two columns, specifically?
+
+    False for every other failure on this table — a status CHECK, a
+    serialization failure, a permission denial. The caller re-raises those
+    untouched, which is the pre-164.2 behaviour for all of them.
+    """
+    code = getattr(exc, "code", None)
+    message = str(getattr(exc, "message", None) or "")
+    if code == _PG_CHECK_VIOLATION:
+        return _MARKER_CONSTRAINT_FRAGMENT in message
+    return False
+
 
 def provenance_source(job_id: str | None) -> str | None:
     """``'writer'`` when a job id accompanies it, ``None`` when it does not.
@@ -124,6 +160,12 @@ def upsert_or_drop_provenance(
     be a silent infinite-retry-shaped no-op. It re-raises, which is the
     pre-164.2 behaviour for every other CHECK on this table.
 
+    ⚠️ Nor is it swallowed for a 23514 whose constraint is not one of THIS
+    module's (164.2-REVIEW WR-03). The payload half of that test is not enough:
+    a status CHECK firing on a payload that happens to carry markers is still
+    not a provenance bug, and stripping the provenance would neither fix it nor
+    describe it. See ``_MARKER_CONSTRAINT_FRAGMENT``.
+
     ⚠️ Any OTHER ``APIError`` propagates untouched, which is load-bearing at
     ``analytics_runner``'s catch-all exit: its enclosing handler catches
     ``PGRST204`` (the schema-cache miss of the deploy window) and re-issues with
@@ -133,7 +175,7 @@ def upsert_or_drop_provenance(
     try:
         write()
     except APIError as exc:
-        if getattr(exc, "code", None) != _PG_CHECK_VIOLATION:
+        if not _refuses_a_marker(exc):
             raise
         if PROVENANCE_SOURCE_KEY not in payload and PROVENANCE_JOB_ID_KEY not in payload:
             raise

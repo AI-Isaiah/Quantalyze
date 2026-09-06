@@ -95,6 +95,26 @@ def _check_violation() -> APIError:
     )
 
 
+def _unrelated_check_violation() -> APIError:
+    """A 23514 from a DIFFERENT CHECK on the SAME table (164.2-REVIEW WR-03).
+
+    ``strategy_analytics`` carries other CHECK constraints and will gain more.
+    One of them firing on a payload that happens to carry markers is not a
+    provenance bug: stripping the markers neither fixes it (the re-issue raises
+    the same violation) nor describes it (the helper's ERROR line names the
+    marker pair, and that line is the ONLY operator signal this degrade emits).
+    """
+    return APIError(
+        {
+            "code": "23514",
+            "message": (
+                'new row for relation "strategy_analytics" violates check '
+                'constraint "strategy_analytics_computation_status_check"'
+            ),
+        }
+    )
+
+
 def _serialization_failure() -> APIError:
     """A DIFFERENT APIError — the fallback must not swallow this one."""
     return APIError({"code": "40001", "message": "preempted by watchdog reclaim"})
@@ -275,6 +295,51 @@ def test_helper_reraises_a_23514_on_a_payload_with_no_markers() -> None:
     with pytest.raises(APIError):
         upsert_or_drop_provenance(payload, _write, where="unit")
     assert len(calls) == 1
+
+
+def test_helper_reraises_a_23514_naming_a_different_constraint(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """NEGATIVE CONTROL for 164.2-REVIEW WR-03. The SQLSTATE alone must not be
+    read as "the database refused MY markers".
+
+    The payload here DOES carry markers, so the marker-free guard above cannot
+    stand in for this: only the constraint-name test can keep the helper's
+    hands off a status CHECK. Three things are asserted, and each one is a
+    separate way the old SQLSTATE-only arm was wrong: the error propagates, the
+    payload keeps its provenance, and — the one the review cared about — NO
+    ERROR line is logged blaming the marker pair for someone else's constraint.
+    """
+    payload: dict[str, Any] = {
+        "strategy_id": _STRATEGY_ID,
+        "computation_error": _SENTENCE,
+        PROVENANCE_SOURCE_KEY: PROVENANCE_SOURCE_WRITER,
+        PROVENANCE_JOB_ID_KEY: _JOB_ID,
+    }
+    boom = _unrelated_check_violation()
+    calls: list[int] = []
+
+    def _write() -> None:
+        calls.append(1)
+        raise boom
+
+    caplog.set_level(logging.ERROR, logger="services.strategy_analytics_provenance")
+    with pytest.raises(APIError) as exc_info:
+        upsert_or_drop_provenance(payload, _write, where="unit")
+
+    assert exc_info.value is boom
+    assert len(calls) == 1, (
+        "a foreign CHECK must not buy a second round trip on the failure path; "
+        f"got {len(calls)} attempt(s)"
+    )
+    assert payload[PROVENANCE_SOURCE_KEY] == PROVENANCE_SOURCE_WRITER
+    assert payload[PROVENANCE_JOB_ID_KEY] == _JOB_ID
+    assert not [r for r in caplog.records if r.levelno == logging.ERROR], (
+        "the helper logged a provenance bug report for a constraint it does not "
+        "own — that line is the only place a REAL marker refusal becomes "
+        "visible, so a false one sends the next operator after the wrong "
+        "constraint (164.2-REVIEW WR-03)"
+    )
 
 
 def test_helper_reraises_a_non_23514_api_error() -> None:
