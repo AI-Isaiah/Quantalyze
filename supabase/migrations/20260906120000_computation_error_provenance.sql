@@ -77,13 +77,95 @@
 -- statement, and branches (b)/(b-prime) null them on the ELSE arm that writes
 -- the generic. A marker standing over a sentence it does not describe is the
 -- one way this design can produce a WORSE outcome than no design at all -- the
--- next generic write would read as curated and freeze. There is no path in this
--- body that writes computation_error without deciding both markers alongside
--- it, and the self-verify block below pins that on every arm.
+-- next generic write would read as curated and freeze.
+--
+-- ⛔⛔ AND THAT PROPERTY IS ENFORCED AT THE TABLE, NOT BY THIS BODY. An earlier
+-- draft of this header closed the paragraph above with "there is no path in
+-- this body that writes computation_error without deciding both markers
+-- alongside it". That sentence is TRUE of this body and was FALSE of the
+-- repository, which is the only scope that matters for an invariant about a
+-- column. The silent-failure review of 2026-09-06 enumerated the writers that
+-- change computation_error (or the status gating it) and would have left a
+-- marker standing:
+--   * analytics-service/services/analytics_runner.py `_mark_complete` --
+--     upserts "computation_error": None on the CSV success path.
+--   * analytics-service/services/job_worker.py `headline_payload` -- the
+--     composite success write, same key, same None.
+--   * analytics-service/services/job_worker.py `_upsert_error_only` -- writes a
+--     NEW curated sentence over an older one on the terminal-success-preserving
+--     failure path.
+--   * 20260712120000_wizard_composite_members_invalidate_analytics.sql
+--     `set_wizard_composite_members` -- NULLs computation_error when the member
+--     signature changes.
+--   * 20260802120000's 16-hour reaper -- writes a fixed sentence (its own row
+--     scope makes it safe on its own; see the census below).
+-- The MEASURED consequence of the first of those, spelled out because it is the
+-- exact scenario this trigger exists for: job J fails, the writer stamps
+-- sentence S with markers ('writer', J), branch (b) keeps both. `_mark_complete`
+-- then blanks the sentence and leaves the markers. A later, DIFFERENT-KIND job's
+-- terminal RPC PERFORMs this bridge; J is a different kind, so the per-kind
+-- supersession does not clear it; branch (b) fires with v_latest_job_id = J; the
+-- markers match; the CASE takes its "keep the existing sentence" arm -- and the
+-- existing sentence is NULL. The row renders computation_status = 'failed' with
+-- NO sentence at all, where the pre-164.2 bridge wrote
+-- computation_error_copy(v_latest_kind). The CONDITIONAL introduces that
+-- regression; it does not inherit it.
+--
+-- Fixing that at the writers would mean six edits today in two languages and an
+-- unbounded number tomorrow, each of them a place where the next author has no
+-- reason to know this column has provenance. STEP 3 below fixes it AT THE TABLE
+-- with a BEFORE UPDATE trigger whose whole content is: a statement that CHANGES
+-- the sentence WITHOUT RESTATING the provenance drops the provenance. Every
+-- writer above becomes correct without being edited, and so does the next one.
+-- The invariant is now a property of the SCHEMA rather than of one function
+-- body -- which is the only form in which the paragraph above can be true.
+--
+-- ⚠️ WHAT THE TRIGGER CANNOT SEE, stated rather than glossed. PL/pgSQL cannot
+-- distinguish "this column was omitted from the SET list" from "this column was
+-- set to the value it already had": both arrive as NEW.<col> = OLD.<col>. So a
+-- writer that re-stamps the SAME job id with a DIFFERENT sentence has its
+-- marker dropped, and the bridge then writes the per-kind generic for that row.
+-- That is a loss of the fix in one corner, never a corruption: the outcome is
+-- exactly the pre-164.2 behaviour, which is the direction every unknown in this
+-- file resolves to. It is booked for the Python writer plan rather than worked
+-- around here, because the alternative -- keeping a marker across a sentence
+-- change -- is the one failure mode this whole design exists to prevent.
+--
+-- ⛔ AND THE TWO MARKERS ARE SET TOGETHER OR NOT AT ALL, by a second CHECK.
+-- Without it, a writer that sets source = 'writer' and forgets the job id
+-- yields `'writer' AND NULL = <uuid>` -- NULL, so the CASE falls to ELSE and the
+-- generic wins. Safe, but SILENT: a half-stamped row is indistinguishable from
+-- an unstamped one, so a writer bug degrades every curated sentence on that
+-- path with no signal anywhere. The pairing CHECK turns that into a 23514 at
+-- the writer, which is a bug report instead of a slow leak.
 --
 -- ⛔ WHO DOES *NOT* NEED A MARKER, stated because "every writer stamps it" is
 -- the version of this decision that is wrong in two places
 -- --------------------------------------------------------------------------
+-- ⚠️ READ THIS LIST AS "does not need to be EDITED", not as "cannot leave a
+-- stale marker". Every entry below is safe because STEP 3's trigger makes it
+-- safe -- the entries state why an entry does not need a marker of its OWN,
+-- which is a different claim and was the only one the first draft made. The
+-- 2026-09-06 rls-policy-auditor review found the census incomplete on exactly
+-- that boundary (`set_wizard_composite_members` was missing), and the
+-- silent-failure review found that its missing member was not the last one.
+--   * `set_wizard_composite_members`
+--     (20260712120000_wizard_composite_members_invalidate_analytics.sql:185-189).
+--     When a composite's member signature changes it UPDATEs the published row
+--     to computation_status = 'pending' and computation_error = NULL. It writes
+--     no marker and must not: the blanking is an INVALIDATION, not a verdict on
+--     any job, and there is no job whose id it could name. It leaves no stale
+--     marker because it changes the sentence and restates no provenance, which
+--     is precisely the trigger's firing condition.
+--   * THE ANALYTICS-SERVICE SUCCESS WRITERS (`_mark_complete`,
+--     `headline_payload`). Same shape: they blank the sentence on a successful
+--     computation and name no job. Same reason they are safe.
+--   * `_mark_computing` (analytics_runner.py). It changes computation_status
+--     and computing_started_at and does NOT touch computation_error, so the
+--     marker in the column still describes the sentence in the column and
+--     nothing is stale. The trigger correctly does not fire. Listed because the
+--     review flagged it, and because "it writes the status the sentence is
+--     gated on" is not the same hazard as "it writes the sentence".
 --   * THE 16-HOUR REAPER (cron job reap_strategy_analytics_stuck_computing,
 --     mig 20260802120000:502-520). It writes a fixed sentence, and its WHERE
 --     clause selects ONLY rows at computation_status = 'computing'. The sole
@@ -136,7 +218,40 @@
 --   5. Both markers cleared in branches (a) and (c), and on the ELSE arm of the
 --      CASEs in (b) and (b-prime). The in-body owed-work paragraph in (b-prime)
 --      is REWRITTEN to record that the debt is paid here.
---   6. Nothing else, and two of the "nothing else"s are load-bearing:
+--   6a. A SECOND CHECK constraint, `..._markers_together_check`, asserting
+--      `(source IS NULL) = (job_id IS NULL)`. See the pairing paragraph above.
+--   6b. The four `array_agg` picks in that aggregate order by
+--      `created_at DESC, id DESC`, not by `created_at DESC` alone. The
+--      pairing claim in delta 2 -- that v_latest_job_id names the job whose kind
+--      became v_latest_kind -- is a claim about TWO separate aggregates agreeing
+--      on which row is first. Postgres guarantees no tie-break between them, and
+--      TIES ARE PRODUCIBLE HERE: `now()` is transaction-scoped, so a fan-out
+--      inserting several jobs in ONE statement stamps them with an identical
+--      created_at. On a tie the kind could come from job X and the id from job
+--      Y, and the bridge would then compare a marker against the wrong job --
+--      failing on exactly the row it should match. `id` is compute_jobs' primary
+--      key, so appending it makes the order TOTAL and the pairing exact. All
+--      FOUR picks carry the same ORDER BY; a tie-break added to only two of them
+--      would fix nothing, which is why the self-verify counts them.
+--      ⚠️ MEASURED, and the measurement is the reason this delta is pinned by
+--      TEXT and not by a gate arm. On the pg-lane (PostgreSQL 16, this schema,
+--      this plan) the UNTIED aggregate already returns the tied rows in exact
+--      `id DESC` order, so the kind pick and the id pick AGREE with and without
+--      the trailing key: 8 tied failures inserted in scrambled id order came
+--      back id-descending, and a probe reading both picks reported AGREE=t.
+--      Two behavioural arms were written for this delta and BOTH passed against
+--      the unfixed aggregate, in either insert order -- i.e. they were tests
+--      that could not fail, which is worse than no test. They were DELETED
+--      rather than shipped. What remains is three self-verify anchors, each
+--      observed RED under its own neuter, pinning the four ORDER BY clauses in
+--      the deployed body. The fix stands on the guarantee Postgres does NOT
+--      make -- there is no defined tie-break BETWEEN two aggregates -- not on
+--      an accident of today's plan, and the accident is exactly what a row
+--      count, an index or a major version can change without warning.
+--   6c. STEP 3: the `strategy_analytics_drop_stale_error_provenance` BEFORE
+--      UPDATE trigger. See the enforcement paragraph above for why the invariant
+--      belongs to the table.
+--   7. Nothing else, and two of the "nothing else"s are load-bearing:
 --      * COMMENT ON FUNCTION is NOT REISSUED. CREATE OR REPLACE keeps the
 --        function's oid, so the pg_description row survives untouched. That
 --        matters because that comment is the applied-ness KEY for arms 0a and
@@ -201,6 +316,38 @@ BEGIN
     ALTER TABLE public.strategy_analytics
       ADD CONSTRAINT strategy_analytics_computation_error_source_check
       CHECK (computation_error_source IN ('writer'));
+  END IF;
+END
+$$;
+
+-- ⛔ THE PAIRING CONSTRAINT. The two markers are ONE fact spelled in two
+-- columns, and this is what says so. Without it a writer that sets the source
+-- and forgets the job id produces `'writer' AND NULL = <uuid>` -> NULL -> the
+-- CASE's ELSE arm -> the per-kind generic. That direction is SAFE, and that is
+-- exactly the problem: a half-stamped row is byte-indistinguishable from an
+-- unstamped one at the reader, so a writer bug silently degrades every curated
+-- sentence on that path and nothing anywhere reports it. Loud at the writer
+-- (23514, naming this constraint) beats quiet at the reader.
+--
+-- ⚠️ The failure it makes loud sits on the FAILURE-RECORDING path, so the Python
+-- writer must catch a constraint violation on the marker keys and retry WITHOUT
+-- them -- otherwise a provenance bug costs the whole failure record rather than
+-- just its provenance. That applies to the ('writer') CHECK above too, and is
+-- booked for the writer plan in TODOS.md; it is a property of the WRITER, which
+-- is why it cannot be fixed in this file.
+--
+-- Spelled as an equality between two IS NULL tests rather than as two implications:
+-- it is total on both directions in one expression and has no NULL result.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'strategy_analytics_computation_error_markers_together_check'
+       AND conrelid = 'public.strategy_analytics'::regclass
+  ) THEN
+    ALTER TABLE public.strategy_analytics
+      ADD CONSTRAINT strategy_analytics_computation_error_markers_together_check
+      CHECK ((computation_error_source IS NULL) = (computation_error_job_id IS NULL));
   END IF;
 END
 $$;
@@ -575,9 +722,20 @@ BEGIN
     -- class. Same ordering, same FILTERs, same partition as before — only the
     -- column changed, from the operator diagnostic to the enum that decides
     -- which curated sentence the user reads.
-    (array_agg(error_kind ORDER BY created_at DESC)
+    --
+    -- ⛔ THE ORDER IS TOTAL, and the trailing key is not tidiness. Four picks
+    -- below choose "the first row" from four independent aggregate states, and
+    -- the pairing this migration rests on -- that the kind and the id below
+    -- describe the SAME failure -- is a claim that all four agree on which row
+    -- that is. An ordering with ties leaves that to the executor. Ties are
+    -- REACHABLE: the timestamp key is transaction-scoped, so a fan-out inserting
+    -- several jobs in one statement stamps them identically. The primary key
+    -- breaks every tie and it is spelled on ALL FOUR picks -- a tie-break on two
+    -- of them would leave exactly the disagreement it was added to remove. The
+    -- self-verify below COUNTS the four rather than testing for presence.
+    (array_agg(error_kind ORDER BY created_at DESC, id DESC)
        FILTER (WHERE NOT is_protected))[1],
-    (array_agg(error_kind ORDER BY created_at DESC)
+    (array_agg(error_kind ORDER BY created_at DESC, id DESC)
        FILTER (WHERE is_protected))[1],
     -- Phase 164.2 / criterion 2: the same two picks by IDENTITY. Same ordering,
     -- same FILTERs, same partition -- so v_latest_job_id names exactly the job
@@ -589,9 +747,9 @@ BEGIN
     -- reason the debt could not be paid there. Both are non-NULL whenever the
     -- branch that reads them fires: the branch's own guard is a count over the
     -- same FILTER, and compute_jobs.id is the primary key.
-    (array_agg(id ORDER BY created_at DESC)
+    (array_agg(id ORDER BY created_at DESC, id DESC)
        FILTER (WHERE NOT is_protected))[1],
-    (array_agg(id ORDER BY created_at DESC)
+    (array_agg(id ORDER BY created_at DESC, id DESC)
        FILTER (WHERE is_protected))[1]
     INTO v_failed_count, v_protected_count, v_unresolved_count,
          v_latest_kind, v_protected_kind,
@@ -906,6 +1064,103 @@ $$;
 REVOKE ALL ON FUNCTION sync_strategy_analytics_status FROM PUBLIC, anon, authenticated;
 
 -- --------------------------------------------------------------------------
+-- STEP 3: the invariant, moved from this file's prose to the table
+-- --------------------------------------------------------------------------
+-- See the header's ⛔⛔ paragraph for the enumerated writers and the measured
+-- NULL-sentence scenario this closes. In one line: a statement that CHANGES the
+-- sentence WITHOUT RESTATING the provenance drops the provenance.
+--
+-- SHAPE COPIED FROM `strategy_analytics_stamp_computing_started` (mig
+-- 20260803120000:116-186), which enforces the neighbouring
+-- computing_started_at invariant on this same table from the same event:
+-- SECURITY INVOKER (the default -- the body touches only its own NEW/OLD tuples
+-- and needs no privilege the firing statement does not already hold), pinned
+-- search_path, self-contained (no helper call -- see 20260516170000:3-11 for the
+-- incident class that rule exists to avoid), REVOKEd from the API roles so it is
+-- never reachable as a PostgREST RPC, and BEFORE UPDATE FOR EACH ROW.
+--
+-- ⚠️ IT COEXISTS WITH THAT TRIGGER AND CANNOT FIGHT IT. Two BEFORE ROW triggers
+-- on one table fire in name order, each handed the previous one's NEW tuple.
+-- This one assigns ONLY the two marker columns; that one assigns ONLY
+-- computing_started_at. The column sets are disjoint, so the composition is
+-- order-independent and the alphabetical precedence of this name is not a fact
+-- anything depends on.
+--
+-- ⚠️ UPDATE ONLY, deliberately, matching 20260803120000's D-18 scope. An INSERT
+-- has no OLD tuple, so there is no prior provenance to invalidate: a fresh row's
+-- markers describe the sentence inserted beside them by construction. A DELETE
+-- would additionally require the sanitize_user erasure exemption
+-- (20260710160000:67), and there is nothing here to enforce on one.
+--
+-- ⛔ IT NEVER RAISES. It coerces, silently, exactly as the stamp trigger does
+-- and for the same reason recorded there: raising would kill a live
+-- analytics-service write, burn its retries and strand the strategy. The
+-- coercion is toward the pre-164.2 behaviour (no provenance -> the per-kind
+-- generic), which is the direction every unknown in this file resolves to.
+--
+-- ⛔ THE BODY CARRIES NO COMMENTS, AND THAT IS THIS FILE'S H1 RULE APPLIED HERE
+-- RATHER THAN AN OVERSIGHT. pg_get_functiondef returns comments, and the
+-- self-verify block below anchors on this body's ONE conditional. A comment
+-- restating the predicate would satisfy those anchors over a deleted predicate,
+-- which is the failure mode the whole self-verify convention exists to avoid.
+-- The prose lives here and in the COMMENT ON FUNCTION, neither of which
+-- pg_get_functiondef returns.
+CREATE OR REPLACE FUNCTION public.strategy_analytics_drop_stale_error_provenance()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = public, pg_catalog
+AS $$
+BEGIN
+  IF NEW.computation_error IS DISTINCT FROM OLD.computation_error
+     AND NEW.computation_error_source IS NOT DISTINCT FROM OLD.computation_error_source
+     AND NEW.computation_error_job_id IS NOT DISTINCT FROM OLD.computation_error_job_id
+  THEN
+    NEW.computation_error_source := NULL;
+    NEW.computation_error_job_id := NULL;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+COMMENT ON FUNCTION public.strategy_analytics_drop_stale_error_provenance() IS
+  'Phase 164.2 / criterion 2: enforces the computation_error PROVENANCE '
+  'invariant at the table, for EVERY writer. Any UPDATE that CHANGES '
+  'computation_error while leaving computation_error_source and '
+  'computation_error_job_id at the values they already held has both markers '
+  'coerced to NULL, because a marker that outlives the sentence it describes is '
+  'read by sync_strategy_analytics_status as a writer''s claim over text that is '
+  'gone -- which is strictly worse than having no provenance at all. This '
+  'closes it for the analytics-service success writers (_mark_complete, '
+  'headline_payload), the failure re-write path (_upsert_error_only) and '
+  'set_wizard_composite_members (mig 20260712120000) WITHOUT editing any of '
+  'them, and for every writer added after this date. Cost, stated: PL/pgSQL '
+  'cannot tell "column omitted from the SET list" from "column set to its '
+  'current value", so a writer re-stamping the SAME job id with a DIFFERENT '
+  'sentence also loses its marker and falls back to the per-kind generic -- the '
+  'pre-164.2 behaviour, never a corruption. Does NOT fire on the bridge''s own '
+  'writes: branches (b)/(b-prime) keep the sentence UNCHANGED when they keep the '
+  'markers (first condition false), and change the sentence while NULLing the '
+  'markers explicitly when they do not (second and third false). '
+  'Self-contained: reads only NEW/OLD, calls nothing (mig 20260516170000:3-11).';
+
+REVOKE ALL ON FUNCTION public.strategy_analytics_drop_stale_error_provenance() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS strategy_analytics_drop_stale_error_provenance_trigger ON public.strategy_analytics;
+CREATE TRIGGER strategy_analytics_drop_stale_error_provenance_trigger
+  BEFORE UPDATE ON public.strategy_analytics
+  FOR EACH ROW
+  EXECUTE FUNCTION public.strategy_analytics_drop_stale_error_provenance();
+
+COMMENT ON TRIGGER strategy_analytics_drop_stale_error_provenance_trigger ON public.strategy_analytics IS
+  'Phase 164.2 / criterion 2: fires on UPDATE only -- not insert (a fresh row''s '
+  'markers describe the sentence inserted beside them), not delete (nothing to '
+  'enforce, and it would need the sanitize_user erasure exemption of '
+  '20260710160000:67). Drops computation_error_source / computation_error_job_id '
+  'whenever a statement changes computation_error without restating them. Fires '
+  'alongside strategy_analytics_stamp_computing_started_trigger; the two assign '
+  'DISJOINT column sets, so their relative order is immaterial.';
+
+-- --------------------------------------------------------------------------
 -- Self-verify -- this migration's own deltas AND every anchor the re-base must
 -- not silently revert
 -- --------------------------------------------------------------------------
@@ -939,6 +1194,14 @@ DECLARE
   v_condef      TEXT;
   v_comment     TEXT;
   v_fn          TEXT := pg_get_functiondef('sync_strategy_analytics_status(uuid)'::regprocedure);
+  -- STEP 3's trigger. Read into its own variable rather than reusing v_fn: the
+  -- two bodies share almost every identifier, and one anchor accidentally run
+  -- against the other body is an anchor that reports on the wrong object.
+  v_fn_trg      TEXT;
+  v_tgtype      SMALLINT;
+  v_tgenabled   "char";
+  v_trg_secdef  BOOLEAN;
+  v_trg_config  TEXT;
 BEGIN
   -- ======================================================================
   -- (P0) THE COLUMN SHAPE. Type, nullability and defaultlessness are ASSERTED,
@@ -998,6 +1261,24 @@ BEGIN
   END IF;
   IF v_condef !~ '''writer''' THEN
     RAISE EXCEPTION 'Criterion 2 verification failed: strategy_analytics_computation_error_source_check exists but does not restrict the column to ''writer''. A constraint of the right name that admits anything is the mitigation reading as present while restricting nothing';
+  END IF;
+
+  -- (P0d) THE PAIRING CHECK, asserted by its DEFINITION for the same reason.
+  -- It is what turns a half-stamped marker into a 23514 at the writer instead
+  -- of a silent fall to the per-kind generic at the reader, and a constraint of
+  -- the right name over the wrong expression is that mitigation reading as
+  -- present while permitting the half-stamp.
+  SELECT pg_get_constraintdef(c.oid)
+    INTO v_condef
+    FROM pg_constraint c
+   WHERE c.conname = 'strategy_analytics_computation_error_markers_together_check'
+     AND c.conrelid = 'public.strategy_analytics'::regclass;
+  IF v_condef IS NULL THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: strategy_analytics_computation_error_markers_together_check is missing. Without it a writer that sets the source and omits the job id produces ''writer'' AND NULL = <uuid>, i.e. NULL, so the bridge falls to its ELSE arm and writes the generic -- SAFE, and therefore SILENT: a half-stamped row is indistinguishable from an unstamped one at the reader, and a writer bug degrades every curated sentence on that path with no signal anywhere';
+  END IF;
+  IF v_condef !~ 'computation_error_source\s+IS\s+NULL'
+     OR v_condef !~ 'computation_error_job_id\s+IS\s+NULL' THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: strategy_analytics_computation_error_markers_together_check does not test BOTH marker columns for NULL. A one-sided constraint permits exactly the half-stamp it is named for';
   END IF;
 
   -- ======================================================================
@@ -1070,11 +1351,27 @@ BEGIN
   -- and a FILTER swapped between the two would hand a branch the OTHER class's
   -- job id -- which is worse than no provenance, because the equality would
   -- then fail on exactly the row it should match and pass on one it should not.
-  IF v_fn !~ '\(\s*array_agg\s*\(\s*id\s+ORDER\s+BY\s+created_at\s+DESC\s*\)\s*FILTER\s*\(\s*WHERE\s+NOT\s+is_protected\s*\)\s*\)\s*\[\s*1\s*\]' THEN
-    RAISE EXCEPTION 'Criterion 2 verification failed: the UNPROTECTED job-id pick is missing or is not FILTERed to `NOT is_protected`. Branch (b) would then compare the row''s marker against the wrong job (or against NULL), and every writer-curated sentence on the loud path would be overwritten by the per-kind generic -- i.e. criterion 2 reverted while the columns still exist and read as a fix';
+  IF v_fn !~ '\(\s*array_agg\s*\(\s*id\s+ORDER\s+BY\s+created_at\s+DESC\s*,\s*id\s+DESC\s*\)\s*FILTER\s*\(\s*WHERE\s+NOT\s+is_protected\s*\)\s*\)\s*\[\s*1\s*\]' THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the UNPROTECTED job-id pick is missing, is not FILTERed to `NOT is_protected`, or lost its `, id DESC` tie-break. Branch (b) would then compare the row''s marker against the wrong job (or against NULL), and every writer-curated sentence on the loud path would be overwritten by the per-kind generic -- i.e. criterion 2 reverted while the columns still exist and read as a fix';
   END IF;
-  IF v_fn !~ '\(\s*array_agg\s*\(\s*id\s+ORDER\s+BY\s+created_at\s+DESC\s*\)\s*FILTER\s*\(\s*WHERE\s+is_protected\s*\)\s*\)\s*\[\s*1\s*\]' THEN
-    RAISE EXCEPTION 'Criterion 2 verification failed: the PROTECTED job-id pick is missing or is not FILTERed to `is_protected`. Branch (b-prime) -- the D-15 recurring-refresh path, which is where the curated sentence matters most because the row stays published -- would compare against the wrong job and always fall to the generic';
+  IF v_fn !~ '\(\s*array_agg\s*\(\s*id\s+ORDER\s+BY\s+created_at\s+DESC\s*,\s*id\s+DESC\s*\)\s*FILTER\s*\(\s*WHERE\s+is_protected\s*\)\s*\)\s*\[\s*1\s*\]' THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the PROTECTED job-id pick is missing, is not FILTERed to `is_protected`, or lost its `, id DESC` tie-break. Branch (b-prime) -- the D-15 recurring-refresh path, which is where the curated sentence matters most because the row stays published -- would compare against the wrong job and always fall to the generic';
+  END IF;
+
+  -- (P2a-tie) THE ORDER IS TOTAL ON ALL FOUR PICKS. A COUNT, not a presence
+  -- test, and the count is what makes this arm able to fail at all: a tie-break
+  -- added to the two id picks alone leaves the two KIND picks free to choose a
+  -- different first row on a tie, which is the exact disagreement the tie-break
+  -- was added to remove -- and both spellings would satisfy any presence test.
+  -- Ties are reachable: created_at is stamped from a transaction-scoped clock,
+  -- so a fan-out inserting several jobs in ONE statement stamps them equal.
+  -- ⚠️ Keyed on the executable `array_agg(` spelling. No comment in this body
+  -- spells it (the prose at the aggregate says "the four picks", deliberately),
+  -- so this count is over code. If a future comment does spell it, this arm goes
+  -- RED and the fix is to reword the comment -- never to raise the integer.
+  IF (SELECT count(*)
+        FROM regexp_matches(v_fn, 'array_agg\s*\([^)]*ORDER\s+BY\s+created_at\s+DESC\s*,\s*id\s+DESC\s*\)', 'g')) <> 4 THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the live-failure aggregate does not carry `ORDER BY created_at DESC, id DESC` on EXACTLY the four picks (two error_kind, two id). Postgres guarantees no tie-break BETWEEN two aggregates, so with a non-total order the kind can be taken from one job and the id from another -- and the bridge then compares the row''s marker against a job that is not the one whose sentence it is reading, failing on exactly the row it should match. A partial fix (two of four) is indistinguishable from none';
   END IF;
   IF v_fn !~ 'INTO\s+v_failed_count\s*,\s*v_protected_count\s*,\s*v_unresolved_count\s*,\s*v_latest_kind\s*,\s*v_protected_kind\s*,\s*v_latest_job_id\s*,\s*v_protected_job_id' THEN
     RAISE EXCEPTION 'Criterion 2 verification failed: the aggregate''s INTO list does not end in v_latest_job_id, v_protected_job_id in that order. The INTO list is positional -- a reordering silently assigns a kind to a job-id variable or swaps the two classes'' ids, and both compile';
@@ -1150,6 +1447,122 @@ BEGIN
   IF (SELECT count(*)
         FROM regexp_matches(v_fn, 'computation_error_job_id\s*=\s*NULL', 'g')) <> 2 THEN
     RAISE EXCEPTION 'Criterion 2 verification failed: the UNCONDITIONAL job-id-marker clear must appear in EXACTLY the two branches that blank computation_error -- (a) and (c). A job id left standing over a blanked sentence is a claim about text that no longer exists, and the next equality test will honour it';
+  END IF;
+
+  -- ======================================================================
+  -- (P3) STEP 3's TRIGGER -- the invariant that no longer lives in prose.
+  -- ======================================================================
+  -- Every arm here is about the ONE claim the header's ⛔⛔ paragraph makes:
+  -- that a marker cannot outlive the sentence it describes NO MATTER WHICH
+  -- WRITER changed it. That claim is worth nothing if the trigger is absent,
+  -- bound to the wrong event, or coerces the wrong way -- and each of those
+  -- three is silent, because the bridge keeps compiling and the columns keep
+  -- existing either way.
+
+  -- (P3a) The trigger EXISTS and is bound to the right function. Read first, so
+  -- a missing trigger reddens by NAME rather than through a NULL tgtype three
+  -- lines down (arm K's rule in the template gate, applied here).
+  SELECT t.tgtype, t.tgenabled
+    INTO v_tgtype, v_tgenabled
+    FROM pg_trigger t
+   WHERE t.tgrelid = 'public.strategy_analytics'::regclass
+     AND t.tgname = 'strategy_analytics_drop_stale_error_provenance_trigger'
+     AND NOT t.tgisinternal
+     AND t.tgfoid = 'public.strategy_analytics_drop_stale_error_provenance()'::regprocedure;
+  IF v_tgtype IS NULL THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the trigger strategy_analytics_drop_stale_error_provenance_trigger is absent from strategy_analytics, or does not call strategy_analytics_drop_stale_error_provenance(). Without it the provenance invariant is a claim in a file header again: _mark_complete blanks the sentence and leaves the markers, and the NEXT branch-(b) call for that same job id keeps the "existing sentence" -- which is NULL. The row then renders computation_status = ''failed'' with no sentence at all, where the pre-164.2 bridge wrote the per-kind copy';
+  END IF;
+
+  -- (P3b) BOUND TO BEFORE UPDATE FOR EACH ROW, all three bits asserted.
+  -- Bits: ROW=1, BEFORE=2, INSERT=4, DELETE=8, UPDATE=16, TRUNCATE=32.
+  -- ⛔ Each of the three is asserted SEPARATELY because each failure is
+  -- different and all three are silent. AFTER instead of BEFORE: the assignment
+  -- to NEW is discarded and the trigger does nothing at all. STATEMENT instead
+  -- of ROW: NEW/OLD do not exist and the body aborts on every update of this
+  -- table, i.e. the whole publish path. Not UPDATE: it never fires.
+  IF (v_tgtype & 2) = 0 THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the provenance trigger is not a BEFORE trigger. An AFTER trigger''s assignment to NEW is DISCARDED, so it would run on every update, report nothing, and enforce nothing -- a green migration over an invariant that does not exist';
+  END IF;
+  IF (v_tgtype & 1) = 0 THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the provenance trigger is not FOR EACH ROW. A statement-level trigger has no NEW/OLD, so this body would abort on every UPDATE of strategy_analytics -- the entire publish path';
+  END IF;
+  IF (v_tgtype & 16) = 0 THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the provenance trigger does not fire on UPDATE. UPDATE is the ONLY event it is about -- every stale-marker path in the header''s writer census is an UPDATE (or the ON CONFLICT arm of an upsert, which is one)';
+  END IF;
+  IF (v_tgtype & (4 | 8 | 32)) <> 0 THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the provenance trigger was WIDENED beyond UPDATE. On INSERT there is no OLD tuple and this body aborts with `record "old" is not assigned yet`, taking every strategy_analytics INSERT with it; a DELETE arm would additionally need the sanitize_user erasure exemption (20260710160000:67). Narrow it back to BEFORE UPDATE';
+  END IF;
+  IF v_tgenabled <> 'O' THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the provenance trigger exists but tgenabled is %, not ''O''. A DISABLED trigger satisfies every catalog presence test in this block while enforcing nothing', v_tgenabled;
+  END IF;
+
+  -- (P3c) The trigger FUNCTION's shape. SECURITY INVOKER (the body needs no
+  -- privilege the firing statement lacks, and a needless definer-rights trigger
+  -- on a cross-tenant table is a standing escalation surface), pinned
+  -- search_path, and unreachable as a PostgREST RPC.
+  SELECT p.prosecdef, array_to_string(p.proconfig, ',')
+    INTO v_trg_secdef, v_trg_config
+    FROM pg_proc p
+   WHERE p.oid = 'public.strategy_analytics_drop_stale_error_provenance()'::regprocedure;
+  IF v_trg_secdef THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: strategy_analytics_drop_stale_error_provenance is SECURITY DEFINER. It touches only its own NEW/OLD tuples and needs no privilege the firing statement does not already hold; definer rights here add a bypass of RLS on a cross-tenant table for no gain';
+  END IF;
+  IF v_trg_config IS NULL OR v_trg_config NOT LIKE '%search_path=public%' THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: strategy_analytics_drop_stale_error_provenance has no pinned search_path (the 89-prior-migration convention, and 20260803120000''s shape)';
+  END IF;
+  IF has_function_privilege('anon', 'public.strategy_analytics_drop_stale_error_provenance()', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.strategy_analytics_drop_stale_error_provenance()', 'EXECUTE') THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: an API role can EXECUTE strategy_analytics_drop_stale_error_provenance -- the REVOKE did not take. A trigger function is never a legitimate PostgREST RPC (20260716131000:74)';
+  END IF;
+
+  v_fn_trg := pg_get_functiondef('public.strategy_analytics_drop_stale_error_provenance()'::regprocedure);
+
+  -- (P3d-neg) NEGATIVE, AND IT SITS ABOVE THE POSITIVE ANCHOR DELIBERATELY --
+  -- the same placement rule as (P2a-neg) above. THE INVERSION is the one edit
+  -- that reads as a tidy-up and reverses the whole meaning: fire when the
+  -- sentence is UNCHANGED, and the trigger strips the markers off the bridge's
+  -- own KEEP arm on branches (b)/(b-prime) -- criterion 2 reverted by the very
+  -- object added to protect it, with no other symptom. Placed below the positive
+  -- anchor it could never be reached, because the inversion breaks that one too.
+  -- ⚠️ The lookahead is load-bearing: without it this pattern also matches the
+  -- two `computation_error_source` / `computation_error_job_id` conjuncts, which
+  -- are CORRECTLY `IS NOT DISTINCT FROM`, and the arm would be RED on the fixed
+  -- body -- a positive anchor that can never be satisfied, wearing a negative's
+  -- clothes.
+  IF v_fn_trg ~* 'NEW\.computation_error(?![_[:alnum:]])\s+IS\s+NOT\s+DISTINCT\s+FROM' THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the provenance trigger''s sentence test is INVERTED (`NEW.computation_error IS NOT DISTINCT FROM OLD.computation_error`). That fires when the sentence is UNCHANGED, which is exactly the state in which branches (b) and (b-prime) KEEP a writer-curated sentence -- so the trigger would strip the markers off the one write that is entitled to them, and every curated sentence would fall to the per-kind generic on the following call. The sentence test must be IS DISTINCT FROM; the two marker tests must be IS NOT DISTINCT FROM';
+  END IF;
+
+  -- (P3e) The guard itself, keyed on the WHOLE three-conjunct condition. A
+  -- fragment anchor is not available to be got wrong here (the body carries no
+  -- comments, by design -- see STEP 3's header note), but the conjuncts are
+  -- anchored together anyway because DROPPING ONE is the silent edit:
+  --   * drop the sentence test  -> the markers are cleared on EVERY update that
+  --     does not restate them, including the bridge's own keep arm.
+  --   * drop either marker test -> the trigger fires on the bridge's and the
+  --     writer's own marker-carrying writes and clears what they just set.
+  IF v_fn_trg !~ 'IF\s+NEW\.computation_error\s+IS\s+DISTINCT\s+FROM\s+OLD\.computation_error\s+AND\s+NEW\.computation_error_source\s+IS\s+NOT\s+DISTINCT\s+FROM\s+OLD\.computation_error_source\s+AND\s+NEW\.computation_error_job_id\s+IS\s+NOT\s+DISTINCT\s+FROM\s+OLD\.computation_error_job_id\s+THEN' THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the provenance trigger''s guard is not the expected three-conjunct condition (sentence CHANGED, and BOTH markers left exactly as they were). Dropping the sentence conjunct clears the markers on every update that does not restate them -- including the bridge''s own keep arm; dropping either marker conjunct makes the trigger fire on the writes that legitimately carry provenance and erase it in the same statement';
+  END IF;
+
+  -- (P3f) Both clears, asserted SEPARATELY. One survivor leaves a half-stamped
+  -- row -- which the pairing CHECK of (P0d) then rejects with a 23514 raised
+  -- from inside a BEFORE trigger, i.e. this defect would surface as an
+  -- unexplained constraint violation on a live analytics write rather than as
+  -- anything naming the trigger.
+  IF v_fn_trg !~ 'NEW\.computation_error_source\s*:=\s*NULL' THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the provenance trigger does not clear computation_error_source. A source marker left over a changed sentence is read by branches (b)/(b-prime) as a writer''s claim -- and half a marker also violates the pairing CHECK, so the symptom is a 23514 on the failure-write path';
+  END IF;
+  IF v_fn_trg !~ 'NEW\.computation_error_job_id\s*:=\s*NULL' THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the provenance trigger does not clear computation_error_job_id. The id is the half that makes the bridge''s equality match, so leaving it is the half that actually causes the wrong sentence to be kept';
+  END IF;
+
+  -- (P3g) It COERCES, it does not RAISE. 20260803120000 records the reason for
+  -- the neighbouring stamp trigger and it holds identically here: raising would
+  -- kill a live analytics-service write mid-failure-report, burn its retries and
+  -- strand the strategy -- turning a lost sentence into a lost failure record.
+  IF v_fn_trg ~* 'RAISE\s+(EXCEPTION|WARNING)' THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the provenance trigger RAISEs. It must coerce silently toward the pre-164.2 behaviour: it fires on the analytics-service FAILURE-recording path, where an exception costs the whole failure record rather than just its provenance';
   END IF;
 
   -- ======================================================================
@@ -1297,7 +1710,7 @@ BEGIN
     RAISE EXCEPTION 'HONEST-01 verification failed: computation_error_copy(NULL) is NULL on this database. Branch (b-prime)''s ELSE arm assigns this value unconditionally, so a NULL here silently blanks computation_error over a live protected failure. ⛔ Do NOT "fix" this by putting b-prime''s retired COALESCE back: its left arm was the operator column and always won, so it never guarded this';
   END IF;
 
-  RAISE NOTICE 'Migration 20260906120000: strategy_analytics.computation_error PROVENANCE applied and sync_strategy_analytics_status re-based (criterion 2 -- both markers present, CHECK-constrained and nullable; branches (b)/(b-prime) keep a writer sentence only for the job they resolved and clear the markers otherwise; branches (a)/(c) clear both; COMMENT ON FUNCTION survived CREATE OR REPLACE (A1 MEASURED); CR-01, JOB-01, F-3/PUB-02, SI-02 and HONEST-01 anchors carried forward, two of them re-anchored).';
+  RAISE NOTICE 'Migration 20260906120000: strategy_analytics.computation_error PROVENANCE applied and sync_strategy_analytics_status re-based (criterion 2 -- both markers present, nullable and constrained TWICE: the domain CHECK on the source and the pairing CHECK that makes a half-stamp a 23514 at the writer instead of a silent generic at the reader; the live-failure aggregate orders all FOUR picks totally (created_at DESC, id DESC) so the kind and the id name the SAME failure under a tie; branches (b)/(b-prime) keep a writer sentence only for the job they resolved and clear the markers otherwise; branches (a)/(c) clear both; and the BEFORE UPDATE trigger strategy_analytics_drop_stale_error_provenance_trigger moves the "a marker never outlives its sentence" invariant from this file''s prose to the TABLE, so the six repo-wide writers that change the sentence without restating provenance are correct without being edited; COMMENT ON FUNCTION survived CREATE OR REPLACE (A1 MEASURED); CR-01, JOB-01, F-3/PUB-02, SI-02 and HONEST-01 anchors carried forward, two of them re-anchored).';
 END $verify$;
 
 COMMIT;

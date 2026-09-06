@@ -342,9 +342,20 @@ BEGIN
     -- class. Same ordering, same FILTERs, same partition as before — only the
     -- column changed, from the operator diagnostic to the enum that decides
     -- which curated sentence the user reads.
-    (array_agg(error_kind ORDER BY created_at DESC)
+    --
+    -- ⛔ THE ORDER IS TOTAL, and the trailing key is not tidiness. Four picks
+    -- below choose "the first row" from four independent aggregate states, and
+    -- the pairing this migration rests on -- that the kind and the id below
+    -- describe the SAME failure -- is a claim that all four agree on which row
+    -- that is. An ordering with ties leaves that to the executor. Ties are
+    -- REACHABLE: the timestamp key is transaction-scoped, so a fan-out inserting
+    -- several jobs in one statement stamps them identically. The primary key
+    -- breaks every tie and it is spelled on ALL FOUR picks -- a tie-break on two
+    -- of them would leave exactly the disagreement it was added to remove. The
+    -- self-verify below COUNTS the four rather than testing for presence.
+    (array_agg(error_kind ORDER BY created_at DESC, id DESC)
        FILTER (WHERE NOT is_protected))[1],
-    (array_agg(error_kind ORDER BY created_at DESC)
+    (array_agg(error_kind ORDER BY created_at DESC, id DESC)
        FILTER (WHERE is_protected))[1],
     -- Phase 164.2 / criterion 2: the same two picks by IDENTITY. Same ordering,
     -- same FILTERs, same partition -- so v_latest_job_id names exactly the job
@@ -356,9 +367,9 @@ BEGIN
     -- reason the debt could not be paid there. Both are non-NULL whenever the
     -- branch that reads them fires: the branch's own guard is a count over the
     -- same FILTER, and compute_jobs.id is the primary key.
-    (array_agg(id ORDER BY created_at DESC)
+    (array_agg(id ORDER BY created_at DESC, id DESC)
        FILTER (WHERE NOT is_protected))[1],
-    (array_agg(id ORDER BY created_at DESC)
+    (array_agg(id ORDER BY created_at DESC, id DESC)
        FILTER (WHERE is_protected))[1]
     INTO v_failed_count, v_protected_count, v_unresolved_count,
          v_latest_kind, v_protected_kind,

@@ -114,7 +114,7 @@
 --
 -- The gate stays CONDITIONAL, which is what separates it from a blanket abort:
 -- with the migration applied it falls through and the arms decide the verdict.
--- The final 'ALL 16 ARMS EXECUTED (A, B, C, …, K)' notice is the sentinel CI's
+-- The final 'ALL 23 ARMS EXECUTED (A, B, C, …, O2)' notice is the sentinel CI's
 -- loop reads the arm count off — if you add or remove an arm, update BOTH N and
 -- the roster on that line. The roster is not decoration: `sql-tests` in
 -- .github/workflows/ci.yml counts its entries and fails the job when they
@@ -136,7 +136,7 @@
 -- scripts/mutation-runner executes on every push: it mutates COPIES on a
 -- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
 -- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
--- ⚠️ ONLY THE TWO APPLIED-NESS GATES USE THE `TEST FAILED (…)` IDIOM. All 16
+-- ⚠️ ONLY THE THREE APPLIED-NESS GATES USE THE `TEST FAILED (…)` IDIOM. All 23
 -- arms below say `ARM x FAILED` / `ARM x SETUP BROKEN`, so they are invisible to
 -- the runner's identity regex: a mutation that reddens an arm scores
 -- NO-IDENTITY, not RED. The single twinned section is therefore `0`, and its
@@ -153,7 +153,7 @@
 -- [REDUNDER-SAVEPOINT] migrations and aborts any lane. Nothing is lost —
 -- 20260510175507 is the repair migration and registers `process_key_long` on
 -- its own.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260906120000_computation_error_provenance.sql"]}
 
 BEGIN;
 
@@ -175,6 +175,23 @@ DECLARE
   s_i4       UUID;  -- Arm I4: a MARKED successor must NOT release the hold
   s_j        UUID;  -- Arm J: marked, but a kind no refresh arm enqueues
   s_j2       UUID;  -- Arm J2: the propagated chain-hop kind stays protected
+  -- Phase 164.2 / criterion 2 (mig 20260906120000). The provenance columns, the
+  -- BEFORE UPDATE trigger that keeps a marker from outliving its sentence, the
+  -- total tie-break on the live-failure picks, and the pairing CHECK.
+  s_l        UUID;  -- Arm L:  the trigger FIRES on a sentence change
+  s_l2       UUID;  -- Arm L2: and does NOT fire when the sentence is unchanged
+  s_m        UUID;  -- Arm M:  end-to-end — a blanked sentence must not be KEPT
+  s_m2       UUID;  -- Arm M2: branch (b)'s keep arm survives the trigger
+  s_m3       UUID;  -- Arm M3: branch (b-prime)'s keep arm survives it too
+  s_o        UUID;  -- Arm O/O2: a half-stamped marker is a 23514, not a shrug
+  v_src      TEXT;
+  v_jobid    UUID;
+  v_caught   TEXT;
+  -- ⛔ SPELLED LITERALLY, for arm A's reason at :344-346: asserting
+  -- `= computation_error_copy(<kind>)` would pass against a copy function that
+  -- leaks its argument, i.e. it would be an assertion that cannot fail for the
+  -- reason we care about.
+  c_perm     TEXT := 'Analytics could not complete for this strategy, and retrying alone will not resolve it. Contact support if you need this strategy computed.';
   j          UUID;
   j_sib      UUID;
   tok        UUID;
@@ -251,6 +268,35 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (0b): public.sync_strategy_analytics_status(uuid) does not carry the migration 20260826120000 comment on this database, so arms A and I would report a copy mismatch for the wrong reason. TWO causes fit: (i) the TEST project has not received 20260826120000_computation_error_curated_copy.sql — apply it and re-run; NO workflow applies migrations to TEST; (ii) the function was REDEFINED by a later migration that dropped this comment, which silently reverts HONEST-01 and puts raw Python exception strings back in front of users in the wizard failure envelope.';
   END IF;
 
+  -- ----- THIRD applied-ness gate: mig 20260906120000 (Phase 164.2 / crit 2) --
+  -- ⛔ KEYED ON THE COLUMN, NOT ON A COMMENT, and that difference is forced.
+  -- 20260906120000 deliberately does NOT reissue COMMENT ON FUNCTION — the
+  -- comment is arms 0a/0b's applied-ness key and arm 0a's mutation twin edits
+  -- it, so re-stamping it would overwrite that mutation later in the same apply
+  -- list and twin 0a would stop biting. There is therefore no comment of its
+  -- own to key on. The two provenance columns are the next-best independent
+  -- witness: they are written by that migration and by nothing else, and they
+  -- are not part of any branch, so neutering the bridge leaves them intact and
+  -- the arms below actually run (the :210-217 rule).
+  --
+  -- ⚠️ ON TEST THIS IS EXPECTED TO FIRE ONCE, on the PR that introduces
+  -- 20260906120000 — for arm 0a's reason: NO workflow applies migrations to
+  -- TEST, and CI's `sql-tests` runs this file against TEST. That is the WR-03
+  -- bargain this whole file is built on, restated rather than softened: a SKIP
+  -- here would mean arms L through O2 — the entire proof that a marker cannot
+  -- outlive its sentence — silently execute zero times on exactly the runs
+  -- where they are new and least proven. Apply the migration to TEST; do not
+  -- convert this to a skip, and do not reword it to any phrasing CI's SKIP grep
+  -- cannot see.
+  IF NOT EXISTS (
+       SELECT 1 FROM pg_attribute a
+        WHERE a.attrelid = 'public.strategy_analytics'::regclass
+          AND a.attname = 'computation_error_job_id'
+          AND NOT a.attisdropped
+     ) THEN
+    RAISE EXCEPTION 'TEST FAILED (0c): public.strategy_analytics has no computation_error_job_id column on this database, so arms L, L2, M, M2, M3, O and O2 would have died on a raw 42703 naming no arm — or, worse, been deleted by a future reader who read that 42703 as "these arms are broken". TWO causes fit: (i) this database has not received 20260906120000_computation_error_provenance.sql — apply it and re-run; expect this exactly once on the PR that introduces it, because NO workflow applies migrations to TEST; (ii) the columns were dropped by a later migration, which reverts criterion 2 outright — the bridge would then abort with 42703 on the live money path, on EVERY terminal compute-job transition.';
+  END IF;
+
   -- ----- SEED ------------------------------------------------------------
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (uid, '00000000-0000-0000-0000-000000000000',
@@ -276,6 +322,13 @@ BEGIN
   INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr I4') RETURNING id INTO s_i4;
   INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr J') RETURNING id INTO s_j;
   INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr J2') RETURNING id INTO s_j2;
+  -- Phase 164.2 / criterion 2.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr L') RETURNING id INTO s_l;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr L2') RETURNING id INTO s_l2;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr M') RETURNING id INTO s_m;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr M2') RETURNING id INTO s_m2;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr M3') RETURNING id INTO s_m3;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr O') RETURNING id INTO s_o;
 
   -- The four PUBLISHED rows are seeded identically on purpose: arms A, B, C and
   -- D differ ONLY in the job's metadata. Anything else that differed would be a
@@ -294,6 +347,10 @@ BEGIN
          -- explanation.
          (s_j, 'complete_with_warnings', TRUE, v_before),
          (s_j2, 'complete_with_warnings', TRUE, v_before),
+         -- Arm M3 keeps that identical seed for the same reason: it is arm A's
+         -- scenario plus a writer stamp, so a divergent outcome has exactly one
+         -- explanation.
+         (s_m3, 'complete_with_warnings', TRUE, v_before),
          -- Arm E: marked, but NOT published. The worker-side guard would have
          -- declined here too; the bridge must agree with it.
          (s_e, 'computing', TRUE, v_before);
@@ -793,7 +850,201 @@ BEGIN
     RAISE EXCEPTION 'ARM K FAILED: role authenticated can EXECUTE sync_strategy_analytics_status. That is a SECURITY DEFINER writer with no ownership check in its body — any signed-in user could drive ANOTHER tenant''s funded account to ''computing'' or ''failed'' by strategy_id. The REVOKE in migration 20260825150000 is the only thing bounding it.';
   END IF;
 
-  RAISE NOTICE 'ALL 16 ARMS EXECUTED (A, B, C, D, E, F, G, H, H2, I, I2, I3, I4, J, J2, K): sync_strategy_analytics_status protects a MARKED ledger refresh (A single-key, B composite, G no branch-(c) fall-through) IDEMPOTENT across a branch-(a) bounce (I, discriminated by I2) with the branch-(a) hold SCOPED to the jobs it is about (I3 releases it for a same-kind unmarked resync and lands that resync on branch (c); I4 refuses to release it for the recurring arm''s own marked retry) and KIND-SCOPED (J2 keeps the chain hop) — and stays LOUD everywhere else (C unmarked, D foreign source, E unpublished row, F unprotected sibling, H/H2 supersession same-kind and cross-kind, J foreign kind) — and is UNREACHABLE by anon/authenticated (K).';
+  -- ========================================================================
+  -- Phase 164.2 / criterion 2 — the PROVENANCE arms (mig 20260906120000)
+  -- ========================================================================
+  -- Everything above tests WHICH sentence the bridge writes. These test whether
+  -- the two marker columns beside that sentence can be trusted, which is the
+  -- only thing that makes the bridge's "keep the writer's sentence" arm safe.
+
+  -- ===== ARM L — a marker must not outlive the sentence it describes ========
+  -- The table-level half of the CRITICAL finding of 2026-09-06. Six writers in
+  -- two languages change computation_error (or blank it) without touching the
+  -- markers — analytics_runner._mark_complete, job_worker.headline_payload,
+  -- job_worker._upsert_error_only, set_wizard_composite_members (mig
+  -- 20260712120000:185-189) among them. None of them is edited; the BEFORE
+  -- UPDATE trigger of 20260906120000 STEP 3 makes all of them correct at once.
+  -- This arm is the shape they share: change the sentence, restate no
+  -- provenance, and the provenance must go.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error,
+                                  computation_error_source, computation_error_job_id)
+  VALUES (s_l, 'failed', 'a writer-curated sentence for job L',
+          'writer', gen_random_uuid());
+
+  UPDATE strategy_analytics SET computation_error = NULL WHERE strategy_id = s_l;
+
+  SELECT computation_error_source, computation_error_job_id INTO v_src, v_jobid
+    FROM strategy_analytics WHERE strategy_id = s_l;
+  IF v_src IS NOT NULL OR v_jobid IS NOT NULL THEN
+    RAISE EXCEPTION 'ARM L FAILED: an UPDATE that blanked computation_error left the provenance standing (source %, job %). That is the exact state analytics_runner._mark_complete leaves behind, and the next branch-(b) call for that job id then KEEPS the "existing sentence" — which is NULL. The row renders computation_status = ''failed'' with no sentence at all, where the pre-164.2 bridge wrote the per-kind copy. The trigger strategy_analytics_drop_stale_error_provenance_trigger is missing, disabled, or its guard no longer fires on a sentence change.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
+  END IF;
+
+  -- ===== ARM L2 — and it is a SCALPEL, not a blunt clear ===================
+  -- L alone is satisfied by a trigger that nulls both markers on EVERY update.
+  -- Such a trigger would strip the provenance off the bridge's own keep arm and
+  -- off the writer's own stamping upsert, and criterion 2 would be reverted by
+  -- the object added to protect it. A statement that leaves the sentence alone
+  -- (analytics_runner._mark_computing writes the status and the reaper clock,
+  -- never the sentence) must leave the markers alone: the marker still
+  -- describes the sentence that is still in the column.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error,
+                                  computation_error_source, computation_error_job_id)
+  VALUES (s_l2, 'failed', 'a writer-curated sentence for job L2',
+          'writer', '3f6f0000-0000-4000-8000-0000000012ab'::uuid);
+
+  UPDATE strategy_analytics SET computation_status = 'computing' WHERE strategy_id = s_l2;
+
+  SELECT computation_error, computation_error_source, computation_error_job_id
+    INTO v_error, v_src, v_jobid
+    FROM strategy_analytics WHERE strategy_id = s_l2;
+  IF v_src IS DISTINCT FROM 'writer'
+     OR v_jobid IS DISTINCT FROM '3f6f0000-0000-4000-8000-0000000012ab'::uuid
+     OR v_error IS DISTINCT FROM 'a writer-curated sentence for job L2' THEN
+    RAISE EXCEPTION 'ARM L2 FAILED: an UPDATE that did NOT touch computation_error still lost the provenance (sentence %, source %, job %). The trigger is clearing unconditionally instead of on a sentence CHANGE, so it strips the markers off the bridge''s own keep arm and off the writer''s stamping upsert — criterion 2 reverted by the object added to protect it.', COALESCE(v_error, 'NULL'), COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
+  END IF;
+
+  -- ===== ARM M — the CRITICAL scenario, end to end ==========================
+  -- L proves the trigger fires. This proves the consequence it prevents, through
+  -- the real bridge, on the real branch, with no assertion about the trigger at
+  -- all: a row whose sentence was blanked while its markers stood must be
+  -- resolved by branch (b) to the per-kind GENERIC — never to the NULL the
+  -- "keep the existing sentence" arm would otherwise preserve. Pre-164.2 this
+  -- row read the generic; the CONDITIONAL is what introduces the NULL, so this
+  -- arm is the one that says criterion 2 did not cost a user their sentence.
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts)
+  VALUES (s_m, 'derive_broker_dailies', 'running', tok, 1, 3)
+  RETURNING id INTO j;
+  PERFORM mark_compute_job_failed(j, 'the failure job M reports', 'permanent', tok);
+
+  -- The Python writer's stamp, as the writer plan will send it.
+  UPDATE strategy_analytics
+     SET computation_error        = 'the curated sentence job M''s writer wrote',
+         computation_error_source = 'writer',
+         computation_error_job_id = j
+   WHERE strategy_id = s_m;
+  -- ...and then a DIFFERENT writer blanks the sentence and says nothing about
+  -- provenance. This is analytics_runner._mark_complete's payload, reduced to
+  -- the one key that matters here.
+  UPDATE strategy_analytics SET computation_error = NULL WHERE strategy_id = s_m;
+
+  PERFORM sync_strategy_analytics_status(s_m);
+
+  SELECT computation_status, computation_error INTO v_status, v_error
+    FROM strategy_analytics WHERE strategy_id = s_m;
+  IF v_status IS DISTINCT FROM 'failed' THEN
+    RAISE EXCEPTION 'ARM M SETUP BROKEN: the row reads % rather than ''failed'', so branch (b) is not the branch under test and the sentence assertion below would be measuring something else.', v_status;
+  END IF;
+  IF v_error IS DISTINCT FROM c_perm THEN
+    RAISE EXCEPTION 'ARM M FAILED: a strategy at computation_status = ''failed'' carries computation_error = %, not the curated sentence for its failure''s kind. A success writer blanked the sentence and left the markers, and branch (b) then honoured them and "kept" a sentence that no longer exists. The user reads a failed strategy with NOTHING explaining it — strictly worse than the pre-164.2 generic, and introduced by criterion 2''s own conditional.', COALESCE(v_error, 'NULL');
+  END IF;
+
+  -- ===== ARM M2 — and the trigger does not fight branch (b) ================
+  -- The other side of L2, through the bridge rather than the table. Branch (b)
+  -- KEEPS the sentence when the markers name the job it just resolved; that
+  -- write restates the markers at the values they already hold, which is
+  -- byte-identical to "did not mention them" as far as the trigger can see. It
+  -- must not fire, because the SENTENCE is unchanged — and that is the whole
+  -- reason the guard tests the sentence rather than the markers.
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts)
+  VALUES (s_m2, 'derive_broker_dailies', 'running', tok, 1, 3)
+  RETURNING id INTO j;
+  PERFORM mark_compute_job_failed(j, 'the failure job M2 reports', 'permanent', tok);
+
+  UPDATE strategy_analytics
+     SET computation_error        = 'the curated sentence job M2''s writer wrote',
+         computation_error_source = 'writer',
+         computation_error_job_id = j
+   WHERE strategy_id = s_m2;
+
+  PERFORM sync_strategy_analytics_status(s_m2);
+
+  SELECT computation_error, computation_error_source, computation_error_job_id
+    INTO v_error, v_src, v_jobid
+    FROM strategy_analytics WHERE strategy_id = s_m2;
+  IF v_error IS DISTINCT FROM 'the curated sentence job M2''s writer wrote' THEN
+    RAISE EXCEPTION 'ARM M2 FAILED: branch (b) did not keep the sentence a writer stamped FOR THE JOB IT JUST RESOLVED — the column reads %. Either the conditional is gone (criterion 2 reverted, the unconditional overwrite is back) or the provenance trigger fired on the keep arm and erased the markers the CASE was about to read.', COALESCE(v_error, 'NULL');
+  END IF;
+  IF v_src IS DISTINCT FROM 'writer' OR v_jobid IS DISTINCT FROM j THEN
+    RAISE EXCEPTION 'ARM M2 FAILED: branch (b) kept the sentence but not its provenance (source %, job %). The markers must travel WITH the sentence: dropped here, the NEXT call reads a curated sentence as bridge-provenanced and overwrites it with the generic — the defect returns one call later, which is the version of it nobody reproduces.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
+  END IF;
+
+  -- ===== ARM M3 — and it does not fight branch (b-prime) either =============
+  -- The SAME claim on the OTHER write branch, and M2 does not imply it: the two
+  -- branches are separate statements with separate CASEs keyed on separate
+  -- variables, and b-prime is the D-15 recurring-refresh path where the curated
+  -- sentence matters MOST, because the row stays published and the sentence is
+  -- the only thing the user is shown about the failure.
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s_m3, 'derive_broker_dailies', 'running', tok, 1, 3,
+          jsonb_build_object('source', 'ledger-refresh'))
+  RETURNING id INTO j;
+  PERFORM mark_compute_job_failed(j, 'the failure job M3 reports', 'permanent', tok);
+
+  UPDATE strategy_analytics
+     SET computation_error        = 'the curated sentence job M3''s writer wrote',
+         computation_error_source = 'writer',
+         computation_error_job_id = j
+   WHERE strategy_id = s_m3;
+
+  PERFORM sync_strategy_analytics_status(s_m3);
+
+  SELECT computation_status, computation_error, computation_error_source, computation_error_job_id
+    INTO v_status, v_error, v_src, v_jobid
+    FROM strategy_analytics WHERE strategy_id = s_m3;
+  IF v_status IS DISTINCT FROM 'complete_with_warnings' THEN
+    RAISE EXCEPTION 'ARM M3 SETUP BROKEN: the row reads % rather than the protected ''complete_with_warnings'', so branch (b-prime) is not the branch under test.', v_status;
+  END IF;
+  IF v_error IS DISTINCT FROM 'the curated sentence job M3''s writer wrote'
+     OR v_src IS DISTINCT FROM 'writer'
+     OR v_jobid IS DISTINCT FROM j THEN
+    RAISE EXCEPTION 'ARM M3 FAILED: branch (b-prime) did not keep the writer''s sentence and its provenance for the job it just resolved (sentence %, source %, job %). This is the recurring-refresh path: the row STAYS PUBLISHED, so this sentence is the entire explanation the user gets for a maintenance failure, and losing it here is the defect 20260826120000 recorded as owed work.', COALESCE(v_error, 'NULL'), COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
+  END IF;
+
+  -- ===== ARM O — a half-stamped marker is LOUD ============================
+  -- The two markers are one fact in two columns. Set one without the other and
+  -- the bridge's predicate evaluates ''writer'' AND NULL = <uuid> -> NULL ->
+  -- ELSE -> the generic: SAFE, and therefore SILENT. A half-stamped row is
+  -- byte-indistinguishable from an unstamped one at the reader, so a writer bug
+  -- would degrade every curated sentence on that path with no signal anywhere.
+  -- The pairing CHECK makes it a 23514 at the writer instead.
+  --
+  -- ⚠️ The probe is AFTER the block, never inside the handler: a PL/pgSQL
+  -- BEGIN...EXCEPTION is an implicit subtransaction, so a read inside the
+  -- handler sees the state its own rollback restored and confirms the rejection
+  -- no matter what the database did (lint rule R1-exception-handler-probe).
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error)
+  VALUES (s_o, 'failed', 'a sentence with no provenance');
+
+  v_caught := 'NONE';
+  BEGIN
+    UPDATE strategy_analytics SET computation_error_source = 'writer' WHERE strategy_id = s_o;
+    v_caught := 'ACCEPTED';
+  EXCEPTION WHEN check_violation THEN
+    v_caught := 'REJECTED';
+  END;
+  IF v_caught IS DISTINCT FROM 'REJECTED' THEN
+    RAISE EXCEPTION 'ARM O FAILED: setting computation_error_source without computation_error_job_id was % rather than rejected. The pairing CHECK strategy_analytics_computation_error_markers_together_check is missing or one-sided, so a writer that forgets the job id produces a row the bridge reads as unstamped — every curated sentence on that path silently becomes the per-kind generic, and nothing reports it.', v_caught;
+  END IF;
+
+  -- O2 — the other direction. It is a separate arm because a one-sided
+  -- constraint (an implication rather than an equality) satisfies O and fails
+  -- this, and the half it would leave open is the one that carries the id the
+  -- bridge's equality actually tests.
+  v_caught := 'NONE';
+  BEGIN
+    UPDATE strategy_analytics SET computation_error_job_id = gen_random_uuid() WHERE strategy_id = s_o;
+    v_caught := 'ACCEPTED';
+  EXCEPTION WHEN check_violation THEN
+    v_caught := 'REJECTED';
+  END;
+  IF v_caught IS DISTINCT FROM 'REJECTED' THEN
+    RAISE EXCEPTION 'ARM O2 FAILED: setting computation_error_job_id without computation_error_source was % rather than rejected. The pairing constraint is an implication, not an equality, so the half it leaves open is precisely the column the bridge''s job-id equality reads.', v_caught;
+  END IF;
+
+  RAISE NOTICE 'ALL 23 ARMS EXECUTED (A, B, C, D, E, F, G, H, H2, I, I2, I3, I4, J, J2, K, L, L2, M, M2, M3, O, O2): sync_strategy_analytics_status protects a MARKED ledger refresh (A single-key, B composite, G no branch-(c) fall-through) IDEMPOTENT across a branch-(a) bounce (I, discriminated by I2) with the branch-(a) hold SCOPED to the jobs it is about (I3 releases it for a same-kind unmarked resync and lands that resync on branch (c); I4 refuses to release it for the recurring arm''s own marked retry) and KIND-SCOPED (J2 keeps the chain hop) — and stays LOUD everywhere else (C unmarked, D foreign source, E unpublished row, F unprotected sibling, H/H2 supersession same-kind and cross-kind, J foreign kind) — and is UNREACHABLE by anon/authenticated (K). Phase 164.2 / criterion 2: a PROVENANCE marker cannot outlive the sentence it describes (L the trigger fires on a blanked sentence, L2 it does not fire when the sentence is untouched, M the end-to-end consequence — a ''failed'' row must never render with NO sentence), the bridge''s keep arm survives it on BOTH write branches (M2 branch (b), M3 branch (b-prime)), and a half-stamped marker is a 23514 at the writer rather than a silent generic at the reader (O source-only, O2 id-only).';
 END $$;
 
 ROLLBACK;
