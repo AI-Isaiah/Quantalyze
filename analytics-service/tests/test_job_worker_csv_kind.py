@@ -89,11 +89,46 @@ async def test_handler_delegates_to_runner_when_strategy_id_present() -> None:
     # rather than loosened to `assert_called_once()`: the fail-safe direction is
     # that an unmarked job is never protected, and a call-shape assertion that
     # stopped naming the values would stop proving it.
+    # Phase 164.2 / criterion 2: `job_id` joins that call shape. This job dict
+    # carries no "id", so it is None — the NULL-marker path, which reproduces the
+    # pre-164.2 behaviour exactly. Named explicitly for the same fail-safe reason
+    # as the three above.
     mock_runner.assert_called_once_with(
         "abc-123",
         refresh_source=None,
         refresh_publish_status=None,
         refresh_publish_warned=False,
+        job_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_handler_forwards_the_claimed_job_id_to_the_runner() -> None:
+    """Phase 164.2 / criterion 2, the key link. This handler is the ONE caller of
+    ``run_csv_strategy_analytics`` that has a compute job, so it is the one caller
+    that can tell the runner WHICH failure its terminal sentence describes.
+
+    Without the forward, every sentence the runner writes carries NULL provenance
+    and ``sync_strategy_analytics_status`` overwrites it with the per-kind generic
+    on the very transition that resolves the failure — the defect this phase
+    exists to close. Neuter the ``job_id=`` argument at ``job_worker.py`` and this
+    reddens.
+    """
+    job = {
+        "kind": "compute_analytics_from_csv",
+        "strategy_id": "abc-123",
+        "id": "9f1c0d2e-0000-4000-8000-00000000abcd",
+    }
+    with patch(
+        "services.analytics_runner.run_csv_strategy_analytics",
+        new=AsyncMock(return_value={"status": "complete", "strategy_id": "abc-123"}),
+    ) as mock_runner:
+        result = await run_compute_analytics_from_csv_job(job)
+    assert result.outcome == DispatchOutcome.DONE
+    assert mock_runner.call_args.kwargs["job_id"] == job["id"], (
+        "the runner must receive the CLAIMED job's own id — the same value this "
+        "worker passes to mark_compute_job_failed, which is what makes the "
+        "bridge's equality test compare like with like"
     )
 
 
