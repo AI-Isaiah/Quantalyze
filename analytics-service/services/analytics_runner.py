@@ -56,6 +56,10 @@ from services.allocated_capital import (
 from services.equity.fallback import merge_dq_flags
 from services.position_reconstruction import _normalize_side
 from services.nav_twr import NAV_TWR_GUARD_KEYS
+from services.strategy_analytics_provenance import (
+    provenance_source,
+    upsert_or_drop_provenance,
+)
 
 logger = logging.getLogger("quantalyze.analytics.runner")
 
@@ -1181,6 +1185,7 @@ async def run_csv_strategy_analytics(
     refresh_source: str | None = None,
     refresh_publish_status: str | None = None,
     refresh_publish_warned: bool = False,
+    job_id: str | None = None,
 ) -> dict[str, Any]:
     """Phase 19.1 / CSV → analytics pipeline Plan 02 Task 2.
 
@@ -1200,6 +1205,23 @@ async def run_csv_strategy_analytics(
     the snapshot block below — so they are the guard's only honest oracle. Both
     default to the unprotected value, which keeps every non-refresh caller on
     the loud path unchanged.
+
+    ``job_id`` (Phase 164.2 / criterion 2) is the ``compute_jobs`` row whose
+    failure a terminal-failure sentence written by this function DESCRIBES. It
+    is stamped into ``strategy_analytics.computation_error_job_id`` beside
+    ``computation_error_source = 'writer'`` in the SAME upsert as the sentence,
+    which is what stops ``sync_strategy_analytics_status`` overwriting a curated
+    sentence with its per-kind generic seconds later (migration
+    ``20260906120000``). Same shape as ``refresh_source``: KEYWORD-ONLY, default
+    None, so the three non-job callers — the CSV-first wizard route, the
+    composite finalizer, the tests — are byte-unchanged. ⚠️ A None ``job_id``
+    means BOTH markers are written as NULL, never a lone ``'writer'``: the two
+    markers are decided by one expression (:func:`provenance_source`) because
+    ``strategy_analytics_computation_error_markers_together_check`` sits on the
+    failure-recording path and a half-stamp there raises 23514 and loses the
+    failure record entirely. NULL markers are read as BRIDGE-OR-LEGACY
+    provenance, i.e. exactly the pre-164.2 behaviour, which is the right answer
+    for a failure that no compute job owns.
 
     Analytics pipeline for source='csv' strategies. Loads
     csv_daily_returns, builds a pd.Series, and calls compute_all_metrics
@@ -1459,8 +1481,7 @@ async def run_csv_strategy_analytics(
         _restored_warned = _publish_snapshot["computation_warned"]
 
         def _upsert_restore() -> None:
-            supabase.table("strategy_analytics").upsert(
-                {
+            _restore_payload: dict[str, Any] = {
                     "strategy_id": strategy_id,
                     # RESTORE, never omit: _mark_computing already wrote
                     # 'computing', so an omitted status is the parked-factsheet
@@ -1478,11 +1499,27 @@ async def run_csv_strategy_analytics(
                         f"{reason} before it could finish; the previously "
                         "published factsheet was left in place."
                     ),
+                    # Phase 164.2 / criterion 2: this sentence is CURATED and
+                    # names the abort reason, so it must survive the bridge.
+                    # Both markers decided by one expression — see
+                    # services/strategy_analytics_provenance.py.
+                    "computation_error_source": provenance_source(job_id),
+                    "computation_error_job_id": job_id,
                     # ⛔ No data_quality_flags rebuild — same laundering class
                     # (migration 20260707120000) the guard above avoids.
-                },
-                on_conflict="strategy_id",
-            ).execute()
+            }
+
+            def _write_restore() -> None:
+                supabase.table("strategy_analytics").upsert(
+                    _restore_payload,
+                    on_conflict="strategy_id",
+                ).execute()
+
+            upsert_or_drop_provenance(
+                _restore_payload,
+                _write_restore,
+                where="analytics_runner._upsert_restore",
+            )
 
         try:
             await asyncio.shield(db_execute(_upsert_restore))
@@ -1609,13 +1646,26 @@ async def run_csv_strategy_analytics(
                             # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
                             "computing_started_at": None,
                             "computation_error": "Insufficient CSV history. At least 2 data points required.",
+                            # Phase 164.2 / criterion 2 — the ROADMAP's own
+                            # example of a curated sentence the bridge used to
+                            # replace with "CSV analytics computation failed."
+                            "computation_error_source": provenance_source(job_id),
+                            "computation_error_job_id": job_id,
                             "data_quality_flags": {"csv_source": True},
                     }
                     _guard_failure_payload_inplace(_insufficient_payload)
-                    supabase.table("strategy_analytics").upsert(
+
+                    def _write_insufficient() -> None:
+                        supabase.table("strategy_analytics").upsert(
+                            _insufficient_payload,
+                            on_conflict="strategy_id",
+                        ).execute()
+
+                    upsert_or_drop_provenance(
                         _insufficient_payload,
-                        on_conflict="strategy_id",
-                    ).execute()
+                        _write_insufficient,
+                        where="analytics_runner._mark_failed",
+                    )
                 await db_execute(_mark_failed)
                 raise HTTPException(status_code=400, detail="Insufficient CSV history")
 
@@ -1868,6 +1918,16 @@ async def run_csv_strategy_analytics(
                     # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
                     "computing_started_at": None,
                     "computation_error": None,
+                    # Phase 164.2 / criterion 2: a success blanks the sentence,
+                    # so it must blank the provenance in the SAME statement. A
+                    # marker left standing over a NULLed sentence would make the
+                    # next generic write look curated. (The BEFORE UPDATE
+                    # trigger strategy_analytics_drop_stale_error_provenance
+                    # would also coerce these two, but a writer that states its
+                    # intent is legible at the call site — the same reason the
+                    # JOB-01 census demands the reaper key here.)
+                    "computation_error_source": None,
+                    "computation_error_job_id": None,
                     "data_quality_flags": data_quality_flags,
                     "trade_metrics": None,    # CSV has no fills
                     "volume_metrics": None,
@@ -1982,13 +2042,27 @@ async def run_csv_strategy_analytics(
                             f"({trunc.hint or 'unknown source'}); operator "
                             "intervention required."
                         ),
+                        # Phase 164.2 / criterion 2: this sentence NAMES the row
+                        # count and the source; the per-kind generic names
+                        # neither, so losing it to the bridge loses the whole
+                        # diagnosis.
+                        "computation_error_source": provenance_source(job_id),
+                        "computation_error_job_id": job_id,
                         "data_quality_flags": {"csv_source": True},
                 }
                 _guard_failure_payload_inplace(_truncated_payload)
-                supabase.table("strategy_analytics").upsert(
+
+                def _write_truncated() -> None:
+                    supabase.table("strategy_analytics").upsert(
+                        _truncated_payload,
+                        on_conflict="strategy_id",
+                    ).execute()
+
+                upsert_or_drop_provenance(
                     _truncated_payload,
-                    on_conflict="strategy_id",
-                ).execute()
+                    _write_truncated,
+                    where="analytics_runner._mark_truncated",
+                )
             try:
                 await db_execute(_mark_truncated)
             except Exception as mark_exc:  # noqa: BLE001
@@ -2024,13 +2098,26 @@ async def run_csv_strategy_analytics(
                             "Strategy returns_denominator_config is malformed; "
                             "operator intervention required."
                         ),
+                        # Phase 164.2 / criterion 2: a PERMANENT, operator-
+                        # actionable cause. The generic would send the reader
+                        # looking at the CSV instead of at the config.
+                        "computation_error_source": provenance_source(job_id),
+                        "computation_error_job_id": job_id,
                         "data_quality_flags": {"csv_source": True},
                 }
                 _guard_failure_payload_inplace(_config_failed_payload)
-                supabase.table("strategy_analytics").upsert(
+
+                def _write_config_failed() -> None:
+                    supabase.table("strategy_analytics").upsert(
+                        _config_failed_payload,
+                        on_conflict="strategy_id",
+                    ).execute()
+
+                upsert_or_drop_provenance(
                     _config_failed_payload,
-                    on_conflict="strategy_id",
-                ).execute()
+                    _write_config_failed,
+                    where="analytics_runner._mark_config_failed",
+                )
             try:
                 await db_execute(_mark_config_failed)
             except Exception as mark_exc:  # noqa: BLE001
@@ -2077,13 +2164,34 @@ async def run_csv_strategy_analytics(
                             # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
                             "computing_started_at": None,
                             "computation_error": "CSV analytics computation failed.",
+                            # Phase 164.2 / criterion 2. This sentence is the
+                            # LEAST specific one this runner writes, and it is
+                            # stamped anyway: the marker is a claim about WHICH
+                            # JOB the sentence belongs to, not a claim that the
+                            # sentence is good. Leaving it unstamped would let a
+                            # later, different-kind transition re-write this row
+                            # with a generic naming the wrong kind.
+                            "computation_error_source": provenance_source(job_id),
+                            "computation_error_job_id": job_id,
                             "data_quality_flags": prior_flags,
                     }
                     _guard_failure_payload_inplace(_unrecoverable_payload)
-                    supabase.table("strategy_analytics").upsert(
+
+                    def _write_unrecoverable() -> None:
+                        supabase.table("strategy_analytics").upsert(
+                            _unrecoverable_payload,
+                            on_conflict="strategy_id",
+                        ).execute()
+
+                    # A 23514 on the markers is handled HERE and degrades to an
+                    # unstamped re-issue; every other APIError — PGRST204 above
+                    # all — propagates untouched to the handler below, which is
+                    # what keeps the schema-cache-miss arm reachable.
+                    upsert_or_drop_provenance(
                         _unrecoverable_payload,
-                        on_conflict="strategy_id",
-                    ).execute()
+                        _write_unrecoverable,
+                        where="analytics_runner._mark_unrecoverable",
+                    )
                 except APIError as api_exc:
                     if getattr(api_exc, "code", None) != _PGRST_SCHEMA_CACHE_MISS:
                         # Narrow ON PURPOSE. Swallowing every APIError here would
@@ -2107,6 +2215,25 @@ async def run_csv_strategy_analytics(
                         _PGRST_SCHEMA_CACHE_MISS,
                         strategy_id,
                     )
+                    # ⛔ AND THIS RE-ISSUE CARRIES NO PROVENANCE MARKERS, ON
+                    # PURPOSE (Phase 164.2 / criterion 2). It exists for the
+                    # deploy window in which PostgREST does not yet know the
+                    # NEWEST column on this table, and this phase adds TWO new
+                    # columns — so adding them here would defeat the arm on the
+                    # very window it exists for: the re-issue would fail with
+                    # the same PGRST204 that made the first write fail, and the
+                    # already-failed job would leave the row 'computing'
+                    # forever. Losing provenance in that window costs the
+                    # curated sentence and nothing else; the bridge writes its
+                    # per-kind generic, which is the pre-164.2 behaviour.
+                    # ⚠️ The key set below must stay EXACTLY these five. It is
+                    # the signature BOTH AST censuses exempt by shape rather
+                    # than by name — test_computing_started_at_stamp.py's
+                    # _STAMP_OMISSION_EXEMPT_KEYS and
+                    # test_computation_error_provenance_census.py's
+                    # PROVENANCE_EXEMPT_KEYS — so adding a key here does not
+                    # loosen an exemption, it collapses one and reddens both
+                    # gates. That is the intended direction.
                     _unrecoverable_reissue_payload: dict[str, Any] = {
                             "strategy_id": strategy_id,
                             "computation_status": "failed",

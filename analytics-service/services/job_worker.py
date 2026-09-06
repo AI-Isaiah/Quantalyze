@@ -2185,11 +2185,21 @@ async def run_compute_analytics_from_csv_job(job: dict[str, Any]) -> DispatchRes
         if _is_marked_refresh and isinstance(_metadata, dict)
         else None
     )
+    # Phase 164.2 / criterion 2: this is the ONE caller of
+    # `run_csv_strategy_analytics` that has a compute job, so it is the one
+    # caller that can name the job a terminal-failure sentence describes. The
+    # other three (the CSV-first wizard route, the composite finalizer, the
+    # tests) leave `job_id` at its None default and take the NULL-marker path,
+    # which reproduces the pre-164.2 behaviour — correct for a failure that no
+    # job owns. T-164.2-18: `job["id"]` is the claimed job's own id from the
+    # queue RPC, the same value this worker passes to mark_compute_job_failed,
+    # so the bridge's equality test compares like with like.
     await run_csv_strategy_analytics(
         strategy_id,
         refresh_source=_source if _is_marked_refresh else None,
         refresh_publish_status=_publish_status if isinstance(_publish_status, str) else None,
         refresh_publish_warned=bool(_publish_warned),
+        job_id=job.get("id"),
     )
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
