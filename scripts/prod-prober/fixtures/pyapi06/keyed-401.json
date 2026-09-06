@@ -1,0 +1,19 @@
+{
+  "_comment": "RED fixture for pyapi06-keyed-refused: OUR key is refused. Only `keyed` differs from ok.json.",
+  "keyed": {
+    "status": 401,
+    "json": { "detail": "Unauthorized" }
+  },
+  "absent": {
+    "status": 401,
+    "json": { "detail": { "code": "SERVICE_KEY_ABSENT", "retryable": false, "detail": "Service key required" } }
+  },
+  "wrong": {
+    "status": 401,
+    "json": { "detail": "Unauthorized" }
+  },
+  "health": {
+    "status": 200,
+    "json": { "status": "ok", "version": "0.1.0", "git_sha": "0000000000000000000000000000000000000000", "config_ok": true, "config_degraded_secrets": [] }
+  }
+}

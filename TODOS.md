@@ -1654,6 +1654,15 @@ true for 146 and half of 142–145, and **false for 141**.
       `wizard_session_id`; exactly one 2xx applied receipt, one honest raced refusal, `category_id`
       holds the winner.
       Full record: `.planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-DEFERRED.md`.
+      ⭐ **OWNER 2026-09-05: the OBSERVATION half is Phase 164.7's**, the first migration-bearing
+      phase in the queued order (164.1 → 164.2 → **164.7** → 164.5 → 164.6), rolling forward to
+      **Phase 164.5** (DRIFT-04's `DROP FUNCTION`, CRON-DRIFT-01-REPAIR) if 164.7's migration does
+      not change a function BODY. Booked as 164.7 success criterion 7. ⛔ The prohibition above
+      STANDS and is the reason this was unowned until now: no PR is manufactured for it — the
+      observation rides a migration PR that phase writes anyway, and the obligation is to READ the
+      VAC-04 step's output and name the branch it took, not to create the occasion. `[VAC-04-ROLE]`
+      below is deliberately NOT carried with it: it changes WHICH credential is used, not whether
+      the control works, and its own entry says not to let it gate a phase.
 
 - [ ] **`[VAC-04-ROLE]` Swap Phase 164.3's repo-vs-PROD body diff onto a zero-table-grant role.**
       Booked 2026-08-29 as the deferred half of a founder ruling, so it is not lost.
@@ -1775,6 +1784,8 @@ are to be planned as one slice, not two.
 
 ⭐ **Standing rule until CRON-OBS-01 lands: `cron.job_run_details.status = 'succeeded'` is NOT
 evidence that a pg_net-based job worked.** Read `net._http_response`.
+
+- [ ] **[MT5-VERDICT-SINK-01] the MT5 capability verdict has NO durable sink, so an `undetermined` outcome is unverifiable the moment it scrolls out of the log** (booked 2026-09-05) — `_Mt5ValidateTrace.outcome` is carried to `emit_mt5_stage_event` (`analytics-service/services/mt5_client.py:205`), which writes a STRUCTURED LOG EVENT, not a row. There is no table to query for a historical `undetermined`, and Railway retention is short enough that a past occurrence is already gone. ⛔ **This is why Phase 161's first human-verification item has been unclosable for over a week**, and re-measuring it can only ever return "still nothing": measured 2026-09-05, `railway logs --service quantalyze-analytics --environment production` contains ZERO `mt5` lines of any kind. The absence of a sink makes that item permanently *unverifiable*, not merely not-yet-verified — a different and worse thing. ⭐ The verifier recommended exactly this on 2026-08-24 ("worth pairing with a durable sink when it is done") and it was never booked; it lived only inside `161-VERIFICATION.md`, which is the one file nobody planning the fix reads. **Fix:** persist which arm fired — a row, or a counter that survives rotation — so the sentence a founder actually read can be established after the fact. ⚠️ **Adjacent to, NOT the same as, `MT5-WEDGE-OBS-01`**: that arm probes LIVENESS (`-10004` vs `-10005`), this is a CAPABILITY verdict (`tradeapi_disabled` → which remedy sentence). Phase 164.1 is the closest live mechanism and the cheapest place to ride along, but it is a founder call whether it rides or waits — do not silently widen 164.1's scope to absorb it.
 
 ### MT5-WEDGE-OBS-01 — a wedged MT5 gateway is invisible to every automated signal (booked 2026-09-01)
 
@@ -2858,6 +2869,31 @@ unrelated to the dispatch. Close it by either scoping `secret-scan` with an `if:
 
 ⚠️ Note the scope limit this implies: "the allowlist now works" is true for the two **range-scan**
 paths (push, pull_request). The dispatch path scans differently and has never been clean.
+
+✅ **RECONFIRMED LIVE 2026-09-05 — still exactly 29, still only on dispatch.** Run **33985008239**
+on `main` at **`ce5d2983`**, event **`workflow_dispatch`**, job `secret-scan` FAILED:
+`gitleaks cmd: gitleaks detect --redact -v --exit-code=2 ... --log-level=debug` with **no
+`--log-opts`**, `2995 commits scanned`, `leaks found: 29`. The immediately preceding run
+**33979505776** at `e01cc2e6`, event **`push`**, passed with `--log-opts=-1`, `1 commits scanned`,
+`no leaks found`. Same scanner (`gitleaks version: 8.30.1`, cache hit), same config
+(`using gitleaks config from GITLEAKS_CONFIG env var: .gitleaks.toml`). ⛔ So the version pin and the
+array-form allowlist are BOTH working — this red is the dispatch-path scope difference this entry
+already describes, not a regression and not a new leak.
+
+SARIF breakdown of the 29 (artifact `gitleaks-results.sarif` on that run): **28 `generic-api-key`**
++ **1 `jwt`** (`src/app/api/verify-strategy/route.test.ts:539`), every one of them in a `*.test.ts` /
+`*.test.py` fixture path. ⚠️ The path list differs from the 2026-08-23 sample recorded above
+(`analytics-client.test.ts`, `ratelimit.test.ts`, `route.test.ts` under several API dirs …), so
+triage must be done against a FRESH scan, not against that sample.
+
+⚠️ **Why a `push` run is not as weak as "1 commit" sounds.** `--log-opts=-1` on `main` scans the
+squash commit, which carries the PR's whole diff — new code IS scanned. What is never re-scanned on
+either range path is OLD history, which is why these 29 pre-existing fixtures surface only under a
+full scan. State it that way; "the gate only scans one commit" overstates it.
+
+⛔ **Candidate for Phase 164.6 GATE-HYGIENE** (it is a gate defect, which is that phase's subject) —
+but it is NOT in 164.6's ROADMAP scope as written. Adding it is a founder scope call, not an
+agent one.
 
 ### `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` on `secret-scan` is now a no-op (raised 2026-08-23, PR #705 review)
 
@@ -5169,6 +5205,27 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   the next session doesn't re-derive this. Never widen the gate in the same commit as a
   behavior change.
 
+- [ ] **`[MYPY-MAINPY-01]` the `mypy --strict` gate's own comment claims running-service
+  coverage it does not have — `main.py` is outside it (logged 2026-09-06, Phase 164.1-02).**
+  `ci.yml:3209-3216` states the strict floor "now covers ALL running-service code —
+  `services/` (part g), `routers/` (part h), and `models/` (part i)". `analytics-service/main.py`
+  is 930 lines and IS the running service (`uvicorn main:app`); nothing under those three
+  packages imports it, so `--follow-imports=silent` never reaches it. MEASURED both sides of
+  Phase 164.1-02 (identical five errors, one line shifted by that plan's +34 lines):
+  `:255` `lifespan(_app: FastAPI)` no return type; `:309` `_crash_handler` missing `Task[None]`;
+  `:741` ×2 `verify_service_key(request, call_next)` no return type and no param types;
+  `:891` `health()` no return type. ⚠️ Two of the five are on the service-key middleware
+  Phase 164.1 hardened for PYAPI-06 and one on the `/health` endpoint 164.1's prober arm polls.
+  ⭐ The FALSE COMMENT is the defect, not the five annotations: a gate asserting complete
+  coverage while blind to the service's entry module is the same class as the gate-integrity
+  items 164.6 already owns. **OWNER 2026-09-06: Phase 164.6 GATE-HYGIENE item (9)**, success
+  criterion 6, which requires the widened gate be PROVEN able to fail (remove one annotation,
+  observe RED, restore byte-identically) — widening it without that proof is the defect
+  Phase 164.3 exists to remove. ⛔ The `analytics-service/tests/` question directly above, and
+  its duplicate at `:3263`, are DELIBERATELY NOT carried with it: 5,439 errors across 182 files
+  is a milestone-sized policy decision, and merging it into a hygiene item would hide it.
+  Source: `.planning/phases/164.1-prod-observability-…/deferred-items.md`.
+
 ## Phase 146.2 — recorded deferrals (logged 2026-08-19)
 
 *The founder rule: an item ABSORBED into a phase is deleted from this file, but an item the
@@ -5904,6 +5961,13 @@ expires. Close them when 164.3.1 closes, not before.
 - [ ] **[MUT-W02] the per-job tolerance pin asserts ONE literal spelling, so an equivalently-written tolerance arm widens the aggregator silently** (reviewer R4-W02, Warning) — `src/__tests__/lint-sql-gates.test.ts:341-360`. The posture arm is the right design and the POPULATION half is genuinely derived from `ci.yml` (confirmed: it fails if a fourth job appears). The `tolerance: null` half is only ``const arm = new RegExp(`\\[ "\\$name" = "${job}" \\]`)``. That is one spelling; `[ "${name}" = "sql-mutation" ]`, `case "$name" in sql-mutation)`, `[[ $name == sql-mutation ]]`, or an `if:` on the job itself all install a tolerance the pin cannot see. All three arms in `ci.yml` use the pinned spelling today, so this is future drift, not a live hole — but "cannot silently widen" is the property the fixer claimed and it is not what is asserted. **Fix:** parse the aggregator's `if/elif` chain and range over its branch conditions (`/"\$\{?name\}?"?\s*(?:=|==)\s*"?([a-z0-9-]+)"?/g`), asserting `named.has(job) === (tolerance !== null)` per job, plus a `named.size > 2` floor so the arm cannot pass on an empty set.
 
 - [ ] **[VAC08-LEDGER-32] 32 repo migrations have no TEST ledger row — measured, baselined, and NOT yet applied** — surfaced 2026-08-30 by VAC-08's first working run (CI 33277829284, PR #724). The count fell 253 → 56 → 53 → 32 as each of four ledger naming conventions was found by the gate's own shape diagnostic; the enumeration is now closed (a basename is `<ts>_<desc>` and `name` has held the whole thing, the description, the timestamp, or nothing — there is no fifth substring), so **32 is real drift, not a join bug**. Arithmetic closes in both directions: 237 of 239 ledger rows now match a repo file and 230 of 262 repo files match a ledger row, leaving no spare rows to explain the 32. They are carried in `scripts/vac08-ledger-baseline.txt` as a dated RATCHET — the gate still fails loud on any *new* migration that misses TEST, and a baselined entry that later turns up present is a hard failure ("delete this line"), so the file can only shrink. ⚠️ **LEDGER ABSENCE IS NOT OBJECT ABSENCE.** These have no `schema_migrations` row; whether their objects exist in TEST (hand-applied, or installed by a later migration) is a different question this gate does not answer, and the body half of VAC-08 reports all four checked function bodies MATCHING the committed snapshot. Do not read the list as "TEST is missing 32 features". ⚠️ **Four are security migrations** — `20260529150000_lock_profile_privileged_columns`, `20260814120000_wizard_rpcs_revoke_authenticated`, `20260715120000_grant_anon_execute_current_user_has_app_role`, `20260823120000_revoke_api_keys_insert` — so any RLS/SQL test asserting those grants may be asserting them against a schema that never received them; worth a targeted object-level probe before trusting those tests. ⛔ `20260823120000_revoke_api_keys_insert` refuses BY DESIGN on a database it cannot identify and may never be applicable to TEST. ⛔ **Do NOT hand-apply these to TEST to shorten the list** — TEST is shared with other people's CI; that is a founder decision, not an agent one. Owner: Phase 164.5 (which already owns the drift-gate family), or a founder call to apply them.
+
+- [ ] **[VAC08-COUNT-SPM01] VAC-08's ledger ratchet reads its two gating counts with the exact `grep … || true` shape the SAME FILE documents as a false-clean (booked 2026-09-05)** — `scripts/test-ledger-drift-check.sh:304-318` carries an explicit `SP-M01` comment block: *"grep exits 0 with a count, 1 with no match, and >= 2 on an ERROR ... on >= 2 the substitution is EMPTY, `${:-0}` makes it `0` ... A gate that cannot read its own result must not report the result it wanted."* That site was FIXED — it captures `grep_rc` and calls `fail "MEASURE_FAIL: ... An uncountable result is not a count of zero."` Sixty lines later `:372-373` uses the UNFIXED pattern **twice**, for `new_count` and `stale_count`:
+  `new_count="$(grep -ac '[^[:space:]]' "$new_file" || true)"; new_count="${new_count:-0}"` (and the same for `stale_count`).
+  ⛔ **These two are the whole ledger half of the gate**: `bad` is set only by `stale_count>0` (:376), `new_count>0` (:386), body drift, or zero comparisons (:550-553) — `missing_count`, the one that IS rc-checked, never gates the exit. So a grep error on either temp file reads as zero and the gate prints "ledger and body checks clean" over unread NEW drift. Reachability is low (the files are written by the script moments earlier) which is why this is not Critical, but it is the precise shape this repo has been bitten by before and the fix idiom already exists 60 lines up.
+  Two smaller siblings in the same function: `:363`/`:365` `grep -aFxv -f … || true` does not distinguish rc 1 (nothing selected — legitimate) from rc >= 2 (error), so a broken filter also reads as 0 NEW drift; and `:336` `2>/dev/null || echo ""` silently disables the ledger-row absurdity floor when its count query fails.
+  **Fix:** apply the `:304-318` idiom to both counts (capture rc, MEASURE_FAIL on >= 2, only rc 1 yields an empty count) and split rc 1 from rc >= 2 at `:363`/`:365`. ⭐ **Ship it with a test that makes the grep actually fail** (unreadable temp file) and asserts MEASURE_FAIL rather than a clean report — a fix with no failing test is the defect class Phase 164.3 exists to remove. Owner: **Phase 164.6 GATE-HYGIENE** (gate integrity, not user-facing copy).
+  ⚠️ Found while investigating a MISREADING of this gate, not a real failure of it: I had grepped the CI job log for the token `VAC-08`, which matches only the two prefixed summary lines, and concluded "clean" contradicted `[VAC08-LEDGER-32]`. It does not — the unprefixed indented lines say `ledger presence: 32 absent, all 32 baselined ...; 0 NEW drift`, i.e. the same measurement. Recorded because the method is the reusable lesson: **grepping a CI log by a token tests the token, not the gate.**
 
 - [ ] **[SQLTEST-GLOBALPRE-01] `test_ledger_refresh_fanout.sql` asserts a GLOBAL precondition on the SHARED test database, so anyone's leftover row reds it** — measured 2026-08-30 on PR #724 CI run 33278937294: `psql:supabase/tests/test_ledger_refresh_fanout.sql:595: ERROR: TEST PRECONDITION FAILED: 1 committed strategy/strategies on this database are already stale, live and ledger-backed... Park or clean them in the test project`. **Not caused by that branch** — it never touched the file (only `test_strategy_shares_rls.sql`), and main was green 2026-08-28. The file's reasoning is sound in isolation: a competing stale strategy would fight its fixtures for the global per-tick LIMIT and make arms G1/G2 measure the wrong thing, and it correctly refuses to touch rows it did not seed (its own D-05 note: shared project, concurrent PRs). But refusing to run is still a red board, and the precondition is a statement about **the whole database**, not about its own fixtures — which is exactly the anti-pattern already fixed for the e2e specs in PR #654 (⭐"e2e specs assert their OWN seed invariant, NOT global empty-state"). On a database shared with other people's CI this arm reds for reasons no author controls, and the standing remedy — "park or clean them in the test project" — is a WRITE to shared TEST, i.e. a founder action, not an agent one. **Two candidate fixes, both out of Phase 164.3's scope:** (a) scope the per-tick LIMIT contention check to strategies this file seeded (tag its fixtures and compare within the tag), so the arm measures its own invariant like the e2e specs now do; or (b) keep the global check but downgrade it from a hard precondition to a SKIP-WITH-REASON that is counted and reported, so a polluted shared DB is visible without being indistinguishable from a real fan-out defect. ⚠️ (b) needs care: an uncounted skip that exits 0 is `SKIP-01`, this repo's own named defect — the skip must be tallied and surfaced, never silent. ⭐ **ROOT-CAUSED + cleared 2026-09-01.** The offending row was a leaked e2e seed: `e2e-sfox-verified-*`, owner `@example.test`, created 2026-08-25, `stale_reason='series_behind'`, last return 2026-08-24. **Leakage is structural, not a one-off** — `e2e/helpers/seed-test-project.ts:1347` seeds the strategy `published` with a deterministic 120d series ending the day before the seed, which the view's own verdict reads stale after 4 days, and teardown is the caller's `afterAll` (`cleanupSfoxVerifiedStrategy:1443` -> `cleanupStrategiesByNamePrefix:345`). ANY aborted or crashed e2e run therefore leaves one behind permanently; the seeder's own comment at `:335-343` already concedes it ("cleanup is the caller's responsibility and no caller cleans", 5,153 published rows as of 2026-07-02). So this WILL recur on the next leaked sfox / deribit / mt5 seed. Cleared by hand for 2026-09-01 only: deleted scoped to a single `id` (never to the predicate — D-05), after confirming `public.strategies` carries no `BEFORE DELETE` trigger and that a plain delete is exactly what the missing `afterAll` would have done (`strategy_analytics` cascades via FK); verified in a fresh session, `offending_rows = 0`, and `sql-tests` then passed. The orphaned `api_keys` row and two `auth.users` were left — neither enters `ledger_refresh_staleness`, which starts `FROM strategies`. ⚠️ Fix (a) is harder than it reads: arms G1/G2 deliberately measure a GLOBAL bound (the per-tick `LIMIT` and per-venue cap are global), so id-scoping alone does not give them the exclusivity they need — do NOT resolve it by widening a tolerance to a magic number. Owner: unassigned; raise with the shared-test-db runbook (`docs/runbooks/shared-test-db-mutex.md`), which already documents the queue-depth vs wedged-holder distinction for the sibling failure mode.
 

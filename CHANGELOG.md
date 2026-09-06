@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.77.14.0] - 2026-09-06
+
+### Phase 164.1 PROD-OBSERVABILITY — one periodic prober, four targets
+
+An hourly prober (`scripts/prod-prober/`) plus the PYAPI-06 fix it detects. Each arm turns a
+silent production failure into a named defect with its own remedy.
+
+- **PYAPI-06 (both halves).** `analytics-client.ts` now refuses with `SeamConfigError` **above**
+  the try, so a missing `ANALYTICS_SERVICE_KEY` can never be rewritten as an upstream outage;
+  `main.py` returns `SERVICE_KEY_ABSENT` for an absent `X-Service-Key`, so absent and wrong keys
+  stop looking identical. The `if provided:` block is byte-identical (34 insertions, 0 deletions).
+- **CRON-OBS-01.** pg_net is async, so a `succeeded` cron run says nothing about the HTTP result
+  — 7 days of 401s once hid behind a green history. The arm joins `cron.job_run_details` to
+  `net._http_response`.
+- **CRON-DRIFT-01 (detect half).** Diffs live `cron.job` rows against a committed manifest, with
+  ten secret-hygiene rules, each carrying a RED fixture proving it fires.
+- **MT5-WEDGE-OBS-01.** `-10004` and `-10005` are kept apart with opposite remedies: redeploy
+  versus clear the modal login dialog, which a redeploy does **not** fix.
+
+`prod-prober.yml` is referenced by nothing in `ci.yml` — a red prober must never block the deploy
+that fixes it.
+
+### Anti-vacuity
+
+Self-test at 51 scenarios, all 20 defect kinds covered, `uncovered` empty. `ARMS_FLOOR = 4` keeps
+an incomplete prober loud; an absurdity floor catches an arm that "ran" without touching a seam.
+Three defects **in the plans themselves** were caught by measurement: a pin that would have
+asserted over an empty set, a hygiene rule that fired on its own green control, and a fixture
+pairing whose assertion could never fire.
+
+### Fixed
+
+- `makeScrubber` no longer redacts public identifiers out of the operator's own log. The mt5 arm
+  must declare `RAILWAY_MT5_SERVICE`/`RAILWAY_ENVIRONMENT`, whose live values are the ordinary
+  words `mt5-gateway` and `production`, so a transport failure printed as
+  `the <redacted> relay refused the <redacted> session`. Fixed with an allowlist **by name**;
+  deliberately not a minimum-length rule, which would be fail-open on a short real secret.
+- `.gitleaks.toml` allowlists the prod-prober fixture shapes. Scoped by shape, not path — a real
+  credential under `scripts/prod-prober/` is still caught, pinned by a guard arm.
+
+### Known limits (recorded, not hidden)
+
+- `mypy --strict main.py` reports 5 pre-existing errors; `main.py` is outside CI's mypy surface.
+  Booked to Phase 164.6 as `MYPY-MAINPY-01` — the gate's comment claims coverage it lacks.
+- The workflow has never been dispatched (WINDOWS 38). Whether a workspace-scoped
+  `RAILWAY_API_TOKEN` authenticates `railway ssh` from a hosted runner is unmeasured; that is
+  Phase 164.1-06's dispatch, which needs this on `main` first.
+
 ## [0.77.13.1] - 2026-09-05
 
 ### chore(planning): 164-family re-partition — sound phase setups for what remains of v1.20

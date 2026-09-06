@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 25
+open_count: 30
 waived_count: 0
-fixed_count: 7
-total_count: 32
-last_updated: 2026-09-05T17:36:27.843Z
+fixed_count: 8
+total_count: 38
+last_updated: 2026-09-05T23:44:43.987Z
 ---
 
 # Broken Windows Ledger
@@ -47,6 +47,12 @@ last_updated: 2026-09-05T17:36:27.843Z
 | 30 | 164.3.1 | unmet-truth | src/__tests__/self-referential-oracle.test.ts |  | The Primitive-D self-referential-oracle AST gate ships REPORT-ONLY in plan 164.3.1-02 and blocks NOTHING until plan 164.3.1-08 flips it. Until that flip lands, a new self-referential assertion can enter the tree and the gate will print a finding without failing the suite. SC-5's calibration half is met (the rule was observed flagging src/__tests__/lint-sql-gates.test.ts:183-184 at HEAD before the site was fixed); the enforcing half is 08's. | fixed |  | 2026-09-01T18:30:00.000Z | 2026-09-05T17:36:27.743Z |
 | 31 | 164.3.1 | unmet-truth | src/__tests__/self-referential-oracle.test.ts |  | MEASURED at HEAD by plan 164.3.1-02: the rule reports 23 findings across 14 files of 128 scanned, and 19 of those are one shared false-positive mechanism - the accumulator idiom (const offenders: string[] = [] -> loop pushes -> expect(offenders).toEqual([])), which CAN fail and is not a primitive-D instance. 2 are the real target and 2 are type-level contracts in types-design-tests.test.ts that genuinely cannot fail at runtime. The rule was deliberately NOT narrowed after the count was seen - tuning a detector to produce a comfortable number is itself the self-referential move this phase exists to stop. Plan 164.3.1-08 must decide explicitly: teach mutation-awareness and re-measure and re-run the fire proof, OR allowlist the 19 by their shared mechanism with the measurement recorded. Detail in 164.3.1-02-CALIBRATION.md section III.a. | fixed |  | 2026-09-01T18:30:00.000Z | 2026-09-05T17:36:27.843Z |
 | 32 | 164.4.1 | deviation | supabase/tests/test_reconcile_dropped_enqueue_sweep.sql |  | 5 of 39 sections use GATE-FILE falsifiers (3 oracle preconditions dominated by Part 1, 1 seed-integrity control dominated by Part 2 arm A, 1 sum-of-pinned-counts whole-block invariant); each carries its domination measurement at the site | fixed |  | 2026-09-05T10:00:09.888Z | 2026-09-05T14:57:19.045Z |
+| 33 | 164.1 | todo | scripts/prod-prober/arms/pyapi06.mjs |  | PYAPI-06 arm does not classify a 401 carrying SERVICE_KEY_ABSENT in response to a PRESENT-but-wrong key (the service conflating absent with mismatched); it needs a 21st defect kind and DEFECT_KINDS is pinned at 20 by the plan-05 wiring test. Limit is documented in the arm header; plan 02's Python-half neuter test is the control. | open |  | 2026-09-05T21:56:43.339Z |  |
+| 34 | 164.1 | deviation | scripts/prod-prober/arms/cron-obs.mjs |  | cron-obs: an UNPARSABLE (non-null, non-empty) pg_net.ttl falls back to the documented 6h default with a printed note, rather than being a measure-fail — so a malformed TTL leaves the 3h scan window unclamped in the one direction that under-reports (pruned responses read as missing). Deliberate fail-open with a loud print; revisit if a real TTL ever fails to parse. | open |  | 2026-09-05T22:52:35.873Z |  |
+| 35 | 164.1 | deviation | scripts/prod-prober/arms/cron-drift.mjs |  | cron-drift: hygieneViolations never runs on a WITHHELD manifest row (command_withheld: true), by design — the row was read by a human at capture time. The gap is that a reviewer could withhold a row precisely to keep a dirty command out of the gate's reach; nothing mechanical prevents that. captureManifest still refuses to WRITE a dirty row, so the gap only opens if someone hand-edits the committed manifest. | open |  | 2026-09-05T22:52:35.974Z |  |
+| 36 | 164.1 | deviation | scripts/prod-prober/run.mjs |  | makeScrubber (plan 01) replaces EVERY occurrence of a requiredEnv VALUE anywhere in the output, with no minimum length. MEASURED during plan 03: with a one-character SUPABASE_DB_PASSWORD ('z') the log line 'cron-drift: database marker = quantalyze-fixture-db' printed as 'quantaly<redacted>e-fixture-db'. Fail-SAFE (it over-redacts, never under-redacts) and unreachable with a realistic credential, but it can mangle unrelated text. Out of plan 03's task scope (plan 01 owns the scrubber); recorded rather than fixed. | open |  | 2026-09-05T22:53:36.531Z |  |
+| 37 | 164.1 | deviation | scripts/prod-prober/run.mjs |  | makeScrubber over the mt5 arm's requiredEnv redacts ORDINARY WORDS in a live run. The mt5 arm must declare RAILWAY_PROJECT_ID / RAILWAY_MT5_SERVICE / RAILWAY_ENVIRONMENT as requiredEnv (D-06: an absent one is credential-absent, and they are 3 of the 10 slots the live run reports), but their LIVE values are 'production' and 'mt5-gateway' — short, common strings. MEASURED at plan 04: a defect detail carrying the CLI's stderr printed as 'the <redacted> relay refused the <redacted> session'. Fail-SAFE (over-redacts, never under-redacts) but it degrades the mt5-ssh-transport diagnostic, which is the one row an operator reads when the transport is broken. Extends WINDOWS entry 36 (plan 03's one-char case) with a value that is realistic rather than pathological. Not fixed here: the scrubber is plan 01's and classifying names as secret-vs-identifier is a change to a security control, out of this plan's task scope. ⭐ CLOSED 2026-09-06: fixed by NON_SECRET_ENV (run.mjs) — an allowlist BY NAME of the three Railway public identifiers, all GitHub vars that already appear verbatim in prod-prober.yml. Proven by self-test scenario 51, which uses the REAL live values ('mt5-gateway', 'production') and a SHORT secret; neutering the allowlist skip reproduces this entry's exact string and the scenario goes RED. ⛔ Entry 36 is left OPEN ON PURPOSE: a minimum-length exemption would have been fail-OPEN on a short real secret, so the mangling it describes is the deliberate fail-safe cost. | fixed |  | 2026-09-05T23:24:29.360Z |  |
+| 38 | 164.1 | unrun-verify | .github/workflows/prod-prober.yml |  | prod-prober.yml has NEVER been dispatched: plan 05 was instructed not to touch live infrastructure, so the credential-assert step, the supabase link + masked pooler export, the checksum-verified Railway CLI install and all four live arms are unexecuted on a GitHub-hosted runner. Whether the stored workspace-scoped RAILWAY_API_TOKEN authenticates railway ssh non-interactively from a hosted runner is likewise unmeasured (CONTEXT's own open question). Plan 164.1-06 owns the single first dispatch. | open |  | 2026-09-05T23:44:43.987Z |  |
 
 ````json
 [
@@ -433,6 +439,78 @@ last_updated: 2026-09-05T17:36:27.843Z
     "reason": "",
     "recorded_at": "2026-09-05T10:00:09.888Z",
     "resolved_at": "2026-09-05T14:57:19.045Z"
+  },
+  {
+    "id": 33,
+    "kind": "todo",
+    "phase": "164.1",
+    "file": "scripts/prod-prober/arms/pyapi06.mjs",
+    "line": null,
+    "description": "PYAPI-06 arm does not classify a 401 carrying SERVICE_KEY_ABSENT in response to a PRESENT-but-wrong key (the service conflating absent with mismatched); it needs a 21st defect kind and DEFECT_KINDS is pinned at 20 by the plan-05 wiring test. Limit is documented in the arm header; plan 02's Python-half neuter test is the control.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T21:56:43.339Z",
+    "resolved_at": null
+  },
+  {
+    "id": 34,
+    "kind": "deviation",
+    "phase": "164.1",
+    "file": "scripts/prod-prober/arms/cron-obs.mjs",
+    "line": null,
+    "description": "cron-obs: an UNPARSABLE (non-null, non-empty) pg_net.ttl falls back to the documented 6h default with a printed note, rather than being a measure-fail — so a malformed TTL leaves the 3h scan window unclamped in the one direction that under-reports (pruned responses read as missing). Deliberate fail-open with a loud print; revisit if a real TTL ever fails to parse.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T22:52:35.873Z",
+    "resolved_at": null
+  },
+  {
+    "id": 35,
+    "kind": "deviation",
+    "phase": "164.1",
+    "file": "scripts/prod-prober/arms/cron-drift.mjs",
+    "line": null,
+    "description": "cron-drift: hygieneViolations never runs on a WITHHELD manifest row (command_withheld: true), by design — the row was read by a human at capture time. The gap is that a reviewer could withhold a row precisely to keep a dirty command out of the gate's reach; nothing mechanical prevents that. captureManifest still refuses to WRITE a dirty row, so the gap only opens if someone hand-edits the committed manifest.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T22:52:35.974Z",
+    "resolved_at": null
+  },
+  {
+    "id": 36,
+    "kind": "deviation",
+    "phase": "164.1",
+    "file": "scripts/prod-prober/run.mjs",
+    "line": null,
+    "description": "makeScrubber (plan 01) replaces EVERY occurrence of a requiredEnv VALUE anywhere in the output, with no minimum length. MEASURED during plan 03: with a one-character SUPABASE_DB_PASSWORD ('z') the log line 'cron-drift: database marker = quantalyze-fixture-db' printed as 'quantaly<redacted>e-fixture-db'. Fail-SAFE (it over-redacts, never under-redacts) and unreachable with a realistic credential, but it can mangle unrelated text. Out of plan 03's task scope (plan 01 owns the scrubber); recorded rather than fixed.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T22:53:36.531Z",
+    "resolved_at": null
+  },
+  {
+    "id": 37,
+    "kind": "deviation",
+    "phase": "164.1",
+    "file": "scripts/prod-prober/run.mjs",
+    "line": null,
+    "description": "makeScrubber over the mt5 arm's requiredEnv redacts ORDINARY WORDS in a live run. The mt5 arm must declare RAILWAY_PROJECT_ID / RAILWAY_MT5_SERVICE / RAILWAY_ENVIRONMENT as requiredEnv (D-06: an absent one is credential-absent, and they are 3 of the 10 slots the live run reports), but their LIVE values are 'production' and 'mt5-gateway' — short, common strings. MEASURED at plan 04: a defect detail carrying the CLI's stderr printed as 'the <redacted> relay refused the <redacted> session'. Fail-SAFE (over-redacts, never under-redacts) but it degrades the mt5-ssh-transport diagnostic, which is the one row an operator reads when the transport is broken. Extends WINDOWS entry 36 (plan 03's one-char case) with a value that is realistic rather than pathological. Not fixed here: the scrubber is plan 01's and classifying names as secret-vs-identifier is a change to a security control, out of this plan's task scope.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-05T23:24:29.360Z",
+    "resolved_at": null
+  },
+  {
+    "id": 38,
+    "kind": "unrun-verify",
+    "phase": "164.1",
+    "file": ".github/workflows/prod-prober.yml",
+    "line": null,
+    "description": "prod-prober.yml has NEVER been dispatched: plan 05 was instructed not to touch live infrastructure, so the credential-assert step, the supabase link + masked pooler export, the checksum-verified Railway CLI install and all four live arms are unexecuted on a GitHub-hosted runner. Whether the stored workspace-scoped RAILWAY_API_TOKEN authenticates railway ssh non-interactively from a hosted runner is likewise unmeasured (CONTEXT's own open question). Plan 164.1-06 owns the single first dispatch.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T23:44:43.987Z",
+    "resolved_at": null
   }
 ]
 ````

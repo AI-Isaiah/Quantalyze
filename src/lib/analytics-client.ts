@@ -449,6 +449,46 @@ async function analyticsRequest(
     process.env.INTERNAL_API_TOKEN ?? "",
   );
 
+  /**
+   * 164.1-02 / PYAPI-06 (D-09) — REFUSE rather than send an unauthenticated
+   * guarded request.
+   *
+   * ⚠️ THROWN ABOVE THE `try`, DELIBERATELY, for the same reason the tenant
+   * claim is minted above it (see the block at lines 415-441). Inside the try,
+   * this throw would be caught by the arms below and — even though arm 1b
+   * rethrows a `SeamConfigError` unwrapped — the reasoning would then depend on
+   * an arm ORDER that a future edit can reshuffle. Above the try it cannot be
+   * rewritten as "the analytics service is not reachable" by construction,
+   * which is exactly the misreport T-164.1-09 names: a deploy fault on OUR side
+   * pointing ops at Railway.
+   *
+   * ⚠️ CALL TIME, NOT MODULE LOAD. There is deliberately NO module-scope
+   * assertion on `ANALYTICS_SERVICE_KEY`: local dev and any build step that
+   * merely IMPORTS this module without the secret must keep working (CONTEXT
+   * D-09 rejects the module-load assertion by name). The refusal fires only
+   * when a guarded request is actually about to leave the process.
+   *
+   * ⛔ THE MESSAGE NAMES THE ENV VAR AND NEVER ITS VALUE (T-164.1-06). Do not
+   * interpolate `SERVICE_KEY`, its length, or a prefix of it — the whole point
+   * of `seam-redaction.ts` listing `ANALYTICS_SERVICE_KEY` is that this secret
+   * never reaches a log line, and a message is a log line.
+   *
+   * WHAT THIS CLOSES (TODOS 0.04). The header below used to be a conditional
+   * spread: with the key absent the request went out ANONYMOUSLY, the service
+   * answered 401, a 401 never trips the 140.2 breaker, and the seam was down
+   * with /health green and zero alerts for seven days. An empty key is now
+   * impossible to send.
+   */
+  if (!SERVICE_KEY) {
+    throw new SeamConfigError(
+      "[analytics-client] ANALYTICS_SERVICE_KEY is not set — refusing to send " +
+        "an unauthenticated request to a guarded analytics route. This is a " +
+        "deployment misconfiguration on our side, NOT an analytics-service " +
+        "failure: set ANALYTICS_SERVICE_KEY to the analytics service's own " +
+        "SERVICE_KEY (Railway is the source of truth) and redeploy.",
+    );
+  }
+
   // SEAMCORE-02: the core returns a `SeamResponse`, whose `json()` / `text()`
   // run inside its classification window. The surface is the closed set this
   // function already used (`ok`, `status`, `statusText`, `headers.get`, `json`,
@@ -463,7 +503,13 @@ async function analyticsRequest(
         "Content-Type": "application/json",
         "X-Api-Version": ANALYTICS_API_VERSION,
         "X-Correlation-Id": correlationId,
-        ...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY }),
+        // 164.1-02 / PYAPI-06 (D-09) — UNCONDITIONAL. This entry used to
+        // be a conditional spread guarded on the key's own truthiness, so
+        // the header vanished SILENTLY when the secret was absent and the
+        // request went out anonymously (TODOS 0.04). The refusal above
+        // makes the empty case unreachable, so the guard has no remaining
+        // job and its only effect was to hide the fault.
+        "X-Service-Key": SERVICE_KEY,
         // TS-04 / SC7 — minted above; see the tenantClaim block.
         "X-Tenant-Claim": tenantClaim,
       },

@@ -2,20 +2,20 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.4.1
-current_phase_name: PGCRON-LANE
-status: complete
-stopped_at: Phase 164.4.1 COMPLETE — verified, ubuntu-measured at run 33973362161
-last_updated: "2026-09-05T17:36:34.047Z"
+current_phase: 164.1
+current_phase_name: PROD-OBSERVABILITY
+status: in_progress
+stopped_at: Completed 164.1-05-PLAN.md
+last_updated: "2026-09-05T23:44:44.501Z"
 last_activity: 2026-09-05
-last_activity_desc: Phase 164.4.1 closed — 44 files, 361 arms, 0 waivers, lane-blocked retired
-state_head: e01cc2e6b47f0a5d4804ac23d63634ecfb057c91
+last_activity_desc: 164.3.1/164.4/164.4.1 records restored and closed; 164.1 discuss+research+validation landed; planning blocked on founder secrets
+state_head: 71bff33bc7fcc949ff5576acf23ee83b455d9b11
 progress:
-  total_phases: 18
-  completed_phases: 4
-  total_plans: 70
-  completed_plans: 66
-  percent: 22
+  total_phases: 19
+  completed_phases: 8
+  total_plans: 107
+  completed_plans: 100
+  percent: 42
 ---
 
 # Project State — Quantalyze
@@ -637,7 +637,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███░░░░░░░] 25%
+Progress: [████░░░░░░] 42%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -812,6 +812,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4.1 P04 | 118 min | 3 tasks | 7 files |
 | Phase 164.4.1 P05 | 175 min | 3 tasks | 6 files |
 | Phase 164.4.1 P06 | 35m | 2 tasks | 9 files |
+| Phase 164.1 P01 | 30 min | 2 tasks | 9 files |
+| Phase 164.1 P02 | 25 min | 2 tasks | 10 files |
+| Phase 164.1 P03 | 22 min | 2 tasks | 24 files |
+| Phase 164.1 P04 | 24 min | 2 tasks | 9 files |
+| Phase 164.1 P05 | 17 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -845,6 +850,13 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.5 inserted: BASELINE-SNAPSHOT created 2026-09-05 by the 164-family re-partition: baseline.sql load-bearing, DRIFT-04 drop, DRIFT-05 both directions, VAC08-LEDGER-32, VAC-07 (deferred from 164.3)
 - Phase 164.6 inserted: GATE-HYGIENE created 2026-09-05: OPS-08-F9/F8/TS/F2, composite-stamp twin (161.1-D13) TS half, PROC-02, PROC-03 residual, H-0001 residual, WINDOWS 23
 - Phase 166 reordered: moved ahead of 165 on 2026-09-05 so dependency churn lands LAST; 166 depends_on 164.6 (ordering only)
+- Phase 164.5 edited: added item (7) CRON-DRIFT-01-REPAIR + criterion 7; title 'the one'->'the two production objects'; requirements +CRON-DRIFT-01 (repair half); depends_on +164.1
+- Phase 164.2 edited: added in-scope item 5 (public uncomputed-factsheet placeholder speaks to a developer on the anonymous prod path) + success criterion 9; found 2026-09-05 while re-measuring Phase 159 item 2 in a live browser
+- Phase 164.6 edited: requirements +VAC08-COUNT-SPM01 (test-ledger-drift-check.sh:372-373 false-clean; booked 2026-09-05)
+- Phase 164.6 edited: requirements +MT5-VERDICT-SINK-01 (MT5 capability verdict has no durable sink; routed here not 164.1 because 164.1's ledger and ARMS_FLOOR are already pinned)
+- Phase 164.7 inserted after Phase 164: APPSETTINGS — app.* GUCs are unsettable on Supabase (ALTER DATABASE and ALTER ROLE both 42501, measured on PROD 2026-09-05); 12 read sites across 4 settings; blocks 161.1 activation. Founder rejected the in-cron-command workaround in favour of the proper fix. MUST precede 164.5. (URGENT)
+- Phase 164.7 edited: carried in VAC04-ARMS-OBSERVE (observation half of [VAC04-ARMS-UNRUN]) — goal paragraph, success criterion 7, requirements line; [VAC-04-ROLE] deliberately excluded
+- Phase 164.6 edited: carried in MYPY-MAINPY-01 from 164.1-02 deferred-items — goal item (9), success criterion 6, requirements entry; analytics-service/tests/ policy question deliberately excluded
 
 ### Decisions
 
@@ -1052,6 +1064,15 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4.1]: 164.4.1-05: FIVE arms use GATE-FILE falsifiers (3 oracle preconditions, 1 seed-integrity control, 1 sum-of-pinned-counts invariant), each with its domination measurement at the site. A gate-file falsifier is NOT a waiver — the arm still raises, names itself first and counts in biting. WAIVED_CEILING unedited at 0.
 - [Phase 164.4.1]: D-07 closed by DOCUMENTING the classifier's text-only boundary and pinning it with a hand-built test — the proposed apply-list widening was retired because it would classify UNANNOTATED files by a line only ANNOTATED files carry (dead code behind a passing test)
 - [Phase 164.4.1]: sql-mutation timeout-minutes STAYS 15 and ci.yml is byte-unchanged by plan 06: the DECISION rule accepts only a measured ubuntu run, and that measurement was scoped out of the executor (worktree branch is not the phase branch, so a dispatch would not be SHA-bound)
+- [Phase 164.1]: ARMS_FLOOR is the literal 4 while only ONE prober arm is registered — the live run exits 1 on '1 registered arm(s) < floor 4' until plans 03/04 land — A floor ratcheted up as arms land can only ever agree with reality, which is not a floor. An incomplete prober must be loud.
+- [Phase 164.1]: KIND_ASSERTIONS lives INSIDE selfTest() — a table-driven isolation loop asserting through a variable is invisible to the plan-05 source-scanning coverage extractor — MEASURED: with the map at module level the extractor reported pyapi06-absent-uncoded and pyapi06-wrong-key-accepted as UNCOVERED.
+- [Phase 164.1]: PYAPI-06 closed at BOTH halves: analytics-client.ts throws a named SeamConfigError above the try when ANALYTICS_SERVICE_KEY is empty (and X-Service-Key is now unconditional), and verify_service_key answers an absent header with its own 401 code SERVICE_KEY_ABSENT. — The truthiness-guarded header spread was TODOS 0.04: with the secret absent every wrapper sent an anonymous request, the service answered 401, a 401 never trips the 140.2 breaker, and the seam ran dark for seven days behind a green board. Absent and wrong had identical bodies, so two faults with opposite remedies were indistinguishable.
+- [Phase 164.1]: SERVICE_KEY_ABSENT is dispositioned as a reasoned EXEMPTION in VENUE_WIRE_CODES_WITHOUT_VERDICT, never a verdict row — the hand-typed roster was OBSERVED going red before the row was typed. — SEAM_MISCONFIGURED's user copy says nothing was submitted, which is false by construction here: a request WAS sent, it simply carried no credential. After the TypeScript half the code cannot arrive from our own client at all, so it reaches no user-facing surface.
+- [Phase 164.1]: 164.1-04: MT5_PROBE_PY emits terminal_info in BOTH branches — the healthy reading must be a positive marker, not the absence of a key
+- [Phase 164.1]: 164.1-04: a non-zero railway ssh exit is DATA, not a measure-fail — a CLI exiting 255 while the terminal answered -10004 still gets the REDEPLOY remedy (proven by a positive control)
+- [Phase 164.1]: 164.1-04: the two IPC remedies are asserted different on the DEFECT ROWS, not on the REMEDIES table — the rows are what an operator reads
+- [Phase 164.1]: 164.1-05: the prober ships as its OWN hourly workflow (prod-prober.yml) with mode identity to the script — the two bare commands, self-test first, status captured on the next line — and a vitest pin whose every predicate is calibrated on a mutated copy. — A script proven by its own self-test proves nothing about a CI invocation that wraps it. ci.yml carries zero references (D-18) so a red prober can never make Railway skip the analytics deploy that would fix it.
+- [Phase 164.1]: 164.1-05: the self-test scenario count is pinned by EXECUTING the runner and counting the headers it prints, not by scraping literals from its source. — The runner auto-numbers its headers at runtime off the same counter its completeness assertion reads, so there is no 'k/50' literal in the source to count; the plan's stated source-grep would have matched zero headers and read as a passing pin.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1754,8 +1775,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-05T10:46:00.442Z
-**Stopped At:** Completed 164.4.1-06-PLAN.md (ubuntu measurement DEFERRED to orchestrator)
+**Last Date:** 2026-09-05T23:44:44.086Z
+**Stopped At:** Completed 164.1-05-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z

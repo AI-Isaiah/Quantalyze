@@ -1,0 +1,52 @@
+[
+  {
+    "rule": "x-service-key-literal",
+    "jobname": "fixture_inline_key_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', 'FAKE-key-0123456789abcdef'), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "app-guc",
+    "jobname": "fixture_guc_job",
+    "command": "SELECT net.http_post(url := current_setting('app.analytics_service_url', true) || '/a')"
+  },
+  {
+    "rule": "vault-absent",
+    "jobname": "match_engine_cron",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', body := '{}'::jsonb)"
+  },
+  {
+    "rule": "pg-password",
+    "jobname": "fixture_dblink_job",
+    "command": "SELECT dblink_connect('host=db.invalid user=postgres password=FAKEPASSWORD')"
+  },
+  {
+    "rule": "authorization-literal",
+    "jobname": "fixture_authz_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('Authorization', 'Basic RkFLRTpGQUtFRkFLRUZBS0U='), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "bearer-literal",
+    "jobname": "fixture_bearer_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Auth', 'Bearer FAKEtoken0123456789'), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "apikey-literal",
+    "jobname": "fixture_apikey_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('apikey', 'FAKE-anon-key-0123456789'), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "service-role",
+    "jobname": "fixture_role_job",
+    "command": "SELECT set_config('role', 'service_role', false)"
+  },
+  {
+    "rule": "jwt-shape",
+    "jobname": "fixture_jwt_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkZBS0UifQ')"
+  },
+  {
+    "rule": "long-literal-in-headers",
+    "jobname": "fixture_longlit_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Trace', 'FAKE-0123456789-0123456789-0123456789'), body := '{}'::jsonb)"
+  }
+]

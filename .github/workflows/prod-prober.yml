@@ -1,0 +1,367 @@
+name: prod-prober (four arms, hourly)
+
+# =============================================================================
+# THE PERIODIC PRODUCTION PROBER — phase 164.1, four arms, one script.
+#
+# pyapi06     the analytics service key, end to end: a keyed GET must be 200, an
+#             UNKEYED one must be refused with SERVICE_KEY_ABSENT, a wrong key
+#             must be refused, and /health must not report degraded secrets.
+# cron-obs    the ASYNC cron HTTP result. `cron.job_run_details.status` records
+#             that net.http_post ENQUEUED, never what the far end answered; the
+#             real status lives in `net._http_response` and nothing read it.
+# cron-drift  PROD `cron.job` compared to the COMMITTED manifest of the
+#             ACHIEVABLE Vault-backed configuration, reporting which side moved.
+# mt5         one real round-trip into the mt5-gateway container, keeping -10004
+#             (bridge not attached) and -10005 (bridge attached, terminal not
+#             answering) apart — they have opposite remedies.
+#
+# ⛔ THIS IS DELIBERATELY ITS OWN WORKFLOW, OUTSIDE ci.yml (D-18). It is not in
+# the `frontend` aggregator's needs list, not in its result loop, and nothing in
+# ci.yml references it. A four-arm production prober is EXPECTED to go red; that
+# is its job. Railway waits on the main CI check-suite and SKIPS the analytics
+# deploy when it is red, so a prober inside that suite would let one outage
+# (a wedged MT5 terminal) block the very deploy that fixes another. The hazard
+# is not hypothetical — analytics-deploy-verify.yml records it in its own header,
+# quoted here VERBATIM (that file, lines 17-24):
+#
+# CRITICAL: this job exits 0 even when prod is stale. It MUST NOT fail the
+# check. A red check on a (HEAD) commit makes Railway's "wait for CI" treat the
+# commit's check-suite as red and SKIP the very deploy this probe verifies — a
+# self-defeating deadlock that left prod stale on 2026-06-21 when the 6h
+# schedule fired while a deploy was still pending (the failed `verify` check on
+# the merge SHA caused Railway to skip it, so prod never converged and the
+# check stayed red). The dedup'd P1 issue is the loud signal; the green check
+# keeps deploys flowing.
+#
+# ⚠️ That precedent chose a green check plus a loud issue. THIS workflow chooses
+# BOTH the issue AND the script's own status, because it lives outside the suite
+# Railway consults, so its redness reaches no deploy gate. RESEARCH treats that
+# containment as an OPEN QUESTION rather than a settled fact, so exactly ONE
+# line here is provisional: POSTURE LINE — measured by plan 164.1-06; see the
+# final step. Nothing else in this file depends on how that measurement lands.
+#
+# CREDENTIALS, BY NAME ONLY. secrets: ANALYTICS_SERVICE_KEY (new this phase — the
+# Railway analytics service's own SERVICE_KEY, copied Railway → GitHub),
+# RAILWAY_API_TOKEN (new this phase — WORKSPACE/account scope; `railway ssh`
+# REFUSES a project-scoped token), SUPABASE_ACCESS_TOKEN, SUPABASE_DB_PASSWORD.
+# vars: SUPABASE_PROJECT_REF, RAILWAY_PROJECT_ID, RAILWAY_MT5_SERVICE,
+# RAILWAY_ENVIRONMENT, and the optional ANALYTICS_BASE_URL override.
+# ⛔ RAILWAY_SSH_PRIVATE_KEY was RETIRED by measurement 2026-09-05: railway
+# 4.36.1's `--native` SSH client is OPT-IN, the default transport needs no key.
+# Do not create that secret.
+#
+# INJECTION SAFETY. No `github.event.*` value ever reaches a `run:` or a
+# `script:` body. Every secret, variable and dispatch input travels through
+# `env:` and is read as a shell/JS variable, so nothing attacker-controllable is
+# ever concatenated into a command. The pooler DSN is masked before it is
+# exported; the password is PGPASSWORD-only, inside the script.
+# =============================================================================
+
+on:
+  schedule:
+    # Hourly. PROD cron jobid 1 is hourly, so a 401 is caught within one tick.
+    # A 6-hourly cadence would leave a 6h blind window on the exact defect that
+    # ran 401 for seven days behind a green cron history.
+    - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "probe = run all four arms against PROD; capture-manifest = read cron.job and upload the oracle as an artifact for human review (never a commit)"
+        type: choice
+        options:
+          - probe
+          - capture-manifest
+        default: probe
+      arm:
+        description: "Narrowed DIAGNOSTIC run of ONE arm (pyapi06 | cron-obs | cron-drift | mt5). Leave EMPTY for the real gate — a narrowed run exits 2 by design, so it can never be mistaken for a pass."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: prod-prober
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    # Derived, not guessed: self-test is fixtures-only and finishes in under a
+    # second; the four live arms are four HTTP calls, two short SQL reads and
+    # ONE railway ssh capped at 120 s by the seam itself; setup is apt-get
+    # postgresql-client + supabase link + a single CLI tarball, ~2 min. Twenty
+    # minutes is roughly 4x the expected wall clock. It must also be EXPLICIT:
+    # GitHub's 360-minute default is itself the hazard analytics-deploy-verify.yml
+    # records — a hung API call able to sit red for six hours.
+    timeout-minutes: 20
+    steps:
+      # The prober reads scripts/ and the committed cron manifest out of the
+      # workspace. persist-credentials:false per the C-0293 invariant — this job
+      # does no git operation, so a persisted GITHUB_TOKEN is pure attack surface.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      # ⛔ NO `if:` ON THIS STEP, EVER (D-06). An `if:` here is the skip mechanism
+      # this whole phase exists to remove: a job that cannot reach production
+      # must FAIL saying so, never report success having measured nothing. The
+      # shape is copied from migration-drift-check.yml's own hard-fail assert.
+      # Names only reach the log — never a value.
+      - name: Assert credentials are configured (D-06 — a skip is not a pass)
+        env:
+          ANALYTICS_SERVICE_KEY: ${{ secrets.ANALYTICS_SERVICE_KEY }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+          RAILWAY_MT5_SERVICE: ${{ vars.RAILWAY_MT5_SERVICE }}
+          RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${ANALYTICS_SERVICE_KEY:-}" ] || missing="${missing} secrets.ANALYTICS_SERVICE_KEY"
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || missing="${missing} secrets.RAILWAY_API_TOKEN"
+          [ -n "${SUPABASE_ACCESS_TOKEN:-}" ] || missing="${missing} secrets.SUPABASE_ACCESS_TOKEN"
+          [ -n "${SUPABASE_DB_PASSWORD:-}" ] || missing="${missing} secrets.SUPABASE_DB_PASSWORD"
+          [ -n "${SUPABASE_PROJECT_REF:-}" ] || missing="${missing} vars.SUPABASE_PROJECT_REF"
+          [ -n "${RAILWAY_PROJECT_ID:-}" ] || missing="${missing} vars.RAILWAY_PROJECT_ID"
+          [ -n "${RAILWAY_MT5_SERVICE:-}" ] || missing="${missing} vars.RAILWAY_MT5_SERVICE"
+          [ -n "${RAILWAY_ENVIRONMENT:-}" ] || missing="${missing} vars.RAILWAY_ENVIRONMENT"
+          if [ -n "$missing" ]; then
+            echo "::error::prod-prober cannot reach production - not configured:${missing}"
+            echo "::error::This is a HARD FAILURE, not a skip (phase 164.1 / D-06). Every arm this"
+            echo "::error::credential feeds would report nothing, and a run that measured nothing"
+            echo "::error::must never read green - that is the SKIP-01 shape the prober exists to"
+            echo "::error::eliminate. Add the named secret or variable and re-dispatch."
+            exit 1
+          fi
+          for name in ANALYTICS_SERVICE_KEY RAILWAY_API_TOKEN SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD SUPABASE_PROJECT_REF RAILWAY_PROJECT_ID RAILWAY_MT5_SERVICE RAILWAY_ENVIRONMENT; do
+            echo "credential: ${name} present"
+          done
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+
+      # The two SQL arms shell out to psql. Same idiom as ci.yml's sql-tests job.
+      - name: Install psql client
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+        with:
+          version: 2.98.2
+
+      # `supabase link` writes the SESSION-pooler DSN (port 5432, IPv4 — the
+      # direct db.<ref> host is IPv6-only and GitHub runners have no IPv6) to
+      # supabase/.temp/pooler-url, with NO password embedded. The password stays
+      # PGPASSWORD-only inside the script, so nothing needs URL-encoding and
+      # there is no credential inside the DSN to leak.
+      # ⛔ NO FALLBACK. If the file is absent or empty we fail: a hand-built DSN
+      # would be a guess at the host and region the CLI owns.
+      - name: Link Supabase and export the masked pooler DSN (D-19)
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          supabase link --project-ref "$SUPABASE_PROJECT_REF"
+          if [ ! -s supabase/.temp/pooler-url ]; then
+            echo "::error::supabase link produced no supabase/.temp/pooler-url. Refusing to"
+            echo "::error::substitute a hand-built DSN - the host and region are CLI-owned."
+            exit 1
+          fi
+          pooler="$(tr -d '\r\n' < supabase/.temp/pooler-url)"
+          if [ -z "$pooler" ]; then
+            echo "::error::supabase/.temp/pooler-url is empty after trimming."
+            exit 1
+          fi
+          echo "::add-mask::$pooler"
+          echo "PROBER_POOLER_URL=$pooler" >> "$GITHUB_ENV"
+          echo "PROBER_POOLER_URL exported (value masked)."
+
+      # The MT5 arm shells out to `railway`. Installed from the PINNED GitHub
+      # release asset and checksum-verified (threat T-164.1-22) — never from an
+      # unpinned installer script and never from npm. The sha256 below was
+      # computed locally with `shasum -a 256` over the downloaded asset during
+      # plan 164.1-05; see that SUMMARY for the command and its output.
+      # 4.36.1 is the version CONTEXT measured: `--native` SSH is opt-in there,
+      # so the default transport needs no registered key.
+      - name: Install the Railway CLI (pinned release asset + sha256)
+        env:
+          RAILWAY_CLI_VERSION: "4.36.1"
+          RAILWAY_CLI_SHA256: "23474f8a3206d4a69a03ab1744f81f9ce904d4795219ff46a4b0a2153c07c08f"
+        run: |
+          set -euo pipefail
+          asset="railway-v${RAILWAY_CLI_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          url="https://github.com/railwayapp/cli/releases/download/v${RAILWAY_CLI_VERSION}/${asset}"
+          mkdir -p "$RUNNER_TEMP/railway"
+          curl -fsSL -o "$RUNNER_TEMP/${asset}" "$url"
+          echo "${RAILWAY_CLI_SHA256}  $RUNNER_TEMP/${asset}" > "$RUNNER_TEMP/railway.sha256"
+          if ! sha256sum -c "$RUNNER_TEMP/railway.sha256"; then
+            echo "::error::Railway CLI checksum MISMATCH for ${asset}. Refusing to execute an"
+            echo "::error::unverified binary that would receive the workspace token in its env."
+            exit 1
+          fi
+          tar -xzf "$RUNNER_TEMP/${asset}" -C "$RUNNER_TEMP/railway"
+          chmod +x "$RUNNER_TEMP/railway/railway"
+          echo "$RUNNER_TEMP/railway" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/railway/railway" --version
+
+      # ⛔ MODE IDENTITY. The line below is byte-identical to the command in the
+      # script's own header and to what a developer runs locally. No wrapper, no
+      # npm alias, no pipe deciding the exit. Pinned from vitest by
+      # src/__tests__/prod-prober-wiring.test.ts, which goes RED if it is softened.
+      #
+      # It runs BEFORE the live probe on purpose: a live run that reports zero
+      # defects proves nothing unless the detector can still fire. The self-test
+      # injects each arm's fault against fixtures and asserts the non-zero exit
+      # NAMING that arm. Fixtures only — it touches no network.
+      - name: Self-test (fixtures only, no network)
+        run: node scripts/prod-prober/run.mjs --self-test
+
+      # Stdout goes to a FILE and is `cat` back, rather than through `| tee`: a
+      # PIPE makes `$?` the LAST command's status, and the log has to survive
+      # into the issue step below. RUNNER_TEMP, never the workspace.
+      - name: Probe production (all four arms, aggregate, exit at the end)
+        id: probe
+        if: inputs.mode != 'capture-manifest'
+        env:
+          ANALYTICS_BASE_URL: ${{ vars.ANALYTICS_BASE_URL || 'https://quantalyze-analytics-production.up.railway.app' }}
+          ANALYTICS_SERVICE_KEY: ${{ secrets.ANALYTICS_SERVICE_KEY }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+          RAILWAY_MT5_SERVICE: ${{ vars.RAILWAY_MT5_SERVICE }}
+          RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}
+          ARM: ${{ inputs.arm }}
+          RUNNER_LOG: ${{ runner.temp }}/prod-prober.log
+        run: |
+          set -uo pipefail
+          if [ -n "${ARM:-}" ]; then
+            echo "NARROWED DIAGNOSTIC dispatch of arm ${ARM}: this mode never returns success."
+            node scripts/prod-prober/run.mjs --arm "$ARM" > "$RUNNER_LOG" 2>&1
+            status=$?
+          else
+            node scripts/prod-prober/run.mjs > "$RUNNER_LOG" 2>&1
+            status=$?
+          fi
+          cat "$RUNNER_LOG"
+          if grep -q '^❌' "$RUNNER_LOG"; then
+            {
+              echo "### prod-prober defects"
+              echo ""
+              echo '```'
+              sed -n '/^❌/,$p' "$RUNNER_LOG"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # POSTURE LINE — the job's status IS the script's. Plan 164.1-06 measures
+          # the deploy-skip hazard and may flip exactly this line; nothing else.
+          exit $status
+
+      - name: Capture the cron manifest (read-only; artifact, never a commit)
+        if: inputs.mode == 'capture-manifest'
+        env:
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          set -uo pipefail
+          node scripts/prod-prober/run.mjs --capture-manifest --out "$RUNNER_TEMP/cron-manifest.json"
+          status=$?
+          exit $status
+
+      # The capture is uploaded for a HUMAN to review and move into place. The
+      # commit is a reviewed act in plan 164.1-06, never something this job does.
+      - name: Upload the captured manifest
+        if: inputs.mode == 'capture-manifest'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cron-manifest
+          path: ${{ runner.temp }}/cron-manifest.json
+          if-no-files-found: error
+          retention-days: 7
+
+      # ⚠️ THE THIRD CLAUSE IS LOAD-BEARING, not defensive noise. A narrowed
+      # `--arm` dispatch returns 2 BY DESIGN even when it finds nothing wrong —
+      # that is what stops a partial check from reading as a full pass. So
+      # `failure()` fires on every narrowed dispatch, and without that third
+      # clause this step would file an auto-issue whose body reads
+      # "0 defect(s)". On a `schedule` trigger `inputs.arm` is empty, so
+      # the guard is inert exactly where the real gate runs.
+      - name: Open or update the prod-prober issue
+        if: failure() && steps.probe.outcome == 'failure' && inputs.arm == ''
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          RUN_ID: ${{ github.run_id }}
+          REPO_NAME: ${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+          LOG_PATH: ${{ runner.temp }}/prod-prober.log
+        with:
+          script: |
+            const fs = require("node:fs");
+            const { RUN_ID, REPO_NAME, HEAD_SHA, LOG_PATH } = process.env;
+            const today = new Date().toISOString().slice(0, 10);
+            const dedupLabel = "prod-prober";
+            const runUrl = `https://github.com/${REPO_NAME}/actions/runs/${RUN_ID}`;
+
+            // The body is the run's OWN text, never a re-description of it: the
+            // defect table and its remedy lines, plus the arms tally. A summary
+            // written here would be a second account able to disagree with the log.
+            let log = "";
+            try {
+              log = fs.readFileSync(LOG_PATH, "utf8");
+            } catch {
+              log = "";
+            }
+            const lines = log.split("\n");
+            const tableAt = lines.findIndex((l) => l.startsWith("❌"));
+            const table =
+              tableAt >= 0
+                ? lines.slice(tableAt).join("\n").replace(/\s+$/, "")
+                : "(the prober produced no defect table - it died before it could report. Read the run log.)";
+            const armsLine =
+              lines.find((l) => l.startsWith("arms: ")) || "(no arms: line - the run did not reach its report)";
+            const countMatch = table.match(/^❌ (\d+) defect/);
+            const defectCount = countMatch ? countMatch[1] : "?";
+
+            const detail = ["```", armsLine, "", table, "```"].join("\n");
+
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: dedupLabel,
+              per_page: 1,
+            });
+            if (existing.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing[0].number,
+                body: [`Still failing on ${today} (repo ${HEAD_SHA}).`, "", detail, "", `Workflow run: ${runUrl}`].join("\n"),
+              });
+              return;
+            }
+            const body = [
+              "The hourly production prober reported at least one defect. Each row below carries its own remedy, copied from the run log verbatim.",
+              "",
+              detail,
+              "",
+              `Workflow run: ${runUrl}`,
+              `Repository SHA at dispatch: \`${HEAD_SHA}\``,
+              "",
+              "Auto-filed by .github/workflows/prod-prober.yml (phase 164.1). Deduplicated by the `" + dedupLabel + "` label; subsequent failures comment here until this issue is closed.",
+            ].join("\n");
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `prod-prober: ${defectCount} defect(s) on ${today}`,
+              body,
+              labels: [dedupLabel, "p1"],
+            });

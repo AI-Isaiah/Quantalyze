@@ -1,0 +1,29 @@
+[
+  {
+    "jobid": 3,
+    "jobname": "retention_compute_jobs_done",
+    "schedule": "23 4 * * *",
+    "active": true,
+    "database": "postgres",
+    "username": "postgres",
+    "command": "SELECT retention_sweep('compute_jobs_done',\r\n  interval '30 days')"
+  },
+  {
+    "jobid": 2,
+    "jobname": "audit_log_cold_purge",
+    "schedule": "17 3 * * *",
+    "active": true,
+    "database": "postgres",
+    "username": "postgres",
+    "command": "SELECT purge_audit_log_cold(interval '90 days')"
+  },
+  {
+    "jobid": 1,
+    "jobname": "match_engine_cron",
+    "schedule": "0 * * * *",
+    "active": true,
+    "database": "postgres",
+    "username": "postgres",
+    "command": "DO $$ DECLARE k text; u text; BEGIN SELECT decrypted_secret INTO k FROM vault.decrypted_secrets WHERE name = 'analytics_service_key'; SELECT decrypted_secret INTO u FROM vault.decrypted_secrets WHERE name = 'analytics_base_url'; PERFORM net.http_post(url := u  ||  '/api/match/cron-recompute',\r\n  headers := jsonb_build_object('Content-Type',\r\n  'application/json',\r\n  'X-Service-Key',\r\n  k),\r\n  body := '{}'::jsonb,\r\n  timeout_milliseconds := 60000); END $$"
+  }
+]

@@ -232,3 +232,32 @@ targetRules = ["jwt"]
 condition = "AND"
 paths = ['''(^|/)\.planning/''']
 regexes = ['''eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NSJ9\.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c''']
+
+[[allowlists]]
+description = """
+Phase 164.1 prod-prober: defect-kind identifiers, a self-test sentinel, and the
+deliberately secret-SHAPED hygiene fixtures. The cron-drift arm ships ten
+secret-hygiene rules and every one carries a RED fixture row proving it fires — a
+rule with no failing fixture is the defect this milestone exists to remove, so
+these strings MUST look like credentials. The JWT here is a HEADER SEGMENT ONLY
+and decodes to {"alg":"HS256","typ":"FAKE"}; every host in these fixtures is
+`.invalid`.
+NOT a path exemption: a real credential committed under scripts/prod-prober/ still
+fails the gate. MEASURED both directions on 2026-09-06 — an unaffiliated
+high-entropy value planted in that directory was still reported.
+⭐ The `regexes` list is the load-bearing key, and that is measured, not assumed:
+deleting `regexes` while KEEPING `paths` turns this into a real path exemption and
+the guard arm goes RED ("expected 0 to be greater than 0"). `condition = "AND"` is
+kept as belt-and-braces but is NOT independently demonstrable here — flipping it to
+"OR" changed no observed behaviour in gitleaks 8.30.1, so do not rely on it alone
+and do not cite it as the reason this is scoped.
+⛔ Never widen this to `paths` alone. Pinned by src/__tests__/gitleaks-allowlist.test.ts.
+"""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)scripts/prod-prober/''']
+regexes = [
+  '''pyapi06-[a-z0-9-]+''',
+  '''SENTINEL-KEY-[0-9a-f]{4,}''',
+  '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkZBS0UifQ''',
+]
