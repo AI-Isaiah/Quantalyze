@@ -1,6 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { KeyPermissionBadge } from "./KeyPermissionBadge";
+import { addSentryBreadcrumb } from "@/lib/sentry-capture";
+
+// 164.2-01 / 161-ERRPREFIX — the component now routes the machine code to a
+// Sentry breadcrumb, so the module is mocked here to observe that call. The
+// factory names BOTH exports deliberately: `vi.mock` replaces the whole module,
+// so omitting `captureToSentry` would make any future import of it `undefined`
+// in this suite and fail at the call, not at the assertion. Idiom copied from
+// `src/app/factsheet/[id]/v2/page.stale-analytics.test.tsx:38` and siblings.
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: vi.fn(),
+  addSentryBreadcrumb: vi.fn(),
+}));
 
 // Helper to mount fetch responses.
 function mockFetchOnce(response: object, ok = true, status = 200) {
@@ -14,6 +26,10 @@ function mockFetchOnce(response: object, ok = true, status = 200) {
 describe("KeyPermissionBadge", () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
+    // `restoreAllMocks` below restores SPIES; a `vi.fn()` from a module factory
+    // keeps its call history across tests, so clear it explicitly or the
+    // breadcrumb assertions would pass on a neighbouring test's call.
+    vi.mocked(addSentryBreadcrumb).mockClear();
   });
 
   afterEach(() => {
@@ -115,28 +131,176 @@ describe("KeyPermissionBadge", () => {
     );
   });
 
-  // When the route returns a structured { error, code } payload (the new
-  // PROBE_BACKEND_UNAVAILABLE shape), prepend the code so support can
-  // grep for it in tickets without asking the user to copy the status.
-  it("prepends the structured `code` field to the error message", async () => {
+  /**
+   * [164.2-01 / 161-ERRPREFIX] — THE SPLIT: prose to the user, code to the log
+   * AND to a Sentry breadcrumb.
+   *
+   * ⚠️ THE TEST THAT USED TO SIT HERE PINNED THE DEFECT. It was titled
+   * "prepends the structured `code` field to the error message" and asserted
+   * `getByText(/PROBE_BACKEND_UNAVAILABLE: Could not reach the permissions
+   * service/)` — it made the raw machine code, inside the user's sentence, a
+   * CONTRACT. Removing the prefix would therefore have read as a regression,
+   * which is why the defect survived four phases. The founder ruling of
+   * 2026-08-26 (161-ERRPREFIX) is a SPLIT, not a deletion: the user reads the
+   * curated prose only, and the code goes to `console.error` and to a Sentry
+   * breadcrumb, preserving the support-ticket greppability the prefix existed
+   * for (the justification was written into `KeyPermissionBadge.tsx:137-138`).
+   *
+   * These assertions are INVERTED rather than deleted — the fixture is kept and
+   * the expectation is the old one negated — so a reader can see the reversal
+   * was deliberate. Same idiom as `api/portfolio-optimizer/route.test.ts:440-462`.
+   *
+   * ⭐ AND IT IS PARAMETRISED, because the defect was a CLASS and not one
+   * string: the prefix was applied to EVERY coded refusal the route can answer.
+   * The population is not guessed here — `src/lib/probe-vocabulary.invariant.test.ts`
+   * derives it from the route source and pins it against a hand-typed ROSTER at
+   * `EXPECTED_TOTAL_CODES = 6`, so a NEW arm fails THERE by name. This table
+   * transcribes that roster plus the status each arm actually answers, read off
+   * `src/app/api/keys/[id]/permissions/route.ts` (503/429/500/502/502/502).
+   */
+  const ROUTE_REFUSALS: ReadonlyArray<{
+    code: string;
+    status: number;
+    prose: string;
+  }> = [
+    {
+      code: "CIRCUIT_OPEN",
+      status: 503,
+      prose:
+        "The analytics service is temporarily unavailable. Please try again in a moment.",
+    },
+    { code: "PROBE_RATE_LIMITED", status: 429, prose: "Too many requests" },
+    {
+      code: "KEY_UNDECRYPTABLE",
+      status: 500,
+      prose:
+        "This stored key can no longer be decrypted. Reconnect the key — retrying will not help.",
+    },
+    {
+      code: "PROBE_BACKEND_UNAVAILABLE",
+      status: 502,
+      prose: "Could not reach the permissions service. Try again shortly.",
+    },
+    {
+      code: "PROBE_TIMEOUT",
+      status: 502,
+      prose: "Permissions probe timed out. Try again.",
+    },
+    {
+      code: "PROBE_FAILED",
+      status: 502,
+      prose: "Could not check key scopes. Try again.",
+    },
+  ];
+
+  function mockRefusal(code: string, status: number, prose: string) {
     global.fetch = vi.fn().mockResolvedValueOnce({
       ok: false,
-      status: 502,
-      statusText: "Bad Gateway",
-      json: async () => ({
-        error: "Could not reach the permissions service. Try again shortly.",
-        code: "PROBE_BACKEND_UNAVAILABLE",
-      }),
+      status,
+      statusText: "Refused",
+      json: async () => ({ error: prose, code }),
     } as Response) as unknown as typeof fetch;
+  }
 
-    render(<KeyPermissionBadge apiKeyId="key-1" />);
-    await waitFor(() =>
-      expect(
-        screen.getByText(
-          /PROBE_BACKEND_UNAVAILABLE: Could not reach the permissions service/,
-        ),
-      ).toBeInTheDocument(),
+  describe("[164.2-01 / 161-ERRPREFIX] the code is split out of the rendered sentence", () => {
+    // ── THE RENDER HALF ─────────────────────────────────────────────────────
+    it.each(ROUTE_REFUSALS)(
+      "$code: the user reads the curated prose and NEVER the raw code",
+      async ({ code, status, prose }) => {
+        mockRefusal(code, status, prose);
+        render(<KeyPermissionBadge apiKeyId="key-1" />);
+
+        await waitFor(() =>
+          expect(screen.getByText(prose)).toBeInTheDocument(),
+        );
+        // THE inversion: the old pin required this substring to be present.
+        expect(
+          document.body.textContent,
+          `The rendered sentence still carries the machine code ${code}. A user ` +
+            "with a broken key is not the reader of a code — the 2026-08-26 " +
+            "ruling routes it to the log and the breadcrumb instead.",
+        ).not.toContain(code);
+      },
     );
+
+    // ── THE LOG HALF ────────────────────────────────────────────────────────
+    // Identity, not substring (`arg === code`), copied from the B-27 test
+    // below at "does NOT render a raw caught message". This is what forces the
+    // code to be its OWN console.error argument: an interpolated
+    // `${err.code}: ${message}` string is not `=== code` and fails here.
+    it.each(ROUTE_REFUSALS)(
+      "$code: the code reaches console.error as an argument of its own",
+      async ({ code, status, prose }) => {
+        const consoleSpy = vi
+          .spyOn(console, "error")
+          .mockImplementation(() => {});
+        mockRefusal(code, status, prose);
+        render(<KeyPermissionBadge apiKeyId="key-1" />);
+
+        await waitFor(() =>
+          expect(screen.getByText(prose)).toBeInTheDocument(),
+        );
+        expect(
+          consoleSpy.mock.calls.find((call) =>
+            call.some((arg) => arg === code),
+          ),
+          `${code} never reached console.error as a standalone argument, so ` +
+            "the greppability the prefix existed for was traded away rather " +
+            "than relocated. That fails the ruling as surely as leaving the " +
+            "prefix in the render.",
+        ).toBeDefined();
+      },
+    );
+
+    // ── THE BREADCRUMB HALF ─────────────────────────────────────────────────
+    it.each(ROUTE_REFUSALS)(
+      "$code: the code is the MESSAGE of a Sentry breadcrumb",
+      async ({ code, status, prose }) => {
+        mockRefusal(code, status, prose);
+        render(<KeyPermissionBadge apiKeyId="key-1" />);
+
+        await waitFor(() =>
+          expect(screen.getByText(prose)).toBeInTheDocument(),
+        );
+        expect(
+          vi.mocked(addSentryBreadcrumb),
+          `No breadcrumb carried ${code}. The breadcrumb is the half of the ` +
+            "split that survives a user who never opens the console.",
+        ).toHaveBeenCalledWith(expect.objectContaining({ message: code }));
+      },
+    );
+
+    // The breadcrumb message must be the CODE, never the prose — the whole
+    // point of the split is that the two audiences get different strings.
+    it("the breadcrumb message is the machine code, not the user's sentence", async () => {
+      const { code, status, prose } = ROUTE_REFUSALS[0];
+      mockRefusal(code, status, prose);
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+
+      await waitFor(() => expect(screen.getByText(prose)).toBeInTheDocument());
+      const call = vi.mocked(addSentryBreadcrumb).mock.calls[0]?.[0];
+      expect(call?.message).toBe(code);
+      expect(call?.message).not.toBe(prose);
+    });
+
+    // NEGATIVE CONTROL — a refusal with NO code must not invent one, and must
+    // not fire a breadcrumb whose message would then be prose or `undefined`.
+    it("a bodied refusal with no `code` renders its prose and fires no breadcrumb", async () => {
+      global.fetch = vi.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        statusText: "Bad Gateway",
+        json: async () => ({ error: "Exchange permission probe failed" }),
+      } as Response) as unknown as typeof fetch;
+
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      await waitFor(() =>
+        expect(
+          screen.getByText("Exchange permission probe failed"),
+        ).toBeInTheDocument(),
+      );
+      expect(vi.mocked(addSentryBreadcrumb)).not.toHaveBeenCalled();
+    });
   });
 
   it("re-fetches on Re-check click", async () => {
@@ -332,8 +496,16 @@ describe("KeyPermissionBadge", () => {
 
       fireEvent.click(screen.getByTestId("key-permission-recheck"));
 
+      // [164.2-01 / 161-ERRPREFIX] INVERTED, not deleted. This `waitFor` used
+      // to read `getByText(/PROBE_FAILED/)` — it was only the WAIT CONDITION
+      // for this test's two real assertions below, but it waited on the raw
+      // code appearing in the DOM, which the 2026-08-26 ruling removes. It now
+      // waits on the route's curated prose instead; the fixture, and both
+      // assertions this test exists for, are untouched.
       await waitFor(() =>
-        expect(screen.getByText(/PROBE_FAILED/)).toBeInTheDocument(),
+        expect(
+          screen.getByText("Could not check key scopes. Try again."),
+        ).toBeInTheDocument(),
       );
 
       // THE assertion: no stale security claim survives the failure.
@@ -361,11 +533,20 @@ describe("KeyPermissionBadge", () => {
 
       fireEvent.click(screen.getByTestId("key-permission-recheck"));
 
+      // [164.2-01 / 161-ERRPREFIX] INVERTED, not deleted. This assertion used
+      // to be byte-exact on `"PROBE_FAILED: Could not check key scopes. Try
+      // again."` — i.e. it pinned the CODE PREFIX as the contract between the
+      // fail-closed route and this component. The 2026-08-26 ruling splits
+      // them: the sentence is what the user reads, and the code is what the
+      // log and the breadcrumb carry. The fixture and the scope-chip assertion
+      // are unchanged; only the expected string moved, plus an explicit
+      // absence check so the prefix cannot creep back through this path.
       await waitFor(() =>
         expect(
-          screen.getByText("PROBE_FAILED: Could not check key scopes. Try again."),
+          screen.getByText("Could not check key scopes. Try again."),
         ).toBeInTheDocument(),
       );
+      expect(document.body.textContent).not.toContain("PROBE_FAILED");
       expect(scopeChips()).toHaveLength(0);
     });
 
