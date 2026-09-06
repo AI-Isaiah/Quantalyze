@@ -5650,6 +5650,31 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   is a milestone-sized policy decision, and merging it into a hygiene item would hide it.
   Source: `.planning/phases/164.1-prod-observability-…/deferred-items.md`.
 
+- [ ] **`[CI-DOCSPATH-01]` a PR that changes NO code runs the entire gate corpus — ~50 job-minutes
+  and two shared-TEST-DB mutex holds for a markdown edit (logged 2026-09-06, at the PR #750 merge).**
+  MEASURED on PR #750 itself, whose diff is FOUR `.planning/` markdown files and zero code, zero
+  SQL, zero migrations: **21 jobs, ~3,001 job-seconds (~50 min)**, a total that EXCLUDES
+  `e2e-seeded` and `sql-tests` because both were still running when the census was taken. The
+  expensive jobs all ran in full — `sql-mutation` 559s, `python` 494s, `e2e` 405s, `frontend-test`
+  368s + 344s, `lighthouse-mobile` 305s. ⚠️ The wasted minutes are the SMALL half: `e2e-seeded`
+  and `sql-tests` each take the shared-TEST-DB advisory mutex, so a roadmap typo fix queues ahead
+  of, and delays, real code PRs on a database SHARED with other people's CI.
+  ⛔ The risk is the fix, not the problem. A path filter that skips jobs has exactly the shape of
+  a gate silently not running — this milestone's named defect class — so it is NOT shippable on
+  evidence that a docs PR got fast; it is shippable only on evidence that a CODE PR still runs
+  everything. Two real pushes are required, not reasoning: (a) a `.planning/**`-only diff showing
+  the skipped set, and (b) a diff touching one `src/**` file AND one `supabase/migrations/**` file
+  showing `sql-mutation`, `sql-tests`, `e2e-seeded`, `python`, `frontend-test` and
+  `migration-drift-check` all EXECUTE. ⚠️ Also beware that `paths-ignore` on a REQUIRED check
+  reports *pending forever* rather than *passed* and wedges branch protection — a job-level `if:`
+  on a changed-files step is usually safer than a workflow-level `paths-ignore`, and whichever is
+  chosen must be shown not to wedge the `frontend` aggregator. A required check stuck pending is a
+  WORSE outcome than the 50 minutes this saves.
+  **OWNER 2026-09-06: Phase 164.6 GATE-HYGIENE item (12)**, success criterion 9. Routed there
+  rather than left here because "when is a gate invoked, and can I prove it still bites" is
+  precisely 164.6's competence. ⛔ NOT in scope: changing WHICH gates exist or what they contain.
+  Source: measured live at the PR #750 merge gate; see `.planning/ROADMAP.md` Phase 164.6 item (12).
+
 ## Phase 146.2 — recorded deferrals (logged 2026-08-19)
 
 *The founder rule: an item ABSORBED into a phase is deleted from this file, but an item the
