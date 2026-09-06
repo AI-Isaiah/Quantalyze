@@ -323,6 +323,42 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
   });
 
   /**
+   * ⭐ THE ALLOWANCE'S VALUE, PINNED TO WITHIN AN HOUR — and without this pair
+   * it was not pinned at all. The +1h arm above only proves the allowance
+   * exceeds four minutes, and the +2d control only proves it is under two days:
+   * every constant in that entire range passes both, so `= 1` could silently
+   * become `= 1.5` and no test in this repo would notice. These two straddle
+   * ONE DAY, an hour either side.
+   *
+   * This is the ONE surface that can pin it: `SyncBadge` takes an INSTANT,
+   * while the factsheet chip's series axis carries UTC dates and has no
+   * sub-day resolution to assert with.
+   */
+  it("WR-06-UTC BOUND (lower): 23 hours ahead is still inside the day allowance", () => {
+    const { container } = render(
+      <SyncBadge
+        computedAt={agoIso(2 * HOUR)}
+        seriesEnd={new Date(Date.now() + 23 * HOUR).toISOString()}
+      />,
+    );
+
+    expect(dotClass(container)).toContain("bg-positive");
+    expect(container.textContent).not.toMatch(/in the future/i);
+  });
+
+  it("WR-06-UTC BOUND (upper): 25 hours ahead is past it — no calendar explains that", () => {
+    const { container } = render(
+      <SyncBadge
+        computedAt={agoIso(2 * HOUR)}
+        seriesEnd={new Date(Date.now() + 25 * HOUR).toISOString()}
+      />,
+    );
+
+    expect(dotClass(container)).toContain("bg-text-muted");
+    expect(container.textContent).toMatch(/Track record ends in the future/i);
+  });
+
+  /**
    * The OTHER control the grace must not break: a genuinely dead track record
    * is still dead. A repair that softened the whole series arm would pass every
    * assertion above and quietly delete the requirement.

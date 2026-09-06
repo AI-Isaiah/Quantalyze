@@ -258,7 +258,22 @@ describe("FreshnessChip — the badge cannot outrun the data (HONEST-02)", () =>
     expect(chip.tone, why).not.toBe(POSITIVE);
   });
 
-  it("C-4: a live series does NOT rescue a stale job — the blend takes the WORSE of the two", () => {
+  // ⭐ C-4 IS THE CHIP TWIN OF `SyncBadge.staler-of-two.test.tsx:62` — the badge
+  // test "Test 2: when the SYNC is the staler fact, the sync-keyed form is
+  // unchanged". Paired here for HONEST-08-RESIDUAL (Phase 164.2): the badge half
+  // of staler-of-two was proven in 163, the chip half was not, and "the SYNC arm
+  // binds" is precisely what distinguishes a correct staler-of-two from an
+  // implementation that always binds to the series.
+  //
+  // ⛔ THE FIXTURE IS 30d/1d, NOT the badge twin's 3d/1d, and the difference is
+  // load-bearing rather than incidental. The two surfaces run DIFFERENT job
+  // ladders — the badge's is 12h/48h, so 3 days is already its worst bucket,
+  // while this chip's is 3d/7d, where 3 days is still `fresh`. Copying 3d/1d
+  // here would make BOTH tones tie at rank 0, so the only thing a neuter could
+  // move is the tie-break, and the proof would be vacuous (164.2 revision B4).
+  // At 30d/1d the job is `old` (rank 3) over a `fresh` series (rank 0): the
+  // tones genuinely differ and the job's genuinely wins.
+  it("C-4: a live series does NOT rescue a stale job — the blend takes the WORSE of the two (chip twin of staler-of-two:62)", () => {
     // The other direction, and the one a "never fresh" assertion can never
     // catch: swap the max for a min and the chip would read "fresh" here, over
     // a report nobody has recomputed in a month.
@@ -379,5 +394,51 @@ describe("FreshnessChip — the badge cannot outrun the data (HONEST-02)", () =>
     // …and it is NOT the series end, which the line below owns.
     expect(chip.dateLine).not.toContain(usDate(ymdDaysAgo(89)));
     expect(recencyLineText(container)).toBe(`Track record through ${usDate(ymdDaysAgo(89))}`);
+  });
+
+  /**
+   * ── WR-06-UTC (Phase 164.2) — the chip's half of the day allowance ────────
+   *
+   * `payload.dates` carries UTC **DATES**, not instants, which is the whole
+   * reason this arm exists: a venue that stamps today's daily bar writes a
+   * calendar date up to a day ahead of a browser west of UTC, and the bare
+   * `days < 0` split called that `future — check data` on a live strategy. The
+   * series call of `bucketByAge` now passes `SERIES_END_FUTURE_ALLOWANCE_DAYS`,
+   * the same constant the discovery badge's `bucketSeriesAge` reads.
+   *
+   * ⚠️ NOTE THE FIXTURE'S RESOLUTION. `ymdDaysAgo(-1)` is TOMORROW'S DATE, read
+   * at UTC midnight, so its distance ahead of the render is somewhere in (0, 1]
+   * days depending on the hour the suite runs. That IS the production input —
+   * this axis has no finer resolution to offer — and the hour-precision version
+   * of the same case is pinned on the badge, which takes an instant
+   * (`staler-of-two`, "a series end an HOUR ahead is a same-day bar").
+   */
+  it("C-13: TOMORROW's bar is a same-day write, not a future date (WR-06-UTC)", () => {
+    const { container } = renderFactsheet(payloadWith(-1, isoHoursAgo(2)));
+
+    const chip = readChip(container);
+    // Within the allowance the series makes no claim at all: the job is the
+    // only fact in question, and it ran two hours ago.
+    expect(chip.label).toBe("Computed · fresh");
+    expect(chip.tone).toBe(POSITIVE);
+    expect(chip.label).not.toContain("future");
+  });
+
+  it("C-14: THREE days ahead is still a future date — the allowance is BOUNDED (WR-06-UTC)", () => {
+    // ⚠️ THREE days, not two, and the extra day is not padding. A date-only
+    // fixture is read at UTC midnight, so "N days ahead" is really "between N-1
+    // and N days ahead" depending on the hour. At N=2 the lower edge lands
+    // EXACTLY on the one-day allowance, which would make this control
+    // knife-edge near 00:00 UTC; N=3 keeps it two full days clear at every
+    // hour. The TIGHT upper bound is pinned on the badge instead, where the
+    // fixture is an instant and can say "+25h" exactly.
+    const { container } = renderFactsheet(payloadWith(-3, isoHoursAgo(2)));
+
+    const chip = readChip(container);
+    // Without a bound, "tolerate a calendar day" degenerates into "tolerate any
+    // future date" and launders a corrupt write into a freshness claim.
+    expect(chip.label).toBe("Track record · future — check data");
+    expect(chip.tone).toBe(MUTED);
+    expect(chip.tone).not.toBe(POSITIVE);
   });
 });
