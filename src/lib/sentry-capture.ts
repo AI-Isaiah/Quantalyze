@@ -234,6 +234,76 @@ export function captureToSentry(
 }
 
 /**
+ * 164.2-01 / 161-ERRPREFIX — ADD A SENTRY BREADCRUMB, NOT AN EXCEPTION.
+ *
+ * ⚠️ WHY THIS EXISTS AT ALL. The founder ruling of 2026-08-26 on 161-ERRPREFIX
+ * is a SPLIT, not a deletion. `KeyPermissionBadge.tsx` used to render
+ * `PROBE_BACKEND_UNAVAILABLE: Could not reach the permissions service…` — the
+ * machine code prefixed onto the curated sentence — and the comment above that
+ * line justified the prefix by SUPPORT-TICKET GREPPABILITY. Removing the prefix
+ * without preserving the code would trade a copy defect for an observability
+ * one, which fails the ruling as surely as leaving the prefix in the render. So
+ * the code goes to `console.error` (an argument of its own) AND here.
+ *
+ * ⛔ THE `message` IS A MACHINE CODE, NEVER USER PROSE. That is the whole point
+ * of the split: the prose is what the user reads, the code is what a support
+ * engineer greps. Passing the sentence here would rebuild the conflation this
+ * helper was created to end.
+ *
+ * MEASURED, 2026-09-06: `grep -rn addBreadcrumb src` returned ZERO hits before
+ * this function — this is the first breadcrumb in the codebase, so there was no
+ * prior convention to follow and `captureToSentry` above is what it copies.
+ *
+ * The skeleton is DELIBERATELY IDENTICAL to `captureToSentry`'s (outer try /
+ * dynamic import / inner try / `.catch` that RESOLVES / outer catch returning a
+ * settled promise) for the reasons stated at `:223-226` — in particular the
+ * `.catch` must resolve rather than reject, or a floating rejection becomes an
+ * unhandled rejection at every `void addSentryBreadcrumb(...)` call site.
+ *
+ * ⚠️ NO IMPORT WAS ADDED FOR THIS. The module imports exactly one module
+ * (`./seam-redaction`) and must keep that property — see `:178-185`: it is
+ * imported by `"use client"` components, so a `next/server` (or any
+ * server-only) import would ship a server module into the browser bundle.
+ */
+export function addSentryBreadcrumb(options: {
+  category: string;
+  /** THE MACHINE CODE. Never the user-facing sentence — see the docblock. */
+  message: string;
+  data?: Record<string, unknown>;
+  level?: "fatal" | "error" | "warning" | "info" | "debug";
+}): Promise<void> {
+  try {
+    // No per-request secrets here: a breadcrumb carries a code and small
+    // structured context, never a credential. The env-secret list still
+    // applies, which is what `scrubRecord` with an empty extra-secret list
+    // gives — the same call `captureToSentry` makes for its `extra`.
+    const data = scrubRecord(options.data, []);
+    return import("@sentry/nextjs")
+      .then((Sentry) => {
+        try {
+          Sentry.addBreadcrumb({
+            category: options.category,
+            message: options.message,
+            data,
+            level: options.level ?? "info",
+          });
+        } catch {
+          // Swallow — the caller already logged via console.error.
+        }
+      })
+      .catch(() => {
+        // Sentry import failed — swallow, and RESOLVE. Same reasoning as
+        // `captureToSentry`'s `.catch`: the chain is returned, so rejecting
+        // would surface as an unhandled rejection at every call site.
+      });
+  } catch {
+    // import() construction failed — hand the caller a settled promise so
+    // `void addSentryBreadcrumb(...)` and `await` are both total.
+    return Promise.resolve();
+  }
+}
+
+/**
  * 140.4-16 / WR-06 — EDGE-TRIGGER FOR THE HIGH-VOLUME CAPTURE SITES.
  *
  * ⚠️ THE PROBLEM THIS SOLVES IS AN ALERT STORM DURING THE EXACT INCIDENT THE

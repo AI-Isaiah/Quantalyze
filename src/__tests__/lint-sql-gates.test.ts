@@ -874,9 +874,13 @@ const RESULT_LOOP_CONDITION_FLOOR = 8;
 const TOLERANCE_BEARING_JOBS = ["e2e-seeded", "plan-anchor-verify", "sql-tests"] as const;
 
 describe("lint-sql-gates: the CI invocation (mode identity)", () => {
-  it("exits 0 over the real 71-file corpus with the allowlist applied", () => {
+  it("exits 0 over the real 72-file corpus with the allowlist applied", () => {
     const res = runCli([]);
-    expect(res.out).toMatch(/scanned 71 file/);
+    // ⚠️ CURRENCY 2026-09-06 (phase 164.2 plan 07): 71 -> 72. The corpus gained
+    // test_sync_status_curated_sentence_survives.sql. The number is pinned
+    // rather than derived on purpose — a linter that stopped SEEING files would
+    // report "0 finding(s)" over a shrinking corpus and read as clean.
+    expect(res.out).toMatch(/scanned 72 file/);
     expect(res.status, res.out).toBe(0);
   });
 

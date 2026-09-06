@@ -232,6 +232,32 @@ restated in prose.
 VAC-04 and VAC-08 have still not run against their real credential; see entries
 25 and 26.
 
+⭐ **CURRENCY 2026-09-06 (Phase 164.2 CURATED-COPY plan 07) — the corpus grew by
+one gate file.** Every paragraph above stays as dated lineage; this one is the
+current reading. Plan 07 added `supabase/tests/test_sync_status_curated_sentence
+_survives.sql` — 7 arms proving the runner's curated `computation_error` sentence
+SURVIVES the status transition, plus an applied-ness probe — 8 sections, 8 twins,
+all 8 biting on the proof run. Read off `node scripts/mutation-runner/run.mjs` at
+the final tree, **exit 0**: `coverage: files 45/72`, `arms: 369/369/0`,
+`biting: 369`, `lane-invocations: 369` (the two independent tallies AGREE),
+`lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, `  pending: 0`,
+`per-arm lane time: mean 1.1s`, `✅ No defects`. 45 annotated + 0 lane-blocked +
+27 `unreachable:` + 0 pending = 72. `FILES_FLOOR` moved 44 → **45** and
+`ARMS_FLOOR` 361 → **369**; `WAIVED_CEILING` is still **0**. Both floors were
+SEPARATED in both directions on real full-corpus lane runs before being pinned —
+at +1 each the runner named both regressions and exited 1; at the pinned values,
+0 defects. ⚠️ **These are that run's DATED readings, not live constants: read
+`FILES_FLOOR` and `ARMS_FLOOR` off the constants themselves in
+`scripts/mutation-runner/run.mjs` (cited by SYMBOL, not by line — this file's
+earlier line cites drifted the moment the runner grew).** The ubuntu SHA-bound confirmation for THIS corpus has not been taken —
+the 567 s / 363-arm figure above is the 164.4.1 tree and must not be read as a
+figure for 45 files. ⛔ `sql-tests` is expected RED on the 164.2 PR for exactly
+two named arms until the provenance migration reaches shared TEST — see TODOS
+`[164.2-TEST-APPLY-PROVENANCE]`; that is a missing apply, not a coupling
+regression.
+Read the run's own `coverage:` and `arms:` lines rather than any number restated
+in prose.
+
 ## Which database am I on? (ask FIRST, every time)
 
 ⛔ **This checkout's Supabase CLI is linked to PRODUCTION.** `supabase/.temp/project-ref` holds

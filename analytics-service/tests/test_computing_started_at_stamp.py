@@ -626,8 +626,24 @@ def test_python_writer_census_counts() -> None:
         ``_publish_snapshot[...]`` subscript SPECIFICALLY so this census can
         classify it — measured: the subscript spelling reddened the value-form arm
         of :func:`test_python_status_writers_stamp_and_clear`, which is that gate
-        working as designed. It resolves through the direct-literal arm, so
-        ``EXPECTED_KEPT_VIA_N1`` is unchanged.
+        working as designed. It resolved through the direct-literal arm, so
+        ``EXPECTED_KEPT_VIA_N1`` was unchanged.
+        ⬆️ **+4 on 2026-09-06 (Phase 164.2 plan 08).** ``EXPECTED_KEPT_VIA_N1``
+        went 7 → 11 and NOTHING moved kept→skipped. Four payloads that used to be
+        written INLINE inside their ``upsert()`` call are now BOUND to a local
+        first — ``analytics_runner._upsert_restore`` and ``job_worker``'s
+        ``_mark_analytics_failed``, ``run_derive_broker_dailies_job._upsert`` and
+        ``run_stitch_composite_job._upsert`` — so they resolve through the n1
+        ``ast.Name`` arm like the rest rather than through the direct-literal
+        arm. The binding is required, not cosmetic:
+        ``services/strategy_analytics_provenance.upsert_or_drop_provenance`` must
+        be able to POP the two ``computation_error_*`` marker keys out of that
+        exact dict and re-issue it if the database refuses them (TODOS
+        ``[PROV-WRITER-23514]``), and an inline literal is not a thing the retry
+        can reach. Each site is still ONE readable literal at ONE call site,
+        which is all this census asks of it — 11 of the 12 kept payloads now
+        resolve via n1, the twelfth being ``_mark_computing``, the sole entry
+        writer, which is untouched by that plan.
       * 12 status-writing dicts — 8 in ``analytics_runner.py`` (1 entry + 6 exits
         + the D-02/R2 schema-cache-miss re-issue in ``_mark_unrecoverable``) and 4
         in ``job_worker.py`` (3 terminal 'failed' + the composite success
@@ -709,7 +725,7 @@ def test_python_writer_census_counts() -> None:
     EXPECTED_STATUS_DICTS = 12
     EXPECTED_RUNNER_DICTS = 8
     EXPECTED_WORKER_DICTS = 4
-    EXPECTED_KEPT_VIA_N1 = 7
+    EXPECTED_KEPT_VIA_N1 = 11
     EXPECTED_SITES_VIA_N2 = 1
     EXPECTED_COMPUTING_DICTS = 1
     EXPECTED_SKIPPED_UNRESOLVED = 0

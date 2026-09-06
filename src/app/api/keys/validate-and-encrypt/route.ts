@@ -10,6 +10,11 @@ import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 // 140.3-G4 / SEAMUX-03 — reads the upstream's own machine code off a forwarded
 // body so the legacy-forward arm preserves it rather than overwriting.
 import { seamErrorCode } from "@/lib/seam-discriminator";
+// 164.2 review B2 — the curated sentence for a status-MAPPED code, read from
+// the one copy table rather than retyped, so it cannot drift from what the
+// envelope renders. `recogniseSeamErrorCode` is the same seam→wizard
+// translation the client applies to this body's `code`.
+import { WIZARD_ERROR_COPY, recogniseSeamErrorCode } from "@/lib/wizardErrors";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
@@ -66,6 +71,64 @@ const MAX_KEY_LABEL_LENGTH = 120;
 // reads. The leaf's header carries the constraint that matters most on THIS
 // route: the copy must never blame the user's key for an outage in which no
 // request to the exchange was ever issued.
+
+/**
+ * 164.2-05 / WIZFORM-02 — a BARE upstream 4xx status, classified.
+ *
+ * ── THE MEASUREMENT ─────────────────────────────────────────────────────────
+ *
+ * PRODUCTION, 2026-08-25: this route answered a key-connect attempt with
+ *
+ *     {"error":"Unauthorized","code":"UNKNOWN"}
+ *
+ * The Railway analytics service rejected OUR service key and answered a bare
+ * 401 — no seam envelope, so `AnalyticsUpstreamError.seamCode` was `null` and
+ * the 4xx-forward arm's `err.seamCode ?? "UNKNOWN"` had nothing left to read.
+ * WIZFORM-02's criterion is *"no wizard failure renders UNKNOWN when the server
+ * DID classify it"*, and a 401 IS a classification. It was discarded one line
+ * before it could be used, because the only channel that arm consulted was the
+ * envelope's.
+ *
+ * ⛔ NO ROSTER ROW CAN CLOSE THIS. Every roster, alias table and coverage law
+ * in this repo operates on a code that already exists; here the wire literally
+ * carried the string `"UNKNOWN"`. The status is the only classification present
+ * on the path, so the status is what has to be read.
+ *
+ * ── WHY 401/403 IS OURS ─────────────────────────────────────────────────────
+ *
+ * The credential on THIS hop is the analytics service key held in our own
+ * environment (PYAPI-06). The user's exchange credentials are the request BODY,
+ * never the authorization. So a 401 or 403 here means our own service rejected
+ * our own key — a configuration fault on our side, which is exactly what
+ * `SEAM_MISCONFIGURED`'s copy already says (*"We could not send this request —
+ * our own configuration is wrong"*). Reading it as "your key was rejected"
+ * would be a fresh false attribution, the class this phase exists to close.
+ *
+ * 422 is the service's own shape refusal → `VALIDATION_FAILED`, whose copy was
+ * deliberately authored to name NO producer so it serves both that 422 and our
+ * own 400. 429 is a throttle on that hop → `RATE_LIMITED`.
+ *
+ * ⛔ 400 IS DELIBERATELY ABSENT. A bare 400 from the validator is a verdict
+ * about the USER's key whose specific sentence we did not receive, and
+ * `VALIDATION_FAILED`'s copy (*"The fault is in our software, not in your key
+ * or your data"*) would be FALSE for it. An unmapped 4xx is genuinely
+ * unclassified and still answers `UNKNOWN` — that residue is honest, not a hole
+ * to be filled by widening this table.
+ *
+ * ⛔ EVERY VALUE MUST BE A KEY OF `SEAM_CODE_TO_WIZARD_CODE`. The client's
+ * `recogniseSeamErrorCode` answers `UNKNOWN` for anything outside that table,
+ * so a row minting a code it does not carry would buy nothing at the surface
+ * while reading like a fix here. `wizardErrors.invariant.test.ts` asserts it.
+ */
+const UPSTREAM_STATUS_TO_SEAM_CODE: ReadonlyMap<number, string> = new Map<
+  number,
+  string
+>([
+  [401, "SEAM_MISCONFIGURED"],
+  [403, "SEAM_MISCONFIGURED"],
+  [422, "VALIDATION_FAILED"],
+  [429, "RATE_LIMITED"],
+]);
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
   const body = await req.json();
@@ -291,13 +354,39 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     //
     // 140.3-G4 / SEAMUX-03 — the builder's DEFAULT deny bodies are codeless, so
     // pass overrides carrying the byte-identical sentence PLUS a code (exactly
-    // keys/sync:136-158 / create-with-key:240-243). KEY_RATE_LIMIT (not
-    // RATE_LIMITED) because this is the key-connect family and its two
-    // already-coded siblings both chose it — one fact, one token within the
-    // family. SEAM_MISCONFIGURED on the 503 outage arm.
+    // the `keys/sync` and `create-with-key` deny arms). SEAM_MISCONFIGURED on
+    // the 503 outage arm.
+    //
+    // ⚠️ 164.2-05 / criterion 4 — RATE_LIMITED, AND THE SUPERSEDED REASON IS
+    // KEPT SO IT IS NOT RE-ARGUED. This block used to read:
+    //
+    //     "KEY_RATE_LIMIT (not RATE_LIMITED) because this is the key-connect
+    //      family and its two already-coded siblings both chose it — one fact,
+    //      one token within the family."
+    //
+    // ⛔ That is an argument for consistency, made about a token that was
+    // FALSE in every member of the family. `KEY_RATE_LIMIT`'s copy says *"The
+    // exchange asked us to slow down … a transient, exchange-side throttle"*
+    // and its second fix line offers *"try a different exchange account"*. The
+    // bucket that denied one line above is `userActionLimiter` keyed
+    // `keys-validate-encrypt:<uid>` — OURS, per USER. No exchange was
+    // consulted, and no other exchange account can clear it. One token per fact
+    // is still the rule; the fact here is our own cap.
+    //
+    // `RATE_LIMITED` needed no new copy — it already said *"the cap is ours,
+    // not your exchange's"*. 164.2-04 moved `create-with-key`'s two arms and
+    // this plan moves the remaining three, so the family is consistent again,
+    // on the sentence that is true. `KEY_RATE_LIMIT` keeps its union member,
+    // its copy entry and its roster rows: `classifyKeyValidationError` still
+    // returns it at 503 for a GENUINE venue throttle, which is the one place
+    // its sentence holds.
+    //
+    // ⚠️ THE `{ error, code }` KEY ORDER IS UNCHANGED. `composite/add-key`
+    // spells the same body `{ code, error }`; neither order is a contract, and
+    // churning this one would move a byte-wise pin for nothing.
     return rateLimitDenyJson(rl, {
       headers: NO_STORE_HEADERS,
-      throttledBody: { error: "Too many requests", code: "KEY_RATE_LIMIT" },
+      throttledBody: { error: "Too many requests", code: "RATE_LIMITED" },
       misconfiguredBody: {
         error: "Rate limiter unavailable",
         code: "SEAM_MISCONFIGURED",
@@ -758,8 +847,43 @@ async function legacyValidateAndEncryptHandler(args: {
       // 140.3-G4 / SEAMUX-03 — preserve the upstream's own machine code
       // (`err.seamCode`, set by `AnalyticsUpstreamError`), UNKNOWN only when it
       // carried none. Never overwrite an upstream-carried code.
+      //
+      // ⚠️ 164.2-05 / WIZFORM-02 — THE ORDER OF THE TWO `??`s IS THE WHOLE
+      // CONTRACT, and it preserves the rule above rather than replacing it.
+      // `err.seamCode` is a classification the service made about THIS failure
+      // and still wins outright; the status map is consulted only when the
+      // envelope carried nothing, which is precisely the 2026-08-25 PROD case
+      // (a bare 401 answering `code: "UNKNOWN"`). Swapping the order would
+      // replace a specific true verdict with an inference from a channel that
+      // carries less. `UNKNOWN` remains the terminal for an unmapped status.
+      //
+      // ⭐ 164.2 review B2 — WHEN THE CODE COMES FROM THE STATUS MAP, THE
+      // MESSAGE MUST NOT COME FROM THE UPSTREAM. Every consumer of this route
+      // renders `error` and ignores `code`
+      // (`AllocatorExchangeManager.tsx`, `ApiKeyManager.tsx`,
+      // `StrategyForm.tsx`), so the PROD reproduction shipped a body whose two
+      // fields contradicted each other: `code: "SEAM_MISCONFIGURED"` (our own
+      // service key is stale) beside `error: "Unauthorized"` — which on a
+      // key-connect form reads as THEIR key being refused. That is the
+      // misattribution this phase exists to eliminate, so on the mapped arm the
+      // upstream's bare status text is replaced with the curated sentence the
+      // mapped code already owns, read from `WIZARD_ERROR_COPY` rather than
+      // retyped here.
+      //
+      // ⚠️ ONLY the mapped arm. When `err.seamCode` was present the upstream
+      // sent a CURATED 4xx detail about the USER's key and F5a forwards it
+      // byte-unchanged — `mappedCode` is computed only when `seamCode` is
+      // absent, precisely so that arm cannot be touched.
+      const mappedCode = err.seamCode
+        ? null
+        : (UPSTREAM_STATUS_TO_SEAM_CODE.get(err.status) ?? null);
       return NextResponse.json(
-        { error: err.message, code: err.seamCode ?? "UNKNOWN" },
+        {
+          error: mappedCode
+            ? WIZARD_ERROR_COPY[recogniseSeamErrorCode(mappedCode)].title
+            : err.message,
+          code: err.seamCode ?? mappedCode ?? "UNKNOWN",
+        },
         { status: err.status, headers: NO_STORE_HEADERS },
       );
     }

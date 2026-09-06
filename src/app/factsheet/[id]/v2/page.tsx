@@ -414,11 +414,15 @@ export default async function FactsheetV2Page({
           analytics service finishes the first compute pass, the full panel
           set will render here.
         </p>
+        {/* Criterion 9 (phase 164.2): a visitor has no developer console to
+            open, and this arm cannot know which of the three gates fired — so
+            it names none. The gate detail stays in the `console.warn` hint
+            above, which is the developer's channel. Not lane-gated: the owner
+            has no console on PROD either. */}
         <p className="mt-3 text-fixed-12 text-text-muted italic">
-          If this persists for more than a few minutes, the strategy may
-          have insufficient observations inside the bundled benchmark
-          window (2023-04-26 onward). See the dev-server console for the
-          exact gate the request fell through.
+          This factsheet has not been computed yet. Some strategies stay in
+          this state, and this page is all there is until one has been
+          computed.
         </p>
       </article>
     );

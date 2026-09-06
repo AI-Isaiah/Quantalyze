@@ -30,6 +30,37 @@ export const WARM_HOURS = 48;
 export const CLOCK_SKEW_TOLERANCE_MINUTES = 5;
 
 /**
+ * How far ahead of the reader's clock a `series_end` may sit and still be a
+ * CURRENT bar rather than a corrupt write, in DAYS.
+ *
+ * ⛔ THE UNIT IS THE POINT (WR-06-UTC). `series_end` is a UTC **DATE**, not an
+ * instant: it names the calendar day of the last daily bar. A venue that
+ * stamps today's bar therefore writes a date that is legitimately "ahead" of
+ * any browser west of UTC — an MT5 broker on UTC+3 near 22:00 UTC does exactly
+ * this, and so does every reader in the Americas for several hours of every
+ * day. `CLOCK_SKEW_TOLERANCE_MINUTES` above is calibrated for two SERVER
+ * CLOCKS drifting apart and is the wrong ORDER OF MAGNITUDE for a date, so
+ * under it an ordinary same-day bar rendered a muted "Track record ends in the
+ * future" over a live strategy. One calendar day is the largest gap a
+ * correctly-written date can open, and it is bounded: two days ahead is still
+ * `future`, because that is a write nobody can have observed.
+ *
+ * EXPORTED, and imported rather than re-typed, for the reason
+ * `CLOCK_SKEW_TOLERANCE_MINUTES` states above: there are TWO bucketers for this
+ * one fact — `bucketSeriesAge` below (the discovery badge) and `bucketByAge` in
+ * `app/factsheet/[id]/v2/FactsheetView.tsx` (the factsheet chip). Fixing one
+ * and transcribing the number into the other is precisely how those two public
+ * surfaces came to contradict each other about one strategy in the first place.
+ *
+ * ⛔ THE SERIES ARM ONLY. `computedAt` is an INSTANT written by our own
+ * pipeline, so the sync arm (`computeFreshness`, and `SyncBadge`'s `timeAgo`)
+ * keeps `CLOCK_SKEW_TOLERANCE_MINUTES`. A day of grace there would launder a
+ * corrupt compute timestamp into a freshness claim; chip-honesty C-10 is the
+ * wrong-scope tripwire that catches it.
+ */
+export const SERIES_END_FUTURE_ALLOWANCE_DAYS = 1;
+
+/**
  * Compute the freshness label for a given computation timestamp.
  * Accepts a Date, an ISO string, a unix-ms number, null, or undefined.
  * Returns `"stale"` for null/undefined/unparseable inputs so the fallback
@@ -198,6 +229,18 @@ export const FUTURE_SERIES_DOT = "bg-text-muted";
  * reader in the module called fresh. Within tolerance is `fresh`, and it is the
  * same constant, imported rather than re-typed.
  *
+ * ⚠️ THE TOLERANCE ON THIS ARM IS NO LONGER THAT CONSTANT (WR-06-UTC, Phase
+ * 164.2), and the paragraph above is kept as the reason the boundary stopped
+ * being zero rather than as a current reading. 163-REVIEW moved this arm from a
+ * bare zero to the SYNC constant, which was the right direction in the wrong
+ * UNIT: `series_end` is a UTC DATE, and a same-day bar is up to a calendar day
+ * ahead of a browser west of UTC — so five minutes still called an ordinary
+ * MT5-on-UTC+3 row `future`. The arm now reads
+ * `SERIES_END_FUTURE_ALLOWANCE_DAYS`, which subsumes the five minutes. The
+ * SYNC arm is untouched and still reads `CLOCK_SKEW_TOLERANCE_MINUTES`: the two
+ * facts are different kinds of clock, which is the whole reason the constants
+ * are two.
+ *
  * Beyond tolerance the answer is `future`: NOT a claim of staleness and NOT a
  * claim of freshness, which is the same non-committal position an unresolvable
  * series end already occupies in `resolveEffectiveRecency` below. A date we
@@ -208,8 +251,12 @@ function bucketSeriesAge(seriesEndMs: number, now: Date): SeriesVerdict {
   const days = (now.getTime() - seriesEndMs) / (1000 * 60 * 60 * 24);
   if (!Number.isFinite(days)) return "stale";
   if (days < 0) {
-    const minutesAhead = -days * 24 * 60;
-    return minutesAhead <= CLOCK_SKEW_TOLERANCE_MINUTES ? "fresh" : "future";
+    // ⛔ DAYS, NOT MINUTES (WR-06-UTC). See SERIES_END_FUTURE_ALLOWANCE_DAYS:
+    // `series_end` is a UTC DATE, so a same-day bar is up to a calendar day
+    // ahead of a browser west of UTC. A day subsumes the five minutes on this
+    // arm, so there is no second comparison — one allowance, one unit.
+    const daysAhead = -days;
+    return daysAhead <= SERIES_END_FUTURE_ALLOWANCE_DAYS ? "fresh" : "future";
   }
   if (days <= SERIES_FRESH_DAYS) return "fresh";
   if (days <= SERIES_STALE_DAYS) return "warm";

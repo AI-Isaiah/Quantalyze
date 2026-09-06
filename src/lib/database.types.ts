@@ -2572,6 +2572,8 @@ export type Database = {
           cagr: number | null
           calmar: number | null
           computation_error: string | null
+          computation_error_job_id: string | null
+          computation_error_source: string | null
           computation_status: string
           computation_warned: boolean
           computed_at: string
@@ -2606,6 +2608,8 @@ export type Database = {
           cagr?: number | null
           calmar?: number | null
           computation_error?: string | null
+          computation_error_job_id?: string | null
+          computation_error_source?: string | null
           computation_status?: string
           computation_warned?: boolean
           computed_at?: string
@@ -2640,6 +2644,8 @@ export type Database = {
           cagr?: number | null
           calmar?: number | null
           computation_error?: string | null
+          computation_error_job_id?: string | null
+          computation_error_source?: string | null
           computation_status?: string
           computation_warned?: boolean
           computed_at?: string

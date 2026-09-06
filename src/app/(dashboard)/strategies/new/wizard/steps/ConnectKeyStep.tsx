@@ -265,6 +265,23 @@ const TRUST_ATOMS: { title: string; body: string }[] = [
  * translation at `UNKNOWN`, misses the set, and lands on `UNKNOWN`, which is
  * what the unrecognised-code case pins.
  *
+ * ⚠️ 164.2-04 — "INTERSECT IN NOTHING" IS NO LONGER TRUE, AND THE PARAGRAPH IS
+ * CORRECTED RATHER THAN DELETED, for the same reason the stale one above it was
+ * kept. This roster gained `RATE_LIMITED` (criterion 4b), which IS a key of
+ * `SEAM_CODE_TO_WIZARD_CODE`. MEASURED, not assumed: that table (in
+ * `wizardErrors.ts`) maps it to ITSELF, so `recogniseCreateWithKeyCode` translating
+ * first still answers `RATE_LIMITED` and the rendered outcome is identical
+ * either way — which is precisely the condition the disjointness argument was
+ * standing in for. The agreement guard
+ * (`seam-ratelimit-posture.invariant.test.ts`, and the overlap oracle in
+ * `seam-wire-vocabulary.invariant.test.ts` that now carries this row by hand)
+ * is what keeps that true; if the mapping ever became a real alias, this row is
+ * where it has to be re-decided. ⛔ So the row below is the ROUTE-MINTED
+ * vocabulary written down, not the active path — the same reading
+ * `KNOWN_FINALIZE_CODES.VALIDATION_FAILED` is listed under, and the same reason:
+ * leaning on the wire table to carry a code we mint ourselves is the implicit
+ * coupling 140.4-12 spent a plan removing.
+ *
  * The members, enumerated from the route rather than remembered:
  *   · emitted directly by `create-with-key/route.ts`
  *   · returned by the shared `classifyKeyValidationError` at its catch arm
@@ -324,7 +341,55 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // `wizardErrors.invariant.test.ts`, whose hand-typed set gained this member
     // in the same commit.
     "KEY_REUSE_UNAVAILABLE",
+    // 164.2-04 / criterion 5 — the SECOND half of the wizard-session fence,
+    // admitted HERE IN THE SAME COMMIT the route starts emitting it, for the
+    // reason the three rows above state. The reuse arm's 23505 now reads which
+    // key the colliding draft holds and answers `DRAFT_ALREADY_EXISTS` only
+    // when that is this key; every other outcome (a different key of the
+    // caller's, or a read that faulted) answers this code, whose cause names
+    // the wizard session instead of claiming a key it did not establish.
+    // ⚠️ It answers 409, so the coverage law derived on "400" is structurally
+    // blind to it — the guard that DOES see it is the `[161-05 / WIZERR-03]`
+    // 409 describe in `wizardErrors.invariant.test.ts`, whose hand-typed set
+    // gained this member in the same commit.
+    "DRAFT_SESSION_COLLISION",
+    // 164.2-04 / criterion 4 — the reuse arm's request-SHAPE refusal, which
+    // used to wear `KEY_MISSING_REQUIRED_FIELD` and tell a reader with no
+    // fields on screen that one of their fields was empty. `KEY_MISSING_
+    // REQUIRED_FIELD` STAYS above: the credential arm emits it from five guards
+    // where a field really did arrive blank.
+    // ⚠️ This one answers 400, so unlike its two neighbours it IS inside the
+    // coverage law's derived population — and it moved `EXPECTED_SPLIT_CODES`
+    // (5 → 6) in the same commit as a result.
+    "PRESELECT_REQUEST_INVALID",
     "KEY_RATE_LIMIT",
+    // 164.2-04 / criterion 4b — OUR OWN per-user cap, which both
+    // `userActionLimiter` deny arms on this route now answer instead of
+    // `KEY_RATE_LIMIT`. That code stays directly above and is still reached
+    // here through `classifyKeyValidationError`, where the throttle really is
+    // the venue's; what changed is that a bucket keyed
+    // `strategies-create-with-key:<uid>` no longer renders as the user's
+    // exchange throttling their key, with a fix line telling them to try a
+    // different exchange account.
+    // ⛔ AND THIS ROW IS OWED BY HAND TWICE OVER. 429 is invisible to the
+    // coverage law (`statusRe` "400") AND to the 409 describe — and the code
+    // does not even ride a `NextResponse.json` literal, it rides
+    // `throttledBody` inside `rateLimitDenyJson`, which no source scan in
+    // `wizardErrors.invariant.test.ts` reads. The `[164.2-04]` describe in that
+    // file is a HAND-TYPED guard written for exactly this row.
+    //
+    // ⚠️ AND UNLIKE ITS NEIGHBOURS, OMITTING THIS LINE WOULD NOT RENDER
+    // `UNKNOWN` TODAY — MEASURED, and said out loud so nobody repeats the
+    // three rows above it as if it were. `RATE_LIMITED` is a key of
+    // `SEAM_CODE_TO_WIZARD_CODE` mapped to ITSELF, and
+    // `recogniseCreateWithKeyCode` translates BEFORE it consults this set, so
+    // the hop answers and the copy is unchanged with or without this row. It is
+    // here anyway, deliberately: this set is the vocabulary THIS ROUTE mints,
+    // and letting the shared wire table silently carry one of our own codes is
+    // the implicit coupling 140.4-12 spent a plan removing — it also means a
+    // future edit to that table (or a `recognise…` that stops translating
+    // first) turns a rendered-copy change into a caught one.
+    "RATE_LIMITED",
     "UNKNOWN",
     // Returned by `classifyKeyValidationError` (src/lib/wizardErrors.ts) — the
     // SHARED classifier this route and composite/add-key both call, so this

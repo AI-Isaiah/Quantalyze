@@ -474,6 +474,48 @@ describe("[140.5-05] AGREEMENT — where the roster and the wire table overlap, 
     //     is acceptable here precisely BECAUSE the mapping is to itself; if it
     //     ever became a real alias, this row is where that would have to be
     //     re-decided.
+    //   · ⭐ KNOWN_CREATE_WITH_KEY_CODES.RATE_LIMITED — added 164.2-04
+    //     (criterion 4b), recorded here in the same commit. THE DECISION THIS
+    //     ROW RECORDS: `create-with-key`'s two `userActionLimiter` deny arms
+    //     used to answer `KEY_RATE_LIMIT`, whose copy says the throttle is "a
+    //     transient, exchange-side throttle" and whose second fix line offers
+    //     "try a different exchange account". That bucket is keyed
+    //     `strategies-create-with-key:<uid>` — ours, per USER — so no exchange
+    //     was involved and no other exchange account could clear it. The arms
+    //     now answer `RATE_LIMITED`, whose copy already said "the cap is ours,
+    //     not your exchange's". `KEY_RATE_LIMIT` stays in the copy table and in
+    //     the roster because `classifyKeyValidationError` still returns it for
+    //     a GENUINE venue throttle, where its sentence is true.
+    //     ⚠️ WHICH VOCABULARY OWNS IT, ANSWERED RATHER THAN LEFT OPEN: the wire
+    //     table maps `RATE_LIMITED` to ITSELF, and `recogniseCreateWithKeyCode`
+    //     translates before consulting the roster, so the HOP is the active
+    //     path and the roster row is the route-minted vocabulary written down —
+    //     the identical reading `KNOWN_FINALIZE_CODES.VALIDATION_FAILED` above
+    //     is listed under. The agreement check above is what keeps the two
+    //     answers the same; if this mapping ever became a real alias, this row
+    //     is where that has to be re-decided.
+    //   · ⭐⭐ KNOWN_ADD_KEY_CODES.RATE_LIMITED and
+    //     KNOWN_SET_MEMBERS_CODES.RATE_LIMITED — added 164.2-05, the rest of
+    //     the class 164.2-04 opened. `userActionLimiter` denies on FOUR routes
+    //     and all four answered `KEY_RATE_LIMIT`; every one of those buckets is
+    //     keyed `<route>:<uid>`, so the exchange sentence and the "try a
+    //     different exchange account" remedy were false at all four. The
+    //     remaining three now answer `RATE_LIMITED`.
+    //     ⚠️ THE OWNERSHIP DECISION IS THE SAME ON THE FIRST AND DIFFERENT ON
+    //     THE SECOND, and flattening the two into one sentence would state a
+    //     falsehood about one of them:
+    //       · `KNOWN_ADD_KEY_CODES` — `MultiKeyConnectStep`'s add-key arm
+    //         translates first, so the HOP is the active path and this row is
+    //         the route-minted vocabulary written down. Identical reading to
+    //         `KNOWN_CREATE_WITH_KEY_CODES` above.
+    //       · `KNOWN_SET_MEMBERS_CODES` — ⭐ THE ROSTER IS THE ACTIVE PATH.
+    //         `handleContinue` has NO translate step: it membership-checks the
+    //         roster directly and otherwise renders UNKNOWN. This overlap
+    //         therefore does NOT shadow anything, and the row is load-bearing
+    //         for what the user reads. Measured: with the row removed the
+    //         step-level envelope carries `data-error-code="UNKNOWN"`.
+    //     Both map to THEMSELVES in the wire table, so both sides agree either
+    //     way and the agreement check above is what holds that.
     const overlaps = ROSTERS.flatMap((r) =>
       [...r.answers.keys()]
         .filter((code) => WIRE_TABLE.has(code))
@@ -485,11 +527,14 @@ describe("[140.5-05] AGREEMENT — where the roster and the wire table overlap, 
         "DELIBERATELY, having decided which vocabulary owns the new code and " +
         "which copy the user should read.",
     ).toEqual([
+      "KNOWN_ADD_KEY_CODES.RATE_LIMITED",
+      "KNOWN_CREATE_WITH_KEY_CODES.RATE_LIMITED",
       "KNOWN_CSV_FINALIZE_CODES.SEAM_MISCONFIGURED",
       "KNOWN_CSV_VALIDATE_CODES.SEAM_MISCONFIGURED",
       "KNOWN_FINALIZE_CODES.SEAM_MISCONFIGURED",
       "KNOWN_FINALIZE_CODES.VALIDATION_FAILED",
       "KNOWN_KICKOFF_CODES.RATE_LIMITED",
+      "KNOWN_SET_MEMBERS_CODES.RATE_LIMITED",
     ]);
   });
 

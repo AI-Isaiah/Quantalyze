@@ -996,17 +996,48 @@ describe("[140.3-G4 / SEAMUX-03] POST /api/keys/validate-and-encrypt — a machi
   });
 
   // ── the deny arm: two bodies, two tokens ──
-  it("429 throttle carries the EXACT { error, code: KEY_RATE_LIMIT } pair", async () => {
+  //
+  // ⚠️ 164.2-05 / criterion 4 — INVERTED PIN, and the history is the point.
+  //
+  // This case read `429 throttle carries the EXACT { error, code:
+  // KEY_RATE_LIMIT } pair`, and its own comment gave the rationale:
+  //
+  //     "KEY_RATE_LIMIT (not RATE_LIMITED): this is the key-connect family and
+  //      its two already-coded siblings both chose KEY_RATE_LIMIT."
+  //
+  // ⛔ THAT RATIONALE IS EXACTLY THE DEFECT. It is an argument for CONSISTENCY
+  // WITHIN A FAMILY, applied to a sentence that was FALSE in every member of
+  // the family: `KEY_RATE_LIMIT`'s copy says "The exchange asked us to slow
+  // down … a transient, exchange-side throttle", and its second fix line offers
+  // "try a different exchange account". The bucket that denied here is
+  // `userActionLimiter` keyed `keys-validate-encrypt:<uid>` — OURS, per USER.
+  // No exchange was consulted and no other exchange account can clear it. One
+  // token across the family is a good rule; it is not a reason to pick the
+  // token that lies. 164.2-04 moved `create-with-key`'s two arms first, so the
+  // family is once again consistent — on the TRUE sentence.
+  //
+  // `RATE_LIMITED` was not authored for this: it already said "the cap is ours,
+  // not your exchange's" (`wizardErrors.ts`). This is WIRING.
+  //
+  // The `{ error, code }` KEY ORDER is preserved byte-for-byte — this route
+  // spells its deny body in that order while `composite/add-key` spells it
+  // `{ code, error }`, and neither order is a contract worth churning here.
+  it("429 throttle carries the EXACT { error, code: RATE_LIMITED } pair", async () => {
     rateLimitResult.success = false;
     rateLimitResult.retryAfter = 12;
     const { POST } = await import("./route");
     const res = await POST(makeReq(VALID_BODY));
     expect(res.status).toBe(429);
-    // KEY_RATE_LIMIT (not RATE_LIMITED): this is the key-connect family and its
-    // two already-coded siblings both chose KEY_RATE_LIMIT.
+    // ⚠️ BYTE-WISE, because `toEqual` on parsed JSON does NOT compare key
+    // order (the WR-03 measurement: a swap left every receipt green). This
+    // route's order is `error` first; the assertion below fixes that as well as
+    // the token.
+    expect(await res.clone().text()).toBe(
+      '{"error":"Too many requests","code":"RATE_LIMITED"}',
+    );
     expect(await res.json()).toEqual({
       error: "Too many requests",
-      code: "KEY_RATE_LIMIT",
+      code: "RATE_LIMITED",
     });
   });
 
@@ -1049,14 +1080,34 @@ describe("[140.3-G4 / SEAMUX-03] POST /api/keys/validate-and-encrypt — a machi
     expect(body.error).toBe("Invalid API credentials");
   });
 
-  it("4xx forward falls back to UNKNOWN only when the upstream carried NO code", async () => {
+  // ⚠️ 164.2-05 / WIZFORM-02 — INVERTED FIXTURE, same claim, and the history is
+  // recorded rather than dropped.
+  //
+  // This case used to construct `AnalyticsUpstreamError("Key has IP
+  // restrictions", 403)` and assert `UNKNOWN`, because a bare status carried no
+  // classification at all. 164.2-05 gave the route
+  // `UPSTREAM_STATUS_TO_SEAM_CODE`, and **403 is now a mapped status** —
+  // `SEAM_MISCONFIGURED`, asserted in the `[164.2-05]` describe at the foot of
+  // this file. Leaving the old fixture here would have made this case assert
+  // the opposite of the route's behaviour; changing only the expectation would
+  // have DELETED the claim ("UNKNOWN when nothing classified it") that the case
+  // exists for.
+  //
+  // So the CLAIM is kept and the FIXTURE moved to a status the map does not
+  // carry. 418 is deliberate: it is a real HTTP status, it is not in the map,
+  // and it stands for the honest residue — an upstream 4xx we cannot name is
+  // UNCLASSIFIED, and `UNKNOWN` is the true answer for it rather than a
+  // failure. ⛔ Do not "complete" the map by adding a row for whatever status
+  // this case is pointed at; that would make this assertion unsatisfiable and
+  // the residue invisible.
+  it("4xx forward falls back to UNKNOWN when the upstream carried NO code AND the status is unmapped", async () => {
     const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
     mockValidateKey.mockRejectedValue(
-      new AnalyticsUpstreamError("Key has IP restrictions", 403),
+      new AnalyticsUpstreamError("I'm a teapot", 418),
     );
     const { POST } = await import("./route");
     const res = await POST(makeReq(VALID_BODY));
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(418);
     expect((await res.json()).code).toBe("UNKNOWN");
   });
 
@@ -1622,9 +1673,16 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
 
     expect(res.status).toBe(429);
     expect(res.headers.get("Retry-After")).toBe("17");
+    // ⚠️ 164.2-05 / criterion 4 — INVERTED with the arm above it, and it has to
+    // move in the SAME commit. This case's whole subject is PARITY: "the
+    // limiter polices the persist arm identically". The limiter sits above the
+    // arm split, so there is exactly ONE deny body; if this pin still said
+    // `KEY_RATE_LIMIT` while the other said `RATE_LIMITED`, the parity claim
+    // would be asserting a difference that cannot exist and would red for a
+    // reason that has nothing to do with the persist arm.
     expect(await res.json()).toEqual({
       error: "Too many requests",
-      code: "KEY_RATE_LIMIT",
+      code: "RATE_LIMITED",
     });
     // The limiter sits ABOVE the arm split, so a persist request cannot become
     // an unthrottled path to a live credential probe.
@@ -2066,5 +2124,236 @@ describe("[161-09 / WIZERR-08] the four request-shape arms carry codes true of t
     const lastMissing = src.lastIndexOf('code: "KEY_MISSING_REQUIRED_FIELD"');
     expect(lastMissing).toBeGreaterThan(0);
     expect(lastMissing).toBeLessThan(discriminator);
+  });
+});
+
+/**
+ * [164.2-05 / WIZFORM-02 — the TRACER instance] a bare upstream 4xx status is
+ * CLASSIFIED, not discarded.
+ *
+ * ── THE MEASUREMENT THIS DESCRIBE EXISTS FOR ────────────────────────────────
+ *
+ * On 2026-08-25 PRODUCTION answered a key-connect attempt with
+ *
+ *     {"error":"Unauthorized","code":"UNKNOWN"}
+ *
+ * from this route. The Railway analytics service had rejected OUR service key
+ * and answered a bare 401: no seam envelope, so `AnalyticsUpstreamError.seamCode`
+ * was `null`, and the 4xx-forward arm's `err.seamCode ?? "UNKNOWN"` had nothing
+ * left to say. WIZFORM-02's criterion is *"no wizard failure renders UNKNOWN
+ * when the server DID classify it"* — and a 401 IS a classification. It was
+ * discarded one line before it could be used, because the only channel the arm
+ * read was the envelope's.
+ *
+ * ⛔ A ROSTER ROW CANNOT CLOSE THIS, and that is why the fix is at the seam
+ * rather than in `KNOWN_VALIDATE_AND_ENCRYPT_CODES`. There was no code to
+ * roster: the wire carried the string "UNKNOWN". Every roster, alias table and
+ * coverage law in this repo operates on a code that already exists. The status
+ * is the only classification present on this path, so the status is what has to
+ * be read.
+ *
+ * ── WHY 401/403 IS `SEAM_MISCONFIGURED` AND NOT AN AUTH REFUSAL ─────────────
+ *
+ * The caller here is OUR server, not the user. This route reaches the analytics
+ * service with the service key held in our own environment (PYAPI-06); the
+ * user's exchange credentials are the request BODY, never the authorization.
+ * So a 401 or a 403 on this hop means our own service rejected our own key —
+ * a configuration fault on our side, which is precisely what
+ * `SEAM_MISCONFIGURED`'s copy already says: *"We could not send this request —
+ * our own configuration is wrong."* Reading it as "your key was rejected" would
+ * be a fresh false attribution, the exact class this phase closes.
+ *
+ * 422 is the analytics service's own shape refusal → `VALIDATION_FAILED`, whose
+ * copy is authored to serve both producers ("a request was refused on its shape
+ * before any work ran"). 429 is a throttle on that hop → `RATE_LIMITED`.
+ *
+ * ⛔ AND AN UNMAPPED STATUS STILL ANSWERS `UNKNOWN`. The map is a hand-typed
+ * closed vocabulary, not a rule for turning any integer into a sentence. A 4xx
+ * we have not reasoned about is genuinely unclassified, and UNKNOWN is the
+ * honest answer for it — see the `418` cases here and in the SEAMUX-03 describe
+ * above.
+ */
+describe("[164.2-05 / WIZFORM-02] keys/validate-and-encrypt — a bare upstream status is classified", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({ api_key_encrypted: "ct-blob" });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * HAND-TYPED, and deliberately NOT read out of the route. An expectation
+   * derived from its own subject cannot fail: drop the map and both sides go
+   * empty together. The route's copy of this table is checked against a
+   * hand-typed one — and against `SEAM_CODE_TO_WIZARD_CODE`'s key set — in
+   * `wizardErrors.invariant.test.ts`.
+   */
+  /**
+   * ⭐ 164.2 review B2 — the third column is the CURATED SENTENCE the mapped
+   * code owns, hand-typed from `WIZARD_ERROR_COPY`'s `title` in
+   * `src/lib/wizardErrors.ts`. It is deliberately NOT read out of that module:
+   * an expectation derived from the same table the route reads cannot fail if
+   * the route stops substituting at all in a way that still resolves copy.
+   * Hand-typing makes this pin bite on BOTH halves — the substitution
+   * happening, and the sentence being the one that was authored.
+   */
+  const MAPPED: ReadonlyArray<readonly [number, string, string]> = [
+    [401, "SEAM_MISCONFIGURED", "We could not send this request — our own configuration is wrong."],
+    [403, "SEAM_MISCONFIGURED", "We could not send this request — our own configuration is wrong."],
+    [422, "VALIDATION_FAILED", "We could not read that request."],
+    [429, "RATE_LIMITED", "You have reached our request limit."],
+  ];
+
+  it("THE PROD REPRODUCTION (2026-08-25): a bare 401 answers SEAM_MISCONFIGURED, never UNKNOWN", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    // Byte-for-byte the shape PROD produced: our service key rejected, no seam
+    // envelope, so `seamCode` is null.
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("Unauthorized", 401),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(
+      body.code,
+      "the 2026-08-25 PROD body `{\"error\":\"Unauthorized\",\"code\":\"UNKNOWN\"}` " +
+        "is back. The upstream DID classify this failure — 401 — and the arm " +
+        "discarded it because the classification arrived on the status channel " +
+        "rather than in a seam envelope. That is WIZFORM-02 by its own words.",
+    ).toBe("SEAM_MISCONFIGURED");
+    expect(body.code).not.toBe("UNKNOWN");
+    // ⭐ 164.2 review B2 — AND THE TWO FIELDS NO LONGER CONTRADICT EACH OTHER.
+    //
+    // ⚠️ THIS REPLACES AN EARLIER `expect(body.error).toBe("Unauthorized")`,
+    // which pinned the defect rather than the contract: every consumer of this
+    // route renders `error` and ignores `code`
+    // (`AllocatorExchangeManager.tsx:583`, `ApiKeyManager.tsx:245`,
+    // `StrategyForm.tsx:187`), so shipping the upstream's bare "Unauthorized"
+    // told the user THEIR key was refused while `code` said OUR configuration
+    // was wrong. On the status-MAPPED arm the sentence is now the curated copy
+    // the code owns.
+    expect(
+      body.error,
+      "the upstream's raw status text is on the wire again. Consumers render " +
+        "`error` and ignore `code`, so \"Unauthorized\" on a key-connect form " +
+        "blames the user's key for OUR stale service key.",
+    ).not.toBe("Unauthorized");
+    expect(body.error).toBe(
+      "We could not send this request — our own configuration is wrong.",
+    );
+  });
+
+  it.each(MAPPED)(
+    "a bare %i (no seamCode) answers %s with ITS curated sentence, not the upstream's text",
+    async (status, expected, sentence) => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      mockValidateKey.mockRejectedValue(
+        new AnalyticsUpstreamError("upstream said no", status),
+      );
+      const { POST } = await import("./route");
+      const res = await POST(makeReq(VALID_BODY));
+
+      expect(res.status).toBe(status);
+      const body = await res.json();
+      expect(
+        body.code,
+        `a bare ${status} fell through to the \`?? "UNKNOWN"\` terminal. The ` +
+          "status IS the classification on this path — the map lookup is not " +
+          "wired into the `code:` expression, or this row is missing from it.",
+      ).toBe(expected);
+      // ⭐ 164.2 review B2 — REPLACES `toBe("upstream said no")`, which pinned
+      // the leak: the upstream's own text is not shown for a code WE inferred
+      // from the status channel.
+      expect(
+        body.error,
+        `the ${status} arm forwarded the upstream's raw text beside a code the ` +
+          "status map supplied. The message and the code then describe " +
+          "different failures, and consumers render only the message.",
+      ).toBe(sentence);
+    },
+  );
+
+  it("an UNMAPPED 4xx still answers UNKNOWN — the residue is honest, not a hole", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("I'm a teapot", 418),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(418);
+    // An UNMAPPED status supplies no code, so it triggers no substitution
+    // either: F5b's forward is what still governs the sentence here.
+    expect((await res.clone().json()).error).toBe("I'm a teapot");
+    expect(
+      (await res.json()).code,
+      "an unmapped 4xx got a named code. The map is a hand-typed CLOSED " +
+        "vocabulary; a status nobody reasoned about is unclassified, and " +
+        "inventing a sentence for it is the false-attribution class this phase " +
+        "exists to close. ⛔ Do not 'fix' this by widening the fallback.",
+    ).toBe("UNKNOWN");
+  });
+
+  it.each(MAPPED)(
+    "an upstream-CARRIED seamCode beats the %i row — the map never overwrites it",
+    async (status) => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      mockValidateKey.mockRejectedValue(
+        new AnalyticsUpstreamError("Invalid API credentials", status, "KEY_AUTH_FAILED"),
+      );
+      const { POST } = await import("./route");
+      const res = await POST(makeReq(VALID_BODY));
+
+      expect(res.status).toBe(status);
+      // ⭐ 164.2 review B2 — F5a IS BYTE-UNCHANGED ON THIS ARM. When the
+      // upstream carried its own code, its `detail` is CURATED copy about the
+      // USER's key and still forwards verbatim; the B2 substitution is scoped
+      // to the arm where the code came from the status map, and this is the
+      // case that would red if that scoping were lost.
+      expect(
+        (await res.clone().json()).error,
+        "the curated upstream detail was replaced. B2's substitution must " +
+          "apply ONLY where the STATUS MAP supplied the code — an " +
+          "upstream-carried seamCode means the service classified this failure " +
+          "itself and its sentence is the true one.",
+      ).toBe("Invalid API credentials");
+      expect(
+        (await res.json()).code,
+        "the status map overwrote a code the upstream actually sent. The `??` " +
+          "chain must read `err.seamCode` FIRST: the envelope's own code is a " +
+          "classification the service made about THIS failure, while the " +
+          "status is our inference from a channel that carries less. Getting " +
+          "the order wrong replaces a specific true verdict with a generic one.",
+      ).toBe("KEY_AUTH_FAILED");
+    },
+  );
+
+  it("the 500 terminal arm is UNTOUCHED — a bare 5xx is not a bare 4xx", async () => {
+    // ⛔ The map is bounded to the `>= 400 && < 500` arm by construction. The
+    // 500 arm below it is reached by TRANSPORT failures and untyped throws as
+    // well as by `AnalyticsUpstreamError`, so a status→code inference there
+    // would be naming a fault we did not observe — and its own comment says so.
+    // A 502 carries no seamCode here and must still answer the terminal.
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("upstream traceback", 502),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    // And the 5xx REDACTION is intact — the raw upstream text never crosses.
+    expect(body.error).toBe("Key validation failed. Please try again.");
   });
 });

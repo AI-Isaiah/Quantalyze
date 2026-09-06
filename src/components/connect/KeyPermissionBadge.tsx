@@ -3,6 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatRelativeTime } from "@/lib/utils";
 import { RouteResponseError } from "@/lib/route-response-error";
+// 164.2-01 / 161-ERRPREFIX — client-safe by construction: `sentry-capture`
+// imports exactly one module and pulls Sentry in dynamically, and it is
+// already imported from `"use client"` components (e.g. EquityChart.tsx:17).
+import { addSentryBreadcrumb } from "@/lib/sentry-capture";
 
 /**
  * The one sentence shown when the failure did NOT come from a route response.
@@ -134,11 +138,49 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
           );
         }
         const message = err.error ?? `HTTP ${res.status}`;
-        // Prepend the route's structured `code` (e.g. PROBE_BACKEND_UNAVAILABLE)
-        // so the displayed text is greppable in support tickets.
-        throw new RouteResponseError(
-          err.code ? `${err.code}: ${message}` : message,
-        );
+        // 164.2-01 / 161-ERRPREFIX — THE CODE IS SPLIT OUT OF THE SENTENCE.
+        //
+        // This used to throw a ternary that interpolated the structured code,
+        // a colon and a space in front of the route's sentence, and the
+        // comment here justified it by support-ticket greppability.
+        //
+        // ⚠️ THAT IS A PARAPHRASE, NOT A QUOTATION, AND THE DIFFERENCE IS
+        // LOAD-BEARING — the same DEF-16-2 hazard `sentry-capture.ts:36-44`
+        // records one level up. 164.2's own verification greps this file for
+        // the removed expression; quoting it verbatim inside its own
+        // correction would re-seed the exact phrase the absence check looks
+        // for, so the check would fail on CORRECTED code and the next author
+        // would "fix" it by deleting the explanation.
+        // The founder ruling of 2026-08-26 is that both halves are owed, to
+        // DIFFERENT readers: the user reads the route's curated prose (they
+        // are not the reader of `PROBE_BACKEND_UNAVAILABLE`), and the machine
+        // code goes where the people who grep actually look — the browser
+        // console and Sentry. Dropping the code would have failed the ruling
+        // as surely as leaving the prefix in the render, so it is RELOCATED,
+        // not deleted.
+        //
+        // ⚠️ THE CODE MUST BE ITS OWN console.error ARGUMENT. Interpolating it
+        // into the string would defeat the identity assertion in the test
+        // (`call.some((arg) => arg === code)`, the B-27 idiom) and, more to
+        // the point, would put it back inside a sentence — the exact shape
+        // this change exists to end.
+        if (typeof err.code === "string" && err.code.length > 0) {
+          console.error(
+            "[KeyPermissionBadge] probe refused with code:",
+            err.code,
+            message,
+          );
+          // Not awaited: observability must never delay or fail the render
+          // path. `addSentryBreadcrumb` always RESOLVES (see its docblock), so
+          // `void` cannot produce an unhandled rejection here.
+          void addSentryBreadcrumb({
+            category: "key-permission-badge",
+            message: err.code,
+            data: { status: res.status },
+            level: "warning",
+          });
+        }
+        throw new RouteResponseError(message);
       }
       const data = (await res.json()) as Permissions;
       if (mountedRef.current) setPerms(data);

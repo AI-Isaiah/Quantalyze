@@ -3485,13 +3485,26 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=8 and ARMS_FLOOR=166 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=9 and ARMS_FLOOR=180 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
+    //
+    // MOVED 2026-09-06 (Phase 164.2 plan 10), 8/166 -> 9/180. Phase 164.2 plan
+    // 07's commit 39cc7ae4 added supabase/tests/test_sync_status_curated_
+    // sentence_survives.sql and raised ci.yml's sql-tests anti-SKIP floors to
+    // SENTINEL_FLOOR=9 / ARMS_FLOOR=180 (:2896-2897) WITHOUT moving this pin,
+    // so the pin went red for a raise it should have mirrored. That red was the
+    // pin working: an exact-literal mirror is deliberately intolerant in BOTH
+    // directions, because the failure it exists to catch -- a floor edited down
+    // to match a deleted arm -- is self-consistent inside ci.yml and invisible
+    // to anything that reads only that file.
+    // => WHENEVER ci.yml:2896-2897 moves, move these two literals in the SAME
+    //    commit. Do not relax this to a >= comparison: that would tolerate a
+    //    raise silently and hand the next author the same trap.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=8", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=9", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -3502,7 +3515,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=166", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=180", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

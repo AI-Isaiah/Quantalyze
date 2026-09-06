@@ -1965,8 +1965,31 @@ describe("[140.5-03 / SEAMPROSE-03] MultiKeyConnectStep — a transport failure 
  * panel 1) and the step-level `set-members` wait.
  *
  * ⚠️ Polarity re-derived: `ErrorEnvelope` renders the wait only when
- * `showRetry`. `KEY_RATE_LIMIT` is `clear_and_retry` and both surfaces supply
- * an `onRetry`, so the wait is reachable at both.
+ * `showRetry`. `RATE_LIMITED` is `clear_and_retry` and both surfaces supply an
+ * `onRetry`, so the wait is reachable at both.
+ *
+ * ⚠️ 164.2-05 — THE FIXTURE'S CODE MOVED, AND WHY IT HAD TO. This describe
+ * modelled the throttle as `{ code: "KEY_RATE_LIMIT" }`, which is what both
+ * routes answered when it was written. As of this plan neither does:
+ * `composite/add-key` and `composite/set-members` both answer `RATE_LIMITED`,
+ * because their buckets are keyed `<route>:<uid>` — ours, per USER — while
+ * `KEY_RATE_LIMIT`'s copy calls the throttle *"exchange-side"* and offers *"try
+ * a different exchange account"*.
+ *
+ * ⛔ A WAIT TEST FIRED FROM A BODY NO ROUTE EMITS IS THE WEAKER TEST, even
+ * though it would have stayed GREEN: `KEY_RATE_LIMIT` is still rostered on both
+ * sets (see the roster comments), so nothing here would have reddened while the
+ * cases quietly stopped covering the live path. Both entries carry the same
+ * `actions: ["clear_and_retry", "request_call"]`, so the wait polarity is
+ * unchanged — which is exactly what makes the swap safe AND makes the old
+ * fixture undetectably stale.
+ *
+ * ⭐ AND IT TURNS THIS DESCRIBE INTO A LIVE GUARD ON THE `set-members` ROSTER
+ * ROW. That arm does NOT translate through `SEAM_CODE_TO_WIZARD_CODE` — it
+ * membership-checks `KNOWN_SET_MEMBERS_CODES` directly — so the code assertions
+ * added below fail if that row is missing, which is the difference between this
+ * roster row and `KNOWN_ADD_KEY_CODES`' (a coupling guard, measured to render
+ * identically either way).
  */
 describe("[140.5-03 / SEAMPROSE-02] MultiKeyConnectStep — the advertised wait reaches both envelopes", () => {
   function throttled(retryAfter?: string) {
@@ -1974,7 +1997,7 @@ describe("[140.5-03 / SEAMPROSE-02] MultiKeyConnectStep — the advertised wait 
       "Content-Type": "application/json",
     };
     if (retryAfter !== undefined) headers["Retry-After"] = retryAfter;
-    return new Response(JSON.stringify({ code: "KEY_RATE_LIMIT" }), {
+    return new Response(JSON.stringify({ code: "RATE_LIMITED" }), {
       status: 429,
       headers,
     });
@@ -2005,6 +2028,14 @@ describe("[140.5-03 / SEAMPROSE-02] MultiKeyConnectStep — the advertised wait 
       "error-envelope-wait",
     );
     expect(wait).toHaveTextContent("12s");
+    // 164.2-05 — the wait must ride the code the route actually answers. On
+    // THIS arm the code survives even without the roster row (the add-key hop
+    // translates through SEAM_CODE_TO_WIZARD_CODE first, which self-maps
+    // RATE_LIMITED); the assertion is here so the pair with the set-members
+    // case below reads as one claim rather than two unrelated ones.
+    expect(
+      within(screen.getByTestId("key-panel-1")).getByTestId("error-envelope"),
+    ).toHaveAttribute("data-error-code", "RATE_LIMITED");
   });
 
   it("add-key: a 429 with NO header renders NO wait — absence is not zero (TRAP-3)", async () => {
@@ -2095,6 +2126,22 @@ describe("[140.5-03 / SEAMPROSE-02] MultiKeyConnectStep — the advertised wait 
 
     const wait = await screen.findByTestId("error-envelope-wait");
     expect(wait).toHaveTextContent("90s");
+    // ⭐ 164.2-05 — THE LIVE GUARD ON `KNOWN_SET_MEMBERS_CODES.RATE_LIMITED`.
+    // This arm does NOT translate: `handleContinue` reads
+    // `data.code && KNOWN_SET_MEMBERS_CODES.has(data.code)` and falls to
+    // `"UNKNOWN"` otherwise. Drop that roster row and this attribute reads
+    // `UNKNOWN` — the generic card, for a refusal the server named precisely.
+    // The wait above would still render (UNKNOWN is also `clear_and_retry`),
+    // which is exactly why the code has to be asserted separately.
+    expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "RATE_LIMITED",
+    );
+    // And the honest sentence, not the exchange one: this route never touches
+    // an exchange on any path.
+    expect(screen.getByTestId("error-envelope")).toHaveTextContent(
+      "the cap is ours, not your exchange's",
+    );
   });
 });
 
