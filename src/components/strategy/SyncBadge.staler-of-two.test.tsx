@@ -262,16 +262,59 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
   });
 
   /**
-   * The grace's other edge. Without this, "tolerate skew" could degenerate into
-   * "tolerate any future date", which would launder a corrupt write into a
-   * freshness claim — the failure mode WR-06 itself warned about.
+   * ⭐ WR-06-UTC (Phase 164.2) — THE ARM THAT FAILS WITHOUT THE DAY ALLOWANCE.
+   *
+   * `series_end` is a UTC **DATE**, not an instant. A venue that stamps today's
+   * daily bar writes a calendar date that is legitimately "ahead" of a browser
+   * sitting west of UTC — an MT5 broker on UTC+3 near 22:00 UTC does exactly
+   * this, and so does every reader in the Americas for several hours a day. The
+   * five-MINUTE `CLOCK_SKEW_TOLERANCE_MINUTES` grace above is calibrated for
+   * two SERVER CLOCKS drifting; it is the wrong unit for a date, and under it
+   * an ordinary same-day bar rendered a muted "Track record ends in the future"
+   * over a perfectly live strategy.
+   *
+   * So the series arm reads `SERIES_END_FUTURE_ALLOWANCE_DAYS`, a DAY, and this
+   * is the case that proves it: revert `bucketSeriesAge` to the minutes
+   * comparison and this test goes red.
    */
-  it("WR-06 GRACE CONTROL: beyond the tolerance it is still a future date", () => {
+  it("WR-06-UTC: a series end an HOUR ahead is a same-day bar, not a future date", () => {
     const { container } = render(
       <SyncBadge
         computedAt={agoIso(2 * HOUR)}
-        // An hour ahead is an order of magnitude past the tolerated drift.
         seriesEnd={new Date(Date.now() + HOUR).toISOString()}
+      />,
+    );
+
+    // Within the day allowance the series is a CURRENT bar: it neither binds
+    // nor recolours, and the honest render is the sync-keyed one, in green.
+    expect(dotClass(container)).toContain("bg-positive");
+    expect(dotClass(container)).not.toContain("bg-text-muted");
+    expect(container.textContent).toMatch(/Synced 2h ago/);
+    expect(container.textContent).not.toMatch(/Track record ends in the future/i);
+  });
+
+  /**
+   * The grace's other edge. Without this, "tolerate skew" could degenerate into
+   * "tolerate any future date", which would launder a corrupt write into a
+   * freshness claim — the failure mode WR-06 itself warned about.
+   *
+   * ⚠️ THIS CONTROL WAS MOVED, NOT DELETED (WR-06-UTC, Phase 164.2). Its
+   * fixture used to be `Date.now() + HOUR` and it asserted the muted dot and
+   * the "Track record ends in the future" sentence for that input — a
+   * behaviour WR-06-UTC deliberately REVERSED, because an hour ahead of a
+   * browser clock is what a same-day UTC bar looks like from the Americas. The
+   * old fixture now lives in the positive arm directly above, asserting the
+   * opposite verdict, in the `portfolio-optimizer/route.test.ts:440-462`
+   * inverted-pin shape: the reader must be able to see that the reversal was
+   * deliberate. The control itself survives at TWO DAYS, which is past the
+   * allowance in every timezone, so the bound is still pinned from above.
+   */
+  it("WR-06 GRACE CONTROL: beyond the DAY allowance it is still a future date", () => {
+    const { container } = render(
+      <SyncBadge
+        computedAt={agoIso(2 * HOUR)}
+        // Two days ahead is past the allowance no matter what hour it is.
+        seriesEnd={new Date(Date.now() + 2 * DAY).toISOString()}
       />,
     );
 
@@ -335,12 +378,56 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
     expect(container.textContent).not.toMatch(/in the future/i);
   });
 
-  it("WR-06: the real discovery TABLE row carries the same repaired pair", () => {
+  /**
+   * ⚠️ THIS CASE WAS INVERTED, NOT DELETED (WR-06-UTC, Phase 164.2), and it is
+   * the one the phase was opened for. It used to assert that tomorrow's
+   * calendar date rendered NO `bg-positive` and a muted dot through the real
+   * table mount — i.e. that the UTC+3 broker case named in its own comment was
+   * shown to a visitor as a suspicious date. That is the defect. `series_end`
+   * is a UTC DATE, so a same-day bar is up to a day "ahead" of any browser west
+   * of UTC, and the honest render for it is the ordinary sync-keyed pair.
+   *
+   * Inverted rather than deleted (`portfolio-optimizer/route.test.ts:440-462`
+   * idiom) because the old behaviour is the defect and a reader needs to see
+   * that the reversal was deliberate. The future arm's real-mount coverage is
+   * NOT lost — it moves to the two-day control directly below.
+   */
+  it("WR-06-UTC: the real discovery TABLE row treats tomorrow's bar as CURRENT", () => {
     // Through the mount a visitor actually travels, not the bare component.
     const row = publishedRow("11111111-0000-4000-8000-000000000003", PHOENIX, {
       computed_at: agoIso(7 * HOUR),
       // Tomorrow's calendar date — the UTC+3 broker case.
       series_end: new Date(Date.now() + DAY).toISOString().slice(0, 10),
+    });
+
+    const { container } = render(
+      <StrategyTable strategies={[row]} categorySlug="crypto-sma" />,
+    );
+
+    // The sync fact is the only one in question now, and it is 7h old: green,
+    // sync-keyed, and making no claim about a date it cannot have observed.
+    expect(container.querySelector(".bg-positive")).toBeTruthy();
+    expect(container.querySelector(".bg-text-muted")).toBeNull();
+    expect(container.textContent).toMatch(/Synced 7h ago/);
+    expect(container.textContent).not.toMatch(/in the future/i);
+    // The allowance is not a licence to look healthy: a dead track would still
+    // bind here, which the 112-day row below proves.
+    expect(container.querySelector(".bg-negative")).toBeNull();
+  });
+
+  it("WR-06: the real discovery TABLE row still flags a date BEYOND the allowance", () => {
+    // The moved control for the case above — the arm that keeps the future
+    // verdict reachable through the mount a visitor actually travels.
+    const row = publishedRow("11111111-0000-4000-8000-000000000004", PHOENIX, {
+      computed_at: agoIso(7 * HOUR),
+      // ⚠️ THREE days, not two, and the extra day is not padding. A DATE-only
+      // fixture is read at UTC midnight, so "N days ahead" is really "between
+      // N-1 and N days ahead" depending on the hour the suite runs. At N=2 the
+      // lower edge lands EXACTLY on the one-day allowance, which would make
+      // this control knife-edge near 00:00 UTC. N=3 keeps it two full days
+      // clear at every hour. The bare-component control above uses an INSTANT
+      // and can therefore say two days exactly.
+      series_end: new Date(Date.now() + 3 * DAY).toISOString().slice(0, 10),
     });
 
     const { container } = render(

@@ -6,7 +6,13 @@ import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 // Phase 163 / HONEST-08 — the SERIES ladder (3d/7d) is shared with the
 // discovery-list badge, which must judge the same fact about the same rows.
-import { SERIES_FRESH_DAYS, SERIES_STALE_DAYS } from "@/lib/freshness";
+// WR-06-UTC — and the future ALLOWANCE for the series arm, for the same
+// reason: two bucketers judge one fact, so the number lives in one file.
+import {
+  SERIES_FRESH_DAYS,
+  SERIES_STALE_DAYS,
+  SERIES_END_FUTURE_ALLOWANCE_DAYS,
+} from "@/lib/freshness";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
 import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
@@ -1105,11 +1111,21 @@ type FreshnessTone = "fresh" | "unknown" | "stale" | "old" | "future" | "neutral
  * "Synced 7h ago" beside a factsheet reading `Track record · old`). The
  * literals moved; the ladder did not change.
  */
-function bucketByAge(days: number): FreshnessTone {
+function bucketByAge(days: number, futureAllowanceDays = 0): FreshnessTone {
   // A future date (days < 0) means the timestamp is ahead of now — treat as
   // neutral/suspicious, never "fresh". (NEW-C20-07)
+  //
+  // ⛔ THE ALLOWANCE DEFAULTS TO ZERO, DELIBERATELY (WR-06-UTC, Phase 164.2).
+  // This function is called TWICE: once on `computedAt` — an INSTANT our own
+  // pipeline wrote, where NEW-C20-07's bare zero is exactly right and C-10 is
+  // the tripwire that says so — and once on the SERIES end, which is a UTC
+  // DATE and can legitimately sit a calendar day ahead of a browser west of
+  // UTC. Only the series call passes `SERIES_END_FUTURE_ALLOWANCE_DAYS`, so a
+  // future compute timestamp is still `future — check data` no matter how far
+  // the series arm's tolerance ever moves. A default of anything but 0 would
+  // silently widen the computedAt arm too.
   if (!Number.isFinite(days)) return "neutral";
-  if (days < 0) return "future";
+  if (days < 0) return -days <= futureAllowanceDays ? "fresh" : "future";
   if (days <= SERIES_FRESH_DAYS) return "fresh";
   if (days <= SERIES_STALE_DAYS) return "stale";
   return "old";
@@ -1191,7 +1207,14 @@ function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; series
   // where the track record ends.
   const seriesEnd = resolveSeriesEnd(seriesDates);
   const seriesAgeTone: FreshnessTone = seriesEnd
-    ? bucketByAge((nowMs - new Date(seriesEnd.iso).getTime()) / 86_400_000)
+    ? bucketByAge(
+        (nowMs - new Date(seriesEnd.iso).getTime()) / 86_400_000,
+        // WR-06-UTC — the SERIES call, and the only one that gets the
+        // allowance. The badge's `bucketSeriesAge` reads the same constant from
+        // the same file, so tomorrow's bar cannot read `fresh` on the discovery
+        // list and `future — check data` here.
+        SERIES_END_FUTURE_ALLOWANCE_DAYS,
+      )
     : "unknown";
   // `resolveSeriesEnd` only ever returns a date `formatIsoDate` already parsed,
   // so `bucketByAge` cannot answer "neutral" here. Mapped rather than asserted:
