@@ -2872,10 +2872,29 @@ jobs:
           # `created_by = auth.uid()` predicate in revoke's UPDATE, which no
           # other arm isolates because for an `authenticated` caller RLS also
           # scopes the statement. 102 + 1 = 103.
-          #   test_strategy_shares_rls.sql                  103
-          #   test_sync_status_marked_refresh_protected.sql  16
-          SENTINEL_FLOOR=8   # files declaring a sentinel
-          ARMS_FLOOR=166     # 9 + 6 + 10 + 10 + 8 + 4 + 103 + 16
+          # Re-measured 2026-09-06 (phase 164.2 plan 07), TWO moves in one edit —
+          # they are stated separately because only one of them is this plan's:
+          #   (1) test_sync_status_marked_refresh_protected.sql 16 -> 23. NOT
+          #       this plan's arms. Plan 06's three-reviewer fix pass added
+          #       seven (L, L2, M, M2, M3, O, O2) for migration 20260906120000's
+          #       provenance trigger and pairing CHECK, and the file's own
+          #       sentinel and roster moved with them — but this table did not,
+          #       so the derivation had been contradicting the corpus since
+          #       commit 6aed4e76 and the contract test below was RED at HEAD.
+          #       Found here because this plan's own row made the file-set
+          #       assertion fire FIRST and mask it; corrected rather than
+          #       stepped around.
+          #   (2) test_sync_status_curated_sentence_survives.sql, NEW, 7 arms —
+          #       the gate that PERFORMS a compute_jobs transition and reads the
+          #       curated computation_error sentence back (criterion 1). Its
+          #       applied-ness gate `0` is deliberately NOT in the roster, the
+          #       same convention the sibling file's 0a/0b/0c follow.
+          # Read off each file's own sentinel, never off this table.
+          #   test_strategy_shares_rls.sql                    103
+          #   test_sync_status_curated_sentence_survives.sql    7
+          #   test_sync_status_marked_refresh_protected.sql    23
+          SENTINEL_FLOOR=9   # files declaring a sentinel
+          ARMS_FLOOR=180     # 9 + 6 + 10 + 10 + 8 + 4 + 103 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

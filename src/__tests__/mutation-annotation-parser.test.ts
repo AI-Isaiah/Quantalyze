@@ -778,8 +778,16 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // no floor moved — this is a step-count pin, not a floor.
     // MEASURED at this commit: `arms=361 waivers=0 fileSteps=380 sqlSteps=102
     // totalSteps=482`.
-    expect(armsSeen).toBe(361);
-    expect(stepsSeen).toBe(380);
+    // ⚠️ CURRENCY 2026-09-06 (phase 164.2 plan 07): arms 361 -> 369 and file
+    // steps 380 -> 396. ONE new annotated gate,
+    // test_sync_status_curated_sentence_survives.sql, with eight twins: arm 0
+    // is a single `sql` post-apply step (no needle), and the seven behavioural
+    // arms carry 2 + 2 + 2 + 3 + 2 + 2 + 3 = 16 `edit` steps, every one of them
+    // LAYERED — the byte change to the bridge's branch, plus the stand-down of
+    // the 20260906120000 self-verify anchor that would otherwise abort the
+    // apply and leave no arm able to be the first failure.
+    expect(armsSeen).toBe(369);
+    expect(stepsSeen).toBe(396);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1537,7 +1545,15 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // a production twin (one `edit` step) after the review refuted its
     // "no production mutation can reach this" prose on a lane. Arms unchanged at
     // 361. MEASURED: `fileSteps=380 sqlSteps=102 totalSteps=482`.
-    expect(needles.length).toBe(380);
+    // ⚠️ CURRENCY 2026-09-06 (phase 164.2 plan 07): arms 361 -> 369 and file
+    // steps 380 -> 396. ONE new annotated gate,
+    // test_sync_status_curated_sentence_survives.sql, with eight twins: arm 0
+    // is a single `sql` post-apply step (no needle), and the seven behavioural
+    // arms carry 2 + 2 + 2 + 3 + 2 + 2 + 3 = 16 `edit` steps, every one of them
+    // LAYERED — the byte change to the bridge's branch, plus the stand-down of
+    // the 20260906120000 self-verify anchor that would otherwise abort the
+    // apply and leave no arm able to be the first failure.
+    expect(needles.length).toBe(396);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2063,7 +2079,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
   // behind at 43 and at 44 while `expect(corpus.filesAnnotated)` moved, so a reader
   // following the parse.mjs citation met a green test claiming a number two lower
   // than the corpus (review WR-07 of 164.4.1-REVIEW.md). Bump BOTH or neither.
-  it("scanCorpus reports 44 of 71 files annotated", () => {
+  it("scanCorpus reports 45 of 72 files annotated", () => {
     const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
     // ⛔ The DENOMINATOR stays 71 — every `.sql` in the directory. Phase 164.4
     // reached ITS end state at `files 39/71` (plan 164.4-11, 2026-09-04) with
@@ -2074,7 +2090,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // pg_cron-deferred test_compute_jobs_error_kind_copy_parity.sql — the
     // singleton SCOPE AMENDMENT #2's 40 was written before — and
     // test_derive_allocator_keys_fanout.sql, the smallest lane-blocked file.
-    expect(corpus.filesTotal).toBe(71);
+    expect(corpus.filesTotal).toBe(72);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2097,7 +2113,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // 2-4 EXECUTE the deployed cron.job.command as their oracle; its apply list
     // is sized so the three `SKIP Part` notices never fire. The plan-04
     // paragraph above stays as the dated record of the 43-file corpus.
-    expect(corpus.filesAnnotated).toBe(44);
+    expect(corpus.filesAnnotated).toBe(45);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2137,6 +2153,12 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_strategy_keys_rls.sql",
       "test_strategy_shares_rls.sql",
       "test_strategy_verifications_wizard_session_tenant_scope.sql",
+      // ⚠️ CURRENCY 2026-09-06 (phase 164.2 plan 07): the FORTY-FIFTH annotated
+      // file, and the first one this family ADDS rather than backfills — the
+      // gate that PERFORMS a compute_jobs transition and reads the curated
+      // computation_error sentence back (criterion 1). Eight sections, eight
+      // twins, all eight biting on the first proof run.
+      "test_sync_status_curated_sentence_survives.sql",
       "test_sync_status_marked_refresh_protected.sql",
       "test_user_notes_dashboard_scope.sql",
       "test_weight_snapshot_seed_secdef.sql",
@@ -2487,9 +2509,14 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // annotated 43 + pending 0 + unreachable 27 + inert 0 + lane-blocked 1 = 71.
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-05), read off `--parse-only`:
     // annotated 44 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 71.
+    // ⚠️ CURRENCY 2026-09-06 (phase 164.2 plan 07), read off `--parse-only`:
+    // annotated 45 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 72.
+    // The DENOMINATOR moved for the first time since these pins were written —
+    // this plan ADDS a gate file rather than backfilling one, so both halves of
+    // the ratio change together and neither may be bumped alone.
     // That is PHASE 164.4.1's END STATE: two of the five classes are measured
     // empty and this arithmetic is what says so in a form a future drift breaks.
-    expect(corpus.filesTotal).toBe(71);
+    expect(corpus.filesTotal).toBe(72);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -2498,7 +2525,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // above (the selftest fixture PAIR, which must still classify exactly
     // `lane-blocked-gate.sql` and NOT its comment-only sibling), and the
     // set-for-set PARTITION check below is the second independent guard.
-    expect(corpus.annotatedFiles).toHaveLength(44);
+    expect(corpus.annotatedFiles).toHaveLength(45);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

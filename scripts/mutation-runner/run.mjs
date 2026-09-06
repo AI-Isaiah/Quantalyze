@@ -786,7 +786,33 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //     per-arm lane time: mean 1.1s over 361 arm run(s)
 // The paired ARMS_FLOOR move (363 -> 361) and its own separation measurement
 // are in the block below.
-export const FILES_FLOOR = 44;
+//
+// ⭐ RE-DERIVED 2026-09-06 BY MEASUREMENT (phase 164.2, plan 07). Value RAISED
+// from 44 to 45 — ONE new annotated file,
+// supabase/tests/test_sync_status_curated_sentence_survives.sql, the gate that
+// PERFORMS a compute_jobs transition and reads the curated computation_error
+// sentence back (criterion 1). The corpus also grew by one file (71 -> 72),
+// which is that same file, so the OUT-of-scope classes did not move:
+// 45 + 0 lane-blocked + 27 unreachable + 0 pending = 72. Every block above
+// stays as dated lineage. Read off the run's own line, never typed from a
+// plan's prose:
+//   `node scripts/mutation-runner/run.mjs`
+//     coverage: files 45/72
+//     lane-blocked: 0 file(s) …
+//     lane-probe: pg_cron AVAILABLE — lane-blocked class is empty, as a hosting lane requires
+//       pending: 0 idiom file(s) without RED-UNDER —
+//     arms: 369/369/0   (executed/annotated/waived)
+//     biting: 369
+//     lane-invocations: 369
+//     per-arm lane time: mean 1.1s over 369 arm run(s)
+//     ✅ No defects. Every annotated arm bit its own arm first.
+//   SEPARATION   Measured on a real full-corpus lane run, same tree:
+//                  FILES_FLOOR=46 (one higher) -> defect ->
+//                    `FILES_FLOOR regression: 45 annotated file(s) < floor 46`
+//                  FILES_FLOOR=45 (this value) -> 0 defects, EXIT 0
+//                So 45 is the separation point, not a value below it.
+// The paired ARMS_FLOOR move (361 -> 369) is in the block below.
+export const FILES_FLOOR = 45;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -1575,7 +1601,28 @@ export const FILES_FLOOR = 44;
 //   RECORD       164.4.1-REVIEW.md findings CR-01 and CR-02, and the measured
 //                refutation recorded at each arm's own site in
 //                supabase/tests/test_reconcile_dropped_enqueue_sweep.sql.
-export const ARMS_FLOOR = 361;
+//
+// ⭐ RE-DERIVED 2026-09-06 BY MEASUREMENT (phase 164.2, plan 07). Value RAISED
+// from 361 to 369 — EIGHT new arms, all in the one new gate file
+// supabase/tests/test_sync_status_curated_sentence_survives.sql (arms 0, S, C,
+// O, D, P, PC, R). No existing arm moved: the three gates coupled to
+// 20260906120000 in this plan gained a migration in their RED-UNDER-SETUP apply
+// lists and nothing else, and their twins (0a; 1/A-3, 2/A-3, 3/F-3; the 24 of
+// test_retention_orphaned_running.sql) were re-observed biting AFTER the
+// coupling. The blocks above stay as dated lineage.
+//   SAMPLE SIZE  369 arms executed, all 369 `RED (identity ok)`. The two
+//                independent tallies AGREE: `arms:` executed 369 and
+//                `lane-invocations:` 369, beside 45 baseline and 45 restore
+//                legs. The 45 per-file `biting` counts SUM to 369.
+//   SEPARATION   Measured on a real full-corpus lane run, same tree, in the
+//                same probe that separated FILES_FLOOR above:
+//                  ARMS_FLOOR=370 (one higher) -> defect ->
+//                    `ARMS_FLOOR regression: 369 biting arm(s) < floor 370`
+//                  ARMS_FLOOR=369 (this value) -> 0 defects, EXIT 0
+//                So 369 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.2-curated-copy-the-curated-computation-
+//                error-sentence-must-act/164.2-07-SUMMARY.md
+export const ARMS_FLOOR = 369;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
