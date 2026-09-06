@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.77.16.0] - 2026-09-06
+
+### Phase 164.2 CURATED-COPY — every failure sentence a user reads is the true, specific one
+
+The phase had two halves. (a) The writer's curated `computation_error` sentence now **survives**
+the `compute_jobs` status transition instead of being overwritten by the bridge's generic one.
+(b) The wizard's refusals stop misattributing — a rate-limit no longer reads as a bad key, and a
+seam misconfiguration no longer reads as the user's fault. It also absorbed 161-ERRPREFIX,
+WR-06-UTC, HONEST-08-RESIDUAL and the anonymous factsheet placeholder.
+
+**Schema — auto-applies to PROD on merge.** New migration
+`20260906120000_computation_error_provenance.sql` adds `strategy_analytics.computation_error_source`
+(TEXT, `CHECK (… IN ('writer'))`) and `computation_error_job_id` (UUID), both nullable — NULL means
+bridge/legacy provenance. `sync_strategy_analytics_status` is re-based on the latest definition
+(`20260826120000:336-905`) with the REVOKE line, SECURITY DEFINER and pinned `search_path` carried
+forward verbatim. A BEFORE UPDATE trigger drops stale provenance when the sentence changes but the
+markers do not, and a pairing CHECK makes a half-stamp unrepresentable at the schema level.
+Both `ADD COLUMN`s are nullable and defaultless, so the apply is metadata-only.
+
+**Writers.** `strategy_analytics_provenance.py` makes a half-stamp inexpressible in Python too:
+`provenance_source(job_id)` returns both markers or neither, and `upsert_or_drop_provenance` takes
+the write as a *callable* so payloads stay dict literals and the AST censuses that police them keep
+working. Ten stamped writers are covered by the deploy-window degrade.
+
+**User-visible copy.** New `PRESELECT_REQUEST_INVALID` and `DRAFT_SESSION_COLLISION` codes; the
+`RATE_LIMITED` and `SEAM_MISCONFIGURED` arms are now reached on four wizard routes; the anonymous
+factsheet placeholder no longer renders the benchmark-window bound (it stays in a server-side
+`console.warn`) and reads "This factsheet has not been computed yet…" instead of leaking a
+dev-server console string. The freshness chip takes the staler of two surfaces, and WR-06-UTC is
+closed.
+
+**Gates.** New SQL gate `test_sync_status_curated_sentence_survives.sql` (8 sections, 8 twins, all
+biting) proves the curated sentence survives the transition. The mutation corpus is now
+`files 45/72`, `arms: 369/369/0`, `biting: 369`, `lane-invocations: 369` (both tallies agree),
+`lane-blocked: 0`, `pending: 0`, `✅ No defects`, exit 0. `FILES_FLOOR` 44 → **45** and `ARMS_FLOOR`
+361 → **369**; `WAIVED_CEILING` stays **0**. Both floors were separated in both directions on real
+full-corpus lane runs before being pinned.
+
+**Review and verification.** Deep code review: 0 Critical, 3 Warning, 5 Info — all three warnings
+plus IN-04 fixed. Verification 9/9 must-haves, with one recorded founder override (see below).
+
+### Known limits carried out of this phase
+
+- **WIZFORM-02 is closed on four of five surfaces, by founder decision.** The fifth,
+  `keys/validate-and-encrypt`, has no code-channel consumer at HEAD — all three readers take the
+  prose — so a render assertion there would be a tautology. The wiring is booked as
+  `[WIZFORM-02-VE-CODECHANNEL]` and the exclusion is pinned by a live assertion that reds the day a
+  consumer starts reading `code`. The `GATED ON WIZFORM-02 CLOSING` marker stays down deliberately.
+- **Deploy order matters.** The migration must reach PROD *before* the analytics worker deploys;
+  only one writer path carries a `PGRST204` fallback for the schema-cache window.
+- `[164.2-TEST-APPLY-PROVENANCE]` — the migration still has to be hand-applied to shared TEST.
+  Nothing in CI applies migrations to TEST, so `sql-tests` is expected red on two named arms until
+  it is.
+- `[164.2-TYPES-REGEN-CHECK]` — `database.types.ts` regen to be confirmed after merge.
+- `HONEST-08`'s live clause was **not observed**: no public row had a track record ending within
+  ~3 days on the verification date. The test half is green and is what the close rests on.
+
 ## [0.77.15.0] - 2026-09-06
 
 ### Phase 164.1 plan 06 — the prober's first live run, and the gate that catches a frozen VERSION
