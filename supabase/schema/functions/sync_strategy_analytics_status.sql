@@ -2,7 +2,13 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260826120000_computation_error_curated_copy.sql
+-- source migration: 20260906120000_computation_error_provenance.sql
+-- --------------------------------------------------------------------------
+-- STEP 2: the bridge, re-based on 20260826120000:336-905
+-- --------------------------------------------------------------------------
+-- Body copied VERBATIM from that file and edited ONLY at the six points listed
+-- in THE DELTA above. COMMENT ON FUNCTION is deliberately not reissued; see the
+-- header, and see assumption A1 in the self-verify block.
 CREATE OR REPLACE FUNCTION sync_strategy_analytics_status(p_strategy_id UUID)
 RETURNS VOID
 LANGUAGE plpgsql
@@ -21,6 +27,15 @@ DECLARE
   -- is absent from this body INCLUDING its comments.
   v_latest_kind        TEXT;
   v_protected_kind     TEXT;
+  -- Phase 164.2 / criterion 2: the IDENTITY of the failure each write branch is
+  -- resolving, alongside its kind. The provenance markers on
+  -- strategy_analytics are only honoured when they name THIS job, so the
+  -- decision needs the id and not just the kind. Same aggregate, same FILTERs,
+  -- same ordering as the two kinds above -- see the file header for why an id
+  -- match rather than a bare "the column is non-NULL" test is what makes cases
+  -- (ii) and (iii) of 20260826120000's owed-work paragraph decidable.
+  v_latest_job_id      UUID;
+  v_protected_job_id   UUID;
   v_publish_healthy    BOOLEAN;
   v_protect_hold       BOOLEAN;
 BEGIN
@@ -179,6 +194,11 @@ BEGIN
   -- four ways, so it is spelled ONCE.
   WITH live_failures AS (
     SELECT
+      -- Phase 164.2 / criterion 2: the failing job's own id. Projected here so
+      -- the aggregate below can carry it into v_latest_job_id /
+      -- v_protected_job_id; the provenance decision on both write branches is
+      -- an EQUALITY against this value, never a presence test.
+      f.id,
       f.error_kind,
       f.created_at,
       -- ⛔ The two marker literals are a CROSS-LANGUAGE CONTRACT with no
@@ -325,9 +345,24 @@ BEGIN
     (array_agg(error_kind ORDER BY created_at DESC)
        FILTER (WHERE NOT is_protected))[1],
     (array_agg(error_kind ORDER BY created_at DESC)
+       FILTER (WHERE is_protected))[1],
+    -- Phase 164.2 / criterion 2: the same two picks by IDENTITY. Same ordering,
+    -- same FILTERs, same partition -- so v_latest_job_id names exactly the job
+    -- whose kind became v_latest_kind, and v_protected_job_id exactly the job
+    -- whose kind became v_protected_kind. That pairing is what lets a write
+    -- branch ask "is the sentence already in the column the one THIS failure's
+    -- writer just wrote?" instead of the unanswerable "is this sentence
+    -- curated?" -- the distinction 20260826120000's header records as the
+    -- reason the debt could not be paid there. Both are non-NULL whenever the
+    -- branch that reads them fires: the branch's own guard is a count over the
+    -- same FILTER, and compute_jobs.id is the primary key.
+    (array_agg(id ORDER BY created_at DESC)
+       FILTER (WHERE NOT is_protected))[1],
+    (array_agg(id ORDER BY created_at DESC)
        FILTER (WHERE is_protected))[1]
     INTO v_failed_count, v_protected_count, v_unresolved_count,
-         v_latest_kind, v_protected_kind
+         v_latest_kind, v_protected_kind,
+         v_latest_job_id, v_protected_job_id
     FROM live_failures;
 
   -- ---- the branch-(a) EXEMPTION (161.1 re-review MEDIUM: idempotence) -------
@@ -424,8 +459,8 @@ BEGIN
   IF v_nonterminal_count > 0 AND NOT v_protect_hold THEN
     -- JOB-01 (Phase 142): a FRESH INSERT at 'computing' IS the transition in, so
     -- the VALUES arm stamps now() unconditionally. The ON CONFLICT arm must NOT.
-    INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at)
-    VALUES (p_strategy_id, 'computing', NULL, now())
+    INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
+    VALUES (p_strategy_id, 'computing', NULL, now(), NULL, NULL)
     ON CONFLICT (strategy_id) DO UPDATE
        SET computation_status = CASE
              WHEN strategy_analytics.computation_status = 'complete_with_warnings'
@@ -434,6 +469,15 @@ BEGIN
              ELSE 'computing'
            END,
            computation_error  = EXCLUDED.computation_error,
+           -- Phase 164.2 / criterion 2: the sentence on the line above is being
+           -- blanked, so the provenance that described it must go with it. A
+           -- marker left standing over a blanked sentence would make the NEXT
+           -- generic write look like a curated one and freeze it there. This
+           -- branch is also the reason the four TypeScript pre-enqueue writers
+           -- need no marker at all: when a job starts, their sentence is stale
+           -- by construction and superseding it is the correct outcome.
+           computation_error_source = NULL,
+           computation_error_job_id = NULL,
            -- JOB-01 (Phase 142): stamp on the TRANSITION INTO computing only,
            -- keyed off the RESOLVED status above — never off the branch. This
            -- bridge is PERFORMed in-RPC on EVERY job transition, so an
@@ -473,11 +517,38 @@ BEGIN
   -- closed by mig 20260708120000).
   IF v_failed_count > 0 THEN
     -- JOB-01 (Phase 142): SQL exit transition #1 — clear the stamp.
-    INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at)
-    VALUES (p_strategy_id, 'failed', computation_error_copy(v_latest_kind), NULL)
+    INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
+    VALUES (p_strategy_id, 'failed', computation_error_copy(v_latest_kind), NULL, NULL, NULL)
     ON CONFLICT (strategy_id) DO UPDATE
        SET computation_status = EXCLUDED.computation_status,
-           computation_error  = EXCLUDED.computation_error,
+           -- ⛔ Phase 164.2 / criterion 2 — THE CONDITIONAL. The generic
+           -- per-kind sentence in the VALUES tuple above is what a FRESH row
+           -- gets, always: there is no earlier writer sentence on a row that
+           -- did not exist. On CONFLICT the row may already carry one, and this
+           -- CASE is the only place that decides.
+           --
+           -- The predicate is an EQUALITY on the job, not a presence test on
+           -- the marker, and that is the whole design. 20260826120000's header
+           -- names three things a bare "the column is non-NULL" test cannot
+           -- tell apart: (i) the sentence THIS failure's writer just wrote,
+           -- (ii) a sentence left by an OLDER, still-unresolved failure, and
+           -- (iii) operator text written by the pre-migration form of the
+           -- protected branch. Keyed on the id of the job this branch itself
+           -- resolved, (i) matches and (ii)/(iii) do not.
+           --
+           -- ⚠️ Plain `=`, deliberately NOT `IS NOT DISTINCT FROM`. Both
+           -- markers are NULL on the ~103 legacy rows and on every row the
+           -- bridge itself last touched, and a NULL on either side makes the
+           -- WHEN neither true nor false, so control falls to ELSE and the
+           -- generic wins. That is exactly today's behaviour, which is what
+           -- "no backfill" is required to mean.
+           computation_error  = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN strategy_analytics.computation_error ELSE EXCLUDED.computation_error END,
+           -- The markers travel WITH the sentence they describe, on the same
+           -- predicate. Kept when the sentence is kept; cleared when the
+           -- generic overwrites it, so the next call cannot read this bridge's
+           -- own generic as a writer's curated sentence.
+           computation_error_source = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN strategy_analytics.computation_error_source ELSE NULL END,
+           computation_error_job_id = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN strategy_analytics.computation_error_job_id ELSE NULL END,
            computing_started_at = NULL,
            computed_at        = now();
     RETURN;
@@ -527,21 +598,33 @@ BEGIN
        --   * It DOES heal a row still carrying operator text written by the
        --     pre-migration form of this very branch, the next time it is touched.
        --
-       -- ⛔ WHAT IS STILL LOST HERE, and is NOT closed by this migration: the
-       -- worker writes a CURATED per-failure sentence into this column on this
-       -- exact path moments before the RPC that runs this bridge, and this
-       -- statement then replaces it with the per-KIND sentence. That loss is
-       -- REAL and it is what a user reads on the portfolio stale warning. It
-       -- PRE-DATES this migration (see above: it was previously a loss to the
-       -- raw diagnostic), so it is not something to revert to. Fixing it needs
-       -- PROVENANCE on this column — a writer/generation marker the Python
-       -- writers set and this branch reads — because preferring the value
-       -- already present cannot tell this failure's sentence from an older
-       -- unrelated one, and would also freeze the pre-migration operator text
-       -- this branch now heals. That is an architectural change, out of this
-       -- plan's scope, and the file header records it as owed work rather than
-       -- as an accepted trade.
-       SET computation_error   = computation_error_copy(v_protected_kind),
+       -- ✅ WHAT WAS STILL LOST HERE IS NOW PAID (Phase 164.2 / criterion 2).
+       -- 20260826120000 recorded, as OWED WORK rather than as an accepted
+       -- trade, that the worker writes a CURATED per-failure sentence into this
+       -- column moments before the RPC that runs this bridge and that this
+       -- statement then replaced it with the per-KIND sentence — the loss a
+       -- user reads on the portfolio stale warning. It also stated the exact
+       -- reason the fix could not be "prefer the value already present": with
+       -- no provenance, that cannot tell this failure's sentence from one left
+       -- by an older unresolved failure, and it would freeze the operator text
+       -- this branch heals.
+       --
+       -- The two marker columns are that provenance, and the CASE below is the
+       -- preference made DECIDABLE: the existing sentence is kept only when a
+       -- writer stamped it FOR THE JOB THIS BRANCH JUST RESOLVED. An older
+       -- unresolved failure's sentence has a different job id and loses; text
+       -- with no marker at all has no id and loses, so the healing property
+       -- 20260826120000 added is untouched; and the retry-positive 'orphaned'
+       -- copy still reaches the user, because the reaper stamps no marker.
+       -- ⚠️ THE PYTHON HALF IS A SEPARATE PLAN. Until the writers set the
+       -- markers, every row on this path has NULL markers, the CASE takes its
+       -- ELSE arm, and this branch behaves EXACTLY as it did before. That is
+       -- the intended deploy order, not an oversight.
+       SET computation_error   = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN strategy_analytics.computation_error ELSE computation_error_copy(v_protected_kind) END,
+           -- The markers travel WITH the sentence, on the same predicate: kept
+           -- when it is kept, cleared when the per-kind copy overwrites it.
+           computation_error_source = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN strategy_analytics.computation_error_source ELSE NULL END,
+           computation_error_job_id = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN strategy_analytics.computation_error_job_id ELSE NULL END,
            -- JOB-01: this is still an exit from computing. The publish columns
            -- are untouched on purpose; see the header for the full list of what
            -- is deliberately NOT written here (status, warned, computed_at).
@@ -558,8 +641,8 @@ BEGIN
   -- to 'complete'. Clears any stale computation_error either way.
   -- JOB-01 (Phase 142): SQL exit transition #2 — clear the stamp. Both arms of
   -- the status CASE are terminal, so the clear is unconditional here.
-  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at)
-  VALUES (p_strategy_id, 'complete', NULL, NULL)
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
+  VALUES (p_strategy_id, 'complete', NULL, NULL, NULL, NULL)
   ON CONFLICT (strategy_id) DO UPDATE
      SET computation_status = CASE
            WHEN strategy_analytics.computation_status = 'complete_with_warnings'
@@ -568,6 +651,13 @@ BEGIN
            ELSE 'complete'
          END,
          computation_error  = NULL,
+         -- Phase 164.2 / criterion 2: UNCONDITIONAL, exactly like the blank on
+         -- the line above and for the same reason. Every live failure is gone;
+         -- there is nothing left for a marker to describe, and one left
+         -- standing here would be read by the NEXT failure's write branch as a
+         -- writer's claim over a sentence that no longer exists.
+         computation_error_source = NULL,
+         computation_error_job_id = NULL,
          computing_started_at = NULL,
          computed_at        = now();
 END;
