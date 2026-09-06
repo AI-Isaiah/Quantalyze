@@ -5227,6 +5227,35 @@ export const KNOWN_VALIDATE_AND_ENCRYPT_CODES: ReadonlySet<WizardErrorCode> =
     // by an alias is a worse artefact to inherit than a complete one. ⛔ Do not
     // read its presence as evidence that the law is checking it.
     "SEAM_MISCONFIGURED",
+    // 164.2-05 / criterion 4 (2026-09-06) — THE SEVENTH MEMBER, and the reason
+    // it was absent is that the code it replaced was never on this route's
+    // wire under its own name.
+    //
+    // This route's `userActionLimiter` deny arm answered `KEY_RATE_LIMIT`,
+    // whose copy calls the throttle *"a transient, exchange-side throttle"* and
+    // whose second fix line offers *"try a different exchange account"*. The
+    // bucket is keyed `keys-validate-encrypt:<uid>` — OURS, per USER — so no
+    // exchange was consulted and no other exchange account could clear it. The
+    // arm now answers `RATE_LIMITED`, which already carried the true sentence
+    // (*"the cap is ours, not your exchange's"*): wiring, not authoring.
+    //
+    // ⚠️ WHAT THIS ROW BUYS, ON THIS ROSTER, IS NOT WHAT IT BUYS ON A WIZARD
+    // STEP'S. Read the ⚠️ paragraph at the head of this table first: none of
+    // this route's three consumers reads the `code` field, so this row means
+    // "typed, and has copy", never "a client renders it". On
+    // `KNOWN_SET_MEMBERS_CODES` the same code IS a copy guard, and on
+    // `KNOWN_ADD_KEY_CODES` a coupling guard — three rosters, three different
+    // answers, measured per route in `wizardErrors.invariant.test.ts`.
+    //
+    // ⚠️ It is also NOT visible to the 4th `ROUTES` row's scanner: the deny
+    // body rides `rateLimitDenyJson`, not a `NextResponse.json` literal, so
+    // `expectedSites` neither sees it nor moves for it. The `[164.2-05]`
+    // hand-typed twin in that file is the only guard on this row.
+    //
+    // ⛔ `KEY_RATE_LIMIT` IS NOT LISTED HERE AND MUST NOT BE ADDED. This route
+    // never emitted it from the classifier — it has no `classifyKeyValidationError`
+    // call at all — so its only producer was the arm that just moved.
+    "RATE_LIMITED",
     "UNKNOWN",
   ]);
 

@@ -776,11 +776,24 @@ describe("POST /api/strategies/composite/add-key — B15 limiter ordering", () =
     // 140.4-16 / WR-03 — byte-wise, because `toEqual` on parsed JSON does NOT
     // compare key order (measured: a swap left all four receipts green). See
     // the note in `keys/sync/route.test.ts`.
+    //
+    // ⚠️ 164.2-05 / criterion 4 — INVERTED PIN. The code was `KEY_RATE_LIMIT`,
+    // and the route's own comment recorded the debt in as many words: "its copy
+    // calls the throttle 'exchange-side'. That sentence is FALSE for our own
+    // limiter and honestly rewording it is plan 140.4-12's change, not this
+    // one." 140.4-12 never made it; this plan pays the debt. The bucket is
+    // keyed `strategies-composite-add-key:<uid>` — ours, per USER — so no
+    // exchange is involved and `KEY_RATE_LIMIT`'s "try a different exchange
+    // account" is a remedy that cannot work. `RATE_LIMITED` already said "the
+    // cap is ours, not your exchange's".
+    //
+    // ⛔ The KEY ORDER, `Retry-After` and `Cache-Control` are all unchanged.
+    // Only the token moved, and the byte-wise assertion is what proves that.
     expect(await res.clone().text()).toBe(
-      '{"code":"KEY_RATE_LIMIT","error":"Too many requests"}',
+      '{"code":"RATE_LIMITED","error":"Too many requests"}',
     );
     expect(await res.json()).toEqual({
-      code: "KEY_RATE_LIMIT",
+      code: "RATE_LIMITED",
       error: "Too many requests",
     });
     expect(res.headers.get("Retry-After")).toBe("42");
@@ -814,6 +827,22 @@ describe("POST /api/strategies/composite/add-key — B15 limiter ordering", () =
         "for OUR store being unreachable blames the user's exchange for our " +
         "outage, on their first click, for as long as Upstash is down.",
     ).not.toBe("KEY_RATE_LIMIT");
+    // ⚠️ 164.2-05 — THE HISTORICAL PIN ABOVE IS KEPT AND A LIVE ONE ADDED
+    // BESIDE IT, because this plan made the old one satisfiable by a code the
+    // route can no longer produce. Once `add-key` stopped emitting
+    // `KEY_RATE_LIMIT` from its own source, `not.toBe("KEY_RATE_LIMIT")` became
+    // a test that cannot fail — vacuous, and indistinguishable from a guard.
+    // Deleting it would lose the record of what this case was written to
+    // defend, so it stays as the historical pin and the assertion below carries
+    // the claim forward onto the code the throttled arm NOW answers.
+    expect(
+      body.code,
+      "a limiter whose STORE is unreachable answered `RATE_LIMITED` — our own " +
+        "cap. The user did not hit any cap: nothing was counted, because the " +
+        "counter is down. Telling them to wait and retry is a remedy for a " +
+        "state they are not in, and it hides the outage from the canary " +
+        "exactly as the exchange-blaming code used to.",
+    ).not.toBe("RATE_LIMITED");
     expect(body.code).toBe("SEAM_MISCONFIGURED");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(res.headers.get("Retry-After")).toBe("60");

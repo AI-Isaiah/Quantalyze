@@ -266,14 +266,21 @@ const MULTI_KEY_FUNNEL_STEP = "connect_key_multi";
  * fix it and redeploy."* The remedy is the ONE shared table
  * (`SEAM_CODE_TO_WIZARD_CODE`, read through `recogniseSeamErrorCode`) consulted
  * FIRST — coverage-law row 1 — not a member here, which would be a hand-typed
- * allow-list edit owed again at every surface the next wire code reaches. The
+ * allow-list edit owed again at every surface the next wire code reaches.
+ *
+ * ⚠️ 164.2-05 CORRECTION (2026-09-06). This paragraph used to continue: *"The
  * table's key set and this set intersect in NOTHING, so the ordering cannot
- * change what any member below renders — and 140.4-16 / WR-11 turned that
- * measurement into an assertion in `seam-ratelimit-posture.invariant.test.ts`,
- * which derives both vocabularies from disk. Note the guard asserts the
- * NECESSARY condition (a shared code must get the SAME answer) rather than
- * disjointness: disjointness holds here but NOT at `KNOWN_KICKOFF_CODES`,
- * which shares `RATE_LIMITED`. See `ConnectKeyStep`'s
+ * change what any member below renders."* THAT IS NO LONGER TRUE — admitting
+ * `RATE_LIMITED` below (see its row) gives this set exactly one member the wire
+ * table also carries. The CONCLUSION still holds, and it always rested on the
+ * other reason: 140.4-16 / WR-11 turned the measurement into an assertion in
+ * `seam-ratelimit-posture.invariant.test.ts`, which derives both vocabularies
+ * from disk and asserts the NECESSARY condition — a shared code must get the
+ * SAME answer — rather than disjointness. The wire table maps `RATE_LIMITED`
+ * to ITSELF, so the two sides AGREE and the ordering still cannot change what
+ * renders. ⛔ Disjointness was only ever a SUFFICIENT condition that happened
+ * to hold here; it did not hold at `KNOWN_KICKOFF_CODES`, which has shared
+ * `RATE_LIMITED` all along, and it does not hold here any more either. See `ConnectKeyStep`'s
  * `KNOWN_CREATE_WITH_KEY_CODES` docblock for the full reasoning; both key-entry
  * steps take the change together because both routes emit the code.
  */
@@ -296,6 +303,38 @@ const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
     "KEY_HAS_WITHDRAW_PERMS",
     "DRAFT_ALREADY_EXISTS",
     "KEY_RATE_LIMIT",
+    // 164.2-05 / criterion 4 (2026-09-06) — BESIDE `KEY_RATE_LIMIT`, NOT
+    // INSTEAD OF IT. The two stand for DIFFERENT facts and both are reachable
+    // on this route.
+    //
+    // `composite/add-key`'s `userActionLimiter` deny arm used to answer
+    // `KEY_RATE_LIMIT`, whose copy calls the throttle *"a transient,
+    // exchange-side throttle"* and whose `fix[1]` offers *"try a different
+    // exchange account"*. That bucket is keyed
+    // `strategies-composite-add-key:<uid>` — OURS, per USER — so no exchange is
+    // consulted and no other exchange account can clear it. The arm now answers
+    // `RATE_LIMITED`, which already carried the true sentence (*"the cap is
+    // ours, not your exchange's"*). The route's own comment had recorded that
+    // debt since 140.4-13 and named 140.4-12 as its owner; 140.4-12 never made
+    // the change, and this plan pays it as a CLASS across all four
+    // `userActionLimiter` routes.
+    //
+    // ⛔ `KEY_RATE_LIMIT` STAYS ABOVE because `classifyKeyValidationError` still
+    // returns it at 503 for a GENUINE venue throttle, where its exchange
+    // sentence is TRUE. Removing it would swap a false sentence for an UNKNOWN
+    // card on the one arm that earned it.
+    //
+    // ⚠️ WHAT THIS ROW ACTUALLY BUYS — MEASURED, because 164.2-04 shipped a
+    // first draft of the twin comment in `ConnectKeyStep.tsx` that claimed the
+    // wrong thing. It is a COUPLING guard, not a copy guard: the add-key arm
+    // below TRANSLATES FIRST through `SEAM_CODE_TO_WIZARD_CODE`, which maps
+    // `RATE_LIMITED` to ITSELF, so deleting this line does NOT make the step
+    // render UNKNOWN. What it buys is that this route's own minted vocabulary
+    // is written down here rather than borrowed from the shared wire table —
+    // which is what makes a future edit to that table a caught change instead
+    // of a rendered one. ⛔ `KNOWN_SET_MEMBERS_CODES` below is the OPPOSITE
+    // case; do not copy this paragraph onto it.
+    "RATE_LIMITED",
     "UNKNOWN",
     // Returned by the shared `classifyKeyValidationError` at its catch arm.
     "SERVICE_UNAVAILABLE_RETRY",
@@ -353,7 +392,37 @@ const KNOWN_SET_MEMBERS_CODES: ReadonlySet<WizardErrorCode> =
   new Set<WizardErrorCode>([
     "MULTI_KEY_WINDOWS_INVALID",
     "GUARD_BLOCKED",
+    // ⚠️ 164.2-05 (2026-09-06) — UNREACHABLE-BY-DESIGN, AND KEPT DELIBERATELY.
+    //
+    // Read this before treating the row as live. `set-members` answered its own
+    // 429 with `KEY_RATE_LIMIT` and that arm was its ONLY producer: this route
+    // performs no key validation, so — as the docblock above says — it never
+    // calls `classifyKeyValidationError` and no classifier verdict can arrive
+    // here. As of 164.2-05 the arm answers `RATE_LIMITED`, so NOTHING emits
+    // this code on this route any more.
+    //
+    // It stays because removing it is a RENDERING change this plan did not
+    // measure: a response from an older instance mid-deploy would go from a
+    // stale sentence to the UNKNOWN card, and picking between those two is a
+    // separate decision from "stop emitting the false one". ⛔ Do not read this
+    // row as evidence that a venue throttle can reach this step — that is
+    // exactly the false attribution the line below was added to remove.
     "KEY_RATE_LIMIT",
+    // ⭐ 164.2-05 / criterion 4 — AND ON THIS ROSTER THE ROW IS A COPY GUARD,
+    // unlike its twin in `KNOWN_ADD_KEY_CODES` above.
+    //
+    // `handleContinue` does NOT translate: it reads
+    // `data.code && KNOWN_SET_MEMBERS_CODES.has(data.code)` and falls straight
+    // to `"UNKNOWN"`. There is no `recogniseSeamErrorCode` hop on this arm, so
+    // omit this line and a real throttle renders the generic UNKNOWN card
+    // instead of the honest cap sentence. MEASURED, not inferred: with the row
+    // absent the step-level envelope reads `data-error-code="UNKNOWN"`.
+    //
+    // The fact it now names is our own per-user cap
+    // (`strategies-composite-set-members:<uid>`), which is the only kind of
+    // throttle this endpoint can produce — it persists date windows and reaches
+    // no venue on any path.
+    "RATE_LIMITED",
     "UNKNOWN",
   ]);
 
@@ -1396,12 +1465,21 @@ export function MultiKeyConnectStep({
           // `SEAM_CODE_TO_WIZARD_CODE`'s keys, never values. Under that
           // predicate `KNOWN_KICKOFF_CODES` ∩ = {RATE_LIMITED} and
           // `KNOWN_FINALIZE_CODES` ∩ = {SEAM_MISCONFIGURED}; this file's two
-          // sets and `ConnectKeyStep`'s intersect in NOTHING. Both real
-          // overlaps AGREE at HEAD, and
+          // sets and `ConnectKeyStep`'s intersect in NOTHING.
+          //
+          // ⚠️ 164.2-05 CORRECTION (2026-09-06) — THAT LAST CLAUSE IS NOW
+          // FALSE, twice over. 164.2-04 admitted `RATE_LIMITED` to
+          // `ConnectKeyStep`'s `KNOWN_CREATE_WITH_KEY_CODES` and this plan
+          // admitted it to BOTH sets in this file, so all three now intersect
+          // the wire table in {RATE_LIMITED}. The measurement is left standing
+          // rather than deleted because the REASONING it records is what this
+          // correction turns on and is still correct: agreement is the
+          // necessary condition, disjointness only a sufficient one. Every
+          // overlap on record is a SELF-MAP, so all of them AGREE at HEAD, and
           // `seam-ratelimit-posture.invariant.test.ts` reddens if a shared code
           // ever gets different answers. Do not restore the disjointness
-          // sentence as the REASON — an empty intersection here is a fact about
-          // today's rosters, and the safety does not rest on it.
+          // sentence as the REASON — an empty intersection here was a fact
+          // about the rosters of the day, and the safety never rested on it.
           // 140.4-16 / WR-09 — READ THROUGH THE LEAF, not off the top level.
           // The commit that added this hop claimed it "mirrors
           // `SyncPreviewStep`'s kickoff arm exactly". It did not: that arm and

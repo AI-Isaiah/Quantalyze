@@ -364,7 +364,9 @@ export function isRateLimitMisconfigured(
  * THE ROUTE OWNS: its body and its extra headers. Measured on the untouched
  * tree, converging the seam onto this builder's FIXED body would have regressed
  * six live 429 contracts — `create-with-key` and `composite/add-key`
- * (`code: "KEY_RATE_LIMIT"`), `keys/sync` at BOTH arms (`code: "RATE_LIMITED"`),
+ * (`code: "KEY_RATE_LIMIT"` ⚠️ AS MEASURED THEN; both answer `RATE_LIMITED`
+ * since 164.2-04/05, which moved the TOKEN and not the ownership this
+ * paragraph is about), `keys/sync` at BOTH arms (`code: "RATE_LIMITED"`),
  * `csv-validate` and `csv-finalize` (the CSV v0 envelope), and
  * `scenario/optimize` (a bespoke sentence with NO `Retry-After`) — and dropped
  * `NO_STORE_HEADERS` from ten of them, re-opening a cache-contract finding.

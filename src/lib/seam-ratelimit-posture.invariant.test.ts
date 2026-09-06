@@ -653,9 +653,32 @@ describe("[140.4-16 / WR-11] no wizard roster is SHADOWED into a different answe
     // The sentence above is left standing rather than rewritten because the
     // reasoning it records — disjointness is sufficient, agreement is necessary
     // — is exactly what this new row exercises.
+    //
+    // ⚠️ 164.2-05 (criterion 4, the CLASS) — TWO MORE, AND NOW ALL FOUR ROSTERS
+    // OVERLAP. `composite/add-key` and `composite/set-members` were the last
+    // two `userActionLimiter` routes still answering `KEY_RATE_LIMIT`; their
+    // buckets are keyed `strategies-composite-add-key:<uid>` and
+    // `strategies-composite-set-members:<uid>`, and `set-members` in particular
+    // reaches no venue on ANY path — it persists date windows. Both now answer
+    // `RATE_LIMITED` and both rosters gained the member.
+    //   · KNOWN_ADD_KEY_CODES.RATE_LIMITED → "RATE_LIMITED", self-map, agrees;
+    //     that arm translates first, so the hop shadows the row.
+    //   · KNOWN_SET_MEMBERS_CODES.RATE_LIMITED → "RATE_LIMITED", self-map,
+    //     agrees — ⭐ but this arm has NO translate step at all, so the roster
+    //     is the ACTIVE path and nothing shadows it. `shadowed()` still lists
+    //     it because this oracle reads vocabularies, not call order; that is
+    //     correct for a VISIBILITY pin and is worth knowing when reading the
+    //     word "shadowed" here.
+    // ⛔ The sentence above claiming the two Set rosters and
+    // KNOWN_SET_MEMBERS_CODES "are genuinely disjoint from the wire
+    // vocabulary" is now false of ALL THREE. It is left standing for the same
+    // reason the 164.2-04 note gives: the reasoning it records — disjointness
+    // sufficient, agreement necessary — is exactly what these rows exercise.
     expect(overlaps).toEqual([
+      "KNOWN_ADD_KEY_CODES.RATE_LIMITED",
       "KNOWN_CREATE_WITH_KEY_CODES.RATE_LIMITED",
       "KNOWN_KICKOFF_CODES.RATE_LIMITED",
+      "KNOWN_SET_MEMBERS_CODES.RATE_LIMITED",
     ]);
   });
 

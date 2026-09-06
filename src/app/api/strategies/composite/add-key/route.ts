@@ -295,15 +295,35 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
     // misconfiguration answers 503 instead of the 429 below.
     //
-    // ⚠️ THE 429 BODY IS UNCHANGED, `{code, error}` IN THAT ORDER. `KEY_RATE_LIMIT`
-    // is a live contract: `MultiKeyConnectStep`'s KNOWN_ADD_KEY_CODES admits it,
-    // and its copy calls the throttle "exchange-side". That sentence is FALSE
-    // for our own limiter and honestly rewording it is plan 140.4-12's change,
-    // not this one — but it is only ever reached on a GENUINE throttle now,
-    // because a misconfiguration no longer arrives here at all.
+    // ⚠️ THE 429 BODY'S SHAPE IS UNCHANGED, `{code, error}` IN THAT ORDER.
+    //
+    // ⭐ 164.2-05 / criterion 4 — THE DEBT THIS BLOCK RECORDED IS PAID. It read:
+    //
+    //     "`KEY_RATE_LIMIT` is a live contract: `MultiKeyConnectStep`'s
+    //      KNOWN_ADD_KEY_CODES admits it, and its copy calls the throttle
+    //      'exchange-side'. That sentence is FALSE for our own limiter and
+    //      honestly rewording it is plan 140.4-12's change, not this one — but
+    //      it is only ever reached on a GENUINE throttle now, because a
+    //      misconfiguration no longer arrives here at all."
+    //
+    // 140.4-12 never made that change, and the last clause was the reason it
+    // felt survivable. ⛔ IT IS ALSO THE PART THAT WAS WRONG. Routing the
+    // MISCONFIGURATION to 503 removed one false attribution and left the other
+    // standing: a GENUINE deny on this arm is our own `userActionLimiter`
+    // bucket, keyed `strategies-composite-add-key:<uid>` — per USER, with no
+    // exchange consulted. "The exchange asked us to slow down" is false on
+    // every path that reaches this line, and `fix[1]`'s "try a different
+    // exchange account" is a remedy no exchange account can perform.
+    //
+    // The answer needed no new copy: `RATE_LIMITED` already said *"the cap is
+    // ours, not your exchange's"*. Wiring, not authoring.
+    //
+    // ⛔ `KEY_RATE_LIMIT` STAYS IN `KNOWN_ADD_KEY_CODES` — unlike this route's
+    // own source, `classifyKeyValidationError` still returns it at 503 for a
+    // GENUINE venue throttle, which is the one place its sentence is true.
     return rateLimitDenyJson(rl, {
       headers: NO_STORE_HEADERS,
-      throttledBody: { code: "KEY_RATE_LIMIT", error: "Too many requests" },
+      throttledBody: { code: "RATE_LIMITED", error: "Too many requests" },
       misconfiguredBody: {
         code: "SEAM_MISCONFIGURED",
         error: "Rate limiter unavailable",
