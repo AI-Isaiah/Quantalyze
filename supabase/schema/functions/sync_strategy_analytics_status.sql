@@ -211,9 +211,9 @@ BEGIN
       --
       -- ⛔ THE KIND SCOPE IS THE SECOND HALF OF THE CONTAINMENT, not decoration
       -- (161.1 migration re-review, rls-policy-auditor MEDIUM). `metadata` is
-      -- NOT a closed namespace and `'source'` is NOT a private key: the single
-      -- request-derived writer, analytics-service/routers/process_key.py:766
-      -- and :1518, puts the caller's `body.source` straight into `p_metadata`.
+      -- NOT a closed namespace and `'source'` is NOT a private key: the
+      -- request-derived writers in analytics-service/routers/process_key.py put
+      -- the caller's `body.source` straight into `p_metadata`.
       -- That value cannot collide with a refresh marker TODAY only because the
       -- Pydantic `Source` Literal at
       -- analytics-service/services/ingestion/adapter.py:59 admits venue names
@@ -230,6 +230,19 @@ BEGIN
       -- by the drift gate in
       -- analytics-service/tests/test_ledger_refresh_kind_scope_drift.py; add a
       -- fan-out arm without adding its kind here and that gate goes RED.
+      --
+      -- ⚠️ CITE CORRECTED 2026-09-06 (prose only, nothing executable moved).
+      -- The `p_metadata` sentence above is inherited VERBATIM from migrations
+      -- 20260825150000 and 20260826120000, where it read "the single
+      -- request-derived writer, analytics-service/routers/process_key.py:766
+      -- and :1518". BOTH halves were stale at this date: :766 is a BLANK line,
+      -- and there are FOUR such sites rather than one -- `"source":
+      -- body.source` occurs at :810 (the `p_metadata` dict spans :806-812),
+      -- :1173, :1519 and :1597. The two earlier migrations are ALREADY APPLIED
+      -- and are deliberately NOT edited, so the same stale cite still lives in
+      -- both of them; this note is the correction of record. The containment
+      -- argument is UNCHANGED -- four request-derived sites widen the surface,
+      -- they do not remove the kind scope's need.
       --
       -- ⛔ It belongs to `is_protected`, NEVER to this CTE's WHERE clause.
       -- Moved into the WHERE it would drop out-of-scope failures from the

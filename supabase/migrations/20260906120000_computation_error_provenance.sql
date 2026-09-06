@@ -3,6 +3,40 @@
 -- failure it is resolving.
 -- Phase 164.2 / plan 06 / criterion 2 (CURATED-COPY). 2026-09-06.
 --
+-- ══════════════════════════════════════════════════════════════════════════
+-- VAC-04 ACKNOWLEDGEMENT — the PROD body this CREATE OR REPLACE overwrites.
+--
+-- prod-body-ack: cb4353d7a356e647445d2e331ff2104ac4e356cfdb4ae4f4f4578e918bfcb995
+--
+-- The gate compares the COMMITTED SNAPSHOT (supabase/schema/functions/) against
+-- PROD's live body. On any function-changing migration PR the two necessarily
+-- disagree: `snapshot-drift` requires the snapshot to carry the body the
+-- MIGRATIONS produce (the new one), while VAC-04 requires it to match what PROD
+-- has TODAY (the old one). The pragma is the designed resolution, and it means
+-- "I read PROD's body and intend to overwrite it" -- so it was earned, not
+-- pasted:
+--
+--   MEASURED 2026-09-06, workflow run 34056186575 at e7a9d828:
+--     PROD live sha256                  cb4353d7...fcb995   (38 differing lines)
+--     committed snapshot at HEAD        67a36c4e...09eee1
+--   and, reproduced LOCALLY with the gate's own normalizer,
+--   `node scripts/sql-body-normalize.mjs --diff-bodies <origin/main snapshot> <HEAD snapshot>`:
+--     origin/main snapshot sha256       cb4353d7...fcb995   <-- IDENTICAL to PROD
+--     HEAD snapshot sha256              67a36c4e...09eee1
+--
+-- ⭐ PROD's live body is therefore EXACTLY the repository's last-known committed
+-- snapshot on main. There is NO out-of-band patch -- DRIFT-02's shape is ABSENT.
+-- The 38 lines are this phase's own six provenance deltas plus the `id DESC`
+-- tie-break, and nothing else: no guard, scope or ownership predicate is
+-- removed (verified independently by the phase's security audit, which also
+-- proved the REVOKE grantee set byte-identical to the definition this file
+-- re-bases on).
+--
+-- ⛔ Had the two hashes NOT matched, the correct action was to FOLD the
+-- difference into this migration, never to record the pragma anyway. The ack is
+-- evidence that PROD was read, not a way to silence the gate.
+-- ══════════════════════════════════════════════════════════════════════════
+--
 -- ⚠️ OPS: merging supabase/migrations/** to main AUTO-APPLIES to PROD. This file
 -- redefines a function that every terminal compute-job transition PERFORMs
 -- in-RPC, so it is live on the next merge with no separate deploy step and no
