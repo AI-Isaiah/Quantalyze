@@ -4,32 +4,53 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.2
 current_phase_name: CURATED-COPY
-status: in_progress
-stopped_at: 164.2 CONTEXT + RESEARCH committed; pattern-mapping running; no PLAN files yet
-last_updated: "2026-09-06T08:45:30.461Z"
+status: complete
+stopped_at: 164.2 COMPLETE — 10/10 plans; 3-reviewer migration gate CLEARED by founder; deep review 0 Critical/3 Warning all fixed; verification 9/9 (criterion 3 a founder override). Nothing applied to PROD or shared TEST.
+last_updated: "2026-09-06T18:07:53.222Z"
 last_activity: 2026-09-06
-last_activity_desc: "164.1 closed by merge (PR 746/748, v0.77.15.0) but UNVERIFIED — no VERIFICATION.md; 164.2 discussed+researched, not planned; 164.6 gained PROBER-CALIBRATION-01; 164.2.1 SESSIONID-FENCE inserted; STATE.md reconciled"
-state_head: c1c8cf3c4935de3ce494dd05c663701f0ff92a25
+last_activity_desc: "164.2 CURATED-COPY executed end-to-end. 10 plans across 4 waves, sequential (harness worktrees fork from origin/HEAD, ~45 commits behind — #683 auto-degrade). Migration 20260906120000 written and proven ONLY on the throwaway pg-lane; its 3-reviewer gate found 1 CRITICAL (a marker outliving its sentence) fixed at the TABLE via a BEFORE UPDATE trigger, and the founder CLEARED the gate 2026-09-06. Deep review: 0 Critical, 3 Warning, all fixed. Verification 9/9. WIZFORM-02 deliberately LEFT OPEN — 4 of 5 surfaces render; keys/validate-and-encrypt has no code-channel consumer, founder accepted and booked [WIZFORM-02-VE-CODECHANNEL]. WINDOWS.md row 37 repaired (it had refused every append for 3 plans). Corpus 369/369/0, exit 0."
+state_head: 77f6e202a257d8488bac996f162ea82fbcc16ef1
+
 # ⚠️ progress: HAND-SET 2026-09-06 against `origin/main`, NOT derived from this checkout.
+
 # This branch is 1 commit behind main and is missing d679f638, so four SHIPPED phase
+
 # directories (164.1, 164.3.1, 164.4, 164.4.1) are empty HERE — the previous values
+
 # (completed_phases 4, total_plans 70, completed_plans 66, percent 20) were derived from
+
 # that incomplete tree and were wrong. Census taken with
+
 # `git ls-tree -r --name-only origin/main .planning/phases/`:
+
 #   total_plans 107 = 158:6 159:7 160:7 161:10 161.1:5 162:9 163:9 164:7 164.1:6
+
 #                     164.3:10 164.3.1:13 164.4:12 164.4.1:6   (164.2/164.2.1/164.5/
+
 #                     164.6/164.7/165/166 author none yet)
+
 #   completed_plans 104 = the same list by SUMMARY count; the 3 shortfalls are
+
 #                     159 (7/6), 160 (7/6) and 164.3 (10/9, plan 07 is 164.3-07-DEFERRED.md)
+
 #   completed_phases 10 = plans>0 AND summaries==plans: 158 161 161.1 162 163 164 164.1
+
 #                     164.3.1 164.4 164.4.1
+
 #   percent 50 = phase-weighted (completed_phases/total_phases), the convention this file
+
 #                fixed at the 156-10 reconciliation — NOT plan-weighted
+
 # ⛔ Do NOT run `state.update-progress` or `state.begin-phase` from this checkout to "fix"
+
 # these: both recompute from local disk and would write the depressed numbers back, and
+
 # begin-phase additionally overwrites the Status:/Last activity:/Plan: prose below with
+
 # template boilerplate and drops `state_head` (measured in a sandbox copy 2026-09-06).
+
 # Merge origin/main first; then a handler-derived recount is trustworthy.
+
 progress:
   total_phases: 20
   completed_phases: 10
@@ -1987,7 +2008,7 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
   pointer lines were re-cut in the same 2026-09-06 pass and now read the live 164.2 position.
   ⛔ Still true and unchanged: `state.patch` cannot write `Current Phase` / `Next recommended run`,
   because `## Current Position` is hand-maintained PROSE with bare `Field: value` lines rather than
-  the `**Field:** value` shape the patcher's bold pattern looks for first. The pointers there are
+  the `**Field:** last_activity_desc
   edited by hand, on purpose.
 - ⚠️ **A working branch that is BEHIND main makes every GSD phase-directory reading lie, silently.**
   Measured 2026-09-06 on `phase-164.2-curated-copy`: 1 behind / 5 ahead of `origin/main`, missing
