@@ -30,12 +30,12 @@
 -- `TEST FAILED (X):` idiom the runner CAN attribute — so each of the seven arms
 -- below carries a RED-UNDER-M twin that is EXECUTED on every push, mutating the
 -- migration on a throwaway pg-lane cluster and requiring THIS arm to be the
--- FIRST failure. Two of the arms (S, P) restate M2 / M3; the other five are new
+-- FIRST failure. Two of the arms (S1, P1) restate M2 / M3; the other five are new
 -- coverage. The overlap is deliberate and is stated here rather than hidden:
 -- what it buys is machine attribution, not a second opinion.
 --
 -- Arms:
---   S   the curated sentence SURVIVES  — a writer stamps a sentence and both
+--   S1  the curated sentence SURVIVES  — a writer stamps a sentence and both
 --                                        markers for job J; mark_compute_job_failed
 --                                        (J, …, 'permanent', tok) resolves J
 --                                        through branch (b); the sentence, the
@@ -43,14 +43,14 @@
 --                                        come back unchanged. This is criterion
 --                                        1's headline. (Restates arm M2 of the
 --                                        sibling gate, attributably.)
---   C   the CONTROL, branch (b)        — byte-identical fixture with NO markers
+--   C1  the CONTROL, branch (b)       — byte-identical fixture with NO markers
 --                                        and a stale sentence in the column. It
 --                                        must be replaced by the per-kind
 --                                        generic, spelled LITERALLY. Without C,
 --                                        a bridge that keeps EVERY sentence
---                                        passes S. Also the "no backfill" claim:
+--                                        passes S1. Also the "no backfill" claim:
 --                                        NULL markers behave exactly as before.
---   O   an OLDER job's marker LOSES    — the case 20260826120000's header called
+--   O1  an OLDER job's marker LOSES    — the case 20260826120000's header called
 --                                        undecidable, and the reason the
 --                                        predicate is an EQUALITY and not a
 --                                        presence test. The row carries
@@ -60,24 +60,24 @@
 --                                        markers cleared. No other arm anywhere
 --                                        distinguishes an equality from a
 --                                        presence test.
---   D   branch (c) clears the markers  — mark_compute_job_done drives the
+--   D1  branch (c) clears the markers  — mark_compute_job_done drives the
 --                                        all-done success write, which must
 --                                        leave NO marker behind. ⚠️ Its fixture
 --                                        is deliberate; see THE TRIGGER MASKS
 --                                        TWO ARMS below.
---   P   branch (b-prime) SURVIVES      — the D-15 recurring-refresh path, where
+--   P1  branch (b-prime) SURVIVES      — the D-15 recurring-refresh path, where
 --                                        the row stays PUBLISHED and this
 --                                        sentence is the entire explanation the
 --                                        user gets. Separate statement, separate
 --                                        CASE, separate variable from branch (b),
---                                        so S does not imply it. Also asserts
+--                                        so S1 does not imply it. Also asserts
 --                                        computed_at did not move. (Restates arm
 --                                        M3 of the sibling gate, attributably.)
---   PC  the CONTROL, branch (b-prime)  — same fixture without the markers: the
+--   PC1 the CONTROL, branch (b-prime)  — same fixture without the markers: the
 --                                        per-kind generic, and both markers NULL.
---                                        Without PC, a b-prime that keeps EVERY
---                                        sentence passes P.
---   R   branch (a) clears the markers   — the RETRYABLE transition. A 'transient'
+--                                        Without PC1, a b-prime that keeps EVERY
+--                                        sentence passes P1.
+--   R1  branch (a) clears the markers   — the RETRYABLE transition. A 'transient'
 --                                        failure with attempts left lands on
 --                                        failed_retry, which the bridge counts as
 --                                        NON-terminal, so the row is re-entered at
@@ -93,20 +93,20 @@
 --       unconditionally. Reached by mark_compute_job_failed with a RETRYABLE
 --       kind ('transient'/'unknown' with attempts left, mig 20260515114555's
 --       `ELSE v_new_status := 'failed_retry'`), because the bridge counts
---       failed_retry as non-terminal. → ARM R.
+--       failed_retry as non-terminal. → ARM R1.
 --       ⚠️ It is ALSO the branch the DEFERRED Python path reaches:
 --       services.job_worker.dispatch PERFORMs this same function directly while
 --       the job is still non-terminal. The CALLER differs; the branch and its
---       write do not, so ARM R is that path's proof as well.
+--       write do not, so ARM R1 is that path's proof as well.
 --   (b) all terminal, a non-superseded UNPROTECTED failed_final → 'failed' with
 --       the per-kind sentence, conditionally preserved. Reached by
 --       mark_compute_job_failed with 'permanent', or with attempts exhausted.
---       → ARMS S (keep), C (overwrite, no marker), O (overwrite, wrong job).
+--       → ARMS S1 (keep), C1 (overwrite, no marker), O1 (overwrite, wrong job).
 --   (b-prime) all live failures are PROTECTED marked refreshes over a healthy
 --       published row → record the sentence, change nothing a subscriber sees.
---       → ARMS P (keep), PC (overwrite).
+--       → ARMS P1 (keep), PC1 (overwrite).
 --   (c) all rows 'done' → terminal success, sentence and markers blanked.
---       Reached by mark_compute_job_done. → ARM D.
+--       Reached by mark_compute_job_done. → ARM D1.
 --   (d) no compute_jobs rows at all → early RETURN, writes nothing. There is no
 --       marker decision on a branch that does not write.
 -- There is no fifth branch, and no other writer of compute_jobs.status PERFORMs
@@ -122,7 +122,7 @@
 -- markers drops them. That trigger is a SECOND mechanism producing the SAME
 -- observable outcome as branches (a) and (c)'s own unconditional marker clears.
 --
--- So the obvious fixture for D and R — a writer-curated sentence in the column,
+-- So the obvious fixture for D1 and R1 — a writer-curated sentence in the column,
 -- then the RPC — CANNOT FAIL under the twin that deletes those clears: the
 -- branch blanks the sentence, the twin has removed the marker assignments from
 -- the SET list, the trigger's guard therefore holds, and the trigger clears the
@@ -143,9 +143,31 @@
 -- trigger explicitly does not cover.
 --
 -- ⚠️ Each arm's sentence assertion is therefore stated where it can fail, and
--- NOT stated where it cannot: D and R assert their branch was reached (the
+-- NOT stated where it cannot: D1 and R1 assert their branch was reached (the
 -- SETUP guards) and then assert the markers, never "the sentence is NULL" —
 -- which is the value the fixture already held.
+--
+-- ⭐ WHY EVERY IDENTITY CARRIES A DIGIT — `S1`, NOT `S`. It is a mechanical
+-- requirement, not a style choice, and it was found by the invariant rather
+-- than assumed. `sectionOfIdentity` (scripts/mutation-runner/run.mjs:2548) is
+-- `id.replace(/(\d)[a-z]*(-[A-Za-z]+)?$/, "$1")`: a trailing `-SUFFIX` collapses
+-- into its parent SECTION only when a DIGIT precedes it. So `S1-SETUP` is a
+-- SUB-ARM of section `S1` and is covered by S1's twin — exactly as the sibling
+-- gate's `0b` and `0c` are sub-arms of its section `0` and are covered by twin
+-- `0a`. Spelled `S-SETUP` it would be its OWN section, and the 164.4-02
+-- section-coverage invariant (src/__tests__/mutation-annotation-parser.test.ts)
+-- would demand a twin for it — correctly, on its own terms: it refuses a file
+-- that raises for a section nothing has proven can fail. MEASURED here: the
+-- first draft used `S-SETUP` and that test named all six guards.
+--
+-- ⚠️ The SETUP guards are deliberately NOT separately twinned. They are VACUITY
+-- guards — "this fixture actually reached the branch this arm is about" — not
+-- claims about the bridge, and a twin for one of them would have to break
+-- PRODUCTION in order to break a FIXTURE, which inverts what the twin is for.
+-- Grouping them into their arm's section is the repo's sanctioned shape for
+-- exactly this, and it costs nothing: a SETUP guard firing still names itself
+-- (`TEST FAILED (S1-SETUP)`), so a failing run says whether the FIXTURE or the
+-- CLAIM broke without anyone reading the message.
 --
 -- pgTAP is NOT installed (CLAUDE.md). Plain PL/pgSQL DO block, RAISE EXCEPTION
 -- on failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed
@@ -167,7 +189,7 @@
 -- read the new columns. Apply the migration to TEST; do NOT convert this to a
 -- skip, and do NOT reword it to a phrasing CI's SKIP grep cannot see.
 --
--- The final 'ALL 7 ARMS EXECUTED (S, C, O, D, P, PC, R)' notice is the sentinel
+-- The final 'ALL 7 ARMS EXECUTED (S1, C1, O1, D1, P1, PC1, R1)' notice is the sentinel
 -- CI's loop reads the arm count off. If you add or remove an arm, update BOTH
 -- the integer and the roster on that line: `sql-tests` counts the roster's
 -- entries and fails when they disagree with N, which is what makes deleting an
@@ -205,13 +227,13 @@ DO $$
 DECLARE
   uid        UUID := gen_random_uuid();
   k_mt5      UUID;
-  s_s        UUID;  -- Arm S:  the writer's sentence survives branch (b)
-  s_c        UUID;  -- Arm C:  the unmarked control on branch (b)
-  s_o        UUID;  -- Arm O:  a marker naming an OLDER job must lose
-  s_d        UUID;  -- Arm D:  branch (c) leaves no marker behind
-  s_p        UUID;  -- Arm P:  the writer's sentence survives branch (b-prime)
-  s_pc       UUID;  -- Arm PC: the unmarked control on branch (b-prime)
-  s_r        UUID;  -- Arm R:  branch (a) leaves no marker behind
+  s_s        UUID;  -- Arm S1:  the writer's sentence survives branch (b)
+  s_c        UUID;  -- Arm C1:  the unmarked control on branch (b)
+  s_o        UUID;  -- Arm O1:  a marker naming an OLDER job must lose
+  s_d        UUID;  -- Arm D1:  branch (c) leaves no marker behind
+  s_p        UUID;  -- Arm P1:  the writer's sentence survives branch (b-prime)
+  s_pc       UUID;  -- Arm PC1: the unmarked control on branch (b-prime)
+  s_r        UUID;  -- Arm R1:  branch (a) leaves no marker behind
   j          UUID;
   j_old      UUID;
   tok        UUID;
@@ -247,7 +269,7 @@ BEGIN
           AND a.attname = 'computation_error_source'
           AND NOT a.attisdropped
      ) THEN
-    RAISE EXCEPTION 'TEST FAILED (0): public.strategy_analytics has no computation_error_source column on this database, so arms S, C, O, D, P, PC and R would have died on a raw 42703 naming no arm — or, worse, been deleted by a future reader who read that 42703 as "these arms are broken". TWO causes fit and this assertion cannot distinguish them, so check both: (i) this database has not received 20260906120000_computation_error_provenance.sql — apply it and re-run; expect this exactly once on the PR that introduces it, because NO workflow applies migrations to TEST; (ii) the columns were dropped by a later migration, which reverts criterion 2 outright — the bridge would then abort with 42703 on the live money path, on EVERY terminal compute-job transition. ⛔ Do NOT "fix" this by turning it into a RAISE NOTICE skip, and do not reword it to any phrasing CI''s SKIP grep cannot see: that is what made a sibling gate assert nothing while reading green.';
+    RAISE EXCEPTION 'TEST FAILED (0): public.strategy_analytics has no computation_error_source column on this database, so arms S1, C1, O1, D1, P1, PC1 and R1 would have died on a raw 42703 naming no arm — or, worse, been deleted by a future reader who read that 42703 as "these arms are broken". TWO causes fit and this assertion cannot distinguish them, so check both: (i) this database has not received 20260906120000_computation_error_provenance.sql — apply it and re-run; expect this exactly once on the PR that introduces it, because NO workflow applies migrations to TEST; (ii) the columns were dropped by a later migration, which reverts criterion 2 outright — the bridge would then abort with 42703 on the live money path, on EVERY terminal compute-job transition. ⛔ Do NOT "fix" this by turning it into a RAISE NOTICE skip, and do not reword it to any phrasing CI''s SKIP grep cannot see: that is what made a sibling gate assert nothing while reading green.';
   END IF;
 
   -- ----- SEED ------------------------------------------------------------
@@ -271,7 +293,7 @@ BEGIN
 
   v_before := now() - INTERVAL '3 days';
 
-  -- ===== ARM S — the curated sentence SURVIVES the transition ============
+  -- ===== ARM S1 — the curated sentence SURVIVES the transition ============
   -- The headline of criterion 1. Note the ORDER: the writer stamps the sentence
   -- and BOTH markers in ONE statement (which is what the pairing CHECK requires
   -- and what the writer plan will send), and only THEN is the job resolved. The
@@ -301,7 +323,7 @@ BEGIN
 
   SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j;
   IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
-    RAISE EXCEPTION 'TEST FAILED (S-SETUP): the job is %, not failed_final, so nothing was ever asked of the bridge and every assertion below would pass vacuously. Either the claim token was rejected (the mig-117 P97 fence needs status = ''running'' AND a matching claim_token) or the RPC signature moved.', v_jobstat;
+    RAISE EXCEPTION 'TEST FAILED (S1-SETUP): the job is %, not failed_final, so nothing was ever asked of the bridge and every assertion below would pass vacuously. Either the claim token was rejected (the mig-117 P97 fence needs status = ''running'' AND a matching claim_token) or the RPC signature moved.', v_jobstat;
   END IF;
 
   SELECT computation_error, computation_error_source, computation_error_job_id, computation_status
@@ -314,18 +336,18 @@ BEGIN
   --            ⚠️ LAYERED: 20260906120000's own (P2b) anchor asserts that whole
   --            CASE and would abort the apply, so it is stood down in the same
   --            mutation.
-  -- RED-UNDER-M: {"arm":"S","apply":[{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"computation_error  = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN strategy_analytics.computation_error ELSE EXCLUDED.computation_error END,","replace":"computation_error  = EXCLUDED.computation_error,","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"IF v_fn !~ 'computation_error\\s*=\\s*CASE","replace":"IF FALSE AND v_fn !~ 'computation_error\\s*=\\s*CASE","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S1","apply":[{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"computation_error  = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN strategy_analytics.computation_error ELSE EXCLUDED.computation_error END,","replace":"computation_error  = EXCLUDED.computation_error,","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"IF v_fn !~ 'computation_error\\s*=\\s*CASE","replace":"IF FALSE AND v_fn !~ 'computation_error\\s*=\\s*CASE","occurrences":1}]}
   IF v_error IS DISTINCT FROM 'Insufficient CSV history. At least 2 data points required.' THEN
-    RAISE EXCEPTION 'TEST FAILED (S): the writer-curated sentence did NOT survive the transition that resolved its own job — computation_error reads %. This is criterion 2''s headline defect: the worker writes a per-failure curated sentence moments before the RPC, and branch (b) overwrote it with the per-kind generic. The user reads a message that does not describe what actually failed.', COALESCE(v_error, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (S1): the writer-curated sentence did NOT survive the transition that resolved its own job — computation_error reads %. This is criterion 2''s headline defect: the worker writes a per-failure curated sentence moments before the RPC, and branch (b) overwrote it with the per-kind generic. The user reads a message that does not describe what actually failed.', COALESCE(v_error, 'NULL');
   END IF;
   IF v_status IS DISTINCT FROM 'failed' THEN
-    RAISE EXCEPTION 'TEST FAILED (S): the row reads computation_status = % rather than ''failed'' after an UNPROTECTED permanent failure, so branch (b) is not the branch that ran and the sentence assertion above was measuring something else.', COALESCE(v_status, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (S1): the row reads computation_status = % rather than ''failed'' after an UNPROTECTED permanent failure, so branch (b) is not the branch that ran and the sentence assertion above was measuring something else.', COALESCE(v_status, 'NULL');
   END IF;
   IF v_src IS DISTINCT FROM 'writer' OR v_jobid IS DISTINCT FROM j THEN
-    RAISE EXCEPTION 'TEST FAILED (S): branch (b) kept the sentence but not its provenance (source %, job %). The markers must travel WITH the sentence: dropped here, the NEXT bridge call reads a curated sentence as bridge-provenanced and overwrites it with the generic — the defect returns one call later, which is the version of it nobody reproduces.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (S1): branch (b) kept the sentence but not its provenance (source %, job %). The markers must travel WITH the sentence: dropped here, the NEXT bridge call reads a curated sentence as bridge-provenanced and overwrites it with the generic — the defect returns one call later, which is the version of it nobody reproduces.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
   END IF;
 
-  -- ===== ARM C — the CONTROL: no markers means the generic wins ==========
+  -- ===== ARM C1 — the CONTROL: no markers means the generic wins ==========
   -- Byte-identical to S except that the sentence in the column carries no
   -- provenance. Two things rest on this arm. (1) It is S's discriminator: a
   -- bridge that preserved EVERY existing sentence would pass S and is exactly
@@ -349,19 +371,19 @@ BEGIN
 
   -- RED-UNDER: weaken branch (b)'s CASE predicate to `WHEN TRUE`, i.e. keep
   --            whatever sentence the row already carries. ⚠️ LAYERED with the
-  --            same (P2b) anchor stand-down as arm S.
-  -- RED-UNDER-M: {"arm":"C","apply":[{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"computation_error  = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN","replace":"computation_error  = CASE WHEN TRUE THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"IF v_fn !~ 'computation_error\\s*=\\s*CASE","replace":"IF FALSE AND v_fn !~ 'computation_error\\s*=\\s*CASE","occurrences":1}]}
+  --            same (P2b) anchor stand-down as arm S1.
+  -- RED-UNDER-M: {"arm":"C1","apply":[{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"computation_error  = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN","replace":"computation_error  = CASE WHEN TRUE THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"IF v_fn !~ 'computation_error\\s*=\\s*CASE","replace":"IF FALSE AND v_fn !~ 'computation_error\\s*=\\s*CASE","occurrences":1}]}
   IF v_error IS DISTINCT FROM c_perm THEN
-    RAISE EXCEPTION 'TEST FAILED (C): an UNPROVENANCED sentence was preserved across the transition — computation_error reads % where the per-kind generic for a permanent failure was required. The preference is a presence test on nothing, or an unconditional keep: either way an OLDER unresolved failure''s sentence, and pre-migration operator text, are now frozen over a live newer failure, and the ~103 legacy rows stop behaving as they did before this migration (which is what "no backfill" was decided to mean).', COALESCE(v_error, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (C1): an UNPROVENANCED sentence was preserved across the transition — computation_error reads % where the per-kind generic for a permanent failure was required. The preference is a presence test on nothing, or an unconditional keep: either way an OLDER unresolved failure''s sentence, and pre-migration operator text, are now frozen over a live newer failure, and the ~103 legacy rows stop behaving as they did before this migration (which is what "no backfill" was decided to mean).', COALESCE(v_error, 'NULL');
   END IF;
   IF v_status IS DISTINCT FROM 'failed' THEN
-    RAISE EXCEPTION 'TEST FAILED (C): the row reads computation_status = % rather than ''failed'', so branch (b) is not the branch under test here either.', COALESCE(v_status, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (C1): the row reads computation_status = % rather than ''failed'', so branch (b) is not the branch under test here either.', COALESCE(v_status, 'NULL');
   END IF;
   IF v_src IS NOT NULL OR v_jobid IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (C): the bridge''s own generic write left a provenance marker behind (source %, job %). A marker standing over this bridge''s per-kind generic makes that generic read as writer-curated to the NEXT call, which then freezes it — strictly worse than having no provenance at all.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (C1): the bridge''s own generic write left a provenance marker behind (source %, job %). A marker standing over this bridge''s per-kind generic makes that generic read as writer-curated to the NEXT call, which then freezes it — strictly worse than having no provenance at all.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
   END IF;
 
-  -- ===== ARM O — a marker naming an OLDER job must LOSE ==================
+  -- ===== ARM O1 — a marker naming an OLDER job must LOSE ==================
   -- Case (ii) of 20260826120000's owed-work paragraph, and the whole reason the
   -- predicate is an EQUALITY against the job the branch itself resolved rather
   -- than a presence test on the marker. No other arm in this repository can tell
@@ -398,7 +420,7 @@ BEGIN
   SELECT created_at INTO v_old_at FROM compute_jobs WHERE id = j_old;
   SELECT created_at INTO v_new_at FROM compute_jobs WHERE id = j;
   IF NOT (v_new_at > v_old_at) THEN
-    RAISE EXCEPTION 'TEST FAILED (O-SETUP): the two failures are not strictly ordered (older %, newer %), so `array_agg(id ORDER BY created_at DESC, id DESC)` falls through to a random uuid and this arm is a coin flip rather than a test.', v_old_at, v_new_at;
+    RAISE EXCEPTION 'TEST FAILED (O1-SETUP): the two failures are not strictly ordered (older %, newer %), so `array_agg(id ORDER BY created_at DESC, id DESC)` falls through to a random uuid and this arm is a coin flip rather than a test.', v_old_at, v_new_at;
   END IF;
 
   SELECT computation_error, computation_error_source, computation_error_job_id
@@ -410,15 +432,15 @@ BEGIN
   --            source marker — the repair 20260826120000's header explicitly
   --            rejected as undecidable. ⚠️ LAYERED with the (P2b) anchor
   --            stand-down.
-  -- RED-UNDER-M: {"arm":"O","apply":[{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"computation_error  = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN","replace":"computation_error  = CASE WHEN strategy_analytics.computation_error_source = 'writer' THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"IF v_fn !~ 'computation_error\\s*=\\s*CASE","replace":"IF FALSE AND v_fn !~ 'computation_error\\s*=\\s*CASE","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"O1","apply":[{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"computation_error  = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN","replace":"computation_error  = CASE WHEN strategy_analytics.computation_error_source = 'writer' THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"IF v_fn !~ 'computation_error\\s*=\\s*CASE","replace":"IF FALSE AND v_fn !~ 'computation_error\\s*=\\s*CASE","occurrences":1}]}
   IF v_error IS DISTINCT FROM c_perm THEN
-    RAISE EXCEPTION 'TEST FAILED (O): a writer sentence stamped for an OLDER, still-unresolved failure was preserved over the NEWER failure this transition resolved — computation_error reads %. The preference has become a presence test on the source marker, which 20260826120000''s header names as the reason the fix could not be done there: it cannot tell THIS failure''s sentence from one an older unresolved failure left, and it freezes the older text in place on the live money path.', COALESCE(v_error, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (O1): a writer sentence stamped for an OLDER, still-unresolved failure was preserved over the NEWER failure this transition resolved — computation_error reads %. The preference has become a presence test on the source marker, which 20260826120000''s header names as the reason the fix could not be done there: it cannot tell THIS failure''s sentence from one an older unresolved failure left, and it freezes the older text in place on the live money path.', COALESCE(v_error, 'NULL');
   END IF;
   IF v_src IS NOT NULL OR v_jobid IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (O): the overwrite left the stale provenance standing (source %, job %). The markers must be cleared on the SAME predicate that overwrites the sentence — a job id beside a sentence that job never wrote is a claim about text that is gone.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (O1): the overwrite left the stale provenance standing (source %, job %). The markers must be cleared on the SAME predicate that overwrites the sentence — a job id beside a sentence that job never wrote is a claim about text that is gone.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
   END IF;
 
-  -- ===== ARM D — branch (c) leaves NO marker behind ======================
+  -- ===== ARM D1 — branch (c) leaves NO marker behind ======================
   -- ⚠️ FIXTURE IS DELIBERATE — see THE TRIGGER MASKS TWO ARMS in the header.
   -- The row is INSERTed with both markers over a NULL sentence. The provenance
   -- trigger is UPDATE-only, so it never saw this row; branch (c) then writes
@@ -445,14 +467,14 @@ BEGIN
 
   SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j;
   IF v_jobstat IS DISTINCT FROM 'done' THEN
-    RAISE EXCEPTION 'TEST FAILED (D-SETUP): the job is %, not done, so branch (c) never ran and the marker assertion below would pass vacuously.', v_jobstat;
+    RAISE EXCEPTION 'TEST FAILED (D1-SETUP): the job is %, not done, so branch (c) never ran and the marker assertion below would pass vacuously.', v_jobstat;
   END IF;
 
   SELECT computation_status, computation_error_source, computation_error_job_id
     INTO v_status, v_src, v_jobid
     FROM strategy_analytics WHERE strategy_id = s_d;
   IF v_status IS DISTINCT FROM 'complete' THEN
-    RAISE EXCEPTION 'TEST FAILED (D-SETUP): the row reads computation_status = % rather than ''complete'', so branch (c) — the all-done terminal success write — is not the branch under test.', COALESCE(v_status, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (D1-SETUP): the row reads computation_status = % rather than ''complete'', so branch (c) — the all-done terminal success write — is not the branch under test.', COALESCE(v_status, 'NULL');
   END IF;
 
   -- RED-UNDER: delete branch (c)'s two unconditional marker clears. ⚠️ LAYERED
@@ -460,12 +482,12 @@ BEGIN
   --            unconditional clears of each marker across the body, so both
   --            counts must be re-baselined to 1 in the same mutation or the
   --            apply aborts.
-  -- RED-UNDER-M: {"arm":"D","apply":[{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"         computation_error_source = NULL,\n         computation_error_job_id = NULL,\n         computing_started_at = NULL,\n         computed_at        = now();\n","replace":"         computing_started_at = NULL,\n         computed_at        = now();\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"'computation_error_source\\s*=\\s*NULL', 'g')) <> 2","replace":"'computation_error_source\\s*=\\s*NULL', 'g')) <> 1","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"'computation_error_job_id\\s*=\\s*NULL', 'g')) <> 2","replace":"'computation_error_job_id\\s*=\\s*NULL', 'g')) <> 1","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"D1","apply":[{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"         computation_error_source = NULL,\n         computation_error_job_id = NULL,\n         computing_started_at = NULL,\n         computed_at        = now();\n","replace":"         computing_started_at = NULL,\n         computed_at        = now();\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"'computation_error_source\\s*=\\s*NULL', 'g')) <> 2","replace":"'computation_error_source\\s*=\\s*NULL', 'g')) <> 1","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"'computation_error_job_id\\s*=\\s*NULL', 'g')) <> 2","replace":"'computation_error_job_id\\s*=\\s*NULL', 'g')) <> 1","occurrences":1}]}
   IF v_src IS NOT NULL OR v_jobid IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (D): branch (c) resolved the strategy to a terminal SUCCESS and left provenance standing (source %, job %). Every live failure is gone, so there is nothing left for a marker to describe — and the NEXT failure''s write branch reads it as a writer''s claim over a sentence that no longer exists and keeps a NULL. The provenance trigger cannot cover this row: it is UPDATE-only and the sentence was already NULL, so branch (c)''s own unconditional clears are the only thing standing here.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (D1): branch (c) resolved the strategy to a terminal SUCCESS and left provenance standing (source %, job %). Every live failure is gone, so there is nothing left for a marker to describe — and the NEXT failure''s write branch reads it as a writer''s claim over a sentence that no longer exists and keeps a NULL. The provenance trigger cannot cover this row: it is UPDATE-only and the sentence was already NULL, so branch (c)''s own unconditional clears are the only thing standing here.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
   END IF;
 
-  -- ===== ARM P — the sentence SURVIVES branch (b-prime) ==================
+  -- ===== ARM P1 — the sentence SURVIVES branch (b-prime) ==================
   -- The D-15 recurring-refresh path. S does not imply this: branch (b-prime) is
   -- a separate UPDATE with its own CASE keyed on its own variable
   -- (v_protected_job_id, off the PROTECTED half of the same aggregate), and it
@@ -495,7 +517,7 @@ BEGIN
     FROM strategy_analytics WHERE strategy_id = s_p;
 
   IF v_status IS DISTINCT FROM 'complete_with_warnings' THEN
-    RAISE EXCEPTION 'TEST FAILED (P-SETUP): the row reads % rather than the protected ''complete_with_warnings'', so branch (b-prime) is not the branch under test and the sentence assertion below would be measuring branch (b) instead.', COALESCE(v_status, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (P1-SETUP): the row reads % rather than the protected ''complete_with_warnings'', so branch (b-prime) is not the branch under test and the sentence assertion below would be measuring branch (b) instead.', COALESCE(v_status, 'NULL');
   END IF;
 
   -- RED-UNDER: revert branch (b-prime)'s SET to the bare
@@ -503,21 +525,21 @@ BEGIN
   --            migration — the unconditional overwrite on the protected path.
   --            ⚠️ LAYERED: the (P2c) anchor asserts that whole CASE and would
   --            abort the apply.
-  -- RED-UNDER-M: {"arm":"P","apply":[{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"SET computation_error   = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN strategy_analytics.computation_error ELSE computation_error_copy(v_protected_kind) END,","replace":"SET computation_error   = computation_error_copy(v_protected_kind),","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"IF v_fn !~ 'SET\\s+computation_error\\s*=\\s*CASE","replace":"IF FALSE AND v_fn !~ 'SET\\s+computation_error\\s*=\\s*CASE","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"P1","apply":[{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"SET computation_error   = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN strategy_analytics.computation_error ELSE computation_error_copy(v_protected_kind) END,","replace":"SET computation_error   = computation_error_copy(v_protected_kind),","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"IF v_fn !~ 'SET\\s+computation_error\\s*=\\s*CASE","replace":"IF FALSE AND v_fn !~ 'SET\\s+computation_error\\s*=\\s*CASE","occurrences":1}]}
   IF v_error IS DISTINCT FROM 'The MT5 gateway did not answer this account for 6 hours.' THEN
-    RAISE EXCEPTION 'TEST FAILED (P): branch (b-prime) overwrote the writer''s sentence for the job it just resolved — computation_error reads %. This is the recurring-refresh path: the row STAYS PUBLISHED, so this sentence is the whole of what the portfolio stale warning tells the user about a maintenance failure, and replacing it with the per-kind generic is precisely the loss 20260826120000 recorded as owed work.', COALESCE(v_error, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (P1): branch (b-prime) overwrote the writer''s sentence for the job it just resolved — computation_error reads %. This is the recurring-refresh path: the row STAYS PUBLISHED, so this sentence is the whole of what the portfolio stale warning tells the user about a maintenance failure, and replacing it with the per-kind generic is precisely the loss 20260826120000 recorded as owed work.', COALESCE(v_error, 'NULL');
   END IF;
   IF v_src IS DISTINCT FROM 'writer' OR v_jobid IS DISTINCT FROM j THEN
-    RAISE EXCEPTION 'TEST FAILED (P): branch (b-prime) kept the sentence but not its provenance (source %, job %). Dropped here, the next recurring refresh reads a curated sentence as bridge-provenanced and overwrites it — the defect returns 20 hours later, on a row nobody is watching.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (P1): branch (b-prime) kept the sentence but not its provenance (source %, job %). Dropped here, the next recurring refresh reads a curated sentence as bridge-provenanced and overwrites it — the defect returns 20 hours later, on a row nobody is watching.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
   END IF;
   IF v_computed IS DISTINCT FROM v_before THEN
-    RAISE EXCEPTION 'TEST FAILED (P): computed_at moved from % to % on a FAILED protected refresh. Branch (b-prime) must write no publish column at all; a moved computed_at reports a failure as a fresh successful computation, which is branch (c)''s laundering (CR-01).', v_before, v_computed;
+    RAISE EXCEPTION 'TEST FAILED (P1): computed_at moved from % to % on a FAILED protected refresh. Branch (b-prime) must write no publish column at all; a moved computed_at reports a failure as a fresh successful computation, which is branch (c)''s laundering (CR-01).', v_before, v_computed;
   END IF;
 
-  -- ===== ARM PC — the CONTROL on branch (b-prime) =======================
-  -- P's discriminator, and it is not implied by C: the two branches are separate
+  -- ===== ARM PC1 — the CONTROL on branch (b-prime) =======================
+  -- PC1's discriminator note: P1's control, and it is not implied by C1: the two branches are separate
   -- statements with separate CASEs, so a b-prime that keeps EVERY sentence
-  -- passes P while C stays green on the other branch entirely.
+  -- passes P1 while C1 stays green on the other branch entirely.
   INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, computed_at, computation_error)
   VALUES (s_pc, 'complete_with_warnings', TRUE, v_before,
           'a stale unprovenanced sentence on control PC');
@@ -535,21 +557,21 @@ BEGIN
     FROM strategy_analytics WHERE strategy_id = s_pc;
 
   IF v_status IS DISTINCT FROM 'complete_with_warnings' THEN
-    RAISE EXCEPTION 'TEST FAILED (PC-SETUP): the row reads % rather than the protected ''complete_with_warnings'', so branch (b-prime) is not the branch under test.', COALESCE(v_status, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (PC1-SETUP): the row reads % rather than the protected ''complete_with_warnings'', so branch (b-prime) is not the branch under test.', COALESCE(v_status, 'NULL');
   END IF;
 
   -- RED-UNDER: weaken branch (b-prime)'s CASE predicate to `WHEN TRUE`, i.e.
   --            keep whatever sentence the row already carries. ⚠️ LAYERED with
-  --            the same (P2c) anchor stand-down as arm P.
-  -- RED-UNDER-M: {"arm":"PC","apply":[{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"SET computation_error   = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN","replace":"SET computation_error   = CASE WHEN TRUE THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"IF v_fn !~ 'SET\\s+computation_error\\s*=\\s*CASE","replace":"IF FALSE AND v_fn !~ 'SET\\s+computation_error\\s*=\\s*CASE","occurrences":1}]}
+  --            the same (P2c) anchor stand-down as arm P1.
+  -- RED-UNDER-M: {"arm":"PC1","apply":[{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"SET computation_error   = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN","replace":"SET computation_error   = CASE WHEN TRUE THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"IF v_fn !~ 'SET\\s+computation_error\\s*=\\s*CASE","replace":"IF FALSE AND v_fn !~ 'SET\\s+computation_error\\s*=\\s*CASE","occurrences":1}]}
   IF v_error IS DISTINCT FROM c_perm THEN
-    RAISE EXCEPTION 'TEST FAILED (PC): an UNPROVENANCED sentence was preserved on the protected branch — computation_error reads % where the per-kind generic was required. Two regressions fit and both are silent: the conditional has become an unconditional keep, or the predicate was weakened to a presence test. Either freezes operator text written by the PRE-migration form of this very branch, which the per-kind copy was added to heal.', COALESCE(v_error, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (PC1): an UNPROVENANCED sentence was preserved on the protected branch — computation_error reads % where the per-kind generic was required. Two regressions fit and both are silent: the conditional has become an unconditional keep, or the predicate was weakened to a presence test. Either freezes operator text written by the PRE-migration form of this very branch, which the per-kind copy was added to heal.', COALESCE(v_error, 'NULL');
   END IF;
   IF v_src IS NOT NULL OR v_jobid IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (PC): branch (b-prime)''s generic write left a provenance marker behind (source %, job %). On a row that STAYS PUBLISHED, a marker over this bridge''s own generic makes it read as writer-curated to every later refresh, which then keeps it forever.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (PC1): branch (b-prime)''s generic write left a provenance marker behind (source %, job %). On a row that STAYS PUBLISHED, a marker over this bridge''s own generic makes it read as writer-curated to every later refresh, which then keeps it forever.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
   END IF;
 
-  -- ===== ARM R — branch (a) leaves NO marker behind =====================
+  -- ===== ARM R1 — branch (a) leaves NO marker behind =====================
   -- The RETRYABLE transition, and the only arm anywhere that reaches branch (a)
   -- with provenance on the row. `mark_compute_job_failed(..., 'transient', ...)`
   -- with attempts left lands the job on failed_retry (mig 20260515114555's
@@ -559,7 +581,7 @@ BEGIN
   -- this function directly while the job is still non-terminal — same branch,
   -- same write, different caller — so this arm is that path's proof too.
   --
-  -- ⚠️ FIXTURE IS DELIBERATE, for arm D's reason: the row is INSERTed with both
+  -- ⚠️ FIXTURE IS DELIBERATE, for arm D1's reason: the row is INSERTed with both
   -- markers over a NULL sentence, so the UPDATE-only provenance trigger cannot
   -- mask branch (a)'s own unconditional clears. With a sentence in the column
   -- the trigger would clear the markers and this arm could not fail.
@@ -576,24 +598,24 @@ BEGIN
 
   SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j;
   IF v_jobstat IS DISTINCT FROM 'failed_retry' THEN
-    RAISE EXCEPTION 'TEST FAILED (R-SETUP): the job is %, not failed_retry, so branch (a) is not the branch under test and this arm is a duplicate of S rather than the non-terminal proof. Either the kind was terminalising (''permanent'' goes straight to failed_final) or attempts were already exhausted (attempts >= max_attempts terminalises any kind).', v_jobstat;
+    RAISE EXCEPTION 'TEST FAILED (R1-SETUP): the job is %, not failed_retry, so branch (a) is not the branch under test and this arm is a duplicate of S rather than the non-terminal proof. Either the kind was terminalising (''permanent'' goes straight to failed_final) or attempts were already exhausted (attempts >= max_attempts terminalises any kind).', v_jobstat;
   END IF;
 
   SELECT computation_status, computation_error_source, computation_error_job_id
     INTO v_status, v_src, v_jobid
     FROM strategy_analytics WHERE strategy_id = s_r;
   IF v_status IS DISTINCT FROM 'computing' THEN
-    RAISE EXCEPTION 'TEST FAILED (R-SETUP): the row reads computation_status = % rather than ''computing''. Branch (a) is the branch this arm is about — a failed_retry job is IN FLIGHT, and if the bridge does not re-enter the row at ''computing'' then the non-terminal count no longer sees failed_retry and the marker assertion below is measuring some other branch.', COALESCE(v_status, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (R1-SETUP): the row reads computation_status = % rather than ''computing''. Branch (a) is the branch this arm is about — a failed_retry job is IN FLIGHT, and if the bridge does not re-enter the row at ''computing'' then the non-terminal count no longer sees failed_retry and the marker assertion below is measuring some other branch.', COALESCE(v_status, 'NULL');
   END IF;
 
   -- RED-UNDER: delete branch (a)'s two unconditional marker clears. ⚠️ LAYERED
-  --            twice with the (P2d) COUNT anchors, exactly as arm D's twin.
-  -- RED-UNDER-M: {"arm":"R","apply":[{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"           computation_error_source = NULL,\n           computation_error_job_id = NULL,\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"'computation_error_source\\s*=\\s*NULL', 'g')) <> 2","replace":"'computation_error_source\\s*=\\s*NULL', 'g')) <> 1","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"'computation_error_job_id\\s*=\\s*NULL', 'g')) <> 2","replace":"'computation_error_job_id\\s*=\\s*NULL', 'g')) <> 1","occurrences":1}]}
+  --            twice with the (P2d) COUNT anchors, exactly as arm D1's twin.
+  -- RED-UNDER-M: {"arm":"R1","apply":[{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"           computation_error_source = NULL,\n           computation_error_job_id = NULL,\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"'computation_error_source\\s*=\\s*NULL', 'g')) <> 2","replace":"'computation_error_source\\s*=\\s*NULL', 'g')) <> 1","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260906120000_computation_error_provenance.sql","find":"'computation_error_job_id\\s*=\\s*NULL', 'g')) <> 2","replace":"'computation_error_job_id\\s*=\\s*NULL', 'g')) <> 1","occurrences":1}]}
   IF v_src IS NOT NULL OR v_jobid IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (R): branch (a) re-entered the row at ''computing'' and left provenance standing (source %, job %). When a job starts, any sentence on the row is stale by construction and the branch blanks it — a marker left behind then makes the NEXT generic write look writer-curated and freezes it there, and the 16-hour reaper''s own sentence is judged against it too. The provenance trigger cannot cover this row: it is UPDATE-only and the sentence was already NULL, so branch (a)''s own unconditional clears are the only thing standing here.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (R1): branch (a) re-entered the row at ''computing'' and left provenance standing (source %, job %). When a job starts, any sentence on the row is stale by construction and the branch blanks it — a marker left behind then makes the NEXT generic write look writer-curated and freezes it there, and the 16-hour reaper''s own sentence is judged against it too. The provenance trigger cannot cover this row: it is UPDATE-only and the sentence was already NULL, so branch (a)''s own unconditional clears are the only thing standing here.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
   END IF;
 
-  RAISE NOTICE 'ALL 7 ARMS EXECUTED (S, C, O, D, P, PC, R): a writer-curated computation_error sentence SURVIVES the compute_jobs transition that resolves its own job, on BOTH write branches (S branch (b), P branch (b-prime), each read back out of strategy_analytics after the real RPC and never inspected in the bridge body), and is REPLACED by the per-kind generic on every path where it does not describe that failure — no marker at all (C branch (b), PC branch (b-prime)) and a marker naming an OLDER still-unresolved failure (O, the case a presence test cannot decide). Provenance is cleared unconditionally on the two branches that blank the sentence: the all-done success write (D branch (c)) and the non-terminal re-entry a RETRYABLE failure produces (R branch (a), which is also the DEFERRED Python direct-call path). Phase 164.2 / criteria 1 and 2, mig 20260906120000.';
+  RAISE NOTICE 'ALL 7 ARMS EXECUTED (S1, C1, O1, D1, P1, PC1, R1): a writer-curated computation_error sentence SURVIVES the compute_jobs transition that resolves its own job, on BOTH write branches (S1 branch (b), P1 branch (b-prime), each read back out of strategy_analytics after the real RPC and never inspected in the bridge body), and is REPLACED by the per-kind generic on every path where it does not describe that failure — no marker at all (C1 branch (b), PC1 branch (b-prime)) and a marker naming an OLDER still-unresolved failure (O1, the case a presence test cannot decide). Provenance is cleared unconditionally on the two branches that blank the sentence: the all-done success write (D1 branch (c)) and the non-terminal re-entry a RETRYABLE failure produces (R1 branch (a), which is also the DEFERRED Python direct-call path). Phase 164.2 / criteria 1 and 2, mig 20260906120000.';
 END $$;
 
 ROLLBACK;
