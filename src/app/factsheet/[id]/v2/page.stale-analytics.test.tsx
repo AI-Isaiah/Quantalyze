@@ -210,6 +210,37 @@ describe("STALE-01 · /factsheet/[id]/v2 — the page both PDF wrappers screensh
     expect(text.toLowerCase()).not.toContain("failed");
     expect(text.toLowerCase()).not.toContain("error");
   });
+  // ── Criterion 9 (phase 164.2) ────────────────────────────────────────────
+  // The placeholder above renders to an ANONYMOUS visitor: `renderPage` calls
+  // FactsheetV2Page directly and the request-client stub carries no `auth`
+  // member, so this is the public lane — the same surface measured on PROD at
+  // /factsheet/8581f739-1a7b-42a4-a209-3acfa327e259 (`Fibonacci Ghost`), where
+  // the italic line told the reader to "See the dev-server console for the
+  // exact gate the request fell through" and volunteered the benchmark-window
+  // bounds. A visitor has no dev-server console, and the render arm cannot
+  // know WHICH of the three gates in the console.warn hint fired, so naming
+  // one of them was a guess presented as a fact. The negatives below go RED
+  // the moment that sentence returns to the render; the positive pins the
+  // replacement's distinctive phrase so a silent re-wording cannot pass.
+  it("V2b: criterion 9 — the ANONYMOUS placeholder (PROD /factsheet/8581f739-1a7b-42a4-a209-3acfa327e259) carries no dev-only instruction and no internal gate detail", async () => {
+    const ui = await renderPage("failed");
+    const text = collectText(ui).join(" ");
+
+    expect(
+      text,
+      "an anonymous visitor has no dev-server console to open",
+    ).not.toContain("dev-server console");
+    expect(
+      text,
+      "the benchmark-window gate is an internal detail, and only one of three possible causes",
+    ).not.toContain("bundled benchmark window");
+    expect(text, "the benchmark window's start date is internal").not.toContain("2023-04-26");
+
+    // Positives: V2's anchor is untouched, and the replacement sentence is the
+    // one this test pins — not merely "some other sentence".
+    expect(text).toContain("still computing");
+    expect(text).toContain("has not been computed yet");
+  });
 
   it("V3: a live `computing` run is withheld the same way", async () => {
     const ui = await renderPage("computing");
