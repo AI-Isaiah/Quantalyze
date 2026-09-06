@@ -92,6 +92,7 @@
  * failure is not a shortcut, it is a wrong instruction to the operator.
  */
 
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -145,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 51;
+export const SELF_TEST_SCENARIOS = 52;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -2096,7 +2097,10 @@ export async function selfTest() {
         log: quiet,
       });
       const argv = capture[0] || [];
-      const dashC = argv[argv.indexOf("-c") + 1] || "";
+      // The payload now lives INSIDE the single word after `--` (see
+      // buildProbeArgv), so read it from there rather than from a separate
+      // `-c` element, which no longer exists.
+      const dashC = argv[argv.indexOf("--") + 1] || "";
       const b64 = (dashC.match(/b64decode\('([^']*)'\)/) || [])[1] || "";
       const sent = b64 ? Buffer.from(b64, "base64").toString("utf8") : "";
 
@@ -2120,8 +2124,34 @@ export async function selfTest() {
         expect(r.exitCode === 0, `the probe ran green against ok.txt (got ${r.exitCode})`) &&
         expect(capture.length === 1, `exactly ONE railway ssh spawn (got ${capture.length}) — every extra call into the container is another chance to wedge the terminal`) &&
         expect(
-          argv[0] === "ssh" && argv[argv.indexOf("--") + 1] === "python3",
+          argv[0] === "ssh" && String(argv[argv.indexOf("--") + 1]).startsWith("python3 "),
           `the argv is a single ssh exec of python3 (${JSON.stringify(argv.slice(0, 9))})`,
+        ) &&
+        // ⛔ THE ARM'S ONLY DEFENCE AGAINST A COMMAND THAT NEVER RUNS.
+        // Railway CLI 4.36.1 JOINS every word after `--` with spaces and hands
+        // the result to `sh -c` inside the container. The fixture seam never
+        // joins argv, so a broken split is INVISIBLE to every other scenario
+        // here — this arm shipped once as three words (`python3`, `-c`, the
+        // one-liner) and would have made every hourly run report
+        // `mt5-ssh-transport` with a remedy blaming the operator's token.
+        // `sh -n` parses without executing, so this is safe and offline.
+        expect(
+          (() => {
+            const joined = argv.slice(argv.indexOf("--") + 1).join(" ");
+            const r = spawnSync("sh", ["-n", "-c", joined], { encoding: "utf8" });
+            return r.status === 0;
+          })(),
+          "and the words after `--`, JOINED THE WAY THE CLI JOINS THEM, are a syntactically valid shell command — three bare words die on the `(` before python starts",
+        ) &&
+        // The positive control: the broken shape MUST fail the same check, or
+        // the assertion above is passing for a reason unrelated to the split.
+        expect(
+          (() => {
+            const b64 = Buffer.from(MT5_MOD.MT5_PROBE_PY, "utf8").toString("base64");
+            const broken = ["python3", "-c", "import base64;exec(base64.b64decode('" + b64 + "'))"].join(" ");
+            return spawnSync("sh", ["-n", "-c", broken], { encoding: "utf8" }).status !== 0;
+          })(),
+          "CALIBRATION: the three-word shape this arm used to emit is REJECTED by the same check",
         ) &&
         expect(
           argv[argv.indexOf("-p") + 1] === SELFTEST_ENV.RAILWAY_PROJECT_ID &&
@@ -2352,6 +2382,45 @@ export async function selfTest() {
         expect(
           NON_SECRET_ENV.includes("RAILWAY_API_TOKEN") === false,
           "the token's name is not on the allowlist, which is why it was redacted",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("two responses in ONE run's window is measure-fail, not a verdict (review WR-01)");
+  // -------------------------------------------------------------------------
+  {
+    const fx = loadFixture("cron-obs", "ambiguous-window.json");
+    if (!fx.ok) {
+      pass = expect(false, fx.reason) && pass;
+    } else {
+      const seams = createSeams({
+        sqlRunner: fixtureSql({ cronObs: fx.data, ttl: fx.data.ttl }),
+        // The fixture's runs are dated; without pinning the clock they fall
+        // outside the scan window and the arm judges nothing.
+        clock: () => new Date(fx.data.now),
+      });
+      const r = await runProber({
+        arms: [CRON_OBS_MOD.ARM],
+        env: { ...SELFTEST_ENV },
+        seams,
+        armsFloor: 1,
+        log: quiet,
+      });
+      const mf = r.defects.filter((d) => d.kind === "measure-fail");
+      pass =
+        expect(mf.length === 1, `the ambiguous run yields exactly ONE measure-fail (got ${mf.length})`) &&
+        expect(
+          String(mf[0].subject).includes("901003"),
+          `and it names the ambiguous run (${mf[0].subject})`,
+        ) &&
+        // THE LOAD-BEARING LEG: the 500 in that window must NOT be reported as
+        // match_engine_cron's answer, and the 200 must NOT buy it a pass. Before
+        // the fence, the loop judged each row independently.
+        expect(
+          noDefectOfKind(r.defects, ["cron-non-2xx", "cron-no-observation", "cron-transport-error"]),
+          "and NO verdict is issued about that run — neither the foreign 500 nor the 200 is attributed to it",
         ) &&
         pass;
     }

@@ -287,7 +287,34 @@ export function judgeCronObs(rows, now, ttlSeconds, log = () => {}) {
     return defects;
   }
 
+  // ⛔ ATTRIBUTION FENCE (review WR-01). The join above is TIME-ONLY —
+  // `h.created BETWEEN r.start_time AND r.start_time + 90s` — because
+  // net._http_response carries no cron jobid. So ANY pg_net response created
+  // in that window attaches to this run, including one issued by a different
+  // caller. With two rows for one run, a foreign 200 sitting beside our own
+  // MISSING response would be judged green and the real failure would never be
+  // reported. A verdict must be bounded by what was actually measured, so an
+  // ambiguous window is a MEASURE-FAIL, never a pass and never a defect verdict.
+  const byRun = new Map();
   for (const r of eligible) {
+    if (r.id === "") continue;
+    byRun.set(r.runid, (byRun.get(r.runid) || 0) + 1);
+  }
+  const ambiguous = new Set([...byRun.entries()].filter(([, n]) => n > 1).map(([id]) => id));
+  for (const runid of ambiguous) {
+    defects.push({
+      kind: "measure-fail",
+      subject: `runid ${runid}`,
+      detail:
+        `run ${runid} has ${byRun.get(runid)} net._http_response rows inside its [start, start+90s] ` +
+        `window. The join is time-only (net._http_response has no jobid), so this arm CANNOT tell ` +
+        `which response is match_engine_cron's. It refuses to issue a verdict rather than pick one — ` +
+        `a green row here could be another caller's while our own request went unanswered.`,
+    });
+  }
+
+  for (const r of eligible) {
+    if (ambiguous.has(r.runid)) continue;
     if (r.id === "") {
       defects.push({
         kind: "cron-no-observation",

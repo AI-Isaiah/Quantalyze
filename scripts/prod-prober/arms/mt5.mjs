@@ -319,9 +319,18 @@ export function buildProbeArgv(env) {
     "-s",
     env.RAILWAY_MT5_SERVICE,
     "--",
-    "python3",
-    "-c",
-    "import base64;exec(base64.b64decode('" + b64 + "'))",
+    // ⛔ ONE word after `--`, not three. Railway CLI 4.36.1 JOINS the trailing
+    // words with spaces and hands the result to `sh -c` in the container, so
+    // `python3 -c import base64;exec(...)` reaches the shell UNQUOTED and dies
+    // on the `(` before Python ever starts. MEASURED 2026-09-06:
+    //   sh -c "python3 -c import base64;exec(base64.b64decode('<b64>'))"
+    //   -> sh: -c: line 0: syntax error near unexpected token `base64.b64decode'
+    // The only `railway ssh` this repo has ever seen succeed
+    // (scripts/mt5-diag.sh:44-45) passes the whole command as ONE argument;
+    // this now matches it. b64 is [A-Za-z0-9+/=] only, so it cannot break out
+    // of either quote layer. Still assembled by CONCATENATION, never a template
+    // literal, so the no-interpolation grep keeps working.
+    "python3 -c \"import base64;exec(base64.b64decode('" + b64 + "'))\"",
   ];
 }
 
