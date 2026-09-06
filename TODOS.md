@@ -97,6 +97,48 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      returned `{"error":"Unauthorized","code":"UNKNOWN"}` — a server-classified upstream fault
      reaching the client with NO code, exactly the defect. This is a live reproduction, so plan
      against it rather than re-verifying whether the gate is still open.
+   - ⛔ **STILL OPEN after Phase 164.2 — FOUNDER DECISION 2026-09-06, taken at the plan-06 gate:
+     accept criterion 3 on FOUR of the five locked surfaces and book the fifth's wiring.** Phase
+     164.2 plan 09 built a RENDER sweep (`src/lib/wizardErrors.roster-render.test.tsx`, 96 tests)
+     that asserts the rendered DOM rather than roster membership, and it was observed RED under
+     two neuters applied to files OTHER than the test — see `164.2-09-SUMMARY.md` →
+     `## Anti-vacuity observations` (Neuter 1, deleting the `["SEAM_MISCONFIGURED",
+     "SEAM_MISCONFIGURED"]` alias row at `wizardErrors.ts:4995`, → `4 failed | 92 passed (96)`;
+     Neuter 2, deleting `"VENUE_ALREADY_CONNECTED"` from `KNOWN_CREATE_WITH_KEY_CODES`).
+     **The fifth surface, `keys/validate-and-encrypt`, has NO code→copy render path at HEAD** —
+     `164.2-09-SUMMARY.md` → `## Surfaces not rendered` re-measured all three consumers
+     (`ApiKeyManager.tsx`, `StrategyForm.tsx`, `AllocatorExchangeManager.tsx`) and **none reads
+     `code`**; a row there could only pass by feeding the expected title in as wire prose and
+     reading it back, which is the proof-by-adjacent-signal that let WIZFORM-02 be *believed*
+     closed in Phase 153. The wiring is booked as **`[WIZFORM-02-VE-CODECHANNEL]`** (🟡 FIX
+     MID-TERM). ⛔ Therefore **the `GATED ON WIZFORM-02 CLOSING` marker STAYS DOWN** — plan 10's
+     W4 precondition required that section to be ABSENT and it is PRESENT, which is the
+     revision-round-2 guard working as designed, not a shortfall.
+     ⭐ The 2026-08-25 PROD reproduction above is nonetheless closed AT THE ROUTE by 164.2 plan 05
+     (`UPSTREAM_STATUS_TO_SEAM_CODE`: 401/403 → `SEAM_MISCONFIGURED`), so a *wizard step* now
+     receives `SEAM_MISCONFIGURED` and the sweep proves `connect-key` renders it as itself. The
+     unproven half is that the three DASHBOARD consumers show it — because they cannot.
+
+   **Context for Phase 164.2.1 (recorded here because it lands in this §D neighbourhood):**
+   - **The `RATE_LIMITED` class fix shipped (164.2 plan 05).** All four `userActionLimiter`
+     routes now answer `RATE_LIMITED`, and `grep -rl '"KEY_RATE_LIMIT"' src/app/api
+     --include=route.ts` returns **0 files** — those buckets are keyed `<route>:<uid>`, ours per
+     user, while `KEY_RATE_LIMIT`'s copy blamed the exchange and offered a remedy no exchange
+     account can perform. ⚠️ **Read `164.2-05-SUMMARY.md` before adding another roster row:** it
+     MEASURED that the three `RATE_LIMITED` roster rows do NOT buy the same thing —
+     `KNOWN_ADD_KEY_CODES` is a **COUPLING** guard (that arm translates first, so the row cannot
+     change what renders), `KNOWN_SET_MEMBERS_CODES` is a real **COPY** guard (removing the row
+     renders `data-error-code="UNKNOWN"`, observed), and `KNOWN_VALIDATE_AND_ENCRYPT_CODES` buys
+     "typed, and has copy" only. Same row, three different meanings.
+   - **`DRAFT_SESSION_COLLISION` was MINTED (164.2 plan 04), 409, and it is only the COPY half.**
+     The reuse arm's 23505 now splits: same API key → `DRAFT_ALREADY_EXISTS` byte-identical;
+     different key or a dark read → `DRAFT_SESSION_COLLISION`, whose cause names the wizard
+     SESSION (not the `(user_id, wizard_session_id, source)` column triple — `wizardErrors.test.ts`
+     bans an internal field name in user-visible copy). ⛔ **The FUNCTIONAL fix — minting a fresh
+     session id or re-resolving to the found draft — is Phase 164.2.1 SESSIONID-FENCE and is NOT
+     shipped.** 164.2 chose which TRUE sentence to show and still answers 409.
+     `PRESELECT_REQUEST_INVALID` (400) was minted in the same plan for the reuse arm's
+     request-shape refusal, and deliberately carries neither member of `RECOVERABLE_ACTIONS`.
 
    **Not in scope:** 0.02 (OKX entity) — founder call, NOT PURSUED.
 
@@ -1139,6 +1181,80 @@ true for 146 and half of 142–145, and **false for 141**.
       commit; or (ii) make `scripts/dump-sql-functions.ts` replay `COMMENT ON FUNCTION` into the
       snapshot so at least the repo-side reader sees the current text. Small, non-user-facing,
       and coupled to a mutation twin — which is why it is booked rather than done inline.
+
+- [ ] **`[164.2-TEST-APPLY-PROVENANCE]` `test_sync_status_curated_sentence_survives.sql` is RED
+      on shared TEST from this PR's first CI run onward, BY DESIGN, and must be hand-applied
+      (booked 2026-09-06, Phase 164.2 plan 10; the red is named in `164.2-07-SUMMARY.md` →
+      `## Deploy notes`).**
+      ⚠️ **STATE THE EXPECTED RED BY NAME so nobody reads it as a coupling regression.** CI's
+      `sql-tests` runs every `supabase/tests/test_*.sql` against `TEST_SUPABASE_DB_URL`, and
+      **nothing applies migrations to TEST** (`SKIP-01`, `CI-MIGRATE-01` — `sql-tests` has no
+      apply step and the migrate workflow is PROD-only). The new gate's applied-ness probe is
+      absence-is-failure by design, so until `20260906120000_computation_error_provenance.sql`
+      reaches TEST:
+      - **`test_sync_status_curated_sentence_survives.sql` → `TEST FAILED (0)`** — the only
+        expected red from plan 07.
+      - **`test_sync_status_marked_refresh_protected.sql` → `TEST FAILED (0c)`** is ALSO
+        expected, but it is **plan 06's** arm (shipped in `6aed4e76`), not plan 07's.
+      - The three coupled gates (`test_sync_status_marked_refresh_protected.sql`'s other arms,
+        `test_compute_jobs_error_kind_copy_parity.sql`, `test_retention_orphaned_running.sql`)
+        stay **GREEN**: their arms never read the new columns, and their apply lists are a
+        pg-lane concern `sql-tests` does not consult.
+      **The remedy, as ordered steps — do not compress them:**
+      1. Run the which-database marker query from `CLAUDE.md` ("Which database am I on?") —
+         `SELECT shobj_description(oid,'pg_database') FROM pg_database WHERE datname =
+         current_database();` — against `$TEST_SUPABASE_DB_URL`, and **proceed only when it names
+         TEST**. `current_database()` is `postgres` on both projects and proves nothing; a NULL
+         marker means re-set it first, not proceed on a guess.
+      2. `psql "$TEST_SUPABASE_DB_URL" -f supabase/migrations/20260906120000_computation_error_provenance.sql`
+      3. Re-run `sql-tests` (or the one gate locally against TEST) and **record the first green
+         run's SHA in this entry**, per the SHA-binding rule — a settled green board can belong
+         to an ancestor commit.
+      ⛔ **Not `supabase db push`, not `db reset --linked`, not `--project-ref`.** This checkout's
+      Supabase CLI is linked to **PRODUCTION** (`supabase/.temp/project-ref`), so every one of
+      those targets prod from this directory. ⚠️ TEST is SHARED with other people's CI; this is a
+      write to someone else's substrate, which is why plan 07 did not perform it and plan 10
+      books it instead of doing it.
+
+- [ ] **`[164.2-TYPES-REGEN-CHECK]` After the migration PR merges and auto-applies to PROD,
+      re-derive the six `database.types.ts` lines that were hand-extended, and confirm no
+      failure upsert was lost in the schema-cache window (booked 2026-09-06, Phase 164.2 plan 10;
+      the hand-extension and this owed check are recorded in `164.2-06-SUMMARY.md` under the
+      `database.types.ts` bullet, "⚠️ For plan 10").**
+      Plan 06 added `computation_error_job_id` and `computation_error_source` to
+      `strategy_analytics`'s `Row`, `Insert` and `Update` **by hand**, in the generated
+      alphabetical position between `computation_error` and `computation_status` — six lines. It
+      could not be generated at authoring time because the CLI is linked to PROD, where the
+      columns did not yet exist (RESEARCH Open Q5).
+      **Two checks, both post-merge:**
+      1. Run the which-database marker query FIRST (this is a **READ-only** `gen types`, but the
+         CLI is linked to PROD and the habit is the guard), then
+         `supabase gen types typescript --linked` and confirm those six lines produce **no diff**.
+         A diff means the hand-extension guessed the generator's shape wrong and every consumer
+         of those types has been typed against a fiction.
+      2. On PROD, confirm **no failure upsert was lost in the PostgREST schema-cache window**
+         around the deploy: the writer starts sending the two marker keys the moment the Python
+         half ships, and PostgREST can answer `PGRST204` for a column it has not yet cached.
+         Read `net._http_response` and the worker logs for `PGRST204` in that interval. Plan 08
+         carries a P11 minimal-key fallback for exactly this, so the expected finding is ZERO
+         lost records — but "expected" is not "measured", and an effect never identifies the
+         writer.
+
+- [ ] **`[164.5-BASELINE-PROVENANCE-COLS]` `supabase/schema/baseline.sql` does not carry
+      `computation_error_source` / `computation_error_job_id`, and Phase 164.5 gates the baseline
+      hash (booked 2026-09-06, Phase 164.2 plan 10).**
+      `supabase/migrations/20260906120000_computation_error_provenance.sql` adds both columns to
+      `strategy_analytics` (plus the `..._computation_error_source_check` and
+      `..._computation_error_markers_together_check` constraints — see `[PROV-WRITER-23514]`).
+      **Measured at HEAD 2026-09-06:** `grep -c 'computation_error_source'
+      supabase/schema/baseline.sql` → **0**; the table's column list at `baseline.sql:5183` still
+      ends `"computation_error" "text",` with no marker columns after it.
+      **Why it is booked and not fixed here:** the baseline is a generated snapshot of APPLIED
+      PROD schema, and the migration has not merged, so regenerating it now would encode a
+      not-yet-true state. Phase 164.5 is the phase that gates the baseline hash — it must
+      regenerate `baseline.sql` after this migration auto-applies, or its own gate will fail on a
+      drift that is really just this pending apply. ⚠️ Sequence with
+      `[164.2-TYPES-REGEN-CHECK]`: both wait on the same PROD apply.
 
 - [ ] **`[PGLANE-HELP-TRUNCATED]` `scripts/pg-lane/run.sh --help` cuts the stand-in disclaimer off mid-sentence (measured 2026-09-02, Phase 164.4 ship review).**
       `run.sh:612` is `-h|--help) sed -n '2,45p' "$0"`, a hardcoded end line. The
@@ -2476,10 +2592,25 @@ the badge would make it read `fresh` while the chip still reads `future — chec
 manufactures a NEW two-surface contradiction — the exact class this phase exists to close.
 That is why the phase-163 fixer deliberately stopped here rather than half-fixing it.
 
-- **[WR-06-UTC] Give both bucketers a day-granularity allowance for future-dated series ends**,
+- [x] **[WR-06-UTC] Give both bucketers a day-granularity allowance for future-dated series ends**,
   in one commit, with a test that renders both surfaces from one row and asserts they agree.
+  ✅ **CLOSED 2026-09-06 — Phase 164.2 plan 02.** Proof, cited not restated:
+  `164.2-02-SUMMARY.md` → `## Anti-vacuity observations` → **Neuter 1 (WR-06-UTC, badge side)**
+  reverted `bucketSeriesAge` to the 5-minute comparison and was observed **RED on 4 tests**
+  (two predicted plus the two arms the plan added beyond spec — an over-count that the SUMMARY
+  accounts for line by line, per this repo's rule that an unexpected RED count is a signal);
+  **Neuter 2 (WR-06-UTC, chip side)** passed `0` instead of the allowance constant at the
+  series call and was observed **RED on exactly 2**, the predicted pair. ⭐ The one-row
+  two-surface test `src/lib/freshness.two-surfaces.test.tsx` failed on its **badge** leg under
+  neuter 1 and on its **chip** leg under neuter 2 — the same row, the same assertion — which is
+  the joint test doing the job no per-surface spec can: catching a fix that lands on one
+  bucketer and not the other. ⚠️ The SUMMARY also records that the allowance's VALUE was
+  unpinned by every test the plan specified (an assertion that passed for any value in a range)
+  and that a third load-bearing pin had to be inverted; both were fixed in-plan, see that
+  SUMMARY's `## Deviations from Plan`. `SyncBadge.tsx` was deliberately NOT modified — recorded
+  there as a measured no-op, not an omission.
 
-- **[161-ERRPREFIX] `KeyPermissionBadge.tsx:140` shows the user the raw error code as a prefix** — it
+- [x] **[161-ERRPREFIX] `KeyPermissionBadge.tsx:140` shows the user the raw error code as a prefix** — it
   renders `err.code ? `${err.code}: ${message}` : message`, so a founder with a broken key reads
   `KEY_UNDECRYPTABLE: This stored key can no longer be decrypted…`. FOUNDER RULING 2026-08-26:
   **split** — prose to the user, structured code to the log and the Sentry breadcrumb. ⚠️ CLASS
@@ -2489,6 +2620,25 @@ That is why the phase-163 fixer deliberately stopped here rather than half-fixin
   the code stops reaching the log. **Owner: Phase 164.2 CURATED-COPY** (moved from 164.1 in the
   2026-09-05 re-partition — it is a sentence a user reads). Booked 2026-09-05; this entry did not
   exist while the ROADMAP told planners to read it.
+  ✅ **CLOSED 2026-09-06 — Phase 164.2 plan 01.** The founder's split shipped as THREE halves,
+  each proven by its OWN neuter. Proof, cited not restated: `164.2-01-SUMMARY.md` →
+  `## Anti-vacuity observations`, baseline **41 passed (41)**, byte backups + `shasum -a 256`
+  before/after, `git checkout --` never used, every neuter script aborting on a missing anchor
+  so a silently-missed neuter cannot read as a pass:
+  - **Neuter 1 — restore the prefix** → RED `8 failed | 33 passed (41)`: the six render rows
+    (*"the user reads the curated prose and NEVER the raw code"*) plus both surviving inverted
+    pins, and the component's own stderr in that run printed the defect itself.
+  - **Neuter 2 — drop the code from `console.error`** → RED `6 failed | 35 passed (41)`, the
+    **log half only**; the render and breadcrumb halves stayed green, which is what proves the
+    halves are independent.
+  - **Neuter 3 — remove the Sentry breadcrumb call** → RED `7 failed | 34 passed (41)`, the
+    **breadcrumb half only**. *"The breadcrumb is the half of the split that survives a user who
+    never opens the console."*
+  **No neuter left the suite green**, and the post-restore hash equalled the pre-neuter hash.
+  ⚠️ Recorded honestly there and worth carrying forward: the FIRST run of neuter 1 reddened
+  **21, not 8** — a test-design fault the plan then fixed (`b0557567`) rather than accepting the
+  flattering number. The support-ticket greppability the prefix existed for is kept, relocated
+  to the log and the breadcrumb exactly as the ruling required.
 
 **Net effect today:** for those ~3 hours a day, a non-UTC reporter's strategy renders a muted
 grey "Track record ends in the future" on both the discovery badge and the factsheet chip.
@@ -4537,7 +4687,7 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       Both named rows now bind to the series arm and changed SUBJECT, not just wording:
       `Momentum Sphinx` → **"Track record ends 7d ago"**; `Phoenix Protocol` → **"Track record
       ends 112d ago"**. The contradiction with the factsheet chip is gone.
-- [ ] **[HONEST-08-RESIDUAL] The over-binding direction is still unproven.** On the page above,
+- [x] **[HONEST-08-RESIDUAL] The over-binding direction is still unproven.** On the page above,
       BOTH visible rows legitimately bind to the series arm (7d → warm, 112d → stale, each
       strictly worse than its sync verdict), so the render cannot distinguish correct
       staler-of-two from **always binds to series**. `computeFreshness`'s own comment warns that
@@ -4545,6 +4695,25 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       everywhere — which is the fix the founder ruled out. Prove the sync arm still renders,
       using a published row with a FRESH series. One exists (newest series end across PROD is
       1 day old) but is not on the `crypto-sma` cohort. **Routed to Phase 164.1.**
+      ✅ **CLOSED 2026-09-06 — Phase 164.2 plan 02 (the 164.1 re-partition moved it here).**
+      The over-binding direction is now PROVEN BY NEUTER, which is the discrimination the live
+      page could not supply. Proof, cited not restated: `164.2-02-SUMMARY.md` →
+      `## Anti-vacuity observations` → **Neuter 3 (HONEST-08-RESIDUAL)** dropped the `TONE_RANK`
+      conjunct at `FactsheetView.tsx:1229-1230` so the series ALWAYS binds. **C-4 — the retitled
+      chip twin, `C-4: a live series does NOT rescue a stale job — the blend takes the WORSE of
+      the two (chip twin of staler-of-two:62)` — went RED BY NAME**, with the predicted
+      diagnostic: `expected 'Track record · fresh' to be 'Computed · old'`. ⭐ Cite **C-4**; there
+      is no C-15 — revision round 2 established the twin already existed rather than minting one.
+      The neuter reddened **8 tests in total** and the SUMMARY checks the count in BOTH
+      directions: every red is a case where the JOB legitimately binds, every green is a case
+      where the SERIES legitimately binds or an early return. ⛔ Note what would NOT have proven
+      it: a `>` → `>=` flip only moves a tie, and at C-4's 30d/1d fixture the two tones are ranks
+      3 and 0, so such a flip changes nothing (revision B4) — a law can hold by coincidence.
+      ⚠️ **The live PROD half is recorded as an HONEST ABSENCE, not as an observation.**
+      `164.2-02-SUMMARY.md` → `## HONEST-08 live observation` reads verbatim
+      `NOT OBSERVED — no public row with a fresh series on 2026-09-06`, with the enumeration that
+      produced it. It was not substituted with a PROD query and it is not claimed here. What
+      closes this entry is the neuter, which discriminates the two hypotheses the page could not.
 
 ### Phase 162 (HONEST) — composite failure no longer names the offending member (added 2026-08-26)
 
