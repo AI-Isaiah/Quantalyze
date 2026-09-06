@@ -1494,10 +1494,17 @@ async def run_csv_strategy_analytics(
                     # The abort stays VISIBLE — in compute_jobs, in this column,
                     # in this log line and in the staleness view. Protected is
                     # not the same as silent.
+                    #
+                    # ⛔ NO `refresh_source` AND NO `reason` HERE. Phase 164.2
+                    # made this sentence DURABLE, so it renders to the account
+                    # holder verbatim; `refresh_source` is an internal marker
+                    # literal and `reason` is `type(_abort_exc).__name__`, a
+                    # Python class name. Both stay on the log lines below, which
+                    # are the operator channel and still name them.
                     "computation_error": (
-                        f"Ledger refresh (source={refresh_source}) aborted by "
-                        f"{reason} before it could finish; the previously "
-                        "published factsheet was left in place."
+                        "The data refresh was interrupted by an unexpected "
+                        "worker shutdown before it could finish; your "
+                        "previously published factsheet was left in place."
                     ),
                     # Phase 164.2 / criterion 2: this sentence is CURATED and
                     # names the abort reason, so it must survive the bridge.
@@ -1926,6 +1933,19 @@ async def run_csv_strategy_analytics(
                     # would also coerce these two, but a writer that states its
                     # intent is legible at the call site — the same reason the
                     # JOB-01 census demands the reaper key here.)
+                    #
+                    # ⚠️ NAMING them is what puts this SUCCESS write inside the
+                    # T-164.2-17 deploy window: during the interval where this
+                    # worker runs ahead of migration 20260906120000, PostgREST
+                    # answers PGRST204 for these two keys and writes NOTHING.
+                    # Unwrapped, that APIError reached the catch-all at the end
+                    # of this function, _mark_unrecoverable recorded a COMPLETED
+                    # computation as 'failed', _heal_delete_cash_series deleted
+                    # the cash series persisted one statement earlier, and an
+                    # attempt was burned against max_attempts. Hence the
+                    # upsert_or_drop_provenance wrapper below — the same degrade
+                    # the failure writers use, landing the pre-164.2 success
+                    # payload byte for byte.
                     "computation_error_source": None,
                     "computation_error_job_id": None,
                     "data_quality_flags": data_quality_flags,
@@ -1946,9 +1966,17 @@ async def run_csv_strategy_analytics(
                     # publish gate PASSES (the D-16 fail-open).
                     payload["series_completeness"] = "user_supplied"
                 payload.update(metrics_result.metrics_json)
-                supabase.table("strategy_analytics").upsert(
-                    payload, on_conflict="strategy_id"
-                ).execute()
+
+                def _write_complete() -> None:
+                    supabase.table("strategy_analytics").upsert(
+                        payload, on_conflict="strategy_id"
+                    ).execute()
+
+                upsert_or_drop_provenance(
+                    payload,
+                    _write_complete,
+                    where="analytics_runner._mark_complete",
+                )
 
             # Phase 105 (BB-02, D5 ordering): persist the cash_settlement SERIES row BEFORE
             # the strategy_analytics scalar/status flip, so a `complete` scalar never exists
@@ -2036,16 +2064,25 @@ async def run_csv_strategy_analytics(
                         "computation_warned": False,
                         # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
                         "computing_started_at": None,
+                        # ⛔ NO `trunc.hint` HERE. Phase 164.2 made this sentence
+                        # DURABLE — the bridge no longer overwrites a stamped
+                        # sentence — so whatever is written here is what the
+                        # account holder reads in <StaleWarning> and in the
+                        # wizard's "Details:" line. `hint` is a LOG-triage
+                        # string (db.py:236-243); on the CSV path it is
+                        # literally "csv_daily_returns strategy_id=<uuid>", i.e.
+                        # an internal table name and a raw id. It stays on the
+                        # logger.error above, which is the operator channel.
                         "computation_error": (
-                            f"CSV analytics aborted: dataset exceeds "
-                            f"{trunc.page_count * trunc.page_size:,} rows "
-                            f"({trunc.hint or 'unknown source'}); operator "
-                            "intervention required."
+                            f"CSV analytics aborted: the dataset exceeds "
+                            f"{trunc.page_count * trunc.page_size:,} rows and "
+                            "needs operator intervention. Nothing was "
+                            "published and your uploaded data was not changed."
                         ),
                         # Phase 164.2 / criterion 2: this sentence NAMES the row
-                        # count and the source; the per-kind generic names
-                        # neither, so losing it to the bridge loses the whole
-                        # diagnosis.
+                        # cap and says what did NOT happen; the per-kind generic
+                        # says neither, so losing it to the bridge loses the
+                        # whole diagnosis.
                         "computation_error_source": provenance_source(job_id),
                         "computation_error_job_id": job_id,
                         "data_quality_flags": {"csv_source": True},

@@ -2195,11 +2195,20 @@ describe("[164.2-05 / WIZFORM-02] keys/validate-and-encrypt — a bare upstream 
    * hand-typed one — and against `SEAM_CODE_TO_WIZARD_CODE`'s key set — in
    * `wizardErrors.invariant.test.ts`.
    */
-  const MAPPED: ReadonlyArray<readonly [number, string]> = [
-    [401, "SEAM_MISCONFIGURED"],
-    [403, "SEAM_MISCONFIGURED"],
-    [422, "VALIDATION_FAILED"],
-    [429, "RATE_LIMITED"],
+  /**
+   * ⭐ 164.2 review B2 — the third column is the CURATED SENTENCE the mapped
+   * code owns, hand-typed from `WIZARD_ERROR_COPY`'s `title` in
+   * `src/lib/wizardErrors.ts`. It is deliberately NOT read out of that module:
+   * an expectation derived from the same table the route reads cannot fail if
+   * the route stops substituting at all in a way that still resolves copy.
+   * Hand-typing makes this pin bite on BOTH halves — the substitution
+   * happening, and the sentence being the one that was authored.
+   */
+  const MAPPED: ReadonlyArray<readonly [number, string, string]> = [
+    [401, "SEAM_MISCONFIGURED", "We could not send this request — our own configuration is wrong."],
+    [403, "SEAM_MISCONFIGURED", "We could not send this request — our own configuration is wrong."],
+    [422, "VALIDATION_FAILED", "We could not read that request."],
+    [429, "RATE_LIMITED", "You have reached our request limit."],
   ];
 
   it("THE PROD REPRODUCTION (2026-08-25): a bare 401 answers SEAM_MISCONFIGURED, never UNKNOWN", async () => {
@@ -2222,14 +2231,30 @@ describe("[164.2-05 / WIZFORM-02] keys/validate-and-encrypt — a bare upstream 
         "rather than in a seam envelope. That is WIZFORM-02 by its own words.",
     ).toBe("SEAM_MISCONFIGURED");
     expect(body.code).not.toBe("UNKNOWN");
-    // F5b is UNTOUCHED: the curated 4xx sentence still forwards. Only `code`
-    // moved.
-    expect(body.error).toBe("Unauthorized");
+    // ⭐ 164.2 review B2 — AND THE TWO FIELDS NO LONGER CONTRADICT EACH OTHER.
+    //
+    // ⚠️ THIS REPLACES AN EARLIER `expect(body.error).toBe("Unauthorized")`,
+    // which pinned the defect rather than the contract: every consumer of this
+    // route renders `error` and ignores `code`
+    // (`AllocatorExchangeManager.tsx:583`, `ApiKeyManager.tsx:245`,
+    // `StrategyForm.tsx:187`), so shipping the upstream's bare "Unauthorized"
+    // told the user THEIR key was refused while `code` said OUR configuration
+    // was wrong. On the status-MAPPED arm the sentence is now the curated copy
+    // the code owns.
+    expect(
+      body.error,
+      "the upstream's raw status text is on the wire again. Consumers render " +
+        "`error` and ignore `code`, so \"Unauthorized\" on a key-connect form " +
+        "blames the user's key for OUR stale service key.",
+    ).not.toBe("Unauthorized");
+    expect(body.error).toBe(
+      "We could not send this request — our own configuration is wrong.",
+    );
   });
 
   it.each(MAPPED)(
-    "a bare %i (no seamCode) answers %s",
-    async (status, expected) => {
+    "a bare %i (no seamCode) answers %s with ITS curated sentence, not the upstream's text",
+    async (status, expected, sentence) => {
       const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
       mockValidateKey.mockRejectedValue(
         new AnalyticsUpstreamError("upstream said no", status),
@@ -2245,7 +2270,15 @@ describe("[164.2-05 / WIZFORM-02] keys/validate-and-encrypt — a bare upstream 
           "status IS the classification on this path — the map lookup is not " +
           "wired into the `code:` expression, or this row is missing from it.",
       ).toBe(expected);
-      expect(body.error).toBe("upstream said no");
+      // ⭐ 164.2 review B2 — REPLACES `toBe("upstream said no")`, which pinned
+      // the leak: the upstream's own text is not shown for a code WE inferred
+      // from the status channel.
+      expect(
+        body.error,
+        `the ${status} arm forwarded the upstream's raw text beside a code the ` +
+          "status map supplied. The message and the code then describe " +
+          "different failures, and consumers render only the message.",
+      ).toBe(sentence);
     },
   );
 
@@ -2258,6 +2291,9 @@ describe("[164.2-05 / WIZFORM-02] keys/validate-and-encrypt — a bare upstream 
     const res = await POST(makeReq(VALID_BODY));
 
     expect(res.status).toBe(418);
+    // An UNMAPPED status supplies no code, so it triggers no substitution
+    // either: F5b's forward is what still governs the sentence here.
+    expect((await res.clone().json()).error).toBe("I'm a teapot");
     expect(
       (await res.json()).code,
       "an unmapped 4xx got a named code. The map is a hand-typed CLOSED " +
@@ -2278,6 +2314,18 @@ describe("[164.2-05 / WIZFORM-02] keys/validate-and-encrypt — a bare upstream 
       const res = await POST(makeReq(VALID_BODY));
 
       expect(res.status).toBe(status);
+      // ⭐ 164.2 review B2 — F5a IS BYTE-UNCHANGED ON THIS ARM. When the
+      // upstream carried its own code, its `detail` is CURATED copy about the
+      // USER's key and still forwards verbatim; the B2 substitution is scoped
+      // to the arm where the code came from the status map, and this is the
+      // case that would red if that scoping were lost.
+      expect(
+        (await res.clone().json()).error,
+        "the curated upstream detail was replaced. B2's substitution must " +
+          "apply ONLY where the STATUS MAP supplied the code — an " +
+          "upstream-carried seamCode means the service classified this failure " +
+          "itself and its sentence is the true one.",
+      ).toBe("Invalid API credentials");
       expect(
         (await res.json()).code,
         "the status map overwrote a code the upstream actually sent. The `??` " +

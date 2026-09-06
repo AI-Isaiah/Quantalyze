@@ -10,6 +10,11 @@ import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 // 140.3-G4 / SEAMUX-03 — reads the upstream's own machine code off a forwarded
 // body so the legacy-forward arm preserves it rather than overwriting.
 import { seamErrorCode } from "@/lib/seam-discriminator";
+// 164.2 review B2 — the curated sentence for a status-MAPPED code, read from
+// the one copy table rather than retyped, so it cannot drift from what the
+// envelope renders. `recogniseSeamErrorCode` is the same seam→wizard
+// translation the client applies to this body's `code`.
+import { WIZARD_ERROR_COPY, recogniseSeamErrorCode } from "@/lib/wizardErrors";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
@@ -851,13 +856,33 @@ async function legacyValidateAndEncryptHandler(args: {
       // (a bare 401 answering `code: "UNKNOWN"`). Swapping the order would
       // replace a specific true verdict with an inference from a channel that
       // carries less. `UNKNOWN` remains the terminal for an unmapped status.
+      //
+      // ⭐ 164.2 review B2 — WHEN THE CODE COMES FROM THE STATUS MAP, THE
+      // MESSAGE MUST NOT COME FROM THE UPSTREAM. Every consumer of this route
+      // renders `error` and ignores `code`
+      // (`AllocatorExchangeManager.tsx`, `ApiKeyManager.tsx`,
+      // `StrategyForm.tsx`), so the PROD reproduction shipped a body whose two
+      // fields contradicted each other: `code: "SEAM_MISCONFIGURED"` (our own
+      // service key is stale) beside `error: "Unauthorized"` — which on a
+      // key-connect form reads as THEIR key being refused. That is the
+      // misattribution this phase exists to eliminate, so on the mapped arm the
+      // upstream's bare status text is replaced with the curated sentence the
+      // mapped code already owns, read from `WIZARD_ERROR_COPY` rather than
+      // retyped here.
+      //
+      // ⚠️ ONLY the mapped arm. When `err.seamCode` was present the upstream
+      // sent a CURATED 4xx detail about the USER's key and F5a forwards it
+      // byte-unchanged — `mappedCode` is computed only when `seamCode` is
+      // absent, precisely so that arm cannot be touched.
+      const mappedCode = err.seamCode
+        ? null
+        : (UPSTREAM_STATUS_TO_SEAM_CODE.get(err.status) ?? null);
       return NextResponse.json(
         {
-          error: err.message,
-          code:
-            err.seamCode ??
-            UPSTREAM_STATUS_TO_SEAM_CODE.get(err.status) ??
-            "UNKNOWN",
+          error: mappedCode
+            ? WIZARD_ERROR_COPY[recogniseSeamErrorCode(mappedCode)].title
+            : err.message,
+          code: err.seamCode ?? mappedCode ?? "UNKNOWN",
         },
         { status: err.status, headers: NO_STORE_HEADERS },
       );

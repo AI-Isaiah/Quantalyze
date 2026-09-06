@@ -46,9 +46,21 @@ cost of the provenance, never the other way round. 164.2-REVIEW WR-02 gave it a
 second reason to fire, on the same principle and with the same remedy: a
 ``PGRST204`` naming a marker column means the worker is running AHEAD of the
 migration, PostgREST wrote nothing, and the lost payload is the one recording a
-failure. Because the helper already sits at every stamped site, T-164.2-17's
-deploy window is mitigated at all of them rather than at the one that happened
-to have a hand-written arm.
+failure. Because the helper sits at every site that NAMES either marker column —
+the nine stamped failure writers AND the two success writers that blank the pair
+(``analytics_runner._mark_complete`` and ``job_worker``'s composite
+``headline_payload``) — T-164.2-17's deploy window is mitigated at all of them
+rather than at the one that happened to have a hand-written arm.
+
+⚠️ The two SUCCESS writers are in that set for a reason worth spelling out: they
+send the marker columns too (blanked), so PostgREST answers ``PGRST204`` on a
+COMPLETED computation during the same window. Unwrapped, that APIError fell into
+``run_csv_strategy_analytics``'s catch-all, ``_mark_unrecoverable`` recorded the
+successful run as ``failed``, ``_heal_delete_cash_series`` deleted the series
+persisted one statement earlier, and a retry attempt was burned. The degrade
+here turns that into the pre-164.2 success payload, which is what it always was.
+The census file's Rule C pins the routing at all eleven sites so it cannot be
+unwrapped back out.
 
 ⛔ THIS MODULE DELIBERATELY CONTAINS NO ``.table("strategy_analytics")`` CALL.
 ``tests/test_computing_started_at_stamp.py`` (JOB-01) and the provenance census
@@ -66,18 +78,25 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from postgrest.exceptions import APIError
 
 logger = logging.getLogger(__name__)
 
 # The ONLY value ``strategy_analytics_computation_error_source_check`` admits.
-# Spelled once here rather than at each of the ten writers: the constraint's
-# domain and this constant are the two ends of a contract with no compiler
-# between them, and ten copies is ten chances for one of them to drift into a
-# 23514 on the failure path.
-PROVENANCE_SOURCE_WRITER: Final[str] = "writer"
+# Spelled once here rather than at each writer: the constraint's domain and this
+# constant are the two ends of a contract with no compiler between them, and one
+# copy per writer is one chance per writer for it to drift into a 23514 on the
+# failure path. How many writers that is has one home —
+# ``tests.test_computation_error_provenance_census.EXPECTED_STAMPED_SITES`` (9
+# on 2026-09-06, plus P1's deliberately unstamped site) — so a count is not
+# restated here where it could go stale.
+#
+# ``Literal`` rather than ``str``: the DB domain is a closed set of one, and the
+# service spells closed sets as Literals (``closed_sets.py``). mypy then refuses
+# a second spelling at a call site instead of leaving it for the CHECK.
+PROVENANCE_SOURCE_WRITER: Final[Literal["writer"]] = "writer"
 
 PROVENANCE_SOURCE_KEY: Final[str] = "computation_error_source"
 PROVENANCE_JOB_ID_KEY: Final[str] = "computation_error_job_id"
@@ -148,7 +167,7 @@ def _refuses_a_marker(exc: APIError) -> bool:
     return False
 
 
-def provenance_source(job_id: str | None) -> str | None:
+def provenance_source(job_id: str | None) -> Literal["writer"] | None:
     """``'writer'`` when a job id accompanies it, ``None`` when it does not.
 
     The pair is all-or-nothing because the pairing CHECK says so, and because a

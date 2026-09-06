@@ -1652,6 +1652,22 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // ⚠️ 162-06 review / B-1 — THIS CODE HAS A SECOND EMITTER THAT RECEIVES NO
   // FIELDS AT ALL, so its remedy is now surface-split.
   //
+  // ⚠️ CORRECTED 2026-09-06 (164.2-04). The paragraph below is kept because it
+  // is the reasoning that produced the split, but its PREMISE no longer holds:
+  // `create-with-key`'s USE-EXISTING-KEY shape guard NO LONGER emits this code.
+  // It answers `PRESELECT_REQUEST_INVALID` instead — the entry directly below
+  // in this table, emitted by that route's USE-EXISTING-KEY shape guard —
+  // which is the emitter-side fix the ⛔ block at the end of this docblock says
+  // is owed.
+  // ⛔ THE TWO `REQUIRES_PRESELECT_SURFACE` BULLETS ARE NOT DEAD. This code is
+  // still reachable ON the preselect surface from the route's TOP-LEVEL
+  // body-parse guard in `create-with-key` (the `"Invalid request body"`
+  // refusal), which runs BEFORE the reuse/credential split and therefore fires
+  // for a preselect submission too. Deleting either bullet on the strength of
+  // the correction above would take the honest preselect remedy away from a
+  // refusal that still reaches that screen.
+  //
+  // HISTORICAL, as it stood before the emitter fix:
   // `create-with-key`'s USE-EXISTING-KEY arm answers 400 with this code from its
   // own shape guard (a non-uuid `wizard_session_id` or `reuse_api_key_id`), and
   // that request body is TWO IDS — the caller typed nothing. The guard's own
@@ -1669,6 +1685,12 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // answering a credential-shaped code for a request that carries no
   // credentials — and lives in `create-with-key/route.ts`, not here. Until it
   // lands, the remedy at least names only what the reader can see.
+  // ⚠️ SUPERSEDED 2026-09-06: it HAS landed. The two sentences immediately
+  // above describe the emitter fix as still owed; Phase 164.2-04 shipped it
+  // (`PRESELECT_REQUEST_INVALID`, the next entry in this table). They are kept
+  // and dated rather than deleted so the reversal is visible — and the
+  // surface-split below STAYS, for the top-level body-parse guard named at the
+  // head of this docblock.
   KEY_MISSING_REQUIRED_FIELD: {
     title: "One of the required fields is empty.",
     cause:

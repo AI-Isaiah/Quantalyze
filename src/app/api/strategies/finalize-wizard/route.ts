@@ -1040,9 +1040,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // which is the sentence 140.3-01 wrote for exactly this condition.
     // ⓘ It needs no roster entry: `SEAM_CODE_TO_WIZARD_CODE` maps it to itself
     // and the translation runs BEFORE the roster check, so `SubmitStep`
-    // surfaces it as-is. (`composite/add-key` still answers `KEY_RATE_LIMIT`
-    // here; that arm carries its own note saying the sentence is wrong for an
-    // internal limiter, and re-cutting it is not this plan's file.)
+    // surfaces it as-is. (⚠️ SUPERSEDED 2026-09-06 — the sentence that stood
+    // here read "`composite/add-key` still answers `KEY_RATE_LIMIT` here; that
+    // arm carries its own note saying the sentence is wrong for an internal
+    // limiter, and re-cutting it is not this plan's file." That debt is PAID:
+    // `composite/add-key`'s own limiter deny arm now answers `RATE_LIMITED`,
+    // and its own comment records the re-cut. The superseded
+    // sentence is kept, dated, rather than deleted, so a reader who met the old
+    // claim elsewhere can see it was closed and not merely dropped.)
     //
     // ⚠️ `SEAM_MISCONFIGURED` on the 503 — already a roster member, and its
     // copy is written for precisely this: "our own configuration is wrong…

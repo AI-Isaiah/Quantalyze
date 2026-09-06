@@ -197,6 +197,16 @@ EXPECTED_EXEMPT_SITES: Final[int] = 1
 EXPECTED_INERT_SITES: Final[int] = 1
 EXPECTED_RESET_SITES: Final[int] = 2
 
+# Rule C's surface: every literal that NAMES either marker column, which is the
+# stamped writers PLUS the two success writers that blank the pair. The resets
+# are in it because naming the columns is what puts a write inside the
+# T-164.2-17 deploy window, and a SUCCESS write losing its whole payload to a
+# PGRST204 is worse than a failure write losing its provenance: the caller's
+# catch-all records a COMPLETED computation as 'failed', heal-deletes the cash
+# series persisted one statement earlier, and burns a retry attempt. That was
+# measured on both reset sites before this constant existed.
+EXPECTED_ROUTED_SITES: Final[int] = EXPECTED_STAMPED_SITES + EXPECTED_RESET_SITES
+
 
 def _error_sites(sites: list[_WriteSite]) -> list[_WriteSite]:
     """Every readable ``strategy_analytics`` write literal naming the sentence.
@@ -275,6 +285,16 @@ def _pairing_defect(site: _WriteSite) -> str | None:
 # routing is then exactly the "arm that cannot fail" class this phase exists to
 # remove: `upsert_or_drop_provenance(_x_payload, _write_x, ...)` could be
 # replaced by a bare `_write_x()` at any site and every other gate stays green.
+#
+# ⚠️ IT COVERS THE SUCCESS WRITERS TOO, and they are the more expensive half.
+# `analytics_runner._mark_complete` and `job_worker`'s composite
+# `headline_payload` blank the two markers, which means they SEND the two column
+# names — so PostgREST answers PGRST204 on a run that SUCCEEDED. Unwrapped, that
+# APIError reached `run_csv_strategy_analytics`'s catch-all, `_mark_unrecoverable`
+# recorded the completed computation as 'failed', `_heal_delete_cash_series`
+# deleted the cash series persisted one statement earlier, and an attempt was
+# burned against max_attempts 3. A failure writer without the wrapper loses its
+# provenance; a success writer without it loses the computation.
 #
 # The rule is structural, and it is the same shape as Rule A: the FIRST
 # POSITIONAL argument must be the very name the payload literal is bound to.
@@ -361,9 +381,12 @@ def _routing_defect(tree: ast.AST, payload_span: _Span) -> str | None:
         f"{name} is stamped but {scope.name!r} never passes it to "
         f"{_ROUTING_HELPER}. The write then has NO deploy-window degrade: a "
         f"PGRST204 naming a marker column (the window before migration "
-        f"20260906120000 reaches PROD) loses the whole failure record, because "
-        f"PostgREST writes nothing on a schema-cache miss — the row is left at "
-        f"'computing' until the 16-hour reaper (164.2-REVIEW WR-02 / IN-04)."
+        f"20260906120000 reaches PROD) loses the WHOLE payload, because "
+        f"PostgREST writes nothing on a schema-cache miss. On a failure writer "
+        f"that strands the row at 'computing' until the 16-hour reaper; on a "
+        f"success writer the APIError reaches the caller's catch-all and a "
+        f"COMPLETED computation is recorded as failed, its series heal-deleted "
+        f"and an attempt burned (164.2-REVIEW WR-02 / IN-04)."
     )
 
 
@@ -394,8 +417,9 @@ def test_python_failure_writers_stamp_provenance() -> None:
 
     Rule B. Every literal that BLANKS the sentence blanks both markers.
 
-    Rule C (164.2-REVIEW IN-04). Every STAMPED literal is handed to
-    ``upsert_or_drop_provenance`` by name, in the function that binds it.
+    Rule C (164.2-REVIEW IN-04). Every literal that NAMES a marker column —
+    stamped OR blanking — is handed to ``upsert_or_drop_provenance`` by name, in
+    the function that binds it.
     """
     files = _py_scan_files()
     assert files, "the python scan found no files — path resolution is broken"
@@ -413,26 +437,35 @@ def test_python_failure_writers_stamp_provenance() -> None:
     defects: list[str] = []
     routing: list[str] = []
     routed_count = 0
+
+    def _check_routing(site: _WriteSite, where: str) -> None:
+        nonlocal routed_count
+        if site.path not in trees:
+            trees[site.path] = ast.parse(site.path.read_text(encoding="utf-8"))
+        routed_count += 1
+        routed = _routing_defect(trees[site.path], _span(site.payload))
+        if routed is not None:
+            routing.append(f"{where}: {routed}")
+
     for site in sites:
         where = f"{_rel(site.path)}:{site.lineno}"
         if _is_none(_dict_value(site.payload, _ERROR_KEY)):
             problem = _reset_defect(site)
+            if problem is None:
+                # Rule C applies to the RESETS too. They name the marker
+                # columns, so PostgREST answers PGRST204 for them during the
+                # deploy window and writes nothing — losing a SUCCESSFUL
+                # computation, which the caller then records as a failure.
+                _check_routing(site, where)
         elif _is_exempt(site) or _is_inert(site):
             continue
         else:
             problem = _pairing_defect(site)
             if problem is None:
-                # Rule C, stamped sites only. P11 writes its re-issue directly
-                # BY DESIGN (a helper there would re-send the unknown columns)
-                # and P1 has nothing to degrade; both are skipped above.
-                if site.path not in trees:
-                    trees[site.path] = ast.parse(
-                        site.path.read_text(encoding="utf-8")
-                    )
-                routed_count += 1
-                routed = _routing_defect(trees[site.path], _span(site.payload))
-                if routed is not None:
-                    routing.append(f"{where}: {routed}")
+                # Rule C, stamped sites. P11 writes its re-issue directly BY
+                # DESIGN (a helper there would re-send the unknown columns) and
+                # P1 has nothing to degrade; both are skipped above.
+                _check_routing(site, where)
         if problem is not None:
             defects.append(f"{where}: {problem}")
 
@@ -447,9 +480,11 @@ def test_python_failure_writers_stamp_provenance() -> None:
         "these stamped writers do not route their write through "
         f"{_ROUTING_HELPER}:\n  " + "\n  ".join(routing)
     )
-    assert routed_count == EXPECTED_STAMPED_SITES, (
+    assert routed_count == EXPECTED_ROUTED_SITES, (
         f"Rule C was evaluated at {routed_count} sites, not "
-        f"{EXPECTED_STAMPED_SITES}. `assert not routing` is satisfied VACUOUSLY "
+        f"{EXPECTED_ROUTED_SITES} (the {EXPECTED_STAMPED_SITES} stamped writers "
+        f"plus the {EXPECTED_RESET_SITES} success writers that blank the "
+        f"markers). `assert not routing` is satisfied VACUOUSLY "
         f"by a rule that never ran, so the count of EVALUATIONS is pinned "
         f"beside the count of sites — a guard rearrangement that skips Rule C "
         f"reddens here instead of reporting green over nothing."

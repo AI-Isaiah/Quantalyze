@@ -144,7 +144,9 @@ describe("KeyPermissionBadge", () => {
    * 2026-08-26 (161-ERRPREFIX) is a SPLIT, not a deletion: the user reads the
    * curated prose only, and the code goes to `console.error` and to a Sentry
    * breadcrumb, preserving the support-ticket greppability the prefix existed
-   * for (the justification was written into `KeyPermissionBadge.tsx:137-138`).
+   * for (the justification that sat at `KeyPermissionBadge.tsx:137-138` until
+   * 164.2-01 removed it — the split comment now standing there records the
+   * reversal, so do not expect to find the old sentence at that anchor).
    *
    * These assertions are INVERTED rather than deleted — the fixture is kept and
    * the expectation is the old one negated — so a reader can see the reversal

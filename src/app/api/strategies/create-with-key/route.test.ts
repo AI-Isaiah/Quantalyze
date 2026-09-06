@@ -4193,6 +4193,9 @@ describe("[162-05 / D-162-3] create-with-key — the use-existing-key arm", () =
 
       const POST = await importPost();
       const res = await POST(makeReq(REUSE_BODY));
+      // Taken BEFORE the body is consumed below — a disturbed Response cannot
+      // be cloned.
+      const bodyText = await res.clone().text();
 
       expect(res.status).toBe(409);
       expect((await res.clone().json()).code).toBe("DRAFT_SESSION_COLLISION");
@@ -4202,6 +4205,42 @@ describe("[162-05 / D-162-3] create-with-key — the use-existing-key arm", () =
           "back to DRAFT_ALREADY_EXISTS would assert 'the same API key' on " +
           "exactly the evidence we failed to obtain.",
       ).not.toBe("DRAFT_ALREADY_EXISTS");
+
+      // ⭐ 164.2 review B1 — THE COPY DECISION IS ONE BIT; THE OPERATOR NEEDS
+      // THE CAUSE. "an UNREADABLE key" names the outcome and never the fault,
+      // so an RLS refusal, a transient PostgREST 5xx and a genuinely absent row
+      // were indistinguishable in the logs. A real fault is now logged at
+      // `console.error` (not `warn`) carrying the PostgREST code that produced
+      // it.
+      const faultLine = (consoleErr.mock.calls as unknown[][]).find((call) =>
+        String(call[0]).includes("colliding-draft"),
+      );
+      expect(
+        faultLine,
+        "the colliding-draft read faulted and nothing reached console.error. " +
+          "The only trace is a warn naming the OUTCOME, which cannot tell an " +
+          "RLS refusal from a transient 5xx from an absent row.",
+      ).toBeDefined();
+      // ⚠️ THE FIRST ARGUMENT SPECIFICALLY, not the whole call. The scrubbed
+      // error object passed alongside it also carries the SQLSTATE, so a
+      // `JSON.stringify(call)` assertion would stay green with the REASON — the
+      // half this finding is about — thrown away. (Measured: it did.)
+      expect(
+        String(faultLine![0]),
+        "the fault line does not name the PostgREST code that caused it. The " +
+          "reason is exactly what the boolean discards, and it must be " +
+          "recorded, not just implied by an attached object.",
+      ).toContain("XX000");
+      expect(
+        faultLine!.length,
+        "the fault reached console.error with no scrubbed error beside the " +
+          "reason — the message is the other half of the cause.",
+      ).toBeGreaterThan(1);
+
+      // ⛔ T-164.2-06 STAYS CLOSED: the cause is for the log ONLY. Neither the
+      // SQLSTATE nor the upstream message may appear in the 409 body.
+      expect(bodyText).not.toContain("XX000");
+      expect(bodyText).not.toContain("read failed");
     });
 
     it("the read is TENANT-SCOPED and asks for nothing but the key id", async () => {

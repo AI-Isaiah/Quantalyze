@@ -87,8 +87,8 @@
  *
  * ═══════════════════════════════════════════════════════════════════════════
  */
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
+import { join, relative } from "node:path";
 
 import {
   cleanup,
@@ -129,6 +129,132 @@ const WIZARD_STEPS = join(
 
 function stripped(path: string): string {
   return stripCommentsPreserveLines(readFileSync(path, "utf-8"), "ts");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// THE FIFTH SURFACE'S TWO MEASUREMENTS (see the `[164.2-09]` describe below).
+//
+// Both live here because both are *derived from disk*. The versions they
+// replace were not: the census compared a hand-typed array's length to a
+// hand-typed `3` (nothing under src/ could move it), and the code-channel
+// detector matched only four hard-coded receiver names, three of which no
+// consumer uses for this route's body.
+// ───────────────────────────────────────────────────────────────────────────
+
+const VALIDATE_ROUTE = "/api/keys/validate-and-encrypt";
+/** A literal `fetch()` to the route — the only way a browser reaches it. */
+const VALIDATE_FETCH_RE =
+  /fetch\(\s*["'`]\/api\/keys\/validate-and-encrypt(?=["'`?])/;
+
+function sourceFilesUnder(dir: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === "node_modules" || entry.name === ".next") continue;
+      sourceFilesUnder(full, out);
+      continue;
+    }
+    if (!/\.(?:m|c)?[jt]sx?$/.test(entry.name)) continue;
+    // Tests NAME the route constantly; they are not consumers of it.
+    if (/\.(?:test|spec)\./.test(entry.name)) continue;
+    out.push(full);
+  }
+  return out;
+}
+
+/**
+ * Every non-test file under `src/` that POSTs to keys/validate-and-encrypt,
+ * repo-relative, comment-stripped so the ~20 files that merely NAME the route
+ * in prose do not count.
+ */
+function derivePosters(): string[] {
+  return sourceFilesUnder(join(REPO, "src"))
+    .filter((path) => {
+      // Cheap pre-filter: stripping every file under src/ is wasted work.
+      if (!readFileSync(path, "utf-8").includes(VALIDATE_ROUTE)) return false;
+      return VALIDATE_FETCH_RE.test(stripped(path));
+    })
+    .map((path) => relative(REPO, path));
+}
+
+/**
+ * Named code-channel reads of the validate-and-encrypt RESPONSE in one
+ * comment-stripped source. Empty ⇒ no code→copy render path exists here.
+ *
+ * ⚠️ SCOPED ON PURPOSE, and the scoping is what makes it honest. A blanket
+ * `/\.code\b/` reds at HEAD on `error.code` (StrategyForm's Supabase-error
+ * helper) and `rpcErr.code` (AllocatorExchangeManager's RPC error) — neither
+ * touches this route's body, so a blanket detector would be a false alarm that
+ * gets narrowed back to nothing. Instead the receiver names are DERIVED:
+ *
+ *   1. the identifier bound to `await fetch(<route>)`;
+ *   2. every identifier bound to `await <that>.json()`;
+ *   3. any `code` destructured straight out of `await <that>.json()`;
+ *   4. a deliberately over-broad backstop — ANY `<ident>.code` read inside the
+ *      block that handles the response — so an alias, a re-wrap or an
+ *      `(await res.json()).code` cannot slip past (1)-(3).
+ */
+function codeChannelReads(src: string): string[] {
+  const hits: string[] = [];
+
+  const receivers = new Set<string>();
+  for (const m of src.matchAll(
+    /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+fetch\(\s*["'`]\/api\/keys\/validate-and-encrypt/g,
+  )) {
+    receivers.add(m[1]);
+  }
+
+  for (const receiver of [...receivers]) {
+    const bindings = new RegExp(
+      `(?:const|let|var)\\s+(\\{[^}]*\\}|[A-Za-z_$][\\w$]*)\\s*=\\s*await\\s+${receiver}\\s*\\??\\.\\s*json\\s*\\(`,
+      "g",
+    );
+    for (const m of src.matchAll(bindings)) {
+      const bound = m[1];
+      if (bound.startsWith("{")) {
+        if (/(^|[{,\s])code\s*(?:[,}:]|$)/.test(bound)) {
+          hits.push(
+            `\`code\` is destructured out of ${receiver}.json(): ${bound.replace(/\s+/g, " ")}`,
+          );
+        }
+      } else {
+        receivers.add(bound);
+      }
+    }
+  }
+
+  for (const name of receivers) {
+    if (new RegExp(`\\b${name}\\s*\\??\\.\\s*code\\b`).test(src)) {
+      hits.push(`\`${name}.code\` is read`);
+    }
+  }
+
+  // (4) The backstop. Window = the enclosing block of the fetch call, i.e.
+  // from the call site forward until the brace depth drops below where it
+  // started. That is the try/handler body in all three consumers today.
+  const at = src.search(VALIDATE_FETCH_RE);
+  if (at >= 0) {
+    let depth = 0;
+    let end = src.length;
+    for (let i = at; i < src.length; i++) {
+      const ch = src[i];
+      if (ch === "{" || ch === "(") depth++;
+      else if (ch === "}" || ch === ")") {
+        depth--;
+        if (depth < 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    const window = src.slice(at, end);
+    const read = window.match(/[A-Za-z_$][\w$]*\s*\??\.\s*code\b/);
+    if (read) {
+      hits.push(`\`${read[0].trim()}\` is read in the response handler`);
+    }
+  }
+
+  return [...new Set(hits)];
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1041,25 +1167,33 @@ describe("[164.2-09] the FIFTH surface is excluded, and the blocker is measured"
       // title here would mean feeding the title in as the wire prose and
       // reading it back — the tautology this file refuses.
       expect(
-        /\b(err|result|data|body)\.code\b/.test(src),
+        codeChannelReads(src),
         `${rel} has started reading the validate-and-encrypt response's \`code\` ` +
           "field. ⭐ THAT IS GOOD NEWS AND IT INVALIDATES THIS EXCLUSION: the " +
           "surface now has a code→copy render path, so add it to SURFACES with " +
           "a real harness and delete this case. See `## Surfaces not rendered` " +
           "in 164.2-09-SUMMARY.md.",
-      ).toBe(false);
+      ).toEqual([]);
     }
   });
 
   it("the consumer census is complete — a FOURTH poster would go unmeasured", () => {
     // Every source file under src/ that POSTs to the route, comment-stripped so
-    // the ~20 files that merely NAME it in prose do not count.
-    const posters = CONSUMERS.length;
+    // the ~20 files that merely NAME it in prose do not count. DERIVED FROM
+    // DISK — the previous spelling compared `CONSUMERS.length` to the literal
+    // 3, i.e. a hand-typed array against a hand-typed number, which no change
+    // to production code could redden.
+    const derived = derivePosters();
     expect(
-      posters,
-      "Hand-typed at 3 (measured 2026-09-06). If a fourth consumer appears it " +
-        "must be added to CONSUMERS above, or the blocker claim covers only " +
-        "three of four.",
+      derived.slice().sort(),
+      "The set of files POSTing to keys/validate-and-encrypt has moved. A new " +
+        "poster must be added to CONSUMERS above (and its code-channel claim " +
+        "measured), or the blocker claim covers only some of the callers.",
+    ).toEqual([...CONSUMERS].sort());
+    expect(
+      derived.length,
+      "Measured 2026-09-06 at 3 call sites. This pins the DERIVED count, not " +
+        "itself.",
     ).toBe(3);
   });
 });

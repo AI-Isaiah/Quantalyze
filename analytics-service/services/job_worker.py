@@ -7915,6 +7915,13 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # anyway — that is F1's fix at the table — but a writer that states its
         # intent is legible at the call site, which is what the AST censuses ask
         # of every key here.)
+        #
+        # ⚠️ NAMING them puts this SUCCESS write inside the T-164.2-17 deploy
+        # window: while this worker runs ahead of migration 20260906120000,
+        # PostgREST answers PGRST204 for these two keys and writes NOTHING, so a
+        # finished composite stitch would be recorded as a failure by the
+        # caller's handler. `_write_headline_and_by_basis` therefore goes
+        # through upsert_or_drop_provenance, exactly like the failure writers.
         "computation_error_source": None,
         "computation_error_job_id": None,
         "trade_metrics": None,     # composite has no fills
@@ -8061,9 +8068,21 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         await db_execute(_persist_smoothed_series)
 
     def _write_headline_and_by_basis() -> None:
-        supabase.table("strategy_analytics").upsert(
-            headline_payload, on_conflict="strategy_id"
-        ).execute()
+        def _write() -> None:
+            supabase.table("strategy_analytics").upsert(
+                headline_payload, on_conflict="strategy_id"
+            ).execute()
+
+        # T-164.2-17 deploy window: `headline_payload` NAMES the two marker
+        # columns (blanked), so a worker running ahead of migration
+        # 20260906120000 gets a PGRST204 and PostgREST writes nothing — losing a
+        # SUCCESSFUL composite stitch. The degrade drops the two unknown keys and
+        # re-issues the pre-164.2 payload.
+        upsert_or_drop_provenance(
+            headline_payload,
+            _write,
+            where="job_worker.run_stitch_composite_job._write_headline_and_by_basis",
+        )
 
     await db_execute(_write_headline_and_by_basis)
 

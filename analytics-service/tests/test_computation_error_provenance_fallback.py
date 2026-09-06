@@ -69,6 +69,14 @@ _STRATEGY_ID = "prov-23514-strategy-uuid"
 _JOB_ID = "11111111-2222-3333-4444-555555555555"
 _SENTENCE = "CSV analytics computation failed."
 
+# The two codes the helper interpolates into its ERROR line. Asserted against
+# ``LogRecord.args``, never against the rendered message: the format string ends
+# with a fixed sentence that NAMES BOTH ("A PGRST204 here is the deploy window …
+# a 23514 does not"), so a substring test on the rendered text is true for both
+# codes no matter which one was seen, and therefore cannot fail.
+_PG_CHECK_VIOLATION_CODE = "23514"
+_PGRST_SCHEMA_CACHE_MISS_CODE = "PGRST204"
+
 # Ten rows: enough to clear the runner's insufficient-history arm (< 2 rows) so
 # the run reaches compute_all_metrics and therefore the catch-all except block.
 _ROWS: list[dict[str, Any]] = [
@@ -331,9 +339,17 @@ def test_helper_drops_markers_and_reissues_once(
         "the failure record is the thing being saved — dropping the sentence "
         "alongside the markers would defeat the entire point"
     )
-    assert [r for r in caplog.records if r.levelno == logging.ERROR], (
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors, (
         "the degrade must be LOUD: its user-visible effect is indistinguishable "
         "from the pre-164.2 world, so the log line is the only bug report"
+    )
+    # ⭐ The INTERPOLATED argument, never the rendered message. The format string
+    # ends with a sentence naming BOTH codes, so `"23514" in getMessage()` is
+    # true for a PGRST204 too and cannot fail — see the mirror assertion in
+    # test_helper_drops_markers_on_a_pgrst204_naming_a_marker_column.
+    assert errors[0].args[1] == _PG_CHECK_VIOLATION_CODE, (
+        f"the log must name the code it actually saw; args were {errors[0].args!r}"
     )
 
 
@@ -434,11 +450,19 @@ def test_helper_drops_markers_on_a_pgrst204_naming_a_marker_column(
     assert seen[1]["computation_status"] == "failed"
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert errors, "the degrade is invisible to users, so the log is the signal"
-    assert "PGRST204" in errors[0].getMessage(), (
+    # ⭐ The INTERPOLATED argument, never the rendered message. The format string
+    # ends with "A PGRST204 here is the deploy window … a 23514 does not", so
+    # BOTH codes are in every rendered message regardless of what was seen: a
+    # `"PGRST204" in getMessage()` assertion passes even for the hardcoded
+    # "(23514: %s)" this line replaced, i.e. it cannot fail.
+    assert errors[0].args[1] == _PGRST_SCHEMA_CACHE_MISS_CODE, (
         "the log must name the code it actually saw. A 23514 is a writer bug to "
         "chase and a PGRST204 is a deploy window that closes itself — reporting "
-        "one as the other is the WR-03 misdiagnosis in a new place"
+        "one as the other is the WR-03 misdiagnosis in a new place; args were "
+        f"{errors[0].args!r}"
     )
+    assert f"({_PGRST_SCHEMA_CACHE_MISS_CODE}: " in errors[0].getMessage()
+    assert f"({_PG_CHECK_VIOLATION_CODE}: " not in errors[0].getMessage()
 
 
 def test_helper_reraises_a_pgrst204_naming_a_different_column() -> None:

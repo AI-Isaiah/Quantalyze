@@ -256,12 +256,12 @@ export function captureToSentry(
  *
  * The skeleton is DELIBERATELY IDENTICAL to `captureToSentry`'s (outer try /
  * dynamic import / inner try / `.catch` that RESOLVES / outer catch returning a
- * settled promise) for the reasons stated at `:180-190` — in particular the
+ * settled promise) for the reasons stated at `:223-226` — in particular the
  * `.catch` must resolve rather than reject, or a floating rejection becomes an
  * unhandled rejection at every `void addSentryBreadcrumb(...)` call site.
  *
  * ⚠️ NO IMPORT WAS ADDED FOR THIS. The module imports exactly one module
- * (`./seam-redaction`) and must keep that property — see `:179-186`: it is
+ * (`./seam-redaction`) and must keep that property — see `:178-185`: it is
  * imported by `"use client"` components, so a `next/server` (or any
  * server-only) import would ship a server module into the browser bundle.
  */

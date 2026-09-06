@@ -1604,15 +1604,20 @@ export const FILES_FLOOR = 45;
 //                and re-separated it on real lanes: 46/370 -> two regressions,
 //                exit 1; 45/369 -> exit 0. ⛔ Read FILES_FLOOR and ARMS_FLOOR off
 //                the constants themselves, never off this comment.
-//                So 361 is exactly the separation point, not a value below it.
+//                So 361 WAS exactly the separation point on 2026-09-05 — past
+//                tense deliberately: the ⚠️ DATED note above supersedes it, and
+//                the live value is the `export const ARMS_FLOOR` below.
 //   RECORD       164.4.1-REVIEW.md findings CR-01 and CR-02, and the measured
 //                refutation recorded at each arm's own site in
 //                supabase/tests/test_reconcile_dropped_enqueue_sweep.sql.
 //
 // ⭐ RE-DERIVED 2026-09-06 BY MEASUREMENT (phase 164.2, plan 07). Value RAISED
 // from 361 to 369 — EIGHT new arms, all in the one new gate file
-// supabase/tests/test_sync_status_curated_sentence_survives.sql (arms 0, S, C,
-// O, D, P, PC, R). No existing arm moved: the three gates coupled to
+// supabase/tests/test_sync_status_curated_sentence_survives.sql. Their MACHINE
+// identities — the strings a reader greps for as `"arm":"…"` — are 0, S1, C1,
+// O1, D1, P1, PC1 and R1; every one but `0` carries a trailing DIGIT on purpose
+// (see that file's ⭐ WHY EVERY IDENTITY CARRIES A DIGIT block), so grepping
+// `"arm":"S"` finds nothing. No existing arm moved: the three gates coupled to
 // 20260906120000 in this plan gained a migration in their RED-UNDER-SETUP apply
 // lists and nothing else, and their twins (0a; 1/A-3, 2/A-3, 3/F-3; the 24 of
 // test_retention_orphaned_running.sql) were re-observed biting AFTER the

@@ -2229,7 +2229,10 @@ describe("[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeySt
  * throttle" and its second fix line offers "try a different exchange account".
  * `userActionLimiter` is a per-USER bucket keyed
  * `strategies-create-with-key:<uid>`: no exchange is involved, and no other
- * exchange account can clear it. `route.ts:891-897` already recorded this as
+ * exchange account can clear it.
+ * `src/app/api/strategies/create-with-key/route.ts:1019` — the comment reading
+ * "our outage, blamed on their exchange", cited by PHRASE because that route is
+ * long and this anchor has already drifted once — already recorded this as
  * "our outage, blamed on their exchange" and accepted it. `RATE_LIMITED`
  * already carries the honest sentence ("the cap is ours, not your exchange's")
  * and was simply not on this route's roster — so this is WIRING, and the roster

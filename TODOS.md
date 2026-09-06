@@ -1132,7 +1132,8 @@ true for 146 and half of 142–145, and **false for 141**.
       marker stays down — plan 10's W4 precondition checks for exactly that section's absence, and it
       is present. This is the guard added in revision round 2 working as designed, not a shortfall.
       **The work:** wire the three consumers onto the code channel (roster + `WIZARD_ERROR_COPY`
-      lookup, as `ConnectKeyStep.tsx:463-468` does), then add the fifth surface to the render sweep
+      lookup, as `ConnectKeyStep.tsx`'s `recogniseCreateWithKeyCode` does), then add the fifth surface
+      to the render sweep
       and raise `EXPECTED_POPULATION_MIN` off the new measurement. Touches live components, not just
       tests — which is why it is its own item rather than a stretch of 164.2.
 
@@ -1172,7 +1173,10 @@ true for 146 and half of 142–145, and **false for 141**.
       Phase 164.2 plan 06 three-reviewer gate, silent-failure-hunter).**
       ⭐ **STATUS 2026-09-06: IMPLEMENTED by Phase 164.2 plan 08, deliberately still OPEN.**
       `upsert_or_drop_provenance` (`analytics-service/services/strategy_analytics_provenance.py`)
-      carries the degrade at all ten stamped sites, narrowed by constraint NAME at the review's
+      carries the degrade at every stamped site — NINE of them, the count pinned as
+      `EXPECTED_STAMPED_SITES` in `test_computation_error_provenance_census.py`; the tenth
+      candidate, `run_sync_trades_job`, is deliberately unstamped per
+      `[SYNCTRADES-ENQUEUE-DONE]` — narrowed by constraint NAME at the review's
       WR-03, and plan 08 made a half-stamp inexpressible by deriving both markers from one
       `provenance_source(job_id)` expression. It stays OPEN because **implemented ≠ proven**: the
       retry arm is unreachable from today's writers and is exercised only against a mocked
@@ -1295,6 +1299,103 @@ true for 146 and half of 142–145, and **false for 141**.
       regenerate `baseline.sql` after this migration auto-applies, or its own gate will fail on a
       drift that is really just this pending apply. ⚠️ Sequence with
       `[164.2-TYPES-REGEN-CHECK]`: both wait on the same PROD apply.
+
+- [ ] **`[164.2-WIZARD-BARE401]` A bare upstream 401/403 with no seam envelope still answers
+      `code: "UNKNOWN"` on the two routes the wizard actually calls (booked 2026-09-06, Phase
+      164.2 ship review).**
+      `create-with-key/route.ts:1731` and `composite/add-key/route.ts:710` both funnel the
+      upstream error through `classifyKeyValidationError`, which reads `seamCode` — **null** on
+      the middleware's bare `{"detail": "Unauthorized"}` body (`analytics-service/main.py:868`) —
+      never reads `.status`, and carries no 401 needle in its substring cascade. So the honest
+      "our credential to the analytics service is wrong" case lands as `UNKNOWN`.
+      The `UPSTREAM_STATUS_TO_SEAM_CODE` map added by this phase closes exactly this hole, but it
+      was added ONLY to `keys/validate-and-encrypt` (`route.ts:123`, consulted at `:879`), whose
+      three consumers read `err.error` and ignore `code` — so the fix currently reaches no user.
+      **Fix:** read the status in the classifier's null-`seamCode` branch, or consult a shared
+      map from both key routes before the cascade; then add a route test on BOTH twins with
+      `new AnalyticsUpstreamError("Unauthorized", 401)`.
+      **Why booked, not fixed at ship time:** it is not a regression — `UNKNOWN` is what these
+      routes answered before this phase too — and `UNKNOWN`'s copy does not blame the user for
+      our own misconfiguration. It fails the blast-radius bar for blocking, not the bar for
+      being real.
+
+- [ ] **`[164.2-RECLAIM-PROVENANCE]` `reclaim_stuck_compute_jobs` requeues without resetting the
+      provenance markers, so a crash-recovered job can lose its curated sentence (booked
+      2026-09-06, Phase 164.2 ship review).**
+      `supabase/schema/functions/reclaim_stuck_compute_jobs.sql:32` sets `status = 'pending'`
+      directly and **never calls `sync_strategy_analytics_status`**, so the marker reset every
+      other requeue path performs does not happen here. The reachable sequence: a job stamps a
+      curated sentence with `('writer', J)`; it dies before `mark_compute_job_failed`; the
+      reaper reclaims it; on attempt 2 the writer writes a **different** curated sentence while
+      restating `('writer', J)` unchanged. The `BEFORE UPDATE` trigger
+      `strategy_analytics_drop_stale_error_provenance` then reads that as a marker outliving its
+      sentence and silently NULLs both markers, and the next bridge call replaces the curated
+      sentence with the per-kind generic.
+      ⚠️ The trigger's own `COMMENT` at
+      `supabase/migrations/20260906120000_computation_error_provenance.sql:1138-1145` records
+      this cost as though it were theoretical. It is not — the crash-recovery path reaches it.
+      **Fix:** `PERFORM sync_strategy_analytics_status(strategy_id)` for each reclaimed row, plus
+      a lane arm in `supabase/tests/test_sync_status_curated_sentence_survives.sql` that
+      reclaims, re-stamps a DIFFERENT sentence under the SAME job id, and reads the curated
+      sentence back.
+
+- [ ] **`[164.2-SEAMCODE-UNION]` `UPSTREAM_STATUS_TO_SEAM_CODE`'s "every value is a key of
+      `SEAM_CODE_TO_WIZARD_CODE`" law is enforced by a source-text scan, not by the compiler
+      (booked 2026-09-06, Phase 164.2 ship review).**
+      The map is typed `ReadonlyMap<number, string>`
+      (`src/app/api/keys/validate-and-encrypt/route.ts:123`). Nothing in the type system stops a
+      value that no wizard code answers to; what stops it is the SOURCE-TEXT scan in
+      `src/lib/wizardErrors.invariant.test.ts:2681-2755` (`deriveStatusMap` at `:2681`, the
+      no-more-no-less assertion at `:2741`, the every-code-is-a-key assertion at `:2757`), which
+      parses the declaration out of the route file's source text.
+      A `SeamWireCode` union in place of `string` would make the same law compile-time.
+      ⚠️ **Why it is booked rather than done:** that scan is guarded by a SELF-TEST that
+      byte-pins the declaration's exact opening line at `:2724` (its sibling for
+      `SEAM_CODE_TO_WIZARD_CODE` at `:1602` does the same). Narrowing the annotation changes
+      those bytes, so the pins must move in the SAME commit or the suite reds on the type change
+      alone — which makes this a small, coupled edit rather than a one-line improvement.
+
+- [ ] **`[164.2-FRESHNESS-TWO-BUCKETERS]` One fact — how old the series end is — is judged by two
+      bucketers with three verdict vocabularies and three rank tables (booked 2026-09-06, Phase
+      164.2 ship review).**
+      `Freshness` + `FRESHNESS_RANK`, `SeriesVerdict` + `SERIES_RANK`, and `FreshnessTone` +
+      `TONE_RANK` all describe the same question. `src/lib/freshness.ts:48-53` names this
+      structure as **exactly how the two public surfaces came to contradict each other** about
+      one strategy: `bucketSeriesAge` (the discovery badge) and `bucketByAge` in
+      `app/factsheet/[id]/v2/FactsheetView.tsx` (the factsheet chip). The remedy actually chosen
+      was a shared exported constant plus a cross-file agreement test — which stops the numbers
+      diverging but leaves the duplication that produced the divergence.
+      **Fix:** export `bucketSeriesAge` and have the chip map `SeriesVerdict -> FreshnessTone`,
+      so the three day-constants are read in ONE place and the two-surfaces test degrades from a
+      value-agreement test to a mapping test.
+
+- [ ] **`[164.2-DENYBODY-DRY]` The rate-limit deny bodies are hand-spelled at every
+      `rateLimitDenyJson` call site, in two key orders (booked 2026-09-06, Phase 164.2 ship
+      review).**
+      **Measured at HEAD 2026-09-06** (`grep -rn 'code: "RATE_LIMITED"' src/app | grep -v
+      '\.test\.'`): NINE `throttledBody` sites spell `{ code: "RATE_LIMITED", error: "Too many
+      requests" }` by hand — `portfolio-optimizer:131`, `strategies/composite/add-key:326`,
+      `strategies/create-with-key:514` and `:1050`, `admin/match/recompute:114`,
+      `admin/match/eval:170`, `keys/sync:172` and `:186`, `keys/validate-and-encrypt:389` — and
+      they disagree on KEY ORDER (`{ code, error }` on the wizard routes, `{ error, code }` on
+      the rest). Each carries a paired `misconfiguredBody` spelling
+      `{ code: "SEAM_MISCONFIGURED", error: "Rate limiter unavailable" }` the same way.
+      **Fix:** export the two bodies as shared constants from `src/lib/ratelimit.ts` and spread
+      them. ⚠️ The byte-wise route tests need their key order settled ONCE first; the code
+      comments at these sites already state that neither order is a contract, so settling it is
+      a decision nobody has had to make yet rather than a contract change.
+
+- [ ] **`[164.2-SENTRY-WITHSENTRY]` `addSentryBreadcrumb` re-types `captureToSentry`'s whole
+      dynamic-import skeleton (booked 2026-09-06, Phase 164.2 ship review).**
+      `src/lib/sentry-capture.ts:275-303` (inside `addSentryBreadcrumb`) is the same outer try /
+      `import()` / inner try / `.catch` that RESOLVES / outer catch returning a settled promise
+      as `:206-233` (inside `captureToSentry`) — the second function's own docblock says the
+      shape is copied deliberately. A module-private `withSentry(use)` would carry it once, at
+      roughly 14 lines instead of ~30 twice.
+      **Verified safe to do:** the three tests that read this file's SOURCE pin only its
+      relative imports and its citations, and the behavioural tests drive it through
+      `vi.doMock`, so none of them pins the internal shape. Booked rather than done only because
+      it is a refactor of live error-reporting code and this phase was prose-only.
 
 - [ ] **`[PGLANE-HELP-TRUNCATED]` `scripts/pg-lane/run.sh --help` cuts the stand-in disclaimer off mid-sentence (measured 2026-09-02, Phase 164.4 ship review).**
       `run.sh:612` is `-h|--help) sed -n '2,45p' "$0"`, a hardcoded end line. The

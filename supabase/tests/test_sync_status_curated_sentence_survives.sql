@@ -149,7 +149,7 @@
 --
 -- ⭐ WHY EVERY IDENTITY CARRIES A DIGIT — `S1`, NOT `S`. It is a mechanical
 -- requirement, not a style choice, and it was found by the invariant rather
--- than assumed. `sectionOfIdentity` (scripts/mutation-runner/run.mjs:2548) is
+-- than assumed. `sectionOfIdentity` (the `export const` in scripts/mutation-runner/run.mjs:2560) is
 -- `id.replace(/(\d)[a-z]*(-[A-Za-z]+)?$/, "$1")`: a trailing `-SUFFIX` collapses
 -- into its parent SECTION only when a DIGIT precedes it. So `S1-SETUP` is a
 -- SUB-ARM of section `S1` and is covered by S1's twin — exactly as the sibling

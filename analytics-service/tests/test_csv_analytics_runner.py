@@ -400,8 +400,13 @@ async def test_csv_analytics_unrecoverable_stamps_csv_source_flag() -> None:
 async def test_csv_analytics_paginated_truncation_writes_specific_error() -> None:
     """WR-03 (19.1-REVIEW). When paginated_select raises
     PaginatedSelectTruncated during _load_series, the runner must:
-      1. Persist a specific computation_error mentioning the row cap
-         and the truncation hint (operator triage signal).
+      1. Persist a specific computation_error mentioning the row cap —
+         and NOT the truncation hint. Phase 164.2 made this sentence
+         durable (the bridge no longer overwrites a stamped sentence),
+         so it renders to the account holder; `hint` is a log-triage
+         string that on this path is "csv_daily_returns strategy_id=
+         <uuid>", i.e. an internal table name and a raw id. It stays on
+         the runner's logger.error (the operator channel).
       2. Stamp data_quality_flags.csv_source=True so the provenance
          pill survives the failure (mirrors WR-05).
       3. Re-raise the typed exception so the worker dispatcher's
@@ -460,6 +465,15 @@ async def test_csv_analytics_paginated_truncation_writes_specific_error() -> Non
     payload = failed[0].args[0]
     assert "1,000,000" in payload["computation_error"] or "1000000" in payload["computation_error"], (
         f"computation_error must cite the row cap; got: "
+        f"{payload['computation_error']!r}"
+    )
+    assert "csv_daily_returns" not in payload["computation_error"], (
+        "the user-visible sentence must not name an internal table; the "
+        f"truncation hint belongs on the log line. Got: "
+        f"{payload['computation_error']!r}"
+    )
+    assert "trunc-strategy-uuid" not in payload["computation_error"], (
+        "the user-visible sentence must not carry a raw strategy id. Got: "
         f"{payload['computation_error']!r}"
     )
     assert payload["data_quality_flags"] == {"csv_source": True}, (

@@ -22,7 +22,11 @@ Both `ADD COLUMN`s are nullable and defaultless, so the apply is metadata-only.
 **Writers.** `strategy_analytics_provenance.py` makes a half-stamp inexpressible in Python too:
 `provenance_source(job_id)` returns both markers or neither, and `upsert_or_drop_provenance` takes
 the write as a *callable* so payloads stay dict literals and the AST censuses that police them keep
-working. Ten stamped writers are covered by the deploy-window degrade.
+working. The stamped writers are covered by the deploy-window degrade — nine of them, the count
+pinned as `EXPECTED_STAMPED_SITES` in
+`analytics-service/tests/test_computation_error_provenance_census.py`. A tenth site,
+`run_sync_trades_job`, is deliberately left UNSTAMPED (`[SYNCTRADES-ENQUEUE-DONE]`), which is why
+the census pins 9 and not 10.
 
 **User-visible copy.** New `PRESELECT_REQUEST_INVALID` and `DRAFT_SESSION_COLLISION` codes; the
 `RATE_LIMITED` and `SEAM_MISCONFIGURED` arms are now reached on four wizard routes; the anonymous

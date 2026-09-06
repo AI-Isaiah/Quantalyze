@@ -1111,19 +1111,26 @@ type FreshnessTone = "fresh" | "unknown" | "stale" | "old" | "future" | "neutral
  * "Synced 7h ago" beside a factsheet reading `Track record · old`). The
  * literals moved; the ladder did not change.
  */
-function bucketByAge(days: number, futureAllowanceDays = 0): FreshnessTone {
+function bucketByAge(days: number, arm: "sync" | "series"): FreshnessTone {
   // A future date (days < 0) means the timestamp is ahead of now — treat as
   // neutral/suspicious, never "fresh". (NEW-C20-07)
   //
-  // ⛔ THE ALLOWANCE DEFAULTS TO ZERO, DELIBERATELY (WR-06-UTC, Phase 164.2).
-  // This function is called TWICE: once on `computedAt` — an INSTANT our own
-  // pipeline wrote, where NEW-C20-07's bare zero is exactly right and C-10 is
-  // the tripwire that says so — and once on the SERIES end, which is a UTC
-  // DATE and can legitimately sit a calendar day ahead of a browser west of
-  // UTC. Only the series call passes `SERIES_END_FUTURE_ALLOWANCE_DAYS`, so a
-  // future compute timestamp is still `future — check data` no matter how far
-  // the series arm's tolerance ever moves. A default of anything but 0 would
-  // silently widen the computedAt arm too.
+  // ⛔ THE FUTURE ALLOWANCE IS DERIVED FROM THE ARM, NOT PASSED IN (WR-06-UTC,
+  // Phase 164.2). This function is called TWICE and the two calls must NOT get
+  // the same tolerance: the `"sync"` arm judges `computedAt` — an INSTANT our
+  // own pipeline wrote, where NEW-C20-07's bare zero is exactly right and C-10
+  // is the tripwire that says so — while the `"series"` arm judges the SERIES
+  // end, which is a UTC DATE and can legitimately sit a calendar day ahead of a
+  // browser west of UTC.
+  //
+  // That split used to ride on a `futureAllowanceDays = 0` default, i.e. on
+  // every caller remembering not to pass a number to the sync arm. It is now
+  // carried by the TYPE: the allowance is not a parameter at all, so widening
+  // the series tolerance cannot reach `computedAt`, and a future compute
+  // timestamp stays `future — check data` no matter how far the series arm's
+  // tolerance ever moves. The only remaining mistake — naming the wrong arm —
+  // is a discriminant a reader can check at the call site.
+  const futureAllowanceDays = arm === "series" ? SERIES_END_FUTURE_ALLOWANCE_DAYS : 0;
   if (!Number.isFinite(days)) return "neutral";
   if (days < 0) return -days <= futureAllowanceDays ? "fresh" : "future";
   if (days <= SERIES_FRESH_DAYS) return "fresh";
@@ -1201,7 +1208,7 @@ function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; series
   }
   const d = new Date(computedAt);
   const days = (nowMs - d.getTime()) / 86_400_000;
-  const jobTone = bucketByAge(days);
+  const jobTone = bucketByAge(days, "sync");
   // The series arm. `resolveSeriesEnd` is the SAME derivation SeriesRecencyLine
   // renders, so the chip and the sentence below it can never disagree about
   // where the track record ends.
@@ -1209,11 +1216,12 @@ function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; series
   const seriesAgeTone: FreshnessTone = seriesEnd
     ? bucketByAge(
         (nowMs - new Date(seriesEnd.iso).getTime()) / 86_400_000,
-        // WR-06-UTC — the SERIES call, and the only one that gets the
-        // allowance. The badge's `bucketSeriesAge` reads the same constant from
-        // the same file, so tomorrow's bar cannot read `fresh` on the discovery
-        // list and `future — check data` here.
-        SERIES_END_FUTURE_ALLOWANCE_DAYS,
+        // WR-06-UTC — the SERIES arm, and the only one whose discriminant
+        // unlocks `SERIES_END_FUTURE_ALLOWANCE_DAYS`. The badge's
+        // `bucketSeriesAge` reads the same constant from the same file, so
+        // tomorrow's bar cannot read `fresh` on the discovery list and
+        // `future — check data` here.
+        "series",
       )
     : "unknown";
   // `resolveSeriesEnd` only ever returns a date `formatIsoDate` already parsed,

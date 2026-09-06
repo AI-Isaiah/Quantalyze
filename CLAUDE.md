@@ -247,8 +247,9 @@ the final tree, **exit 0**: `coverage: files 45/72`, `arms: 369/369/0`,
 SEPARATED in both directions on real full-corpus lane runs before being pinned —
 at +1 each the runner named both regressions and exited 1; at the pinned values,
 0 defects. ⚠️ **These are that run's DATED readings, not live constants: read
-`FILES_FLOOR` (`run.mjs:815`) and `ARMS_FLOOR` (`run.mjs:1625`) off the file
-itself.** The ubuntu SHA-bound confirmation for THIS corpus has not been taken —
+`FILES_FLOOR` and `ARMS_FLOOR` off the constants themselves in
+`scripts/mutation-runner/run.mjs` (cited by SYMBOL, not by line — this file's
+earlier line cites drifted the moment the runner grew).** The ubuntu SHA-bound confirmation for THIS corpus has not been taken —
 the 567 s / 363-arm figure above is the 164.4.1 tree and must not be read as a
 figure for 45 files. ⛔ `sql-tests` is expected RED on the 164.2 PR for exactly
 two named arms until the provenance migration reaches shared TEST — see TODOS

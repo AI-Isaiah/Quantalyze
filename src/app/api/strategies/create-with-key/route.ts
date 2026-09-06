@@ -713,8 +713,24 @@ async function handleReuseExistingKey(
       // `create_wizard_strategy_for_key` INSERTs (20260826130000:241) and it is
       // the third column of the index; omitting it would read a CSV-path row
       // and compare the wrong draft.
+      //
+      // ⭐ THE OUTCOME IS ONE BOOLEAN; THE CAUSE IS NOT. `collidingReadFaulted`
+      // is what the copy decision needs, but it collapses three DIFFERENT
+      // operational facts — an RLS/permission refusal, a transient PostgREST
+      // 5xx, and "the row simply is not there" — into one bit. An operator
+      // reading only "an UNREADABLE key" cannot tell which happened, and
+      // "no row found immediately after a 23505 fired" is itself a surprising
+      // state that deserves its own line. So the REASON is recorded beside the
+      // flag and logged: a genuine fault at `console.error`, the no-row case as
+      // a warn alongside the copy decision it produced.
+      //
+      // ⛔ THE REASON IS FOR THE LOG ONLY. Neither the code, the message nor
+      // the no-row fact may reach the response body (T-164.2-06) — both 409
+      // bodies below are unchanged and still carry no key id and no cause.
       let collidingKeyId: string | null = null;
       let collidingReadFaulted = false;
+      let collidingReadReason: string | null = null;
+      let collidingReadFault: unknown = null;
       try {
         const { data: colliding, error: collidingError } = await admin
           .from("strategies")
@@ -723,13 +739,31 @@ async function handleReuseExistingKey(
           .eq("wizard_session_id", wizardSessionId)
           .eq("source", "wizard")
           .maybeSingle();
-        if (collidingError || !colliding) {
+        if (collidingError) {
           collidingReadFaulted = true;
+          collidingReadFault = collidingError;
+          collidingReadReason = `read-error:${collidingError.code ?? "no-code"}`;
+        } else if (!colliding) {
+          // Separated deliberately: the read SUCCEEDED and found nothing, one
+          // statement after the unique index said something was there.
+          collidingReadFaulted = true;
+          collidingReadReason = "no-row";
         } else {
           collidingKeyId = (colliding as { api_key_id: string | null }).api_key_id;
         }
-      } catch {
+      } catch (collidingThrown) {
         collidingReadFaulted = true;
+        collidingReadFault = collidingThrown;
+        collidingReadReason = "threw";
+      }
+
+      if (collidingReadFault !== null) {
+        console.error(
+          "[strategies/create-with-key] reuse arm 23505: the colliding-draft " +
+            `read FAULTED (${collidingReadReason}); falling back to the ` +
+            "session sentence:",
+          scrubSeamError(collidingReadFault),
+        );
       }
 
       // ⭐ A DARK READ FALLS TO THE SESSION SENTENCE, NOT TO THE KEY ONE, and
@@ -741,7 +775,7 @@ async function handleReuseExistingKey(
         console.warn(
           "[strategies/create-with-key] reuse arm 23505: colliding draft holds " +
             "the SAME key — DRAFT_ALREADY_EXISTS",
-          { wizard_session_id: wizardSessionId },
+          { wizard_session_id: wizardSessionId, colliding_read: "ok" },
         );
         return NextResponse.json(
           { code: "DRAFT_ALREADY_EXISTS", error: "A wizard session with this key is already in progress." },
@@ -752,7 +786,10 @@ async function handleReuseExistingKey(
         "[strategies/create-with-key] reuse arm 23505: colliding draft is over " +
           (collidingReadFaulted ? "an UNREADABLE key" : "a DIFFERENT key") +
           " — DRAFT_SESSION_COLLISION",
-        { wizard_session_id: wizardSessionId },
+        {
+          wizard_session_id: wizardSessionId,
+          colliding_read: collidingReadReason ?? "ok",
+        },
       );
       return NextResponse.json(
         { code: "DRAFT_SESSION_COLLISION", error: "A draft from an earlier wizard session is still open." },

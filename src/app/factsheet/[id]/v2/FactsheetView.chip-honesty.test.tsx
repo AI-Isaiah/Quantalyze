@@ -365,6 +365,27 @@ describe("FreshnessChip — the badge cannot outrun the data (HONEST-02)", () =>
     expect(chip.tone).not.toBe(POSITIVE);
   });
 
+  it("C-10b: a computedAt HALF A DAY ahead is still 'future' — the series allowance does not reach the job arm (WR-06-UTC)", () => {
+    // ⚠️ C-10 ABOVE CANNOT CATCH THIS. Its fixture is 400 days ahead, which
+    // reads "future" under EITHER arm's tolerance, so it proves the future arm
+    // survives a blend — not that the job arm was denied the series arm's
+    // one-day allowance. Wire `bucketByAge`'s computedAt call to the "series"
+    // discriminant and C-10 stays green; this control goes red.
+    //
+    // Twelve hours is chosen to sit strictly INSIDE
+    // `SERIES_END_FUTURE_ALLOWANCE_DAYS` (one day) and strictly outside zero,
+    // so it can only be read as "fresh" by an arm that was handed the series
+    // tolerance. `computed_at` is an INSTANT our own pipeline wrote: a value
+    // ahead of now is a corrupt write, and the UTC-date reasoning that earns
+    // the series its calendar day has no counterpart here.
+    const { container } = renderFactsheet(payloadWith(1, isoHoursAgo(-12)));
+
+    const chip = readChip(container);
+    expect(chip.label).toBe("Computed · future — check data");
+    expect(chip.tone).toBe(MUTED);
+    expect(chip.tone).not.toBe(POSITIVE);
+  });
+
   it("C-11: an unparseable computedAt still reads the colorless em dash", () => {
     // The non-finite guard. A fresh series must not upgrade a chip whose own
     // timestamp cannot be read — the honest answer stays "—".
