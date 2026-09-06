@@ -2,20 +2,40 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.1
-current_phase_name: PROD-OBSERVABILITY
+current_phase: 164.2
+current_phase_name: CURATED-COPY
 status: in_progress
-stopped_at: Completed 164.1-05-PLAN.md
-last_updated: "2026-09-06T08:33:04.047Z"
-last_activity: 2026-09-05
-last_activity_desc: 164.3.1/164.4/164.4.1 records restored and closed; 164.1 discuss+research+validation landed; planning blocked on founder secrets
-state_head: 03ae5fa059f4bbc1dd16d7076486b7c1adf4b8a9
+stopped_at: 164.2 CONTEXT + RESEARCH committed; pattern-mapping running; no PLAN files yet
+last_updated: "2026-09-06T08:45:30.461Z"
+last_activity: 2026-09-06
+last_activity_desc: "164.1 closed by merge (PR 746/748, v0.77.15.0) but UNVERIFIED — no VERIFICATION.md; 164.2 discussed+researched, not planned; 164.6 gained PROBER-CALIBRATION-01; 164.2.1 SESSIONID-FENCE inserted; STATE.md reconciled"
+state_head: c1c8cf3c4935de3ce494dd05c663701f0ff92a25
+# ⚠️ progress: HAND-SET 2026-09-06 against `origin/main`, NOT derived from this checkout.
+# This branch is 1 commit behind main and is missing d679f638, so four SHIPPED phase
+# directories (164.1, 164.3.1, 164.4, 164.4.1) are empty HERE — the previous values
+# (completed_phases 4, total_plans 70, completed_plans 66, percent 20) were derived from
+# that incomplete tree and were wrong. Census taken with
+# `git ls-tree -r --name-only origin/main .planning/phases/`:
+#   total_plans 107 = 158:6 159:7 160:7 161:10 161.1:5 162:9 163:9 164:7 164.1:6
+#                     164.3:10 164.3.1:13 164.4:12 164.4.1:6   (164.2/164.2.1/164.5/
+#                     164.6/164.7/165/166 author none yet)
+#   completed_plans 104 = the same list by SUMMARY count; the 3 shortfalls are
+#                     159 (7/6), 160 (7/6) and 164.3 (10/9, plan 07 is 164.3-07-DEFERRED.md)
+#   completed_phases 10 = plans>0 AND summaries==plans: 158 161 161.1 162 163 164 164.1
+#                     164.3.1 164.4 164.4.1
+#   percent 50 = phase-weighted (completed_phases/total_phases), the convention this file
+#                fixed at the 156-10 reconciliation — NOT plan-weighted
+# ⛔ Do NOT run `state.update-progress` or `state.begin-phase` from this checkout to "fix"
+# these: both recompute from local disk and would write the depressed numbers back, and
+# begin-phase additionally overwrites the Status:/Last activity:/Plan: prose below with
+# template boilerplate and drops `state_head` (measured in a sandbox copy 2026-09-06).
+# Merge origin/main first; then a handler-derived recount is trustworthy.
 progress:
   total_phases: 20
-  completed_phases: 4
-  total_plans: 70
-  completed_plans: 66
-  percent: 20
+  completed_phases: 10
+  total_plans: 107
+  completed_plans: 104
+  percent: 50
 ---
 
 # Project State — Quantalyze
@@ -166,8 +186,102 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 164.4.1 (PGCRON-LANE) — EXECUTING
-Plan: 5 of 6
+Phase: 164.2 (CURATED-COPY) — IN PROGRESS, planning not started
+Plan: none authored yet — `/gsd-plan-phase 164.2` has not run, so the plan count is UNKNOWN
+⛔ 2026-09-06: this line deliberately carries NO `N of M` pair. Written as `0 of 0` it parsed, and
+`state.advance-plan` then answered `reason: last_plan` / `status: ready_for_verification` — an
+unplanned phase reported as ready to verify (measured in a sandbox copy). With no numeric pair the
+verb cannot mis-advance. Restore the `N of M` shape when planning produces real plans.
+
+⭐ **RECONCILED 2026-09-06. Everything from here to the `⚠️ RETAINED — Phase 164.4.1 execution
+log` marker below is the CURRENT position. It SUPERSEDES the `Phase: 164.4.1 (PGCRON-LANE) —
+EXECUTING` / `Plan: 5 of 6` pointer that stood on these two lines until now, and it supersedes the
+`Status:` and `Last activity:` lines further down, which were both written mid-164.4 and are kept
+as lineage. Nothing below was deleted.**
+
+**Where the work actually is.** Phase **164.2 (CURATED-COPY)** is in flight on branch
+`phase-164.2-curated-copy`. `164.2-CONTEXT.md` (commit `24618f73`) and `164.2-RESEARCH.md`
+(`cf402eb0`) are written and committed, and `03ae5fa0` records the four CONTEXT decisions RESEARCH
+refuted. Pattern-mapping is running. **No PLAN file exists yet** — `.planning/phases/164.2-…/`
+holds CONTEXT and RESEARCH only, which is why `roadmap.analyze` reports its `disk_status` as
+`researched`. ⛔ Do not read `Plan: 0 of 0` as "nothing to do"; read it as "the plan count is not
+yet known because planning has not run".
+
+**Phases that shipped since the superseded pointer was written — each with the citation, none
+asserted from memory:**
+
+- **164.4 REDUNDER-BACKFILL — COMPLETE.** PRs #741 (`a55ff918`), #742 (`75e58cb1`), #743
+  (`3ed6919e`). `164.4-VERIFICATION.md` on `origin/main`: `status: passed`, 4/4 must-haves, and
+  its one `human_verification` item is recorded `human_verification_resolved: 2026-09-05` by
+  founder decision on the superseding ubuntu run 33961609382 at `1aa8bb70`.
+- **164.4.1 PGCRON-LANE — COMPLETE.** PR #744, squash-merged `e01cc2e6` (v0.77.13.0).
+  `164.4.1-VERIFICATION.md`: `status: passed`, 5/5 must-haves, `verified_at_head: 581d54cb`, and
+  SC-1's human item closed by ubuntu run **33973362161** at `ab0d5644`.
+- **164.3.1 SOUND-PRIMITIVES — COMPLETE.** `164.3.1-VERIFICATION.md`: `status: passed`, 9/9
+  criteria, re-verified at `e30f7c33`.
+- **164-family re-partition — SHIPPED.** PR #745, `ce5d2983` (v0.77.13.1).
+- **164.1 PROD-OBSERVABILITY — ALL SIX PLANS EXECUTED AND MERGED, but FORMALLY UNVERIFIED.**
+  Code merged as PR #746 (`42868a9b`); the phase's planning artifacts plus plan 06 (the first live
+  PROD prober run, the captured cron manifest, the posture flip and the new `version-gate` CI job)
+  merged as PR #748 (`d679f638`, v0.77.15.0, 2026-09-06). All six `164.1-0N-SUMMARY.md` files exist
+  on `origin/main` and `164.1-06-SUMMARY.md` reads `status: complete`. ⛔ **There is NO
+  `164.1-VERIFICATION.md` anywhere in the repo** — `/gsd-verify-work 164.1` has not been run, so
+  this phase is CLOSED-BY-MERGE, not VERIFIED. Do not restate it as verified.
+  ⚠️ Its first live run found a REAL open production fault: MT5 `initialize()` returned **-6**
+  (authorization failed — terminal up and answering IPC, but not logged in), filed as issue
+  **#747** and left for founder action. That is an open production item, not a phase defect.
+
+⛔ **THIS CHECKOUT IS ONE COMMIT BEHIND `origin/main`, and that is why the phase-directory
+readings lie. Measured 2026-09-06:** `git rev-list --left-right --count origin/main...HEAD` = `1 5`
+— the branch forked at `42868a9b` and does **not** contain `d679f638`, which is precisely the
+commit that carried 119 planning artifacts for 164.1 / 164.3.1 / 164.4 / 164.4.1 onto main (PR #746
+was squashed and `/gsd-pr-branch` filtered the transient `.planning/` files out of the reviewer's
+diff, so they reached main only via #748). Consequence: in THIS working tree those four phase
+directories contain nothing but `.gitkeep` (164.4.1 has no directory at all), so
+`roadmap.analyze` reports them `empty` / `no_directory` and every derived progress integer is
+depressed. **They were NOT archived and NOT lost** — `git ls-tree -r origin/main .planning/phases/`
+shows 164.1 at 6 PLAN + 6 SUMMARY, 164.3.1 at 13 + 13, 164.4 at 12 + 12, 164.4.1 at 6 + 6, and
+`git show --diff-filter=D d679f638 -- .planning/phases/` is EMPTY, so nothing was deleted.
+✅ **Fix: merge `origin/main` into this branch.** `d679f638` touches neither `STATE.md` nor
+`ROADMAP.md` (verified: `git diff 42868a9b d679f638 -- .planning/STATE.md .planning/ROADMAP.md` is
+empty), so the merge is clean apart from `state.json`. It was deliberately NOT done in this
+reconciliation pass because a pattern-mapper is running against this checkout and a merge would
+change the tree underneath it. **Do it before the next `/gsd-plan-phase 164.2`.**
+
+⚠️ **The two phase counters disagree BY DESIGN — neither is a completion oracle, and picking the
+larger one is wrong. Diagnosed 2026-09-06 by reading the SDK, not by preference:**
+
+- `query init.milestone-op` → `completed_phases` counts a current-milestone ROADMAP phase whose
+  directory holds **at least one SUMMARY file** (`init.cjs:1912-1935`,
+  `listPhaseSummaryFiles(...).length > 0`). It answers *"how many phases have produced any output
+  at all"*. Measured here today: **9 of 20**.
+- `query roadmap.analyze` → `completed_phases` counts phases whose **`disk_status === 'complete'`**
+  (`roadmap.cjs:535`), i.e. plan_count > 0 AND every plan has its SUMMARY. It answers *"how many
+  phases have no unfinished plan on disk"*. Measured here today: **4 of 20**.
+- Both read ONLY `.planning/phases/<dir>/`. Neither reads a VERIFICATION.md, a PR, or a merge
+  commit — so **neither number can tell you whether a phase shipped**, and on this behind-main
+  checkout both are additionally depressed by the four artifact-less directories above. The
+  per-phase `roadmap_complete` field is a THIRD, unrelated thing: it reads the `✅ COMPLETE` marker
+  in the ROADMAP heading, which is why only 158 and 163 carry it.
+- ⛔ Consequence for planners: **cite a merge commit, a PR number or a VERIFICATION.md status when
+  you claim a phase is done. Do not cite either counter.**
+
+⚠️ **`roadmap.analyze`'s `next_phase: "164.7"` is a FILE-ORDER ARTIFACT, not a scheduling signal.**
+`nextPhase` is `phases.find(disk_status ∈ {empty, no_directory, discussed, researched})`
+(`roadmap.cjs:531`) over headings in the order they appear in `ROADMAP.md`. The v1.20 heading order
+is 158, 159, 160, 161, 161.1, 162, 163, 164, **164.7**, 164.3, 164.3.1, 164.4, 164.4.1, 164.1,
+164.2, 164.2.1, 164.5, 164.6, 166, 165 — the 164-family inserts sit in insertion order, not
+execution order — so 164.7 wins on position over the in-flight 164.2 (which is `researched` and
+therefore also matches the predicate). The **intended** order is
+**164.1 → 164.2 → 164.2.1 → 164.7 → 164.5 → 164.6 → 166 → 165**; it lives in ROADMAP prose and in
+each phase's `Depends on:` line, and is not encoded in heading position. Same defect in
+`current_phase: "159"`, which is just the first `planned|partial` heading (159 is 7 plans / 6
+summaries) — an oldest-incomplete pointer, not the live position. **Read this section, not those
+two fields.**
+
+⚠️ RETAINED — Phase 164.4.1 execution log (2026-09-04/05). SUPERSEDED AS POSITION by the block
+above; kept verbatim as that phase's own dated record. 164.4.1 is COMPLETE (PR #744, `e01cc2e6`),
+so every "Next is plan NN" below has been discharged:
       class + lane probe + SCOPE AMENDMENT #2, 04-11 the eight annotation batches) —
       hand-maintained; `state.advance-plan` still REFUSES on this section
       (`ambiguous_position_phase`, see § Known Issues)
@@ -188,12 +302,25 @@ Plan: 5 of 6
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: 164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition, v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0), Railway on `e01cc2e6`. 164-family RE-PARTITIONED 2026-09-05 (164.1 → PROD-OBSERVABILITY, 164.2 CURATED-COPY +161-ERRPREFIX, NEW 164.5 BASELINE-SNAPSHOT, NEW 164.6 GATE-HYGIENE, order 164.6 → 166 → 165). Next: `/gsd-autonomous --only 164.1`.
+Status: Phase 164.2 CURATED-COPY discussed and researched, NOT yet planned. Upstream 164.1 is closed-by-merge (PR #746 `42868a9b` + PR #748 `d679f638`, v0.77.15.0) but has NO VERIFICATION.md. Next: merge `origin/main` into `phase-164.2-curated-copy` (this checkout is 1 behind), then `/gsd-plan-phase 164.2`. Open production item: issue #747, MT5 `-6` authorization failure, founder action.
+      ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
+      lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
+      v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
+      Railway on `e01cc2e6`. 164-family RE-PARTITIONED 2026-09-05 (164.1 → PROD-OBSERVABILITY,
+      164.2 CURATED-COPY +161-ERRPREFIX, NEW 164.5 BASELINE-SNAPSHOT, NEW 164.6 GATE-HYGIENE,
+      order 164.6 → 166 → 165). Next: `/gsd-autonomous --only 164.1`."* — that `Next:` is
+      DISCHARGED; 164.1 ran and merged.
       `arms: 262/262/0`, `biting: 262`, 0 waivers, exit 0. Next: land 164.4-11 as its own PR with
       `sql-mutation` GREEN on ubuntu SHA-bound to the head, then `/gsd-verify-work 164.4`.
       ⏳ Phase 164.4.1 PGCRON-LANE is still owed the 4 lane-blocked files plus the 1 `pending:`
       file (`test_compute_jobs_error_kind_copy_parity.sql`, ~100 sections).
-Last activity: 2026-09-04 — Phase 164.4.1 execution started
+      ✅ 2026-09-06: both ⏳ items above are DISCHARGED. 164.4-11 landed (PR #742 `75e58cb1`,
+      closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
+      `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
+      `scripts/mutation-runner/run.mjs`, never off a number restated here.
+Last activity: 2026-09-06 — Phase 164.2 CURATED-COPY: CONTEXT (`24618f73`), RESEARCH (`cf402eb0`) and the four refuted CONTEXT decisions (`03ae5fa0`) committed; Phase 164.6 gained PROBER-CALIBRATION-01 (`61aa8cf0`); Phase 164.2.1 SESSIONID-FENCE inserted (`c1c8cf3c`); STATE.md reconciled
+      ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
+      *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
       arms moves; `WAIVED_CEILING` unedited). Full corpus **exit 0**: `coverage: files 39/71`,
       `arms: 262/262/0`, `biting: 262`, `lane-invocations: 262` (tallies agree), `mean 1.0s`, 0
@@ -268,8 +395,20 @@ its own PR and never branched from `feat/phase-156-connect-refactor`.
 
 ### Retained — Phase 156 close-out (COMPLETE 2026-08-13, do NOT lose this)
 
-Phase: 156 (connect-refactor — the venue the server validated is the venue the server writes) — ✅ COMPLETE 2026-08-13
-Plan: 10 of 10 complete. PR A shipped as v0.60.0.0 (merge `25e28d3a`) and is LIVE ON PROD; PR B is authored on `feat/phase-156-migration-b` and NOT yet opened.
+⚠️ **SHAPE FIX 2026-09-06 — the two field labels below were `Phase:` and `Plan:` and are now
+`Retained phase:` / `Retained plan:`. Nothing else in this block changed; no sentence was cut.**
+Reason: `stateCurrentPositionSlice` (`gsd-core/bin/lib/state-document.cjs:510`) collects
+`## Current Position` with `levelBounded: true`, so every `###` block nested under it — this one
+included — is inside the slice, and `advancePlanCore`
+(`gsd-core/bin/lib/state-transition.cjs:1067`) refuses with `ambiguous_position_phase` when that
+slice matches `/^Phase:.*$/gm` more than once. The `### Blockers` entry recorded the diagnosis and
+proposed moving this whole block to its own top-level section; relabelling the two lines is the
+smaller change that reaches the same result — promoting the heading to `##` would have swallowed
+`### Phase 142.1 scope` and `### Phase 140.1 close-out` into a Phase-156 section they do not belong
+to. This block is still marked *do NOT lose this* and is still retained verbatim below.
+
+Retained phase: 156 (connect-refactor — the venue the server validated is the venue the server writes) — ✅ COMPLETE 2026-08-13
+Retained plan: 10 of 10 complete. PR A shipped as v0.60.0.0 (merge `25e28d3a`) and is LIVE ON PROD; PR B is authored on `feat/phase-156-migration-b` and NOT yet opened.
 Status: Phase 156 complete. ⚠️ **Read this before assuming the control is live:** Migration B (`20260814120000_wizard_rpcs_revoke_authenticated.sql`) is applied to **no database** — merging PR B is what applies it. The SQL gates plans 08/09 wrote are **state-adaptive**: they SKIP on a pre-Migration-B database and ARM after, so a green `sql-tests` on PR B is green *with the four new RPC-door assertions SKIPping*. That is by design (applying Migration B to TEST before the gates land would red `sql-tests` on every open PR), but it means **nothing in the 5d/5f/5g/5h set has been observed armed-and-green in CI**. The first run after Migration B reaches TEST is the observation.
 Last activity: 2026-08-13 -- Phase 156 plan 10 executed (five prose sites re-strengthened, PARITY-04's deferred control closed, ROADMAP/REQUIREMENTS/STATE ledgers closed, phase gate run)
 
@@ -858,6 +997,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.7 edited: carried in VAC04-ARMS-OBSERVE (observation half of [VAC04-ARMS-UNRUN]) — goal paragraph, success criterion 7, requirements line; [VAC-04-ROLE] deliberately excluded
 - Phase 164.6 edited: carried in MYPY-MAINPY-01 from 164.1-02 deferred-items — goal item (9), success criterion 6, requirements entry; analytics-service/tests/ policy question deliberately excluded
 - Phase 164.2.1 inserted after Phase 164.2: SESSIONID-FENCE — stale wizardSessionId root cause; the 2026-09-05 re-partition dropped it from 164.2 as already satisfied, measured FALSE 2026-09-06 (URGENT)
+- Phase 164.6 edited: carried in PROBER-CALIBRATION-01 (commit `61aa8cf0`, 2026-09-06) — goal item (10), success criterion 7, requirements entry. Found BY HAND at the PR #748 merge gate, not by a gate: the arm named `CALIBRATION: an UNGUARDED exit 0 on the probe path is still caught` (`src/__tests__/prod-prober-wiring.test.ts:292`, shipped in PR #748 / v0.77.15.0) mutates the schedule guard and then asserts only that the text changed — it never re-runs the `guardAt`/`exitZeroAt` check at `:279-281` against the mutant, so it passes with `:279-281` deleted outright. NOT vacuous in effect (removing the guard IS caught by the `toContain` at `:277`), but the arm's name promises a proof it does not perform. Non-blocking by the stopping rule — neither user-facing nor data-integrity — so #748 landed at v0.77.15.0 with this booked rather than fixed. ⚠️ `61aa8cf0` touched ROADMAP.md ALONE; this STATE entry was added 2026-09-06 during the STATE reconciliation, because a scope amendment touching one file is incomplete.
 
 ### Decisions
 
@@ -1836,6 +1976,28 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - 161.1-04 (wave 4, 2026-08-25): the composite arm LANDED DORMANT — `enqueue_ledger_composite_refresh` (migration `20260825140000`), 8-arm SQL gate, static gates 10-11, and the D-15 non-destructive guard EXTENDED to `run_stitch_composite_job._stamp_failed` (a second destructive stamp plan 02's guard never covered; found by measurement, fixed under Rule 2). ⛔ **Task 3 is a BLOCKING founder LIVE op and is NOT done:** one manual `stitch_composite` enqueue for the one live PROD composite must be observed to completion (`last_return_date` advancing in the staleness view, NOT a job going green) before the composite schedule is documented as activatable. The runbook's composite section is deliberately UNWRITTEN until then. TODOS 0.3 stays OPEN — half of its close condition (the arm exists) is met, half (a composite observed to refresh) is not.
 - 164-05 MEASURED: the phase-148 guard does NOT catch a second unstable_cache call site outside factsheet/[id]/v2/page.tsx (12/12 green under NEUTER-D). 164-07's closure guard does not close it either — the page imports the builder, not the reverse. Closed for the token route by src/app/factsheet-share/[token]/page.no-cache-reach.test.ts; the general repo-wide call-site pin is still unowned.
 - `state.advance-plan` REFUSES on this STATE.md (measured 2026-09-01 by 164.3.1-09): the `## Current Position` section carries a **second** `Phase:` line — line 129, inside the retained `### Retained — Phase 156 close-out` block — so the verb returns `ambiguous_position_phase` and will not advance rather than silently picking the first. Left UNRESOLVED on purpose: that block is marked *do NOT lose this*, and restructuring a retained ledger is outside a measure-only plan's scope. ⚠️ Consequence: the `Plan: 1 of 12` line under Current Position is **STALE** (9 of 12 plans now have SUMMARYs on disk). Read the frontmatter `progress` block or count `.planning/phases/164.3.1-*/`, never that line. Fix = move the Phase-156 retained block out of `## Current Position` into its own top-level section, or teach the verb to ignore `###`-nested entries.
+  ✅ **RESOLVED 2026-09-06, SUPERSEDING the entry above (kept as the dated diagnosis).** The two
+  offending field labels in the retained Phase-156 block were relabelled `Retained phase:` /
+  `Retained plan:`; `/^Phase:.*$/gm` no longer matches them, the `## Current Position` slice now
+  carries exactly ONE `Phase:` line, and no sentence of the retained block was cut — the block
+  carries its own dated SHAPE FIX note saying so. The relabel was chosen over the proposed
+  "move the block to its own top-level section" because promoting its heading to `##` would have
+  swallowed `### Phase 142.1 scope` and `### Phase 140.1 close-out` into a Phase-156 section.
+  ⚠️ The entry above also cited "`Plan: 1 of 12` … 164.3.1" — that pointer is long gone; both
+  pointer lines were re-cut in the same 2026-09-06 pass and now read the live 164.2 position.
+  ⛔ Still true and unchanged: `state.patch` cannot write `Current Phase` / `Next recommended run`,
+  because `## Current Position` is hand-maintained PROSE with bare `Field: value` lines rather than
+  the `**Field:** value` shape the patcher's bold pattern looks for first. The pointers there are
+  edited by hand, on purpose.
+- ⚠️ **A working branch that is BEHIND main makes every GSD phase-directory reading lie, silently.**
+  Measured 2026-09-06 on `phase-164.2-curated-copy`: 1 behind / 5 ahead of `origin/main`, missing
+  exactly `d679f638` — the commit that carried 119 planning artifacts for 164.1 / 164.3.1 / 164.4 /
+  164.4.1 onto main after `/gsd-pr-branch` filtered them out of PR #746's reviewer diff. In that
+  checkout all four directories hold only `.gitkeep`, so `roadmap.analyze` calls four SHIPPED
+  phases `empty` / `no_directory` and the derived progress integers drop. There is no gate for
+  this. ⛔ Before trusting any `disk_status`, `completed_phases` or `next_phase` reading, run
+  `git rev-list --left-right --count origin/main...HEAD` and confirm the left number is 0.
+  See `## Current Position` for the full diagnosis and for why the two counters differ by design.
 - [REDUNDER-PGCRON] **4** idiom gate files (**100** of 355 sections, incl. Phase 164.4 rank 1) cannot be falsified on the pg-lane, which has no pg_cron. Mechanism re-measured 2026-09-03 and it is **2 RAISE + 2 green-skip**, not the blanket all-files-RAISE this line used to claim: reconcile `:268` and retention `:212` RAISE EXCEPTION on the absent extension so their baseline is never GREEN; derive `:159` and the reaper `:282` baseline GREEN but withhold whole Parts behind a pg_cron-conditional NOTICE, so those arms are un-falsifiable. DEFERRED by founder decision 2026-09-03 (SCOPE AMENDMENT #2) and printed by the runner as `lane-blocked:` every run, with a per-run lane probe that reddens the gate (`lane-blocked-stale`) once pg_cron IS available. Needs a lane-substrate plan. Booked in TODOS.md.
 - 164.4-01 <human-check> UNMET: the PR number, merged head SHA and SHA-bound sql-mutation ubuntu run id + wall clock are PENDING in 164.4-01-SUMMARY.md. Plan 164.4-02's precondition is gate=blocking-human and reads exactly those fields — it WILL halt until 164.4-01 is landed (/ship, /gsd-pr-branch + the CLAUDE.md deletion guard) and its CI board read SHA-bound.
 - 164.4-02 <human-check> OPEN: the batch (b5fa08c2 / c850a790 / 9cffb584) was NOT pushed and no PR was opened, so there is no SHA-bound sql-mutation ubuntu green for it. Plan 03's precondition reads that run id / head SHA / wall clock out of 164.4-02-SUMMARY.md coverage D6, which is status: pending.
