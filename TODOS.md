@@ -1136,6 +1136,37 @@ true for 146 and half of 142–145, and **false for 141**.
       and raise `EXPECTED_POPULATION_MIN` off the new measurement. Touches live components, not just
       tests — which is why it is its own item rather than a stretch of 164.2.
 
+- [ ] **`[SYNCTRADES-ENQUEUE-DONE]` `run_sync_trades_job` returns DONE after recording an
+      analytics failure, so the bridge erases the record one RPC later — and the F1 remedy
+      does NOT transfer to this handler (booked 2026-09-06, 164.2-REVIEW WR-01).**
+      `analytics-service/services/job_worker.py` `run_sync_trades_job._mark_analytics_failed`
+      writes `computation_status='failed'` plus a curated sentence when the follow-on
+      `enqueue_compute_job` fails, then the handler returns `DispatchOutcome.DONE` (the trades
+      DID persist). `main_worker.py:929` maps DONE to `mark_compute_job_done`, whose in-RPC
+      `PERFORM sync_strategy_analytics_status` finds every job for the strategy terminal-done —
+      no analytics job was enqueued, that being the failure — and takes branch (c):
+      `computation_status='complete'`, `computation_error=NULL`, both provenance markers NULL,
+      `computed_at=now()`. **The user's row reads 'complete' with no analytics and a fresh
+      vintage**, and the wizard poller is handed a success for a strategy with no factsheet.
+      The erasure is PRE-EXISTING — the 161.1 F1 class, whose comment at `job_worker.py:5082`
+      describes it exactly and fixes it for the derive path by returning FAILED/permanent.
+      ⛔ **Do not simply copy that remedy here.** MEASURED: the bridge's `is_protected` predicate
+      is scoped to kinds `derive_broker_dailies`, `compute_analytics_from_csv` and
+      `stitch_composite` (`supabase/schema/functions/sync_strategy_analytics_status.sql:258-263`).
+      F1 is applied at a `derive_broker_dailies` job, so on a marked recurring refresh over a
+      healthy published row it lands on branch (b-prime), which PRESERVES the publish state.
+      `sync_trades` is not in that list and can never be protected, so the same edit here always
+      lands on the LOUD branch (b): a routine cron sync whose follow-on enqueue hiccups would
+      unpublish a live funded factsheet to 'failed' until the next tick's `done` supersedes it,
+      and a SYSTEMATIC enqueue fault (a bad kind, an RLS change) would take every live strategy
+      dark within one cron tick. **The work:** scope the FAILED return to the case with nothing
+      published to lose (no `strategy_analytics` row at `complete`/`complete_with_warnings`), or
+      give the dropped-enqueue readmit sweep a path that covers live-API strategies — either is
+      a founder-facing behaviour decision, which is why the review fix pass corrected the false
+      claims instead. Until it lands, P1's payload is deliberately UNSTAMPED and
+      `tests/test_computation_error_provenance_census.py` carves it out by exact key set with
+      `EXPECTED_INERT_SITES = 1`, so re-stamping it takes that count to 0 and reddens the gate.
+
 - [ ] **`[PROV-WRITER-23514]` The provenance markers sit on the FAILURE-RECORDING path, so a
       writer bug must cost the provenance and NOT the failure record (booked 2026-09-06,
       Phase 164.2 plan 06 three-reviewer gate, silent-failure-hunter).**

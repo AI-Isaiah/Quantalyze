@@ -2093,6 +2093,57 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # waiting_for_complete state and renders an error envelope.
         # Best-effort: if even this write fails, we log + swallow rather
         # than fail the job (the trades are already persisted).
+        # ⛔⛔ THIS WRITE IS ERASED ONE RPC LATER, AND NO PROVENANCE MARKER CAN
+        # SAVE IT (164.2-REVIEW WR-01). READ THIS BEFORE ADDING ONE BACK.
+        # --------------------------------------------------------------------
+        # Phase 164.2 stamped this payload with ('writer', <this job's id>) on
+        # the theory that the bridge's branch (b) would then keep the curated
+        # sentence. MEASURED, it never reaches a branch that consults a marker:
+        # this handler returns DispatchOutcome.DONE at the foot of the function
+        # (the trades DID persist), `main_worker.py:929` maps DONE to
+        # `mark_compute_job_done`, and that RPC ends in
+        # `PERFORM sync_strategy_analytics_status`. With this sync job now done
+        # and NO analytics job enqueued — that is the very failure being
+        # recorded — every compute_jobs row for the strategy is terminal-done,
+        # `live_failures` is empty, and the bridge takes branch (c), which
+        # writes computation_status='complete', computation_error=NULL, BOTH
+        # markers NULL and a fresh computed_at, unconditionally.
+        #
+        # So the user's row reads 'complete' with no analytics and a fresh
+        # vintage. That erasure is PRE-EXISTING — it is the 161.1 F1 class, and
+        # F1's comment at the derive handler's insufficient-history exit
+        # (:5082) describes it exactly — and this comment is what 164.2 owed it
+        # instead of a stamp that nothing reads.
+        #
+        # ⛔ AND THE F1 REMEDY DOES NOT TRANSFER TO THIS HANDLER. F1 returns
+        # FAILED/permanent so the bridge takes (b) or (b-prime). It is applied
+        # at a `derive_broker_dailies` job, and that kind is IN the bridge's
+        # `is_protected` kind list (`derive_broker_dailies`,
+        # `compute_analytics_from_csv`, `stitch_composite`) — so on a marked
+        # recurring refresh over a healthy published row it lands on (b-prime),
+        # which PRESERVES the publish state. `sync_trades` is not in that list
+        # and can never be protected, so the same edit here always lands on the
+        # LOUD branch (b): a routine cron sync whose follow-on enqueue hiccups
+        # would unpublish a live funded factsheet to 'failed' until the next
+        # tick's `done` supersedes it — and if the enqueue ever fails
+        # SYSTEMATICALLY (a bad kind, an RLS change), every live strategy on the
+        # platform goes dark within one cron tick. Correcting the outcome here
+        # needs to be scoped to the case with nothing published to lose, which
+        # is a founder-facing change and NOT a review fix. Booked in TODOS.md as
+        # [SYNCTRADES-ENQUEUE-DONE].
+        #
+        # Until that lands this payload is DELIBERATELY UNSTAMPED, and the
+        # provenance census carves it out BY EXACT KEY SET with its own count,
+        # so re-stamping it collapses the carve-out and reddens the gate rather
+        # than silently restoring an inert marker.
+        #
+        # ⚠️ The WRITE itself stays, and the paragraph above is why the comment
+        # below it must not be read as a working guarantee: the bridge runs
+        # inside the very next RPC, so the 'failed' row this lands is visible to
+        # the wizard poller for milliseconds at best. It is kept because it is
+        # the authoritative record at the moment it is made, because deleting it
+        # would be a SECOND behaviour change on the same live path, and because
+        # it is the row that becomes correct the day the TODOS item lands.
         try:
             def _mark_analytics_failed() -> None:
                 _enqueue_failed_payload: dict[str, Any] = {
@@ -2109,26 +2160,15 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                             "The next scheduled sync will retry — "
                             "contact support if this persists."
                         ),
-                        # Phase 164.2 / criterion 2: this sentence tells the user
-                        # the sync SUCCEEDED and only the analytics enqueue
-                        # failed. The bridge's per-kind generic for sync_trades
-                        # says the opposite, so losing it misattributes the
-                        # failure — the class this phase exists to close.
-                        "computation_error_source": provenance_source(job.get("id")),
-                        "computation_error_job_id": job.get("id"),
+                        # ⛔ NO computation_error_source / computation_error_job_id.
+                        # See the block above this `try`. A marker here is read by
+                        # nobody and asserts a protection that does not exist.
                 }
 
-                def _write_enqueue_failed() -> None:
-                    ctx.supabase.table("strategy_analytics").upsert(
-                        _enqueue_failed_payload,
-                        on_conflict="strategy_id",
-                    ).execute()
-
-                upsert_or_drop_provenance(
+                ctx.supabase.table("strategy_analytics").upsert(
                     _enqueue_failed_payload,
-                    _write_enqueue_failed,
-                    where="job_worker._mark_analytics_failed",
-                )
+                    on_conflict="strategy_id",
+                ).execute()
 
             await db_execute(_mark_analytics_failed)
         except Exception as mark_exc:  # noqa: BLE001

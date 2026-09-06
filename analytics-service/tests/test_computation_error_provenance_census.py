@@ -53,7 +53,21 @@ would assert something false:
     Branch (a) blanks the column when the job starts, and that is correct: their
     sentence describes a state the new computation supersedes;
   * the pg_cron reaper and ``set_wizard_composite_members`` are SQL, and the
-    migration header's census says why neither needs a marker of its own.
+    migration header's census says why neither needs a marker of its own;
+  * ⛔ P1 — ``job_worker.run_sync_trades_job._mark_analytics_failed`` — is IN
+    the class and is deliberately UNSTAMPED (164.2-REVIEW WR-01). Its handler
+    returns ``DispatchOutcome.DONE``, so the bridge reaches it on branch (c),
+    which clears the sentence and both markers unconditionally: a marker there
+    is never read by any branch that consults one. It is counted separately
+    (``EXPECTED_INERT_SITES``) rather than left in the stamped total, because a
+    census that counts it as stamped is asserting a protection that does not
+    exist — which was the finding. See ``PROVENANCE_INERT_KEYS``.
+
+⚠️ SO A GREEN HERE DOES NOT MEAN "these sentences survive". It means each of
+them carries a well-formed marker pair. Whether a given marker is ever READ
+depends on which bridge branch the writer's dispatch outcome routes to, and
+that is a property of ``main_worker``'s outcome mapping, not of this file. P1
+is the site where those two things came apart.
 
 ────────────────────────────────────────────────────────────────────────────
 THE SHAPE RULE, AND WHY IT IS NOT "the source must be the string 'writer'"
@@ -78,6 +92,7 @@ wrong thing.
 from __future__ import annotations
 
 import ast
+from pathlib import Path
 from typing import Final
 
 # D-10: the scan surface is single-sourced. This census walks exactly the files
@@ -128,17 +143,58 @@ _SOURCE_HELPER: Final[str] = "provenance_source"
 # to 2 (the defect reddens here instead of being absorbed).
 PROVENANCE_EXEMPT_KEYS: Final[frozenset[str]] = _STAMP_OMISSION_EXEMPT_KEYS
 
+# ---------------------------------------------------------------------------
+# P1 — the INERT carve-out (164.2-REVIEW WR-01)
+# ---------------------------------------------------------------------------
+# ``job_worker.run_sync_trades_job._mark_analytics_failed``. It writes a curated
+# sentence and it is DELIBERATELY UNSTAMPED, because a marker there is read by
+# nobody: the handler returns ``DispatchOutcome.DONE`` (the trades persisted),
+# ``main_worker.py:929`` maps DONE to ``mark_compute_job_done``, and that RPC's
+# ``PERFORM sync_strategy_analytics_status`` finds every job terminal-done and
+# takes branch (c) — which writes 'complete', a NULL sentence, NULL markers and
+# a fresh ``computed_at``, unconditionally. Stamping it asserts a protection
+# that does not exist, which is the false claim the review found.
+#
+# The erasure itself is PRE-EXISTING (the 161.1 F1 class) and correcting it is
+# booked in TODOS.md as ``[SYNCTRADES-ENQUEUE-DONE]``; the writer's own comment
+# records why F1's FAILED-instead-of-DONE remedy does not transfer to a
+# ``sync_trades`` job. When that lands, this site is re-stamped and this
+# carve-out is DELETED — and it cannot be forgotten, because re-stamping moves
+# the site out of this signature and takes the count below to 0.
+#
+# ⭐ IDENTIFIED BY EXACT KEY SET *and* FILE, matching the JOB-01 census's own
+# carve-out (``_is_stamp_omission_exempt``), and the file half is load-bearing
+# here rather than decoration: ``analytics_runner._upsert_restore`` (P6) carries
+# exactly these five keys plus the two markers, so a P6 that lost its markers
+# would collapse onto this signature. With the file pin it lands in Rule A's
+# defect list by name instead. MEASURED inside ``job_worker.py`` itself, where
+# the pin does not help: no other writer there can collapse onto this signature
+# — P2 has three keys, and P3/P4/P5 all carry ``data_quality_flags``.
+PROVENANCE_INERT_FILE: Final[str] = "job_worker.py"
+PROVENANCE_INERT_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "strategy_id",
+        "computation_status",
+        "computation_warned",
+        "computing_started_at",
+        "computation_error",
+    }
+)
+
 # Hand-typed floors. A new writer must update this census AND stamp, rather than
 # slide in under a green gate.
-#   10 stamped — analytics_runner P6-P10 (_upsert_restore, _mark_failed,
+#    9 stamped — analytics_runner P6-P10 (_upsert_restore, _mark_failed,
 #      _mark_truncated, _mark_config_failed, _mark_unrecoverable) and job_worker
-#      P1-P5 (_mark_analytics_failed, the derive guard's _upsert_error_only and
-#      _upsert, the composite guard's _upsert_error_only and _upsert).
+#      P2-P5 (the derive guard's _upsert_error_only and _upsert, the composite
+#      guard's _upsert_error_only and _upsert).
 #    1 exempt — P11.
+#    1 inert — P1, see the block above. This was the tenth STAMPED site until
+#      164.2-REVIEW WR-01 measured its stamp unreadable.
 #    2 resets — analytics_runner._mark_complete and job_worker's composite
 #      headline_payload, the two success writers that blank the sentence.
-EXPECTED_STAMPED_SITES: Final[int] = 10
+EXPECTED_STAMPED_SITES: Final[int] = 9
 EXPECTED_EXEMPT_SITES: Final[int] = 1
+EXPECTED_INERT_SITES: Final[int] = 1
 EXPECTED_RESET_SITES: Final[int] = 2
 
 
@@ -156,6 +212,14 @@ def _error_sites(sites: list[_WriteSite]) -> list[_WriteSite]:
 
 def _is_exempt(site: _WriteSite) -> bool:
     return _payload_keys(site.payload) == PROVENANCE_EXEMPT_KEYS
+
+
+def _is_inert(site: _WriteSite) -> bool:
+    """P1 — the writer whose stamp no bridge branch can read (WR-01)."""
+    return (
+        site.path.name == PROVENANCE_INERT_FILE
+        and _payload_keys(site.payload) == PROVENANCE_INERT_KEYS
+    )
 
 
 def _pairing_defect(site: _WriteSite) -> str | None:
@@ -243,7 +307,7 @@ def test_python_failure_writers_stamp_provenance() -> None:
         where = f"{_rel(site.path)}:{site.lineno}"
         if _is_none(_dict_value(site.payload, _ERROR_KEY)):
             problem = _reset_defect(site)
-        elif _is_exempt(site):
+        elif _is_exempt(site) or _is_inert(site):
             continue
         else:
             problem = _pairing_defect(site)
@@ -271,16 +335,10 @@ def test_provenance_census_counts() -> None:
     scan = _scan_python(_py_scan_files())
     sites = _error_sites(scan.all_sites)
 
-    stamped = [
-        s
-        for s in sites
-        if not _is_none(_dict_value(s.payload, _ERROR_KEY)) and not _is_exempt(s)
-    ]
-    exempt = [
-        s
-        for s in sites
-        if not _is_none(_dict_value(s.payload, _ERROR_KEY)) and _is_exempt(s)
-    ]
+    writes = [s for s in sites if not _is_none(_dict_value(s.payload, _ERROR_KEY))]
+    stamped = [s for s in writes if not _is_exempt(s) and not _is_inert(s)]
+    exempt = [s for s in writes if _is_exempt(s)]
+    inert = [s for s in writes if _is_inert(s)]
     resets = [s for s in sites if _is_none(_dict_value(s.payload, _ERROR_KEY))]
 
     def _where(group: list[_WriteSite]) -> str:
@@ -298,6 +356,19 @@ def test_provenance_census_counts() -> None:
         "carve-out covering nothing. 2 means a compliant sibling payload lost "
         "its markers and collapsed onto P11's key set, which is a DEFECT being "
         "absorbed by a carve-out that was only ever meant to cover one write."
+    )
+    assert len(inert) == EXPECTED_INERT_SITES, (
+        f"expected exactly {EXPECTED_INERT_SITES} INERT writer (P1, "
+        f"job_worker._mark_analytics_failed — see 164.2-REVIEW WR-01), found "
+        f"{len(inert)}:\n  " + _where(inert)
+        + "\n0 means P1 was re-stamped (or removed) without deleting this "
+        "carve-out. If TODOS [SYNCTRADES-ENQUEUE-DONE] has landed and the "
+        "handler now returns FAILED on that path, that is CORRECT — delete "
+        "PROVENANCE_INERT_* and raise EXPECTED_STAMPED_SITES back to 10 in the "
+        "same commit. If it has not landed, a stamp there is a protection that "
+        "branch (c) erases one RPC later.\n2 means a SECOND writer in "
+        f"{PROVENANCE_INERT_FILE} lost its markers and collapsed onto P1's "
+        "signature — a defect being absorbed by a carve-out meant for one site."
     )
     assert len(resets) == EXPECTED_RESET_SITES, (
         f"expected exactly {EXPECTED_RESET_SITES} success writers that blank "
@@ -328,6 +399,63 @@ def test_the_exempt_payload_is_matched_by_shape_not_by_name() -> None:
     )
     assert _SOURCE_KEY not in PROVENANCE_EXEMPT_KEYS
     assert _JOB_ID_KEY not in PROVENANCE_EXEMPT_KEYS
+
+
+def test_the_inert_carve_out_is_matched_by_shape_and_can_still_fire() -> None:
+    """P1's carve-out (WR-01) has the same anti-vacuity duty as P11's, plus one
+    more: it must not be widened into an excuse for a writer that COULD be read.
+
+    Two halves, and the second is the one that makes the first mean something:
+    the signature is pinned by value, and the classifier is exercised against
+    hand-built payloads so its green over the live tree is falsifiable without
+    editing the live tree.
+    """
+    assert PROVENANCE_INERT_KEYS == frozenset(
+        {
+            "strategy_id",
+            "computation_status",
+            "computation_warned",
+            "computing_started_at",
+            "computation_error",
+        }
+    ), (
+        "P1's signature moved. Widening it excuses writers whose markers WOULD "
+        "be read — the carve-out is scoped to the one site measured unreadable."
+    )
+    assert _SOURCE_KEY not in PROVENANCE_INERT_KEYS
+    assert _JOB_ID_KEY not in PROVENANCE_INERT_KEYS
+    assert PROVENANCE_INERT_KEYS != PROVENANCE_EXEMPT_KEYS, (
+        "the two carve-outs must stay distinguishable: P11 omits "
+        "computing_started_at and carries data_quality_flags, P1 the reverse"
+    )
+
+    def _site(file_name: str, source: str) -> _WriteSite:
+        payload = ast.parse(source, mode="eval").body
+        assert isinstance(payload, ast.Dict)
+        return _WriteSite(Path(f"/synthetic/{file_name}"), 1, payload, "n1")
+
+    p1_shape = (
+        '{"strategy_id": s, "computation_status": "failed",'
+        ' "computation_warned": False, "computing_started_at": None,'
+        ' "computation_error": "boom"}'
+    )
+    assert _is_inert(_site(PROVENANCE_INERT_FILE, p1_shape)), (
+        "the classifier no longer recognises P1's own shape — the live count "
+        "below would then be 0 for the wrong reason"
+    )
+    assert not _is_inert(_site("analytics_runner.py", p1_shape)), (
+        "the FILE half is load-bearing: analytics_runner._upsert_restore (P6) "
+        "carries exactly these five keys plus the markers, so an unstamped P6 "
+        "must land in Rule A's defects by name, not vanish into P1's carve-out"
+    )
+    assert not _is_inert(
+        _site(
+            PROVENANCE_INERT_FILE,
+            '{"strategy_id": s, "computation_status": "failed",'
+            ' "computation_warned": False, "computing_started_at": None,'
+            ' "computation_error": "boom", "data_quality_flags": f}',
+        )
+    ), "one extra key must COLLAPSE the carve-out, never widen it"
 
 
 def test_the_rules_fire_on_synthetic_defects() -> None:
