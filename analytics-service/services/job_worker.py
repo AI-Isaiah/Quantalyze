@@ -155,6 +155,10 @@ from services.mt5_probe import (
 )
 from services.sfox_factory import make_sfox_client
 from services.sfox_read import sfox_transactions_crawl_wallclock_budget_s
+from services.strategy_analytics_provenance import (
+    provenance_source,
+    upsert_or_drop_provenance,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -2091,8 +2095,7 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # than fail the job (the trades are already persisted).
         try:
             def _mark_analytics_failed() -> None:
-                ctx.supabase.table("strategy_analytics").upsert(
-                    {
+                _enqueue_failed_payload: dict[str, Any] = {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
                         # SI-02 (MEDIUM-2): clear the runner-owned warned marker on
@@ -2106,9 +2109,26 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                             "The next scheduled sync will retry — "
                             "contact support if this persists."
                         ),
-                    },
-                    on_conflict="strategy_id",
-                ).execute()
+                        # Phase 164.2 / criterion 2: this sentence tells the user
+                        # the sync SUCCEEDED and only the analytics enqueue
+                        # failed. The bridge's per-kind generic for sync_trades
+                        # says the opposite, so losing it misattributes the
+                        # failure — the class this phase exists to close.
+                        "computation_error_source": provenance_source(job.get("id")),
+                        "computation_error_job_id": job.get("id"),
+                }
+
+                def _write_enqueue_failed() -> None:
+                    ctx.supabase.table("strategy_analytics").upsert(
+                        _enqueue_failed_payload,
+                        on_conflict="strategy_id",
+                    ).execute()
+
+                upsert_or_drop_provenance(
+                    _enqueue_failed_payload,
+                    _write_enqueue_failed,
+                    where="job_worker._mark_analytics_failed",
+                )
 
             await db_execute(_mark_analytics_failed)
         except Exception as mark_exc:  # noqa: BLE001
@@ -2992,16 +3012,35 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
 
                     def _upsert_error_only() -> None:
-                        ctx.supabase.table("strategy_analytics").upsert(
-                            {
+                        _error_only_payload: dict[str, Any] = {
                                 "strategy_id": strategy_id,
                                 # JOB-01 still applies: clear the reaper anchor on
                                 # exit. It carries no publish meaning.
                                 "computing_started_at": None,
                                 "computation_error": scrubbed,
-                            },
-                            on_conflict="strategy_id",
-                        ).execute()
+                                # Phase 164.2 / criterion 2. THIS is the D-15
+                                # path: the row stays PUBLISHED and this sentence
+                                # is the entire explanation the account holder
+                                # gets for a stale factsheet. It is also the
+                                # branch (b-prime) the bridge reaches on a
+                                # recurring refresh, so an unstamped sentence
+                                # here is replaced by the per-kind generic within
+                                # seconds — the exact defect this phase closes.
+                                "computation_error_source": provenance_source(job.get("id")),
+                                "computation_error_job_id": job.get("id"),
+                        }
+
+                        def _write_error_only() -> None:
+                            ctx.supabase.table("strategy_analytics").upsert(
+                                _error_only_payload,
+                                on_conflict="strategy_id",
+                            ).execute()
+
+                        upsert_or_drop_provenance(
+                            _error_only_payload,
+                            _write_error_only,
+                            where="job_worker.run_derive_broker_dailies_job._upsert_error_only",
+                        )
 
                     await db_execute(_upsert_error_only)
                     # ⛔ And NO _heal_delete_basis_series(). This is the half that
@@ -3021,8 +3060,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # ---- end D-15; everything below is BYTE-UNCHANGED -----------------
 
             def _upsert() -> None:
-                ctx.supabase.table("strategy_analytics").upsert(
-                    {
+                _derive_failed_payload: dict[str, Any] = {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
                         # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
@@ -3030,13 +3068,28 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
                         "computing_started_at": None,
                         "computation_error": scrubbed,
+                        # Phase 164.2 / criterion 2. `scrubbed` is the D-162-4
+                        # message half — curated copy, never the raw exception —
+                        # and it renders VERBATIM on the account surface.
+                        "computation_error_source": provenance_source(job.get("id")),
+                        "computation_error_job_id": job.get("id"),
                         "data_quality_flags": {"csv_source": True},
                         # F-4 (Fable): authoritative-clear the by-basis column so a
                         # prior object can't render on a now-FAILED row.
                         "metrics_json_by_basis": None,
-                    },
-                    on_conflict="strategy_id",
-                ).execute()
+                }
+
+                def _write_derive_failed() -> None:
+                    ctx.supabase.table("strategy_analytics").upsert(
+                        _derive_failed_payload,
+                        on_conflict="strategy_id",
+                    ).execute()
+
+                upsert_or_drop_provenance(
+                    _derive_failed_payload,
+                    _write_derive_failed,
+                    where="job_worker.run_derive_broker_dailies_job._upsert",
+                )
 
             await db_execute(_upsert)
             # D3 SECONDARY: single choke point — every terminal-failure stamp that flows
@@ -6167,20 +6220,38 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         ):
 
             def _upsert_error_only() -> None:
-                supabase.table("strategy_analytics").upsert(
-                    {
+                _composite_error_only_payload: dict[str, Any] = {
                         "strategy_id": strategy_id,
                         # JOB-01 still applies: clear the reaper anchor on exit.
                         # It carries no publish meaning.
                         "computing_started_at": None,
                         "computation_error": scrubbed,
+                        # Phase 164.2 / criterion 2: same D-15 stale-but-live
+                        # shape as the derive arm, and `test_stitch_composite_job
+                        # .py:558` pins that this column renders VERBATIM to the
+                        # account holder. ⚠️ Word choice is constrained here —
+                        # M-3's source scan greps this whole function body for a
+                        # publish-status token WITHOUT stripping comments, so a
+                        # comment can redden it.
+                        "computation_error_source": provenance_source(job.get("id")),
+                        "computation_error_job_id": job.get("id"),
                         # M-2's read-modify-write is PRESERVED, not bypassed. The
                         # coverage mask must survive a failed refresh or real gap
                         # days render with no missing-segment annotation.
                         "data_quality_flags": merged_flags,
-                    },
-                    on_conflict="strategy_id",
-                ).execute()
+                }
+
+                def _write_composite_error_only() -> None:
+                    supabase.table("strategy_analytics").upsert(
+                        _composite_error_only_payload,
+                        on_conflict="strategy_id",
+                    ).execute()
+
+                upsert_or_drop_provenance(
+                    _composite_error_only_payload,
+                    _write_composite_error_only,
+                    where="job_worker.run_stitch_composite_job._upsert_error_only",
+                )
 
             await db_execute(_upsert_error_only)
             logger.warning(
@@ -6194,18 +6265,30 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             return
 
         def _upsert() -> None:
-            supabase.table("strategy_analytics").upsert(
-                {
+            _composite_failed_payload: dict[str, Any] = {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
                     "computation_warned": False,
                     # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
                     "computing_started_at": None,
                     "computation_error": scrubbed,
+                    # Phase 164.2 / criterion 2 — see the D-15 sibling above.
+                    "computation_error_source": provenance_source(job.get("id")),
+                    "computation_error_job_id": job.get("id"),
                     "data_quality_flags": merged_flags,
-                },
-                on_conflict="strategy_id",
-            ).execute()
+            }
+
+            def _write_composite_failed() -> None:
+                supabase.table("strategy_analytics").upsert(
+                    _composite_failed_payload,
+                    on_conflict="strategy_id",
+                ).execute()
+
+            upsert_or_drop_provenance(
+                _composite_failed_payload,
+                _write_composite_failed,
+                where="job_worker.run_stitch_composite_job._upsert",
+            )
 
         await db_execute(_upsert)
 
@@ -7783,6 +7866,17 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
         "computing_started_at": None,
         "computation_error": None,
+        # Phase 164.2 / criterion 2: a success blanks the sentence, so it blanks
+        # the provenance in the SAME statement. A marker left standing over a
+        # NULLed sentence is read by sync_strategy_analytics_status as a writer's
+        # claim over text that is gone, and the row then renders 'failed' with no
+        # sentence at all. (The BEFORE UPDATE trigger
+        # strategy_analytics_drop_stale_error_provenance would coerce these two
+        # anyway — that is F1's fix at the table — but a writer that states its
+        # intent is legible at the call site, which is what the AST censuses ask
+        # of every key here.)
+        "computation_error_source": None,
+        "computation_error_job_id": None,
         "trade_metrics": None,     # composite has no fills
         "volume_metrics": None,
         "exposure_metrics": None,
