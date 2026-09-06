@@ -637,7 +637,26 @@ describe("[140.4-16 / WR-11] no wizard roster is SHADOWED into a different answe
     // The two Set rosters (create-with-key, add-key) and KNOWN_SET_MEMBERS_CODES
     // are genuinely disjoint from the wire vocabulary, which is what their
     // docblocks claim — the claim is simply not true of all four.
-    expect(overlaps).toEqual(["KNOWN_KICKOFF_CODES.RATE_LIMITED"]);
+    //
+    // ⚠️ 164.2-04 (criterion 4b) — A SECOND OVERLAP, AND IT IS NOW TRUE OF TWO
+    // OF THE FOUR. `create-with-key`'s two `userActionLimiter` deny arms moved
+    // off `KEY_RATE_LIMIT` (exchange copy, and a fix line offering "try a
+    // different exchange account") onto `RATE_LIMITED` (ours, per USER: the
+    // bucket is keyed `strategies-create-with-key:<uid>` and no exchange is
+    // consulted), so `KNOWN_CREATE_WITH_KEY_CODES` gained the member and the
+    // Set roster that "is genuinely disjoint" above no longer is.
+    //   · KNOWN_CREATE_WITH_KEY_CODES.RATE_LIMITED → "RATE_LIMITED", the same
+    //     self-map, so the two sides AGREE and the hop's precedence is again
+    //     invisible to the user. The agreement assertion above is what holds
+    //     that, and the roster row is deliberately kept as the route's own
+    //     minted vocabulary rather than borrowed from the wire table.
+    // The sentence above is left standing rather than rewritten because the
+    // reasoning it records — disjointness is sufficient, agreement is necessary
+    // — is exactly what this new row exercises.
+    expect(overlaps).toEqual([
+      "KNOWN_CREATE_WITH_KEY_CODES.RATE_LIMITED",
+      "KNOWN_KICKOFF_CODES.RATE_LIMITED",
+    ]);
   });
 
   it("the needle self-test — the agreement assertion CAN fail", () => {

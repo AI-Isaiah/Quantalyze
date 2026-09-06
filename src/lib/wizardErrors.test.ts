@@ -2017,8 +2017,23 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * sits OUTSIDE the scanned population and the destructive class below is still
    * four members. The baseline was re-measured at HEAD before it moved — 89 is
    * what 161-REVIEW left and nothing between it and this plan minted a member.
+   *
+   * ⚠️ 90 → 92 (164.2-04 / criteria 4 and 5). TWO entries, and THIS guard's
+   * reasoning was re-run over both BEFORE the number moved:
+   *   · `PRESELECT_REQUEST_INVALID` — `actions: ["leave_and_return",
+   *     "expand_log"]`. Neither is `start_fresh`, so the entry is outside the
+   *     scanned population.
+   *   · `DRAFT_SESSION_COLLISION` — `actions: ["request_call", "expand_log"]`.
+   *     Same reading, and the omission is deliberate rather than incidental:
+   *     it is split off `DRAFT_ALREADY_EXISTS`, which DOES carry `start_fresh`
+   *     and IS in the population, and the resume banner that offers that
+   *     control does not render on the surface this new code is emitted to.
+   * So the destructive class below is STILL four members and neither new entry
+   * changes what this guard scans. The baseline was re-measured at HEAD before
+   * it moved — 90 is what 162-05 left and nothing between it and this plan
+   * minted a member.
    */
-  const EXPECTED_TABLE_SIZE = 90;
+  const EXPECTED_TABLE_SIZE = 92;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2492,8 +2507,31 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * `no_data_found` one is raised inside the function before its INSERT, in a
    * transaction that rolls back. It carries none of the four FORBIDDEN
    * fragments.
+   *
+   * ⚠️ 90 → 92 (164.2-04 / criteria 4 and 5). TWO entries, and THIS guard is
+   * the banned-claims honesty scan, so its reasoning was re-run over both
+   * BEFORE the number moved — each read against all four FORBIDDEN fragments
+   * by hand:
+   *   · `PRESELECT_REQUEST_INVALID` claims "Nothing was created, nothing was
+   *     stored, and nothing was sent to your exchange". Its ONE emitter is a
+   *     uuid shape guard that runs before any read, any write and any venue
+   *     hop, so all three negatives are established rather than hoped for. It
+   *     names no internal field, claims no notification, and asserts nothing
+   *     about a fetch stage.
+   *   · `DRAFT_SESSION_COLLISION` claims "Nothing was created by this attempt
+   *     and none of your stored keys changed". Its ONE emitter is the reuse
+   *     arm's 23505, raised inside `create_wizard_strategy_for_key` before its
+   *     INSERT commits and in a transaction that rolls back, and that arm
+   *     writes `api_keys` never. ⚠️ It is deliberately worded as "none of your
+   *     stored keys changed" and NOT as the more reassuring "data is
+   *     unchanged", which is one of the four fragments below.
+   *   ⚠️ AND THE `wizard_session_id` BAN WAS THE SHARP ONE HERE. The collision
+   *     this second entry describes IS a wizard-session constraint, so the
+   *     obvious sentence names the column. It does not: the index name and the
+   *     column triple live in the entry's comment, and the cause says "the
+   *     wizard session this browser is still carrying" instead.
    */
-  const EXPECTED_TABLE_SIZE = 90;
+  const EXPECTED_TABLE_SIZE = 92;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(

@@ -143,6 +143,27 @@ export type WizardErrorCode =
   | "KEY_VENUE_NOT_ENABLED"
   | "KEY_INPUT_TOO_LONG"
   | "KEY_INVALID_FORMAT"
+  // Phase 164.2-04 / criterion 4 — THE SIXTH CAUSE `KEY_MISSING_REQUIRED_FIELD`
+  // WAS STILL SWALLOWING, and the one its own emitter had already written down
+  // as wrong. `create-with-key`'s USE-EXISTING-KEY arm refuses a non-uuid
+  // `wizard_session_id` / `reuse_api_key_id` with a 400, and that request body
+  // is TWO IDS the caller never typed: the screen paints a saved-key summary
+  // with no fields on it at all. The guard's own comment says the refusal "is
+  // about OUR REQUEST SHAPE rather than about the user's key — which is why it
+  // may not wear a `KEY_*` verdict that blames a credential", and it wore one
+  // anyway for two phases.
+  //
+  // ⛔ 162-06 REVIEW SPLIT THE BULLETS AND SAID SO IN THE ENTRY: `fixRequires`
+  // gates `fix[]` and NOTHING else, so the surface-split remedy left the TITLE
+  // ("One of the required fields is empty.") and the CAUSE ("one of the
+  // credential fields was blank") reading as though a field were blank on the
+  // one screen that has none. That entry's docblock names the whole fix as
+  // belonging at the emitter. This is that fix: the emitter stops answering a
+  // credential-shaped code for a request that carries no credentials.
+  //
+  // `KEY_MISSING_REQUIRED_FIELD` STAYS on the five credential-arm guards, where
+  // a field really did arrive empty and its copy is true word for word.
+  | "PRESELECT_REQUEST_INVALID"
   | "KEY_IP_ALLOWLIST"
   // Phase 140.3-05 / TS-35 — the two venue-transient verdicts that had no
   // wizard member, read off the machine `code` the Python service has emitted
@@ -192,6 +213,25 @@ export type WizardErrorCode =
   | "KEY_SCOPE_CHECK_UNREADABLE"
   | "KEY_SCOPE_BROADENED"
   | "DRAFT_ALREADY_EXISTS"
+  // Phase 164.2-04 / criterion 5 — THE HALF OF `DRAFT_ALREADY_EXISTS`'s CAUSE
+  // THAT WAS NEVER TRUE, split off for the same reason every split above it was.
+  //
+  // "A draft strategy with the same API key is already in progress" is TRUE on
+  // the TOCTOU arm and on the credential arm's fallthrough. It is FALSE on the
+  // preselect stale-session path, where the constraint that actually fired is
+  // `strategies_user_wizard_session_source_uniq` (20260728120000:167) — a
+  // (user, wizard session, source) key that has nothing to say about which API
+  // key the colliding draft holds. `localStorage.ts` restores one shared
+  // wizard-session token across sources and drafts, so the row we collide with
+  // is routinely a draft over a DIFFERENT key of the caller's, and the reader
+  // was told to go and look for a draft of the key they just picked.
+  //
+  // ⛔ SCOPE, WRITTEN DOWN SO THE NEXT READER DOES NOT MISREAD THIS AS THE FIX:
+  // this member only chooses which TRUE sentence to show. The route still
+  // answers 409 and the caller still cannot proceed. Minting a fresh session id
+  // (or re-resolving onto the draft that was found) is the FUNCTIONAL fix and
+  // it belongs to Phase 164.2.1 SESSIONID-FENCE.
+  | "DRAFT_SESSION_COLLISION"
   // 154.1 / WIZCONT-02 review CR — THE HALF OF THE VENUE FENCE THAT HAD NO
   // HONEST ANSWER, split off `DRAFT_ALREADY_EXISTS` for the same reason every
   // split above was made: the incumbent sentence is FALSE here, and specifically
@@ -1657,6 +1697,39 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry", "request_call"],
   },
 
+  // Phase 164.2-04 / criterion 4 — THE ENTRY THE ONE ABOVE SAID IT WAS OWED.
+  //
+  // `KEY_MISSING_REQUIRED_FIELD`'s docblock records the whole fix as belonging
+  // at the emitter, because `fixRequires` gates `fix[]` and nothing else: the
+  // preselect surface still read "One of the required fields is empty." over a
+  // screen with no fields. `create-with-key`'s use-existing-key arm now answers
+  // THIS code instead, and every sentence below is written for that ONE arm.
+  //
+  // ⚠️ WHAT THIS ARM ACTUALLY REFUSED, and why no clause may reach past it: a
+  // `wizard_session_id` or a `reuse_api_key_id` that is not a uuid. Both are
+  // built by OUR page out of a prop and stored wizard state; the reader typed
+  // neither and can edit neither. So the copy names no field, no credential and
+  // no exchange — there is nothing of theirs to correct.
+  //
+  // ⛔ NEITHER MEMBER OF `RECOVERABLE_ACTIONS`, and that is the behaviour half
+  // rather than a formatting choice. `buildEnvelope` derives `recoverable:
+  // false`, so no Retry renders — a Retry here re-sends the identical two ids
+  // and is refused identically, which is precisely the control
+  // `ConnectKeyStep.preselect-refusal-class.test.tsx`'s C3 assertion forbids on
+  // a 400. `DASHBOARD_REQUEST_INVALID` is authored under the same reading and
+  // this entry deliberately mirrors its register.
+  PRESELECT_REQUEST_INVALID: {
+    title: "We could not send that request.",
+    cause:
+      "The request this step built was refused by our own service before any work started. Nothing was created, nothing was stored, and nothing was sent to your exchange. The fault is in our software, not in the key you picked.",
+    fix: [
+      "Reload the page and pick the key again — a fresh page may build the request correctly.",
+      "If it is refused a second time, email security@quantalyze.com with the correlation id below. A request our own page built wrong is ours to fix.",
+    ],
+    docsHref: "/security",
+    actions: ["leave_and_return", "expand_log"],
+  },
+
   KEY_UNSUPPORTED_VENUE: {
     title: "We do not support that exchange.",
     cause:
@@ -1944,6 +2017,49 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // render a Retry on the credential surface too, where the collision is not
     // resolvable by re-sending.
     actions: ["resume_draft", "start_fresh"],
+  },
+
+  // Phase 164.2-04 / criterion 5 — THE ARM `DRAFT_ALREADY_EXISTS`'s CAUSE WAS
+  // FALSE ON, split off it and deliberately adjacent so the pair is read
+  // together. They differ by ONE fact: WHICH key the draft we collided with
+  // holds. The entry above says "the same API key" and is right whenever the
+  // route has established that; this one is what the route answers when it has
+  // established the opposite, or could not establish it at all.
+  //
+  // ⚠️ NO INTERNAL FIELD NAME IN THE USER-VISIBLE STRINGS. The constraint is
+  // `strategies_user_wizard_session_source_uniq` over (user_id,
+  // wizard_session_id, source) — that belongs in this comment, not in the
+  // cause. `wizardErrors.test.ts`'s banned-claims scan bans an internal column
+  // name in copy on its own ground ("say what the user gets, never the
+  // mechanism's field name"), so the cause names the SESSION, which is the fact
+  // the reader can act on, and leaves the index name here.
+  //
+  // ⚠️ BOTH BULLETS ARE ALWAYS-ON — no `fixRequires`. Unlike the entry above,
+  // this code is emitted from exactly ONE site, on the preselect surface, so
+  // there is no second surface for a bullet to be wrong on. Both are written as
+  // CONDITIONALS for the same reason that entry's preselect pair is: the arm
+  // covers a lost race (where pressing again wins) and a genuinely different
+  // key (where it cannot), and a flat promise would be false on one of them.
+  //
+  // ⛔ THIS IS THE COPY HALF ONLY. The reader still cannot get past this screen
+  // without abandoning the key they chose. Phase 164.2.1 SESSIONID-FENCE owns
+  // the functional fix — a fresh session id, or re-resolving onto the draft the
+  // route just read. Do not "improve" these sentences into promising it.
+  DRAFT_SESSION_COLLISION: {
+    title: "A draft from an earlier session is still open.",
+    cause:
+      "This browser is still carrying the wizard session that opened an earlier draft, and it is that draft — not the key you picked — that our records clash with. Nothing was created by this attempt and none of your stored keys changed.",
+    fix: [
+      "Press “Continue with this key” once more. If the clash was a race with your own first press, we hand that draft back and carry on from where it stopped — nothing is created twice.",
+      "If it is refused a second time, the open draft belongs to a different key of yours and this screen cannot reach it. Email security@quantalyze.com with the correlation id below. Nothing was created by this attempt.",
+    ],
+    docsHref: "/security#draft-resume",
+    // ⛔ NEITHER MEMBER OF `RECOVERABLE_ACTIONS`, for the reason the entry above
+    // states in full: the action the first bullet names IS the step's painted
+    // primary control, so a Retry beside it would be a second button for the
+    // same press. ⛔ And `start_fresh` must not be added — the resume banner
+    // that offers it does not render on this surface.
+    actions: ["request_call", "expand_log"],
   },
 
   // 154.1 / WIZCONT-02 review CR — the entry directly above is the one this was

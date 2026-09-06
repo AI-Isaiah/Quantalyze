@@ -474,6 +474,26 @@ describe("[140.5-05] AGREEMENT — where the roster and the wire table overlap, 
     //     is acceptable here precisely BECAUSE the mapping is to itself; if it
     //     ever became a real alias, this row is where that would have to be
     //     re-decided.
+    //   · ⭐ KNOWN_CREATE_WITH_KEY_CODES.RATE_LIMITED — added 164.2-04
+    //     (criterion 4b), recorded here in the same commit. THE DECISION THIS
+    //     ROW RECORDS: `create-with-key`'s two `userActionLimiter` deny arms
+    //     used to answer `KEY_RATE_LIMIT`, whose copy says the throttle is "a
+    //     transient, exchange-side throttle" and whose second fix line offers
+    //     "try a different exchange account". That bucket is keyed
+    //     `strategies-create-with-key:<uid>` — ours, per USER — so no exchange
+    //     was involved and no other exchange account could clear it. The arms
+    //     now answer `RATE_LIMITED`, whose copy already said "the cap is ours,
+    //     not your exchange's". `KEY_RATE_LIMIT` stays in the copy table and in
+    //     the roster because `classifyKeyValidationError` still returns it for
+    //     a GENUINE venue throttle, where its sentence is true.
+    //     ⚠️ WHICH VOCABULARY OWNS IT, ANSWERED RATHER THAN LEFT OPEN: the wire
+    //     table maps `RATE_LIMITED` to ITSELF, and `recogniseCreateWithKeyCode`
+    //     translates before consulting the roster, so the HOP is the active
+    //     path and the roster row is the route-minted vocabulary written down —
+    //     the identical reading `KNOWN_FINALIZE_CODES.VALIDATION_FAILED` above
+    //     is listed under. The agreement check above is what keeps the two
+    //     answers the same; if this mapping ever became a real alias, this row
+    //     is where that has to be re-decided.
     const overlaps = ROSTERS.flatMap((r) =>
       [...r.answers.keys()]
         .filter((code) => WIRE_TABLE.has(code))
@@ -485,6 +505,7 @@ describe("[140.5-05] AGREEMENT — where the roster and the wire table overlap, 
         "DELIBERATELY, having decided which vocabulary owns the new code and " +
         "which copy the user should read.",
     ).toEqual([
+      "KNOWN_CREATE_WITH_KEY_CODES.RATE_LIMITED",
       "KNOWN_CSV_FINALIZE_CODES.SEAM_MISCONFIGURED",
       "KNOWN_CSV_VALIDATE_CODES.SEAM_MISCONFIGURED",
       "KNOWN_FINALIZE_CODES.SEAM_MISCONFIGURED",

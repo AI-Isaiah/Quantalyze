@@ -473,9 +473,24 @@ async function handleReuseExistingKey(
   // it is on the credential arm: the draft it mints is a wizard draft like any
   // other, and omitting it would leave the F6 fence and every downstream
   // session-keyed reader looking at a NULL.
+  //
+  // ⭐ 164.2-04 / criterion 4 — THE CONTRADICTION THE PARAGRAPH ABOVE DESCRIBED
+  // IS CLOSED. This guard answered `KEY_MISSING_REQUIRED_FIELD` for two phases
+  // while its own comment said it may not, and the copy that reached the reader
+  // was "One of the required fields is empty." on the one screen in the wizard
+  // that paints no fields at all. 162-06 review split that entry's BULLETS by
+  // `fixRequires` and recorded in the entry itself that `fixRequires` gates
+  // `fix[]` and nothing else, so the title and cause kept lying and the whole
+  // fix belonged HERE. `PRESELECT_REQUEST_INVALID` is that fix: it names OUR
+  // request, no field, no credential and no exchange.
+  //
+  // ⚠️ `code` FIRST, as a LITERAL — the shape `wizardErrors.invariant.test.ts`'s
+  // scanner requires. This site IS inside that route's derived 400 population,
+  // so the substitution moved `EXPECTED_SPLIT_CODES` (5 → 6) while
+  // `expectedSites` stayed 13: one refusal, one sentence, same site.
   if (!isUuid(wizardSessionId) || !isUuid(reuseKeyId)) {
     return NextResponse.json(
-      { code: "KEY_MISSING_REQUIRED_FIELD", error: "wizard_session_id and reuse_api_key_id must be uuids" },
+      { code: "PRESELECT_REQUEST_INVALID", error: "wizard_session_id and reuse_api_key_id must be uuids" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -483,7 +498,12 @@ async function handleReuseExistingKey(
   // Limiter AFTER shape validation, so a malformed request does not burn one of
   // the caller's own tokens (B15 ordering: auth → validate → limit), and
   // through the chokepoint so a limiter misconfiguration answers 503 rather
-  // than the exchange-blaming 429.
+  // than the 429 below.
+  //
+  // ⭐ 164.2-04 / criterion 4b — THE 429 NO LONGER BLAMES THE EXCHANGE EITHER.
+  // See the credential arm's twin (the `THIS IS THE SHARPEST SITE IN THE CLASS`
+  // block) for the full reasoning; both arms moved in the same commit because
+  // they are the same bucket.
   const rl = await checkLimit(
     userActionLimiter,
     `strategies-create-with-key:${user.id}`,
@@ -491,7 +511,7 @@ async function handleReuseExistingKey(
   if (!rl.success) {
     return rateLimitDenyJson(rl, {
       headers: NO_STORE_HEADERS,
-      throttledBody: { code: "KEY_RATE_LIMIT", error: "Too many requests" },
+      throttledBody: { code: "RATE_LIMITED", error: "Too many requests" },
       misconfiguredBody: {
         code: "SEAM_MISCONFIGURED",
         error: "Rate limiter unavailable",
@@ -664,10 +684,78 @@ async function handleReuseExistingKey(
       return venueAlreadyConnectedResponse(null);
     }
     if (error.code === "23505") {
-      // The wizard-session fence. Byte-identical to the credential arm's
-      // fallthrough: a draft for THIS session already exists.
+      // The wizard-session fence — `strategies_user_wizard_session_source_uniq`
+      // (20260728120000:167), a UNIQUE over (user_id, wizard_session_id, source)
+      // WHERE wizard_session_id IS NOT NULL.
+      //
+      // ⭐ 164.2-04 / criterion 5 — TWO DIFFERENT FAILURES SHARED ONE SENTENCE,
+      // AND THE SENTENCE WAS TRUE OF ONLY ONE OF THEM. `DRAFT_ALREADY_EXISTS`
+      // says "A draft strategy with the same API key is already in progress",
+      // but the index that fired says nothing whatever about which key the
+      // colliding row holds. `src/lib/wizard/localStorage.ts` restores ONE
+      // wizard-session token across sources and drafts, so the row we collide
+      // with is routinely a draft over a DIFFERENT key of this caller's — and
+      // the reader was then sent to look for a draft of the key they had just
+      // picked, which does not exist. So: READ which key the colliding draft
+      // actually holds, and answer the sentence that is true.
+      //
+      // ⛔ THIS IS THE COPY HALF ONLY. Both branches still answer 409 and the
+      // caller still cannot proceed with the key they chose. Minting a fresh
+      // session id, or re-resolving onto the draft this read just found, is the
+      // FUNCTIONAL fix and belongs to Phase 164.2.1 SESSIONID-FENCE. Do not
+      // grow this branch into it.
+      //
+      // ⚠️ THE READ IS DELIBERATELY NARROW (T-164.2-06). It is scoped by
+      // `user_id = user.id`, so it can only ever see the caller's own row, and
+      // it selects `api_key_id` ALONE — which is compared here and never put on
+      // the wire. Neither response body carries a key id, a strategy id or a
+      // name. `source` is pinned to 'wizard' because that is the literal
+      // `create_wizard_strategy_for_key` INSERTs (20260826130000:241) and it is
+      // the third column of the index; omitting it would read a CSV-path row
+      // and compare the wrong draft.
+      let collidingKeyId: string | null = null;
+      let collidingReadFaulted = false;
+      try {
+        const { data: colliding, error: collidingError } = await admin
+          .from("strategies")
+          .select("api_key_id")
+          .eq("user_id", user.id)
+          .eq("wizard_session_id", wizardSessionId)
+          .eq("source", "wizard")
+          .maybeSingle();
+        if (collidingError || !colliding) {
+          collidingReadFaulted = true;
+        } else {
+          collidingKeyId = (colliding as { api_key_id: string | null }).api_key_id;
+        }
+      } catch {
+        collidingReadFaulted = true;
+      }
+
+      // ⭐ A DARK READ FALLS TO THE SESSION SENTENCE, NOT TO THE KEY ONE, and
+      // that is the fail-safe direction rather than an arbitrary default: the
+      // session collision is the constraint that DID fire, so that sentence is
+      // established with or without this read. "the same API key" is the claim
+      // that needs the read, so it is the one that may not be made without it.
+      if (!collidingReadFaulted && collidingKeyId === adminKey.id) {
+        console.warn(
+          "[strategies/create-with-key] reuse arm 23505: colliding draft holds " +
+            "the SAME key — DRAFT_ALREADY_EXISTS",
+          { wizard_session_id: wizardSessionId },
+        );
+        return NextResponse.json(
+          { code: "DRAFT_ALREADY_EXISTS", error: "A wizard session with this key is already in progress." },
+          { status: 409, headers: NO_STORE_HEADERS },
+        );
+      }
+      console.warn(
+        "[strategies/create-with-key] reuse arm 23505: colliding draft is over " +
+          (collidingReadFaulted ? "an UNREADABLE key" : "a DIFFERENT key") +
+          " — DRAFT_SESSION_COLLISION",
+        { wizard_session_id: wizardSessionId },
+      );
       return NextResponse.json(
-        { code: "DRAFT_ALREADY_EXISTS", error: "A wizard session with this key is already in progress." },
+        { code: "DRAFT_SESSION_COLLISION", error: "A draft from an earlier wizard session is still open." },
         { status: 409, headers: NO_STORE_HEADERS },
       );
     }
@@ -895,9 +983,34 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // 429 body is UNCHANGED (`{code, error}` in that order, NO_STORE_HEADERS +
     // Retry-After) because it is the correct answer to a REAL throttle; what
     // changed is that a misconfiguration no longer reaches it.
+    //
+    // ⭐ 164.2-04 / criterion 4b — AND THE 429 ITSELF WAS NEVER A REAL THROTTLE
+    // EITHER, so the sentence above is now corrected at its source rather than
+    // left standing. `userActionLimiter` is OUR per-USER bucket, keyed
+    // `strategies-create-with-key:<uid>`: no exchange is consulted, no exchange
+    // is throttling anything, and `KEY_RATE_LIMIT`'s second fix line ("try a
+    // different exchange account") is a remedy that provably cannot clear a
+    // bucket keyed on the user. `RATE_LIMITED` already carried the honest
+    // sentence — "the cap is ours, not your exchange's" — and was simply not on
+    // this route's roster, so this is WIRING and not new copy (164.2 CONTEXT
+    // correction 5). `KEY_RATE_LIMIT` stays reachable here through
+    // `classifyKeyValidationError`, which IS a venue throttle and where its copy
+    // is true; its entry and its envelope pin are untouched.
+    //
+    // ⚠️ THE ROSTER ROW IS OWED BY HAND, in the shape the `KEY_ORPHANED` block
+    // further down this file records for 409: the coverage law in
+    // `wizardErrors.invariant.test.ts` derives this route's emitters with a
+    // `statusRe` fragment of "400", and the 409 twin beside it cannot see a 429
+    // either — this code does not even ride a `NextResponse.json` literal, it
+    // rides `throttledBody` inside `rateLimitDenyJson`. Omitting
+    // `RATE_LIMITED` from `KNOWN_CREATE_WITH_KEY_CODES` would leave it failing
+    // ConnectKeyStep's membership check and falling through to `UNKNOWN` —
+    // whose copy IS recoverable — so the reader would get "Try the last action
+    // again." with a Retry for our own cap. The `[164.2-04]` describe in that
+    // same file is the hand-typed guard that reds when this row goes missing.
     return rateLimitDenyJson(rl, {
       headers: NO_STORE_HEADERS,
-      throttledBody: { code: "KEY_RATE_LIMIT", error: "Too many requests" },
+      throttledBody: { code: "RATE_LIMITED", error: "Too many requests" },
       misconfiguredBody: {
         code: "SEAM_MISCONFIGURED",
         error: "Rate limiter unavailable",

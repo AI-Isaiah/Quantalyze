@@ -197,6 +197,31 @@ const venueOwnerLookupMock = vi.fn(async () => ({ data: null, error: null }) as 
   error: { code?: string; message?: string } | null;
 });
 
+/**
+ * 164.2-04 / criterion 5 — the reuse arm's POST-23505 read of the draft it
+ * actually collided with.
+ *
+ * The route asks `strategies` for `api_key_id` by (user_id, wizard_session_id,
+ * source='wizard') after the RPC raises a unique violation, and answers
+ * `DRAFT_ALREADY_EXISTS` only when that key is the one the caller picked.
+ *
+ * ⭐ ROUTED ON THE `source` FILTER, and the coupling is deliberate in exactly
+ * the way the `status` routing above is. The F6 session fence keys on
+ * (user_id, wizard_session_id) with NO `source`, so without this the two reads
+ * are indistinguishable here and `draftLookupMock`'s canned row would answer a
+ * question it was never written for. Delete `.eq("source", "wizard")` from the
+ * route — which would read a CSV-path row and compare the wrong draft against
+ * the wrong key — and this mock stops being reached, so the split cases red
+ * instead of quietly re-labelling themselves.
+ *
+ * ⚠️ IT DEFAULTS TO "NOTHING THERE", which is the READ-FAULT case, so a test
+ * that wants the same-key branch has to seed it deliberately.
+ */
+const collidingDraftLookupMock = vi.fn(async () => ({ data: null, error: null }) as {
+  data: { api_key_id: string | null } | null;
+  error: { code?: string; message?: string } | null;
+});
+
 /** Every `.eq()`/`.is()` filter the route applied, per builder. */
 type CapturedFilters = Record<string, unknown>;
 const capturedSelects: Array<{
@@ -391,6 +416,16 @@ function makeSelectBuilder(
           ? venueStrategyLookupMock()
           : venueOwnerLookupMock();
       }
+      // 164.2-04 — the reuse arm's post-23505 read. See
+      // `collidingDraftLookupMock` for why `source` is the discriminator.
+      // ⚠️ BOTH columns, not `source` alone: the venue fence's draft-scoped
+      // read carries `source` too (route.ts:308). It is caught by the
+      // `api_key_id` branch above, so this is belt-and-braces rather than
+      // load-bearing — and it stays because the day that branch is reordered
+      // the failure would be a canned row answering the wrong question.
+      if ("source" in filters && "wizard_session_id" in filters) {
+        return collidingDraftLookupMock();
+      }
       return draftLookupMock();
     },
   };
@@ -508,8 +543,17 @@ function makeReq(body: unknown): NextRequest {
  * false for EVERY user on their FIRST click — our outage, blamed on the user's
  * exchange, on the step where they hand us a credential.
  *
- * The 429 half is the anti-regression: a REAL throttle still answers exactly
- * what it answered before, key order included.
+ * The 429 half is the anti-regression: the deny arm still answers the same wire
+ * SHAPE it answered before, key order included.
+ *
+ * ⚠️ 164.2-04 / criterion 4b — THE WORDS "a REAL throttle" USED TO STAND HERE
+ * AND WERE FALSE. There is no throttle on this path in either direction:
+ * `userActionLimiter` is our own per-USER bucket keyed
+ * `strategies-create-with-key:<uid>`, and no exchange is consulted before it
+ * denies. So the 429 was misattributed for exactly the same reason the 503 was
+ * — one blamed the venue for our limiter being DOWN, the other blamed the venue
+ * for our limiter being ENFORCED — and only the first half was fixed in 140.4.
+ * Both arms now name the party that actually refused.
  */
 describe("[140.4-13 / SEAMRIM-05] POST /api/strategies/create-with-key — the limiter deny arm", () => {
   afterEach(() => {
@@ -534,6 +578,20 @@ describe("[140.4-13 / SEAMRIM-05] POST /api/strategies/create-with-key — the l
       "Our own limiter's store being unreachable must not render as the " +
         "user's exchange throttling their key.",
     ).not.toBe("KEY_RATE_LIMIT");
+    // ⚠️ 164.2-04 — THE LINE ABOVE WENT VACUOUS ON THIS ROUTE and is kept only
+    // as the historical pin. Criterion 4b took `KEY_RATE_LIMIT` off both of
+    // this route's limiter arms, so "not KEY_RATE_LIMIT" is now satisfied by a
+    // code the route can no longer emit from its own source at all. The claim
+    // the case was written to defend — a misconfiguration must not render as a
+    // rate limit — is carried by THIS assertion from here on, and it names the
+    // code the throttled arm actually answers now.
+    expect(
+      body.code,
+      "Our own limiter's store being unreachable must not render as the user " +
+        "having hit our cap either: nothing was counted, nothing was denied on " +
+        "a quota, and 'wait, then run the same action again' is a remedy that " +
+        "cannot clear a store that is down.",
+    ).not.toBe("RATE_LIMITED");
     expect(body.code).toBe("SEAM_MISCONFIGURED");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(res.headers.get("Retry-After")).toBe("60");
@@ -553,13 +611,37 @@ describe("[140.4-13 / SEAMRIM-05] POST /api/strategies/create-with-key — the l
     // 140.4-16 / WR-03 — byte-wise, because `toEqual` on parsed JSON does NOT
     // compare key order (measured: a swap left all four receipts green). See
     // the note in `keys/sync/route.test.ts`.
+    //
+    // ⛔ THIS CASE'S CODE WAS INVERTED BY 164.2-04 (criterion 4b), and the
+    // inversion is deliberate. It used to pin `KEY_RATE_LIMIT` and its own
+    // describe called that "the anti-regression: a REAL throttle still answers
+    // exactly what it answered before". THAT PREMISE WAS WRONG, and the class
+    // fix is the reason: `userActionLimiter` is not a throttle at all, real or
+    // otherwise — it is OUR per-USER bucket, keyed
+    // `strategies-create-with-key:<uid>`. No exchange is consulted on this
+    // path, so the code whose copy says "a transient, exchange-side throttle"
+    // and whose second fix line offers "try a different exchange account" was
+    // describing a party that had not been involved and naming a remedy that
+    // cannot clear a bucket keyed on the user. `RATE_LIMITED` already carried
+    // the honest sentence ("the cap is ours, not your exchange's").
+    //
+    // ⭐ WHAT THE CASE STILL PINS IS UNCHANGED AND IS THE POINT: the body is
+    // `{code, error}` in THAT key order, byte-wise, with NO_STORE_HEADERS and
+    // Retry-After. Only the code token moved; the wire SHAPE is still fenced.
     expect(await res.clone().text()).toBe(
-      '{"code":"KEY_RATE_LIMIT","error":"Too many requests"}',
+      '{"code":"RATE_LIMITED","error":"Too many requests"}',
     );
-    expect(await res.json()).toEqual({
-      code: "KEY_RATE_LIMIT",
+    const throttledBody = await res.json();
+    expect(throttledBody).toEqual({
+      code: "RATE_LIMITED",
       error: "Too many requests",
     });
+    expect(
+      throttledBody.code,
+      "The per-user cap must not render as the user's exchange throttling " +
+        "their key. KEY_RATE_LIMIT stays reachable on this route only through " +
+        "classifyKeyValidationError, where the throttle really is the venue's.",
+    ).not.toBe("KEY_RATE_LIMIT");
     expect(res.headers.get("Retry-After")).toBe("42");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(validateKeyMock).not.toHaveBeenCalled();
@@ -3622,6 +3704,8 @@ describe("[162-05 / D-162-3] create-with-key — the use-existing-key arm", () =
   }
 
   let consoleErr: ReturnType<typeof vi.spyOn>;
+  /** 164.2-04 — the 23505 split logs which branch it took, at warn level. */
+  let consoleWarn: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     // ⚠️ THE SEAMUX-08 BLOCK ABOVE LEAKS, and its own docblock says so: a
@@ -3686,16 +3770,21 @@ describe("[162-05 / D-162-3] create-with-key — the use-existing-key arm", () =
     encryptKeyMock.mockReset();
     venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
     venueOwnerLookupMock.mockResolvedValue({ data: null, error: null });
+    collidingDraftLookupMock.mockClear();
+    collidingDraftLookupMock.mockResolvedValue({ data: null, error: null });
     adminClientThrows.value = false;
     limiter.result = { success: true };
     consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
   afterEach(() => {
     consoleErr.mockRestore();
+    consoleWarn.mockRestore();
     reuseKeyRow.value = null;
     venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
     venueOwnerLookupMock.mockResolvedValue({ data: null, error: null });
+    collidingDraftLookupMock.mockResolvedValue({ data: null, error: null });
     vi.restoreAllMocks();
   });
 
@@ -3954,7 +4043,24 @@ describe("[162-05 / D-162-3] create-with-key — the use-existing-key arm", () =
     );
 
     expect(res.status).toBe(400);
-    expect((await res.json()).code).toBe("KEY_MISSING_REQUIRED_FIELD");
+    // ⛔ THIS CASE'S CODE WAS INVERTED BY 164.2-04 (criterion 4), and the
+    // inversion is what closes the defect the case's own TITLE already named.
+    // It used to pin `KEY_MISSING_REQUIRED_FIELD` while asserting the refusal is
+    // "on OUR request shape — never a verdict about their key". Those two
+    // sentences contradicted each other: that code's title is "One of the
+    // required fields is empty." and its cause says "one of the credential
+    // fields was blank", rendered on the saved-key summary — a screen with no
+    // fields on it and a body carrying two ids the reader never typed. The
+    // route's own guard comment said so too ("it may not wear a `KEY_*` verdict
+    // that blames a credential") and it wore one for two phases.
+    //
+    // ⭐ 162-06 review reached for `fixRequires` and split the BULLETS by
+    // surface; that entry's docblock records why that was only half a fix —
+    // `fixRequires` gates `fix[]` and nothing else, so the title and the cause
+    // kept lying — and names the emitter as the owner of the rest. This is it.
+    // `KEY_MISSING_REQUIRED_FIELD` is untouched on the credential arm's five
+    // guards (the 12-site table above), where a field really did arrive empty.
+    expect((await res.json()).code).toBe("PRESELECT_REQUEST_INVALID");
     expect(
       reuseKeyAdminLookupMock,
       'A non-uuid must never reach a `.eq("id", …)` filter — Postgres answers ' +
@@ -3968,8 +4074,185 @@ describe("[162-05 / D-162-3] create-with-key — the use-existing-key arm", () =
     const res = await POST(makeReq({ reuse_api_key_id: REUSE_KEY_ID }));
 
     expect(res.status).toBe(400);
-    expect((await res.json()).code).toBe("KEY_MISSING_REQUIRED_FIELD");
+    // Inverted by 164.2-04 (criterion 4) on the same terms as the case above —
+    // ONE guard covers both fields, so both cases move together or the guard
+    // has been split behind our backs.
+    expect((await res.json()).code).toBe("PRESELECT_REQUEST_INVALID");
     expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  // ───────────────── 164.2-04 / criterion 5 — the 23505 split ────────────────
+  /**
+   * ⭐ ONE SQLSTATE, TWO DIFFERENT FAILURES, AND ONE SENTENCE THAT WAS TRUE OF
+   * ONLY ONE OF THEM.
+   *
+   * The RPC raises 23505 off `strategies_user_wizard_session_source_uniq`
+   * (20260728120000:167) — a UNIQUE over (user_id, wizard_session_id, source).
+   * That index says NOTHING about which API key the colliding row holds, but
+   * the route answered `DRAFT_ALREADY_EXISTS`, whose cause is "A draft strategy
+   * with the SAME API key is already in progress". `wizard/localStorage.ts`
+   * restores one wizard-session token across sources and drafts, so the row we
+   * collide with is routinely a draft over a DIFFERENT key of the caller's —
+   * and the reader was then sent to find a draft of the key they had just
+   * picked, which does not exist.
+   *
+   * So the arm now READS which key the colliding draft holds and picks the
+   * sentence that is true. Three cases, because there are three answers that
+   * read can give, and each is asserted on its own: a neuter that skips the
+   * read entirely must red on more than one of them.
+   *
+   * ⛔ STILL 409 ON EVERY BRANCH. This is the COPY half. Phase 164.2.1
+   * SESSIONID-FENCE owns the functional fix (a fresh session id, or resolving
+   * onto the draft this read just found), so a case asserting 200 here would be
+   * asserting work that has not been done.
+   */
+  describe("[164.2-04] the wizard-session 23505 names the collision it actually hit", () => {
+    /** A live key of the caller's, and an RPC that raises the fence. */
+    function seedCollision() {
+      seedKey(MOCK_USER.id);
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: { code: "23505", message: "duplicate key value" },
+      });
+    }
+
+    it("SAME key → DRAFT_ALREADY_EXISTS, byte-identical to what it always answered", async () => {
+      seedCollision();
+      // The colliding draft holds the very key the caller preselected, so "with
+      // the same API key" is established rather than assumed.
+      collidingDraftLookupMock.mockResolvedValue({
+        data: { api_key_id: REUSE_KEY_ID },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(REUSE_BODY));
+
+      expect(res.status).toBe(409);
+      // BYTE-WISE: `toEqual` on parsed JSON does not compare key order, and
+      // this body is the one the pre-164.2 arm shipped. The whole claim of this
+      // case is that the incumbent answer survives untouched on its own arm.
+      expect(await res.clone().text()).toBe(
+        '{"code":"DRAFT_ALREADY_EXISTS","error":"A wizard session with this key is already in progress."}',
+      );
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+      // ⛔ THE READ MUST HAVE HAPPENED. Without this the case passes on a route
+      // that never reads and always answers DRAFT_ALREADY_EXISTS — i.e. green
+      // on the exact bug (Pitfall 5).
+      expect(
+        collidingDraftLookupMock,
+        "The arm answered the same-key sentence without reading which key the " +
+          "colliding draft holds, so it is asserting a fact it never checked.",
+      ).toHaveBeenCalled();
+    });
+
+    it("DIFFERENT key → DRAFT_SESSION_COLLISION, and the response names no key", async () => {
+      seedCollision();
+      // A draft of the caller's own, over a DIFFERENT key — the stale-session
+      // case `localStorage.ts`'s one shared token produces.
+      const OTHER_KEY_ID = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+      collidingDraftLookupMock.mockResolvedValue({
+        data: { api_key_id: OTHER_KEY_ID },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(REUSE_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.clone().text();
+      expect(text).toBe(
+        '{"code":"DRAFT_SESSION_COLLISION","error":"A draft from an earlier wizard session is still open."}',
+      );
+      expect(
+        (await res.json()).code,
+        "'A draft strategy with the same API key is already in progress' is " +
+          "false here: the draft we collided with is over a different key, and " +
+          "the reader would be sent to look for a draft that does not exist.",
+      ).not.toBe("DRAFT_ALREADY_EXISTS");
+      // T-164.2-06 — the read exists to compare, never to disclose. Neither the
+      // colliding key id nor the caller's own may reach the wire.
+      expect(
+        text.includes(OTHER_KEY_ID) || text.includes(REUSE_KEY_ID),
+        "The refusal body carries a key id. The post-23505 read selects " +
+          "api_key_id ALONE and it is compared, never rendered.",
+      ).toBe(false);
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    });
+
+    it("the read FAULTS → DRAFT_SESSION_COLLISION, because that is the claim the fence establishes on its own", async () => {
+      seedCollision();
+      // A dark read. ⭐ THE FAIL-SAFE DIRECTION IS THE WHOLE POINT: the session
+      // collision is the constraint that DID fire, so that sentence holds with
+      // or without this read. "the same API key" is the claim that NEEDS the
+      // read, so it is the one that may not be made without it.
+      collidingDraftLookupMock.mockResolvedValue({
+        data: null,
+        error: { code: "XX000", message: "read failed" },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(REUSE_BODY));
+
+      expect(res.status).toBe(409);
+      expect((await res.clone().json()).code).toBe("DRAFT_SESSION_COLLISION");
+      expect(
+        (await res.json()).code,
+        "A dark read must never be resolved INTO the stronger claim. Falling " +
+          "back to DRAFT_ALREADY_EXISTS would assert 'the same API key' on " +
+          "exactly the evidence we failed to obtain.",
+      ).not.toBe("DRAFT_ALREADY_EXISTS");
+    });
+
+    it("the read is TENANT-SCOPED and asks for nothing but the key id", async () => {
+      seedCollision();
+      collidingDraftLookupMock.mockResolvedValue({
+        data: { api_key_id: REUSE_KEY_ID },
+        error: null,
+      });
+
+      const POST = await importPost();
+      await POST(makeReq(REUSE_BODY));
+
+      // Read off the filters the route ACTUALLY applied, not off the mock.
+      //
+      // ⚠️ `source` ALONE DOES NOT IDENTIFY THIS READ — the venue-identity
+      // fence's draft-scoped read (route.ts:308) also carries it, and it runs
+      // FIRST, so a find on `source` returns the wrong select and this case
+      // would assert the wrong query's filters. The session id is what makes
+      // the pair unique. (Measured: the first draft of this case did exactly
+      // that and reported `wizard_session_id: undefined`.)
+      const read = capturedSelects.find(
+        (s) =>
+          s.table === "strategies" &&
+          "source" in s.filters &&
+          "wizard_session_id" in s.filters,
+      );
+      expect(
+        read,
+        "The post-23505 read did not carry both `.eq(\"wizard_session_id\", …)` " +
+          "and `.eq(\"source\", …)`. Without `source` the query matches the " +
+          "CSV-path row for the same session and compares the wrong draft " +
+          "against the caller's key.",
+      ).toBeDefined();
+      expect(
+        read!.filters.user_id,
+        "T-164.2-06: the read must be scoped by the caller's own uid, so it " +
+          "can never see another tenant's draft.",
+      ).toBe(MOCK_USER.id);
+      expect(read!.filters.wizard_session_id).toBe(WIZARD_SESSION_ID);
+      expect(
+        read!.filters.source,
+        "create_wizard_strategy_for_key INSERTs source='wizard' " +
+          "(20260826130000:241) and `source` is the third column of the index.",
+      ).toBe("wizard");
+      expect(
+        read!.client,
+        "The user-scoped client cannot be trusted to see a draft the RLS " +
+          "policies may hide; the arm already holds the admin client it used " +
+          "for the write.",
+      ).toBe("admin");
+    });
   });
 
   it("CREDENTIAL FIELDS ARE IGNORED — nothing is validated, encrypted, or sent to a venue", async () => {

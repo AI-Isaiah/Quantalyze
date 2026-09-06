@@ -252,6 +252,14 @@ const ROUTES: readonly RouteUnderTest[] = [
     // two guards is a copy decision, not a way of holding this number down:
     // both fields are OUR request shape, they fail together for the caller, and
     // splitting them would publish two sentences where one is true.
+    //
+    // ⚠️ 13 STAYS AT 164.2-04, and the reason is worth stating because the code
+    // changed underneath it. That one reuse-arm 400 emitter now answers
+    // `PRESELECT_REQUEST_INVALID` instead of `KEY_MISSING_REQUIRED_FIELD` — a
+    // SUBSTITUTION at the same site, not an addition — so the site COUNT is
+    // untouched while the vocabulary moves (which `EXPECTED_SPLIT_CODES` above
+    // is what records). If this number ever has to move for that arm again,
+    // check first whether a guard was SPLIT in two: one refusal, one sentence.
     expectedSites: 13,
   },
   {
@@ -860,6 +868,20 @@ const DERIVED_FLOOR = 36;
 /**
  * HAND-TYPED. The four codes 142.2-07 minted, and the one it left in place.
  * Compared against a from-disk derivation, never against a second derivation.
+ *
+ * ⚠️ 5 → 6 (164.2-04 / criterion 4). `PRESELECT_REQUEST_INVALID` joins because
+ * it is a 400 emitted by `create-with-key`, which puts it inside this set's
+ * derived population whether or not anybody wants it there.
+ *
+ * ⭐ THIS LAW WAS NOT ON 164.2-04's LIST OF FIVE, and it reds the moment the
+ * reuse arm's 400 changes code — which is the law doing its job rather than a
+ * defect. It is recorded here because the next author minting a 400 on either
+ * split route will meet it too: the set is CLOSED, so a new 400 code is admitted
+ * by hand or the suite reds.
+ *
+ * ⛔ `KEY_MISSING_REQUIRED_FIELD` STAYS. The credential arm still emits it from
+ * five guards and `composite/add-key` from its own; only the reuse arm's ONE
+ * request-shape 400 moved off it.
  */
 const EXPECTED_SPLIT_CODES: readonly string[] = [
   "KEY_INPUT_TOO_LONG",
@@ -867,6 +889,7 @@ const EXPECTED_SPLIT_CODES: readonly string[] = [
   "KEY_MISSING_REQUIRED_FIELD",
   "KEY_UNSUPPORTED_VENUE",
   "KEY_VENUE_NOT_ENABLED",
+  "PRESELECT_REQUEST_INVALID",
 ];
 
 describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its route's roster", () => {
@@ -1177,6 +1200,33 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
     },
   );
 
+  /**
+   * HAND-TYPED. Codes that one of the two mirror routes emits and the other
+   * STRUCTURALLY CANNOT, so their absence on the far side is not a guard that
+   * was edited alone.
+   *
+   * ⚠️ 164.2-04 — THIS LIST DID NOT EXIST BEFORE, and it exists now because the
+   * mirror held by COINCIDENCE rather than by construction. `create-with-key`
+   * has carried a use-existing-key arm since 162-05 that `composite/add-key`
+   * has no counterpart for at all; that arm's ONE 400 emitter happened to
+   * answer `KEY_MISSING_REQUIRED_FIELD`, which the far route emits from its own
+   * credential guards, so the SETS matched while the GUARDS never did. Criterion
+   * 4 moved that emitter onto `PRESELECT_REQUEST_INVALID` and the coincidence
+   * ended.
+   *
+   * ⛔ THE TWO WAYS NOT TO DO THIS, both rejected:
+   *   · Emit `PRESELECT_REQUEST_INVALID` from `composite/add-key` so the sets
+   *     match again — that demands a guard that must not exist, which is the
+   *     exact reasoning the `KEY_INVALID_FORMAT` law above already records for
+   *     `finalize-wizard`.
+   *   · Delete or soften the mirror law — it catches the phase's stated risk
+   *     (fixing one route and leaving the other) and nothing else does.
+   * So the law keeps comparing guard for guard over everything the two routes
+   * SHARE, and the single-route arm is named here, once, with the assertion
+   * below proving the name is still earning its place.
+   */
+  const MIRROR_EXEMPT: readonly string[] = ["PRESELECT_REQUEST_INVALID"];
+
   it("the two KEY-VALIDATION routes emit the SAME set of codes — they are structural mirrors", () => {
     // Not a tautology: the routes are separate files with separate guards, and
     // the phase's stated risk is fixing one and leaving the other. A divergence
@@ -1190,11 +1240,47 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
     const [aLabel, bLabel] = SPLIT_ROUTE_LABELS;
     const a = derived.find((x) => x.label === aLabel)!;
     const b = derived.find((x) => x.label === bLabel)!;
+    const aSet = new Set(a.codes);
+    const bSet = new Set(b.codes);
+
+    // ⛔ THE EXEMPTION IS POLICED BEFORE IT IS APPLIED. A row that is emitted by
+    // BOTH routes, or by NEITHER, is hiding a real divergence rather than
+    // describing a structural one — and an exemption nobody re-reads is how a
+    // closed-set law rots into a list of whatever happens to be emitted.
+    for (const code of MIRROR_EXEMPT) {
+      const sides = [aSet.has(code) ? aLabel : null, bSet.has(code) ? bLabel : null]
+        .filter((s): s is string => s !== null);
+      expect(
+        sides.length,
+        `MIRROR_EXEMPT names ${code}, which ${
+          sides.length === 0
+            ? "NEITHER route emits — the row is dead weight; delete it"
+            : `BOTH routes emit (${sides.join(", ")}) — it is no longer a ` +
+              "single-route arm, so delete the row and let the mirror compare it"
+        }.`,
+      ).toBe(1);
+    }
+
+    const compare = (s: Set<string>) =>
+      [...s].filter((c) => !MIRROR_EXEMPT.includes(c)).sort();
+
+    // ⛔ NON-VACUITY. Exempting the whole vocabulary would satisfy the equality
+    // below with two empty arrays. The floor is hand-typed from the five codes
+    // 142.2-07 minted, which both routes emit and none of which is exempt.
     expect(
-      [...new Set(a.codes)].sort(),
+      compare(aSet).length,
+      "The compared population collapsed — either the scanner went blind or " +
+        "MIRROR_EXEMPT has swallowed the shared vocabulary, and the equality " +
+        "below is then two empty arrays agreeing.",
+    ).toBeGreaterThanOrEqual(5);
+
+    expect(
+      compare(aSet),
       `${aLabel} and ${bLabel} mirror each other guard for guard; their ` +
-        `emitted vocabularies diverged, which means one side was edited alone.`,
-    ).toEqual([...new Set(b.codes)].sort());
+        `emitted vocabularies diverged, which means one side was edited alone. ` +
+        `(Codes named in MIRROR_EXEMPT are excluded — see its docblock before ` +
+        `adding one.)`,
+    ).toEqual(compare(bSet));
   });
 
   it("the two SPLIT routes' emitted vocabulary is the hand-typed split set — no more, no less", () => {
@@ -2013,9 +2099,18 @@ describe("[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeySt
    * the SET, so two sites of one code stay one member. That arm also re-emits
    * `DRAFT_ALREADY_EXISTS` and `VENUE_ALREADY_CONNECTED`, both already members
    * and both through text that was already here.
+   *
+   * 4 → 5 (164.2-04 / criterion 5): `DRAFT_SESSION_COLLISION` joins on the same
+   * terms. The reuse arm's 23505 branch is now a CHOICE between two 409s — it
+   * reads which key the colliding draft actually holds, keeps
+   * `DRAFT_ALREADY_EXISTS` when that is this key, and answers the new code when
+   * it is a different key of the caller's or when the read faulted. So the arm
+   * gains one emitter site and one member, and `DRAFT_ALREADY_EXISTS` stays
+   * because both this arm and the credential arm's fallthrough still emit it.
    */
   const EXPECTED_409_CODES = [
     "DRAFT_ALREADY_EXISTS",
+    "DRAFT_SESSION_COLLISION",
     "KEY_ORPHANED",
     "KEY_REUSE_UNAVAILABLE",
     "VENUE_ALREADY_CONNECTED",
@@ -2039,7 +2134,9 @@ describe("[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeySt
       // assertion below will tell you the new set.
       // 3 → 4 at 162-05 (D-162-3), re-measured under emitterRe("409") on the
       // comment-stripped source after the use-existing-key arm landed.
-    ).toBeGreaterThanOrEqual(4);
+      // 4 → 5 at 164.2-04 (criterion 5), re-measured the same way after the
+      // 23505 branch split into two emitters.
+    ).toBeGreaterThanOrEqual(5);
   });
 
   it("the 409 vocabulary is the hand-typed set — no more, no less", () => {
@@ -2077,5 +2174,180 @@ describe("[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeySt
         "control, for refusals a retry cannot clear. Add each one to the " +
         "roster; ⛔ do not relax this test to match the roster.",
     ).toEqual([]);
+  });
+});
+
+/**
+ * [164.2-04] create-with-key's 429 refusals clear ConnectKeyStep's roster too.
+ *
+ * ── WHY THIS IS NOT ANOTHER `deriveEmittedCodes` DESCRIBE ───────────────────
+ *
+ * The 409 twin above widens the STATUS and keeps the scanner. That does not
+ * work here, and the reason is structural rather than a matter of taste:
+ * `emitterRe` matches `NextResponse.json({ code: "X", error: … }, { … status:
+ * NNN })`, and this route's two 429s are not written that way. They are
+ *
+ *     return rateLimitDenyJson(rl, {
+ *       headers: NO_STORE_HEADERS,
+ *       throttledBody: { code: "RATE_LIMITED", error: "Too many requests" },
+ *       misconfiguredBody: { code: "SEAM_MISCONFIGURED", … },
+ *     });
+ *
+ * — the status lives inside `rateLimitDenyJson` (src/lib/ratelimit.ts), not
+ * beside the code. MEASURED before this describe was written:
+ * `deriveEmittedCodes(stripped(route), "429")` returns `[]`. So a derived twin
+ * here would be the exact vacuity this file's floors exist to catch: an empty
+ * scan reporting "no uncovered codes" forever. The assertions below are
+ * HAND-TYPED against a literal count instead, and the count is positively
+ * controlled.
+ *
+ * ── WHAT IT DEFENDS (164.2-04 / criterion 4b) ───────────────────────────────
+ *
+ * `KEY_RATE_LIMIT`'s copy says the throttle is "a transient, exchange-side
+ * throttle" and its second fix line offers "try a different exchange account".
+ * `userActionLimiter` is a per-USER bucket keyed
+ * `strategies-create-with-key:<uid>`: no exchange is involved, and no other
+ * exchange account can clear it. `route.ts:891-897` already recorded this as
+ * "our outage, blamed on their exchange" and accepted it. `RATE_LIMITED`
+ * already carries the honest sentence ("the cap is ours, not your exchange's")
+ * and was simply not on this route's roster — so this is WIRING, and the roster
+ * row is OWED BY HAND for the same reason the 409 rows are.
+ *
+ * ⛔ `KEY_RATE_LIMIT` STAYS IN THE ROSTER AND IN THE COPY TABLE. It is still
+ * reachable here through `classifyKeyValidationError`, which is a GENUINE venue
+ * throttle and where its exchange copy is true. Removing it would replace one
+ * false sentence with an UNKNOWN.
+ */
+describe("[164.2-04] create-with-key's 429 refusals clear ConnectKeyStep's roster too", () => {
+  const unionSource = stripped(UNION_SOURCE);
+  const union = new Set(deriveUnionMembers(unionSource));
+  const route = ROUTES.find((r) => r.label === "create-with-key")!;
+  const routeSource = stripped(route.route);
+  const roster = new Set(deriveRoster(stripped(route.rosterFile), route.rosterName));
+
+  /** Occurrences of a `code: "X"` literal, on comment-stripped source. */
+  const codeLiteralCount = (source: string, code: string): number =>
+    (source.match(new RegExp(`\\bcode:\\s*"${code}"`, "g")) ?? []).length;
+
+  /**
+   * HAND-TYPED. The vocabulary this route answers 429 with.
+   *
+   * ONE member, and the ONE is the point: before 164.2-04 it was
+   * `KEY_RATE_LIMIT` at both sites.
+   */
+  const EXPECTED_429_CODES = ["RATE_LIMITED"] as const;
+
+  /**
+   * HAND-TYPED, and deliberately NOT `EXPECTED_429_CODES.length`. Two
+   * `userActionLimiter` deny arms — the preselect one (after the reuse arm's
+   * shape guard) and the credential one (after all input validation) — each
+   * with its own `throttledBody`. Sizing this from the array below would make
+   * the floor self-referential, which is the 2026-08-25 verifier finding the
+   * 409 twin above records.
+   */
+  const EXPECTED_429_SITES = 2;
+
+  it("NOT VACUOUS — the literal counter can find what it is looking for", () => {
+    // ⛔ The whole twin rests on `codeLiteralCount`. A counter that matched
+    // NOTHING would satisfy "zero KEY_RATE_LIMIT" forever while the route kept
+    // emitting it, so the counter is calibrated on a hand-built fixture whose
+    // answers are known by construction — never on the subject itself.
+    const FIXTURE =
+      'throttledBody: { code: "RATE_LIMITED", error: "Too many requests" },\n' +
+      'throttledBody: { code:   "RATE_LIMITED", error: "Too many requests" },\n' +
+      '{ code: "KEY_RATE_LIMIT", error: "Too many requests" }\n';
+    expect(
+      codeLiteralCount(FIXTURE, "RATE_LIMITED"),
+      "The counter missed a `code:` literal it was handed directly — including " +
+        "the extra-whitespace spelling. Every assertion below is then satisfied " +
+        "by blindness.",
+    ).toBe(2);
+    expect(
+      codeLiteralCount(FIXTURE, "KEY_RATE_LIMIT"),
+      "The counter cannot see KEY_RATE_LIMIT, so the zero asserted below " +
+        "means nothing.",
+    ).toBe(1);
+    // ⛔ AND `RATE_LIMITED` MUST NOT COUNT `KEY_RATE_LIMIT`'s OCCURRENCES. The
+    // shorter name is a suffix of the longer one, so a counter without the
+    // `code:` prefix anchor would report 3 here and the "exactly two" assertion
+    // below would pass on a route that never moved off the exchange code.
+    expect(
+      codeLiteralCount('{ code: "KEY_RATE_LIMIT", error: "x" }', "RATE_LIMITED"),
+      "RATE_LIMITED matched inside KEY_RATE_LIMIT. The suffix trap is live and " +
+        "the site count below is measuring the wrong thing.",
+    ).toBe(0);
+
+    // The route source itself parsed — a stripped file that came back empty
+    // would count zero of everything.
+    expect(
+      routeSource.length,
+      "create-with-key's comment-stripped source came back short.",
+    ).toBeGreaterThan(10_000);
+
+    // ⚠️ AND THE DERIVED SCANNER IS RECORDED AS BLIND HERE, measured rather
+    // than assumed, so nobody later "simplifies" this describe into a
+    // `deriveEmittedCodes(…, "429")` that silently asserts nothing.
+    expect(
+      deriveEmittedCodes(routeSource, "429"),
+      "emitterRe now DOES see this route's 429s. That is an improvement — " +
+        "rewrite this describe onto the derivation, do not delete it.",
+    ).toEqual([]);
+    // The positive half of that pair: the same scanner is alive at 409.
+    expect(
+      deriveEmittedCodes(routeSource, "409").length,
+      "emitterRe derived nothing at 409 either, so the blindness asserted " +
+        "above is the scanner being broken rather than the 429 body shape.",
+    ).toBeGreaterThanOrEqual(5);
+  });
+
+  it("both limiter deny arms answer RATE_LIMITED and neither answers KEY_RATE_LIMIT", () => {
+    expect(
+      codeLiteralCount(routeSource, "RATE_LIMITED"),
+      "create-with-key must put `code: \"RATE_LIMITED\"` on the wire at BOTH " +
+        `userActionLimiter deny arms (${EXPECTED_429_SITES} sites: the ` +
+        "preselect one and the credential one). A count of 1 means only one " +
+        "arm was moved and the other still blames the user's exchange for our " +
+        "own per-user cap.",
+    ).toBe(EXPECTED_429_SITES);
+    expect(
+      codeLiteralCount(routeSource, "KEY_RATE_LIMIT"),
+      "create-with-key emits `KEY_RATE_LIMIT` from its own source again. That " +
+        "code's copy says the throttle is exchange-side and offers 'try a " +
+        "different exchange account' — neither is true of `userActionLimiter`, " +
+        "a per-user bucket no exchange account can clear. It is reachable on " +
+        "this route ONLY through classifyKeyValidationError, which never " +
+        "appears as a literal here.",
+    ).toBe(0);
+  });
+
+  it("every 429 code is a union member AND admitted by ConnectKeyStep's roster", () => {
+    for (const code of EXPECTED_429_CODES) {
+      expect(
+        union.has(code),
+        `${code} has no WizardErrorCode member, so formatKeyError falls ` +
+          "through to UNKNOWN.",
+      ).toBe(true);
+      expect(
+        roster.has(code),
+        `${route.rosterName} does not admit ${code}. 429 is invisible to the ` +
+          "coverage law (statusRe '400') AND to the 409 twin above, so this " +
+          "assertion is the ONLY guard on this roster row. ⚠️ Its absence " +
+          "would not change what renders TODAY — measured: " +
+          "SEAM_CODE_TO_WIZARD_CODE maps RATE_LIMITED to itself and " +
+          "recogniseCreateWithKeyCode translates before it consults the " +
+          "roster — so this is a coupling guard, not a copy guard: it keeps " +
+          "the route's own minted vocabulary written down rather than " +
+          "borrowed from the shared wire table, which is what makes a future " +
+          "edit to that table a caught change instead of a rendered one. " +
+          "⛔ Add the roster row; do not relax this test.",
+      ).toBe(true);
+    }
+    // The roster parsed at all — a roster that came back empty would fail the
+    // membership checks above for the right reason but would also hide a
+    // wholesale parse failure behind one confusing name.
+    expect(
+      roster.size,
+      "KNOWN_CREATE_WITH_KEY_CODES parsed short or empty.",
+    ).toBeGreaterThanOrEqual(DEFAULT_ROSTER_FLOOR);
   });
 });
