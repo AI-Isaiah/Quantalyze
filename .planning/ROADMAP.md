@@ -1305,6 +1305,35 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.6 to break down)
 
+### Phase 164.8: TESTPREPROD — TEST becomes a real pre-prod: every migration is proven on a real Postgres before it reaches a customer (INSERTED)
+
+**Goal:** The shared TEST project stops being a stale bystander and becomes the stage every migration crosses BEFORE production. Two halves: (1) bring TEST current — the migration backlog it has accumulated while nothing applied to it; (2) apply on merge to TEST FIRST, then PROD, so a migration that cannot apply is caught against a real Postgres instead of against customers.
+
+⚖️ **FOUNDER DECISION 2026-09-06**, in the founder's own framing: *"Make TEST a real pre-prod — bring it current, then apply on merge before PROD. This is what you'd expect, and it's the only thing that fixes e2e running against a stale schema."*
+
+⛔ **The defect this closes is that NOTHING applies migrations to TEST today.** `sql-tests` has no apply step and the migrate workflow is PROD-only, so every pre-apply gate SKIP is PERMANENT and deployed function bodies are tested nowhere. Read TODOS `[NOTHING-APPLIES-MIGRATIONS-TO-TEST]` and `[164.2-TEST-APPLY-PROVENANCE]` before planning — the second is the concrete, dated instance: Phase 164.2's PR went RED on `sql-tests` for exactly two named arms purely because its provenance migration had not reached TEST, and was resolved by a HAND apply through the Management API. That hand apply is the thing this phase automates.
+
+⚠️ **Constraints that are not negotiable and are already measured:**
+
+| Constraint | Consequence for this phase |
+|---|---|
+| TEST is **SHARED** with other people's CI | A write there is not private and a global assertion there is not reliable (`FANOUT-GLOBAL-01`). Per-run isolation, not global truncation. |
+| This checkout's Supabase CLI is linked to **PRODUCTION** | `supabase db push`, `db reset --linked`, `--project-ref` and `--db-url` from this directory all target PROD. The link is deliberate (the pre-flight gates diff against PROD on purpose) — do NOT "fix" it by unlinking. |
+| `current_database()` is `postgres` on BOTH projects | It proves nothing. Verify via the hand-set `shobj_description(oid, 'pg_database')` marker before ANY write; a NULL marker means STOP, not proceed. |
+| Pre-flight migration gates run against PROD, not TEST | A TEST-first pipeline does NOT de-risk them — measured: a PROD-only `INTO STRICT` would have aborted the deploy while TEST had none. |
+
+**Downstream consequence, NOT a goal of this phase:** per-run isolation on TEST is the precondition for raising Playwright workers above 1 in the `e2e-seeded` job (`playwright.config.ts`, the `workers: process.env.CI ? 1 : undefined` line). Today the MA-8 batch shares ONE test database across all specs, which is why serialisation is load-bearing rather than sloppy. ⛔ Do NOT plan parallelism as an objective here: measured on main run `34059839696`, `e2e-seeded` sits behind `sql-mutation` (503s), so parallelism buys ~1-2 min of wall clock and is worth nothing on its own. It is a thing that becomes SAFE, not a thing to chase.
+
+**Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries `[NOTHING-APPLIES-MIGRATIONS-TO-TEST]`, `[164.2-TEST-APPLY-PROVENANCE]`, `FANOUT-GLOBAL-01` — read each before planning, do not re-derive.
+
+**Depends on:** Phase 164.6 (ordering only — no code dependency). ⚠️ Queued LAST in the 164.x series by founder decision 2026-09-06, in full knowledge of the counter-argument: Phase 164.7 and Phase 164.5 each write forward migrations and will therefore each hit the hand-apply path this phase automates. That cost is accepted, not overlooked.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.8 to break down)
+
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
 **Goal:** No metric persisted to `metrics_json` or rendered in a chart is the output of quantstats'
@@ -1406,14 +1435,16 @@ Plans:
 | 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
 | 164. SHARE revocable links | 7/7 | Complete | v0.76.0.0 |
 | 164.1 PROD-OBSERVABILITY (one prober: PYAPI-06, CRON-OBS-01, CRON-DRIFT-01, MT5-WEDGE-OBS-01) | 0/? | Queued NEXT (re-partitioned 2026-09-05 from HARDEN-GUARDS) | - |
-| 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC both bucketers, HONEST-08-RESIDUAL, 161-ERRPREFIX) | 0/? | Queued 2nd | - |
+| 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC both bucketers, HONEST-08-RESIDUAL, 161-ERRPREFIX) | 10/10 | Complete — PR #749 merged `05994f1d`, main CI green, PROD verified by effect | v0.77.16.0 |
 | 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8 routed on, H-0001 routed on) | 9/10 | Complete — plan 07 (VAC-07) DEFERRED to 164.5 by founder decision 2026-08-29, stays unchecked | v0.77.0.0 |
 | 164.3.1 SOUND-PRIMITIVES (four cycling primitives) | 13/13 | Complete | v0.77.1.x |
 | 164.4 REDUNDER-BACKFILL (39 idiom files annotated; 5 pg_cron-blocked files handed to 164.4.1) | 12/12 | Complete | v0.77.12.0 |
 | 164.4.1 PGCRON-LANE (pg_cron on the lane; 5 deferred gates annotated; lane-blocked 0; ARMS_FLOOR 361) | 6/6 | Complete — PR #744 merged `e01cc2e6`, ubuntu-measured | v0.77.13.0 |
+| 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 0/? | Queued 2nd (row added 2026-09-06; the phase itself was created 2026-09-05 and had no summary row) | - |
 | 164.5 BASELINE-SNAPSHOT (baseline.sql load-bearing, DRIFT-04 drop, DRIFT-05, VAC08-LEDGER-32, VAC-07) | 0/? | Queued 3rd (created 2026-09-05) | - |
 | 164.6 GATE-HYGIENE (OPS-08 residue, composite-stamp twin, PROC-02/03, H-0001) | 0/? | Queued 4th (created 2026-09-05) | - |
-| 166. QSTATS-TRUTH | 0/? | Queued 5th (re-ordered ahead of 165, 2026-09-05) | - |
+| 164.8 TESTPREPROD (TEST becomes a real pre-prod: bring it current, apply on merge to TEST before PROD) | 0/? | Queued 5th — LAST in the 164.x series by founder decision 2026-09-06 (created 2026-09-06) | - |
+| 166. QSTATS-TRUTH | 0/? | Queued 6th (re-ordered ahead of 165, 2026-09-05) | - |
 | 165. DEPS dependabot campaign | 0/? | Queued LAST (after 166 — dependency churn lands last) | - |
 
 ### Requirement Coverage (v1.20)
