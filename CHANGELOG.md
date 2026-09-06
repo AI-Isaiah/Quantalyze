@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.77.16.1] - 2026-09-06
+
+### Planning: Phase 164.8 inserted; CI-DOCSPATH-01 carried into 164.6
+
+Roadmap and backlog only — no application code, no SQL, no migrations, no CI behaviour change.
+
+**Phase 164.8 TESTPREPROD** inserted, queued LAST in the 164.x series (after 164.6) by founder
+decision: bring the shared TEST project current, then apply migrations to TEST on merge BEFORE
+PROD, so every migration is proven on a real Postgres before it reaches a customer. Closes the
+class where `sql-tests` goes red on a migration PR purely because the migration never reached
+TEST — the dated instance being PR #749, resolved by a hand apply through the Management API.
+Playwright worker parallelism is recorded there as a downstream consequence of per-run
+isolation, explicitly not a goal.
+
+**CI-DOCSPATH-01** carried into Phase 164.6 GATE-HYGIENE as item (12) / criterion 9, with a
+`TODOS.md` entry. Measured at PR #750's own merge gate: a four-file `.planning/`-only diff ran
+21 jobs / ~3,001 job-seconds (~50 min), excluding `e2e-seeded` and `sql-tests` which were still
+running at census time. The mutex cost matters more than the minutes — both of those take the
+shared-TEST-DB advisory lock, so a roadmap edit delays real code PRs on a database shared with
+other people's CI. Booked in 164.6 rather than TODOS alone because a job-skipping path filter
+has the shape of a gate silently not running.
+
+Also corrected: Phase 164.7 had no summary-table row, 164.2 is marked Complete at 10/10 plans
+(measured, not assumed), and STATE.md's hand-set `progress:` block was restored after
+`state.add-roadmap-evolution` recomputed it from local disk as an undocumented side effect.
+
 ## [0.77.16.0] - 2026-09-06
 
 ### Phase 164.2 CURATED-COPY — every failure sentence a user reads is the true, specific one
