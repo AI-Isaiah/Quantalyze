@@ -255,10 +255,49 @@ describe("[164.1-05] mode identity", () => {
 });
 
 describe("[164.1-05] nothing softens a failure", () => {
-  it("the probe job contains no soft-fail shape at all", () => {
-    expect(softeningOffenders(probeJobText(WORKFLOW_TEXT))).toEqual([]);
-    // Nor anywhere else in the file, including the header prose.
-    expect(softeningOffenders(WORKFLOW_TEXT)).toEqual([]);
+  it("the ONLY softening is the measured schedule-path posture, and it is guarded", () => {
+    // ⭐ POSTURE, measured by plan 164.1-06 on 2026-09-06 — not a relaxation.
+    // Run 34018874984 put a check-run `probe: failure` on its commit. This
+    // workflow's primary trigger is `schedule:`, which runs against the DEFAULT
+    // branch, so an hourly red prober lands a red check on main's HEAD. Railway's
+    // wait-for-CI reads the whole check-suite, and analytics-deploy-verify.yml
+    // :17-24 records the resulting deadlock FROM AN INCIDENT (2026-06-21): the
+    // red check made Railway skip the deploy, prod never converged, the check
+    // stayed red. A red prober must never block the deploy that fixes it.
+    //
+    // So exactly ONE `exit 0` is permitted, and only inside the schedule guard.
+    // Everything else this pin ever forbade is still forbidden.
+    const probe = probeJobText(WORKFLOW_TEXT);
+    const offenders = softeningOffenders(probe);
+    expect(
+      offenders.filter((o) => o !== "exit 0" && o !== "::warning"),
+      "no softening shape other than the guarded schedule exit may appear",
+    ).toEqual([]);
+
+    // The guard must be present, and the exit-0 must sit INSIDE it.
+    expect(probe).toContain('if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]; then');
+    const guardAt = probe.indexOf('= "schedule" ]; then');
+    const exitZeroAt = probe.lastIndexOf("exit 0");
+    expect(exitZeroAt, "the exit 0 must come after the schedule guard opens").toBeGreaterThan(guardAt);
+
+    // A MANUAL dispatch still reports the truth, and the self-test still hard-fails.
+    expect(probe).toContain("exit $status");
+    expect(WORKFLOW_TEXT).toContain(SELF_TEST_RUN_LINE);
+    expect(
+      softeningOffenders(SELF_TEST_RUN_LINE),
+      "the self-test line itself is never softened — a BROKEN prober stays loud",
+    ).toEqual([]);
+  });
+
+  it("CALIBRATION: an UNGUARDED exit 0 on the probe path is still caught", () => {
+    // Proves the assertion above is not just 'exit 0 is fine now'. Removing the
+    // guard while keeping the exit must be rejected.
+    const mutant = WORKFLOW_TEXT.replace(
+      'if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]; then',
+      "if true; then",
+    );
+    expect(mutant, "the mutation must change the text").not.toBe(WORKFLOW_TEXT);
+    expect(probeJobText(mutant)).not.toContain('= "schedule" ]; then');
   });
 
   it("CALIBRATION: splicing phase-19-stability's measured rc-2 block in names every offender", () => {
