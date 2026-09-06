@@ -106,6 +106,22 @@ _SCOPED_RE = re.compile(
 #     ⚠️ Recorded one wave late. The map belongs in the SAME commit as the SQL
 #     edit — plan 01 shipped the file without it, and the pin did exactly what it
 #     is for by going red until someone looked.
+#   * Phase 161.1 also added supabase/tests/test_sync_status_marked_refresh_
+#     protected.sql, with SIX scoped driver UPDATEs, and that key was MISSED
+#     entirely — the same commit that recorded the staleness file. Phase 164.2
+#     plan 06 then took it to 8 (the two new provenance CASE arms, ARM M2/M3) and
+#     plan 07 added supabase/tests/test_sync_status_curated_sentence_survives.sql
+#     with THREE, so by 2026-09-06 the pin was two generations stale
+#                                                  -> (absent) -> 8, (absent) -> 3
+#     ⚠️ MEASURED at plan 08, not inferred: a plain `grep -c 'UPDATE
+#     strategy_analytics'` over each file returns 8 and 3, matching what the
+#     scanner extracts — so the counts moved because the SQL moved, not because
+#     _UPDATE_RE started over- or under-matching. D-05 itself
+#     (test_every_strategy_analytics_update_in_sql_tests_is_seed_scoped) was
+#     GREEN throughout: every one of these eleven UPDATEs is already bound to a
+#     block-local seeded strategy_id. It was only this anti-vacuity pin that was
+#     red, and it stayed red across three plans — which is the cost of recording
+#     it late, stated here rather than quietly corrected.
 #
 # ⚠️ A count of ZERO is expressed by ABSENCE, not by an explicit `: 0` entry.
 # `actual` below is built with a truthiness filter, so a file with no matches
@@ -118,6 +134,8 @@ _EXPECTED_MATCH_COUNTS: dict[str, int] = {
     "test_ledger_refresh_staleness.sql": 2,
     "test_metrics_by_basis_write.sql": 4,
     "test_strategy_analytics_stuck_computing_reaper.sql": 3,
+    "test_sync_status_curated_sentence_survives.sql": 3,
+    "test_sync_status_marked_refresh_protected.sql": 8,
     "test_wizard_composite_members.sql": 2,
 }
 
