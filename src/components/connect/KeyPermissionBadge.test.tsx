@@ -237,18 +237,23 @@ describe("KeyPermissionBadge", () => {
         mockRefusal(code, status, prose);
         render(<KeyPermissionBadge apiKeyId="key-1" />);
 
+        // ⚠️ THE WAIT IS ON THIS HALF'S OWN SUBJECT, NOT ON THE RENDER.
+        // Waiting on the prose instead was measured (164.2-01, neuter 1) to
+        // make all six of these rows go RED for a RENDER reason — a timeout,
+        // not a log finding — which would have made the log half unable to
+        // distinguish "the code stopped reaching the console" from "the prose
+        // changed". Each half must fail for its own cause.
         await waitFor(() =>
-          expect(screen.getByText(prose)).toBeInTheDocument(),
+          expect(
+            consoleSpy.mock.calls.find((call) =>
+              call.some((arg) => arg === code),
+            ),
+            `${code} never reached console.error as a standalone argument, ` +
+              "so the greppability the prefix existed for was traded away " +
+              "rather than relocated. That fails the ruling as surely as " +
+              "leaving the prefix in the render.",
+          ).toBeDefined(),
         );
-        expect(
-          consoleSpy.mock.calls.find((call) =>
-            call.some((arg) => arg === code),
-          ),
-          `${code} never reached console.error as a standalone argument, so ` +
-            "the greppability the prefix existed for was traded away rather " +
-            "than relocated. That fails the ruling as surely as leaving the " +
-            "prefix in the render.",
-        ).toBeDefined();
       },
     );
 
@@ -259,14 +264,16 @@ describe("KeyPermissionBadge", () => {
         mockRefusal(code, status, prose);
         render(<KeyPermissionBadge apiKeyId="key-1" />);
 
+        // Waits on the BREADCRUMB, for the same reason the log half above
+        // waits on the console: a half that waits on the render cannot fail
+        // for its own cause.
         await waitFor(() =>
-          expect(screen.getByText(prose)).toBeInTheDocument(),
+          expect(
+            vi.mocked(addSentryBreadcrumb),
+            `No breadcrumb carried ${code}. The breadcrumb is the half of ` +
+              "the split that survives a user who never opens the console.",
+          ).toHaveBeenCalledWith(expect.objectContaining({ message: code })),
         );
-        expect(
-          vi.mocked(addSentryBreadcrumb),
-          `No breadcrumb carried ${code}. The breadcrumb is the half of the ` +
-            "split that survives a user who never opens the console.",
-        ).toHaveBeenCalledWith(expect.objectContaining({ message: code }));
       },
     );
 
@@ -277,7 +284,9 @@ describe("KeyPermissionBadge", () => {
       mockRefusal(code, status, prose);
       render(<KeyPermissionBadge apiKeyId="key-1" />);
 
-      await waitFor(() => expect(screen.getByText(prose)).toBeInTheDocument());
+      await waitFor(() =>
+        expect(vi.mocked(addSentryBreadcrumb)).toHaveBeenCalled(),
+      );
       const call = vi.mocked(addSentryBreadcrumb).mock.calls[0]?.[0];
       expect(call?.message).toBe(code);
       expect(call?.message).not.toBe(prose);
