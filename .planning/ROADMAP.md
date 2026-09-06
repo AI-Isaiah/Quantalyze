@@ -1163,6 +1163,94 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.2 to break down)
 
+### Phase 164.2.1: SESSIONID-FENCE — the stale wizardSessionId root cause: a preselect for key B must never inherit an abandoned draft's idempotency token from key A (INSERTED)
+
+**Goal:** Close the FUNCTIONAL dead end that Phase 162 shipped honest copy about but did not
+remove: an abandoned wizard draft over key A lends its `wizardSessionId` to a preselect for
+key B, and the resulting 23505 can never be cleared by re-pressing Continue.
+
+⛔ **WHY THIS PHASE EXISTS AT ALL — a dropped criterion resting on a false claim.** The
+2026-09-05 re-partition DROPPED this from Phase 164.2 (old criterion 6) with the instruction
+"already satisfied, verify by reading the preselect path rather than re-planning it". That was
+never verified. MEASURED FALSE 2026-09-06: the preselect path that would satisfy it does not
+exist.
+
+**THE MECHANISM, measured — an asymmetry inside ONE function.**
+`deriveWizardResumeOverrides` (`src/lib/wizard/localStorage.ts:493`) takes
+`(loaded, source, initialDraftId)` and has ZERO preselect awareness — grepping that file for
+`preselect`, `apiKeyId` or `api_key_id` returns nothing, and its only call site
+(`WizardClient.tsx:443`) passes no key. Inside it:
+
+- the **session-id** restore is gated on SOURCE ONLY, with no pointer check (`:538-539`)
+- the **API-branch step** restore IS pointer-gated — `initialDraftId && loaded.strategyId === initialDraftId` (`:563`)
+
+So on a preselect for key B with an abandoned key-A draft still in localStorage, both sides are
+`source: "api"`, the source gate passes, and key A's idempotency token is handed to key B's
+submission. The STEP is correctly not restored (the user gets the resume banner); the TOKEN
+silently carries across. `clearWizardState` fires only on submit / delete-draft / start-fresh,
+so an ABANDONED draft leaves the payload intact — the file says so itself at `:519-522`.
+
+`create-with-key` then takes 23505 on `strategies_user_wizard_session_source_uniq`, falls
+through the constraint dispatch at `route.ts:1300` to the `DRAFT_ALREADY_EXISTS` 409 — "A
+wizard session with this key is already in progress" — which is FALSE, the colliding row
+belongs to key A. `resolveStrategiesForKey` looks up by `api_key_id` (key B) and never finds
+it. The stored id is stable, so re-pressing Continue can never win.
+
+⭐ **The file predicted this.** `localStorage.ts:524-530`: "THIS IS TRIGGER REMOVAL, NOT THE
+GUARANTEE. The guarantee is the partial unique index … This line removes the one known trigger;
+if a second one is ever found, the DB still holds." This IS that second trigger, and the index
+holding is exactly why it presents as a permanent 23505 rather than as corruption.
+
+**DELIVERABLE — remove the trigger, leave the index as the guarantee** (the file's own
+doctrine, applied literally): persist the draft's `api_key_id` in the localStorage payload,
+give `deriveWizardResumeOverrides` a fourth parameter for the incoming preselect key, and
+DECLINE the session-id restore when they differ. Declining is already documented safe at
+`:534-536` — `WizardClient` seeds from `newWizardSessionId()` on mount, so key B keeps its own
+fresh token, which is what a distinct submission should carry anyway.
+
+⚠️ A server-side re-resolve on 23505 is the SECOND choice, not the first: it means the server
+rewriting a client-owned idempotency token, and it fixes the symptom one route at a time.
+Record the reasoning if it is chosen anyway.
+
+⛔ NOT in scope: the `DRAFT_ALREADY_EXISTS` COPY split — that is Phase 164.2's criterion 5 and
+stays there. This phase removes the dead end; 164.2 makes the sentence describing it true. They
+are deliberately separable and each ships alone.
+
+**Success Criteria**:
+
+1. A preselect for key B does NOT inherit an abandoned key-A draft's `wizardSessionId` —
+   proven by a test that seeds localStorage with key A's payload, mounts the wizard with a key
+   B preselect, and asserts the emitted session id is neither A's nor equal across the two.
+   ⛔ INSPECTION IS NOT EVIDENCE: this exact item was declared "already satisfied" once on a
+   read, and the read was wrong.
+2. The test is SHOWN to fail with the fix neutered — remove the new pointer gate, observe RED,
+   restore byte-identically (`shasum -a 256` before == after, never `git checkout --`). A test
+   that passes with the gate removed has not closed this.
+3. The SOURCE gate at `localStorage.ts:538` is NOT narrowed or removed in the process — it
+   closes a DIFFERENT trigger (the cross-source api→csv carry, Phase 140.4 / SEAMRIM-03) and
+   its own comment forbids reading it as permission to narrow the index. A change that fixes
+   the preselect case by loosening the source case trades one dead end for another.
+4. The partial unique index `strategies_user_wizard_session_source_uniq` (migration
+   `20260728120000`) is UNTOUCHED. It is the guarantee, not the bug; the fix removes a trigger
+   that reaches it, and a phase that "fixes" this by widening the index has removed the
+   guarantee instead.
+5. The existing `localStorage.test.ts` pins for the source gate still pass unmodified — if any
+   must change, the change is an INVERSION with its history stated, never a deletion.
+
+**Requirements**: TBD (no v1.20 requirement IDs) — this phase carries NO TODOS entry, because
+the item was never in TODOS: it lived as Phase 164.2's old criterion 6 and was dropped from the
+ROADMAP on 2026-09-05. ⚠️ Read `.planning/164-FAMILY-REPARTITION.md` and Phase 164.2's
+RESEARCH.md (Open Question 2) before planning — RESEARCH is what refuted the drop, and its
+verdict is the reason this phase exists.
+**Depends on:** Phase 164.2 (ordering only — 164.2 owns the copy half of the same bug and
+should land first so the sentence and the dead end are fixed in a legible order; no code
+dependency)
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.2.1 to break down)
+
 ### Phase 164.5: BASELINE-SNAPSHOT — the committed PROD schema baseline becomes the local stack's source and a gate, and the two production objects no migration owns are dispositioned under review (INSERTED)
 
 **Goal:** `supabase/schema/baseline.sql` (committed 2026-08-29, WR-04) becomes load-bearing instead of decorative, in this order: (1) repoint `scripts/local-stack/run.sh:50` at `supabase/schema/baseline.sql` and drop the `.gitignore:138` exclusion (`REPLAY-SPIKE.md:135` records that the current path makes `run.sh up` exit FATAL); (2) a baseline STALENESS gate — sha256 of the file against the hash recorded in `BASELINE.md`, failing loud on mismatch (WINDOWS 29: "committed with NO staleness gate AND NO consumer"); (3) **DRIFT-04** — `create_allocator_connected_strategy` exists in PROD under NO migration, is `SECURITY DEFINER` with `GRANT ALL … TO authenticated`, and writes encrypted credential material. FOUNDER DECISION 2026-08-29: DROP it — `DROP FUNCTION public.create_allocator_connected_strategy(<exact 11 arg types>)` with **NO `IF EXISTS` and NO `CASCADE`**, pre-flight asserting (a) live body == `baseline.sql`, (b) zero dependents, (c) `pg_stat_statements` read for call evidence and ABORT when it is unavailable — never infer zero calls from an absent measurement. Three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) before any apply; the drop is production DDL on a credential surface. (4) **DRIFT-05** as TWO gates, not conflated: (a) hermetic name-set diff, both directions, `baseline.sql` vs `supabase/schema/functions/*.sql`, a third assertion inside `dump-sql-functions.ts --check`; (b) baseline-vs-LIVE staleness on the credentialed job VAC-04 already rides. (5) **VAC08-LEDGER-32** — 32 repo migrations have no TEST ledger row; disposition each by name. (6) **VAC-07** — Phase 159's two blocked items as ONE spec on the pg-lane: two concurrent `csv-finalize` POSTs on one never-classified `wizard_session_id`; this is also where the advisory-lock concurrency test that left 164.1 lives. ⚠️ VAC-07 stays `Pending` in REQUIREMENTS until its spec is observed RED with the fence removed and GREEN with it — `[VAC-07-DEFER]` forbids scoring it earlier. (7) **CRON-DRIFT-01-REPAIR** — the SECOND production object the repo does not own. Migration `20260408215026_schedule_match_cron_hourly.sql:60-76` schedules `match_engine_cron` on `current_setting('app.analytics_service_key')`; setting that placeholder GUC needs superuser and returns **42501** on Supabase, so the committed design could never have run here. PROD jobid 1 was hand-re-scheduled 2026-09-01 onto a `DO` block reading `vault.decrypted_secrets`, and that command text exists NOWHERE in the repo — `grep -rn decrypted_secrets supabase/ scripts/ src/` returns ZERO hits; only `TODOS.md:1743` records it, in prose. A rebuild from migrations therefore reproduces the unrunnable job. This is DRIFT-04's class, not 164.2's (it is infrastructure config, not a sentence a user reads) and not 164.1's (164.1 DETECTS the drift; repairing drift it did not create would cost it its independence). Write ONE forward migration re-scheduling `match_engine_cron` to the achievable Vault-backed command, taken from the manifest Phase 164.1 commits and measured against live PROD, so 164.1's cron-drift arm reads zero. ⛔ Production DDL on a credential-bearing cron row: three reviewers before any apply, and the pre-flight must assert the live `cron.job.command` for jobid 1 matches the manifest before replacing it — ABORT on mismatch rather than overwrite an unknown command, the same never-infer-from-an-absent-measurement rule DRIFT-04 carries. ⚠️ PROD is currently CORRECT (verified 2026-09-01, `net._http_response` id 3485 returned 200); this closes a REPRODUCIBILITY gap, not an outage. Substrate: the pg-lane with pg_cron (164.4.1); nothing here touches shared TEST or PROD except the reviewed DRIFT-04 and CRON-DRIFT-01-REPAIR migrations.

@@ -6,16 +6,16 @@ current_phase: 164.1
 current_phase_name: PROD-OBSERVABILITY
 status: in_progress
 stopped_at: Completed 164.1-05-PLAN.md
-last_updated: "2026-09-05T23:44:44.501Z"
+last_updated: "2026-09-06T08:33:04.047Z"
 last_activity: 2026-09-05
 last_activity_desc: 164.3.1/164.4/164.4.1 records restored and closed; 164.1 discuss+research+validation landed; planning blocked on founder secrets
-state_head: 71bff33bc7fcc949ff5576acf23ee83b455d9b11
+state_head: 03ae5fa059f4bbc1dd16d7076486b7c1adf4b8a9
 progress:
-  total_phases: 19
-  completed_phases: 8
-  total_plans: 107
-  completed_plans: 100
-  percent: 42
+  total_phases: 20
+  completed_phases: 4
+  total_plans: 70
+  completed_plans: 66
+  percent: 20
 ---
 
 # Project State — Quantalyze
@@ -857,6 +857,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.7 inserted after Phase 164: APPSETTINGS — app.* GUCs are unsettable on Supabase (ALTER DATABASE and ALTER ROLE both 42501, measured on PROD 2026-09-05); 12 read sites across 4 settings; blocks 161.1 activation. Founder rejected the in-cron-command workaround in favour of the proper fix. MUST precede 164.5. (URGENT)
 - Phase 164.7 edited: carried in VAC04-ARMS-OBSERVE (observation half of [VAC04-ARMS-UNRUN]) — goal paragraph, success criterion 7, requirements line; [VAC-04-ROLE] deliberately excluded
 - Phase 164.6 edited: carried in MYPY-MAINPY-01 from 164.1-02 deferred-items — goal item (9), success criterion 6, requirements entry; analytics-service/tests/ policy question deliberately excluded
+- Phase 164.2.1 inserted after Phase 164.2: SESSIONID-FENCE — stale wizardSessionId root cause; the 2026-09-05 re-partition dropped it from 164.2 as already satisfied, measured FALSE 2026-09-06 (URGENT)
 
 ### Decisions
 
