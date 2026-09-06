@@ -115,6 +115,44 @@ def _unrelated_check_violation() -> APIError:
     )
 
 
+def _marker_schema_cache_miss() -> APIError:
+    """PostgREST while its cache predates migration ``20260906120000``.
+
+    164.2-REVIEW WR-02, the deploy window T-164.2-17 names: the worker deploys
+    before the DDL reaches PROD, PostgREST answers this and WRITES NOTHING, and
+    the payload it drops is the one recording a failure. PostgREST names exactly
+    ONE unknown column per response, which is what makes the column test in
+    ``_refuses_a_marker`` a sound discriminator rather than a guess.
+    """
+    return APIError(
+        {
+            "code": "PGRST204",
+            "message": (
+                "Could not find the 'computation_error_source' column of "
+                "'strategy_analytics' in the schema cache"
+            ),
+        }
+    )
+
+
+def _stamp_schema_cache_miss() -> APIError:
+    """The SAME code naming a DIFFERENT column — ``computing_started_at``.
+
+    This one belongs to ``analytics_runner._mark_unrecoverable``'s own D-02/R2
+    arm and must reach it untouched. It is the reason the WR-02 arm keys on the
+    column name and not on the code.
+    """
+    return APIError(
+        {
+            "code": "PGRST204",
+            "message": (
+                "Could not find the 'computing_started_at' column of "
+                "'strategy_analytics' in the schema cache"
+            ),
+        }
+    )
+
+
 def _serialization_failure() -> APIError:
     """A DIFFERENT APIError — the fallback must not swallow this one."""
     return APIError({"code": "40001", "message": "preempted by watchdog reclaim"})
@@ -123,18 +161,33 @@ def _serialization_failure() -> APIError:
 class _Harness(NamedTuple):
     sb: MagicMock
     table: MagicMock
-    inside_unrecoverable: list[bool]
+    inside_target: list[bool]
     observed: list[BaseException]
     sent: list[dict[str, Any]]
+    target: str
+    series: list[dict[str, Any]]
 
 
-def _build_harness(upsert_error: Exception | None) -> _Harness:
+def _build_harness(
+    upsert_error: Exception | None,
+    *,
+    target: str = "_mark_unrecoverable",
+    series: list[dict[str, Any]] | None = None,
+) -> _Harness:
     """A supabase mock that refuses MARKER-BEARING payloads the way the CHECK does.
 
-    ``upsert_error`` is raised only for writes issued from inside
-    ``_mark_unrecoverable`` whose payload names a provenance marker. A payload
-    without the markers succeeds — which is precisely why the fallback cannot
-    pass by re-sending an identical payload.
+    ``upsert_error`` is raised only for writes issued from inside ``target``
+    whose payload names a provenance marker. A payload without the markers
+    succeeds — which is precisely why the fallback cannot pass by re-sending an
+    identical payload.
+
+    ``target`` and ``series`` exist for 164.2-REVIEW WR-02: the deploy-window
+    degrade must be proven at a writer OTHER than P10, because P10 is the ONE
+    site that already had a hand-written ``PGRST204`` arm and a test driving
+    only P10 could not tell the helper's arm from that one. Passing
+    ``target="_mark_failed"`` with a one-row series drives the runner's
+    insufficient-history exit instead, which has no hand-written arm of any
+    kind — it is one of the nine sites the review found uncovered.
     """
     sb = MagicMock()
     table = MagicMock()
@@ -151,7 +204,7 @@ def _build_harness(upsert_error: Exception | None) -> _Harness:
     select_chain.eq.return_value = eq_chain
     table.select.return_value = select_chain
 
-    inside_unrecoverable: list[bool] = []
+    inside_target: list[bool] = []
     sent: list[dict[str, Any]] = []
 
     def _upsert(payload: dict[str, Any], **_kwargs: Any) -> MagicMock:
@@ -162,14 +215,16 @@ def _build_harness(upsert_error: Exception | None) -> _Harness:
         carries_marker = (
             PROVENANCE_SOURCE_KEY in payload or PROVENANCE_JOB_ID_KEY in payload
         )
-        if upsert_error is not None and inside_unrecoverable and carries_marker:
+        if upsert_error is not None and inside_target and carries_marker:
             chain.execute.side_effect = upsert_error
         else:
             chain.execute.return_value = MagicMock(data=[payload])
         return chain
 
     table.upsert.side_effect = _upsert
-    return _Harness(sb, table, inside_unrecoverable, [], sent)
+    return _Harness(
+        sb, table, inside_target, [], sent, target, _ROWS if series is None else series
+    )
 
 
 def _db_execute_router(harness: _Harness) -> Any:
@@ -178,16 +233,16 @@ def _db_execute_router(harness: _Harness) -> Any:
     async def _side_effect(fn: Any) -> Any:
         name = getattr(fn, "__name__", "")
         if name == "_load_series":
-            return _ROWS
-        if name == "_mark_unrecoverable":
-            harness.inside_unrecoverable.append(True)
+            return harness.series
+        if name == harness.target:
+            harness.inside_target.append(True)
             try:
                 return fn()
             except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
                 harness.observed.append(exc)
                 raise
             finally:
-                harness.inside_unrecoverable.pop()
+                harness.inside_target.pop()
         return fn()
 
     return _side_effect
@@ -342,6 +397,83 @@ def test_helper_reraises_a_23514_naming_a_different_constraint(
     )
 
 
+def test_helper_drops_markers_on_a_pgrst204_naming_a_marker_column(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """164.2-REVIEW WR-02. The deploy-window degrade, in the helper that already
+    sits at every stamped site.
+
+    Without it a schema-cache miss on the two new columns loses the whole
+    failure record — PostgREST writes NOTHING — and the row is stranded at
+    'computing' until the 16-hour reaper while the wizard poller spins.
+    """
+    payload: dict[str, Any] = {
+        "strategy_id": _STRATEGY_ID,
+        "computation_status": "failed",
+        "computation_error": _SENTENCE,
+        PROVENANCE_SOURCE_KEY: PROVENANCE_SOURCE_WRITER,
+        PROVENANCE_JOB_ID_KEY: _JOB_ID,
+    }
+    seen: list[dict[str, Any]] = []
+
+    def _write() -> None:
+        seen.append(dict(payload))
+        if PROVENANCE_SOURCE_KEY in payload:
+            raise _marker_schema_cache_miss()
+
+    caplog.set_level(logging.ERROR, logger="services.strategy_analytics_provenance")
+    upsert_or_drop_provenance(payload, _write, where="unit")
+
+    assert len(seen) == 2, f"expected one miss then one re-issue, got {seen!r}"
+    assert PROVENANCE_SOURCE_KEY not in seen[1]
+    assert PROVENANCE_JOB_ID_KEY not in seen[1]
+    assert seen[1]["computation_error"] == _SENTENCE, (
+        "the failure record is the thing being saved; the deploy window must "
+        "cost the provenance and nothing else"
+    )
+    assert seen[1]["computation_status"] == "failed"
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors, "the degrade is invisible to users, so the log is the signal"
+    assert "PGRST204" in errors[0].getMessage(), (
+        "the log must name the code it actually saw. A 23514 is a writer bug to "
+        "chase and a PGRST204 is a deploy window that closes itself — reporting "
+        "one as the other is the WR-03 misdiagnosis in a new place"
+    )
+
+
+def test_helper_reraises_a_pgrst204_naming_a_different_column() -> None:
+    """NARROWNESS for WR-02, and the guard on P10's own arm.
+
+    ``analytics_runner._mark_unrecoverable`` owns the ``computing_started_at``
+    schema-cache miss (D-02/R2) and re-issues the five-key payload PostgREST
+    knew before that column existed. If this helper swallowed every PGRST204 it
+    would strip the markers, re-issue a payload that STILL names the unknown
+    column, and hand that handler a second identical miss — one wasted write on
+    the failure path and a log line blaming the wrong columns.
+    """
+    payload: dict[str, Any] = {
+        "strategy_id": _STRATEGY_ID,
+        "computing_started_at": None,
+        PROVENANCE_SOURCE_KEY: PROVENANCE_SOURCE_WRITER,
+        PROVENANCE_JOB_ID_KEY: _JOB_ID,
+    }
+    boom = _stamp_schema_cache_miss()
+    calls: list[int] = []
+
+    def _write() -> None:
+        calls.append(1)
+        raise boom
+
+    with pytest.raises(APIError) as exc_info:
+        upsert_or_drop_provenance(payload, _write, where="unit")
+
+    assert exc_info.value is boom
+    assert len(calls) == 1
+    assert payload[PROVENANCE_SOURCE_KEY] == PROVENANCE_SOURCE_WRITER, (
+        "a miss on someone else's column must leave the provenance alone"
+    )
+
+
 def test_helper_reraises_a_non_23514_api_error() -> None:
     """Load-bearing at the runner's catch-all exit: its enclosing handler owns
     ``PGRST204`` (the deploy-window schema-cache miss) and must keep seeing it."""
@@ -385,6 +517,61 @@ def test_helper_lets_a_failing_reissue_propagate() -> None:
 # ---------------------------------------------------------------------------
 # 3. End-to-end through the real runner
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pgrst204_marker_miss_records_the_failure_at_a_non_p10_writer() -> None:
+    """164.2-REVIEW WR-02, END TO END, at one of the NINE sites that had no
+    deploy-window arm of their own.
+
+    The review's finding was not "PGRST204 is unhandled" — P10 handled it — but
+    that P10 was the ONLY one of ten stamped writers that did, while the phase
+    dispositioned T-164.2-17 as mitigated. So this test deliberately drives
+    ``_mark_failed`` (the insufficient-history exit, reached with a one-row
+    series), NOT ``_mark_unrecoverable``: it has no hand-written PGRST204 arm,
+    so the only thing that can land the failure record here is the helper.
+
+    Without the helper's arm the APIError leaves ``_mark_failed``, propagates
+    out of ``run_csv_strategy_analytics`` as itself rather than as the runner's
+    400, and NOTHING lands — the row keeps whatever ``_mark_computing`` left.
+    """
+    harness = _build_harness(
+        _marker_schema_cache_miss(), target="_mark_failed", series=_ROWS[:1]
+    )
+
+    exc = await _run(harness, job_id=_JOB_ID)
+    assert exc.status_code == 400, (
+        "the runner's own insufficient-history exit must still be the outcome; a "
+        "500 here means the miss escaped and this test is measuring the wrong arm"
+    )
+
+    writes = _terminal_writes(harness)
+    assert len(writes) == 2, (
+        "expected the refused stamped write followed by the marker-free "
+        f"re-issue; got {len(writes)}: {writes!r}"
+    )
+    refused, fallback = writes
+    assert refused[PROVENANCE_SOURCE_KEY] == PROVENANCE_SOURCE_WRITER, (
+        "the first attempt must be the STAMPED payload — if it already omits "
+        "the markers the injection never fired and this test is vacuous"
+    )
+    assert refused[PROVENANCE_JOB_ID_KEY] == _JOB_ID
+    assert PROVENANCE_SOURCE_KEY not in fallback
+    assert PROVENANCE_JOB_ID_KEY not in fallback
+    assert (
+        fallback["computation_error"]
+        == "Insufficient CSV history. At least 2 data points required."
+    ), (
+        "the curated sentence is what the deploy window may cost; the FAILURE "
+        "RECORD is not"
+    )
+    assert fallback["computation_status"] == "failed"
+    assert fallback["computing_started_at"] is None, (
+        "JOB-01 still applies on the degraded path"
+    )
+    assert harness.observed == [], (
+        "the helper absorbed the miss, so nothing should have escaped _mark_failed"
+    )
 
 
 @pytest.mark.asyncio

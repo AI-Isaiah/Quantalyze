@@ -42,7 +42,13 @@ apart in a later edit.
 resolution of TODOS ``[PROV-WRITER-23514]``: if a 23514 reaches a marker-bearing
 payload ANYWAY — a constraint this module does not know about, a future
 migration narrowing the domain further — the failure record must survive at the
-cost of the provenance, never the other way round.
+cost of the provenance, never the other way round. 164.2-REVIEW WR-02 gave it a
+second reason to fire, on the same principle and with the same remedy: a
+``PGRST204`` naming a marker column means the worker is running AHEAD of the
+migration, PostgREST wrote nothing, and the lost payload is the one recording a
+failure. Because the helper already sits at every stamped site, T-164.2-17's
+deploy window is mitigated at all of them rather than at the one that happened
+to have a hand-written arm.
 
 ⛔ THIS MODULE DELIBERATELY CONTAINS NO ``.table("strategy_analytics")`` CALL.
 ``tests/test_computing_started_at_stamp.py`` (JOB-01) and the provenance census
@@ -102,18 +108,43 @@ _PG_CHECK_VIOLATION: Final[str] = "23514"
 # Both are declared in 20260906120000_computation_error_provenance.sql:317,:349.
 _MARKER_CONSTRAINT_FRAGMENT: Final[str] = "strategy_analytics_computation_error_"
 
+# PostgREST's OWN code (not a SQLSTATE) for "the schema cache does not know that
+# column". It writes NOTHING and the whole payload is lost.
+_PGRST_SCHEMA_CACHE_MISS: Final[str] = "PGRST204"
+
+_MARKER_COLUMNS: Final[tuple[str, str]] = (PROVENANCE_SOURCE_KEY, PROVENANCE_JOB_ID_KEY)
+
 
 def _refuses_a_marker(exc: APIError) -> bool:
     """Is ``exc`` the database refusing THESE two columns, specifically?
 
+    Two ways it can, and they are unrelated failures with the same remedy:
+
+      * ``23514`` — a marker CHECK constraint refused the VALUES (TODOS
+        ``[PROV-WRITER-23514]``); matched by constraint name, see
+        ``_MARKER_CONSTRAINT_FRAGMENT``.
+      * ``PGRST204`` — PostgREST's schema cache does not know the COLUMNS yet,
+        i.e. the worker is running ahead of migration
+        ``20260906120000_computation_error_provenance.sql`` (164.2-REVIEW
+        WR-02). Matched by the column name PostgREST puts in its own message:
+        "Could not find the 'computation_error_source' column of
+        'strategy_analytics' in the schema cache".
+
     False for every other failure on this table — a status CHECK, a
-    serialization failure, a permission denial. The caller re-raises those
-    untouched, which is the pre-164.2 behaviour for all of them.
+    serialization failure, a permission denial, and a ``PGRST204`` naming any
+    OTHER column. The caller re-raises those untouched, which is the pre-164.2
+    behaviour for all of them, and it is what keeps
+    ``analytics_runner._mark_unrecoverable``'s own ``PGRST204`` arm (which owns
+    ``computing_started_at``) reachable: that arm's error names its own column,
+    so this predicate answers False and the exception reaches it exactly as
+    before.
     """
     code = getattr(exc, "code", None)
     message = str(getattr(exc, "message", None) or "")
     if code == _PG_CHECK_VIOLATION:
         return _MARKER_CONSTRAINT_FRAGMENT in message
+    if code == _PGRST_SCHEMA_CACHE_MISS:
+        return any(column in message for column in _MARKER_COLUMNS)
     return False
 
 
@@ -140,8 +171,10 @@ def upsert_or_drop_provenance(
     *,
     where: str,
 ) -> None:
-    """Run ``write``; on a 23514 against a marker-bearing ``payload``, drop the
-    markers and run it ONCE more.
+    """Run ``write``; when the database refuses the MARKERS on a marker-bearing
+    ``payload`` — a 23514 on one of their CHECK constraints, or a ``PGRST204``
+    saying the columns are not in the schema cache yet — drop the markers and
+    run it ONCE more.
 
     TODOS ``[PROV-WRITER-23514]``. Both marker CHECK constraints sit on the path
     that RECORDS A FAILURE, so a provenance bug must cost the provenance and not
@@ -166,11 +199,29 @@ def upsert_or_drop_provenance(
     not a provenance bug, and stripping the provenance would neither fix it nor
     describe it. See ``_MARKER_CONSTRAINT_FRAGMENT``.
 
+    ⭐ A ``PGRST204`` NAMING A MARKER COLUMN takes the same degrade (164.2-REVIEW
+    WR-02), and this is the deploy-window mitigation for T-164.2-17 at every
+    stamped site rather than at one of them. The migration must reach PROD before
+    a worker sends the two new keys; in the window between the Railway deploy and
+    the DDL, PostgREST answers ``PGRST204`` and WRITES NOTHING — so the payload
+    that is lost is the one RECORDING A FAILURE, and the row sits at 'computing'
+    until the 16-hour reaper while the wizard poller spins. Dropping the two
+    unknown keys and re-issuing lands exactly the pre-164.2 payload. The phase's
+    other argument (migrations auto-apply on merge, Railway deploys after main
+    CI) is a property of the pipeline, not of this tree; this arm is the property
+    of the tree.
+
     ⚠️ Any OTHER ``APIError`` propagates untouched, which is load-bearing at
-    ``analytics_runner``'s catch-all exit: its enclosing handler catches
-    ``PGRST204`` (the schema-cache miss of the deploy window) and re-issues with
-    the minimal key set PostgREST knew before these columns existed. That arm
-    must keep seeing its own error.
+    ``analytics_runner``'s catch-all exit: its enclosing handler catches a
+    ``PGRST204`` naming ``computing_started_at`` and re-issues with the minimal
+    key set PostgREST knew before THAT column existed. That arm must keep seeing
+    its own error, and it does — ``_refuses_a_marker`` answers False for it. The
+    two arms COMPOSE at that one site, in either order: PostgREST names ONE
+    unknown column per response, so if it names a marker this arm strips the
+    pair and the re-issue's own ``PGRST204`` (now naming ``computing_started_at``)
+    propagates to that handler; if it names ``computing_started_at`` first this
+    predicate is False and that handler runs immediately, re-issuing the five-key
+    payload which carries no markers either way.
     """
     try:
         write()
@@ -181,17 +232,27 @@ def upsert_or_drop_provenance(
             raise
         payload.pop(PROVENANCE_SOURCE_KEY, None)
         payload.pop(PROVENANCE_JOB_ID_KEY, None)
-        # ERROR, not warning: reaching this line means a writer emitted a marker
-        # pair the database refused, which is a bug report. The sentence below
-        # is the only place that bug becomes visible, because the retry makes
-        # its user-visible effect indistinguishable from the pre-164.2 world.
+        # ERROR, not warning: reaching this line means the database refused the
+        # marker pair, which is either a writer bug (23514) or a worker running
+        # ahead of its migration (PGRST204). The sentence below is the only
+        # place either becomes visible, because the retry makes its user-visible
+        # effect indistinguishable from the pre-164.2 world.
+        #
+        # ⚠️ The CODE is interpolated, never hardcoded. It used to read "(23514:
+        # %s)" over a message that could only be a 23514; now two codes reach
+        # here and they mean OPPOSITE things — a 23514 is a bug to chase, a
+        # PGRST204 is a deploy window that closes itself when PostgREST reloads.
+        # Naming the wrong one is the same class of misdiagnosis WR-03 fixed.
         logger.error(
             "strategy_analytics provenance: the database REFUSED the "
-            "computation_error markers at %s (23514: %s). Re-issuing the same "
+            "computation_error markers at %s (%s: %s). Re-issuing the same "
             "failure record WITHOUT provenance so the failure is still "
             "recorded; the status bridge will overwrite the curated sentence "
-            "with its per-kind generic for this row (TODOS PROV-WRITER-23514).",
+            "with its per-kind generic for this row (TODOS PROV-WRITER-23514). "
+            "A PGRST204 here is the deploy window of migration "
+            "20260906120000 and clears on its own; a 23514 does not.",
             where,
+            getattr(exc, "code", None),
             exc.message or exc,
         )
         write()
