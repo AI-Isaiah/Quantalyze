@@ -264,6 +264,109 @@ def _pairing_defect(site: _WriteSite) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Rule C — the stamped literal's write must go THROUGH the retry helper (IN-04)
+# ---------------------------------------------------------------------------
+# Before 164.2-REVIEW WR-02 this was unpinned and harmless: the helper only
+# caught a 23514, and `provenance_source` had already closed the reachable 23514
+# at the root, so deleting the wrapper at any of the sites changed nothing a
+# test could see. WR-02 made it LOAD-BEARING — it now also carries the PGRST204
+# deploy-window degrade for the two columns this phase added — and an unpinned
+# routing is then exactly the "arm that cannot fail" class this phase exists to
+# remove: `upsert_or_drop_provenance(_x_payload, _write_x, ...)` could be
+# replaced by a bare `_write_x()` at any site and every other gate stays green.
+#
+# The rule is structural, and it is the same shape as Rule A: the FIRST
+# POSITIONAL argument must be the very name the payload literal is bound to.
+# Passing some other dict would type-check, run, and silently degrade nothing.
+_ROUTING_HELPER: Final[str] = "upsert_or_drop_provenance"
+
+_Span = tuple[int, int]
+
+
+def _span(node: ast.AST) -> _Span:
+    """(first line, last line) of a node. Used to re-find a payload literal in a
+    SECOND parse of the same file, since the census's scan and this rule do not
+    share a tree and node identity therefore cannot be relied on."""
+    return (getattr(node, "lineno", 0), getattr(node, "end_lineno", 0) or 0)
+
+
+def _enclosing_function(
+    tree: ast.AST, span: _Span
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """The INNERMOST function whose body contains ``span``.
+
+    Innermost matters: the payload of P1-style writers is assigned in a closure
+    (``_mark_x``) that ALSO calls the helper, while the actual ``.upsert(...)``
+    sits one level deeper in a second closure (``_write_x``). Anchoring on the
+    deepest function would look for the helper in the wrong scope; anchoring on
+    the outermost would accept a helper call from an unrelated sibling arm.
+    """
+    best: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        end = node.end_lineno or 0
+        if node.lineno <= span[0] and end >= span[1]:
+            if best is None or node.lineno > best.lineno:
+                best = node
+    return best
+
+
+def _bound_name(scope: ast.AST, span: _Span) -> str | None:
+    """The name the dict literal at ``span`` is assigned to inside ``scope``."""
+    for node in ast.walk(scope):
+        if isinstance(node, ast.AnnAssign):
+            if (
+                node.value is not None
+                and _span(node.value) == span
+                and isinstance(node.target, ast.Name)
+            ):
+                return node.target.id
+        elif isinstance(node, ast.Assign) and _span(node.value) == span:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    return target.id
+    return None
+
+
+def _routing_defect(tree: ast.AST, payload_span: _Span) -> str | None:
+    """``None`` when the payload at ``payload_span`` is handed to the helper."""
+    scope = _enclosing_function(tree, payload_span)
+    if scope is None:
+        return (
+            f"the stamped payload is not inside a function, so its routing "
+            f"through {_ROUTING_HELPER} cannot be read. {_ROUTING_HELPER} takes "
+            f"the write as a CALLABLE, which requires a closure."
+        )
+    name = _bound_name(scope, payload_span)
+    if name is None:
+        return (
+            f"the stamped payload is not bound to a name in "
+            f"{scope.name!r}, so nothing can be passed to {_ROUTING_HELPER}. "
+            f"The helper MUTATES the payload it is given, so it must receive "
+            f"the same dict object the write closure reads."
+        )
+    for node in ast.walk(scope):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == _ROUTING_HELPER
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == name
+        ):
+            return None
+    return (
+        f"{name} is stamped but {scope.name!r} never passes it to "
+        f"{_ROUTING_HELPER}. The write then has NO deploy-window degrade: a "
+        f"PGRST204 naming a marker column (the window before migration "
+        f"20260906120000 reaches PROD) loses the whole failure record, because "
+        f"PostgREST writes nothing on a schema-cache miss — the row is left at "
+        f"'computing' until the 16-hour reaper (164.2-REVIEW WR-02 / IN-04)."
+    )
+
+
 def _reset_defect(site: _WriteSite) -> str | None:
     """``None`` when a sentence-blanking literal blanks both markers too."""
     for key in (_SOURCE_KEY, _JOB_ID_KEY):
@@ -286,9 +389,13 @@ def _reset_defect(site: _WriteSite) -> str | None:
 
 def test_python_failure_writers_stamp_provenance() -> None:
     """Rule A. Every ``strategy_analytics`` literal that WRITES a sentence carries
-    both markers, decided by one expression — except P11, exempt by exact shape.
+    both markers, decided by one expression — except P11, exempt by exact shape,
+    and P1, inert by exact shape and file.
 
     Rule B. Every literal that BLANKS the sentence blanks both markers.
+
+    Rule C (164.2-REVIEW IN-04). Every STAMPED literal is handed to
+    ``upsert_or_drop_provenance`` by name, in the function that binds it.
     """
     files = _py_scan_files()
     assert files, "the python scan found no files — path resolution is broken"
@@ -302,7 +409,10 @@ def test_python_failure_writers_stamp_provenance() -> None:
         "looking reports green over nothing."
     )
 
+    trees: dict[Path, ast.Module] = {}
     defects: list[str] = []
+    routing: list[str] = []
+    routed_count = 0
     for site in sites:
         where = f"{_rel(site.path)}:{site.lineno}"
         if _is_none(_dict_value(site.payload, _ERROR_KEY)):
@@ -311,6 +421,18 @@ def test_python_failure_writers_stamp_provenance() -> None:
             continue
         else:
             problem = _pairing_defect(site)
+            if problem is None:
+                # Rule C, stamped sites only. P11 writes its re-issue directly
+                # BY DESIGN (a helper there would re-send the unknown columns)
+                # and P1 has nothing to degrade; both are skipped above.
+                if site.path not in trees:
+                    trees[site.path] = ast.parse(
+                        site.path.read_text(encoding="utf-8")
+                    )
+                routed_count += 1
+                routed = _routing_defect(trees[site.path], _span(site.payload))
+                if routed is not None:
+                    routing.append(f"{where}: {routed}")
         if problem is not None:
             defects.append(f"{where}: {problem}")
 
@@ -320,6 +442,17 @@ def test_python_failure_writers_stamp_provenance() -> None:
         + "\nEvery Python writer of strategy_analytics.computation_error must "
         "decide computation_error_source and computation_error_job_id in the "
         "SAME dict literal as the sentence (Phase 164.2 / criterion 2)."
+    )
+    assert not routing, (
+        "these stamped writers do not route their write through "
+        f"{_ROUTING_HELPER}:\n  " + "\n  ".join(routing)
+    )
+    assert routed_count == EXPECTED_STAMPED_SITES, (
+        f"Rule C was evaluated at {routed_count} sites, not "
+        f"{EXPECTED_STAMPED_SITES}. `assert not routing` is satisfied VACUOUSLY "
+        f"by a rule that never ran, so the count of EVALUATIONS is pinned "
+        f"beside the count of sites — a guard rearrangement that skips Rule C "
+        f"reddens here instead of reporting green over nothing."
     )
 
 
@@ -513,3 +646,84 @@ def test_the_rules_fire_on_synthetic_defects() -> None:
 
     half_reset = _site('{"computation_error": None, "computation_error_source": None}')
     assert "never names computation_error_job_id" in (_reset_defect(half_reset) or "")
+
+
+def test_rule_c_fires_on_a_writer_that_skips_the_retry_helper() -> None:
+    """Self-test for Rule C (164.2-REVIEW IN-04), on the SAME real shape.
+
+    Rule C's green over the live tree is worth nothing unless it can go red, and
+    "remove the helper at a real site and watch it red" is a neuter, not a test.
+    These four modules are the live writers' shape — payload bound in a closure,
+    the ``.upsert(...)`` one closure deeper — put through the same functions:
+
+      1. routed correctly            → None
+      2. helper deleted, bare write  → RED, and it names the payload
+      3. helper called with the WRONG dict → RED (an arg check, not a name-in-
+         the-file check; ``in`` on the source text would pass this)
+      4. payload inlined at the write, bound to nothing → RED
+    """
+
+    def _defect(source: str) -> str | None:
+        tree = ast.parse(source)
+        payloads = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Dict)
+            and any(
+                isinstance(k, ast.Constant) and k.value == _ERROR_KEY
+                for k in node.keys
+            )
+        ]
+        assert len(payloads) == 1, f"fixture must hold one payload, got {payloads!r}"
+        return _routing_defect(tree, _span(payloads[0]))
+
+    _WRITE = (
+        '            supabase.table("strategy_analytics").upsert(\n'
+        "                p, on_conflict=\"strategy_id\"\n"
+        "            ).execute()\n"
+    )
+
+    routed = (
+        "def handler():\n"
+        "    def mark():\n"
+        '        p = {"computation_error": "boom",\n'
+        '             "computation_error_source": provenance_source(j),\n'
+        '             "computation_error_job_id": j}\n'
+        "        def write():\n" + _WRITE + '        upsert_or_drop_provenance(p, write, where="x")\n'
+    )
+    assert _defect(routed) is None, _defect(routed)
+
+    bare = (
+        "def handler():\n"
+        "    def mark():\n"
+        '        p = {"computation_error": "boom",\n'
+        '             "computation_error_source": provenance_source(j),\n'
+        '             "computation_error_job_id": j}\n'
+        "        def write():\n" + _WRITE + "        write()\n"
+    )
+    problem = _defect(bare) or ""
+    assert _ROUTING_HELPER in problem and problem.startswith("p is stamped"), problem
+
+    wrong_dict = (
+        "def handler():\n"
+        "    def mark():\n"
+        '        p = {"computation_error": "boom",\n'
+        '             "computation_error_source": provenance_source(j),\n'
+        '             "computation_error_job_id": j}\n'
+        "        def write():\n" + _WRITE + '        upsert_or_drop_provenance(other, write, where="x")\n'
+    )
+    assert _ROUTING_HELPER in (_defect(wrong_dict) or ""), (
+        "the helper MUTATES the dict it is given; passing a different one "
+        "degrades nothing, so the FIRST ARGUMENT is the whole rule"
+    )
+
+    unbound = (
+        "def handler():\n"
+        "    def mark():\n"
+        '        supabase.table("strategy_analytics").upsert(\n'
+        '            {"computation_error": "boom",\n'
+        '             "computation_error_source": provenance_source(j),\n'
+        '             "computation_error_job_id": j}\n'
+        "        ).execute()\n"
+    )
+    assert "not bound to a name" in (_defect(unbound) or "")
