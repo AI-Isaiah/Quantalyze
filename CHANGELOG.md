@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.77.15.0] - 2026-09-06
+
+### Phase 164.1 plan 06 — the prober's first live run, and the gate that catches a frozen VERSION
+
+- **First live PROD run.** Four arms, all four credentials resolved, `arms: 4/4/0`. Three green;
+  the MT5 arm returned `mt5-terminal-error -6` — a real production fault (authorization failed),
+  filed as #747. The thesis held on its first outing.
+- **CR-01 fix.** `buildProbeArgv` passed `python3`, `-c` and the payload as three separate words,
+  but the Railway CLI joins everything after `--` and hands it to a shell — so the probe died
+  before Python started. The fixture seam never joins argv, so 51 self-test scenarios passed over
+  a structurally broken arm. Scenario 47 now asserts the joined string parses under `sh -n`.
+- **WR-01 fix.** `cron-obs` attributed a response to a run without checking the window held only
+  one; two responses in one window silently picked the first. Ambiguity is now its own
+  `measure-fail`, with a RED fixture.
+- **Scrubber allowlist.** `RAILWAY_PROJECT_ID`, `RAILWAY_MT5_SERVICE` and `RAILWAY_ENVIRONMENT`
+  are public identifiers and no longer redacted from the report. Allowlist-by-name only — a
+  minimum-length rule was considered and dropped as fail-open on a short real secret.
+- **Committed PROD cron manifest** (14 rows, reviewed row by row) so `cron-drift` has a baseline.
+- **Posture line flipped.** On `schedule:` a defect warns and exits 0; on dispatch it exits
+  non-zero. Measured reason, not preference: a red check-run on a HEAD commit makes Railway skip
+  the deploy, which `analytics-deploy-verify.yml:17-24` records happening on 2026-06-21.
+
+### `version-gate` (new blocking CI job)
+
+PR #746 shipped an entire phase — a new workflow, four new script modules, a changed API
+response — with VERSION and package.json identical to main and no CHANGELOG entry, behind 21
+green checks. `scripts/check-version-bump.mjs` now fails a PR that changes anything outside
+`.planning/` without a version bump and a matching CHANGELOG heading. Planning-only PRs stay
+exempt. `--self-test` 5/5 proves each failure mode fires. `/gsd-ship` gained a
+`version_and_changelog` step so the bump happens before the PR, not at the merge gate.
+
 ## [0.77.14.0] - 2026-09-06
 
 ### Phase 164.1 PROD-OBSERVABILITY — one periodic prober, four targets

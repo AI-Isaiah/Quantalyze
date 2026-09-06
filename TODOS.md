@@ -190,6 +190,19 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      OMITS the header entirely when the key is falsy. No throw, no log, no startup failure: an
      unconfigured platform secret silently degrades into an ANONYMOUS request.
    - `analytics-service/main.py:802` — PYAPI-06 site 5 captures the mismatch only `if provided:`.
+
+   ⭐ **SHIPPED in Phase 164.1 (2026-09-06, PR #746, v0.77.14.0).** Both halves. TS:
+   `analytics-client.ts` refuses with `SeamConfigError` ABOVE the try when
+   `ANALYTICS_SERVICE_KEY` is unset, so a missing key can no longer be rewritten as an
+   upstream outage. Python: an ABSENT `X-Service-Key` returns 401 with
+   `detail.code = "SERVICE_KEY_ABSENT"` while a WRONG key keeps the opaque
+   `{"detail":"Unauthorized"}` — the two are finally distinguishable. The `if provided:`
+   block is byte-identical (34 insertions, 0 deletions), so the zero-event pin still holds.
+   COVERED GOING FORWARD by the `pyapi06` arm of `scripts/prod-prober/` on an hourly
+   schedule, with five defect kinds. ⭐ VERIFIED IN PRODUCTION, behaviourally rather than
+   by a green job row: after the deploy, an absent header returned
+   `{"detail":{"code":"SERVICE_KEY_ABSENT",...}}` and a wrong key returned
+   `{"detail":"Unauthorized"}`; the arm read GREEN on live run 34018874984.
      An absent header is deliberately treated as "internet background noise" from a prober, and
      that reasoning is CORRECT in isolation — an unauthenticated prober must not page anyone.
    - **Composed, they cancel out.** The one caller that can legitimately send an absent header is
@@ -1782,12 +1795,49 @@ observability (a service down while every instrument reads green). ⭐ `CRON-OBS
 `MT5-WEDGE-OBS-01` are ONE mechanism with two targets — a periodic prober that fails loud — and
 are to be planned as one slice, not two.
 
+⭐ **SHIPPED in Phase 164.1 (2026-09-06, PR #746, v0.77.14.0) — the DETECT half of both.**
+`CRON-OBS-01` is the `cron-obs` arm: it joins `cron.job_run_details` to `net._http_response`
+and reports `cron-non-2xx`, `cron-no-observation` and `cron-transport-error`, so an async
+pg_net result can no longer hide behind a green cron history. It also carries an ATTRIBUTION
+FENCE (review WR-01): the join is time-only because `net._http_response` has no jobid, so a run
+with more than one response in its window is `measure-fail`, never a verdict — a foreign 200
+must not buy a pass for our own missing answer.
+`CRON-DRIFT-01` is the `cron-drift` arm, comparing live `cron.job` against the committed
+`scripts/prod-prober/cron-manifest.json` with ten secret-hygiene rules, each carrying a RED
+fixture proving it fires. The manifest was captured from PROD (run 34018613991) and every one
+of its 14 `command` strings was read individually and approved for publication by the founder.
+⛔ The REPAIR half of CRON-DRIFT-01 is NOT shipped and stays open below — it belongs to Phase
+164.5 item (7). The capture CONFIRMED the drift it describes: live jobid 1 runs a Vault-backed
+`DO` block, while migration `20260408215026` still schedules it on
+`current_setting('app.analytics_service_key')`, which returns 42501 on this platform. Both arms
+read GREEN on live run 34018874984.
+
 ⭐ **Standing rule until CRON-OBS-01 lands: `cron.job_run_details.status = 'succeeded'` is NOT
 evidence that a pg_net-based job worked.** Read `net._http_response`.
 
 - [ ] **[MT5-VERDICT-SINK-01] the MT5 capability verdict has NO durable sink, so an `undetermined` outcome is unverifiable the moment it scrolls out of the log** (booked 2026-09-05) — `_Mt5ValidateTrace.outcome` is carried to `emit_mt5_stage_event` (`analytics-service/services/mt5_client.py:205`), which writes a STRUCTURED LOG EVENT, not a row. There is no table to query for a historical `undetermined`, and Railway retention is short enough that a past occurrence is already gone. ⛔ **This is why Phase 161's first human-verification item has been unclosable for over a week**, and re-measuring it can only ever return "still nothing": measured 2026-09-05, `railway logs --service quantalyze-analytics --environment production` contains ZERO `mt5` lines of any kind. The absence of a sink makes that item permanently *unverifiable*, not merely not-yet-verified — a different and worse thing. ⭐ The verifier recommended exactly this on 2026-08-24 ("worth pairing with a durable sink when it is done") and it was never booked; it lived only inside `161-VERIFICATION.md`, which is the one file nobody planning the fix reads. **Fix:** persist which arm fired — a row, or a counter that survives rotation — so the sentence a founder actually read can be established after the fact. ⚠️ **Adjacent to, NOT the same as, `MT5-WEDGE-OBS-01`**: that arm probes LIVENESS (`-10004` vs `-10005`), this is a CAPABILITY verdict (`tradeapi_disabled` → which remedy sentence). Phase 164.1 is the closest live mechanism and the cheapest place to ride along, but it is a founder call whether it rides or waits — do not silently widen 164.1's scope to absorb it.
 
 ### MT5-WEDGE-OBS-01 — a wedged MT5 gateway is invisible to every automated signal (booked 2026-09-01)
+
+⭐ **SHIPPED in Phase 164.1 (2026-09-06, PR #746, v0.77.14.0).** The `mt5` arm runs a COMMITTED
+read-only Python constant inside the gateway container over `railway ssh` — `initialize()`,
+`last_error()`, `terminal_info()` and nothing else; no log-in call, no order call, no run-time
+interpolation. `-10004` classifies as `mt5-no-ipc` ONLY and `-10005` as `mt5-ipc-timeout` ONLY,
+with DIFFERENT remedies: the first says redeploy the gateway, the second says open the VNC
+console and clear the modal login dialog BECAUSE A REDEPLOY DOES NOT FIX IT (the Wine prefix
+lives on the persistent volume). That distinction cost three separate investigations before it
+was understood.
+⭐ D-20 ANSWERED BY MEASUREMENT, not assumption: a WORKSPACE-scoped `RAILWAY_API_TOKEN` DOES
+authenticate `railway ssh` from a hosted runner — live run 34018874984 returned a structured
+MT5 code from inside the container. (A project-scoped token is refused; they are different
+variables, not aliases.)
+⚠️ THE FIRST LIVE RUN FOUND A REAL PRODUCTION FAULT, which is the point: `mt5-terminal-error`
+code **-6 = authorization failed** (the repo's own contract fixture names it,
+`test_mt5_client_contract.py:1692`). The terminal is UP and answering IPC — not -10004, not
+-10005 — but `initialize()` fails authorization, i.e. it is not logged in, so MT5-backed
+strategies will not sync. Tracked as issue #747; the arm correctly WITHHELD both IPC remedies
+rather than forcing an unknown code into the nearest known bucket. ⛔ Left for founder action
+2026-09-06; this is an operational fault, not a code defect.
 
 Same class as `CRON-OBS-01`: the failure is real, user-facing, and silent to every instrument.
 
