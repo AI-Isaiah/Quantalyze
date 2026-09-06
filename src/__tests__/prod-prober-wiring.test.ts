@@ -460,13 +460,13 @@ describe("[164.1-05] kinds and floors", () => {
     ]);
   });
 
-  it("SELF_TEST_SCENARIOS is 50, and the runner PRINTS exactly 50 headers numbered 1..50", async () => {
+  it("SELF_TEST_SCENARIOS is 51, and the runner PRINTS exactly 51 headers numbered 1..51", async () => {
     // ⭐ SOURCE-DERIVED, not scraped. The headers are auto-numbered at RUNTIME
     // off the same counter the runner's completeness assertion reads, so there
     // is no literal `k/50` in the source to count. Executing the self-test is
     // the only honest way to derive the number — and it is fixtures-only, no
     // network, under a tenth of a second.
-    expect(SELF_TEST_SCENARIOS).toBe(50);
+    expect(SELF_TEST_SCENARIOS).toBe(51);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);

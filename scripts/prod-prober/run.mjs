@@ -145,7 +145,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 50;
+export const SELF_TEST_SCENARIOS = 51;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -231,10 +231,36 @@ const DEFAULT_CREDENTIAL_REMEDY =
  * discipline is the braces. Self-test scenario 12 injects sentinel values and
  * asserts no captured line and no defect detail carries them.
  */
+/**
+ * Env NAMES whose values are PUBLIC IDENTIFIERS, not credentials.
+ *
+ * All three are GitHub `vars`, never `secrets`; all three appear verbatim in
+ * `.github/workflows/prod-prober.yml`; and their LIVE values are ordinary
+ * words ("production", "mt5-gateway"). Redacting them protects nothing and
+ * destroys the one row an operator reads when the transport is broken —
+ * measured at plan 04 as `the <redacted> relay refused the <redacted> session`
+ * (WINDOWS 37). The step summary and the auto-filed issue copy that log
+ * verbatim (D-03), so the damage reaches the first thing a human sees.
+ *
+ * ⛔ A name goes on this list ONLY if its value is already public in a
+ * committed file. Everything NOT listed is redacted regardless of length:
+ * there is deliberately NO minimum-length exemption, because a short secret is
+ * still a secret and a length floor would be fail-OPEN. WINDOWS 36 (a
+ * one-character password mangling unrelated text) is therefore left standing
+ * ON PURPOSE — it is the fail-SAFE cost, and trading it for a fail-open rule
+ * would be a strictly worse control.
+ *
+ * ⚠️ `ANALYTICS_BASE_URL` is deliberately NOT here: self-test scenario 12 pins
+ * it as redacted, and a base URL is worth not echoing even though it is not
+ * secret. This list is the minimum that closes WINDOWS 37, nothing wider.
+ */
+export const NON_SECRET_ENV = ["RAILWAY_PROJECT_ID", "RAILWAY_MT5_SERVICE", "RAILWAY_ENVIRONMENT"];
+
 function makeScrubber(arms, env) {
   const values = [];
   for (const arm of arms) {
     for (const name of arm.requiredEnv) {
+      if (NON_SECRET_ENV.includes(name)) continue;
       const value = env[name];
       if (typeof value === "string" && value.length > 0) values.push(value);
     }
@@ -2277,6 +2303,57 @@ export async function selfTest() {
           else process.env[k] = v;
         }
       }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("a PUBLIC IDENTIFIER survives the log while a SHORT secret is still redacted (WINDOWS 37)");
+  // -------------------------------------------------------------------------
+  {
+    const fx = loadFixtureText("mt5", "no-probe-line.txt");
+    if (!fx.ok) {
+      pass = expect(false, fx.reason) && pass;
+    } else {
+      // The REAL production values, not the deliberately-unlike ones the rest
+      // of the self-test uses — the point is that the live shape now reads.
+      // The token is SHORT on purpose: it proves the fix is an allowlist and
+      // not a length floor, which would have been fail-open.
+      const SHORT_SECRET = "hunter2";
+      const env = {
+        ...SELFTEST_ENV,
+        RAILWAY_MT5_SERVICE: "mt5-gateway",
+        RAILWAY_ENVIRONMENT: "production",
+        RAILWAY_API_TOKEN: SHORT_SECRET,
+      };
+      const seams = createSeams({
+        sshRunner: fixtureSsh({
+          stdout: fx.data,
+          status: 255,
+          stderr: `the mt5-gateway relay refused the production session (token ${SHORT_SECRET})`,
+        }),
+      });
+      const r = await runProber({ arms: [MT5_MOD.ARM], env, seams, armsFloor: 1, log: quiet });
+      const d = r.defects[0] || {};
+      const detail = String(d.detail);
+      pass =
+        expect(d.kind === "mt5-ssh-transport", `the transport defect still fires (got ${d.kind})`) &&
+        expect(
+          detail.includes("mt5-gateway"),
+          `the SERVICE NAME survives, so the row is readable (${JSON.stringify(detail)})`,
+        ) &&
+        expect(
+          detail.includes("production"),
+          "the ENVIRONMENT name survives too — both are public identifiers, in the workflow file",
+        ) &&
+        expect(
+          detail.includes(SHORT_SECRET) === false,
+          "and the SHORT secret is STILL redacted — the allowlist is by NAME, never by length",
+        ) &&
+        expect(
+          NON_SECRET_ENV.includes("RAILWAY_API_TOKEN") === false,
+          "the token's name is not on the allowlist, which is why it was redacted",
+        ) &&
+        pass;
     }
   }
 
