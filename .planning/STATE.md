@@ -4,12 +4,12 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.2
 current_phase_name: CURATED-COPY
-status: complete
-stopped_at: 164.2 COMPLETE — 10/10 plans; 3-reviewer migration gate CLEARED by founder; deep review 0 Critical/3 Warning all fixed; verification 9/9 (criterion 3 a founder override). Nothing applied to PROD or shared TEST.
-last_updated: "2026-09-06T18:07:53.222Z"
+status: shipped
+stopped_at: "164.2 SHIPPED — PR #749 (from the filtered branch phase-164.2-curated-copy-pr). Ship review by 11 reviewers found 2 assertions that could NOT fail (one of them the pin the criterion-3 override rested on) and 4 user-facing/data-integrity defects; all fixed with observed-RED proofs. Founder cleared the copy gate and authorised land-and-deploy. Migration 20260906120000 applies to PROD on merge."
+last_updated: "2026-09-06T21:40:00.000Z"
 last_activity: 2026-09-06
-last_activity_desc: "164.2 CURATED-COPY executed end-to-end. 10 plans across 4 waves, sequential (harness worktrees fork from origin/HEAD, ~45 commits behind — #683 auto-degrade). Migration 20260906120000 written and proven ONLY on the throwaway pg-lane; its 3-reviewer gate found 1 CRITICAL (a marker outliving its sentence) fixed at the TABLE via a BEFORE UPDATE trigger, and the founder CLEARED the gate 2026-09-06. Deep review: 0 Critical, 3 Warning, all fixed. Verification 9/9. WIZFORM-02 deliberately LEFT OPEN — 4 of 5 surfaces render; keys/validate-and-encrypt has no code-channel consumer, founder accepted and booked [WIZFORM-02-VE-CODECHANNEL]. WINDOWS.md row 37 repaired (it had refused every append for 3 plans). Corpus 369/369/0, exit 0."
-state_head: 77f6e202a257d8488bac996f162ea82fbcc16ef1
+last_activity_desc: "164.2 shipped as PR #749. Version bumped 0.77.15.0 -> 0.77.16.0 with a CHANGELOG entry (nothing in GSD or CI enforces either). Ship review: security auditor + 10 diff-scoped specialists; 5 file-disjoint fixers. TWO VACUITIES: the roster-render poster census compared a hand-typed length to a hand-typed literal while claiming to scan src/ (it read no files) — and that was the pin the founder's criterion-3 override explicitly rested on; and the PGRST204 assertion passed on the format string's static tail. Three more found while fixing: C-10's 400-day fixture could not detect the arm-swap it guarded, the provenance census's Rule C ran only on stamped sites, and a fixer caught its own draft assertion passing for the wrong reason. FOUR user-facing/data-integrity: the two SUCCESS writers sat outside the PGRST204 degrade while the docstring claimed full coverage (a succeeded compute was recorded failed, cash series heal-deleted, retry burned); durable writer sentences had made an internal table name + raw uuid and a Python exception class name reach user copy; validate-and-encrypt showed OUR stale service key as 'Unauthorized' on a key-connect form; the post-23505 read discarded both failure channels. Fixing stale anchors introduced 3 bare file:line cites that [SEAMPROSE-01] bans for going stale — caught by the full suite. Gates re-run by the orchestrator: vitest 14180/0 (Node 22), pytest 5430, mypy --strict 79 files, tsc clean, corpus 369 arms no defects. SECURITY.md added: 21/21 closed, threats_open 0, HIGH proven non-vacuous by three lane mutants that each abort the apply."
+state_head: 22a5fe962953f30c012b7ff4c223fcbf87c766d0
 
 # ⚠️ progress: HAND-SET 2026-09-06 against `origin/main`, NOT derived from this checkout.
 
