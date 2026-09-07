@@ -355,13 +355,25 @@ export interface NameSetRatchetRow {
 /**
  * ⛔ THIS RATCHET MAY ONLY SHRINK.
  *
- * The name-set diff is RED at HEAD, and it is red for reasons that predate it.
- * The alternative go-green route — regenerating `supabase/schema/baseline.sql`
- * from PROD — needs the production credential, a secret re-scan, and moves the
- * sha256 recorded in `supabase/schema/BASELINE.md`. That is a separate reviewed
- * act, so this gate ships on a dated named ratchet instead (Phase 164.5 P-02,
- * PRECEDENT B — the same shape as `scripts/vac08-ledger-baseline.txt` and
- * `LINEAGE_ALLOWLIST` in `scripts/lint-app-guc.mjs`).
+ * ⚠️ THE PARAGRAPH THAT STOOD HERE IS SPENT — its condition was met on
+ * 2026-09-07. It read: "The name-set diff is RED at HEAD … The alternative
+ * go-green route — regenerating `supabase/schema/baseline.sql` from PROD —
+ * needs the production credential, a secret re-scan, and moves the sha256
+ * recorded in `supabase/schema/BASELINE.md`. That is a separate reviewed act,
+ * so this gate ships on a dated named ratchet instead (Phase 164.5 P-02,
+ * PRECEDENT B …)." That act has now been performed, on a founder decision, and
+ * it did exactly what the paragraph predicted: the dump moved from 119 to 121
+ * distinct function names and TWO of this ratchet's three rows —
+ * `match_engine_cron_tick` and `strategy_analytics_drop_stale_error_provenance`
+ * — stopped describing a disagreement and were DELETED.
+ *
+ * ⛔ ONE ROW SURVIVES ON PURPOSE, and it is not an oversight. The regeneration
+ * was taken BEFORE DRIFT-04's DROP applies, so `create_allocator_connected_
+ * strategy` is still in PROD and therefore still in the dump, while no
+ * migration defines it — it is `baseline-only` for exactly the reason recorded,
+ * and a re-dump can never clear it. The shape stays PRECEDENT B (the same shape
+ * as `scripts/vac08-ledger-baseline.txt` and `LINEAGE_ALLOWLIST` in
+ * `scripts/lint-app-guc.mjs`).
  *
  * ⛔ A ROW MATCHES ON NAME **AND SIDE**. A ratcheted name that has FLIPPED SIDES
  * — recorded `baseline-only`, now `snapshot-only`, or the reverse — is a
@@ -385,35 +397,17 @@ export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
     side: "baseline-only",
     capturedAt: "2026-09-07",
     clearedBy:
-      "a regeneration of supabase/schema/baseline.sql from PROD, taken as a separate reviewed act " +
-      "AFTER Phase 164.5 plan 06's DROP applies. Plan 06 does NOT delete this row; the regeneration does.",
+      "a regeneration of supabase/schema/baseline.sql from PROD taken AFTER DRIFT-04's DROP has " +
+      "actually applied to PROD. ⚠️ ORDERING, re-stated 2026-09-07 because the first half of this " +
+      "sentence has already been spent: a regeneration was taken on 2026-09-07 and this row " +
+      "correctly SURVIVED it, because the DROP had not applied and the function was therefore " +
+      "still in the live catalogue it dumped. Regenerating again changes nothing here; dropping " +
+      "the function is what clears this row, and the re-dump only records it.",
     reason:
       "pending DRIFT-04. This function exists in PROD under NO migration — that is the entire " +
       "defect DRIFT-04 names, and the founder's 2026-08-29 verdict is DROP, not adopt. It is " +
-      "therefore in the committed PROD dump and in no replayed migration.",
-  },
-  {
-    name: "match_engine_cron_tick",
-    side: "snapshot-only",
-    capturedAt: "2026-09-07",
-    clearedBy:
-      "a regeneration of supabase/schema/baseline.sql from PROD taken after " +
-      "20260907120000_analytics_service_settings_and_vault_tick.sql is applied there.",
-    reason:
-      "the baseline PREDATES the migration. supabase/schema/BASELINE.md records the dump as taken " +
-      "2026-08-29; this function is first defined by 20260907120000, merged 2026-09-07. Earlier " +
-      "migrations (20260408113029, 20260408215026) only NAME it in comments — they do not define it.",
-  },
-  {
-    name: "strategy_analytics_drop_stale_error_provenance",
-    side: "snapshot-only",
-    capturedAt: "2026-09-07",
-    clearedBy:
-      "a regeneration of supabase/schema/baseline.sql from PROD taken after " +
-      "20260906120000_computation_error_provenance.sql is applied there.",
-    reason:
-      "the baseline PREDATES the migration — dump taken 2026-08-29, migration dated 2026-09-06. " +
-      "See CLAUDE.md [164.2-TEST-APPLY-PROVENANCE] for that migration's own outstanding apply.",
+      "therefore in the committed PROD dump and in no replayed migration. RE-CONFIRMED against " +
+      "the 2026-09-07 regeneration: still present in the fresh dump, still defined by no migration.",
   },
 ];
 

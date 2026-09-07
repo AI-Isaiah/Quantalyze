@@ -44,20 +44,35 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const GATE_PATH = join(REPO_ROOT, "scripts", "baseline-content-drift-check.mjs");
 
 // ───────────────────────────────────────────────────────────────────────────
-// THE PINS. Measured 2026-09-07 on the corpus at commit 415e0a6c:
-// 114 MATCH / 6 DRIFT / 2 SNAPSHOT_MISSING / 0 SNAPSHOT_ONLY / 0 UNCOMPARABLE.
-// The eight names below are that census. ⛔ THE LIST MAY ONLY SHRINK.
+// THE PINS. ⛔ THE LIST MAY ONLY SHRINK, AND IT HAS.
+//
+// LINEAGE — measured 2026-09-07 on the corpus at commit 415e0a6c, against the
+// 2026-08-29 PROD dump: 114 MATCH / 6 DRIFT / 2 SNAPSHOT_MISSING / 0
+// SNAPSHOT_ONLY / 0 UNCOMPARABLE, i.e. EIGHT rows —
+//   check_fan_in_ready, enqueue_ledger_composite_refresh,
+//   enqueue_ledger_refresh_for_strategies, match_engine_cron_tick,
+//   reject_sentinel_writes, retention_delete_guard,
+//   strategy_analytics_drop_stale_error_provenance, sync_strategy_analytics_status.
+//
+// CURRENT — measured 2026-09-07 after `supabase db dump --linked` re-took
+// supabase/schema/baseline.sql from PROD (119 -> 121 distinct function names):
+// 119 MATCH / 3 DRIFT / 0 SNAPSHOT_MISSING / 0 SNAPSHOT_ONLY / 0 UNCOMPARABLE
+// over 122 compared functions. FIVE of the eight went MATCH and were deleted.
+//
+// ⛔ THE THREE SURVIVORS ARE NOT A LEFTOVER — THEY ARE THE FINDING. Every one
+// of the eight rows was booked with `clearedBy: "A regeneration of
+// supabase/schema/baseline.sql from PROD"`. That act has now happened, and
+// these three rows' `snapshotHash` values did not move by a single bit: PROD's
+// bodies were never stale. PROD runs an EARLIER revision of each body than the
+// migration chain renders, which is a PROD-vs-REPO divergence of the DRIFT-04
+// family, tracked as DRIFT-06 in TODOS.md. A further regeneration will NEVER
+// clear them, so do not lower this pin again expecting one to.
 // ───────────────────────────────────────────────────────────────────────────
-const PINNED_SIZE = 8;
+const PINNED_SIZE = 3;
 const PINNED_NAMES = [
   "check_fan_in_ready",
-  "enqueue_ledger_composite_refresh",
-  "enqueue_ledger_refresh_for_strategies",
-  "match_engine_cron_tick",
   "reject_sentinel_writes",
   "retention_delete_guard",
-  "strategy_analytics_drop_stale_error_provenance",
-  "sync_strategy_analytics_status",
 ];
 
 /**

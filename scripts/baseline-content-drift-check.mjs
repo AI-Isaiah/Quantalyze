@@ -138,11 +138,27 @@ export const FINDING_KINDS = [
 /**
  * ── THE DATED RATCHET ──────────────────────────────────────────────────────
  *
- * MEASURED 2026-09-07 at commit `415e0a6c` by re-running the comparison in this
- * session (0.13 s): **114 MATCH, 6 DRIFT, 2 SNAPSHOT_MISSING, 0 SNAPSHOT_ONLY,
- * 0 UNCOMPARABLE**. These eight rows are that census, transcribed from the run
- * rather than from the plan — the plan's own table was written on the same day
- * and agrees row-for-row, which is a corroboration, not the source.
+ * ⚠️ SUPERSEDED 2026-09-07 by the PROD REGENERATION. The prior reading — taken
+ * at commit `415e0a6c` against the 2026-08-29 dump — was **114 MATCH, 6 DRIFT,
+ * 2 SNAPSHOT_MISSING, 0 SNAPSHOT_ONLY, 0 UNCOMPARABLE**, and it is kept here as
+ * dated lineage, not as the current census.
+ *
+ * MEASURED 2026-09-07 after `supabase db dump --linked` re-took
+ * `supabase/schema/baseline.sql` from PROD (119 -> 121 distinct function names):
+ * **119 MATCH, 3 DRIFT, 0 SNAPSHOT_MISSING, 0 SNAPSHOT_ONLY, 0 UNCOMPARABLE**
+ * over 122 compared functions. FIVE rows went MATCH and were DELETED, which is
+ * the only direction this list is allowed to move.
+ *
+ * ⛔ THE THREE SURVIVORS ARE NOT WHAT THEY SAID THEY WERE. Every one of the
+ * eight original rows carried `clearedBy: "A regeneration of
+ * supabase/schema/baseline.sql from PROD"`. That regeneration has now HAPPENED,
+ * and these three rows' `snapshotHash` values did not move by a single bit —
+ * PROD's bodies were never stale. So the shared diagnosis ("the dump is the
+ * stale side, the chain is the current truth") was FALSE for them, and each
+ * row's `reason` now records what was actually measured instead: PROD runs an
+ * EARLIER revision of the body than the migration chain renders. That is a
+ * PROD-vs-REPO divergence of the DRIFT-04 family, tracked as DRIFT-06 in
+ * TODOS.md, and a further regeneration will never clear it.
  *
  * Every row pins `snapshotHash` + `candidateHash` + `nargs` + `hunks`. `hunks`
  * is implied by the two hashes (it is a pure function of the two bodies), so
@@ -165,48 +181,23 @@ export const CONTENT_DRIFT_ALLOWLIST = [
     hunks: 5,
     capturedAt: "2026-09-07",
     clearedBy:
-      "A regeneration of supabase/schema/baseline.sql from PROD (a separate reviewed act that " +
-      "also moves the sha256 recorded in supabase/schema/BASELINE.md).",
+      "PROD and the migration chain agreeing on this body — which a regeneration of " +
+      "supabase/schema/baseline.sql CANNOT deliver, because the regeneration of 2026-09-07 was " +
+      "taken and this row's snapshotHash did not move by a single bit. Clearing it needs the " +
+      "20260510180226 body to actually reach the live catalogue, or the repo's migration text to " +
+      "be re-based onto what PROD really runs. Both are founder-gated acts on PROD.",
     reason:
-      "The committed dump was taken from PROD on 2026-08-29; the chain has since been re-rendered " +
-      "from migrations that redefine this body. The dump is a snapshot of a real production " +
-      "catalogue and is not editable by hand — correcting it means re-dumping, which needs the " +
-      "PROD credential and a fresh secret scan. Pinned rather than fixed here so this gate can " +
-      "block the NEXT drift today instead of waiting on a credential-bearing act.",
-  },
-  {
-    function: "enqueue_ledger_composite_refresh",
-    nargs: 0,
-    status: "DRIFT",
-    snapshotHash: "7c3d33e96f1cbe5a864750ff083670e23ab4c586b8529d48da005006b4d81ac4",
-    candidateHash: "15e3ba963fa0349eec352e1a5f8a3be5258fe8f34ff996926e99b9d2f72996b5",
-    hunks: 15,
-    capturedAt: "2026-09-07",
-    clearedBy:
-      "A regeneration of supabase/schema/baseline.sql from PROD (a separate reviewed act that " +
-      "also moves the sha256 recorded in supabase/schema/BASELINE.md).",
-    reason:
-      "Phase 164.7's ledger-refresh switch (20260907130000_ledger_refresh_switch_to_system_flags) " +
-      "re-based Lock B off the unsettable app.* GUC onto a fail-CLOSED public.system_flags read. " +
-      "The 15-line magnitude is that re-base. VAC-04's PROD arm already observed and acknowledged " +
-      "this same move against the live catalogue, so the chain is the CURRENT truth and the dump " +
-      "is the stale side — precisely the direction this gate exists to make visible.",
-  },
-  {
-    function: "enqueue_ledger_refresh_for_strategies",
-    nargs: 0,
-    status: "DRIFT",
-    snapshotHash: "88e6af8472e4e48175a62b1ee189f7411407b14827d948c81aa015f511ae6e36",
-    candidateHash: "adeb6d168187b2dfb22fa4798eb14972e233342e8721d7221323a9311053705f",
-    hunks: 15,
-    capturedAt: "2026-09-07",
-    clearedBy:
-      "A regeneration of supabase/schema/baseline.sql from PROD (a separate reviewed act that " +
-      "also moves the sha256 recorded in supabase/schema/BASELINE.md).",
-    reason:
-      "The single-key arm of the same Phase 164.7 Lock B re-base as the composite arm above, moved " +
-      "by the same successor migration in the same commit because a half-moved switch is a switch " +
-      "with two answers. Identical 15-line magnitude, identical disposition.",
+      "⚠️ RE-MEASURED 2026-09-07 against a FRESHLY REGENERATED PROD dump, and the row's original " +
+      "diagnosis was WRONG. It read 'the committed dump was taken from PROD on 2026-08-29; the " +
+      "chain has since been re-rendered from migrations that redefine this body' — i.e. the dump " +
+      "is stale. It is not. The new dump's normalized body hashes to the SAME snapshotHash as the " +
+      "old one, so PROD never moved; only two migrations ever define this function " +
+      "(20260411144407, then 20260510180226) and PROD is running the EARLIER of the two. The " +
+      "difference is executable, not cosmetic: the chain declares `v_row_found BOOLEAN` and " +
+      "SELECTs `true` into it to distinguish 'no parent row' from 'a parent row of NULLs'; PROD " +
+      "has neither. So this is a PROD-vs-REPO divergence of the DRIFT-04 family — either " +
+      "20260510180226 never reached PROD, or its file was retro-edited after it did — and a " +
+      "read-only dump cannot tell those two apart. Tracked as DRIFT-06 in TODOS.md.",
   },
   {
     function: "reject_sentinel_writes",
@@ -217,13 +208,19 @@ export const CONTENT_DRIFT_ALLOWLIST = [
     hunks: 9,
     capturedAt: "2026-09-07",
     clearedBy:
-      "A regeneration of supabase/schema/baseline.sql from PROD (a separate reviewed act that " +
-      "also moves the sha256 recorded in supabase/schema/BASELINE.md).",
+      "the same act named on check_fan_in_ready above — NOT a baseline regeneration. That was " +
+      "performed on 2026-09-07 and left this row's snapshotHash bit-identical.",
     reason:
-      "A guard trigger body redefined by a migration after the 2026-08-29 dump was taken. The dump " +
-      "side is the stale one; the chain side is what a fresh apply produces. Not editable in place " +
-      "for the same reason as every other row here — baseline.sql is a byte-identical pg_dump, and " +
-      "hand-patching it would make it stop being that.",
+      "⚠️ RE-MEASURED 2026-09-07 against a FRESHLY REGENERATED PROD dump; the original 'the dump " +
+      "side is the stale one' diagnosis is FALSIFIED. snapshotHash is unchanged, so PROD's body " +
+      "never moved. Two migrations define this trigger function (20260513073518, then " +
+      "20260515114310) and PROD runs the EARLIER one: its three RAISE EXCEPTION messages are the " +
+      "short 2026-05-13 wording, while the chain renders the 2026-05-15 wording that adds 'by " +
+      "user-originated writes (sentinel reserved for sanitize_user)' and the 'red-team Finding 4' " +
+      "citation. The nine hunks are those three messages and the dollar-quote tag; the GUARD " +
+      "LOGIC — which sentinel values are refused, on which three tables — is identical on both " +
+      "sides, so this is a message-text divergence and not a hole in the guard. Same DRIFT-04 " +
+      "family as the row above. Tracked as DRIFT-06 in TODOS.md.",
   },
   {
     function: "retention_delete_guard",
@@ -234,64 +231,19 @@ export const CONTENT_DRIFT_ALLOWLIST = [
     hunks: 2,
     capturedAt: "2026-09-07",
     clearedBy:
-      "A regeneration of supabase/schema/baseline.sql from PROD (a separate reviewed act that " +
-      "also moves the sha256 recorded in supabase/schema/BASELINE.md).",
+      "the same act named on check_fan_in_ready above — NOT a baseline regeneration. That was " +
+      "performed on 2026-09-07 and left this row's snapshotHash bit-identical.",
     reason:
-      "The smallest disagreement in the census at two differing lines — the delete-guard's " +
-      "sanitize_user exemption clause. Small does not mean cosmetic: this gate compares NORMALIZED " +
-      "bodies, so comments and whitespace are already stripped and two lines is two lines of real " +
-      "executable difference. Pinned by hash so any FURTHER move on it still fails.",
-  },
-  {
-    function: "sync_strategy_analytics_status",
-    nargs: 1,
-    status: "DRIFT",
-    snapshotHash: "cb4353d7a356e647445d2e331ff2104ac4e356cfdb4ae4f4f4578e918bfcb995",
-    candidateHash: "67a36c4e2d85832676adbb9c09faf971795a830548d8857b37dacc74c709eee1",
-    hunks: 38,
-    capturedAt: "2026-09-07",
-    clearedBy:
-      "A regeneration of supabase/schema/baseline.sql from PROD (a separate reviewed act that " +
-      "also moves the sha256 recorded in supabase/schema/BASELINE.md).",
-    reason:
-      "The largest disagreement in the census at 38 differing lines. Phase 164.2 CURATED-COPY grew " +
-      "this body's curated computation_error sentence handling and supabase/tests/" +
-      "test_sync_status_curated_sentence_survives.sql gates the resulting behaviour, so the CHAIN " +
-      "side is the tested one and the dump is behind it.",
-  },
-  {
-    function: "match_engine_cron_tick",
-    nargs: 0,
-    status: "SNAPSHOT_MISSING",
-    snapshotHash: null,
-    candidateHash: "323330b42bdbbb8eaa797686ed80b5bf4f2a2bc9cb56f349838a72a524c943d9",
-    hunks: null,
-    capturedAt: "2026-09-07",
-    clearedBy:
-      "A regeneration of supabase/schema/baseline.sql from PROD (a separate reviewed act that " +
-      "also moves the sha256 recorded in supabase/schema/BASELINE.md).",
-    reason:
-      "Created by 20260907120000_analytics_service_settings_and_vault_tick.sql, which merged AFTER " +
-      "the 2026-08-29 dump, so the committed dump has no body for it at all — `snapshotHash: null` " +
-      "is structural here, not an omission. Repointing the live cron row at this function is Phase " +
-      "164.5.1 CRONREPOINT and is explicitly outside this phase's fence.",
-  },
-  {
-    function: "strategy_analytics_drop_stale_error_provenance",
-    nargs: 0,
-    status: "SNAPSHOT_MISSING",
-    snapshotHash: null,
-    candidateHash: "195717dd429248fe6bb3c2a9de8058e8669771af28ad8e6ce691e7d9956cd472",
-    hunks: null,
-    capturedAt: "2026-09-07",
-    clearedBy:
-      "A regeneration of supabase/schema/baseline.sql from PROD (a separate reviewed act that " +
-      "also moves the sha256 recorded in supabase/schema/BASELINE.md).",
-    reason:
-      "Phase 164.2 CURATED-COPY's provenance-drop trigger function, added by a migration after the " +
-      "dump was taken. TODOS `[164.2-TEST-APPLY-PROVENANCE]` already records that this same " +
-      "provenance migration has not reached shared TEST either — the dump lagging it is the same " +
-      "missing-apply lag seen from the snapshot side, not a second defect.",
+      "⚠️ RE-MEASURED 2026-09-07 against a FRESHLY REGENERATED PROD dump; the original diagnosis " +
+      "is FALSIFIED here too, and this row is the cleanest specimen of the class. Exactly ONE " +
+      "migration in the repository defines this function (20260515113853_retention_crons_safe), " +
+      "so there is no later revision for PROD to be behind — yet PROD's RAISE message OMITS the " +
+      "clause 'This indicates an unbounded DELETE (missing WHERE) — aborting.' that this single " +
+      "defining migration contains. A live catalogue cannot lag a migration it is the only " +
+      "definition of; the migration FILE was therefore edited after it was applied, which is the " +
+      "retro-edit half of the DRIFT-04 family. The 100,000-row ceiling and the abort itself are " +
+      "identical on both sides, so the guard's behaviour is unaffected — only its message text. " +
+      "Tracked as DRIFT-06 in TODOS.md.",
   },
 ];
 

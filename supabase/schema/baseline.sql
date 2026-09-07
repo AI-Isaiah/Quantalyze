@@ -3766,23 +3766,39 @@ CREATE OR REPLACE FUNCTION "public"."enqueue_ledger_composite_refresh"() RETURNS
     SET "search_path" TO 'public', 'pg_catalog'
     AS $$
 DECLARE
-  v_enabled  TEXT;
+  v_enabled  BOOLEAN;
   v_row      RECORD;
   v_job_id   UUID;
   v_existing INTEGER;
   v_enqueued INTEGER := 0;
 BEGIN
-  -- ---- the fail-closed activation switch --------------------------------
-  -- FIRST statement in the body, deliberately, and it reads the SAME setting the
-  -- single-key arm reads so ONE reset kills BOTH arms on the next tick. The
-  -- missing-ok form of current_setting returns NULL when the setting was never
-  -- set; COALESCE makes that an empty string, and the comparison is EXACT
-  -- EQUALITY against the lowercase word. Anything else — unset, empty, '1', 'on',
-  -- 'TRUE', or 'true ' with a trailing space — is dormant. A truthiness test or a
-  -- boolean cast would open the flag on every one of them.
-  v_enabled := COALESCE(current_setting('app.ledger_refresh_enabled', TRUE), '');
-  IF v_enabled <> 'true' THEN
-    RAISE NOTICE 'enqueue_ledger_composite_refresh: dormant (activation setting not exactly true); enqueued 0';
+  -- ---- the fail-closed activation switch (164.7 D-01) --------------------
+  -- FIRST statement in the body, deliberately, and it reads the SAME key the
+  -- single-key arm reads so ONE reset kills BOTH arms on the next tick.
+  --
+  -- The reasoning is the single-key arm's, and it is not repeated in full here
+  -- on purpose — two copies of one argument drift. In brief: the switch moved
+  -- off a database setting an operator is refused 42501 when setting (MEASURED
+  -- on PROD 2026-09-05) and onto public.system_flags; the BOOLEAN NOT NULL
+  -- column makes the old '1' / 'on' / 'TRUE' / 'true ' class unrepresentable
+  -- rather than merely rejected; a read that RAISES leaves v_enabled NULL and a
+  -- MISSING ROW leaves it NULL too, both of which are DORMANT — the deliberate
+  -- inverse of send-intro/route.ts, whose missing-row branch is fail-OPEN
+  -- because its switch defaults ON and this one does not.
+  --
+  -- ⛔ The comparison is NULL-safe and must stay so: `<> TRUE` and `NOT
+  -- v_enabled` both evaluate NULL when the read failed, so the IF falls through
+  -- and the flag opens on exactly the failure path.
+  BEGIN
+    SELECT sf.enabled INTO v_enabled
+      FROM public.system_flags sf
+     WHERE sf.key = 'ledger_refresh_enabled';
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'enqueue_ledger_composite_refresh: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;
+    v_enabled := NULL;
+  END;
+  IF v_enabled IS DISTINCT FROM TRUE THEN
+    RAISE NOTICE 'enqueue_ledger_composite_refresh: dormant (system_flags.ledger_refresh_enabled is not TRUE); enqueued 0';
     RETURN 0;
   END IF;
 
@@ -3988,7 +4004,7 @@ $$;
 ALTER FUNCTION "public"."enqueue_ledger_composite_refresh"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."enqueue_ledger_composite_refresh"() IS 'Phase 161.1 / LEDGER-01: the recurring COMPOSITE refresh arm for ledger-backed venues. Parameterless SECURITY DEFINER; returns the number of jobs ACTUALLY INSERTED this tick. DORMANT until the app.ledger_refresh_enabled database setting is exactly ''true'' (fail-closed) — the SAME switch the single-key arm reads, so one reset kills both. Selects stale COMPOSITE strategies from public.ledger_refresh_staleness — declaring no venue of its own — excludes any composite with a member on the deferred venue (D-01/D-13), and enqueues stitch_composite, which is chain-terminal and writes the headline strategy_analytics row directly. Bounded by a 20-hour ATTEMPT cooldown (the binding constraint), a non-terminal in-flight guard, and a per-tick BURST cap. Registers no schedule; activation is a founder LIVE op per docs/runbooks/ledger-refresh-go-live.md.';
+COMMENT ON FUNCTION "public"."enqueue_ledger_composite_refresh"() IS 'Phase 161.1 / LEDGER-01: the recurring COMPOSITE refresh arm for ledger-backed venues. Parameterless SECURITY DEFINER; returns the number of jobs ACTUALLY INSERTED this tick. DORMANT unless public.system_flags holds the key ''ledger_refresh_enabled'' with enabled = TRUE (Phase 164.7 / D-01) — the SAME row the single-key arm reads, so one reset kills both, and the read is fail-CLOSED on a missing row, a FALSE row and a failing read alike. Selects stale COMPOSITE strategies from public.ledger_refresh_staleness — declaring no venue of its own — excludes any composite with a member on the deferred venue (D-01/D-13), and enqueues stitch_composite, which is chain-terminal and writes the headline strategy_analytics row directly. Bounded by a 20-hour ATTEMPT cooldown (the binding constraint), a non-terminal in-flight guard, and a per-tick BURST cap. Registers no schedule; activation is a founder LIVE op per docs/runbooks/ledger-refresh-go-live.md.';
 
 
 
@@ -3997,25 +4013,61 @@ CREATE OR REPLACE FUNCTION "public"."enqueue_ledger_refresh_for_strategies"() RE
     SET "search_path" TO 'public', 'pg_catalog'
     AS $$
 DECLARE
-  v_enabled  TEXT;
+  v_enabled  BOOLEAN;
   v_row      RECORD;
   v_job_id   UUID;
   v_existing INTEGER;
   v_enqueued INTEGER := 0;
 BEGIN
-  -- ---- Lock B (D-08): the fail-closed activation switch ------------------
-  -- FIRST statement in the body, deliberately. The missing-ok form of
-  -- current_setting returns NULL when the setting was never set; COALESCE makes
-  -- that an empty string, and the comparison is EXACT EQUALITY against the
-  -- lowercase word. Anything else — unset, empty, '1', 'on', 'TRUE', 'true '
-  -- with a trailing space — is dormant. A truthiness test would open the flag on
-  -- half of that list.
+  -- ---- Lock B (D-08, 164.7 D-01): the fail-closed activation switch ------
+  -- FIRST statement in the body, deliberately — unchanged from the form this
+  -- replaces, and the placement is the point: nothing this function does can
+  -- happen before the switch has been read.
   --
-  -- Resetting this setting is the incident-pressure kill switch: the next tick
-  -- returns 0 with no schedule operation, no deploy, no migration.
-  v_enabled := COALESCE(current_setting('app.ledger_refresh_enabled', TRUE), '');
-  IF v_enabled <> 'true' THEN
-    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant (activation setting not exactly true); enqueued 0';
+  -- WHAT CHANGED. The switch was a database setting in the `app.` namespace;
+  -- an operator on this platform is refused 42501 when setting one (MEASURED on
+  -- PROD 2026-09-05), so the runbook's activation step could not be performed.
+  -- It now reads public.system_flags, which this project has been operating
+  -- since April. The column is BOOLEAN NOT NULL, so the old comment's list of
+  -- near-misses — '1', 'on', 'TRUE', 'true ' with a trailing space — is no longer
+  -- a class that must be REJECTED by an exact comparison; it is a class that
+  -- cannot be REPRESENTED. That is the improvement, and it is why no normaliser
+  -- and no cast appears anywhere below.
+  --
+  -- FAIL-CLOSED ON EVERY PATH, which is what the wrapping buys:
+  --   * read raises (table dropped, permission denied, planner fault) -> the
+  --     handler leaves v_enabled NULL -> dormant;
+  --   * NO ROW for this key -> SELECT INTO without STRICT assigns NULL ->
+  --     dormant. ⛔ This is the DELIBERATE INVERSE of the missing-row branch in
+  --     src/app/api/admin/match/send-intro/route.ts, which treats a missing row
+  --     as ENABLED. That is right for a kill switch defaulting ON and wrong
+  --     here: this is a dormant-by-default activation switch, so its absent
+  --     state must be its closed state. Only that route's error branch and its
+  --     enabled=false branch transfer.
+  --   * row present and FALSE -> dormant.
+  --
+  -- ⛔ THE COMPARISON IS NULL-SAFE AND MUST STAY SO. With v_enabled NULL both
+  -- `v_enabled <> TRUE` and `NOT v_enabled` evaluate to NULL, the IF is not
+  -- taken, and the body falls THROUGH to the fan-out — i.e. those two spellings
+  -- open the flag on precisely the failure path this guard exists for.
+  --
+  -- ⚠️ NOTHING but the assignment goes in the handler. A probe or a second read
+  -- inside an EXCEPTION block is the shape lint rule R1 flags in the gate corpus;
+  -- keeping it clean at the source is what stops a gate copying the bad shape.
+  --
+  -- Resetting the row is still the incident-pressure kill switch: the next tick
+  -- returns 0 with no schedule operation, no deploy and no migration. It is an
+  -- UPDATE an admin session or the service role can already make.
+  BEGIN
+    SELECT sf.enabled INTO v_enabled
+      FROM public.system_flags sf
+     WHERE sf.key = 'ledger_refresh_enabled';
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'enqueue_ledger_refresh_for_strategies: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;
+    v_enabled := NULL;
+  END;
+  IF v_enabled IS DISTINCT FROM TRUE THEN
+    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant (system_flags.ledger_refresh_enabled is not TRUE); enqueued 0';
     RETURN 0;
   END IF;
 
@@ -4215,7 +4267,7 @@ $$;
 ALTER FUNCTION "public"."enqueue_ledger_refresh_for_strategies"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."enqueue_ledger_refresh_for_strategies"() IS 'Phase 161.1 / LEDGER-01,-02,-04: the recurring single-key refresh fan-out for ledger-backed venues. Parameterless SECURITY DEFINER; returns the number of jobs ACTUALLY INSERTED this tick. DORMANT until the app.ledger_refresh_enabled database setting is exactly ''true'' (fail-closed). Selects stale, non-composite, key-eligible strategies from public.ledger_refresh_staleness — declaring no venue of its own — and enqueues derive_broker_dailies in strategy-mode (the chain TAIL, which auto-chains to compute_analytics_from_csv; the chain HEAD is a provable no-op on a published strategy). Bounded by a 20-hour ATTEMPT cooldown (the binding constraint), an in-flight conjunct, a per-venue rank cap and a per-tick burst LIMIT. Registers no schedule; activation is a founder LIVE op per docs/runbooks/ledger-refresh-go-live.md.';
+COMMENT ON FUNCTION "public"."enqueue_ledger_refresh_for_strategies"() IS 'Phase 161.1 / LEDGER-01,-02,-04: the recurring single-key refresh fan-out for ledger-backed venues. Parameterless SECURITY DEFINER; returns the number of jobs ACTUALLY INSERTED this tick. DORMANT unless public.system_flags holds the key ''ledger_refresh_enabled'' with enabled = TRUE (Phase 164.7 / D-01; the read is fail-CLOSED — a missing row, a FALSE row and a failing read are all dormant). Selects stale, non-composite, key-eligible strategies from public.ledger_refresh_staleness — declaring no venue of its own — and enqueues derive_broker_dailies in strategy-mode (the chain TAIL, which auto-chains to compute_analytics_from_csv; the chain HEAD is a provable no-op on a published strategy). Bounded by a 20-hour ATTEMPT cooldown (the binding constraint), an in-flight conjunct, a per-venue rank cap and a per-tick burst LIMIT. Registers no schedule; activation is a founder LIVE op per docs/runbooks/ledger-refresh-go-live.md.';
 
 
 
@@ -6177,6 +6229,81 @@ COMMENT ON FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_err
 
 
 
+CREATE OR REPLACE FUNCTION "public"."match_engine_cron_tick"() RETURNS bigint
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $_$
+DECLARE
+  v_key TEXT;
+  v_url TEXT;
+  v_req BIGINT;
+  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b). BYTE-IDENTICAL to the CHECK
+  --    constraint's expression in STEP 1b, and STEP 3 check 7 asserts that the
+  --    two really are the same string by reading pg_get_constraintdef and this
+  --    body back out of the catalogue. Two copies of one rule is the point: the
+  --    constraint is one ALTER TABLE away from gone, and this is what still
+  --    refuses the POST when it is.
+  c_url_allowed CONSTANT TEXT :=
+    '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
+BEGIN
+  -- The Vault read, byte-for-byte the idiom the live job row already runs.
+  SELECT decrypted_secret INTO v_key
+    FROM vault.decrypted_secrets
+   WHERE name = 'analytics_service_key';
+  IF v_key IS NULL OR v_key = '' THEN
+    RAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header';
+  END IF;
+
+  SELECT s.value INTO v_url
+    FROM public.system_settings s
+   WHERE s.key = 'analytics_service_url';
+  IF v_url IS NULL OR v_url = '' THEN
+    RAISE EXCEPTION 'analytics_service_url missing from system_settings — refusing to post to a null url';
+  END IF;
+
+  -- ⛔ AND IT MUST BE A DESTINATION THIS FILE ALLOWS (T-164.7-06, layer (b)).
+  -- The CHECK constraint in STEP 1b already refuses to STORE anything else; this
+  -- re-test is what stands when that constraint has been dropped, and it is the
+  -- last thing between an admin-writable row and a live service key in an
+  -- outbound header.
+  --
+  -- ⚠️ THE MESSAGE DOES NOT ECHO THE OFFENDING URL, and that is not squeamishness
+  -- about PII. RAISE text lands in the cron job-run row, in the Postgres log and
+  -- in whatever ships those onward; echoing an attacker-chosen string there
+  -- writes their collector's hostname into every downstream reader of this
+  -- project's logs, and an operator who needs the value can SELECT it. Same rule
+  -- as the two RAISEs above (T-161.1-10): name the SETTING, never its value.
+  IF v_url !~ c_url_allowed THEN
+    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: an https host under .up.railway.app';
+  END IF;
+
+  -- ⚠️ net.http_post is ASYNC. The BIGINT returned here is a REQUEST ID, not an
+  -- HTTP status: a request that ends in a 401 or a timeout returns a perfectly
+  -- ordinary id and leaves the caller looking successful. Whether the POST
+  -- actually landed is read out of net._http_response, which is what the
+  -- cron-obs prober arm does (TODOS CRON-OBS-01). Do not add a success message
+  -- here — there is nothing at this point that knows whether it succeeded.
+  SELECT net.http_post(
+           url := v_url || '/api/match/cron-recompute',
+           headers := jsonb_build_object(
+                        'Content-Type', 'application/json',
+                        'X-Service-Key', v_key
+                      ),
+           body := '{}'::jsonb,
+           timeout_milliseconds := 60000
+         ) INTO v_req;
+  RETURN v_req;
+END
+$_$;
+
+
+ALTER FUNCTION "public"."match_engine_cron_tick"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."match_engine_cron_tick"() IS 'Phase 164.7 / SC-2 / DRIFT-02: the CALLABLE half of the mechanism the live match_engine_cron job already runs. Reads the analytics service key from vault.decrypted_secrets and the service URL from public.system_settings, RAISES when either is absent or empty rather than sending a null header, RAISES again when the url is not a destination the STEP 1b allow-list permits (T-164.7-06 — that re-test is what survives the CHECK constraint being dropped, and it never echoes the offending value), and fires one ASYNC net.http_post whose returned BIGINT is a request id and NOT an HTTP success. Registers nothing and is invoked by nothing in this repository yet: repointing the live job row at it is Phase 164.5 item (7), which must also settle the manifest hygiene rule requiring the literal vault.decrypted_secrets to appear in that row''s own command text (164.7-RESEARCH Open Question 2).';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."parse_holding_ref"("p_ref" "text") RETURNS TABLE("venue" "text", "symbol" "text", "holding_type" "text")
     LANGUAGE "plpgsql" IMMUTABLE PARALLEL SAFE
     AS $$
@@ -7715,6 +7842,30 @@ $$;
 ALTER FUNCTION "public"."stamp_first_sync_success"("p_user_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."strategy_analytics_drop_stale_error_provenance"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+BEGIN
+  IF NEW.computation_error IS DISTINCT FROM OLD.computation_error
+     AND NEW.computation_error_source IS NOT DISTINCT FROM OLD.computation_error_source
+     AND NEW.computation_error_job_id IS NOT DISTINCT FROM OLD.computation_error_job_id
+  THEN
+    NEW.computation_error_source := NULL;
+    NEW.computation_error_job_id := NULL;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."strategy_analytics_drop_stale_error_provenance"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."strategy_analytics_drop_stale_error_provenance"() IS 'Phase 164.2 / criterion 2: enforces the computation_error PROVENANCE invariant at the table, for EVERY writer. Any UPDATE that CHANGES computation_error while leaving computation_error_source and computation_error_job_id at the values they already held has both markers coerced to NULL, because a marker that outlives the sentence it describes is read by sync_strategy_analytics_status as a writer''s claim over text that is gone -- which is strictly worse than having no provenance at all. This closes it for the analytics-service success writers (_mark_complete, headline_payload), the failure re-write path (_upsert_error_only) and set_wizard_composite_members (mig 20260712120000) WITHOUT editing any of them, and for every writer added after this date. Cost, stated: PL/pgSQL cannot tell "column omitted from the SET list" from "column set to its current value", so a writer re-stamping the SAME job id with a DIFFERENT sentence also loses its marker and falls back to the per-kind generic -- the pre-164.2 behaviour, never a corruption. Does NOT fire on the bridge''s own writes: branches (b)/(b-prime) keep the sentence UNCHANGED when they keep the markers (first condition false), and change the sentence while NULLing the markers explicitly when they do not (second and third false). Self-contained: reads only NEW/OLD, calls nothing (mig 20260516170000:3-11).';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."strategy_analytics_stamp_computing_started"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     SET "search_path" TO 'public', 'pg_catalog'
@@ -7912,6 +8063,15 @@ DECLARE
   -- is absent from this body INCLUDING its comments.
   v_latest_kind        TEXT;
   v_protected_kind     TEXT;
+  -- Phase 164.2 / criterion 2: the IDENTITY of the failure each write branch is
+  -- resolving, alongside its kind. The provenance markers on
+  -- strategy_analytics are only honoured when they name THIS job, so the
+  -- decision needs the id and not just the kind. Same aggregate, same FILTERs,
+  -- same ordering as the two kinds above -- see the file header for why an id
+  -- match rather than a bare "the column is non-NULL" test is what makes cases
+  -- (ii) and (iii) of 20260826120000's owed-work paragraph decidable.
+  v_latest_job_id      UUID;
+  v_protected_job_id   UUID;
   v_publish_healthy    BOOLEAN;
   v_protect_hold       BOOLEAN;
 BEGIN
@@ -8070,6 +8230,11 @@ BEGIN
   -- four ways, so it is spelled ONCE.
   WITH live_failures AS (
     SELECT
+      -- Phase 164.2 / criterion 2: the failing job's own id. Projected here so
+      -- the aggregate below can carry it into v_latest_job_id /
+      -- v_protected_job_id; the provenance decision on both write branches is
+      -- an EQUALITY against this value, never a presence test.
+      f.id,
       f.error_kind,
       f.created_at,
       -- ⛔ The two marker literals are a CROSS-LANGUAGE CONTRACT with no
@@ -8082,9 +8247,9 @@ BEGIN
       --
       -- ⛔ THE KIND SCOPE IS THE SECOND HALF OF THE CONTAINMENT, not decoration
       -- (161.1 migration re-review, rls-policy-auditor MEDIUM). `metadata` is
-      -- NOT a closed namespace and `'source'` is NOT a private key: the single
-      -- request-derived writer, analytics-service/routers/process_key.py:766
-      -- and :1518, puts the caller's `body.source` straight into `p_metadata`.
+      -- NOT a closed namespace and `'source'` is NOT a private key: the
+      -- request-derived writers in analytics-service/routers/process_key.py put
+      -- the caller's `body.source` straight into `p_metadata`.
       -- That value cannot collide with a refresh marker TODAY only because the
       -- Pydantic `Source` Literal at
       -- analytics-service/services/ingestion/adapter.py:59 admits venue names
@@ -8101,6 +8266,19 @@ BEGIN
       -- by the drift gate in
       -- analytics-service/tests/test_ledger_refresh_kind_scope_drift.py; add a
       -- fan-out arm without adding its kind here and that gate goes RED.
+      --
+      -- ⚠️ CITE CORRECTED 2026-09-06 (prose only, nothing executable moved).
+      -- The `p_metadata` sentence above is inherited VERBATIM from migrations
+      -- 20260825150000 and 20260826120000, where it read "the single
+      -- request-derived writer, analytics-service/routers/process_key.py:766
+      -- and :1518". BOTH halves were stale at this date: :766 is a BLANK line,
+      -- and there are FOUR such sites rather than one -- `"source":
+      -- body.source` occurs at :810 (the `p_metadata` dict spans :806-812),
+      -- :1173, :1519 and :1597. The two earlier migrations are ALREADY APPLIED
+      -- and are deliberately NOT edited, so the same stale cite still lives in
+      -- both of them; this note is the correction of record. The containment
+      -- argument is UNCHANGED -- four request-derived sites widen the surface,
+      -- they do not remove the kind scope's need.
       --
       -- ⛔ It belongs to `is_protected`, NEVER to this CTE's WHERE clause.
       -- Moved into the WHERE it would drop out-of-scope failures from the
@@ -8213,12 +8391,38 @@ BEGIN
     -- class. Same ordering, same FILTERs, same partition as before — only the
     -- column changed, from the operator diagnostic to the enum that decides
     -- which curated sentence the user reads.
-    (array_agg(error_kind ORDER BY created_at DESC)
+    --
+    -- ⛔ THE ORDER IS TOTAL, and the trailing key is not tidiness. Four picks
+    -- below choose "the first row" from four independent aggregate states, and
+    -- the pairing this migration rests on -- that the kind and the id below
+    -- describe the SAME failure -- is a claim that all four agree on which row
+    -- that is. An ordering with ties leaves that to the executor. Ties are
+    -- REACHABLE: the timestamp key is transaction-scoped, so a fan-out inserting
+    -- several jobs in one statement stamps them identically. The primary key
+    -- breaks every tie and it is spelled on ALL FOUR picks -- a tie-break on two
+    -- of them would leave exactly the disagreement it was added to remove. The
+    -- self-verify below COUNTS the four rather than testing for presence.
+    (array_agg(error_kind ORDER BY created_at DESC, id DESC)
        FILTER (WHERE NOT is_protected))[1],
-    (array_agg(error_kind ORDER BY created_at DESC)
+    (array_agg(error_kind ORDER BY created_at DESC, id DESC)
+       FILTER (WHERE is_protected))[1],
+    -- Phase 164.2 / criterion 2: the same two picks by IDENTITY. Same ordering,
+    -- same FILTERs, same partition -- so v_latest_job_id names exactly the job
+    -- whose kind became v_latest_kind, and v_protected_job_id exactly the job
+    -- whose kind became v_protected_kind. That pairing is what lets a write
+    -- branch ask "is the sentence already in the column the one THIS failure's
+    -- writer just wrote?" instead of the unanswerable "is this sentence
+    -- curated?" -- the distinction 20260826120000's header records as the
+    -- reason the debt could not be paid there. Both are non-NULL whenever the
+    -- branch that reads them fires: the branch's own guard is a count over the
+    -- same FILTER, and compute_jobs.id is the primary key.
+    (array_agg(id ORDER BY created_at DESC, id DESC)
+       FILTER (WHERE NOT is_protected))[1],
+    (array_agg(id ORDER BY created_at DESC, id DESC)
        FILTER (WHERE is_protected))[1]
     INTO v_failed_count, v_protected_count, v_unresolved_count,
-         v_latest_kind, v_protected_kind
+         v_latest_kind, v_protected_kind,
+         v_latest_job_id, v_protected_job_id
     FROM live_failures;
 
   -- ---- the branch-(a) EXEMPTION (161.1 re-review MEDIUM: idempotence) -------
@@ -8315,8 +8519,8 @@ BEGIN
   IF v_nonterminal_count > 0 AND NOT v_protect_hold THEN
     -- JOB-01 (Phase 142): a FRESH INSERT at 'computing' IS the transition in, so
     -- the VALUES arm stamps now() unconditionally. The ON CONFLICT arm must NOT.
-    INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at)
-    VALUES (p_strategy_id, 'computing', NULL, now())
+    INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
+    VALUES (p_strategy_id, 'computing', NULL, now(), NULL, NULL)
     ON CONFLICT (strategy_id) DO UPDATE
        SET computation_status = CASE
              WHEN strategy_analytics.computation_status = 'complete_with_warnings'
@@ -8325,6 +8529,15 @@ BEGIN
              ELSE 'computing'
            END,
            computation_error  = EXCLUDED.computation_error,
+           -- Phase 164.2 / criterion 2: the sentence on the line above is being
+           -- blanked, so the provenance that described it must go with it. A
+           -- marker left standing over a blanked sentence would make the NEXT
+           -- generic write look like a curated one and freeze it there. This
+           -- branch is also the reason the four TypeScript pre-enqueue writers
+           -- need no marker at all: when a job starts, their sentence is stale
+           -- by construction and superseding it is the correct outcome.
+           computation_error_source = NULL,
+           computation_error_job_id = NULL,
            -- JOB-01 (Phase 142): stamp on the TRANSITION INTO computing only,
            -- keyed off the RESOLVED status above — never off the branch. This
            -- bridge is PERFORMed in-RPC on EVERY job transition, so an
@@ -8364,11 +8577,38 @@ BEGIN
   -- closed by mig 20260708120000).
   IF v_failed_count > 0 THEN
     -- JOB-01 (Phase 142): SQL exit transition #1 — clear the stamp.
-    INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at)
-    VALUES (p_strategy_id, 'failed', computation_error_copy(v_latest_kind), NULL)
+    INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
+    VALUES (p_strategy_id, 'failed', computation_error_copy(v_latest_kind), NULL, NULL, NULL)
     ON CONFLICT (strategy_id) DO UPDATE
        SET computation_status = EXCLUDED.computation_status,
-           computation_error  = EXCLUDED.computation_error,
+           -- ⛔ Phase 164.2 / criterion 2 — THE CONDITIONAL. The generic
+           -- per-kind sentence in the VALUES tuple above is what a FRESH row
+           -- gets, always: there is no earlier writer sentence on a row that
+           -- did not exist. On CONFLICT the row may already carry one, and this
+           -- CASE is the only place that decides.
+           --
+           -- The predicate is an EQUALITY on the job, not a presence test on
+           -- the marker, and that is the whole design. 20260826120000's header
+           -- names three things a bare "the column is non-NULL" test cannot
+           -- tell apart: (i) the sentence THIS failure's writer just wrote,
+           -- (ii) a sentence left by an OLDER, still-unresolved failure, and
+           -- (iii) operator text written by the pre-migration form of the
+           -- protected branch. Keyed on the id of the job this branch itself
+           -- resolved, (i) matches and (ii)/(iii) do not.
+           --
+           -- ⚠️ Plain `=`, deliberately NOT `IS NOT DISTINCT FROM`. Both
+           -- markers are NULL on the ~103 legacy rows and on every row the
+           -- bridge itself last touched, and a NULL on either side makes the
+           -- WHEN neither true nor false, so control falls to ELSE and the
+           -- generic wins. That is exactly today's behaviour, which is what
+           -- "no backfill" is required to mean.
+           computation_error  = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN strategy_analytics.computation_error ELSE EXCLUDED.computation_error END,
+           -- The markers travel WITH the sentence they describe, on the same
+           -- predicate. Kept when the sentence is kept; cleared when the
+           -- generic overwrites it, so the next call cannot read this bridge's
+           -- own generic as a writer's curated sentence.
+           computation_error_source = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN strategy_analytics.computation_error_source ELSE NULL END,
+           computation_error_job_id = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN strategy_analytics.computation_error_job_id ELSE NULL END,
            computing_started_at = NULL,
            computed_at        = now();
     RETURN;
@@ -8418,21 +8658,33 @@ BEGIN
        --   * It DOES heal a row still carrying operator text written by the
        --     pre-migration form of this very branch, the next time it is touched.
        --
-       -- ⛔ WHAT IS STILL LOST HERE, and is NOT closed by this migration: the
-       -- worker writes a CURATED per-failure sentence into this column on this
-       -- exact path moments before the RPC that runs this bridge, and this
-       -- statement then replaces it with the per-KIND sentence. That loss is
-       -- REAL and it is what a user reads on the portfolio stale warning. It
-       -- PRE-DATES this migration (see above: it was previously a loss to the
-       -- raw diagnostic), so it is not something to revert to. Fixing it needs
-       -- PROVENANCE on this column — a writer/generation marker the Python
-       -- writers set and this branch reads — because preferring the value
-       -- already present cannot tell this failure's sentence from an older
-       -- unrelated one, and would also freeze the pre-migration operator text
-       -- this branch now heals. That is an architectural change, out of this
-       -- plan's scope, and the file header records it as owed work rather than
-       -- as an accepted trade.
-       SET computation_error   = computation_error_copy(v_protected_kind),
+       -- ✅ WHAT WAS STILL LOST HERE IS NOW PAID (Phase 164.2 / criterion 2).
+       -- 20260826120000 recorded, as OWED WORK rather than as an accepted
+       -- trade, that the worker writes a CURATED per-failure sentence into this
+       -- column moments before the RPC that runs this bridge and that this
+       -- statement then replaced it with the per-KIND sentence — the loss a
+       -- user reads on the portfolio stale warning. It also stated the exact
+       -- reason the fix could not be "prefer the value already present": with
+       -- no provenance, that cannot tell this failure's sentence from one left
+       -- by an older unresolved failure, and it would freeze the operator text
+       -- this branch heals.
+       --
+       -- The two marker columns are that provenance, and the CASE below is the
+       -- preference made DECIDABLE: the existing sentence is kept only when a
+       -- writer stamped it FOR THE JOB THIS BRANCH JUST RESOLVED. An older
+       -- unresolved failure's sentence has a different job id and loses; text
+       -- with no marker at all has no id and loses, so the healing property
+       -- 20260826120000 added is untouched; and the retry-positive 'orphaned'
+       -- copy still reaches the user, because the reaper stamps no marker.
+       -- ⚠️ THE PYTHON HALF IS A SEPARATE PLAN. Until the writers set the
+       -- markers, every row on this path has NULL markers, the CASE takes its
+       -- ELSE arm, and this branch behaves EXACTLY as it did before. That is
+       -- the intended deploy order, not an oversight.
+       SET computation_error   = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN strategy_analytics.computation_error ELSE computation_error_copy(v_protected_kind) END,
+           -- The markers travel WITH the sentence, on the same predicate: kept
+           -- when it is kept, cleared when the per-kind copy overwrites it.
+           computation_error_source = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN strategy_analytics.computation_error_source ELSE NULL END,
+           computation_error_job_id = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN strategy_analytics.computation_error_job_id ELSE NULL END,
            -- JOB-01: this is still an exit from computing. The publish columns
            -- are untouched on purpose; see the header for the full list of what
            -- is deliberately NOT written here (status, warned, computed_at).
@@ -8449,8 +8701,8 @@ BEGIN
   -- to 'complete'. Clears any stale computation_error either way.
   -- JOB-01 (Phase 142): SQL exit transition #2 — clear the stamp. Both arms of
   -- the status CASE are terminal, so the clear is unconditional here.
-  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at)
-  VALUES (p_strategy_id, 'complete', NULL, NULL)
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
+  VALUES (p_strategy_id, 'complete', NULL, NULL, NULL, NULL)
   ON CONFLICT (strategy_id) DO UPDATE
      SET computation_status = CASE
            WHEN strategy_analytics.computation_status = 'complete_with_warnings'
@@ -8459,6 +8711,13 @@ BEGIN
            ELSE 'complete'
          END,
          computation_error  = NULL,
+         -- Phase 164.2 / criterion 2: UNCONDITIONAL, exactly like the blank on
+         -- the line above and for the same reason. Every live failure is gone;
+         -- there is nothing left for a marker to describe, and one left
+         -- standing here would be read by the NEXT failure's write branch as a
+         -- writer's claim over a sentence that no longer exists.
+         computation_error_source = NULL,
+         computation_error_job_id = NULL,
          computing_started_at = NULL,
          computed_at        = now();
 END;
@@ -9941,6 +10200,10 @@ CREATE TABLE IF NOT EXISTS "public"."strategy_analytics" (
     "metrics_json_by_basis" "jsonb",
     "computing_started_at" timestamp with time zone,
     "series_completeness" "text",
+    "computation_error_source" "text",
+    "computation_error_job_id" "uuid",
+    CONSTRAINT "strategy_analytics_computation_error_markers_together_check" CHECK ((("computation_error_source" IS NULL) = ("computation_error_job_id" IS NULL))),
+    CONSTRAINT "strategy_analytics_computation_error_source_check" CHECK (("computation_error_source" = 'writer'::"text")),
     CONSTRAINT "strategy_analytics_computation_status_check" CHECK (("computation_status" = ANY (ARRAY['pending'::"text", 'computing'::"text", 'complete'::"text", 'complete_with_warnings'::"text", 'failed'::"text"]))),
     CONSTRAINT "strategy_analytics_metrics_by_basis_shape" CHECK ((("metrics_json_by_basis" IS NULL) OR ("jsonb_typeof"("metrics_json_by_basis") = 'object'::"text")))
 );
@@ -9966,6 +10229,14 @@ COMMENT ON COLUMN "public"."strategy_analytics"."computing_started_at" IS 'JOB-0
 
 
 COMMENT ON COLUMN "public"."strategy_analytics"."series_completeness" IS 'MT5-12 (Phase 142.2): the completeness verdict for this strategy''s daily series. Values: ledger_complete | sampled_gapped (a SAMPLED NAV series with interior holes -- combine_sfox_balance_history only, when nav_gap_days > 0; NOT the gapped-perp case) | fill_derived_unproven (every ccxt fills+funding series, ALWAYS and unconditionally -- the normal case for that path, not a per-account judgement) | user_supplied | composite_stitched. The PRODUCER decides: the verdict is assigned by the code that builds the series, from a single producer registry in Python (analytics-service/services/broker_dailies.py). TypeScript holds a SEPARATE admissibility policy -- a hand-typed subset in src/lib/strategyGate.ts, deliberately never imported -- which answers which verdicts the gate may trust, not which verdicts exist; that independence is intentional and is not a second copy of the producer set. NULL means the series'' inputs were never examined, and the gate refuses NULL (fail-closed). Deliberately NO CHECK constraint on the values: a CHECK would be a second hand-maintained copy of the producer set -- the drift class this column deletes -- and would fail a live money-path write instead of reddening a build; the fail-loud assert at the derive seam is the enforcement. Backfilling this column is FORBIDDEN: a backfill fabricates a trust claim about series whose inputs no longer exist to examine.';
+
+
+
+COMMENT ON COLUMN "public"."strategy_analytics"."computation_error_source" IS 'Phase 164.2 / criterion 2: PROVENANCE for computation_error. NULL means BRIDGE-OR-LEGACY -- the sentence was written by sync_strategy_analytics_status, by the 16-hour stuck-computing reaper, by a pre-enqueue TypeScript writer, or before this column existed -- and reproduces the pre-164.2 behaviour exactly (no backfill was performed, deliberately: migrating historical rows would assert provenance nobody recorded). The single admissible non-NULL value is ''writer'', set by the analytics-service strategy_analytics failure writers IN THE SAME STATEMENT as the sentence itself, alongside computation_error_job_id. READ by sync_strategy_analytics_status, which keeps the existing sentence on branches (b) and (b-prime) only when this is ''writer'' AND computation_error_job_id equals the job that branch just resolved. The bridge NULLs this column on every overwrite and on every blank, so it can never stand over a sentence it does not describe.';
+
+
+
+COMMENT ON COLUMN "public"."strategy_analytics"."computation_error_job_id" IS 'Phase 164.2 / criterion 2: the compute_jobs.id whose failure the computation_error sentence describes. NULL means BRIDGE-OR-LEGACY provenance (see computation_error_source). Deliberately NOT a foreign key: compute_jobs rows are retained for audit under their own retention policy, and an FK would couple that retention to this column; the bridge''s test is an equality, so an id that no longer resolves simply fails to match and the per-kind generic wins. This id is what makes the preference DECIDABLE -- a presence test on the source column alone cannot tell THIS failure''s sentence from one left by an OLDER unresolved failure, which is the reason 20260826120000''s header gave for recording the fix as owed work rather than doing it there. Written by the analytics-service strategy_analytics failure writers in the same statement as the sentence; NULLed by the bridge on every overwrite and every blank.';
 
 
 
@@ -10687,6 +10958,26 @@ CREATE TABLE IF NOT EXISTS "public"."system_flags" (
 ALTER TABLE "public"."system_flags" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."system_settings" (
+    "key" "text" NOT NULL,
+    "value" "text" NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_by" "uuid",
+    CONSTRAINT "system_settings_analytics_service_url_allowed" CHECK ((("key" <> 'analytics_service_url'::"text") OR ("value" ~ '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$'::"text")))
+);
+
+
+ALTER TABLE "public"."system_settings" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."system_settings" IS 'Phase 164.7 / SC-2: NON-SECRET operator configuration, keyed by name, readable and writable by admins and the service role only. The TEXT-valued sibling of system_flags (which stays BOOLEAN-only). ⛔ SECRETS GO TO VAULT, NEVER HERE: every row is plaintext, is dumped by pg_dump and is visible to anyone who can read the table. See vault.create_secret / vault.decrypted_secrets, which is where public.match_engine_cron_tick() reads the analytics service key from.';
+
+
+
+COMMENT ON CONSTRAINT "system_settings_analytics_service_url_allowed" ON "public"."system_settings" IS 'T-164.7-06: pins the analytics_service_url row to an https host under .up.railway.app (plus the loopback discard literal the gate uses), because system_settings_admin_all is FOR ALL TO authenticated and an app-admin can therefore PATCH that row through PostgREST — one tick later the Vault-held analytics service key arrives at whatever host it names. Requiring a migration to change WHERE a live secret is sent is the desired property, not a limitation: every hostname a real redeploy of this service can have is already inside the allow-list. public.match_engine_cron_tick() re-tests the SAME expression before posting, so dropping this constraint does not open the route.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."token_price_history" (
     "symbol" "text" NOT NULL,
     "asof" "date" NOT NULL,
@@ -11244,6 +11535,11 @@ ALTER TABLE ONLY "public"."strategy_verifications"
 
 ALTER TABLE ONLY "public"."system_flags"
     ADD CONSTRAINT "system_flags_pkey" PRIMARY KEY ("key");
+
+
+
+ALTER TABLE ONLY "public"."system_settings"
+    ADD CONSTRAINT "system_settings_pkey" PRIMARY KEY ("key");
 
 
 
@@ -11992,6 +12288,14 @@ CREATE OR REPLACE TRIGGER "strategies_reject_sentinel" BEFORE INSERT OR UPDATE O
 
 
 
+CREATE OR REPLACE TRIGGER "strategy_analytics_drop_stale_error_provenance_trigger" BEFORE UPDATE ON "public"."strategy_analytics" FOR EACH ROW EXECUTE FUNCTION "public"."strategy_analytics_drop_stale_error_provenance"();
+
+
+
+COMMENT ON TRIGGER "strategy_analytics_drop_stale_error_provenance_trigger" ON "public"."strategy_analytics" IS 'Phase 164.2 / criterion 2: fires on UPDATE only -- not insert (a fresh row''s markers describe the sentence inserted beside them), not delete (nothing to enforce, and it would need the sanitize_user erasure exemption of 20260710160000:67). Drops computation_error_source / computation_error_job_id whenever a statement changes computation_error without restating them. Fires alongside strategy_analytics_stamp_computing_started_trigger; the two assign DISJOINT column sets, so their relative order is immaterial.';
+
+
+
 CREATE OR REPLACE TRIGGER "strategy_analytics_stamp_computing_started_trigger" BEFORE UPDATE ON "public"."strategy_analytics" FOR EACH ROW EXECUTE FUNCTION "public"."strategy_analytics_stamp_computing_started"();
 
 
@@ -12444,6 +12748,11 @@ ALTER TABLE ONLY "public"."strategy_verifications"
 
 ALTER TABLE ONLY "public"."system_flags"
     ADD CONSTRAINT "system_flags_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "public"."profiles"("id");
+
+
+
+ALTER TABLE ONLY "public"."system_settings"
+    ADD CONSTRAINT "system_settings_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "public"."profiles"("id");
 
 
 
@@ -13300,6 +13609,21 @@ CREATE POLICY "system_flags_service_all" ON "public"."system_flags" USING (("aut
 
 
 
+ALTER TABLE "public"."system_settings" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "system_settings_admin_all" ON "public"."system_settings" TO "authenticated" USING ((EXISTS ( SELECT 1
+   FROM "public"."profiles" "p"
+  WHERE (("p"."id" = "auth"."uid"()) AND ("p"."is_admin" = true))))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM "public"."profiles" "p"
+  WHERE (("p"."id" = "auth"."uid"()) AND ("p"."is_admin" = true)))));
+
+
+
+CREATE POLICY "system_settings_service_all" ON "public"."system_settings" USING (("auth"."role"() = 'service_role'::"text")) WITH CHECK (("auth"."role"() = 'service_role'::"text"));
+
+
+
 ALTER TABLE "public"."token_price_history" ENABLE ROW LEVEL SECURITY;
 
 
@@ -14055,6 +14379,11 @@ GRANT ALL ON FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_e
 
 
 
+REVOKE ALL ON FUNCTION "public"."match_engine_cron_tick"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."match_engine_cron_tick"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."parse_holding_ref"("p_ref" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."parse_holding_ref"("p_ref" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."parse_holding_ref"("p_ref" "text") TO "service_role";
@@ -14225,6 +14554,11 @@ REVOKE ALL ON FUNCTION "public"."stamp_first_sync_success"("p_user_id" "uuid") F
 GRANT ALL ON FUNCTION "public"."stamp_first_sync_success"("p_user_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."stamp_first_sync_success"("p_user_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."stamp_first_sync_success"("p_user_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."strategy_analytics_drop_stale_error_provenance"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."strategy_analytics_drop_stale_error_provenance"() TO "service_role";
 
 
 
@@ -14801,6 +15135,11 @@ GRANT ALL ON TABLE "public"."strategy_verifications" TO "service_role";
 GRANT ALL ON TABLE "public"."system_flags" TO "anon";
 GRANT ALL ON TABLE "public"."system_flags" TO "authenticated";
 GRANT ALL ON TABLE "public"."system_flags" TO "service_role";
+
+
+
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE "public"."system_settings" TO "authenticated";
+GRANT ALL ON TABLE "public"."system_settings" TO "service_role";
 
 
 

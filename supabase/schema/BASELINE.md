@@ -48,17 +48,51 @@ SP-M03 records what happens when they drift apart.
 
 | | |
 |---|---|
-| Taken | 2026-08-29 |
+| Taken | 2026-09-07 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
 | Supabase CLI | 2.84.2 (CI pins 2.98.2 — see the caveat below) |
-| sha256 | `514ba9bccd3181d925860576479e1d9ed623e429b3cb8d135f70a031e24a37fb` |
-| Shape | 61 tables, 152 policies, 121 function statements (119 distinct names), **0 data statements** |
+| sha256 | `9fad9a1b4c3cedac17883933bed0c57392d3f675b38bd65d570172b96c99168f` |
+| Shape | 62 tables, 154 policies, 123 function statements (121 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
 `scripts/local-stack/REPLAY-SPIKE.md`: no DSN, no `\connect`, no `ALTER DATABASE`, no JWT,
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-09-07 — what moved, and what did NOT
+
+The prior capture (2026-08-29, sha256 `514ba9bc…`, 14 921 lines / 701 524 bytes, 61 tables /
+152 policies / 121 function statements / 119 distinct names) stays here as dated lineage. It
+was regenerated on a founder decision because DRIFT-05 gate (b)'s first credentialed run went
+RED and was RIGHT: two functions existed in PROD and in no committed baseline.
+
+**The diff is 449 changed lines out of 15 260 (394 added, 55 removed) across 27 hunks, and
+NONE of it is cosmetic.** The same CLI (2.84.2) produced both files, and the unified diff's
+first hunk starts at line 3766 — there is no header, version, ordering or quoting churn
+anywhere in the file. Every hunk is content:
+
+| Change | Origin |
+|---|---|
+| `system_settings` table + 2 policies + URL allow-list constraint + grants + comments | Phase 164.7 `20260907120000` |
+| `match_engine_cron_tick()` + owner + grants + comment | Phase 164.7 `20260907120000` |
+| `enqueue_ledger_composite_refresh` / `enqueue_ledger_refresh_for_strategies` bodies re-based off the unsettable `app.*` GUC onto `public.system_flags` | Phase 164.7 `20260907130000` |
+| `strategy_analytics_drop_stale_error_provenance()` + its BEFORE UPDATE trigger + comments | Phase 164.2 `20260906120000` |
+| `strategy_analytics.computation_error_source` / `.computation_error_job_id` columns, comments, and their appearance in two `sync_strategy_analytics_status` INSERT column lists | Phase 164.2 `20260906120000` |
+
+Distinct function names went **119 → 121**, and the two additions are exactly the two names
+DRIFT-05 reported as `live-only`. That gate's verdict and this dump agree number-for-number.
+
+⛔ **The regeneration did NOT clear three drifting bodies, and that is the finding.**
+`check_fan_in_ready`, `reject_sentinel_writes` and `retention_delete_guard` were all pinned in
+`CONTENT_DRIFT_ALLOWLIST` with `clearedBy: "A regeneration of supabase/schema/baseline.sql
+from PROD"`. The regeneration happened and **their `snapshotHash` values did not move by a
+single bit** — PROD's bodies were never stale. PROD runs an EARLIER revision of each than the
+migration chain renders. `retention_delete_guard` is the cleanest specimen: exactly one
+migration in this repository defines it, and PROD's `RAISE` message is missing a clause that
+single defining migration contains, which a live catalogue cannot lag. That is a PROD-vs-REPO
+divergence of the DRIFT-04 family, not baseline staleness; it is tracked as **DRIFT-06** in
+`TODOS.md` and each allowlist row now records the measurement instead of the falsified claim.
 
 ## Why it exists rather than a migration replay
 
@@ -97,8 +131,9 @@ TWO gates now cover this file, and they cover DIFFERENT things:
 — not tables, columns, policies, triggers, grants, indexes, defaults or extensions — and its
 chain side is a hermetic text replay, not a live one (69 of 262 migrations fail to replay from
 empty, so a live replay is impossible here, not merely slow). Read its own SCOPE line, which it
-prints on every run. The provenance number above is still "true on 2026-08-29" for everything
-outside function bodies.
+prints on every run. The provenance number above is still only "true on 2026-09-07" for
+everything outside function bodies — the regeneration refreshes WHEN that statement was taken,
+never WHAT it covers.
 
 **Version-skew caveat for whoever writes that gate:** the local CLI is 2.84.2, CI pins 2.98.2.
 If `pg_dump` output formatting differs between them, a `--check` authored against these bytes
@@ -124,7 +159,11 @@ of them. A future regeneration carrying a `\connect` line or a JWT would have pa
 documented check and landed in a PUBLIC repo. The pattern now covers all five, and `-a` is
 not optional — this repository contains a MEASURED NUL-bearing file, and grep reports a
 NUL-bearing file as clean with exit 1. Today's `baseline.sql` is clean under the FULL set
-(re-run independently 2026-08-29), so this is forward-looking, not a live exposure. If you
+(re-run independently 2026-08-29, and again on the 2026-09-07 regeneration — the nine NEW
+matches for those three words are two `vault.decrypted_secrets` / `decrypted_secret`
+IDENTIFIERS and three `COMMENT ON` bodies, carrying no secret VALUE and already shipping
+publicly in `supabase/migrations/20260907120000`), so this is forward-looking, not a live
+exposure. If you
 widen the prose, widen this line in the same edit — that mismatch is the defect class this
 whole phase exists to remove.
 
