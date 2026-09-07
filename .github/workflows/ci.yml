@@ -2834,6 +2834,7 @@ jobs:
           # new use-existing-key SECURITY DEFINER writer. Its nine arms are
           # counted here in the same diff that adds them, which is the point of
           # holding the totals outside the .sql files.
+          #   test_analytics_service_settings_and_vault_tick.sql  7
           #   test_create_wizard_strategy_for_key.sql         9
           #   test_get_verified_cohort_rank_gate.sql          6
           #   test_ledger_refresh_composite_arm.sql          10
@@ -2906,8 +2907,8 @@ jobs:
           #   test_strategy_shares_rls.sql                    103
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=9   # files declaring a sentinel
-          ARMS_FLOOR=180     # 9 + 6 + 10 + 10 + 8 + 4 + 103 + 7 + 23
+          SENTINEL_FLOOR=10  # files declaring a sentinel
+          ARMS_FLOOR=187     # 7 + 9 + 6 + 10 + 10 + 8 + 4 + 103 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
