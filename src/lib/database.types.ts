@@ -2908,6 +2908,50 @@ export type Database = {
           },
         ]
       }
+      // HAND-WRITTEN from migration 20260907120000_analytics_service_settings_and_vault_tick.sql
+      // (Phase 164.7 / plan 02). This repository has no `gen types` script and its
+      // Supabase CLI is linked to PRODUCTION (CLAUDE.md "Which database am I on?"),
+      // so there is no safe way to regenerate this file from the live schema —
+      // see 164.7-RESEARCH § Q2. Mirrors the system_flags block above, with
+      // `value: string` in place of `enabled: boolean`. `npx tsc --noEmit` is the
+      // proof it is well-formed; nothing proves it matches the database except the
+      // migration beside it, which is why the two must be edited together.
+      system_settings: {
+        Row: {
+          key: string
+          updated_at: string
+          updated_by: string | null
+          value: string
+        }
+        Insert: {
+          key: string
+          updated_at?: string
+          updated_by?: string | null
+          value: string
+        }
+        Update: {
+          key?: string
+          updated_at?: string
+          updated_by?: string | null
+          value?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "system_settings_updated_by_fkey"
+            columns: ["updated_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "system_settings_updated_by_fkey"
+            columns: ["updated_by"]
+            isOneToOne: false
+            referencedRelation: "public_profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       token_price_history: {
         Row: {
           asof: string
