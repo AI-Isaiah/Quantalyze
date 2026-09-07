@@ -37,6 +37,7 @@ import {
   CONTENT_DRIFT_ALLOWLIST,
   FINDABLE_STATUSES,
   FINDING_KINDS,
+  COMPARED_FLOOR,
   checkContentDrift,
   checkRepo,
   validateAllowlist,
@@ -304,7 +305,7 @@ describe("[CR-01] zero comparisons is a MEASURE_FAIL, never a clean run", () => 
     const { dir, chainDir, snapshotFile } = corpus(unparseable);
     try {
       writeFileSync(snapshotFile, "");
-      const res = checkRepo({ snapshotFile, chainDir, allowlist: [] });
+      const res = checkRepo({ snapshotFile, chainDir, allowlist: [], comparedFloor: 0 });
       // The pre-fix reading was exactly this, minus the refusal.
       expect(res.compared).toBe(0);
       expect(res.findings).toEqual([]);
@@ -328,7 +329,7 @@ describe("[CR-01] zero comparisons is a MEASURE_FAIL, never a clean run", () => 
     const { dir, chainDir, snapshotFile } = corpus({ aim_floor_probe: real });
     try {
       writeFileSync(snapshotFile, real);
-      const res = checkRepo({ snapshotFile, chainDir, allowlist: [] });
+      const res = checkRepo({ snapshotFile, chainDir, allowlist: [], comparedFloor: 1 });
       expect(res.compared).toBeGreaterThan(0);
       expect(res.measureFails).toEqual([]);
       expect(res.ok).toBe(true);
@@ -388,5 +389,60 @@ describe("[IN-01] allowlist names travel with the allowlist that ran", () => {
     expect([...res.allowlistNames].sort()).toEqual(
       CONTENT_DRIFT_ALLOWLIST.map((r: { function: string; nargs: number }) => `${r.function}/${r.nargs}`).sort(),
     );
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// [WR-C] THE PARTIAL-DROP RATCHET
+//
+// Iteration 2 of the code review found the CR-01 floor catching only a TOTAL
+// parse failure, while the SP-C05 class it cites — and the measurement it names
+// (`sanitize_user$v2`) — is a SINGLE definition. Reproduced through the real
+// `checkRepo`: a 3-file chain with one unparseable definition read
+// `compared 2, findings 0, ok true`, exit 0. Clean, while a function had left
+// the corpus on BOTH sides at once.
+// ───────────────────────────────────────────────────────────────────────────
+describe("[WR-C] a PARTIAL drop out of the corpus is a MEASURE_FAIL", () => {
+  function corpus(sqlByName: Record<string, string>) {
+    const dir = mkdtempSync(join(tmpdir(), "bcd-partial-"));
+    const chainDir = join(dir, "functions");
+    mkdirSync(chainDir);
+    for (const [name, sql] of Object.entries(sqlByName)) {
+      writeFileSync(join(chainDir, `${name}.sql`), sql);
+    }
+    return { dir, chainDir, snapshotFile: join(dir, "baseline.sql") };
+  }
+  const fn = (n: string) =>
+    `CREATE OR REPLACE FUNCTION public.${n}()\nRETURNS void\nLANGUAGE plpgsql\n` +
+    `AS $$\nBEGIN\n  PERFORM 1;\nEND;\n$$;\n`;
+
+  it("FIRES: comparing fewer than COMPARED_FLOOR functions refuses", () => {
+    const { dir, chainDir, snapshotFile } = corpus({ a: fn("a"), b: fn("b") });
+    try {
+      writeFileSync(snapshotFile, fn("a") + fn("b"));
+      const res = checkRepo({ snapshotFile, chainDir, allowlist: [] });
+      // Two real functions compared — well under the pinned floor.
+      expect(res.compared).toBe(2);
+      expect(res.findings).toEqual([]);
+      // Pre-fix this was ok:true / exit 0.
+      expect(res.ok).toBe(false);
+      expect(res.measureFails).toHaveLength(1);
+      expect(res.measureFails[0].reason).toContain("below the pinned COMPARED_FLOOR");
+      expect(res.measureFails[0].reason).toContain("BOTH sides at once");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("RATCHET: COMPARED_FLOOR equals what the REAL corpus compares — stale in EITHER direction fails", () => {
+    // Catches both a silent decrement (the defect) and a floor left stale-low
+    // after the corpus legitimately grows (the ratchet going soft).
+    const real = checkRepo();
+    expect(
+      COMPARED_FLOOR,
+      `the real corpus now compares ${real.compared} function(s) but COMPARED_FLOOR is pinned at ` +
+        `${COMPARED_FLOOR}. Update the constant in the same commit as the change that moved it, ` +
+        "and say in the message whether a function was really added or removed.",
+    ).toBe(real.compared);
   });
 });

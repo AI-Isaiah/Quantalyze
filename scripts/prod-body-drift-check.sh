@@ -220,6 +220,19 @@ assert_credentials() {
 #
 # ── ⛔ NO RATCHET HERE, AND THAT IS A DECISION, NOT AN OVERSIGHT (WR-07) ──────
 #
+# ⚠️ [WR-D] THE "BY CONSTRUCTION" ABOVE IS CONDITIONAL, AND NOTHING CHECKS THE
+# CONDITION. This gate's comparand is `supabase db dump --linked --schema public`
+# (migration-drift-check.yml), while the remedy it names — regenerating the
+# committed baseline — is documented as `supabase db dump --linked` with no
+# --schema flag (supabase/schema/BASELINE.md). The two scopes are NOT the same.
+# The refusal's argument holds only while every function in the baseline lives in
+# `public`, which is TRUE TODAY (measured 2026-09-08: all baseline functions are
+# `"public".`) and is therefore not a live defect. But a function created outside
+# `public` would be permanently `baseline-only` here with no ratchet path — the
+# exact state the refusal assumes cannot arise. ⛔ Do NOT answer that by adding a
+# ratchet; answer it by aligning the two dump scopes, which needs a measured
+# regeneration rather than a flag edit. Booked in TODOS.md as [WR-D-DUMP-SCOPE].
+#
 # Both sibling gates ship an escape valve — gate (a) has `NAME_SET_RATCHET`
 # (scripts/dump-sql-functions.ts) and the content gate has
 # `CONTENT_DRIFT_ALLOWLIST`. Gate (b) deliberately has neither. The recurrence

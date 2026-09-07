@@ -244,6 +244,16 @@ cmd_up() {
   # `up --no-shema` (typo) used to load the baseline silently — a safe DIRECTION, but
   # the same class of lie the other gates this phase added refuse: a typo'd flag that
   # quietly ran a different gate than the caller asked for.
+  # [IN-A] ⛔ ROOT CAUSE, not the symptom. The dispatcher used to call
+  # `cmd_up "${1:-}"`, which DROPPED $2 and beyond before this function could see
+  # them — so `up --no-schema --wat` ran the --no-schema path and silently ignored
+  # `--wat`. MEASURED 2026-09-08: a guard placed inside cmd_up could never fire,
+  # because `$#` was always 1; the stack booted for real. The dispatcher now
+  # forwards "$@" and the arity check lives here, ahead of everything that boots.
+  if [ "$#" -gt 1 ]; then
+    echo "FATAL: 'up' takes at most one argument; got $#: $*" >&2
+    exit 1
+  fi
   case "${1:-}" in
     "") ;;
     --no-schema) with_schema=0 ;;
@@ -252,6 +262,7 @@ cmd_up() {
       exit 1
       ;;
   esac
+
 
   generate_stack_config
   arm_teardown
@@ -391,7 +402,7 @@ usage() {
 }
 
 case "${1:-}" in
-  up)          shift; cmd_up "${1:-}" ;;
+  up)          shift; cmd_up "$@" ;;
   down)        cmd_down ;;
   --self-test) cmd_self_test ;;
   # Runs ONLY the teardown assertion, against whatever `DOCKER_BIN` names.

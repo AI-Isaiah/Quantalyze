@@ -298,7 +298,11 @@ function main(argv) {
   }
   const recordedSha = RECORDED_SHA_RE.exec(md)?.[1] ?? null;
   // IN-03: a fresh matcher per run — a `g` regex carries `lastIndex` state.
-  const recordedShaCount = md.match(new RegExp(RECORDED_SHA_RE_ALL.source, "g"))?.length ?? 0;
+  // [IN-B] Use the exported /g regex itself rather than re-deriving a new one from
+  // its `.source`. `String.prototype.match` with a /g regex does not consult
+  // lastIndex, so the shared instance is safe here, and the export now has a real
+  // consumer instead of being a `.source` donor that could drift from its own name.
+  const recordedShaCount = md.match(RECORDED_SHA_RE_ALL)?.length ?? 0;
 
   let bytes = null;
   try {

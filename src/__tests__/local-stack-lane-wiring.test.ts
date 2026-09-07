@@ -121,15 +121,22 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
     // The lane config is a standalone ROOT config and inherits none of
     // vitest.config.ts's fences. `fileParallelism: false` shares one worker across
     // lane files, so without these a `process.env.X =` in one file reaches the next.
+    // ⛔ [WR-A, iteration 2] LINE-EXACT AND NON-COMMENT, never a whole-file
+    // `toContain`. MEASURED 2026-09-08: with all three fences commented out —
+    // the lane genuinely losing them, `setup 157ms` -> `setup 0ms` — a
+    // whole-file toContain stayed 7/7 GREEN, because the commented-out text is
+    // still text in the file. That is the WR-01 defect verbatim, thirty lines
+    // above the code that fixes WR-01 correctly. Same idiom as the WR-03 pin.
+    const cfgLines = cfg.split("\n").map((l) => l.trim());
     for (const fence of [
-      'setupFiles: ["src/test-setup.ts"]',
-      "unstubGlobals: true",
-      "unstubEnvs: true",
+      'setupFiles: ["src/test-setup.ts"],',
+      "unstubGlobals: true,",
+      "unstubEnvs: true,",
     ]) {
       expect(
-        cfg,
-        `the lane config no longer restates \`${fence}\` — it is a root config, so it inherits nothing, and the env-restore fence is simply absent`,
-      ).toContain(fence);
+        cfgLines.filter((l) => l === fence).length,
+        `the lane config no longer restates \`${fence}\` on a live (non-comment) line — it is a root config, so it inherits nothing, and the env-restore fence is simply absent. A commented-out fence is not a fence.`,
+      ).toBe(1);
     }
   });
 

@@ -100,6 +100,24 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Repo-relative, so the header, the CI step and every finding name one path. */
 export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
+
+/**
+ * [WR-C] The PARTIAL-drop ratchet. The `compared === 0` floor below catches a
+ * TOTAL parse failure; the SP-C05 class it cites is a parser that stops
+ * recognising **a** definition, and the measurement it names (`sanitize_user$v2`,
+ * 2026-08-29) is a SINGLE one. Reproduced 2026-09-08 through the real
+ * `checkRepo`: a 3-file chain with one unparseable definition read
+ * `compared 2, findings 0, ok true`, exit 0 — clean, while a function had
+ * silently left the corpus on BOTH sides at once.
+ *
+ * MEASURED 2026-09-08 at this tree: 122. Same contract as `FILES_FLOOR` /
+ * `ARMS_FLOOR` in scripts/mutation-runner/run.mjs — pinned AT the measured
+ * value, so a drop is a hard failure and a legitimate removal is an EXPLICIT
+ * edit here rather than a silent decrement. ⛔ Never lower this to make a red
+ * run green; a drop means either a real removal (say so, in the same commit) or
+ * the parser blinding itself, which is the whole defect.
+ */
+export const COMPARED_FLOOR = 122;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */
@@ -502,6 +520,11 @@ export function checkRepo(opts = {}) {
   const snapPath = resolve(opts.snapshotFile ?? join(REPO_ROOT, SNAPSHOT_FILE));
   const chainDir = resolve(opts.chainDir ?? join(REPO_ROOT, CHAIN_DIR));
   const allowlist = opts.allowlist ?? CONTENT_DRIFT_ALLOWLIST;
+  // The floor is an opt for the SAME reason snapshotFile/chainDir/allowlist are:
+  // the self-test and the specs drive deliberately tiny synthetic corpora, which
+  // are legitimately below the real corpus's pinned floor. The CLI never passes
+  // it, so the shipped gate always uses COMPARED_FLOOR.
+  const comparedFloor = opts.comparedFloor ?? COMPARED_FLOOR;
 
   if (!existsSync(snapPath))
     return {
@@ -550,6 +573,22 @@ export function checkRepo(opts = {}) {
   // file's own header says that list may only shrink to zero — so the mask is
   // scheduled to be removed. A corpus of zero compares nothing and must never read
   // as clean, exactly as the zero-chain-files guard above already says.
+  if (result.compared > 0 && result.compared < comparedFloor)
+    return {
+      ...result,
+      ok: false,
+      measureFails: [
+        ...result.measureFails,
+        {
+          reason:
+            `only ${result.compared} function(s) were compared, below the pinned COMPARED_FLOOR of ` +
+            `${comparedFloor}. A function has left the corpus on BOTH sides at once — either a real ` +
+            "removal (update COMPARED_FLOOR in the same commit and say why) or the shared parser " +
+            "blinding itself, which is the SP-C05 defect this gate exists to catch.",
+        },
+      ],
+      chainFiles: chain.files.length,
+    };
   if (result.compared === 0)
     return {
       ...result,

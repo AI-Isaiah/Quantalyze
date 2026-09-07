@@ -983,7 +983,17 @@ describe("SP-C05 — 'absent from PROD' must be measured by an instrument that d
       ".github/workflows/migration-drift-check.yml",
       "utf8",
     );
-    expect(yml).toContain("- 'supabase/schema/baseline.sql'");
+    // ⛔ [WR-B, iteration 2] LINE-EXACT, matching the WR-03 pin twelve lines
+    // below. MEASURED 2026-09-08: a whole-file `toContain` left the suite at
+    // 405/405 with the entry COMMENTED OUT, while WR-03's `l.trim() === …`
+    // went RED under the identical mutation.
+    const hits = yml
+      .split("\n")
+      .filter((l) => l.trim() === "- 'supabase/schema/baseline.sql'");
+    expect(
+      hits.length,
+      "the entry must be a LIVE paths entry, not commented-out text — a commented entry does not trigger the workflow",
+    ).toBe(1);
   });
 
   it("WR-03: gate (a)'s normalizer dependency re-runs gate (a) — both trigger lists name it", () => {

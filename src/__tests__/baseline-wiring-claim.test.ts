@@ -120,7 +120,18 @@ describe("WR-04 — BASELINE.md and the lane agree about who reads what", () => 
     // The document invites this comparison and nothing performed it. Until
     // 164.5's staleness gate exists, this at least keeps the recorded hash
     // honest about the committed bytes.
-    const recorded = /\|\s*sha256\s*\|\s*`([0-9a-f]{64})`\s*\|/.exec(readFileSync(BASELINE_MD, "utf8"));
+    // [IN-C] Refuse AMBIGUITY rather than silently taking the first row — the
+    // same contract `check-baseline-staleness.mjs` now enforces one file away
+    // (`judge()` -> `baseline-sha-absent` on >= 2 rows). Binding to the first
+    // match meant a superseded lineage row inserted above the current one would
+    // be compared instead, and the mismatch would read as a stale baseline.
+    const md = readFileSync(BASELINE_MD, "utf8");
+    const allRows = md.match(/\|\s*sha256\s*\|\s*`[0-9a-f]{64}`\s*\|/g) ?? [];
+    expect(
+      allRows.length,
+      "BASELINE.md records more than one sha256 row; which one is current is now ambiguous, so this test would silently grade against the wrong one",
+    ).toBe(1);
+    const recorded = /\|\s*sha256\s*\|\s*`([0-9a-f]{64})`\s*\|/.exec(md);
     expect(recorded, "BASELINE.md no longer records a sha256 in its provenance table").not.toBeNull();
 
     const actual = createHash("sha256").update(readFileSync(BASELINE_SQL)).digest("hex");

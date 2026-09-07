@@ -1350,6 +1350,31 @@ true for 146 and half of 142–145, and **false for 141**.
       ⛔ Do NOT clear this by adding a skip, an `if:` on the step, or a ratchet populated from
       this entry's prose. The whole point of the leg is that it exits 1 rather than skipping.
 
+- [ ] **`[WR-D-DUMP-SCOPE]` DRIFT-05 gate (b) compares a `--schema public` dump against a
+      baseline documented as a FULL dump — not live today, latent tomorrow (booked 2026-09-08,
+      Phase 164.5 code review iteration 2, finding WR-D).**
+      `.github/workflows/migration-drift-check.yml:203` runs
+      `supabase db dump --linked --schema public -f "$DUMP"`, while the remedy the gate itself
+      names — regenerating the committed baseline — is documented at
+      `supabase/schema/BASELINE.md:150` as `supabase db dump --linked -f supabase/schema/baseline.sql`,
+      with **no `--schema` flag**. The two scopes are not the same.
+      ⚠️ **NOT A LIVE DEFECT, and do not report it as one.** Measured 2026-09-08: every function
+      in the committed baseline is `"public".`, so the two scopes coincide on today's corpus and
+      gate (b) is comparing like with like.
+      **Why it is booked anyway.** It is the unchecked premise under WR-07's refusal to add a
+      ratchet to gate (b). That refusal rests on "every divergence gate (b) can report is cleared
+      by regenerating, BY CONSTRUCTION" — which is true only while the comparand and the remedy
+      cover the same schemas. A function created outside `public` would be permanently
+      `baseline-only` with no ratchet path, i.e. exactly the state the refusal assumes cannot
+      arise, and the gate would be red forever with the documented remedy unable to clear it.
+      ⛔ **The answer is NOT to add a ratchet** — that reintroduces the "we declined the remedy"
+      list this repo forbids. Align the two dump scopes. That needs a measured regeneration (a
+      full dump pulls in more than `public`, and nobody has measured what that does to the 122
+      compared functions or to the committed file's size), so it is a separate reviewed act with
+      a credential, not a flag edit.
+      The condition is recorded at the source in `scripts/prod-body-drift-check.sh`, in the
+      `⛔ NO RATCHET HERE` block, so a reader of the refusal meets its own caveat.
+
 - [ ] **`[164.2-TEST-APPLY-PROVENANCE]` `test_sync_status_curated_sentence_survives.sql` is RED
       on shared TEST from this PR's first CI run onward, BY DESIGN, and must be hand-applied
       (booked 2026-09-06, Phase 164.2 plan 10; the red is named in `164.2-07-SUMMARY.md` →
