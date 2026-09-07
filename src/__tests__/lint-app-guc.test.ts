@@ -14,13 +14,17 @@
  * The one deliberate exception is `EXPECTED_KIND_IDS`, which is the literal the
  * export is COMPARED AGAINST; that is the point of an exact-set pin.
  *
- * ⚠️ DATED 2026-09-07 — THE CENSUS ARM IS AN INTERIM. The last describe block
- * pins `scanCorpus()` on the real tree at 12 findings across 5 files. That is
- * the number MEASURED at plan 164.7-01's Task 1 run, and it is the evidence the
- * gate SEES the tree before anything is annotated. Plan 164.7-05 annotates
- * those five files and fills LINEAGE_ALLOWLIST; when it does, this arm is
- * rewritten to `0 findings, 5 annotated files by name`. Until then the corpus
- * step in CI is RED by design. Do NOT "fix" the count by loosening the rule.
+ * ⚠️ DATED 2026-09-07 — THE INTERIM IS OVER, and this is what replaced it. The
+ * last describe block used to pin `scanCorpus()` on the real tree at 12 findings
+ * across 5 files (per-file 1/5/4/1/1), MEASURED at plan 164.7-01's Task 1 run,
+ * as the evidence the gate SEES the tree before anything is annotated. Plan
+ * 164.7-05 annotated those five files and filled `LINEAGE_ALLOWLIST` in the same
+ * commit, so the census arm is now `0 findings, 5 annotated files BY NAME` —
+ * and the twelve sites did not go anywhere: the five allowlist `occurrences`
+ * SUM TO 12, re-measured here against `countReads()` of each real file. That
+ * sum is what makes "0 findings" mean "accounted for" rather than "no longer
+ * looked at". ⛔ Do NOT restore the 12-finding pin: it was the interim, not the
+ * goal, and the two anti-vacuity arms below are what keep the exemption honest.
  */
 import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -98,10 +102,24 @@ describe("lint-app-guc: the shipped finding kinds", () => {
     expect(cronDrift).toContain(DETECT_RE.source);
   });
 
-  it("LINEAGE_ALLOWLIST is EMPTY at this commit — plan 164.7-05 fills it", () => {
-    // Dated pin, 2026-09-07. This is what makes the interim RED honest: nothing
-    // is exempt yet, so the 12 findings below are the whole tree.
-    expect(LINEAGE_ALLOWLIST).toEqual([]);
+  it("LINEAGE_ALLOWLIST holds exactly the five annotated files, and every entry is complete", () => {
+    // ⚠️ SUPERSEDES the dated `toEqual([])` pin of plan 164.7-01. That one was
+    // honest for the interval it named — nothing was exempt yet, so the 12
+    // findings WERE the whole tree. Plan 164.7-05 filled the list; asserting
+    // emptiness now would assert the phase had not happened.
+    expect(LINEAGE_ALLOWLIST.map((e) => e.file)).toEqual([
+      "supabase/migrations/20260407164606_perfect_match.sql",
+      "supabase/migrations/20260408113029_cron_heartbeat.sql",
+      "supabase/migrations/20260408215026_schedule_match_cron_hourly.sql",
+      "supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql",
+      "supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql",
+    ]);
+    for (const e of LINEAGE_ALLOWLIST) {
+      expect(Number.isInteger(e.occurrences), `${e.file}: occurrences must be an integer`).toBe(true);
+      expect(e.occurrences, `${e.file}: an exemption for zero reads is not an exemption`).toBeGreaterThan(0);
+      expect(typeof e.successor, `${e.file}: successor must be a string`).toBe("string");
+      expect(e.reason.length, `${e.file}: a reason a reviewer cannot read is not a reason`).toBeGreaterThan(40);
+    }
   });
 });
 
@@ -313,12 +331,17 @@ describe("lint-app-guc: MEASURE_FAIL never shares a code path with 'measured zer
   });
 });
 
-describe("lint-app-guc: the MEASURED interim census on the real tree", () => {
+describe("lint-app-guc: the MEASURED ANNOTATED census on the real tree", () => {
   /**
-   * ⚠️ DATED 2026-09-07, measured at plan 164.7-01 Task 1 on this tree — every
-   * number below was read off that run's output, not derived from the plan.
-   * Plan 164.7-05 rewrites this block to `0 findings, 5 annotated files by
-   * name`. Until then the count IS the evidence that the gate sees the tree.
+   * ⚠️ DATED 2026-09-07, plan 164.7-05. The five files below are annotated, and
+   * these are the counts their HEADERS pin — but nothing here is read back from
+   * a header or from the allowlist as its own oracle. Every count is
+   * re-measured with `countReads()` over the real file's bytes, so this map is
+   * a THIRD independent statement of the same number, beside the header and the
+   * allowlist entry that must already agree with each other.
+   *
+   * ⛔ These are exactly the twelve sites the plan-164.7-01 interim census
+   * reported (1 / 5 / 4 / 1 / 1). Zero findings does not mean zero reads.
    */
   const EXPECTED_CENSUS: Record<string, number> = {
     "supabase/migrations/20260407164606_perfect_match.sql": 1,
@@ -336,29 +359,91 @@ describe("lint-app-guc: the MEASURED interim census on the real tree", () => {
     expect(result.filesScanned).toBeGreaterThan(200);
   });
 
-  it("reports exactly 12 findings across exactly the 5 measured files", () => {
-    expect(findings.length).toBe(12);
-    expect([...new Set(findings.map((f) => f.file))].sort()).toEqual(
-      Object.keys(EXPECTED_CENSUS).sort(),
+  // ── (g) the census arm this plan REPLACED the 12/5 interim with ────────────
+  it("reports ZERO findings, exactly the five annotated files BY NAME, and every allowlist count equals the file's measured count", () => {
+    expect(
+      findings.map((f) => `${f.file}:${f.line} ${f.kind}`),
+      "the annotated tree must be clean — and it must be clean by ANNOTATION, never by loosening the rule",
+    ).toEqual([]);
+    expect(result.annotated).toEqual(Object.keys(EXPECTED_CENSUS).sort());
+
+    // ⛔ THE ANTI-VACUITY HALF. "0 findings" is also what a dead scanner
+    // reports. Re-measure each annotated file's reads off disk and require the
+    // allowlist entry to equal it — so a sixth read appended anywhere in these
+    // five, or one removed, breaks this arm even if the gate itself were
+    // neutered into silence.
+    const measured: Record<string, number> = {};
+    for (const entry of LINEAGE_ALLOWLIST) {
+      const reads = countReads(readFileSync(join(ROOT, entry.file), "utf8")).length;
+      measured[entry.file] = reads;
+      expect(entry.occurrences, `${entry.file}: allowlist count vs countReads() of the real file`).toBe(reads);
+    }
+    expect(measured).toEqual(EXPECTED_CENSUS);
+    expect(
+      Object.values(measured).reduce((a, b) => a + b, 0),
+      "the five exempted files still hold the SAME twelve sites the interim census reported",
+    ).toBe(12);
+  });
+
+  // ── (h) remove one allowlist entry in memory → exactly one finding ─────────
+  it("a header ALONE exempts nothing: dropping one allowlist entry fires exactly one header-not-allowlisted", () => {
+    const dropped = "supabase/migrations/20260408113029_cron_heartbeat.sql";
+    const r = scanCorpus({ allowlist: LINEAGE_ALLOWLIST.filter((e) => e.file !== dropped) });
+    expect(kindsOf(r.findings as Finding[])).toEqual(["header-not-allowlisted"]);
+    expect((r.findings as Finding[])[0].file).toBe(dropped);
+  });
+
+  // ── (i) append one read to a copy of an annotated file → count mismatch ────
+  it("one MORE app-GUC read in an already-annotated file fires exactly one header-count-mismatch", () => {
+    // The copy is scanned with the REAL allowlist entry, re-pointed at the temp
+    // path and otherwise unchanged (same occurrences, same successor), so the
+    // ONLY thing wrong with the corpus is the extra read. The named successor
+    // is copied in beside it, or `successor-invalid` would fire as well and
+    // this arm would isolate nothing.
+    const dir = tempDir("annotated-plus-one");
+    const entry = LINEAGE_ALLOWLIST.find((e) =>
+      e.file.endsWith("20260825130000_ledger_refresh_fanout_dormant.sql"),
+    )!;
+    const base = "20260825130000_ledger_refresh_fanout_dormant.sql";
+    const target = join(dir, base);
+    writeFileSync(target, readFileSync(join(ROOT, entry.file), "utf8"));
+    writeFileSync(
+      join(dir, entry.successor),
+      readFileSync(join(ROOT, "supabase/migrations", entry.successor), "utf8"),
     );
+    const tempEntry = { ...entry, file: relPath(target) };
+
+    // Control FIRST: the untouched copy under the real entry is clean, so a
+    // finding below is caused by the appended read and not by the copying.
+    expect(scanCorpus({ migrationsDir: dir, allowlist: [tempEntry] }).findings).toEqual([]);
+
+    writeFileSync(
+      target,
+      readFileSync(target, "utf8") +
+        "\nDO $$ BEGIN PERFORM current_setting('app.ledger_refresh_enabled', TRUE); END $$;\n",
+    );
+    const r = scanCorpus({ migrationsDir: dir, allowlist: [tempEntry] });
+    expect(kindsOf(r.findings as Finding[])).toEqual(["header-count-mismatch"]);
+    expect((r.findings as Finding[])[0].message).toContain("A NEW read was added");
   });
 
-  it("reports the per-file counts 1 / 5 / 4 / 1 / 1", () => {
-    const perFile: Record<string, number> = {};
-    for (const f of findings) perFile[f.file] = (perFile[f.file] ?? 0) + 1;
-    expect(perFile).toEqual(EXPECTED_CENSUS);
-  });
-
-  it("reports all 12 as unannotated-reader — nothing is annotated yet", () => {
-    expect([...new Set(kindsOf(findings))]).toEqual(["unannotated-reader"]);
-    expect(result.annotated).toEqual([]);
-  });
-
-  it("counts the COMMENTED site too (D-05) — cron_heartbeat line 113", () => {
-    // The one site the RUNTIME never sees and the GATE must. Pinned by line,
-    // because a masking scanner would report 11 findings and 5 files and look
-    // almost right.
-    const heartbeat = findings.filter((f) => f.file.endsWith("20260408113029_cron_heartbeat.sql"));
-    expect(heartbeat.map((f) => f.line)).toContain(113);
+  it("counts the COMMENTED site too (D-05) — the secret-hygiene comment in cron_heartbeat", () => {
+    // The one site the RUNTIME never sees and the GATE must. With the file now
+    // annotated there is no finding to read the line off, so the line is
+    // re-derived from the bytes: the read whose own line begins with `--`.
+    // ⛔ NOT pinned to a literal line number any more — plan 164.7-05's header
+    // shifted it, and a hard-coded number would have to be re-typed by whoever
+    // next touches the masthead, which is how a pin becomes a chore and then a
+    // lie. A masking scanner reports 4 here and looks almost right.
+    const src = readFileSync(
+      join(ROOT, "supabase/migrations/20260408113029_cron_heartbeat.sql"),
+      "utf8",
+    );
+    const lines = src.split("\n");
+    const reads = countReads(src);
+    expect(reads.length, "the file's five sites (D-05 counts the comment)").toBe(5);
+    const commented = reads.filter((r) => lines[r.line - 1].trimStart().startsWith("--"));
+    expect(commented.length, "exactly one of the five is inside a `--` comment").toBe(1);
+    expect(lines[commented[0].line - 1]).toContain("current_setting");
   });
 });

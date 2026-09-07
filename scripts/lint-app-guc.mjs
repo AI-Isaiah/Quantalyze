@@ -170,17 +170,77 @@ export const FINDING_KINDS = [
 ];
 
 /**
- * The exemptions. EMPTY at plan 164.7-01 BY DESIGN: this plan ships the machine,
- * and plan 164.7-05 annotates the five measured files and fills this list in the
- * same commit as their headers. Until then the bare corpus scan is RED with the
- * measured interim census (12 findings, 5 files) — that is the gate seeing the
- * tree, not a regression.
+ * The exemptions. It was EMPTY at plan 164.7-01 BY DESIGN — that plan shipped
+ * the machine and the corpus scan was RED with the measured interim census
+ * (12 findings across 5 files, per-file 1/5/4/1/1). ⭐ FILLED 2026-09-07 by
+ * plan 164.7-05, in the SAME commit as the five files' headers, which is the
+ * whole point: an exemption granted from inside the file it excuses is not an
+ * exemption, it is a self-signed permission slip.
  *
  * An entry is `{ file, occurrences, successor, reason }`, where `file` is the
  * repo-relative path, `occurrences` and `successor` must equal what the file's
  * own header says, and `reason` is prose for the reviewer.
+ *
+ * ⛔ The five `occurrences` below SUM TO 12 — the same 12 the interim census
+ * reported. Nothing was repaired away and nothing was loosened: every one of
+ * the twelve sites is still there and still counted, and each is now accounted
+ * for by a dated header carrying the evidence that it has no live consumer.
+ * `src/__tests__/lint-app-guc.test.ts` pins that sum and re-measures each count
+ * against `countReads()` of the real file, so adding a sixth read to any of
+ * these five — or removing one — fails.
  */
-export const LINEAGE_ALLOWLIST = [];
+export const LINEAGE_ALLOWLIST = [
+  {
+    file: `${MIGRATIONS_DIR}/20260407164606_perfect_match.sql`,
+    occurrences: 1,
+    successor: "none",
+    reason:
+      "D-04 (ROADMAP criterion 2 SCOPE AMENDMENT, 2026-09-07): the read is inside a one-shot DO " +
+      "block that ran at apply on 2026-04-07 and can never run again. `successor: none` is not a " +
+      "gap — there is no live value to move, so migrating it would re-point code that will never " +
+      "execute and deleting it would make the repo stop describing what applied to PROD.",
+  },
+  {
+    file: `${MIGRATIONS_DIR}/20260408113029_cron_heartbeat.sql`,
+    occurrences: 5,
+    successor: "20260907120000_analytics_service_settings_and_vault_tick.sql",
+    reason:
+      "Two one-shot preflight reads, two inside the $cron$ command literal this migration wrote " +
+      "(superseded by 20260408215026, same jobname, then hand-repaired on PROD onto Vault on " +
+      "2026-09-01), and ONE inside a `--` comment — which the gate counts, because a grep cannot " +
+      "tell a comment from a statement (D-05). A fresh apply would still write the GUC-reading " +
+      "command: a latent-on-rebuild defect, not an ongoing outage.",
+  },
+  {
+    file: `${MIGRATIONS_DIR}/20260408215026_schedule_match_cron_hourly.sql`,
+    occurrences: 4,
+    successor: "20260907120000_analytics_service_settings_and_vault_tick.sql",
+    reason:
+      "Same two kinds as its predecessor, which it supersedes (same jobname, daily -> hourly). It " +
+      "is itself superseded on PROD by the 2026-09-01 hand repair captured in " +
+      "scripts/prod-prober/cron-manifest.json jobid 1; repointing that LIVE row at the successor's " +
+      "public.match_engine_cron_tick() is Phase 164.5 item 7, outside this phase's fence.",
+  },
+  {
+    file: `${MIGRATIONS_DIR}/20260825130000_ledger_refresh_fanout_dormant.sql`,
+    occurrences: 1,
+    successor: "20260907130000_ledger_refresh_switch_to_system_flags.sql",
+    reason:
+      "Phase 161.1's Lock B activation check. The successor re-bases it on a fail-CLOSED read of " +
+      "public.system_flags because the setting cannot be set on this platform at all (both ALTER " +
+      "forms return 42501, measured on PROD 2026-09-05). This file stays byte-identical in its " +
+      "executable text: it is the record of what applied on 2026-08-25.",
+  },
+  {
+    file: `${MIGRATIONS_DIR}/20260825140000_ledger_refresh_composite_arm.sql`,
+    occurrences: 1,
+    successor: "20260907130000_ledger_refresh_switch_to_system_flags.sql",
+    reason:
+      "The composite arm's Lock B, identical in mechanism to the single-key arm above and moved by " +
+      "the same successor in the same commit — the two bodies are re-based together because a " +
+      "half-moved switch is a switch with two answers.",
+  },
+];
 
 /**
  * The allowlist the SELF-TEST runs its fixtures under. Each fixture is scanned

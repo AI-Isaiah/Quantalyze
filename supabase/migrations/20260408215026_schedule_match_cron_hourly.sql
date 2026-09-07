@@ -1,3 +1,7 @@
+-- APP-GUC-LINEAGE: retired 2026-09-07; occurrences: 4; successor: 20260907120000_analytics_service_settings_and_vault_tick.sql; reason: four app-namespace sites — TWO preflight reads inside the one-shot DO block that ran once at apply on 2026-04-08, and TWO inside the $cron$ command literal this migration WROTE. This migration SUPERSEDES 20260408113029 (same jobname, daily to hourly), so only this one ever described the row that existed; it is itself superseded on PROD by the 2026-09-01 hand repair captured verbatim in scripts/prod-prober/cron-manifest.json jobid 1, whose command reads the key from vault.decrypted_secrets and carries the URL as a literal. A FRESH apply of this file would still write the GUC-reading command — a latent-on-rebuild defect, NOT an ongoing outage. The mechanism PROD actually runs is described by the successor.
+-- Repointing the LIVE job row at the successor's public.match_engine_cron_tick() is
+-- Phase 164.5 item 7 — one production row, deliberately outside Phase 164.7's fence,
+-- which changes only what the MIGRATIONS READ.
 -- Migration 015: Reschedule match engine cron to hourly (was daily in 013)
 --
 -- T-0.6 from the 2026-04-09 cap-intro friend demo sprint. Migration 013 ships
