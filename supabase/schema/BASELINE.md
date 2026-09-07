@@ -1,39 +1,48 @@
 # `baseline.sql` — committed full-schema snapshot
 
 **What it is:** a byte-identical `supabase db dump` (schema only, zero data statements)
-of the production catalogue. It exists to become the schema source for the VAC-07
-local-stack lane, which cannot use `supabase db reset` because the migration chain does
-not replay — see `scripts/local-stack/REPLAY-SPIKE.md` for that measurement.
+of the production catalogue. It is the schema source for the VAC-07 local-stack lane,
+which cannot use `supabase db reset` because the migration chain does not replay — see
+`scripts/local-stack/REPLAY-SPIKE.md` for that measurement.
 
-## ⛔ NOT WIRED YET — this file currently has NO consumer
+## ✅ WIRED 2026-09-07 (Phase 164.5, criterion 1) — the lane reads this file
 
-**Nothing reads it.** `scripts/local-stack/run.sh:50` sets
-`BASELINE_FILE="${LANE_DIR}/baseline.sql"` — that is `scripts/local-stack/baseline.sql`,
-a *different* path, which `.gitignore:138` ignores and which does not exist in a fresh
-checkout. MEASURED 2026-08-29: `bash scripts/local-stack/run.sh up` exits 1 with
-`FATAL: no schema baseline at .../scripts/local-stack/baseline.sql`. A grep across
-`scripts/`, `.github/`, `package.json` and `src/` for `supabase/schema/baseline.sql`
-returns only this document.
+`scripts/local-stack/run.sh` sets
+`BASELINE_FILE="${REPO_ROOT}/supabase/schema/baseline.sql"`, and `load_baseline()` feeds
+exactly that file to `psql -v ON_ERROR_STOP=1` against the local stack's `DB_URL`. Ask the
+lane rather than reading the assignment — that is what the seam is for:
 
-This section replaces a sentence that read *"It **is** the schema source for the VAC-07
-local-stack lane"* — present tense, about a wiring that does not exist. That is this
-phase's own defect class (a claim never compared to the thing) inside an artifact this
-phase shipped, so it is corrected here rather than papered over.
+```
+bash scripts/local-stack/run.sh --print-baseline-path
+# -> <repo>/supabase/schema/baseline.sql
+```
 
-**The wiring is deliberately NOT done in 164.3.** VAC-07 was deferred by founder decision
-on 2026-08-29 (`.planning/phases/164.3-…/164.3-07-DEFERRED.md`), and repointing `run.sh`
-now would change plan 04's shipped behaviour without plan 04's gates being re-run.
+`src/__tests__/baseline-wiring-claim.test.ts` pins this in BOTH directions: it resolves
+the lane's answer and this document's prose to absolute paths and fails if either moves
+without the other. This section exists because that test requires it — while the lane was
+unwired the document had to say so, and the moment the repoint landed the test went RED
+until this prose matched. The RED was observed, not assumed (`164.5-01-SUMMARY.md`).
 
-**Phase 164.5 (BASELINE-SNAPSHOT) owns all three steps**, together:
+**What is NOT claimed here.** Nothing in `.github/workflows/` invokes
+`scripts/local-stack/run.sh up`; the boot recorded in `164.5-01-SUMMARY.md` is a dated
+developer-box measurement, not a CI-enforced fact. And this wiring is not a staleness
+gate — see the UNGATED section below.
 
-1. repoint `BASELINE_FILE` at `supabase/schema/baseline.sql` (or add it as the fallback);
-2. drop `.gitignore:138`, which is what makes the lane-local path invisible;
-3. add the staleness gate below, including an assertion that the loaded baseline's
-   sha256 matches the one recorded here — so a silently-swapped baseline is a failure
-   rather than a load.
+### Committing a regenerated dump is a deliberate, reviewed act
 
-Until then the lane fails loud, which is the correct behaviour for a lane with no schema.
-It is not, and must not be described as, a lane that reads this file.
+**Relocated from `.gitignore` in this same commit** (Phase 164.5 P-05). A lane-local
+`baseline.sql` used to be gitignored, with the reasoning carried in a comment above the
+ignore line. The ignore line is gone — the lane no longer reads that path — but the
+reasoning is the asset, so it lives here now:
+
+> A schema dump can carry a DSN, a host, or a project ref. Committing one is therefore a
+> deliberate, reviewed act, never a casual `git add`. Run the secret scan recorded in
+> `scripts/local-stack/REPLAY-SPIKE.md` **first**, and treat any hit as **do not commit**
+> (threat T-164.3-09).
+
+⚠️ This repository is PUBLIC. The scan command and the five classes it must cover are in
+the *Regenerating* section below; keep the prose claim and the grep pattern identical —
+SP-M03 records what happens when they drift apart.
 
 ## Provenance
 
@@ -65,12 +74,31 @@ So the baseline is a dump, not a replay. **Derivation is a one-time act; it is n
 coupling.** This file is pinned in git and reviewed in a PR, so every developer and every CI
 run gets identical bytes — the same relationship a lockfile has to a registry.
 
-## ⚠️ UNGATED as of this commit — see WINDOWS.md 29
+## ✅ GATED as of 2026-09-07 (Phase 164.5) — WINDOWS.md 29 is closed
 
-There is **no staleness check on this file yet**. `sql-function-snapshot.yml` gates
-`supabase/schema/functions/`; nothing yet gates this. A snapshot with no drift gate is exactly
-the artifact that diverges quietly and then gets trusted, so treat the number above as "true on
-2026-08-29" and nothing more. Building the gate is Phase 164.5 scope.
+⚠️ **This section said the opposite until 2026-09-07 and the claim outlived its truth by nine
+days.** It read: *"There is no staleness check on this file yet … nothing yet gates this …
+Building the gate is Phase 164.5 scope."* That is exactly the defect class this phase exists to
+close — a claim never compared to the thing it describes — so it is corrected here rather than
+quietly overwritten.
+
+TWO gates now cover this file, and they cover DIFFERENT things:
+
+1. **`scripts/check-baseline-staleness.mjs`** (Phase 164.5 plan 02) — a CO-EDIT gate. It fails
+   when `supabase/schema/baseline.sql`'s sha256 stops matching the value recorded in THIS file,
+   and passes only when both move together. Wired into `.github/workflows/sql-function-snapshot.yml`,
+   self-test first. Defect kinds: `baseline-sha-mismatch`, `baseline-sha-absent`,
+   `baseline-sql-unreadable`.
+2. **`scripts/baseline-content-drift-check.mjs`** (Phase 164.5 plan 03) — a CONTENT gate pinning
+   this file to the MIGRATION CHAIN. The co-edit gate above cannot fire when a migration changes
+   a function body and `baseline.sql` is left untouched; this one can.
+
+⛔ **Neither gate makes the dump comprehensively current.** Gate 2 compares FUNCTION BODIES ONLY
+— not tables, columns, policies, triggers, grants, indexes, defaults or extensions — and its
+chain side is a hermetic text replay, not a live one (69 of 262 migrations fail to replay from
+empty, so a live replay is impossible here, not merely slow). Read its own SCOPE line, which it
+prints on every run. The provenance number above is still "true on 2026-08-29" for everything
+outside function bodies.
 
 **Version-skew caveat for whoever writes that gate:** the local CLI is 2.84.2, CI pins 2.98.2.
 If `pg_dump` output formatting differs between them, a `--check` authored against these bytes

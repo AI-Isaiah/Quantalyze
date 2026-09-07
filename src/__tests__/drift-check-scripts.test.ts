@@ -1830,15 +1830,18 @@ describe("[VAC04-C2] GATE-LEVEL — the realpath guard driven THROUGH THE REAL G
 // proved that on the reader CLIs; this block drives it THROUGH THE REAL GATE
 // (SC-4), on the same P10 input, and asserts the gate's own output.
 //
-// WHICH SITE THE INPUT REACHES. The normalizer's `--function-names` call at
-// prod-body-drift-check.sh:207 is the FIRST reader call and the ONLY site this
-// input reaches: its `|| fail` wraps the refusal into
-// "could not extract function names from the changed migrations." and exits 1.
-// The naive reader's call at :221 is never executed on this input — so the
-// naive refusal's reachability AT GATE LEVEL on THIS input is a STATED
-// NON-COVERAGE, not a claim. What IS shown (the stated-bound `it` below) is
-// that with ONLY the normalizer's refusal disabled the naive refusal still
-// reaches the verdict through :221's `|| fail`, which is why the recorded
+// WHICH SITE THE INPUT REACHES. Cited by SYMBOL, not by line — these anchors
+// drifted the moment prod-body-drift-check.sh grew its --baseline-live leg
+// (Phase 164.5 plan 04). The normalizer's `--function-names` call guarded by
+// `|| fail "could not extract function names from the changed migrations."` is
+// the FIRST reader call and the ONLY site this input reaches: that `|| fail`
+// wraps the refusal and exits 1. The naive reader's call, guarded by
+// `|| fail "the independent name reader failed on the changed migrations."`,
+// is never executed on this input — so the naive refusal's reachability AT
+// GATE LEVEL on THIS input is a STATED NON-COVERAGE, not a claim. What IS
+// shown (the stated-bound `it` below) is that with ONLY the normalizer's
+// refusal disabled the naive refusal still reaches the verdict through its own
+// `|| fail`, which is why the recorded
 // neuter cycle C4-N1 (164.3.1-13-SUMMARY.md) disables BOTH members: a
 // single-member neuter cannot flip the gate's exit code.
 //

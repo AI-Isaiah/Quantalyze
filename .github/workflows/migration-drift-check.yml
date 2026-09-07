@@ -222,3 +222,66 @@ jobs:
           export PROD_DUMP_SCHEMAS="public"
           # Mode identity (Pitfall 2): this is the exact command a developer runs.
           bash scripts/prod-body-drift-check.sh
+
+      # ── Phase 164.5 / DRIFT-05 gate (b) — COMMITTED BASELINE vs LIVE PROD ───
+      #
+      # The step above compares function BODIES, and only for the functions THIS
+      # PR's migrations name — so a function that exists in PROD under NO
+      # migration is never in its name list and is never looked at. That is
+      # DRIFT-04 (`create_allocator_connected_strategy`), which sat in production
+      # unowned until a human went looking.
+      #
+      # ⛔ DRIFT-05 IS TWO GATES. Gate (a) is hermetic and lives in
+      # `scripts/dump-sql-functions.ts --check`: it diffs the committed dump
+      # `supabase/schema/baseline.sql` against the migration replay, on every PR,
+      # with no credential. But `baseline.sql` is a DATED capture, so (a) can only
+      # see the DRIFT-04 class as of the last refresh. THIS step is gate (b), the
+      # live direction. Neither covers the other, and a green (a) is not evidence
+      # about (b).
+      #
+      # D-12, unchanged and restated because it is what makes this admissible: it
+      # rides THIS job, THIS credential and THE DUMP THE STEP ABOVE ALREADY TOOK.
+      # No second dump, no second copy of production access. The secret is already
+      # in this job's blast radius on every migrations PR, so this step widens
+      # nothing.
+      #
+      # ⛔ It deliberately carries no step-level condition of its own — the same
+      # choice the D-17a comment above records for the VAC-04 step, for the same
+      # reason: the script's FIRST act is its own credential assertion, and an
+      # absent credential is `exit 1`. A step that could inherit a condition
+      # making it silently not run is the forbidden shape.
+      #
+      # ⚠️ STATED, not hidden: GitHub skips a step when an earlier one in the job
+      # fails, so a VAC-04 failure above short-circuits this one. That is a
+      # LOUDLY RED job, not a green one that skipped a check — categorically
+      # different from the SKIP-01 shape. It is not "fixed" with a condition of
+      # its own, which would reintroduce exactly the mechanism forbidden above.
+      #
+      # Redaction (T-164.3-04, public repo): the dump is never `cat`ted and its
+      # path is never logged; this leg prints function names and counts only.
+      - name: DRIFT-05 (b) - committed baseline vs LIVE PROD function-name set
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          DUMP="${RUNNER_TEMP}/prod-schema.sql"
+          # Never infer from an absent measurement: a missing dump is a gate that
+          # could not read PROD, not a PROD that matches the committed baseline.
+          # The path is deliberately not echoed.
+          if [ ! -s "$DUMP" ]; then
+            echo "::error::DRIFT-05 (b): the PROD schema dump written by the VAC-04 step is absent or"
+            echo "::error::empty in the runner temp directory. This leg compares the committed baseline"
+            echo "::error::against that dump; without it there is nothing to compare, and a pass here"
+            echo "::error::would be a verdict over bytes this run never read."
+            exit 1
+          fi
+          # The SAME two independent name readers the step above unions, over the
+          # SAME dump (SP-C05): a lexer and a line-anchored regex that imports
+          # nothing from it. One reading would agree with itself by construction,
+          # and agreement is this leg's entire pass condition.
+          export BODY_NAME_INDEX_CMD="node scripts/sql-body-normalize.mjs --function-names ${DUMP}"
+          export BODY_NAME_INDEX_XCHECK_CMD="node scripts/sql-function-names-naive.mjs ${DUMP}"
+          # Mode identity (Pitfall 2): this is the exact command a developer runs.
+          bash scripts/prod-body-drift-check.sh --baseline-live

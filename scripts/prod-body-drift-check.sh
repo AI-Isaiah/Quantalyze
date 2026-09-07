@@ -21,6 +21,35 @@
 # 7-param `_enqueue_compute_job_internal` reports 0 `INTO STRICT` in code and 1
 # including comments).
 #
+# ── TWO LEGS IN ONE FILE, AND THEY ANSWER DIFFERENT QUESTIONS ────────────────
+# This script has two modes. They share the credential, the dump and the three
+# non-negotiables below; they do NOT share a subject.
+#
+#   (no argument)     VAC-04 — repo snapshot BODY vs PROD BODY, for the
+#                     functions THIS PR's migrations touch. What CI has always
+#                     run; unchanged by Phase 164.5.
+#   --baseline-live   DRIFT-05 gate (b) — the committed PROD schema dump
+#                     `supabase/schema/baseline.sql` vs the LIVE catalogue, by
+#                     function NAME SET, both directions. A name live in PROD
+#                     but absent from the committed baseline is the shape that
+#                     would have caught DRIFT-04 (`create_allocator_connected_
+#                     strategy`, created straight into PROD under no migration)
+#                     THE DAY IT APPEARED.
+#   --self-test       drives (b)'s red and green arms with stub commands and no
+#                     credential at all. It does NOT exercise the VAC-04 leg —
+#                     that one is proven by src/__tests__/drift-check-scripts.test.ts.
+#
+# ⛔ DRIFT-05 IS TWO GATES AND THEY MUST NEVER BE CONFLATED. Gate (a) is the
+# HERMETIC name-set diff inside `scripts/dump-sql-functions.ts --check`: no
+# credential, no network, cannot flake — and, because it compares `baseline.sql`
+# against the migration replay, it can only see the DRIFT-04 class AS OF THE LAST
+# BASELINE REFRESH (the dump is dated 2026-08-29 at the time of writing). This
+# leg is gate (b), the LIVE direction. NEITHER GATE COVERS THE OTHER: (a) runs on
+# every PR and is blind to anything PROD did since the refresh; (b) sees PROD
+# today but runs only on migration PRs, on a credential fork PRs never get.
+# Believing (a) subsumes (b) would be a control that reads green while blind —
+# TODOS `[DRIFT-05]` names that precisely.
+#
 # ── NON-NEGOTIABLES ──────────────────────────────────────────────────────────
 # 1. NEVER SKIP. The credential check is the FIRST thing this script does and
 #    an absent credential is `exit 1`, never `exit 0` and never a `::notice::`
@@ -106,9 +135,16 @@
 #                       independent second reading applied to THIS PR's
 #                       migrations, for the same reason
 #                       BODY_NAME_INDEX_XCHECK_CMD exists on the PROD side.
+#   BASELINE_FILE       default supabase/schema/baseline.sql — the committed PROD
+#                       schema dump `--baseline-live` compares against. An ABSENT
+#                       baseline is exit 1, never an empty name set: "could not
+#                       read the baseline" and "the baseline agrees" must not
+#                       share a code path.
 #
-# ── USAGE (CI pastes this verbatim — mode identity) ──────────────────────────
-#   bash scripts/prod-body-drift-check.sh
+# ── USAGE (CI pastes these lines VERBATIM — mode identity) ───────────────────
+#   bash scripts/prod-body-drift-check.sh                  # VAC-04 body drift
+#   bash scripts/prod-body-drift-check.sh --baseline-live  # DRIFT-05 gate (b)
+#   bash scripts/prod-body-drift-check.sh --self-test      # gate (b)'s own arms
 set -euo pipefail
 
 GATE="VAC-04 repo-vs-PROD function-body drift gate"
@@ -118,19 +154,387 @@ fail() {
   exit 1
 }
 
+# ── MODE, VALIDATED BEFORE ANYTHING ELSE ─────────────────────────────────────
+# The empty mode is VAC-04 and stays byte-identical in behaviour — that is the
+# invocation CI has always pasted. An UNRECOGNISED argument is a hard failure
+# rather than a silent fall-through to the default: a typo'd flag that quietly
+# ran a different gate than the caller asked for is the same class of lie as a
+# skip that reads as a pass.
+MODE="${1:-}"
+case "$MODE" in
+  "" | --baseline-live | --self-test) ;;
+  *) fail "unknown mode '${MODE}'. Usage: $0 [--baseline-live|--self-test]" ;;
+esac
+
 # ── 1. CREDENTIALS: FIRST, UNCONDITIONAL, AND FATAL WHEN ABSENT ──────────────
 # Deliberately before ANY work detection, so this gate can never rationalise an
 # exit 0 out of "there was nothing to do" while it is unconfigured.
-for var in SUPABASE_PROJECT_REF SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD; do
-  if [ -z "${!var:-}" ]; then
-    echo "::error::${GATE}: ${var} is not configured, so this gate CANNOT read PROD."
-    echo "::error::This is a HARD FAILURE, not a skip. A gate that reports success while"
-    echo "::error::unconfigured is the SKIP-01 defect this phase exists to remove: it would"
-    echo "::error::be green having checked nothing, on the workflow guarding production"
-    echo "::error::migrations. Configure the secret, or delete this gate deliberately."
-    exit 1
+#
+# Extracted into a function in Phase 164.5 so the `--baseline-live` leg makes the
+# IDENTICAL assertion rather than a second copy that could drift apart from this
+# one. The messages and the exit code are unchanged; the VAC-04 path calls it at
+# exactly the point the loop used to sit.
+assert_credentials() {
+  for var in SUPABASE_PROJECT_REF SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD; do
+    if [ -z "${!var:-}" ]; then
+      echo "::error::${GATE}: ${var} is not configured, so this gate CANNOT read PROD."
+      echo "::error::This is a HARD FAILURE, not a skip. A gate that reports success while"
+      echo "::error::unconfigured is the SKIP-01 defect this phase exists to remove: it would"
+      echo "::error::be green having checked nothing, on the workflow guarding production"
+      echo "::error::migrations. Configure the secret, or delete this gate deliberately."
+      exit 1
+    fi
+  done
+}
+
+# ── DRIFT-05 GATE (b) — COMMITTED BASELINE vs LIVE, BY NAME SET ──────────────
+#
+# The question VAC-04 above cannot ask. VAC-04 compares BODIES, and only for the
+# functions THIS PR's migrations name — so a function that exists in PROD and in
+# no migration is never in its name list and is never looked at. Gate (a) in
+# `scripts/dump-sql-functions.ts --check` asks the name-set question hermetically,
+# but against `supabase/schema/baseline.sql`, a DATED dump: it sees a PROD-only
+# function only once that dump is next refreshed. This leg asks it against PROD
+# TODAY.
+#
+# ⛔ It inherits all three non-negotiables verbatim in behaviour:
+#   1. an absent credential is `exit 1` naming the variable, NEVER a `::notice::`
+#      skip (D-02) — `assert_credentials` is the SAME function VAC-04 calls, not
+#      a second copy that could drift;
+#   2. output carries function NAMES and COUNTS and nothing else — no bodies, no
+#      DSN, no host, no project ref, because this repository is PUBLIC. Every
+#      fetch's stderr is withheld;
+#   3. a name index that cannot be built, an index that comes back EMPTY, and an
+#      absent baseline are each `exit 1`. "Could not measure" and "measured zero
+#      problems" do not share a code path here either.
+#
+# ⛔ TWO INDEPENDENT READINGS ON *BOTH* SIDES (SP-C05). The live side unions
+# `BODY_NAME_INDEX_CMD` (the normalizer's lexer) with
+# `BODY_NAME_INDEX_XCHECK_CMD` (`scripts/sql-function-names-naive.mjs`, which
+# imports nothing from the normalizer). The BASELINE side unions the same two
+# readers over `BASELINE_FILE` — otherwise a definition the lexer cannot parse
+# would be missing from the baseline reading AND, through the same parser, from
+# the live reading, and the two would agree by construction. That is the exact
+# defect SP-C05 named, and a name-set diff is even more exposed to it than a body
+# diff: agreement is its entire pass condition.
+baseline_live_check() {
+  # Dynamic scoping: `fail` and `assert_credentials` below print THIS label.
+  # shellcheck disable=SC2178
+  local GATE="DRIFT-05 gate (b) committed-baseline-vs-LIVE function-name drift"
+
+  assert_credentials
+
+  # ⛔ D-12/SC-7 — a precondition refusal PRINTS WHAT IT RESOLVED TO, not only
+  # the name of the thing that was missing. `${#…}` takes no `:-` default and
+  # this function runs under `set -u`, so the resolved value is captured into a
+  # local first (distinct name, for the same reason the `nrm`/`naive` block
+  # below uses distinct names).
+  local idx_cmd node_path node_rc
+  idx_cmd="${BODY_NAME_INDEX_CMD:-}"
+  [ -n "$idx_cmd" ] || fail "BODY_NAME_INDEX_CMD resolved to '${idx_cmd}' (${#idx_cmd} character(s)) — there is no way to read PROD's function-name index, and a leg that cannot read PROD cannot report that PROD matches the committed baseline."
+  [ -n "${BODY_NAME_INDEX_XCHECK_CMD:-}" ] || fail "BODY_NAME_INDEX_XCHECK_CMD is unset — with ONE index, a definition the parser cannot read is missing from the live reading AND from the baseline reading through the same parser, so the two agree by construction (SP-C05, MEASURED). Agreement is this leg's entire pass condition, so a single reading is not admissible."
+  # The exit code and the resolved path are CAPTURED rather than discarded into
+  # `>/dev/null`: "exited 1, resolved to ''" is the diagnostic. PATH itself is
+  # never printed — on a developer box it carries a username, and this log is
+  # public (NON-NEGOTIABLE 2).
+  node_rc=0
+  node_path="$(command -v node 2>/dev/null)" || node_rc=$?
+  [ -n "$node_path" ] || fail "node is not on PATH: 'command -v node' exited ${node_rc} and resolved to '${node_path}'; the shared name readers cannot run."
+
+  # ⚠️ NOT `local NORMALIZER="${NORMALIZER:-…}"`. Bash creates the local FIRST
+  # and evaluates the assignment word after, so that idiom reads the (unset)
+  # local and silently discards any caller override. Distinct names instead.
+  local nrm naive baseline
+  nrm="${NORMALIZER:-scripts/sql-body-normalize.mjs}"
+  naive="${NAIVE_NAMES:-scripts/sql-function-names-naive.mjs}"
+  baseline="${BASELINE_FILE:-supabase/schema/baseline.sql}"
+
+  [ -f "$nrm" ] || fail "normalizer not found at ${nrm}."
+  [ -f "$naive" ] || fail "the independent name reader was not found at ${naive}. Without a SECOND derivation, the baseline's name set is a claim the normalizer makes about its own parse (SP-C05)."
+  if [ "$(cd "$(dirname "$nrm")" && pwd)/$(basename "$nrm")" = "$(cd "$(dirname "$naive")" && pwd)/$(basename "$naive")" ]; then
+    fail "NORMALIZER and NAIVE_NAMES resolve to the SAME file (${nrm}). Two readings that share an implementation agree by construction; this leg needs two derivations, not two invocations."
   fi
-done
+  # ⛔ An ABSENT baseline is not a baseline that agrees. This leg's whole subject
+  # is whether that committed file still describes PROD; with the file gone there
+  # is no claim to check and reporting a pass would be a verdict over nothing.
+  [ -f "$baseline" ] || fail "the committed PROD baseline was not found at ${baseline}. A baseline this leg could not read is not a baseline that matches PROD, so it fails closed rather than comparing PROD against an empty name set."
+
+  local tmp
+  tmp="$(mktemp -d)"
+  # ⛔ Split traps, copied from scripts/test-ledger-drift-check.sh. RETURN fires
+  # when this function returns and misses every `exit` path; EXIT catches those.
+  # A single combined `trap … EXIT INT TERM` is WRONG: a bash signal handler
+  # RESUMES the script when it returns, so Ctrl-C would delete $tmp and then keep
+  # running against files that no longer exist.
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  # ── the COMMITTED side, two independent readings, unioned ──────────────────
+  node "$nrm" --function-names "$baseline" > "$tmp/base.lexer.txt" \
+    || fail "could not read the committed baseline's function names with ${nrm}. A baseline whose names could not be extracted is not a baseline with no functions in it."
+  node "$naive" "$baseline" > "$tmp/base.naive.txt" \
+    || fail "the independent name reader at ${naive} failed on the committed baseline ${baseline}. A baseline whose names could not be extracted is not a baseline with no functions in it."
+  LC_ALL=C sort -u "$tmp/base.lexer.txt" "$tmp/base.naive.txt" | sed '/^[[:space:]]*$/d' > "$tmp/base.txt"
+  grep -aqE '[^[:space:]]' "$tmp/base.txt" \
+    || fail "the committed baseline at ${baseline} yielded ZERO function names. A schema dump with no functions in it is not a state this leg can distinguish from a reader that stopped matching, so it fails closed."
+
+  # ── the LIVE side, two independent readings, unioned ───────────────────────
+  # shellcheck disable=SC2086
+  $BODY_NAME_INDEX_CMD > "$tmp/live.primary.txt" 2>"$tmp/live.primary.err" \
+    || fail "could not index PROD's function names (stderr withheld — public log). Without the index there is nothing to compare the committed baseline against, and 'could not read PROD' is not 'PROD matches'."
+  # shellcheck disable=SC2086
+  $BODY_NAME_INDEX_XCHECK_CMD > "$tmp/live.xcheck.txt" 2>"$tmp/live.xcheck.err" \
+    || fail "could not build the INDEPENDENT cross-check index of PROD's function names (stderr withheld — public log). With only the primary index this leg's agreement would be one parser agreeing with itself."
+  # ⛔ D-12/SC-7 — measured BEFORE the verdict, so the refusal can say what the
+  # index actually wrote: "0 byte(s)" (the command produced nothing at all) and
+  # "N byte(s), none a non-blank name" (it produced whitespace) are different
+  # failures and used to read identically in the log.
+  local live_primary_bytes
+  live_primary_bytes="$(wc -c < "$tmp/live.primary.txt" | tr -d ' ')"
+  grep -aqE '[^[:space:]]' "$tmp/live.primary.txt" \
+    || fail "PROD's function-name index came back EMPTY — the primary index wrote ${live_primary_bytes} byte(s) to ${tmp}/live.primary.txt and not one non-blank name. A production database with zero functions is not a state this leg can distinguish from a broken index, so it fails closed."
+  grep -aqE '[^[:space:]]' "$tmp/live.xcheck.txt" \
+    || fail "the INDEPENDENT cross-check index of PROD's function names came back EMPTY. A cross-check that finds nothing cannot contradict anything, so it would silently degrade this leg back to a single reading of itself."
+  LC_ALL=C sort -u "$tmp/live.primary.txt" "$tmp/live.xcheck.txt" | sed '/^[[:space:]]*$/d' > "$tmp/live.txt"
+
+  # ── the diff, BOTH directions ──────────────────────────────────────────────
+  # LC_ALL=C on both sides of every comm: the inputs must be in the same
+  # collation order as comm's own comparison, or it emits wrong rows silently.
+  LC_ALL=C comm -13 "$tmp/base.txt" "$tmp/live.txt" > "$tmp/live-only.txt"
+  LC_ALL=C comm -23 "$tmp/base.txt" "$tmp/live.txt" > "$tmp/base-only.txt"
+
+  local base_n live_n live_only_n base_only_n
+  base_n="$(grep -ac '[^[:space:]]' "$tmp/base.txt" || true)"
+  live_n="$(grep -ac '[^[:space:]]' "$tmp/live.txt" || true)"
+
+  echo "Committed baseline (${baseline}): ${base_n:-0} function name(s), union of two independent readings."
+  echo "LIVE PROD catalogue:              ${live_n:-0} function name(s), union of two independent readings."
+
+  local bad=0
+  set +e
+  grep -aqE '[^[:space:]]' "$tmp/live-only.txt"
+  local rc_live=$?
+  grep -aqE '[^[:space:]]' "$tmp/base-only.txt"
+  local rc_base=$?
+  set -e
+  [ "$rc_live" -le 1 ] || fail "MEASURE_FAIL: could not read the live-only name list (grep exited ${rc_live}). A list this leg could not read is not a list that measured zero rows."
+  [ "$rc_base" -le 1 ] || fail "MEASURE_FAIL: could not read the baseline-only name list (grep exited ${rc_base}). A list this leg could not read is not a list that measured zero rows."
+
+  if [ "$rc_live" -eq 0 ]; then
+    live_only_n="$(grep -ac '[^[:space:]]' "$tmp/live-only.txt" || true)"
+    echo "::error::${GATE}: ${live_only_n} function(s) exist in PROD but NOT in the committed baseline:"
+    sed 's|^|::error::  live-only: |' "$tmp/live-only.txt"
+    echo "::error::"
+    echo "::error::This is DRIFT-04's shape, live. A function present in production and absent from"
+    echo "::error::${baseline} is either (i) created straight into PROD under no migration, or"
+    echo "::error::(ii) shipped by a migration since the baseline was captured — and the committed"
+    echo "::error::baseline has not been refreshed since. Both are the baseline no longer describing"
+    echo "::error::PROD, which is the only thing anything downstream trusts it for."
+    echo "::error::Resolve by DISPOSITIONING each name (adopt into a migration, or DROP it under"
+    echo "::error::review) and regenerating ${baseline} from PROD as a separate reviewed act."
+    bad=1
+  fi
+  if [ "$rc_base" -eq 0 ]; then
+    base_only_n="$(grep -ac '[^[:space:]]' "$tmp/base-only.txt" || true)"
+    echo "::error::${GATE}: ${base_only_n} function(s) are in the committed baseline but NOT in PROD:"
+    sed 's|^|::error::  baseline-only: |' "$tmp/base-only.txt"
+    echo "::error::"
+    echo "::error::The committed baseline claims production holds something production does not."
+    echo "::error::Either it was dropped from PROD out of band, or the baseline was captured from"
+    echo "::error::somewhere other than the database this credential reads. Both make every later"
+    echo "::error::reader of ${baseline} wrong about PROD."
+    bad=1
+  fi
+
+  if [ "$bad" = 1 ]; then
+    # ⛔ D-12/SC-7 — the closing block states the four counts the verdict was
+    # reached from, so the last ::error:: in the log is never a conclusion with
+    # no measurement beside it. `${live_only_n:-0}`/`${base_only_n:-0}` carry
+    # defaults because each is assigned only inside its own branch above and
+    # `bad=1` is reachable from either one alone.
+    echo "::error::${GATE}: VERDICT from ${base_n:-0} committed baseline name(s) vs ${live_n:-0} LIVE PROD name(s) — ${live_only_n:-0} live-only, ${base_only_n:-0} baseline-only."
+    echo "::error::"
+    echo "::error::⛔ This leg is gate (b) of DRIFT-05 — the LIVE direction. Gate (a), the hermetic"
+    echo "::error::name-set diff in 'npx tsx scripts/dump-sql-functions.ts --check', can be GREEN"
+    echo "::error::while this is red: it compares the committed baseline against the migration"
+    echo "::error::replay, so it is only ever as current as the last baseline refresh. Neither gate"
+    echo "::error::covers the other, and a green (a) is not evidence about (b)."
+    return 1
+  fi
+
+  echo "::notice::${GATE}: the committed baseline and the LIVE PROD catalogue name the SAME ${base_n:-0} function(s), in both directions. This is a measured agreement over two independent readings per side, not an unread one."
+  echo "::notice::⛔ Scope, stated rather than implied: this leg compares NAME SETS. It says nothing about function BODIES — that is the VAC-04 leg above — and nothing about the migration chain, which is gate (a) in scripts/dump-sql-functions.ts --check. Neither of the three covers another."
+  return 0
+}
+
+# ── --self-test: gate (b)'s red arms and its green path, with NO credential ───
+#
+# ⚠️ SCOPE, stated rather than implied: this proves gate (b)'s DECISION LOGIC and
+# exit codes only. It does NOT exercise the VAC-04 body-drift leg (proven by
+# src/__tests__/drift-check-scripts.test.ts) and it does not prove the commands
+# migration-drift-check.yml hands it — that is the first live run.
+self_test() {
+  local tmp
+  tmp="$(mktemp -d)"
+  # Split traps, same reasoning as baseline_live_check above.
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  # Two committed-baseline fixtures. Definitions start at the beginning of their
+  # line and carry no `$` in the identifier, so BOTH readers see all of them —
+  # the arms must fail on the name-set verdict, never on a reader disagreement
+  # that has nothing to do with what they are testing.
+  # shellcheck disable=SC2016  # `$$` is a SQL dollar-quote tag, deliberately literal.
+  local shared='CREATE OR REPLACE FUNCTION public.shared_fn(p uuid) RETURNS uuid LANGUAGE sql AS $$ SELECT p; $$;'
+  # shellcheck disable=SC2016
+  local extra='CREATE OR REPLACE FUNCTION public.baseline_only_fn() RETURNS void LANGUAGE sql AS $$ SELECT 1; $$;'
+  printf '%s\n' "$shared" > "$tmp/base-one.sql"
+  printf '%s\n%s\n' "$shared" "$extra" > "$tmp/base-two.sql"
+
+  # Stub live index. Two files so the primary and the cross-check can be driven
+  # apart, and so "the index command failed" is a state an arm can produce.
+  cat > "$tmp/live.sh" <<'STUB'
+#!/usr/bin/env bash
+[ "${LIVE_RC:-0}" = "0" ] || exit "$LIVE_RC"
+[ -n "${LIVE_NAMES:-}" ] && printf '%s\n' "$LIVE_NAMES"
+exit 0
+STUB
+  cat > "$tmp/livex.sh" <<'STUB'
+#!/usr/bin/env bash
+[ "${LIVE_RC:-0}" = "0" ] || exit "$LIVE_RC"
+[ -n "${LIVE_XNAMES:-${LIVE_NAMES:-}}" ] && printf '%s\n' "${LIVE_XNAMES:-$LIVE_NAMES}"
+exit 0
+STUB
+  chmod +x "$tmp/live.sh" "$tmp/livex.sh"
+
+  local pass=0 total=0
+  local -a results=()
+
+  # Runs the REAL leg through the REAL dispatch. Arm env is a prefix so nothing
+  # leaks between arms.
+  arm() {
+    # ⚠️ `${6-…}`, NOT `${6:-…}`. The colon form treats an EMPTY argument as
+    # unset, so the absent-credential arm passed "" and silently got
+    # "stub-password" — it ran with a full credential and exited 0 while
+    # claiming to test an absent one. Caught here because the credential is
+    # asserted TWICE, once by this arm and once by the message arm below, and
+    # the two disagreed. A single arm would have shipped it.
+    local label="$1" want="$2" base="$3" names="$4" rc_stub="${5:-0}" pw="${6-stub-password}"
+    total=$((total + 1))
+    local rc=0
+    BASELINE_FILE="$base" \
+    LIVE_NAMES="$names" \
+    LIVE_RC="$rc_stub" \
+    BODY_NAME_INDEX_CMD="bash $tmp/live.sh" \
+    BODY_NAME_INDEX_XCHECK_CMD="bash $tmp/livex.sh" \
+    NORMALIZER="${NORMALIZER:-scripts/sql-body-normalize.mjs}" \
+    NAIVE_NAMES="${NAIVE_NAMES:-scripts/sql-function-names-naive.mjs}" \
+    SUPABASE_PROJECT_REF="stub-ref" \
+    SUPABASE_ACCESS_TOKEN="stub-token" \
+    SUPABASE_DB_PASSWORD="$pw" \
+      bash "$0" --baseline-live > "$tmp/arm.out" 2>&1 || rc=$?
+
+    # ⛔ NON-NEGOTIABLE 2, CHECKED RATHER THAN ASSERTED. The arms' output is
+    # CAPTURED (not discarded) precisely so this can run: a dollar-quote in it
+    # would mean a SQL body reached a public log. The fixtures above contain
+    # `$$`, so this arm can genuinely fail — discarding the output would make
+    # the claim unfalsifiable.
+    if grep -aqE '\$[A-Za-z_0-9]*\$' "$tmp/arm.out"; then
+      results+=("  FAIL ${label} — REDACTION: dollar-quoted SQL reached the output")
+      return 0
+    fi
+    if [ "$rc" -eq "$want" ]; then
+      results+=("  ok   ${label} (exit ${rc}, expected ${want})")
+      pass=$((pass + 1))
+    else
+      results+=("  FAIL ${label} (exit ${rc}, expected ${want})")
+    fi
+  }
+
+  # RED 1 — a name LIVE in PROD and absent from the committed baseline. DRIFT-04's
+  # shape: the direction a hermetic gate cannot see until the next refresh.
+  arm "live-only name RED" 1 "$tmp/base-one.sql" "shared_fn
+live_only_fn"
+
+  # RED 2 — a name in the committed baseline and absent from PROD. Its own
+  # fixture: one arm proving "the comparator fires" leaves a direction untested.
+  arm "baseline-only name RED" 1 "$tmp/base-two.sql" "shared_fn"
+
+  # GREEN — both sides name the same functions.
+  arm "both sides equal GREEN" 0 "$tmp/base-one.sql" "shared_fn"
+
+  # RED 3 — D-02. An absent credential is exit 1 NAMING the credential, never a
+  # skip and never exit 0.
+  arm "absent credential RED (SUPABASE_DB_PASSWORD)" 1 "$tmp/base-one.sql" "shared_fn" 0 ""
+
+  # RED 4 — the name index cannot be built. "Could not measure" must not share a
+  # code path with "measured zero problems".
+  arm "live name index UNBUILDABLE RED" 1 "$tmp/base-one.sql" "shared_fn" 3
+
+  # RED 5 — the index runs and returns nothing. A production database with zero
+  # functions is not distinguishable from a reader that stopped matching.
+  arm "live name index EMPTY RED" 1 "$tmp/base-one.sql" ""
+
+  # RED 6 — the committed baseline is absent. There is no claim to check, so a
+  # pass would be a verdict over nothing.
+  arm "missing committed baseline RED" 1 "$tmp/nowhere.sql" "shared_fn"
+
+  # The absent-credential arm must not merely exit 1 — it must SAY WHICH
+  # credential, or an operator cannot act on it and a different failure could be
+  # mistaken for it.
+  total=$((total + 1))
+  local credout rc_cred=0
+  BASELINE_FILE="$tmp/base-one.sql" \
+  LIVE_NAMES="shared_fn" \
+  BODY_NAME_INDEX_CMD="bash $tmp/live.sh" \
+  BODY_NAME_INDEX_XCHECK_CMD="bash $tmp/livex.sh" \
+  SUPABASE_PROJECT_REF="stub-ref" \
+  SUPABASE_ACCESS_TOKEN="stub-token" \
+  SUPABASE_DB_PASSWORD="" \
+    bash "$0" --baseline-live > "$tmp/cred.out" 2>&1 || rc_cred=$?
+  credout="$(cat "$tmp/cred.out")"
+  if [ "$rc_cred" -eq 1 ] \
+     && printf '%s' "$credout" | grep -aqF 'SUPABASE_DB_PASSWORD is not configured' \
+     && printf '%s' "$credout" | grep -aqF 'HARD FAILURE, not a skip' \
+     && ! printf '%s' "$credout" | grep -aqF '::notice::'; then
+    results+=("  ok   absent credential NAMES it and emits no ::notice:: skip (exit ${rc_cred}, expected 1)")
+    pass=$((pass + 1))
+  else
+    results+=("  FAIL absent credential must exit 1, name SUPABASE_DB_PASSWORD, and emit no ::notice:: skip (exit ${rc_cred})")
+  fi
+
+  printf '%s\n' "${results[@]}"
+  if [ "$pass" -ne "$total" ]; then
+    echo "SELF-TEST FAIL: ${pass}/${total} arms behaved as declared."
+    return 1
+  fi
+  echo "DRIFT-05 gate (b): self-test OK (${pass}/${total} arms — six red modes fire, the green path passes, the absent credential is exit 1 and named, and no arm leaked dollar-quoted SQL)."
+  echo "⚠️ This proves gate (b)'s decision logic only. It does not exercise the VAC-04 body-drift leg, and it does not prove the commands migration-drift-check.yml hands it."
+  return 0
+}
+
+if [ "$MODE" = "--self-test" ]; then
+  _rc=0
+  self_test || _rc=$?
+  exit "$_rc"
+fi
+
+if [ "$MODE" = "--baseline-live" ]; then
+  _rc=0
+  baseline_live_check || _rc=$?
+  exit "$_rc"
+fi
+
+# ── VAC-04 leg (the no-argument mode) continues from here, unchanged ──────────
+assert_credentials
 
 [ -n "${BODY_FETCH_CMD:-}" ] || fail "BODY_FETCH_CMD is unset — there is no way to read PROD bodies, and a gate that cannot read cannot pass."
 [ -n "${BODY_NAME_INDEX_CMD:-}" ] || fail "BODY_NAME_INDEX_CMD is unset — without PROD's function-name index this gate cannot tell 'genuinely absent from PROD' from 'the extractor returned nothing', and it would read the second as a pass."

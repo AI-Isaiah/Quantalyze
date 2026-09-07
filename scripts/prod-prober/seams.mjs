@@ -87,7 +87,7 @@ function bump(kind, arm) {
  * A network throw comes back as `measureFail`, NEVER as a thrown error and
  * NEVER as a status the caller could mistake for a verdict. "Could not
  * measure" and "measured no problem" do not share a code path here
- * (`scripts/prod-body-drift-check.sh:24-35`, non-negotiable 3).
+ * (`scripts/prod-body-drift-check.sh`'s `NON-NEGOTIABLES` header block, non-negotiable 3).
  *
  * @param {string} url
  * @param {{method?: string, headers?: Record<string,string>}} [init]
@@ -151,7 +151,7 @@ export async function realFetch(url, init = {}) {
  * arm needs to answer it at all: a psql that could not run, timed out, or
  * exited non-zero comes back as `measureFail`, never as an empty answer.
  * ("Could not measure" and "measured no problem" do not share a code path —
- * `scripts/prod-body-drift-check.sh:24-35`, non-negotiable 3.)
+ * `scripts/prod-body-drift-check.sh`'s `NON-NEGOTIABLES` header block, non-negotiable 3.)
  *
  * @param {Record<string,string|undefined>} env  needs `PROBER_POOLER_URL`,
  *        `SUPABASE_DB_PASSWORD` and `PATH`. Read ONCE, at factory time.

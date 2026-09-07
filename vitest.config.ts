@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import { resolve } from "path";
 import os from "os";
 import { NODE_ENV_TEST_FILES } from "./vitest.node-env";
+import { LOCAL_STACK_LANE_FILES } from "./vitest.local-stack-files";
 
 // CI-flake mitigation (2026-05-20, per HANDOVER-CI-FLAKES-2026-05-20.md).
 // GitHub Actions runners have 4 logical cores; Vitest's default worker
@@ -107,6 +108,23 @@ export default defineConfig({
     // that way: overlap runs a file twice (inflating the test count and the
     // coverage denominator), a gap drops it silently.
     //
+    // ⚠️ Phase 164.5 / VAC-07 — A THIRD SET NOW SITS OUTSIDE BOTH PROJECTS.
+    // `LOCAL_STACK_LANE_FILES` (vitest.local-stack-files.ts) is excluded from the
+    // jsdom project and appears in neither project's include, so this run covers
+    // `INCLUDE − NODE_ENV_TEST_FILES − LOCAL_STACK_LANE_FILES`. Those files need a
+    // booted Supabase CLI stack (PostgREST + GoTrue over HTTP) that the sharded
+    // `frontend-test` job has not got; left in, they would redden every shard.
+    // They run instead under `vitest.local-stack.config.ts`, in the
+    // `frontend-local-stack` CI job, which boots the lane first.
+    // ⛔ Their exclusion here is what makes the CI wiring LOAD-BEARING rather than
+    // convenient: a file in that list with no lane job runs NOWHERE. That is the
+    // `csv-finalize-rpc.test.ts` tombstone class, so
+    // `src/__tests__/local-stack-lane-wiring.test.ts` — which DOES run in these
+    // shards — pins the exclusion here, the include there, and the job's presence
+    // in the `frontend` aggregator's `needs:` list AND its result loop.
+    // The node project needs no matching exclude: its include IS
+    // `NODE_ENV_TEST_FILES`, which the list is deliberately not a member of.
+    //
     // ⚠️ `defaultExclude` must be spread back in. Setting `exclude` REPLACES
     // vitest's default (node_modules, dist, .idea, …) rather than adding to
     // it, and without it the jsdom project walks node_modules.
@@ -123,7 +141,11 @@ export default defineConfig({
         test: {
           name: "jsdom",
           include: INCLUDE,
-          exclude: [...defaultExclude, ...NODE_ENV_TEST_FILES],
+          exclude: [
+            ...defaultExclude,
+            ...NODE_ENV_TEST_FILES,
+            ...LOCAL_STACK_LANE_FILES,
+          ],
         },
       },
       {

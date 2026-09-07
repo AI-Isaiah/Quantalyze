@@ -131,11 +131,19 @@ scripts/mark-reverified-closed.py
 # file is ignored so that NO key ever lands in a commit by construction rather
 # than by remembering (threat T-164.3-09).
 scripts/local-stack/.stack-env
-# baseline.sql is a schema dump. Ignored by default because a dump can carry a
-# DSN, host, or project ref. Committing one is a deliberate, reviewed act:
-# run the secret scan in scripts/local-stack/REPLAY-SPIKE.md first, then
-# `git add -f`. Never add it casually.
-scripts/local-stack/baseline.sql
+# ⛔ The lane-local baseline-dump exclusion that used to sit here was DELETED in
+# Phase 164.5 (criterion 1): the lane now reads the COMMITTED
+# `supabase/schema/baseline.sql`, so the ignored path had no consumer left.
+# Its reasoning — a schema dump can carry a DSN, host or project ref, so
+# committing one is a deliberate reviewed act preceded by the secret scan in
+# `scripts/local-stack/REPLAY-SPIKE.md` — was MOVED to
+# `supabase/schema/BASELINE.md`, not dropped. Read it there before committing
+# any regenerated dump.
+#
+# ⚠️ Deliberately NOT respelling the old ignored path here.
+# `src/__tests__/baseline-wiring-claim.test.ts` greps THIS file for that exact
+# literal on its UNWIRED branch; a prose mention would satisfy that grep while
+# the ignore line was gone, i.e. an assertion that can no longer fail.
 # Derived per-run Supabase workdir (a copy of supabase/config.toml with
 # [db.migrations] disabled). Generated, never authored.
 scripts/local-stack/.stack/
