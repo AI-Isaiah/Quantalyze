@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.2
-current_phase_name: CURATED-COPY
-status: shipped
-stopped_at: "164.2 SHIPPED — PR #749 (from the filtered branch phase-164.2-curated-copy-pr). Ship review by 11 reviewers found 2 assertions that could NOT fail (one of them the pin the criterion-3 override rested on) and 4 user-facing/data-integrity defects; all fixed with observed-RED proofs. Founder cleared the copy gate and authorised land-and-deploy. Migration 20260906120000 applies to PROD on merge."
-last_updated: "2026-09-06T21:21:45.008Z"
+current_phase: 164.2.1
+current_phase_name: SESSIONID-FENCE
+status: verified
+stopped_at: "164.2.1 SESSIONID-FENCE implemented and VERIFIED 5/5 on branch phase-164.2.1-sessionid-fence — NOT yet shipped, no PR opened. Code review found 0 Critical / 2 Warning / 4 Info; all six actionable findings fixed (52161f70..b12581f7). Verifier RE-TOOK both neuters at HEAD because five review-fix commits had changed both production files after plan 02 captured its evidence. Full suite 843 files / 14200 tests, 0 failures."
+last_updated: "2026-09-07T02:29:22.265Z"
 last_activity: 2026-09-06
 last_activity_desc: "164.2 shipped as PR #749. Version bumped 0.77.15.0 -> 0.77.16.0 with a CHANGELOG entry (nothing in GSD or CI enforces either). Ship review: security auditor + 10 diff-scoped specialists; 5 file-disjoint fixers. TWO VACUITIES: the roster-render poster census compared a hand-typed length to a hand-typed literal while claiming to scan src/ (it read no files) — and that was the pin the founder's criterion-3 override explicitly rested on; and the PGRST204 assertion passed on the format string's static tail. Three more found while fixing: C-10's 400-day fixture could not detect the arm-swap it guarded, the provenance census's Rule C ran only on stamped sites, and a fixer caught its own draft assertion passing for the wrong reason. FOUR user-facing/data-integrity: the two SUCCESS writers sat outside the PGRST204 degrade while the docstring claimed full coverage (a succeeded compute was recorded failed, cash series heal-deleted, retry burned); durable writer sentences had made an internal table name + raw uuid and a Python exception class name reach user copy; validate-and-encrypt showed OUR stale service key as 'Unauthorized' on a key-connect form; the post-23505 read discarded both failure channels. Fixing stale anchors introduced 3 bare file:line cites that [SEAMPROSE-01] bans for going stale — caught by the full suite. Gates re-run by the orchestrator: vitest 14180/0 (Node 22), pytest 5430, mypy --strict 79 files, tsc clean, corpus 369 arms no defects. SECURITY.md added: 21/21 closed, threats_open 0, HIGH proven non-vacuous by three lane mutants that each abort the apply."
-state_head: 05994f1d2950f0a78b414cc63fd71ccb559e5ace
+state_head: 41d57860
 
 # ⚠️ progress: HAND-SET 2026-09-06 against `origin/main`, NOT derived from this checkout.
 
@@ -87,12 +87,72 @@ state_head: 05994f1d2950f0a78b414cc63fd71ccb559e5ace
 
 # alone will keep under-reporting by 10 plans / 1 phase until then.
 
+# ⛔ HAND-SET AGAIN 2026-09-07 for Phase 164.2.1 (2 plans, 2 SUMMARYs on disk):
+
+#   total_plans 117 + 2 = 119 · completed_plans 114 + 2 = 116
+
+#   completed_phases 11 + 1 = 12 (164.2.1: plans>0 AND summaries==plans)
+
+#   percent 57 = 12/21 phase-weighted
+
+# ⚠️ CUMULATIVE CLOBBERER LIST — handlers MEASURED rewriting this block from local
+
+# disk during phase 164.2.1: state.update-progress, state.begin-phase,
+
+# state.add-roadmap-evolution, state.add-decision, state.record-metric,
+
+# state.record-session. That is SIX, and it includes the executor's own standard
+
+# state-update step — GSD's normal flow calls a handler this file forbids from
+
+# this checkout. Restore by hand after any handler call; do not assume a handler
+
+# is safe because an earlier note called it safe (that claim was itself wrong).
+
+# ⛔ RE-SET 2026-09-07 (164.2.1 plan 01 execution). TWO MORE handlers clobbered this block
+
+# from local disk, both writing 21/7/103/97/33: `state.update-progress` (named above, run
+
+# by the executor's standard state-update step before reading this banner — the standard
+
+# step and this prohibition are in direct conflict, and this banner wins) and
+
+# `state.add-decision`, which is an APPEND handler and has no business recomputing
+
+# anything. The ⛔ list is therefore: update-progress, begin-phase, add-roadmap-evolution,
+
+# add-decision. `state.record-metric` and `state.record-session` were run in the same
+
+# session and did NOT touch it. Values restored to the 2026-09-06 census both times.
+
+# ⛔ CORRECTION 2026-09-07 (164.2.1 plan 02 execution). The last sentence above is FALSE as
+
+# measured today: `state.record-metric` AND `state.record-session` BOTH clobbered this block,
+
+# each writing 21/7/103/98/33 (98 not 97 — plan 02's SUMMARY is now on disk, so the local
+
+# recount moved). `record-session` even ENUMERATES what it wrote: its JSON response lists
+
+# `progress.total_phases`, `progress.completed_phases`, `progress.total_plans`,
+
+# `progress.completed_plans`, `progress.percent` among the fields it touched. Whether plan 01
+
+# mis-attributed or the SDK changed is not established — what IS measured is that NO state
+
+# handler may be assumed safe. ⛔ TREAT EVERY `state.*` HANDLER AS A CLOBBERER: re-read these
+
+# five lines after every single call and restore them. Known-clobbering list, cumulative:
+
+# update-progress, begin-phase, add-roadmap-evolution, add-decision, record-metric,
+
+# record-session. Values restored to the 2026-09-06 census after each of the two calls.
+
 progress:
   total_phases: 21
-  completed_phases: 11
-  total_plans: 117
-  completed_plans: 114
-  percent: 52
+  completed_phases: 12
+  total_plans: 119
+  completed_plans: 116
+  percent: 57
 ---
 
 # Project State — Quantalyze
@@ -1013,6 +1073,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.1 P03 | 22 min | 2 tasks | 24 files |
 | Phase 164.1 P04 | 24 min | 2 tasks | 9 files |
 | Phase 164.1 P05 | 17 min | 2 tasks | 2 files |
+| Phase 164.2.1 P01 | 35m | 3 tasks | 4 files |
+| Phase 164.2.1 P02 | 20m | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -1273,6 +1335,16 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.1]: 164.1-04: the two IPC remedies are asserted different on the DEFECT ROWS, not on the REMEDIES table — the rows are what an operator reads
 - [Phase 164.1]: 164.1-05: the prober ships as its OWN hourly workflow (prod-prober.yml) with mode identity to the script — the two bare commands, self-test first, status captured on the next line — and a vitest pin whose every predicate is calibrated on a mutated copy. — A script proven by its own self-test proves nothing about a CI invocation that wraps it. ci.yml carries zero references (D-18) so a red prober can never make Railway skip the analytics deploy that would fix it.
 - [Phase 164.1]: 164.1-05: the self-test scenario count is pinned by EXECUTING the runner and counting the headers it prints, not by scraping literals from its source. — The runner auto-numbers its headers at runtime off the same counter its completeness assertion reads, so there is no 'k/50' literal in the source to count; the plan's stated source-grep would have matched zero headers and read as a passing pin.
+- [Phase 164.2]: 164.2.1-01: deriveWizardResumeOverrides gained a 4th positional incomingApiKeyId defaulted to null (D-01), so all 25 pre-existing three-arg calls compile and pass byte-unmodified; null incoming = no key claim and changes nothing.
+- [Phase 164.2]: 164.2.1-01: an ABSENT or null stored apiKeyId meeting a PRESENT incoming key DECLINES the session-id restore (D-02) — the deliberate inversion of the '?? "api"' back-compat idiom, because the defaulting population is exactly the drafts carrying the dead end. Cost: one fresh token for pre-existing drafts.
+- [Phase 164.2]: 164.2.1-01: the loadWizardState validator arm for apiKeyId follows the failedCsvSubmitSig shape (absent OR null accepted, else bounded string) — a source-shaped arm would refuse every CSV payload, since nine of the fourteen save sites write null.
+- [Phase 164.2]: 164.2.1-01: persistPointer takes an explicit keyId argument and handleConnectSuccess passes result.apiKeyId — a closure read is the PRE-connect key, and on the reuse arm it coincidentally equals the preselect id, so the WIRE test's responder answers a third distinct key id.
+- [Phase 164.2]: 164.2.1-01 DEVIATION: the new component spec installs explicit storage doubles rather than the preselect spec's guarded clear — MEASURED on Node 25, window.localStorage.setItem is not a function, writeWizardState swallows it, and the seed silently never existed (SC-1c was passing for the wrong reason). An applied-ness probe in the seed helper now names that failure.
+- [Phase 164.2]: 164.2.1-02: criterion 2 is CLOSED by two INDEPENDENT neuters, not one — the helper's key clause (7 RED arms incl. both component cases) and the call site's 4th argument (2 RED component cases, helper untouched). A single neuter at the helper cannot distinguish a correct helper the call site never feeds; the wiring needs its own proof.
+- [Phase 164.2]: 164.2.1-02: criterion 3's REAL evidence is the six SEAMRIM-03 pins staying GREEN *under neuter A* — the whitespace-stripped clause grep is only a tripwire, since it detects a REWRITE of the source clause but not an additive narrowing. Both were taken; both hold.
+- [Phase 164.2]: 164.2.1-02: `--reporter=verbose` is MANDATORY for any "these pins stayed green" claim — the default reporter prints zero occurrences of a passing test's title, so a file-level pass count cannot name a pin, and a `tail` on the log cuts the SEAMRIM names that sit mid-file.
+- [Phase 164.2]: 164.2.1-02 DEVIATION (Rule 3): 8 pre-existing LOCAL-USERNAME violations in this phase's own PLAN/RESEARCH artifacts (from planning commit bedda506) reddened check-planning-hygiene and the full suite. Fixed at the cause with the repo's existing `<user>` placeholder convention. ⚠️ The scanner's needle is the LIVE `USER`, so it never fires on CI — a local-only gate that any phase skipping `npm test` will keep re-introducing.
+- [Phase 164.2]: 164.2.1-02 MEASURED: `state.record-metric` and `state.record-session` BOTH clobber STATE.md's hand-set `progress:` block, contradicting the banner plan 01 left saying they were safe. No `state.*` handler may be assumed safe; re-read and restore the five lines after every call.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1975,8 +2047,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-05T23:44:44.086Z
-**Stopped At:** Completed 164.1-05-PLAN.md
+**Last Date:** 2026-09-07T02:29:21.895Z
+**Stopped At:** Completed 164.2.1-02-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z

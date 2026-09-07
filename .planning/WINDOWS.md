@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 32
+open_count: 33
 waived_count: 0
-fixed_count: 8
-total_count: 40
-last_updated: 2026-09-06T17:20:07.208Z
+fixed_count: 10
+total_count: 43
+last_updated: 2026-09-07T07:02:20.270Z
 ---
 
 # Broken Windows Ledger
@@ -55,6 +55,9 @@ last_updated: 2026-09-06T17:20:07.208Z
 | 38 | 164.1 | unrun-verify | .github/workflows/prod-prober.yml |  | prod-prober.yml has NEVER been dispatched: plan 05 was instructed not to touch live infrastructure, so the credential-assert step, the supabase link + masked pooler export, the checksum-verified Railway CLI install and all four live arms are unexecuted on a GitHub-hosted runner. Whether the stored workspace-scoped RAILWAY_API_TOKEN authenticates railway ssh non-interactively from a hosted runner is likewise unmeasured (CONTEXT's own open question). Plan 164.1-06 owns the single first dispatch. | open |  | 2026-09-05T23:44:43.987Z |  |
 | 39 | 164.2 | unrun-verify | supabase/tests/test_sync_status_curated_sentence_survives.sql |  | The new gate is UNRUN on shared TEST and will report TEST FAILED (0) there from this PR's first CI run, alongside plan 06's TEST FAILED (0c), until 20260906120000_computation_error_provenance.sql is hand-applied to TEST. Nothing applies migrations to TEST (sql-tests has no apply step; the migrate workflow is PROD-only), so this is EXPECTED and is NOT a coupling regression - the three coupled gates' arms never read the new columns and stay green. Remedy booked as [164.2-TEST-APPLY-PROVENANCE] in TODOS.md: the which-database marker query against TEST_SUPABASE_DB_URL FIRST, then psql -f, never supabase db push (this checkout's CLI is linked to PROD). | open |  | 2026-09-06T17:20:07.111Z |  |
 | 40 | 164.2 | deviation | .planning/WINDOWS.md |  | This ledger refused every append during phase 164.2 - plans 06, 07 and 10 each recorded their deviations in their SUMMARY instead. Cause, found by the orchestrator 2026-09-06: row 37's RENDERED TABLE cell carried a closing paragraph (the NON_SECRET_ENV fix, dated 2026-09-06) that the FENCED JSON description did not, so the two sides disagreed and the writer refused. The table was hand-edited without the JSON. Repaired by syncing the JSON description to the table text (a clean prefix, +568 chars); no table cell was hand-edited, and the repair was validated by asserting the prefix invariant before writing. Lesson: hand-editing the rendered table silently disables the ledger for every later phase. | open |  | 2026-09-06T17:20:07.208Z |  |
+| 41 | 164.2.1 | deviation | src/app/(dashboard)/allocations/components/ContributionWizardOverlay.sessionid-fence.test.tsx |  | Plan 01 deviated (Rule 3): the spec installs explicit storage doubles instead of the preselect spec's guarded clear — on Node 25 window.localStorage.setItem is not a function, writeWizardState swallows it, and the seed silently never existed (SC-1c was passing vacuously). Fixed and pinned by an applied-ness probe; recorded, not open. | fixed |  | 2026-09-07T02:08:54.153Z | 2026-09-07T02:09:16.275Z |
+| 42 | 164.2.1 | deviation | .planning/phases/164.2.1-sessionid-fence/164.2.1-02-PLAN.md |  | Plan 02 deviated (Rule 3): 8 pre-existing LOCAL-USERNAME violations (the local machine username inside home-directory paths) in this phase's own 01-PLAN/02-PLAN/RESEARCH artifacts reddened check-planning-hygiene and therefore the full suite. Introduced by planning commit bedda506, an ancestor of plan 02's base; wave 1 never ran the full suite so it had not surfaced. The scanner derives its needle from the live USER, so on CI (USER=runner) it never fires - a local-only gate. Fixed at the cause with the repo's own <user> placeholder convention (9 existing .planning files already carry /Users/<user>/ and -Users-<user>-, including <automated> verify commands). Planning artifacts only; no source file, test, criterion or verify command was weakened. Recorded, not open. | fixed |  | 2026-09-07T02:28:20.652Z | 2026-09-07T02:28:47.667Z |
+| 43 | 164.2.1 | unmet-truth | src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.test.tsx |  | FLAKY under full-suite load — a green full suite is therefore not a reliable truth on this file. 'focus management — pre-flight portal + failure transition > submitting → failure transition moves focus to the error banner' failed once in npm test (843 passed \| 1 failed), then passed on an immediate identical re-run (844 passed \| 14217 tests, exit 0). NOT a 164.2.1 regression, MEASURED not assumed: the file is UNTOUCHED by this phase (git diff --name-only vs merge-base is empty), it is 49/49 green in isolation, and it was green in the pre-wave full run. jsdom focus assertions are timing-sensitive and this component animates. Recorded so the next person who sees a lone red here does not bisect a phase that did not cause it, and so the underlying timing dependence is not mistaken for noise forever. | open |  | 2026-09-07T07:02:20.270Z |  |
 
 ````json
 [
@@ -536,6 +539,42 @@ last_updated: 2026-09-06T17:20:07.208Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-06T17:20:07.208Z",
+    "resolved_at": null
+  },
+  {
+    "id": 41,
+    "kind": "deviation",
+    "phase": "164.2.1",
+    "file": "src/app/(dashboard)/allocations/components/ContributionWizardOverlay.sessionid-fence.test.tsx",
+    "line": null,
+    "description": "Plan 01 deviated (Rule 3): the spec installs explicit storage doubles instead of the preselect spec's guarded clear — on Node 25 window.localStorage.setItem is not a function, writeWizardState swallows it, and the seed silently never existed (SC-1c was passing vacuously). Fixed and pinned by an applied-ness probe; recorded, not open.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-07T02:08:54.153Z",
+    "resolved_at": "2026-09-07T02:09:16.275Z"
+  },
+  {
+    "id": 42,
+    "kind": "deviation",
+    "phase": "164.2.1",
+    "file": ".planning/phases/164.2.1-sessionid-fence/164.2.1-02-PLAN.md",
+    "line": null,
+    "description": "Plan 02 deviated (Rule 3): 8 pre-existing LOCAL-USERNAME violations (the local machine username inside home-directory paths) in this phase's own 01-PLAN/02-PLAN/RESEARCH artifacts reddened check-planning-hygiene and therefore the full suite. Introduced by planning commit bedda506, an ancestor of plan 02's base; wave 1 never ran the full suite so it had not surfaced. The scanner derives its needle from the live USER, so on CI (USER=runner) it never fires - a local-only gate. Fixed at the cause with the repo's own <user> placeholder convention (9 existing .planning files already carry /Users/<user>/ and -Users-<user>-, including <automated> verify commands). Planning artifacts only; no source file, test, criterion or verify command was weakened. Recorded, not open.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-07T02:28:20.652Z",
+    "resolved_at": "2026-09-07T02:28:47.667Z"
+  },
+  {
+    "id": 43,
+    "kind": "unmet-truth",
+    "phase": "164.2.1",
+    "file": "src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.test.tsx",
+    "line": null,
+    "description": "FLAKY under full-suite load — a green full suite is therefore not a reliable truth on this file. 'focus management — pre-flight portal + failure transition > submitting → failure transition moves focus to the error banner' failed once in npm test (843 passed | 1 failed), then passed on an immediate identical re-run (844 passed | 14217 tests, exit 0). NOT a 164.2.1 regression, MEASURED not assumed: the file is UNTOUCHED by this phase (git diff --name-only vs merge-base is empty), it is 49/49 green in isolation, and it was green in the pre-wave full run. jsdom focus assertions are timing-sensitive and this component animates. Recorded so the next person who sees a lone red here does not bisect a phase that did not cause it, and so the underlying timing dependence is not mistaken for noise forever.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T07:02:20.270Z",
     "resolved_at": null
   }
 ]

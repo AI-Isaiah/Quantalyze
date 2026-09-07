@@ -1114,6 +1114,69 @@ true for 146 and half of 142–145, and **false for 141**.
    misnumbered — it runs 1, 2, 3, **5**, 4, **5**, so "SC5" is ambiguous in any report.
    (c) `REQUIREMENTS.md:1434` rollup reads "153 WIZFORM-01..04 + MT5-14", omitting WIZFORM-05.
 
+- [ ] **`[164.2.1-INCOMING-NULL-CONFLATION]` ⚖️ FOUNDER CALL — `sessionKeyMatches`'s
+      incoming-`null` arm conflates "provably no key" with "could not determine the key", and on
+      the second reading a user who connects key B can be handed key A's strategy and key A's
+      `api_key_id`, silently (booked 2026-09-07 while correcting Phase 164.2.1's own records;
+      ⛔ PRE-EXISTING — NOT introduced by 164.2.1, which neither created nor widened it).**
+      **The trace, verified by command at HEAD, both legs:**
+      1. `WizardPage` (`src/app/(dashboard)/strategies/new/wizard/page.tsx:41`) wraps
+         `readLatestWizardDraft` in a `try/catch` and, on a fault, degrades `initialDraft` to
+         `null` — its own comment at `:101` says *"Degrade to \"no draft\""*. That route passes
+         **no `preselectKey` at all** (`:141-145` renders `<WizardClient>` with only
+         `initialDraft` / `initialDraftKind`), so `WizardClient`'s 4th argument
+         `initialDraft?.api_key_id ?? preselectKey?.id ?? null` resolves to `null`,
+         `sessionKeyMatches` (`src/lib/wizard/localStorage.ts:584-590` @ `f42d1c59`)
+         short-circuits `if (incoming === null) return true;`, and the restore gate inside
+         `deriveWizardResumeOverrides` (`:672` @ `f42d1c59`) restores the stored key-A
+         `wizardSessionId`. ⚠️ **Cite these two by SYMBOL** — `localStorage.ts` is actively
+         growing and every line number in it drifted within a day of this booking.
+         ⚠️ **A draft-read FAULT is not the only trigger.** `draftIsOnThisBranch`
+         (`page.tsx:108-110`) also nulls `initialDraft` whenever the stored draft belongs to the
+         *other* branch (`draftMatchesSource(kind, source)` false) — normal operation, no fault
+         required. Any record that describes this as fault-only is understating it.
+      2. `POST` (`src/app/api/strategies/create-with-key/route.ts:840`, the F6 idempotency
+         fence at `:1077-1104`) selects `strategies` on `(user_id, wizard_session_id)` ONLY and
+         then does `if (existingDraft?.id && existingDraft.api_key_id) { return { ok: true,
+         strategy_id: existingDraft.id, api_key_id: existingDraft.api_key_id } }` — returning
+         the existing draft **without ever comparing the submitted key**, and **without setting a
+         `deduped` flag** the client could notice or surface.
+      **Consequence, stated plainly:** on `/strategies/new/wizard` with an abandoned key-A
+      payload in localStorage, connecting **key B** can hand back **key A's strategy and key A's
+      `api_key_id`**. The user is silently resumed onto the wrong key's strategy. This is a
+      user-facing correctness defect, which is why it is booked in FIX NOW and not mid-term.
+      **The root cause is a CONFLATION, and only half of it is a hazard.** `incoming === null`
+      today means two different facts that the call site does not distinguish:
+      - **CSV branch — provably keyless.** All 13 CSV save sites write the literal
+        `apiKeyId: null` and the call site passes literal `null` when `source === "csv"`
+        (the WR-02 ternary). There is no key to compare and never was. **Not a hazard**, and the
+        literal `null` is load-bearing: comparing here would strip a live RT-3 CSV burn.
+      - **API branch — could not determine.** `initialDraft` was nulled (fault, or wrong-branch
+        draft) and there is no preselect, so the caller does not KNOW the key. Today that is
+        read as "claims nothing, so decline nothing". **This is the hazard**, and it is exactly
+        the shape CONTEXT decision **D-02** already ruled on for the *stored* side: *"an
+        unprovable case is not a safe case."* The two sides are being held to different rules.
+      **Two candidate resolutions, neither free:**
+      (a) **Distinguish no-key from unknown-key at the call site** — pass a third state (e.g.
+          `"unknown"` vs `null`) and make *unknown meeting a present stored key* **DECLINE**,
+          matching D-02's own rule. Costs one lost idempotency token on that path (the draft,
+          the resume banner and the server row all survive — `WizardClient` re-seeds from
+          `newWizardSessionId()` on mount), and touches the 4th-parameter contract D-01 pinned.
+      (b) **Keep it permissive but make it COUNTABLE** — emit telemetry at the incoming-`null`
+          arm (and/or a `deduped` flag from the F6 fence) so the residual has a measured rate
+          instead of an argued one. Cheaper, changes no behaviour, and would tell us whether (a)
+          is worth its cost.
+      ⛔ **FOUNDER CALL — do NOT let an agent silently "fix" this.** Either resolution changes
+      founder-locked decision **D-01** (4th positional parameter, defaulted, not an options
+      object) and (a) also re-opens **D-02**'s boundary. The permissive arm is what makes
+      164.2.1's change provably monotonic — the grant set is a strict subset of the pre-PR grant
+      set precisely BECAUSE incoming `null` reproduces pre-PR behaviour byte-for-byte — so
+      narrowing it is a deliberate behaviour change, not a bug fix, and it must be decided, not
+      assumed. Recorded against Phase 164.2.1 in `164.2.1-SECURITY.md` (Notes carried forward)
+      and `164.2.1-VERIFICATION.md` (IN-04); neither raises `threats_open` nor moves the
+      `passed` verdict, because the phase's own criteria are about the **preselect** path and
+      here there is no preselect at all.
+
 ---
 
 ## 🟡 FIX MID-TERM

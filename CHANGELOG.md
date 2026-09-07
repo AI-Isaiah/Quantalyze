@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.77.17.0] - 2026-09-07
+
+### Phase 164.2.1 SESSIONID-FENCE — an abandoned draft can no longer poison a new key's submission
+
+Closes a functional dead end that Phase 162 shipped honest copy about but did not remove. An
+abandoned wizard draft over API key A lent its `wizardSessionId` to a preselect for key B; the
+submission then took a 23505 on `strategies_user_wizard_session_source_uniq` and surfaced
+"A wizard session with this key is already in progress" — which was false, since the colliding
+row belonged to key A. Because the stored id was stable, **re-pressing Continue could never
+clear it.** The user's only escape was clearing site data.
+
+`deriveWizardResumeOverrides` now takes the incoming preselect key and declines the session-id
+restore when it does not match the key the token was minted under. A payload with no stored key
+(every draft written before this ships) also declines: absent is not proof of sameness, and the
+unprovable case is exactly what this phase exists to stop assuming. The cost is one refreshed
+token for pre-existing drafts — the draft, the resume banner and the server-side row are all
+untouched, and a distinct submission should carry a distinct token anyway.
+
+This is TRIGGER REMOVAL, not a new guarantee. The partial unique index is untouched and remains
+the guarantee; the file's own doctrine says so, and this was the second trigger it predicted.
+
+Also fixed, found while building the fence:
+
+- **A stale closure at the only API-branch writer.** `persistPointer` stamped the pre-connect
+  key because `setApiKeyId` and `persistPointer` ran in the same tick. On the key-reuse arm the
+  stale value coincidentally equals the preselect id, so the defect was invisible in precisely
+  the preselect scenario. It now takes the resolved key explicitly.
+- **The CSV branch now claims no key at all.** The fence has no meaning where no key is
+  involved, and without this the only thing it could do on a CSV mount was strip an RT-3
+  duplicate-submission burn. Narrow to reach, but a guard that can only cause harm on a branch
+  it has no business touching should not exist.
+
+Known limits, recorded rather than fixed: with no draft offered and no incoming key, a stored
+token is still restored on the manager route — pre-existing, a silent resume rather than a dead
+end, and outside this phase's criteria.
+
 ## [0.77.16.1] - 2026-09-06
 
 ### Planning: Phase 164.8 inserted; CI-DOCSPATH-01 carried into 164.6
