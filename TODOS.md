@@ -6804,6 +6804,57 @@ follows is what was deliberately left, with the reason.
 - [x] **[DRIFT-05] add the PROD→snapshot direction to the function-snapshot gate** — ✅ **BUILT 2026-09-07, Phase 164.5 plan 04, as TWO gates that the tree keeps apart.** (a) `NAME_SET_RATCHET` + `diffNameSets` in `scripts/dump-sql-functions.ts`, inside `--check`, both directions, with a RED fixture per direction in `--self-test` (11 → 22 assertions) and a dated ratchet carrying the three disagreements measured at HEAD. (b) `bash scripts/prod-body-drift-check.sh --baseline-live`, wired as a step in `migration-drift-check.yml` after the existing `supabase db dump`, riding VAC-04's job and credential; 8/8 self-test arms; exit 1 naming the variable when the credential is absent, never a skip. Both files' headers state that neither gate covers the other, and both gates' failure output repeats it. ⚠️ (b) has NOT yet run against the real credential and is EXPECTED RED on its first — see `[DRIFT-05B-FIRST-RUN]`. ⛔ `WINDOWS.md` 29 is NOT closed by this: it is about `baseline.sql` having no staleness gate at all, and (b) closes only the NAME-SET half. Body-level and table/policy-level staleness of that file remain ungated. Original entry follows. — today `dump-sql-functions.ts --check` compares migrations→snapshot and is hermetic by design, so a function present in PROD but in no migration is absent from its input and therefore from its diff: structurally invisible, permanently green. `supabase/schema/baseline.sql` makes the missing direction computable; a name-set diff is a two-line assertion. This is how DRIFT-04 would have been caught years ago. **FOUNDER DECISION 2026-08-29: build it, as TWO gates in Phase 164.5, and do not conflate them.** (a) HERMETIC name-set diff, both directions, comparing two COMMITTED files — `baseline.sql`'s function names against `supabase/schema/functions/*.sql`. No credentials, no Docker, no network, cannot flake; a third assertion inside `dump-sql-functions.ts --check`. It catches the DRIFT-04 class but only AS OF THE LAST BASELINE REFRESH. (b) baseline-vs-LIVE staleness — needs credentials, so it rides the PR-triggered credentialed job VAC-04 already uses; this is WINDOWS.md 29. Shipping (a) while believing it covers (b) would be a control that reads green while blind — the exact defect class Phase 164.3 exists to eliminate. Build (a) first: it costs nothing and closes the measured hole.
 - [ ] **[DRIFT-06] PROD runs an EARLIER revision of three function bodies than the migration chain renders** — ⭐ **SURFACED 2026-09-07 BY THE BASELINE REGENERATION ITSELF, and it is a finding the regeneration was expected to ERASE rather than expose.** All eight `CONTENT_DRIFT_ALLOWLIST` rows in `scripts/baseline-content-drift-check.mjs` were booked on 2026-09-07 with one shared diagnosis — *"the committed dump was taken from PROD on 2026-08-29; the chain has since been re-rendered from migrations that redefine this body"*, i.e. the dump is stale — and one shared `clearedBy`: *"A regeneration of supabase/schema/baseline.sql from PROD."* That regeneration has now been performed. **Five rows cleared and were deleted. Three did not clear, and their `snapshotHash` values did not move by a single bit** — meaning PROD's bodies were never stale, so the shared diagnosis was FALSE for them. The three are `check_fan_in_ready/1` (5 hunks), `reject_sentinel_writes/0` (9 hunks) and `retention_delete_guard/0` (2 hunks). ⚠️ **WHAT WAS MEASURED, per function.** `check_fan_in_ready` is defined by two migrations (`20260411144407`, then `20260510180226`) and PROD runs the EARLIER: the chain declares `v_row_found BOOLEAN` and `SELECT`s `true` into it to distinguish "no parent row" from "a parent row of NULLs"; PROD has neither, so this one is **executable, not cosmetic**. `reject_sentinel_writes` is likewise defined twice (`20260513073518`, then `20260515114310`) with PROD on the earlier: its three `RAISE EXCEPTION` messages carry the short 2026-05-13 wording rather than the 2026-05-15 wording that adds "by user-originated writes (sentinel reserved for sanitize_user)" and the "red-team Finding 4" citation — the guard LOGIC (which sentinel values are refused, on which three tables) is identical on both sides, so this one is message text only. `retention_delete_guard` is the cleanest specimen and the one that rules out the innocent explanation: **exactly ONE migration in this repository defines it** (`20260515113853_retention_crons_safe`), so there is no later revision for PROD to be behind — yet PROD's `RAISE` message omits the clause "This indicates an unbounded DELETE (missing WHERE) — aborting." that this single defining migration contains. A live catalogue cannot lag a migration it is the only definition of. ⛔ **THE TWO CANDIDATE CAUSES ARE NOT DISTINGUISHABLE FROM A READ-ONLY DUMP, and neither is assumed here:** either those migrations never reached PROD, or their FILES were retro-edited after being applied (the class `[⭐Re-base SQL fn before CREATE OR REPLACE]` and the "Drift = OLDER REVISION, not comment-stripped" memory both name). `retention_delete_guard` can only be the second. Settling it needs `pg_stat_statements`-independent evidence — the applied-migration ledger on PROD, or `git log -p` on each migration file looking for an edit dated after its apply. **NOT fixed here, deliberately:** every repair path writes to PROD or rewrites migration history, and this session was read-only by instruction. This is the DRIFT-04 family (production surface that no reviewed artifact describes), one step less severe: the functions ARE defined by migrations, just not by the revision PROD is running. Route any repair through the three-reviewer rule (`migration-reviewer` + `rls-policy-auditor` + `silent-failure-hunter`) before asking to apply. The three allowlist rows are RETAINED with corrected `reason`/`clearedBy` text naming this entry — ⛔ they must NOT be deleted to make the gate green, and a further regeneration will never clear them.
 
+      ⭐ **ARCHAEOLOGY DONE 2026-09-08 — TWO OF THE THREE ARE SETTLED, AND THE ANSWER IS THE
+      RETRO-EDIT BRANCH.** The entry above named two candidate causes and refused to pick. PROD's
+      applied-migration ledger settles it, because `supabase_migrations.schema_migrations` on this
+      project carries a **`statements text[]` column holding the SQL text that actually ran** —
+      the evidence the entry said was needed. All reads, marker re-confirmed PRODUCTION first.
+
+      **Cause #1 ("never reached PROD") is REFUTED for all three.** Every defining migration is in
+      the ledger — `20260411144407`, `20260510180226`, `20260513073518`, `20260515113853`,
+      `20260515114310` — and all 265 rows are in the post-rename 14-digit form (`oldform_count=0`).
+      The 2026-05-15 rename commit `eaaed7e0` is **R100 on every one of these files**: a pure
+      rename, zero content change, so it is not the mechanism.
+
+      **The closed loop, for two functions:** repo file (newer) ≠ ledger's applied text (older)
+      **==** live PROD body.
+
+      | function | repo file | ledger applied text | live PROD |
+      |---|---|---|---|
+      | `retention_delete_guard` (needle `unbounded DELETE`) | PRESENT | **ABSENT** | **ABSENT** |
+      | `check_fan_in_ready` (needle `v_row_found`) | PRESENT | **ABSENT** | **ABSENT** |
+      | `reject_sentinel_writes` (needle `sentinel reserved for sanitize_user`) | PRESENT | *no usable row* | **ABSENT** |
+
+      The ledger rows were checked to be the functions' OWN definitions, not mere mentions:
+      `20260515113853`'s recorded statement contains **exactly one** `CREATE OR REPLACE FUNCTION`
+      head and it is `retention_delete_guard`; `20260510180226`'s contains five heads, one of them
+      `check_fan_in_ready`, and the string `v_row_found` appears nowhere in the whole recorded
+      statement. So PROD is **not lagging a later revision it never received** — it faithfully ran
+      an EARLIER TEXT OF THE SAME FILE, and the file was edited afterwards. That also dissolves the
+      `retention_delete_guard` paradox the entry called its cleanest specimen: a live catalogue
+      indeed cannot lag a migration it is the only definition of, and it isn't — the FILE moved.
+
+      ⛔ **`reject_sentinel_writes` is NOT settled and must not be written up as if it were.**
+      Its two definers give no usable evidence: `20260513073518` is one of **9 stub rows (of 265)
+      carrying 0 statements**, and `20260515114310`'s recorded fragment is 1,326 chars of a
+      24,858-char file and belongs to a different function (`guard_wizard_draft_updates`, "127a").
+      Live PROD lacks the newer wording, and `git log --follow` shows no content commit on either
+      file after creation — so if a retro-edit happened there it is invisible in git. Open.
+
+      ⚠️ **STATE THE INSTRUMENT'S LIMIT.** `statements[]` is NOT a faithful full record for every
+      row. Recorded-vs-repo character counts: `20260411144407` 44,654 / 44,858 (65 statements,
+      essentially complete) but `20260510180226` 8,994 / 30,268, `20260515113853` 5,425 / 11,791,
+      `20260515114310` 1,326 / 24,858 — each a **single** statement. The two conclusions above
+      survive that limit because they rest on what a recorded statement CONTAINS (its own CREATE
+      head) versus what it demonstrably LACKS, not on the row being complete. Any further use of
+      this column must re-establish that per row; an ABSENT needle in a partial row proves nothing
+      on its own, which is why `reject_sentinel_writes` stays open.
+
+      **This does not change the disposition.** Repair still writes to PROD or rewrites migration
+      history, still goes through the three-reviewer rule, and the three
+      `CONTENT_DRIFT_ALLOWLIST` rows are still RETAINED — a further regeneration will never clear
+      them, and deleting them to make the gate green remains forbidden.
+
       ⭐ **ORCHESTRATOR MEASUREMENT 2026-09-07 — one of the two candidate causes is now RULED OUT for `retention_delete_guard`, by git archaeology rather than by a dump.** The entry above correctly refuses to choose between "never reached PROD" and "the file was retro-edited after being applied". For THIS function the second is now FALSIFIED:
       • `supabase/migrations/20260515113853_retention_crons_safe.sql` has ONE commit at its current path (`eaaed7e0`, 2026-05-15).
       • Following renames, it was `supabase/migrations/121_retention_crons_safe.sql`, created 2026-05-13 in `0f3872c7`.
