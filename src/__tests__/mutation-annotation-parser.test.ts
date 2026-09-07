@@ -798,10 +798,16 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // onto 20260907130000 moved no COUNT — the same steps, aimed at the
     // superseding migration, ten of them disambiguated with `nth` because that
     // migration CREATE OR REPLACEs both bodies.
-    // MEASURED at this commit over scanCorpus: `arms=380 waivers=0
-    // fileSteps=404 sqlSteps=109 totalSteps=513`.
-    expect(armsSeen).toBe(380);
-    expect(stepsSeen).toBe(404);
+    // ⚠️ CURRENCY 2026-09-07 (phase 164.7, SQL-fixer pass): arms 380 -> 384 and
+    // file steps 404 -> 406. FOUR new arms, all four in the SAME gate — the
+    // fixer grew test_analytics_service_settings_and_vault_tick.sql from 7 arms
+    // to 11. TWO of the four carry no file edit (they are `sql` steps), which
+    // is why steps moved by only two while arms moved by four, and why sqlSteps
+    // moved 109 -> 111 in lockstep.
+    // MEASURED at this commit over scanCorpus: `arms=384 waivers=0
+    // fileSteps=406 sqlSteps=111 totalSteps=517`.
+    expect(armsSeen).toBe(384);
+    expect(stepsSeen).toBe(406);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1571,9 +1577,13 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // lockstep with `stepsSeen` above — every one of the eight new file steps
     // is an `edit` carrying a `find`, and plan 04's re-point of the 27
     // pre-existing ledger twins changed each needle's TARGET migration without
-    // changing how many there are. MEASURED: `fileSteps=404 sqlSteps=109
-    // totalSteps=513`.
-    expect(needles.length).toBe(404);
+    // changing how many there are.
+    // ⚠️ CURRENCY 2026-09-07 (phase 164.7, SQL-fixer pass): 404 -> 406, again in
+    // lockstep with `stepsSeen` above — the fixer's four new arms in
+    // test_analytics_service_settings_and_vault_tick.sql contribute exactly two
+    // `edit` steps between them; the other two are `sql`.
+    // MEASURED: `fileSteps=406 sqlSteps=111 totalSteps=517`.
+    expect(needles.length).toBe(406);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

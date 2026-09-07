@@ -1747,8 +1747,15 @@ export const FILES_FLOOR = 46;
 //                probe that separated FILES_FLOOR above:
 //                  ARMS_FLOOR=381 (one higher) -> defect ->
 //                    `ARMS_FLOOR regression: 380 biting arm(s) < floor 381`
-//                  ARMS_FLOOR=380 (this value) -> 0 defects, EXIT 0
-//                So 380 is exactly the separation point, not a value below it.
+//                  ARMS_FLOOR=380 (that value)  -> 0 defects, EXIT 0
+//                ⚠️ CURRENCY 2026-09-07 (SQL-fixer pass): 380 -> 384. The fixer
+//                grew test_analytics_service_settings_and_vault_tick.sql from 7
+//                arms to 11 (C3, R3, T1 and the U2 constraint arm), so the
+//                corpus bites 384. RE-SEPARATED on real full-corpus lane runs:
+//                  ARMS_FLOOR=385 (one higher) -> defect ->
+//                    `ARMS_FLOOR regression: 384 biting arm(s) < floor 385`
+//                  ARMS_FLOOR=384 (this value) -> 0 defects, EXIT 0
+//                So 384 is exactly the separation point, not a value below it.
 //                The STALE direction is NOT this runner's to report — see the
 //                ⛔ block above FILES_FLOOR. At 369 on this tree the run exits
 //                0, and it is src/__tests__/mutation-runner-floors.test.ts that
@@ -1758,7 +1765,7 @@ export const FILES_FLOOR = 46;
 //                to-a-mechanism-this-p/164.7-05-SUMMARY.md, beside
 //                164.7-05-FLOORS.log, which carries all three runs with their
 //                exit codes, wall clocks and printed lines.
-export const ARMS_FLOOR = 380;
+export const ARMS_FLOOR = 384;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

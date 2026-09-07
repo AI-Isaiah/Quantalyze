@@ -122,7 +122,20 @@
 -- `http://127.0.0.1:9` — loopback, the IANA DISCARD port. It is there so
 -- supabase/tests/test_analytics_service_settings_and_vault_tick.sql can prove
 -- the got-past-both-guards path (arm C1) WITHOUT opening a socket to the
--- internet on every CI run. Permitting it costs nothing: a value that cannot
+-- internet on every CI run.
+--
+-- ⛔ WHICH LAYER ACTUALLY NEEDS IT — do not re-derive this wrongly. It is NOT
+-- this CHECK constraint. The gate DROPS the constraint (its U2-SETUP block)
+-- before arm C1 writes the fixture, so layer (a) is already gone by then. What
+-- C1 has to get past is layer (b), `c_url_allowed` compiled into
+-- match_engine_cron_tick() below, which no test can drop. The constraint then
+-- carries the same literal ONLY because STEP 3 check 7 asserts the two
+-- spellings are byte-identical — narrowing the constraint alone would fail
+-- check 7, not free the constraint. MEASURED 2026-09-07: removing the loopback
+-- from all three spellings takes the gate baseline RED at C1 (exit 3); that is
+-- the whole of the evidence that this carve-out is load-bearing.
+--
+-- Permitting it costs nothing: a value that cannot
 -- leave the host cannot exfiltrate the key, and the worst an admin achieves by
 -- setting it is a match-engine outage they can already cause with any wrong
 -- Railway hostname. ⛔ Do NOT widen it to `127.0.0.1` with a free port, and do

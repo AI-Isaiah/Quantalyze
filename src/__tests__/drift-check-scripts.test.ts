@@ -3064,8 +3064,20 @@ describe("IN-04 — the scratch directory does not survive a fail() path", () =>
     try {
       writeFileSync(join(bin, "pg_ctl"), "#!/bin/sh\nexit 0\n");
       writeFileSync(join(bin, "initdb"), '#!/bin/sh\necho "initdb: stub failure" >&2\nexit 1\n');
+      // ⚠️ The `postgres` stub is LOAD-BEARING, not decoration. resolve_pgbin()
+      // and both PGBIN guards refuse a directory carrying pg_ctl but no
+      // `postgres` server binary — the homebrew-libpq shadowing measured
+      // 2026-09-07, where a client-only keg killed the lane inside initdb with
+      // no diagnosis reaching the caller. Without this stub the guard fires
+      // FIRST and neither of these tests reaches the path it exists to drive:
+      // the D-04 case failed outright, and the R3-W03 case kept PASSING for the
+      // wrong reason (the guard's own fail() also removes the scratch dir, so
+      // "no scratch directory survives" stayed true while initdb never ran).
+      // It is never executed — pg_ctl start is stubbed to exit 1.
+      writeFileSync(join(bin, "postgres"), ["#!/bin/sh", "exit 1"].join("\n"));
       chmodSync(join(bin, "pg_ctl"), 0o755);
       chmodSync(join(bin, "initdb"), 0o755);
+      chmodSync(join(bin, "postgres"), 0o755);
 
       const before = new Set(laneScratch());
       const res = spawnSync("bash", [join(process.cwd(), "scripts", "pg-lane", "run.sh")], {
@@ -3078,6 +3090,17 @@ describe("IN-04 — the scratch directory does not survive a fail() path", () =>
         res.status,
         "the stub must make the lane FAIL — otherwise nothing is driven and this arm proves nothing",
       ).not.toBe(0);
+      // ⛔ A NON-ZERO EXIT IS NOT EVIDENCE THE RIGHT PATH RAN. The PGBIN guard
+      // refuses a client-only keg and also exits non-zero, so the status check
+      // above is satisfied by a run that never reached initdb and never created
+      // the scratch directory this arm is about — the leak detector then reads
+      // "no leak" against a lane that did nothing. MEASURED 2026-09-07: with the
+      // `postgres` stub absent this test stayed GREEN for exactly that reason.
+      // Naming initdb's own message is what separates the two.
+      expect(
+        `${res.stderr ?? ""}${res.stdout ?? ""}`,
+        "the lane must actually reach initdb — a PGBIN guard refusal exits non-zero too, and would satisfy the status check while driving nothing",
+      ).toContain("initdb: stub failure");
 
       const added = laneScratch().filter((n) => !before.has(n));
       expect(
@@ -3128,8 +3151,20 @@ describe("IN-04 — the scratch directory does not survive a fail() path", () =>
           "exit 0",
         ].join("\n"),
       );
+      // ⚠️ The `postgres` stub is LOAD-BEARING, not decoration. resolve_pgbin()
+      // and both PGBIN guards refuse a directory carrying pg_ctl but no
+      // `postgres` server binary — the homebrew-libpq shadowing measured
+      // 2026-09-07, where a client-only keg killed the lane inside initdb with
+      // no diagnosis reaching the caller. Without this stub the guard fires
+      // FIRST and neither of these tests reaches the path it exists to drive:
+      // the D-04 case failed outright, and the R3-W03 case kept PASSING for the
+      // wrong reason (the guard's own fail() also removes the scratch dir, so
+      // "no scratch directory survives" stayed true while initdb never ran).
+      // It is never executed — pg_ctl start is stubbed to exit 1.
+      writeFileSync(join(bin, "postgres"), ["#!/bin/sh", "exit 1"].join("\n"));
       chmodSync(join(bin, "pg_ctl"), 0o755);
       chmodSync(join(bin, "initdb"), 0o755);
+      chmodSync(join(bin, "postgres"), 0o755);
       const apply = join(dir, "apply.sql");
       const gate = join(dir, "gate.sql");
       writeFileSync(apply, "SELECT 1;\n");
@@ -3485,7 +3520,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=9 and ARMS_FLOOR=180 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=10 and ARMS_FLOOR=195 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -3502,9 +3537,20 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // => WHENEVER ci.yml:2896-2897 moves, move these two literals in the SAME
     //    commit. Do not relax this to a >= comparison: that would tolerate a
     //    raise silently and hand the next author the same trap.
+    //
+    // MOVED 2026-09-07 (Phase 164.7, SQL-fixer pass), 9/180 -> 10/195. Two
+    // raises land here at once, and they are NOT the same kind of change:
+    //   * SENTINEL_FLOOR 9 -> 10 and ARMS_FLOOR 180 -> 191 came earlier in this
+    //     phase, when test_analytics_service_settings_and_vault_tick.sql joined
+    //     the sentinel-bearing set with 7 arms.
+    //   * ARMS_FLOOR 191 -> 195 is this pass: the fixer grew that same file
+    //     from 7 arms to 11, so its row in ci.yml's derivation table moves
+    //     7 -> 11 and the total follows.
+    // The pin went red across both because it is an exact-literal mirror, which
+    // is the design. Moving it here is mirroring a raise, never authorising one.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=9", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=10", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -3515,7 +3561,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=180", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=195", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

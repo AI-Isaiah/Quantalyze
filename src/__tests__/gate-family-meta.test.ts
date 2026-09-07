@@ -860,8 +860,8 @@ export const KNOWN_THRESHOLD_SITES: readonly string[] = [
   // a threshold leaving this family is a decision worth a red, not churn.
   "scripts/test-ledger-drift-check.sh :: ledger_rows -ge 50", //  VAC-08 absurdity floor: 'scored' + 2026-08-29
   "scripts/prod-body-drift-check.sh :: SNAPSHOT_MIN=50", //         VAC-04 absurdity floor: 'measured' + 2026-09-01
-  "scripts/mutation-runner/run.mjs :: FILES_FLOOR=45", //           coverage ratchet: MEASURED + 2026-09-06 (44 -> 45 at phase 164.2 plan 07, the first ADDED gate rather than a backfilled one; the denominator moved with it, 71 -> 72)
-  "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=369", //           biting ratchet: MEASURED + 2026-09-06 (361 -> 369 at phase 164.2 plan 07: eight new twins in one added gate, all eight biting on the first proof run; WAIVED_CEILING still 0)
+  "scripts/mutation-runner/run.mjs :: FILES_FLOOR=46", //           coverage ratchet: MEASURED + 2026-09-07 (45 -> 46 at phase 164.7 plan 02, which added supabase/tests/test_analytics_service_settings_and_vault_tick.sql; the denominator moved with it, 72 -> 73. Unmoved by the SQL-fixer pass later the same day, which grew that file's ARMS but added no FILE)
+  "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=384", //           biting ratchet: MEASURED + 2026-09-07 (369 -> 380 across phase 164.7 plans 02 and 04, then 380 -> 384 in the SQL-fixer pass, which took test_analytics_service_settings_and_vault_tick.sql from 7 arms to 11. SEPARATED in both directions on real full-corpus lane runs: 385 gives "ARMS_FLOOR regression: 384 biting arm(s) < floor 385" and exit 1; 384 gives 0 defects and exit 0, with arms/biting/lane-invocations all reading 384. WAIVED_CEILING still 0)
   // The family's only UPPER bound. Invisible to this arm until the name class
   // widened past FLOOR|MIN on 2026-09-02 — registered here on the run that
   // first saw it, with its measurement at run.mjs:201-227 and the constant

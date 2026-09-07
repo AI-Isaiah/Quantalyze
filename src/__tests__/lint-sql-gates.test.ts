@@ -880,7 +880,12 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // test_sync_status_curated_sentence_survives.sql. The number is pinned
     // rather than derived on purpose — a linter that stopped SEEING files would
     // report "0 finding(s)" over a shrinking corpus and read as clean.
-    expect(res.out).toMatch(/scanned 72 file/);
+    // ⚠️ CURRENCY 2026-09-07 (phase 164.7): 72 -> 73. The corpus gained
+    // supabase/tests/test_analytics_service_settings_and_vault_tick.sql. The
+    // count stays HARDCODED on purpose, per the note above — deriving it would
+    // let a linter that stopped seeing files report "0 finding(s)" over a
+    // shrinking corpus and read as clean.
+    expect(res.out).toMatch(/scanned 73 file/);
     expect(res.status, res.out).toBe(0);
   });
 
