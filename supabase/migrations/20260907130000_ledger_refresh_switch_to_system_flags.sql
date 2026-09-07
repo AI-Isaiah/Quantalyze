@@ -3,6 +3,48 @@
 -- table — fail-CLOSED, in both fan-out bodies.
 -- Phase 164.7 / plan 03 / criterion 2 (APPSETTINGS). 2026-09-07.
 --
+-- ══════════════════════════════════════════════════════════════════════════
+-- VAC-04 ACKNOWLEDGEMENT — the TWO PROD bodies these CREATE OR REPLACEs
+-- overwrite. Both arms drift, and both are acknowledged separately.
+--
+-- prod-body-ack: 88e6af8472e4e48175a62b1ee189f7411407b14827d948c81aa015f511ae6e36
+-- prod-body-ack: 7c3d33e96f1cbe5a864750ff083670e23ab4c586b8529d48da005006b4d81ac4
+--
+-- The gate compares the COMMITTED SNAPSHOT (supabase/schema/functions/) against
+-- PROD's live body. On any function-changing migration PR the two necessarily
+-- disagree: `snapshot-drift` requires the snapshot to carry the body the
+-- MIGRATIONS produce (the new one), while VAC-04 requires it to match what PROD
+-- has TODAY (the old one). The pragma is the designed resolution, and it means
+-- "I read PROD's body and intend to overwrite it" — so it was EARNED, not
+-- pasted:
+--
+--   MEASURED 2026-09-07, workflow run 34138679709 at 51f576ef:
+--     enqueue_ledger_refresh_for_strategies/0
+--       PROD live sha256            88e6af84...ae6e36   (15 differing lines)
+--       committed snapshot at HEAD  adeb6d16...53705f
+--     enqueue_ledger_composite_refresh/0
+--       PROD live sha256            7c3d33e9...4d81ac4   (15 differing lines)
+--       committed snapshot at HEAD  15e3ba96...2996b5
+--
+--   and, reproduced LOCALLY with the gate's own normalizer, aiming its `live`
+--   argument at origin/main's snapshot rather than at PROD:
+--     node scripts/sql-body-normalize.mjs --diff-bodies \
+--       supabase/schema/functions/<fn>.sql <origin/main's copy of the same file>
+--   returned, for BOTH functions, the SAME two hashes and the SAME 15 differing
+--   lines the gate reported against PROD.
+--
+-- ⭐ PROD's live bodies are therefore EXACTLY the repository's last-known
+-- committed snapshots on main, for BOTH arms. There is NO out-of-band patch —
+-- DRIFT-02's shape is ABSENT. The 15 lines in each are this phase's Lock B
+-- replacement and nothing else: the activation read moves from the `app.`
+-- namespace database setting to public.system_flags, and every other line of
+-- both bodies is the 20260825130000 / 20260825140000 snapshot byte for byte.
+--
+-- ⚠️ The local reproduction is what makes this an ACK rather than a hash
+-- transcribed off a log. Copying the two `prod-body-ack:` lines from CI output
+-- would satisfy the grep while proving nothing about what is being overwritten;
+-- deriving the same hashes from origin/main is what identifies PROD's body.
+--
 -- ⚠️ OPS: merging supabase/migrations/** to main AUTO-APPLIES to PROD. This file
 -- redefines two live SECURITY DEFINER functions, so the new bodies are live on
 -- the next merge with no separate deploy step.
