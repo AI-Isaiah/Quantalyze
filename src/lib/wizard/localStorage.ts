@@ -152,6 +152,30 @@ export interface WizardLocalState {
    * deliberately NOT persisted.
    */
   failedCsvSubmitSig?: string | null;
+  /**
+   * Phase 164.2.1 / SESSIONID-FENCE — the `api_keys.id` this draft was being
+   * built over when the payload was written, or `null` on the CSV branch (that
+   * branch has no key at all). Written EXPLICITLY from `WizardClient`'s
+   * `apiKeyId` state at every save site — it is NOT sticky like
+   * `failedCsvSubmitSig` above, because `setApiKeyId(result.apiKeyId)` moves the
+   * key mid-wizard and a carried-forward value would hold the OLD key while the
+   * session id had already moved on.
+   *
+   * ⚠️ WHAT THIS FIELD IS NOT: it is not a guarantee, and it is not an
+   * authorization fact. The guarantee against a duplicate submission remains the
+   * partial unique index `strategies_user_wizard_session_source_uniq` on
+   * (user_id, wizard_session_id, source) (migration 20260728120000). This field
+   * exists only so `deriveWizardResumeOverrides` can stop LENDING one key's
+   * `wizardSessionId` to a wizard opened over a different key — it removes a
+   * trigger, it does not replace the fence.
+   *
+   * ABSENT on every payload written before this phase shipped. Absent does NOT
+   * default to the common case the way `source` does: absent means "cannot prove
+   * same key", and a present incoming key therefore DECLINES the session-id
+   * restore (CONTEXT.md D-02). Bounded at FINGERPRINT_MAX_LEN by the load-time
+   * validator, as every other optional string on this payload is.
+   */
+  apiKeyId?: string | null;
 }
 
 /** Returns true when running in a browser with localStorage available. */
@@ -455,6 +479,23 @@ export async function loadWizardState(): Promise<WizardLocalState | null> {
         return null;
       }
     }
+    // Phase 164.2.1 / SESSIONID-FENCE: the key this draft was built over is
+    // optional and either null (the CSV branch, which has no key) or a BOUNDED
+    // string. Absent is a payload written before this phase and is accepted —
+    // the DECLINE for that case is decided at the gate, not here, because a
+    // rejection here would throw away the step pointer and the strategy name
+    // too. ⚠️ The `!== null` clause is load-bearing: nine of the fourteen save
+    // sites are CSV-branch and write `apiKeyId: null` explicitly, so a
+    // `source`-shaped arm (present ⇒ must be a string) would refuse every CSV
+    // payload ever written.
+    if (obj.apiKeyId !== undefined && obj.apiKeyId !== null) {
+      if (
+        typeof obj.apiKeyId !== "string" ||
+        (obj.apiKeyId as string).length > FINGERPRINT_MAX_LEN
+      ) {
+        return null;
+      }
+    }
     return parsed as WizardLocalState;
   } catch {
     return null;
@@ -490,10 +531,33 @@ export interface WizardResumeOverrides {
   failedCsvSubmitSig?: string;
 }
 
+/**
+ * Phase 164.2.1 / SESSIONID-FENCE — may a stored `wizardSessionId` be reused for
+ * the key the caller is about to submit under?
+ *
+ * The asymmetry is deliberate and is the whole contract:
+ *   incoming `null`  ⇒ TRUE. The caller makes NO key claim — the CSV branch (no
+ *     key exists), the manager route mounted with neither draft nor preselect,
+ *     and every legacy three-argument caller. Nothing is being compared, so
+ *     nothing may be declined: this is what leaves pre-164.2.1 behaviour intact.
+ *   incoming present ⇒ the stored key must be a string EQUAL to it. An absent or
+ *     null stored key therefore falls to FALSE — see CONTEXT.md D-02: absent
+ *     means we cannot prove the same key, and this phase exists because an
+ *     unprovable case was assumed safe once already.
+ */
+function sessionKeyMatches(
+  stored: string | null | undefined,
+  incoming: string | null,
+): boolean {
+  if (incoming === null) return true;
+  return typeof stored === "string" && stored === incoming;
+}
+
 export function deriveWizardResumeOverrides(
   loaded: WizardLocalState | null,
   source: "api" | "csv",
   initialDraftId: string | null,
+  incomingApiKeyId: string | null = null,
 ): WizardResumeOverrides {
   // Phase 154 / WIZCONT-01 — NO local pointer at all is the COMMON case for a
   // server-side draft, not an edge case: the ContributionWizardOverlay opening
@@ -533,7 +597,43 @@ export function deriveWizardResumeOverrides(
   // Declining the restore is safe: WizardClient seeds wizardSessionId from
   // `newWizardSessionId()` on mount, so the CSV wizard simply keeps its own
   // fresh token — which is what a distinct submission should carry anyway.
-  if (loaded.wizardSessionId && (loaded.source ?? "api") === source) {
+  // Phase 164.2.1 / SESSIONID-FENCE — the restore is ALSO gated on the key.
+  //
+  // WHY, stated as the reason rather than the rule: the same shared storage key
+  // that lets an abandoned API draft meet the CSV wizard also lets it meet the
+  // API wizard opened over a DIFFERENT key — an owner clicks "Finish setup →"
+  // on key B while an abandoned draft over key A is still in localStorage.
+  // Restoring on `source` alone handed key B's submission key A's idempotency
+  // token, so `create-with-key` took 23505 on the index below. Worse than a
+  // one-off: the stored token is STABLE, so pressing Continue again re-sends the
+  // same id and the refusal can never be cleared by the user. That is what makes
+  // the collision a permanent dead end rather than a retryable error.
+  //
+  // ⚠️ THIS IS THE SECOND TRIGGER the paragraph above anticipated ("if a second
+  // one is ever found, the DB still holds"). It is trigger removal on exactly
+  // those terms: the guarantee is still the partial unique index
+  // `strategies_user_wizard_session_source_uniq` (migration 20260728120000), and
+  // nothing here may be read as permission to narrow it.
+  //
+  // The absent-key case INVERTS the `?? "api"` idiom directly above, and the
+  // inversion is load-bearing rather than an inconsistency: `?? "api"` defaults
+  // an absent field to the COMMON case, which is safe there because a legacy
+  // payload really was written by the API branch. Here the defaulting population
+  // — payloads written before this phase, which carry no `apiKeyId` at all — is
+  // PRECISELY the set of drafts that carry the dead end. So an absent stored key
+  // meeting a present incoming key declines (`sessionKeyMatches` returns false);
+  // an absent incoming key claims nothing and changes nothing (it returns true).
+  //
+  // Declining is safe: WizardClient seeds wizardSessionId from
+  // `newWizardSessionId()` on mount, so the wizard keeps the draft, the resume
+  // banner and the user's work — only the idempotency token is fresh, which is
+  // what a submission over a different key should carry anyway. The cost is one
+  // lost token for drafts saved before this shipped, accepted on the record
+  // (CONTEXT.md D-02).
+  //
+  // ANDed into the SAME `if` on purpose: `failedCsvSubmitSig` is emitted inside
+  // it, and the burn must decline together with the id it retired.
+  if (loaded.wizardSessionId && (loaded.source ?? "api") === source && sessionKeyMatches(loaded.apiKeyId, incomingApiKeyId)) {
     out.wizardSessionId = loaded.wizardSessionId;
 
     // RT-3 — the burn rides with the session id it retired, never on its own.

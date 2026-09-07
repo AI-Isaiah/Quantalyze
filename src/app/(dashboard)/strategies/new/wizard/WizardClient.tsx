@@ -444,6 +444,12 @@ export function WizardClient({
         loaded,
         source,
         initialDraft?.id ?? null,
+        // Phase 164.2.1 / SESSIONID-FENCE — the key THIS mount will submit
+        // under. Deliberately the SAME expression that seeds the `apiKeyId`
+        // state above, so the gate compares the stored token against exactly
+        // the key the submission carries; reading the state variable here
+        // instead would make the comparison depend on render timing.
+        initialDraft?.api_key_id ?? preselectKey?.id ?? null,
       );
       if (overrides.wizardSessionId) {
         setWizardSessionId(overrides.wizardSessionId);
