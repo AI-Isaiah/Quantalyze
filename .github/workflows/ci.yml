@@ -800,6 +800,19 @@ jobs:
         # wrapper, no flags, no npm alias — wrapping a run changes its result,
         # and a CI-only invocation mode is a different program.
         run: node scripts/lint-sql-gates.mjs
+      # ── Phase 164.7, criterion 1: the app-GUC reader gate ──────────────────
+      # A SIBLING script, not an eighth rule of lint-sql-gates: that linter runs
+      # every rule on maskSql() output, which blanks comments AND string-literal
+      # contents — after masking an app-GUC read is invisible, and decision D-05
+      # requires this gate to COUNT comments. Same hermetic contract, same mode
+      # identity (these two lines are the EXACT commands a developer runs).
+      # ⚠️ DATED 2026-09-07: the corpus step below is EXPECTED RED between this
+      # commit and phase 164.7 plan 05's annotation commit — 12 findings across
+      # 5 files, the measured census. That is the gate seeing the tree.
+      - name: App-GUC gate self-test - every finding kind fires on its red fixture
+        run: node scripts/lint-app-guc.mjs --self-test
+      - name: App-GUC gate - zero unannotated app-GUC reads in supabase/migrations
+        run: node scripts/lint-app-guc.mjs
 
   sql-mutation:
     # Phase 164.3 / VAC-01 + VAC-02 — the RED-UNDER mutation runner over the
