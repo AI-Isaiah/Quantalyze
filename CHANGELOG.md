@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.77.19.0] - 2026-09-07 — Phase 164.5 BASELINE-SNAPSHOT (6/7 criteria)
+
+The committed `supabase/schema/baseline.sql` becomes load-bearing and gated. It had zero
+consumers and zero gates: nothing read it, nothing checked it was current.
+
+- **Criterion 1** — `scripts/local-stack/run.sh` now boots from the committed baseline. It had
+  resolved `BASELINE_FILE` to `${LANE_DIR}/baseline.sql`, the exact path `.gitignore` excluded, so
+  the committed file had no reader at all. Proven by running it.
+- **Criterion 2** — a baseline/`BASELINE.md` co-edit staleness gate, four mutation arms, self-test
+  10/10, wired into `sql-function-snapshot.yml` with the self-test first.
+- **Criterion 4** — DRIFT-05 as TWO gates: (a) a hermetic name-set diff in `dump-sql-functions.ts
+  --check` matching on name AND side; (b) `prod-body-drift-check.sh --baseline-live`, which exits 1
+  when its credential is absent and never skips.
+- **Criterion 5** — all 31 unledgered migrations dispositioned by name. Measured: the gate's own
+  name-parse is byte-identical before and after, so nothing VAC-08 detects was weakened.
+- **Criterion 6 / VAC-07** — a two-client concurrent `csv-finalize` spec, observed RED with the
+  advisory fence removed and GREEN with it restored.
+- **Criterion 7** — BASELINE-CONTENT-DRIFT pins the baseline to the migration chain, not just to
+  its own changelog. Its allowlist pins the snapshot/candidate hash PAIR, so a different drift on an
+  allowlisted function still fails.
+
+Also fixed five bare-conclusion emissions this phase introduced into `prod-body-drift-check.sh` —
+failure messages that stated a verdict without printing what the gate saw.
+
+⛔ Criterion 3 (the DRIFT-04 `DROP`) is NOT in this release. It is one-way production DDL on a
+`SECURITY DEFINER` function handling encrypted credentials, and it awaits a founder decision.
+
 ## [0.77.18.0] - 2026-09-07
 
 ### Phase 164.7 APPSETTINGS — every app-GUC reader moves to a mechanism
