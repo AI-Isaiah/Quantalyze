@@ -28,7 +28,8 @@
  * `src/__tests__/mutation-runner-floors.test.ts`.
  */
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -37,6 +38,7 @@ import {
   FINDABLE_STATUSES,
   FINDING_KINDS,
   checkContentDrift,
+  checkRepo,
   validateAllowlist,
 } from "../../scripts/baseline-content-drift-check.mjs";
 
@@ -258,5 +260,80 @@ describe("finding registry", () => {
     expect(res.findings[0].message).toContain("aim_alpha");
     // The output contract: hashes and counts, never body text. This repo is PUBLIC.
     expect(res.findings[0].message).not.toContain("PERFORM");
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// [CR-01] THE ZERO-COMPARISON FLOOR
+//
+// Code review 2026-09-08 found `checkRepo` guarding that both paths EXIST and
+// that the chain directory is non-empty, while NOTHING guarded the number of
+// functions actually compared. Both sides run through ONE parser, so a
+// definition it stops recognising vanishes from both at once and they agree by
+// construction — the SP-C05 shape `prod-body-drift-check.sh` defends against
+// with a zero-name refusal.
+//
+// MEASURED before the fix, on a 120-file chain the parser recognised nothing
+// in, with the allowlist at the zero rows its own header says it may shrink to:
+//   compared 0, findings 0, ok true, EXIT 0.
+// The three live allowlist rows were the ONLY thing making that red, via their
+// staleness findings — a mask that is scheduled to be removed.
+//
+// ⛔ Both arms are needed. The first proves the floor FIRES; the second proves
+// it is not simply always-on, which is the failure mode that would make the
+// first arm unfalsifiable.
+// ───────────────────────────────────────────────────────────────────────────
+describe("[CR-01] zero comparisons is a MEASURE_FAIL, never a clean run", () => {
+  /** A chain dir of real .sql FILES whose contents the extractor cannot parse. */
+  function corpus(sqlByName: Record<string, string>) {
+    const dir = mkdtempSync(join(tmpdir(), "bcd-floor-"));
+    const chainDir = join(dir, "functions");
+    mkdirSync(chainDir);
+    for (const [name, sql] of Object.entries(sqlByName)) {
+      writeFileSync(join(chainDir, `${name}.sql`), sql);
+    }
+    const snapshotFile = join(dir, "baseline.sql");
+    return { dir, chainDir, snapshotFile };
+  }
+
+  it("FIRES: 120 chain files the parser recognises nothing in -> ok false", () => {
+    const unparseable: Record<string, string> = {};
+    for (let i = 0; i < 120; i += 1) {
+      unparseable[`f${i}`] = "-- a comment only; no CREATE FUNCTION head\n";
+    }
+    const { dir, chainDir, snapshotFile } = corpus(unparseable);
+    try {
+      writeFileSync(snapshotFile, "");
+      const res = checkRepo({ snapshotFile, chainDir, allowlist: [] });
+      // The pre-fix reading was exactly this, minus the refusal.
+      expect(res.compared).toBe(0);
+      expect(res.findings).toEqual([]);
+      expect(res.chainFiles).toBe(120);
+      // The floor itself.
+      expect(res.ok).toBe(false);
+      expect(res.measureFails).toHaveLength(1);
+      expect(res.measureFails[0].reason).toContain("ZERO functions were compared");
+      // It must report the file count it DID see, so "no files" and "no parses"
+      // are distinguishable in a CI log.
+      expect(res.measureFails[0].reason).toContain("chain files 120");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("AIM: does NOT fire when the same harness parses one real definition", () => {
+    const real =
+      "CREATE OR REPLACE FUNCTION public.aim_floor_probe()\n" +
+      "RETURNS void\nLANGUAGE plpgsql\nAS $$\nBEGIN\n  PERFORM 1;\nEND;\n$$;\n";
+    const { dir, chainDir, snapshotFile } = corpus({ aim_floor_probe: real });
+    try {
+      writeFileSync(snapshotFile, real);
+      const res = checkRepo({ snapshotFile, chainDir, allowlist: [] });
+      expect(res.compared).toBeGreaterThan(0);
+      expect(res.measureFails).toEqual([]);
+      expect(res.ok).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

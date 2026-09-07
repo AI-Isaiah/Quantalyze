@@ -1023,6 +1023,25 @@ jobs:
       - name: Baseline content-drift gate - committed baseline.sql agrees with the migration chain
         run: node scripts/baseline-content-drift-check.mjs
 
+      # [CR-02] `prod-body-drift-check.sh --self-test` was invoked by NOTHING —
+      # eight hermetic arms, the only control that can tell a working DRIFT-05
+      # gate (b) from a defanged one, while the script's own header at :144 says
+      # "CI pastes these lines VERBATIM". Every sibling self-test in this repo is
+      # wired (lint-sql-gates, lint-app-guc, baseline-content-drift, mutation
+      # runner, verify-plan-anchors, check-baseline-staleness, dump-sql-functions,
+      # prod-prober); this one was the exception. ⚠️ THIS IS A RECURRENCE: the
+      # comment at ~:1443 in this same file records the identical defect being
+      # found and fixed for another gate.
+      #
+      # It belongs HERE rather than in migration-drift-check.yml, where gate (b)'s
+      # real `--baseline-live` leg runs, because the self-test is HERMETIC — it
+      # drives the arms with stub commands and needs no credential — so it must
+      # run on every PR, not only on the migration PRs that trigger that workflow.
+      # A gate whose control only runs when the gate itself runs cannot catch a
+      # commit that defangs it.
+      - name: DRIFT-05 gate (b) self-test - all eight arms fire with stub commands, no credential
+        run: bash scripts/prod-body-drift-check.sh --self-test
+
   sql-mutation:
     # Phase 164.3 / VAC-01 + VAC-02 — the RED-UNDER mutation runner over the
     # annotated SQL gate corpus. THE ON-EVERY-PUSH DETECTOR THIS PHASE EXISTS

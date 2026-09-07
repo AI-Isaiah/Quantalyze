@@ -526,6 +526,34 @@ export function checkRepo(opts = {}) {
     allowlist,
     chainIndex: chain.index,
   });
+  // [CR-01] The FLOOR. The three guards above prove the two paths EXIST and that
+  // the chain directory is non-empty; none of them proves a single function was
+  // actually compared. Both sides run through ONE parser (`diffFunctionBodies` ->
+  // `extractFunctionDefs`), which is the SP-C05 shape `prod-body-drift-check.sh`
+  // names and defends against with a zero-name refusal: a definition the parser
+  // stops recognising vanishes from BOTH sides at once, so they agree by
+  // construction and the run reads clean. Measured 2026-09-08 on a 120-file chain
+  // the parser recognised nothing in: `compared 0, findings 0, ok true, EXIT 0`.
+  // That was masked ONLY by the three allowlist rows' staleness findings, and this
+  // file's own header says that list may only shrink to zero — so the mask is
+  // scheduled to be removed. A corpus of zero compares nothing and must never read
+  // as clean, exactly as the zero-chain-files guard above already says.
+  if (result.compared === 0)
+    return {
+      ...result,
+      ok: false,
+      measureFails: [
+        ...result.measureFails,
+        {
+          reason:
+            `${SNAPSHOT_FILE} and ${CHAIN_DIR} both parsed, but ZERO functions were compared ` +
+            `(chain files ${chain.files.length}). NOTHING was measured, so this is a MEASURE_FAIL ` +
+            "rather than a clean run — the single shared parser recognising nothing makes both " +
+            "sides agree vacuously.",
+        },
+      ],
+      chainFiles: chain.files.length,
+    };
   return { ...result, chainFiles: chain.files.length };
 }
 
