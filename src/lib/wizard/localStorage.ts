@@ -484,10 +484,14 @@ export async function loadWizardState(): Promise<WizardLocalState | null> {
     // string. Absent is a payload written before this phase and is accepted —
     // the DECLINE for that case is decided at the gate, not here, because a
     // rejection here would throw away the step pointer and the strategy name
-    // too. ⚠️ The `!== null` clause is load-bearing: nine of the fourteen save
-    // sites are CSV-branch and write `apiKeyId: null` explicitly, so a
+    // too. ⚠️ The `!== null` clause is load-bearing: THIRTEEN of the fourteen
+    // save sites are CSV-branch and write the literal `apiKeyId: null`, so a
     // `source`-shaped arm (present ⇒ must be a string) would refuse every CSV
-    // payload ever written.
+    // payload ever written. (Counted at the tree, not estimated: the fourteenth
+    // is `persistPointer`, the ONE API-branch writer. "Nine" — the JSX-inline
+    // subset alone — was the first count here and it was wrong; the name
+    // autosave, the re-mint, the burn and the start-new callbacks are CSV sites
+    // too.)
     if (obj.apiKeyId !== undefined && obj.apiKeyId !== null) {
       if (
         typeof obj.apiKeyId !== "string" ||

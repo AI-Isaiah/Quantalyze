@@ -1001,8 +1001,9 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
       expect((await loadWizardState())?.apiKeyId).toBe("key-a");
     });
 
-    // ⛔ THE CSV HAZARD. Nine of the fourteen save sites are CSV-branch and
-    // write `apiKeyId: null` explicitly (the branch has no key at all). A
+    // ⛔ THE CSV HAZARD. THIRTEEN of the fourteen save sites are CSV-branch and
+    // write the literal `apiKeyId: null` (the branch has no key at all); the
+    // fourteenth, `persistPointer`, is the one API-branch writer. A
     // validator written like `source`'s — present ⇒ must be a string — would
     // refuse EVERY CSV payload, and the whole CSV wizard would silently lose its
     // resume. Null is a legal value, not a malformed one.
