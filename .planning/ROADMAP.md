@@ -482,6 +482,23 @@ So the value can only be set per-session, which no out-of-band operator action c
 6. Three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) before any migration applies, per project rule. Merging `supabase/migrations/**` to `main` auto-applies to PROD.
 7. `VAC04-ARMS-OBSERVE`: the SUMMARY quotes the `VAC-04 — repo-vs-PROD function body drift` step's OWN output from this phase's migration PR verbatim and names, by line reference, which branch it took. If that branch was again the `:198` short-circuit, the SUMMARY says exactly that and records the roll-forward to Phase 164.5 — it does NOT claim the arms ran. ⚠️ A green `migration-drift-check` job is not evidence: the whole point of `[VAC04-ARMS-UNRUN]` is that the job was green while the arms never executed.
 
+⭐ **CARRIED OUT 2026-09-07 — `BASELINE-CONTENT-DRIFT`, a MEASUREMENT this phase makes and a
+HAND-OFF it does not fix.** ⛔ Deliberately NOT an eighth success criterion: this phase's seven plans
+were already written, checked and executing when it was found, and a criterion no plan delivers is a
+phase that fails its own bar. It is recorded here because 164.7 is where it was measured and 164.7 is
+what makes it worse.
+
+**Measured at `14dc1f5e`:** `supabase/schema/baseline.sql` still contains the SUPERSEDED Lock B —
+`grep -c ledger_refresh_enabled` returns **4** — and `grep -rn baseline.sql .github/workflows/*.yml`
+returns **0**. Nothing in CI reads that file today. This phase's `20260907130000` migration replaces
+both ledger bodies, so the committed baseline becomes staler the moment 164.7 lands.
+
+⚠️ **Phase 164.5 criterion 2 does NOT catch this, and that is the point of the hand-off.** That gate
+fails "on a one-byte change to `baseline.sql` without a matching `BASELINE.md` update" — a CO-EDIT
+gate. 164.7 changes no byte of `baseline.sql`, so no `BASELINE.md` update is owed and the co-edit gate
+stays GREEN while the content silently diverges from the migration chain. Co-editedness and
+correctness are different properties. Booked as 164.5 criterion 8.
+
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries CRON-DRIFT-01 (the GUC half only — the LIVE-row repair is 164.5 item 7), `VAC04-ARMS-UNRUN` (the OBSERVATION half only — the credential swap `[VAC-04-ROLE]` is NOT this phase's), and the 161.1 ACTIVATION human-verification item in `161.1-VERIFICATION.md`, which this phase exists to unblock — read each before planning, do not re-derive
 **Depends on:** Phase 164. ⛔ **MUST run BEFORE Phase 164.5**, whose item (7) writes a `cron.job` repair migration that should consume this phase's settled mechanism rather than inventing a parallel one.
 **Plans:** 7 plans
@@ -1282,6 +1299,7 @@ Plans:
 5. VAC08-LEDGER-32: every one of the 32 unledgered migrations is applied to TEST or dispositioned by name; VAC-08 reports zero unledgered migrations on its next credentialed run.
 6. VAC-07: the concurrent csv-finalize spec exists on the pg-lane, was observed RED with the advisory lock removed and GREEN with it restored, and only then does REQUIREMENTS flip VAC-07 to Complete.
 7. CRON-DRIFT-01-REPAIR: after the migration applies, Phase 164.1's cron-drift arm reports ZERO drift for `match_engine_cron` against the committed manifest, and `grep -rn decrypted_secrets supabase/migrations/` returns the new migration. The pre-flight ABORTS non-zero WITHOUT writing when the live jobid 1 command does not match the manifest — proven by running it against a deliberately mismatched manifest, not by inspection.
+8. ⭐ **BASELINE-CONTENT-DRIFT (carried in from Phase 164.7, 2026-09-07): the baseline is pinned to the MIGRATION CHAIN, not merely to its own changelog.** Criterion 2 above is a CO-EDIT gate — it fires on a byte change to `baseline.sql` with no `BASELINE.md` update. It cannot fire when a migration changes a function body and `baseline.sql` is left untouched, which is exactly what Phase 164.7 does. MEASURED at `14dc1f5e`: `baseline.sql` still carries the superseded Lock B (`grep -c ledger_refresh_enabled` = **4**) and **zero** workflows in `.github/workflows/` reference the file at all. **Done when** a gate compares the committed baseline against the applied migration chain and FAILS on a body that disagrees — proven by mutation in BOTH directions (regenerate the baseline and observe GREEN; revert one function body and observe RED naming that function), never by inspection. ⛔ This must land BEFORE any squash: collapsing 263 migrations onto an unpinned, already-drifted baseline freezes the drift into the new floor permanently. ⚠️ 44 function names in `supabase/migrations/**` carry more than one definition (`mark_compute_job_done` × 9), which is the weight a squash would reclaim and the reason the ordering matters.
 
 **Requirements**: VAC-07 (deferred here from 164.3) + TODOS entries DRIFT-04, DRIFT-05, VAC08-LEDGER-32, CRON-DRIFT-01 (the REPAIR half only — the DETECT half is Phase 164.1's), `[VAC-07-DEFER]` — read each before planning, do not re-derive
 **Depends on:** Phase 164.4.1 (the pg-lane with pg_cron is the substrate), Phase 164.3 (VAC-04/VAC-08 credentialed jobs that (4b) and (5) ride), Phase 164.1 (its committed cron manifest is (7)'s oracle — (7) cannot be written before it exists), **Phase 164.7** (item (7) must consume 164.7's settled `app.*` replacement mechanism, not invent a second answer — the `20260408215026` GUC design is exactly what 164.7 retires)
