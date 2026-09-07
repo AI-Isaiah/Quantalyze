@@ -601,11 +601,14 @@ export function WizardClient({
         step: "csv_upload",
         source: "csv",
         strategyName,
+        apiKeyId,
       });
       setSavedAt(Date.now());
     }, NAME_AUTOSAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [source, step, hydrated, strategyName, wizardSessionId]);
+    // 164.2.1 — `apiKeyId` is captured by the payload above (constant `null` on
+    // this branch), so it belongs in the deps by the RANK-08 rule below.
+  }, [source, step, hydrated, strategyName, wizardSessionId, apiKeyId]);
 
   // RANK-08 (159-07) — the CLASSIFICATION half of the CSV submission identity.
   // Read off `csvMetadataDraft`: that is the draft `CsvSubmitStep` posts as
@@ -673,6 +676,7 @@ export function WizardClient({
       source: "csv",
       strategyName,
       failedCsvSubmitSig: null,
+      apiKeyId,
     });
     setWizardSessionId(nextWizardSessionId);
     // The RETIRED session id (the one the failed submit spent) — so an operator
@@ -699,6 +703,7 @@ export function WizardClient({
     csvAssetClass,
     wizardSessionId,
     step,
+    apiKeyId,
   ]);
 
   // CR-01 — record the content the FAILED submit was made with. The next
@@ -727,6 +732,7 @@ export function WizardClient({
       source: "csv",
       strategyName,
       failedCsvSubmitSig: fingerprint,
+      apiKeyId,
     });
     // ⚠️ RANK-08 — same rule as the effect above: the classification values
     // MUST stay listed here. This callback CAPTURES the values it burns; a
@@ -740,6 +746,7 @@ export function WizardClient({
     csvAssetClass,
     wizardSessionId,
     step,
+    apiKeyId,
   ]);
 
   /**
@@ -782,6 +789,7 @@ export function WizardClient({
       source: "csv",
       strategyName,
       failedCsvSubmitSig: null,
+      apiKeyId,
     });
     setWizardSessionId(nextWizardSessionId);
     // Same event as the content-keyed re-mint: the FACT is identical (a session
@@ -793,10 +801,23 @@ export function WizardClient({
       wizard_session_id: wizardSessionId,
       step: "csv_submit_start_new",
     });
-  }, [step, strategyName, wizardSessionId]);
+  }, [step, strategyName, wizardSessionId, apiKeyId]);
 
+  /**
+   * ⚠️ Phase 164.2.1 / SESSIONID-FENCE — `keyId` IS A PARAMETER, NOT A CLOSURE
+   * READ, and that is load-bearing rather than a style choice.
+   *
+   * `handleConnectSuccess` calls `setApiKeyId(result.apiKeyId)` and this
+   * function IN THE SAME TICK. A `useCallback` recreates on the NEXT render, so
+   * an `apiKeyId` read from this closure would be the PRE-connect key — `null`
+   * on the credentials arm, and on the reuse arm the preselected id, which
+   * happens to equal `result.apiKeyId` and therefore hides the defect in
+   * exactly the preselect test one would write for it. This is the ONE
+   * API-branch writer, so the wrong key here is the wrong key in the only
+   * payload the fence reads on the API branch.
+   */
   const persistPointer = useCallback(
-    (nextStep: WizardStepKey, id: string | null) => {
+    (nextStep: WizardStepKey, id: string | null, keyId: string | null) => {
       if (!id) return;
       // P473: saveWizardState is async (HMAC sign). Fire-and-forget —
       // the optimistic setSavedAt below + the server-side draft as the
@@ -805,6 +826,7 @@ export function WizardClient({
         strategyId: id,
         wizardSessionId,
         step: nextStep,
+        apiKeyId: keyId,
       });
       setSavedAt(Date.now());
       setToastKey((k) => k + 1);
@@ -871,9 +893,9 @@ export function WizardClient({
       // since abandoned.
       if (key !== "metadata") setMetadataServerFieldError(null);
       setStep(key);
-      persistPointer(key, strategyId);
+      persistPointer(key, strategyId, apiKeyId);
     },
-    [persistPointer, strategyId],
+    [persistPointer, strategyId, apiKeyId],
   );
 
   /**
@@ -898,10 +920,10 @@ export function WizardClient({
       if (!metadataFieldIsRendered(field, { showCapitalQuestion })) return false;
       setMetadataServerFieldError({ field, code });
       setStep("metadata");
-      persistPointer("metadata", strategyId);
+      persistPointer("metadata", strategyId, apiKeyId);
       return true;
     },
-    [persistPointer, strategyId, showCapitalQuestion],
+    [persistPointer, strategyId, showCapitalQuestion, apiKeyId],
   );
 
   const handleConnectSuccess = useCallback(
@@ -925,7 +947,9 @@ export function WizardClient({
       // submit.
       setDedupedExisting(result.deduped === true);
       setStep("sync_preview");
-      persistPointer("sync_preview", result.strategyId);
+      // 164.2.1 — `result.apiKeyId`, never the `apiKeyId` state: setApiKeyId
+      // above has not been applied yet in this tick.
+      persistPointer("sync_preview", result.strategyId, result.apiKeyId);
       trackForQuantsEventClient("wizard_step_complete_1", {
         wizard_session_id: wizardSessionId,
         strategy_id: result.strategyId,
@@ -939,14 +963,14 @@ export function WizardClient({
     (snapshot: SyncPreviewSnapshot) => {
       setSyncSnapshot(snapshot);
       setStep("metadata");
-      persistPointer("metadata", strategyId);
+      persistPointer("metadata", strategyId, apiKeyId);
       trackForQuantsEventClient("wizard_step_complete_2", {
         wizard_session_id: wizardSessionId,
         strategy_id: strategyId ?? undefined,
         trade_count: snapshot.tradeCount,
       });
     },
-    [strategyId, wizardSessionId, persistPointer],
+    [strategyId, wizardSessionId, persistPointer, apiKeyId],
   );
 
   const handleMetadataComplete = useCallback(
@@ -961,13 +985,13 @@ export function WizardClient({
       // CTA advances to submit, where the unchanged finalize POST ("Submit for
       // review") fires.
       setStep("review");
-      persistPointer("review", strategyId);
+      persistPointer("review", strategyId, apiKeyId);
       trackForQuantsEventClient("wizard_step_complete_3", {
         wizard_session_id: wizardSessionId,
         strategy_id: strategyId ?? undefined,
       });
     },
-    [strategyId, wizardSessionId, persistPointer],
+    [strategyId, wizardSessionId, persistPointer, apiKeyId],
   );
 
   const handleSubmitSuccess = useCallback(
@@ -1081,12 +1105,15 @@ export function WizardClient({
     // draft (Phase 154 — sending a CSV draft to sync_preview would land it on
     // an API-branch step with no key behind it).
     setStep(draftResumeStep);
-    persistPointer(draftResumeStep, initialDraft.id);
+    // 164.2.1 — the DRAFT's own key wins, mirroring the `apiKeyId` useState
+    // seed: this resume is about that draft, and the state may not have
+    // caught up to it yet on a first paint.
+    persistPointer(draftResumeStep, initialDraft.id, initialDraft.api_key_id ?? apiKeyId);
     trackForQuantsEventClient("wizard_resume", {
       wizard_session_id: wizardSessionId,
       strategy_id: initialDraft.id,
     });
-  }, [initialDraft, draftResumeStep, persistPointer, wizardSessionId]);
+  }, [initialDraft, draftResumeStep, persistPointer, wizardSessionId, apiKeyId]);
 
   /**
    * ⚠️ Phase 140.3-10 / TRAP-4 — `start_fresh` DESTROYS THE DRAFT, so it goes
@@ -1296,7 +1323,7 @@ export function WizardClient({
                   // behavior that no longer exists is a false sentence in
                   // exactly the class this phase closes.
                   setStep("connect_key");
-                  persistPointer("connect_key", strategyId);
+                  persistPointer("connect_key", strategyId, apiKeyId);
                 }}
                 onTryAnotherKey={() => {
                   // 161-04 / WIZERR-02 — A REMEDY MAY NOT DESTROY ANYTHING.
@@ -1344,7 +1371,7 @@ export function WizardClient({
                   // resume pointer still naming `sync_preview` would be its own
                   // small version of the divergence above.
                   setStep("connect_key");
-                  persistPointer("connect_key", strategyId);
+                  persistPointer("connect_key", strategyId, apiKeyId);
                   trackForQuantsEventClient("wizard_try_different_key", {
                     wizard_session_id: wizardSessionId,
                   });
@@ -1382,7 +1409,7 @@ export function WizardClient({
                 onBack={() => {
                   setMetadataServerFieldError(null);
                   setStep("sync_preview");
-                  persistPointer("sync_preview", strategyId);
+                  persistPointer("sync_preview", strategyId, apiKeyId);
                 }}
               />
             )}
@@ -1399,15 +1426,15 @@ export function WizardClient({
                 metadata={metadataDraft}
                 onContinue={() => {
                   setStep("submit");
-                  persistPointer("submit", strategyId);
+                  persistPointer("submit", strategyId, apiKeyId);
                 }}
                 onBack={() => {
                   setStep("metadata");
-                  persistPointer("metadata", strategyId);
+                  persistPointer("metadata", strategyId, apiKeyId);
                 }}
                 onEdit={(owningStep) => {
                   setStep(owningStep);
-                  persistPointer(owningStep, strategyId);
+                  persistPointer(owningStep, strategyId, apiKeyId);
                 }}
               />
             )}
@@ -1433,7 +1460,7 @@ export function WizardClient({
                   // Phase 53 / APPLY-02 — Back from submit returns to the
                   // review recap (the step that now precedes submit).
                   setStep("review");
-                  persistPointer("review", strategyId);
+                  persistPointer("review", strategyId, apiKeyId);
                 }}
               />
             )}
@@ -1477,6 +1504,7 @@ export function WizardClient({
                     step: "csv_preview",
                     source: "csv",
                     strategyName: payload.strategyName,
+                    apiKeyId,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1499,6 +1527,7 @@ export function WizardClient({
                     step: "csv_upload",
                     source: "csv",
                     strategyName,
+                    apiKeyId,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1512,6 +1541,7 @@ export function WizardClient({
                     step: "csv_metadata",
                     source: "csv",
                     strategyName,
+                    apiKeyId,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1543,6 +1573,7 @@ export function WizardClient({
                     step: "csv_review",
                     source: "csv",
                     strategyName,
+                    apiKeyId,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1555,6 +1586,7 @@ export function WizardClient({
                     step: "csv_preview",
                     source: "csv",
                     strategyName,
+                    apiKeyId,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1586,6 +1618,7 @@ export function WizardClient({
                     step: "csv_submit",
                     source: "csv",
                     strategyName,
+                    apiKeyId,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1598,6 +1631,7 @@ export function WizardClient({
                     step: "csv_metadata",
                     source: "csv",
                     strategyName,
+                    apiKeyId,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1610,6 +1644,7 @@ export function WizardClient({
                     step: owningStep,
                     source: "csv",
                     strategyName,
+                    apiKeyId,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1647,6 +1682,7 @@ export function WizardClient({
                     step: "csv_review",
                     source: "csv",
                     strategyName,
+                    apiKeyId,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);

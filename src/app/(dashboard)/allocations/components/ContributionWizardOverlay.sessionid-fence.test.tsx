@@ -372,3 +372,64 @@ describe("[164.2.1 / SESSIONID-FENCE] a preselect for key B never inherits key A
   });
 });
 
+/**
+ * WIRE — the gate reads a field somebody has to WRITE, and writing the wrong one
+ * is invisible from the fence's own tests.
+ *
+ * `persistPointer` is the ONE API-branch writer. `handleConnectSuccess` calls
+ * `setApiKeyId(result.apiKeyId)` and `persistPointer(...)` in the same tick, so a
+ * `persistPointer` that read `apiKeyId` from its closure would stamp the
+ * PRE-connect key. ⛔ THE REASON THIS `it` USES A THIRD ID: on the reuse arm the
+ * stale closure value is the PRESELECTED key — which is what a preselect test
+ * would naturally have the server answer with, making the two indistinguishable.
+ * Answering with an id that is NEITHER makes the difference observable.
+ */
+describe("[164.2.1 / SESSIONID-FENCE] WIRE — the persisted key is the one the connect RESOLVED", () => {
+  /** Neither KEY_A nor KEY_B: the key the server says this submit landed on. */
+  const RESOLVED_KEY_ID = "cccccccc-0000-4000-8000-00000000000c";
+
+  it("stamps the RESOLVED key into the envelope, not the pre-connect closure value", async () => {
+    createResponder = async () =>
+      jsonResponse({
+        ok: true,
+        strategy_id: "ssssssss-0000-4000-8000-00000000000c",
+        api_key_id: RESOLVED_KEY_ID,
+      });
+
+    render(
+      <ContributionWizardOverlay isOpen onClose={vi.fn()} preselectKey={KEY_B} />,
+    );
+    await findSummary();
+    await awaitHydration();
+
+    fireEvent.click(screen.getByTestId("wizard-preselect-continue"));
+
+    // The wizard's own STATE moved to the resolved key…
+    expect(await screen.findByTestId("mock-sync-preview")).toBeInTheDocument();
+    expect(screen.getByTestId("sync-api-key-id")).toHaveTextContent(
+      RESOLVED_KEY_ID,
+    );
+
+    // …and the ENVELOPE agrees with it. That agreement is the sentence a stale
+    // closure violates: state says C, storage says B, and a later mount decides
+    // whether to lend its token by reading storage.
+    await waitFor(() => {
+      const raw = window.localStorage.getItem("quantalyze_wizard_state_v1");
+      expect(raw).not.toBeNull();
+      const payload = JSON.parse(JSON.parse(raw!).p) as {
+        apiKeyId?: string | null;
+        step?: string;
+      };
+      expect(payload.step).toBe("sync_preview");
+      expect(payload.apiKeyId).toBe(RESOLVED_KEY_ID);
+      // NEGATIVE CONTROL — the preselected key is exactly what the stale
+      // closure would have written here.
+      expect(
+        payload.apiKeyId,
+        "The envelope carries the PRE-connect key. `persistPointer` is reading " +
+          "`apiKeyId` from its closure instead of taking it as an argument.",
+      ).not.toBe(KEY_B.id);
+    });
+  });
+});
+
