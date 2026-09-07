@@ -23,6 +23,23 @@
 -- secret to a host of their choosing (T-164.7-06). Two layers stand in the way
 -- and both are asserted — the table-level REVOKE from anon and the two policies.
 --
+-- ⭐ AND WHO MAY WRITE IS NOT THE WHOLE CLAIM — WHAT MAY BE WRITTEN IS THE REST
+-- OF IT. `system_settings_admin_all` is FOR ALL TO authenticated, so R1 and R2
+-- say nothing whatsoever about an ADMIN: an app-admin PATCHes that row through
+-- PostgREST, entirely within the policy, and the next tick hands the Vault-held
+-- service key to their host. Three arms bound the value rather than the writer —
+-- U2 (the CHECK constraint refuses a foreign destination), C2 (the callable
+-- re-tests the same allow-list, which is the layer that survives one ALTER TABLE
+-- dropping the constraint) and C3 (its refusal does not echo the attacker's
+-- string into this project's logs).
+--
+-- ⭐ T1 IS THE STATEMENT RLS CANNOT SEE. TRUNCATE is not subject to row
+-- security, and Supabase's bootstrap `GRANT ALL ON TABLES` includes it — so
+-- until the migration revokes it, any logged-in user empties this table and
+-- every later tick RAISES the missing-row message while the row's real cause of
+-- death was a statement no policy evaluated. R1/R2/R3 are all blind to it by
+-- construction; that is why it is its own arm and not a clause of R2.
+--
 -- ⛔ THE APPLIED-NESS GATE RAISES. IT DOES NOT SKIP (WR-03). Arm 0 keys on the
 -- pg_proc/pg_class catalogue, not on anything inside the function body: a
 -- presence gate that is a substring of the thing under test stops seeing it
@@ -55,6 +72,25 @@
 -- net.http_post is fire-and-forget, so a reachable one would make every CI run
 -- of this file trigger a production match-engine recompute. On the pg-lane
 -- there is no pg_net at all and the call dies on 3F000 before any socket opens.
+-- ⭐ That literal is inside the migration's destination allow-list FOR THIS
+-- REASON, and the migration says so at its ⚠️ THE ONE NON-RAILWAY VALUE note:
+-- the alternative — a fixture that had to be a real Railway hostname — is a
+-- socket to the internet on every CI run, and permitting a value that cannot
+-- leave the host costs nothing an attacker wants.
+--
+-- ⛔ THIS FILE DROPS THE CHECK CONSTRAINT AFTER ARM U2, ON PURPOSE, AND THE
+-- ORDERING IS LOAD-BEARING — do not move the drop earlier and do not remove it.
+-- U2 proves the constraint bites while it is still in force. From that point on
+-- the arms need fixture values that are deliberately NOT valid destinations
+-- (`r2-must-not-stick`, `r3-must-stick`, C2's foreign host), and leaving the
+-- constraint in force would let it reject R2's UPDATE — so R2's twin, which adds
+-- the permissive `TO authenticated` policy, would stop reddening and a real
+-- policy regression would sit behind a CHECK constraint that happened to catch
+-- it. R3 is worse: its write must STICK, and a constraint would refuse it
+-- outright. The drop takes an ACCESS EXCLUSIVE lock held to this file's
+-- ROLLBACK; that is acceptable here and nowhere near a general licence — nothing
+-- else in the corpus writes public.system_settings and it has no application
+-- reader at all (there is no admin route, by design).
 --
 -- ⭐ WHY EVERY IDENTITY CARRIES A DIGIT — `V1`, not `V`. `sectionOfIdentity` in
 -- scripts/mutation-runner/run.mjs is `id.replace(/(\d)[a-z]*(-[A-Za-z]+)?$/, "$1")`:
@@ -83,10 +119,23 @@
 --                                consumer anywhere yet. It is a SEPARATE check
 --                                on a SEPARATE variable, so V1 does not imply
 --                                it: deleting the url guard leaves V1 green.
+--   U2  foreign url REFUSED    — the CHECK constraint will not STORE a
+--                                destination outside the allow-list. Bounds
+--                                WHAT may be written where R1/R2 bound WHO, and
+--                                an ADMIN is inside every predicate they test.
 --   C1  both present ⇒ PAST    — the discriminator. Without it a callable that
 --                                raised UNCONDITIONALLY would pass V1 and U1
 --                                and never post anything, which is the outage
 --                                with the opposite sign.
+--   C2  foreign url ⇒ RAISE    — the callable re-tests the allow-list itself.
+--                                U2 is one ALTER TABLE from being gone; this is
+--                                the layer that is still there afterwards, so
+--                                it is not a duplicate of U2 but its survivor.
+--   C3  refusal does not echo  — that RAISE names the SETTING, never the
+--                                attacker-chosen value (T-161.1-10). RAISE text
+--                                reaches the job-run row and the Postgres log,
+--                                and writing a collector's hostname there hands
+--                                it to every downstream reader of these logs.
 --   R1  anon reads nothing     — two layers: `REVOKE ALL … FROM anon` and the
 --                                absence of any anon-visible policy. system_flags
 --                                carries a scoped anon-readable policy for its
@@ -99,12 +148,16 @@
 --   R3  service_role CAN write — the positive control. Without it, R1 and R2
 --                                are both satisfied by a table nobody can write
 --                                at all, i.e. by a broken operator surface.
+--   T1  no TRUNCATE for authed — the statement row security does not see.
+--                                Supabase's bootstrap GRANT ALL includes
+--                                TRUNCATE; R1/R2/R3 are blind to it because no
+--                                policy is consulted for it.
 --
 -- pgTAP is NOT installed (CLAUDE.md). Plain PL/pgSQL DO block, RAISE EXCEPTION
 -- on failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed
 -- assertion exits non-zero. The whole test rolls back.
 --
--- The final `ALL 7 ARMS EXECUTED (…)` notice at the foot of this file is the
+-- The final `ALL 11 ARMS EXECUTED (…)` notice at the foot of this file is the
 -- sentinel CI's loop reads the arm count off. If you add or remove an arm,
 -- update BOTH the integer and the roster on that line: `sql-tests` counts the
 -- roster's entries and fails when they disagree with N, which is what makes
@@ -235,6 +288,70 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (U1): the callable did raise with the url row deleted, but its message does not name analytics_service_url — it reads: %. Two very different faults produce a raise here (an absent setting and an absent pg_net) and only the message tells an operator which one they are looking at.', COALESCE(v_msg, 'NULL');
   END IF;
 
+  -- ===== ARM U2 — the CHECK constraint REFUSES a foreign destination ======
+  -- The THIRD route to the service key, and the cheapest of the three. STEP 3
+  -- of the migration closes a caller-supplied argument (check 1) and a shadowed
+  -- schema (check 2); this is the one an attacker does not have to be clever
+  -- for. `system_settings_admin_all` is FOR ALL TO authenticated with an
+  -- is_admin conjunct, so an APP-ADMIN rewriting this row is acting entirely
+  -- INSIDE the policy R2 asserts — R2 is not weakened, it simply never made a
+  -- claim about admins. One tick later the Vault-held key is in a header sent to
+  -- whatever host the row now names (T-164.7-06).
+  --
+  -- ⚠️ Attempted as the ORDINARY session role, deliberately. A CHECK constraint
+  -- binds every writer — owner, service_role and admin alike — so proving it
+  -- here proves it for the admin path without this arm depending on R1/R2/R3's
+  -- grant and policy layers at all. The url row is ABSENT at this point (U1
+  -- deleted it), so the write under test is an INSERT.
+  v_state := NULL;
+  BEGIN
+    INSERT INTO public.system_settings (key, value)
+    VALUES ('analytics_service_url', 'https://collector.attacker.example');
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE;
+  END;
+  SELECT count(*) INTO v_cnt
+    FROM public.system_settings WHERE key = 'analytics_service_url';
+
+  -- RED-UNDER: drop the constraint on the live lane AFTER the apply list has
+  --            run. That single ALTER TABLE is exactly the realistic
+  --            regression — a hardening pass, a hand-repair or a restore that
+  --            re-creates the table without it — and it needs no migration and
+  --            no review. The foreign host is then stored and this arm is the
+  --            FIRST failure. ⚠️ A `sql` step and NOT an edit removing the
+  --            migration's ADD CONSTRAINT: STEP 3 check 7 asserts that
+  --            constraint exists, so the edit would ABORT the apply and no arm
+  --            could be the first failure — the runner would score a defect
+  --            rather than a bite. The lane's --post-apply hook is for this.
+  -- RED-UNDER-M: {"arm":"U2","apply":[{"kind":"sql","stmt":"ALTER TABLE public.system_settings DROP CONSTRAINT system_settings_analytics_service_url_allowed"}]}
+  IF v_cnt <> 0 OR v_state IS DISTINCT FROM '23514' THEN
+    RAISE EXCEPTION 'TEST FAILED (U2): public.system_settings STORED analytics_service_url pointing at a host this project does not deploy to — the row count for that key is now % and the write returned SQLSTATE % (23514 = the constraint refusing it, which is what should have happened). That row is the destination public.match_engine_cron_tick() POSTs the Vault-held analytics service key to, and system_settings_admin_all is FOR ALL TO authenticated: any app-admin reaches it with one PATCH through PostgREST, entirely inside the policy R2 asserts. R1 and R2 cannot see this — they bound WHO may write the row, and an admin is a legitimate writer. ⛔ Do NOT "fix" a red here by widening the allow-list to admit the value: changing where a live secret is sent is meant to cost a migration a human reads.', v_cnt, COALESCE(v_state, 'none — the write succeeded');
+  END IF;
+
+  -- ----- the constraint comes OFF for the remainder of this file -----------
+  -- ⛔ ORDER IS LOAD-BEARING; see the ⛔ THIS FILE DROPS THE CHECK CONSTRAINT
+  -- note in the header for the whole argument. In one line: U2 above has just
+  -- proven the constraint bites, and every arm after this point needs a fixture
+  -- value that is deliberately NOT a valid destination — leaving it in force
+  -- would make it, not RLS, the thing that rejects R2's UPDATE, so R2's twin
+  -- would stop reddening and a genuine policy regression would hide behind a
+  -- CHECK constraint that happened to catch it.
+  --
+  -- ⚠️ Wrapped and named. If the CI role may not ALTER this table the statement
+  -- fails with a bare 42501 carrying no arm identity, and every arm below would
+  -- then die on a constraint violation naming nothing. Say so by name instead.
+  v_setup := NULL;
+  BEGIN
+    ALTER TABLE public.system_settings
+      DROP CONSTRAINT IF EXISTS system_settings_analytics_service_url_allowed;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT, v_state = RETURNED_SQLSTATE;
+    v_setup := v_state || ' ' || v_msg;
+  END;
+  IF v_setup IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (U2-SETUP): could not drop system_settings_analytics_service_url_allowed for the remainder of this transaction (%). Arms C1, C2, R2 and R3 all write fixture values that the allow-list correctly refuses, so with the constraint still in force each of them would fail on a 23514 that has nothing to do with the claim it makes — and R2 would report GREEN for the wrong reason, because a rejected UPDATE looks the same whether RLS or a CHECK rejected it. Record what this says; do NOT weaken the constraint to accommodate it.', v_setup;
+  END IF;
+
   -- ===== ARM C1 — both present ⇒ the callable gets PAST both checks =======
   -- The discriminator, and it is not optional: a function whose body were
   -- `RAISE EXCEPTION ''analytics_service_key missing from vault …''` and nothing
@@ -273,6 +390,60 @@ BEGIN
   END IF;
   IF v_raised AND v_state NOT IN ('42883', '3F000') THEN
     RAISE EXCEPTION 'TEST FAILED (C1): the callable got past both guards and then failed with SQLSTATE % — %. The only failure tolerated at this point is the absence of pg_net (42883 undefined_function / 3F000 invalid_schema_name), which is the expected state on the pg-lane. Anything else is a real fault in the post itself and is being reported nowhere: net.http_post is fire-and-forget, so nothing downstream would ever notice.', v_state, v_msg;
+  END IF;
+
+  -- ===== ARMS C2/C3 — a FOREIGN url ⇒ the callable REFUSES, and does not ==
+  -- =====               name the value it refused ==========================
+  -- C2 is NOT a duplicate of U2. U2 asserts the CHECK constraint, which one
+  -- ALTER TABLE removes without a migration and without review — this file just
+  -- removed it, four statements above, with no more privilege than the CI role
+  -- already had. C2 asserts the layer that is still standing at that point: the
+  -- callable re-tests the SAME allow-list on the value it just read, immediately
+  -- before building the header. Delete it and the whole destination control is
+  -- one statement deep.
+  UPDATE public.system_settings
+     SET value = 'https://collector.attacker.example'
+   WHERE key = 'analytics_service_url';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'TEST FAILED (C2-SETUP): there is no analytics_service_url row to point at a foreign host, so C2 and C3 below would be measuring the MISSING-ROW guard instead of the destination guard — a raise either way, and the two are indistinguishable from the pass/fail outcome alone. C1 inserted that row immediately above, so its absence means C1''s fixture did not land.';
+  END IF;
+
+  v_raised := false;
+  v_msg    := NULL;
+  BEGIN
+    PERFORM public.match_engine_cron_tick();
+  EXCEPTION WHEN OTHERS THEN
+    v_raised := true;
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT;
+  END;
+
+  -- RED-UNDER: stand the destination guard down — `IF v_url !~ c_url_allowed
+  --            THEN` becomes `IF FALSE THEN`, which is the state this file was
+  --            in before the constraint existed: the read still happens, the
+  --            value is still the attacker's host, and the function sails into
+  --            net.http_post carrying the live X-Service-Key to it. No layering
+  --            needed — the migration's STEP 3 check 7 asserts the allow-list
+  --            LITERAL is still in the body, and that literal is the DECLARE
+  --            line, which this edit does not touch, so the apply still
+  --            succeeds. ⚠️ Deliberately NOT a `sql` step dropping the
+  --            constraint: this file has already dropped it, so such a step
+  --            would mutate nothing and the arm could not redden.
+  -- RED-UNDER-M: {"arm":"C2","apply":[{"kind":"edit","file":"supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql","find":"IF v_url !~ c_url_allowed THEN","replace":"IF FALSE THEN","occurrences":1}]}
+  IF NOT v_raised OR v_msg !~ 'not an allowed destination' THEN
+    RAISE EXCEPTION 'TEST FAILED (C2): with analytics_service_url set to a host outside the allow-list and the CHECK constraint dropped, match_engine_cron_tick() did not refuse by name — raised=%, message: %. The constraint is one ALTER TABLE from gone and this re-test is what is supposed to be left, so a green U2 beside a red C2 means the destination control has exactly one layer and it is the removable one. What follows is not a configuration nuisance: net.http_post is fire-and-forget, so the Vault-held service key leaves in an X-Service-Key header and NOTHING downstream ever reports where it went.', v_raised, COALESCE(v_msg, 'NULL');
+  END IF;
+
+  -- RED-UNDER: make the refusal ECHO the value — append `(%)', v_url` to the
+  --            message. That is the tempting "helpful" edit under incident
+  --            pressure and it is the one T-161.1-10 forbids: RAISE text lands
+  --            in the cron job-run row and the Postgres log, so an
+  --            attacker-chosen hostname gets written into every downstream
+  --            reader of this project's logs by the guard that refused it.
+  --            ⚠️ It leaves `not an allowed destination` in place, so C2 above
+  --            stays GREEN and this arm is the first failure.
+  -- RED-UNDER-M: {"arm":"C3","apply":[{"kind":"edit","file":"supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql","find":"read it with an admin session. Allowed: an https host under .up.railway.app';","replace":"read it with an admin session. Allowed: an https host under .up.railway.app (%)', v_url;","occurrences":1}]}
+  IF v_msg ~ 'collector\.attacker\.example' THEN
+    RAISE EXCEPTION 'TEST FAILED (C3): the destination refusal ECHOED the url it refused — it reads: %. The value in that row is attacker-controlled by construction (that is the whole premise of U2/C2), and RAISE text is not a private channel: it becomes the cron job-run row''s error and a Postgres log line, so the guard that refused the destination is the thing that publishes it to every reader of these logs. Name the SETTING, never its value — the same rule the two absence raises above follow (T-161.1-10). An operator who needs the value can SELECT it.', v_msg;
   END IF;
 
   -- ===== ARM R1 — anon reads NOTHING out of system_settings ==============
@@ -378,12 +549,61 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (R3): the service role could NOT write analytics_service_url — the row still reads %. R1 and R2 are both satisfied by a table nobody can write, so without this arm a settings table that is inert reads exactly like one that is correctly locked down. The operator path this breaks is the only way the URL is ever changed: there is no admin route for it by design (see the migration header).', COALESCE(v_val, 'NULL');
   END IF;
 
+  -- ===== ARM T1 — an authenticated user cannot TRUNCATE the table ========
+  -- ⛔ THE ONE STATEMENT ROW SECURITY NEVER SEES. TRUNCATE is not subject to
+  -- RLS, so system_settings_admin_all is not consulted for it and R1/R2/R3 are
+  -- blind to it BY CONSTRUCTION rather than by oversight. Supabase's project
+  -- bootstrap grants ALL on new public tables to anon, authenticated and
+  -- service_role, and ALL includes TRUNCATE — so without the migration's
+  -- REVOKE any logged-in user empties this table, after which every tick RAISES
+  -- 'analytics_service_url missing from system_settings' and an operator spends
+  -- the incident looking for a deleted row while the cause was a statement no
+  -- policy evaluated. anon is already covered by `REVOKE ALL … FROM anon`;
+  -- authenticated is the role that keeps its four RLS-scoped privileges and had
+  -- to lose the three that are not scoped.
+  --
+  -- ⚠️ Runs LAST of the RLS/grant arms because, under its own twin, the TRUNCATE
+  -- SUCCEEDS and empties the table. Placed earlier it would pull the ground out
+  -- from under every arm after it and the run would report a cascade instead of
+  -- one named failure.
+  SELECT count(*) INTO v_cnt FROM public.system_settings;
+  IF v_cnt = 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (T1-SETUP): public.system_settings is ALREADY empty before this arm truncates anything, so a denied TRUNCATE and a permitted one leave identical state and T1 below would pass without asking its question. R3 wrote a row three statements ago; if it is gone, something between here and there deleted it.';
+  END IF;
+
+  PERFORM set_config('request.jwt.claims',
+                     json_build_object('sub', v_uid::text, 'role', 'authenticated')::text,
+                     true);
+  SET LOCAL ROLE authenticated;
+  v_state := NULL;
+  BEGIN
+    TRUNCATE public.system_settings;
+  EXCEPTION WHEN OTHERS THEN
+    v_state := 'denied';
+  END;
+  RESET ROLE;
+  SELECT count(*) INTO v_cnt FROM public.system_settings;
+
+  -- RED-UNDER: hand the privilege back on the live lane. A `sql` step and NOT
+  --            an edit of the migration's REVOKE line, because that REVOKE
+  --            names three privileges in one statement and weakening it by text
+  --            invites a needle that removes REFERENCES or TRIGGER instead —
+  --            neither of which this arm measures, so the annotation would look
+  --            non-biting rather than wrong. ⚠️ Also deliberately NOT `GRANT ALL
+  --            … TO authenticated`: that would restore REFERENCES and TRIGGER
+  --            too, and an arm that reddens under a three-privilege grant does
+  --            not tell you which one it was reading.
+  -- RED-UNDER-M: {"arm":"T1","apply":[{"kind":"sql","stmt":"GRANT TRUNCATE ON public.system_settings TO authenticated"}]}
+  IF v_state IS DISTINCT FROM 'denied' OR v_cnt = 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (T1): an authenticated NON-ADMIN TRUNCATEd public.system_settings — the statement was % and the table now holds % row(s). RLS did not fail here and could not have: TRUNCATE is not subject to row security, so system_settings_admin_all was never consulted and R1, R2 and R3 all stay green through this. The consequence is not a lost configuration row: match_engine_cron_tick() then RAISES the MISSING-ROW message on every tick, which sends an operator to re-seed a setting while the actual cause was a privilege no policy governs. ⛔ Fix it at the grant layer — `REVOKE TRUNCATE, REFERENCES, TRIGGER … FROM authenticated` — never by adding a policy, which would change nothing.', COALESCE(v_state, 'permitted'), v_cnt;
+  END IF;
+
   -- Leave the row as the migration seeded it. Cosmetic — the ROLLBACK below is
   -- what actually protects shared TEST — but it keeps a psql session that is
   -- read mid-transaction from showing a value no migration ever wrote.
   UPDATE public.system_settings SET value = v_seedurl WHERE key = 'analytics_service_url';
 
-  RAISE NOTICE 'ALL 7 ARMS EXECUTED (0,V1,U1,C1,R1,R2,R3): public.match_engine_cron_tick() RAISES by name when the analytics_service_key secret is absent from the vault (V1) and when the analytics_service_url row is absent from system_settings (U1) — each measured by removing that value inside this transaction and calling the real function, never by inspecting its body — and gets PAST both guards when both are present (C1), which is what stops a callable that refuses unconditionally from passing V1 and U1 while posting nothing forever. public.system_settings is unreadable by anon at both the grant layer and the policy layer (R1), unwritable by an authenticated non-admin (R2), and writable by the service role (R3), so the host a live service key is POSTed to cannot be read or redirected by anyone a browser can be. Phase 164.7 / criterion 2 / SC-2, mig 20260907120000.';
+  RAISE NOTICE 'ALL 11 ARMS EXECUTED (0,V1,U1,U2,C1,C2,C3,R1,R2,R3,T1): public.match_engine_cron_tick() RAISES by name when the analytics_service_key secret is absent from the vault (V1) and when the analytics_service_url row is absent from system_settings (U1) — each measured by removing that value inside this transaction and calling the real function, never by inspecting its body — and gets PAST both guards when both are present (C1), which is what stops a callable that refuses unconditionally from passing V1 and U1 while posting nothing forever. The DESTINATION is bounded in two independent layers: public.system_settings will not STORE a url outside the allow-list (U2), and with that CHECK constraint dropped — one ALTER TABLE, which this file performs on itself — the callable still REFUSES to post to one (C2) without naming the value it refused (C3). public.system_settings is unreadable by anon at both the grant layer and the policy layer (R1), unwritable by an authenticated non-admin (R2), writable by the service role (R3), and not TRUNCATABLE by an authenticated user (T1) — the one statement row security never sees. So the host a live service key is POSTed to cannot be read, redirected or erased by anyone a browser can be. Phase 164.7 / criterion 2 / SC-2, mig 20260907120000.';
 END $$;
 
 ROLLBACK;

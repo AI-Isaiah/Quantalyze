@@ -75,6 +75,68 @@
 -- ⚠️ NO IDENTIFIER AND NO SECRET APPEARS IN ANY RAISE TEXT (T-161.1-10). The
 -- messages name the SETTING, never its value.
 --
+-- ══════════════════════════════════════════════════════════════════════════
+-- ⛔ THE THIRD ROUTE TO THE SERVICE KEY: WRITING THE ROW (T-164.7-06)
+-- ══════════════════════════════════════════════════════════════════════════
+-- STEP 3's checks 1 and 2 close two routes by which a caller aims the service
+-- key at a host of their choosing — a caller-supplied argument, and a shadowed
+-- `system_settings` reached through an unpinned search_path. There is a THIRD,
+-- and it is the cheapest of the three: `system_settings_admin_all` is FOR ALL TO
+-- authenticated, so ANY app-admin can UPDATE the analytics_service_url row
+-- straight through PostgREST. One tick later the Vault-held key arrives at their
+-- host, in a header, with no other guard between. Presence-and-non-emptiness is
+-- not a destination check.
+--
+-- ⭐ TWO LAYERS, AND THE CONSTRAINT IS DELIBERATELY THE STRICTER OF THE TWO:
+--   (a) a CHECK constraint on public.system_settings pins the VALUE of the
+--       analytics_service_url row to the allow-list below. Other keys are
+--       unconstrained — the predicate is `key <> 'analytics_service_url' OR …`,
+--       so this table stays a general operator-config table.
+--   (b) public.match_engine_cron_tick() re-tests the SAME allow-list on the
+--       value it just read, immediately before the POST. This is not belt and
+--       braces for its own sake: the constraint can be dropped by one ALTER
+--       TABLE, and (b) is what still stands when it is.
+--
+-- ⭐ "CHANGING WHERE A SERVICE KEY IS SENT NOW REQUIRES A MIGRATION AND REVIEW,
+-- NOT A PATCH" IS THE DESIRED PROPERTY, NOT A LIMITATION OF THIS DESIGN. The
+-- ⚠️ note above says the url goes in an admin-writable table so an operator does
+-- not need secret-management privileges to change a HOSTNAME. That is still
+-- true INSIDE the deployment platform: any Railway host under
+-- `*.up.railway.app` is writable at will, which is every hostname a real
+-- redeploy of this service can ever have. Moving the analytics service OFF
+-- Railway is not a hostname change — it is a change of who receives a live
+-- secret, and it should cost a migration that a human reads.
+--
+-- ⚠️ RESIDUAL, NAMED RATHER THAN GLOSSED. The allow-list is a SUFFIX, and
+-- Railway subdomains are issued to whoever deploys a service there. An attacker
+-- who is BOTH an app-admin on this project AND the owner of a Railway
+-- deployment can still redirect the key to their own `*.up.railway.app` host.
+-- What the constraint removes is the "any host on the internet" version of the
+-- attack — a collector on a domain the attacker already owns, reachable with one
+-- PATCH. Narrowing further (pinning the exact production host) would make the
+-- row un-editable in an incident, which is the property the table exists for;
+-- the honest closure is an admin route with an audit trail, which the ⛔ block
+-- above records as deliberately deferred.
+--
+-- ⚠️ THE ONE NON-RAILWAY VALUE THE ALLOW-LIST PERMITS is exactly
+-- `http://127.0.0.1:9` — loopback, the IANA DISCARD port. It is there so
+-- supabase/tests/test_analytics_service_settings_and_vault_tick.sql can prove
+-- the got-past-both-guards path (arm C1) WITHOUT opening a socket to the
+-- internet on every CI run. Permitting it costs nothing: a value that cannot
+-- leave the host cannot exfiltrate the key, and the worst an admin achieves by
+-- setting it is a match-engine outage they can already cause with any wrong
+-- Railway hostname. ⛔ Do NOT widen it to `127.0.0.1` with a free port, and do
+-- NOT add a second loopback form — a single fixed literal is not a port
+-- scanner.
+--
+-- ⚠️ AND `authenticated` MUST LOSE TRUNCATE. Supabase's project bootstrap grants
+-- ALL on new public tables to anon, authenticated and service_role, and ALL
+-- includes TRUNCATE — which is NOT subject to row security. RLS scoping the
+-- admin policy therefore does nothing about it: any authenticated user could
+-- empty this table, and match_engine_cron_tick() would then RAISE on every tick
+-- for the "missing row" reason while the row's real cause of death was a
+-- statement RLS never saw.
+--
 -- Convention: BEGIN/COMMIT with a session lock_timeout, matching the repo
 -- majority and migration 20260825130000 (project Rule 11).
 
@@ -107,6 +169,57 @@ COMMENT ON TABLE public.system_settings IS
 
 ALTER TABLE public.system_settings ENABLE ROW LEVEL SECURITY;
 
+-- --------------------------------------------------------------------------
+-- STEP 1b: the DESTINATION ALLOW-LIST (T-164.7-06, layer (a))
+-- --------------------------------------------------------------------------
+-- See the ⛔ THIRD ROUTE block in the header for why presence-and-non-emptiness
+-- is not a destination check, what this does and does not buy, and why the one
+-- loopback literal is in here.
+--
+-- ⚠️ ADDED BEFORE THE SEED, DELIBERATELY. The INSERT below is then VALIDATED by
+-- this constraint on every apply, so a seed literal that drifted out of the
+-- allow-list fails the migration by name instead of installing a row the
+-- function will refuse to use at the next tick.
+--
+-- ⚠️ Guarded by a catalogue probe for the same reason the policies below are:
+-- ALTER TABLE … ADD CONSTRAINT has no IF NOT EXISTS and a re-apply of this file
+-- must not abort on 42710.
+--
+-- ⚠️ IT IS A VALIDATING CONSTRAINT, NOT `NOT VALID`. On any real apply path this
+-- table was created three statements ago and holds at most the seed, so there is
+-- nothing to scan. If it ever DOES abort an apply, the cause is a row an
+-- operator set out of band to a destination this file refuses — which is a state
+-- to STOP and read, not to admit with NOT VALID.
+DO $allowlist$
+BEGIN
+  IF NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'public.system_settings'::regclass
+          AND conname  = 'system_settings_analytics_service_url_allowed'
+     ) THEN
+    ALTER TABLE public.system_settings
+      ADD CONSTRAINT system_settings_analytics_service_url_allowed
+      CHECK (
+        key <> 'analytics_service_url'
+        OR value ~ '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$'
+      );
+  END IF;
+END
+$allowlist$;
+
+COMMENT ON CONSTRAINT system_settings_analytics_service_url_allowed
+  ON public.system_settings IS
+  'T-164.7-06: pins the analytics_service_url row to an https host under '
+  '.up.railway.app (plus the loopback discard literal the gate uses), because '
+  'system_settings_admin_all is FOR ALL TO authenticated and an app-admin can '
+  'therefore PATCH that row through PostgREST — one tick later the Vault-held '
+  'analytics service key arrives at whatever host it names. Requiring a '
+  'migration to change WHERE a live secret is sent is the desired property, not '
+  'a limitation: every hostname a real redeploy of this service can have is '
+  'already inside the allow-list. public.match_engine_cron_tick() re-tests the '
+  'SAME expression before posting, so dropping this constraint does not open '
+  'the route.';
+
 -- Defense in depth, following the 20260621120000_scenarios_table_and_rls.sql
 -- precedent: a fresh table inherits Supabase's project-bootstrap
 -- `GRANT ALL ON TABLES TO anon, authenticated, service_role`, so anon keeps
@@ -116,6 +229,16 @@ ALTER TABLE public.system_settings ENABLE ROW LEVEL SECURITY;
 -- grants entirely and block anon at BOTH the grant layer and the RLS layer.
 -- `authenticated` keeps its default grants; the admin policy scopes its rows.
 REVOKE ALL ON TABLE public.system_settings FROM anon;
+
+-- ⛔ …EXCEPT the three that RLS cannot scope. See the ⚠️ TRUNCATE note in the
+-- header: `GRANT ALL ON TABLES` includes TRUNCATE, and TRUNCATE IS NOT SUBJECT
+-- TO ROW SECURITY, so system_settings_admin_all does not stand between an
+-- ordinary authenticated user and an empty table. REFERENCES and TRIGGER go
+-- with it — neither has any legitimate caller here, and a trigger installed by a
+-- non-admin on the table that names the analytics service key's destination is
+-- its own escalation. SELECT/INSERT/UPDATE/DELETE are deliberately LEFT, because
+-- those are the four RLS does scope and the admin policy is what scopes them.
+REVOKE TRUNCATE, REFERENCES, TRIGGER ON TABLE public.system_settings FROM authenticated;
 
 -- Two policies, cloned from system_flags' admin/service pair. ⚠️ The admin
 -- predicate is `profiles.is_admin`, NEVER current_user_has_app_role(): that
@@ -172,6 +295,14 @@ DECLARE
   v_key TEXT;
   v_url TEXT;
   v_req BIGINT;
+  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b). BYTE-IDENTICAL to the CHECK
+  --    constraint's expression in STEP 1b, and STEP 3 check 7 asserts that the
+  --    two really are the same string by reading pg_get_constraintdef and this
+  --    body back out of the catalogue. Two copies of one rule is the point: the
+  --    constraint is one ALTER TABLE away from gone, and this is what still
+  --    refuses the POST when it is.
+  c_url_allowed CONSTANT TEXT :=
+    '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
 BEGIN
   -- The Vault read, byte-for-byte the idiom the live job row already runs.
   SELECT decrypted_secret INTO v_key
@@ -186,6 +317,22 @@ BEGIN
    WHERE s.key = 'analytics_service_url';
   IF v_url IS NULL OR v_url = '' THEN
     RAISE EXCEPTION 'analytics_service_url missing from system_settings — refusing to post to a null url';
+  END IF;
+
+  -- ⛔ AND IT MUST BE A DESTINATION THIS FILE ALLOWS (T-164.7-06, layer (b)).
+  -- The CHECK constraint in STEP 1b already refuses to STORE anything else; this
+  -- re-test is what stands when that constraint has been dropped, and it is the
+  -- last thing between an admin-writable row and a live service key in an
+  -- outbound header.
+  --
+  -- ⚠️ THE MESSAGE DOES NOT ECHO THE OFFENDING URL, and that is not squeamishness
+  -- about PII. RAISE text lands in the cron job-run row, in the Postgres log and
+  -- in whatever ships those onward; echoing an attacker-chosen string there
+  -- writes their collector's hostname into every downstream reader of this
+  -- project's logs, and an operator who needs the value can SELECT it. Same rule
+  -- as the two RAISEs above (T-161.1-10): name the SETTING, never its value.
+  IF v_url !~ c_url_allowed THEN
+    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: an https host under .up.railway.app';
   END IF;
 
   -- ⚠️ net.http_post is ASYNC. The BIGINT returned here is a REQUEST ID, not an
@@ -212,6 +359,9 @@ COMMENT ON FUNCTION public.match_engine_cron_tick() IS
   'match_engine_cron job already runs. Reads the analytics service key from '
   'vault.decrypted_secrets and the service URL from public.system_settings, '
   'RAISES when either is absent or empty rather than sending a null header, '
+  'RAISES again when the url is not a destination the STEP 1b allow-list '
+  'permits (T-164.7-06 — that re-test is what survives the CHECK constraint '
+  'being dropped, and it never echoes the offending value), '
   'and fires one ASYNC net.http_post whose returned BIGINT is a request id and '
   'NOT an HTTP success. Registers nothing and is invoked by nothing in this '
   'repository yet: repointing the live job row at it is Phase 164.5 item (7), '
@@ -253,6 +403,17 @@ DECLARE
   v_policies INTEGER;
   v_seed     TEXT;
   v_fn       TEXT;
+  v_owner    TEXT;
+  v_bypass   BOOLEAN;
+  v_super    BOOLEAN;
+  v_trunc    BOOLEAN;
+  v_con      TEXT;
+  -- The allow-list, spelled a THIRD time so check 7 can assert that the other
+  -- two — the CHECK constraint and the function body — are still each other.
+  -- Held in a variable rather than inlined into two `position()` calls so that
+  -- the comparison cannot be satisfied by two different needles.
+  v_allow    TEXT :=
+    '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
 BEGIN
   -- 1. The function exists and takes no arguments.
   SELECT p.pronargs, p.prosecdef, p.proconfig
@@ -279,6 +440,38 @@ BEGIN
     RAISE EXCEPTION 'Migration 20260907120000: match_engine_cron_tick has no pinned search_path. On a SECURITY DEFINER function that is a privilege-escalation route — a caller-created public.system_settings earlier in the path would supply the url the service key is posted to';
   END IF;
 
+  -- 2b. …and the DEFINER role can actually SEE the row it reads (161.1-AUDIT
+  --     F-2). Copied from this file's sibling 20260907130000 check 2b, WITH the
+  --     same correction: the predicate is `rolsuper OR rolbypassrls`, never
+  --     rolbypassrls alone. pg_roles.rolbypassrls reports only the EXPLICITLY
+  --     granted attribute, while a SUPERUSER bypasses RLS implicitly with the
+  --     flag still FALSE, so the narrow predicate is a FALSE NEGATIVE that
+  --     aborts a correct apply — and this file is on the auto-apply-to-PROD
+  --     route where an abort lands mid-file with no rollback step.
+  --
+  --     ⚠️ WHY IT BELONGS HERE AND NOT ONLY THERE. STEP 1 turns RLS ON over
+  --     public.system_settings and admits exactly two principals, neither of
+  --     which is this function's owner. The read at call time therefore resolves
+  --     only because the owner is RLS-exempt. Lose the exemption and
+  --     `SELECT s.value INTO v_url` returns NO ROW, v_url is NULL, and the guard
+  --     below RAISES 'analytics_service_url missing from system_settings' — a
+  --     message that is TRUE-LOOKING AND WRONG, sending an operator to re-seed a
+  --     row that is demonstrably already there while the tick stays dead. That
+  --     is worth failing the apply over; a correct error about a false cause
+  --     costs more than a loud one about the real one.
+  SELECT r.rolname, r.rolbypassrls, r.rolsuper
+    INTO v_owner, v_bypass, v_super
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN pg_roles r ON r.oid = p.proowner
+   WHERE n.nspname = 'public' AND p.proname = 'match_engine_cron_tick';
+  IF v_owner IS NULL THEN
+    RAISE EXCEPTION 'Migration 20260907120000: could not resolve the owner of public.match_engine_cron_tick — pg_proc.proowner has no matching pg_roles row';
+  END IF;
+  IF NOT (COALESCE(v_bypass, FALSE) OR COALESCE(v_super, FALSE)) THEN
+    RAISE EXCEPTION 'Migration 20260907120000: match_engine_cron_tick is owned by role "%" (rolsuper=%, rolbypassrls=%), which is exempt from row security by neither route. As SECURITY DEFINER it reads the RLS-enabled public.system_settings as that role, and RLS admits only admins and the service role — so the analytics_service_url read returns NO ROW and the function reports "analytics_service_url missing from system_settings" while the row is demonstrably present. A true-looking error about a false cause', v_owner, v_super, v_bypass;
+  END IF;
+
   -- 3. Neither browser-facing role may EXECUTE it. ⚠️ Falsifiable on the
   --    pg-lane only because 07-fixture-supabase-default-privileges.sql grants
   --    the project-bootstrap defaults first; on a vanilla cluster the REVOKE is
@@ -288,6 +481,22 @@ BEGIN
     INTO v_anon, v_auth;
   IF v_anon OR v_auth THEN
     RAISE EXCEPTION 'Migration 20260907120000: EXECUTE on match_engine_cron_tick is reachable (anon=%, authenticated=%). A browser-reachable SECURITY DEFINER function that posts the analytics service key is an unauthenticated trigger for the whole match engine', v_anon, v_auth;
+  END IF;
+
+  -- 3b. `authenticated` may not TRUNCATE the settings table. ⛔ THIS IS NOT
+  --     COVERED BY CHECK 4's RLS ASSERTION AND CANNOT BE: TRUNCATE is not
+  --     subject to row security, so system_settings_admin_all is not consulted
+  --     for it at all. Supabase's project bootstrap grants ALL on new public
+  --     tables to authenticated, ALL includes TRUNCATE, and the result is an
+  --     ordinary logged-in user emptying the table that names where the
+  --     analytics service key is sent — after which every tick RAISES the
+  --     missing-row message and the real cause is a statement no policy saw.
+  --     ⚠️ Falsifiable on the pg-lane only because fixture 07 grants the
+  --     bootstrap defaults first; on a vanilla cluster the REVOKE is a no-op.
+  SELECT has_table_privilege('authenticated', 'public.system_settings', 'TRUNCATE')
+    INTO v_trunc;
+  IF v_trunc THEN
+    RAISE EXCEPTION 'Migration 20260907120000: role authenticated can TRUNCATE public.system_settings. TRUNCATE is NOT subject to row security, so the admin policy does not stand in front of it — any logged-in user can empty the table that names the host the analytics service key is POSTed to, and match_engine_cron_tick would then RAISE the missing-row message on every tick while the row''s actual cause of death was a statement RLS never evaluated';
   END IF;
 
   -- 4. The table exists, RLS is ON, and both policies are present.
@@ -331,7 +540,31 @@ BEGIN
     RAISE EXCEPTION 'Migration 20260907120000: match_engine_cron_tick does not read analytics_service_url. A hardcoded URL is what this file exists to replace — an operator would have to ship a migration to change a hostname';
   END IF;
 
-  RAISE NOTICE 'Migration 20260907120000: applied (system_settings seeded, match_engine_cron_tick defined, NOTHING scheduled)';
+  -- 7. BOTH DESTINATION LAYERS ARE PRESENT, AND THEY ARE STILL THE SAME RULE
+  --    (T-164.7-06). The constraint and the function body each carry their own
+  --    copy of the allow-list; two copies is what makes layer (b) survive layer
+  --    (a) being dropped, and it is also what lets them DRIFT. So this check
+  --    holds a THIRD copy and asserts both of the others contain it verbatim.
+  --
+  --    ⚠️ `position()`, not `~`. v_allow is itself a regular expression: matching
+  --    it AS a pattern against the catalogue text would ask an entirely
+  --    different question (and would never match, since neither text is a URL).
+  --    The claim here is byte-presence of the same literal in both places.
+  SELECT pg_get_constraintdef(c.oid) INTO v_con
+    FROM pg_constraint c
+   WHERE c.conrelid = 'public.system_settings'::regclass
+     AND c.conname  = 'system_settings_analytics_service_url_allowed';
+  IF v_con IS NULL THEN
+    RAISE EXCEPTION 'Migration 20260907120000: the CHECK constraint system_settings_analytics_service_url_allowed is not on public.system_settings. system_settings_admin_all is FOR ALL TO authenticated, so without it any app-admin PATCHes the analytics_service_url row through PostgREST and the next tick delivers the Vault-held service key to a host of their choosing (T-164.7-06). STEP 1b did not run, or a later migration dropped it';
+  END IF;
+  IF position(v_allow IN v_con) = 0 THEN
+    RAISE EXCEPTION 'Migration 20260907120000: system_settings_analytics_service_url_allowed exists but its expression is not the allow-list this file states — it reads: %. Either it was replaced with a weaker predicate, or the two layers have drifted and the constraint is now admitting destinations the function will refuse (or, far worse, the reverse)', v_con;
+  END IF;
+  IF position(v_allow IN v_fn) = 0 THEN
+    RAISE EXCEPTION 'Migration 20260907120000: match_engine_cron_tick does not re-test the destination allow-list before posting. That re-test is the ONLY layer left once someone runs ALTER TABLE public.system_settings DROP CONSTRAINT system_settings_analytics_service_url_allowed — one statement, no migration, and with it gone a presence check is all that stands between an admin-writable row and a live service key in an outbound header';
+  END IF;
+
+  RAISE NOTICE 'Migration 20260907120000: applied (system_settings seeded and destination-constrained, TRUNCATE revoked from authenticated, match_engine_cron_tick defined, NOTHING scheduled)';
 END $verify$;
 
 COMMIT;

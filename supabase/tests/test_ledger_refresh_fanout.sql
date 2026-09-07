@@ -268,11 +268,26 @@ BEGIN
   -- TEST project would report them as coupling regressions instead of as a
   -- missing apply. This check names the un-applied migration precisely.
   --
-  -- ⚠️ Comment-stripped, and not optionally. pg_get_functiondef returns the body
-  -- WITH its comments, and 20260907130000's body comments discuss
-  -- `public.system_flags` at length — an unstripped match would be satisfied by
-  -- the PROSE describing the read rather than by the read (lint rule R2, the
-  -- exact mechanism that rule exists for).
+  -- ⚠️ Comment-stripped, and not optionally — for the two reasons that are TRUE
+  -- rather than the tidier one that is not. It would read well to say
+  -- 20260907130000's body prose would satisfy an unstripped match; that claim is
+  -- FALSE and was MEASURED false in both bodies — `FROM public.system_flags`
+  -- occurs exactly ONCE, in CODE, and ZERO times in any comment. The reasons
+  -- that hold:
+  --   (i)  lint rule R2-functiondef-comment-strip mandates the idiom BY RULE for
+  --        any regex over a pg_get_functiondef result. The rule was written
+  --        against a divergence measured on a DIFFERENT body — PROD's 7-param
+  --        `_enqueue_compute_job_internal` — not against this one;
+  --   (ii) the property must keep holding under FUTURE comment edits that nobody
+  --        re-measures. One sentence added to that body's Lock B block quoting
+  --        the needle would make this probe unfalsifiable, silently.
+  --
+  -- ⚠️ RESIDUAL neither this site nor its sibling used to state, and it is the
+  -- FALSE-PASS direction: `--[^\n]*` does not strip `/* … */`. A block comment
+  -- quoting the needle satisfies this probe with the read gone. Neither body
+  -- uses one today (measured: 0 occurrences of `/*`). The opposite direction is
+  -- safe by construction — a `--` inside a string literal makes the strip eat
+  -- real code, which can only cause a FALSE FAILURE, and a false failure is loud.
   SELECT regexp_replace(pg_get_functiondef(p.oid), '--[^\n]*', '', 'g')
     INTO v_body
     FROM pg_proc p
