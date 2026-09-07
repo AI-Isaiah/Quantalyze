@@ -2695,6 +2695,56 @@ verifier pass and a green 88-file regression gate had all cleared the phase.
   evidence. Recorded as blocked deliberately: reporting them as passes is the vacuity this phase
   spent its whole red-team budget on.
 
+### ⚠️ GATE-COMMENT-D2-FALSE — two gate comments + a SUMMARY assert a measurement that is FALSE (booked 2026-09-07, phase 164.7 red-team)
+
+`test_ledger_refresh_fanout.sql` (arm 0 probe comment, ~:270-274), its composite twin, and
+`164.7-04-SUMMARY.md` Decision 3 all justify the comment-stripping probe by asserting that the
+migration's own body comments contain the needle, so a RAW `pg_get_functiondef` match would be
+satisfied by PROSE.
+
+⛔ **Measured false on the live stored bodies:**
+
+```
+proname                                | needle_in_comments | needle_in_code
+enqueue_ledger_composite_refresh       |                  0 |              1
+enqueue_ledger_refresh_for_strategies  |                  0 |              1
+```
+
+The needle is `FROM public\.system_flags`, not `system_flags`. The comments carry the latter and
+never the former. A raw probe on a body with the code removed and the comments intact would NOT
+have passed.
+
+✅ **The CHANGE is correct and mandatory anyway** — `sql-gate-lint` rule
+`[R2-functiondef-comment-strip]` rejects a raw `pg_get_functiondef` match, and `sql-gate-lint` is
+in the `frontend` aggregator's `needs:`, so the plan's original form was unshippable. Over-strip
+risk is nil today (`inline_dashdash_lines = 0` on both bodies) and fail-CLOSED in principle: the
+assertion is `v_body !~ needle`, so stripping too much can only produce a spurious RED, never a
+false green.
+
+**Fix:** reword all three to cite R2 and the LATENT risk ("a future comment line could supply the
+needle") instead of claiming a measurement that does not hold. Prose/citation defect — per the
+stopping rule this is recorded, NOT blocking.
+
+### ⚠️ LANE-FORCERLS-GAP — the pg-lane's `compute_jobs` lacks the FORCE RLS that PROD has (booked 2026-09-07, phase 164.7 red-team)
+
+Measured on a lane: `compute_jobs` has `relforcerowsecurity = f`. PROD sets
+`ALTER TABLE compute_jobs FORCE ROW LEVEL SECURITY` (and `compute_job_kinds`) in
+`20260516104201_compute_jobs_audit_2026_05_07_residual.sql:209-210`, which is not in every gate's
+apply list.
+
+**Why it matters:** under FORCE RLS a table OWNER is *not* exempt. So any gate that reaches
+`compute_jobs` by making a role the table owner behaves differently on the lane than it would on
+PROD — the lane is more permissive. A gate could pass on the lane for a reason that does not hold
+in production.
+
+✅ **Scope checked before booking:** `grep -rn "FORCE ROW LEVEL SECURITY" supabase/migrations/`
+shows only `compute_jobs`, `compute_job_kinds` and (guarded) `weight_snapshots`. **`system_flags`
+is never FORCEd**, so phase 164.7's own ownership scaffolding IS faithful; this is a pre-existing
+gap in the three original tables, not something 164.7 introduced.
+
+**Fix:** add the FORCE-RLS statements to the pg-lane fixtures (or to the affected apply lists) so
+the lane's row-security posture matches PROD. Guard fidelity — recorded, not blocking.
+
 ### ⚠️ BYPASSRLS-POLICY-UNMUTATABLE — 22 `*_service_*` RLS policies CANNOT be proven by dropping them (measured 2026-09-07, phase 164.7 plan 02)
 
 `service_role` is **BYPASSRLS** — on the pg-lane and on Supabase. So a policy that grants
