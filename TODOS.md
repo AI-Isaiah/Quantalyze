@@ -2695,6 +2695,32 @@ verifier pass and a green 88-file regression gate had all cleared the phase.
   evidence. Recorded as blocked deliberately: reporting them as passes is the vacuity this phase
   spent its whole red-team budget on.
 
+### ⚠️ BYPASSRLS-POLICY-UNMUTATABLE — 22 `*_service_*` RLS policies CANNOT be proven by dropping them (measured 2026-09-07, phase 164.7 plan 02)
+
+`service_role` is **BYPASSRLS** — on the pg-lane and on Supabase. So a policy that grants
+`service_role` access is **belt-and-braces**: dropping it changes no observable behaviour, because
+the role never consulted RLS in the first place.
+
+**Measured, not reasoned:** plan 02 authored a RED-UNDER twin doing
+`DROP POLICY system_settings_service_all` and the runner reported `arm R3 exit 0 NO-RED`. The twin
+was replaced with an over-broadening of the migration's own `REVOKE ALL … FROM anon` to
+`FROM anon, service_role`, which fails at the GRANT layer instead and bites correctly.
+
+**Scope of the property, measured:** `grep -rhoE "CREATE POLICY [a-z0-9_]*service[a-z0-9_]*"` over
+`supabase/migrations/**` returns **22** distinct names (`allocator_equity_derived_service_all`,
+`feature_flags_service_all`, `csv_daily_returns_service_role_all`, …). Every one has this property.
+The repo already knew it in prose — two migrations from July/August carry
+`-- service_role/BYPASSRLS` comments — but it was never connected to gate authoring.
+
+✅ **The shipped corpus is CLEAN.** Checked by parsing every `RED-UNDER-M` object in
+`supabase/tests/test_*.sql` for a twin mutating a service-role policy: **0 hits**. So none of the
+369 shipped arms is silently non-biting for this reason. This is a trap for FUTURE authors, not a
+live defect.
+
+**How to apply:** to prove a service-role access path, mutate the **GRANT/REVOKE layer** or the
+function's own guard — never the policy. A twin that drops a `*_service_*` policy and still passes
+is not evidence of anything.
+
 ### ⛔ GSD-04 — `state.advance-plan` CLOBBERS STATE.md while RETURNING AN ERROR (measured 2026-09-07, phase 164.7 plan 01)
 
 **A failed handler call is not a no-op.** Measured by the 164.7-01 executor: `state.advance-plan`
@@ -2706,6 +2732,13 @@ returned
 
 and *had already written* `7/108/97/33` over the hand-set `13/126/118/62`, plus inserted a blank
 line after every comment line in the progress banner. The error was reported AFTER the damage.
+
+⚠️ **A second one was found the same day.** `gsd-tools windows append` (phase 164.7 plan 02) also
+silently rewrote `.planning/STATE.md` as a SIDE EFFECT of appending a WINDOWS entry — bumping
+`state_head`/`last_updated` and inserting blank lines through the hand-set 2026-09-07 comment block.
+It is not a progress-integer clobberer, but it reformats the very banner that carries the
+prohibition list, so the warning erodes itself. That executor reverted with
+`git show HEAD:<path> >` rather than a blanket restore.
 
 ⚠️ This makes **seven** measured STATE.md progress clobberers, not six. The banner in
 `.planning/STATE.md` names the other six (`state.update-progress`, `begin-phase`,
