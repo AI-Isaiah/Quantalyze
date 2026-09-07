@@ -2695,6 +2695,61 @@ verifier pass and a green 88-file regression gate had all cleared the phase.
   evidence. Recorded as blocked deliberately: reporting them as passes is the vacuity this phase
   spent its whole red-team budget on.
 
+### ⛔ GSD-04 — `state.advance-plan` CLOBBERS STATE.md while RETURNING AN ERROR (measured 2026-09-07, phase 164.7 plan 01)
+
+**A failed handler call is not a no-op.** Measured by the 164.7-01 executor: `state.advance-plan`
+returned
+
+```json
+{"error":"Cannot parse Current Plan or Total Plans in Phase from STATE.md"}
+```
+
+and *had already written* `7/108/97/33` over the hand-set `13/126/118/62`, plus inserted a blank
+line after every comment line in the progress banner. The error was reported AFTER the damage.
+
+⚠️ This makes **seven** measured STATE.md progress clobberers, not six. The banner in
+`.planning/STATE.md` names the other six (`state.update-progress`, `begin-phase`,
+`add-roadmap-evolution`, `add-decision`, `record-metric`, `record-session`); `advance-plan` is new
+and is the first one observed to clobber *on its failure path*.
+
+**Why the integers are wrong every time:** these handlers recount from LOCAL DISK. On a phase branch
+that is fine only by luck — `.planning/phases/164.2.1-*/` does not exist on `main` at all, because
+the `-pr` filter strips phase artifacts (they reach main only at milestone archival). A recount from
+a worktree is wronger still: it sees 1 of 7 SUMMARYs.
+
+**How to apply:** treat the STATE.md banner's prohibition list as covering `advance-plan` too, and
+do not assume a handler that errored left the file alone — `shasum` it before and after, or read it
+back. `roadmap.update-plan-progress` has the same disk-counting shape and must be run ONCE after all
+waves merge, never per-executor.
+
+Tooling/process, not user-facing — recorded, not blocking, per the stopping rule.
+
+### ⚠️ PLANVERIFY-CD-01 — plan `<automated>` blocks hardcode the PRIMARY checkout path, which is wrong under worktree isolation (measured 2026-09-07, phase 164.7 wave 1)
+
+Every `<automated>` verify in this repo's plans opens with an absolute
+`cd /Users/<user>/claude-projects/quantalyze`. That is correct when the executor runs in
+the primary checkout, and **wrong the moment the phase runs with `isolation="worktree"`** — the `cd`
+walks OUT of the agent's worktree and measures the primary tree, which contains none of that
+executor's new files.
+
+⛔ **The dangerous half is not the failure, it is the SUCCESS.** A verify that asserts *zero*
+occurrences of something (`grep -c … = 0`, "no stray token", "gate reports no findings") PASSES
+VACUOUSLY when pointed at a tree where the file does not exist yet. That is the same
+cannot-fail class the 164.7 plan-checker already caught twice inside these very plans.
+
+Measured: the 164.7-01 executor hit this and repointed the `cd` at its own worktree, changing only
+the path and keeping every other byte (including the `{ …; test $? = 1; }` groups). It reported the
+deviation. The two sibling executors were NOT warned, so the orchestrator must RE-RUN their verifies
+in the correct tree before accepting any wave-1 result rather than trusting the self-reports.
+
+**Newly exposed, not longstanding:** worktree parallelism was only enabled on 2026-09-07 after a
+stale memory claiming worktrees fork from `origin/HEAD` was disproved by measurement. Every prior
+phase ran sequentially in the primary checkout, where the hardcoded `cd` was a no-op.
+
+**Fix:** plans should open verifies with a repo-root resolution that works in both
+(`cd "$(git rev-parse --show-toplevel)"`) rather than an absolute path. Cheap, and it makes the
+verify measure whatever tree it is actually running in.
+
 ### ⚠️ GSD-03 — `gsd-tools query init.plan-phase` emits INVALID JSON whenever a prior phase's verify command contains SQL dollar-quoting (booked 2026-09-07, phase 164.7 planning)
 
 **Measured at `14dc1f5e`**, running `node ~/.claude/gsd-core/bin/gsd-tools.cjs query init.plan-phase 164.7`
