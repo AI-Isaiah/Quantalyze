@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 32
 waived_count: 0
-fixed_count: 8
-total_count: 40
-last_updated: 2026-09-06T17:20:07.208Z
+fixed_count: 9
+total_count: 41
+last_updated: 2026-09-07T02:09:16.275Z
 ---
 
 # Broken Windows Ledger
@@ -55,6 +55,7 @@ last_updated: 2026-09-06T17:20:07.208Z
 | 38 | 164.1 | unrun-verify | .github/workflows/prod-prober.yml |  | prod-prober.yml has NEVER been dispatched: plan 05 was instructed not to touch live infrastructure, so the credential-assert step, the supabase link + masked pooler export, the checksum-verified Railway CLI install and all four live arms are unexecuted on a GitHub-hosted runner. Whether the stored workspace-scoped RAILWAY_API_TOKEN authenticates railway ssh non-interactively from a hosted runner is likewise unmeasured (CONTEXT's own open question). Plan 164.1-06 owns the single first dispatch. | open |  | 2026-09-05T23:44:43.987Z |  |
 | 39 | 164.2 | unrun-verify | supabase/tests/test_sync_status_curated_sentence_survives.sql |  | The new gate is UNRUN on shared TEST and will report TEST FAILED (0) there from this PR's first CI run, alongside plan 06's TEST FAILED (0c), until 20260906120000_computation_error_provenance.sql is hand-applied to TEST. Nothing applies migrations to TEST (sql-tests has no apply step; the migrate workflow is PROD-only), so this is EXPECTED and is NOT a coupling regression - the three coupled gates' arms never read the new columns and stay green. Remedy booked as [164.2-TEST-APPLY-PROVENANCE] in TODOS.md: the which-database marker query against TEST_SUPABASE_DB_URL FIRST, then psql -f, never supabase db push (this checkout's CLI is linked to PROD). | open |  | 2026-09-06T17:20:07.111Z |  |
 | 40 | 164.2 | deviation | .planning/WINDOWS.md |  | This ledger refused every append during phase 164.2 - plans 06, 07 and 10 each recorded their deviations in their SUMMARY instead. Cause, found by the orchestrator 2026-09-06: row 37's RENDERED TABLE cell carried a closing paragraph (the NON_SECRET_ENV fix, dated 2026-09-06) that the FENCED JSON description did not, so the two sides disagreed and the writer refused. The table was hand-edited without the JSON. Repaired by syncing the JSON description to the table text (a clean prefix, +568 chars); no table cell was hand-edited, and the repair was validated by asserting the prefix invariant before writing. Lesson: hand-editing the rendered table silently disables the ledger for every later phase. | open |  | 2026-09-06T17:20:07.208Z |  |
+| 41 | 164.2.1 | deviation | src/app/(dashboard)/allocations/components/ContributionWizardOverlay.sessionid-fence.test.tsx |  | Plan 01 deviated (Rule 3): the spec installs explicit storage doubles instead of the preselect spec's guarded clear — on Node 25 window.localStorage.setItem is not a function, writeWizardState swallows it, and the seed silently never existed (SC-1c was passing vacuously). Fixed and pinned by an applied-ness probe; recorded, not open. | fixed |  | 2026-09-07T02:08:54.153Z | 2026-09-07T02:09:16.275Z |
 
 ````json
 [
@@ -537,6 +538,18 @@ last_updated: 2026-09-06T17:20:07.208Z
     "reason": "",
     "recorded_at": "2026-09-06T17:20:07.208Z",
     "resolved_at": null
+  },
+  {
+    "id": 41,
+    "kind": "deviation",
+    "phase": "164.2.1",
+    "file": "src/app/(dashboard)/allocations/components/ContributionWizardOverlay.sessionid-fence.test.tsx",
+    "line": null,
+    "description": "Plan 01 deviated (Rule 3): the spec installs explicit storage doubles instead of the preselect spec's guarded clear — on Node 25 window.localStorage.setItem is not a function, writeWizardState swallows it, and the seed silently never existed (SC-1c was passing vacuously). Fixed and pinned by an applied-ness probe; recorded, not open.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-07T02:08:54.153Z",
+    "resolved_at": "2026-09-07T02:09:16.275Z"
   }
 ]
 ````

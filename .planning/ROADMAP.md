@@ -1254,11 +1254,11 @@ verdict is the reason this phase exists.
 **Depends on:** Phase 164.2 (ordering only — 164.2 owns the copy half of the same bug and
 should land first so the sentence and the dead end are fixed in a legible order; no code
 dependency)
-**Plans:** 2 plans
+**Plans:** 1/2 plans executed
 
 Plans:
 
-- [ ] 164.2.1-01-PLAN.md — Key fence: `incomingApiKeyId` 4th param + `sessionKeyMatches` gate, `apiKeyId` payload field + validator (absent-or-null OK), wired call site, `persistPointer` explicit key arg + all 14 save sites, unit + component proofs with positive control
+- [x] 164.2.1-01-PLAN.md — Key fence: `incomingApiKeyId` 4th param + `sessionKeyMatches` gate, `apiKeyId` payload field + validator (absent-or-null OK), wired call site, `persistPointer` explicit key arg + all 14 save sites, unit + component proofs with positive control
 - [ ] 164.2.1-02-PLAN.md — Neuter → RED → byte-identical restore at helper AND call site (SEAMRIM pins green under neuter), then full-suite / tsc / migration-untouched / append-only-pins gates
 
 ### Phase 164.5: BASELINE-SNAPSHOT — the committed PROD schema baseline becomes the local stack's source and a gate, and the two production objects no migration owns are dispositioned under review (INSERTED)
