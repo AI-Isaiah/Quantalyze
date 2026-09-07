@@ -2695,6 +2695,35 @@ verifier pass and a green 88-file regression gate had all cleared the phase.
   evidence. Recorded as blocked deliberately: reporting them as passes is the vacuity this phase
   spent its whole red-team budget on.
 
+### ⚠️ GSD-03 — `gsd-tools query init.plan-phase` emits INVALID JSON whenever a prior phase's verify command contains SQL dollar-quoting (booked 2026-09-07, phase 164.7 planning)
+
+**Measured at `14dc1f5e`**, running `node ~/.claude/gsd-core/bin/gsd-tools.cjs query init.plan-phase 164.7`
+(gsd-core 1.12.0). The output fails `json.loads` with
+`JSONDecodeError: Invalid \escape: line 54 column 242`.
+
+The offending value is a `prior_verify_commands[].command` entry harvested from Phase **164.4.1**
+(the pg_cron lane task). That command contains a plpgsql anonymous block written through `printf`,
+so the shell text carries `DO \$\$ DECLARE …`. The emitter does not re-escape those backslash
+runs for JSON, so the blob it prints cannot be parsed by the very consumer the workflow spec
+tells the orchestrator to parse it with ("Parse JSON for: `researcher_model`, …").
+
+⚠️ **This is upstream (`@opengsd/gsd-core`), not ours** — but WE trigger it, and we will keep
+triggering it: `prior_verify_commands` (#2401) is deliberately surfaced at every context window,
+and this repo's verify commands are full of SQL. Any future phase whose nearest prior phase used a
+dollar-quoted block hits the same wall.
+
+**Workaround used during 164.7 planning** (recorded so the next person does not re-derive it):
+strip the `prior_verify_commands` array by bracket-matching on the raw text and parse the
+remainder. The key is not needed for planning; every other field parses cleanly.
+
+⛔ Do NOT "fix" this by removing dollar-quoting from our verify commands — the commands are
+correct and the emitter is wrong. If it needs a local fix, it belongs in the shim, not in our
+plans.
+
+**Done when:** either gsd-core escapes the value correctly, or our launcher wrapper strips the key
+before the orchestrator parses it. Guard hygiene / tooling, not user-facing or data-integrity — so
+recorded rather than blocking, per the stopping rule.
+
 ### ⚠️ GSD-01 — `/gsd-plan-phase` cannot add ONE plan to a partly-executed phase (booked 2026-08-28)
 
 `/gsd-plan-phase <N>` replans the **whole** phase. Once some plans carry SUMMARYs, running it risks
