@@ -16,6 +16,14 @@ DECLARE
   v_key TEXT;
   v_url TEXT;
   v_req BIGINT;
+  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b). BYTE-IDENTICAL to the CHECK
+  --    constraint's expression in STEP 1b, and STEP 3 check 7 asserts that the
+  --    two really are the same string by reading pg_get_constraintdef and this
+  --    body back out of the catalogue. Two copies of one rule is the point: the
+  --    constraint is one ALTER TABLE away from gone, and this is what still
+  --    refuses the POST when it is.
+  c_url_allowed CONSTANT TEXT :=
+    '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
 BEGIN
   -- The Vault read, byte-for-byte the idiom the live job row already runs.
   SELECT decrypted_secret INTO v_key
@@ -30,6 +38,22 @@ BEGIN
    WHERE s.key = 'analytics_service_url';
   IF v_url IS NULL OR v_url = '' THEN
     RAISE EXCEPTION 'analytics_service_url missing from system_settings — refusing to post to a null url';
+  END IF;
+
+  -- ⛔ AND IT MUST BE A DESTINATION THIS FILE ALLOWS (T-164.7-06, layer (b)).
+  -- The CHECK constraint in STEP 1b already refuses to STORE anything else; this
+  -- re-test is what stands when that constraint has been dropped, and it is the
+  -- last thing between an admin-writable row and a live service key in an
+  -- outbound header.
+  --
+  -- ⚠️ THE MESSAGE DOES NOT ECHO THE OFFENDING URL, and that is not squeamishness
+  -- about PII. RAISE text lands in the cron job-run row, in the Postgres log and
+  -- in whatever ships those onward; echoing an attacker-chosen string there
+  -- writes their collector's hostname into every downstream reader of this
+  -- project's logs, and an operator who needs the value can SELECT it. Same rule
+  -- as the two RAISEs above (T-161.1-10): name the SETTING, never its value.
+  IF v_url !~ c_url_allowed THEN
+    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: an https host under .up.railway.app';
   END IF;
 
   -- ⚠️ net.http_post is ASYNC. The BIGINT returned here is a REQUEST ID, not an
