@@ -399,8 +399,15 @@ export function checkContentDrift({ snapshotSql, chainSql, allowlist = CONTENT_D
 
   const byIdentity = new Map(allowlist.map((row) => [identity(row), row]));
   const consumed = new Set();
-  const fileFor = (r) =>
-    chainIndex.get(r.name) ?? (r.status === "SNAPSHOT_ONLY" ? SNAPSHOT_FILE : SNAPSHOT_FILE);
+  // WR-06: a ternary used to sit here returning SNAPSHOT_FILE from BOTH arms —
+  // dead code shaped like a rule. Its apparent intent ("SNAPSHOT_ONLY names the
+  // dump, because it has no chain counterpart") does not hold either:
+  // `diffFunctionBodies` only emits SNAPSHOT_ONLY when a SAME-NAMED chain
+  // definition exists, or when the chain side is empty — and in that second case
+  // the lookup misses and the fallback already names the dump. So the chain file
+  // is the file a human opens for every status, and lookup-then-fallback is the
+  // whole rule. Self-test arm 7 pins the attribution against a re-flip.
+  const fileFor = (r) => chainIndex.get(r.name) ?? SNAPSHOT_FILE;
 
   for (const r of rows) {
     if (r.status === "UNCOMPARABLE") {
@@ -482,6 +489,11 @@ function summarize({ rows, counts, findings, measureFails, allowlist, ok }) {
     counts: counts ?? { MATCH: 0, DRIFT: 0, SNAPSHOT_MISSING: 0, SNAPSHOT_ONLY: 0, UNCOMPARABLE: 0 },
     compared: (rows ?? []).length,
     allowlisted: allowlist.length,
+    // IN-01: the NAMES travel with the COUNT, off the same list. `report()` used
+    // to print the module-level constant beside a count derived from whatever
+    // list actually ran, so an injected allowlist produced a count and a name
+    // list describing two different things.
+    allowlistNames: allowlist.map((r) => `${r.function}/${r.nargs}`),
   };
 }
 
@@ -588,9 +600,7 @@ export function report(result) {
   );
   console.log(
     `baseline-content-drift: allowlisted rows ${result.allowlisted} — ` +
-      (result.allowlisted
-        ? CONTENT_DRIFT_ALLOWLIST.map((r) => `${r.function}/${r.nargs}`).join(", ")
-        : "(none)"),
+      (result.allowlisted ? (result.allowlistNames ?? []).join(", ") : "(none)"),
   );
   console.log(`baseline-content-drift: findings ${result.findings.length}`);
   console.log(`baseline-content-drift: ${SCOPE_SENTENCE}`);
@@ -740,6 +750,25 @@ export function selfTest() {
     assert(res.counts.SNAPSHOT_ONLY === 1, "SNAPSHOT_ONLY: the fixture actually produces the status");
     assert(!res.ok, "SNAPSHOT_ONLY: is a FINDING, not silently ignored");
     assert(kinds(res).includes("content-drift"), "SNAPSHOT_ONLY: fires `content-drift`");
+    // WR-06: with no chainIndex the annotation falls back to the dump...
+    assert(
+      res.findings[0].file === SNAPSHOT_FILE,
+      "SNAPSHOT_ONLY: with no chain index, the finding names the committed dump",
+    );
+    // ...and with one, it names the chain file that DOES define this name. The
+    // pair is what makes the attribution rule falsifiable: assert only the first
+    // and a lookup that stopped working would still read as correct.
+    const idx = new Map([["alpha", `${CHAIN_DIR}/alpha.sql`]]);
+    const resIdx = checkContentDrift({
+      snapshotSql: snap,
+      chainSql: fn("alpha", "  PERFORM 1;"),
+      allowlist: [],
+      chainIndex: idx,
+    });
+    assert(
+      resIdx.findings[0].file === `${CHAIN_DIR}/alpha.sql`,
+      "SNAPSHOT_ONLY: a same-named chain definition exists, so the finding names the chain file",
+    );
   }
 
   // ── 8. A name-only allowlist row is REFUSED at startup. ──────────────────

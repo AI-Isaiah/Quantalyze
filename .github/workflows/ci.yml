@@ -595,6 +595,23 @@ jobs:
           # UNMEASURED, and an unmeasured thing is not a passing thing. If this job's
           # first run dies inside `supabase start`, that is the live hypothesis.
           version: 2.98.2
+      # `scripts/local-stack/run.sh` loads the committed baseline through `psql`,
+      # and `resolve_psql`'s ONLY fallback is /opt/homebrew/opt/postgresql@16 — a
+      # macOS keg that does not exist on this runner. A miss is not a skip: it is
+      # `FATAL: psql not found ...` and exit 1, on a job that is aggregator-BLOCKING
+      # from its first ever run. `sql-tests` in this same file installs the client
+      # explicitly for the same reason (see its "Install psql client" step).
+      # ⚠️ HONEST BOUND: this is insurance, not a measured absence — no ubuntu run
+      # of this job exists yet, so whether the image already ships `psql` is
+      # UNVERIFIED. ~10s to remove one of the two unmeasured terms in the job's own
+      # timeout note; if the first green run proves the image ships it, drop this
+      # step on that evidence rather than on assumption.
+      - name: Install psql client (the lane loads the baseline through it)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          psql --version
       - name: Preflight - the lane must have a non-empty test corpus
         # A green job that ran nothing is the silent-green this lane exists to
         # eliminate. `passWithNoTests: false` in the config is the second control;

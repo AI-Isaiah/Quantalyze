@@ -337,3 +337,56 @@ describe("[CR-01] zero comparisons is a MEASURE_FAIL, never a clean run", () => 
     }
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// [IN-01] THE REPORTED NAMES COME FROM THE LIST THAT RAN
+//
+// Code review 2026-09-08 found `report()` printing `result.allowlisted` (a count
+// derived from whatever list `checkContentDrift`/`checkRepo` was given) beside a
+// name list read straight off the module-level `CONTENT_DRIFT_ALLOWLIST`. With
+// an injected allowlist the two describe different things, and the CI log's
+// "allowlisted rows N — <names>" line would then be internally inconsistent.
+// The fix threads the names through the result; these arms pin that they follow
+// the injected list AND that the real corpus still reports its own rows.
+// ───────────────────────────────────────────────────────────────────────────
+describe("[IN-01] allowlist names travel with the allowlist that ran", () => {
+  it("an INJECTED allowlist is reported by its own names, not the module constant's", () => {
+    const body = (n: string) =>
+      `CREATE OR REPLACE FUNCTION public.aim_alpha()\nRETURNS void\nLANGUAGE plpgsql\nAS $$\nBEGIN\n  PERFORM ${n};\nEND;\n$$;\n`;
+    const res = checkContentDrift({
+      snapshotSql: body("1"),
+      chainSql: body("2"),
+      // A structurally COMPLETE row: the reporting fields must follow the list
+      // that ran, not a list that happened to be well-formed.
+      allowlist: [
+        {
+          function: "aim_injected",
+          nargs: 7,
+          status: "DRIFT",
+          snapshotHash: "a".repeat(64),
+          candidateHash: "b".repeat(64),
+          hunks: 1,
+          capturedAt: "2026-09-08",
+          clearedBy: "This fixture row being deleted with the arm it drives.",
+          reason:
+            "A self-test fixture row for [IN-01]. It names a function that appears nowhere in the " +
+            "corpus and never describes a real disagreement in this repository.",
+        },
+      ],
+    });
+    expect(res.allowlisted).toBe(1);
+    expect(res.allowlistNames).toEqual(["aim_injected/7"]);
+    // The module constant's rows exist and are DIFFERENT names, so a leak shows.
+    for (const shipped of PINNED_NAMES) {
+      expect(res.allowlistNames.join(",")).not.toContain(shipped);
+    }
+  });
+
+  it("AIM: the real corpus still reports the SHIPPED rows — the field is not just an echo", () => {
+    const res = checkRepo();
+    expect(res.allowlisted).toBe(PINNED_SIZE);
+    expect([...res.allowlistNames].sort()).toEqual(
+      CONTENT_DRIFT_ALLOWLIST.map((r: { function: string; nargs: number }) => `${r.function}/${r.nargs}`).sort(),
+    );
+  });
+});

@@ -50,6 +50,11 @@ on:
       - 'supabase/migrations/**'
       - 'supabase/schema/**'
       - 'scripts/dump-sql-functions.ts'
+      # DRIFT-05 gate (a) derives BOTH name sets through `extractFunctionDefs`,
+      # imported from here by scripts/dump-sql-functions.ts — so an edit to this
+      # file changes this gate's verdict without running it. Same reason
+      # migration-drift-check.yml lists it for gate (b).
+      - 'scripts/sql-body-normalize.mjs'
       - 'scripts/check-baseline-staleness.mjs'
       - '.github/workflows/sql-function-snapshot.yml'
   push:
@@ -58,6 +63,9 @@ on:
       - 'supabase/migrations/**'
       - 'supabase/schema/**'
       - 'scripts/dump-sql-functions.ts'
+      # Same reason as the pull_request list above: gate (a)'s two name sets
+      # are both produced by `extractFunctionDefs` from this file.
+      - 'scripts/sql-body-normalize.mjs'
       - 'scripts/check-baseline-staleness.mjs'
       - '.github/workflows/sql-function-snapshot.yml'
   workflow_dispatch:
@@ -95,6 +103,11 @@ jobs:
         # `judge()` stubbed to return `[]`, the step below printed
         # "✅ No defects" and exited 0 while proving nothing; the self-test
         # failed 8 of 9 assertions by name on that same tree.
+        # ⚠️ That "8 of 9" is the DATED 2026-09-07 reading and is kept as
+        # lineage, not as a current count. The self-test now declares 12
+        # assertions across 9 sections (IN-02/IN-03, 2026-09-08) and refuses to
+        # pass if the number that RAN disagrees with the number it declares —
+        # read the count off the run, never off this comment.
         run: node scripts/check-baseline-staleness.mjs --self-test
       - name: Baseline co-edit gate - baseline.sql matches the sha256 BASELINE.md records
         # Mode identity (164.3-RESEARCH Pitfall 2): these two lines are the EXACT

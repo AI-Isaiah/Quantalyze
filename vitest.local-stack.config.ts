@@ -38,6 +38,17 @@ export default defineConfig({
     // divergences from the Node runtime are a documented hazard on this seam.
     environment: "node",
     include: LOCAL_STACK_LANE_FILES,
+    // ⛔ RESTATED, NOT INHERITED. This is a standalone ROOT config, not a project of
+    // `vitest.config.ts`, so it inherits NOTHING — and that file says the price in
+    // its own words: "a project that forgot `setupFiles` would silently lose the
+    // env-restore fence". The fence exists because DEF-16-1, this repo's known
+    // CI-only failure class, is an ORDERING defect from unrestored `process.env` and
+    // `globalThis` writes. `fileParallelism: false` below puts every lane file in ONE
+    // worker process, so a direct `process.env.X =` in the first file reaches the
+    // second — latent while the lane holds one file, live on the next one added.
+    setupFiles: ["src/test-setup.ts"],
+    unstubGlobals: true,
+    unstubEnvs: true,
     // The lane boots a real stack and creates real auth users; sign-in round trips
     // and the concurrent POSTs are slower than a unit test by an order of magnitude.
     testTimeout: 120_000,

@@ -60,6 +60,28 @@ function aggregatorBlock(): string {
   return CI.slice(start, end);
 }
 
+/**
+ * The `frontend-local-stack:` job block, sliced out for the same reason
+ * `aggregatorBlock()` slices the aggregator: a bare whole-file `toContain` is
+ * satisfied by a YAML COMMENT anywhere in the 5,000-line file, so a job stripped
+ * back to a checkout-only no-op — which still reports `success` — would leave every
+ * one of these pins green. MEASURED 2026-09-08: commenting out all three `run:`
+ * lines left the three whole-file assertions TRUE.
+ */
+function laneJobBlock(): string {
+  const start = CI.indexOf(`\n  ${LANE_JOB}:\n`);
+  expect(
+    start,
+    `the ${LANE_JOB} job is gone from ci.yml — the lane files are excluded from the shards, so without it they run NOWHERE`,
+  ).toBeGreaterThan(-1);
+  const end = CI.indexOf("\n  frontend-policy:\n", start);
+  expect(
+    end,
+    `could not find the end of the ${LANE_JOB} block`,
+  ).toBeGreaterThan(start);
+  return CI.slice(start, end);
+}
+
 describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in the ordinary shards)", () => {
   it("the lane list is non-empty and every file in it exists", () => {
     expect(
@@ -96,6 +118,19 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
       cfg,
       "passWithNoTests must stay false — a lane invocation that collected nothing and exited 0 is the silent green this whole arrangement exists to prevent",
     ).toContain("passWithNoTests: false");
+    // The lane config is a standalone ROOT config and inherits none of
+    // vitest.config.ts's fences. `fileParallelism: false` shares one worker across
+    // lane files, so without these a `process.env.X =` in one file reaches the next.
+    for (const fence of [
+      'setupFiles: ["src/test-setup.ts"]',
+      "unstubGlobals: true",
+      "unstubEnvs: true",
+    ]) {
+      expect(
+        cfg,
+        `the lane config no longer restates \`${fence}\` — it is a root config, so it inherits nothing, and the env-restore fence is simply absent`,
+      ).toContain(fence);
+    }
   });
 
   it("package.json's test:local-stack script names the lane config", () => {
@@ -109,22 +144,22 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
   });
 
   it(`ci.yml defines the ${LANE_JOB} job, and it BOOTS the lane and RUNS it`, () => {
-    expect(
-      CI,
-      `the ${LANE_JOB} job is gone from ci.yml — the lane files are excluded from the shards, so without it they run NOWHERE`,
-    ).toContain(`\n  ${LANE_JOB}:\n`);
-    expect(
-      CI,
-      `the ${LANE_JOB} job no longer boots the Supabase stack; the spec would fail loud rather than skip, but the gate would be permanently red for the wrong reason`,
-    ).toContain("bash scripts/local-stack/run.sh up");
-    expect(
-      CI,
-      `the ${LANE_JOB} job no longer invokes the lane's own npm script`,
-    ).toContain("npm run test:local-stack");
-    expect(
-      CI,
-      `the ${LANE_JOB} job no longer tears its stack down — 13 orphaned containers per run`,
-    ).toContain("bash scripts/local-stack/run.sh --assert-teardown");
+    // Scoped to the job's OWN block, and to lines that are not comments: the
+    // literals must be EXECUTED by this job, not merely mentioned near it.
+    const executed = laneJobBlock()
+      .split("\n")
+      .filter((l) => !/^\s*#/.test(l));
+    const why: Record<string, string> = {
+      "bash scripts/local-stack/run.sh up": `the ${LANE_JOB} job no longer boots the Supabase stack; the spec would fail loud rather than skip, but the gate would be permanently red for the wrong reason`,
+      "npm run test:local-stack": `the ${LANE_JOB} job no longer invokes the lane's own npm script`,
+      "bash scripts/local-stack/run.sh --assert-teardown": `the ${LANE_JOB} job no longer tears its stack down — 13 orphaned containers per run`,
+    };
+    for (const [cmd, reason] of Object.entries(why)) {
+      expect(
+        executed.some((l) => l.includes(cmd)),
+        `${reason} (a comment mentioning \`${cmd}\` does not run it)`,
+      ).toBe(true);
+    }
   });
 
   it(`the frontend aggregator lists ${LANE_JOB} in BOTH needs: and its result loop`, () => {

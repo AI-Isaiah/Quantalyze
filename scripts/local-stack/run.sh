@@ -240,9 +240,18 @@ resolve_psql() {
 # --- commands -----------------------------------------------------------------
 cmd_up() {
   local with_schema=1
-  if [ "${1:-}" = "--no-schema" ]; then
-    with_schema=0
-  fi
+  # ⛔ REJECT an unrecognised argument rather than treating it as "load the schema".
+  # `up --no-shema` (typo) used to load the baseline silently — a safe DIRECTION, but
+  # the same class of lie the other gates this phase added refuse: a typo'd flag that
+  # quietly ran a different gate than the caller asked for.
+  case "${1:-}" in
+    "") ;;
+    --no-schema) with_schema=0 ;;
+    *)
+      echo "FATAL: unknown argument to 'up': '$1'. Only --no-schema is accepted." >&2
+      exit 1
+      ;;
+  esac
 
   generate_stack_config
   arm_teardown

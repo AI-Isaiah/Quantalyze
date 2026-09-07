@@ -43,6 +43,17 @@ on:
       - 'scripts/prod-body-drift-check.sh'
       - 'scripts/sql-body-normalize.mjs'
       - 'scripts/sql-function-names-naive.mjs'
+      # DRIFT-05 gate (b)'s SUBJECT, and the trade is TAKEN rather than left to
+      # omission. Regenerating this dump from PROD is the remedy gate (b)'s own
+      # failure text demands; without this entry the remedy PR is the one PR
+      # that never re-runs the gate that demanded it, and the operator learns
+      # whether it worked on someone else's later migration PR.
+      # It does NOT widen the "PR-head content executing under
+      # SUPABASE_DB_PASSWORD" radius the paragraph above bounds: it is DATA read
+      # by the scripts already listed here, never executed. That is why the
+      # "must not be extended to non-VAC-04 paths" rule above is not breached —
+      # this path IS gate (b)'s subject, and it is inert.
+      - 'supabase/schema/baseline.sql'
 
 concurrency:
   group: migration-drift-check-${{ github.event.pull_request.number }}

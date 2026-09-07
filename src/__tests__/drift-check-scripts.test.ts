@@ -972,6 +972,45 @@ describe("SP-C05 — 'absent from PROD' must be measured by an instrument that d
     expect(yml).toContain("- 'scripts/sql-function-names-naive.mjs'");
   });
 
+  it("WR-04: gate (b)'s SUBJECT re-runs gate (b) — baseline.sql is in migration-drift-check.yml's paths", () => {
+    // The gate's own failure text names regenerating `supabase/schema/
+    // baseline.sql` as the remedy for a red run. Without this path entry the
+    // regeneration PR is the ONE PR that does not re-run the gate that demanded
+    // it, and the operator learns whether the remedy worked from someone else's
+    // later migration PR, off a state stale again by then. MEASURED absent
+    // 2026-09-08.
+    const yml = readFileSync(
+      ".github/workflows/migration-drift-check.yml",
+      "utf8",
+    );
+    expect(yml).toContain("- 'supabase/schema/baseline.sql'");
+  });
+
+  it("WR-03: gate (a)'s normalizer dependency re-runs gate (a) — both trigger lists name it", () => {
+    // `scripts/dump-sql-functions.ts` imports `extractFunctionDefs` from
+    // `scripts/sql-body-normalize.mjs`, and BOTH of gate (a)'s name sets
+    // (baseline and migration-replay) are derived through it — so an edit there
+    // changes the gate's verdict. It was in NEITHER trigger list until
+    // 2026-09-08. Both lists are asserted: `pull_request` alone leaves the
+    // main-push arm blind.
+    const dumper = readFileSync("scripts/dump-sql-functions.ts", "utf8");
+    expect(
+      dumper,
+      "if the dumper stops importing the normalizer this pin is stale, not passing",
+    ).toContain('from "./sql-body-normalize.mjs"');
+    const yml = readFileSync(
+      ".github/workflows/sql-function-snapshot.yml",
+      "utf8",
+    );
+    const hits = yml.split("\n").filter((l) =>
+      l.trim() === "- 'scripts/sql-body-normalize.mjs'",
+    );
+    expect(
+      hits.length,
+      "the entry must appear in BOTH the pull_request and the push paths list",
+    ).toBe(2);
+  });
+
   it("SP-C06: a FAILING `git diff` is a MEASURE_FAIL, not 'no migration files changed'", () => {
     // ⛔ The line read `git diff … > changed.txt || true`, which converted
     // "could not list the changed files" into "the list is empty" and then into

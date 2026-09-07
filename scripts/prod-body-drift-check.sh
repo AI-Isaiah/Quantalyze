@@ -217,6 +217,38 @@ assert_credentials() {
 # the live reading, and the two would agree by construction. That is the exact
 # defect SP-C05 named, and a name-set diff is even more exposed to it than a body
 # diff: agreement is its entire pass condition.
+#
+# ── ⛔ NO RATCHET HERE, AND THAT IS A DECISION, NOT AN OVERSIGHT (WR-07) ──────
+#
+# Both sibling gates ship an escape valve — gate (a) has `NAME_SET_RATCHET`
+# (scripts/dump-sql-functions.ts) and the content gate has
+# `CONTENT_DRIFT_ALLOWLIST`. Gate (b) deliberately has neither. The recurrence
+# WR-07 describes is REAL and accepted: a function-adding migration merges,
+# supabase-migrate.yml applies it to PROD, and every later migration PR reads
+# `live-only: <fn>` until `supabase/schema/baseline.sql` is regenerated. The
+# remedy is regeneration, every time.
+#
+# The reason a ratchet is the WRONG answer for THIS leg is an asymmetry with
+# gate (a), not squeamishness about the mechanism:
+#   * gate (a) compares the committed dump against the MIGRATION REPLAY. Its one
+#     ratcheted row (`create_allocator_connected_strategy`) is a function that
+#     exists in PROD under no migration, so it SURVIVES a regeneration — the row
+#     was re-confirmed against the 2026-09-07 re-dump. Only DRIFT-04's DROP
+#     clears it. A ratchet is the only way to carry a divergence the remedy
+#     cannot reach.
+#   * gate (b) compares the committed dump against the LIVE CATALOGUE THAT DUMP
+#     IS TAKEN FROM. Every divergence it can report is therefore cleared by
+#     regenerating, BY CONSTRUCTION — there is no gate (b) row a fresh dump
+#     leaves standing. So a ratchet row here could never mean anything but "we
+#     declined the remedy", which is precisely the "adding a row records that
+#     you looked away" that NAME_SET_RATCHET's own header forbids. It would be a
+#     list that can only ever be widened to turn a red run green.
+#
+# What was done about the cost instead of ratcheting it: `supabase/schema/
+# baseline.sql` was added to migration-drift-check.yml's `paths:` (WR-04), so
+# the regeneration PR is now the PR that re-runs this gate and confirms the
+# remedy landed — rather than deferring that confirmation to an unrelated later
+# PR, from a state stale again by then.
 baseline_live_check() {
   # Dynamic scoping: `fail` and `assert_credentials` below print THIS label.
   # shellcheck disable=SC2178
