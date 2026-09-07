@@ -258,6 +258,71 @@ regression.
 Read the run's own `coverage:` and `arms:` lines rather than any number restated
 in prose.
 
+⭐ **CURRENCY 2026-09-07 (Phase 164.7 APPSETTINGS plan 05) — the corpus grew by
+one gate file AND by four arms inside two existing ones.** Every paragraph above
+stays as dated lineage; this one is the current reading. Plan 02 added
+`supabase/tests/test_analytics_service_settings_and_vault_tick.sql` (7 arms — the
+two RAISE paths of the Vault/`system_settings` tick asked for BY NAME, the
+discriminator that refuses a callable which raises unconditionally, and three
+RLS/grant arms). Plan 04 then added arms K and L to EACH ledger gate (row-FALSE
+and read-RAISES, beside the existing missing-row arm A) and RE-POINTED all 27
+pre-existing edit-kind twins in those two files at the superseding migration
+`20260907130000_ledger_refresh_switch_to_system_flags.sql`, every one re-observed
+biting AFTER the re-point — a twin left mutating a body that `CREATE OR REPLACE`
+overwrites has silently stopped being a test. Read off
+`node scripts/mutation-runner/run.mjs` at the final tree, **exit 0**:
+`coverage: files 46/73`, `arms: 380/380/0`, `biting: 380`,
+`lane-invocations: 380` (the two independent tallies AGREE), `lane-blocked: 0
+file(s)`, `lane-probe: pg_cron AVAILABLE`, `  pending: 0`,
+`per-arm lane time: mean 1.1s`, `✅ No defects`. 46 annotated + 0 lane-blocked +
+27 `unreachable:` + 0 pending = 73. `FILES_FLOOR` moved 45 → **46** and
+`ARMS_FLOOR` 369 → **380**; `WAIVED_CEILING` is still **0**.
+
+⚠️ **The two floors are separated in DIFFERENT LAYERS, and this plan MEASURED
+that rather than inheriting the earlier paragraphs' wording.** A full-corpus run
+with the floors left stale-low at 45/369 on this 46-file tree exits **0** with
+`✅ No defects` — `run.mjs`'s gate paths are `annotatedFiles < filesFloor` and
+`bitingArms < armsFloor`, so a floor BELOW the corpus is invisible to it by
+construction. The stale direction is caught one layer up, by
+`src/__tests__/mutation-runner-floors.test.ts`, which failed on that same tree
+with `RATCHET STALE: 46 of 73 gate files are now annotated but FILES_FLOOR is
+still 45` and the paired ARMS_FLOOR message. At +1 each (47/381) the runner named
+both regressions and exited 1; at the pinned values it exits 0. ⛔ So "separated
+in both directions" means **the runner for the upper direction and the vitest
+ratchet for the lower**. An earlier plan's expectation that `run.mjs` alone
+reports a stale ratchet is FALSE, was falsified by measurement here, and is
+recorded in `164.7-05-FLOORS.log` with all three runs' exit codes.
+
+⚠️ **New in this phase: `sql-gate-lint` now ALSO runs `scripts/lint-app-guc.mjs`**
+— self-test first, then the corpus scan, both pasted verbatim as a developer runs
+them. It is a SIBLING of `lint-sql-gates.mjs`, not an eighth rule of it, because
+that linter masks comments and string-literal contents while decision D-05
+requires this gate to COUNT comments. Its corpus step was RED BY DESIGN at 12
+findings across 5 files between plans 01 and 05; plan 05 drove it to **0 findings
+with the five annotated files named**, by ANNOTATION — a dated
+`-- APP-GUC-LINEAGE:` header AND an agreeing, count-pinned `LINEAGE_ALLOWLIST`
+entry, two edits in two files, whose five counts still SUM TO the same 12 sites.
+⛔ A red corpus step from here is a regression and is never cleared by widening
+the allowlist or relaxing `DETECT_RE`.
+
+⛔ **`sql-tests` and VAC-08 are expected RED on the 164.7 PR** for exactly the
+arms named in `TODOS.md` `[164.7-TEST-APPLY-APPSETTINGS]`, until the founder
+hand-applies `20260907120000` and `20260907130000` to shared TEST. That is a
+missing apply, not a coupling regression.
+
+⚠️ **Every number above is a DATED reading of one macOS box on 2026-09-07** (472
+legs = 380 arms + 46 baseline + 46 restore; 531 s and 528 s at mean 1.1 s/arm,
+plus one 614 s run contaminated by a busy-wait loop beside it), **not a live
+constant.** Read `FILES_FLOOR` and `ARMS_FLOOR` off the constants themselves in
+`scripts/mutation-runner/run.mjs`, cited by SYMBOL. No SHA-bound ubuntu run of a
+46-file / 380-arm corpus exists; the 567 s and 646 s figures above are the
+164.4.1 tree at 363 and 361 arms and must not be read as figures for this one.
+`sql-mutation`'s `timeout-minutes` stays **20**, unchanged — the rule's one
+permitted raise was taken on 2026-09-05 and 20 is a declared CEILING, so a future
+crossing is answered by `[REDUNDER-SUBSET-SPLIT]`, never by raising again.
+Read the run's own `coverage:` and `arms:` lines rather than any number restated
+in prose.
+
 ## Which database am I on? (ask FIRST, every time)
 
 ⛔ **This checkout's Supabase CLI is linked to PRODUCTION.** `supabase/.temp/project-ref` holds
