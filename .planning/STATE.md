@@ -159,6 +159,14 @@ state_head: 41d57860
 #   percent          57 -> 62   — 13/21.
 # ⛔ The six clobbering handlers named below still must not be run from this checkout; the
 # 164.2.1 stripping above is a NEW, independent reason they would produce wrong integers.
+# ⛔ SEVENTH CLOBBERER, MEASURED 2026-09-07 (164.7 plan 01 execution, worktree agent-aaff4983):
+# `state.advance-plan` clobbers this block TOO — and it does so while RETURNING AN ERROR
+# ("Cannot parse Current Plan or Total Plans in Phase from STATE.md"). It wrote 7/108/97/33
+# over 13/126/118/62 and inserted a blank line after every comment line above. A failed
+# handler call is NOT a no-op. Restored by hand. Cumulative list is now SEVEN:
+# update-progress, begin-phase, add-roadmap-evolution, add-decision, record-metric,
+# record-session, advance-plan. The 164.7 executors therefore SKIPPED the standard
+# state-update step entirely, per this banner's own rule that it wins over that step.
 progress:
   total_phases: 21
   completed_phases: 13
