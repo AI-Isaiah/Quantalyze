@@ -1,0 +1,173 @@
+# Phase 164.7 plan 04 — NEUTER LOG
+
+**Every assertion this plan added must be able to FAIL.** Six neuters, three per
+gate file, each one observed CAUGHT by the machine that is supposed to catch it,
+each restored from a BYTE BACKUP and verified by sha256.
+
+Measured 2026-09-07 on this worktree at the tree committed by this plan's first
+three commits, on a throwaway pg-lane cluster
+(`PGBIN=/opt/homebrew/opt/postgresql@16/bin`; the PATH `pg_ctl` is PostgreSQL 18,
+which has no pg_cron, and the lane correctly refuses to boot on it).
+
+## Restore protocol
+
+⛔ Restore is by BYTE BACKUP and `cp`, never by a git working-tree restore
+command. A restore-to-HEAD in a neuter harness silently destroys the
+uncommitted work the harness itself is standing on; this harness copies the file
+aside first, mutates in place, and copies it back, then compares sha256 before
+and after. Six pairs, twelve hashes, all equal, and `git status --porcelain` is
+empty at the end of every block.
+
+## What each neuter defeats, and which layer catches it
+
+| # | Neuter | Layer that must catch it | Observed |
+|---|---|---|---|
+| N1 | arm K's two `TEST FAILED (K)` raises are downgraded from `RAISE EXCEPTION` to `RAISE NOTICE` — the arm can no longer fail | the mutation runner's `--file … --arm K` lane | `SYNTHESISED(K)`, defect `synthesised-identity`, **biting: 0**. A NOTICE-carried identity is not ATTRIBUTABLE (GRAMMAR rule 3c: severity must be ERROR), so the arm is not counted as biting — the control refusing to accept a raise the gate did not really make |
+| N2 | arm L's `RED-UNDER-M` twin line is deleted; the human `RED-UNDER` prose stays | `--parse-only`, the parity gate | `17 prose / 16 twin(s)`, static defect `parity`. The prose-only backfill this phase exists to prevent is a hard failure, not a silent omission |
+| N3 | the precondition that refuses a COMMITTED-OPEN activation row — three legs, see below | the lane, three ways | see below |
+
+## N3 is three legs, and it corrected a claim rather than confirming one
+
+The plan asked for a neuter proving the precondition "guards arm A's meaning",
+i.e. that arm A would go RED for the wrong reason without it. **It does not, and
+this is the measurement that says so.**
+
+* **leg (a) — precondition INTACT, a committed-TRUE row seeded by a `sql` step on
+  arm A's twin.** The gate exits 3 having emitted **no** `TEST FAILED (…)` at
+  all; the runner reports `NO-IDENTITY` / `wrong-first-failure` with
+  `SIGHTINGS: none`. The guard FIRES, and `TEST ABORTED` is deliberately not an
+  identity the runner can attribute — exactly as the comment above it claims.
+* **leg (b) — the same seeded row, precondition downgraded to a NOTICE.** Arm A's
+  own twin now reddens arm A cleanly: `RED (identity ok)`, biting 1. So the
+  precondition is the ONLY thing standing between the two outcomes.
+* **leg (c) — the same seeded row, precondition a NOTICE, and NO mutation at
+  all.** The lane exits 0 and the file prints
+  `ALL 12 ARMS EXECUTED (A-L) and passed`. **This is the leg that settles it:** a
+  committed-open switch does not make any arm vacuous, because the rewritten arm
+  A DELETEs the row and arm K UPSERTs it FALSE — each dormant arm now builds the
+  state it measures. The pre-164.7 arm A read a SESSION setting it never set,
+  which is why the inherited comment called this an anti-vacuity guard; that was
+  true of the old arm and is false of the new one.
+
+The precondition was NOT deleted, because leg (a) shows it firing on a real
+condition worth firing on: a committed TRUE row means an operator has the ledger
+refresh LIVE, and this file writes that row inside its transaction. Its comment
+and its RAISE message were rewritten to say that instead of the retired claim
+(commit `04c33bb6`).
+
+## Blocks
+
+```
+NEUTER N1 on supabase/tests/test_ledger_refresh_fanout.sql
+BEFORE sha256: 7da4e5904186d9790b7051530ec2820d2c5dd89bbec159154d8a7ac558a09644
+neutered: 2 arm-K raise(s) downgraded to NOTICE
+  baseline  supabase/tests/test_ledger_refresh_fanout.sql — exit 0 (1.1s)
+  arm K                        exit   3  SYNTHESISED(K)  (1.1s)
+  restore   supabase/tests/test_ledger_refresh_fanout.sql — exit 0 (1.1s)
+biting: 0   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)
+  file test_ledger_refresh_fanout.sql: sections 16 / judged 1 / annotated 17 / waived 0 / biting 0
+❌ 1 defect(s):
+  --------------------  ------------------------  ----
+  synthesised-identity  K                         supabase/tests/test_ledger_refresh_fanout.sql
+AFTER sha256: 7da4e5904186d9790b7051530ec2820d2c5dd89bbec159154d8a7ac558a09644
+restore: sha256 EQUAL
+git status --porcelain (gate files): []
+
+NEUTER N2 on supabase/tests/test_ledger_refresh_fanout.sql
+BEFORE sha256: 7da4e5904186d9790b7051530ec2820d2c5dd89bbec159154d8a7ac558a09644
+neutered: arm L RED-UNDER-M line deleted; markers now 16
+  supabase/tests/test_compute_jobs_error_kind_copy_parity.sql: 3 prose / 3 twin(s) / 0 waiver(s)
+  supabase/tests/test_ledger_refresh_fanout.sql: 17 prose / 16 twin(s) / 0 waiver(s)
+  file test_compute_jobs_error_kind_copy_parity.sql: sections 3 / judged 0 / annotated 3 / waived 0 / biting 0
+  file test_ledger_refresh_fanout.sql: sections 17 / judged 0 / annotated 16 / waived 0 / biting 0
+❌ 1 static defect(s):
+  parity                -                         supabase/tests/test_ledger_refresh_fanout.sql
+AFTER sha256: 7da4e5904186d9790b7051530ec2820d2c5dd89bbec159154d8a7ac558a09644
+restore: sha256 EQUAL
+git status --porcelain (gate files): []
+
+NEUTER N3 on supabase/tests/test_ledger_refresh_fanout.sql — the precondition that refuses a COMMITTED-OPEN switch
+BEFORE sha256: 7da4e5904186d9790b7051530ec2820d2c5dd89bbec159154d8a7ac558a09644
+
+--- leg (a): precondition INTACT, a committed-TRUE row seeded by a sql step on arm A's twin
+  baseline  supabase/tests/test_ledger_refresh_fanout.sql — exit 0 (1.1s)
+  arm A                        exit   3  NO-IDENTITY  (1.1s)
+  restore   supabase/tests/test_ledger_refresh_fanout.sql — exit 0 (1.1s)
+biting: 0   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)
+❌ 1 defect(s):
+  wrong-first-failure   A                         supabase/tests/test_ledger_refresh_fanout.sql
+      gate exited 3 but no "TEST FAILED (…)" in its output was ATTRIBUTABLE to a raise in /var/folders/3y/kf3qlnbx58v3jnwys2pc89_r0000gn/T/mutation-runner-Emw9BL/slot-2/src/supabase/tests/test_ledger_refresh_fanout.sql — the failure is not attributable to any arm. EXPECTED: an ERROR/P0001 block under that path whose CONTEXT chain is exactly one "PL/pgSQL function inline_code_block line N at RAISE" frame resolving to /var/folders/3y/kf3qlnbx58v3jnwys2pc89_r0000gn/T/mutation-runner-Emw9BL/slot-2/src/supabase/tests/test_ledger_refresh_fanout.sql:488 (statement 202-1013, so psql prefix :1013 and CONTEXT line 287) or /var/folders/3y/kf3qlnbx58v3jnwys2pc89_r0000gn/T/mutation-runner-Emw9BL/slot-2/src/supabase/tests/test_ledger_refresh_fanout.sql:492 (statement 202-1013, so psql prefix :1013 and CONTEXT line 291). SIGHTINGS: none — the lane emitted no TEST FAILED (…) at all
+
+--- leg (b): SAME seeded row, precondition downgraded to a NOTICE
+  baseline  supabase/tests/test_ledger_refresh_fanout.sql — exit 0 (1.2s)
+  arm A                        exit   3  RED (identity ok)  (1.1s)
+  restore   supabase/tests/test_ledger_refresh_fanout.sql — exit 0 (1.1s)
+biting: 1   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)
+No defects in the narrowed scope.
+
+--- leg (c): precondition still a NOTICE, committed-TRUE row via --post-apply, NO mutation at all
+lane exit: 0
+TEST ABORTED: the COMMITTED public.system_flags row for ledger_refresh_enabled is TRUE on this database, so the ledger refresh is LIVE here. This file
+ALL 12 ARMS EXECUTED (A-L) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, bounded, and every one
+
+AFTER sha256: 7da4e5904186d9790b7051530ec2820d2c5dd89bbec159154d8a7ac558a09644
+restore: sha256 EQUAL
+
+NEUTER N1 on supabase/tests/test_ledger_refresh_composite_arm.sql
+BEFORE sha256: ac789bcdbbe63d745d43ccdc4be6afe46a8617873238720888d501e85b2deadb
+neutered: 2 arm-K raise(s) downgraded to NOTICE
+  baseline  supabase/tests/test_ledger_refresh_composite_arm.sql — exit 0 (1.2s)
+  arm K                        exit   3  SYNTHESISED(K)  (1.1s)
+  restore   supabase/tests/test_ledger_refresh_composite_arm.sql — exit 0 (1.3s)
+biting: 0   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)
+  file test_ledger_refresh_composite_arm.sql: sections 16 / judged 1 / annotated 17 / waived 0 / biting 0
+❌ 1 defect(s):
+  --------------------  ------------------------  ----
+  synthesised-identity  K                         supabase/tests/test_ledger_refresh_composite_arm.sql
+AFTER sha256: ac789bcdbbe63d745d43ccdc4be6afe46a8617873238720888d501e85b2deadb
+restore: sha256 EQUAL
+git status --porcelain (gate files): []
+
+NEUTER N2 on supabase/tests/test_ledger_refresh_composite_arm.sql
+BEFORE sha256: ac789bcdbbe63d745d43ccdc4be6afe46a8617873238720888d501e85b2deadb
+neutered: arm L RED-UNDER-M line deleted; markers now 16
+  supabase/tests/test_compute_jobs_error_kind_copy_parity.sql: 3 prose / 3 twin(s) / 0 waiver(s)
+  supabase/tests/test_ledger_refresh_composite_arm.sql: 17 prose / 16 twin(s) / 0 waiver(s)
+  file test_compute_jobs_error_kind_copy_parity.sql: sections 3 / judged 0 / annotated 3 / waived 0 / biting 0
+  file test_ledger_refresh_composite_arm.sql: sections 17 / judged 0 / annotated 16 / waived 0 / biting 0
+❌ 1 static defect(s):
+  parity                -                         supabase/tests/test_ledger_refresh_composite_arm.sql
+AFTER sha256: ac789bcdbbe63d745d43ccdc4be6afe46a8617873238720888d501e85b2deadb
+restore: sha256 EQUAL
+git status --porcelain (gate files): []
+
+NEUTER N3 on supabase/tests/test_ledger_refresh_composite_arm.sql — the precondition that refuses a COMMITTED-OPEN switch
+BEFORE sha256: ac789bcdbbe63d745d43ccdc4be6afe46a8617873238720888d501e85b2deadb
+
+--- leg (a): precondition INTACT, a committed-TRUE row seeded by a sql step on arm A's twin
+  baseline  supabase/tests/test_ledger_refresh_composite_arm.sql — exit 0 (1.1s)
+  arm A                        exit   3  NO-IDENTITY  (1.2s)
+  restore   supabase/tests/test_ledger_refresh_composite_arm.sql — exit 0 (1.2s)
+biting: 0   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)
+❌ 1 defect(s):
+  wrong-first-failure   A                         supabase/tests/test_ledger_refresh_composite_arm.sql
+      gate exited 3 but no "TEST FAILED (…)" in its output was ATTRIBUTABLE to a raise in /var/folders/3y/kf3qlnbx58v3jnwys2pc89_r0000gn/T/mutation-runner-MWidKA/slot-2/src/supabase/tests/test_ledger_refresh_composite_arm.sql — the failure is not attributable to any arm. EXPECTED: an ERROR/P0001 block under that path whose CONTEXT chain is exactly one "PL/pgSQL function inline_code_block line N at RAISE" frame resolving to /var/folders/3y/kf3qlnbx58v3jnwys2pc89_r0000gn/T/mutation-runner-MWidKA/slot-2/src/supabase/tests/test_ledger_refresh_composite_arm.sql:510 (statement 214-1039, so psql prefix :1039 and CONTEXT line 297) or /var/folders/3y/kf3qlnbx58v3jnwys2pc89_r0000gn/T/mutation-runner-MWidKA/slot-2/src/supabase/tests/test_ledger_refresh_composite_arm.sql:514 (statement 214-1039, so psql prefix :1039 and CONTEXT line 301). SIGHTINGS: none — the lane emitted no TEST FAILED (…) at all
+
+--- leg (b): SAME seeded row, precondition downgraded to a NOTICE
+  baseline  supabase/tests/test_ledger_refresh_composite_arm.sql — exit 0 (1.1s)
+  arm A                        exit   3  RED (identity ok)  (1.1s)
+  restore   supabase/tests/test_ledger_refresh_composite_arm.sql — exit 0 (1.1s)
+biting: 1   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)
+No defects in the narrowed scope.
+
+--- leg (c): precondition still a NOTICE, committed-TRUE row via --post-apply, NO mutation at all
+lane exit: 0
+TEST ABORTED: the COMMITTED public.system_flags row for ledger_refresh_enabled is TRUE on this database, so the ledger refresh is LIVE here. This file
+ALL 12 ARMS EXECUTED (A-L) and passed — the composite refresh arm is dormant on a missing row, a FALSE row and a RAISING read, partitioned from the si
+
+AFTER sha256: ac789bcdbbe63d745d43ccdc4be6afe46a8617873238720888d501e85b2deadb
+restore: sha256 EQUAL
+
+```
+
+RESTORE VERIFIED: sha256 equal x6; git status clean
