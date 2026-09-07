@@ -5,7 +5,7 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.2.1
 current_phase_name: SESSIONID-FENCE
 status: verified
-stopped_at: "164.2.1 SESSIONID-FENCE implemented and VERIFIED 5/5 on branch phase-164.2.1-sessionid-fence — NOT yet shipped, no PR opened. Code review found 0 Critical / 2 Warning / 4 Info; all six actionable findings fixed (52161f70..b12581f7). Verifier RE-TOOK both neuters at HEAD because five review-fix commits had changed both production files after plan 02 captured its evidence. Full suite 843 files / 14200 tests, 0 failures."
+stopped_at: "164.7 APPSETTINGS — waves 1-3 DONE and merged on phase-164.7-appsettings (pushed). AT THE WAVE-4 GATE, which is where the phase is designed to stop. Verified BY THE ORCHESTRATOR on the merged tree, not taken from executor reports: full mutation corpus EXIT 0 — files 46/73, arms 380/380/0, biting 380, lane-invocations 380 (tallies agree), lane-blocked 0, pending 0, no defects; lint-app-guc exit 0 with 0 findings and 5 lineage-annotated files, its --self-test still passing (the exemption did NOT disarm the gate); tsc clean; contracts 110/110; pytest ledger gates 39; npm run lint exit 0. Floors pinned FILES_FLOOR 46 / ARMS_FLOOR 380 / WAIVED_CEILING 0 after separation in BOTH directions. ⛔ REMAINING, both needing the founder: (1) wave 4 = three reviewers then the PR — merging supabase/migrations/** auto-applies to PROD; (2) wave 5 = PROD activation, which is TWO live ops not one because the ledger_refresh_fanout schedule is NOT registered on PROD (manifest has 14 jobs, none of them), plus a cron-manifest re-capture or the cron-drift prober trips. ⭐ PROD definer owner MEASURED safe: both functions owned by postgres with rolsuper=FALSE but rolbypassrls=TRUE, and check 2b tests the DISJUNCTION, so the migration will not abort mid-apply. Owed and NOT taken: a SHA-bound ubuntu run of the 46-file/380-arm corpus and the first ubuntu run of the two sql-gate-lint app-GUC steps."
 last_updated: "2026-09-07T02:29:22.265Z"
 last_activity: 2026-09-06
 last_activity_desc: "164.2 shipped as PR #749. Version bumped 0.77.15.0 -> 0.77.16.0 with a CHANGELOG entry (nothing in GSD or CI enforces either). Ship review: security auditor + 10 diff-scoped specialists; 5 file-disjoint fixers. TWO VACUITIES: the roster-render poster census compared a hand-typed length to a hand-typed literal while claiming to scan src/ (it read no files) — and that was the pin the founder's criterion-3 override explicitly rested on; and the PGRST204 assertion passed on the format string's static tail. Three more found while fixing: C-10's 400-day fixture could not detect the arm-swap it guarded, the provenance census's Rule C ran only on stamped sites, and a fixer caught its own draft assertion passing for the wrong reason. FOUR user-facing/data-integrity: the two SUCCESS writers sat outside the PGRST204 degrade while the docstring claimed full coverage (a succeeded compute was recorded failed, cash series heal-deleted, retry burned); durable writer sentences had made an internal table name + raw uuid and a Python exception class name reach user copy; validate-and-encrypt showed OUR stale service key as 'Unauthorized' on a key-connect form; the post-23505 read discarded both failure channels. Fixing stale anchors introduced 3 bare file:line cites that [SEAMPROSE-01] bans for going stale — caught by the full suite. Gates re-run by the orchestrator: vitest 14180/0 (Node 22), pytest 5430, mypy --strict 79 files, tsc clean, corpus 369 arms no defects. SECURITY.md added: 21/21 closed, threats_open 0, HIGH proven non-vacuous by three lane mutants that each abort the apply."
@@ -147,12 +147,36 @@ state_head: 41d57860
 
 # record-session. Values restored to the 2026-09-06 census after each of the two calls.
 
+# ⚠️ HAND-SET AGAIN 2026-09-07 (phase 164.7 planning). Deltas, each with its source:
+#   completed_phases 12 -> 13   — 164.2.1 SESSIONID-FENCE merged as 14dc1f5e (PR #752).
+#   completed_plans  116 -> 118 — 164.2.1's TWO plans, counted with
+#                                 `git ls-tree -r phase-164.2.1-sessionid-fence` because
+#                                 `.planning/phases/164.2.1-*/` DOES NOT EXIST on main:
+#                                 the `-pr` filter strips phase artifacts, so they reach
+#                                 main only at milestone archival. Counting from disk on
+#                                 this branch would have silently undercounted by 2.
+#   total_plans      119 -> 126 — 164.7's seven plans, checker PASS WITH CONCERNS at 65d1248c.
+#   percent          57 -> 62   — 13/21.
+# 2026-09-07 (later): completed_plans 118 -> 123 — 164.7 plans 01-05 executed, merged and
+#   RE-VERIFIED BY THE ORCHESTRATOR on the merged tree (full corpus exit 0: files 46/73,
+#   arms 380/380/0, biting 380, tallies agree, no defects). Plans 06/07 are human gates,
+#   so completed_phases stays 13 and percent stays 62 — the PHASE is NOT complete.
+# ⛔ The six clobbering handlers named below still must not be run from this checkout; the
+# 164.2.1 stripping above is a NEW, independent reason they would produce wrong integers.
+# ⛔ SEVENTH CLOBBERER, MEASURED 2026-09-07 (164.7 plan 01 execution, worktree agent-aaff4983):
+# `state.advance-plan` clobbers this block TOO — and it does so while RETURNING AN ERROR
+# ("Cannot parse Current Plan or Total Plans in Phase from STATE.md"). It wrote 7/108/97/33
+# over 13/126/118/62 and inserted a blank line after every comment line above. A failed
+# handler call is NOT a no-op. Restored by hand. Cumulative list is now SEVEN:
+# update-progress, begin-phase, add-roadmap-evolution, add-decision, record-metric,
+# record-session, advance-plan. The 164.7 executors therefore SKIPPED the standard
+# state-update step entirely, per this banner's own rule that it wins over that step.
 progress:
   total_phases: 21
-  completed_phases: 12
-  total_plans: 119
-  completed_plans: 116
-  percent: 57
+  completed_phases: 13
+  total_plans: 126
+  completed_plans: 123
+  percent: 62
 ---
 
 # Project State — Quantalyze

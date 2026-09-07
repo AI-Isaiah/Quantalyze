@@ -473,20 +473,45 @@ So the value can only be set per-session, which no out-of-band operator action c
 **Success Criteria**:
 
 1. Zero `current_setting('app.` occurrences remain in `supabase/migrations/**` outside a dated, commented lineage block — proven by a grep in CI, with a RED fixture showing the gate fires when one is reintroduced. A gate that cannot fire is this milestone's named defect.
-2. Each of the 4 settings is dispositioned BY NAME with its chosen mechanism and a migration that moves it: `analytics_service_key` → Vault, `analytics_service_url` / `admin_email` / `ledger_refresh_enabled` → the settings table. No setting is silently dropped, and `app.admin_email` (1 site, possibly dead) is either migrated or DELETED with the evidence that nothing reads it.
+2. Each of the 4 settings is dispositioned BY NAME with its chosen mechanism and a migration that moves it: `analytics_service_key` → Vault, `analytics_service_url` → the settings table, `ledger_refresh_enabled` → the EXISTING `system_flags` table. No setting is silently dropped.
+
+   ⚠️ **SCOPE AMENDMENT 2026-09-07 (phase 164.7 discuss, D-04) — `app.admin_email` is ANNOTATED, not "either migrated or DELETED".** The original wording offered exactly those two dispositions; measurement at `14dc1f5e` says neither is correct. `20260407164606_perfect_match.sql:31` is not a live reader — it sits inside a one-shot `DO $$ … END $$` block that ran ONCE when the migration applied on 2026-04-07 and can never run again (no function body, no cron command, no view; `grep -rln 'perfect_match\|v_admin_email' supabase/migrations/` returns that one file). **Migrating it** would re-point code that will never execute. **Deleting it** would edit an APPLIED migration so the repo no longer describes the statements that ran against PROD — a cosmetic grep win paid for with a false permanent record. Disposition: a dated, commented lineage block, which is the exemption criterion 1 already defines, carrying the evidence that nothing reads it. ⚠️ Criterion 1's gate is a grep and a grep cannot tell a comment from a statement, so `20260408113029_cron_heartbeat.sql:113` — an `app.analytics_service_key` mention inside a `--` comment, which the ROADMAP's original "12 read sites / key ×5" census counted as a read site and which is NOT one — gets a lineage block on the same grounds. The executable census is **11 sites**, not 12.
 3. ⭐ **The 161.1 activation switch is THROWN on PROD and observed working** — this phase is not done when the code changes, it is done when `enqueue_ledger_refresh_for_strategies` returns a non-zero count on a real tick and `ledger_refresh_staleness.days_since_last_return` goes DOWN for the mt5 cohort. ⚠️ A green `compute_jobs` row is NOT success: the defect 161.1 fixes wore a green badge for weeks (`process_key_long` returns DONE and leaves `strategy_analytics` untouched). Check the view, not the job.
 4. The out-of-band kill switch is REAL and proven by measurement: with the schedule still registered and firing, flipping the setting makes the next tick enqueue 0 — observed, not asserted. This is the property the rejected workaround would have destroyed.
 5. `docs/runbooks/ledger-refresh-go-live.md` is corrected at every step whose privilege claim was falsified — Step 1a/1b/1c and the Rollback section — and records the 2026-09-05 measurement that closes its own open question OQ-3. ⚠️ The runbook currently instructs an operator to run two statements that BOTH 42501, then verify in a new session; anyone following it today stalls at step one.
 6. Three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) before any migration applies, per project rule. Merging `supabase/migrations/**` to `main` auto-applies to PROD.
 7. `VAC04-ARMS-OBSERVE`: the SUMMARY quotes the `VAC-04 — repo-vs-PROD function body drift` step's OWN output from this phase's migration PR verbatim and names, by line reference, which branch it took. If that branch was again the `:198` short-circuit, the SUMMARY says exactly that and records the roll-forward to Phase 164.5 — it does NOT claim the arms ran. ⚠️ A green `migration-drift-check` job is not evidence: the whole point of `[VAC04-ARMS-UNRUN]` is that the job was green while the arms never executed.
 
+⭐ **CARRIED OUT 2026-09-07 — `BASELINE-CONTENT-DRIFT`, a MEASUREMENT this phase makes and a
+HAND-OFF it does not fix.** ⛔ Deliberately NOT an eighth success criterion: this phase's seven plans
+were already written, checked and executing when it was found, and a criterion no plan delivers is a
+phase that fails its own bar. It is recorded here because 164.7 is where it was measured and 164.7 is
+what makes it worse.
+
+**Measured at `14dc1f5e`:** `supabase/schema/baseline.sql` still contains the SUPERSEDED Lock B —
+`grep -c ledger_refresh_enabled` returns **4** — and `grep -rn baseline.sql .github/workflows/*.yml`
+returns **0**. Nothing in CI reads that file today. This phase's `20260907130000` migration replaces
+both ledger bodies, so the committed baseline becomes staler the moment 164.7 lands.
+
+⚠️ **Phase 164.5 criterion 2 does NOT catch this, and that is the point of the hand-off.** That gate
+fails "on a one-byte change to `baseline.sql` without a matching `BASELINE.md` update" — a CO-EDIT
+gate. 164.7 changes no byte of `baseline.sql`, so no `BASELINE.md` update is owed and the co-edit gate
+stays GREEN while the content silently diverges from the migration chain. Co-editedness and
+correctness are different properties. Booked as 164.5 criterion 8.
+
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries CRON-DRIFT-01 (the GUC half only — the LIVE-row repair is 164.5 item 7), `VAC04-ARMS-UNRUN` (the OBSERVATION half only — the credential swap `[VAC-04-ROLE]` is NOT this phase's), and the 161.1 ACTIVATION human-verification item in `161.1-VERIFICATION.md`, which this phase exists to unblock — read each before planning, do not re-derive
 **Depends on:** Phase 164. ⛔ **MUST run BEFORE Phase 164.5**, whose item (7) writes a `cron.job` repair migration that should consume this phase's settled mechanism rather than inventing a parallel one.
-**Plans:** 0 plans
+**Plans:** 7 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.7 to break down)
+- [ ] 164.7-01-PLAN.md — Criterion-1 gate: `scripts/lint-app-guc.mjs` (hermetic, raw-text, exact-count lineage header + script-side allowlist), red/green fixtures, vitest pin, two steps in `sql-gate-lint`; corpus reads 12 findings / 5 files by design until plan 05 (wave 1)
+- [ ] 164.7-02-PLAN.md — `20260907120000`: `system_settings` (D-03) + `match_engine_cron_tick()` reading Vault + the table (D-02 as DRIFT-02), schedules nothing; vault stand-in fixture 32; 7-arm gate; types block (wave 1)
+- [ ] 164.7-03-PLAN.md — `20260907130000`: both ledger fan-outs re-based with Lock B as a fail-CLOSED `system_flags` read (D-01/C-03), seed FALSE; fixture 31; snapshots regenerated; pytest gates re-anchored (wave 1)
+- [ ] 164.7-04-PLAN.md — Re-point all 28 edit-kind twins at the superseding migration, table activation, arms A/K/L (missing row / FALSE / raising read ⇒ 0) in both ledger gates, 17/17 RED each (wave 2)
+- [ ] 164.7-05-PLAN.md — Floors separated both directions and pinned (46 files); five dated lineage headers + allowlist → gate 0 findings (D-04/D-05); ledger + match-engine runbooks corrected (two live ops, manifest re-capture, OQ-3 closed, #747 note); CLAUDE.md/TODOS currency (wave 3)
+- [ ] 164.7-06-PLAN.md — Three reviewers before the PR (D-07); ship checkpoint; VAC-04 output READ and branch named by line, ack EARNED via `--diff-bodies` (D-08); dry-run + expected `sql-tests`/VAC-08 reds read; WINDOWS 25 dispositioned (wave 4, checkpoint)
+- [ ] 164.7-07-PLAN.md — PROD activation as a founder `checkpoint:decision` (D-06): measured pre-flight, two live ops + view-based observation + kill-switch proof + manifest re-capture, or DEFER with the blocker named; closes the 161.1 ACTIVATION item (wave 5, checkpoint)
 
 ### Phase 164.3: VACUITY — a control that cannot fail must be caught by machine, not by red team (INSERTED)
 
@@ -1274,6 +1299,7 @@ Plans:
 5. VAC08-LEDGER-32: every one of the 32 unledgered migrations is applied to TEST or dispositioned by name; VAC-08 reports zero unledgered migrations on its next credentialed run.
 6. VAC-07: the concurrent csv-finalize spec exists on the pg-lane, was observed RED with the advisory lock removed and GREEN with it restored, and only then does REQUIREMENTS flip VAC-07 to Complete.
 7. CRON-DRIFT-01-REPAIR: after the migration applies, Phase 164.1's cron-drift arm reports ZERO drift for `match_engine_cron` against the committed manifest, and `grep -rn decrypted_secrets supabase/migrations/` returns the new migration. The pre-flight ABORTS non-zero WITHOUT writing when the live jobid 1 command does not match the manifest — proven by running it against a deliberately mismatched manifest, not by inspection.
+8. ⭐ **BASELINE-CONTENT-DRIFT (carried in from Phase 164.7, 2026-09-07): the baseline is pinned to the MIGRATION CHAIN, not merely to its own changelog.** Criterion 2 above is a CO-EDIT gate — it fires on a byte change to `baseline.sql` with no `BASELINE.md` update. It cannot fire when a migration changes a function body and `baseline.sql` is left untouched, which is exactly what Phase 164.7 does. MEASURED at `14dc1f5e`: `baseline.sql` still carries the superseded Lock B (`grep -c ledger_refresh_enabled` = **4**) and **zero** workflows in `.github/workflows/` reference the file at all. **Done when** a gate compares the committed baseline against the applied migration chain and FAILS on a body that disagrees — proven by mutation in BOTH directions (regenerate the baseline and observe GREEN; revert one function body and observe RED naming that function), never by inspection. ⛔ This must land BEFORE any squash: collapsing 263 migrations onto an unpinned, already-drifted baseline freezes the drift into the new floor permanently. ⚠️ 44 function names in `supabase/migrations/**` carry more than one definition (`mark_compute_job_done` × 9), which is the weight a squash would reclaim and the reason the ordering matters.
 
 **Requirements**: VAC-07 (deferred here from 164.3) + TODOS entries DRIFT-04, DRIFT-05, VAC08-LEDGER-32, CRON-DRIFT-01 (the REPAIR half only — the DETECT half is Phase 164.1's), `[VAC-07-DEFER]` — read each before planning, do not re-derive
 **Depends on:** Phase 164.4.1 (the pg-lane with pg_cron is the substrate), Phase 164.3 (VAC-04/VAC-08 credentialed jobs that (4b) and (5) ride), Phase 164.1 (its committed cron manifest is (7)'s oracle — (7) cannot be written before it exists), **Phase 164.7** (item (7) must consume 164.7's settled `app.*` replacement mechanism, not invent a second answer — the `20260408215026` GUC design is exactly what 164.7 retires)

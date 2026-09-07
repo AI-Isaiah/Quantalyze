@@ -1,3 +1,7 @@
+-- APP-GUC-LINEAGE: retired 2026-09-07; occurrences: 5; successor: 20260907120000_analytics_service_settings_and_vault_tick.sql; reason: five app-namespace sites of three kinds. TWO are preflight reads inside the one-shot DO block that ran once when this migration applied on 2026-04-08. TWO are baked into the $cron$ command literal this migration WROTE into the job row — a row superseded by 20260408215026 (same jobname) and then hand-repaired on PROD onto Vault on 2026-09-01, captured verbatim in scripts/prod-prober/cron-manifest.json jobid 1, so this text has had no live consumer since. ONE is a mention inside the secret-hygiene `--` comment in section 3 below (line 113 of the pre-annotation file; this header shifts it), which the gate counts because a grep cannot tell a comment from a statement (D-05). A FRESH apply of this file would still write the GUC-reading command — a latent-on-rebuild defect, NOT an ongoing outage. The mechanism PROD actually runs is described by the successor.
+-- The successor defines public.match_engine_cron_tick(): key from vault.decrypted_secrets,
+-- url from public.system_settings, a loud RAISE on either absence. Repointing the LIVE job
+-- row at it is Phase 164.5 item 7 and is deliberately out of scope for Phase 164.7.
 -- Migration 013: pg_cron heartbeat + match engine schedule (Sprint 1 T1.5 + T1.5a)
 --
 -- Observability for the FastAPI match engine cron.

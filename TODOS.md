@@ -1323,6 +1323,90 @@ true for 146 and half of 142–145, and **false for 141**.
       write to someone else's substrate, which is why plan 07 did not perform it and plan 10
       books it instead of doing it.
 
+- [x] **RESOLVED 2026-09-07 — both migrations (and a third) are now APPLIED to shared TEST.**
+      Applied in ascending version order through the authenticated TEST connection, each gated by
+      its own self-verify block: `20260823120000_revoke_api_keys_insert` (which was ALSO absent —
+      see the correction below), then `20260907120000`, then `20260907130000`.
+      **Transcription was verified, not assumed:** `pg_proc.prosrc` is exactly the text between
+      the dollar-quote delimiters, so all three function bodies were md5-compared against the repo
+      files — `enqueue_ledger_refresh_for_strategies`, `enqueue_ledger_composite_refresh` and
+      `match_engine_cron_tick` all MATCH byte for byte. End state measured on TEST:
+      `system_flags.ledger_refresh_enabled = FALSE` (dormant), the `analytics_service_url` row
+      seeded, the allow-list CHECK constraint present, and **zero** `cron.job` rows matching
+      `ledger_refresh` — nothing was scheduled or activated.
+      ⚠️ **THE "14 MISSING MIGRATIONS" READING WAS WRONG, and the method is the reusable lesson.**
+      Comparing repo filenames against `schema_migrations.version` said 14 were missing. Reading
+      the `name` column instead showed almost all of them already applied — several under
+      RE-STAMPED versions (`20260827130000_sanitize_user_revoke_strategy_shares` is ledgered at
+      version `20260828062101`), some under a bare version string, and four applied TWICE. Only
+      THREE were genuinely absent, confirmed by object effect rather than by the ledger:
+      `authenticated` still held INSERT on `api_keys`, `system_settings` did not exist, and
+      neither fan-out body read `system_flags`. ⛔ **Never compute TEST drift from
+      `version` alone — join on `name`, then confirm by probing the object.** Re-applying the
+      other eleven would have re-run their self-verify blocks against already-current state.
+      The original entry follows, as the dated record of what was expected:
+
+- [ ] **`[164.7-TEST-APPLY-APPSETTINGS]` Two migrations from Phase 164.7 are RED on shared TEST
+      from this PR's first CI run onward, BY DESIGN, and must be hand-applied (booked 2026-09-07,
+      Phase 164.7 plan 05; the reds are named in `164.7-02-SUMMARY.md` → "Expected reds, named
+      before the PR" and in `164.7-04-SUMMARY.md`).**
+      ⚠️ **STATE THE EXPECTED REDS BY NAME so nobody reads them as coupling regressions.** CI's
+      `sql-tests` runs every `supabase/tests/test_*.sql` against `TEST_SUPABASE_DB_URL`, and
+      **nothing applies migrations to TEST** (`SKIP-01`, `CI-MIGRATE-01` — `sql-tests` has no
+      apply step and the migrate workflow is PROD-only). Each affected gate opens with an
+      applied-ness probe that is absence-is-failure by design, so until
+      `20260907120000_analytics_service_settings_and_vault_tick.sql` and
+      `20260907130000_ledger_refresh_switch_to_system_flags.sql` reach TEST:
+      - **`test_analytics_service_settings_and_vault_tick.sql` → `TEST FAILED (0)`** — arm 0 is
+        the applied-ness probe for `20260907120000`.
+      - **`test_ledger_refresh_fanout.sql` → `TEST FAILED (0)`, cause (iii)** — arm 0's probe now
+        also requires the fail-CLOSED `system_flags` body `20260907130000` deploys.
+      - **`test_ledger_refresh_composite_arm.sql` → `TEST FAILED (0)`, cause (iii)** — same probe,
+        composite body.
+      - **VAC-08 → `NOT baselined`** for BOTH new migration ledger rows. ⛔
+        `scripts/vac08-ledger-baseline.txt` may only SHRINK — do not widen it to silence this.
+      **The remedy, as ordered steps — do not compress them:**
+      1. Run the which-database marker query from `CLAUDE.md` ("Which database am I on?") —
+         `SELECT shobj_description(oid,'pg_database') FROM pg_database WHERE datname =
+         current_database();` — against `$TEST_SUPABASE_DB_URL`, and **proceed only when it names
+         TEST**. `current_database()` is `postgres` on both projects and proves nothing; a NULL
+         marker means re-set it first, not proceed on a guess.
+      2. `psql "$TEST_SUPABASE_DB_URL" -f supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql`
+      3. `psql "$TEST_SUPABASE_DB_URL" -f supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql`
+         — **in that timestamp order**; 130000 re-bases bodies 120000 never touches, but the
+         ledger order is what VAC-08 compares.
+      4. Re-run `sql-tests` and **record the first green run's SHA in this entry**, per the
+         SHA-binding rule — a settled green board can belong to an ancestor commit.
+      ⚠️ **ONE UNKNOWN, to be READ OFF the first `sql-tests` log rather than predicted**
+      (`164.7-RESEARCH.md` § Q1, Open Question 3): whether shared TEST has a `vault` schema at
+      all, and if it does, whether the CI role may `SELECT` from `vault.decrypted_secrets` and
+      `DELETE` against a view with computed columns. If it cannot,
+      `test_analytics_service_settings_and_vault_tick.sql` turns `TEST FAILED (V1-SETUP)` AFTER
+      the apply rather than green. ⛔ Do NOT convert that guard to a skip — a skip is how an
+      unmeasured substrate starts reading as a pass.
+      ⛔ **Not `supabase db push`, not `db reset --linked`, not `--project-ref`.** This checkout's
+      Supabase CLI is linked to **PRODUCTION** (`supabase/.temp/project-ref`), so every one of
+      those targets prod from this directory. ⚠️ TEST is SHARED with other people's CI; this is a
+      write to someone else's substrate, which is why plan 05 books it instead of doing it.
+
+- [ ] **`[164.7-VAULT-ABSENT-RULE]` The `vault-absent` cron-hygiene rule and a Phase 164.5 repoint
+      of jobid 1 are in direct conflict, and must move in ONE change (booked 2026-09-07, Phase
+      164.7 plan 05, from `164.7-RESEARCH.md` § Q1 Open Question 2).**
+      `scripts/prod-prober/arms/cron-drift.mjs`'s `vault-absent` rule fires when
+      `name === "match_engine_cron" && !text.includes("vault.decrypted_secrets")` — it requires
+      that literal string in the job's COMMAND TEXT. Phase 164.7 shipped
+      `public.match_engine_cron_tick()` (migration `20260907120000`), which reads Vault INSIDE its
+      body. So the moment Phase 164.5 item (7) repoints the live row to
+      `SELECT public.match_engine_cron_tick();`, the command text no longer contains the literal
+      and the rule fires **against a correct repair**. ⛔ Do not discover this at repair time and
+      "fix" it by keeping a decorative `DO` wrapper around the call purely to satisfy a grep —
+      that is a gate shaped by its own false positive. **Three things move together, in one
+      commit:** (a) the rule — accept EITHER the literal or a call to a function whose committed
+      body contains it, and ship a RED fixture for the new arm, because a widened rule with no
+      fixture is a rule nobody has watched fail; (b)
+      `scripts/prod-prober/cron-manifest.json`, re-captured from PROD after the repair; and (c)
+      the live row itself. Owner: Phase 164.5 item (7).
+
 - [ ] **`[164.2-TYPES-REGEN-CHECK]` After the migration PR merges and auto-applies to PROD,
       re-derive the six `database.types.ts` lines that were hand-extended, and confirm no
       failure upsert was lost in the schema-cache window (booked 2026-09-06, Phase 164.2 plan 10;
@@ -2196,6 +2280,21 @@ of its 14 `command` strings was read individually and approved for publication b
 `current_setting('app.analytics_service_key')`, which returns 42501 on this platform. Both arms
 read GREEN on live run 34018874984.
 
+⭐ **DATED 2026-09-07 (Phase 164.7 APPSETTINGS) — the GUC half of `CRON-DRIFT-01` is CLOSED; the
+LIVE-ROW half stays open for Phase 164.5 item (7).** What 164.7 closed: the repo now DESCRIBES the
+mechanism PROD has been running since the 2026-09-01 hand repair — `public.match_engine_cron_tick()`
+in `20260907120000_analytics_service_settings_and_vault_tick.sql`, key from `vault.decrypted_secrets`,
+URL from `public.system_settings`, a loud `RAISE` on either absence — so a rebuild from migrations
+no longer reproduces an unrunnable job, and `20260408113029` / `20260408215026` carry dated
+`-- APP-GUC-LINEAGE:` headers naming that successor. A CI gate (`scripts/lint-app-guc.mjs`, wired
+into `sql-gate-lint`) now fails any NEW app-GUC reader written into `supabase/migrations/**`.
+⛔ What is NOT closed: the live `cron.job` row still runs the hand-written `DO` block rather than
+the callable, so repo and PROD agree in MECHANISM but not in TEXT. Repointing it is 164.5 item (7)
+— and see the `164.7-VAULT-ABSENT-RULE` entry above (named without its brackets on purpose: the
+bracketed form is the entry's unique key and a cross-reference must not create a second one),
+because the repoint trips the `vault-absent` hygiene rule unless the rule, the manifest and the
+row move in the same change.
+
 ⭐ **Standing rule until CRON-OBS-01 lands: `cron.job_run_details.status = 'succeeded'` is NOT
 evidence that a pg_net-based job worked.** Read `net._http_response`.
 
@@ -2694,6 +2793,173 @@ verifier pass and a green 88-file regression gate had all cleared the phase.
   Same for Sentry (`SENTRY_DSN` unset locally). Both need a deployed environment to become real
   evidence. Recorded as blocked deliberately: reporting them as passes is the vacuity this phase
   spent its whole red-team budget on.
+
+### ⚠️ GATE-COMMENT-D2-FALSE — two gate comments + a SUMMARY assert a measurement that is FALSE (booked 2026-09-07, phase 164.7 red-team)
+
+`test_ledger_refresh_fanout.sql` (arm 0 probe comment, ~:270-274), its composite twin, and
+`164.7-04-SUMMARY.md` Decision 3 all justify the comment-stripping probe by asserting that the
+migration's own body comments contain the needle, so a RAW `pg_get_functiondef` match would be
+satisfied by PROSE.
+
+⛔ **Measured false on the live stored bodies:**
+
+```
+proname                                | needle_in_comments | needle_in_code
+enqueue_ledger_composite_refresh       |                  0 |              1
+enqueue_ledger_refresh_for_strategies  |                  0 |              1
+```
+
+The needle is `FROM public\.system_flags`, not `system_flags`. The comments carry the latter and
+never the former. A raw probe on a body with the code removed and the comments intact would NOT
+have passed.
+
+✅ **The CHANGE is correct and mandatory anyway** — `sql-gate-lint` rule
+`[R2-functiondef-comment-strip]` rejects a raw `pg_get_functiondef` match, and `sql-gate-lint` is
+in the `frontend` aggregator's `needs:`, so the plan's original form was unshippable. Over-strip
+risk is nil today (`inline_dashdash_lines = 0` on both bodies) and fail-CLOSED in principle: the
+assertion is `v_body !~ needle`, so stripping too much can only produce a spurious RED, never a
+false green.
+
+**Fix:** reword all three to cite R2 and the LATENT risk ("a future comment line could supply the
+needle") instead of claiming a measurement that does not hold. Prose/citation defect — per the
+stopping rule this is recorded, NOT blocking.
+
+### ⚠️ LANE-FORCERLS-GAP — the pg-lane's `compute_jobs` lacks the FORCE RLS that PROD has (booked 2026-09-07, phase 164.7 red-team)
+
+Measured on a lane: `compute_jobs` has `relforcerowsecurity = f`. PROD sets
+`ALTER TABLE compute_jobs FORCE ROW LEVEL SECURITY` (and `compute_job_kinds`) in
+`20260516104201_compute_jobs_audit_2026_05_07_residual.sql:209-210`, which is not in every gate's
+apply list.
+
+**Why it matters:** under FORCE RLS a table OWNER is *not* exempt. So any gate that reaches
+`compute_jobs` by making a role the table owner behaves differently on the lane than it would on
+PROD — the lane is more permissive. A gate could pass on the lane for a reason that does not hold
+in production.
+
+✅ **Scope checked before booking:** `grep -rn "FORCE ROW LEVEL SECURITY" supabase/migrations/`
+shows only `compute_jobs`, `compute_job_kinds` and (guarded) `weight_snapshots`. **`system_flags`
+is never FORCEd**, so phase 164.7's own ownership scaffolding IS faithful; this is a pre-existing
+gap in the three original tables, not something 164.7 introduced.
+
+**Fix:** add the FORCE-RLS statements to the pg-lane fixtures (or to the affected apply lists) so
+the lane's row-security posture matches PROD. Guard fidelity — recorded, not blocking.
+
+### ⚠️ BYPASSRLS-POLICY-UNMUTATABLE — 22 `*_service_*` RLS policies CANNOT be proven by dropping them (measured 2026-09-07, phase 164.7 plan 02)
+
+`service_role` is **BYPASSRLS** — on the pg-lane and on Supabase. So a policy that grants
+`service_role` access is **belt-and-braces**: dropping it changes no observable behaviour, because
+the role never consulted RLS in the first place.
+
+**Measured, not reasoned:** plan 02 authored a RED-UNDER twin doing
+`DROP POLICY system_settings_service_all` and the runner reported `arm R3 exit 0 NO-RED`. The twin
+was replaced with an over-broadening of the migration's own `REVOKE ALL … FROM anon` to
+`FROM anon, service_role`, which fails at the GRANT layer instead and bites correctly.
+
+**Scope of the property, measured:** `grep -rhoE "CREATE POLICY [a-z0-9_]*service[a-z0-9_]*"` over
+`supabase/migrations/**` returns **22** distinct names (`allocator_equity_derived_service_all`,
+`feature_flags_service_all`, `csv_daily_returns_service_role_all`, …). Every one has this property.
+The repo already knew it in prose — two migrations from July/August carry
+`-- service_role/BYPASSRLS` comments — but it was never connected to gate authoring.
+
+✅ **The shipped corpus is CLEAN.** Checked by parsing every `RED-UNDER-M` object in
+`supabase/tests/test_*.sql` for a twin mutating a service-role policy: **0 hits**. So none of the
+369 shipped arms is silently non-biting for this reason. This is a trap for FUTURE authors, not a
+live defect.
+
+**How to apply:** to prove a service-role access path, mutate the **GRANT/REVOKE layer** or the
+function's own guard — never the policy. A twin that drops a `*_service_*` policy and still passes
+is not evidence of anything.
+
+### ⛔ GSD-04 — `state.advance-plan` CLOBBERS STATE.md while RETURNING AN ERROR (measured 2026-09-07, phase 164.7 plan 01)
+
+**A failed handler call is not a no-op.** Measured by the 164.7-01 executor: `state.advance-plan`
+returned
+
+```json
+{"error":"Cannot parse Current Plan or Total Plans in Phase from STATE.md"}
+```
+
+and *had already written* `7/108/97/33` over the hand-set `13/126/118/62`, plus inserted a blank
+line after every comment line in the progress banner. The error was reported AFTER the damage.
+
+⚠️ **A second one was found the same day.** `gsd-tools windows append` (phase 164.7 plan 02) also
+silently rewrote `.planning/STATE.md` as a SIDE EFFECT of appending a WINDOWS entry — bumping
+`state_head`/`last_updated` and inserting blank lines through the hand-set 2026-09-07 comment block.
+It is not a progress-integer clobberer, but it reformats the very banner that carries the
+prohibition list, so the warning erodes itself. That executor reverted with
+`git show HEAD:<path> >` rather than a blanket restore.
+
+⚠️ This makes **seven** measured STATE.md progress clobberers, not six. The banner in
+`.planning/STATE.md` names the other six (`state.update-progress`, `begin-phase`,
+`add-roadmap-evolution`, `add-decision`, `record-metric`, `record-session`); `advance-plan` is new
+and is the first one observed to clobber *on its failure path*.
+
+**Why the integers are wrong every time:** these handlers recount from LOCAL DISK. On a phase branch
+that is fine only by luck — `.planning/phases/164.2.1-*/` does not exist on `main` at all, because
+the `-pr` filter strips phase artifacts (they reach main only at milestone archival). A recount from
+a worktree is wronger still: it sees 1 of 7 SUMMARYs.
+
+**How to apply:** treat the STATE.md banner's prohibition list as covering `advance-plan` too, and
+do not assume a handler that errored left the file alone — `shasum` it before and after, or read it
+back. `roadmap.update-plan-progress` has the same disk-counting shape and must be run ONCE after all
+waves merge, never per-executor.
+
+Tooling/process, not user-facing — recorded, not blocking, per the stopping rule.
+
+### ⚠️ PLANVERIFY-CD-01 — plan `<automated>` blocks hardcode the PRIMARY checkout path, which is wrong under worktree isolation (measured 2026-09-07, phase 164.7 wave 1)
+
+Every `<automated>` verify in this repo's plans opens with an absolute
+`cd /Users/<user>/claude-projects/quantalyze`. That is correct when the executor runs in
+the primary checkout, and **wrong the moment the phase runs with `isolation="worktree"`** — the `cd`
+walks OUT of the agent's worktree and measures the primary tree, which contains none of that
+executor's new files.
+
+⛔ **The dangerous half is not the failure, it is the SUCCESS.** A verify that asserts *zero*
+occurrences of something (`grep -c … = 0`, "no stray token", "gate reports no findings") PASSES
+VACUOUSLY when pointed at a tree where the file does not exist yet. That is the same
+cannot-fail class the 164.7 plan-checker already caught twice inside these very plans.
+
+Measured: the 164.7-01 executor hit this and repointed the `cd` at its own worktree, changing only
+the path and keeping every other byte (including the `{ …; test $? = 1; }` groups). It reported the
+deviation. The two sibling executors were NOT warned, so the orchestrator must RE-RUN their verifies
+in the correct tree before accepting any wave-1 result rather than trusting the self-reports.
+
+**Newly exposed, not longstanding:** worktree parallelism was only enabled on 2026-09-07 after a
+stale memory claiming worktrees fork from `origin/HEAD` was disproved by measurement. Every prior
+phase ran sequentially in the primary checkout, where the hardcoded `cd` was a no-op.
+
+**Fix:** plans should open verifies with a repo-root resolution that works in both
+(`cd "$(git rev-parse --show-toplevel)"`) rather than an absolute path. Cheap, and it makes the
+verify measure whatever tree it is actually running in.
+
+### ⚠️ GSD-03 — `gsd-tools query init.plan-phase` emits INVALID JSON whenever a prior phase's verify command contains SQL dollar-quoting (booked 2026-09-07, phase 164.7 planning)
+
+**Measured at `14dc1f5e`**, running `node ~/.claude/gsd-core/bin/gsd-tools.cjs query init.plan-phase 164.7`
+(gsd-core 1.12.0). The output fails `json.loads` with
+`JSONDecodeError: Invalid \escape: line 54 column 242`.
+
+The offending value is a `prior_verify_commands[].command` entry harvested from Phase **164.4.1**
+(the pg_cron lane task). That command contains a plpgsql anonymous block written through `printf`,
+so the shell text carries `DO \$\$ DECLARE …`. The emitter does not re-escape those backslash
+runs for JSON, so the blob it prints cannot be parsed by the very consumer the workflow spec
+tells the orchestrator to parse it with ("Parse JSON for: `researcher_model`, …").
+
+⚠️ **This is upstream (`@opengsd/gsd-core`), not ours** — but WE trigger it, and we will keep
+triggering it: `prior_verify_commands` (#2401) is deliberately surfaced at every context window,
+and this repo's verify commands are full of SQL. Any future phase whose nearest prior phase used a
+dollar-quoted block hits the same wall.
+
+**Workaround used during 164.7 planning** (recorded so the next person does not re-derive it):
+strip the `prior_verify_commands` array by bracket-matching on the raw text and parse the
+remainder. The key is not needed for planning; every other field parses cleanly.
+
+⛔ Do NOT "fix" this by removing dollar-quoting from our verify commands — the commands are
+correct and the emitter is wrong. If it needs a local fix, it belongs in the shim, not in our
+plans.
+
+**Done when:** either gsd-core escapes the value correctly, or our launcher wrapper strips the key
+before the orchestrator parses it. Guard hygiene / tooling, not user-facing or data-integrity — so
+recorded rather than blocking, per the stopping rule.
 
 ### ⚠️ GSD-01 — `/gsd-plan-phase` cannot add ONE plan to a partly-executed phase (booked 2026-08-28)
 
@@ -6472,7 +6738,7 @@ expires. Close them when 164.3.1 closes, not before.
 - [ ] **[MUT-I03] document that concurrent agents editing the tree make the mutation runner's own `dirty-checkout` gate red for unrelated reasons** (reviewer R4-I03, Info) — during round 4 the runner's `dirty-checkout` detector fired with `M src/__tests__/audit-coverage.test.ts`; the diff was another agent's uncommitted `it("PROBE multi-line template with unmatched slash-star", …)` with a `console.log` and no assertion, independently probing [AUDCOV-01]. Reverted, not at HEAD, not in the reviewed range. Two observations worth keeping: (1) `dirty-checkout` works and is worth keeping; (2) the next operator should not chase a red that belongs to a concurrent editor. **Fix:** one line in the runner's header naming the interaction.
 - [ ] **[MUT-W02] the per-job tolerance pin asserts ONE literal spelling, so an equivalently-written tolerance arm widens the aggregator silently** (reviewer R4-W02, Warning) — `src/__tests__/lint-sql-gates.test.ts:341-360`. The posture arm is the right design and the POPULATION half is genuinely derived from `ci.yml` (confirmed: it fails if a fourth job appears). The `tolerance: null` half is only ``const arm = new RegExp(`\\[ "\\$name" = "${job}" \\]`)``. That is one spelling; `[ "${name}" = "sql-mutation" ]`, `case "$name" in sql-mutation)`, `[[ $name == sql-mutation ]]`, or an `if:` on the job itself all install a tolerance the pin cannot see. All three arms in `ci.yml` use the pinned spelling today, so this is future drift, not a live hole — but "cannot silently widen" is the property the fixer claimed and it is not what is asserted. **Fix:** parse the aggregator's `if/elif` chain and range over its branch conditions (`/"\$\{?name\}?"?\s*(?:=|==)\s*"?([a-z0-9-]+)"?/g`), asserting `named.has(job) === (tolerance !== null)` per job, plus a `named.size > 2` floor so the arm cannot pass on an empty set.
 
-- [ ] **[VAC08-LEDGER-32] 32 repo migrations have no TEST ledger row — measured, baselined, and NOT yet applied** — surfaced 2026-08-30 by VAC-08's first working run (CI 33277829284, PR #724). The count fell 253 → 56 → 53 → 32 as each of four ledger naming conventions was found by the gate's own shape diagnostic; the enumeration is now closed (a basename is `<ts>_<desc>` and `name` has held the whole thing, the description, the timestamp, or nothing — there is no fifth substring), so **32 is real drift, not a join bug**. Arithmetic closes in both directions: 237 of 239 ledger rows now match a repo file and 230 of 262 repo files match a ledger row, leaving no spare rows to explain the 32. They are carried in `scripts/vac08-ledger-baseline.txt` as a dated RATCHET — the gate still fails loud on any *new* migration that misses TEST, and a baselined entry that later turns up present is a hard failure ("delete this line"), so the file can only shrink. ⚠️ **LEDGER ABSENCE IS NOT OBJECT ABSENCE.** These have no `schema_migrations` row; whether their objects exist in TEST (hand-applied, or installed by a later migration) is a different question this gate does not answer, and the body half of VAC-08 reports all four checked function bodies MATCHING the committed snapshot. Do not read the list as "TEST is missing 32 features". ⚠️ **Four are security migrations** — `20260529150000_lock_profile_privileged_columns`, `20260814120000_wizard_rpcs_revoke_authenticated`, `20260715120000_grant_anon_execute_current_user_has_app_role`, `20260823120000_revoke_api_keys_insert` — so any RLS/SQL test asserting those grants may be asserting them against a schema that never received them; worth a targeted object-level probe before trusting those tests. ⛔ `20260823120000_revoke_api_keys_insert` refuses BY DESIGN on a database it cannot identify and may never be applicable to TEST. ⛔ **Do NOT hand-apply these to TEST to shorten the list** — TEST is shared with other people's CI; that is a founder decision, not an agent one. Owner: Phase 164.5 (which already owns the drift-gate family), or a founder call to apply them.
+- [ ] **[VAC08-LEDGER-32] 32 repo migrations have no TEST ledger row — measured, baselined, and NOT yet applied** — surfaced 2026-08-30 by VAC-08's first working run (CI 33277829284, PR #724). The count fell 253 → 56 → 53 → 32 as each of four ledger naming conventions was found by the gate's own shape diagnostic; the enumeration is now closed (a basename is `<ts>_<desc>` and `name` has held the whole thing, the description, the timestamp, or nothing — there is no fifth substring), so **32 is real drift, not a join bug**. Arithmetic closes in both directions: 237 of 239 ledger rows now match a repo file and 230 of 262 repo files match a ledger row, leaving no spare rows to explain the 32. They are carried in `scripts/vac08-ledger-baseline.txt` as a dated RATCHET — the gate still fails loud on any *new* migration that misses TEST, and a baselined entry that later turns up present is a hard failure ("delete this line"), so the file can only shrink. ⚠️ **LEDGER ABSENCE IS NOT OBJECT ABSENCE.** These have no `schema_migrations` row; whether their objects exist in TEST (hand-applied, or installed by a later migration) is a different question this gate does not answer, and the body half of VAC-08 reports all four checked function bodies MATCHING the committed snapshot. Do not read the list as "TEST is missing 32 features". ⚠️ **Four are security migrations** — `20260529150000_lock_profile_privileged_columns`, `20260814120000_wizard_rpcs_revoke_authenticated`, `20260715120000_grant_anon_execute_current_user_has_app_role`, `20260823120000_revoke_api_keys_insert` — so any RLS/SQL test asserting those grants may be asserting them against a schema that never received them; worth a targeted object-level probe before trusting those tests. ⭐ **UPDATE 2026-09-07 — the count is now 31, and the caveat about `20260823120000_revoke_api_keys_insert` is FALSIFIED.** On founder instruction ("apply what is missing") that migration was applied to TEST and its baseline line deleted; it is the only line ever removed by an apply. It did NOT refuse: its census guard demands POSITIVE evidence of which database it is on, and TEST supplied the non-PROD signature it asks for (6,098 e2e-shaped rows, ZERO carrying the PROD mt5 census signature), so it took the lenient branch BY MEASUREMENT rather than by anything being softened. Its four structural post-verifies then passed on TEST exactly as on PROD — INSERT withdrawn from anon+authenticated, DELETE retained by authenticated, INSERT retained by service_role (now the only writer), SELECT allowlist intact. **The lesson generalises to the other three security migrations named above:** "may never be applicable" was a guess about a guard nobody had run, and the guard turned out to answer for itself. ⛔ **Do NOT hand-apply the remaining 31 to TEST to shorten the list** — TEST is shared with other people's CI; that stays a founder decision, not an agent one. Owner: Phase 164.5 (which already owns the drift-gate family), or a founder call to apply them.
 
 - [ ] **[VAC08-COUNT-SPM01] VAC-08's ledger ratchet reads its two gating counts with the exact `grep … || true` shape the SAME FILE documents as a false-clean (booked 2026-09-05)** — `scripts/test-ledger-drift-check.sh:304-318` carries an explicit `SP-M01` comment block: *"grep exits 0 with a count, 1 with no match, and >= 2 on an ERROR ... on >= 2 the substitution is EMPTY, `${:-0}` makes it `0` ... A gate that cannot read its own result must not report the result it wanted."* That site was FIXED — it captures `grep_rc` and calls `fail "MEASURE_FAIL: ... An uncountable result is not a count of zero."` Sixty lines later `:372-373` uses the UNFIXED pattern **twice**, for `new_count` and `stale_count`:
   `new_count="$(grep -ac '[^[:space:]]' "$new_file" || true)"; new_count="${new_count:-0}"` (and the same for `stale_count`).
@@ -6507,3 +6773,23 @@ changing the fixtures), and whether a scheduled full-history scan should run so 
 visible on a cadence rather than only when someone dispatches CI by hand.
 ⚠️ Pin `GITLEAKS_VERSION` when touching this: 8.24.3 silently drops `[[allowlists]]`, and
 gitleaks auto-loads `.gitleaks.toml` from cwd, so omitting `-c` tests nothing.
+
+## Phase 164.7 (APPSETTINGS) — SQL-fixer + three-reviewer residuals (logged 2026-09-07)
+
+None of these is blocking under the stopping rule (no user-facing or data-integrity
+blast radius). All were surfaced while the fixer grew
+`supabase/tests/test_analytics_service_settings_and_vault_tick.sql` from 7 arms to 11
+and the three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter)
+read the result.
+
+- [ ] **[APPGUC-DETECT-DOUBLEQUOTE-01] `lint-app-guc.mjs`'s `DETECT_RE` misses the doubled-quote spelling of a GUC read.** The corpus scans clean today, so this is a latent hole, not a live miss: a reader written as `current_setting('quantalyze.foo'')` (or any doubled `''` inside the SQL string literal, which is how a GUC name would be spelled inside a PL/pgSQL body that is itself quoted) is not matched, so a NEW app-GUC reader could be added in that form and the criterion-1 gate would report 0 findings. **Fix:** extend `DETECT_RE` to accept the doubled-quote form and ship it with a red fixture in the gate's own `--self-test` (the existing self-test is the right home — it already proves each rule can fire). ⚠️ Do NOT "fix" this by loosening the regex until the corpus count changes; the corpus is 0 findings by design and a fix that moves that number is matching something else.
+
+- [ ] **[APPGUC-UTF16-01] The app-GUC scan reads files as UTF-8 only.** A UTF-16-encoded `.sql` or `.ts` in the corpus would scan as clean regardless of content. MEASURED 2026-09-07: the current corpus has no UTF-16 files, so the gate is honest today. Recorded because the failure mode is silent — an unreadable file and a clean file are indistinguishable in the report. Related in kind to the ⛔ NUL-byte blindness already recorded for `grep` on `src/lib/wizardErrors.test.ts`. **Fix:** detect a BOM / non-UTF-8 decode and MEASURE_FAIL by name rather than counting the file as scanned.
+
+- [ ] **[APPGUC-WARNING-UNINSTRUMENTED-01] The ledger fan-out guard's `WARNING` reaches no instrument.** `20260907130000_ledger_refresh_switch_to_system_flags.sql` fails CLOSED and RAISEs a `WARNING` naming why it declined to fan out, which is the right behaviour — but nothing reads PostgreSQL's log for that string. In production the observable difference between "the flag is off, deliberately" and "the flag row is missing / mistyped and we are silently not refreshing" is zero. ⚠️ This is the `pg_net` lesson in a different costume: a green cron history is not evidence the work happened. **Fix:** surface the decline as a counted row (a `system_flags` read-back in the cron manifest capture, or a row the fan-out writes when it declines), not as a log line nobody greps. Owner: whoever takes the next OPS/observability phase.
+
+- [ ] **[VAULTTICK-EMPTYKEY-01] `match_engine_cron_tick()` tests `v_key = ''`, not `btrim(v_key) = ''`.** A vault secret that is pure whitespace passes the guard and is sent as the `Authorization` header, producing a 401 from the analytics service rather than the named `RAISE` the guard exists to give. Narrow blast radius (an operator would have to store whitespace), and the failure is loud downstream, which is why it is booked rather than fixed mid-phase. **Fix:** `btrim(v_key) = ''`, plus an arm in the gate that stores a single space and asserts the function RAISEs by name. ⚠️ Adding that arm moves `ARMS_FLOOR` — separate it in both directions on a real full-corpus lane run before pinning, per the runner's own derivation block.
+
+- [ ] **[164.7-PLAN03-EVIDENCE-01] Plan 03's lane evidence is not re-derivable from the artifacts it left.** The SUMMARY cites a lane result without the workdir, the apply list, or the exit code that would let a later reader reproduce it. Nothing is known to be WRONG — this is a provenance gap, not a contradicted claim. Recorded because "measured" with no re-derivable trace is exactly the shape that let a false stated-reason survive review twice in this milestone (see `[GATE-COMMENT-D2-FALSE]`). **Fix:** when re-touching plan 03's area, re-run the lane and record the invocation verbatim beside the number.
+
+- [ ] **[164.7-CITATION-DRIFT-01] Line-number citations in the 164.7 artifacts drifted by ~4 lines** when the fixer's four new arms landed in `test_analytics_service_settings_and_vault_tick.sql`, and again when the loopback comment was corrected in `20260907120000_...sql`. Prose that cites `file:line` in `.planning/phases/164.7-*` and in this file's neighbours should be read as approximate. ⭐ The durable lesson is the one already recorded for the project CLAUDE.md: **cite by SYMBOL, not by line** — a line cite in a file that is still growing is wrong by the next commit.

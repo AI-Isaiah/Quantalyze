@@ -90,13 +90,27 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 resolve_pgbin() {
   local d
-  if command -v pg_ctl >/dev/null 2>&1; then dirname "$(command -v pg_ctl)"; return 0; fi
-  if command -v pg_config >/dev/null 2>&1; then pg_config --bindir; return 0; fi
+  # ⛔ EVERY candidate must carry the `postgres` SERVER binary, not just pg_ctl.
+  # MEASURED 2026-09-07: homebrew linked libpq 18.6 into /opt/homebrew/bin, whose
+  # keg ships initdb and pg_ctl but NO postgres. The old first branch took it on
+  # `command -v pg_ctl` alone, and the lane then died inside initdb — 0.1 s, no
+  # cluster, and a caller (the mutation runner) that could only report "baseline
+  # exit 1" and "lane-probe UNREADABLE". A client-only keg is not a server.
+  if command -v pg_ctl >/dev/null 2>&1; then
+    d=$(dirname "$(command -v pg_ctl)")
+    if [ -x "$d/postgres" ]; then echo "$d"; return 0; fi
+  fi
+  if command -v pg_config >/dev/null 2>&1; then
+    d=$(pg_config --bindir)
+    if [ -x "$d/postgres" ]; then echo "$d"; return 0; fi
+  fi
   for d in /usr/lib/postgresql/*/bin /opt/homebrew/opt/postgresql@*/bin; do
-    if [ -x "$d/pg_ctl" ]; then echo "$d"; return 0; fi
+    if [ -x "$d/pg_ctl" ] && [ -x "$d/postgres" ]; then echo "$d"; return 0; fi
   done
-  echo "ERROR: no PostgreSQL server binaries found (need initdb/pg_ctl)." >&2
+  echo "ERROR: no PostgreSQL server binaries found (need initdb/pg_ctl/postgres)." >&2
   echo "Set PGBIN=<dir>, or install postgresql (ubuntu: /usr/lib/postgresql/*/bin)." >&2
+  echo "NOTE: a directory with pg_ctl but no \`postgres\` is a CLIENT-only keg" >&2
+  echo "      (e.g. homebrew libpq) and is deliberately refused." >&2
   return 1
 }
 
@@ -269,6 +283,7 @@ run_lane() {
 
   if [ -z "${PGBIN:-}" ]; then PGBIN=$(resolve_pgbin) || exit 1; fi
   [ -x "$PGBIN/pg_ctl" ] || fail "PGBIN=$PGBIN has no executable pg_ctl"
+  [ -x "$PGBIN/postgres" ] || fail "PGBIN=$PGBIN has pg_ctl but no \`postgres\` server binary — that is a CLIENT-only keg (e.g. homebrew libpq), not a server"
   export PATH="$PGBIN:$PATH"
   if [ -z "${PORT:-}" ]; then PORT=$(alloc_port) || exit 1; fi
 
@@ -816,6 +831,7 @@ main() {
     --print-pgbin)
       if [ -z "${PGBIN:-}" ]; then PGBIN=$(resolve_pgbin) || exit 1; fi
       [ -x "$PGBIN/pg_ctl" ] || fail "PGBIN=$PGBIN has no executable pg_ctl"
+      [ -x "$PGBIN/postgres" ] || fail "PGBIN=$PGBIN has pg_ctl but no \`postgres\` server binary — that is a CLIENT-only keg (e.g. homebrew libpq), not a server"
       echo "$PGBIN"
       return ;;
     # ⭐ The range is DERIVED, not a pinned byte offset. It was `2,45`, then

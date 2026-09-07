@@ -12,16 +12,29 @@
 #    baseline allowed to hold stale entries is a control that quietly stops
 #    controlling, which is what this phase exists to remove.
 #
-# ⚠️ LEDGER ABSENCE IS NOT OBJECT ABSENCE. These 32 have no schema_migrations
+# ⚠️ LEDGER ABSENCE IS NOT OBJECT ABSENCE. These 31 have no schema_migrations
 #    row under any of the four naming conventions. Whether their OBJECTS exist
 #    in TEST (hand-applied, or installed by a later migration) is a DIFFERENT
 #    question this gate does not answer. Do not read this list as "TEST is
-#    missing 32 features".
+#    missing 31 features".
 #
 # ⛔ DO NOT hand-apply these to TEST to shorten the list. TEST is shared with
-#    other people's CI. Removing entries is a founder decision, and
-#    20260823120000_revoke_api_keys_insert refuses BY DESIGN on a database it
-#    cannot identify, so it may never be applicable.
+#    other people's CI. Removing entries is a founder decision.
+#
+# ⭐ 2026-09-07, ON FOUNDER INSTRUCTION ("apply what is missing"), the entry
+#    20260823120000_revoke_api_keys_insert was APPLIED to TEST and removed from
+#    this list — 32 -> 31. It is the ONLY line ever removed by an apply.
+#    ⚠️ The removed caveat above guessed that this migration "may never be
+#    applicable" because it refuses on a database it cannot identify. That guess
+#    is FALSIFIED, and by the migration's own design rather than around it: its
+#    census guard requires POSITIVE evidence of which database it is on, and
+#    TEST supplied the non-PROD signature it asks for (6,098 e2e-shaped rows,
+#    ZERO rows carrying the PROD mt5 census signature), so it took the lenient
+#    branch by measurement. Its four structural post-verifies then ran and
+#    passed on TEST exactly as they would on PROD: INSERT withdrawn from anon
+#    and authenticated, DELETE still held by authenticated (the disconnect-a-key
+#    path), INSERT still held by service_role (now the ONLY writer), and the
+#    SELECT allowlist intact. Nothing was softened to make the apply pass.
 #
 # Owner: [VAC08-LEDGER-32] in TODOS.md.
 20260525113000_phase19_soak_status_rpc
@@ -55,4 +68,3 @@
 20260814120000_wizard_rpcs_revoke_authenticated
 20260819150000_reconcile_sweep_readmit_attempt_ceiling
 20260819151000_csv_finalize_fold_guard1_null_safe
-20260823120000_revoke_api_keys_insert

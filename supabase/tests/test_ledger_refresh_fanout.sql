@@ -1,7 +1,29 @@
 -- Test: public.enqueue_ledger_refresh_for_strategies — the LEDGER-01/-02/-04
 -- refresh fan-out. Guards migration
 -- 20260825130000_ledger_refresh_fanout_dormant.sql (Phase 161.1 / D-01, D-07,
--- D-08, D-09).
+-- D-08, D-09) AS SUPERSEDED BY
+-- 20260907130000_ledger_refresh_switch_to_system_flags.sql (Phase 164.7 / D-01).
+--
+-- ⛔ WHICH FILE THE ARMS ACTUALLY MEASURE (Phase 164.7 plan 04, TRAP E / C-02).
+-- 20260907130000 `CREATE OR REPLACE`s this body, and this gate's apply list ends
+-- with it, so the body running under every arm below is the NEW one. A
+-- `CREATE OR REPLACE` does not alter the OLD migration's text — so a twin that
+-- still mutated 20260825130000 would mutate a body that is overwritten before
+-- the first assertion runs, apply cleanly, and report `no-red`: an arm that
+-- cannot fail, inside the machine built to find arms that cannot fail. Every
+-- edit-kind twin in this file therefore names 20260907130000. The precedent is
+-- test_sync_status_curated_sentence_survives.sql (164.2 plan 07), which points
+-- its twins at the superseding migration for the same reason.
+--
+-- ⚠️ AND WHY SEVERAL TWINS CARRY `"occurrences":2,"nth":1`. 20260907130000 holds
+-- BOTH fan-out bodies (single-key at STEP 2, composite at STEP 3), so needles
+-- that were unique in the 20260825 file — `INTERVAL '20 hours'`, the key
+-- conjuncts, `WHERE lrs.is_stale` — now match TWICE. `nth: 1` is the SINGLE-KEY
+-- body, measured: the single-key `CREATE OR REPLACE` precedes the composite one
+-- in that file. If the two are ever reordered, `nth: 1` mutates the composite
+-- body, this gate does not redden and the runner reports `no-red` — loudly. The
+-- three activation-guard twins (A, K, L) do NOT use `nth`: their needles span a
+-- line naming this function, so they are unique by construction.
 --
 -- What makes this gate worth having: MATCHED PAIRS
 -- ------------------------------------------------
@@ -16,9 +38,23 @@
 -- LIMIT to equal the cap.
 --
 -- Arms:
---   A  DORMANCY (LEDGER-02)  — activation setting unset ⇒ returns 0, inserts 0.
---                              This is the arm that proves merging the migration
---                              changes no production behaviour.
+--   A  DORMANCY, MISSING ROW  — no public.system_flags row for the activation
+--      (LEDGER-02)              key ⇒ returns 0, inserts 0. This is the arm that
+--                              proves merging the migration changes no
+--                              production behaviour, and it is ALSO 164.7 C-03's
+--                              pinned REJECTION of the fail-OPEN missing-row
+--                              branch in send-intro/route.ts.
+--   K  DORMANCY, ROW FALSE    — the row exists and is FALSE ⇒ returns 0.
+--   L  DORMANCY, READ RAISES  — the flag read itself fails ⇒ returns 0 AND does
+--                              not propagate the error.
+--
+--   ⭐ WHY THREE ARMS AND NOT ONE. A, K and L are three different failure
+--   surfaces of ONE guard, and no single mutation reddens all three — which is
+--   the operational proof that they are not redundant. A's twin (`IS NOT NULL
+--   AND …`) opens on NULL and leaves K green; K's twin (`IS NULL AND …`) opens
+--   on FALSE and leaves A green; L's twin (the handler assigns TRUE instead of
+--   NULL) leaves both A and K green. Three arms, three twins, each isolating one
+--   defect: the runner's identity discipline applied to a truth table.
 --   B  POSITIVE (LEDGER-01)  — same seed with the setting on ⇒ exactly one
 --                              strategy-scoped derive_broker_dailies job whose
 --                              metadata source EQUALS the refresh marker, and a
@@ -58,10 +94,23 @@
 -- holder would make it skip and redden the positive arms for the wrong reason.
 -- The repo already runs supabase/tests/*.sql one file at a time; keep it that way.
 --
--- Session-scoped activation: the fan-out reads its activation setting per
--- session, so this ONE file can exercise BOTH the dormant and the active arms —
--- arm A first with the setting untouched, then set_config(..., is_local => true)
--- for the rest, which unwinds with the transaction.
+-- TABLE-SCOPED activation (164.7 D-01, replacing the session-scoped setting).
+-- The fan-out no longer reads an `app.`-namespace database setting — an operator
+-- on this platform is refused 42501 when setting one (MEASURED on PROD
+-- 2026-09-05) — it reads public.system_flags. So this ONE file exercises the
+-- dormant and the active arms by WRITING that table inside the surrounding
+-- transaction: arm A deletes the row, arm K sets it FALSE, arm L renames the
+-- table out from under the read, and the activation before arm B upserts TRUE.
+-- Every one of those writes rolls back with the file's closing ROLLBACK.
+--
+-- ⚠️ On the SHARED test project that is a write to a COMMITTED row, and the D-05
+-- caution in this file applies to it: the row is locked until ROLLBACK, so a
+-- concurrent session UPDATING the same key blocks for the length of this file. It
+-- is one global config row, not another PR's fixture, and MVCC leaves concurrent
+-- READERS on the pre-transaction value — but it is a write, so it is written down
+-- here rather than left to be discovered. What this file must NEVER do is COMMIT
+-- one: the precondition below ABORTS on a committed TRUE row instead of flipping
+-- it.
 --
 -- pgTAP is NOT installed (CLAUDE.md). Plain PL/pgSQL DO block, RAISE EXCEPTION on
 -- failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed
@@ -71,7 +120,7 @@
 -- --------------------------------------------------------------------------
 -- This file used to open with `RAISE NOTICE 'SKIP: …'; RETURN;` when the fan-out
 -- function was absent. MEASURED 2026-08-25 against an empty Postgres 16: that path
--- printed the notice and exited `EXITCODE=0` having executed ZERO of arms A-J. The
+-- printed the notice and exited `EXITCODE=0` having executed ZERO of arms A-L. The
 -- CI step (.github/workflows/ci.yml, `sql-tests` → "Run SQL self-tests against
 -- test Supabase project") reads ONLY that exit code, so the skip was
 -- byte-identical to a pass in the only channel anything mechanical looks at — and
@@ -96,14 +145,14 @@
 -- The consequence is deliberate and IS the forcing function: this file is RED
 -- until the phase's migrations are applied to the TEST project. The fan-out is a
 -- SECURITY DEFINER, cross-tenant enqueue function that auto-applies to PROD on
--- merge, and arms A-J are the ONLY executed coverage of its SELECT predicates —
+-- merge, and arms A-L are the ONLY executed coverage of its SELECT predicates —
 -- every other gate in the phase is a static text scan over the migration source.
 -- Arm A (dormancy) is what proves the merge changes no production behaviour; a
 -- skip meant that proof had never been run anywhere but an executor's laptop.
 --
 -- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
 -- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
--- fails on a printed 'SKIP:', and reads the 'ALL 10 ARMS EXECUTED' sentinel back off
+-- fails on a printed 'SKIP:', and reads the 'ALL 12 ARMS EXECUTED' sentinel back off
 -- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
 -- edit that neuters an arm in place — deleting the assertion, short-circuiting
 -- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
@@ -118,9 +167,31 @@
 -- was DISCOVERED, not guessed — plan 164.4-04 started from the sibling composite
 -- gate's proven 10-entry list and needed ONE more iteration: this gate enqueues
 -- `derive_broker_dailies`, whose kind row and admission CHECK come from
--- 20260614120000, without which the seed trips compute_jobs_kind_fkey. Proven
--- `ALL 10 ARMS EXECUTED (A-J)`, mean 1.06 s/lane over 3 timed runs.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql"]}
+-- 20260614120000, without which the seed trips compute_jobs_kind_fkey.
+--
+-- ⭐ PHASE 164.7 plan 04 added TWO entries, and the ORDER of both is load-bearing:
+--   * `31-fixture-system-flags.sql` sits IMMEDIATELY BEFORE 20260825130000.
+--     public.system_flags is created by 20260407164606_perfect_match.sql, which
+--     cannot enter any apply list (it reads auth.users, FKs onto `strategies`
+--     and creates four unrelated tables), so the lane needs the stand-in. It
+--     must precede 20260907130000, whose STEP 1 INSERTs into that table; placing
+--     it before 20260825130000 keeps the two ledger gates' lists identical in
+--     shape. It carries NO seed row, which is what leaves arm A's missing-row
+--     case testable. It is a stand-in, so no twin may target it (GRAMMAR rule 4).
+--   * `20260907130000_ledger_refresh_switch_to_system_flags.sql` is applied
+--     LAST, because its `CREATE OR REPLACE` must be the definition the arms run
+--     against. That is precisely why every edit-kind twin below names it: the
+--     20260825 bodies are overwritten before arm 0 executes, so mutating them
+--     would be mutating dead text (TRAP E / C-02).
+-- Proven on this 13-entry list: the completion notice below printed with its
+-- full roster A-L, and the runner reported `per-arm lane time: mean 1.1s` over
+-- three separate diagnostic runs of this file (MEASURED 2026-09-07; the
+-- pre-164.7 reading was 1.06 s over the 11-entry list, so the two extra apply
+-- entries cost nothing measurable).
+-- ⚠️ The sentinel string itself is deliberately NOT repeated in this header:
+-- this file's own verify pins it to exactly ONE occurrence, so that the roster
+-- can only be edited where it is RAISED.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","scripts/pg-lane/fixtures/31-fixture-system-flags.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql"]}
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
@@ -157,12 +228,20 @@ DECLARE
   v_source     TEXT;
   v_foreign    INTEGER;
   -- ⛔ Arm J's three. plpgsql compiles this DO block WHOLE: an undeclared
-  --    variable raises 42601 and NONE of arms A-J run — the failure would not
+  --    variable raises 42601 and NONE of arms A-L run — the failure would not
   --    be "arm J is broken", it would be "the file asserted nothing". Adding an
   --    arm means adding its DECLAREs here in the same edit.
   v_owner      TEXT;
   v_own_super  BOOLEAN;
   v_own_bypass BOOLEAN;
+  -- ⛔ Arms K and L, and arm 0's applied-ness probe, add three more under the
+  --    SAME rule as arm J's three above — a missing DECLARE is a 42601 that
+  --    stops the WHOLE block compiling, so arms A-L would all vanish together
+  --    and the file would assert nothing while exiting on a message that names
+  --    no arm.
+  v_flag       BOOLEAN;  -- the COMMITTED activation row, read by the precondition
+  v_ret_l      INTEGER;  -- arm L: survives its subtransaction's rollback
+  v_body       TEXT;     -- arm 0: the comment-stripped body of the fan-out
 BEGIN
   -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
   -- RED-UNDER: DROP the function on the live lane after the migrations have
@@ -178,16 +257,77 @@ BEGIN
      WHERE n.nspname = 'public'
        AND p.proname = 'enqueue_ledger_refresh_for_strategies'
   ) THEN
-    RAISE EXCEPTION 'TEST FAILED (0): public.enqueue_ledger_refresh_for_strategies is not registered on this database, so NONE of arms A-J ran — including arm A, the dormancy proof that merging this migration changes no production behaviour. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825130000 — apply the phase''s migrations to it and re-run; expect this exactly once, on the PR that introduces them, because NO workflow applies migrations to TEST; (ii) the function was DROPPED or RENAMED after being applied, which is a real regression in a SECURITY DEFINER cross-tenant enqueue path. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip: that made this file exit 0 having asserted nothing, on exactly the run where this function first reaches PROD.';
+    RAISE EXCEPTION 'TEST FAILED (0): public.enqueue_ledger_refresh_for_strategies is not registered on this database, so NONE of arms A-L ran — including arm A, the dormancy proof that merging this migration changes no production behaviour. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825130000 — apply the phase''s migrations to it and re-run; expect this exactly once, on the PR that introduces them, because NO workflow applies migrations to TEST; (ii) the function was DROPPED or RENAMED after being applied, which is a real regression in a SECURITY DEFINER cross-tenant enqueue path. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip: that made this file exit 0 having asserted nothing, on exactly the run where this function first reaches PROD.';
   END IF;
 
-  -- ----- anti-vacuity precondition on arm A -------------------------------
-  -- Arm A is meaningless if this session already has the activation setting on.
-  -- Detect that rather than paper over it: silently forcing the setting off here
-  -- would turn "the flag is fail-closed" into "the test set it to off", which
-  -- proves nothing about the unset case.
-  IF COALESCE(current_setting('app.ledger_refresh_enabled', TRUE), '') = 'true' THEN
-    RAISE EXCEPTION 'TEST ABORTED: the activation setting is already true in this session, so arm A cannot test the DORMANT case. Run this file in a clean session.';
+  -- ----- and the body running here is the ONE THE ARMS DESCRIBE ------------
+  -- Cause (iii): the function exists, but it is the PRE-164.7 body that reads
+  -- the retired `app.`-namespace database setting. Every arm below would then be
+  -- measuring a body that no longer exists in the repo — arms A/K/L would fail
+  -- for reasons that have nothing to do with the guard they name, and a shared
+  -- TEST project would report them as coupling regressions instead of as a
+  -- missing apply. This check names the un-applied migration precisely.
+  --
+  -- ⚠️ Comment-stripped, and not optionally — for the two reasons that are TRUE
+  -- rather than the tidier one that is not. It would read well to say
+  -- 20260907130000's body prose would satisfy an unstripped match; that claim is
+  -- FALSE and was MEASURED false in both bodies — `FROM public.system_flags`
+  -- occurs exactly ONCE, in CODE, and ZERO times in any comment. The reasons
+  -- that hold:
+  --   (i)  lint rule R2-functiondef-comment-strip mandates the idiom BY RULE for
+  --        any regex over a pg_get_functiondef result. The rule was written
+  --        against a divergence measured on a DIFFERENT body — PROD's 7-param
+  --        `_enqueue_compute_job_internal` — not against this one;
+  --   (ii) the property must keep holding under FUTURE comment edits that nobody
+  --        re-measures. One sentence added to that body's Lock B block quoting
+  --        the needle would make this probe unfalsifiable, silently.
+  --
+  -- ⚠️ RESIDUAL neither this site nor its sibling used to state, and it is the
+  -- FALSE-PASS direction: `--[^\n]*` does not strip `/* … */`. A block comment
+  -- quoting the needle satisfies this probe with the read gone. Neither body
+  -- uses one today (measured: 0 occurrences of `/*`). The opposite direction is
+  -- safe by construction — a `--` inside a string literal makes the strip eat
+  -- real code, which can only cause a FALSE FAILURE, and a false failure is loud.
+  SELECT regexp_replace(pg_get_functiondef(p.oid), '--[^\n]*', '', 'g')
+    INTO v_body
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public'
+     AND p.proname = 'enqueue_ledger_refresh_for_strategies';
+  IF v_body IS NULL OR v_body !~ 'FROM public\.system_flags' THEN
+    RAISE EXCEPTION 'TEST FAILED (0): public.enqueue_ledger_refresh_for_strategies exists on this database but its executable body does not read the activation flag from public.system_flags, so it is the PRE-164.7 revision that reads the retired app-namespace database setting. Arms A, K and L below describe the table-backed fail-closed guard and would measure something else entirely. Cause (iii): migration 20260907130000_ledger_refresh_switch_to_system_flags.sql has not been applied to THIS database. Apply it and re-run. ⛔ Do NOT relax this check to match either body: the two guards fail closed for different reasons, and a gate that accepts both cannot tell an un-applied migration from a regression.';
+  END IF;
+
+  -- ----- precondition: the switch must not be COMMITTED OPEN here -----------
+  -- ⚠️ STATED PRECISELY, because the imprecise version is the tempting one.
+  -- This is NOT an anti-vacuity guard for arm A. MEASURED (this plan's neuter
+  -- N3): with a committed TRUE row and this check downgraded to a NOTICE, the
+  -- file still runs and every arm still passes — because arm A DELETEs the row
+  -- and arm K UPSERTs it FALSE, so each dormant arm now builds the state it
+  -- measures. The pre-164.7 arm A did not: it read a SESSION setting it never
+  -- set, so a session that already had the setting on made it vacuous, and this
+  -- check was that arm's anti-vacuity guard. The rewrite moved the state into
+  -- the arm and the guard's job changed with it. Do not restore the old claim.
+  --
+  -- What it DOES guard, and why it is still here:
+  --   * a COMMITTED TRUE row means an operator has opened the ledger refresh on
+  --     this database. This file would then DELETE and re-UPSERT that live row
+  --     inside its transaction, holding a row lock on it for the file's whole
+  --     length on a SHARED project, and would print "the ledger refresh fan-out
+  --     is dormant" about a database where it is LIVE. Both are things a human
+  --     must be told, not things a test should quietly work around.
+  --   * ⛔ AND IT MUST NOT WRITE ITS WAY OUT. Silently forcing the row back to
+  --     FALSE would undo a live activation; doing so inside a rolled-back
+  --     transaction would leave the operator's row untouched while this file
+  --     reported a dormancy it had manufactured. Abort, and make a human read it.
+  --
+  -- `TEST ABORTED` is deliberately NOT a `TEST FAILED (…)` identity: no arm
+  -- claims this, and the mutation runner must not be able to attribute it.
+  SELECT enabled INTO v_flag
+    FROM public.system_flags
+   WHERE key = 'ledger_refresh_enabled';
+  IF v_flag IS TRUE THEN
+    RAISE EXCEPTION 'TEST ABORTED: the COMMITTED public.system_flags row for ledger_refresh_enabled is TRUE on this database, so the ledger refresh is LIVE here. This file writes that row (arm A deletes it, arm K sets it FALSE, the activation sets it TRUE) inside its transaction, so running it would hold a lock on an operator''s live row for the length of the file on a SHARED project, and would print a dormancy notice about a database that is not dormant. Never UPDATE a committed row from a test on a shared project — find out why the switch is open before running this file. If this is the TEST project and the activation was accidental, close it deliberately in its own session.';
   END IF;
 
   -- ----- FOREIGN-CANDIDATE PRECONDITION (read-only) -----------------------
@@ -315,41 +455,169 @@ BEGIN
   RAISE NOTICE 'Seed OK.';
 
   -- ======================================================================
-  -- ARM A — DORMANCY (LEDGER-02). The activation setting is untouched, so it
-  -- is unset. A maximally stale, fully eligible strategy is on the table and
-  -- the function must still do NOTHING. This is the arm that says "merging
-  -- this migration changes no production behaviour".
+  -- ARM A — DORMANCY, MISSING ROW (LEDGER-02 / 164.7 C-03). There is NO
+  -- public.system_flags row for the activation key. A maximally stale, fully
+  -- eligible strategy is on the table and the function must still do NOTHING.
+  --
+  -- This is the arm that says "merging this migration changes no production
+  -- behaviour", and it is ALSO the pinned rejection of the fail-OPEN
+  -- missing-row branch in src/app/api/admin/match/send-intro/route.ts. That
+  -- route treats `flagRow === null` as ENABLED, which is right for a kill
+  -- switch defaulting ON and WRONG here: this is a dormant-by-default
+  -- activation switch, so its absent state must be its closed state. C-03
+  -- required that rejection to be PINNED rather than argued; this arm is the pin.
+  --
+  -- The DELETE runs inside the surrounding transaction and unwinds with the
+  -- closing ROLLBACK. It is deliberately a DELETE and not "just don't seed the
+  -- row": migration 20260907130000 SEEDS the row at apply time, so on any
+  -- database where that migration has run the row EXISTS, and the missing-row
+  -- state has to be created to be tested.
   -- ======================================================================
-  -- RED-UNDER: neuter the fail-closed activation switch in 20260825130000 —
-  --            compare v_enabled against a word no setting ever holds, so the
-  --            unset case falls THROUGH to the fan-out instead of returning 0.
-  --            The dormancy claim is the whole "merging changes no production
-  --            behaviour" property, so this is the mutation that proves arm A
-  --            is what holds it.
-  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"IF v_enabled <> 'true' THEN","replace":"IF v_enabled = 'never-a-real-setting' THEN","occurrences":1}]}
+  -- RED-UNDER: make the fail-closed activation guard in 20260907130000
+  --            NULL-UNSAFE — `IF v_enabled IS NOT NULL AND v_enabled IS
+  --            DISTINCT FROM TRUE THEN`. A missing row leaves v_enabled NULL,
+  --            the IF is no longer taken, and the body falls THROUGH to the
+  --            fan-out instead of returning 0.
+  -- ⚠️ WHY NOT the crude `IS DISTINCT FROM TRUE` -> `= FALSE` swap. MEASURED
+  --    (164.7-03 neuter N1(a)): that removes the token 20260907130000's OWN
+  --    verification block checks for at apply time (check 5, per function), so
+  --    the migration ABORTS, the gate never runs, and no arm can be the first
+  --    failure. Keeping the token and adding the NULL guard passes the
+  --    migration's text check and still opens the flag on exactly the path this
+  --    arm exists for — the two-layer lesson from plan 03, applied here.
+  -- ⚠️ This twin ALSO reddens arm L (a raising read leaves v_enabled NULL too,
+  --    so it falls through identically). Arm A executes FIRST, so the file's
+  --    first failure is A and the identity is correct. A future reorder that
+  --    put L ahead of A would report `wrong-first-failure: L` on this twin —
+  --    that is the runner working, not a bug, and the fix would be to restore
+  --    the order rather than to widen the mutation.
+  -- ⚠️ The needle spans the NOTICE line, which names THIS function, so it is
+  --    unique in a file holding both fan-out bodies. No `nth` is needed or used.
+  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"IF v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant","replace":"IF v_enabled IS NOT NULL AND v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_a;
+
+  DELETE FROM public.system_flags WHERE key = 'ledger_refresh_enabled';
 
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 0 THEN
-    RAISE EXCEPTION 'TEST FAILED (A): the fan-out returned % with the activation setting UNSET, expected 0 — the dormancy lock is open and merging this migration would change production behaviour', v_ret;
+    RAISE EXCEPTION 'TEST FAILED (A): the fan-out returned % with NO activation row at all, expected 0 — a MISSING flag row is opening the switch. That is the send-intro fail-OPEN branch, which 164.7 C-03 explicitly rejects for this switch: a dormant-by-default activation must treat its absent state as its closed state, and merging this migration would change production behaviour', v_ret;
   END IF;
   SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_a;
   IF v_cnt <> 0 THEN
-    RAISE EXCEPTION 'TEST FAILED (A): the fan-out inserted % job(s) with the activation setting UNSET, expected 0', v_cnt;
+    RAISE EXCEPTION 'TEST FAILED (A): the fan-out inserted % job(s) with NO activation row at all, expected 0', v_cnt;
   END IF;
 
-  -- Everything below runs with the switch ON. is_local => true, so it unwinds
-  -- with the transaction and cannot leak into a later file on this session.
-  PERFORM set_config('app.ledger_refresh_enabled', 'true', TRUE);
+  -- ======================================================================
+  -- ARM K — DORMANCY, ROW PRESENT AND FALSE. The state migration 20260907130000
+  -- actually leaves behind: the row exists and is closed. Arm A cannot cover
+  -- this — a guard that opens on FALSE while still closing on NULL passes arm A
+  -- and ships an activation switch that is on the moment an operator writes the
+  -- row at all.
+  -- ======================================================================
+  -- RED-UNDER: make the guard in 20260907130000 fire ONLY on NULL —
+  --            `IF v_enabled IS NULL AND v_enabled IS DISTINCT FROM TRUE THEN`.
+  --            A FALSE row no longer takes the IF and the fan-out proceeds.
+  -- ⚠️ Deliberately the MIRROR of arm A's twin, and that is the proof the two
+  --    arms are not redundant: under this mutation arm A stays GREEN (NULL is
+  --    still dormant) and only K reddens, while under arm A's twin K stays
+  --    green. Neither mutation can redden both. The token
+  --    `IS DISTINCT FROM TRUE` is preserved for the same apply-time reason arm
+  --    A's twin preserves it.
+  -- RED-UNDER-M: {"arm":"K","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"IF v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant","replace":"IF v_enabled IS NULL AND v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant","occurrences":1}]}
+  INSERT INTO public.system_flags (key, enabled)
+  VALUES ('ledger_refresh_enabled', FALSE)
+  ON CONFLICT (key) DO UPDATE SET enabled = FALSE;
+
+  v_ret := public.enqueue_ledger_refresh_for_strategies();
+  IF v_ret <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (K): the fan-out returned % with the activation row present and FALSE, expected 0 — this is the exact state migration 20260907130000 leaves on PROD, so a non-zero here means merging it starts the fan-out', v_ret;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_a;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (K): the fan-out inserted % job(s) with the activation row present and FALSE, expected 0', v_cnt;
+  END IF;
+
+  -- ======================================================================
+  -- ARM L — DORMANCY WHEN THE READ ITSELF RAISES, AND WITHOUT PROPAGATING.
+  -- The switch used to be `current_setting(…, TRUE)`, which CANNOT raise. A
+  -- table read can: dropped table, revoked privilege, planner fault. 164.7 D-01
+  -- makes that path fail CLOSED, and this arm is the only executed proof of it.
+  -- TWO properties, and both matter: the fan-out must return 0, and it must NOT
+  -- propagate the error — an hourly cron that starts erroring is a page, not a
+  -- dormancy.
+  --
+  -- ⛔ NO SAVEPOINT, of any spelling. This gate is one dollar-quoted DO block
+  --    (⚠️ the quote token is NOT written out here: a literal doubled dollar
+  --    sign inside this comment CLOSES the block, and psql then reports a
+  --    syntax error hundreds of lines away — MEASURED on the first lane run of
+  --    this arm, `syntax error at or near "…"` reported against the file's LAST
+  --    line)
+  -- and PL/pgSQL cannot parse transaction-control statements (TODOS
+  -- [REDUNDER-SAVEPOINT]; test_enqueue_compute_job_dedupe_non_terminal.sql's
+  -- header records the same 42601). The substitute is the RAISE-TO-ROLLBACK
+  -- idiom plan 164.7-03 established: a plpgsql EXCEPTION block IS an implicit
+  -- subtransaction, so raising a private SQLSTATE and catching exactly that
+  -- SQLSTATE unwinds the block's work.
+  --
+  -- ⚠️ WHY THE RAISE AND NOT AN EXPLICIT RENAME-BACK. The RENAME takes ACCESS
+  -- EXCLUSIVE on public.system_flags. An explicit rename-back would hold that
+  -- lock until the transaction ended — the whole rest of this file — which on
+  -- the SHARED test project blocks every other session touching the table.
+  -- Unwinding by exception releases it the instant the handler runs. `SET LOCAL
+  -- lock_timeout` makes a wait fail LOUD rather than wedge.
+  --
+  -- ⚠️ v_ret_l survives the rollback: plpgsql local-variable assignments are not
+  -- transactional. The assertion is deliberately placed AFTER the block's END —
+  -- a probe inside an EXCEPTION handler reads state the subtransaction has
+  -- already rolled back (lint rule R1).
+  --
+  -- ⚠️ A `TEST FAILED (L)` raised by the inner handler carries P0001, not P0164,
+  -- so the outer P0164-only handler does not swallow it: an unexpectedly
+  -- RAISING fan-out reddens this arm by name instead of vanishing.
+  -- ======================================================================
+  -- RED-UNDER: make the guard's own EXCEPTION handler in 20260907130000 open
+  --            the flag instead of closing it — `v_enabled := TRUE;` in place
+  --            of `v_enabled := NULL;`. The read still fails, the handler now
+  --            reports the failure as "enabled", and the fan-out proceeds and
+  --            enqueues for the still-published stale candidate.
+  -- ⚠️ This twin reddens L and ONLY L: arms A and K never make the read fail,
+  --    so their handler never runs. It is the third mutually exclusive mutation
+  --    of the same guard, which is why three arms and not one.
+  -- ⚠️ The needle spans the WARNING text, which names THIS function, so it is
+  --    unique in a file holding both fan-out bodies. No `nth` is needed or used.
+  -- RED-UNDER-M: {"arm":"L","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"'enqueue_ledger_refresh_for_strategies: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;\n    v_enabled := NULL;","replace":"'enqueue_ledger_refresh_for_strategies: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;\n    v_enabled := TRUE;","occurrences":1}]}
+  SET LOCAL lock_timeout = '2s';
+  BEGIN
+    ALTER TABLE public.system_flags RENAME TO system_flags_arm_l;
+    BEGIN
+      v_ret_l := public.enqueue_ledger_refresh_for_strategies();
+    EXCEPTION WHEN OTHERS THEN
+      RAISE EXCEPTION 'TEST FAILED (L): the fan-out RAISED (SQLSTATE %) when its activation-flag read failed, instead of treating the failure as dormant and returning 0. An hourly cron that starts erroring is an incident; the guard is required to swallow the error, WARN with the SQLSTATE, and stay closed', SQLSTATE;
+    END;
+    RAISE EXCEPTION USING ERRCODE = 'P0164', MESSAGE = 'arm L: unwinding the RENAME (not a failure)';
+  EXCEPTION WHEN SQLSTATE 'P0164' THEN
+    NULL;
+  END;
+  IF v_ret_l <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (L): the fan-out returned % when its activation-flag read RAISED, expected 0 — the handler is treating a FAILED read as an OPEN switch, which is the one direction a fail-closed guard may never fail in', v_ret_l;
+  END IF;
+
+  -- Everything below runs with the switch ON. The row is written inside this
+  -- transaction and unwinds with the closing ROLLBACK — never a committed write
+  -- on a shared project. ON CONFLICT DO UPDATE because arm K has just written
+  -- the row FALSE.
+  INSERT INTO public.system_flags (key, enabled)
+  VALUES ('ledger_refresh_enabled', TRUE)
+  ON CONFLICT (key) DO UPDATE SET enabled = TRUE;
 
   -- ======================================================================
   -- RED-UNDER: change the enqueued job's metadata `source` marker in
-  --            20260825130000. The job still lands, so the count and
+  --            20260907130000. The job still lands, so the count and
   --            target-shape assertions stay green — what reddens is the
   --            byte-for-byte marker the non-destructive failure guard in
   --            job_worker.py reads back before it declines to downgrade a
   --            published row.
-  -- RED-UNDER-M: {"arm":"B","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"'source', 'ledger-refresh',","replace":"'source', 'ledger-refresh-drifted',","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"B","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"'source', 'ledger-refresh',","replace":"'source', 'ledger-refresh-drifted',","occurrences":1}]}
   -- ARM B — POSITIVE (LEDGER-01). Same seed, switch on.
   -- ======================================================================
   v_ret := public.enqueue_ledger_refresh_for_strategies();
@@ -388,13 +656,19 @@ BEGIN
 
   -- ======================================================================
   -- RED-UNDER: remove all three things that make a second tick a no-op, in one
-  --            LAYERED mutation of 20260825130000: the 20-hour attempt cooldown
+  --            LAYERED mutation of 20260907130000: the 20-hour attempt cooldown
   --            (interval -> 0), the non-terminal in-flight guard (status set ->
   --            a status nothing holds), and the INSERTIONS-not-CALLS counter
   --            (v_existing = 0 dropped). All three are needed: leave any one in
   --            place and the second tick still returns 0 for a different reason,
   --            which would make a green here prove the wrong conjunct.
-  -- RED-UNDER-M: {"arm":"E","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '0 hours'","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"AND cj2.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')","replace":"AND cj2.status IN ('cancelled')","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"IF v_existing = 0 AND v_job_id IS NOT NULL THEN","replace":"IF v_job_id IS NOT NULL THEN","occurrences":1}]}
+  -- ⚠️ nth 1: this needle now matches TWICE in 20260907130000 — that one file
+  --    holds BOTH fan-out bodies. `nth: 1` selects the single-key body,
+  --    MEASURED (its CREATE OR REPLACE is first in the file). The composite
+  --    body is left UNMUTATED, so this arm reddens on the body it names and
+  --    nothing else. A reorder of the two bodies makes this mutate the wrong
+  --    one and the runner reports `no-red` — loud, not silent.
+  -- RED-UNDER-M: {"arm":"E","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '0 hours'","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"AND cj2.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')","replace":"AND cj2.status IN ('cancelled')","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"IF v_existing = 0 AND v_job_id IS NOT NULL THEN","replace":"IF v_job_id IS NOT NULL THEN","occurrences":2,"nth":1}]}
   -- ARM E — DEDUPE. A second tick while the job is in flight adds nothing.
   -- ======================================================================
   v_ret := public.enqueue_ledger_refresh_for_strategies();
@@ -413,12 +687,18 @@ BEGIN
   -- ARM C — NEGATIVE CONTROL. A FRESH single-key strategy is not enqueued.
   -- Without this arm, a body that enqueues everything passes arm B.
   -- ======================================================================
-  -- RED-UNDER: make the staleness conjunct in 20260825130000's candidate CTE
+  -- RED-UNDER: make the staleness conjunct in 20260907130000's candidate CTE
   --            vacuous (`WHERE lrs.is_stale` -> `WHERE (lrs.is_stale OR TRUE)`).
   --            Only s_c is published at this point, so no earlier arm's cohort
   --            changes; the fresh strategy becomes a candidate and every ledger
   --            strategy would be refreshed on every tick.
-  -- RED-UNDER-M: {"arm":"C","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"WHERE lrs.is_stale","replace":"WHERE (lrs.is_stale OR TRUE)","occurrences":1}]}
+  -- ⚠️ nth 1: this needle now matches TWICE in 20260907130000 — that one file
+  --    holds BOTH fan-out bodies. `nth: 1` selects the single-key body,
+  --    MEASURED (its CREATE OR REPLACE is first in the file). The composite
+  --    body is left UNMUTATED, so this arm reddens on the body it names and
+  --    nothing else. A reorder of the two bodies makes this mutate the wrong
+  --    one and the runner reports `no-red` — loud, not silent.
+  -- RED-UNDER-M: {"arm":"C","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"WHERE lrs.is_stale","replace":"WHERE (lrs.is_stale OR TRUE)","occurrences":2,"nth":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_c;
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 0 THEN
@@ -444,13 +724,13 @@ BEGIN
   -- conjunct instead, the exclusion is unfalsifiable, and the predicate — not
   -- this arm — is what needs fixing.
   -- ======================================================================
-  -- RED-UNDER: delete the composite exclusion in 20260825130000 —
+  -- RED-UNDER: delete the composite exclusion in 20260907130000 —
   --            `AND lrs.is_composite = FALSE` -> `AND lrs.is_composite IS NOT NULL`.
   --            This is the re-run this arm's own ⚠️ note demands before any
   --            green here is trusted: the composite REACHES the conjunct (the
   --            api_keys join is LEFT and the key conjuncts are NULL-tolerant),
   --            so it is is_composite, and nothing else, that excludes it.
-  -- RED-UNDER-M: {"arm":"D","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"AND lrs.is_composite = FALSE","replace":"AND lrs.is_composite IS NOT NULL","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"D","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"AND lrs.is_composite = FALSE","replace":"AND lrs.is_composite IS NOT NULL","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_d;
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 0 THEN
@@ -474,13 +754,19 @@ BEGIN
   -- what caps the outstanding backlog at the cohort size regardless of tick
   -- rate. Both edges, so the interval cannot drift silently.
   -- ======================================================================
-  -- RED-UNDER: narrow the ATTEMPT cooldown in 20260825130000 from 20 hours to
+  -- RED-UNDER: narrow the ATTEMPT cooldown in 20260907130000 from 20 hours to
   --            1 hour. The fixture's prior attempt is 2 hours old, so the
   --            narrowed window no longer covers it and the strategy is
   --            re-enqueued — a permanently-failing strategy would get a job
   --            every tick. Arm E's second tick is unaffected: its job is created
   --            inside this transaction, so it is still inside a 1-hour window.
-  -- RED-UNDER-M: {"arm":"F","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '1 hour'","occurrences":1}]}
+  -- ⚠️ nth 1: this needle now matches TWICE in 20260907130000 — that one file
+  --    holds BOTH fan-out bodies. `nth: 1` selects the single-key body,
+  --    MEASURED (its CREATE OR REPLACE is first in the file). The composite
+  --    body is left UNMUTATED, so this arm reddens on the body it names and
+  --    nothing else. A reorder of the two bodies makes this mutate the wrong
+  --    one and the runner reports `no-red` — loud, not silent.
+  -- RED-UNDER-M: {"arm":"F","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '1 hour'","occurrences":2,"nth":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_f;
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 0 THEN
@@ -506,14 +792,14 @@ BEGIN
   -- ⚠️ Counts, never a duration or a rate. This arm pins the SHAPE of the
   -- bound. The safety argument is arm F's cooldown, NOT this LIMIT — see D-09.
   -- ======================================================================
-  -- RED-UNDER: widen the PER-VENUE cap in 20260825130000 from
+  -- RED-UNDER: widen the PER-VENUE cap in 20260907130000 from
   --            `venue_rank <= 2` to `venue_rank <= 4`. The per-tick LIMIT is 4
   --            and this cohort is 6 on ONE venue, so with the cap gone the
   --            global LIMIT bounds the tick at 4 instead — exactly the "a venue
   --            that serialises every job starves every other venue" result this
   --            arm names, and the discrimination the LIMIT-strictly-greater-
   --            than-cap rule exists to preserve.
-  -- RED-UNDER-M: {"arm":"G1","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"WHERE c.venue_rank <= 2","replace":"WHERE c.venue_rank <= 4","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"G1","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"WHERE c.venue_rank <= 2","replace":"WHERE c.venue_rank <= 4","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = ANY(g1_v1);
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 2 THEN
@@ -541,12 +827,12 @@ BEGIN
   -- LIMIT is at most 4 and strictly greater than the cap. Neither half is
   -- sufficient alone; together they pin the integer.
   -- ======================================================================
-  -- RED-UNDER: lower the per-tick LIMIT in 20260825130000 from 4 to 3. This is
+  -- RED-UNDER: lower the per-tick LIMIT in 20260907130000 from 4 to 3. This is
   --            the LOWER edge this arm's own note says it pins (the UPPER edge
   --            is the static gate). The needle carries its indentation: the
   --            unindented `LIMIT 4` at :194 is PROSE, and mutating a comment
   --            would be a no-op reported as a non-biting arm.
-  -- RED-UNDER-M: {"arm":"G2","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"       LIMIT 4","replace":"       LIMIT 3","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"G2","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"       LIMIT 4","replace":"       LIMIT 3","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = ANY(g2_v1) OR id = ANY(g2_v2);
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 4 THEN
@@ -567,24 +853,36 @@ BEGIN
   -- keeps is_active = TRUE (rows persist for audit), so is_active alone does
   -- not cover the other two.
   -- ======================================================================
-  -- RED-UNDER: point the REVOKED-key conjunct in 20260825130000 at a status no
+  -- RED-UNDER: point the REVOKED-key conjunct in 20260907130000 at a status no
   --            key ever holds, so a revoked key is admitted. The aggregate arm
   --            reads the RETURN value, so any one of the three sub-cases
   --            leaking is enough to redden it.
-  -- RED-UNDER-M: {"arm":"H","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"AND ak.sync_status IS DISTINCT FROM 'revoked'","replace":"AND ak.sync_status IS DISTINCT FROM 'never-a-real-status'","occurrences":1}]}
+  -- ⚠️ nth 1: this needle now matches TWICE in 20260907130000 — that one file
+  --    holds BOTH fan-out bodies. `nth: 1` selects the single-key body,
+  --    MEASURED (its CREATE OR REPLACE is first in the file). The composite
+  --    body is left UNMUTATED, so this arm reddens on the body it names and
+  --    nothing else. A reorder of the two bodies makes this mutate the wrong
+  --    one and the runner reports `no-red` — loud, not silent.
+  -- RED-UNDER-M: {"arm":"H","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"AND ak.sync_status IS DISTINCT FROM 'revoked'","replace":"AND ak.sync_status IS DISTINCT FROM 'never-a-real-status'","occurrences":2,"nth":1}]}
   UPDATE strategies SET status = 'published' WHERE id IN (s_h_inact, s_h_revoked, s_h_disc);
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (H): strategies whose keys are inactive / revoked / disconnected produced % enqueue(s), expected 0', v_ret;
   END IF;
 
-  -- RED-UNDER: make the is_active conjunct in 20260825130000 vacuous, with the
+  -- RED-UNDER: make the is_active conjunct in 20260907130000 vacuous, with the
   --            aggregate arm H NEUTERED — H reads the RETURN value and fires
   --            first on any leak at all, so it must be suppressed for the
   --            per-fixture row count to be the first failure. The other two
   --            sub-case fixtures stay excluded by their own conjuncts, so this
   --            names the INACTIVE case alone.
-  -- RED-UNDER-M: {"arm":"H/inactive","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"AND COALESCE(ak.is_active, TRUE)","replace":"AND (COALESCE(ak.is_active, TRUE) OR TRUE)","occurrences":1}],"neuter":[{"arm":"H"}]}
+  -- ⚠️ nth 1: this needle now matches TWICE in 20260907130000 — that one file
+  --    holds BOTH fan-out bodies. `nth: 1` selects the single-key body,
+  --    MEASURED (its CREATE OR REPLACE is first in the file). The composite
+  --    body is left UNMUTATED, so this arm reddens on the body it names and
+  --    nothing else. A reorder of the two bodies makes this mutate the wrong
+  --    one and the runner reports `no-red` — loud, not silent.
+  -- RED-UNDER-M: {"arm":"H/inactive","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"AND COALESCE(ak.is_active, TRUE)","replace":"AND (COALESCE(ak.is_active, TRUE) OR TRUE)","occurrences":2,"nth":1}],"neuter":[{"arm":"H"}]}
   SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_h_inact;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (H/inactive): an INACTIVE key produced % job(s), expected 0', v_cnt;
@@ -593,16 +891,28 @@ BEGIN
   --            failure. A revoked key keeps is_active TRUE, so this sub-case is
   --            reachable ONLY through the sync_status conjunct — which is the
   --            claim the arm makes in its own message.
-  -- RED-UNDER-M: {"arm":"H/revoked","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"AND ak.sync_status IS DISTINCT FROM 'revoked'","replace":"AND ak.sync_status IS DISTINCT FROM 'never-a-real-status'","occurrences":1}],"neuter":[{"arm":"H"}]}
+  -- ⚠️ nth 1: this needle now matches TWICE in 20260907130000 — that one file
+  --    holds BOTH fan-out bodies. `nth: 1` selects the single-key body,
+  --    MEASURED (its CREATE OR REPLACE is first in the file). The composite
+  --    body is left UNMUTATED, so this arm reddens on the body it names and
+  --    nothing else. A reorder of the two bodies makes this mutate the wrong
+  --    one and the runner reports `no-red` — loud, not silent.
+  -- RED-UNDER-M: {"arm":"H/revoked","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"AND ak.sync_status IS DISTINCT FROM 'revoked'","replace":"AND ak.sync_status IS DISTINCT FROM 'never-a-real-status'","occurrences":2,"nth":1}],"neuter":[{"arm":"H"}]}
   SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_h_revoked;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (H/revoked): a REVOKED key produced % job(s), expected 0 — a revoked key keeps is_active TRUE, so the is_active conjunct alone does not cover this case', v_cnt;
   END IF;
-  -- RED-UNDER: make the soft-disconnect conjunct in 20260825130000 vacuous,
+  -- RED-UNDER: make the soft-disconnect conjunct in 20260907130000 vacuous,
   --            with arm H neutered. A soft-disconnected key also keeps
   --            is_active TRUE and a non-revoked sync_status, so only this
   --            conjunct can exclude it.
-  -- RED-UNDER-M: {"arm":"H/disconnected","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"AND ak.disconnected_at IS NULL","replace":"AND (ak.disconnected_at IS NULL OR TRUE)","occurrences":1}],"neuter":[{"arm":"H"}]}
+  -- ⚠️ nth 1: this needle now matches TWICE in 20260907130000 — that one file
+  --    holds BOTH fan-out bodies. `nth: 1` selects the single-key body,
+  --    MEASURED (its CREATE OR REPLACE is first in the file). The composite
+  --    body is left UNMUTATED, so this arm reddens on the body it names and
+  --    nothing else. A reorder of the two bodies makes this mutate the wrong
+  --    one and the runner reports `no-red` — loud, not silent.
+  -- RED-UNDER-M: {"arm":"H/disconnected","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"AND ak.disconnected_at IS NULL","replace":"AND (ak.disconnected_at IS NULL OR TRUE)","occurrences":2,"nth":1}],"neuter":[{"arm":"H"}]}
   SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_h_disc;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (H/disconnected): a DISCONNECTED key produced % job(s), expected 0 — a soft-disconnected key also keeps is_active TRUE', v_cnt;
@@ -684,12 +994,22 @@ BEGIN
   --            role that is exempt from row security by NEITHER route. Editing
   --            20260825130000 cannot reach this arm: its own DO block asserts
   --            the same disjunction and would abort the apply.
-  -- ⚠️ The three RLS-enabled tables move with the function DELIBERATELY. Left
+  -- ⚠️ The FOUR RLS-enabled tables move with the function DELIBERATELY. Left
   --    behind, the new owner reads them under RLS and the fan-out returns 0 on
   --    every tick — which is precisely the failure this arm's prose describes,
   --    and it reddens arm B three hundred lines earlier instead. Moving them
   --    isolates the ONE property under test: the owner's exemption.
-  -- RED-UNDER-M: {"arm":"J","apply":[{"kind":"sql","stmt":"CREATE ROLE lrf_owner_drift NOLOGIN"},{"kind":"sql","stmt":"GRANT USAGE ON SCHEMA public TO lrf_owner_drift"},{"kind":"sql","stmt":"GRANT SELECT ON ALL TABLES IN SCHEMA public TO lrf_owner_drift"},{"kind":"sql","stmt":"GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO lrf_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.strategies OWNER TO lrf_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.strategy_keys OWNER TO lrf_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.compute_jobs OWNER TO lrf_owner_drift"},{"kind":"sql","stmt":"ALTER FUNCTION public.enqueue_ledger_refresh_for_strategies() OWNER TO lrf_owner_drift"}]}
+  -- ⭐ public.system_flags is the FOURTH, added by 164.7 D-01, and it was found
+  --    by MEASUREMENT, not by reading: the first lane run of this file after the
+  --    switch moved reported `WRONG-ARM(B)` on this twin. The new guard READS
+  --    system_flags, the drift role is exempt from row security by neither
+  --    route, the RLS-enabled stand-in admits it no rows, the flag reads NULL,
+  --    the fan-out is dormant and arm B fails first. That is the same mechanism
+  --    the three tables above were moved for — one more table, one more move.
+  --    ⛔ A table OWNER is not subject to RLS (absent FORCE ROW LEVEL SECURITY,
+  --    which neither the fixture nor 20260407164606 sets), which is what makes
+  --    the move sufficient.
+  -- RED-UNDER-M: {"arm":"J","apply":[{"kind":"sql","stmt":"CREATE ROLE lrf_owner_drift NOLOGIN"},{"kind":"sql","stmt":"GRANT USAGE ON SCHEMA public TO lrf_owner_drift"},{"kind":"sql","stmt":"GRANT SELECT ON ALL TABLES IN SCHEMA public TO lrf_owner_drift"},{"kind":"sql","stmt":"GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO lrf_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.strategies OWNER TO lrf_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.strategy_keys OWNER TO lrf_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.compute_jobs OWNER TO lrf_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.system_flags OWNER TO lrf_owner_drift"},{"kind":"sql","stmt":"ALTER FUNCTION public.enqueue_ledger_refresh_for_strategies() OWNER TO lrf_owner_drift"}]}
   SELECT r.rolname, r.rolsuper, r.rolbypassrls
     INTO v_owner, v_own_super, v_own_bypass
     FROM pg_proc p
@@ -704,7 +1024,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (J): enqueue_ledger_refresh_for_strategies is owned by role "%" (rolsuper=%, rolbypassrls=%), which is exempt from RLS by neither route. As SECURITY DEFINER it reads the security_invoker view ledger_refresh_staleness as that role, so api_keys/strategy_keys RLS collapses `exchanges` to the empty array, the venue conjunct drops every row, and the fan-out returns 0 on every tick — indistinguishable from a healthy, fully-fresh estate. Migration 20260825130000 pins this at apply time only; ownership drift afterwards is what this arm exists to catch', v_owner, v_own_super, v_own_bypass;
   END IF;
 
-  RAISE NOTICE 'ALL 10 ARMS EXECUTED (A-J) and passed — the ledger refresh fan-out is dormant, bounded, and its bounds are falsifiable.';
+  RAISE NOTICE 'ALL 12 ARMS EXECUTED (A-L) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, bounded, and every one of those claims is falsifiable.';
 END $$;
 
 ROLLBACK;
