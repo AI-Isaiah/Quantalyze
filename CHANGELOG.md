@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.77.18.0] - 2026-09-07
+
+### Phase 164.7 APPSETTINGS — every app-GUC reader moves to a mechanism
+
+The ledger-refresh activation switch and the analytics-service settings stop living in `app.`
+database settings, which an operator on this platform is refused `42501` when setting (measured
+on PROD 2026-09-05) — so the runbook's activation step could not actually be performed. The
+switch now reads `public.system_flags`, fail-CLOSED on a missing row, a FALSE row and a failing
+read alike. The service URL moves to a new `public.system_settings` table and the service key to
+Vault, read by `public.match_engine_cron_tick()`.
+
+The destination is bounded in **two independent layers**: a CHECK constraint that refuses to
+STORE a URL outside the allow-list, and the same expression re-tested inside the function before
+it posts — which is what still refuses when the constraint is one `ALTER TABLE` away from gone.
+A migration-time assertion reads both back out of the catalogue and fails unless they are the
+same literal.
+
+Nothing is scheduled and nothing is activated: the flag ships FALSE, so merging this changes zero
+production behaviour. Activation stays a founder live op.
+
+#### Corrected: a security control justified by a false reason
+
+The migration claimed the loopback allow-list entry existed so the gate could prove its
+got-past-both-guards arm. That is false as written — the gate drops the CHECK constraint before
+that arm runs. Narrowing all three spellings to railway-only takes the gate baseline RED, so the
+entry **is** load-bearing, but via the constant compiled into the function, which no test can
+drop; the constraint carries it only because the byte-identity assertion requires it. Comment
+corrected at the source with the measurement attached.
+
+#### `pg-lane` refused a client-only PostgreSQL keg
+
+`resolve_pgbin()` accepted any directory containing `pg_ctl`. A homebrew `libpq` link shadowed
+pg16 on PATH — it ships `initdb` and `pg_ctl` but no `postgres` — so the lane died inside
+`initdb` in 0.1 s and the mutation runner could only report `baseline exit 1` and
+`lane-probe: UNREADABLE`. Every resolution branch and both `PGBIN` guards now require the server
+binary, and an explicit client keg is refused by name. Invisible on ubuntu, which resolves
+`/usr/lib/postgresql/*/bin`.
+
+That fix exposed two tests that could not fail. Both build a stub `PGBIN` the new guard refuses
+first: one failed outright, and **one kept passing while never reaching `initdb`** — its only
+evidence was a non-zero exit, which a guard refusal also produces, and the guard's own cleanup
+removed the scratch directory so its leak check stayed true. Both now stub `postgres`, and the
+second asserts it reached `initdb` by name.
+
+#### Mutation corpus
+
+`FILES_FLOOR` 45 → 46 and `ARMS_FLOOR` 369 → 384, separated in both directions on real
+full-corpus lane runs (385 names the regression and exits 1; 384 reports no defects and exits 0).
+`WAIVED_CEILING` stays **0**. Five further threshold sites that had drifted are brought current,
+four of which were already red.
+
+`sql-gate-lint` additionally runs `scripts/lint-app-guc.mjs` — the criterion-1 reader gate — with
+a self-test and a corpus scan at 0 findings over five lineage-annotated files.
+
 ## [0.77.17.0] - 2026-09-07
 
 ### Phase 164.2.1 SESSIONID-FENCE — an abandoned draft can no longer poison a new key's submission

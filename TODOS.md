@@ -1323,6 +1323,29 @@ true for 146 and half of 142–145, and **false for 141**.
       write to someone else's substrate, which is why plan 07 did not perform it and plan 10
       books it instead of doing it.
 
+- [x] **RESOLVED 2026-09-07 — both migrations (and a third) are now APPLIED to shared TEST.**
+      Applied in ascending version order through the authenticated TEST connection, each gated by
+      its own self-verify block: `20260823120000_revoke_api_keys_insert` (which was ALSO absent —
+      see the correction below), then `20260907120000`, then `20260907130000`.
+      **Transcription was verified, not assumed:** `pg_proc.prosrc` is exactly the text between
+      the dollar-quote delimiters, so all three function bodies were md5-compared against the repo
+      files — `enqueue_ledger_refresh_for_strategies`, `enqueue_ledger_composite_refresh` and
+      `match_engine_cron_tick` all MATCH byte for byte. End state measured on TEST:
+      `system_flags.ledger_refresh_enabled = FALSE` (dormant), the `analytics_service_url` row
+      seeded, the allow-list CHECK constraint present, and **zero** `cron.job` rows matching
+      `ledger_refresh` — nothing was scheduled or activated.
+      ⚠️ **THE "14 MISSING MIGRATIONS" READING WAS WRONG, and the method is the reusable lesson.**
+      Comparing repo filenames against `schema_migrations.version` said 14 were missing. Reading
+      the `name` column instead showed almost all of them already applied — several under
+      RE-STAMPED versions (`20260827130000_sanitize_user_revoke_strategy_shares` is ledgered at
+      version `20260828062101`), some under a bare version string, and four applied TWICE. Only
+      THREE were genuinely absent, confirmed by object effect rather than by the ledger:
+      `authenticated` still held INSERT on `api_keys`, `system_settings` did not exist, and
+      neither fan-out body read `system_flags`. ⛔ **Never compute TEST drift from
+      `version` alone — join on `name`, then confirm by probing the object.** Re-applying the
+      other eleven would have re-run their self-verify blocks against already-current state.
+      The original entry follows, as the dated record of what was expected:
+
 - [ ] **`[164.7-TEST-APPLY-APPSETTINGS]` Two migrations from Phase 164.7 are RED on shared TEST
       from this PR's first CI run onward, BY DESIGN, and must be hand-applied (booked 2026-09-07,
       Phase 164.7 plan 05; the reds are named in `164.7-02-SUMMARY.md` → "Expected reds, named
