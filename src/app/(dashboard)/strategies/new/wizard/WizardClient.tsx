@@ -858,7 +858,21 @@ export function WizardClient({
         strategyId: id,
         wizardSessionId,
         step: nextStep,
-        apiKeyId: keyId,
+        // 164.2.1 / IN-02 — `|| null`, and the empty string it collapses is a
+        // REAL value arriving here, not a defensive flourish.
+        // `handleConnectSuccess` is also `MultiKeyConnectStep`'s `onSuccess`,
+        // and that step's success shape coalesces a null member key to `""`
+        // (MultiKeyConnectStep.tsx, `apiKeyId: first.apiKeyId ?? ""`). The
+        // field is documented as an `api_keys.id` or `null`; `""` is neither,
+        // and the load-time validator would accept it (a string of length 0).
+        // Inert today — a composite draft has `api_key_id = null` and the
+        // overlay never offers one under a preselect, so the incoming key is
+        // always `null` there and `""` is never compared — but a stored value
+        // outside its own documented domain is one call-site change away from
+        // being compared. Normalised HERE because this is the one API-branch
+        // writer, which is the smallest place that makes code and docblock
+        // agree.
+        apiKeyId: keyId || null,
       });
       setSavedAt(Date.now());
       setToastKey((k) => k + 1);
