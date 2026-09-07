@@ -722,7 +722,15 @@ DECLARE
   v_seeded      BOOLEAN;
   -- The two positive needles, held in variables so the loop states each one once.
   v_flag_needle TEXT := 'FROM public.system_flags';
-  v_null_needle TEXT := 'IS DISTINCT FROM TRUE';
+  -- ⚠️ BOUND TO THE GUARDED VARIABLE, not floating. `IS DISTINCT FROM TRUE`
+  -- alone asserts only that the token appears SOMEWHERE in the stripped body —
+  -- it is satisfied by a null-safe comparison of any other variable, in any
+  -- other statement, while the activation guard itself has been rewritten to
+  -- `NOT v_enabled`. Naming the variable is what makes check 5 an assertion
+  -- about the flag. Measured before tightening: `v_enabled IS DISTINCT FROM
+  -- TRUE` occurs exactly ONCE per body (and nowhere else in this file), so the
+  -- widened needle costs nothing today and refuses the drift tomorrow.
+  v_null_needle TEXT := 'v_enabled IS DISTINCT FROM TRUE';
   -- ⛔ ASSEMBLED BY CONCATENATION, DELIBERATELY, and do NOT "tidy" it into one
   --    literal. Check (6) asserts that the retired app-namespace database-setting
   --    call appears NOWHERE in the executable body. Written whole, the needle
@@ -808,21 +816,39 @@ BEGIN
 
     -- 4/5/6. THE GUARD ITSELF, asserted on the EXECUTABLE text.
     --
-    -- ⚠️ D-05: pg_get_functiondef returns the body WITH its comments, and this
-    -- body's comments discuss every token asserted below. A position() test over
-    -- the raw definition would therefore be satisfied by the PROSE — a gate that
-    -- a comment can satisfy is not a gate. Whole-line `--` comments are stripped
-    -- first, and the assertions run on what is left.
+    -- ⚠️ D-05: pg_get_functiondef returns the body WITH its comments, so a
+    -- position() test over the raw definition is a test a COMMENT can satisfy.
+    -- Comments are stripped first and the assertions run on what is left.
     --
-    -- ⚠️ RESIDUAL, RECORDED not closed: a trailing comment on a line of code
-    -- survives this strip (the line does not begin with `--`). The three needles
-    -- below are all statement-shaped, so a trailing comment cannot supply one
-    -- without also being a plausible statement; the behavioural proof of the
-    -- guard is the pg-lane tracer, not this text check.
-    SELECT string_agg(src_line, E'\n')
-      INTO v_def
-      FROM regexp_split_to_table(v_def_raw, E'\n') AS src_line
-     WHERE btrim(src_line) NOT LIKE '--%';
+    -- ⭐ WHY THE STRIP IS HERE, STATED AS THE TWO REASONS THAT ARE TRUE RATHER
+    -- THAN THE ONE THAT IS NOT. It would be tidy to say "this body's own prose
+    -- would satisfy the raw match", and that claim is FALSE: MEASURED on both
+    -- bodies in this file, `FROM public.system_flags` and
+    -- `IS DISTINCT FROM TRUE` each occur exactly ONCE, in CODE, and ZERO times
+    -- in any comment. The two reasons that hold:
+    --   (i) lint rule R2-functiondef-comment-strip mandates the idiom BY RULE
+    --       for any regex/LIKE over a pg_get_functiondef result — the rule was
+    --       written against a divergence measured on a DIFFERENT body (PROD's
+    --       7-param _enqueue_compute_job_internal), not against this one;
+    --   (ii) the property has to hold under FUTURE comment edits that nobody
+    --       re-measures. A sentence added to the Lock B block next year that
+    --       happens to quote `IS DISTINCT FROM TRUE` would silently make check 5
+    --       unfalsifiable, and nothing would report it.
+    --
+    -- ⚠️ RESIDUAL, RECORDED not closed, and it is the FALSE-PASS direction: this
+    -- idiom does not strip `/* … */`. A block comment quoting a needle satisfies
+    -- these checks with the code gone. Neither body uses one today (measured: 0
+    -- occurrences of `/*` in both). The other direction is safe by construction —
+    -- a `--` inside a string literal makes the strip eat real code, which can
+    -- only cause a FALSE FAILURE, and a false failure is loud.
+    --
+    -- ⚠️ THE REGEXP FORM, matching this repo's R2 idiom and the sibling gates'.
+    -- The line-based form this replaces (`btrim(src_line) NOT LIKE '--%'`) left
+    -- TRAILING comments intact, which is the false-PASS direction. Measured
+    -- equivalent on today's bodies — 0 code lines in either carry a trailing
+    -- `--` — so this is a consistency fix that closes the file's own recorded
+    -- residual rather than a behaviour change.
+    v_def := regexp_replace(v_def_raw, '--[^\n]*', '', 'g');
 
     IF v_def IS NULL OR length(v_def) < 500 THEN
       RAISE EXCEPTION 'Migration 20260907130000: the comment-stripped definition of public.% is % character(s) — the strip is broken, so checks (4)-(6) below would pass over nothing', v_fn, COALESCE(length(v_def), 0);
