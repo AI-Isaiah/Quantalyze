@@ -831,7 +831,7 @@ main() {
     --print-pgbin)
       if [ -z "${PGBIN:-}" ]; then PGBIN=$(resolve_pgbin) || exit 1; fi
       [ -x "$PGBIN/pg_ctl" ] || fail "PGBIN=$PGBIN has no executable pg_ctl"
-  [ -x "$PGBIN/postgres" ] || fail "PGBIN=$PGBIN has pg_ctl but no \`postgres\` server binary — that is a CLIENT-only keg (e.g. homebrew libpq), not a server"
+      [ -x "$PGBIN/postgres" ] || fail "PGBIN=$PGBIN has pg_ctl but no \`postgres\` server binary — that is a CLIENT-only keg (e.g. homebrew libpq), not a server"
       echo "$PGBIN"
       return ;;
     # ⭐ The range is DERIVED, not a pinned byte offset. It was `2,45`, then
