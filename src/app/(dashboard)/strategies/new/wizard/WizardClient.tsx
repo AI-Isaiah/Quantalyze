@@ -495,8 +495,17 @@ export function WizardClient({
     return () => {
       cancelled = true;
     };
-    // Run once on mount. `source` and `initialDraft` come from props/URL
-    // and are stable for the lifetime of this component instance.
+    // Run once on mount. `source`, `initialDraft` AND `preselectKey` come from
+    // props/URL and are stable for the lifetime of this component instance —
+    // `preselectKey` is named explicitly because 164.2.1 made this effect
+    // capture it, and a disable justified by a list that omits what it captures
+    // licenses nothing. Its stability is structural, not incidental: the
+    // contribution overlay's remount key includes `activePreselect?.id`
+    // (ContributionWizardOverlay.tsx), so choosing a different key tears this
+    // instance down rather than changing the prop in place, and the manager
+    // route never passes one at all. ⚠️ A future caller that mutates
+    // `preselectKey` WITHOUT a remount would silently gate the session-id
+    // restore on a key this effect read once and never re-read.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
