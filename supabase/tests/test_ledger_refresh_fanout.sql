@@ -283,17 +283,28 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (0): public.enqueue_ledger_refresh_for_strategies exists on this database but its executable body does not read the activation flag from public.system_flags, so it is the PRE-164.7 revision that reads the retired app-namespace database setting. Arms A, K and L below describe the table-backed fail-closed guard and would measure something else entirely. Cause (iii): migration 20260907130000_ledger_refresh_switch_to_system_flags.sql has not been applied to THIS database. Apply it and re-run. ⛔ Do NOT relax this check to match either body: the two guards fail closed for different reasons, and a gate that accepts both cannot tell an un-applied migration from a regression.';
   END IF;
 
-  -- ----- anti-vacuity precondition on arms A and K -------------------------
-  -- Arms A and K are meaningless if the activation flag is already COMMITTED
-  -- TRUE on this database. Detect that rather than paper over it: silently
-  -- forcing the row back to FALSE would turn "the flag is fail-closed" into "the
-  -- test closed it", which proves nothing about the dormant cases.
+  -- ----- precondition: the switch must not be COMMITTED OPEN here -----------
+  -- ⚠️ STATED PRECISELY, because the imprecise version is the tempting one.
+  -- This is NOT an anti-vacuity guard for arm A. MEASURED (this plan's neuter
+  -- N3): with a committed TRUE row and this check downgraded to a NOTICE, the
+  -- file still runs and every arm still passes — because arm A DELETEs the row
+  -- and arm K UPSERTs it FALSE, so each dormant arm now builds the state it
+  -- measures. The pre-164.7 arm A did not: it read a SESSION setting it never
+  -- set, so a session that already had the setting on made it vacuous, and this
+  -- check was that arm's anti-vacuity guard. The rewrite moved the state into
+  -- the arm and the guard's job changed with it. Do not restore the old claim.
   --
-  -- ⛔ AND IT MUST NOT WRITE. supabase/tests run against ONE SHARED project. A
-  -- COMMITTED TRUE row means an operator opened the switch; UPDATEing it from a
-  -- test would undo a live activation, and doing so inside a transaction that
-  -- rolls back would leave the operator's row untouched while the arms below
-  -- reported a dormancy they had manufactured. Abort and make a human read it.
+  -- What it DOES guard, and why it is still here:
+  --   * a COMMITTED TRUE row means an operator has opened the ledger refresh on
+  --     this database. This file would then DELETE and re-UPSERT that live row
+  --     inside its transaction, holding a row lock on it for the file's whole
+  --     length on a SHARED project, and would print "the ledger refresh fan-out
+  --     is dormant" about a database where it is LIVE. Both are things a human
+  --     must be told, not things a test should quietly work around.
+  --   * ⛔ AND IT MUST NOT WRITE ITS WAY OUT. Silently forcing the row back to
+  --     FALSE would undo a live activation; doing so inside a rolled-back
+  --     transaction would leave the operator's row untouched while this file
+  --     reported a dormancy it had manufactured. Abort, and make a human read it.
   --
   -- `TEST ABORTED` is deliberately NOT a `TEST FAILED (…)` identity: no arm
   -- claims this, and the mutation runner must not be able to attribute it.
@@ -301,7 +312,7 @@ BEGIN
     FROM public.system_flags
    WHERE key = 'ledger_refresh_enabled';
   IF v_flag IS TRUE THEN
-    RAISE EXCEPTION 'TEST ABORTED: the COMMITTED public.system_flags row for ledger_refresh_enabled is TRUE on this database, so arms A and K cannot test the dormant cases. Never UPDATE a committed row from a test on a SHARED project — an operator turned the ledger refresh ON; find out why before running this file. If this is the TEST project and the activation was accidental, close it deliberately in its own session.';
+    RAISE EXCEPTION 'TEST ABORTED: the COMMITTED public.system_flags row for ledger_refresh_enabled is TRUE on this database, so the ledger refresh is LIVE here. This file writes that row (arm A deletes it, arm K sets it FALSE, the activation sets it TRUE) inside its transaction, so running it would hold a lock on an operator''s live row for the length of the file on a SHARED project, and would print a dormancy notice about a database that is not dormant. Never UPDATE a committed row from a test on a shared project — find out why the switch is open before running this file. If this is the TEST project and the activation was accidental, close it deliberately in its own session.';
   END IF;
 
   -- ----- FOREIGN-CANDIDATE PRECONDITION (read-only) -----------------------
