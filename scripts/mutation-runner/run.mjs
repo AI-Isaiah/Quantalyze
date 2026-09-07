@@ -1731,12 +1731,15 @@ export const FILES_FLOOR = 46;
 //                The 46 per-file `biting` counts SUM to 380. WAIVED_CEILING is
 //                untouched at 0: eleven arms added, twenty-seven re-pointed,
 //                zero waivers.
-//   ⚠️ WALL CLOCK  531 s / 528 s / 614 s across the three runs, and the third is
-//                the outlier for a known reason: a busy-wait loop the executor
-//                used to block on that run burned a core beside it, which the
-//                run itself reports as `per-arm lane time: mean 1.3s` against
-//                1.1s in the other two. Read the 1.1s runs as this corpus's
-//                figure. NONE of these is an ubuntu number — see the
+//   ⚠️ WALL CLOCK  531 s / 528 s / 614 s / 514 s across FOUR runs, and the third
+//                is the outlier for a known reason: a busy-wait loop the
+//                executor used to block on it burned a core beside it, which
+//                that run itself reports as `per-arm lane time: mean 1.3s`
+//                against 1.1s in the other three. Read the three 1.1s runs as
+//                this corpus's figure. The FOURTH is the one that matters for
+//                the claim "the full corpus exits 0 at this plan's final
+//                commit": it is SHA-BOUND to df45db38 on a CLEAN tree, exit 0,
+//                514 s. NONE of these is an ubuntu number — see the
 //                timeout-minutes derivation in ci.yml, which is unchanged at 20
 //                (its one permitted raise was taken on 2026-09-05 and 20 is a
 //                declared CEILING).

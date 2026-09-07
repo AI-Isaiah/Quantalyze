@@ -2,7 +2,8 @@ Phase 164.7 plan 05 — FLOOR SEPARATION EVIDENCE
 ================================================
 
 Every number below was READ OFF a run. Nothing here is projected, and nothing is
-copied from a plan's prose. Three FULL-corpus lane runs plus two vitest readings.
+copied from a plan's prose. FOUR full-corpus lane runs plus two vitest readings.
+Runs 1-3 measured a working tree; run 4 is SHA-BOUND to this plan's final commit.
 
 Host      Darwin 25.6.0 arm64 / MacBook-Air-von-Laptop.local
 Branch    worktree-agent-abc52246958c98fda (phase-164.7-appsettings), HEAD d193e4cd
@@ -151,3 +152,38 @@ baseline + 46 restore), contaminated as noted, with 531 s and 528 s clean.
 SHA-bound ubuntu run of a 46-file / 380-arm corpus exists yet; the 567 s and
 646 s figures in ci.yml are the 164.4.1 tree at 363 and 361 arms and must not be
 read as figures for this one. `timeout-minutes` is UNCHANGED at 20.
+
+
+RUN 4 — THE PINNED VALUES, SHA-BOUND TO THE PLAN'S FINAL COMMIT
+---------------------------------------------------------------
+date          2026-09-07T12:31:24Z
+HEAD          df45db384614fd38ab0d752b083fca6b6ba30748  (working tree CLEAN)
+floors        FILES_FLOOR = 46   ARMS_FLOOR = 380   WAIVED_CEILING = 0
+exit          0
+wall clock    514 s
+
+    coverage: files 46/73
+    lane-blocked: 0 file(s) probe pg_extension for pg_cron and are not yet annotated — (none; the lane hosts pg_cron since Phase 164.4.1, TODOS [REDUNDER-PGCRON] retired 2026-09-05)
+    lane-probe: pg_cron AVAILABLE — lane-blocked class is empty, as a hosting lane requires
+      pending: 0 idiom file(s) without RED-UNDER —
+    arms: 380/380/0   (executed/annotated/waived)
+    biting: 380   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)
+    lane-invocations: 380   (arm lanes actually spawned — tallied inside runLane, independent of the 380 the verdict loop counted; plus 46 baseline / 46 restore leg(s))
+    per-arm lane time: mean 1.1s over 380 arm run(s)
+    ✅ No defects. Every annotated arm bit its own arm first.
+
+Runs 1-3 measured a working tree; THIS one measured a committed, clean tree whose
+sha is printed above, which is what "the full corpus exits 0 at this plan's final
+commit" actually requires. It also settles the wall clock: 514 s at
+`mean 1.1s`, with no busy-wait loop beside it, so the three clean readings are
+**531 s / 528 s / 514 s** and run 3's 614 s at 1.3 s/arm is the contaminated one.
+
+⛔ ONE COMMIT FOLLOWS THIS RUN — the one that appends this section, the matching
+SUMMARY row and two comment-only lines in run.mjs. It is recorded here rather
+than chased with a fifth run, because chasing it never terminates: every run
+needs a commit and every commit invalidates the run. What makes that honest is a
+diff, not an argument — `git diff --name-only df45db38 <that commit>` touches
+only `.planning/**` and comment lines in `scripts/mutation-runner/run.mjs`, and
+`git diff df45db38 <that commit> -- supabase/ scripts/pg-lane/` is EMPTY. No
+constant, no gate file, no migration and no fixture moved, so the runner's inputs
+are byte-identical to the tree measured above.
