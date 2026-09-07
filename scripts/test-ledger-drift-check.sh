@@ -619,7 +619,7 @@ STUB
   }
 
   # An EMPTY baseline for every arm. Without it the self-test inherits the
-  # repo's real vac08-ledger-baseline.txt, whose 32 entries are all "stale"
+  # repo's real vac08-ledger-baseline.txt, whose 31 entries are all "stale"
   # against a one-migration fixture — the harness would be measuring production
   # data it never set up, and every arm would red for a reason unrelated to what
   # it is testing. The ratchet itself is proven in
