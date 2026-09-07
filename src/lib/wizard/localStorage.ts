@@ -64,6 +64,17 @@ const ENVELOPE_VERSION = 2;
  * over-long `strategyName` is.
  */
 const FINGERPRINT_MAX_LEN = 64;
+/**
+ * Phase 164.2.1 / SESSIONID-FENCE — upper bound on the persisted `apiKeyId`.
+ *
+ * ⚠️ ITS OWN CONSTANT, not a reuse of `FINGERPRINT_MAX_LEN` above, even though
+ * both happen to be 64 today. That field bounds a CSV-submission digest; this
+ * one bounds an `api_keys.id`, which is a UUID (36 chars, so 64 is already
+ * generous headroom). Sharing the literal would mean a future resize of the
+ * fingerprint silently moved the key bound with it, and nothing in either
+ * docblock would say why. The bounds are equal by coincidence, not by contract.
+ */
+const API_KEY_ID_MAX_LEN = 64;
 
 /**
  * Canonical ordered list of wizard step keys — the SINGLE source of truth.
@@ -186,8 +197,11 @@ export interface WizardLocalState {
    * ABSENT on every payload written before this phase shipped. Absent does NOT
    * default to the common case the way `source` does: absent means "cannot prove
    * same key", and a present incoming key therefore DECLINES the session-id
-   * restore (CONTEXT.md D-02). Bounded at FINGERPRINT_MAX_LEN by the load-time
-   * validator, as every other optional string on this payload is.
+   * restore (CONTEXT.md D-02). Bounded at API_KEY_ID_MAX_LEN (64) by the
+   * load-time validator — like every other optional string on this payload,
+   * each of which carries its OWN bound (`strategyName` is 80, the burn
+   * fingerprint is 64); what they share is the practice of being bounded, not
+   * the number.
    */
   apiKeyId?: string | null;
 }
@@ -509,7 +523,7 @@ export async function loadWizardState(): Promise<WizardLocalState | null> {
     if (obj.apiKeyId !== undefined && obj.apiKeyId !== null) {
       if (
         typeof obj.apiKeyId !== "string" ||
-        (obj.apiKeyId as string).length > FINGERPRINT_MAX_LEN
+        (obj.apiKeyId as string).length > API_KEY_ID_MAX_LEN
       ) {
         return null;
       }
