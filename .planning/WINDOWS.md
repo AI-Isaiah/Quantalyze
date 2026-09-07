@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 33
+open_count: 34
 waived_count: 0
 fixed_count: 10
-total_count: 43
-last_updated: 2026-09-07T07:02:20.270Z
+total_count: 44
+last_updated: 2026-09-07T10:18:29.567Z
 ---
 
 # Broken Windows Ledger
@@ -58,6 +58,7 @@ last_updated: 2026-09-07T07:02:20.270Z
 | 41 | 164.2.1 | deviation | src/app/(dashboard)/allocations/components/ContributionWizardOverlay.sessionid-fence.test.tsx |  | Plan 01 deviated (Rule 3): the spec installs explicit storage doubles instead of the preselect spec's guarded clear — on Node 25 window.localStorage.setItem is not a function, writeWizardState swallows it, and the seed silently never existed (SC-1c was passing vacuously). Fixed and pinned by an applied-ness probe; recorded, not open. | fixed |  | 2026-09-07T02:08:54.153Z | 2026-09-07T02:09:16.275Z |
 | 42 | 164.2.1 | deviation | .planning/phases/164.2.1-sessionid-fence/164.2.1-02-PLAN.md |  | Plan 02 deviated (Rule 3): 8 pre-existing LOCAL-USERNAME violations (the local machine username inside home-directory paths) in this phase's own 01-PLAN/02-PLAN/RESEARCH artifacts reddened check-planning-hygiene and therefore the full suite. Introduced by planning commit bedda506, an ancestor of plan 02's base; wave 1 never ran the full suite so it had not surfaced. The scanner derives its needle from the live USER, so on CI (USER=runner) it never fires - a local-only gate. Fixed at the cause with the repo's own <user> placeholder convention (9 existing .planning files already carry /Users/<user>/ and -Users-<user>-, including <automated> verify commands). Planning artifacts only; no source file, test, criterion or verify command was weakened. Recorded, not open. | fixed |  | 2026-09-07T02:28:20.652Z | 2026-09-07T02:28:47.667Z |
 | 43 | 164.2.1 | unmet-truth | src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.test.tsx |  | FLAKY under full-suite load — a green full suite is therefore not a reliable truth on this file. 'focus management — pre-flight portal + failure transition > submitting → failure transition moves focus to the error banner' failed once in npm test (843 passed \| 1 failed), then passed on an immediate identical re-run (844 passed \| 14217 tests, exit 0). NOT a 164.2.1 regression, MEASURED not assumed: the file is UNTOUCHED by this phase (git diff --name-only vs merge-base is empty), it is 49/49 green in isolation, and it was green in the pre-wave full run. jsdom focus assertions are timing-sensitive and this component animates. Recorded so the next person who sees a lone red here does not bisect a phase that did not cause it, and so the underlying timing dependence is not mistaken for noise forever. | open |  | 2026-09-07T07:02:20.270Z |  |
+| 44 | 164.7 | deviation | supabase/tests/test_analytics_service_settings_and_vault_tick.sql |  | MEASURED: a DROP POLICY <t>_service_all mutation twin is UNFALSIFIABLE repo-wide — service_role is BYPASSRLS on the pg-lane and on Supabase, so every *_service_all policy is belt-and-braces and no twin of that shape can bite (no-red R3, 164.7-02-NEUTER.log Part B2). Any existing arm relying on one is worth re-measuring. | open |  | 2026-09-07T10:18:29.567Z |  |
 
 ````json
 [
@@ -575,6 +576,18 @@ last_updated: 2026-09-07T07:02:20.270Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-07T07:02:20.270Z",
+    "resolved_at": null
+  },
+  {
+    "id": 44,
+    "kind": "deviation",
+    "phase": "164.7",
+    "file": "supabase/tests/test_analytics_service_settings_and_vault_tick.sql",
+    "line": null,
+    "description": "MEASURED: a DROP POLICY <t>_service_all mutation twin is UNFALSIFIABLE repo-wide — service_role is BYPASSRLS on the pg-lane and on Supabase, so every *_service_all policy is belt-and-braces and no twin of that shape can bite (no-red R3, 164.7-02-NEUTER.log Part B2). Any existing arm relying on one is worth re-measuring.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T10:18:29.567Z",
     "resolved_at": null
   }
 ]
