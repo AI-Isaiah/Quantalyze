@@ -112,6 +112,9 @@ export const FINDING_KINDS = [
   {
     id: "unannotated-reader",
     title: "app-GUC read with no lineage annotation",
+    // TWO red fixtures, because D-05's whole claim is that an executable read
+    // and a commented read are the same finding to this gate.
+    redFixtures: ["unannotated-reader.red.sql", "unannotated-comment.red.sql"],
     scope:
       "One finding per DETECT_RE match, in RAW text, in a file that carries no lineage " +
       "header or whose header will not parse. This is the finding the phase exists to " +
@@ -120,6 +123,11 @@ export const FINDING_KINDS = [
   {
     id: "header-malformed",
     title: "lineage header present but unparseable",
+    // NO red fixture is POSSIBLE: a malformed header also leaves the file's
+    // reads unannotated, so any fixture for it fires two kinds and isolates
+    // neither. Proven in src/__tests__/lint-app-guc.test.ts by feeding bad
+    // payloads straight to parseLineageHeader(). Declared, not skipped.
+    selfTestFixture: false,
     scope:
       "The `-- APP-GUC-LINEAGE:` marker is there but a field is missing, the date is not " +
       "a real YYYY-MM-DD, or the count is not an integer. The file's reads are STILL " +
@@ -151,6 +159,10 @@ export const FINDING_KINDS = [
   {
     id: "allowlist-stale",
     title: "allowlist entry for a file that no longer carries a valid header",
+    // A CORPUS-mode condition — it fires after the whole pass, so no single
+    // file exhibits it. The vitest drives scanCorpus() over a temp corpus with
+    // a temp allowlist. Declared, not skipped.
+    selfTestFixture: false,
     scope:
       "An exemption for a file that no longer needs one is an error, not a courtesy — same " +
       "rule as lint-sql-gates' allowlist. Delete the entry so the gate bites the file again.",
@@ -182,6 +194,23 @@ export const FIXTURE_ALLOWLIST = [
     occurrences: 2,
     successor: "successor-target.green.sql",
     reason: "The worked green pair: one executable read plus one commented read, both annotated.",
+  },
+  {
+    file: `${FIXTURE_DIR}/header-count-mismatch.red.sql`,
+    occurrences: 1,
+    successor: "none",
+    reason:
+      "Pins exactly what that fixture's header claims, so the ONLY thing wrong with the file " +
+      "is its measured count. Without this entry the fixture would fire header-not-allowlisted " +
+      "as well and would isolate nothing.",
+  },
+  {
+    file: `${FIXTURE_DIR}/successor-invalid.red.sql`,
+    occurrences: 1,
+    successor: "does-not-exist.sql",
+    reason:
+      "Agrees with that fixture's header on both fields, so the paperwork is complete and the " +
+      "only defect left is the successor that is not there.",
   },
 ];
 
@@ -482,8 +511,12 @@ function sqlFilesUnder(absDir) {
       a.name.localeCompare(b.name),
     )) {
       const p = join(dir, ent.name);
-      if (ent.isDirectory()) walk(p);
-      else if (ent.name.endsWith(".sql")) out.push(p);
+      // The `.sql` test comes FIRST, deliberately. A DIRECTORY named `x.sql` is
+      // a corpus entry that cannot be read, and it is collected so scanFile
+      // MEASURE_FAILs on it. Skipping it silently would let an unreadable
+      // corpus entry read as a clean one (threat T-164.7-04).
+      if (ent.name.endsWith(".sql")) out.push(p);
+      else if (ent.isDirectory()) walk(p);
     }
   };
   walk(absDir);
