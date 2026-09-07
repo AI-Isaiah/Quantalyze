@@ -786,8 +786,22 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // LAYERED — the byte change to the bridge's branch, plus the stand-down of
     // the 20260906120000 self-verify anchor that would otherwise abort the
     // apply and leave no arm able to be the first failure.
-    expect(armsSeen).toBe(369);
-    expect(stepsSeen).toBe(396);
+    // ⚠️ CURRENCY 2026-09-07 (phase 164.7 plan 05): arms 369 -> 380 and file
+    // steps 396 -> 404. ELEVEN new arms from TWO sources, not one — SEVEN in the
+    // new gate test_analytics_service_settings_and_vault_tick.sql (plan 02) and
+    // FOUR in the two EXISTING ledger gates (plan 04: arms K and L in each,
+    // completing the fail-closed truth table beside arm A). Only EIGHT file
+    // steps came with the eleven arms, which is FEWER steps than arms for the
+    // first time in this series and has one cause: three of the new gate's arms
+    // are `sql` steps that carry no file edit at all. Separately, plan 04's
+    // re-point of all 27 pre-existing edit-kind twins in the two ledger gates
+    // onto 20260907130000 moved no COUNT — the same steps, aimed at the
+    // superseding migration, ten of them disambiguated with `nth` because that
+    // migration CREATE OR REPLACEs both bodies.
+    // MEASURED at this commit over scanCorpus: `arms=380 waivers=0
+    // fileSteps=404 sqlSteps=109 totalSteps=513`.
+    expect(armsSeen).toBe(380);
+    expect(stepsSeen).toBe(404);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1553,7 +1567,13 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // LAYERED — the byte change to the bridge's branch, plus the stand-down of
     // the 20260906120000 self-verify anchor that would otherwise abort the
     // apply and leave no arm able to be the first failure.
-    expect(needles.length).toBe(396);
+    // ⚠️ CURRENCY 2026-09-07 (phase 164.7 plan 05): 396 -> 404, moving in
+    // lockstep with `stepsSeen` above — every one of the eight new file steps
+    // is an `edit` carrying a `find`, and plan 04's re-point of the 27
+    // pre-existing ledger twins changed each needle's TARGET migration without
+    // changing how many there are. MEASURED: `fileSteps=404 sqlSteps=109
+    // totalSteps=513`.
+    expect(needles.length).toBe(404);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2090,7 +2110,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // pg_cron-deferred test_compute_jobs_error_kind_copy_parity.sql — the
     // singleton SCOPE AMENDMENT #2's 40 was written before — and
     // test_derive_allocator_keys_fanout.sql, the smallest lane-blocked file.
-    expect(corpus.filesTotal).toBe(72);
+    expect(corpus.filesTotal).toBe(73);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2113,10 +2133,25 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // 2-4 EXECUTE the deployed cron.job.command as their oracle; its apply list
     // is sized so the three `SKIP Part` notices never fire. The plan-04
     // paragraph above stays as the dated record of the 43-file corpus.
-    expect(corpus.filesAnnotated).toBe(45);
+    // ⚠️ CURRENCY 2026-09-07 (phase 164.7 plan 05): MEASURED `files 46/73`, the
+    // other 27 all still `unreachable:` and printed by name. The one added is
+    // test_analytics_service_settings_and_vault_tick.sql, the 7-arm gate over
+    // public.match_engine_cron_tick() and public.system_settings — the FIRST
+    // gate in this corpus whose subject is a Vault read, which is why the
+    // pg-lane gained scripts/pg-lane/fixtures/32-fixture-vault-stand-in.sql to
+    // give it a provable RAISE path on a cluster with no supabase_vault. The
+    // 164.2 paragraph above stays as the dated record of the 45-file corpus.
+    expect(corpus.filesAnnotated).toBe(46);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
+      // ⚠️ CURRENCY 2026-09-07 (phase 164.7 plan 02, pinned by plan 05): the
+      // FORTY-SIXTH annotated file. Seven arms — the two RAISE paths of the
+      // Vault/system_settings tick asked for BY NAME, the discriminator that
+      // refuses a callable which raises unconditionally, and three RLS/grant
+      // arms. Two of its twins are not the ones its plan specified: both were
+      // measured unfalsifiable on a real lane and replaced (164.7-02-NEUTER.log).
+      "test_analytics_service_settings_and_vault_tick.sql",
       "test_api_keys_exchange_not_user_writable.sql",
       "test_api_keys_insert_not_client_writable.sql",
       "test_api_keys_venue_identity_uniq.sql",
@@ -2516,7 +2551,11 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // the ratio change together and neither may be bumped alone.
     // That is PHASE 164.4.1's END STATE: two of the five classes are measured
     // empty and this arithmetic is what says so in a form a future drift breaks.
-    expect(corpus.filesTotal).toBe(72);
+    // ⚠️ CURRENCY 2026-09-07 (phase 164.7 plan 05), read off `--parse-only`:
+    // annotated 46 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 73.
+    // Both halves moved together again, and for the same reason as 164.2 plan
+    // 07: one ADDED gate file, not a backfill. Neither half may be bumped alone.
+    expect(corpus.filesTotal).toBe(73);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -2525,7 +2564,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // above (the selftest fixture PAIR, which must still classify exactly
     // `lane-blocked-gate.sql` and NOT its comment-only sibling), and the
     // set-for-set PARTITION check below is the second independent guard.
-    expect(corpus.annotatedFiles).toHaveLength(45);
+    expect(corpus.annotatedFiles).toHaveLength(46);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {
