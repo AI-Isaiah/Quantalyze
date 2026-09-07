@@ -440,35 +440,88 @@ export function WizardClient({
     (async () => {
       const loaded = await loadWizardState();
       if (cancelled) return;
+      // Phase 164.2.1 / SESSIONID-FENCE — the key THIS mount will submit
+      // under, and `null` when it will submit under none.
+      //
+      // Hoisted into a local rather than passed inline because the decline
+      // warning below has to read the SAME value; recomputing the expression
+      // there would let the two drift apart, and a triage label computed from a
+      // different key than the gate saw is worse than no label.
+      //
+      // API branch: deliberately the SAME expression that seeds the
+      // `apiKeyId` state above, so the gate compares the stored token against
+      // exactly the key the submission carries; reading the state variable
+      // here instead would make the comparison depend on render timing.
+      //
+      // ⛔ CSV branch: a LITERAL `null`, and this ternary is what makes the
+      // "no key on the CSV branch" sentences in `localStorage.ts` true by
+      // CONSTRUCTION rather than merely usually-true. `ContributionWizard
+      // Overlay` passes `preselectKey` regardless of source and renders the
+      // "CSV upload" pill under a live preselect, so "Finish setup → on key
+      // B" followed by "CSV upload" arrives here with a preselect in hand.
+      // A CSV submission carries no key, so a key comparison on this branch
+      // can never decline anything MEANINGFUL — the only thing it can do is
+      // strip a live CSV session id together with the `failedCsvSubmitSig`
+      // burn riding on it (the gate emits the pair or neither), which is
+      // precisely the RT-3 hazard of a fresh id with the burn gone. Claiming
+      // no key is therefore the honest claim, not a loophole. Pinned by
+      // `ContributionWizardOverlay.csv-preselect-burn.test.tsx`.
+      const incomingApiKeyId =
+        source === "csv"
+          ? null
+          : (initialDraft?.api_key_id ?? preselectKey?.id ?? null);
       const overrides = deriveWizardResumeOverrides(
         loaded,
         source,
         initialDraft?.id ?? null,
-        // Phase 164.2.1 / SESSIONID-FENCE — the key THIS mount will submit
-        // under, and `null` when it will submit under none.
-        //
-        // API branch: deliberately the SAME expression that seeds the
-        // `apiKeyId` state above, so the gate compares the stored token against
-        // exactly the key the submission carries; reading the state variable
-        // here instead would make the comparison depend on render timing.
-        //
-        // ⛔ CSV branch: a LITERAL `null`, and this ternary is what makes the
-        // "no key on the CSV branch" sentences in `localStorage.ts` true by
-        // CONSTRUCTION rather than merely usually-true. `ContributionWizard
-        // Overlay` passes `preselectKey` regardless of source and renders the
-        // "CSV upload" pill under a live preselect, so "Finish setup → on key
-        // B" followed by "CSV upload" arrives here with a preselect in hand.
-        // A CSV submission carries no key, so a key comparison on this branch
-        // can never decline anything MEANINGFUL — the only thing it can do is
-        // strip a live CSV session id together with the `failedCsvSubmitSig`
-        // burn riding on it (the gate emits the pair or neither), which is
-        // precisely the RT-3 hazard of a fresh id with the burn gone. Claiming
-        // no key is therefore the honest claim, not a loophole. Pinned by
-        // `ContributionWizardOverlay.csv-preselect-burn.test.tsx`.
-        source === "csv"
-          ? null
-          : (initialDraft?.api_key_id ?? preselectKey?.id ?? null),
+        incomingApiKeyId,
       );
+      // Phase 164.2.1 / SESSIONID-FENCE — THE DECLINE MUST NOT BE SILENT.
+      //
+      // `deriveWizardResumeOverrides` refuses by OMISSION — it just does not
+      // emit `wizardSessionId` — so the branch below cannot tell a decline from
+      // "nothing was stored", an unverifiable payload, or a fresh tab nonce.
+      // Every other refusal in the storage module says so on the console
+      // (`localStorage_payload_refused: …`); this one decides which idempotency
+      // token the submission carries, and a key-resolution regression that
+      // declined EVERY API resume would be indistinguishable in production from
+      // the fence working. A payload that LOADED and HELD a session id which
+      // did not come back is therefore reported here.
+      //
+      // ⛔ NEVER the key ids or the session id themselves — a coarse reason
+      // only, and no user data.
+      //
+      // ⚠️ The reason is a TRIAGE LABEL recomputed at this call site, NOT the
+      // gate. It is deliberately written to degrade rather than lie: anything it
+      // cannot account for — including a condition the derivation grows later —
+      // falls through to "other" instead of being mislabelled as a key refusal.
+      if (loaded?.wizardSessionId && !overrides.wizardSessionId) {
+        let reason = "other";
+        if ((loaded.source ?? "api") !== source) {
+          reason = "source_mismatch";
+        } else if (incomingApiKeyId !== null) {
+          if (typeof loaded.apiKeyId !== "string") {
+            // Payloads written before this phase carry no key at all — the
+            // accepted one-time cost on the record (CONTEXT.md D-02). Named
+            // apart from a real mismatch so the transient post-ship population
+            // is not read as a live defect.
+            reason = "stored_key_absent";
+          } else if (loaded.apiKeyId !== incomingApiKeyId) {
+            reason = "key_mismatch";
+          }
+        }
+        // COUNTABLE, not merely diagnosable. A console warning is a Sentry
+        // breadcrumb; it cannot answer "how often does this fence fire in
+        // production", which is the only question that distinguishes working
+        // correctly from an over-declining regression. `step` carries the
+        // reason label — never a key id, never a session id.
+        trackForQuantsEventClient("wizard_session_id_not_restored", {
+          step: reason,
+        });
+        console.warn(
+          `[wizard] session_id_not_restored: ${reason} — submitting under a fresh token`,
+        );
+      }
       if (overrides.wizardSessionId) {
         setWizardSessionId(overrides.wizardSessionId);
       }
@@ -1151,15 +1204,32 @@ export function WizardClient({
     // draft (Phase 154 — sending a CSV draft to sync_preview would land it on
     // an API-branch step with no key behind it).
     setStep(draftResumeStep);
-    // 164.2.1 — the DRAFT's own key wins, mirroring the `apiKeyId` useState
-    // seed: this resume is about that draft, and the state may not have
-    // caught up to it yet on a first paint.
-    persistPointer(draftResumeStep, initialDraft.id, initialDraft.api_key_id ?? apiKeyId);
+    // 164.2.1 / SESSIONID-FENCE — the DRAFT'S OWN KEY, OR NOTHING.
+    //
+    // This resume is about THAT draft, so the only key claim its payload may
+    // carry is the one the draft itself persisted. `api_key_id === null` is a
+    // draft with no key (a composite, or a CSV-sourced one), and `null` is the
+    // true value for it — the same reason every `saveWizardState` call on the
+    // CSV branch below stamps a literal `null`, and the same reason
+    // `persistPointer` normalises `""` away.
+    //
+    // ⛔ This used to read `initialDraft.api_key_id ?? apiKeyId`, justified by a
+    // first-paint divergence between the draft and the `apiKeyId` state. The
+    // fallback FABRICATED a claim: on a keyless draft it stamped whatever the
+    // state held — on the contribution overlay, the PRESELECTED key — so the
+    // stored payload asserted the draft had been built over a key it had never
+    // been built over, and the fence downstream compares against exactly what
+    // is written here. There is also no divergence to defend against: this
+    // reads the `initialDraft` PROP directly, not a state derived from it.
+    persistPointer(draftResumeStep, initialDraft.id, initialDraft.api_key_id);
     trackForQuantsEventClient("wizard_resume", {
       wizard_session_id: wizardSessionId,
       strategy_id: initialDraft.id,
     });
-  }, [initialDraft, draftResumeStep, persistPointer, wizardSessionId, apiKeyId]);
+    // `apiKeyId` is deliberately NOT a dependency: this callback no longer reads
+    // it (see above), and listing an unread value would re-create the handler on
+    // every key change for no reason.
+  }, [initialDraft, draftResumeStep, persistPointer, wizardSessionId]);
 
   /**
    * ⚠️ Phase 140.3-10 / TRAP-4 — `start_fresh` DESTROYS THE DRAFT, so it goes
@@ -1520,15 +1590,26 @@ export function WizardClient({
           // defeats the resume guard above (which treats undefined as 'api'
           // for back-compat). Missing `strategyName` makes back-navigation
           // forget the user's typed name. Reviewer should diff the entire
-          // CSV branch in one read and confirm: (a) all 4 saveWizardState
-          // calls have BOTH discriminator fields, (b) strategyName flows
-          // through the 3 step props, (c) the wrapping conditional balanced.
+          // CSV branch in one read and confirm: (a) EVERY `saveWizardState`
+          // call in this branch carries BOTH discriminator fields, (b) every
+          // step component that renders or edits the name is passed the
+          // current `strategyName` (`CsvUploadStep` takes it as
+          // `initialStrategyName`), (c) the wrapping conditional balanced.
           //
-          // ⛔ 164.2.1 / SESSIONID-FENCE — and every one of them stamps the
-          // LITERAL `apiKeyId: null`, never the `apiKeyId` state. The state can
-          // hold a preselected key even here (the overlay passes `preselectKey`
-          // regardless of source and renders its "CSV upload" pill under a live
-          // preselect), and a CSV payload carrying a key is what lets
+          // ⚠️ NO COUNTS IN THIS CHECKLIST, DELIBERATELY. It used to read
+          // "all 4 saveWizardState calls" and "the 3 step props". The branch has
+          // grown past both since, so a reviewer following the instruction
+          // literally stopped short of the calls that were added after the
+          // integer was written — and the 164.2.1 sentence below silently
+          // inherited the stale "4" by binding to it. A count in a checklist
+          // over code that grows goes wrong invisibly; a quantifier cannot.
+          //
+          // ⛔ 164.2.1 / SESSIONID-FENCE — and EVERY `saveWizardState` call in
+          // this branch stamps the LITERAL `apiKeyId: null`, never the
+          // `apiKeyId` state. The state can hold a preselected key even here
+          // (the overlay passes `preselectKey` regardless of source and renders
+          // its "CSV upload" pill under a live preselect), and a CSV payload
+          // carrying a key is what lets
           // `deriveWizardResumeOverrides` decline a CSV session id — taking the
           // `failedCsvSubmitSig` burn with it, since the gate emits the pair or
           // neither. A CSV submission carries no key, so `null` is the true

@@ -619,6 +619,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
       strategyId: "00000000-0000-4000-8000-000000000001",
       wizardSessionId: "session-1",
       step: "sync_preview",
+      apiKeyId: null,
     });
 
     // Envelope-shape sanity: stored payload is an object with v/p/h.
@@ -643,6 +644,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
       strategyId: "00000000-0000-4000-8000-000000000aaa",
       wizardSessionId: "session-aaa",
       step: "sync_preview",
+      apiKeyId: null,
     });
 
     // Tamper: rewrite p to point at a different strategyId, keep h.
@@ -672,6 +674,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
       strategyId: "00000000-0000-4000-8000-000000000bbb",
       wizardSessionId: "session-bbb",
       step: "metadata",
+      apiKeyId: null,
     });
 
     // Simulate a new tab: a fresh sessionStorage nonce.
@@ -737,6 +740,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
       strategyId: "00000000-0000-4000-8000-000000000eee",
       wizardSessionId: "session-review",
       step: "review",
+      apiKeyId: null,
     });
     const loaded = await loadWizardState();
     expect(loaded).not.toBeNull();
@@ -750,6 +754,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
       step: "csv_review",
       source: "csv",
       strategyName: "Aurora Capital",
+      apiKeyId: null,
     });
     const loaded = await loadWizardState();
     expect(loaded).not.toBeNull();
@@ -769,6 +774,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
       // Cast through unknown: an attacker/old-code-written value the enum
       // does not know about.
       step: "not_a_real_step" as unknown as WizardLocalState["step"],
+      apiKeyId: null,
     });
     const loaded = await loadWizardState();
     expect(loaded).toBeNull();
@@ -817,6 +823,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
         source: "csv",
         strategyName: "Alpha 2024",
         failedCsvSubmitSig: BURN,
+        apiKeyId: null,
       });
 
       // ABSENCE assertion: exactly ONE localStorage key exists, and it is the
@@ -840,6 +847,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
         step: "csv_upload",
         source: "csv",
         strategyName: "Alpha 2024",
+        apiKeyId: null,
       });
       const loaded = await loadWizardState();
       // Absence must be falsy so no downstream reader can mistake it for a burn.
@@ -854,6 +862,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
         source: "csv",
         strategyName: "Alpha 2024",
         failedCsvSubmitSig: BURN,
+        apiKeyId: null,
       });
 
       // The shape of the eight CSV step-transition saves in WizardClient: they
@@ -866,6 +875,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
         step: "csv_review",
         source: "csv",
         strategyName: "Alpha 2024",
+        apiKeyId: null,
       });
 
       const loaded = await loadWizardState();
@@ -881,6 +891,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
         source: "csv",
         strategyName: "Alpha 2024",
         failedCsvSubmitSig: BURN,
+        apiKeyId: null,
       });
       await saveWizardState({
         strategyId: "",
@@ -889,6 +900,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
         source: "csv",
         strategyName: "Alpha 2025",
         failedCsvSubmitSig: null,
+        apiKeyId: null,
       });
 
       const loaded = await loadWizardState();
@@ -904,6 +916,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
         source: "csv",
         strategyName: "Alpha 2024",
         failedCsvSubmitSig: BURN,
+        apiKeyId: null,
       });
 
       // Rewrite the burn in place, keeping the original h.
@@ -1028,6 +1041,14 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
         wizardSessionId: "session-legacy",
         step: "sync_preview",
         source: "api",
+        // ⛔ `undefined`, NOT `null`: this pin's whole subject is the pre-164.2.1
+        // payload shape, and `null` is a payload that DOES make a key claim — it
+        // would serialise the field and the assertion below would be pinning a
+        // different thing than its name says. `WizardSaveInput` makes the property
+        // REQUIRED so no save site can forget it; `undefined` is how a caller says
+        // "this payload makes no key claim" out loud, and `JSON.stringify` then drops
+        // it, reproducing the legacy bytes byte-for-byte.
+        apiKeyId: undefined,
       });
       const loaded = await loadWizardState();
       expect(loaded).not.toBeNull();
@@ -1109,6 +1130,68 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
       });
 
       expect((await loadWizardState())?.apiKeyId).toBe("x".repeat(64));
+    });
+
+    /**
+     * IN-02, READ LAYER — the EMPTY STRING is refused, and it is a real value
+     * rather than a hypothetical: `MultiKeyConnectStep`'s composite success
+     * shape coalesces a null member key to `""` (`apiKeyId: first.apiKeyId ?? ""`),
+     * and that payload is what the one API-branch writer receives.
+     *
+     * `""` satisfies every OTHER clause of this arm — it is a string, and 0 is
+     * within the bound — so without the length check the validator would ADMIT a
+     * value outside the field's own documented domain (an `api_keys.id` or
+     * `null`, never the empty string), and `sessionKeyMatches` would then compare
+     * it against a present incoming key as if it were one.
+     *
+     * ⚠️ TWO LAYERS, PINNED SEPARATELY AND ON PURPOSE. `persistPointer` also
+     * normalises `""` away at the WRITER, and that pin lives in
+     * `ContributionWizardOverlay.sessionid-fence.test.tsx`, asserting on the
+     * bytes it writes without ever calling `loadWizardState`. This one asserts
+     * the READ refusal, so it holds for a payload the writer never produced — a
+     * future writer's, or a same-tab script's. Neither test can pass for the
+     * other's reason.
+     *
+     * The save goes through the REAL writer (which does not validate on write),
+     * so the stored bytes genuinely carry `""` rather than being hand-forged.
+     */
+    it("refuses a payload whose apiKeyId is the EMPTY STRING (outside the field's domain)", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await saveWizardState({
+        strategyId: "00000000-0000-4000-8000-00000000000f",
+        wizardSessionId: "session-empty-key",
+        step: "sync_preview",
+        source: "api",
+        apiKeyId: "",
+      });
+      // The empty string really did reach the signed envelope — otherwise this
+      // would be pinning a write-side normalisation that does not live here.
+      const stored = JSON.parse(localStore["quantalyze_wizard_state_v1"]);
+      expect(JSON.parse(stored.p).apiKeyId).toBe("");
+
+      expect(await loadWizardState()).toBeNull();
+      expect(
+        warn.mock.calls.some((args) =>
+          String(args[0]).includes("localStorage_payload_refused: apiKeyId"),
+        ),
+        "The payload was refused without naming the offending field, so the " +
+          "refusal is indistinguishable from a tamper/nonce failure in a console.",
+      ).toBe(true);
+      warn.mockRestore();
+    });
+
+    it("a ONE-character key is accepted (the empty-string guard is not a blanket)", async () => {
+      // The lower-end bracket for the arm above, mirroring the upper-end
+      // "just inside the bound" case: without it, a guard that refused EVERY
+      // present key would pass the empty-string test for the wrong reason.
+      await saveWizardState({
+        strategyId: "00000000-0000-4000-8000-000000000010",
+        wizardSessionId: "session-short-key",
+        step: "sync_preview",
+        source: "api",
+        apiKeyId: "k",
+      });
+      expect((await loadWizardState())?.apiKeyId).toBe("k");
     });
   });
 });

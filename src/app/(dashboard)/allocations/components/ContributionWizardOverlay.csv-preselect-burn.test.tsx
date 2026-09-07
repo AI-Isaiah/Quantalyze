@@ -7,17 +7,20 @@
  * `wizardSessionId` when the incoming key differs from the stored one, and it
  * declines the `failedCsvSubmitSig` burn WITH it — deliberately, since the two
  * are emitted as a pair (a burn identifies which submission spent THAT id).
- * Five comments shipped with plan 01 asserted that this can never bite the CSV
- * branch because "the CSV branch has no key at all". Nothing enforced that:
+ * The hazard is that "the CSV branch has no key at all" is an INVARIANT nothing
+ * enforced — an assertion the storage module's prose relies on, with no
+ * mechanism behind it (review WR-02). Three facts about the wizard make it
+ * violable:
  *
- *   · the thirteen CSV save sites stamped the wizard's `apiKeyId` STATE, and
+ *   · a CSV save site that stamps the wizard's `apiKeyId` STATE rather than a
+ *     literal `null` puts a key on a CSV payload, and
  *   · that state seeds from `initialDraft?.api_key_id ?? preselectKey?.id`, and
  *   · `ContributionWizardOverlay` passes `preselectKey` regardless of source
  *     while rendering its "CSV upload" pill under a live preselect.
  *
  * So: "Finish setup →" on key B, then "CSV upload", mounts the CSV wizard with
  * a key-B claim in hand. Meeting a stored CSV payload (which carries
- * `apiKeyId: null`) the gate declined the CSV session id and took the burn with
+ * `apiKeyId: null`) the gate declines the CSV session id and takes the burn with
  * it — a fresh id with the fence disarmed, which is the exact RT-3 hazard:
  * content a failed attempt already spent gets resubmitted with nothing left to
  * retire the spent id. On the CSV branch a key comparison has no meaning
@@ -33,15 +36,18 @@
  *      expression turns the first `it` below RED (the re-mint event never
  *      fires) while the hydration wait still passes, because `strategyName` is
  *      restored outside the key gate. That is the neuter proof for this file.
- *   2. THE THIRTEEN CSV SAVE SITES stamp a literal `null` instead of the
- *      wizard's `apiKeyId` state. ⚠️ MEASURED: putting the state back does NOT
- *      redden the two `it`s above — and the reason is worth writing down rather
+ *   2. EVERY CSV SAVE SITE stamps a literal `null` instead of the wizard's
+ *      `apiKeyId` state. ⚠️ MEASURED: putting the state back does NOT redden
+ *      the first two `it`s below — and the reason is worth writing down rather
  *      than papering over. With half 1 in place EVERY CSV mount claims no key,
  *      so a key stored on a CSV payload is never consulted by the gate, and an
  *      API mount cannot reach it either (the SOURCE gate declines first). Half
  *      2 is therefore not a second fence; it is what makes the field's
  *      DOCUMENTED DOMAIN ("`null` on the CSV branch") true, which is what the
- *      third `it` pins, and what lets the CSV hook dep arrays drop `apiKeyId`.
+ *      two DOMAIN `it`s pin, and what lets the CSV hook dep arrays drop
+ *      `apiKeyId`. ⚠️ Those two name the ONE save site each drives (the
+ *      upload-success transition and the debounced name autosave) — between
+ *      them they do NOT cover every CSV save site, and neither claims to.
  *
  * Do not "strengthen" this header into claiming half 2 is independently
  * observable here. It is not, it was checked, and a test file that overstates
@@ -73,6 +79,7 @@ import {
   saveWizardState,
 } from "@/lib/wizard/localStorage";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
+import { installWizardStorageDoubles } from "@/test/helpers/wizard-storage-doubles";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ContributionWizardOverlay } from "./ContributionWizardOverlay";
 
@@ -120,6 +127,7 @@ let uploadPayload: {
 vi.mock("@/app/(dashboard)/strategies/new/wizard/steps/CsvUploadStep", () => ({
   CsvUploadStep: (props: {
     onSuccess: (p: typeof uploadPayload) => void;
+    onNameChange?: (name: string) => void;
     initialStrategyName?: string;
   }) => (
     <div data-testid="mock-csv-upload">
@@ -130,6 +138,21 @@ vi.mock("@/app/(dashboard)/strategies/new/wizard/steps/CsvUploadStep", () => ({
         onClick={() => props.onSuccess(uploadPayload)}
       >
         upload ok
+      </button>
+      {/*
+        The REAL step calls `onNameChange` on every keystroke (its own docblock:
+        "report every name edit up to WizardClient so it survives back/forward"),
+        and that prop is the ONLY input to the parent's debounced name autosave.
+        Without this affordance the autosave is unreachable from this file and
+        the `it` that claims to drive it would be driving the upload-success save
+        instead — which is exactly the mislabel review WR-02 follow-up found.
+      */}
+      <button
+        type="button"
+        data-testid="fire-name-change"
+        onClick={() => props.onNameChange?.(RENAMED)}
+      >
+        rename
       </button>
     </div>
   ),
@@ -151,6 +174,13 @@ const KEY_B = {
 
 const CSV_SESSION = "cccccccc-0000-4000-8000-000000000001";
 const SEEDED_NAME = "Alpha 2024";
+/**
+ * A name DIFFERENT from the seeded one, so the payload the debounced autosave
+ * writes is distinguishable from the seed it overwrites. Without that the
+ * autosave `it` below could not tell "the autosave wrote" from "the seed is
+ * still there".
+ */
+const RENAMED = "Alpha 2024 (corrected)";
 const SERIES_SPENT = [{ date: "2024-01-01", daily_return: 0.01 }];
 const SERIES_CORRECTED = [{ date: "2024-01-01", daily_return: 0.09 }];
 
@@ -173,49 +203,14 @@ const SPENT_BURN = csvSubmissionFingerprint(
   null,
 );
 
-let localStore: Record<string, string>;
-let sessionStore: Record<string, string>;
-
 /**
- * ⛔ Explicit storage doubles, copied from the sibling sessionid-fence spec.
- * Node 25 shadows jsdom's `window.localStorage` with an implementation whose
- * `setItem` is not a function; `writeWizardState` SWALLOWS that, so the seed
- * would silently never exist and every assertion here would be vacuous. CI is
- * Node 22, where jsdom's own implementation works — these make both boxes read
- * the same.
+ * ⛔ Explicit storage doubles — see `installWizardStorageDoubles` for why they
+ * are load-bearing rather than cosmetic (Node 25 shadows jsdom's
+ * `window.localStorage` with an implementation whose `setItem` is not a
+ * function, `writeWizardState` SWALLOWS that, and every assertion here would be
+ * vacuous). `localStore` is read directly below to assert on the stored bytes.
  */
-function installStorage() {
-  const mk = (
-    get: () => Record<string, string>,
-    set: (v: Record<string, string>) => void,
-  ) =>
-    ({
-      getItem: (k: string) => (k in get() ? get()[k] : null),
-      setItem: (k: string, v: string) => {
-        get()[k] = v;
-      },
-      removeItem: (k: string) => {
-        delete get()[k];
-      },
-      clear: () => set({}),
-      key: () => null,
-      length: 0,
-    }) as unknown as Storage;
-  Object.defineProperty(window, "localStorage", {
-    value: mk(
-      () => localStore,
-      (v) => (localStore = v),
-    ),
-    configurable: true,
-  });
-  Object.defineProperty(window, "sessionStorage", {
-    value: mk(
-      () => sessionStore,
-      (v) => (sessionStore = v),
-    ),
-    configurable: true,
-  });
-}
+let localStore: Record<string, string>;
 
 /** The overlay's own draft read. `draft: null` — no draft is offered here. */
 function installRoutes() {
@@ -238,9 +233,8 @@ beforeEach(async () => {
   // ⚠️ DRAIN BEFORE CLEARING — wizard saves are fire-and-forget, and a
   // straggler from the previous test lands between the clear and the seed.
   await flushWizardStateSaves();
-  localStore = {};
-  sessionStore = {};
-  installStorage();
+  // Fresh doubles per test — installing IS the reset.
+  ({ localStore } = installWizardStorageDoubles());
   uploadPayload = {
     fmt: "daily_returns",
     preview: PREVIEW,
@@ -363,32 +357,37 @@ describe("[164.2.1 / WR-02] a key preselect must not strip the CSV branch's RT-3
   });
 
   /**
-   * THE DOMAIN PIN — half 2 of the fix (see the header), and it is honestly
-   * labelled as a domain assertion rather than dressed up as a second fence.
+   * THE DOMAIN PINS — half 2 of the fix (see the header), honestly labelled as
+   * domain assertions rather than dressed up as a second fence.
    *
-   * `WizardLocalState.apiKeyId` is documented as "the `api_keys.id` this draft
-   * was being built over, or `null` on the CSV branch". Before WR-02 that
-   * sentence was false on exactly this mount: the thirteen CSV save sites
-   * stamped the wizard's `apiKeyId` STATE, which seeds from `preselectKey?.id`,
-   * so the debounced name autosave wrote a KEY onto a CSV payload. Nothing
-   * reads it today (half 1 makes every CSV mount claim no key, and the SOURCE
-   * gate keeps API mounts away from a `source: "csv"` payload) — which is
-   * precisely why a test is worth having: a field whose stored value contradicts
-   * its own docblock is one call-site change away from being read.
+   * THE INVARIANT: `WizardLocalState.apiKeyId` is documented as "the
+   * `api_keys.id` this draft was being built over, or `null` on the CSV branch".
+   * A CSV save site that stamps the wizard's `apiKeyId` STATE instead of a
+   * literal `null` makes that sentence false, because the state seeds from
+   * `preselectKey?.id` and the overlay renders its "CSV upload" pill under a
+   * live preselect. Nothing reads the field on this branch today (half 1 makes
+   * every CSV mount claim no key, and the SOURCE gate keeps API mounts away from
+   * a `source: "csv"` payload) — which is precisely why the pins are worth
+   * having: a field whose stored value contradicts its own docblock is one
+   * call-site change away from being read.
    *
-   * ⛔ This `it` is the only thing that fails if the literal `null` stamps are
-   * reverted. It is a STORAGE-SHAPE assertion by design; the behavioural oracle
-   * lives in the two `it`s above.
+   * ⛔ THESE TWO ARE WHAT FAILS IF THE LITERAL `null` STAMPS ARE REVERTED, and
+   * they are STORAGE-SHAPE assertions by design — the behavioural oracle lives
+   * in the two `it`s above. Each names ONE save site and drives exactly that
+   * site; neither is a claim about every CSV save site in `WizardClient`. The
+   * two chosen are the ones this harness can reach without leaving `csv_upload`
+   * behind: the upload-success transition and the debounced name autosave.
    */
-  it("DOMAIN: the CSV autosave stamps a literal null, never the preselected key", async () => {
+  it("DOMAIN: the csv_upload → csv_preview save stamps a literal null, never the preselected key", async () => {
     await seedBurnedCsvSession();
     await openOverlayOnCsvUnderPreselectB();
 
-    // Drive the debounced name autosave: it is gated on `hydrated`, `step ===
-    // "csv_upload"` and a non-empty name, all of which hold right now. The
-    // restored name re-renders CsvUploadStep, which echoes it back through
-    // `onNameChange` in the real step; here we fire the change ourselves, which
-    // is the same input the effect sees.
+    // ⚠️ THIS DRIVES THE UPLOAD-SUCCESS SAVE SITE, NOT THE NAME AUTOSAVE. The
+    // click runs `CsvUploadStep`'s `onSuccess`, whose handler advances to
+    // `csv_preview` and writes the `step: "csv_preview"` payload asserted below.
+    // (It cannot be the autosave: that effect early-returns once `step !==
+    // "csv_upload"`, and the mocked step never calls `onNameChange` on this
+    // path. The autosave has its own `it` directly below.)
     fireEvent.click(screen.getByTestId("fire-upload-success"));
     await screen.findByTestId("mock-csv-preview");
     await flushWizardStateSaves();
@@ -397,14 +396,58 @@ describe("[164.2.1 / WR-02] a key preselect must not strip the CSV branch's RT-3
     expect(raw).toBeTruthy();
     const payload = JSON.parse(JSON.parse(raw).p) as {
       source?: string;
+      step?: string;
       apiKeyId?: string | null;
     };
     expect(payload.source).toBe("csv");
+    // Names the site: a payload at any other step would mean the click landed
+    // somewhere else and the assertion below is about a different writer.
+    expect(payload.step).toBe("csv_preview");
     expect(
       payload.apiKeyId,
-      "A CSV payload is carrying the PRESELECTED key. The CSV save sites are " +
-        "stamping the `apiKeyId` state instead of the literal `null` the " +
-        "field's docblock promises, and a CSV submission carries no key.",
+      "A CSV payload is carrying the PRESELECTED key. The upload-success save " +
+        "site is stamping the `apiKeyId` state instead of the literal `null` " +
+        "the field's docblock promises, and a CSV submission carries no key.",
+    ).toBeNull();
+  });
+
+  it("DOMAIN: the debounced name autosave stamps a literal null, never the preselected key", async () => {
+    await seedBurnedCsvSession();
+    await openOverlayOnCsvUnderPreselectB();
+
+    // The autosave effect is gated on `source === "csv"`, `step ===
+    // "csv_upload"`, `hydrated`, and a non-empty name — all of which hold right
+    // now, and the step stays `csv_upload` because nothing here advances it.
+    // `onNameChange` is the real step's per-keystroke hoist and the effect's
+    // only input, so firing it is the same signal a typed character produces.
+    fireEvent.click(screen.getByTestId("fire-name-change"));
+
+    // ⚠️ The wait is on the RENAMED payload, not merely on "something is
+    // stored": the seed written by `seedBurnedCsvSession` is already at
+    // `csv_upload`, so a wait that ignored the name would resolve on the SEED
+    // and this `it` would assert nothing about the autosave at all. Timeout
+    // comfortably past the 400 ms debounce plus the async HMAC sign.
+    await waitFor(
+      () => {
+        const raw = localStore["quantalyze_wizard_state_v1"];
+        expect(raw).toBeTruthy();
+        const p = JSON.parse(JSON.parse(raw).p) as { strategyName?: string };
+        expect(p.strategyName).toBe(RENAMED);
+      },
+      { timeout: 3000 },
+    );
+
+    const payload = JSON.parse(
+      JSON.parse(localStore["quantalyze_wizard_state_v1"]).p,
+    ) as { source?: string; step?: string; apiKeyId?: string | null };
+    expect(payload.source).toBe("csv");
+    expect(payload.step).toBe("csv_upload");
+    expect(
+      payload.apiKeyId,
+      "A CSV payload is carrying the PRESELECTED key. The debounced name " +
+        "autosave is stamping the `apiKeyId` state instead of the literal " +
+        "`null` the field's docblock promises, and a CSV submission carries " +
+        "no key.",
     ).toBeNull();
   });
 });

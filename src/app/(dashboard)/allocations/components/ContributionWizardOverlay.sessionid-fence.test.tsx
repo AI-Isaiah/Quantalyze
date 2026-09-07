@@ -46,8 +46,14 @@ import {
   saveWizardState,
 } from "@/lib/wizard/localStorage";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
+import { installWizardStorageDoubles } from "@/test/helpers/wizard-storage-doubles";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ContributionWizardOverlay } from "./ContributionWizardOverlay";
+// Mounted DIRECTLY by the keyless-draft resume pin at the bottom of this file:
+// the overlay refuses to OFFER a keyless draft under a live preselect, so the
+// prop combination that pin needs cannot be produced through it. Every other
+// `it` here goes through the overlay.
+import { WizardClient } from "@/app/(dashboard)/strategies/new/wizard/WizardClient";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -87,6 +93,51 @@ vi.mock("@/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep", () => (
   ),
 }));
 
+/**
+ * ⭐ A WRAPPER, NOT A REPLACEMENT — the REAL `MultiKeyConnectStep` still renders,
+ * so every `wizard-preselect-continue` assertion in this file keeps running
+ * against the real connect UI. What is ADDED is one affordance that emits the
+ * step's own `onSuccess` payload with an EMPTY `apiKeyId`.
+ *
+ * ⚠️ WHY THE PAYLOAD HAS TO BE INJECTED HERE rather than through the create
+ * route this file already controls: BOTH `ConnectKeyStep` arms guard
+ * `!data.api_key_id` before calling `onSuccess`, and `""` is falsy — so a
+ * response carrying an empty key is refused there and never reaches
+ * `handleConnectSuccess`. The ONE producer of `""` is this step's OWN success
+ * shape, `apiKeyId: first.apiKeyId ?? ""` in its composite `handleContinue`
+ * (a member panel whose key id is null coalesces to the empty string). This
+ * button emits precisely that shape, so the value under test is the real
+ * contract's, not a value invented for the test.
+ */
+vi.mock(
+  "@/app/(dashboard)/strategies/new/wizard/steps/MultiKeyConnectStep",
+  async (importOriginal) => {
+    const actual =
+      (await importOriginal()) as typeof import("@/app/(dashboard)/strategies/new/wizard/steps/MultiKeyConnectStep");
+    const Real = actual.MultiKeyConnectStep;
+    return {
+      MultiKeyConnectStep: (props: Parameters<typeof Real>[0]) => (
+        <>
+          <Real {...props} />
+          <button
+            type="button"
+            data-testid="emit-composite-success-empty-key"
+            onClick={() =>
+              props.onSuccess({
+                strategyId: "ssssssss-0000-4000-8000-00000000000e",
+                apiKeyId: "",
+                exchange: "bybit",
+              })
+            }
+          >
+            composite continue with an empty member key
+          </button>
+        </>
+      ),
+    };
+  },
+);
+
 // --- Fixtures --------------------------------------------------------------
 
 const KEY_A = {
@@ -117,6 +168,18 @@ const DRAFT_ON_KEY_A = {
   max_capacity: null,
   api_key_id: KEY_A.id,
   asset_class: "crypto",
+};
+
+/**
+ * A KEYLESS draft — `api_key_id: null`, which is what a composite or a
+ * CSV-sourced draft looks like. It is the input the resume pin below needs,
+ * because it is the ONLY shape where "the draft's own key" and "the wizard's
+ * `apiKeyId` state" can disagree.
+ */
+const KEYLESS_DRAFT = {
+  ...DRAFT_ON_KEY_A,
+  id: "dddddddd-0000-4000-8000-000000000002",
+  api_key_id: null,
 };
 
 /**
@@ -167,54 +230,6 @@ function installRoutes() {
   }) as typeof fetch);
 }
 
-/**
- * Explicit storage doubles, copied from `WizardClient.csv-burn-persistence
- * .test.tsx` — the sibling that also seeds and reads back through the REAL
- * writer. ⛔ NOT optional here and NOT stylistic: MEASURED on this box (Node
- * 25.8.1), the guarded `window.localStorage?.clear?.()` the preselect spec uses
- * is enough for a file that only WRITES, but Node 25 shadows jsdom's
- * `window.localStorage` with an implementation whose `setItem` IS NOT A
- * FUNCTION. `writeWizardState` catches that, warns, and stores nothing — so the
- * seed silently never existed, `loadWizardState` answered null, and SC-1c
- * passed for the wrong reason while SC-1d failed. CI is Node 22, where jsdom's
- * own implementation works; these doubles make both boxes read the same.
- */
-let localStore: Record<string, string>;
-let sessionStore: Record<string, string>;
-
-function installStorage() {
-  const mk = (
-    get: () => Record<string, string>,
-    set: (v: Record<string, string>) => void,
-  ) =>
-    ({
-      getItem: (k: string) => (k in get() ? get()[k] : null),
-      setItem: (k: string, v: string) => {
-        get()[k] = v;
-      },
-      removeItem: (k: string) => {
-        delete get()[k];
-      },
-      clear: () => set({}),
-      key: () => null,
-      length: 0,
-    }) as unknown as Storage;
-  Object.defineProperty(window, "localStorage", {
-    value: mk(
-      () => localStore,
-      (v) => (localStore = v),
-    ),
-    configurable: true,
-  });
-  Object.defineProperty(window, "sessionStorage", {
-    value: mk(
-      () => sessionStore,
-      (v) => (sessionStore = v),
-    ),
-    configurable: true,
-  });
-}
-
 beforeEach(async () => {
   createCalls = [];
   createResponder = async () =>
@@ -228,9 +243,11 @@ beforeEach(async () => {
   // from the previous test lands between the clear and the assertion (the
   // Node-22-only failure the sibling overlay spec records).
   await flushWizardStateSaves();
-  localStore = {};
-  sessionStore = {};
-  installStorage();
+  // Fresh doubles per test — installing IS the reset. See the helper's docblock
+  // for why explicit doubles are load-bearing here rather than cosmetic: without
+  // them, on Node 25 the seed silently never lands and SC-1c passes for the
+  // wrong reason while SC-1d fails.
+  installWizardStorageDoubles();
   // ⛔ See the file header: without this every hydration wait after the first
   // resolves on the PREVIOUS test's `wizard_start` and the click races the
   // async localStorage read.
@@ -244,8 +261,14 @@ afterEach(() => {
 
 /**
  * Key A's abandoned payload, written through the REAL writer so the envelope
- * carries a verifiable HMAC. `apiKeyId` is omitted when `keyId` is undefined —
- * that is the pre-164.2.1 payload shape, not a null one.
+ * carries a verifiable HMAC. `apiKeyId` is omitted from the STORED BYTES when
+ * `keyId` is undefined — that is the pre-164.2.1 payload shape, not a null one.
+ *
+ * ⚠️ The omission happens in `JSON.stringify`, not here. `WizardSaveInput` makes
+ * the property REQUIRED (a save site that forgets it writes the legacy shape by
+ * accident and silently declines forever), so the default `keyId === undefined`
+ * is passed through EXPLICITLY and serialisation is what drops it. A caller that
+ * means "this payload makes no key claim" has to say so; it cannot omit it.
  */
 async function seedAbandonedDraftOnKeyA(keyId?: string) {
   await saveWizardState({
@@ -253,7 +276,7 @@ async function seedAbandonedDraftOnKeyA(keyId?: string) {
     wizardSessionId: A_SESSION,
     step: "sync_preview",
     source: "api",
-    ...(keyId === undefined ? {} : { apiKeyId: keyId }),
+    apiKeyId: keyId,
   });
   await flushWizardStateSaves();
   // ⛔ APPLIED-NESS PROBE, not decoration. `writeWizardState` SWALLOWS a storage
@@ -430,6 +453,127 @@ describe("[164.2.1 / SESSIONID-FENCE] WIRE — the persisted key is the one the 
           "`apiKeyId` from its closure instead of taking it as an argument.",
       ).not.toBe(KEY_B.id);
     });
+  });
+
+  /**
+   * IN-02 — THE WRITER NORMALISES `""`, and this pins the WRITER, not the
+   * load-time validator.
+   *
+   * `persistPointer` writes `apiKeyId: keyId || null`. The `|| null` collapses an
+   * empty string, which is a REAL value arriving at this parameter: the composite
+   * `MultiKeyConnectStep` coalesces a null member key to `""` in the very
+   * `onSuccess` payload `handleConnectSuccess` receives (see the wrapper mock at
+   * the top of this file for why the value has to enter there).
+   *
+   * ⚠️ TWO LAYERS NOW REJECT `""` AND THIS ONE DISCRIMINATES THE WRITER. The
+   * load-time validator also refuses an empty `apiKeyId`, but it refuses the
+   * WHOLE PAYLOAD at READ time — so it cannot keep `""` out of the stored bytes,
+   * only out of a `loadWizardState` result. This assertion reads the ENVELOPE
+   * that was just written and never calls `loadWizardState`, so reverting the
+   * validator's empty-string arm leaves it green while reverting the writer's
+   * `|| null` turns it red. The validator's own arm is pinned separately, at the
+   * read layer, in `src/lib/wizard/localStorage.test.ts`.
+   *
+   * WHY IT MATTERS that `""` never lands: `""` is outside the field's documented
+   * domain (an `api_keys.id` or `null`), and a stored `""` meeting a present
+   * incoming key would be handed to `sessionKeyMatches` as if it were a key.
+   */
+  it("IN-02: an EMPTY key from the composite step is stored as null, never as an empty string", async () => {
+    render(
+      <ContributionWizardOverlay isOpen onClose={vi.fn()} preselectKey={KEY_B} />,
+    );
+    await findSummary();
+    await awaitHydration();
+
+    fireEvent.click(screen.getByTestId("emit-composite-success-empty-key"));
+
+    await waitFor(() => {
+      const raw = window.localStorage.getItem("quantalyze_wizard_state_v1");
+      expect(raw).not.toBeNull();
+      const payload = JSON.parse(JSON.parse(raw!).p) as {
+        strategyId?: string;
+        apiKeyId?: string | null;
+      };
+      // Names the writer: this envelope is the one the click caused, not some
+      // earlier save. Nothing else in this `it` writes.
+      expect(payload.strategyId).toBe("ssssssss-0000-4000-8000-00000000000e");
+      expect(
+        payload.apiKeyId,
+        "The API-branch writer stored the empty string. `persistPointer` is " +
+          "dropping its `|| null` normalisation, so a value outside the " +
+          "field's documented domain (an `api_keys.id` or `null`) is now in " +
+          "the signed envelope, where a later mount would compare it as a key.",
+      ).toBeNull();
+    });
+  });
+});
+
+/**
+ * WIRE — RESUMING A KEYLESS DRAFT MAY NOT FABRICATE A KEY CLAIM.
+ *
+ * `handleResume` persists the pointer for the draft the user chose to resume.
+ * It used to write `initialDraft.api_key_id ?? apiKeyId`, and the `??` fallback
+ * is a FABRICATION on a keyless draft: the state it falls back to seeds from
+ * `initialDraft?.api_key_id ?? preselectKey?.id`, so a draft that was never
+ * built over a key got the PRESELECTED key stamped onto its payload. The fence
+ * downstream compares against exactly what is written here, so a fabricated
+ * claim makes a later mount believe the draft belongs to a key it does not.
+ *
+ * ⚠️ HONEST SCOPE — this is a CONTRACT pin on `handleResume`, not a
+ * user-reachable regression today, and the difference is worth stating rather
+ * than implying. `ContributionWizardOverlay` only offers a draft when
+ * `draft.api_key_id === activePreselect.id`, so a keyless draft is never offered
+ * under a live preselect there; the manager route passes no preselect at all. The
+ * combination is therefore mounted DIRECTLY here. What it guards is the moment
+ * that overlay predicate is relaxed — at which point the wrong expression in
+ * `handleResume` becomes reachable with nothing else in the suite noticing.
+ *
+ * ⛔ AND IT IS NOT VACUOUS: restoring the `?? apiKeyId` fallback turns this `it`
+ * red with the preselected key in the message, which is the whole point of
+ * mounting the combination rather than waiting for it to become reachable.
+ */
+describe("[164.2.1 / SESSIONID-FENCE] WIRE — a keyless draft's resume stamps the DRAFT's key, never the preselect", () => {
+  it("persists apiKeyId: null when a draft with api_key_id === null is resumed under a live preselect", async () => {
+    render(
+      <WizardClient
+        entryContext="contribution"
+        initialDraft={KEYLESS_DRAFT}
+        initialDraftKind="api"
+        preselectKey={KEY_B}
+        onSuccess={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    // The banner is what makes `handleResume` reachable at all: with nothing in
+    // localStorage, `deriveWizardResumeOverrides` answers `{showResumeBanner:
+    // true}` for a draft with no pointer, which is the "the founder always
+    // chooses" path rather than a silent resume.
+    fireEvent.click(await screen.findByTestId("wizard-resume"));
+
+    await waitFor(() => {
+      const raw = window.localStorage.getItem("quantalyze_wizard_state_v1");
+      expect(raw).not.toBeNull();
+      const payload = JSON.parse(JSON.parse(raw!).p) as {
+        strategyId?: string;
+        apiKeyId?: string | null;
+      };
+      // Names the writer: the pointer this resume persisted, for this draft.
+      expect(payload.strategyId).toBe(KEYLESS_DRAFT.id);
+      expect(
+        payload.apiKeyId,
+        "The resume stamped a key the draft was never built over — on this " +
+          "mount, the PRESELECTED one. `handleResume` is falling back to the " +
+          "`apiKeyId` state instead of writing `initialDraft.api_key_id`, and " +
+          "the fence downstream compares against exactly what is written here.",
+      ).toBeNull();
+    });
+    // Spelled out separately so a future `null`-vs-preselect regression reports
+    // WHICH wrong value was written rather than only that it was not null.
+    const payload = JSON.parse(
+      JSON.parse(window.localStorage.getItem("quantalyze_wizard_state_v1")!).p,
+    ) as { apiKeyId?: string | null };
+    expect(payload.apiKeyId).not.toBe(KEY_B.id);
   });
 });
 

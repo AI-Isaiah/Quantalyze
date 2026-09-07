@@ -155,7 +155,7 @@ export interface WizardLocalState {
    * read as licence to weaken the server fence.
    *
    * STICKY: `saveWizardState` preserves this field when a caller OMITS it, so
-   * the eight CSV step-transition saves cannot clobber a live burn. An explicit
+   * the CSV step-transition saves cannot clobber a live burn. An explicit
    * `null` clears it. See `saveWizardState` for the full contract.
    *
    * Bounded at FINGERPRINT_MAX_LEN chars by the load-time validator — this
@@ -171,15 +171,27 @@ export interface WizardLocalState {
    * Written EXPLICITLY at every save site, and the two branches write it
    * DIFFERENTLY on purpose:
    *   · API branch — the ONE writer is `persistPointer`, which takes the key as
-   *     an ARGUMENT rather than reading it from a closure, so the value is the
-   *     key the connect RESOLVED and not the pre-connect one.
-   *   · CSV branch — all thirteen sites stamp the LITERAL `null`. NOT the
+   *     an ARGUMENT rather than reading it from a closure. ⚠️ What that buys is
+   *     narrower than "the stored value is the key the connect RESOLVED": it
+   *     MOVES the read to the caller, it does not eliminate it. Most callers
+   *     hand it the same `apiKeyId` state a closure would have read, and they
+   *     are correct to — by then the state IS the resolved key. The parameter
+   *     earns its keep at the one caller where the two differ, `handleConnectSuccess`,
+   *     which passes `result.apiKeyId` because the state has not yet been set to
+   *     it; a closure read there would have persisted the PRE-connect key.
+   *   · CSV branch — every CSV save site stamps the LITERAL `null`. NOT the
    *     wizard's `apiKeyId` state, which can hold a preselected key even there
    *     (the contribution overlay passes `preselectKey` regardless of source),
    *     and a CSV payload carrying a key would let the gate below decline a CSV
    *     session id — taking its `failedCsvSubmitSig` burn with it, since the two
    *     are emitted as a pair. A CSV submission carries no key, so `null` is the
    *     true value.
+   *
+   * The save-site COUNT is deliberately absent from this docblock. It is the
+   * RELATIONSHIP that is contractual — every CSV site writes `null`, and the one
+   * exception is the single API-branch writer — and an integer nothing derives
+   * goes stale the moment a step gains or loses a save. This exact number
+   * already drifted once inside this phase.
    *
    * It is NOT sticky like `failedCsvSubmitSig` above, because
    * `setApiKeyId(result.apiKeyId)` moves the key mid-wizard and a carried-
@@ -205,6 +217,37 @@ export interface WizardLocalState {
    */
   apiKeyId?: string | null;
 }
+
+/**
+ * Phase 164.2.1 / SESSIONID-FENCE — the SAVE-SIDE shape, and the reason it is
+ * not simply `Omit<WizardLocalState, "savedAt">`.
+ *
+ * `apiKeyId` is OPTIONAL on `WizardLocalState` because that type also describes
+ * what a READ can produce, and every payload written before this phase omits the
+ * field entirely — a read-side `apiKeyId: string | null` would refuse to type
+ * the legacy shape the validator is deliberately built to accept.
+ *
+ * On the WRITE side the same optionality is a silent-failure channel. A save
+ * site that forgets the field type-checks; `JSON.stringify` then drops the
+ * `undefined`; and the resulting payload is byte-identical to a pre-164.2.1 one,
+ * which `sessionKeyMatches` reads as "cannot prove same key" and DECLINES
+ * against any present incoming key — permanently, since the stored payload is
+ * rewritten in that same shape on every subsequent save. The wizard would keep
+ * minting fresh session ids and nobody would see an error.
+ *
+ * So the field is REQUIRED here — a required property whose VALUE may be
+ * `undefined`, which is not the same thing as an optional property. Omitting it
+ * is a compile error at the call site; writing `apiKeyId: undefined` compiles
+ * and still produces the legacy shape, because `JSON.stringify` drops it. That
+ * is the point: a caller that genuinely means "this payload makes no key claim"
+ * can still say so, but it has to SAY it rather than forget it.
+ */
+export type WizardSaveInput = Omit<
+  WizardLocalState,
+  "savedAt" | "apiKeyId"
+> & {
+  apiKeyId: string | null | undefined;
+};
 
 /** Returns true when running in a browser with localStorage available. */
 function hasLocalStorage(): boolean {
@@ -306,6 +349,26 @@ export async function computeWizardHmac(
   }
 }
 
+/**
+ * Is there a stored envelope at all, whatever its integrity?
+ *
+ * This exists so the sticky-burn carry-forward in `writeWizardState` can tell a
+ * REFUSED read from an EMPTY one. `loadWizardState` collapses both to `null` by
+ * design — a caller must not be able to act on an unverified payload — but the
+ * two mean opposite things to the carry-forward: empty means nothing was ever
+ * burned, refused means a burn may exist and is about to be lost. It reads only
+ * the presence of the key and never parses, verifies or returns the payload, so
+ * it cannot become a back door around the HMAC check.
+ */
+function storedEnvelopeExists(): boolean {
+  if (!hasLocalStorage()) return false;
+  try {
+    return window.localStorage.getItem(STORAGE_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
+
 /** Constant-time-ish hex string compare. */
 function hexEquals(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
@@ -328,7 +391,7 @@ function hexEquals(a: string, b: string): boolean {
  *   `null`                ⇒ clear the burn
  *   string                ⇒ set the burn
  *
- * WHY sticky rather than a required argument: eight CSV step-transition
+ * WHY sticky rather than a required argument: the CSV step-transition
  * saves in `WizardClient.tsx` write the pointer without any knowledge of the
  * burn, and stepping back from `csv_submit` to change the file — the exact
  * path RT-3 exists for — fires one of them. A non-sticky field would be
@@ -351,7 +414,7 @@ function hexEquals(a: string, b: string): boolean {
  * is the only ordering a caller can reason about.
  */
 export async function saveWizardState(
-  state: Omit<WizardLocalState, "savedAt">,
+  state: WizardSaveInput,
 ): Promise<void> {
   // Chain onto the previous save. `writeWizardState` never rejects, so the
   // queue cannot be poisoned by one bad write.
@@ -380,15 +443,37 @@ export function flushWizardStateSaves(): Promise<void> {
 }
 
 async function writeWizardState(
-  state: Omit<WizardLocalState, "savedAt">,
+  state: WizardSaveInput,
 ): Promise<void> {
   if (!hasLocalStorage()) return;
   try {
     // RT-3 sticky carry-forward. Only pay for the extra read+verify when the
     // caller did not speak to the field.
+    //
+    // ⚠️ A REFUSED READ IS NOT AN EMPTY ONE, and `prior?.failedCsvSubmitSig ??
+    // null` could not tell them apart. `loadWizardState` answers `null` both
+    // when nothing is stored and when something IS stored but failed
+    // verification (tamper, a fresh tab's nonce, a malformed field), so a single
+    // refused read used to silently RESET a live CSV submit burn — the burn's
+    // whole job is to survive a reload, and it was being cleared by the read
+    // that was supposed to preserve it, with nothing logged.
+    //
+    // The distinction is made below and it is DIAGNOSTIC, not a change of
+    // outcome: an unverifiable burn still must not be carried into a
+    // freshly-signed payload (that would launder an unverified value through our
+    // own HMAC, and this module's whole contract is that it does not). What
+    // changes is that the clear is now ANNOUNCED. Refusing the save outright is
+    // deliberately NOT the answer either — a second tab legitimately fails
+    // verification on every first save, so failing closed would break resume for
+    // the normal case rather than for the hazard.
     let burn: string | null | undefined = state.failedCsvSubmitSig;
     if (burn === undefined) {
       const prior = await loadWizardState();
+      if (!prior && storedEnvelopeExists()) {
+        console.warn(
+          "[wizard] saveWizardState: prior payload present but unreadable; a live failedCsvSubmitSig burn (if any) is being cleared, not carried forward",
+        );
+      }
       burn = prior?.failedCsvSubmitSig ?? null;
     }
     const payload: WizardLocalState = {
@@ -403,12 +488,27 @@ async function writeWizardState(
       const h = await computeWizardHmac(payloadJson, nonce);
       // If subtle crypto failed mid-call, drop the save rather than
       // write an unsigned envelope that loadWizardState would reject.
-      if (!h) return;
+      //
+      // WARNED, not silent: the sibling catch at the bottom of this function
+      // logs, and these two refusals produce the SAME user-visible outcome as a
+      // thrown write — nothing is persisted — so leaving them quiet made a
+      // crypto-unavailable environment present as "the resume pointer just never
+      // works here", with no console line to distinguish it from a wizard that
+      // simply had nothing to save.
+      if (!h) {
+        console.warn(
+          "[wizard] saveWizardState skipped: subtle crypto unavailable, refusing to write an unsigned envelope",
+        );
+        return;
+      }
       envelope = JSON.stringify({ v: ENVELOPE_VERSION, p: payloadJson, h });
     } else {
       // No sessionStorage (Safari private, etc.) — without a per-tab
       // nonce there is no integrity story, so refuse to persist. The
       // server-side draft is still the source of truth.
+      console.warn(
+        "[wizard] saveWizardState skipped: no per-tab signing nonce (sessionStorage unavailable)",
+      );
       return;
     }
     window.localStorage.setItem(STORAGE_KEY, envelope);
@@ -461,6 +561,18 @@ export async function loadWizardState(): Promise<WizardLocalState | null> {
       return null;
     }
 
+    // Every refusal below WARNS, naming the offending FIELD and never its value.
+    //
+    // WHY, stated as the reason rather than the rule: the three HMAC arms above
+    // already warn, so a tamper/replay refusal is visible in a console — but the
+    // shape arms below were silent, and their user-visible symptom is identical
+    // to the HMAC one (the wizard cold-starts, the resume banner never appears,
+    // a live CSV burn is dropped). A silent refusal therefore presents as "the
+    // resume pointer just never works here" with nothing to grep for. The field
+    // NAME is diagnostic; the VALUE is not logged, because this payload carries
+    // a user's strategy name and the ids their draft is keyed on, and a console
+    // line is readable by any script on the page — the same threat model that
+    // put the HMAC envelope here in the first place.
     const parsed = JSON.parse(payloadJson) as unknown;
     if (
       !parsed ||
@@ -470,6 +582,9 @@ export async function loadWizardState(): Promise<WizardLocalState | null> {
       typeof (parsed as Record<string, unknown>).step !== "string" ||
       typeof (parsed as Record<string, unknown>).savedAt !== "number"
     ) {
+      console.warn(
+        "[wizard] localStorage_payload_refused: required field missing or mistyped",
+      );
       return null;
     }
     const obj = parsed as Record<string, unknown>;
@@ -477,11 +592,13 @@ export async function loadWizardState(): Promise<WizardLocalState | null> {
     // with the `WizardStepKey` type). A resumed pointer at any known step
     // round-trips; an unknown/corrupt step safe-degrades to the SSR default.
     if (!WIZARD_STEP_KEYS.includes(obj.step as WizardStepKey)) {
+      console.warn("[wizard] localStorage_payload_refused: step");
       return null;
     }
     // Phase 15: optional `source` discriminator. Absent ⇒ 'api'
     // (back-compat). Anything else is a malformed payload.
     if (obj.source !== undefined && obj.source !== "api" && obj.source !== "csv") {
+      console.warn("[wizard] localStorage_payload_refused: source");
       return null;
     }
     // Cross-AI revision 2026-04-30: optional `strategyName` must be a
@@ -491,6 +608,7 @@ export async function loadWizardState(): Promise<WizardLocalState | null> {
         typeof obj.strategyName !== "string" ||
         (obj.strategyName as string).length > 80
       ) {
+        console.warn("[wizard] localStorage_payload_refused: strategyName");
         return null;
       }
     }
@@ -504,32 +622,56 @@ export async function loadWizardState(): Promise<WizardLocalState | null> {
         typeof obj.failedCsvSubmitSig !== "string" ||
         (obj.failedCsvSubmitSig as string).length > FINGERPRINT_MAX_LEN
       ) {
+        console.warn("[wizard] localStorage_payload_refused: failedCsvSubmitSig");
         return null;
       }
     }
     // Phase 164.2.1 / SESSIONID-FENCE: the key this draft was built over is
     // optional and either null (the CSV branch, which has no key) or a BOUNDED
-    // string. Absent is a payload written before this phase and is accepted —
-    // the DECLINE for that case is decided at the gate, not here, because a
-    // rejection here would throw away the step pointer and the strategy name
-    // too. ⚠️ The `!== null` clause is load-bearing: THIRTEEN of the fourteen
-    // save sites are CSV-branch and write the literal `apiKeyId: null`, so a
-    // `source`-shaped arm (present ⇒ must be a string) would refuse every CSV
-    // payload ever written. (Counted at the tree, not estimated: the fourteenth
-    // is `persistPointer`, the ONE API-branch writer. "Nine" — the JSX-inline
-    // subset alone — was the first count here and it was wrong; the name
-    // autosave, the re-mint, the burn and the start-new callbacks are CSV sites
-    // too.)
+    // NON-EMPTY string. Absent is a payload written before this phase and is
+    // accepted — the DECLINE for that case is decided at the gate, not here,
+    // because a rejection here would throw away the step pointer and the
+    // strategy name too.
+    //
+    // ⚠️ The `!== null` clause is load-bearing: EVERY CSV save site writes the
+    // literal `apiKeyId: null` (the branch has no key at all), so a
+    // `source`-shaped arm — present ⇒ must be a string — would refuse every CSV
+    // payload ever written and the CSV wizard would silently lose its resume.
+    // The one exception is `persistPointer`, the single API-branch writer. That
+    // RELATIONSHIP is what this comment states; the save-site COUNT is
+    // deliberately not written here, because an integer nothing derives goes
+    // stale the moment a step gains or loses a save — as this very count already
+    // did once inside this phase.
+    //
+    // ⚠️ THE EMPTY STRING IS REFUSED, and it is a real value rather than a
+    // hypothetical: `MultiKeyConnectStep`'s success shape coalesces a null
+    // member key to `""`, which reaches the API-branch writer. `""` satisfies
+    // every other clause in this arm (it is a string, and 0 is within the
+    // bound), so without this check the validator would ADMIT a value outside
+    // the field's own documented domain — an `api_keys.id` or `null`, never the
+    // empty string. `persistPointer` also normalises it at the writer, and that
+    // is not redundant with this: the writer protects the payloads that writer
+    // produces, while THIS is where the type's domain is asserted for every
+    // payload, including one a future writer or a same-tab script produces. A
+    // stored `""` meeting a present incoming key would otherwise be compared by
+    // `sessionKeyMatches` as if it were a key.
     if (obj.apiKeyId !== undefined && obj.apiKeyId !== null) {
       if (
         typeof obj.apiKeyId !== "string" ||
+        (obj.apiKeyId as string).length === 0 ||
         (obj.apiKeyId as string).length > API_KEY_ID_MAX_LEN
       ) {
+        console.warn("[wizard] localStorage_payload_refused: apiKeyId");
         return null;
       }
     }
     return parsed as WizardLocalState;
-  } catch {
+  } catch (err) {
+    // Malformed JSON in either the envelope or `p`, or storage throwing on
+    // access. Same reasoning as the field arms above: the caller sees only
+    // `null`, so without this the read is indistinguishable from "nothing was
+    // ever saved". The error itself carries no payload content.
+    console.warn("[wizard] loadWizardState failed:", err);
     return null;
   }
 }
@@ -568,18 +710,42 @@ export interface WizardResumeOverrides {
  * the key the caller is about to submit under?
  *
  * The asymmetry is deliberate and is the whole contract:
- *   incoming `null`  ⇒ TRUE. The caller makes NO key claim — the CSV branch
- *     (which submits no key, and whose call site passes a LITERAL `null` for
- *     that reason rather than whatever the wizard's key state happens to hold),
- *     the manager route mounted with neither draft nor preselect, and every
- *     legacy three-argument caller. Nothing is being compared, so nothing may be
- *     declined: this is what leaves pre-164.2.1 behaviour intact — and on the
- *     CSV branch it is also what keeps a live burn from being stripped by a
- *     comparison that could never mean anything there.
+ *   incoming `null`  ⇒ TRUE. `null` here means "the caller makes NO key claim",
+ *     and it is permissive because there is nothing to compare against, not
+ *     because the situation is known safe.
  *   incoming present ⇒ the stored key must be a string EQUAL to it. An absent or
  *     null stored key therefore falls to FALSE — see CONTEXT.md D-02: absent
  *     means we cannot prove the same key, and this phase exists because an
  *     unprovable case was assumed safe once already.
+ *
+ * ⚠️ `null` CONFLATES TWO DIFFERENT FACTS, and the docblock must say so rather
+ * than imply the permissive arm is harmless. The CSV branch's `null` is
+ * PROVABLY KEYLESS — that branch submits no key at all, and its call site passes
+ * a LITERAL `null` for that reason rather than whatever the wizard's key state
+ * happens to hold. The API-branch `null` (the manager wizard mounted with
+ * neither draft nor preselect, and every legacy three-argument caller) means
+ * only COULD NOT DETERMINE. Both reach this function as the same value, so the
+ * unknown case is answered with the provably-keyless case's verdict. That is
+ * founder-locked decision D-01: the unknown case stays permissive, because
+ * declining it would retire a session id for every caller that never had a key
+ * to compare — including the CSV branch, whose `failedCsvSubmitSig` burn is
+ * emitted as a pair with the session id and would go with it.
+ *
+ * ⚠️ KNOWN RESIDUAL, NAMED BECAUSE D-01 DOES NOT REMOVE IT. On the manager
+ * wizard route (`src/app/(dashboard)/strategies/new/wizard/page.tsx`) a
+ * draft-read fault degrades `initialDraft` to null — the page renders WITHOUT a
+ * draft rather than throwing — so the wizard mounts with no draft, no preselect,
+ * and therefore a `null` incoming key. This function then permits an abandoned
+ * key-A payload's `wizardSessionId` to be restored. The create route
+ * (`src/app/api/strategies/create-with-key/route.ts`) short-circuits its
+ * idempotency fence on `(user_id, wizard_session_id)` ALONE: when a draft
+ * matches, it returns that draft's `strategy_id` and `api_key_id` WITHOUT
+ * comparing the submitted key and WITHOUT a `deduped` flag. So a user who
+ * connects key B down that path can be handed key A's strategy and key A's
+ * `api_key_id`. This gate does NOT close that; it removes the trigger only where
+ * an incoming key exists to compare. Closing it belongs at the create route's
+ * fence (compare the submitted key, or key the fence on it), not here — do not
+ * read this permissive arm as evidence the case is covered.
  */
 function sessionKeyMatches(
   stored: string | null | undefined,
