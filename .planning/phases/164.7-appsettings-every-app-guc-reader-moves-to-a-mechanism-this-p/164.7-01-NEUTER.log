@@ -1,0 +1,110 @@
+# 164.7-01 NEUTER LOG — proving the app-GUC gate can fail
+
+Date:      2026-09-07T10:07:09Z
+HEAD:      9694cb9c0ab32c62b4b1c6639156cd47ac715852
+Branch:    worktree-agent-aaff49834223b3fbc
+Host:      Darwin 25.6.0 arm64 / node v25.8.1
+Subject:   scripts/lint-app-guc.mjs
+Backup:    /private/tmp/claude-501/-Users-helios-mammut-claude-projects-quantalyze/11a6e3f6-eb0f-46ac-ba88-a3d6767e5dd8/scratchpad/lint-app-guc.mjs.byte-backup  (byte copy, taken once, immediately before N1)
+
+METHOD. Three independent neuters. Each one breaks a DIFFERENT load-bearing
+part of the engine, and for each the observation is a RED that NAMES the arm
+that caught it. Restores are a byte-for-byte 'cp' from the backup above,
+verified by sha256 equality AND by grepping the newest Task-2 export
+(FIXTURE_ALLOWLIST) back out of the restored file. No blanket working-tree
+restore is used anywhere in this harness — such a command discards
+uncommitted work silently, which is exactly what a neuter/restore harness
+must never do.
+
+===========================================================================
+
+--- N1: break the detector — DETECT_RE anchored to a literal that exists nowhere
+
+EDIT:
+  perl -pi -e "s|^export const DETECT_RE = .*|export const DETECT_RE = /zzNEUTERED_N1_NO_SUCH_LITERALzz/i;|" scripts/lint-app-guc.mjs
+
+EXPECTED: --self-test exits 1 naming unannotated-reader as not firing on its own red fixture
+
+BEFORE sha256: 55d775f06e0b9890d4c3e81b3d5393e7191c569d4e469a94a4d5339e16387445
+
+OBSERVED exit code: 1
+OBSERVED first RED line:
+  SELF-TEST FAIL: unannotated-reader did not fire on its own red fixture unannotated-reader.red.sql — the rule cannot fail.
+OBSERVED also:
+  7 SELF-TEST FAIL line(s) in total
+AFTER sha256: 55d775f06e0b9890d4c3e81b3d5393e7191c569d4e469a94a4d5339e16387445
+RESTORE: sha256 AFTER == BEFORE  ✅
+RESTORE: newest Task-2 export FIXTURE_ALLOWLIST present in the restored file  ✅
+
+--- N2: break the exemption — parseLineageHeader short-circuits to a valid, self-matching header for EVERY file
+
+EDIT:
+  perl -0pi -e 's/export function parseLineageHeader\(text\) \{/export function parseLineageHeader(text) {\n  return { line: 1, raw: "", date: "2026-09-07", occurrences: countReads(text).length, successor: "none", reason: "neutered" };/' scripts/lint-app-guc.mjs
+
+EXPECTED: --self-test exits 1 on unannotated-reader (its red fixture now LOOKS annotated), and the vitest anti-vacuity arm (d) fails
+
+BEFORE sha256: 55d775f06e0b9890d4c3e81b3d5393e7191c569d4e469a94a4d5339e16387445
+
+OBSERVED exit code: 1
+OBSERVED first RED line:
+  SELF-TEST FAIL: unannotated-reader did not fire on its own red fixture unannotated-reader.red.sql — the rule cannot fail.
+OBSERVED also:
+  vitest exit 1 — Tests  17 failed | 11 passed (28) ; first failing arm: × has the green pair, and the successor named by the annotated green exists 2ms
+AFTER sha256: 55d775f06e0b9890d4c3e81b3d5393e7191c569d4e469a94a4d5339e16387445
+RESTORE: sha256 AFTER == BEFORE  ✅
+RESTORE: newest Task-2 export FIXTURE_ALLOWLIST present in the restored file  ✅
+
+--- N3: break the measurement floor — scanCorpus stops demanding a non-empty corpus, so an empty tree reads as clean
+
+EDIT:
+  perl -pi -e 's/requireNonEmpty: true/requireNonEmpty: false/' scripts/lint-app-guc.mjs
+
+EXPECTED: the vitest MEASURE_FAIL arm (f) fails — an empty corpus reports 0 findings instead of MEASURE_FAIL
+
+BEFORE sha256: 55d775f06e0b9890d4c3e81b3d5393e7191c569d4e469a94a4d5339e16387445
+
+OBSERVED exit code: 1
+OBSERVED first RED line:
+  × MEASURE_FAILs on an empty corpus instead of reporting a clean tree 3ms
+OBSERVED also:
+  Tests  1 failed | 27 passed (28)
+AFTER sha256: 55d775f06e0b9890d4c3e81b3d5393e7191c569d4e469a94a4d5339e16387445
+RESTORE: sha256 AFTER == BEFORE  ✅
+RESTORE: newest Task-2 export FIXTURE_ALLOWLIST present in the restored file  ✅
+
+===========================================================================
+
+## Final state
+
+Final sha256 of scripts/lint-app-guc.mjs: 55d775f06e0b9890d4c3e81b3d5393e7191c569d4e469a94a4d5339e16387445
+Equal to the original BEFORE: yes
+git status --porcelain scripts/lint-app-guc.mjs: 0 line(s)
+node scripts/lint-app-guc.mjs --self-test: exit 0
+  lint-app-guc self-test OK: 4 finding kinds, red+green each (5 red, 2 green fixtures; 2 kind(s) vitest-covered by declaration).
+
+RESTORE VERIFIED: sha256 equal x3; git status clean
+
+===========================================================================
+
+## Appendix — the ARM-LEVEL confirmations the plan names
+
+The 'first RED line' quoted per block is whatever vitest printed first, which
+is not necessarily the arm the neuter was aimed at. These are the aimed-at
+arms, grepped out of the same captured runs:
+
+N2, vitest anti-vacuity arm (d) — expected to fail, and did:
+  × walks a real migration from clean, to flagged, to annotated, to un-pinned 1ms
+
+N2, the self-test arm — expected to fail, and did:
+  × the self-test passes over the committed fixtures 1ms
+
+N3, vitest MEASURE_FAIL arm (f) — expected to fail, and did (it was the ONLY
+failure of the 28, which is what makes N3 a targeted neuter rather than a
+general breakage):
+  × MEASURE_FAILs on an empty corpus instead of reporting a clean tree 3ms
+
+N1 fired 7 SELF-TEST FAIL lines rather than 1: with the detector dead, every
+annotated fixture also goes RED on its count (a header pinning 2 over a file
+the engine now reads as holding 0). The line that matters is the first one
+quoted in the N1 block — the red fixture whose whole job is to fire, not
+firing.
