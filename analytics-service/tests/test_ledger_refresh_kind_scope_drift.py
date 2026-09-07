@@ -42,9 +42,19 @@ _PROTECTION_MIGRATION: Final[Path] = (
 # marker; a third arm is exactly the drift this gate exists to catch, so it is
 # NOT enumerated defensively — it would show up as a fan-out kind missing from
 # the SQL scope.
+#
+# ⚠️ THREE FILES, and the THIRD is the live one. Phase 164.7 / D-01 re-defined
+# BOTH arms in 20260907130000 (the activation switch moved off an
+# `app.`-namespace database setting no operator on this platform can set, and
+# onto public.system_flags). The two 20260825 entries are LINEAGE: their text is
+# unchanged, so leaving them here costs nothing and keeps the historical enqueues
+# in the comparison — but on their own they would pin a body that no longer runs,
+# which is precisely the stale-pointer failure this module's docstring warns
+# about. The newest entry is what makes this gate about the LIVE definition.
 _FANOUT_MIGRATIONS: Final[tuple[Path, ...]] = (
     _MIGRATIONS / "20260825130000_ledger_refresh_fanout_dormant.sql",
     _MIGRATIONS / "20260825140000_ledger_refresh_composite_arm.sql",
+    _MIGRATIONS / "20260907130000_ledger_refresh_switch_to_system_flags.sql",
 )
 _PROCESS_KEY_ROUTER: Final[Path] = (
     _REPO_ROOT / "analytics-service" / "routers" / "process_key.py"

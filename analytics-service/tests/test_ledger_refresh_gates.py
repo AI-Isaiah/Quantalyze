@@ -89,14 +89,31 @@ from typing import Final
 _STALENESS_VIEW_MIGRATION_NAME: Final[str] = (
     "20260825120000_ledger_refresh_staleness_view.sql"
 )
+# ⚠️ MOVED 2026-09-07 (phase 164.7 / D-01), and this is the pointer-hygiene rule
+# above being obeyed rather than an exception to it. 20260907130000 re-defines
+# BOTH fan-out bodies in ONE file: the activation switch moved off an
+# `app.`-namespace database setting that no operator on this platform can set
+# (42501, MEASURED on PROD 2026-09-05) and onto public.system_flags, fail-CLOSED.
+# So the two pointers below name the SAME migration now — the extractors still
+# find each body by its own dollar-quote tag, which is precisely why that
+# migration keeps the tags rather than renaming them.
 _FANOUT_MIGRATION_NAME: Final[str] = (
+    "20260907130000_ledger_refresh_switch_to_system_flags.sql"
+)
+_COMPOSITE_MIGRATION_NAME: Final[str] = (
+    "20260907130000_ledger_refresh_switch_to_system_flags.sql"
+)
+# ⛔ The ORIGINAL definitions, kept as NAMED LINEAGE rather than deleted. Gates 3b
+# and 10c assert the EXACT SET {original, live} rather than a count, so a silent
+# THIRD definition and the disappearance of either one are distinguishable
+# failures instead of an integer that happens to still read 2. The originals are
+# untouched on purpose: an applied migration file is the record of what was
+# applied to PROD, and editing it so the repo no longer describes the statements
+# that ran trades a cosmetic win for a lie in the permanent record.
+_FANOUT_ORIGINAL_MIGRATION_NAME: Final[str] = (
     "20260825130000_ledger_refresh_fanout_dormant.sql"
 )
-# Plan 04 / LEDGER-01 — the COMPOSITE arm. Same pointer-hygiene rule as the two
-# above: this constant and its migration move together IN THE SAME COMMIT. A
-# stale pointer here keeps every gate-10 test green while it guards a body
-# nothing runs.
-_COMPOSITE_MIGRATION_NAME: Final[str] = (
+_COMPOSITE_ORIGINAL_MIGRATION_NAME: Final[str] = (
     "20260825140000_ledger_refresh_composite_arm.sql"
 )
 # Plan 05 / the SQL status bridge. ⛔ THIS FILE IS THE REASON THE OLD NAME GLOB
@@ -134,9 +151,34 @@ _FANOUT_FUNCTION_NAME: Final[str] = "enqueue_ledger_refresh" + "_for_strategies"
 # self-match would be indistinguishable from a real second definition.
 _COMPOSITE_FUNCTION_NAME: Final[str] = "enqueue_ledger_composite" + "_refresh"
 
-# The activation setting (plan 02, D-08 lock B). Not a scan-collision risk, but
-# kept beside the others because it is the third cross-file literal.
+# The activation switch, in BOTH of its spellings.
+#
+# ⭐ THE LIVE ONE (phase 164.7 / D-01): a row in public.system_flags keyed on this
+# string, `enabled BOOLEAN NOT NULL`. The BOOLEAN column is why the whole
+# string-normaliser apparatus this gate used to carry is gone: '1', 'on', 'TRUE'
+# and 'true ' with a trailing space are no longer a class that an exact
+# comparison must REJECT, they are a class the column cannot REPRESENT.
+_ACTIVATION_FLAG_KEY: Final[str] = "ledger_refresh_enabled"
+# ⚰️ THE RETIRED ONE — the `app.`-namespace database setting the two 20260825
+# migrations read. Kept for TWO live jobs, not for sentiment:
+#   * floor 2 of gate 3a requires every _PHASE_IDENTIFIER_TOKENS entry to resolve
+#     in at least one SCANNED migration, and this one resolves in 20260825130000
+#     and 20260825140000, both of which are still inside window 1 (MEASURED
+#     2026-09-07: those two files, and no others under supabase/migrations/,
+#     contain it — so floor 3's `escaped` check cannot fire on it either);
+#   * the fail-closed gate below asserts this call is ABSENT from both live
+#     bodies, which is the half of the move that a text gate can prove.
+# ⛔ If both 20260825 files are ever redated out of window 1, this token stops
+# resolving and floor 2 goes RED. That is correct: retire the token in the same
+# commit rather than widening the window to keep a dead string alive.
 _ACTIVATION_SETTING: Final[str] = "app.ledger_refresh_enabled"
+# ⛔ ASSEMBLED AT RUNTIME, for the same reason as the pg_cron tokens above and NOT
+# by imitation: the negative assertion below scans a migration body for this
+# call, and the repo-wide `app.` reader lint reads whole files. Spelled as one
+# literal here, this file would be an occurrence of the very call it forbids.
+_RETIRED_ACTIVATION_CALL: Final[str] = (
+    "current_" + "setting('" + _ACTIVATION_SETTING + "'"
+)
 
 # ---------------------------------------------------------------------------
 # The dormancy scan's SELECTION — ⛔ NOT BY NAME (F17)
@@ -161,15 +203,48 @@ _ACTIVATION_SETTING: Final[str] = "app.ledger_refresh_enabled"
 _PHASE_MIGRATION_WINDOW_START: Final[str] = "20260825000000"
 _PHASE_MIGRATION_WINDOW_END: Final[str] = "20260826000000"
 
+# ⛔ A SECOND, DISJOINT RANGE — NOT A WIDENING OF THE FIRST, and the difference is
+# a RED gate. Phase 164.7's 20260907130000 defines both live bodies, so it must be
+# scanned; the obvious edit is to move _PHASE_MIGRATION_WINDOW_END forward.
+#
+# MEASURED 2026-09-07. Listing supabase/migrations/ and keeping the 14-digit
+# stamps in the half-open span from this window's START up to 20260908000000 —
+# i.e. what a contiguous widen to that bound would select — returns ELEVEN
+# files, and
+#     grep -c -E 'cron\.(un)?schedule' \
+#       supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql
+# returns 3. That migration carries a LEGITIMATE, live pg_cron registration —
+# it has nothing to do with this fan-out — so a contiguous widen would drag it
+# into the scan and floor 4's offender loop would report LEDGER-02 DORMANCY
+# VIOLATION against a correct file, on the very commit that landed this change.
+# A gate that goes red on correct code gets relaxed, and then it guards nothing.
+#
+# The second range is HALF-OPEN and ONE STAMP WIDE, so it admits exactly
+# 20260907130000 and cannot silently acquire a neighbour.
+#
+# ⚠️ 20260907120000 (this phase's analytics-side migration) stays OUTSIDE both
+# ranges, deliberately. Floor 3's `escaped` check cannot flag it: MEASURED, it
+# names none of _PHASE_IDENTIFIER_TOKENS, so it does not belong to this enqueue
+# surface and this gate has no standing over it.
+#
+# ⛔ Anything inside these ranges is scanned RAW by floor 4, comments INCLUDED.
+# That is exactly why 20260907130000 may not carry a schedule token even in prose.
+_PHASE_MIGRATION_WINDOW_2_START: Final[str] = "20260907130000"
+_PHASE_MIGRATION_WINDOW_2_END: Final[str] = "20260907130001"
+
 # ⛔ THE FLOOR IS A SET, NOT A COUNT. `len(paths) >= 4` is satisfiable by any
 # four files that happen to land in the window; this names the exact migrations
 # that MUST be inside the scan, so the check fails loudly when a pointer goes
 # stale or a file is redated out of the window instead of going quiet.
 _PHASE_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
     _STALENESS_VIEW_MIGRATION_NAME,
-    _FANOUT_MIGRATION_NAME,
-    _COMPOSITE_MIGRATION_NAME,
+    _FANOUT_ORIGINAL_MIGRATION_NAME,
+    _COMPOSITE_ORIGINAL_MIGRATION_NAME,
     _SYNC_STATUS_MIGRATION_NAME,
+    # Phase 164.7 / D-01 — the live bodies. Admitted by window 2, and named here
+    # so that a redating (or a silently dropped second range) fails floor 1 by
+    # name instead of shrinking the scan quietly.
+    _FANOUT_MIGRATION_NAME,
 })
 
 # ⛔ THE ESCAPE CHECK'S TOKENS. A window is still a selection, so something has
@@ -185,7 +260,14 @@ _PHASE_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
 _PHASE_IDENTIFIER_TOKENS: Final[tuple[str, ...]] = (
     _FANOUT_FUNCTION_NAME,
     _COMPOSITE_FUNCTION_NAME,
+    # Both spellings of the switch. The retired `app.`-namespace one still
+    # resolves in the two 20260825 migrations (floor 2 holds either way); the
+    # live key is what a FUTURE migration touching this switch would name, and it
+    # is the one that makes floor 3 able to notice such a file escaping the
+    # ranges. Keeping only the retired one would leave the live surface unguarded
+    # the moment the last 20260825 reader is redated away.
     _ACTIVATION_SETTING,
+    _ACTIVATION_FLAG_KEY,
     "ledger_refresh_staleness",
 )
 
@@ -208,26 +290,22 @@ _MIGRATION_FILENAME_CITATION_RE: Final[re.Pattern[str]] = re.compile(
     r"\d{14}_[A-Za-z0-9_]+\.sql"
 )
 
-# ⛔ THE NORMALISERS gate 4 / gate 10d reject around the activation read (F16).
-# The activation comparison was asserted with an UNANCHORED
-# `re.search(r"(?:<>|!=|=)\s*'true'")`, which `lower(v_enabled) <> 'true'` and
-# `btrim(v_enabled) <> 'true'` both satisfy — and each of those OPENS the flag on
-# exactly the values the assertion's own message calls forbidden ('TRUE',
-# 'true '). Any of these wrapped around the value being compared, or applied on
-# the read itself, is the drift.
-_ACTIVATION_NORMALISERS: Final[tuple[str, ...]] = (
-    "lower",
-    "upper",
-    "initcap",
-    "btrim",
-    "trim",
-    "ltrim",
-    "rtrim",
-    "normalize",
-    "regexp_replace",
-    "replace",
-    "translate",
-)
+# ⚰️ THE NORMALISER LIST IS GONE, and the F16 lesson it carried is NOT.
+#
+# It existed because the activation value was a STRING: `lower(v_enabled) <>
+# 'true'` and `btrim(v_enabled) <> 'true'` both satisfied an unanchored
+# `re.search(r"(?:<>|!=|=)\s*'true'")` while each OPENED the flag on a value the
+# assertion's own message called forbidden. Phase 164.7 moved the switch to a
+# `BOOLEAN NOT NULL` column, so there is no string left to normalise and a list of
+# normalisers would now be an assertion that cannot fail — the exact disease this
+# file exists to detect.
+#
+# ⛔ THE LESSON TRANSFERS INTACT, in a new shape: a comparison can still be
+# written so that it reads as correct and opens the flag on the failure path. The
+# boolean spellings that do it are `IF NOT v_enabled` and `IF v_enabled <> TRUE`,
+# both of which evaluate NULL — and therefore fall THROUGH — when the read raised
+# or the row is missing. They are asserted ABSENT by name, beside the positive
+# assertion, in _ACTIVATION_NULL_UNSAFE_SPELLINGS below.
 
 # Region floors. Hand-typed, and deliberately well under the measured sizes
 # (4246 / 1105 / 190 / 10500 / 7685 characters at the commit that introduced
@@ -367,24 +445,37 @@ def _composite_migration_path() -> pathlib.Path:
 _MIGRATION_TIMESTAMP_RE: Final[re.Pattern[str]] = re.compile(r"^(\d{14})_")
 
 
+_PHASE_MIGRATION_WINDOWS: Final[tuple[tuple[str, str], ...]] = (
+    (_PHASE_MIGRATION_WINDOW_START, _PHASE_MIGRATION_WINDOW_END),
+    (_PHASE_MIGRATION_WINDOW_2_START, _PHASE_MIGRATION_WINDOW_2_END),
+)
+
+
+def _windows_description() -> str:
+    """The ranges, spelled for a failure message. Both, always."""
+    return " U ".join(f"[{start}, {end})" for start, end in _PHASE_MIGRATION_WINDOWS)
+
+
 def _phase_migration_paths() -> list[pathlib.Path]:
-    """Every migration inside this phase's timestamp window.
+    """Every migration inside ANY of this phase's timestamp ranges.
 
     ⛔ Selection is the 14-digit filename TIMESTAMP, never a descriptive-name
     glob. See _PHASE_MIGRATION_WINDOW_START for the measurement that retired the
     glob: it missed this phase's own fourth migration while its count floor
     stayed green on the three that happened to be named right (F17).
+
+    ⛔ And it is a UNION OF DISJOINT HALF-OPEN RANGES, never one widened range.
+    See _PHASE_MIGRATION_WINDOW_2_START for the measurement that forbids the
+    widen: the contiguous span between the two ranges contains a migration with a
+    legitimate live pg_cron registration, and pulling it in would make floor 4
+    report a dormancy violation against correct code.
     """
     out: list[pathlib.Path] = []
     for path in sorted(_migrations_dir().glob("*.sql")):
         stamp = _MIGRATION_TIMESTAMP_RE.match(path.name)
         if stamp is None:
             continue
-        if (
-            _PHASE_MIGRATION_WINDOW_START
-            <= stamp.group(1)
-            < _PHASE_MIGRATION_WINDOW_END
-        ):
+        if any(start <= stamp.group(1) < end for start, end in _PHASE_MIGRATION_WINDOWS):
             out.append(path)
     return out
 
@@ -1134,10 +1225,18 @@ class TestGate3Dormancy:
     deploy recreates the v1.11 wedge verbatim.
 
     ⛔ NOT by enumerating filenames, and — since F17 — ⛔ NOT by matching them
-    either. Selection is the migration TIMESTAMP WINDOW. The old
-    `*ledger_refresh*.sql` glob missed this phase's own fourth migration while
-    its integer count floor stayed green on the three that happened to be named
-    right; see _PHASE_MIGRATION_WINDOW_START."""
+    either. Selection is the migration TIMESTAMP, taken against a UNION OF
+    DISJOINT HALF-OPEN RANGES. The old `*ledger_refresh*.sql` glob missed this
+    phase's own fourth migration while its integer count floor stayed green on
+    the three that happened to be named right; see
+    _PHASE_MIGRATION_WINDOW_START.
+
+    ⛔ The ranges are a union rather than one widened span, and that is a
+    MEASUREMENT, not a style: the gap between them contains
+    20260826140000_compute_jobs_error_kind_orphaned.sql, which carries a
+    legitimate live pg_cron registration of its own. Widening would make floor 4
+    report LEDGER-02 DORMANCY VIOLATION against a correct file. See
+    _PHASE_MIGRATION_WINDOW_2_START."""
 
     def test_3a_no_schedule_in_any_phase_migration(self) -> None:
         paths = _phase_migration_paths()
@@ -1151,11 +1250,15 @@ class TestGate3Dormancy:
         assert not missing, (
             f"{missing} are not inside the dormancy scan. The scan selects "
             f"migrations under {_migrations_dir()} whose 14-digit timestamp is "
-            f"in [{_PHASE_MIGRATION_WINDOW_START}, {_PHASE_MIGRATION_WINDOW_END}) "
+            f"in {_windows_description()} "
             f"and matched {sorted(scanned)}. Either a pointer constant went "
             "stale (rename the constant IN THE SAME COMMIT as the file) or a "
-            "migration was redated out of the window — in which case widen the "
-            "window in the same commit. Until then the scan below is VACUOUS "
+            "migration was redated out of every range — in which case add a "
+            "DISJOINT range for it in the same commit. ⛔ Do NOT widen an "
+            "existing range to reach it: the spans between these ranges hold "
+            "migrations with legitimate pg_cron registrations, and swallowing "
+            "one makes floor 4 red against correct code. Until then the scan "
+            "below is VACUOUS "
             "for those files, and gate 3a is the ONLY thing standing between a "
             "pg_cron registration and PROD auto-apply."
         )
@@ -1225,10 +1328,11 @@ class TestGate3Dormancy:
         assert not escaped, (
             f"{escaped} name this phase's enqueue surface "
             f"({list(_PHASE_IDENTIFIER_TOKENS)}) but fall OUTSIDE the dormancy "
-            f"window [{_PHASE_MIGRATION_WINDOW_START}, "
-            f"{_PHASE_MIGRATION_WINDOW_END}), so no scan covers them. Migrations "
-            "AUTO-APPLY to PROD on merge to main. Extend the window IN THE SAME "
-            "COMMIT as the migration that needed it."
+            f"ranges {_windows_description()}, so no scan covers them. "
+            "Migrations AUTO-APPLY to PROD on merge to main. Add a DISJOINT "
+            "range covering it IN THE SAME COMMIT as the migration that needed "
+            "one — never by widening an existing range (see "
+            "_PHASE_MIGRATION_WINDOW_2_START for what a widen swallows)."
         )
 
         offenders: list[str] = []
@@ -1259,158 +1363,307 @@ class TestGate3Dormancy:
             "that runbook."
         )
 
-    def test_3b_fanout_function_name_appears_in_exactly_one_migration(self) -> None:
+    def test_3b_fanout_function_name_appears_in_exactly_the_named_migrations(
+        self,
+    ) -> None:
         """Closes the hole 3a still leaves: a migration whose FILENAME lacks the
         phase token could register a schedule for this function and never enter
-        3a's glob."""
-        hits = sorted(
+        3a's selection.
+
+        ⛔ AN EXACT SET, NOT A COUNT — and it is TWO names now, not one. Phase
+        164.7 / D-01 re-defined this body in a forward migration, so the name
+        legitimately appears in the ORIGINAL definition and in the LIVE one. A
+        bare `len(hits) == 2` would be satisfied by any two files; asserting the
+        SET names which two, so a third definition, a rename, or the silent
+        disappearance of either is a distinguishable failure.
+        """
+        expected = {_FANOUT_ORIGINAL_MIGRATION_NAME, _FANOUT_MIGRATION_NAME}
+        hits = {
             path.name
             for path in _migrations_dir().glob("*.sql")
             if _FANOUT_FUNCTION_NAME in path.read_text(encoding="utf-8")
+        }
+        assert hits == expected, (
+            "expected the fan-out function name to appear in EXACTLY the two "
+            f"migrations that define it, {sorted(expected)}; found "
+            f"{sorted(hits)}.\n"
+            "  missing ⇒ the search is broken, or a migration was renamed "
+            "without moving _FANOUT_MIGRATION_NAME / "
+            "_FANOUT_ORIGINAL_MIGRATION_NAME — this gate is then proving "
+            "nothing, so fix the pointer rather than relaxing the set.\n"
+            "  extra ⇒ a further migration either REDEFINES the fan-out (in "
+            "which case it is the live one: move _FANOUT_MIGRATION_NAME to it "
+            "in the same commit, and this file's extractors with it), or "
+            "REGISTERS A SCHEDULE for it, or CALLS it. The last two are "
+            "forbidden from a migration: migrations auto-apply to PROD, and "
+            "activation belongs to docs/runbooks/ledger-refresh-go-live.md "
+            "(WORKER-03)."
         )
-        # EXACTLY one, not "at most one". Zero means the search is broken, and
-        # reporting a broken search as success is the failure mode this entire
-        # file exists to prevent.
-        assert len(hits) == 1, (
-            f"expected the fan-out function name to appear in EXACTLY 1 "
-            f"migration (the one that defines it, {_FANOUT_MIGRATION_NAME}); "
-            f"found {len(hits)}: {hits}.\n"
-            "  0 hits ⇒ the search is broken (or the migration was renamed "
-            "without moving _FANOUT_MIGRATION_NAME) — this gate is proving "
-            "nothing, fix it rather than relaxing it.\n"
-            "  2+ hits ⇒ a second migration either REGISTERS A SCHEDULE for the "
-            "fan-out or CALLS it. This phase forbids both from a migration: "
-            "migrations auto-apply to PROD, and activation belongs to "
-            "docs/runbooks/ledger-refresh-go-live.md (WORKER-03)."
+
+        # BOTH members DEFINE it — the set above would otherwise be satisfied by
+        # a file that merely mentions the name in a comment.
+        for name in sorted(expected):
+            body = (_migrations_dir() / name).read_text(encoding="utf-8")
+            assert (
+                f"CREATE OR REPLACE FUNCTION public.{_FANOUT_FUNCTION_NAME}" in body
+            ), (
+                f"{name} carries the fan-out's name but does not DEFINE it with "
+                "CREATE OR REPLACE FUNCTION. This set is meant to enumerate the "
+                "definitions; a file that only mentions the name belongs "
+                "nowhere in it."
+            )
+            assert _SCHEDULE_VERB not in body and _UNSCHEDULE_VERB not in body, (
+                f"{name} defines the fan-out AND names a pg_cron registration "
+                "verb. Migrations auto-apply to PROD on merge to main."
+            )
+            assert f"PERFORM public.{_FANOUT_FUNCTION_NAME}" not in body, (
+                f"{name} CALLS the fan-out at apply time. Merging would enqueue "
+                "real cross-tenant jobs on PROD with no founder action."
+            )
+
+        # The NEWEST definition is the live one, and timestamp order is what
+        # decides that — the snapshot generator replays migrations in filename
+        # order and keeps the last definition, so this file's pointer must name
+        # the maximum of the set or it guards a superseded body.
+        assert max(expected) == _FANOUT_MIGRATION_NAME, (
+            f"_FANOUT_MIGRATION_NAME names {_FANOUT_MIGRATION_NAME}, but "
+            f"{max(expected)} sorts later and therefore supersedes it on replay. "
+            "The pointer must name the LIVE definition; move it in the same "
+            "commit as the migration that superseded the old one."
         )
 
 
 # ---------------------------------------------------------------------------
 # GATE 4 — LEDGER-02 lock B, the fail-closed activation switch
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# The activation assertion — ANCHORED TO THE READ (F16)
-# ---------------------------------------------------------------------------
-# ⛔ DO NOT go back to `re.search(r"(?:<>|!=|=)\s*'true'", code)`. That regex
-# was UNANCHORED to the activation read, so it matched any comparison against the
-# literal 'true' anywhere in the body. MEASURED: both
-# `IF lower(v_enabled) <> 'true'` and `IF btrim(v_enabled) <> 'true'` satisfied
-# it — and each of those OPENS the flag on exactly the values the assertion's own
-# message cites as forbidden ('TRUE' for lower, 'true ' for btrim). The gate
-# could not fail for either defect it named.
+# ⛔ RE-ANCHORED 2026-09-07 (phase 164.7 / D-01), in the same commit as the
+# migration that moved the switch. It is no longer a database setting compared as
+# a string; it is a row in public.system_flags read into a BOOLEAN. The old
+# assertion — "exact lowercase string equality against 'true'" — could not
+# survive that and was NOT deleted, it was re-specified onto the property that
+# replaced it: the whole fail-closed contract, in seven parts, each failing for a
+# distinguishable reason.
 #
-# The assertion below is anchored in four steps, each failing for a
-# distinguishable reason:
-#   1. locate the ONE assignment whose right-hand side reads the setting;
-#   2. that right-hand side must not NORMALISE (a `lower(...)` there would make
-#      the comparison exact and still accept 'TRUE');
-#   3. the comparison must name the assigned variable BARE — no normaliser
-#      wrapped around it — and every literal it is compared against must be
-#      exactly 'true';
-#   4. no boolean cast anywhere in the body.
+#   1. the body reads the flag EXACTLY ONCE, by the anchored read below. Zero
+#      means the anchor is broken and every check after it is skipped; two means
+#      the checks can pass on one read while the other is the one that gates.
+#   2. the read sits inside a `BEGIN … EXCEPTION WHEN OTHERS THEN … END;` block.
+#      An UNWRAPPED read propagates its exception, which turns a transient fault
+#      into a FAILED TICK rather than a dormant one — and on the scheduled path
+#      that is an error nobody reads.
+#   3. the handler does exactly two things: RAISE WARNING carrying SQLSTATE, and
+#      assign the variable NULL. Nothing else. A probe or a second read inside a
+#      handler is the shape lint rule R1 flags across the SQL gate corpus, and a
+#      handler that assigns TRUE is a fail-OPEN switch wearing a fail-closed
+#      shape.
+#   4. that block is the FIRST STATEMENT of the body. 161.1's own comment calls
+#      the placement deliberate; here "first" is made LITERAL — the outer BEGIN
+#      immediately followed by the guard's BEGIN in the comment-stripped text —
+#      because "the guard is present somewhere" is satisfied by a guard that runs
+#      after the fan-out has already enqueued.
+#   5. the comparison is `IF <var> IS DISTINCT FROM TRUE THEN` and it RETURNs 0.
+#   6. NEITHER NULL-UNSAFE SPELLING APPEARS.
+#   7. the retired `app.`-namespace call is GONE from the body.
+#
+# ⛔ (6) IS THE F16 LESSON, TRANSPOSED — read it before "simplifying" (5). The old
+# defect was a normaliser wrapped around a string comparison that READ as exact
+# and was not (`lower(v_enabled) <> 'true'` opens the flag on 'TRUE'). The boolean
+# analogue is `IF NOT v_enabled` and `IF v_enabled <> TRUE`: with v_enabled NULL —
+# which is what a MISSING ROW and a FAILED READ both produce — each evaluates
+# NULL, the IF is not taken, and the body falls THROUGH to the fan-out. They open
+# the flag on exactly the path the guard exists for. So absence is asserted BY
+# NAME beside the positive assertion, rather than being left implied by it.
 _ACTIVATION_READ_RE: Final[re.Pattern[str]] = re.compile(
-    r"([A-Za-z_][A-Za-z_0-9]*)\s*:=\s*([^;]*?current_setting\s*\(\s*'"
-    + re.escape(_ACTIVATION_SETTING)
-    + r"'[^;]*?)\s*;",
+    r"SELECT\s+sf\.enabled\s+INTO\s+(\w+)\s+FROM\s+public\.system_flags\s+sf\s+"
+    r"WHERE\s+sf\.key\s*=\s*'" + re.escape(_ACTIVATION_FLAG_KEY) + r"'",
+    re.IGNORECASE,
+)
+
+# The guard block, captured in two halves so the handler can be inspected on its
+# own. Anchored on the read rather than on "the first BEGIN", so a body that
+# opens with some OTHER exception block cannot supply this match.
+_ACTIVATION_GUARD_BLOCK_RE: Final[re.Pattern[str]] = re.compile(
+    r"\bBEGIN\b\s+(?P<attempt>SELECT\s+sf\.enabled\b.*?)"
+    r"\bEXCEPTION\s+WHEN\s+OTHERS\s+THEN\b(?P<handler>.*?)\bEND\s*;",
     re.IGNORECASE | re.DOTALL,
 )
 
+# "FIRST statement", made literal: nothing but whitespace between the body's own
+# BEGIN and the guard's BEGIN. Comments are already stripped before this runs, so
+# a comment cannot satisfy it and a comment cannot break it either.
+_GUARD_IS_FIRST_STATEMENT_RE: Final[re.Pattern[str]] = re.compile(
+    r"\bBEGIN\s+BEGIN\s+SELECT\s+sf\.enabled\b", re.IGNORECASE
+)
 
-def _assert_activation_is_exact_lowercase_true(code: str, *, arm: str) -> None:
-    """Assert ``arm``'s body opens ONLY on the exact lowercase string 'true'."""
+# ⛔ Statements that must NOT appear inside the handler. R1 at the source: the SQL
+# gate corpus copies this shape, and a probe in a handler is how a handler comes
+# to hide the very failure it caught.
+_HANDLER_FORBIDDEN_VERBS: Final[tuple[str, ...]] = (
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "PERFORM",
+    "EXECUTE",
+    "CALL",
+    "RETURN",
+)
+
+# ⛔ The two NULL-UNSAFE comparisons, by name. `{var}` is substituted with the
+# variable the read actually assigns, so this cannot be satisfied by some other
+# boolean in the body.
+_ACTIVATION_NULL_UNSAFE_SPELLINGS: Final[tuple[tuple[str, str], ...]] = (
+    (r"IF\s+NOT\s+{var}\b", "IF NOT {var} THEN"),
+    (r"IF\s+{var}\s*(?:<>|!=)\s*TRUE\b", "IF {var} <> TRUE THEN"),
+)
+
+
+def _assert_activation_is_fail_closed_table_read(code: str, *, arm: str) -> None:
+    """Assert ``arm``'s body opens ONLY on a committed TRUE, and is dormant on
+    every failure path — missing row, failing read, explicit FALSE."""
+    # 0. the read is present at all. Its own message, so "the switch is gone"
+    #    never surfaces as "the anchor found 0 reads".
+    assert "FROM public.system_flags" in code, (
+        f"LEDGER-02 LOCK B: the {arm} does not read the activation flag from "
+        "public.system_flags. Lock B is what makes merging the migration "
+        "behaviour-neutral, and it is the incident-pressure kill switch "
+        "(rollback level 1 in the runbook). Without it this body fans out "
+        "unconditionally on every tick."
+    )
+
     reads = _ACTIVATION_READ_RE.findall(code)
-    # EXACTLY one, not "at least one": zero means the anchor is broken and every
-    # check below would be skipped, two means one of them could be the live one
-    # while the other is the one this gate inspects.
     assert len(reads) == 1, (
-        f"expected the {arm} to assign current_setting("
-        f"'{_ACTIVATION_SETTING}', ...) to a variable EXACTLY once; found "
+        f"expected the {arm} to read system_flags."
+        f"{_ACTIVATION_FLAG_KEY} into a variable EXACTLY once; found "
         f"{len(reads)}: {reads}.\n"
-        "  0 => the anchor is broken (the read was inlined into the IF, or the "
-        "setting was renamed). EVERY check below is then skipped and this gate "
-        "proves nothing — re-anchor it, do not relax it.\n"
-        "  2+ => two reads of the kill switch, and the checks below can pass on "
-        "one while the other is the one that actually gates the fan-out."
+        "  0 => the anchor is broken (the read was inlined into the IF, the "
+        "alias changed, or the key was renamed). EVERY check below is then "
+        "skipped and this gate proves nothing — re-anchor it, do not relax "
+        "it.\n"
+        "  2+ => two reads of the kill switch, and the checks below can pass "
+        "on one while the other is the one that actually gates the fan-out."
     )
-    variable, read_expression = reads[0]
+    variable = reads[0]
 
-    # 1. the READ must not normalise. `v := lower(COALESCE(current_setting(...)))`
-    #    leaves the comparison below exact and still opens the flag on 'TRUE'.
-    normalised_read = sorted(
-        name
-        for name in _ACTIVATION_NORMALISERS
-        if re.search(rf"\b{name}\s*\(", read_expression, flags=re.IGNORECASE)
+    # 1. the read is WRAPPED, and the handler is exactly the two statements.
+    block = _ACTIVATION_GUARD_BLOCK_RE.search(code)
+    assert block is not None, (
+        f"LEDGER-02 LOCK B: the {arm} reads the activation flag OUTSIDE a "
+        "`BEGIN … EXCEPTION WHEN OTHERS THEN … END;` block. A table read can "
+        "raise — missing table, permission denied, planner fault — and the "
+        "database setting it replaced could not. Unwrapped, that exception "
+        "propagates out of the fan-out and the tick FAILS instead of going "
+        "dormant, which on the scheduled path is an error nobody reads. The "
+        "wrapping is what converts every failure into the closed side."
     )
-    assert not normalised_read, (
-        f"LEDGER-02 LOCK B: the {arm} NORMALISES the activation setting as it "
-        f"reads it ({normalised_read} in {read_expression.strip()!r}). The "
-        "comparison further down would still be exact string equality against "
-        "'true' and the flag would STILL open on 'TRUE' / 'true ' / ' TRUE ', "
-        "which is the whole point of comparing exactly. COALESCE is the only "
-        "wrapper this read is allowed — it supplies the unset default, it does "
-        "not change a value that is set."
+    handler = block.group("handler")
+
+    warnings = re.findall(r"\bRAISE\s+WARNING\b", handler, flags=re.IGNORECASE)
+    assert len(warnings) == 1, (
+        f"LEDGER-02 LOCK B: the {arm}'s activation-read handler contains "
+        f"{len(warnings)} RAISE WARNING statement(s), expected exactly 1. A "
+        "silent handler makes a failing switch indistinguishable from a closed "
+        "one, which is the wedge shape this phase exists to remove."
+    )
+    assert "SQLSTATE" in handler.upper(), (
+        f"LEDGER-02 LOCK B: the {arm}'s activation-read handler warns without "
+        "carrying SQLSTATE. The SQLSTATE is the only thing that tells an "
+        "operator WHY the flag could not be read; no identifier may be carried "
+        "beside it (T-161.1-10)."
     )
 
-    # 2. the COMPARISON must name the variable BARE.
-    wrapped = sorted(
-        name
-        for name in _ACTIVATION_NORMALISERS
+    nulls = re.findall(
+        rf"\b{re.escape(variable)}\s*:=\s*NULL\s*;", handler, flags=re.IGNORECASE
+    )
+    assert len(nulls) == 1, (
+        f"LEDGER-02 LOCK B: the {arm}'s activation-read handler assigns "
+        f"`{variable} := NULL;` {len(nulls)} time(s), expected exactly 1. A "
+        "handler that leaves the variable untouched, or assigns TRUE, is a "
+        "fail-OPEN switch wearing a fail-closed shape: the read raised and the "
+        "fan-out proceeds anyway."
+    )
+
+    trespassers = sorted(
+        verb
+        for verb in _HANDLER_FORBIDDEN_VERBS
+        if re.search(rf"\b{verb}\b", handler, flags=re.IGNORECASE)
+    )
+    assert not trespassers, (
+        f"LEDGER-02 LOCK B: the {arm}'s activation-read handler contains "
+        f"{trespassers}. The handler does exactly two things — warn with "
+        "SQLSTATE, and set the flag variable NULL. A probe or a write inside an "
+        "EXCEPTION block is the shape lint rule R1-exception-handler-probe "
+        "flags across supabase/tests; keeping it clean HERE is what stops the "
+        "gate files copying the bad shape from the body they exercise."
+    )
+
+    # 2. …and the block is the FIRST statement of the body.
+    assert _GUARD_IS_FIRST_STATEMENT_RE.search(code) is not None, (
+        f"LEDGER-02 LOCK B: the activation guard is NOT the first statement of "
+        f"the {arm}. 161.1's own comment calls that placement deliberate, and "
+        "the reason is concrete: a guard that runs after the advisory lock, the "
+        "candidate query or the enqueue loop is a guard that runs after work has "
+        "already happened. 'Present somewhere in the body' is not the property "
+        "this switch needs."
+    )
+
+    # 3. the comparison is the NULL-SAFE one, and it returns 0.
+    comparison = re.search(
+        r"IF\s+"
+        + re.escape(variable)
+        + r"\s+IS\s+DISTINCT\s+FROM\s+TRUE\s+THEN(?P<then>.*?)\bEND\s+IF\s*;",
+        code,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    assert comparison is not None, (
+        f"LEDGER-02 LOCK B: the {arm} does not compare the activation value "
+        f"with `IF {variable} IS DISTINCT FROM TRUE THEN`. That exact form is "
+        "the fail-closed truth table: it is TRUE for FALSE and TRUE for NULL, "
+        "and NULL is what BOTH a missing row and a failed read produce. Any "
+        "NULL-unsafe form falls through on those two paths and opens the flag "
+        "precisely when the switch could not be read."
+    )
+    assert re.search(r"\bRETURN\s+0\s*;", comparison.group("then")), (
+        f"LEDGER-02 LOCK B: the {arm}'s dormant branch does not `RETURN 0;`. "
+        "The integer this function returns is the INSERTION count the go-live "
+        "runbook has the founder read back, so the dormant path must answer 0 "
+        "rather than fall through to the fan-out."
+    )
+
+    # 4. and NEITHER NULL-unsafe spelling is anywhere in the body (F16).
+    unsafe = sorted(
+        label.format(var=variable)
+        for pattern, label in _ACTIVATION_NULL_UNSAFE_SPELLINGS
         if re.search(
-            rf"\b{name}\s*\(\s*{re.escape(variable)}\b", code, flags=re.IGNORECASE
+            pattern.format(var=re.escape(variable)), code, flags=re.IGNORECASE
         )
     )
-    assert not wrapped, (
-        f"LEDGER-02 LOCK B: the {arm} wraps the activation value in {wrapped} "
-        f"before comparing it. That is still 'exact equality against the "
-        "lowercase string true' as an unanchored regex reads it, and it is "
-        "precisely how the flag comes to open on 'TRUE' (lower/upper/initcap) or "
-        "on 'true ' with a trailing space (btrim/trim/ltrim/rtrim) — the values "
-        f"this gate exists to keep dormant. Compare {variable} bare."
+    assert not unsafe, (
+        f"LEDGER-02 LOCK B: the {arm} contains {unsafe}. With {variable} NULL "
+        "— the state a MISSING ROW and a FAILED READ both produce — each of "
+        "those evaluates to NULL, the IF is not taken, and the body falls "
+        "THROUGH to the fan-out. They open the flag on exactly the failure path "
+        "this guard exists for. This is the boolean form of the F16 defect: a "
+        "comparison that reads as correct and is not."
     )
 
-    # 3. every literal the variable is compared against must be exactly 'true'.
-    compared = re.findall(
-        rf"\b{re.escape(variable)}\s*(?:<>|!=|(?<![:<>!=])=(?!=))\s*'([^']*)'",
-        code,
-    )
-    assert compared, (
-        f"LEDGER-02 LOCK B: the {arm} never compares {variable} directly "
-        "against a string literal. Lock B is the fail-closed switch that makes "
-        "merging the migration behaviour-neutral and the incident-pressure kill "
-        "switch (rollback level 1 in the runbook); a truthiness test, a cast or "
-        "an indirection through another expression is not it."
-    )
-    wrong = sorted({literal for literal in compared if literal != "true"})
-    assert not wrong, (
-        f"LEDGER-02 LOCK B: the {arm} compares {variable} against {wrong}, not "
-        "only against the lowercase 'true'. The flag must open on that one exact "
-        "string and nothing else — '1', 'on', 'TRUE' and 'true ' with a trailing "
-        "space are four ways to activate a cross-tenant PROD fan-out by accident."
-    )
-
-    # 4. and no boolean cast anywhere: `::bool` accepts '1', 'on', 'yes', 't'.
-    casts = sorted(
-        set(re.findall(r"::\s*(bool(?:ean)?)\b", code, flags=re.IGNORECASE))
-    )
-    assert not casts, (
-        f"LEDGER-02 LOCK B: the {arm} casts to {casts}. The activation "
-        "comparison must be exact string equality against 'true' — a boolean "
-        "cast accepts '1', 'on', 'yes' and 't', so the flag would open on values "
-        "nobody intended as activation."
+    # 5. the retired database-setting read is GONE. Needle assembled at runtime;
+    #    see _RETIRED_ACTIVATION_CALL.
+    assert _RETIRED_ACTIVATION_CALL not in code, (
+        f"LEDGER-02 LOCK B: the {arm} still reads the retired "
+        f"`{_ACTIVATION_SETTING}` database setting. An operator on this "
+        "platform is refused 42501 when setting it (MEASURED on PROD "
+        "2026-09-05), so that read can never be TRUE: the arm would be "
+        "permanently dormant for the wrong reason, and the runbook's activation "
+        "step would remain unperformable."
     )
 
 
 class TestGate4ActivationLock:
-    def test_activation_is_exact_lowercase_string_equality(self) -> None:
-        code = _strip_sql_comments(function_body())
-        assert f"current_setting('{_ACTIVATION_SETTING}'" in code, (
-            "LEDGER-02 LOCK B: the fan-out body does not read "
-            f"current_setting('{_ACTIVATION_SETTING}', …). Lock B is the "
-            "fail-closed switch that makes merging this migration "
-            "behaviour-neutral, and it is also the incident-pressure kill "
-            "switch (rollback level 1 in the runbook)."
+    def test_activation_is_fail_closed_table_read(self) -> None:
+        _assert_activation_is_fail_closed_table_read(
+            _strip_sql_comments(function_body()), arm="fan-out body"
         )
-        _assert_activation_is_exact_lowercase_true(code, arm="fan-out body")
 
 
 # ---------------------------------------------------------------------------
@@ -1757,14 +2010,14 @@ class TestGate10CompositeArm:
         between a schedule and PROD."""
         paths = {path.name for path in _phase_migration_paths()}
         assert _COMPOSITE_MIGRATION_NAME in paths, (
-            f"{_COMPOSITE_MIGRATION_NAME} is outside the dormancy window "
-            f"[{_PHASE_MIGRATION_WINDOW_START}, {_PHASE_MIGRATION_WINDOW_END}) "
+            f"{_COMPOSITE_MIGRATION_NAME} is outside the dormancy ranges "
+            f"{_windows_description()} "
             f"(scanned: {sorted(paths)}). Gate 3a is the scan that keeps a "
             "pg_cron registration out of a migration, and migrations AUTO-APPLY "
-            "to PROD on merge to main. A composite migration outside that window "
-            "could register its own schedule and reach production with no deploy "
-            "step and no founder action. Redate it back into the window, or "
-            "widen the window in the same commit."
+            "to PROD on merge to main. A composite migration outside those "
+            "ranges could register its own schedule and reach production with no "
+            "deploy step and no founder action. Redate it back into a range, or "
+            "add a DISJOINT range for it in the same commit — never widen one."
         )
 
     def test_10b_composite_body_declares_no_venue_literal(self) -> None:
@@ -1847,50 +2100,69 @@ class TestGate10CompositeArm:
             "Do not delete it on the grounds that nothing matches it."
         )
 
-    def test_10c_composite_function_name_appears_in_exactly_one_migration(
+    def test_10c_composite_function_name_appears_in_exactly_the_named_migrations(
         self,
     ) -> None:
-        """Gate 3b's twin. 3a's glob cannot see a migration whose FILENAME lacks
-        the phase token, so a differently-named migration could register a
-        schedule for THIS function and never enter that scan."""
-        hits = sorted(
+        """Gate 3b's twin, with the same EXACT-SET re-specification. 3a's
+        selection cannot see a migration whose timestamp falls outside it, so a
+        differently-dated migration could register a schedule for THIS function
+        and never enter that scan."""
+        expected = {_COMPOSITE_ORIGINAL_MIGRATION_NAME, _COMPOSITE_MIGRATION_NAME}
+        hits = {
             path.name
             for path in _migrations_dir().glob("*.sql")
             if _COMPOSITE_FUNCTION_NAME in path.read_text(encoding="utf-8")
-        )
-        assert len(hits) == 1, (
-            "expected the composite arm's function name to appear in EXACTLY 1 "
-            f"migration (the one that defines it, {_COMPOSITE_MIGRATION_NAME}); "
-            f"found {len(hits)}: {hits}.\n"
-            "  0 hits ⇒ the search is broken (or the migration was renamed "
-            "without moving _COMPOSITE_MIGRATION_NAME) — this gate is proving "
-            "nothing, fix it rather than relaxing it.\n"
-            "  2+ hits ⇒ a second migration either REGISTERS A SCHEDULE for the "
-            "composite arm or CALLS it. Both are forbidden from a migration: "
-            "migrations auto-apply to PROD, and activation belongs to "
-            "docs/runbooks/ledger-refresh-go-live.md (WORKER-03)."
+        }
+        assert hits == expected, (
+            "expected the composite arm's function name to appear in EXACTLY "
+            f"the two migrations that define it, {sorted(expected)}; found "
+            f"{sorted(hits)}.\n"
+            "  missing ⇒ the search is broken, or a migration was renamed "
+            "without moving _COMPOSITE_MIGRATION_NAME / "
+            "_COMPOSITE_ORIGINAL_MIGRATION_NAME.\n"
+            "  extra ⇒ a further migration either REDEFINES the composite arm "
+            "(move the pointer to it in the same commit), or REGISTERS A "
+            "SCHEDULE for it, or CALLS it. The last two are forbidden from a "
+            "migration: migrations auto-apply to PROD, and activation belongs "
+            "to docs/runbooks/ledger-refresh-go-live.md (WORKER-03)."
         )
 
-    def test_10d_activation_is_exact_lowercase_string_equality(self) -> None:
+        for name in sorted(expected):
+            body = (_migrations_dir() / name).read_text(encoding="utf-8")
+            assert (
+                f"CREATE OR REPLACE FUNCTION public.{_COMPOSITE_FUNCTION_NAME}"
+                in body
+            ), (
+                f"{name} carries the composite arm's name but does not DEFINE "
+                "it with CREATE OR REPLACE FUNCTION."
+            )
+            assert _SCHEDULE_VERB not in body and _UNSCHEDULE_VERB not in body, (
+                f"{name} defines the composite arm AND names a pg_cron "
+                "registration verb. Migrations auto-apply to PROD."
+            )
+            assert f"PERFORM public.{_COMPOSITE_FUNCTION_NAME}" not in body, (
+                f"{name} CALLS the composite arm at apply time."
+            )
+
+        assert max(expected) == _COMPOSITE_MIGRATION_NAME, (
+            f"_COMPOSITE_MIGRATION_NAME names {_COMPOSITE_MIGRATION_NAME}, but "
+            f"{max(expected)} sorts later and supersedes it on replay."
+        )
+
+    def test_10d_activation_is_fail_closed_table_read(self) -> None:
         """Gate 4, on the composite body.
 
-        ⚠️ The composite arm reads the SAME setting as the single-key arm, and
-        that is the design: one reset kills BOTH arms on the next tick, while the
-        two SCHEDULES stay independently unschedulable. Asserting the name here
-        is therefore also asserting that the shared kill switch is still shared —
-        a composite arm on a setting of its own would leave a founder resetting
-        one flag under incident pressure while the other arm kept ticking.
+        ⚠️ The composite arm reads the SAME system_flags KEY as the single-key
+        arm, and that is the design: one reset kills BOTH arms on the next tick,
+        while the two SCHEDULES stay independently unschedulable. The shared
+        helper anchors on that key by name, so running it here is also asserting
+        that the shared kill switch is still shared — a composite arm on a key of
+        its own would survive the reset a founder makes under incident pressure
+        while believing both arms were stopped.
         """
-        code = _strip_sql_comments(composite_body())
-        assert f"current_setting('{_ACTIVATION_SETTING}'" in code, (
-            "the composite arm's body does not read "
-            f"current_setting('{_ACTIVATION_SETTING}', …). That setting is the "
-            "SHARED fail-closed switch: it is what makes merging this migration "
-            "behaviour-neutral, and it is the incident-pressure kill switch for "
-            "BOTH arms at once (rollback level 1 in the runbook). A composite "
-            "arm reading a different setting would survive the kill switch."
+        _assert_activation_is_fail_closed_table_read(
+            _strip_sql_comments(composite_body()), arm="composite arm"
         )
-        _assert_activation_is_exact_lowercase_true(code, arm="composite arm")
 
     def test_10e_burst_cap_is_bounded(self) -> None:
         """Gate 5's analogue, with the composite arm's OWN derivation.

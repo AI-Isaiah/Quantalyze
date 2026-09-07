@@ -2,10 +2,13 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260825140000_ledger_refresh_composite_arm.sql
+-- source migration: 20260907130000_ledger_refresh_switch_to_system_flags.sql
 -- --------------------------------------------------------------------------
--- STEP 1: the composite fan-out
+-- STEP 3: the composite arm
 -- --------------------------------------------------------------------------
+-- Re-based on supabase/schema/functions/enqueue_ledger_composite_refresh.sql
+-- (source migration 20260825140000), Lock B replaced with the SAME guard. It
+-- reads the SAME key, so one reset still kills BOTH arms on the next tick.
 CREATE OR REPLACE FUNCTION public.enqueue_ledger_composite_refresh()
 RETURNS INTEGER
 LANGUAGE plpgsql
@@ -13,23 +16,39 @@ SECURITY DEFINER
 SET search_path = public, pg_catalog
 AS $composite$
 DECLARE
-  v_enabled  TEXT;
+  v_enabled  BOOLEAN;
   v_row      RECORD;
   v_job_id   UUID;
   v_existing INTEGER;
   v_enqueued INTEGER := 0;
 BEGIN
-  -- ---- the fail-closed activation switch --------------------------------
-  -- FIRST statement in the body, deliberately, and it reads the SAME setting the
-  -- single-key arm reads so ONE reset kills BOTH arms on the next tick. The
-  -- missing-ok form of current_setting returns NULL when the setting was never
-  -- set; COALESCE makes that an empty string, and the comparison is EXACT
-  -- EQUALITY against the lowercase word. Anything else — unset, empty, '1', 'on',
-  -- 'TRUE', or 'true ' with a trailing space — is dormant. A truthiness test or a
-  -- boolean cast would open the flag on every one of them.
-  v_enabled := COALESCE(current_setting('app.ledger_refresh_enabled', TRUE), '');
-  IF v_enabled <> 'true' THEN
-    RAISE NOTICE 'enqueue_ledger_composite_refresh: dormant (activation setting not exactly true); enqueued 0';
+  -- ---- the fail-closed activation switch (164.7 D-01) --------------------
+  -- FIRST statement in the body, deliberately, and it reads the SAME key the
+  -- single-key arm reads so ONE reset kills BOTH arms on the next tick.
+  --
+  -- The reasoning is the single-key arm's, and it is not repeated in full here
+  -- on purpose — two copies of one argument drift. In brief: the switch moved
+  -- off a database setting an operator is refused 42501 when setting (MEASURED
+  -- on PROD 2026-09-05) and onto public.system_flags; the BOOLEAN NOT NULL
+  -- column makes the old '1' / 'on' / 'TRUE' / 'true ' class unrepresentable
+  -- rather than merely rejected; a read that RAISES leaves v_enabled NULL and a
+  -- MISSING ROW leaves it NULL too, both of which are DORMANT — the deliberate
+  -- inverse of send-intro/route.ts, whose missing-row branch is fail-OPEN
+  -- because its switch defaults ON and this one does not.
+  --
+  -- ⛔ The comparison is NULL-safe and must stay so: `<> TRUE` and `NOT
+  -- v_enabled` both evaluate NULL when the read failed, so the IF falls through
+  -- and the flag opens on exactly the failure path.
+  BEGIN
+    SELECT sf.enabled INTO v_enabled
+      FROM public.system_flags sf
+     WHERE sf.key = 'ledger_refresh_enabled';
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'enqueue_ledger_composite_refresh: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;
+    v_enabled := NULL;
+  END;
+  IF v_enabled IS DISTINCT FROM TRUE THEN
+    RAISE NOTICE 'enqueue_ledger_composite_refresh: dormant (system_flags.ledger_refresh_enabled is not TRUE); enqueued 0';
     RETURN 0;
   END IF;
 

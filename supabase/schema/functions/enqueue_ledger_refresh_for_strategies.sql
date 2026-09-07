@@ -2,10 +2,13 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260825130000_ledger_refresh_fanout_dormant.sql
+-- source migration: 20260907130000_ledger_refresh_switch_to_system_flags.sql
 -- --------------------------------------------------------------------------
--- STEP 1: the fan-out
+-- STEP 2: the single-key fan-out
 -- --------------------------------------------------------------------------
+-- Re-based on supabase/schema/functions/enqueue_ledger_refresh_for_strategies.sql
+-- (source migration 20260825130000), Lock B replaced. Every other line of the
+-- body is that snapshot's, byte for byte.
 CREATE OR REPLACE FUNCTION public.enqueue_ledger_refresh_for_strategies()
 RETURNS INTEGER
 LANGUAGE plpgsql
@@ -13,25 +16,61 @@ SECURITY DEFINER
 SET search_path = public, pg_catalog
 AS $fanout$
 DECLARE
-  v_enabled  TEXT;
+  v_enabled  BOOLEAN;
   v_row      RECORD;
   v_job_id   UUID;
   v_existing INTEGER;
   v_enqueued INTEGER := 0;
 BEGIN
-  -- ---- Lock B (D-08): the fail-closed activation switch ------------------
-  -- FIRST statement in the body, deliberately. The missing-ok form of
-  -- current_setting returns NULL when the setting was never set; COALESCE makes
-  -- that an empty string, and the comparison is EXACT EQUALITY against the
-  -- lowercase word. Anything else — unset, empty, '1', 'on', 'TRUE', 'true '
-  -- with a trailing space — is dormant. A truthiness test would open the flag on
-  -- half of that list.
+  -- ---- Lock B (D-08, 164.7 D-01): the fail-closed activation switch ------
+  -- FIRST statement in the body, deliberately — unchanged from the form this
+  -- replaces, and the placement is the point: nothing this function does can
+  -- happen before the switch has been read.
   --
-  -- Resetting this setting is the incident-pressure kill switch: the next tick
-  -- returns 0 with no schedule operation, no deploy, no migration.
-  v_enabled := COALESCE(current_setting('app.ledger_refresh_enabled', TRUE), '');
-  IF v_enabled <> 'true' THEN
-    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant (activation setting not exactly true); enqueued 0';
+  -- WHAT CHANGED. The switch was a database setting in the `app.` namespace;
+  -- an operator on this platform is refused 42501 when setting one (MEASURED on
+  -- PROD 2026-09-05), so the runbook's activation step could not be performed.
+  -- It now reads public.system_flags, which this project has been operating
+  -- since April. The column is BOOLEAN NOT NULL, so the old comment's list of
+  -- near-misses — '1', 'on', 'TRUE', 'true ' with a trailing space — is no longer
+  -- a class that must be REJECTED by an exact comparison; it is a class that
+  -- cannot be REPRESENTED. That is the improvement, and it is why no normaliser
+  -- and no cast appears anywhere below.
+  --
+  -- FAIL-CLOSED ON EVERY PATH, which is what the wrapping buys:
+  --   * read raises (table dropped, permission denied, planner fault) -> the
+  --     handler leaves v_enabled NULL -> dormant;
+  --   * NO ROW for this key -> SELECT INTO without STRICT assigns NULL ->
+  --     dormant. ⛔ This is the DELIBERATE INVERSE of the missing-row branch in
+  --     src/app/api/admin/match/send-intro/route.ts, which treats a missing row
+  --     as ENABLED. That is right for a kill switch defaulting ON and wrong
+  --     here: this is a dormant-by-default activation switch, so its absent
+  --     state must be its closed state. Only that route's error branch and its
+  --     enabled=false branch transfer.
+  --   * row present and FALSE -> dormant.
+  --
+  -- ⛔ THE COMPARISON IS NULL-SAFE AND MUST STAY SO. With v_enabled NULL both
+  -- `v_enabled <> TRUE` and `NOT v_enabled` evaluate to NULL, the IF is not
+  -- taken, and the body falls THROUGH to the fan-out — i.e. those two spellings
+  -- open the flag on precisely the failure path this guard exists for.
+  --
+  -- ⚠️ NOTHING but the assignment goes in the handler. A probe or a second read
+  -- inside an EXCEPTION block is the shape lint rule R1 flags in the gate corpus;
+  -- keeping it clean at the source is what stops a gate copying the bad shape.
+  --
+  -- Resetting the row is still the incident-pressure kill switch: the next tick
+  -- returns 0 with no schedule operation, no deploy and no migration. It is an
+  -- UPDATE an admin session or the service role can already make.
+  BEGIN
+    SELECT sf.enabled INTO v_enabled
+      FROM public.system_flags sf
+     WHERE sf.key = 'ledger_refresh_enabled';
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'enqueue_ledger_refresh_for_strategies: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;
+    v_enabled := NULL;
+  END;
+  IF v_enabled IS DISTINCT FROM TRUE THEN
+    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant (system_flags.ledger_refresh_enabled is not TRUE); enqueued 0';
     RETURN 0;
   END IF;
 
