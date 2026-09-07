@@ -1323,6 +1323,67 @@ true for 146 and half of 142–145, and **false for 141**.
       write to someone else's substrate, which is why plan 07 did not perform it and plan 10
       books it instead of doing it.
 
+- [ ] **`[164.7-TEST-APPLY-APPSETTINGS]` Two migrations from Phase 164.7 are RED on shared TEST
+      from this PR's first CI run onward, BY DESIGN, and must be hand-applied (booked 2026-09-07,
+      Phase 164.7 plan 05; the reds are named in `164.7-02-SUMMARY.md` → "Expected reds, named
+      before the PR" and in `164.7-04-SUMMARY.md`).**
+      ⚠️ **STATE THE EXPECTED REDS BY NAME so nobody reads them as coupling regressions.** CI's
+      `sql-tests` runs every `supabase/tests/test_*.sql` against `TEST_SUPABASE_DB_URL`, and
+      **nothing applies migrations to TEST** (`SKIP-01`, `CI-MIGRATE-01` — `sql-tests` has no
+      apply step and the migrate workflow is PROD-only). Each affected gate opens with an
+      applied-ness probe that is absence-is-failure by design, so until
+      `20260907120000_analytics_service_settings_and_vault_tick.sql` and
+      `20260907130000_ledger_refresh_switch_to_system_flags.sql` reach TEST:
+      - **`test_analytics_service_settings_and_vault_tick.sql` → `TEST FAILED (0)`** — arm 0 is
+        the applied-ness probe for `20260907120000`.
+      - **`test_ledger_refresh_fanout.sql` → `TEST FAILED (0)`, cause (iii)** — arm 0's probe now
+        also requires the fail-CLOSED `system_flags` body `20260907130000` deploys.
+      - **`test_ledger_refresh_composite_arm.sql` → `TEST FAILED (0)`, cause (iii)** — same probe,
+        composite body.
+      - **VAC-08 → `NOT baselined`** for BOTH new migration ledger rows. ⛔
+        `scripts/vac08-ledger-baseline.txt` may only SHRINK — do not widen it to silence this.
+      **The remedy, as ordered steps — do not compress them:**
+      1. Run the which-database marker query from `CLAUDE.md` ("Which database am I on?") —
+         `SELECT shobj_description(oid,'pg_database') FROM pg_database WHERE datname =
+         current_database();` — against `$TEST_SUPABASE_DB_URL`, and **proceed only when it names
+         TEST**. `current_database()` is `postgres` on both projects and proves nothing; a NULL
+         marker means re-set it first, not proceed on a guess.
+      2. `psql "$TEST_SUPABASE_DB_URL" -f supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql`
+      3. `psql "$TEST_SUPABASE_DB_URL" -f supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql`
+         — **in that timestamp order**; 130000 re-bases bodies 120000 never touches, but the
+         ledger order is what VAC-08 compares.
+      4. Re-run `sql-tests` and **record the first green run's SHA in this entry**, per the
+         SHA-binding rule — a settled green board can belong to an ancestor commit.
+      ⚠️ **ONE UNKNOWN, to be READ OFF the first `sql-tests` log rather than predicted**
+      (`164.7-RESEARCH.md` § Q1, Open Question 3): whether shared TEST has a `vault` schema at
+      all, and if it does, whether the CI role may `SELECT` from `vault.decrypted_secrets` and
+      `DELETE` against a view with computed columns. If it cannot,
+      `test_analytics_service_settings_and_vault_tick.sql` turns `TEST FAILED (V1-SETUP)` AFTER
+      the apply rather than green. ⛔ Do NOT convert that guard to a skip — a skip is how an
+      unmeasured substrate starts reading as a pass.
+      ⛔ **Not `supabase db push`, not `db reset --linked`, not `--project-ref`.** This checkout's
+      Supabase CLI is linked to **PRODUCTION** (`supabase/.temp/project-ref`), so every one of
+      those targets prod from this directory. ⚠️ TEST is SHARED with other people's CI; this is a
+      write to someone else's substrate, which is why plan 05 books it instead of doing it.
+
+- [ ] **`[164.7-VAULT-ABSENT-RULE]` The `vault-absent` cron-hygiene rule and a Phase 164.5 repoint
+      of jobid 1 are in direct conflict, and must move in ONE change (booked 2026-09-07, Phase
+      164.7 plan 05, from `164.7-RESEARCH.md` § Q1 Open Question 2).**
+      `scripts/prod-prober/arms/cron-drift.mjs`'s `vault-absent` rule fires when
+      `name === "match_engine_cron" && !text.includes("vault.decrypted_secrets")` — it requires
+      that literal string in the job's COMMAND TEXT. Phase 164.7 shipped
+      `public.match_engine_cron_tick()` (migration `20260907120000`), which reads Vault INSIDE its
+      body. So the moment Phase 164.5 item (7) repoints the live row to
+      `SELECT public.match_engine_cron_tick();`, the command text no longer contains the literal
+      and the rule fires **against a correct repair**. ⛔ Do not discover this at repair time and
+      "fix" it by keeping a decorative `DO` wrapper around the call purely to satisfy a grep —
+      that is a gate shaped by its own false positive. **Three things move together, in one
+      commit:** (a) the rule — accept EITHER the literal or a call to a function whose committed
+      body contains it, and ship a RED fixture for the new arm, because a widened rule with no
+      fixture is a rule nobody has watched fail; (b)
+      `scripts/prod-prober/cron-manifest.json`, re-captured from PROD after the repair; and (c)
+      the live row itself. Owner: Phase 164.5 item (7).
+
 - [ ] **`[164.2-TYPES-REGEN-CHECK]` After the migration PR merges and auto-applies to PROD,
       re-derive the six `database.types.ts` lines that were hand-extended, and confirm no
       failure upsert was lost in the schema-cache window (booked 2026-09-06, Phase 164.2 plan 10;
@@ -2195,6 +2256,21 @@ of its 14 `command` strings was read individually and approved for publication b
 `DO` block, while migration `20260408215026` still schedules it on
 `current_setting('app.analytics_service_key')`, which returns 42501 on this platform. Both arms
 read GREEN on live run 34018874984.
+
+⭐ **DATED 2026-09-07 (Phase 164.7 APPSETTINGS) — the GUC half of `CRON-DRIFT-01` is CLOSED; the
+LIVE-ROW half stays open for Phase 164.5 item (7).** What 164.7 closed: the repo now DESCRIBES the
+mechanism PROD has been running since the 2026-09-01 hand repair — `public.match_engine_cron_tick()`
+in `20260907120000_analytics_service_settings_and_vault_tick.sql`, key from `vault.decrypted_secrets`,
+URL from `public.system_settings`, a loud `RAISE` on either absence — so a rebuild from migrations
+no longer reproduces an unrunnable job, and `20260408113029` / `20260408215026` carry dated
+`-- APP-GUC-LINEAGE:` headers naming that successor. A CI gate (`scripts/lint-app-guc.mjs`, wired
+into `sql-gate-lint`) now fails any NEW app-GUC reader written into `supabase/migrations/**`.
+⛔ What is NOT closed: the live `cron.job` row still runs the hand-written `DO` block rather than
+the callable, so repo and PROD agree in MECHANISM but not in TEXT. Repointing it is 164.5 item (7)
+— and see the `164.7-VAULT-ABSENT-RULE` entry above (named without its brackets on purpose: the
+bracketed form is the entry's unique key and a cross-reference must not create a second one),
+because the repoint trips the `vault-absent` hygiene rule unless the rule, the manifest and the
+row move in the same change.
 
 ⭐ **Standing rule until CRON-OBS-01 lands: `cron.job_run_details.status = 'succeeded'` is NOT
 evidence that a pg_net-based job worked.** Read `net._http_response`.

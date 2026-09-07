@@ -1,3 +1,7 @@
+-- APP-GUC-LINEAGE: retired 2026-09-07; occurrences: 1; successor: 20260907130000_ledger_refresh_switch_to_system_flags.sql; reason: the single app-namespace read is this file's Lock B activation check. The successor re-bases it on a fail-CLOSED read of public.system_flags, because the setting this file reads cannot be set on this platform at all: both the database-level and the role-level ALTER form return 42501, measured on PROD in the SQL editor as postgres on 2026-09-05. Nothing in this file's executable text is edited — it remains the record of what applied to PROD on 2026-08-25, and the successor is where the live body now lives.
+-- A missing row, a FALSE row and a RAISING read are all dormant in the successor's body;
+-- the runbook docs/runbooks/ledger-refresh-go-live.md owns activation and now names the
+-- successor rather than this file.
 -- Migration: enqueue_ledger_composite_refresh — the recurring, DORMANT, bounded
 -- COMPOSITE refresh arm for ledger-backed venues.
 -- Phase 161.1 / LEDGER-01. 2026-08-25.

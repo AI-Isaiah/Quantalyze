@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 35
+open_count: 36
 waived_count: 0
 fixed_count: 10
-total_count: 45
-last_updated: 2026-09-07T10:18:29.567Z
+total_count: 46
+last_updated: 2026-09-07T12:29:08.213Z
 ---
 
 # Broken Windows Ledger
@@ -60,6 +60,7 @@ last_updated: 2026-09-07T10:18:29.567Z
 | 43 | 164.2.1 | unmet-truth | src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.test.tsx |  | FLAKY under full-suite load — a green full suite is therefore not a reliable truth on this file. 'focus management — pre-flight portal + failure transition > submitting → failure transition moves focus to the error banner' failed once in npm test (843 passed \| 1 failed), then passed on an immediate identical re-run (844 passed \| 14217 tests, exit 0). NOT a 164.2.1 regression, MEASURED not assumed: the file is UNTOUCHED by this phase (git diff --name-only vs merge-base is empty), it is 49/49 green in isolation, and it was green in the pre-wave full run. jsdom focus assertions are timing-sensitive and this component animates. Recorded so the next person who sees a lone red here does not bisect a phase that did not cause it, and so the underlying timing dependence is not mistaken for noise forever. | open |  | 2026-09-07T07:02:20.270Z |  |
 | 44 | 164.7 | unrun-verify | .github/workflows/ci.yml |  | sql-gate-lint's two new app-GUC steps have never run on ubuntu; the corpus step is RED by design (12 findings/5 files) until 164.7-05 annotates the tree, so no push or workflow_dispatch is permitted before then | open |  | 2026-09-07T10:11:28.312Z |  |
 | 45 | 164.7 | deviation | supabase/tests/test_analytics_service_settings_and_vault_tick.sql |  | MEASURED: a DROP POLICY <t>_service_all mutation twin is UNFALSIFIABLE repo-wide — service_role is BYPASSRLS on the pg-lane and on Supabase, so every *_service_all policy is belt-and-braces and no twin of that shape can bite (no-red R3, 164.7-02-NEUTER.log Part B2). Any existing arm relying on one is worth re-measuring. | open |  | 2026-09-07T10:18:29.567Z |  |
+| 46 | 164.7 | deviation | .planning/phases/164.7-appsettings-every-app-guc-reader-moves-to-a-mechanism-this-p/deferred-items.md |  | npm run lint is RED on the 164.7 branch: 86 planning-hygiene violations (ABSOLUTE-HOME-PATH / SCRATCH-HOME-PATH / LOCAL-USERNAME) across 13 of the phase's OWN plan, summary and neuter files, leaking the local username on a public repo. Predates plan 05 (git diff over those files vs d193e4cd is empty). Remedy edits three PENDING plans, so plan 05 recorded it instead of fixing it; owner is plan 06. See deferred-items.md D-164.7-05-1. | open |  | 2026-09-07T12:29:08.213Z |  |
 
 ````json
 [
@@ -601,6 +602,18 @@ last_updated: 2026-09-07T10:18:29.567Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-07T10:18:29.567Z",
+    "resolved_at": null
+  },
+  {
+    "id": 46,
+    "kind": "deviation",
+    "phase": "164.7",
+    "file": ".planning/phases/164.7-appsettings-every-app-guc-reader-moves-to-a-mechanism-this-p/deferred-items.md",
+    "line": null,
+    "description": "npm run lint is RED on the 164.7 branch: 86 planning-hygiene violations (ABSOLUTE-HOME-PATH / SCRATCH-HOME-PATH / LOCAL-USERNAME) across 13 of the phase's OWN plan, summary and neuter files, leaking the local username on a public repo. Predates plan 05 (git diff over those files vs d193e4cd is empty). Remedy edits three PENDING plans, so plan 05 recorded it instead of fixing it; owner is plan 06. See deferred-items.md D-164.7-05-1.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T12:29:08.213Z",
     "resolved_at": null
   }
 ]

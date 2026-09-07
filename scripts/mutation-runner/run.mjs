@@ -812,7 +812,69 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //                  FILES_FLOOR=45 (this value) -> 0 defects, EXIT 0
 //                So 45 is the separation point, not a value below it.
 // The paired ARMS_FLOOR move (361 -> 369) is in the block below.
-export const FILES_FLOOR = 45;
+//
+// ⭐ RE-DERIVED 2026-09-07 BY MEASUREMENT (phase 164.7, plan 05). Value RAISED
+// from 45 to 46 — ONE new annotated file,
+// supabase/tests/test_analytics_service_settings_and_vault_tick.sql (phase
+// 164.7 plan 02), the gate over public.match_engine_cron_tick() and
+// public.system_settings. Its seven machine identities are 0, V1, U1, C1, R1,
+// R2 and R3. The corpus also grew by exactly that one file (72 -> 73), so the
+// OUT-of-scope classes did not move:
+// 46 + 0 lane-blocked + 27 unreachable + 0 pending = 73. Every block above
+// stays as dated lineage.
+//   DATE         2026-09-07, on the phase-164.7-appsettings branch at d193e4cd
+//                plus this plan's working tree (the five lineage headers of
+//                Task 2 are comment-only additions to migrations and were
+//                present for the two separation runs; run 1 below measured the
+//                SAME 380 arms without them, which is the evidence that a
+//                masthead comment moved no arm).
+//   COMMAND      `node scripts/mutation-runner/run.mjs` (full corpus, macOS,
+//                PGBIN=/opt/homebrew/opt/postgresql@16/bin), read off the run's
+//                own lines and never typed from a plan's prose:
+//                  coverage: files 46/73
+//                  lane-blocked: 0 file(s) …
+//                  lane-probe: pg_cron AVAILABLE — lane-blocked class is empty, as a hosting lane requires
+//                    pending: 0 idiom file(s) without RED-UNDER —
+//                  arms: 380/380/0   (executed/annotated/waived)
+//                  biting: 380
+//                  lane-invocations: 380
+//                  per-arm lane time: mean 1.1s over 380 arm run(s)
+//                  ✅ No defects. Every annotated arm bit its own arm first.
+//   ⚠️ TWO twins in the new file are NOT the ones its plan specified, and the
+//                difference was MEASURED rather than argued
+//                (164.7-02-NEUTER.log): C1's planned vault-key rename made arm
+//                U1 the first failure (`WRONG-ARM(U1)`), and R3's planned
+//                `DROP POLICY system_settings_service_all` reported `no-red`
+//                because `service_role` is BYPASSRLS — a property of every
+//                `*_service_all` policy in this repository, not of that table.
+//                Both were replaced with twins that bite, so all seven count.
+//   SEPARATION   Measured on real full-corpus lane runs, same tree:
+//                  FILES_FLOOR=47 (one higher) -> defect ->
+//                    `FILES_FLOOR regression: 46 annotated file(s) < floor 47`
+//                    (beside the paired ARMS_FLOOR regression)   exit 1, 528 s
+//                  FILES_FLOOR=46 (this value) -> 0 defects, EXIT 0      614 s
+//                So 46 is the separation point, not a value below it.
+//   ⛔ THE STALE DIRECTION IS NOT THIS RUNNER'S, AND THIS PLAN MEASURED IT
+//                RATHER THAN INHERITING THE EARLIER BLOCKS' WORDING. A full
+//                corpus run with the floors left stale-low at 45/369 on this
+//                46-file tree EXITS 0 with `✅ No defects` (531 s): the gate
+//                path is `if (annotatedFiles < filesFloor)`, so a floor BELOW
+//                the corpus is invisible here BY CONSTRUCTION. The lower
+//                direction is caught one layer up, by
+//                src/__tests__/mutation-runner-floors.test.ts, which failed on
+//                that same tree with
+//                  `RATCHET STALE: 46 of 73 gate files are now annotated but
+//                   FILES_FLOOR is still 45. Raise FILES_FLOOR in
+//                   scripts/mutation-runner/run.mjs to 46.`
+//                beside the paired ARMS_FLOOR message. All three runs and both
+//                vitest readings are in 164.7-05-FLOORS.log with their exit
+//                codes. ⚠️ A future plan must not read "separated in both
+//                directions" as "the runner reports both" — it does not, and
+//                expecting it to would let a stale ratchet read as a green gate.
+// The paired ARMS_FLOOR move (369 -> 380) is in the block below.
+//   RECORD       .planning/phases/164.7-appsettings-every-app-guc-reader-moves-
+//                to-a-mechanism-this-p/164.7-05-SUMMARY.md
+export const FILES_FLOOR = 46;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -1634,7 +1696,69 @@ export const FILES_FLOOR = 45;
 //                So 369 is exactly the separation point, not a value below it.
 //   RECORD       .planning/phases/164.2-curated-copy-the-curated-computation-
 //                error-sentence-must-act/164.2-07-SUMMARY.md
-export const ARMS_FLOOR = 369;
+//
+// ⭐ RE-DERIVED 2026-09-07 BY MEASUREMENT (phase 164.7, plan 05). Value RAISED
+// from 369 to 380 — ELEVEN new arms, from TWO sources rather than one, which is
+// why this move is not a single-file backfill like the last three:
+//   * SEVEN in the one new annotated file,
+//     supabase/tests/test_analytics_service_settings_and_vault_tick.sql
+//     (plan 02). Machine identities: 0, V1, U1, C1, R1, R2, R3 — V1 and U1 ask
+//     the callable for each of its two RAISEs BY NAME, C1 is the discriminator
+//     that refuses a function whose whole body is one unconditional RAISE
+//     (which would pass V1 and U1 and post nothing forever — the CRON-DRIFT-01
+//     outage with the sign reversed), and R1/R2/R3 are the anon read, the
+//     non-admin write and the anon grant-layer hardening.
+//   * FOUR in the two EXISTING ledger gate files (plan 04): arms K and L in
+//     each of test_ledger_refresh_fanout.sql and
+//     test_ledger_refresh_composite_arm.sql. With the existing arm A they pin
+//     the whole fail-closed truth table of the switch 20260907130000 deploys:
+//     row MISSING, row FALSE, read RAISES — each returns 0, each under a twin
+//     that reddens it and only it.
+// ⚠️ WHAT DID NOT MOVE, AND WHY IT COULD HAVE. Plan 04 RE-POINTED all 27
+// pre-existing edit-kind twins in those two gates at the superseding migration
+// 20260907130000_ledger_refresh_switch_to_system_flags.sql, leaving the 2
+// staleness-view steps byte-identical; ten needed `nth` because that migration
+// CREATE OR REPLACEs BOTH bodies. Had the re-point not happened in the SAME
+// commit as the apply-list extension, those twins would have gone on mutating a
+// body the new migration overwrites — `no-red` on up to 27 arms, absorbable by
+// nothing, because WAIVED_CEILING is 0. Every one was re-observed biting AFTER
+// the re-point, which is why this floor moves by exactly +11 and not by less.
+//   DATE         2026-09-07, same tree and same probe as the FILES_FLOOR block.
+//   SAMPLE SIZE  380 arms executed, all 380 `RED (identity ok)`. The two
+//                independent tallies AGREE: `arms:` executed 380 and
+//                `lane-invocations:` 380, beside 46 baseline and 46 restore
+//                legs — 472 legs, 614 s wall clock on the authoring macOS box.
+//                The 46 per-file `biting` counts SUM to 380. WAIVED_CEILING is
+//                untouched at 0: eleven arms added, twenty-seven re-pointed,
+//                zero waivers.
+//   ⚠️ WALL CLOCK  531 s / 528 s / 614 s / 514 s across FOUR runs, and the third
+//                is the outlier for a known reason: a busy-wait loop the
+//                executor used to block on it burned a core beside it, which
+//                that run itself reports as `per-arm lane time: mean 1.3s`
+//                against 1.1s in the other three. Read the three 1.1s runs as
+//                this corpus's figure. The FOURTH is the one that matters for
+//                the claim "the full corpus exits 0 at this plan's final
+//                commit": it is SHA-BOUND to df45db38 on a CLEAN tree, exit 0,
+//                514 s. NONE of these is an ubuntu number — see the
+//                timeout-minutes derivation in ci.yml, which is unchanged at 20
+//                (its one permitted raise was taken on 2026-09-05 and 20 is a
+//                declared CEILING).
+//   SEPARATION   Measured on real full-corpus lane runs, same tree, in the same
+//                probe that separated FILES_FLOOR above:
+//                  ARMS_FLOOR=381 (one higher) -> defect ->
+//                    `ARMS_FLOOR regression: 380 biting arm(s) < floor 381`
+//                  ARMS_FLOOR=380 (this value) -> 0 defects, EXIT 0
+//                So 380 is exactly the separation point, not a value below it.
+//                The STALE direction is NOT this runner's to report — see the
+//                ⛔ block above FILES_FLOOR. At 369 on this tree the run exits
+//                0, and it is src/__tests__/mutation-runner-floors.test.ts that
+//                fails, with `The corpus declares 380 twin(s) of which 0 are
+//                waivers, so a green run bites 380. ARMS_FLOOR is 369.`
+//   RECORD       .planning/phases/164.7-appsettings-every-app-guc-reader-moves-
+//                to-a-mechanism-this-p/164.7-05-SUMMARY.md, beside
+//                164.7-05-FLOORS.log, which carries all three runs with their
+//                exit codes, wall clocks and printed lines.
+export const ARMS_FLOOR = 380;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

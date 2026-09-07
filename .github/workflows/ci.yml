@@ -806,9 +806,17 @@ jobs:
       # contents — after masking an app-GUC read is invisible, and decision D-05
       # requires this gate to COUNT comments. Same hermetic contract, same mode
       # identity (these two lines are the EXACT commands a developer runs).
-      # ⚠️ DATED 2026-09-07: the corpus step below is EXPECTED RED between this
-      # commit and phase 164.7 plan 05's annotation commit — 12 findings across
-      # 5 files, the measured census. That is the gate seeing the tree.
+      # ⚠️ DATED 2026-09-07, and CLOSED the same day. The corpus step below was
+      # EXPECTED RED between plan 164.7-01's commit and plan 164.7-05's
+      # annotation commit — 12 findings across 5 files, per-file 1/5/4/1/1, the
+      # measured interim census. That interval is OVER: plan 05 annotated all
+      # five files and filled LINEAGE_ALLOWLIST in the same commit, and the step
+      # now prints `app-guc: findings 0` with the five files named.
+      # ⛔ From here a RED corpus step is a REGRESSION, not the interim. It is
+      # never to be cleared by widening LINEAGE_ALLOWLIST or relaxing DETECT_RE:
+      # the exemption takes a dated header AND an agreeing, count-pinned
+      # allowlist entry, and `src/__tests__/lint-app-guc.test.ts` re-measures
+      # every one of those counts against the real files' bytes.
       - name: App-GUC gate self-test - every finding kind fires on its red fixture
         run: node scripts/lint-app-guc.mjs --self-test
       - name: App-GUC gate - zero unannotated app-GUC reads in supabase/migrations
@@ -991,6 +999,18 @@ jobs:
     # scheduled full run enforcing the floors, and the split is PRINTED, never
     # silent. That is a separate plan (a runner subset mode plus ci.yml work),
     # NOT a further timeout raise.
+    #
+    # ⚖️ RULE RE-APPLIED 2026-09-07 (phase 164.7 plan 05) — NO CHANGE, and the
+    # reading is recorded rather than the decision restated. The corpus grew to
+    # 46 files / 380 arms = **472 legs** (380 + 46 baseline + 46 restore). Local
+    # macOS wall clocks, from 164.7-05-FLOORS.log: **531 s** and **528 s** at
+    # `per-arm lane time: mean 1.1s`, plus one 614 s run whose 1.3 s/arm is
+    # contaminated by a busy-wait loop running beside it and is reported as such.
+    # ⛔ None of the three is an ubuntu number, and this rule reads MEASURED
+    # UBUNTU runs — no SHA-bound ubuntu run of a 46-file corpus exists yet. The
+    # rule's one permitted raise was already taken above, and 20 is the CEILING,
+    # so there is nothing to raise: a future crossing is answered by
+    # [REDUNDER-SUBSET-SPLIT], not by a third value.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

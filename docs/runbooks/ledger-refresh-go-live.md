@@ -19,14 +19,22 @@ Two migrations carry the mechanism:
 | Migration | What it defines |
 |---|---|
 | `supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql` | `public.ledger_refresh_staleness` — the read-only freshness surface. The measuring instrument for every verification below. |
-| `supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql` | `public.enqueue_ledger_refresh_for_strategies()` — the zero-argument fan-out, shipped DORMANT. |
+| `supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql` | `public.enqueue_ledger_refresh_for_strategies()` — the zero-argument fan-out, shipped DORMANT. ⚠️ **Lineage since 2026-09-07:** the record of what applied on 2026-08-25, carrying a dated `-- APP-GUC-LINEAGE:` header. The live body is the row below. |
+| `supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql` | ⭐ **Where BOTH fan-out bodies now live.** `CREATE OR REPLACE` of `enqueue_ledger_refresh_for_strategies()` AND `enqueue_ledger_composite_refresh()`, each re-based on its committed snapshot, with Lock B rewritten as a fail-CLOSED read of `public.system_flags` and kept as the FIRST statement. Seeds `('ledger_refresh_enabled', FALSE)`. |
 
-⚠️ **The Step-2 registration statement invokes the function body defined in
-`20260825130000_ledger_refresh_fanout_dormant.sql`.** If that migration is ever superseded by a
-later `CREATE OR REPLACE`, **this pointer must move with it.** This is not pedantry: this phase's
-own research found a stale file pointer keeping a gate green while the body it guarded was one
-nobody ran. A pointer that has quietly stopped naming the live body is worse than no pointer,
-because it is still trusted.
+⚠️ **POINTER MOVED 2026-09-07 — this is the case the warning below was written for, and it has now
+happened once.** The Step-2 registration statement invokes the body defined in
+`20260907130000_ledger_refresh_switch_to_system_flags.sql`, **not** in `20260825130000`. Phase
+164.7 moved the switch off an `app.*` GUC because that GUC cannot be set on this platform at all —
+both the database-level and the role-level `ALTER … SET` return `42501`, measured on PROD
+2026-09-05 — so the activation this runbook exists to perform was, until that migration,
+impossible.
+
+⚠️ **The Step-2 registration statement invokes the function body defined in the migration named in
+the last row above.** If that migration is ever superseded by a later `CREATE OR REPLACE`, **this
+pointer must move with it.** This is not pedantry: this phase's own research found a stale file
+pointer keeping a gate green while the body it guarded was one nobody ran. A pointer that has
+quietly stopped naming the live body is worse than no pointer, because it is still trusted.
 
 ---
 
@@ -137,6 +145,23 @@ These are funded, published strategies.
 **Any item that does not return its expected answer is an ABORT, not a note-and-continue.** Abort
 means: do not run Step 1, do not run Step 2.
 
+### P0 — which database is this? (BLOCKING, and FIRST in every session)
+
+⛔ `current_database()` is `postgres` on BOTH projects and proves nothing. Neither does a green
+query or a familiar-looking table. Before any statement in this runbook that WRITES — Step 1,
+Step 2, either rollback — run this in the same session:
+
+```sql
+SELECT shobj_description(oid, 'pg_database') AS which_database
+  FROM pg_database WHERE datname = current_database();
+```
+
+- **Expected:** the hand-set marker naming **PROD** (see `CLAUDE.md`, "Which database am I on?").
+- **Abort if:** it names anything else, or comes back NULL. A NULL marker means the `COMMENT ON
+  DATABASE` was lost; re-set it before writing rather than proceeding on a guess. The Supabase CLI
+  and the browser SQL editor have **no** automated production guard — this marker is the only one,
+  and this checkout's CLI is linked to production.
+
 ### P1 — the A7 tracer passed
 
 The recurring `derive_broker_dailies` → `strategy_analytics` path must have been proven end-to-end
@@ -162,6 +187,23 @@ SELECT to_regclass('public.ledger_refresh_staleness')          AS view_present,
 
 - **Expected:** both columns non-NULL.
 - **Abort if:** either is NULL — the merge did not carry the migration.
+
+⚠️ **ADDED 2026-09-07 — `to_regprocedure` non-NULL is no longer enough.** The function has existed
+since 2026-08-25; what Phase 164.7 changed is its BODY. Assert the MECHANISM, not the name:
+
+```sql
+SELECT pg_get_functiondef('public.enqueue_ledger_refresh_for_strategies()'::regprocedure) ~ 'system_flags'
+         AS guard_is_table_backed;
+SELECT key, enabled, updated_at FROM public.system_flags WHERE key = 'ledger_refresh_enabled';
+SELECT jobname, schedule, active FROM cron.job WHERE jobname = 'ledger_refresh_fanout';
+```
+
+- **Expected:** `guard_is_table_backed = t`; exactly one flag row, `enabled = f` (the seed — the
+  switch ships OFF); **zero** cron rows, because Step 2 has not run yet.
+- **Abort if:** `guard_is_table_backed = f` — the merge carried `20260825130000` but not
+  `20260907130000`, so the body still reads a GUC nobody can set and Step 1 would change nothing
+  while every other check read green.
+- **Abort if:** the flag row is absent — see Step 1a. Do not INSERT it by hand.
 
 ### P3 — ⛔ venue enable flags — THE HARD GATE
 
@@ -214,6 +256,16 @@ SELECT cj.kind,
   single day) or the flag never reached the running process. Clear the wedge per
   `docs/runbooks/mt5-go-live.md` before proceeding.
 
+⚠️ **DATED 2026-09-07 — read this, then run the probe anyway.** Issue **#747** (MT5
+`initialize()` → `-6 authorization failed`, raised 2026-09-06 by the Phase 164.1 prober's first
+live run) was **CLOSED the same day**: the founder re-logged the terminal over VNC and prober run
+**34027776532** read `initialize=true`. ⛔ That does **not** discharge this gate. P3-C is a
+BEHAVIOURAL probe over `compute_jobs`, and a closed issue is a statement about the past — the MT5
+gateway is on record wedging three times in a single day. **Run the query at activation time and
+read its answer.** If the reading is stale, the ABORT rule above applies as written: criterion 3
+is then blocked by an operational fault outside this activation, and the honest outcome is to say
+so, not to activate around it.
+
 ### P4 — the BEFORE census
 
 ```sql
@@ -259,68 +311,102 @@ Confirm the worker is live and consuming (`/health` per `docs/runbooks/railway-w
 
 ---
 
-## Step 1 — the activation setting (LIVE op 1 of 2)
+## Step 1 — the activation flag (LIVE op 1 of 2)
 
-The fan-out's first statement compares `app.ledger_refresh_enabled` by **exact equality** against
-the lowercase word `true` (migration `20260825130000`, `:253-257`). Anything else — unset, empty,
-`1`, `on`, `TRUE`, or `true` with a trailing space — is dormant.
+The fan-out's first statement is a fail-CLOSED read of `public.system_flags` (migration
+`20260907130000_ledger_refresh_switch_to_system_flags.sql`, Lock B in **both** bodies). It opens on
+exactly one state: a row with `key = 'ledger_refresh_enabled'` and `enabled = TRUE`. A **missing
+row**, a row with `enabled = FALSE`, and a read that **RAISES** (permission denied, table absent,
+connection fault) are all dormant — the last logs a `WARNING` carrying its SQLSTATE and returns 0
+rather than propagating.
 
-**Op 1 comes first on purpose.** Executing it is also the live test of whether database-level
-`app.*` GUCs work on this project (open question OQ-3), and a privilege failure discovered here
-costs nothing because nothing can tick yet.
+**Op 1 comes first on purpose.** A failure discovered here costs nothing, because nothing can tick
+yet: Step 2 has not registered the schedule.
 
-### 1a — set it (database-level, preferred)
+### ⚠️ Steps 1a–1d were REWRITTEN 2026-09-07 — the old ones could not execute
 
-```sql
-ALTER DATABASE postgres SET app.ledger_refresh_enabled = 'true';
-```
+What this runbook used to print, and what those statements actually do on this platform:
 
-This is the sanctioned form in this repo — see `20260408113029_cron_heartbeat.sql:17-18`,
-`20260407164606_perfect_match.sql:24`, and `docs/runbooks/match-engine.md:20`, which instructs
-persisting `app.*` settings this way precisely so restores stay idempotent.
+| Statement the earlier revision instructed | Measured result on PROD |
+|---|---|
+| `ALTER DATABASE postgres SET app.ledger_refresh_enabled = 'true'` (old 1a) | **`ERROR: 42501: permission denied to set parameter`** |
+| `ALTER ROLE <role> SET app.ledger_refresh_enabled = 'true'` (old 1c) | **`ERROR: 42501: permission denied to set parameter`** |
+| `SET app.ledger_refresh_enabled = 'true'` (session-scoped) | ✅ returns `true` |
 
-### 1b — verify, in a NEW session
+**Measured 2026-09-05 in the Supabase SQL editor as `postgres`**, all three forms, and recorded in
+`.planning/ROADMAP.md` under Phase 164.7. A custom placeholder GUC needs superuser to persist and
+`postgres` is not one here. Anyone following the old Step 1 stalled at 1a and then again at 1c.
 
-⛔ `ALTER DATABASE … SET` applies to sessions opened **after** it. Reading it back in the session
-that ran it proves nothing. **Disconnect and reconnect**, then:
+The third row is why a session GUC can **never** be the out-of-band switch this runbook needs: it
+dies with the session that set it, so no operator action outside the tick can reach the tick. That
+is the whole reason Phase 164.7 re-based Lock B on a table.
 
-```sql
-SELECT current_setting('app.ledger_refresh_enabled', TRUE) AS activation;
-```
+⚠️ **The old 1c's pg_cron-username trap is gone with the mechanism, not merely unmentioned.** It
+warned that a role-level GUC applies only to that role's sessions while pg_cron runs each job as
+`cron.job.username`, so setting it on the wrong role left the fan-out permanently dormant behind
+green checks. A table row is visible to every session and every role that can read
+`public.system_flags` — there is no role left to get wrong.
 
-- **Expected:** exactly `true`.
-- **Abort if:** NULL, empty, or any other spelling.
-
-### 1c — role-level fallback, if the role lacks database-level privilege
-
-```sql
-ALTER ROLE <the role pg_cron will run the job as> SET app.ledger_refresh_enabled = 'true';
-```
-
-Verify identically: **new session**, `current_setting(...)` returns exactly `true`.
-
-⛔ **The fallback has a trap the database-level form does not.** A role-level GUC applies only to
-that role's sessions, and pg_cron runs each job as the role recorded in `cron.job.username` — the
-role that executed `cron.schedule`. Set it on the wrong role and the fan-out is permanently dormant
-while every check above reads green. If you used the fallback, **come back after Step 2** and
-confirm the two agree:
+### 1a — throw it
 
 ```sql
-SELECT jobname, username FROM cron.job WHERE jobname = 'ledger_refresh_fanout';
-SELECT rolname, rolconfig FROM pg_roles WHERE rolname = '<that username>';
+UPDATE public.system_flags SET enabled = TRUE, updated_at = now() WHERE key = 'ledger_refresh_enabled';
 ```
 
-- **Expected:** `rolconfig` contains `app.ledger_refresh_enabled=true`.
+(One line on purpose: it is pasted into a SQL editor, and a statement split across lines is a
+statement half of which can be pasted.)
 
-### 1d — record which form worked
+- **Expected:** `UPDATE 1`.
+- **Abort if:** `UPDATE 0`. The seed row is missing, i.e. `20260907130000` did not apply (it seeds
+  `('ledger_refresh_enabled', FALSE)` with `ON CONFLICT DO NOTHING`). ⛔ **Do not INSERT the row by
+  hand under incident pressure** — re-check P2 instead. A row no migration owns is a row the next
+  apply will not reconcile.
 
-Write down whether the **database-level** or the **role-level** form was the one that verified.
-That observation is what closes OQ-3 by measurement; it is owed to this runbook's execution record
-and nowhere else.
+### 1b — verify, in the SAME session
+
+```sql
+SELECT key, enabled, updated_at, updated_by
+  FROM public.system_flags
+ WHERE key = 'ledger_refresh_enabled';
+```
+
+- **Expected:** exactly one row, `enabled = t`, `updated_at` within seconds of now.
+- **Abort if:** zero rows, or `enabled = f`.
+
+⚠️ **Why the old "disconnect and reconnect" rule no longer applies.** The old database-level form
+only reached sessions opened *after* it, so reading it back in the session that ran it proved
+nothing — which is why the old 1b insisted on a new session. A **table read is not
+session-cached**: the committed row is visible to this session and to every later one, including
+every pg_cron tick. Same-session verification is now the correct check, not a weaker one.
+
+### 1c — (deleted)
+
+The role-level fallback and its `cron.job.username` trap are gone; see the correction table above.
+There is no fallback to reach for, because on this platform there was never a form of
+`ALTER … SET` that worked — which is what made the old fallback dangerous rather than merely
+redundant.
+
+### 1d — the execution record (OQ-3 is CLOSED)
+
+⭐ **Open question OQ-3 — "which form persisted the setting?" — is closed by measurement, and the
+answer is NEITHER.** The 2026-09-05 table above settles it, so nothing is owed to this runbook's
+own execution any more.
+
+What the execution record takes instead:
+
+- the `updated_at` and `updated_by` returned by 1b, and
+- the P0 which-database marker output, from the same session.
 
 ---
 
 ## Step 2 — the schedule (LIVE op 2 of 2)
+
+⛔ **MEASURED 2026-09-07: the schedule is NOT REGISTERED on PROD, so activation is TWO live ops —
+not one.** `scripts/prod-prober/cron-manifest.json`, captured from production by the Phase 164.1
+prober, holds **14 jobnames and none of them is `ledger_refresh_fanout`**; `161.1-VERIFICATION.md`
+measured the same absence on 2026-08-28. Throwing the flag in Step 1 therefore changes nothing on
+its own — the body is dormant because no job calls it as well as because the flag was off. Both
+ops are required, in this order, and both are LIVE.
 
 ```sql
 SELECT cron.schedule(
@@ -352,6 +438,28 @@ a worker that cannot serve it. That is the v1.11 wedge recreated verbatim, and i
 rule at `docs/runbooks/flipretry-derived-equity-go-live.md:169`. Both ledger-refresh migrations
 were verified at merge to contain **zero** pg_cron registration verbs, and a static gate keeps them
 that way. Live pg_cron state and git therefore diverge **on purpose**.
+
+### 2e — re-capture the cron manifest, IMMEDIATELY after registering
+
+⚠️ **ADDED 2026-09-07 — this is part of the operation, not follow-up.** The Phase 164.1
+`cron-drift` prober arm compares live `cron.job` against the committed manifest by **jobname set
+equality first**. The moment Step 2 succeeds, PROD carries a 15th job the manifest does not, and
+the arm reports drift on every run until the manifest is re-captured. That is not a false positive
+to wait out — it is the arm doing its job, and leaving it red teaches the next reader to ignore it.
+
+```bash
+node scripts/prod-prober/run.mjs --capture-manifest --out scripts/prod-prober/cron-manifest.json
+```
+
+Then **read the `command` text of every job in the resulting diff before committing.** The manifest
+is a committed, world-readable file in a public repository, and each command string was
+individually approved for publication when it was first captured. Commit it as its own reviewed
+change.
+
+- **Expected:** the diff ADDS exactly one job — `ledger_refresh_fanout`, `25 * * * *`, active — and
+  changes nothing else.
+- **Abort if:** any other job moved. A second unexplained difference means PROD drifted somewhere
+  this runbook is not looking, and committing the manifest would bless it.
 
 ---
 
@@ -398,27 +506,81 @@ SELECT cj.kind, cj.status, cj.created_at, cj.completed_at,
 green badge for weeks — re-enqueuing `process_key_long` returns `DONE` on a published strategy and
 leaves `strategy_analytics` untouched. **Check the view, not the job.**
 
+### Did the tick itself run, and how much did it enqueue?
+
+```sql
+SELECT d.start_time, d.status, d.return_message
+  FROM cron.job_run_details d JOIN cron.job j ON j.jobid = d.jobid
+ WHERE j.jobname = 'ledger_refresh_fanout'
+ ORDER BY d.start_time DESC LIMIT 3;
+
+SELECT count(*) AS enqueued_this_tick
+  FROM compute_jobs
+ WHERE metadata ->> 'source' = 'ledger-refresh'
+   AND created_at > now() - INTERVAL '65 minutes';
+```
+
+- **Expected:** `succeeded`, and `enqueued_this_tick = 2` for the four-strategy single-venue
+  backlog (the per-venue cap of 2 binds — see "First tick"). The count the function returns is a
+  NOTICE and does not reach `return_message`, which is why the second query exists at all.
+- ⚠️ Neither of these is success. They tell you the mechanism fired; the census above tells you it
+  worked.
+
+### Proving the kill switch — with the schedule still firing
+
+This is the property the rejected `SET app.… ; SELECT …` workaround would have destroyed: a caller
+that sets the flag on itself can never be switched off from outside.
+
+```sql
+UPDATE public.system_flags SET enabled = FALSE, updated_at = now() WHERE key = 'ledger_refresh_enabled';
+SELECT key, enabled, updated_at FROM public.system_flags WHERE key = 'ledger_refresh_enabled';
+```
+
+Record that `updated_at` — it is the flip timestamp the next query needs. Then, after the next
+`:25` tick, **with the schedule STILL registered**:
+
+```sql
+SELECT d.start_time, d.status
+  FROM cron.job_run_details d JOIN cron.job j ON j.jobid = d.jobid
+ WHERE j.jobname = 'ledger_refresh_fanout' ORDER BY d.start_time DESC LIMIT 1;
+
+SELECT count(*) AS enqueued_since_flip
+  FROM compute_jobs
+ WHERE metadata ->> 'source' = 'ledger-refresh'
+   AND created_at > '<the updated_at recorded above>';
+```
+
+- **Expected:** the tick `succeeded` (it RAN) **and** `enqueued_since_flip = 0` (it did nothing).
+  ⛔ Both halves are the assertion. A tick that did not run proves nothing about the switch.
+
 ---
 
 ## Rollback, part 1 of 2 — stop the bleeding
 
 Two levels, fastest first.
 
-### FAST — reset the activation setting
+### FAST — flip the activation flag off
 
 ```sql
-ALTER DATABASE postgres SET app.ledger_refresh_enabled = 'false';
+UPDATE public.system_flags SET enabled = FALSE, updated_at = now() WHERE key = 'ledger_refresh_enabled';
 ```
 
-(or `RESET`; anything that is not exactly `true` is dormant). The schedule keeps firing, the
-function returns 0 and enqueues nothing. **No schedule operation, no deploy, no migration** —
-effective for every new session, which includes every subsequent pg_cron tick.
+- **Expected:** `UPDATE 1`.
 
-Verify in a **new session** that `current_setting('app.ledger_refresh_enabled', TRUE)` is no longer
-exactly `true`, then confirm the next tick enqueues nothing.
+Verify in the **same session** — a table read is not session-cached:
 
-If Step 1 used the **role-level** fallback, reset it at the role level too — resetting only the
-database level leaves a role-level `true` in force.
+```sql
+SELECT key, enabled, updated_at FROM public.system_flags WHERE key = 'ledger_refresh_enabled';
+```
+
+- **Expected:** `enabled = f`.
+
+Then confirm the next tick enqueues nothing. The schedule keeps firing, Lock B reads `FALSE` and
+the function returns 0. **No schedule operation, no deploy, no migration** — and, unlike the
+mechanism this replaced, effective for the very next tick rather than only for sessions opened
+afterwards.
+
+⚠️ **REWRITTEN 2026-09-07, and this was the more dangerous half.** This section used to instruct `ALTER DATABASE postgres SET app.ledger_refresh_enabled = 'false'`, which returns **`42501: permission denied to set parameter`**, followed by a role-level reset with the identical result (both measured 2026-09-05 in the SQL editor as `postgres`; the table is in Step 1's correction block). A rollback that cannot execute is discovered under incident pressure, which is why it was corrected in the same commit as Step 1 rather than after it. There is no role-level reset left to remember: the flag is one row, visible to every session.
 
 ### FULL — unschedule the job
 
