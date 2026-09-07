@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.2
-current_phase_name: CURATED-COPY
-status: shipped
-stopped_at: Completed 164.2.1-02-PLAN.md
+current_phase: 164.2.1
+current_phase_name: SESSIONID-FENCE
+status: verified
+stopped_at: "164.2.1 SESSIONID-FENCE implemented and VERIFIED 5/5 on branch phase-164.2.1-sessionid-fence — NOT yet shipped, no PR opened. Code review found 0 Critical / 2 Warning / 4 Info; all six actionable findings fixed (52161f70..b12581f7). Verifier RE-TOOK both neuters at HEAD because five review-fix commits had changed both production files after plan 02 captured its evidence. Full suite 843 files / 14200 tests, 0 failures."
 last_updated: "2026-09-07T02:29:22.265Z"
 last_activity: 2026-09-06
 last_activity_desc: "164.2 shipped as PR #749. Version bumped 0.77.15.0 -> 0.77.16.0 with a CHANGELOG entry (nothing in GSD or CI enforces either). Ship review: security auditor + 10 diff-scoped specialists; 5 file-disjoint fixers. TWO VACUITIES: the roster-render poster census compared a hand-typed length to a hand-typed literal while claiming to scan src/ (it read no files) — and that was the pin the founder's criterion-3 override explicitly rested on; and the PGRST204 assertion passed on the format string's static tail. Three more found while fixing: C-10's 400-day fixture could not detect the arm-swap it guarded, the provenance census's Rule C ran only on stamped sites, and a fixer caught its own draft assertion passing for the wrong reason. FOUR user-facing/data-integrity: the two SUCCESS writers sat outside the PGRST204 degrade while the docstring claimed full coverage (a succeeded compute was recorded failed, cash series heal-deleted, retry burned); durable writer sentences had made an internal table name + raw uuid and a Python exception class name reach user copy; validate-and-encrypt showed OUR stale service key as 'Unauthorized' on a key-connect form; the post-23505 read discarded both failure channels. Fixing stale anchors introduced 3 bare file:line cites that [SEAMPROSE-01] bans for going stale — caught by the full suite. Gates re-run by the orchestrator: vitest 14180/0 (Node 22), pytest 5430, mypy --strict 79 files, tsc clean, corpus 369 arms no defects. SECURITY.md added: 21/21 closed, threats_open 0, HIGH proven non-vacuous by three lane mutants that each abort the apply."
-state_head: 8612c4750dfefa89dfe13c529b71aeda43981b26
+state_head: 41d57860
 
 # ⚠️ progress: HAND-SET 2026-09-06 against `origin/main`, NOT derived from this checkout.
 
@@ -87,6 +87,28 @@ state_head: 8612c4750dfefa89dfe13c529b71aeda43981b26
 
 # alone will keep under-reporting by 10 plans / 1 phase until then.
 
+# ⛔ HAND-SET AGAIN 2026-09-07 for Phase 164.2.1 (2 plans, 2 SUMMARYs on disk):
+
+#   total_plans 117 + 2 = 119 · completed_plans 114 + 2 = 116
+
+#   completed_phases 11 + 1 = 12 (164.2.1: plans>0 AND summaries==plans)
+
+#   percent 57 = 12/21 phase-weighted
+
+# ⚠️ CUMULATIVE CLOBBERER LIST — handlers MEASURED rewriting this block from local
+
+# disk during phase 164.2.1: state.update-progress, state.begin-phase,
+
+# state.add-roadmap-evolution, state.add-decision, state.record-metric,
+
+# state.record-session. That is SIX, and it includes the executor's own standard
+
+# state-update step — GSD's normal flow calls a handler this file forbids from
+
+# this checkout. Restore by hand after any handler call; do not assume a handler
+
+# is safe because an earlier note called it safe (that claim was itself wrong).
+
 # ⛔ RE-SET 2026-09-07 (164.2.1 plan 01 execution). TWO MORE handlers clobbered this block
 
 # from local disk, both writing 21/7/103/97/33: `state.update-progress` (named above, run
@@ -127,10 +149,10 @@ state_head: 8612c4750dfefa89dfe13c529b71aeda43981b26
 
 progress:
   total_phases: 21
-  completed_phases: 11
-  total_plans: 117
-  completed_plans: 114
-  percent: 52
+  completed_phases: 12
+  total_plans: 119
+  completed_plans: 116
+  percent: 57
 ---
 
 # Project State — Quantalyze
