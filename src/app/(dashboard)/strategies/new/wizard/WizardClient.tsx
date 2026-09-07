@@ -440,11 +440,88 @@ export function WizardClient({
     (async () => {
       const loaded = await loadWizardState();
       if (cancelled) return;
+      // Phase 164.2.1 / SESSIONID-FENCE — the key THIS mount will submit
+      // under, and `null` when it will submit under none.
+      //
+      // Hoisted into a local rather than passed inline because the decline
+      // warning below has to read the SAME value; recomputing the expression
+      // there would let the two drift apart, and a triage label computed from a
+      // different key than the gate saw is worse than no label.
+      //
+      // API branch: deliberately the SAME expression that seeds the
+      // `apiKeyId` state above, so the gate compares the stored token against
+      // exactly the key the submission carries; reading the state variable
+      // here instead would make the comparison depend on render timing.
+      //
+      // ⛔ CSV branch: a LITERAL `null`, and this ternary is what makes the
+      // "no key on the CSV branch" sentences in `localStorage.ts` true by
+      // CONSTRUCTION rather than merely usually-true. `ContributionWizard
+      // Overlay` passes `preselectKey` regardless of source and renders the
+      // "CSV upload" pill under a live preselect, so "Finish setup → on key
+      // B" followed by "CSV upload" arrives here with a preselect in hand.
+      // A CSV submission carries no key, so a key comparison on this branch
+      // can never decline anything MEANINGFUL — the only thing it can do is
+      // strip a live CSV session id together with the `failedCsvSubmitSig`
+      // burn riding on it (the gate emits the pair or neither), which is
+      // precisely the RT-3 hazard of a fresh id with the burn gone. Claiming
+      // no key is therefore the honest claim, not a loophole. Pinned by
+      // `ContributionWizardOverlay.csv-preselect-burn.test.tsx`.
+      const incomingApiKeyId =
+        source === "csv"
+          ? null
+          : (initialDraft?.api_key_id ?? preselectKey?.id ?? null);
       const overrides = deriveWizardResumeOverrides(
         loaded,
         source,
         initialDraft?.id ?? null,
+        incomingApiKeyId,
       );
+      // Phase 164.2.1 / SESSIONID-FENCE — THE DECLINE MUST NOT BE SILENT.
+      //
+      // `deriveWizardResumeOverrides` refuses by OMISSION — it just does not
+      // emit `wizardSessionId` — so the branch below cannot tell a decline from
+      // "nothing was stored", an unverifiable payload, or a fresh tab nonce.
+      // Every other refusal in the storage module says so on the console
+      // (`localStorage_payload_refused: …`); this one decides which idempotency
+      // token the submission carries, and a key-resolution regression that
+      // declined EVERY API resume would be indistinguishable in production from
+      // the fence working. A payload that LOADED and HELD a session id which
+      // did not come back is therefore reported here.
+      //
+      // ⛔ NEVER the key ids or the session id themselves — a coarse reason
+      // only, and no user data.
+      //
+      // ⚠️ The reason is a TRIAGE LABEL recomputed at this call site, NOT the
+      // gate. It is deliberately written to degrade rather than lie: anything it
+      // cannot account for — including a condition the derivation grows later —
+      // falls through to "other" instead of being mislabelled as a key refusal.
+      if (loaded?.wizardSessionId && !overrides.wizardSessionId) {
+        let reason = "other";
+        if ((loaded.source ?? "api") !== source) {
+          reason = "source_mismatch";
+        } else if (incomingApiKeyId !== null) {
+          if (typeof loaded.apiKeyId !== "string") {
+            // Payloads written before this phase carry no key at all — the
+            // accepted one-time cost on the record (CONTEXT.md D-02). Named
+            // apart from a real mismatch so the transient post-ship population
+            // is not read as a live defect.
+            reason = "stored_key_absent";
+          } else if (loaded.apiKeyId !== incomingApiKeyId) {
+            reason = "key_mismatch";
+          }
+        }
+        // COUNTABLE, not merely diagnosable. A console warning is a Sentry
+        // breadcrumb; it cannot answer "how often does this fence fire in
+        // production", which is the only question that distinguishes working
+        // correctly from an over-declining regression. `step` carries the
+        // reason label — never a key id, never a session id.
+        trackForQuantsEventClient("wizard_session_id_not_restored", {
+          step: reason,
+        });
+        console.warn(
+          `[wizard] session_id_not_restored: ${reason} — submitting under a fresh token`,
+        );
+      }
       if (overrides.wizardSessionId) {
         setWizardSessionId(overrides.wizardSessionId);
       }
@@ -471,8 +548,17 @@ export function WizardClient({
     return () => {
       cancelled = true;
     };
-    // Run once on mount. `source` and `initialDraft` come from props/URL
-    // and are stable for the lifetime of this component instance.
+    // Run once on mount. `source`, `initialDraft` AND `preselectKey` come from
+    // props/URL and are stable for the lifetime of this component instance —
+    // `preselectKey` is named explicitly because 164.2.1 made this effect
+    // capture it, and a disable justified by a list that omits what it captures
+    // licenses nothing. Its stability is structural, not incidental: the
+    // contribution overlay's remount key includes `activePreselect?.id`
+    // (ContributionWizardOverlay.tsx), so choosing a different key tears this
+    // instance down rather than changing the prop in place, and the manager
+    // route never passes one at all. ⚠️ A future caller that mutates
+    // `preselectKey` WITHOUT a remount would silently gate the session-id
+    // restore on a key this effect read once and never re-read.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -595,10 +681,17 @@ export function WizardClient({
         step: "csv_upload",
         source: "csv",
         strategyName,
+        // 164.2.1 — the LITERAL null, never the `apiKeyId` state. See the
+        // ternary at the `deriveWizardResumeOverrides` call site above: this is
+        // a CSV save, the CSV branch carries no key, and stamping a preselected
+        // key here is what would let the gate strip a CSV burn.
+        apiKeyId: null,
       });
       setSavedAt(Date.now());
     }, NAME_AUTOSAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
+    // 164.2.1 — the payload above captures NOTHING key-related (it stamps a
+    // literal), so nothing key-related belongs in these deps.
   }, [source, step, hydrated, strategyName, wizardSessionId]);
 
   // RANK-08 (159-07) — the CLASSIFICATION half of the CSV submission identity.
@@ -667,6 +760,8 @@ export function WizardClient({
       source: "csv",
       strategyName,
       failedCsvSubmitSig: null,
+      // 164.2.1 — literal null: CSV save, no key on this branch.
+      apiKeyId: null,
     });
     setWizardSessionId(nextWizardSessionId);
     // The RETIRED session id (the one the failed submit spent) — so an operator
@@ -721,6 +816,8 @@ export function WizardClient({
       source: "csv",
       strategyName,
       failedCsvSubmitSig: fingerprint,
+      // 164.2.1 — literal null: CSV save, no key on this branch.
+      apiKeyId: null,
     });
     // ⚠️ RANK-08 — same rule as the effect above: the classification values
     // MUST stay listed here. This callback CAPTURES the values it burns; a
@@ -776,6 +873,8 @@ export function WizardClient({
       source: "csv",
       strategyName,
       failedCsvSubmitSig: null,
+      // 164.2.1 — literal null: CSV save, no key on this branch.
+      apiKeyId: null,
     });
     setWizardSessionId(nextWizardSessionId);
     // Same event as the content-keyed re-mint: the FACT is identical (a session
@@ -789,8 +888,21 @@ export function WizardClient({
     });
   }, [step, strategyName, wizardSessionId]);
 
+  /**
+   * ⚠️ Phase 164.2.1 / SESSIONID-FENCE — `keyId` IS A PARAMETER, NOT A CLOSURE
+   * READ, and that is load-bearing rather than a style choice.
+   *
+   * `handleConnectSuccess` calls `setApiKeyId(result.apiKeyId)` and this
+   * function IN THE SAME TICK. A `useCallback` recreates on the NEXT render, so
+   * an `apiKeyId` read from this closure would be the PRE-connect key — `null`
+   * on the credentials arm, and on the reuse arm the preselected id, which
+   * happens to equal `result.apiKeyId` and therefore hides the defect in
+   * exactly the preselect test one would write for it. This is the ONE
+   * API-branch writer, so the wrong key here is the wrong key in the only
+   * payload the fence reads on the API branch.
+   */
   const persistPointer = useCallback(
-    (nextStep: WizardStepKey, id: string | null) => {
+    (nextStep: WizardStepKey, id: string | null, keyId: string | null) => {
       if (!id) return;
       // P473: saveWizardState is async (HMAC sign). Fire-and-forget —
       // the optimistic setSavedAt below + the server-side draft as the
@@ -799,6 +911,21 @@ export function WizardClient({
         strategyId: id,
         wizardSessionId,
         step: nextStep,
+        // 164.2.1 / IN-02 — `|| null`, and the empty string it collapses is a
+        // REAL value arriving here, not a defensive flourish.
+        // `handleConnectSuccess` is also `MultiKeyConnectStep`'s `onSuccess`,
+        // and that step's success shape coalesces a null member key to `""`
+        // (MultiKeyConnectStep.tsx, `apiKeyId: first.apiKeyId ?? ""`). The
+        // field is documented as an `api_keys.id` or `null`; `""` is neither,
+        // and the load-time validator would accept it (a string of length 0).
+        // Inert today — a composite draft has `api_key_id = null` and the
+        // overlay never offers one under a preselect, so the incoming key is
+        // always `null` there and `""` is never compared — but a stored value
+        // outside its own documented domain is one call-site change away from
+        // being compared. Normalised HERE because this is the one API-branch
+        // writer, which is the smallest place that makes code and docblock
+        // agree.
+        apiKeyId: keyId || null,
       });
       setSavedAt(Date.now());
       setToastKey((k) => k + 1);
@@ -865,9 +992,9 @@ export function WizardClient({
       // since abandoned.
       if (key !== "metadata") setMetadataServerFieldError(null);
       setStep(key);
-      persistPointer(key, strategyId);
+      persistPointer(key, strategyId, apiKeyId);
     },
-    [persistPointer, strategyId],
+    [persistPointer, strategyId, apiKeyId],
   );
 
   /**
@@ -892,10 +1019,10 @@ export function WizardClient({
       if (!metadataFieldIsRendered(field, { showCapitalQuestion })) return false;
       setMetadataServerFieldError({ field, code });
       setStep("metadata");
-      persistPointer("metadata", strategyId);
+      persistPointer("metadata", strategyId, apiKeyId);
       return true;
     },
-    [persistPointer, strategyId, showCapitalQuestion],
+    [persistPointer, strategyId, showCapitalQuestion, apiKeyId],
   );
 
   const handleConnectSuccess = useCallback(
@@ -919,7 +1046,9 @@ export function WizardClient({
       // submit.
       setDedupedExisting(result.deduped === true);
       setStep("sync_preview");
-      persistPointer("sync_preview", result.strategyId);
+      // 164.2.1 — `result.apiKeyId`, never the `apiKeyId` state: setApiKeyId
+      // above has not been applied yet in this tick.
+      persistPointer("sync_preview", result.strategyId, result.apiKeyId);
       trackForQuantsEventClient("wizard_step_complete_1", {
         wizard_session_id: wizardSessionId,
         strategy_id: result.strategyId,
@@ -933,14 +1062,14 @@ export function WizardClient({
     (snapshot: SyncPreviewSnapshot) => {
       setSyncSnapshot(snapshot);
       setStep("metadata");
-      persistPointer("metadata", strategyId);
+      persistPointer("metadata", strategyId, apiKeyId);
       trackForQuantsEventClient("wizard_step_complete_2", {
         wizard_session_id: wizardSessionId,
         strategy_id: strategyId ?? undefined,
         trade_count: snapshot.tradeCount,
       });
     },
-    [strategyId, wizardSessionId, persistPointer],
+    [strategyId, wizardSessionId, persistPointer, apiKeyId],
   );
 
   const handleMetadataComplete = useCallback(
@@ -955,13 +1084,13 @@ export function WizardClient({
       // CTA advances to submit, where the unchanged finalize POST ("Submit for
       // review") fires.
       setStep("review");
-      persistPointer("review", strategyId);
+      persistPointer("review", strategyId, apiKeyId);
       trackForQuantsEventClient("wizard_step_complete_3", {
         wizard_session_id: wizardSessionId,
         strategy_id: strategyId ?? undefined,
       });
     },
-    [strategyId, wizardSessionId, persistPointer],
+    [strategyId, wizardSessionId, persistPointer, apiKeyId],
   );
 
   const handleSubmitSuccess = useCallback(
@@ -1075,11 +1204,31 @@ export function WizardClient({
     // draft (Phase 154 — sending a CSV draft to sync_preview would land it on
     // an API-branch step with no key behind it).
     setStep(draftResumeStep);
-    persistPointer(draftResumeStep, initialDraft.id);
+    // 164.2.1 / SESSIONID-FENCE — the DRAFT'S OWN KEY, OR NOTHING.
+    //
+    // This resume is about THAT draft, so the only key claim its payload may
+    // carry is the one the draft itself persisted. `api_key_id === null` is a
+    // draft with no key (a composite, or a CSV-sourced one), and `null` is the
+    // true value for it — the same reason every `saveWizardState` call on the
+    // CSV branch below stamps a literal `null`, and the same reason
+    // `persistPointer` normalises `""` away.
+    //
+    // ⛔ This used to read `initialDraft.api_key_id ?? apiKeyId`, justified by a
+    // first-paint divergence between the draft and the `apiKeyId` state. The
+    // fallback FABRICATED a claim: on a keyless draft it stamped whatever the
+    // state held — on the contribution overlay, the PRESELECTED key — so the
+    // stored payload asserted the draft had been built over a key it had never
+    // been built over, and the fence downstream compares against exactly what
+    // is written here. There is also no divergence to defend against: this
+    // reads the `initialDraft` PROP directly, not a state derived from it.
+    persistPointer(draftResumeStep, initialDraft.id, initialDraft.api_key_id);
     trackForQuantsEventClient("wizard_resume", {
       wizard_session_id: wizardSessionId,
       strategy_id: initialDraft.id,
     });
+    // `apiKeyId` is deliberately NOT a dependency: this callback no longer reads
+    // it (see above), and listing an unread value would re-create the handler on
+    // every key change for no reason.
   }, [initialDraft, draftResumeStep, persistPointer, wizardSessionId]);
 
   /**
@@ -1290,7 +1439,7 @@ export function WizardClient({
                   // behavior that no longer exists is a false sentence in
                   // exactly the class this phase closes.
                   setStep("connect_key");
-                  persistPointer("connect_key", strategyId);
+                  persistPointer("connect_key", strategyId, apiKeyId);
                 }}
                 onTryAnotherKey={() => {
                   // 161-04 / WIZERR-02 — A REMEDY MAY NOT DESTROY ANYTHING.
@@ -1338,7 +1487,7 @@ export function WizardClient({
                   // resume pointer still naming `sync_preview` would be its own
                   // small version of the divergence above.
                   setStep("connect_key");
-                  persistPointer("connect_key", strategyId);
+                  persistPointer("connect_key", strategyId, apiKeyId);
                   trackForQuantsEventClient("wizard_try_different_key", {
                     wizard_session_id: wizardSessionId,
                   });
@@ -1376,7 +1525,7 @@ export function WizardClient({
                 onBack={() => {
                   setMetadataServerFieldError(null);
                   setStep("sync_preview");
-                  persistPointer("sync_preview", strategyId);
+                  persistPointer("sync_preview", strategyId, apiKeyId);
                 }}
               />
             )}
@@ -1393,15 +1542,15 @@ export function WizardClient({
                 metadata={metadataDraft}
                 onContinue={() => {
                   setStep("submit");
-                  persistPointer("submit", strategyId);
+                  persistPointer("submit", strategyId, apiKeyId);
                 }}
                 onBack={() => {
                   setStep("metadata");
-                  persistPointer("metadata", strategyId);
+                  persistPointer("metadata", strategyId, apiKeyId);
                 }}
                 onEdit={(owningStep) => {
                   setStep(owningStep);
-                  persistPointer(owningStep, strategyId);
+                  persistPointer(owningStep, strategyId, apiKeyId);
                 }}
               />
             )}
@@ -1427,7 +1576,7 @@ export function WizardClient({
                   // Phase 53 / APPLY-02 — Back from submit returns to the
                   // review recap (the step that now precedes submit).
                   setStep("review");
-                  persistPointer("review", strategyId);
+                  persistPointer("review", strategyId, apiKeyId);
                 }}
               />
             )}
@@ -1441,9 +1590,30 @@ export function WizardClient({
           // defeats the resume guard above (which treats undefined as 'api'
           // for back-compat). Missing `strategyName` makes back-navigation
           // forget the user's typed name. Reviewer should diff the entire
-          // CSV branch in one read and confirm: (a) all 4 saveWizardState
-          // calls have BOTH discriminator fields, (b) strategyName flows
-          // through the 3 step props, (c) the wrapping conditional balanced.
+          // CSV branch in one read and confirm: (a) EVERY `saveWizardState`
+          // call in this branch carries BOTH discriminator fields, (b) every
+          // step component that renders or edits the name is passed the
+          // current `strategyName` (`CsvUploadStep` takes it as
+          // `initialStrategyName`), (c) the wrapping conditional balanced.
+          //
+          // ⚠️ NO COUNTS IN THIS CHECKLIST, DELIBERATELY. It used to read
+          // "all 4 saveWizardState calls" and "the 3 step props". The branch has
+          // grown past both since, so a reviewer following the instruction
+          // literally stopped short of the calls that were added after the
+          // integer was written — and the 164.2.1 sentence below silently
+          // inherited the stale "4" by binding to it. A count in a checklist
+          // over code that grows goes wrong invisibly; a quantifier cannot.
+          //
+          // ⛔ 164.2.1 / SESSIONID-FENCE — and EVERY `saveWizardState` call in
+          // this branch stamps the LITERAL `apiKeyId: null`, never the
+          // `apiKeyId` state. The state can hold a preselected key even here
+          // (the overlay passes `preselectKey` regardless of source and renders
+          // its "CSV upload" pill under a live preselect), and a CSV payload
+          // carrying a key is what lets
+          // `deriveWizardResumeOverrides` decline a CSV session id — taking the
+          // `failedCsvSubmitSig` burn with it, since the gate emits the pair or
+          // neither. A CSV submission carries no key, so `null` is the true
+          // value, not a placeholder.
           <>
             {step === "csv_upload" && (
               <CsvUploadStep
@@ -1471,6 +1641,7 @@ export function WizardClient({
                     step: "csv_preview",
                     source: "csv",
                     strategyName: payload.strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1493,6 +1664,7 @@ export function WizardClient({
                     step: "csv_upload",
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1506,6 +1678,7 @@ export function WizardClient({
                     step: "csv_metadata",
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1537,6 +1710,7 @@ export function WizardClient({
                     step: "csv_review",
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1549,6 +1723,7 @@ export function WizardClient({
                     step: "csv_preview",
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1580,6 +1755,7 @@ export function WizardClient({
                     step: "csv_submit",
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1592,6 +1768,7 @@ export function WizardClient({
                     step: "csv_metadata",
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1604,6 +1781,7 @@ export function WizardClient({
                     step: owningStep,
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1641,6 +1819,7 @@ export function WizardClient({
                     step: "csv_review",
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);

@@ -34,6 +34,7 @@
  * countable.
  */
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { installWizardStorageDoubles } from "@/test/helpers/wizard-storage-doubles";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // --- Navigation ---
@@ -184,49 +185,17 @@ const SERIES_A = [{ date: "2024-01-01", daily_return: 0.01 }];
 const SERIES_B = [{ date: "2024-01-01", daily_return: 0.09 }];
 
 /**
- * Explicit storage doubles. Node 25 shadows jsdom's `window.localStorage` with
- * its own experimental implementation, which has no `clear()`; wiring these
- * also makes the reload boundary explicit — `localStore` and `sessionStore`
- * are the ONLY state that crosses the unmount, which is precisely what a
- * browser reload preserves.
+ * Explicit storage doubles — see `installWizardStorageDoubles` for the Node-25
+ * rationale (now stated once instead of paraphrased in three specs). Wiring
+ * these also makes the reload boundary explicit here: the two backing stores
+ * are the ONLY state that crosses the unmount, which is precisely what a browser
+ * reload preserves.
  */
 let localStore: Record<string, string>;
-let sessionStore: Record<string, string>;
-
-function installStorage() {
-  const mk = (get: () => Record<string, string>, set: (v: Record<string, string>) => void) =>
-    ({
-      getItem: (k: string) => (k in get() ? get()[k] : null),
-      setItem: (k: string, v: string) => {
-        get()[k] = v;
-      },
-      removeItem: (k: string) => {
-        delete get()[k];
-      },
-      clear: () => set({}),
-      key: () => null,
-      length: 0,
-    }) as unknown as Storage;
-  Object.defineProperty(window, "localStorage", {
-    value: mk(
-      () => localStore,
-      (v) => (localStore = v),
-    ),
-    configurable: true,
-  });
-  Object.defineProperty(window, "sessionStorage", {
-    value: mk(
-      () => sessionStore,
-      (v) => (sessionStore = v),
-    ),
-    configurable: true,
-  });
-}
 
 beforeEach(async () => {
-  localStore = {};
-  sessionStore = {};
-  installStorage();
+  // Fresh doubles per test — installing IS the reset.
+  ({ localStore } = installWizardStorageDoubles());
   newWizardSessionIdMock.mockClear();
   uploadPayload = {
     fmt: "daily_returns",

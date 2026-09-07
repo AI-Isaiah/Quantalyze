@@ -370,3 +370,46 @@ dirs still reach `main` when `/gsd-complete-milestone` archives them into
 archival is the intended destination; excluding artifacts from a PR is presentation, not
 privacy. Upstream's `pr_strict` mode would change that, and it is not in the installed
 version (local gsd-core `1.11.0` — `grep pr_strict` returns nothing).
+
+### ⛔ Reviewers run BEFORE the filter — and `/gsd-update` will silently undo this
+
+**Rule: the specialist/automated review pass runs on the WORKING branch, before
+`filter_planning_artifacts` builds the `-pr` branch.** Only the human reviewer-request
+prompt may run after the PR exists, because only that one needs a PR number.
+
+⚠️ MEASURED 2026-09-07 (Phase 164.2.1, PR #752), all three of these happened in one run:
+
+1. **Fixes landed on the wrong branch.** `filter_planning_artifacts` ends by checking out the
+   `-pr` branch and only returns via its own final `git checkout "$CURRENT_BRANCH"`. Miss that
+   line and every subsequent agent edits the derived `-pr` head, while the working branch —
+   the one carrying the full history — receives nothing.
+2. **A fixer could not find the file it was told to fix.** The filter strips
+   `.planning/phases/` from the `-pr` branch by design, so an agent asked to correct
+   `SECURITY.md` / `VERIFICATION.md` found no such path. It recovered only by building its own
+   worktree; the naive outcome is a fixer reporting "file not found" or, worse, recreating the
+   file empty.
+3. **The PR body described a tree that no longer existed.** `generate_pr_body` runs before the
+   fixes, so the PR narrated the pre-fix state and the fixes needed a force-push or trailing
+   commits on an open PR.
+
+**The global workflow was rewired on 2026-09-07** — `~/.claude/gsd-core/workflows/ship.md` now
+has a `specialist_review` step positioned before `filter_planning_artifacts`, and the
+success criteria assert the ordering plus a post-filter `git branch --show-current` check.
+
+⛔ **That edit lives in the GLOBAL install and `/gsd-update` OVERWRITES it.** This has already
+cost the same file its `optional_review` specialist edit once before. After every
+`/gsd-update`, re-apply it: move the `**Specialist reviewers…**` and
+`**External code review command…**` blocks out of `optional_review` into a new
+`specialist_review` step placed immediately before `<step name="filter_planning_artifacts">`,
+leaving only `**Manual review options:**` behind. A pre-rewire backup is kept at
+`~/.claude/gsd-core/workflows/ship.md.bak-preview-reorder` for diffing.
+
+**Cheap check that the ordering survived:**
+
+```bash
+grep -n '^<step name=' ~/.claude/gsd-core/workflows/ship.md \
+  | grep -E 'specialist_review|filter_planning_artifacts'
+```
+
+`specialist_review` MUST print a lower line number than `filter_planning_artifacts`. If it is
+missing entirely, `/gsd-update` has reverted the rewire.
