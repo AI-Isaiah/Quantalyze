@@ -50,7 +50,7 @@ inserted before 20260825130000, PLUS 20260907130000 appended last.
 # 164.7-03 NEUTER LOG — the MIGRATION's guard, on the pg-lane
 
 migration: supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql
-byte backup: /private/tmp/claude-501/-Users-helios-mammut-claude-projects-quantalyze/11a6e3f6-eb0f-46ac-ba88-a3d6767e5dd8/scratchpad/p03-tracer/20260907130000.byte-backup.sql
+byte backup: /private/tmp/claude-501/-Users-<user>-claude-projects-quantalyze/11a6e3f6-eb0f-46ac-ba88-a3d6767e5dd8/scratchpad/p03-tracer/20260907130000.byte-backup.sql
 pristine sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
 pristine 'IS DISTINCT FROM TRUE' count: 3
 ⛔ The restore-from-HEAD checkout idiom is BANNED in this harness and
@@ -83,7 +83,7 @@ BEFORE sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
       behavioural oracle sits underneath the text gates.
       lane exit: 3   (expected non-zero)
       the apply itself: GREEN — its own NOTICE printed
-      RED: psql:/private/tmp/claude-501/-Users-helios-mammut-claude-projects-quantalyze/11a6e3f6-eb0f-46ac-ba88-a3d6767e5dd8/scratchpad/p03-tracer/gate.sql:177: ERROR:  P0001: TEST FAILED (T-a): the fan-out returned 1 with NO system_flags row for the key, expected 0. A missing row is DORMANT here, deliberately — the inverse of send-intro/route.ts, whose missing-row branch is fail-OPEN because its switch defaults ON
+      RED: psql:/private/tmp/claude-501/-Users-<user>-claude-projects-quantalyze/11a6e3f6-eb0f-46ac-ba88-a3d6767e5dd8/scratchpad/p03-tracer/gate.sql:177: ERROR:  P0001: TEST FAILED (T-a): the fan-out returned 1 with NO system_flags row for the key, expected 0. A missing row is DORMANT here, deliberately — the inverse of send-intro/route.ts, whose missing-row branch is fail-OPEN because its switch defaults ON
 AFTER sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
 
 ## N2 — the handler assigns TRUE instead of NULL, FANOUT body only
@@ -92,7 +92,7 @@ arm that sees it: a handler that assigns TRUE is a fail-OPEN switch
 wearing a fail-closed shape.
 BEFORE sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
 lane exit: 3   (expected non-zero)
-RED: psql:/private/tmp/claude-501/-Users-helios-mammut-claude-projects-quantalyze/11a6e3f6-eb0f-46ac-ba88-a3d6767e5dd8/scratchpad/p03-tracer/gate.sql:177: ERROR:  P0001: TEST FAILED (T-c): the fan-out returned 1 with its flag table RENAMED AWAY, expected 0. The handler must leave the value NULL and the comparison must treat NULL as dormant — a NULL-unsafe comparison falls THROUGH here and opens the flag on exactly the failure path
+RED: psql:/private/tmp/claude-501/-Users-<user>-claude-projects-quantalyze/11a6e3f6-eb0f-46ac-ba88-a3d6767e5dd8/scratchpad/p03-tracer/gate.sql:177: ERROR:  P0001: TEST FAILED (T-c): the fan-out returned 1 with its flag table RENAMED AWAY, expected 0. The handler must leave the value NULL and the comparison must treat NULL as dormant — a NULL-unsafe comparison falls THROUGH here and opens the flag on exactly the failure path
 AFTER sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
 
 ## N3 — the guard MOVED BELOW the advisory-lock block, FANOUT body only
@@ -120,7 +120,7 @@ BEFORE sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
       the tracer's as-applied arm is the only thing left:
       lane exit: 3   (expected non-zero)
       the apply itself: GREEN — its own NOTICE printed
-      RED: psql:/private/tmp/claude-501/-Users-helios-mammut-claude-projects-quantalyze/11a6e3f6-eb0f-46ac-ba88-a3d6767e5dd8/scratchpad/p03-tracer/gate.sql:177: ERROR:  P0001: TEST FAILED (T-b): the migration left the activation flag as true, expected FALSE. A migration that applies with this switch OPEN starts a cross-tenant fan-out on the next tick with no founder action — "merging changes ZERO production behaviour" would be false on the very apply that claims it
+      RED: psql:/private/tmp/claude-501/-Users-<user>-claude-projects-quantalyze/11a6e3f6-eb0f-46ac-ba88-a3d6767e5dd8/scratchpad/p03-tracer/gate.sql:177: ERROR:  P0001: TEST FAILED (T-b): the migration left the activation flag as true, expected FALSE. A migration that applies with this switch OPEN starts a cross-tenant fan-out on the next tick with no founder action — "merging changes ZERO production behaviour" would be false on the very apply that claims it
 AFTER sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
 
 FINAL lane on the restored file: exit 0
