@@ -155,11 +155,25 @@ export interface WizardLocalState {
   /**
    * Phase 164.2.1 / SESSIONID-FENCE — the `api_keys.id` this draft was being
    * built over when the payload was written, or `null` on the CSV branch (that
-   * branch has no key at all). Written EXPLICITLY from `WizardClient`'s
-   * `apiKeyId` state at every save site — it is NOT sticky like
-   * `failedCsvSubmitSig` above, because `setApiKeyId(result.apiKeyId)` moves the
-   * key mid-wizard and a carried-forward value would hold the OLD key while the
-   * session id had already moved on.
+   * branch submits no key at all).
+   *
+   * Written EXPLICITLY at every save site, and the two branches write it
+   * DIFFERENTLY on purpose:
+   *   · API branch — the ONE writer is `persistPointer`, which takes the key as
+   *     an ARGUMENT rather than reading it from a closure, so the value is the
+   *     key the connect RESOLVED and not the pre-connect one.
+   *   · CSV branch — all thirteen sites stamp the LITERAL `null`. NOT the
+   *     wizard's `apiKeyId` state, which can hold a preselected key even there
+   *     (the contribution overlay passes `preselectKey` regardless of source),
+   *     and a CSV payload carrying a key would let the gate below decline a CSV
+   *     session id — taking its `failedCsvSubmitSig` burn with it, since the two
+   *     are emitted as a pair. A CSV submission carries no key, so `null` is the
+   *     true value.
+   *
+   * It is NOT sticky like `failedCsvSubmitSig` above, because
+   * `setApiKeyId(result.apiKeyId)` moves the key mid-wizard and a carried-
+   * forward value would hold the OLD key while the session id had already moved
+   * on.
    *
    * ⚠️ WHAT THIS FIELD IS NOT: it is not a guarantee, and it is not an
    * authorization fact. The guarantee against a duplicate submission remains the
@@ -540,10 +554,14 @@ export interface WizardResumeOverrides {
  * the key the caller is about to submit under?
  *
  * The asymmetry is deliberate and is the whole contract:
- *   incoming `null`  ⇒ TRUE. The caller makes NO key claim — the CSV branch (no
- *     key exists), the manager route mounted with neither draft nor preselect,
- *     and every legacy three-argument caller. Nothing is being compared, so
- *     nothing may be declined: this is what leaves pre-164.2.1 behaviour intact.
+ *   incoming `null`  ⇒ TRUE. The caller makes NO key claim — the CSV branch
+ *     (which submits no key, and whose call site passes a LITERAL `null` for
+ *     that reason rather than whatever the wizard's key state happens to hold),
+ *     the manager route mounted with neither draft nor preselect, and every
+ *     legacy three-argument caller. Nothing is being compared, so nothing may be
+ *     declined: this is what leaves pre-164.2.1 behaviour intact — and on the
+ *     CSV branch it is also what keeps a live burn from being stripped by a
+ *     comparison that could never mean anything there.
  *   incoming present ⇒ the stored key must be a string EQUAL to it. An absent or
  *     null stored key therefore falls to FALSE — see CONTEXT.md D-02: absent
  *     means we cannot prove the same key, and this phase exists because an

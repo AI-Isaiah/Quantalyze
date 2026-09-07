@@ -445,11 +445,29 @@ export function WizardClient({
         source,
         initialDraft?.id ?? null,
         // Phase 164.2.1 / SESSIONID-FENCE — the key THIS mount will submit
-        // under. Deliberately the SAME expression that seeds the `apiKeyId`
-        // state above, so the gate compares the stored token against exactly
-        // the key the submission carries; reading the state variable here
-        // instead would make the comparison depend on render timing.
-        initialDraft?.api_key_id ?? preselectKey?.id ?? null,
+        // under, and `null` when it will submit under none.
+        //
+        // API branch: deliberately the SAME expression that seeds the
+        // `apiKeyId` state above, so the gate compares the stored token against
+        // exactly the key the submission carries; reading the state variable
+        // here instead would make the comparison depend on render timing.
+        //
+        // ⛔ CSV branch: a LITERAL `null`, and this ternary is what makes the
+        // "no key on the CSV branch" sentences in `localStorage.ts` true by
+        // CONSTRUCTION rather than merely usually-true. `ContributionWizard
+        // Overlay` passes `preselectKey` regardless of source and renders the
+        // "CSV upload" pill under a live preselect, so "Finish setup → on key
+        // B" followed by "CSV upload" arrives here with a preselect in hand.
+        // A CSV submission carries no key, so a key comparison on this branch
+        // can never decline anything MEANINGFUL — the only thing it can do is
+        // strip a live CSV session id together with the `failedCsvSubmitSig`
+        // burn riding on it (the gate emits the pair or neither), which is
+        // precisely the RT-3 hazard of a fresh id with the burn gone. Claiming
+        // no key is therefore the honest claim, not a loophole. Pinned by
+        // `ContributionWizardOverlay.csv-preselect-burn.test.tsx`.
+        source === "csv"
+          ? null
+          : (initialDraft?.api_key_id ?? preselectKey?.id ?? null),
       );
       if (overrides.wizardSessionId) {
         setWizardSessionId(overrides.wizardSessionId);
@@ -601,14 +619,18 @@ export function WizardClient({
         step: "csv_upload",
         source: "csv",
         strategyName,
-        apiKeyId,
+        // 164.2.1 — the LITERAL null, never the `apiKeyId` state. See the
+        // ternary at the `deriveWizardResumeOverrides` call site above: this is
+        // a CSV save, the CSV branch carries no key, and stamping a preselected
+        // key here is what would let the gate strip a CSV burn.
+        apiKeyId: null,
       });
       setSavedAt(Date.now());
     }, NAME_AUTOSAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-    // 164.2.1 — `apiKeyId` is captured by the payload above (constant `null` on
-    // this branch), so it belongs in the deps by the RANK-08 rule below.
-  }, [source, step, hydrated, strategyName, wizardSessionId, apiKeyId]);
+    // 164.2.1 — the payload above captures NOTHING key-related (it stamps a
+    // literal), so nothing key-related belongs in these deps.
+  }, [source, step, hydrated, strategyName, wizardSessionId]);
 
   // RANK-08 (159-07) — the CLASSIFICATION half of the CSV submission identity.
   // Read off `csvMetadataDraft`: that is the draft `CsvSubmitStep` posts as
@@ -676,7 +698,8 @@ export function WizardClient({
       source: "csv",
       strategyName,
       failedCsvSubmitSig: null,
-      apiKeyId,
+      // 164.2.1 — literal null: CSV save, no key on this branch.
+      apiKeyId: null,
     });
     setWizardSessionId(nextWizardSessionId);
     // The RETIRED session id (the one the failed submit spent) — so an operator
@@ -703,7 +726,6 @@ export function WizardClient({
     csvAssetClass,
     wizardSessionId,
     step,
-    apiKeyId,
   ]);
 
   // CR-01 — record the content the FAILED submit was made with. The next
@@ -732,7 +754,8 @@ export function WizardClient({
       source: "csv",
       strategyName,
       failedCsvSubmitSig: fingerprint,
-      apiKeyId,
+      // 164.2.1 — literal null: CSV save, no key on this branch.
+      apiKeyId: null,
     });
     // ⚠️ RANK-08 — same rule as the effect above: the classification values
     // MUST stay listed here. This callback CAPTURES the values it burns; a
@@ -746,7 +769,6 @@ export function WizardClient({
     csvAssetClass,
     wizardSessionId,
     step,
-    apiKeyId,
   ]);
 
   /**
@@ -789,7 +811,8 @@ export function WizardClient({
       source: "csv",
       strategyName,
       failedCsvSubmitSig: null,
-      apiKeyId,
+      // 164.2.1 — literal null: CSV save, no key on this branch.
+      apiKeyId: null,
     });
     setWizardSessionId(nextWizardSessionId);
     // Same event as the content-keyed re-mint: the FACT is identical (a session
@@ -801,7 +824,7 @@ export function WizardClient({
       wizard_session_id: wizardSessionId,
       step: "csv_submit_start_new",
     });
-  }, [step, strategyName, wizardSessionId, apiKeyId]);
+  }, [step, strategyName, wizardSessionId]);
 
   /**
    * ⚠️ Phase 164.2.1 / SESSIONID-FENCE — `keyId` IS A PARAMETER, NOT A CLOSURE
@@ -1477,6 +1500,16 @@ export function WizardClient({
           // CSV branch in one read and confirm: (a) all 4 saveWizardState
           // calls have BOTH discriminator fields, (b) strategyName flows
           // through the 3 step props, (c) the wrapping conditional balanced.
+          //
+          // ⛔ 164.2.1 / SESSIONID-FENCE — and every one of them stamps the
+          // LITERAL `apiKeyId: null`, never the `apiKeyId` state. The state can
+          // hold a preselected key even here (the overlay passes `preselectKey`
+          // regardless of source and renders its "CSV upload" pill under a live
+          // preselect), and a CSV payload carrying a key is what lets
+          // `deriveWizardResumeOverrides` decline a CSV session id — taking the
+          // `failedCsvSubmitSig` burn with it, since the gate emits the pair or
+          // neither. A CSV submission carries no key, so `null` is the true
+          // value, not a placeholder.
           <>
             {step === "csv_upload" && (
               <CsvUploadStep
@@ -1504,7 +1537,7 @@ export function WizardClient({
                     step: "csv_preview",
                     source: "csv",
                     strategyName: payload.strategyName,
-                    apiKeyId,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1527,7 +1560,7 @@ export function WizardClient({
                     step: "csv_upload",
                     source: "csv",
                     strategyName,
-                    apiKeyId,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1541,7 +1574,7 @@ export function WizardClient({
                     step: "csv_metadata",
                     source: "csv",
                     strategyName,
-                    apiKeyId,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1573,7 +1606,7 @@ export function WizardClient({
                     step: "csv_review",
                     source: "csv",
                     strategyName,
-                    apiKeyId,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1586,7 +1619,7 @@ export function WizardClient({
                     step: "csv_preview",
                     source: "csv",
                     strategyName,
-                    apiKeyId,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1618,7 +1651,7 @@ export function WizardClient({
                     step: "csv_submit",
                     source: "csv",
                     strategyName,
-                    apiKeyId,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1631,7 +1664,7 @@ export function WizardClient({
                     step: "csv_metadata",
                     source: "csv",
                     strategyName,
-                    apiKeyId,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1644,7 +1677,7 @@ export function WizardClient({
                     step: owningStep,
                     source: "csv",
                     strategyName,
-                    apiKeyId,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1682,7 +1715,7 @@ export function WizardClient({
                     step: "csv_review",
                     source: "csv",
                     strategyName,
-                    apiKeyId,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
