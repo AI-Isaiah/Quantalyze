@@ -342,5 +342,33 @@ describe("[164.2.1 / SESSIONID-FENCE] a preselect for key B never inherits key A
         "decline.",
     ).toBe(A_SESSION);
   });
+
+  // ⭐ THE POPULATION THAT EXISTS TODAY. Every payload in a real browser right
+  // now was written before this phase and carries NO `apiKeyId` at all. CONTEXT
+  // D-02: absent means we cannot prove the same key, so it DECLINES — the
+  // deliberate inversion of the `?? "api"` back-compat idiom, taken because the
+  // defaulting population here is precisely the set of drafts carrying the dead
+  // end. Cost, accepted on the record: one fresh token. The draft, the resume
+  // banner and the user's work are untouched.
+  it("SC-1e: does NOT POST a LEGACY payload's session id (no apiKeyId) under a key-B preselect", async () => {
+    await seedAbandonedDraftOnKeyA();
+
+    render(
+      <ContributionWizardOverlay isOpen onClose={vi.fn()} preselectKey={KEY_B} />,
+    );
+    await findSummary();
+    await awaitHydration();
+
+    fireEvent.click(screen.getByTestId("wizard-preselect-continue"));
+
+    await waitFor(() => expect(createCalls).toHaveLength(1));
+    expect(
+      createCalls[0].wizard_session_id,
+      "A pre-164.2.1 payload cannot prove which key it was minted under, and " +
+        "assuming the common case is exactly the assumption that shipped this " +
+        "dead end once already.",
+    ).not.toBe(A_SESSION);
+    expect(typeof createCalls[0].wizard_session_id).toBe("string");
+  });
 });
 
