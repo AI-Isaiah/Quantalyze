@@ -1348,15 +1348,21 @@ Plans:
 
 **Depends on:** nothing outstanding. ⭐ **RE-ORDERED 2026-09-08 — PULLED FORWARD, runs NEXT.** ⚠️ **The SECTION was physically MOVED on 2026-09-08 to sit here, immediately after Phase 164.5 and ahead of 164.5.1.** For several hours it was pulled forward in this prose only while the section still sat after 164.6 — which meant `roadmap.analyze`, which walks FILE ORDER and returns the first incomplete phase, would have handed the next session 164.6. Prose is not the queue; position is. If a phase is re-ordered, MOVE IT. This SUPERSEDES the 2026-09-06 founder decision that queued it LAST; that decision is preserved verbatim in the next sentence because it was taken deliberately and its reasoning still reads correctly for the world before 2026-09-08. It said: *"Queued LAST in the 164.x series by founder decision 2026-09-06, in full knowledge of the counter-argument: Phase 164.7 and Phase 164.5 each write forward migrations and will therefore each hit the hand-apply path this phase automates. That cost is accepted, not overlooked."* What changed is that the accepted cost stopped being a per-PR inconvenience and became a PERMANENTLY RED `main` (see the scope block below), and that the phase's own design was found to break on the migration that caused it. The former dependency on Phase 164.6 was documented as "ordering only — no code dependency", so nothing technical resisted the re-order.
 
-**Plans:** 6 plans
+**Plans:** 1/6 plans executed
 
 Plans:
 
-- [ ] 164.8-01-PLAN.md — `scripts/restore-test-from-baseline.sh`: one-transaction drop+replay+survivors+ledger-seed with six pre-write refusals, proven by a 12-arm `--self-test` on a throwaway Postgres (no TEST/PROD byte touched)
-- [ ] 164.8-02-PLAN.md — `test-restore-from-baseline.yml`: dispatch-only, ref-guarded, `mode=preflight|restore` + `confirm` token, `environment: Test`, backup artifact BEFORE the script, whole-act mutex, CLI post-verify; line-exact wiring pins
-- [ ] 164.8-03-PLAN.md — WAVE 1 EXECUTION: preflight → `checkpoint:decision` → restore → SHA-bound readings → `vac08-ledger-baseline.txt` emptied BESIDE AN AIM with `ENTRY_COUNT` 31 → 0 in the same commit
-- [ ] 164.8-04-PLAN.md — WAVE 2 PIPELINE: `apply-test` (`environment: Test`, mutex, marker, `db push --include-all --db-url`) + `apply-test-verdict` (`if: always()`, skipped = fault) gate PROD `apply`; pins; SHA-bound dispatch proof
-- [ ] 164.8-05-PLAN.md — WAVE 3 CLOSURE: TODOS closures with run ids (incl. the `TEST-NOT-APPLICABLE` pragma recorded as DEAD SCOPE by measurement), first SHA-bound VAC-08 `0 absent` reading, CLAUDE.md + mutex runbook currency
+⚠️ **RE-SYNCED 2026-09-08 by the 164.8-01 executor.** The five bullets that stood here described
+the PRE-SPLIT plan set and had been stale since `fbb18c98` ("164.8 plan count 5 -> 6"), which moved
+the count but not the list: every entry from 02 down named the plan one slot BELOW it on disk, and
+06 was missing entirely. Each bullet below is now taken from that plan file's own `<objective>`.
+
+- [x] 164.8-01-PLAN.md — `scripts/restore-test-from-baseline.sh`: the one-transaction drop+replay+survivors+ledger-seed mechanism with SEVEN pre-write refusals, a search_path-independent census (B1) and a derived `pg_depend` closure (B2), plus the `--self-test` SKELETON carrying the two GREEN arms. Writes NO byte to TEST or PROD
+- [ ] 164.8-02-PLAN.md — finish the proof: every RED path observed on a throwaway Postgres, `EXPECTED_ARMS` introduced ONCE at its final value, the constants pinned in vitest, the header written
+- [ ] 164.8-03-PLAN.md — `test-restore-from-baseline.yml`: dispatch-only, ref-guarded, `mode=preflight|restore` + `confirm` token, `environment: Test`, backup artifact BEFORE the script, whole-act mutex, CLI post-verify; line-exact wiring pins
+- [ ] 164.8-04-PLAN.md — WAVE 1 EXECUTION, the one-way door: preflight → `checkpoint:decision` → restore → SHA-bound readings → `vac08-ledger-baseline.txt` emptied BESIDE AN AIM with `ENTRY_COUNT` 31 → 0 in the same commit
+- [ ] 164.8-05-PLAN.md — WAVE 2 PIPELINE: `apply-test` (`environment: Test`, mutex, marker, `db push --include-all --db-url`) + `apply-test-verdict` (`if: always()`, skipped = fault) gate PROD `apply`; pins; SHA-bound dispatch proof
+- [ ] 164.8-06-PLAN.md — WAVE 3 CLOSURE: record the verdicts and the SHA-bound readings, TODOS closures with run ids (incl. the `TEST-NOT-APPLICABLE` pragma recorded as DEAD SCOPE by measurement), first SHA-bound VAC-08 `0 absent` reading, CLAUDE.md + mutex runbook currency
 
 ### Phase 164.5.1: CRONREPOINT — the live `match_engine_cron` row is repointed at the mechanism the repo actually describes, and the migration-vs-runbook rule is settled first (INSERTED)
 
@@ -1605,7 +1611,7 @@ Plans:
 | 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 0/? | Queued 2nd (row added 2026-09-06; the phase itself was created 2026-09-05 and had no summary row) | - |
 | 164.5 BASELINE-SNAPSHOT (baseline.sql load-bearing, DRIFT-04 drop, DRIFT-05, VAC08-LEDGER, VAC-07) | 7/7 built, crit 3 apply pending founder | Queued 3rd (created 2026-09-05) | - |
 | 164.6 GATE-HYGIENE (OPS-08 residue, composite-stamp twin, PROC-02/03, H-0001) | 0/? | Queued 4th (created 2026-09-05) | - |
-| 164.8 TESTPREPROD (TEST becomes a real pre-prod: bring it current, apply on merge to TEST before PROD) | 0/? | Queued 5th — LAST in the 164.x series by founder decision 2026-09-06 (created 2026-09-06) | - |
+| 164.8 TESTPREPROD (TEST becomes a real pre-prod: bring it current, apply on merge to TEST before PROD) | 1/6 | Queued 5th — LAST in the 164.x series by founder decision 2026-09-06 (created 2026-09-06) | - |
 | 166. QSTATS-TRUTH | 0/? | Queued 6th (re-ordered ahead of 165, 2026-09-05) | - |
 | 165. DEPS dependabot campaign | 0/? | Queued LAST (after 166 — dependency churn lands last) | - |
 
