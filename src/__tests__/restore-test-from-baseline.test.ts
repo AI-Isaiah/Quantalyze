@@ -3,8 +3,10 @@
  *
  * ⛔ WHAT THIS FILE DEFENDS. `scripts/restore-test-from-baseline.sh` runs ONE
  * destructive transaction — `DROP SCHEMA public CASCADE` — against a database
- * OTHER PEOPLE'S CI shares. Its `--self-test` proves eighteen arms on a throwaway
- * cluster. None of that survives an edit that MOVES a line: the census reading the
+ * OTHER PEOPLE'S CI shares. Its `--self-test` proves every arm of that contract on a
+ * throwaway cluster — how many arms that is, is the script's own `EXPECTED_ARMS`
+ * constant, and `bash scripts/restore-test-from-baseline.sh --self-test` prints the
+ * tally; a numeral restated here would drift the first time an arm is added. None of that survives an edit that MOVES a line: the census reading the
  * catalogue before it sets `search_path`, the `pg_depend` closure sinking below the
  * DROP, the marker query drifting after the first write, psql's whole-file
  * transaction flag appearing and appending an unconditional COMMIT to what
@@ -67,6 +69,26 @@ function liveIndexOf(text: string, needle: string): number {
 function liveCount(text: string, needle: string): number {
   return liveLines(text).filter(({ line }) => line.includes(needle)).length;
 }
+
+/**
+ * The destructive statement every ordering pin below is measured against.
+ *
+ * ⛔ THE TRAILING SEMICOLON IS LOAD-BEARING — do not "simplify" it away. The phrase
+ * `DROP SCHEMA public CASCADE` also appears inside LIVE prose: the mutex refusal's
+ * `fail "…keeping other people's CI out during DROP SCHEMA public CASCADE. …"` sits
+ * near the TOP of the --run region, hundreds of lines above the statement itself.
+ * `liveIndexOf` returns the FIRST live line containing its needle, so the bare phrase
+ * binds to that sentence and every "X sits above the DROP" pin below silently starts
+ * measuring against the wrong line — MEASURED 2026-09-08, when exactly that made two
+ * intact ordering pins report a false RED.
+ *
+ * The semicolon disambiguates by MEASUREMENT, not by hope: the statement is written
+ * `DROP SCHEMA public CASCADE;` and every prose mention ends the phrase with a period.
+ * Measured on this tree the same day: the semicolon form matches exactly one line in
+ * the whole script (the statement), the bare form matches five. This is a strict
+ * TIGHTENING — the pin binds more precisely than before, never less.
+ */
+const DROP_STMT = "DROP SCHEMA public CASCADE;";
 
 // ── REGIONS ────────────────────────────────────────────────────────────────
 // Pins are asserted against the REGION, not the whole file: `pg_policies` appears
@@ -147,22 +169,22 @@ describe("restore-test-from-baseline.sh — the regions are real", () => {
 });
 
 describe("restore-test-from-baseline.sh — the arm ratchet", () => {
-  it("EXPECTED_ARMS=18 is a live line, exactly once, with its MEASURED date beside it", () => {
+  it("EXPECTED_ARMS=21 is a live line, exactly once, with its MEASURED date beside it", () => {
     const region = selfTestRegion(SRC);
     expect(
-      liveCount(region, "EXPECTED_ARMS=18"),
-      "the arm ratchet is no longer a single live `EXPECTED_ARMS=18` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
+      liveCount(region, "EXPECTED_ARMS=21"),
+      "the arm ratchet is no longer a single live `EXPECTED_ARMS=21` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
     ).toBe(1);
 
     // SC-9 (`gate-family-meta.test.ts:18-30`): a threshold constant needs a
     // measurement token AND a date beside it, or nobody can tell a measured floor
     // from a guessed one.
     const lines = region.split("\n");
-    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=18"));
+    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=21"));
     const beside = `${lines[at - 1] ?? ""}\n${lines[at]}`;
     expect(
       beside,
-      "EXPECTED_ARMS=18 carries no MEASURED date on its own or the preceding line — SC-9",
+      "EXPECTED_ARMS=21 carries no MEASURED date on its own or the preceding line — SC-9",
     ).toContain("MEASURED 2026-09-08");
 
     // The harness must ASSERT the count, not merely print it.
@@ -171,15 +193,15 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — comment the constant out; a whole-file `toContain` would
     // still pass, this pin must not.
-    const commented = SRC.replace("\nEXPECTED_ARMS=18\n", "\n# EXPECTED_ARMS=18\n");
+    const commented = SRC.replace("\nEXPECTED_ARMS=21\n", "\n# EXPECTED_ARMS=21\n");
     expect(commented).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=18")).toBe(0);
+    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=21")).toBe(0);
 
     // CALIBRATION — a second copy of the constant is a disagreement waiting to
     // happen, and must fail the "exactly once" leg.
-    const doubled = SRC.replace("\nEXPECTED_ARMS=18\n", "\nEXPECTED_ARMS=18\nEXPECTED_ARMS=18\n");
+    const doubled = SRC.replace("\nEXPECTED_ARMS=21\n", "\nEXPECTED_ARMS=21\nEXPECTED_ARMS=21\n");
     expect(doubled).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=18")).toBe(2);
+    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=21")).toBe(2);
   });
 
   it("plan 01's interim closing line is GONE — the word it used appears nowhere", () => {
@@ -198,8 +220,8 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — re-insert the interim line; the pin must flip.
     const restored = SRC.replace(
-      "\nEXPECTED_ARMS=18\n",
-      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=18\n`,
+      "\nEXPECTED_ARMS=21\n",
+      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=21\n`,
     );
     expect(restored).not.toBe(SRC);
     expect(restored.includes(interimWord)).toBe(true);
@@ -278,7 +300,9 @@ describe("restore-test-from-baseline.sh — B2: the derived closure runs before 
     const run = runRegion(SRC);
     const dependAt = liveIndexOf(run, "pg_depend");
     const abortAt = liveIndexOf(run, "NOT a censused survivor");
-    const dropAt = liveIndexOf(run, "DROP SCHEMA public CASCADE");
+    // ⛔ DROP_STMT, not the bare phrase: the semicolon is what keeps this needle off
+    // the mutex refusal's prose copy near the top of the region. See its comment.
+    const dropAt = liveIndexOf(run, DROP_STMT);
     expect(dependAt, "the --run region no longer reads pg_depend").toBeGreaterThanOrEqual(0);
     expect(abortAt, "the closure's abort sentence is gone").toBeGreaterThanOrEqual(0);
     expect(dropAt, "the DROP is gone").toBeGreaterThanOrEqual(0);
@@ -316,7 +340,8 @@ describe("restore-test-from-baseline.sh — B2: the derived closure runs before 
     expect(
       whitelistAt,
       "the whitelist assertion no longer precedes the DROP",
-    ).toBeLessThan(liveIndexOf(run, "DROP SCHEMA public CASCADE"));
+      // ⛔ DROP_STMT — the semicolon keeps this off the mutex refusal's prose copy.
+    ).toBeLessThan(liveIndexOf(run, DROP_STMT));
 
     // CALIBRATION — delete the assertion.
     const gone = SRC.replace(
@@ -407,7 +432,8 @@ describe("restore-test-from-baseline.sh — every refusal precedes the first wri
     // is consulted after the first write.
     const run = runRegion(SRC);
     const markerAt = liveIndexOf(run, "shobj_description");
-    const dropAt = liveIndexOf(run, "DROP SCHEMA public CASCADE");
+    // ⛔ DROP_STMT — the semicolon keeps this off the mutex refusal's prose copy.
+    const dropAt = liveIndexOf(run, DROP_STMT);
     const truncAt = liveIndexOf(run, "TRUNCATE");
     expect(markerAt, "the marker query is gone").toBeGreaterThanOrEqual(0);
     expect(markerAt, `the marker is read at ${markerAt}, AFTER the DROP at ${dropAt}`).toBeLessThan(dropAt);
@@ -422,7 +448,7 @@ describe("restore-test-from-baseline.sh — every refusal precedes the first wri
     expect(moved).not.toBe(SRC);
     const mRun = runRegion(moved);
     expect(liveIndexOf(mRun, "shobj_description")).toBeGreaterThan(
-      liveIndexOf(mRun, "DROP SCHEMA public CASCADE"),
+      liveIndexOf(mRun, DROP_STMT),
     );
   });
 
@@ -431,7 +457,8 @@ describe("restore-test-from-baseline.sh — every refusal precedes the first wri
     expect(
       liveIndexOf(run, "pg_get_triggerdef"),
       "the survivors census is captured AFTER the DROP — by then the survivors are gone and there is nothing to capture",
-    ).toBeLessThan(liveIndexOf(run, "DROP SCHEMA public CASCADE"));
+      // ⛔ DROP_STMT — the semicolon keeps this off the mutex refusal's prose copy.
+    ).toBeLessThan(liveIndexOf(run, DROP_STMT));
 
     // W3's refusal is PRE-WRITE. The ordering that matters is the CALL order in
     // run_restore, not the definition order: a refusal defined early and called
@@ -504,14 +531,26 @@ describe("restore-test-from-baseline.sh — every refusal precedes the first wri
     // pinned at the measured number so a NEW one is a red rather than an
     // unnoticed widening.
     //
-    // `|| true`  x6 — five `grep -c`/`diff` reads (grep exits 1 on zero matches,
-    //                 diff exits 1 on difference; both are READINGS, each followed
-    //                 by an explicit comparison) and one `shift || true` on the
-    //                 last argv token.
-    // `set +e`   x3 — the three `grep -ac` counts whose rc is captured into `rc`
-    //                 and then CHECKED (`[ "$rc" -le 1 ] || fail MEASURE_FAIL`),
-    //                 which is the opposite of softening: it turns a broken grep
-    //                 into a hard failure instead of a zero.
+    // ⭐ RE-MEASURED 2026-09-08, after A7/A8 converted the two counts-followed-by-a-
+    // comparison sites from `|| true` to explicit rc capture + MEASURE_FAIL. That
+    // moved `|| true` 6→4 and `set +e` 3→6, and the two numbers move TOGETHER for
+    // that reason: the rise in `set +e` is the price of the fall in `|| true`, and it
+    // buys a HARDER failure, not a softer one.
+    //
+    // `|| true`  x4 — two `grep -a -m1` extractions of the FIRST error line out of
+    //                 `transaction.out` in `run_transaction` (grep exits 1 when the
+    //                 file holds no error line, which is a legitimate reading and is
+    //                 handled by the `[ -n "$first" ]` fallback that follows), the
+    //                 diagnostic `diff` printed AFTER `cmp -s` has already decided the
+    //                 preflight is a failure (diff exits 1 on difference — the very
+    //                 case being reported, and `fail` fires on the next line either
+    //                 way), and one `shift || true` on the last argv token.
+    // `set +e`   x6 — six measurements whose rc is captured and then CHECKED: five
+    //                 `grep -ac` counts (`[ "$rc" -le 1 ] || fail MEASURE_FAIL …`) and
+    //                 the shared normalizer's `--function-names` run
+    //                 (`[ "$frc" -eq 0 ] || fail MEASURE_FAIL …`). That is the
+    //                 OPPOSITE of softening: it turns a broken grep or a crashed
+    //                 normalizer into a hard failure instead of a silent zero.
     const run = runRegion(SRC);
     const runLive = liveLines(run).map(({ line }) => line).join("\n");
     for (const token of ["continue-on-error", "exit 0", "::warning"]) {
@@ -520,7 +559,7 @@ describe("restore-test-from-baseline.sh — every refusal precedes the first wri
         `the --run region now carries the softening token \`${token}\``,
       ).toBe(false);
     }
-    const ALLOWED: Record<string, number> = { "|| true": 6, "set +e": 3 };
+    const ALLOWED: Record<string, number> = { "|| true": 4, "set +e": 6 };
     for (const [token, n] of Object.entries(ALLOWED)) {
       expect(
         runLive.split(token).length - 1,
@@ -535,7 +574,7 @@ describe("restore-test-from-baseline.sh — every refusal precedes the first wri
     );
     expect(widened).not.toBe(SRC);
     const wLive = liveLines(runRegion(widened)).map(({ line }) => line).join("\n");
-    expect(wLive.split("|| true").length - 1).toBe(7);
+    expect(wLive.split("|| true").length - 1).toBe(5);
   });
 });
 
@@ -629,15 +668,19 @@ describe("restore-test-from-baseline-fixtures — the arm corpus is a DIRECTORY 
     expect(migrationsOf(synthetic).length).toBe(5);
   });
 
-  it("exactly six arm overlays, each named by the arm that loads it", () => {
+  it("exactly seven arm overlays, each named by the arm that loads it", () => {
     const names = readdirSync(FIXTURES);
-    // ⚠️ SIX, not the four the plan's frontmatter listed: arms 17 and 18 were added
-    // after that list was written and each names its own overlay
-    // (`arm-public-operator.sql`, `arm-default-acl.sql`). Recorded here rather than
-    // pinned at a stale number, because a pin that disagrees with the corpus is a
-    // pin somebody will edit downward.
+    // ⚠️ SEVEN, not the four the plan's frontmatter listed: arms 17, 18 and 19 were
+    // added after that list was written and each names its own overlay
+    // (`arm-public-operator.sql`, `arm-default-acl.sql`, `arm-no-survivors.sql`).
+    // Recorded here rather than pinned at a stale number, because a pin that
+    // disagrees with the corpus is a pin somebody will edit downward. The
+    // bidirectional extraction below is what keeps this list honest: it is asserted
+    // EQUAL to the set of names `setup_lane` actually loads, so adding a fixture
+    // without arming it — or arming a name with no fixture — is a RED either way.
     expect(overlaysOf(names)).toEqual([
       "arm-default-acl.sql",
+      "arm-no-survivors.sql",
       "arm-orphan-view.sql",
       "arm-public-operator.sql",
       "arm-stray-publication.sql",

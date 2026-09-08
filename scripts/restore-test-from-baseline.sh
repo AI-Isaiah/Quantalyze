@@ -63,19 +63,37 @@
 #   RESTORE_REQUIRE_MUTEX     default 1
 #   PGBIN                     (self-test only) server binaries for the throwaway lane
 #
-# psql's STDERR IS printed: it names SQL objects, not credentials. The DSN is not.
+# ⚠️ psql's STDERR IS printed for the transaction — and it does NOT only name SQL
+# objects. A connect or auth failure names the HOST, its IP and the DB user; the
+# calling workflow says so in its own comment
+# (.github/workflows/test-restore-from-baseline.yml:659). What keeps that out of a
+# world-readable log is the workflow's REDACTION step, not any property of psql.
+# Two consequences, both deliberate: the DSN itself is never echoed by this script,
+# and the identity-marker read sends its stderr to a FILE rather than into the
+# value it judges or into the log (refusal 5).
 #
 # ── WHAT --self-test PROVES, AND WHAT IT DOES NOT ───────────────────────────
 # It boots a THROWAWAY PostgreSQL cluster the `scripts/pg-lane/run.sh` way and runs
 # the REAL `--run` dispatch against it. It never touches TEST or PROD.
 #
-# IT PROVES THE MECHANISM: eighteen counted arms — seven refusals that fire before
-# any write, a preflight whose rollback is measured byte-for-byte, a restore that
-# commits the full shape, three survivor classes that round-trip, a fourth class
-# the derived census names and aborts on, a redaction check with a subject, a
-# whitelist tripwire, a default ACL that round-trips, and a calibration arm proving
-# the harness can say no. Every arm has a NAMED falsifier that was observed RED on
-# a scratch copy; the record is `164.8-02-SUMMARY.md`.
+# IT PROVES THE MECHANISM. The arm COUNT is the constant `EXPECTED_ARMS` below and
+# nowhere else — no numeral in this header restates it, because a numeral in prose
+# drifts the moment an arm is added and there is nothing to catch it. To read the
+# live tally, run the command:
+#
+#   bash scripts/restore-test-from-baseline.sh --self-test
+#
+# and read its own closing line. WHAT the arms prove: every refusal that fires
+# before a write, and every BRANCH of every one of them; a preflight whose rollback
+# is measured byte-for-byte; a restore that commits the full shape; three survivor
+# classes that round-trip, INCLUDING a trigger's enabled-state; a fourth class the
+# derived census names and aborts on, with a full census AND with an empty one; a
+# redaction check with a subject; a whitelist tripwire; a default ACL that
+# round-trips; and a calibration arm proving the harness can say no. The full table,
+# with the arms that carry more than one leg, is beside `EXPECTED_ARMS` below.
+# Every arm has a NAMED falsifier that was observed RED and then restored from a
+# byte backup; the record is `164.8-02-SUMMARY.md` and this phase's review-fix
+# report.
 #
 # ⛔ IT DOES NOT PROVE THAT THE REAL DUMP APPLIES. The pg-lane has no `pg_net` and
 # no `supabase_vault`, so `supabase/schema/baseline.sql` CANNOT replay on it; every
@@ -84,23 +102,33 @@
 # `--mode preflight` against TEST itself, inside a transaction that rolls back
 # (Plans 03/04). A green self-test is evidence about this script, never about TEST.
 #
-# The closing line, verbatim, MEASURED 2026-09-08 on macOS (11 s, exit 0) — the same
-# date that sits beside EXPECTED_ARMS below:
+# ⛔ THE CLOSING LINE IS NOT RESTATED HERE. It used to be pasted in verbatim, which
+# made this header a SECOND copy of a string only one place emits — the drift class
+# that left a seven-rule linter documented as "four static rules" for three rules'
+# worth of releases. The line is emitted by the `echo` at the end of `self_test`,
+# it prints ONLY after both failure checks have passed, and the way to read it is
+# to run the command:
 #
-#   restore-test-from-baseline: self-test OK (18/18 arms — seven refusals fire
-#   before any write, preflight rolls back byte-for-byte, restore commits the full
-#   shape, survivors round-trip search_path-independently, the derived census names
-#   an unlisted dependent, redaction is checked with a subject, the census whitelist
-#   refuses an unresolvable class, default ACLs round-trip, harness calibrated)
+#   bash scripts/restore-test-from-baseline.sh --self-test
 #
-# (wrapped for this comment; the script emits it on ONE line, which is what CI greps)
+# ⚠️ NOTHING GREPS IT. The workflow step (test-restore-from-baseline.yml:412) runs
+# the command and judges its EXIT CODE; the only repo-wide match for the line's
+# text is a SOURCE-text assertion in `src/__tests__/restore-test-from-baseline.test.ts`.
+# Do not add a grep gate on it either — a grep on a success sentence is a gate that
+# passes whenever the sentence is printed, which is the failure mode A4 removed.
 #
 # ── TWO DESIGN CHOICES THAT LOOK LIKE HYGIENE AND ARE NOT ───────────────────
-# B1 — the census runs under `SET search_path = pg_catalog` because `pg_get_expr`
-# and `pg_get_triggerdef` OMIT the qualifier of anything on the reader's path, so
-# under the default path a survivor whose source spells `public.f()` unqualified
-# renders without `public.`, is never censused, is CASCADE-dropped, and a pre/post
-# key-set comparison agrees on a set that excludes it.
+# B1 — the census runs under `SET search_path = pg_catalog` because Postgres does
+# not store the SOURCE TEXT of an expression. It stores a PARSE TREE in which the
+# function is already resolved to an oid, and `pg_get_expr` / `pg_get_triggerdef`
+# RE-RENDER that tree against the READER's search_path, omitting the qualifier of
+# anything the reader can reach unqualified. So under psql's default
+# `"$user", public` a QUALIFIED source and an UNQUALIFIED source deparse
+# IDENTICALLY — both without `public.` — and a census that substring-matches
+# `public.` sees NEITHER. How the source spelled it is irrelevant. With only
+# pg_catalog on the path every public reference renders qualified, so the match
+# finds it; without the SET it is never censused, is CASCADE-dropped, and a
+# pre/post key-set comparison agrees on a set that excludes it.
 #
 # B2 — the closure reads `pg_depend` and not the `drop cascades to` NOTICEs because
 # that channel truncates at 100 dependents (MAX_REPORTED_DEPS) and the real `public`
@@ -108,12 +136,23 @@
 # CASCADE's output necessarily runs after the drop, too late to refuse.
 #
 # ── THIS LOG IS PUBLIC ──────────────────────────────────────────────────────
-# The repo is public and Actions logs are world-readable. Everything this script
-# prints is NAMES AND COUNTS: object names, schema names, row counts, sha256 values,
-# epochs. NEVER a DSN, NEVER a password, NEVER a SQL body. The identity marker's
-# TEXT is withheld even when it is the reason for a refusal. `--self-test` enforces
-# this on itself: every arm's captured output is grepped for a DSN shape and for
+# The repo is public and Actions logs are world-readable.
+#
+# WHAT IS ENFORCED: no DSN and no password, ever. The identity marker's TEXT is
+# withheld even when it is the reason for a refusal, and psql's stderr from the
+# marker read goes to a file rather than to the log. `--self-test` enforces the DSN
+# rule on itself — every arm's captured output is grepped for a DSN shape and for
 # dollar-quoted SQL, and arm 14 proves that grep fires on a real leak.
+#
+# ⛔ WHAT IS **NOT** TRUE, AND USED TO BE CLAIMED HERE: that this script prints
+# "NAMES AND COUNTS … NEVER a SQL body". It prints SQL bodies. The survivors census
+# emits column 4 of every survivor row as full DDL — `pg_get_triggerdef(...)` and a
+# reconstructed `CREATE POLICY … USING (<qual>) WITH CHECK (<qual>)` — and
+# `run_restore` cats the WHOLE pre-census, that column included, to stdout. A policy
+# USING expression IS a SQL body, and on the real TEST those expressions name
+# tables, columns and role predicates. The honest statement is the narrow one above
+# plus the workflow's redaction step; do not restore the broad claim, and do not
+# rely on it. (Narrowing the cats is B-batch, in the workflow.)
 #
 # ── TWO THINGS THIS SCRIPT DELIBERATELY DOES NOT DO ─────────────────────────
 # 1. IT DOES NOT BACK ANYTHING UP. The WORKFLOW takes the backup, BEFORE calling
@@ -132,6 +171,18 @@
 # backup gives back the shape of the old TEST and its migration history, and
 # gives back none of its contents.
 #
+# ⛔ A SECOND, QUIETER LOSS: `supabase_migrations.schema_migrations.statements`.
+# The ledger re-seed below TRUNCATEs the table and writes ONE prose provenance
+# sentence into `statements` for every row. That column held the SQL each
+# migration was actually applied to TEST with — the repo's documented way of
+# settling repo-vs-remote body drift "by reading, not by dating", and the only
+# record of any row hand-applied to TEST outside a committed migration. After a
+# restore it is gone for good: nothing repopulates it, and VAC-08 does not read
+# it, so nothing turns red to tell you. The workflow's backup artifact keeps
+# `ledger.csv` byte-exact, so the ONLY surviving copy is that artifact — which
+# expires after 90 days. The backup README.txt's "WHAT CANNOT BE REVERSED" block
+# names this loss too, beside the data one, so the artifact carries the warning.
+#
 # TEST is SHARED with other people's CI and we cannot see their runs. That is why
 # `--mode restore` is founder-executed or founder-approved AT THE MOMENT OF
 # EXECUTION, never an unattended job (CONTEXT safety rule 4).
@@ -141,8 +192,18 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 GATE="restore-test-from-baseline"
 FIXTURES="$SCRIPT_DIR/restore-test-from-baseline-fixtures"
 
-# The shared-TEST advisory mutex key. Same integer ci.yml, analytics-deploy-verify.yml,
-# main-ci-cancelled-watcher.yml and mutex-probe.yml take.
+# The shared-TEST advisory mutex key.
+#
+# ⭐ WHO ACTUALLY TAKES IT — MEASURED 2026-09-08, not remembered. Regenerate with:
+#
+#   grep -c 'pg_advisory_lock(61616158)' .github/workflows/*.yml
+#
+# Three workflows CALL it: `ci.yml` (3 call sites), `mutex-probe.yml` (3) and
+# `test-restore-from-baseline.yml` (1 — the Acquire step this script runs inside).
+# ⚠️ `analytics-deploy-verify.yml` matches the INTEGER twice and calls it ZERO
+# times (a comment at :93 and an issue-body string at :178), and
+# `main-ci-cancelled-watcher.yml` does not contain the integer at all. This comment
+# named both of them as takers until the grep above was run.
 MUTEX_KEY=61616158
 
 fail() {
@@ -172,22 +233,35 @@ cleanup_out_dir() {
 
 # psql against the target. -X so no ~/.psqlrc, -A -t so the output is a stable
 # byte stream, ON_ERROR_STOP so a failed statement is exit 3 and not a silent skip.
-# (scripts/test-ledger-drift-check.sh:141-146 is the same shape.)
+# (scripts/test-ledger-drift-check.sh:140-141 is the same shape — MEASURED
+# 2026-09-08: :140 is the `psql … -X -q -A -t -v ON_ERROR_STOP=1` line the flags
+# live on. The old cite of :141-146 started one line LATER and so excluded the very
+# flags this comment is about, pointing a reader at the SQL instead.)
 psqlt() { psql "$RESTORE_DB_URL" -X -q -A -t -v ON_ERROR_STOP=1 "$@"; }
 
 # ---------------------------------------------------------------------------
 # The census SQL. ONE file, run twice (pre and post), so pre/post comparison is a
 # comparison of the same program's output and cannot drift.
 #
-# ⛔ B1 — `SET search_path = pg_catalog` IS LOAD-BEARING, not hygiene. `pg_get_expr`
-# and `pg_get_triggerdef` OMIT the schema qualifier of anything on the session
-# search_path. Under psql's default `"$user", public`, a policy whose source text
-# reads `current_user_has_app_role(...)` unqualified renders as
-# `current_user_has_app_role(...)` — so a census that substring-matches `public.`
-# in `pg_policies.qual` never sees it, `DROP SCHEMA public CASCADE` removes it, and
-# a pre/post key-set comparison agrees on a set that EXCLUDES it. With only
-# pg_catalog on the path every public reference renders SCHEMA-QUALIFIED, so the
-# match finds it AND the DDL we capture stays replayable after the dump's own
+# ⛔ B1 — `SET search_path = pg_catalog` IS LOAD-BEARING, not hygiene, and the
+# reason is NOT how any particular policy's source is spelled.
+#
+# Postgres does not keep the source text of a policy expression. It keeps a PARSE
+# TREE with the function already resolved to an oid, and `pg_get_expr` /
+# `pg_get_triggerdef` re-render that tree against the READER's search_path,
+# dropping the qualifier of anything the reader can reach unqualified. Under
+# psql's default `"$user", public` a policy authored `public.f(...)` and one
+# authored `f(...)` therefore deparse to the SAME string — `f(...)` — and a census
+# that substring-matches `public.` in `pg_policies.qual` sees NEITHER of them.
+#
+# ⭐ MEASURED, not reasoned: plan 01's NEUTER 1 removed this SET and BOTH storage
+# policies vanished from the census — the QUALIFIED twin included
+# (src/__tests__/restore-test-from-baseline.test.ts:217-218). `DROP SCHEMA public
+# CASCADE` then removes them and a pre/post key-set comparison agrees on a set
+# that EXCLUDES them.
+#
+# With only pg_catalog on the path every public reference renders SCHEMA-QUALIFIED,
+# so the match finds it AND the DDL we capture stays replayable after the dump's own
 # `set_config('search_path', '', false)`.
 # ---------------------------------------------------------------------------
 write_census_sql() {
@@ -249,9 +323,28 @@ SELECT 'nonpostgres_fn=' || n.nspname || '.' || p.proname || ' owner=' || pg_get
 --     `CREATE TRIGGER on_auth_user_created ON auth.users ... handle_new_user()`)
 --     spells its function UNQUALIFIED in source, which is exactly what a text
 --     match misses.
+--
+-- ⛔ A10 — THE KEY CARRIES `tgenabled`, AND THE DDL RESTORES IT.
+--     `pg_get_triggerdef()` NEVER emits the enabled state: a DISABLED / ENABLE
+--     REPLICA / ENABLE ALWAYS trigger replays as ENABLED-ON-ORIGIN, which is a
+--     trigger that fires when it was configured not to. This repo already treats
+--     `tgenabled` as load-bearing — `supabase/tests/test_api_keys_insert_not_
+--     client_writable.sql:240` pins that a DISABLED trigger "scrubs nothing"
+--     while satisfying every presence test. So the state is appended as the
+--     matching `ALTER TABLE … TRIGGER` statement, AND folded into the survivor
+--     KEY, so the post-replay comparison below is (name, state) and not name
+--     alone. An unhandled `tgenabled` value falls through the ELSE with no ALTER
+--     — and is caught anyway, because its key would then differ pre vs post.
 SELECT 'survivor' || chr(9) || 'trigger' || chr(9)
-       || n.nspname || '.' || c.relname || ':' || t.tgname || chr(9)
+       || n.nspname || '.' || c.relname || ':' || t.tgname || ':' || t.tgenabled::text || chr(9)
        || pg_get_triggerdef(t.oid) || ';'
+       || CASE t.tgenabled
+            WHEN 'O' THEN ''
+            WHEN 'D' THEN format(' ALTER TABLE %I.%I DISABLE TRIGGER %I;', n.nspname, c.relname, t.tgname)
+            WHEN 'R' THEN format(' ALTER TABLE %I.%I ENABLE REPLICA TRIGGER %I;', n.nspname, c.relname, t.tgname)
+            WHEN 'A' THEN format(' ALTER TABLE %I.%I ENABLE ALWAYS TRIGGER %I;', n.nspname, c.relname, t.tgname)
+            ELSE ''
+          END
   FROM pg_trigger t
   JOIN pg_class c ON c.oid = t.tgrelid
   JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -283,11 +376,25 @@ SELECT 'survivor' || chr(9) || 'policy' || chr(9)
 
 -- (c) realtime publication membership of public tables. The publication itself is
 --     schema-less and survives the DROP; its MEMBERSHIP rows do not.
+--
+-- ⛔ A11 — `NOT p.puballtables` IS LOAD-BEARING. `pg_publication_tables` EXPANDS a
+--     `FOR ALL TABLES` publication: it reports every matching table even though
+--     `pg_publication_rel` holds no row for any of them. Censused, such a
+--     publication yields one survivor key PER PUBLIC TABLE; refusal 7 then passes
+--     for the tables the dump re-creates and REFUSES for the ones it does not, and
+--     the survivor replay would run `ALTER PUBLICATION … ADD TABLE` against a
+--     publication that already covers everything — which errors
+--     `publication "…" is defined as FOR ALL TABLES` and aborts EVERY restore with
+--     a diagnosis naming the wrong cause. A FOR ALL TABLES publication needs no
+--     re-ADD: it re-acquires the new tables the moment the dump creates them.
+--     Self-test arm 8 carries such a publication for exactly this reason.
 SELECT 'survivor' || chr(9) || 'publication' || chr(9)
        || 'pub:public.' || pt.tablename || chr(9)
        || format('ALTER PUBLICATION %I ADD TABLE public.%I;', pt.pubname, pt.tablename)
   FROM pg_publication_tables pt
+  JOIN pg_publication p ON p.pubname = pt.pubname
  WHERE pt.schemaname = 'public'
+   AND NOT p.puballtables
  ORDER BY 1;
 CENSUS_SQL
 }
@@ -381,10 +488,19 @@ refuse_bad_migration_corpus() {
 # ⛔ The marker TEXT is never printed. This log is public.
 refuse_wrong_database() {
   local marker rc=0
+  # ⛔ A9 — STDERR GOES TO A FILE, NOT INTO `marker`. With `2>&1` any psql or libpq
+  # diagnostic emitted on a SUCCESSFUL connect (a NOTICE, a server/client version
+  # mismatch warning, a GSSAPI or SSL note) becomes part of the value the three
+  # identity refusals judge — and a non-empty stderr line DEFEATS the NULL check
+  # below, which is precisely the branch CLAUDE.md calls "the marker was lost".
+  # The calling workflow already does it this way
+  # (.github/workflows/test-restore-from-baseline.yml:655-657, stderr to its own
+  # file); this is that shape. The stderr text is NOT printed: it can name the
+  # host, its IP and the DB user, and this log is public.
   marker=$(psqlt -c "SELECT shobj_description(oid, 'pg_database') AS which_database
-  FROM pg_database WHERE datname = current_database();" 2>&1) || rc=$?
+  FROM pg_database WHERE datname = current_database();" 2>"$RESTORE_OUT_DIR/marker.err") || rc=$?
   if [ "$rc" -ne 0 ]; then
-    fail "the database identity marker could not be read (psql exited ${rc}). Refusing to write to a database this script cannot identify."
+    fail "the database identity marker could not be read (psql exited ${rc}; its stderr is at ${RESTORE_OUT_DIR}/marker.err and is NOT printed — it can name the host and the DB user). Refusing to write to a database this script cannot identify."
   fi
   marker=$(printf '%s' "$marker" | tr -d '\r')
   if [ -z "$marker" ]; then
@@ -406,12 +522,43 @@ refuse_wrong_database() {
 # this script asserts it is held rather than taking it itself — a lock taken here
 # would be released the moment this process exits.
 refuse_without_mutex() {
+  local mode="${1:-}"
   if [ "$RESTORE_REQUIRE_MUTEX" != "1" ]; then
-    note "mutex check DISABLED by RESTORE_REQUIRE_MUTEX=${RESTORE_REQUIRE_MUTEX}"
+    # ⛔ A5 — THE BYPASS IS REFUSED OUTRIGHT FOR THE DESTRUCTIVE MODE. This seam
+    # disables the ONE thing keeping other people's CI out of shared TEST during
+    # `DROP SCHEMA public CASCADE`. `--mode preflight` and `--self-test` write
+    # NOTHING (the terminator is ROLLBACK, and the self-test runs against a
+    # throwaway cluster), so the seam is useful there and harmless. `--mode
+    # restore` COMMITS, so there the bypass is not a seam, it is the removal of
+    # the guard — and it is a refusal, not a note.
+    if [ "$mode" = "restore" ]; then
+      fail "RESTORE_REQUIRE_MUTEX=${RESTORE_REQUIRE_MUTEX} would bypass the shared-TEST mutex check, and this is --mode restore, which COMMITS. The mutex is the only thing keeping other people's CI out during DROP SCHEMA public CASCADE. The bypass is accepted for --mode preflight and --self-test, which write nothing; it is refused here."
+    fi
+    # Loud, on stderr, and it names the mode it is being tolerated for. (It is NOT
+    # spelled `::warning::`: `src/__tests__/restore-test-from-baseline.test.ts`
+    # pins the --run region to carry no `::warning` token, since in this repo that
+    # token has meant "a gate that reported instead of failing". See the report.)
+    echo "${GATE}: ⚠️ MUTEX CHECK DISABLED by RESTORE_REQUIRE_MUTEX=${RESTORE_REQUIRE_MUTEX} — tolerated ONLY because mode=${mode:-<unset>} writes nothing. Nothing is keeping other CI off this database." >&2
     return 0
   fi
   local held rc=0
-  held=$(psqlt -c "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = ${MUTEX_KEY} AND granted;" 2>&1) || rc=$?
+  # ⛔ A6 — `objid` ALONE IS NOT THE LOCK. pg_locks rows for advisory locks carry
+  # the key split across `classid`/`objid` and tagged by `objsubid`: the ONE-key
+  # form `pg_advisory_lock(bigint)` — the form every caller in this repo uses
+  # (measured: .github/workflows/ci.yml:2610,3701,4432, mutex-probe.yml:206,
+  # test-restore-from-baseline.yml:517 are all `pg_advisory_lock(61616158)`) —
+  # sets classid=0, objid=<key>, objsubid=1. Without `classid = 0` and
+  # `objsubid = 1` a TWO-key lock `pg_advisory_lock(0, 61616158)` satisfies this
+  # probe; without the `database` term the SAME key held in ANY OTHER database of
+  # the cluster does. Both would report "the mutex is held" while nothing at all
+  # is keeping other CI off THIS database. Self-test arm 6 carries a leg for each.
+  held=$(psqlt -c "SELECT count(*) FROM pg_locks
+     WHERE locktype = 'advisory'
+       AND classid = 0
+       AND objid = ${MUTEX_KEY}
+       AND objsubid = 1
+       AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+       AND granted;" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "could not read pg_locks to confirm the shared-TEST mutex (psql exited ${rc})."
   held=$(printf '%s' "$held" | tr -d '[:space:]')
   case "$held" in ''|*[!0-9]*) fail "MEASURE_FAIL: the mutex probe returned '${held}', not a count. An unreadable lock state is not a held lock." ;; esac
@@ -446,7 +593,24 @@ refuse_publication_row_without_table() {
 # CENSUS
 # ---------------------------------------------------------------------------
 census_val() { awk -F= -v k="$2" '$1 == k { print $2; exit }' "$1"; }
-census_survivor_count() { grep -ac '^survivor	' "$1" || true; }
+
+# Every line of a census class, sorted — the shape used to compare a LIST pre/post
+# rather than a count. awk, not grep: awk exits 0 on zero matches, so an empty
+# class is an empty string and never an rc that has to be softened away.
+census_class_lines() { awk -v k="$2" 'index($0, k "=") == 1' "$1" | LC_ALL=C sort; }
+
+# ⛔ A7 — `grep -c … || true` SWALLOWED EXIT 2. grep exits 1 for "no matches" (a
+# READING) and 2 for "the file could not be read" (a BROKEN INSTRUMENT), and
+# `|| true` made both of them the empty string. The post-restore comparison
+# `[ "$post_survivors" = "$pre_survivors" ]` then compared "" to "" and PASSED
+# VACUOUSLY — a survivor accounting that cannot fail. rc is captured and checked
+# the way derive_expected_shape already does it.
+census_survivor_count() {
+  local n rc
+  set +e; n=$(grep -ac '^survivor	' "$1"); rc=$?; set -e
+  [ "$rc" -le 1 ] || fail "MEASURE_FAIL: could not count survivor rows in ${1} (grep exited ${rc}). An unreadable census is not a census of nothing."
+  printf '%s' "${n:-0}"
+}
 
 run_census() {
   local out="$1" rc=0
@@ -484,9 +648,21 @@ derive_expected_shape() {
   [ "$rc" -le 1 ] || fail "MEASURE_FAIL: could not count CREATE POLICY lines in ${BASELINE_FILE} (grep exited ${rc})."
   command -v node >/dev/null 2>&1 || fail "node is not on PATH; the shared normalizer cannot run."
   [ -f "$NORMALIZER" ] || fail "normalizer not found at ${NORMALIZER}."
-  EXP_FUNCTIONS=$(node "$NORMALIZER" --function-names "$BASELINE_FILE" | grep -ac '[^[:space:]]' || true)
+  # ⛔ A8 — THE PIPELINE IS SPLIT SO THE NORMALIZER'S OWN rc IS SEEN. Written as
+  # one pipe ending in `|| true`, a CRASHED normalizer produced EXP_FUNCTIONS=0
+  # and the run then aborted with "expected 0 distinct function name(s)" — which
+  # reads as "the dump does not apply" when the truth is "the normalizer did not
+  # run". Fail-safe in direction, misdiagnosing in message. The `-ge 1` floor is
+  # the one EXP_TABLES already had: a baseline that defines no function is not
+  # this repo's baseline.
+  local fnames frc
+  set +e; fnames=$(node "$NORMALIZER" --function-names "$BASELINE_FILE"); frc=$?; set -e
+  [ "$frc" -eq 0 ] || fail "MEASURE_FAIL: the shared normalizer (${NORMALIZER}) exited ${frc} reading ${BASELINE_FILE}. A crashed normalizer is not a dump with zero functions."
+  set +e; EXP_FUNCTIONS=$(printf '%s\n' "$fnames" | grep -ac '[^[:space:]]'); rc=$?; set -e
+  [ "$rc" -le 1 ] || fail "MEASURE_FAIL: could not count the normalizer's function names (grep exited ${rc})."
   EXP_TABLES=${EXP_TABLES:-0}; EXP_POLICIES=${EXP_POLICIES:-0}; EXP_FUNCTIONS=${EXP_FUNCTIONS:-0}
   [ "$EXP_TABLES" -ge 1 ] || fail "${BASELINE_FILE} carries ZERO CREATE TABLE lines. A dump that creates nothing is not a baseline."
+  [ "$EXP_FUNCTIONS" -ge 1 ] || fail "the shared normalizer read ZERO function names out of ${BASELINE_FILE}. A baseline that defines no function is not this repo's baseline; treat this as a broken reading, not an empty dump."
   note "expected shape from the dump text: tables=${EXP_TABLES} policies=${EXP_POLICIES} functions=${EXP_FUNCTIONS}"
 }
 
@@ -507,7 +683,15 @@ build_transaction() {
     [ -n "$k" ] || continue
     keys_csv="${keys_csv}${keys_csv:+, }'$(sql_lit "$k")'"
   done < "$RESTORE_OUT_DIR/survivors.keys"
-  [ -n "$keys_csv" ] || keys_csv="NULL::text"
+  # ⛔ A1 — AN EMPTY CENSUS RENDERS AN EMPTY ARRAY, NEVER `ARRAY[NULL]`. With
+  # `NULL::text` here the closure below compiled to `v_keys := ARRAY[NULL::text]`,
+  # `r.key = ANY (ARRAY[NULL])` is SQL NULL rather than false, plpgsql treats
+  # `IF NULL` as FALSE, and the B2 closure NEVER RAISED — so with zero censused
+  # survivors EVERY cross-schema dependent was CASCADE-dropped into a COMMITTED
+  # restore. Self-test arm 19 is the permanent observation. The `coalesce(...)`
+  # in the closure's own test is the second, independent remedy: either one alone
+  # closes this, and both are kept because the failure mode is silent and total.
+  # (`x = ANY (ARRAY[]::text[])` is FALSE, not NULL — measured on pg16.)
 
   set +e; FILTERED_N=$(grep -ac "$FILTER_PATTERN" "$BASELINE_FILE"); rc=$?; set -e
   [ "$rc" -le 1 ] || fail "MEASURE_FAIL: could not count the filtered line class in ${BASELINE_FILE} (grep exited ${rc})."
@@ -640,7 +824,8 @@ BEGIN
                ELSE NULL
              END AS own_schema,
              CASE
-               WHEN p.classid = 'pg_trigger'::regclass THEN (SELECT n.nspname || '.' || c.relname || ':' || t.tgname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE t.oid = p.objid)
+               -- A10: the key carries tgenabled, exactly as the census emits it.
+               WHEN p.classid = 'pg_trigger'::regclass THEN (SELECT n.nspname || '.' || c.relname || ':' || t.tgname || ':' || t.tgenabled::text FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE t.oid = p.objid)
                WHEN p.classid = 'pg_policy'::regclass THEN (SELECT n.nspname || '.' || c.relname || ':' || pl.polname FROM pg_policy pl JOIN pg_class c ON c.oid = pl.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE pl.oid = p.objid)
                WHEN p.classid = 'pg_publication_rel'::regclass THEN (SELECT 'pub:public.' || c.relname FROM pg_publication_rel pr JOIN pg_class c ON c.oid = pr.prrelid WHERE pr.oid = p.objid)
                ELSE pg_describe_object(p.classid, p.objid, p.objsubid)
@@ -656,7 +841,12 @@ BEGIN
        AND o.key IS NOT NULL
      ORDER BY 1
   LOOP
-    IF NOT (r.key = ANY (v_keys)) THEN
+    -- ⛔ A1, remedy 2 of 2. \`coalesce(..., false)\` and NOT a bare \`NOT (… = ANY …)\`:
+    -- a NULL element anywhere in v_keys makes the comparison SQL NULL, plpgsql
+    -- treats \`IF NULL\` as false, and this closure silently stops refusing. The
+    -- post-replay survivor loop below already guards the same way; this one did
+    -- not, and it is the one that runs BEFORE the DROP.
+    IF NOT coalesce(r.key = ANY (v_keys), false) THEN
       RAISE EXCEPTION 'restore aborted: % depends on public and is NOT a censused survivor — it would be CASCADE-dropped and never re-created; extend the survivors census (a new class = a new self-test arm) or remove the object by founder decision', r.key;
     END IF;
   END LOOP;
@@ -737,8 +927,13 @@ BEGIN
     RAISE EXCEPTION 'restore aborted: % ledger row(s) carry a version that is not the 14-digit filename prefix. That is the exact shape (an APPLY timestamp in the version column) this restore exists to remove', v_n;
   END IF;
 
+  -- A10/A11: this UNION must render the SAME key grammar the census does, or the
+  -- two sides are two different measurements wearing one name. tgenabled is part
+  -- of the trigger key (a trigger that came back ENABLED when it was DISABLED is
+  -- a trigger that fires when it was configured not to), and a FOR ALL TABLES
+  -- publication is excluded on BOTH sides.
   SELECT array_agg(kk ORDER BY kk) INTO v_post_keys FROM (
-    SELECT n.nspname || '.' || c.relname || ':' || t.tgname AS kk
+    SELECT n.nspname || '.' || c.relname || ':' || t.tgname || ':' || t.tgenabled::text AS kk
       FROM pg_trigger t
       JOIN pg_class c ON c.oid = t.tgrelid
       JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -753,7 +948,9 @@ BEGIN
     UNION ALL
     SELECT 'pub:public.' || pt.tablename
       FROM pg_publication_tables pt
+      JOIN pg_publication p2 ON p2.pubname = pt.pubname
      WHERE pt.schemaname = 'public'
+       AND NOT p2.puballtables
   ) s;
 
   IF v_keys IS NOT NULL THEN
@@ -827,7 +1024,7 @@ run_restore() {
   write_census_sql "$RESTORE_OUT_DIR/census.sql"
 
   refuse_wrong_database
-  refuse_without_mutex
+  refuse_without_mutex "$mode"
 
   note "── pre-census (read-only) ──────────────────────────────────────────"
   run_census "$RESTORE_OUT_DIR/pre-census.txt"
@@ -835,6 +1032,9 @@ run_restore() {
   split_survivors
   local pre_survivors
   pre_survivors=$(census_survivor_count "$RESTORE_OUT_DIR/pre-census.txt")
+  # A7's second half: the value is COMPARED to the post-census one later, and ""
+  # equals "" — so it is proven to be a number here, before anything relies on it.
+  case "$pre_survivors" in ''|*[!0-9]*) fail "MEASURE_FAIL: the survivor count read '${pre_survivors}', not a number. An unreadable census is not a census of zero survivors." ;; esac
   note "survivors censused: ${pre_survivors}"
 
   refuse_publication_row_without_table
@@ -872,6 +1072,24 @@ run_restore() {
   [ "$n_functions" = "$EXP_FUNCTIONS" ] || fail "post-census functions=${n_functions}, expected ${EXP_FUNCTIONS}."
   [ "$n_ledger"    = "${#MIGRATION_BASENAMES[@]}" ] || fail "post-census ledger_rows=${n_ledger}, expected ${#MIGRATION_BASENAMES[@]}."
   [ "$post_survivors" = "$pre_survivors" ] || fail "post-census survivors=${post_survivors}, pre-census had ${pre_survivors}."
+
+  # ⛔ A12 — THE DESTRUCTIVE MODE MUST NOT BE THE WEAKER READER. `--mode preflight`
+  # compares the whole census BYTE-FOR-BYTE, so it covers these three classes
+  # incidentally; `--mode restore` used to check only tables/policies/functions/
+  # ledger_rows/survivors and therefore checked NEITHER the extension count nor
+  # the two ownership lists — the very readings the header calls the reason "the
+  # DROP can be expected to succeed". An extension that lived IN public and is not
+  # re-created by the dump, or a public object the dump brings back under a
+  # different owner, would have committed silently.
+  local pre_ext post_ext class
+  pre_ext=$(census_val "$RESTORE_OUT_DIR/pre-census.txt" extensions)
+  post_ext=$(census_val "$RESTORE_OUT_DIR/post-census.txt" extensions)
+  [ "$post_ext" = "$pre_ext" ] || fail "post-census extensions=${post_ext}, pre-census had ${pre_ext}. An extension that lived in public was CASCADE-dropped and the dump did not put it back."
+  for class in nonpostgres_rel nonpostgres_fn; do
+    [ "$(census_class_lines "$RESTORE_OUT_DIR/post-census.txt" "$class")" \
+      = "$(census_class_lines "$RESTORE_OUT_DIR/pre-census.txt" "$class")" ] \
+      || fail "the ${class} ownership list changed across the restore. Pre and post disagree about which public objects \`postgres\` does not own — the reading the founder is shown before deciding the DROP can succeed. Compare ${RESTORE_OUT_DIR}/pre-census.txt with ${RESTORE_OUT_DIR}/post-census.txt."
+  done
 
   echo "restore: tables=${n_tables} policies=${n_policies} functions=${n_functions} ledger_rows=${n_ledger} survivors=${post_survivors}/${pre_survivors} filtered=${FILTERED_N} mode=restore"
 }
@@ -932,6 +1150,21 @@ main() {
 #    8  GREEN preflight, rolls back              16  ---- harness calibration
 #                                                17  RED  unresolvable object class
 #                                                18  GREEN default ACL round-trips
+#                                                19  RED  ZERO censused survivors (A1)
+#                                                20  RED  marker names neither (A2)
+#                                                21  RED  migration corpus (A3)
+#
+# Several arms carry more than one LEG, because one guard can be false in more than
+# one way and an arm that measures the easy way is not measuring the guard:
+#   arm 6  — (a) no lock, (b) the key held in ANOTHER database of the cluster,
+#            (c) the same integer taken by the TWO-key advisory-lock form,
+#            (d) the RESTORE_REQUIRE_MUTEX bypass against `--mode restore`.
+#   arm 8  — additionally carries a `FOR ALL TABLES` publication, which
+#            pg_publication_tables EXPANDS; it must NOT be censused as survivors.
+#   arm 9  — additionally puts survivor class (a) into ENABLE REPLICA, which
+#            pg_get_triggerdef() does not emit, and asserts the state round-trips.
+#   arm 21 — (a) a filename the interpolation gate refuses, (b) an EMPTY corpus,
+#            (c) an ABSENT migrations dir.
 #
 # ── REDACTION IS A CHECK WITH A SUBJECT (T-164.8-05) ────────────────────────
 # Every arm's combined output is captured, and after EVERY arm the harness greps
@@ -948,12 +1181,14 @@ main() {
 # transaction, against TEST itself (Plans 03/04).
 # ===========================================================================
 
-# ⛔ THE RATCHET. Introduced ONCE, at its final value, so it is never patched across
-# plans and can be read off one place. Raise it only together with the arm that adds
-# one; lowering it to make a run green is deleting a proof. Eighteen arms, each with
-# a NAMED falsifier observed RED on a scratch copy, recorded in 164.8-02-SUMMARY.md.
-# MEASURED 2026-09-08 — `--self-test` prints 18/18 and exits 0 on a throwaway cluster.
-EXPECTED_ARMS=18
+# ⛔ THE RATCHET. Read off ONE place; raise it only together with the arm that adds
+# one, and never lower it to make a run green — that is deleting a proof. Every arm
+# has a NAMED falsifier that was OBSERVED RED and then restored from a byte backup;
+# the record is 164.8-02-SUMMARY.md for arms 1-18 and this phase's review-fix report
+# for arms 19-21 (the empty survivor census, the foreign identity marker, and the
+# three unarmed exits of the migration-corpus refusal).
+# MEASURED 2026-09-08 — `--self-test` prints 21/21 and exits 0 on a throwaway cluster.
+EXPECTED_ARMS=21
 
 SELFTEST_MUTEX_HOLDER_PID=""
 SELFTEST_TMPD=""
@@ -1110,8 +1345,10 @@ FRESHSTUB
   lane_q() { psql "$lane_dsn" -X -q -A -t -v ON_ERROR_STOP=1 -c "$1" | tr -d '[:space:]'; }
 
   # EVERY arm starts from a freshly loaded fixture: the restore arms MUTATE. An
-  # optional OVERLAY (`fixtures/arm-<name>.sql`) is loaded on top, which is how a
-  # single fixture serves eighteen arms without any of them seeing another's shape.
+  # optional OVERLAY (`fixtures/arm-<name>.sql`) is loaded on top, which is how ONE
+  # fixture serves every arm — see `EXPECTED_ARMS` for how many that is — without
+  # any of them seeing another's shape. (No numeral here: a count spelled in prose
+  # beside a constant that moves is a count that will disagree with it.)
   fresh_db() {
     local overlay="${1:-}"
     release_mutex
@@ -1130,11 +1367,16 @@ FRESHSTUB
   # holds it: a BACKGROUND psql that takes pg_advisory_lock and then sleeps. The
   # script under test asserts the lock is held by SOMEONE ELSE; a lock it took
   # itself would vanish the moment it exited.
+  #
+  # ⚠️ TWO SEAMS, BOTH FOR ARM 6's A6 LEGS: which DATABASE the lock is taken in,
+  # and which advisory-lock FORM takes it. The default is the real path — the
+  # one-key form, in the database under test.
   hold_mutex() {
+    local dsn="${1:-$lane_dsn}" lock_sql="${2:-SELECT pg_advisory_lock(${MUTEX_KEY});}"
     : > "$SELFTEST_TMPD/holder.log"
-    nohup psql "$lane_dsn" -X -q -A -t -v ON_ERROR_STOP=1 \
+    nohup psql "$dsn" -X -q -A -t -v ON_ERROR_STOP=1 \
       -c "SET statement_timeout = 0;" \
-      -c "SELECT pg_advisory_lock(${MUTEX_KEY});" \
+      -c "$lock_sql" \
       -c "SELECT 'MUTEX-ACQUIRED';" \
       -c "SELECT pg_sleep(600);" >> "$SELFTEST_TMPD/holder.log" 2>&1 &
     SELFTEST_MUTEX_HOLDER_PID=$!
@@ -1164,13 +1406,14 @@ FRESHSTUB
   local ARM_BASELINE_DOC="$SELFTEST_TMPD/BASELINE.md"
   local ARM_FRESHNESS="bash $SELFTEST_TMPD/freshness.sh"
   local ARM_REQUIRE_MUTEX=1
+  local ARM_MIGRATIONS_DIR="$FIXTURES/migrations"
 
   run_leg() {
     local script="$1" mode="$2" tag="$3"
     RESTORE_DB_URL="$lane_dsn" \
     BASELINE_FILE="$FIXTURES/baseline-fixture.sql" \
     BASELINE_DOC="$ARM_BASELINE_DOC" \
-    MIGRATIONS_DIR="$FIXTURES/migrations" \
+    MIGRATIONS_DIR="$ARM_MIGRATIONS_DIR" \
     NORMALIZER="$norm" \
     FRESHNESS_TS_CMD="$ARM_FRESHNESS" \
     RESTORE_OUT_DIR="$SELFTEST_TMPD/out-${tag}" \
@@ -1346,17 +1589,63 @@ FRESHSTUB
 
   # ═══ ARM 6 — the shared-TEST advisory mutex is not held ════════════════════
   # `fresh_db` releases the holder and this arm deliberately does NOT re-take it.
+  #
+  # FOUR LEGS, because "the mutex is held" has three ways of being false and the
+  # bypass seam is a fourth:
+  #   (a) no lock at all;
+  #   (b) A6 — the key held in ANOTHER DATABASE of the same cluster. Advisory
+  #       locks are per-database; a probe that does not filter `database` reads a
+  #       lock that is keeping nothing off THIS database;
+  #   (c) A6 — the same integer taken by the TWO-key form `pg_advisory_lock(0,
+  #       KEY)`, which lands as classid=0/objid=KEY/objsubid=2 and satisfies an
+  #       objid-only probe;
+  #   (d) A5 — the RESTORE_REQUIRE_MUTEX bypass, refused for --mode restore.
   arm_mutex_absent() {
+    local out rc n
+
+    # (a) nothing holds it.
     fresh_db || return 1
-    local out="$SELFTEST_TMPD/a6.out" rc=0
+    out="$SELFTEST_TMPD/a6.out"; rc=0
     arm_env preflight a6 > "$out" 2>&1 || rc=$?
     cat "$out"
-    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: an unheld mutex exited ${rc}, expected 1"; return 1; }
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (a): an unheld mutex exited ${rc}, expected 1"; return 1; }
     grep -aq "mutex (${MUTEX_KEY}) is not held" "$out" \
-      || { echo "MEASURE_FAIL: the refusal does not report the shared-TEST mutex ${MUTEX_KEY} as unheld"; return 1; }
-    local n
+      || { echo "MEASURE_FAIL (a): the refusal does not report the shared-TEST mutex ${MUTEX_KEY} as unheld"; return 1; }
     n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
-    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — the mutex refusal did NOT fire before the first write."; return 1; }
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL (a): the stray table is gone (count=${n}) — the mutex refusal did NOT fire before the first write."; return 1; }
+
+    # (b) the key is held, in the WRONG DATABASE.
+    hold_mutex "$admin_dsn" || return 1
+    out="$SELFTEST_TMPD/a6b.out"; rc=0
+    arm_env preflight a6b > "$out" 2>&1 || rc=$?
+    cat "$out"
+    release_mutex
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (b): the mutex held in ANOTHER database of the cluster exited ${rc}, expected 1. The pg_locks probe is not filtering on \`database\`, so a lock keeping nothing off this database reads as held."; return 1; }
+    grep -aq "mutex (${MUTEX_KEY}) is not held" "$out" \
+      || { echo "MEASURE_FAIL (b): the refusal is not the unheld-mutex one"; return 1; }
+
+    # (c) the same integer, taken by the TWO-key form.
+    hold_mutex "$lane_dsn" "SELECT pg_advisory_lock(0, ${MUTEX_KEY});" || return 1
+    out="$SELFTEST_TMPD/a6c.out"; rc=0
+    arm_env preflight a6c > "$out" 2>&1 || rc=$?
+    cat "$out"
+    release_mutex
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (c): a TWO-key advisory lock carrying ${MUTEX_KEY} exited ${rc}, expected 1. The probe is not filtering on classid/objsubid, so a different lock that happens to share the integer reads as held."; return 1; }
+    grep -aq "mutex (${MUTEX_KEY}) is not held" "$out" \
+      || { echo "MEASURE_FAIL (c): the refusal is not the unheld-mutex one"; return 1; }
+
+    # (d) A5 — the bypass seam, against the mode that COMMITS. The mutex IS held
+    #     here, so the only thing this leg can be measuring is the bypass refusal.
+    hold_mutex || return 1
+    local ARM_REQUIRE_MUTEX=0
+    out="$SELFTEST_TMPD/a6d.out"; rc=0
+    arm_env restore a6d > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (d): RESTORE_REQUIRE_MUTEX=0 with --mode restore exited ${rc}, expected 1. The bypass removed the only guard keeping other CI out of a shared database during DROP SCHEMA public CASCADE."; return 1; }
+    grep -aq 'would bypass the shared-TEST mutex check, and this is --mode restore' "$out" \
+      || { echo "MEASURE_FAIL (d): the refusal is not the bypass one — some other guard fired, so the bypass branch is unmeasured"; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL (d): the stray table is gone (count=${n}) — the bypass refusal did NOT fire before the first write."; return 1; }
     return 0
   }
 
@@ -1392,6 +1681,15 @@ FRESHSTUB
   # ═══ ARM 8 — GREEN preflight: the whole transaction runs and ROLLS BACK ════
   arm_g_preflight() {
     setup_lane || return 1
+    # ⛔ A11's SUBJECT. A second publication, `FOR ALL TABLES`, alongside the
+    # fixture's row-based `supabase_realtime`. `pg_publication_tables` EXPANDS it
+    # over every public table — including `e2e_leftover`, which the dump does NOT
+    # re-create — while `pg_publication_rel` holds no row for any of them. Without
+    # the `NOT p.puballtables` filter the census emits those expanded rows as
+    # survivors and refusal 7 kills this GREEN arm naming `pub:public.e2e_leftover`
+    # — the wrong cause, for a publication that needs no re-ADD at all.
+    psql "$lane_dsn" -X -q -v ON_ERROR_STOP=1 \
+      -c "CREATE PUBLICATION fixture_all_tables FOR ALL TABLES;" >/dev/null
     local out="$SELFTEST_TMPD/g-preflight.out"
     local rc=0
     arm_env preflight > "$out" 2>&1 || rc=$?
@@ -1410,6 +1708,18 @@ FRESHSTUB
   # ═══ ARM 9 — GREEN restore: the whole transaction runs and COMMITS ═════════
   arm_g_restore() {
     setup_lane || return 1
+    # ⛔ A10's SUBJECT. Survivor class (a) is put into a NON-DEFAULT enabled state
+    # before the restore. `pg_get_triggerdef()` never emits that state, so without
+    # the census's `ALTER TABLE … TRIGGER` companion the trigger comes back
+    # ENABLED-ON-ORIGIN — firing when it was configured not to — and a key-only
+    # comparison cannot see it. It is `ENABLE REPLICA` rather than `DISABLE` so
+    # the state is one a real deployment uses deliberately, and so the arm cannot
+    # be satisfied by a trigger that simply failed to be created.
+    psql "$lane_dsn" -X -q -v ON_ERROR_STOP=1 \
+      -c "ALTER TABLE auth.users ENABLE REPLICA TRIGGER on_auth_user_created;" >/dev/null
+    local n0
+    n0=$(lane_q "SELECT tgenabled FROM pg_trigger WHERE tgname='on_auth_user_created' AND NOT tgisinternal;")
+    [ "$n0" = "R" ] || { echo "MEASURE_FAIL: the premise is broken — on_auth_user_created is in state '${n0}', not 'R', so the round-trip below would prove nothing."; return 1; }
     local out="$SELFTEST_TMPD/g-restore.out"
     local rc=0
     arm_env restore > "$out" 2>&1 || rc=$?
@@ -1422,6 +1732,8 @@ FRESHSTUB
     [ "$n" = "0" ] || { echo "MEASURE_FAIL: the stray table public.e2e_leftover survived the restore (count=${n})."; return 1; }
     n=$(lane_q "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace s ON s.oid=c.relnamespace WHERE NOT t.tgisinternal AND s.nspname='auth' AND c.relname='users' AND t.tgname='on_auth_user_created';")
     [ "$n" = "1" ] || { echo "MEASURE_FAIL: survivor class (a) LOST — auth.users:on_auth_user_created is absent after the restore (count=${n})."; return 1; }
+    n=$(lane_q "SELECT tgenabled FROM pg_trigger WHERE tgname='on_auth_user_created' AND NOT tgisinternal;")
+    [ "$n" = "R" ] || { echo "MEASURE_FAIL (A10): survivor class (a) came back in state '${n}', not the 'R' (ENABLE REPLICA) it was censused in. pg_get_triggerdef() does not emit tgenabled, so the trigger was silently re-created ENABLED-ON-ORIGIN — it now fires where it was configured not to, and a key-only comparison agrees the survivor round-tripped."; return 1; }
     n=$(lane_q "SELECT count(*) FROM pg_policies WHERE schemaname='storage' AND tablename='objects' AND policyname='qualified_ref';")
     [ "$n" = "1" ] || { echo "MEASURE_FAIL: survivor class (b) LOST — storage.objects:qualified_ref is absent after the restore (count=${n})."; return 1; }
     n=$(lane_q "SELECT count(*) FROM pg_publication_tables WHERE schemaname='public' AND tablename='fx_keep';")
@@ -1596,6 +1908,118 @@ FRESHSTUB
     return 0
   }
 
+  # ═══ ARM 19 (A1) — ZERO censused survivors: the closure still refuses ══════
+  # ⛔ THE ARM THIS SCRIPT MOST NEEDED AND DID NOT HAVE. Eighteen arms all ran with
+  # a NON-EMPTY survivor census, so the `ARRAY[NULL::text]` rendering of the empty
+  # case was never executed by any of them — and in that case the B2 closure did
+  # not refuse ANYTHING. A guard that is off exactly when the census is empty is a
+  # guard that is off exactly when there is least to lose track of.
+  arm_empty_survivor_census() {
+    setup_lane no-survivors || return 1
+    local n
+    # The premise, measured: if this overlay leaves ANY survivor behind, the arm is
+    # exercising the ordinary non-empty path and proves nothing about A1.
+    n=$(lane_q "SELECT (SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace s ON s.oid=c.relnamespace JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_namespace pn ON pn.oid=p.pronamespace WHERE NOT t.tgisinternal AND s.nspname<>'public' AND pn.nspname='public')
+                 + (SELECT count(*) FROM pg_policies WHERE schemaname<>'public' AND (coalesce(qual,'') LIKE '%public.%' OR coalesce(with_check,'') LIKE '%public.%'))
+                 + (SELECT count(*) FROM pg_publication_tables WHERE schemaname='public');")
+    [ "$n" = "0" ] || { echo "MEASURE_FAIL: the overlay left ${n} survivor(s) behind, so this arm runs the NON-empty path and measures nothing about the empty one."; return 1; }
+    local out="$SELFTEST_TMPD/a19.out" rc=0
+    arm_env restore a19 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: with ZERO censused survivors the restore exited ${rc}, expected 1. This is A1: the closure rendered ARRAY[NULL::text], every \`r.key = ANY (v_keys)\` was SQL NULL, plpgsql read \`IF NULL\` as false, and every cross-schema dependent was CASCADE-dropped into a COMMITTED restore."; return 1; }
+    grep -aq 'survivors censused: 0' "$out" \
+      || { echo "MEASURE_FAIL: the run does not report a survivor census of 0 — the empty branch was not the one exercised"; return 1; }
+    grep -aq 'analytics.v_leftover' "$out" \
+      || { echo "MEASURE_FAIL: the abort does not NAME the lost dependent"; return 1; }
+    grep -aq 'NOT a censused survivor' "$out" \
+      || { echo "MEASURE_FAIL: the abort is not the derived-census closure's — it stopped for some OTHER reason, so the empty-array case is still unmeasured"; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_views WHERE schemaname='analytics' AND viewname='v_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: analytics.v_leftover is GONE (count=${n}) — it was CASCADE-dropped and the transaction committed anyway."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — the transaction did not roll back."; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 20 (A2) — the marker names NEITHER TEST NOR PROD ══════════════════
+  # ⛔ THE THIRD BRANCH OF THE IDENTITY REFUSAL, PREVIOUSLY UNARMED. Arm 2 covers
+  # a NULL marker and arm 3 a marker matching BOTH regexes; the EXPECT branch —
+  # a marker that is present, readable, and simply does not name TEST — had no
+  # arm at all, so deleting it left the self-test green. That is the branch a
+  # THIRD project's database would land in.
+  #
+  # `quantalyze staging fixture` matches neither RESTORE_EXPECT_MARKER_RE (whole
+  # word `test`; `staging` contains none) nor RESTORE_REFUSE_MARKER_RE (`prod`).
+  arm_marker_foreign() {
+    setup_lane || return 1
+    psql "$lane_dsn" -X -q -v ON_ERROR_STOP=1 \
+      -c "COMMENT ON DATABASE ${lane_db} IS 'quantalyze staging fixture';" >/dev/null
+    local out="$SELFTEST_TMPD/a20.out" rc=0
+    arm_env preflight a20 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: a marker naming neither TEST nor PROD exited ${rc}, expected 1"; return 1; }
+    grep -aq 'does not name TEST' "$out" \
+      || { echo "MEASURE_FAIL: the refusal is not the EXPECT one — the NULL or the PROD branch fired instead, so the 'present but foreign' branch is still unmeasured"; return 1; }
+    # ⛔ The marker TEXT must NOT be echoed: this log is public and the marker can
+    # name a project. The refusal says so; this asserts it kept its word.
+    if grep -aq 'staging fixture' "$out"; then
+      echo "MEASURE_FAIL: the run PRINTED the identity marker's text. This log is public and the marker names a project."
+      return 1
+    fi
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — the marker refusal did NOT fire before the first write."; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 21 (A3) — the migration corpus: three refusals, none of them armed ═
+  # Refusal 4 has three exits and none had an arm. The charset one is the ONLY
+  # interpolation gate in this script — every basename below it is pasted into an
+  # INSERT — so an unarmed charset guard is an unarmed injection boundary.
+  #
+  # Pure filesystem: all three fire before the first connection, so no lane is
+  # needed and the legs are cheap.
+  arm_bad_migration_corpus() {
+    local out rc
+    local scratch="$SELFTEST_TMPD/mig-arm21"
+    rm -rf "$scratch"
+
+    # (a) the charset refusal. `;` is the character that would end the INSERT and
+    #     start a statement of the filename's choosing.
+    mkdir -p "$scratch/bad"
+    : > "$scratch/bad/20260101000000_bad;name.sql"
+    local ARM_MIGRATIONS_DIR="$scratch/bad"
+    out="$SELFTEST_TMPD/a21a.out"; rc=0
+    arm_env preflight a21a > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (a): a migration filename carrying ';' exited ${rc}, expected 1. That basename is interpolated into an INSERT."; return 1; }
+    grep -aq 'refuses to interpolate into SQL' "$out" \
+      || { echo "MEASURE_FAIL (a): the refusal is not the charset one — some other guard fired, so the only interpolation gate in this script is unmeasured"; return 1; }
+    grep -aq '20260101000000_bad;name' "$out" \
+      || { echo "MEASURE_FAIL (a): the refusal does not echo the offending basename, so a reader cannot see which file to fix"; return 1; }
+
+    # (b) the EMPTY corpus. Zero migrations means the glob drifted, not that the
+    #     ledger is clean — a seed of nothing is not a restore.
+    mkdir -p "$scratch/empty"
+    ARM_MIGRATIONS_DIR="$scratch/empty"
+    out="$SELFTEST_TMPD/a21b.out"; rc=0
+    arm_env preflight a21b > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (b): an EMPTY migrations dir exited ${rc}, expected 1. An empty repo-side list would seed an empty ledger and report success."; return 1; }
+    grep -aq 'The repo-side list is EMPTY' "$out" \
+      || { echo "MEASURE_FAIL (b): the refusal is not the empty-corpus one"; return 1; }
+
+    # (c) the dir is ABSENT altogether — a moved directory must not read as a
+    #     clean one.
+    ARM_MIGRATIONS_DIR="$scratch/does-not-exist"
+    out="$SELFTEST_TMPD/a21c.out"; rc=0
+    arm_env preflight a21c > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (c): an ABSENT migrations dir exited ${rc}, expected 1"; return 1; }
+    grep -aq 'migrations dir not found' "$out" \
+      || { echo "MEASURE_FAIL (c): the refusal does not say the migrations dir is missing"; return 1; }
+    return 0
+  }
+
   run_arm "1  RED   credential absent — a missing DSN is a hard failure, never a skip" 0 arm_credential_absent
   run_arm "2  RED   identity marker NULL — refused before any write" 0 arm_marker_null
   run_arm "3  RED   identity marker names PROD — refused, loudly" 0 arm_marker_prod
@@ -1615,11 +2039,21 @@ FRESHSTUB
   run_arm "16 ----- harness calibration: run_arm can report FAIL, and the flip inverts" 0 arm_harness_calibration
   run_arm "17 RED   an object class the derived-census whitelist does not resolve" 0 arm_unresolvable_class
   run_arm "18 GREEN a default ACL on public round-trips instead of falsely aborting" 0 arm_default_acl
+  run_arm "19 RED   ZERO censused survivors — the closure still refuses (A1)" 0 arm_empty_survivor_census
+  run_arm "20 RED   identity marker names neither TEST nor PROD (A2)" 0 arm_marker_foreign
+  run_arm "21 RED   migration corpus: bad charset, empty, absent (A3)" 0 arm_bad_migration_corpus
 
   release_mutex
 
   printf '%s\n' "${results[@]}"
-  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — seven refusals fire before any write, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently, the derived census names an unlisted dependent, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, harness calibrated)"
+  # ⛔ A4 — THE SUCCESS LINE PRINTS ONLY AFTER BOTH FAILURE CHECKS HAVE PASSED.
+  # It used to print ABOVE them, so a 15-of-18 run emitted a full success
+  # narrative — "seven refusals fire before any write, preflight rolls back
+  # byte-for-byte …" — and only then the FAIL line. Both sibling gates order it
+  # this way (scripts/test-ledger-drift-check.sh:667-671,
+  # scripts/prod-body-drift-check.sh:560-564). Below both checks, `pass`, `total`
+  # and EXPECTED_ARMS are all equal by construction, so the denominator is the
+  # ratchet and says so.
   if [ "$total" -ne "$EXPECTED_ARMS" ]; then
     echo "SELF-TEST FAIL: ${total} arms ran but EXPECTED_ARMS is ${EXPECTED_ARMS}. An arm that disappeared is a RED, not a smaller PASSED."
     return 1
@@ -1628,6 +2062,7 @@ FRESHSTUB
     echo "SELF-TEST FAIL: ${pass}/${total} arms behaved as declared."
     return 1
   fi
+  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — seven refusals fire before any write and every branch of every one of them is armed, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, harness calibrated)"
   return 0
 }
 

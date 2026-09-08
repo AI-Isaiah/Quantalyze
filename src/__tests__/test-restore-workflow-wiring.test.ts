@@ -2,9 +2,12 @@
  * test-restore-from-baseline WIRING PIN — Phase 164.8 plan 03.
  *
  * ⛔ THE DEFECT THIS FILE CATCHES. `scripts/restore-test-from-baseline.sh` proves its
- * own contract with `--self-test`: eighteen counted arms, each with a falsifier that
- * was observed RED (`164.8-02-SUMMARY.md`). NONE of that survives a WORKFLOW that
- * invokes it differently. A second trigger key, a commented-out `environment:`, a
+ * own contract with `--self-test`: every arm counted against its own `EXPECTED_ARMS`
+ * constant, each with a falsifier that was observed RED (`164.8-02-SUMMARY.md`). The
+ * tally is printed by `bash scripts/restore-test-from-baseline.sh --self-test`; a
+ * numeral restated here would be stale the first time an arm is added, so it is not.
+ * NONE of that survives a WORKFLOW that invokes it differently. A second trigger key,
+ * a commented-out `environment:`, a
  * backup step that drifts below the script step, a fork-PR `exit 0` surviving inside
  * the credential branch, or an ancestry assert that passes on a non-ancestor sha —
  * each turns a proven mechanism into a destructive act with no proof around it. The
@@ -29,6 +32,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -39,9 +43,11 @@ import { join } from "node:path";
 const ROOT = process.cwd();
 const WF_PATH = ".github/workflows/test-restore-from-baseline.yml";
 const CI_PATH = ".github/workflows/ci.yml";
+const SCRIPT_PATH = "scripts/restore-test-from-baseline.sh";
 const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
 const WF = read(WF_PATH);
 const CI = read(CI_PATH);
+const SCRIPT = read(SCRIPT_PATH);
 
 const RESTORE_JOB = "restore";
 const GUARD_JOB = "dispatch-guard";
@@ -169,6 +175,23 @@ function stepBody(text: string, name: string): string {
   // upload step and every key assertion below would have had nothing to look at).
   const m = `${text}\n  __end_of_file__:\n`.match(re);
   return m ? m[0] : "";
+}
+
+/**
+ * The `-e '…'` expressions of the redaction step's sed program, in order.
+ *
+ * Sliced between `if sed -i -E` and the `; then` that closes the command, so an
+ * unrelated `-e '…'` elsewhere in the step cannot pad the list. Returns [] when the
+ * anchors are gone, and its one consumer asserts a non-empty exact length — an empty
+ * program would make "the DSN was scrubbed" vacuously reportable.
+ */
+function redactExpressions(text: string): string[] {
+  const body = text.slice(text.indexOf("- name: Redact connection metadata"));
+  const a = body.indexOf("if sed -i -E");
+  if (a < 0) return [];
+  const b = body.indexOf("; then", a);
+  if (b < 0) return [];
+  return [...body.slice(a, b).matchAll(/-e '([^']*)'/g)].map((m) => m[1]);
 }
 
 /** Every shape that could turn a failure into a pass, reported BY NAME. */
@@ -522,6 +545,242 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     });
   });
 
+  describe("the redaction is fail-closed: nothing unredacted reaches a PUBLIC artifact", () => {
+    const REDACT = "Redact connection metadata from the backup directory (public artifact)";
+    const UPLOAD = "Upload the pre-restore backup (schema + ledger; NOT data)";
+
+    it("the redaction step exists, runs on every outcome, and runs BEFORE the upload", () => {
+      // ⛔ WHY THE ORDER IS THE WHOLE CONTROL. Both steps are `if: always()`. In a
+      // job, `always()` steps run in FILE ORDER — so the only thing that makes the
+      // redaction a precondition of the upload rather than a bystander is that it is
+      // written above it. Drift the upload above the redaction and every assertion
+      // about scrubbing stays true while the unredacted channels ship anyway.
+      const b = jobBlock(WF, RESTORE_JOB);
+      expect(stepIndex(b, REDACT), "the redaction step is gone").toBeGreaterThan(-1);
+      expect(stepIndex(b, UPLOAD), "the upload step is gone").toBeGreaterThan(-1);
+      expect(
+        liveLines(stepBody(WF, REDACT)).some((l) => l.trim() === "if: always()"),
+        "the redaction step no longer carries `if: always()` — on an ABORTED run it would not run at all, and the aborted run is exactly the one whose channels hold a psql connect failure naming the TEST pooler host",
+      ).toBe(true);
+      calibrate(
+        "the redaction step precedes the upload step",
+        (s) =>
+          s
+            .replace(`- name: ${REDACT}`, "- name: __SWAP__")
+            .replace(`- name: ${UPLOAD}`, `- name: ${REDACT}`)
+            .replace("- name: __SWAP__", `- name: ${UPLOAD}`),
+        (t) => {
+          const jb = jobBlock(t, RESTORE_JOB);
+          const r = stepIndex(jb, REDACT);
+          const u = stepIndex(jb, UPLOAD);
+          return r > -1 && u > -1 && r < u;
+        },
+      );
+      calibrate(
+        "the redaction runs on an aborted run too",
+        (s) => s.replace(`      - name: ${REDACT}\n        if: always()\n`, `      - name: ${REDACT}\n`),
+        (t) => liveLines(stepBody(t, REDACT)).some((l) => l.trim() === "if: always()"),
+      );
+    });
+
+    it("the scrubbed channel set is exactly .err/.log/.out — never the .sql/.csv the reversal replays", () => {
+      // ⭐ THE SCOPE IS AS LOAD-BEARING AS THE SCRUB. A substitution inside
+      // `schema.sql` or `ledger.csv` would corrupt the very bytes the reversal recipe
+      // replays, so those two are deliberately left byte-exact; the price is that the
+      // glob must never widen. Both the destroy loop (`withhold_channels`) and the
+      // redact loop are pinned, because a widened destroy loop is a reversal recipe
+      // deleted on the way to the artifact.
+      const body = stepBody(WF, REDACT);
+      expect(body, "the redaction step body could not be extracted").not.toBe("");
+      const globLines = liveLines(body).filter((l) => l.includes('"${outdir}"/*.'));
+      expect(
+        globLines.length,
+        "the redaction step no longer has exactly two channel-glob loops (withhold_channels and the redact loop)",
+      ).toBe(2);
+      for (const l of globLines) {
+        expect(l).toContain('"${outdir}"/*.err');
+        expect(l).toContain('"${outdir}"/*.log');
+        expect(l).toContain('"${outdir}"/*.out');
+        expect(
+          /\*\.(sql|csv)/.test(l),
+          `a channel loop widened to .sql or .csv — those are the reversal recipe and must stay byte-exact: ${l.trim()}`,
+        ).toBe(false);
+      }
+      calibrate(
+        "the channel-glob pin bites on a widening to .sql",
+        (s) =>
+          s.replace(
+            'for f in "${outdir}"/*.err "${outdir}"/*.log "${outdir}"/*.out; do',
+            'for f in "${outdir}"/*.err "${outdir}"/*.log "${outdir}"/*.out "${outdir}"/*.sql; do',
+          ),
+        (t) =>
+          liveLines(stepBody(t, REDACT))
+            .filter((l) => l.includes('"${outdir}"/*.'))
+            .every((l) => !/\*\.(sql|csv)/.test(l)),
+      );
+    });
+
+    it("the step's OWN sed program scrubs a DSN — EXECUTED against a fixture log", () => {
+      // ⭐ EXECUTED, NOT GREPPED. The expressions are lifted OUT of the YAML and run,
+      // so a step that keeps the strings and guts the program is a RED here. Run as
+      // `sed -E` (no `-i`): the step's `sed -i -E` form is GNU-only — BSD sed reads
+      // the `-E` as `-i`'s backup-extension argument and never enables extended
+      // regexes — and this suite must measure the same thing on a developer's macOS
+      // as on the ubuntu runner. The workflow itself only ever runs on ubuntu.
+      const exprs = redactExpressions(WF);
+      expect(
+        exprs.length,
+        "the redaction step's sed program no longer carries its five expressions (DSN credentials, host=, user=, `server at \"…\"`, `for user \"…\"`)",
+      ).toBe(5);
+
+      const scrub = (program: string[], input: string): string => {
+        const dir = mkdtempSync(join(tmpdir(), "redact-"));
+        const f = join(dir, "psql.err");
+        writeFileSync(f, input);
+        const r = spawnSync("sed", ["-E", ...program.flatMap((e) => ["-e", e]), f], {
+          encoding: "utf8",
+        });
+        rmSync(dir, { recursive: true, force: true });
+        if (r.status !== 0) throw new Error(`sed failed: ${r.stderr}`);
+        return r.stdout ?? "";
+      };
+
+      const FIXTURE =
+        'psql: error: connection to server at "db.abcdefgh.supabase.co" (10.11.12.13), port 5432 failed: FATAL: password authentication failed for user "postgres.abcdefgh"\n' +
+        "DSN=postgresql://postgres.abcdefgh:s3cr3tpassw0rd@db.abcdefgh.supabase.co:5432/postgres\n" +
+        "host=db.abcdefgh.supabase.co user=postgres.abcdefgh\n";
+
+      const out = scrub(exprs, FIXTURE);
+      for (const secret of ["s3cr3tpassw0rd", "postgres.abcdefgh"]) {
+        expect(
+          out.includes(secret),
+          `the redaction left \`${secret}\` in the channel. This artifact is world-readable on a PUBLIC repo; the DB user and the password are exactly what must not survive.\n${out}`,
+        ).toBe(false);
+      }
+      expect(
+        out.includes('server at "db.abcdefgh.supabase.co"'),
+        "the redaction left psql's `server at \"<host>\" (<ip>)` shape intact — the TEST pooler host and its IP are disclosed",
+      ).toBe(false);
+      expect(out).toContain("***");
+
+      // CALIBRATION — drop the DSN expression and the credential SURVIVES. Without
+      // this twin, `out.includes(secret) === false` could be reported by a fixture
+      // that never carried the secret in the first place.
+      const withoutDsn = exprs.filter((e) => !e.includes("postgres(ql)?://"));
+      expect(
+        withoutDsn.length,
+        "CALIBRATION: no expression matched the DSN shape, so the twin removes nothing",
+      ).toBe(exprs.length - 1);
+      expect(
+        scrub(withoutDsn, FIXTURE).includes("s3cr3tpassw0rd"),
+        "CALIBRATION: the password survived neither program — the fixture does not exercise the DSN expression, so the pin above proves nothing",
+      ).toBe(true);
+    });
+
+    it("a FAILED substitution DESTROYS the channels and exits 1 — EXECUTED, forced to fail", () => {
+      // ⛔ THE CONTROL THIS FILE EXISTS FOR. Both this step and the upload are
+      // `if: always()`, so a redaction that merely FAILED would make the run red while
+      // the unredacted channels shipped anyway — a control whose failure still
+      // publishes the thing it exists to withhold is not a control. The step's answer
+      // is to DESTROY the .err/.log/.out channels on any failure. That is executed
+      // here, with the substitution forced to fail (`false` in place of `sed`) so the
+      // failure is deterministic on every platform rather than depending on which
+      // sed the developer has.
+      const script = extractRunScript(WF, REDACT);
+      expect(
+        script.includes("if sed -i -E \\"),
+        "the redaction step's substitution is no longer the `if sed -i -E \\` form this twin forces to fail — re-anchor the mutation rather than deleting the twin",
+      ).toBe(true);
+      const forced = script.replace("if sed -i -E \\", "if false -i -E \\");
+
+      const runnerTemp = mkdtempSync(join(tmpdir(), "redact-run-"));
+      const outdir = join(runnerTemp, "test-backup");
+      mkdirSync(outdir);
+      const channels = ["psql.err", "dump.log", "transaction.out"];
+      const keepers = ["schema.sql", "ledger.csv"];
+      for (const f of [...channels, ...keepers]) {
+        writeFileSync(join(outdir, f), "host=db.abcdefgh.supabase.co\n");
+      }
+      const scriptFile = join(runnerTemp, "redact.sh");
+      writeFileSync(scriptFile, forced);
+      const r = spawnSync("bash", [scriptFile], {
+        encoding: "utf8",
+        env: { ...process.env, RUNNER_TEMP: runnerTemp },
+      });
+      const surviving = readdirSync(outdir).sort();
+      rmSync(runnerTemp, { recursive: true, force: true });
+
+      expect(
+        r.status,
+        `a failed substitution did not fail the step (exit ${r.status}). The upload is \`if: always()\`; a green redaction step is the only thing that makes the artifact safe to publish.\n${r.stdout}${r.stderr}`,
+      ).toBe(1);
+      for (const c of channels) {
+        expect(
+          surviving.includes(c),
+          `\`${c}\` SURVIVED a failed redaction and would be uploaded unredacted to a world-readable artifact`,
+        ).toBe(false);
+      }
+      expect(
+        surviving,
+        "the fail-closed path destroyed the reversal recipe too — schema.sql and ledger.csv carry no connection metadata and are what makes the act reversible",
+      ).toEqual(keepers.slice().sort());
+      expect(`${r.stdout}${r.stderr}`).toContain("::error::");
+      expect(`${r.stdout}${r.stderr}`).toContain("WITHHELD");
+    });
+  });
+
+  describe("B4 — the workflow's marker gate is coupled to the script's constants", () => {
+    it("both hard-coded regexes still equal the script's RESTORE_*_MARKER_RE defaults", () => {
+      // ⛔ THE FAILURE DIRECTION. The workflow hard-codes COPIES of two script
+      // defaults, and this step is the EARLIER and CHEAPER of the two gates: it
+      // refuses before `supabase db dump` reads anything. Tighten the script's
+      // defaults without tightening these copies and the cheap gate silently becomes
+      // the WEAKER one — it admits a database the script would refuse, after the
+      // backup has already read it and written it into a PUBLIC artifact. Nothing but
+      // this pin couples them.
+      //
+      // ⭐ READ BY SYMBOL, never by line number: the script's constants move.
+      const defaultOf = (name: string): string => {
+        const m = SCRIPT.match(
+          new RegExp(`^${name}="\\$\\{${name}:-(.*)\\}"$`, "m"),
+        );
+        expect(
+          m,
+          `${SCRIPT_PATH} no longer declares \`${name}\` as a \`\${${name}:-<default>}\` assignment on one line. This pin reads it by SYMBOL on purpose — re-anchor it rather than restating the regex here.`,
+        ).not.toBeNull();
+        return (m as RegExpMatchArray)[1];
+      };
+      const expectRe = defaultOf("RESTORE_EXPECT_MARKER_RE");
+      const refuseRe = defaultOf("RESTORE_REFUSE_MARKER_RE");
+
+      const marker = stepBody(WF, "Which database am I on");
+      expect(marker, "the `Which database am I on` step is gone").not.toBe("");
+      const greps = liveLines(marker)
+        .map((l) => l.match(/grep -Eiq '([^']*)'/))
+        .filter((m): m is RegExpMatchArray => m !== null)
+        .map((m) => m[1]);
+      expect(
+        greps,
+        "the marker step's two `grep -Eiq '…'` tests are no longer exactly the script's expect-then-refuse defaults, in that order. Whichever side was tightened, tighten the other: this step runs BEFORE the backup, so a workflow regex looser than the script's admits a database the script would refuse.",
+      ).toEqual([expectRe, refuseRe]);
+
+      // CALIBRATION — tighten the SCRIPT's default only, exactly the one-sided edit
+      // this pin exists to catch, and the pin must flip.
+      const tightened = SCRIPT.replace(
+        "RESTORE_REFUSE_MARKER_RE:-prod",
+        "RESTORE_REFUSE_MARKER_RE:-prod|production",
+      );
+      expect(tightened, "CALIBRATION: the mutation changed nothing").not.toBe(SCRIPT);
+      const mutatedRefuse = (tightened.match(
+        /^RESTORE_REFUSE_MARKER_RE="\$\{RESTORE_REFUSE_MARKER_RE:-(.*)\}"$/m,
+      ) as RegExpMatchArray)[1];
+      expect(
+        greps[1] === mutatedRefuse,
+        "CALIBRATION: the workflow's copy matched the TIGHTENED script default too, so the pin cannot see a one-sided tightening",
+      ).toBe(false);
+    });
+  });
+
   describe("no softening: a failure here can never read as a pass", () => {
     it("no softening token survives in the restore job (mutex steps excluded, see the comment)", () => {
       expect(
@@ -810,5 +1069,94 @@ exit 64
     expect(extractRunScript(WF, READER)).toContain(
       "gh run list --workflow supabase-migrate.yml --branch main -L 1",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The post-verify's ErrMissingLocal diagnosis, and the ORDER that makes it
+// reachable.
+//
+// ⛔ WHY THIS EXISTS. Until 2026-09-08 the third assertion in this step was
+// `grep -q 'Reverted'`. That capitalised token occurs ZERO times in the pinned
+// 2.98.2 binary (measured by installing it and running `strings -a <bin> |
+// grep -cF Reverted`) and zero times in 2.84.2. It could never match: it failed
+// OPEN and was not evidence about anything. The wording the CLI actually emits
+// comes from `internal/migration/up.suggestRevertHistory`.
+//
+// ⛔ AND WHY ORDER IS THE LOAD-BEARING HALF. ErrMissingLocal exits NON-ZERO, so a
+// generic `rc` check placed first consumes it and reports the wrong cause — "the
+// CLI could not read the ledger" for what is really a remote row with no local
+// file. Swapping the two branches back would leave every string below present
+// and every specific diagnosis unreachable, which is why the pin is on the
+// ORDER and is proved by EXECUTION, not by substring presence alone.
+// ---------------------------------------------------------------------------
+describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
+  const STEP = "Post-verify with the Supabase CLI — ledger SHAPE";
+  const SENTENCE = "Remote migration versions not found in local migrations directory.";
+
+  it("the CLI's own ErrMissingLocal sentence is tested BEFORE the generic rc branch", () => {
+    const body = extractRunScript(WF, STEP);
+    const at = body.indexOf(`grep -aqF '${SENTENCE}'`);
+    expect(
+      at,
+      `the post-verify no longer tests for the CLI's ErrMissingLocal sentence. Do not reinstate a \`Reverted\` grep in its place: that token does not exist in the pinned binary.`,
+    ).toBeGreaterThan(-1);
+    expect(
+      at,
+      "the ErrMissingLocal test no longer precedes the generic `rc` branch, so the specific diagnosis is unreachable — a non-zero exit is consumed by the general message first",
+    ).toBeLessThan(body.indexOf('if [ "${rc}" -ne 0 ]'));
+
+    // The dead token must not come back — checked on the step's LIVE lines only.
+    // Scanning the whole file would match the comment above the step that RECORDS
+    // why the grep was removed, which is the note a future reader most needs.
+    const live = body
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("#"))
+      .join("\n");
+    expect(
+      /grep [^\n]*'Reverted'/.test(live),
+      "a `grep 'Reverted'` was reinstated. Measured 2026-09-08: zero occurrences of that capitalised token in the pinned 2.98.2 binary, so the test cannot fail and is not evidence.",
+    ).toBe(false);
+  });
+
+  it("EXECUTED — a missing-local dry run reports the specific cause, not the generic one", () => {
+    const body = extractRunScript(WF, STEP);
+    const runWithStub = (stdout: string, rc: number): string => {
+      const dir = mkdtempSync(join(tmpdir(), "postverify-"));
+      const bin = join(dir, "bin");
+      const runnerTemp = join(dir, "tmp");
+      for (const d of [bin, runnerTemp]) mkdirSync(d, { recursive: true });
+      writeFileSync(join(bin, "supabase"), `#!/bin/bash\ncat <<'EOF'\n${stdout}\nEOF\nexit ${rc}\n`);
+      chmodSync(join(bin, "supabase"), 0o755);
+      const script = join(dir, "step.sh");
+      writeFileSync(script, body);
+      const r = spawnSync("bash", [script], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+          RUNNER_TEMP: runnerTemp,
+          TEST_DB_SESSION_URL: "postgresql://u:p@h:5432/postgres",
+        },
+      });
+      rmSync(dir, { recursive: true, force: true });
+      return `${r.stdout ?? ""}${r.stderr ?? ""}`;
+    };
+
+    const out = runWithStub(`${SENTENCE}\nTry supabase migration repair --status reverted`, 1);
+    expect(
+      out.includes("remote migration versions with no local file"),
+      `a missing-local dry run did not produce the specific diagnosis. If it produced the generic "could not read the ledger" instead, the two branches have been reordered.\n${out}`,
+    ).toBe(true);
+    expect(
+      out.includes("The CLI could not read the ledger"),
+      "the generic rc message fired for a missing-local run — it consumed the specific case, which is exactly the ordering defect this pin exists to catch",
+    ).toBe(false);
+
+    // CALIBRATION — a genuine connection failure must still reach the generic
+    // branch, so the pin above is measuring ORDER and not just string presence.
+    const generic = runWithStub("Connection refused", 1);
+    expect(generic.includes("The CLI could not read the ledger")).toBe(true);
+    expect(generic.includes("remote migration versions with no local file")).toBe(false);
   });
 });
