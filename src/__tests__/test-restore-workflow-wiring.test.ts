@@ -1240,6 +1240,18 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
       "the activity gate went back to `state IN (...)`. That shape is fail-open by construction — measured on a PG16 lane, a busy session with state 'disabled' passed the gate.",
     ).toBe(false);
 
+    // ⛔ AND the gate must exclude OUR OWN mutex holder, or it can never pass.
+    // `Acquire shared-test-db mutex` leaves a background psql running
+    // `SELECT pg_sleep(6000)` — a client backend, different pid, `active` for the whole
+    // hold. MEASURED on run 34265750211, the first real dispatch: the gate counted it
+    // and refused itself ("1 other client session(s) are not idle"; the 1 was ours).
+    // Safe rather than a loophole: PGAPPNAME marks only the holder, and any session
+    // carrying it is either ours or another run BLOCKED on the lock we hold.
+    expect(
+      body.includes("application_name <> 'ci-shared-test-db-mutex'"),
+      "the activity gate no longer excludes the mutex holder. Without this it counts the background psql that HOLDS the advisory lock for this very act, so the count is never 0 and the gate can never pass — measured on run 34265750211.",
+    ).toBe(true);
+
     // Plain `idle` is the one exclusion, and it must stay excluded: pooled PostgREST
     // connections park there permanently and would make the gate unpassable.
     expect(body).toContain("'idle'");

@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.77.24.0] - 2026-09-08 — the activity gate counted its own mutex holder
+
+The first real dispatch of `mode=restore` (run 34265750211, on main at 20256c79)
+refused with `shared TEST is NOT quiet: 1 other client session(s) are not idle`.
+Backup, restore and post-verify were all skipped, so TEST was untouched — the gate
+failed in the safe direction. But the 1 was OURS.
+
+- **`Acquire shared-test-db mutex` leaves a background psql running
+  `SELECT pg_sleep(6000)`** to hold the advisory lock for the whole act. That session
+  is a client backend, has a different pid, and is `active` for the entire 100-minute
+  hold — so the activity probe counted it and the gate refused itself. As written it
+  could NEVER have passed. That is as broken as fail-open: a gate that always refuses
+  is a gate someone eventually disables.
+- **Fixed by excluding `application_name <> 'ci-shared-test-db-mutex'`.** Safe rather
+  than a loophole: PGAPPNAME marks only the mutex holder, and any session carrying that
+  name is either our own holder or another run BLOCKED on the lock we are holding —
+  neither can write to TEST while we hold it. A genuine worker (e2e, another job's
+  psql) does not carry the name and still counts.
+- **Both directions measured** on a throwaway PG16 lane, driving the step's real bytes
+  and starting a holder exactly as the workflow does (PGAPPNAME + `pg_advisory_lock`
+  + `pg_sleep`): holder alone → exit 0; holder plus a genuine `idle in transaction`
+  session → exit 1. The gate is unblocked without being blinded.
+
+Second defect in this gate found by running it rather than reasoning about it — the
+first (a fail-open state enumeration) was caught by the pre-landing checklist. Both
+were in the direction the tests did not cover.
+
 ## [0.77.23.0] - 2026-09-08 — the TEST activity gate moves INSIDE the mutex
 
 Phase 164.8 plan 04 halted at its own activity gate. The gate as specified could not
