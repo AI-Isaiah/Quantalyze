@@ -1,0 +1,971 @@
+name: TEST restore from baseline
+
+# Rebuild the SHARED TEST project's `public` schema from `supabase/schema/baseline.sql`
+# at the sha `supabase/schema/BASELINE.md` records, and seed TEST's migration ledger
+# CLI-shaped, so that `supabase db push` can run natively against TEST afterwards.
+# Phase 164.8, CONTEXT.md § SUPERSEDING DECISION 2026-09-08 (the founder's decision,
+# taken against the planner's stated recommendation and recorded as such).
+#
+# ⛔ DISPATCH-ONLY AND FOUNDER-RUN. There is no `push`, no `schedule` and no
+# `pull_request` trigger, and there never may be: this workflow's `restore` mode runs
+# `DROP SCHEMA public CASCADE` against a database OTHER PEOPLE'S CI USES. It is
+# dispatched by hand, by the founder, at the moment of execution — CONTEXT safety
+# rule 4. `src/__tests__/test-restore-workflow-wiring.test.ts` pins the single
+# trigger key, and its calibration twin proves that pin can fail.
+#
+# ⛔ WHAT `mode=restore` DESTROYS, AND WHAT CANNOT BE PUT BACK:
+#
+#   SCHEMA AND LEDGER ARE REVERSIBLE from the backup artifact (90-day retention;
+#   `psql -f` the schema file after a manual drop, `\copy` the ledger CSV back — a
+#   founder act, written as prose). DATA IS NOT: every row in every `public` table on
+#   TEST is destroyed and no data dump is taken (a data dump of TEST to a public-repo
+#   artifact would be an information-disclosure finding of its own; e2e specs re-seed
+#   their own rows). CONTEXT safety rule 3 names ledger and schema; this is that rule,
+#   no wider.
+#
+#   Concretely, per decision D-16 and `e2e/helpers/seed-test-project.ts`, the e2e
+#   specs re-seed the rows they need on every run, so they recover by themselves.
+#   Pre-existing HAND-CREATED rows do not, and neither do `public.profiles` rows
+#   belonging to existing `auth.users`: `auth` is not in the dropped schema, so
+#   `auth.users` itself SURVIVES, while its profile row does not, and the re-created
+#   `on_auth_user_created` trigger only covers FUTURE signups. Anyone relying on a
+#   hand-made TEST account will find it half-present afterwards. That is the cost the
+#   founder is accepting at the Plan 04 checkpoint, and it is not reversible from this
+#   workflow's artifact.
+#
+# ── REQUIRED ONE-TIME CONFIGURATION ─────────────────────────────────────────
+#   * GitHub Environment `Test` (Settings → Environments). It EXISTS. Measured
+#     2026-09-08: one protection rule, a deployment-branch policy allowing `main`
+#     only; `required_reviewers=0`, `wait_timer=0`, `secrets=0`, `variables=0`.
+#     ⛔ It is NOT an approval gate and must not be described as one — the founder
+#     keeps it for the durable Deployments AUDIT record it produces. Do NOT add
+#     reviewers to it, and do NOT set `protected_branches: true`: `main` carries no
+#     branch protection on this repo (measured: the protection API returns 404), so
+#     that setting would permit NOTHING. The approval surface is the dispatch itself
+#     plus Plan 04's founder `checkpoint:decision`.
+#   * Repository secret `TEST_SUPABASE_DB_URL` — already present (set 2026-05-13),
+#     the Supavisor pooler DSN on port 6543, rewritten to the session-mode port 5432
+#     in-job exactly as `ci.yml` rewrites it. ⛔ It is a REPO-level secret and must
+#     STAY one: 33 sites in `ci.yml` and 6 in `mutex-probe.yml` read it from jobs that
+#     declare no environment, and an environment secret of the same name would shadow
+#     it for environment-bound jobs only — one name resolving to two databases
+#     depending on the job.
+#
+# ── THIS LOG IS PUBLIC ──────────────────────────────────────────────────────
+# The repository is public and Actions logs are world-readable. Every step below
+# prints NAMES AND COUNTS ONLY: object names, schema names, row counts, sha256
+# values, byte sizes. NEVER a DSN, NEVER a host, NEVER a password, NEVER the identity
+# marker's text — not even when the marker is the reason for a refusal. psql's stderr
+# is redacted with the same three patterns `ci.yml`'s acquire step uses (158-REVIEW
+# WR-08) before it reaches the log or the artifact.
+#
+# ── DISPATCH RECIPE (this is what Plan 04 runs, verbatim) ───────────────────
+#
+# ⚠️ FIRST: a `workflow_dispatch` workflow is dispatchable only once its file is on
+# the DEFAULT branch. Until this file is merged to `main`, `gh workflow run` returns
+# "could not find any workflows named …". Plan 04's first checkpoint is therefore
+# "merge this PR", not "dispatch".
+#
+#   (1) MEASURE. Preflight runs the WHOLE transaction and then ROLLS BACK, so it is
+#       the measurement the founder decides on — not a lighter check:
+#
+#           gh workflow run test-restore-from-baseline.yml --ref main -f mode=preflight
+#
+#       Read the run log for, in order:
+#         * `pre-census` — the counts and the survivor list as TEST is TODAY;
+#         * every `survivor` line whose key begins `pub:public.` — a realtime
+#           publication row naming a table `baseline.sql` does not re-create is a
+#           PRE-WRITE REFUSAL the preflight will name (W3). The remedy is a
+#           founder-run `ALTER PUBLICATION supabase_realtime DROP TABLE public.<t>`
+#           recorded in the RESTORE log, then re-preflight. This workflow will never
+#           drop a publication row by itself;
+#         * `expected shape` — the counts derived from the dump text;
+#         * `filtered:` — the one line class removed from the dump;
+#         * `post-census == pre-census (byte-for-byte)` and `mode=preflight` — the
+#           rollback MEASURED, which is the whole point of the mode.
+#
+#   (2) DECIDE. The founder reads (1) and decides. There is no automatic promotion
+#       from a green preflight to a restore, by design.
+#
+#   (3) EXECUTE. `confirm` must equal the first 8 hex characters of the sha256 row in
+#       `supabase/schema/BASELINE.md`. At the time of writing that is `27826b76`; the
+#       token goes STALE the moment the baseline is regenerated, and the step below
+#       COMPUTES it from the file rather than trusting this line — the recipe shows
+#       the SHAPE, never the authority:
+#
+#           gh workflow run test-restore-from-baseline.yml --ref main -f mode=restore -f confirm=27826b76
+#
+#   (4) READ THE RESULT. The restore log ends with ONE summary line from the script,
+#       of the shape `restore: tables=… policies=… functions=… ledger_rows=…
+#       survivors=…/… filtered=… mode=restore`, followed by the CLI post-verify.
+#       ⚠️ WHAT THE POST-VERIFY PROVES: the ledger's SHAPE — the Supabase CLI can
+#       parse it, raises no `ErrMissingLocal`, and finds nothing pending. It does NOT
+#       prove any object exists. The seed writes one row per repo migration file, so
+#       nothing CAN be pending there. Object presence is proven elsewhere: by the
+#       script's in-transaction shape assertions (counts derived from the dump text,
+#       compared inside the transaction) and, for every gate that cares, by the
+#       applied-ness probes in `supabase/tests/*.sql` on the next `sql-tests` run.
+#
+# ── PRECEDENTS THIS FILE COPIES RATHER THAN REINVENTS ───────────────────────
+#   * `supabase-migrate.yml` — environment-bound apply, pinned `supabase/setup-cli`
+#     at CLI 2.98.2, and its one-time-setup header block.
+#   * `migration-drift-check.yml:102-121` — the NEWER unconditional credential
+#     assert. Its OLDER split `configured` output, which tolerates an absent secret,
+#     is deliberately NOT copied.
+#   * `mutex-probe.yml` — a `dispatch-guard` JOB that explains itself. ⚠️ That one
+#     exits 0 on purpose; this one exits 1, see the job comment.
+#   * `prod-prober.yml:66-78` — typed `workflow_dispatch` inputs.
+#   * `ci.yml` — the shared-TEST advisory mutex acquire/release pair, copied with
+#     exactly one deliberate difference, and the runner-image PostgreSQL probe.
+#
+# ── SCRIPT INJECTION ────────────────────────────────────────────────────────
+# Founder-typed `inputs.*` reach `run:` blocks only through `env:`, and are compared,
+# never executed. No `${{ }}` expression appears inside any `run:` body in this file.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "preflight = run the WHOLE transaction and ROLL BACK (the measurement); restore = the same stream, COMMITTED. Destructive."
+        type: choice
+        options:
+          - preflight
+          - restore
+        default: preflight
+      confirm:
+        description: "restore mode only — type the first 8 hex chars of the baseline sha recorded in supabase/schema/BASELINE.md; a preflight ignores it"
+        type: string
+        default: ""
+
+# Never cancel a run in flight: cancelling mid-restore would leave the shared TEST
+# database in a state nobody can describe, and the mutex holder would be reaped by
+# job teardown while the transaction's fate is unknown. Queue instead.
+concurrency:
+  group: test-restore-from-baseline
+  cancel-in-progress: false
+
+# `actions: read` is the minimum scope that lets `gh run list` read THIS repository's
+# own run history, which the PROD-ledger premise assert below depends on. Nothing
+# here writes anything through the GitHub API.
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  # A mis-dispatched RESTORE is a fault, not a no-op — which is why this guard EXITS 1
+  # where `mutex-probe.yml`'s guard deliberately exits 0. That probe's concern is the
+  # opposite of this one's: a red check on a main-HEAD sha makes Railway skip the
+  # analytics deploy (issue #616), so its guard must stay green. Here the ref IS the
+  # safety property. `--ref <branch>` checks out that branch's `supabase/schema/`, so a
+  # dispatch off main would restore the shared TEST database from an UNREVIEWED
+  # branch's dump. A silent green would teach the operator that the dispatch worked.
+  dispatch-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref != 'refs/heads/main'
+    steps:
+      - name: Explain why nothing ran, and fail
+        run: |
+          set -euo pipefail
+          echo "::error::test-restore-from-baseline did NOT run: ref '${GITHUB_REF}' is not refs/heads/main."
+          echo "This workflow restores the SHARED TEST database from supabase/schema/baseline.sql"
+          echo "as it exists ON THE DISPATCHED REF. Off main that dump is unreviewed, so the"
+          echo "dispatch is refused rather than quietly ignored — a green check here would read"
+          echo "as 'it ran and found nothing to do'."
+          echo ""
+          echo "Dispatch it against main:"
+          echo ""
+          echo "    gh workflow run test-restore-from-baseline.yml --ref main -f mode=preflight"
+          echo ""
+          echo "See this file's header for the full recipe and for what a restore destroys."
+          exit 1
+
+  restore:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    # Bound to the `Test` environment for the durable Deployments audit record it
+    # produces. It carries no reviewers and no secrets by founder decision — see the
+    # header. This is NOT an approval gate.
+    environment: Test
+    # docs/runbooks/shared-test-db-mutex.md section 2: three COUPLED numbers, copied
+    # rather than re-derived. The mutex holder's `pg_sleep(6000)` (100 min) must
+    # OUTLIVE this job's TTL, or the lock is released while the job still does DB
+    # work; the acquire cap is 3600 s (60 min) of queueing. 90 < 100 holds, with
+    # 30 min of headroom above the cap for the restore itself.
+    # ⛔ If you RAISE this past 100 min, raise the holder's sleep in ci.yml's acquire
+    # step FIRST — and then this copy is no longer byte-identical to it, which the
+    # wiring test will say out loud.
+    timeout-minutes: 90
+    steps:
+      # fetch-depth: 0 — BOTH the baseline freshness refusal (`git log -1 --format=%ct`
+      # over supabase/schema/baseline.sql vs supabase/migrations) and the PROD-ledger
+      # ancestry assert below need real history. A shallow clone makes the first read
+      # the clone date and the second fail on an unknown object.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # NO `if:` ON THIS STEP, deliberately — migration-drift-check.yml:102-121's
+      # newer shape, not supabase-migrate.yml's older `configured` output. An absent
+      # credential on a hand-dispatched destructive workflow is a FAULT: reporting
+      # success having restored nothing is exactly the silent green this phase exists
+      # to remove. Fork PRs cannot reach here; there is no pull_request trigger.
+      - name: Assert TEST credential is configured
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+            echo "::error::secrets.TEST_SUPABASE_DB_URL is not configured."
+            echo "::error::This is a HARD FAILURE, not a skip. Every step below writes to, or reads"
+            echo "::error::from, the shared TEST database; without the credential this run can prove"
+            echo "::error::nothing and must not conclude success. It is a REPOSITORY secret — do not"
+            echo "::error::add a same-named secret to the Test environment, which would shadow it."
+            exit 1
+          fi
+          echo "TEST_SUPABASE_DB_URL is present (value never printed)."
+
+      # The confirm token is a PUBLIC sha prefix, not a secret — it is printed on
+      # purpose so a mis-typed dispatch tells the operator the right answer. What it
+      # buys is that `mode=restore` cannot be reached by a stray click on the Run
+      # workflow button: `mode` defaults to preflight AND the destructive mode needs a
+      # token that has to be read out of the tree being dispatched.
+      - name: Refuse restore without the confirm token
+        env:
+          MODE: ${{ inputs.mode }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          doc="supabase/schema/BASELINE.md"
+          if [ ! -f "${doc}" ]; then
+            echo "::error::${doc} is missing, so the confirm token cannot be computed and no restore can be authorised."
+            exit 1
+          fi
+          # The SAME provenance row scripts/check-baseline-staleness.mjs's
+          # RECORDED_SHA_RE reads, spelled for sed. First match wins, as there.
+          sha="$(sed -nE 's/^\|[[:space:]]*sha256[[:space:]]*\|[[:space:]]*`([0-9a-f]{64})`[[:space:]]*\|.*$/\1/p' "${doc}" | head -1)"
+          if [ "${#sha}" -ne 64 ]; then
+            echo "::error::${doc} carries no parseable sha256 provenance row (matched ${#sha} chars, expected 64)."
+            echo "::error::The confirm token is DERIVED from that row. An unparseable provenance row is"
+            echo "::error::its own defect: it means nothing attests the dump this workflow would replay."
+            exit 1
+          fi
+          token="${sha:0:8}"
+          if [ "${MODE}" = "restore" ]; then
+            if [ "${CONFIRM}" != "${token}" ]; then
+              echo "::error::mode=restore requires -f confirm=${token} (the first 8 hex chars of the sha256 row in ${doc} AT THIS REF)."
+              echo "::error::Got '${CONFIRM}'. Re-dispatch with the token above. It is a public sha prefix,"
+              echo "::error::not a secret; it exists so a destructive dispatch cannot be a stray click, and"
+              echo "::error::it changes whenever the baseline is regenerated."
+              exit 1
+            fi
+            echo "confirm token matches ${doc}'s sha row (${token}) — the destructive mode is authorised for THIS tree."
+          else
+            echo "confirm not required for preflight (mode=${MODE}); for reference, this tree's restore token is ${token}."
+          fi
+
+      # ── W5: THE PREMISE THE LEDGER SEED RESTS ON, ENFORCED ─────────────────
+      # The restore seeds ONE ledger row per repo migration file, and each row's
+      # provenance sentence CLAIMS that TEST now matches PROD. The only evidence that
+      # claim rests on is that PROD's own ledger equals the repo file set — i.e. that
+      # `supabase-migrate.yml` last ran GREEN on main at a commit this checkout
+      # descends from. If PROD's newest apply FAILED, or ran at a sha that is not an
+      # ancestor of HEAD, the seed would write 266 rows asserting a parity nobody has.
+      # The window BETWEEN that sha and HEAD is covered separately, by the script's
+      # baseline-freshness refusal (a migration landing after the dump was taken).
+      #
+      # Split in two on purpose: this step READS, the next one JUDGES. The judgement
+      # is therefore executable under stubs with the three readings injected through
+      # `env:`, which is how src/__tests__/test-restore-workflow-wiring.test.ts proves
+      # it exits 1 on a failed conclusion and on a non-ancestor sha instead of merely
+      # grepping for the words.
+      #
+      # Placed BEFORE the mutex acquire so a stale premise never holds a lock on a
+      # database other people's CI is waiting for.
+      - name: Read PROD's newest migration apply
+        id: prod-apply
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          reading="$(gh run list --workflow supabase-migrate.yml --branch main -L 1 --json status,conclusion,headSha)"
+          n="$(printf '%s' "${reading}" | jq 'length')"
+          if [ "${n}" != "1" ]; then
+            echo "::error::gh run list returned ${n} runs of supabase-migrate.yml on main, expected exactly 1."
+            echo "::error::Zero means PROD has never applied a migration through that workflow, so there is"
+            echo "::error::no evidence at all for the parity the ledger seed would claim."
+            exit 1
+          fi
+          {
+            printf 'status=%s\n'     "$(printf '%s' "${reading}" | jq -r '.[0].status')"
+            printf 'conclusion=%s\n' "$(printf '%s' "${reading}" | jq -r '.[0].conclusion')"
+            printf 'head_sha=%s\n'   "$(printf '%s' "${reading}" | jq -r '.[0].headSha')"
+          } >> "${GITHUB_OUTPUT}"
+          printf '%s' "${reading}" | jq -r '"supabase-migrate.yml newest run on main: status=\(.[0].status) conclusion=\(.[0].conclusion) headSha=\(.[0].headSha)"'
+
+      - name: Assert PROD's ledger equals the repo file set
+        env:
+          APPLY_STATUS: ${{ steps.prod-apply.outputs.status }}
+          APPLY_CONCLUSION: ${{ steps.prod-apply.outputs.conclusion }}
+          APPLY_HEAD_SHA: ${{ steps.prod-apply.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          failed=""
+          if [ "${APPLY_STATUS:-}" != "completed" ]; then
+            failed="${failed} status(got '${APPLY_STATUS:-}', want 'completed')"
+          fi
+          if [ "${APPLY_CONCLUSION:-}" != "success" ]; then
+            failed="${failed} conclusion(got '${APPLY_CONCLUSION:-}', want 'success')"
+          fi
+          case "${APPLY_HEAD_SHA:-}" in
+            *[!0-9a-fA-F]*|"")
+              failed="${failed} ancestor(headSha '${APPLY_HEAD_SHA:-}' is not a hex sha, so ancestry cannot be decided)"
+              ;;
+            *)
+              if ! git merge-base --is-ancestor "${APPLY_HEAD_SHA}" HEAD 2>/dev/null; then
+                failed="${failed} ancestor(${APPLY_HEAD_SHA} is not an ancestor of this checkout's HEAD)"
+              fi
+              ;;
+          esac
+          if [ -n "${failed}" ]; then
+            echo "::error::the PROD-ledger premise does not hold —${failed}."
+            echo "::error::The ledger seed writes one row per repo migration file, each claiming parity"
+            echo "::error::with PROD. That claim's ONLY evidence is a green supabase-migrate.yml on main"
+            echo "::error::at a commit this checkout descends from. Refusing to seed a claim nobody has."
+            exit 1
+          fi
+          echo "PROD-ledger premise holds: supabase-migrate.yml concluded success at ${APPLY_HEAD_SHA}, an ancestor of HEAD."
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+
+      # Pinned to the SAME CLI version supabase-migrate.yml and migration-drift-check.yml
+      # pin, so the tool that took `baseline.sql`, the tool that takes the pre-restore
+      # backup, and the tool that post-verifies the ledger are one tool.
+      # ⚠️ Installed UNCONDITIONALLY, not inside the restore-only post-verify below:
+      # the backup step needs `supabase db dump`, and the backup runs in BOTH modes.
+      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+        with:
+          version: 2.98.2
+
+      - name: Install psql client
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          psql --version
+
+      # Self-test FIRST, corpus second — the sql-gate-lint idiom. A gate whose red
+      # path has not been observed in THIS run is not evidence about this run.
+      - name: Baseline co-edit gate — self-test
+        run: node scripts/check-baseline-staleness.mjs --self-test
+
+      # The co-edit gate runs here as its own step, and not only inside the restore
+      # script, so a sha drift between baseline.sql and BASELINE.md is a NAMED red in
+      # the workflow log before anything connects to TEST.
+      - name: Baseline co-edit gate
+        run: node scripts/check-baseline-staleness.mjs
+
+      # Copied from ci.yml's `- name: Probe - the runner image's PostgreSQL server
+      # binaries resolve` (the sql-mutation job). The restore script's --self-test
+      # boots a THROWAWAY cluster the scripts/pg-lane/run.sh way, which needs SERVER
+      # binaries, not just the client installed above. Non-fatal by design there and
+      # here: pg-lane's own four-step resolution chain owns the judgement, and a second
+      # divergent opinion about which layout is acceptable would be worse than none.
+      # ⚠️ ci.yml's pg_cron provisioning step is deliberately NOT copied: Plan 01's
+      # fixtures create no cron job, so this lane needs no pg_cron. A future fixture
+      # that did need it would provision it the way `sql-mutation` does.
+      - name: Probe - the runner image's PostgreSQL server binaries resolve
+        run: |
+          set -uo pipefail
+          echo "PATH pg_ctl:      $(command -v pg_ctl || echo '(not on PATH)')"
+          echo "pg_config bindir: $(pg_config --bindir 2>/dev/null || echo '(pg_config absent)')"
+          echo "--- /usr/lib/postgresql glob ---"
+          ls -d /usr/lib/postgresql/*/bin 2>/dev/null || echo "(no /usr/lib/postgresql/*/bin)"
+          echo "--- initdb/pg_ctl under that glob ---"
+          ls -l /usr/lib/postgresql/*/bin/initdb /usr/lib/postgresql/*/bin/pg_ctl 2>/dev/null \
+            || echo "(no initdb/pg_ctl under the glob)"
+
+      # The script's own eighteen counted arms, run against a throwaway cluster on this
+      # runner. It touches neither TEST nor PROD. Pasted VERBATIM — the script's header
+      # says local and CI must be byte-identical in mode, and an A/B that changes
+      # invocation mode is not an A/B.
+      - name: Restore script self-test
+        run: bash scripts/restore-test-from-baseline.sh --self-test
+
+      # ── THE SHARED-TEST ADVISORY MUTEX, HELD ACROSS THE WHOLE ACT ──────────
+      # CONTEXT safety rule 2. Acquired HERE, before the backup, and released only
+      # after the post-verify, so backup → script → post-verify is one serialized
+      # span rather than three raceable ones.
+      #
+      # This step is a COPY of `- name: Acquire shared-test-db mutex` from
+      # .github/workflows/ci.yml, with EXACTLY ONE deliberate difference: ci.yml's
+      # fork-PR early exit — which prints a notice and `exit 0` — is replaced by a
+      # fail-loud credential assert. This workflow has no `pull_request` trigger and
+      # can never run on a fork, so an absent credential here is a FAULT, and an
+      # `exit 0` would hand a destructive job an unlocked shared database.
+      # ⛔ Everything from the `if ! command -v psql` line to the end of this step is
+      # BYTE-IDENTICAL to ci.yml's, and src/__tests__/test-restore-workflow-wiring.test.ts
+      # asserts that identity: if the mutex protocol changes in ci.yml, this file goes
+      # RED until the copy is re-synced. Do not edit the suffix here.
+      - name: Acquire shared-test-db mutex
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+            echo "::error::TEST_SUPABASE_DB_URL is empty at the mutex acquire. This workflow is dispatch-only and never runs on a fork PR, so this is a FAULT, not a fork — a HARD FAILURE, not a skip. Proceeding would run a DESTRUCTIVE act against a shared database with no mutual exclusion."
+            exit 1
+          fi
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          # Session-mode DSN. The documented secret points at the Supavisor
+          # pooler on port 6543 = TRANSACTION mode, where a SESSION advisory lock
+          # does not survive between statements; session mode is served on 5432
+          # of the same host. Derived by parameter expansion and NEVER echoed —
+          # this repository is public and the derived string is not a value
+          # GitHub can mask for us.
+          dsn="${TEST_SUPABASE_DB_URL}"
+          case "${dsn}" in
+            *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+          esac
+          # [158-MUTEX-01 F2] libpq keepalives on the holder path. During the
+          # contended pg_advisory_lock wait and the pg_sleep hold this
+          # connection carries ZERO traffic, and Linux's default first TCP
+          # keepalive fires at 7200s — never, on these timescales — so a
+          # runner-side NAT idle expiry would zombify the holder invisibly:
+          # the backend keeps the lock long after the job is gone. 60s
+          # keepalives keep the NAT mapping fresh AND let the client detect a
+          # dead path in ~2min (15s x 4), so psql dies and the release step's
+          # dead-holder witness fires instead of a silent wedge. The secret's
+          # shape is NOT assumed: append with '&' if the DSN already carries a
+          # query string, '?' otherwise.
+          keepalive_params="keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4"
+          case "${dsn}" in
+            *\?*) dsn="${dsn}&${keepalive_params}" ;;
+            *)    dsn="${dsn}?${keepalive_params}" ;;
+          esac
+          log="${RUNNER_TEMP}/shared-test-db-mutex.log"
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          # 158-REVIEW WR-01: the idle sleep MUST outlive this job's
+          # `timeout-minutes`, or the holder session ends — releasing the lock —
+          # while the job is still doing DB work, and another run walks straight
+          # in. The old value (3300s = 55min) was SHORTER than the then-60min
+          # TTL, so any job that acquired early and ran long silently lost mutual
+          # exclusion for its last ~5 minutes. 6000s = 100min sits above this
+          # job's `timeout-minutes` with headroom, so the JOB always dies first
+          # and teardown is the only thing that ever releases this lock.
+          # ⛔ If you lower `timeout-minutes`, this stays valid. If you RAISE it,
+          # raise this too — the invariant is sleep > TTL, and nothing else
+          # enforces it.
+          # [158-MUTEX-01] (holder death at 120s; 2026-08-20/21 runs, e.g.
+          # 32424762495): sleep > TTL is NECESSARY but not SUFFICIENT — the
+          # holder session must ALSO disable the server statement_timeout. The
+          # TEST project sets a server-wide statement_timeout=120000, and both
+          # the contended pg_advisory_lock wait and the pg_sleep are single
+          # statements, so the server killed the holder ~120s after acquiring:
+          # psql exited, the session dropped, the lock silently released, and
+          # the job's remaining DB work ran UNSERIALIZED (the release step's
+          # dead-holder ::error:: fired on every long-job run). That is why the
+          # holder's FIRST -c statement below zeroes statement_timeout, before
+          # pg_advisory_lock — session-level SET is permitted for any role and
+          # overrides the configuration-file default, exempting both the lock
+          # wait and the idle sleep. Third invariant leg, pinned in
+          # critical-regressions.test.ts.
+          # [158-MUTEX-02] (orphaned holder backend; run 32457330139): killing
+          # the psql CLIENT does not kill its SERVER backend — neither pg_sleep
+          # nor a pg_advisory_lock wait ever reads the client socket, so the
+          # release step's client-side kill left a backend holding the lock for
+          # its full 6000s sleep and starved e2e-seeded past the 3600s cap.
+          # Before 158-MUTEX-01 the server statement_timeout was the ACCIDENTAL
+          # janitor for such orphans; client_connection_check_interval is the
+          # real one — the backend polls its client socket during query
+          # execution AND lock waits, aborting within ~30s of the client dying.
+          # Covers both the sleeping holder and a lock-waiting contender whose
+          # client died (a job-timeout kill mid-wait leaves the same zombie).
+          # HOLDER-BACKEND-PID feeds the release step's guarded server-side
+          # pg_terminate_backend, which frees the lock immediately rather than
+          # after the ~30s check interval. Both GUCs and the marker MUST stay
+          # before pg_advisory_lock, so the lock wait itself is covered.
+          start_holder() {
+            : > "${log}"
+            PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
+              nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+                -c "SET statement_timeout = 0;" \
+                -c "SET client_connection_check_interval = '30s';" \
+                -c "SELECT 'HOLDER-BACKEND-PID ' || pg_backend_pid();" \
+                -c "SELECT pg_advisory_lock(61616158);" \
+                -c "SELECT 'MUTEX-ACQUIRED';" \
+                -c "SELECT pg_sleep(6000);" \
+                >> "${log}" 2>&1 &
+            holder=$!
+            echo "${holder}" > "${pidfile}"
+          }
+          # 158-REVIEW CR-04: the cap absorbs legitimate cross-run QUEUE DEPTH,
+          # not just a wedge. Three simultaneous runs put ~8 other holds ahead of
+          # the last waiter (~60m at the measured ~20m of lock-time per run), and
+          # the phase's success criterion is that all three still pass. 2700s was
+          # comparable to the work it had to absorb, so ordinary contention —
+          # which this repo's history records as NORMAL — surfaced as a red
+          # sql-tests → red `frontend` → skipped Railway deploy.
+          #
+          # 158-REVIEW WR-13: retry a DEAD SESSION, never a full wait. Every
+          # other network op in this file retries by explicit flakiness-audit
+          # decision (`npm ci`, `pip install`, the lychee download, the SRH
+          # readiness poll); this one did not, so a single transient connect
+          # blip inside PGCONNECT_TIMEOUT killed the backgrounded psql and
+          # exited 1 — now a red REQUIRED check, and on main a skipped Railway
+          # deploy. The two failure modes are deliberately kept distinct:
+          # "session died" is retryable (below), "waited past the cap" is NOT
+          # (that is contention, and retrying would just re-queue at the back).
+          # `waited` is CUMULATIVE across attempts, so retries can never extend
+          # the total wait beyond the cap the TTL was sized against.
+          waited=0
+          for attempt in 1 2 3; do
+            start_holder
+            while [ "${waited}" -lt 3600 ]; do
+              if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+                # [158-MUTEX-02] best effort: an absent/empty pid file only
+                # forfeits the release step's immediate server-side reap — the
+                # ccci GUC above still bounds an orphaned backend at ~30s.
+                sed -n 's/^HOLDER-BACKEND-PID \([0-9]\{1,\}\)$/\1/p' "${log}" | head -n 1 \
+                  > "${RUNNER_TEMP}/shared-test-db-mutex-backend-pid" || true
+                echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s (attempt ${attempt}/3)."
+                exit 0
+              fi
+              if ! kill -0 "${holder}" 2>/dev/null; then
+                echo "::warning::mutex acquire attempt ${attempt}/3 lost its psql session after ${waited}s (redacted output follows)."
+                # 158-REVIEW WR-08: psql NEVER echoes the DSN on failure, so the
+                # userinfo pattern alone matched nothing and the raw text — the
+                # TEST pooler host, its resolved IP, and the DB username /
+                # project-ref — went straight into a PUBLIC Actions log, against
+                # this mutex's own stated invariant ("never a DSN, host,
+                # username, or password, in any CI log line"). Redact the shapes
+                # psql actually emits:
+                #   connection to server at "<host>" (<ip>), port <n> failed
+                #   FATAL:  password authentication failed for user "<user>"
+                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
+                       -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
+                       -e 's#(for user )"[^"]*"#\1"***"#g' "${log}" >&2 || true
+                break
+              fi
+              sleep 5
+              waited=$(( waited + 5 ))
+              if [ $(( waited % 60 )) -eq 0 ]; then
+                echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
+              fi
+            done
+            # Cap exhausted => contention, not a transient. Stop retrying and
+            # fall through to the census + timeout diagnostic below.
+            if [ "${waited}" -ge 3600 ]; then
+              break
+            fi
+            # The session is dead; drop its pid so the release step cannot kill
+            # an unrelated process that inherits the number.
+            rm -f "${pidfile}"
+            # 158-REVIEW WR-02 (iter 3): back off ONLY when a retry actually
+            # follows. Unguarded, the last iteration printed "retrying the mutex
+            # acquire in 15s" and then slept 15s before falling out of the loop
+            # to the "after 3 attempts" error — telling the operator a fourth
+            # attempt was coming when none was, which this repo's
+            # fail-loud-and-ACCURATE doctrine counts as a real cost. Worse, that
+            # phantom 15s was added to `waited`, and `waited` is the variable the
+            # cap-vs-session-fault branch below is chosen by: a run that
+            # legitimately queued to 3585s and then lost its session could be
+            # pushed over 3600 by backoff bookkeeping alone and misreported as
+            # contention rather than as the session fault it actually was.
+            if [ "${attempt}" -lt 3 ]; then
+              backoff=$(( attempt * 5 ))
+              echo "retrying the mutex acquire in ${backoff}s"
+              sleep "${backoff}"
+              waited=$(( waited + backoff ))
+            fi
+          done
+          if [ "${waited}" -lt 3600 ]; then
+            echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). Two causes fit: (1) a CONNECT/session fault — check the TEST project's session-mode pooler (port 5432); or (2) something killed the session MID-WAIT while it contended for the lock — before 158-MUTEX-01 the server-wide statement_timeout did exactly that at 120s per attempt (the holder now zeroes statement_timeout as its first statement, so that specific kill should no longer occur). If the redacted output shows 'canceling statement due to statement timeout', that is NOT lock contention: the holder zeroes statement_timeout as its very first statement, so post-158-MUTEX-01 that signature can only mean the SET never stuck to this session's backend — the session-mode DSN rewrite regressed, the secret's shape changed, or a pooler is intercepting SET. Triage it as a pooler/session fault."
+            exit 1
+          fi
+          # 158-REVIEW CR-04: do NOT assert "a holder is wedged" — measure, then
+          # name both causes. From inside this loop a deep waiter queue and a
+          # wedged holder are indistinguishable, and the old message confidently
+          # named the rarer one, sending the operator hunting for a wedge that
+          # may not exist. Counts ONLY: no pids, no host, no DSN, and stderr is
+          # discarded outright — this log is public.
+          #
+          # 158-REVIEW WR-01 (iter 3): the census MUST be bounded. PGCONNECT_TIMEOUT
+          # bounds only the CONNECT; once connected, an unbounded query against a sick
+          # TEST Postgres/pooler blocks until this job's `timeout-minutes` kills the
+          # runner — so the operator gets LESS information than before the census
+          # existed (a bare "exceeded the maximum execution time"), and the job squats
+          # a runner for ~30 more minutes while holding no lock. A sick backend is
+          # precisely the condition under which this timeout fires, and this repo's
+          # history records a wedged TEST backend as a MEASURED event, not a
+          # hypothetical. Both bounds are needed because they cover different faults:
+          # `statement_timeout` is server-side (a slow or lock-blocked query) and
+          # `timeout` is client-side (a black-holed connection the server never hears
+          # about, where a server-side timeout can never fire). A diagnostic must
+          # never outlive the thing it diagnoses. `${census:-unavailable}` below
+          # already handles the empty result, so the message stays honest either way.
+          census="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+            -c "SET statement_timeout = '10s';" \
+            -c "SELECT count(*) FILTER (WHERE granted) || ' granted, ' || count(*) FILTER (WHERE NOT granted) || ' waiting' FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158;" \
+            2>/dev/null | tr -d '\r' | tail -1)" || true
+          echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158). Lock census: ${census:-unavailable}. TWO causes are possible and this step cannot distinguish them: (1) QUEUE DEPTH — concurrent runs each hold the lock ~20m, which is a NORMAL condition in this repo; re-run once the queue drains. (2) A WEDGED holder whose runner is gone. Triage (count the waiters first) and manual unlock: docs/runbooks/shared-test-db-mutex.md sections 2-3."
+          exit 1
+      # CLAUDE.md § "Which database am I on? (ask FIRST, every time)". The restore
+      # script repeats this check as its own refusal 5; this step exists so the log
+      # shows the refusal BEFORE the backup runs — otherwise a wrong DSN would be
+      # discovered only after `supabase db dump` had already read a database this
+      # workflow cannot identify, and the artifact would carry PROD's schema.
+      # ⛔ The marker TEXT is never printed, not even when it is the reason to refuse.
+      - name: Which database am I on
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          # Session-mode DSN, derived exactly as the acquire step derives it. The
+          # acquire step ALSO appends libpq keepalives; those are for a connection
+          # that carries zero traffic for 100 minutes and are deliberately omitted
+          # from the short-lived connections below.
+          dsn="${TEST_SUPABASE_DB_URL}"
+          case "${dsn}" in
+            *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+          esac
+          rc=0
+          marker="$(PGCONNECT_TIMEOUT=15 timeout 30 psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+            -c "SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database();" \
+            2>"${RUNNER_TEMP}/marker.err")" || rc=$?
+          if [ "${rc}" -ne 0 ]; then
+            # psql's connect/auth failures name the host, its IP and the DB user.
+            # Same three redactions as ci.yml's acquire step (158-REVIEW WR-08).
+            sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
+                   -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
+                   -e 's#(for user )"[^"]*"#\1"***"#g' "${RUNNER_TEMP}/marker.err" >&2
+            echo "::error::the database identity marker could not be read (psql exited ${rc}). Refusing to back up or restore a database this workflow cannot identify. current_database() is 'postgres' on BOTH projects and proves nothing."
+            exit 1
+          fi
+          marker="$(printf '%s' "${marker}" | tr -d '\r')"
+          if [ -z "${marker}" ]; then
+            echo "::error::the database identity marker is NULL. A NULL marker means the COMMENT ON DATABASE was LOST, not that this is TEST. Re-set it before any write (CLAUDE.md)."
+            exit 1
+          fi
+          if ! printf '%s' "${marker}" | grep -Eiq '(^|[^[:alnum:]_])test([^[:alnum:]_]|$)'; then
+            echo "::error::the database identity marker does not name TEST as a whole word. Refusing. The marker text is withheld: this log is public."
+            exit 1
+          fi
+          if printf '%s' "${marker}" | grep -Eiq 'prod'; then
+            echo "::error::the database identity marker names PRODUCTION. Refusing, loudly. The marker text is withheld: this log is public."
+            exit 1
+          fi
+          echo "which_database: OK — the marker names TEST and not PROD."
+
+      # ── THE BACKUP. CONTEXT safety rule 3, and no wider than it. ────────────
+      # ⛔ WHAT THIS ARTIFACT HOLDS: TEST's migration ledger (CSV) and TEST's `public`
+      # schema (a supabase db dump), plus the script's pre-drop census once it runs.
+      # SCHEMA AND LEDGER ARE THEREFORE REVERSIBLE. ⛔ WHAT IT DOES NOT HOLD: DATA.
+      # DATA IS NOT REVERSIBLE — every row in every `public` table on TEST is
+      # destroyed by `mode=restore` and no data dump is taken, because a data dump of
+      # TEST published to a PUBLIC-repo artifact would be an information-disclosure
+      # finding of its own. e2e specs re-seed their own rows; hand-created rows are
+      # lost for good. This is stated in the step NAME too, so a reader skimming the
+      # step list cannot miss it.
+      #
+      # RESTORE_OUT_DIR is pointed at this same directory, so the script's pre-drop
+      # census (`pre-census.txt`, `survivors.keys`, `survivors.sql`) lands in the
+      # artifact as well — including when the transaction aborts, which is exactly the
+      # run where it is worth having.
+      - name: Back up TEST before any write (schema + ledger; NOT data)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          outdir="${RUNNER_TEMP}/test-backup"
+          mkdir -p "${outdir}"
+          dsn="${TEST_SUPABASE_DB_URL}"
+          case "${dsn}" in
+            *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+          esac
+
+          # (a) The ledger, as CSV. `statements` carries the SQL each row was applied
+          # with — the column that settles repo-vs-remote body drift by reading rather
+          # than by dating. If the column does not exist this step fails LOUD, before
+          # any write, which is the safe direction.
+          rc=0
+          ( cd "${outdir}" && PGCONNECT_TIMEOUT=15 timeout 120 psql "${dsn}" -X -q -v ON_ERROR_STOP=1 \
+              -c "\copy (SELECT version, name, statements FROM supabase_migrations.schema_migrations ORDER BY version) TO 'ledger.csv' CSV HEADER" \
+            ) 2>"${outdir}/ledger.err" || rc=$?
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::could not copy TEST's migration ledger (psql exited ${rc}). Refusing to proceed: without the ledger backup the act is not reversible even for the ledger."
+            exit 1
+          fi
+
+          # (b) The schema, taken with the SAME pinned CLI that produced baseline.sql.
+          # Schema only — `supabase db dump` emits no data statements.
+          rc=0
+          supabase db dump --db-url "${dsn}" -f "${outdir}/schema-before.sql" \
+            >"${outdir}/dump.log" 2>&1 || rc=$?
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::supabase db dump of TEST failed (exit ${rc}); see the redacted dump.log in the backup artifact. This is a RED, not a skip: without the schema backup the act is not reversible."
+            exit 1
+          fi
+
+          # (c) A self-describing README, so the artifact carries its own reversal
+          # recipe and its own honesty about what it cannot reverse.
+          cat > "${outdir}/README.txt" <<'BACKUP_README'
+          TEST pre-restore backup — .github/workflows/test-restore-from-baseline.yml
+
+          WHAT IS HERE
+            ledger.csv        supabase_migrations.schema_migrations (version, name, statements)
+                              as it stood immediately BEFORE the restore.
+            schema-before.sql `supabase db dump` of TEST's schema, same pinned CLI (2.98.2)
+                              that produced supabase/schema/baseline.sql. NO data statements.
+            pre-census.txt    the restore script's pre-drop census, if it got that far.
+            survivors.keys    the non-public objects depending on `public` that the restore
+            survivors.sql     re-creates, and the DDL it re-creates them with.
+            transaction.out   psql's output for the transaction, redacted.
+
+          REVERSING THE SCHEMA AND THE LEDGER (a founder act, deliberately manual)
+            1. Take the shared-TEST advisory mutex (key 61616158) — see
+               docs/runbooks/shared-test-db-mutex.md.
+            2. Confirm the identity marker names TEST:
+                 SELECT shobj_description(oid,'pg_database') FROM pg_database
+                  WHERE datname = current_database();
+            3. DROP SCHEMA public CASCADE; CREATE SCHEMA public;
+            4. psql -v ON_ERROR_STOP=1 -f schema-before.sql
+            5. TRUNCATE supabase_migrations.schema_migrations;
+               \copy supabase_migrations.schema_migrations (version, name, statements)
+                 FROM 'ledger.csv' CSV HEADER
+
+          ⛔ WHAT CANNOT BE REVERSED FROM THIS ARTIFACT
+            DATA. Every row in every `public` table on TEST was destroyed and no data
+            dump was taken — a data dump of TEST in a public-repo artifact would be an
+            information-disclosure finding of its own. e2e specs re-seed their own rows
+            (e2e/helpers/seed-test-project.ts); hand-created rows, and public.profiles
+            rows for pre-existing auth.users, are gone. auth.users itself survived.
+          BACKUP_README
+
+          # Counts and byte sizes ONLY. Never a row, never a name from the ledger.
+          # The row count is asked of the DATABASE, not derived from `wc -l`: the
+          # `statements` column carries multi-line SQL, so a CSV line count is not a
+          # row count and printing it as one would be a number that reads true and is
+          # not.
+          rc=0
+          ledger_rows="$(PGCONNECT_TIMEOUT=15 timeout 60 psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+            -c "SELECT count(*) FROM supabase_migrations.schema_migrations;" 2>/dev/null | tr -d '\r' | tail -1)" || rc=$?
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::could not count TEST's ledger rows (psql exited ${rc}) — the backup was taken but its completeness cannot be reported, so this run stops rather than claiming a backup it did not measure."
+            exit 1
+          fi
+          echo "backup: ledger_rows=${ledger_rows} ledger_bytes=$(wc -c < "${outdir}/ledger.csv") schema_bytes=$(wc -c < "${outdir}/schema-before.sql")"
+          echo "backup: SCHEMA AND LEDGER ARE REVERSIBLE from this artifact. DATA IS NOT — no data dump was taken."
+
+      # The script's `--run` dispatch, pasted verbatim from its own CLI contract.
+      # RESTORE_DB_URL is the session-mode DSN derived exactly as the mutex step
+      # derives it; the script asserts for itself that the mutex is already held, and
+      # refuses if it is not (it never takes the lock, and it never takes a backup).
+      - name: Run the restore script
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          dsn="${TEST_SUPABASE_DB_URL}"
+          case "${dsn}" in
+            *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+          esac
+          export RESTORE_DB_URL="${dsn}"
+          export RESTORE_OUT_DIR="${RUNNER_TEMP}/test-backup"
+          bash scripts/restore-test-from-baseline.sh --run --mode "$MODE"
+
+      # ── W4: WHAT THIS PROVES, AND WHAT IT DOES NOT ─────────────────────────
+      # It proves the ledger's SHAPE: the pinned Supabase CLI can PARSE the seeded
+      # ledger (no `ErrMissingLocal` — the failure mode that made the forward-only plan
+      # unimplementable in the first place) and finds nothing pending. That is exactly
+      # the precondition Plan 05's `apply-test` job needs.
+      # ⛔ It does NOT prove any object exists. The seed writes one row per repo
+      # migration file, so nothing CAN be pending here — a green line below is
+      # compatible with an empty schema. Object presence is proven by the script's
+      # in-transaction shape assertions (counts derived from the dump text) and, for
+      # every gate that cares, by the applied-ness probes in supabase/tests/*.sql on
+      # the next sql-tests run.
+      #
+      # `if:` on the STEP is a MODE SELECT, not a credential skip: in preflight the
+      # transaction rolled back, so the ledger is unchanged and there is nothing new
+      # to verify.
+      #
+      # ⚠️ FIRST USE OF `--db-url` WITH THE POOLER DSN IN THIS REPO. `supabase db push
+      # --help` says the connection string "must be percent-encoded". If the CLI
+      # rejects a DSN that psql accepted three steps earlier, the fix is to
+      # percent-encode the PASSWORD INSIDE THE SECRET — a settings act — and NEVER to
+      # transform the string in YAML: a rewrite here would apply to this workflow only
+      # and would silently diverge from the 39 other sites that read the same secret.
+      #
+      # The two asserted strings were MEASURED in the CLI binary on 2026-09-08
+      # (v2.84.2 locally; CI pins 2.98.2, where the wording is NOT independently
+      # verified). Both directions are asserted on purpose: a bare "no pending line"
+      # negative would pass vacuously if the wording changed. If this step reddens on
+      # the up-to-date assertion alone, verify the 2.98.2 wording before concluding
+      # anything about the ledger — `supabase migration list --db-url <dsn>` is the
+      # cross-check, where every local version must show in the Remote column.
+      - name: Post-verify with the Supabase CLI — ledger SHAPE
+        if: inputs.mode == 'restore'
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          dsn="${TEST_SUPABASE_DB_URL}"
+          case "${dsn}" in
+            *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+          esac
+          raw="${RUNNER_TEMP}/dry-run.raw"
+          out="${RUNNER_TEMP}/dry-run.txt"
+          rc=0
+          supabase db push --include-all --dry-run --db-url "${dsn}" >"${raw}" 2>&1 || rc=$?
+          # The CLI names the host and the user in a connect failure. Redact before
+          # anything reaches this public log.
+          sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
+                 -e 's#(host=)[^ "]*#\1***#g' \
+                 -e 's#(user=)[^ "]*#\1***#g' \
+                 -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
+                 -e 's#(for user )"[^"]*"#\1"***"#g' "${raw}" > "${out}"
+          rm -f "${raw}"
+          cat "${out}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::supabase db push --dry-run exited ${rc} against the restored TEST ledger. The CLI could not read the ledger it is supposed to push against; the redacted output is above."
+            exit 1
+          fi
+          if grep -q 'Would push these migrations:' "${out}"; then
+            echo "::error::the restored ledger leaves migrations PENDING — the seed did not write one row per repo migration file, or the CLI parses the versions differently than the seed spelled them."
+            exit 1
+          fi
+          if grep -q 'Reverted' "${out}"; then
+            echo "::error::the CLI reports a REVERTED migration against the restored ledger — a remote row with no local file, which is the ErrMissingLocal class this restore exists to remove."
+            exit 1
+          fi
+          if ! grep -q 'Remote database is up to date.' "${out}"; then
+            echo "::error::the CLI did not print 'Remote database is up to date.'. Either the ledger is not CLI-consistent, or the pinned CLI's wording changed between 2.84.2 (where both strings were measured) and 2.98.2. Verify the wording before concluding anything about the ledger — this assertion is deliberately positive so a wording change reddens instead of passing vacuously."
+            exit 1
+          fi
+          echo "post-verify: the pinned CLI parses the seeded ledger and reports nothing pending — ledger SHAPE is consistent. This says NOTHING about object presence."
+
+
+      # Best-effort EARLY release, copied VERBATIM (including its `if: always()`) from
+      # `- name: Release shared-test-db mutex (best effort)` in .github/workflows/ci.yml.
+      # Job teardown drops the psql session anyway; killing it here hands the lock to
+      # the next waiter a little sooner. It must never redden a job whose real work
+      # passed, which is why it is the ONE step in this file allowed to end without a
+      # non-zero exit — and why the wiring test's softening-token scan excludes it.
+      # Placed after the post-verify and before the artifact plumbing: the mutex is
+      # held across backup → script → post-verify and not one step longer.
+      - name: Release shared-test-db mutex (best effort)
+        if: always()
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          if [ ! -f "${pidfile}" ]; then
+            echo "No mutex pid recorded (fork PR / acquire skipped) — nothing to release."
+            exit 0
+          fi
+          holder="$(cat "${pidfile}")"
+          if kill "${holder}" 2>/dev/null; then
+            echo "Released the shared-test-db mutex (terminated psql pid ${holder})."
+          else
+            # 158-REVIEW WR-01: reaching here is a FAULT, not housekeeping. A
+            # pidfile exists, so the acquire step really did start a holder — and
+            # that holder is now dead while this job was still running. Every DB
+            # step between its death and now ran with the mutex RELEASED, i.e.
+            # potentially concurrently with another run against the shared TEST
+            # project. The previous message ("was already gone — the session drop
+            # released the lock") described this as normal and printed on exactly
+            # the failure path it was supposed to surface.
+            # [158-MUTEX-01]: the once-common cause (the server-wide
+            # statement_timeout killing pg_sleep at ~120s) is fixed — the holder
+            # zeroes statement_timeout — so a dead holder here is now UNEXPECTED
+            # and always worth investigating.
+            # Annotation only: this step is `if: always()` and must never redden a
+            # job whose real work passed, and `echo ::error::` does not change the
+            # exit status. Job teardown remains the guaranteed release path.
+            echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
+          fi
+          # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
+          # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
+          # so it kept the lock and starved the other jobs' acquires for its
+          # full 6000s sleep. Terminate the recorded backend server-side too;
+          # the pg_locks guard (same key, same pid) makes it a no-op if that
+          # backend already exited or the pid was recycled — never a blind
+          # terminate. Best effort like the rest of this step: ccci bounds any
+          # survivor at ~30s, and nothing here may redden the job.
+          backendpidfile="${RUNNER_TEMP}/shared-test-db-mutex-backend-pid"
+          backend="$(cat "${backendpidfile}" 2>/dev/null || true)"
+          case "${backend}" in
+            ''|*[!0-9]*)
+              echo "No server backend pid recorded — leaving any orphan to client_connection_check_interval."
+              ;;
+            *)
+              if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+                echo "TEST_SUPABASE_DB_URL withheld — skipping the server-side backend reap."
+              else
+                # Session-mode DSN, derived exactly as in the acquire step and
+                # never echoed; bounded like the acquire step's census query.
+                dsn="${TEST_SUPABASE_DB_URL}"
+                case "${dsn}" in
+                  *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+                esac
+                reaped="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+                  -c "SET statement_timeout = '10s';" \
+                  -c "SELECT pg_terminate_backend(${backend}) FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158 AND pid = ${backend};" \
+                  2>/dev/null | tr -d '\r' | tail -1)" || true
+                if [ "${reaped}" = "t" ]; then
+                  echo "Server-side reap: backend ${backend} was STILL on key 61616158 — pg_terminate_backend sent (the client kill alone had not freed the lock)."
+                else
+                  echo "Server-side reap: backend ${backend} no longer on key 61616158 (already exited, or the census was unavailable) — nothing to terminate."
+                fi
+              fi
+              ;;
+          esac
+
+      # psql and the CLI name the TEST pooler host, its IP and the DB user in a
+      # connect/auth failure, and those files are about to become a world-readable
+      # artifact on a PUBLIC repo. Redact the three shapes psql emits, plus libpq's
+      # key=value form, in the LOG channels only — never in ledger.csv or in the two
+      # .sql files, where a substitution would corrupt the very bytes the reversal
+      # recipe replays.
+      - name: Redact connection metadata from the backup directory (public artifact)
+        if: always()
+        run: |
+          set -euo pipefail
+          outdir="${RUNNER_TEMP}/test-backup"
+          if [ ! -d "${outdir}" ]; then
+            echo "no backup directory to redact (the run failed before the backup step)."
+          else
+            for f in "${outdir}"/*.err "${outdir}"/*.log "${outdir}"/*.out; do
+              if [ -f "${f}" ]; then
+                sed -i -E \
+                  -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
+                  -e 's#(host=)[^ "]*#\1***#g' \
+                  -e 's#(user=)[^ "]*#\1***#g' \
+                  -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
+                  -e 's#(for user )"[^"]*"#\1"***"#g' "${f}"
+              fi
+            done
+            echo "redacted the .err/.log/.out channels in the backup directory; .sql and .csv are left byte-exact so the reversal recipe replays."
+          fi
+
+      # `if: always()` so an ABORTED script still leaves the backup behind — that is
+      # the run where the artifact matters most. Placed after the script rather than
+      # immediately after the backup step so the script's pre-drop census is inside it
+      # too; the backup FILES are written before the script either way, which is the
+      # ordering the wiring test pins.
+      - name: Upload the pre-restore backup (schema + ledger; NOT data)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: test-restore-backup-${{ github.run_id }}
+          path: ${{ runner.temp }}/test-backup
+          retention-days: 90
+          if-no-files-found: error
