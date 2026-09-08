@@ -1432,6 +1432,45 @@ true for 146 and half of 142–145, and **false for 141**.
       other eleven would have re-run their self-verify blocks against already-current state.
       The original entry follows, as the dated record of what was expected:
 
+- [ ] **`[164.5-TEST-VAC08-DROP-UNAPPLIABLE]` The DRIFT-04 drop migration is RED on VAC-08 from
+      PR #758's first CI run onward, STRUCTURALLY and PERMANENTLY, and cannot be cleared by
+      applying it (booked 2026-09-08, founder decision on the merge-red question).**
+      ⚠️ **This is NOT the same shape as `[164.2-TEST-APPLY-PROVENANCE]` or
+      `[164.7-TEST-APPLY-APPSETTINGS]` above.** Those two are migrations that SHOULD reach TEST
+      and are merely waiting for a hand-apply. This one **can never reach TEST at all**, and the
+      difference was MEASURED, not assumed:
+      - `supabase/tests`-side there is no gate involved — the red is VAC-08 itself:
+        `##[error]VAC-08 …: 1 repo migration(s) are not present in the TEST ledger and are NOT
+        baselined: 20260908120000_drop_create_allocator_connected_strategy`. `frontend` is red
+        only because it aggregates `sql-tests`; there is ONE root cause, not two.
+      - **TEST carries ZERO overloads** of `public.create_allocator_connected_strategy`
+        (measured 2026-09-08 against `TEST`'s own `pg_database` marker, `overloads=0`).
+      - The migration is a **bare `DROP FUNCTION` with an exact 11-argument signature and no
+        `IF EXISTS`** — deliberately, so a moved signature aborts loudly instead of dropping
+        nothing quietly. On TEST it therefore raises `42883` and the migration ABORTS.
+      ⛔ **The three wrong fixes, and why each is refused:**
+      - *Add it to `scripts/vac08-ledger-baseline.txt`.* Refused: that file's own header says it
+        is "a RATCHET, not a mute button" and exists to "stop a KNOWN, pre-existing gap from
+        masking a NEW one". A migration authored today entering the list IS the masking shape.
+      - *Add `IF EXISTS` so it applies to TEST.* Refused: that reintroduces the vacuous pass the
+        migration's own STEP 1 comment exists to refuse, on PROD as well as TEST.
+      - *Hand-apply to TEST.* Impossible — there is nothing there to drop.
+      ✅ **The real fix is Phase 164.8 TESTPREPROD**: VAC-08 needs a disposition for "repo
+      migration DROPs object X and TEST has zero of X" that is distinct from drift, shipped with
+      a red/green fixture pair proving it fires AND proving it does not swallow a genuine missing
+      apply. Until then this red is expected and is named here so nobody reads it as a coupling
+      regression.
+
+- [ ] **`[164.5-STALE-GENERATED-TYPES]` `src/lib/database.types.ts` keeps a generated declaration
+      for `create_allocator_connected_strategy` after PR #758 drops it (booked 2026-09-08).**
+      Inert, and deliberately left rather than hand-edited: **nothing generates or gates this
+      file** — `grep -rn 'database.types' .github/workflows/` returns nothing and `package.json`
+      carries no `gen:types`-shaped script, so there is no regeneration step to run and no CI job
+      that would catch the staleness. Hand-editing a generated file to match would create the
+      illusion that something keeps it current. The right fix is a types-regeneration step with a
+      freshness gate; until one exists, a declaration for an RPC that has zero `.rpc()` call sites
+      is dead weight, not a defect.
+
 - [ ] **`[164.7-TEST-APPLY-APPSETTINGS]` Two migrations from Phase 164.7 are RED on shared TEST
       from this PR's first CI run onward, BY DESIGN, and must be hand-applied (booked 2026-09-07,
       Phase 164.7 plan 05; the reds are named in `164.7-02-SUMMARY.md` → "Expected reds, named
