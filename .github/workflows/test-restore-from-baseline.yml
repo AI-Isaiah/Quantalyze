@@ -804,6 +804,19 @@ jobs:
       # routed around rather than fixed. An open transaction is NOT `idle` — it reads
       # `idle in transaction`, holds locks, and will write when it resumes, so it counts.
       # `backend_type = 'client backend'` excludes autovacuum and the background
+      #
+      # ⛔ AND IT EXCLUDES OUR OWN MUTEX HOLDER, which is not pedantry — without this the
+      # gate CANNOT EVER PASS. `Acquire shared-test-db mutex` above leaves a background
+      # psql running `SELECT pg_sleep(6000)` to hold the advisory lock for the whole act.
+      # That session is a client backend, has a different pid, and is `active` for the
+      # entire hold, so the predicate counted it and the gate refused itself. MEASURED on
+      # run 34265750211, the first real dispatch: "shared TEST is NOT quiet: 1 other
+      # client session(s) are not idle", with the restore correctly skipped — the 1 was
+      # ours. Excluding by `application_name` is safe rather than a loophole: PGAPPNAME
+      # marks only the mutex holder, and ANY session carrying that name is either our own
+      # holder or another run BLOCKED on the lock we are holding — neither can write to
+      # TEST while we hold it. A genuine worker (e2e, another job's psql) does not carry
+      # the name and still counts.
       # workers, which are not other people's CI.
       #
       # Scope: restore only. `mode=preflight` rolls its transaction back and writes
@@ -822,6 +835,7 @@ jobs:
                  WHERE datname = current_database()
                    AND pid <> pg_backend_pid()
                    AND backend_type = 'client backend'
+                   AND application_name <> 'ci-shared-test-db-mutex'
                    AND (state IS NULL OR state <> 'idle');" \
             2>"${RUNNER_TEMP}/activity.err")" || rc=$?
           if [ "${rc}" -ne 0 ]; then
