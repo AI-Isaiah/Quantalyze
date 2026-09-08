@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.77.21.0] - 2026-09-08 — DRIFT-04 closed: baseline regenerated, ratchet row retired
+
+The companion to 0.77.20.0, landed immediately after because DRIFT-05 gate (a) reads RED
+in any tree that has one without the other.
+
+- **`supabase/schema/baseline.sql` regenerated from post-DROP PROD.** 91 lines removed,
+  **zero added**. The zero-added reading is the point: it says PROD's catalogue moved in
+  exactly one way since 2026-09-07 and in no other, which is what rules out this re-dump
+  silently absorbing unrelated drift. Tables 62 and policies 154 unchanged; function
+  statements 123 → 122, distinct names 121 → 120. `BASELINE.md` co-edited in the same
+  commit; the co-edit gate passes.
+- **`NAME_SET_RATCHET` row deleted — after the gate demanded it.** `--check` exited 1 with
+  `ratchet-stale: … present on NEITHER side. The row describes nothing: DELETE this
+  NAME_SET_RATCHET entry.` The red was observed before the edit, not assumed after it. The
+  list is now empty with a comment saying that is a measured resting state, not an unused
+  feature.
+- **`scripts/preflight-drop-allocator-fn.sh` landed.** It had never reached `main`: the
+  pr-branch filter dropped all four commits touching it, including one that changed nothing
+  else. 0.77.20.0's changelog cited a path that did not exist in the repository — a reviewer
+  could not have re-run the measurement the PROD removal rests on. The landed bytes are
+  sha256 `85abbb49…`, byte-identical to the copy actually executed against PROD in both
+  directions. Self-test 52/52.
+
 ## [0.77.20.0] - 2026-09-08 — DRIFT-04: the unowned PROD function is dropped
 
 `public.create_allocator_connected_strategy(uuid, uuid, text ×8, integer)` existed on
