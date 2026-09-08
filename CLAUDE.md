@@ -1,330 +1,5 @@
 @AGENTS.md
 
-## Test Coverage
-
-The TypeScript test suite tracks coverage via `@vitest/coverage-v8`. Run
-`npm run test:coverage` to produce a v8 report (text + HTML + JSON
-summary in `coverage/`).
-
-- **Gate (ratchet)**: lines 82 / statements 80 / functions 74 / branches 72,
-  configured as Vitest thresholds in `vitest.config.ts`. These are set a few
-  points under measured actual (2026-06-20: 85.2 / 83.3 / 77.4 / 75.5) so a
-  real regression fails CI but normal noise does not. When actual climbs
-  durably, raise the thresholds to match.
-- **Target**: 80%, matching the `--cov-fail-under=80` gate the
-  `analytics-service/` Python suite already enforces. Lines and statements
-  already clear it; functions and branches are the next ratchet.
-
-Coverage is **a blocking CI gate** as of tech-debt #11 (2026-06-20): the
-vitest shards in `.github/workflows/ci.yml` run with `--coverage` and emit
-blob reports, and the `frontend-coverage` job merges them (`vitest run
---merge-reports --coverage`) and enforces the thresholds on the full-suite
-numbers; the aggregator `frontend` check gates branch protection on it.
-(Since 2026-07-02 the suite executes once, sharded — the old separate
-full-suite coverage run is gone. The prior 60% floor was enforced nowhere —
-CI ran vitest sharded without `--coverage`.)
-
-## SQL gate integrity jobs (v0.77.0.0, Phase 164.3)
-
-The `frontend` aggregator gates more than coverage now. Three jobs in
-`.github/workflows/ci.yml` are in both its `needs:` list and its result loop, so
-a failure fails the aggregate rather than passing quietly:
-
-- **`sql-mutation`** — mutates every SQL gate arm carrying a `RED-UNDER`
-  annotation, asserts the file goes RED with that arm named, restores, asserts
-  GREEN. Exits 1 on an annotation that does not bite, on coverage below a
-  ratchet floor pinned at the measured value, on more waived arms than
-  `WAIVED_CEILING` (0) in `scripts/mutation-runner/run.mjs`, and when the
-  runner's two independent arm tallies (`arms:` vs `lane-invocations:`)
-  disagree (v0.77.1.0). Runs on its own throwaway PostgreSQL cluster
-  (`scripts/pg-lane/run.sh`), never against shared TEST. Since 2026-09-03 it
-  also prints, and MEASURE_FAILs on the absence of, a `lane-blocked:` line
-  naming the four idiom gate files that probe `pg_extension` for pg_cron — 100
-  sections DEFERRED by founder decision (`[REDUNDER-PGCRON]`, SCOPE AMENDMENT
-  #2) because the lane has no pg_cron — beside a `lane-probe:` line measured on
-  the lane itself, which is what lets the deferral expire: pg_cron AVAILABLE
-  with a non-empty lane-blocked class raises `lane-blocked-stale` and exits 1.
-  ⚠️ **CURRENCY 2026-09-05: the clause "because the lane has no pg_cron" is no
-  longer true and the deferral it describes is RETIRED.** Phase 164.4.1 put
-  pg_cron ON the lane; the four files (and an apply-list-blind fifth) are
-  annotated, and the line now reads `lane-blocked: 0 file(s)` with a reason that
-  says so. Both prints, the probe leg and the `lane-blocked-stale` defect are
-  UNCHANGED and stay live for any future unannotated pg_cron gate — see the
-  dated paragraph at the end of this section.
-- **`sql-gate-lint`** — four static rules over `supabase/tests`, each shipped
-  with a red and a green fixture proving the rule can fire.
-- **`plan-anchor-verify`** — re-resolves every `file:line` anchor and named
-  symbol a pending PLAN.md asserts, and fails loud on a miss.
-
-Two more gates live outside the aggregator: **VAC-04** (repo-vs-PROD function
-body diff) is a step in `migration-drift-check.yml` on migration PRs, and
-**VAC-08** (repo-vs-TEST ledger + body drift) runs in `sql-tests`. Both exit 1
-when their credential is absent — neither ever skips.
-
-⚠️ `sql-mutation` and `sql-gate-lint` were first observed green on ubuntu on
-2026-09-02 (workflow_dispatch run 33620169220 at 89cbef8b, self-test 12/12,
-`arms: 30/30/0`, tallies agree — closes `.planning/WINDOWS.md` entry 28);
-`plan-anchor-verify` was skipped in that run. ⚠️ CURRENCY 2026-09-03: that
-`30/30/0` is the run-33620169220 quote and stays as lineage; so do plan 02's
-`45/45/0`, plan 04's `86/86/0`, plan 05's `134/134/0` and plan 06's `163/163/0`
-(the last two both confirmed on ubuntu — run 33785233457 at PR #735 head
-`f0d19bf7`, 232 s, and run 33794810067 at PR #736 head `ba6fe1e2`, 278 s).
-Plan 07's `189/189/0` at `files 17/71` also stays as lineage — and so does its
-ubuntu wall clock, run 33804312706 at PR #737 head `4a9f33da`, **458 s**, which
-is the one run that reported `per-arm lane time: mean 1.7s` where every other
-ubuntu run and every local run measured 1.0 s. Plan 08's `219/219/0` at
-`files 23/71` stays as lineage too. ⚠️ CURRENCY 2026-09-04: Phase 164.4 plan 09
-then annotated five NEW gate files — the wizard-session tenant-scope index, the
-wizard composite fence, the weight-snapshot seed SECDEF trigger, the
-csv-finalize auth guard and the resync-retry single-job substrate —
-5 + 5 + 4 + 3 + 3 = 20 sections, so the measured corpus is now
-`coverage: files 28/71`, `arms: 239/239/0`, `biting: 239`,
-`lane-invocations: 239`, tallies agree, `FILES_FLOOR` is pinned at 28 and
-`ARMS_FLOOR` at 239, with `pending: 12` idiom files still to go. That batch was
-REDUCED from the six files it planned: `test_compute_jobs_error_kind_copy_parity
-.sql` is un-baselineable until the pg-lane can host pg_cron, and the founder
-chose to retire `[REDUNDER-PGCRON]` by putting pg_cron ON the lane as its own
-plan rather than work around it — so that file stays in `pending:` alongside the
-four already-deferred ones.
-⚠️ CURRENCY 2026-09-04: plan 10 then annotated the LAST FOUR non-mixed idiom
-files — the allocator pre-terminus equity flag, the enqueue_compute_job
-non-terminal dedupe, the metrics_json_by_basis write shape and the
-set_compute_job_progress claim fence — 2 + 2 + 2 + 2 = 8 sections, so the
-measured corpus is now `coverage: files 32/71`, `arms: 247/247/0`,
-`biting: 247`, `lane-invocations: 247`, tallies agree, `FILES_FLOOR` is pinned
-at 32 and `ARMS_FLOOR` at 247, with `pending: 8` idiom files still to go: the
-SEVEN ⚠️ mixed files plan 11 takes, plus the pg_cron-deferred one above.
-⚠️ The phase's end state is therefore `files 39/71`, NOT the `40/71` of SCOPE
-AMENDMENT #2 — that amendment predates plan 09's deferral. Note also that
-`lane-blocked:` still names only FOUR files: the deferred fifth is blocked by a
-migration in its APPLY LIST rather than by its own text, which `gateNeedsPgCron`
-cannot see (TODOS `[REDUNDER-LANEBLOCKED-BLIND]`), so it is reported under
-`pending:` and is pinned there as a tripwire.
-⚠️ CURRENCY 2026-09-04: plan 11 then annotated the SEVEN ⚠️ mixed files — the
-api_keys exchange lock, the strategy-keys publish-integrity delete guard, the
-api_keys client-INSERT revoke, the sync-status protected marked refresh, the
-wizard-draft update guard, the profiles privileged-column lock and the
-wizard-session idempotency fence — 4 + 4 + 3 + 1 + 1 + 1 + 1 = 15 sections, so
-the measured corpus is `coverage: files 39/71`, `arms: 262/262/0`,
-`biting: 262`, `lane-invocations: 262`, tallies agree, `FILES_FLOOR` pinned at
-39 and `ARMS_FLOOR` at 262, with **`pending: 1`** — exactly
-`test_compute_jobs_error_kind_copy_parity.sql`, owed to Phase 164.4.1
-PGCRON-LANE. That is Phase 164.4's END STATE on today's lane: every idiom gate
-file the pg-lane can reach is annotated and proven, and the 32 files outside it
-are printed by name on every run (27 `unreachable:` + 4 `lane-blocked:` +
-that 1 `pending:`). ⛔ `pending:` is NOT empty and must not be made to look
-empty — the parser test pins it as a one-name SET so an attestation of
-completeness cannot be shipped ahead of 164.4.1.
-⚠️ CURRENCY 2026-09-05: Phase **164.4.1 PGCRON-LANE** is now under way and the
-paragraph above is 164.4's dated end state, not the current reading. Plan 01 put
-pg_cron ON the pg-lane (`shared_preload_libraries` on the single `pg_ctl -o`
-start, +0.009 s/lane); plan 02 then annotated the two files that were blocked in
-the two DIFFERENT ways — `test_compute_jobs_error_kind_copy_parity.sql` (3
-sections, blocked only through its APPLY LIST) and
-`test_derive_allocator_keys_fanout.sql` (7 sections, blocked through its own
-text). MEASURED at plan 02: `coverage: files 41/71`, `arms: 272/272/0`,
-`biting: 272`, `lane-invocations: 272`, tallies agree, `FILES_FLOOR` 41 and
-`ARMS_FLOOR` 272, `WAIVED_CEILING` still 0 (nine arms moves, zero waivers).
-⛔ The `pending:` prohibition above is SUPERSEDED and its second clause is no
-longer true: `pending:` is now measured EMPTY, deliberately, as CONTEXT decision
-D-04's own task, and the parser test's pin is the empty set BESIDE an AIM (`it`
-title `pending AIM (D-04)`) that proves the class is still computed by
-classifying a stripped copy of a real gate. Do NOT "restore" the one-name pin.
-⚠️ **Every `node scripts/mutation-runner/run.mjs` in this interval EXITS 1** with
-exactly one defect, `lane-blocked-stale` — pg_cron is available while three
-files (`test_reconcile_dropped_enqueue_sweep.sql`,
-`test_retention_orphaned_running.sql`,
-`test_strategy_analytics_stuck_computing_reaper.sql`) are still classified
-`lane-blocked`. That is success criterion 3's tripwire doing its job, not a
-regression; it clears when plan 05 lands. A run showing any OTHER defect kind IS
-a regression.
-✅ **CURRENCY 2026-09-05: THAT INTERVAL IS OVER — plan 05 landed and the full
-corpus EXITS 0.** The paragraph above stays as the dated record of plans 01-04.
-Measured at `b6b830cf`: `coverage: files 44/71`, `lane-blocked: 0 file(s)`,
-`lane-probe: pg_cron AVAILABLE`, `  pending: 0`, `arms: 363/363/0`,
-`biting: 363`, `lane-invocations: 363`, tallies agree, `✅ No defects`.
-`FILES_FLOOR` is pinned at 44 and `ARMS_FLOOR` at 363 (not the 365 the plan
-⚠️ SUPERSEDED 2026-09-05 by the phase REVIEW (`164.4.1-REVIEW.md`, CR-01/CR-02): `ARMS_FLOOR`
-is **361**, not 363. Three arms of `test_reconcile_dropped_enqueue_sweep.sql` were found either
-unfalsifiable or mutating the gate's own text where a production mutation reaches them; two were
-reclassified as named INVARIANTs (never waived). `FILES_FLOOR` stays 44 and `WAIVED_CEILING`
-stays 0. The floor moved DOWN because two arms had never been proven against a production
-regression — read `run.mjs` for the live constants, never a number restated in prose.
-projected — 324 + 39, read off the run). The last file was
-`test_reconcile_dropped_enqueue_sweep.sql`, 39 sections, all 39 biting on the
-first proof run. The class was emptied BY ANNOTATION: `parse.mjs`, the probe
-fixture and the probe/defect code in `run.mjs` are untouched and SELF-TEST 17/17
-still passes, so the tripwire stays live for any future unannotated pg_cron gate.
-⚠️ The runner still PRINTS `lane-probe: pg_cron AVAILABLE — lane-blocked class is
-STALE` while the class is empty; that sentence is now false-reading and plan 06
-corrects it at the source. From here, a run that exits NON-ZERO is a regression.
-`WAIVED_CEILING` is still 0, now through TWO founder decisions that both took
-the root-cause fix over an exception: plan 08's trust-signal anon-EXECUTE
-assertion was resolved by a REORDER putting the precondition ahead of its
-dependants (TODOS `[REDUNDER-WAIVER-01]`), and plan 09's resync-retry assertion
-(b) by wrapping its INSERT in the exception idiom the SAME FILE already used, so
-that a narrowed unique index reports `TEST FAILED (b)` instead of a raw 23505
-naming no arm. Read the run's own `coverage:` and `arms:` lines rather than any
-number restated in prose.
-✅ **CURRENCY 2026-09-05 (Phase 164.4.1 plan 06) — THE PHASE'S CLOSING READING.
-Every paragraph above stays as dated lineage; this one is the current state.**
-* **HOW pg_cron got onto the lane.** `scripts/pg-lane/run.sh` carries
-  `shared_preload_libraries=pg_cron` (with `cron.database_name` and
-  `cron.max_running_jobs=0` — the lane schedules nothing, it needs the catalog
-  to exist) on its SINGLE `pg_ctl -o` start, and each affected gate's
-  `RED-UNDER-SETUP` apply list carries migration
-  `20260513094906_enable_pg_cron.sql`. **No migration was edited anywhere in
-  this phase.** Cost measured, not assumed: +0.009 s/lane isolated,
-  `per-arm lane time: mean 1.1s` at corpus scale.
-* **What was annotated: five files, 103 sections** — the four that were
-  `lane-blocked:` plus `test_compute_jobs_error_kind_copy_parity.sql`, the
-  apply-list-blind fifth that had been sitting in `pending:`.
-* **END STATE, read off the run:** `coverage: files 44/71`,
-  `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, `  pending: 0`,
-  `arms: 363/363/0`, `biting: 363`, `lane-invocations: 363` (tallies agree),
-  `✅ No defects`, **exit 0**. `FILES_FLOOR` 44, `ARMS_FLOOR` 363,
-  `WAIVED_CEILING` still **0** — nine files' worth of arms moved, zero waivers
-  added. 44 + 0 + 27 + 0 + 0 = 71; the 27 are `unreachable:`
-  (`[REDUNDER-NONIDIOM]`, still open and still printed by name every run).
-* ⛔ **Both `lane-blocked: 0` and `pending: 0` are pinned as MEASURED EMPTY SETS
-  BESIDE AIMs, never as bare empty assertions.** The `pending` pin has
-  `it("pending AIM (D-04)…")`, which classifies a stripped copy of a real gate
-  to prove the class is still computed; the `lane-blocked` class stays DERIVED
-  and its tripwire is proven by SELF-TEST 17/17 on a synthetic corpus. This
-  **SUPERSEDES the ⛔ `pending:` is NOT empty sentence above** — do not "restore"
-  the old one-name pin, and do not replace either AIM with a bare `toEqual([])`.
-* **The tripwire fired and cleared, both observed.** FIRED on the
-  pre-annotation tree (`164.4.1-TRIPWIRE-FIRED.log`), and SHA-bound on ubuntu in
-  workflow run 33938272686 at `f04ce51b`, whose provisioning step answered
-  RESEARCH's open question by measurement: `postgresql-16-cron` comes from
-  **noble/universe, not PGDG**, major 16, `.so` and `.control` both present.
-  CLEARED locally at plan 05 — exit 0, class empty — with nothing in the
-  classifier, the probe fixture or the defect code touched to clear it.
-* **Message honesty, plan 06:** the runner used to print "which the pg-lane
-  cannot host … (deferred 2026-09-03)" unconditionally and "lane-blocked class
-  is STALE" over an EMPTY class. Both were corrected at the source; each arm now
-  says what it means for that run, and the grep prefixes ci.yml depends on are
-  byte-identical. `[REDUNDER-PGCRON]` and `[REDUNDER-LANEBLOCKED-BLIND]` are
-  both closed in `TODOS.md` with their reasoning — the second DELIBERATELY: its
-  proposed fix would have classified UNANNOTATED files by a line only ANNOTATED
-  files carry, i.e. dead code behind a passing test, so the limit is documented
-  and pinned by a hand-built calibration instead.
-* ⭐ **MEASURED 2026-09-05 — the SHA-bound ubuntu run of the FINISHED tree
-  exists.** workflow_dispatch run **33961609382**, head sha
-  **1aa8bb7088e978320041b6a97d187b8247b8fe3d**, `sql-mutation` **success in
-  567 s (9.45 min)**. Ubuntu read IDENTICAL to the authoring box:
-  `coverage: files 44/71`, `arms: 363/363/0`, `biting: 363`,
-  `lane-invocations: 363`, `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`,
-  `✅ No defects`, `per-arm lane time: mean 1.1s`; pg_cron came from
-  noble/universe at **1.6.2-1**. LEGS: 363 arms + 44 baseline + 44 restore =
-  **451 legs**. `sql-mutation`'s `timeout-minutes` therefore **stays 15** by
-  applying the rule literally — 9.45 min does not reach the ~10 min trigger,
-  and when it is crossed the raise is to 20 ONCE (`ci.yml:933-953` carries this
-  derivation). The 445 s of run 33938272686 is the PRE-annotation tree at 262
-  arms and must not be read as a figure for this corpus.
-  ⚠️ Every arm/file count in this bullet is that run's DATED reading at
-  `1aa8bb70`, not a live constant: read `FILES_FLOOR` and `ARMS_FLOOR` off
-  `scripts/mutation-runner/run.mjs` itself, since an arm reclassified after
-  this date moves the floor without moving this paragraph.
-  ⛔ From here, a run that exits NON-ZERO is a regression, not the tripwire.
-Read the run's own `coverage:` and `arms:` lines rather than any number
-restated in prose.
-VAC-04 and VAC-08 have still not run against their real credential; see entries
-25 and 26.
-
-⭐ **CURRENCY 2026-09-06 (Phase 164.2 CURATED-COPY plan 07) — the corpus grew by
-one gate file.** Every paragraph above stays as dated lineage; this one is the
-current reading. Plan 07 added `supabase/tests/test_sync_status_curated_sentence
-_survives.sql` — 7 arms proving the runner's curated `computation_error` sentence
-SURVIVES the status transition, plus an applied-ness probe — 8 sections, 8 twins,
-all 8 biting on the proof run. Read off `node scripts/mutation-runner/run.mjs` at
-the final tree, **exit 0**: `coverage: files 45/72`, `arms: 369/369/0`,
-`biting: 369`, `lane-invocations: 369` (the two independent tallies AGREE),
-`lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, `  pending: 0`,
-`per-arm lane time: mean 1.1s`, `✅ No defects`. 45 annotated + 0 lane-blocked +
-27 `unreachable:` + 0 pending = 72. `FILES_FLOOR` moved 44 → **45** and
-`ARMS_FLOOR` 361 → **369**; `WAIVED_CEILING` is still **0**. Both floors were
-SEPARATED in both directions on real full-corpus lane runs before being pinned —
-at +1 each the runner named both regressions and exited 1; at the pinned values,
-0 defects. ⚠️ **These are that run's DATED readings, not live constants: read
-`FILES_FLOOR` and `ARMS_FLOOR` off the constants themselves in
-`scripts/mutation-runner/run.mjs` (cited by SYMBOL, not by line — this file's
-earlier line cites drifted the moment the runner grew).** The ubuntu SHA-bound confirmation for THIS corpus has not been taken —
-the 567 s / 363-arm figure above is the 164.4.1 tree and must not be read as a
-figure for 45 files. ⛔ `sql-tests` is expected RED on the 164.2 PR for exactly
-two named arms until the provenance migration reaches shared TEST — see TODOS
-`[164.2-TEST-APPLY-PROVENANCE]`; that is a missing apply, not a coupling
-regression.
-Read the run's own `coverage:` and `arms:` lines rather than any number restated
-in prose.
-
-⭐ **CURRENCY 2026-09-07 (Phase 164.7 APPSETTINGS plan 05) — the corpus grew by
-one gate file AND by four arms inside two existing ones.** Every paragraph above
-stays as dated lineage; this one is the current reading. Plan 02 added
-`supabase/tests/test_analytics_service_settings_and_vault_tick.sql` (7 arms — the
-two RAISE paths of the Vault/`system_settings` tick asked for BY NAME, the
-discriminator that refuses a callable which raises unconditionally, and three
-RLS/grant arms). Plan 04 then added arms K and L to EACH ledger gate (row-FALSE
-and read-RAISES, beside the existing missing-row arm A) and RE-POINTED all 27
-pre-existing edit-kind twins in those two files at the superseding migration
-`20260907130000_ledger_refresh_switch_to_system_flags.sql`, every one re-observed
-biting AFTER the re-point — a twin left mutating a body that `CREATE OR REPLACE`
-overwrites has silently stopped being a test. Read off
-`node scripts/mutation-runner/run.mjs` at the final tree, **exit 0**:
-`coverage: files 46/73`, `arms: 384/384/0`, `biting: 384`,
-`lane-invocations: 384` (the two independent tallies AGREE), `lane-blocked: 0
-file(s)`, `lane-probe: pg_cron AVAILABLE`, `  pending: 0`,
-`per-arm lane time: mean 1.1s`, `✅ No defects`. 46 annotated + 0 lane-blocked +
-27 `unreachable:` + 0 pending = 73. `FILES_FLOOR` moved 45 → **46** and
-`ARMS_FLOOR` 369 → **384**; `WAIVED_CEILING` is still **0**.
-
-⚠️ **The two floors are separated in DIFFERENT LAYERS, and this plan MEASURED
-that rather than inheriting the earlier paragraphs' wording.** A full-corpus run
-with the floors left stale-low at 45/369 on this 46-file tree exits **0** with
-`✅ No defects` — `run.mjs`'s gate paths are `annotatedFiles < filesFloor` and
-`bitingArms < armsFloor`, so a floor BELOW the corpus is invisible to it by
-construction. The stale direction is caught one layer up, by
-`src/__tests__/mutation-runner-floors.test.ts`, which failed on that same tree
-with `RATCHET STALE: 46 of 73 gate files are now annotated but FILES_FLOOR is
-still 45` and the paired ARMS_FLOOR message. At +1 each (47/381) the runner named
-both regressions and exited 1; at the pinned values it exits 0. ⛔ So "separated
-in both directions" means **the runner for the upper direction and the vitest
-ratchet for the lower**. An earlier plan's expectation that `run.mjs` alone
-reports a stale ratchet is FALSE, was falsified by measurement here, and is
-recorded in `164.7-05-FLOORS.log` with all three runs' exit codes.
-
-⚠️ **New in this phase: `sql-gate-lint` now ALSO runs `scripts/lint-app-guc.mjs`**
-— self-test first, then the corpus scan, both pasted verbatim as a developer runs
-them. It is a SIBLING of `lint-sql-gates.mjs`, not an eighth rule of it, because
-that linter masks comments and string-literal contents while decision D-05
-requires this gate to COUNT comments. Its corpus step was RED BY DESIGN at 12
-findings across 5 files between plans 01 and 05; plan 05 drove it to **0 findings
-with the five annotated files named**, by ANNOTATION — a dated
-`-- APP-GUC-LINEAGE:` header AND an agreeing, count-pinned `LINEAGE_ALLOWLIST`
-entry, two edits in two files, whose five counts still SUM TO the same 12 sites.
-⛔ A red corpus step from here is a regression and is never cleared by widening
-the allowlist or relaxing `DETECT_RE`.
-
-⚠️ **CORRECTION 2026-09-07 (Phase 164.5 planning):** the paragraph above originally read `ARMS_FLOOR` 369 → **380** with `arms: 380/380/0`. That was the reading BEFORE 164.7 plan 04 added arms K and L to each ledger gate; the shipped value is **384**, read by symbol from `export const ARMS_FLOOR` in `scripts/mutation-runner/run.mjs`. The prose and the constant had already diverged, which is exactly why this file says to read the constants by SYMBOL and never a number restated in prose. `FILES_FLOOR` is **46** and `WAIVED_CEILING` is still **0**.
-
-⛔ **`sql-tests` and VAC-08 are expected RED on the 164.7 PR** for exactly the
-arms named in `TODOS.md` `[164.7-TEST-APPLY-APPSETTINGS]`, until the founder
-hand-applies `20260907120000` and `20260907130000` to shared TEST. That is a
-missing apply, not a coupling regression.
-
-⚠️ **Every number above is a DATED reading of one macOS box on 2026-09-07** (472
-legs = 380 arms + 46 baseline + 46 restore; 531 s and 528 s at mean 1.1 s/arm,
-plus one 614 s run contaminated by a busy-wait loop beside it), **not a live
-constant.** Read `FILES_FLOOR` and `ARMS_FLOOR` off the constants themselves in
-`scripts/mutation-runner/run.mjs`, cited by SYMBOL. No SHA-bound ubuntu run of a
-46-file / 380-arm corpus exists; the 567 s and 646 s figures above are the
-164.4.1 tree at 363 and 361 arms and must not be read as figures for this one.
-`sql-mutation`'s `timeout-minutes` stays **20**, unchanged — the rule's one
-permitted raise was taken on 2026-09-05 and 20 is a declared CEILING, so a future
-crossing is answered by `[REDUNDER-SUBSET-SPLIT]`, never by raising again.
-Read the run's own `coverage:` and `arms:` lines rather than any number restated
-in prose.
-
 ## Which database am I on? (ask FIRST, every time)
 
 ⛔ **This checkout's Supabase CLI is linked to PRODUCTION.** `supabase/.temp/project-ref` holds
@@ -350,7 +25,102 @@ The **CLI** and the **browser SQL editor** have no automated guard at all. The m
 only thing standing between a dashboard tab and production.
 
 ⚠️ TEST is SHARED with other people's CI. A write there is not private, and a global assertion
-there is not reliable (see `FANOUT-GLOBAL-01` in TODOS.md).
+there is NOT reliable — "no stuck jobs exist", "the table is empty" measure other people's rows
+too. Assert about YOUR OWN rows.
+⛔ `FANOUT-GLOBAL-01` is NOT a `TODOS.md` id (measured 2026-09-08: 0 hits). It exists only as
+prose here and in the ROADMAP. **Phase 164.9 TESTISOLATION owns writing the real entry** — do not
+send a planner looking for a spec that was never written.
+
+## Test Coverage
+
+`npm run test:coverage` → v8 report (text + HTML + JSON summary in `coverage/`).
+
+**Blocking CI gate.** The vitest shards in `.github/workflows/ci.yml` run with `--coverage` and
+emit blob reports; `frontend-coverage` merges them (`vitest run --merge-reports --coverage`) and
+enforces the thresholds on full-suite numbers. The `frontend` aggregator gates on it.
+
+⛔ **Read the live thresholds from `vitest.config.ts`, never from a number restated here.** They
+are a RATCHET, set a few points under measured actual so a real regression fails CI but noise
+does not. When actual climbs durably, raise them to match. Target is 80%, matching the
+`--cov-fail-under=80` the `analytics-service/` Python suite enforces (`.github/workflows/ci.yml:3819`).
+
+## SQL gate integrity jobs (v0.77.0.0, Phase 164.3)
+
+The `frontend` aggregator gates more than coverage now. Three jobs in
+`.github/workflows/ci.yml` are in both its `needs:` list and its result loop, so
+a failure fails the aggregate rather than passing quietly:
+
+- **`sql-mutation`** — mutates every SQL gate arm carrying a `RED-UNDER` annotation, asserts
+  the file goes RED with that arm named, restores, asserts GREEN. Exits 1 on an annotation that
+  does not bite, on coverage below a ratchet floor pinned at the measured value, on more waived
+  arms than `WAIVED_CEILING` in `scripts/mutation-runner/run.mjs`, and when the runner's two
+  independent arm tallies (`arms:` vs `lane-invocations:`) disagree. Runs on its own throwaway
+  PostgreSQL cluster (`scripts/pg-lane/run.sh`), never against shared TEST — the lane carries
+  `shared_preload_libraries=pg_cron` (Phase 164.4.1, +0.009 s/lane), so pg_cron gates run there.
+  It prints, and MEASURE_FAILs on the absence of, a `lane-blocked:` line beside a `lane-probe:`
+  line measured on the lane itself; pg_cron AVAILABLE with a NON-EMPTY lane-blocked class raises
+  `lane-blocked-stale` and exits 1. That tripwire stays live for any future unannotated pg_cron
+  gate even though the class is currently empty — it has been observed both firing and clearing.
+- **`sql-gate-lint`** — **seven** static rules over `supabase/tests` (`R1-exception-handler-probe`,
+  `R2-functiondef-comment-strip`, `R3-additive-diagnostic-narrow`, `R4-tgtype-bitmask-completeness`,
+  `R5-fixture-shadows-migration-table`, `R6-fixture-shadows-fixture-table`, `R7-fixture-shadows-policy`),
+  each shipped with a red and a green fixture proving the rule can fire.
+  ⛔ Do not restate that count from memory — `node scripts/lint-sql-gates.mjs --self-test` prints
+  it (`lint-sql-gates self-test OK: 7 rules, red+green each.`). This file said "four" until
+  2026-09-08, while a paragraph below it already called the app-GUC linter "not an EIGHTH rule",
+  so the file contradicted itself for three rules' worth of drift.
+- **`plan-anchor-verify`** — re-resolves every `file:line` anchor and named
+  symbol a pending PLAN.md asserts, and fails loud on a miss.
+
+Two more gates live outside the aggregator: **VAC-04** (repo-vs-PROD function
+body diff) is a step in `migration-drift-check.yml` on migration PRs, and
+**VAC-08** (repo-vs-TEST ledger + body drift) runs in `sql-tests`. Both exit 1
+when their credential is absent — neither ever skips.
+
+### Current reading — 2026-09-07, Phase 164.7 (a DATED reading, not a constant)
+
+⛔ **Regenerate, do not trust:** `node scripts/mutation-runner/run.mjs` prints every figure
+below. If it disagrees with this block, the RUN is right and this block is stale.
+
+`coverage: files 46/73` · `arms: 384/384/0` · `biting: 384` · `lane-invocations: 384` (the two
+independent tallies AGREE) · `lane-blocked: 0 file(s)` · `lane-probe: pg_cron AVAILABLE` ·
+`pending: 0` · `per-arm lane time: mean 1.1s` · `✅ No defects` · exit 0.
+46 annotated + 0 lane-blocked + 27 `unreachable:` (`[REDUNDER-NONIDIOM]`, printed by name every
+run) + 0 pending = 73.
+
+⛔ **Read `FILES_FLOOR`, `ARMS_FLOOR` and `WAIVED_CEILING` by SYMBOL from
+`scripts/mutation-runner/run.mjs` — never from a number restated in this file.** Prose and
+constant have diverged here before (`ARMS_FLOOR` prose said 380, shipped value was 384); the
+dated record of that correction is in `docs/sql-gate-lineage.md`.
+
+⛔ **A run that exits NON-ZERO is a regression.** `WAIVED_CEILING` is **0** and has stayed 0
+through two founder decisions that each took the root-cause fix over an exception — a REORDER
+putting a precondition ahead of its dependants (`[REDUNDER-WAIVER-01]`), and wrapping an INSERT
+in the exception idiom its own file already used, so a narrowed unique index reports a named arm
+instead of a raw 23505. Do not add a waiver; fix the cause.
+
+⛔ **Two floors, two layers.** `scripts/mutation-runner/run.mjs` gates on `annotatedFiles < filesFloor` and
+`bitingArms < armsFloor`, so a floor set BELOW the corpus is invisible to it by construction.
+The stale-low direction is caught one layer up by `src/__tests__/mutation-runner-floors.test.ts`
+(`RATCHET STALE: … but FILES_FLOOR is still …`). Separating a floor "in both directions" means
+the runner for the upper and the vitest ratchet for the lower.
+
+**`sql-gate-lint` also runs `scripts/lint-app-guc.mjs`** — self-test first, then the corpus scan,
+both pasted verbatim as a developer runs them. It is a SIBLING of `lint-sql-gates.mjs`, not an
+eighth rule of it, because that linter masks comments and string-literal contents while this gate
+must COUNT comments (decision D-05). The corpus step is at **0 findings** with five files
+annotated (regenerate with `node scripts/lint-app-guc.mjs --self-test` then `node scripts/lint-app-guc.mjs`; do not
+trust this count) via a dated `-- APP-GUC-LINEAGE:` header AND an agreeing, count-pinned
+`LINEAGE_ALLOWLIST` entry. ⛔ A red corpus step is a regression and is NEVER cleared by widening
+the allowlist or relaxing `DETECT_RE`.
+
+**Timeout.** `sql-mutation`'s `timeout-minutes` is **20** (`.github/workflows/ci.yml:1259`, job at `:1069`) and stays there: the rule's one
+permitted raise was taken on 2026-09-05 and 20 is a declared CEILING. A future crossing is
+answered by `[REDUNDER-SUBSET-SPLIT]`, never by raising again (`ci.yml` carries the derivation).
+
+📜 **Dated lineage for Phases 164.3 → 164.7 — every historical arm tally, ubuntu run id and
+superseded CURRENCY paragraph — now lives in `docs/sql-gate-lineage.md`.** It is history; nothing
+in it is a live constant.
 
 ## Design System
 Always read DESIGN.md before making any visual or UI decisions.
@@ -358,125 +128,25 @@ All font choices, colors, spacing, and aesthetic direction are defined there.
 Do not deviate without explicit user approval.
 In QA mode, flag any code that doesn't match DESIGN.md.
 
-## Skill routing
+## GSD orchestration rules (measured 2026-09-08 — both of these cost time this session)
 
-When the user's request matches an available skill, ALWAYS invoke it using the Skill
-tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
-The skill has specialized workflows that produce better results than ad-hoc answers.
+⛔ **Never dispatch a `gsd-*` agent yourself. Run the WORKFLOW'S dispatch step, preamble
+included.** Invoking the Skill is NOT sufficient — you can invoke it and then hand-dispatch from
+inside it, which is what happened. In `execute-phase` the preamble resolves isolation via
+`gsd_run query dispatch-isolation`, and that call's SIDE EFFECT is writing
+`.gsd/dispatch-isolation-sentinel.json`, which the isolation guard hooks read. Skip it and the
+guard refuses the dispatch with a message that looks like a config bug and is not.
+Recovery: `worktree.reap-orphans`, honour `worktree.base-check` (it auto-degrades to `none` when
+`origin/HEAD` has diverged from `HEAD` — correct, since a harness worktree forks from
+`origin/HEAD` and would lack the branch's work), then
+`record-dispatch-isolation --isolation <verdict> --phase <n>`.
+⚠️ `inspect-dispatch-isolation` reports the HOST CAPABILITY, not the recorded verdict — read the
+sentinel FILE to confirm.
 
-Key routing rules:
-- Product ideas, "is this worth building", brainstorming → invoke office-hours
-- Bugs, errors, "why is this broken", 500 errors → invoke investigate
-- Ship, deploy, push, create PR → invoke ship
-- QA, test the site, find bugs → invoke qa
-- Code review, check my diff → invoke review
-- Update docs after shipping → invoke document-release
-- Weekly retro → invoke retro
-- Design system, brand → invoke design-consultation
-- Visual audit, design polish → invoke design-review
-- Architecture review → invoke plan-eng-review
-- Save progress, checkpoint, resume → invoke checkpoint
-- Code quality, health check → invoke health
-- Tech debt, "what should we refactor", "code health", refactoring priorities, maintenance backlog → invoke engineering:tech-debt
-- Architecture decision, ADR, "how should we architect", evaluate architecture, system design review → invoke engineering:architecture
-
-## PR branches — always filter transient planning artifacts
-
-`.planning/` is TRACKED here (see `.gitignore:53-63` — untracked planning silently
-breaks parallel executor worktrees, which is not a preference but a GSD hard
-requirement, `gsd-core CONFIGURATION.md:670`). The consequence is that PR diffs carry
-PLAN/SUMMARY/CONTEXT/RESEARCH noise into review.
-
-GSD's tool for that is `/gsd-pr-branch`. **Nothing invokes it automatically** —
-`autonomous.md` has no ship step, and `ship.md` contains zero references to it. It runs
-only when a human or agent types it. This section is what makes it run.
-
-### The step
-
-After `/ship` has committed and before opening the PR:
-
-1. Run `/gsd-pr-branch`. It builds `<branch>-pr` from the base, cherry-picking code and
-   structural planning commits (`STATE`, `ROADMAP`, `MILESTONES`, `PROJECT`,
-   `REQUIREMENTS`, `milestones/**`) while dropping transient ones (`phases/`, `quick/`,
-   `research/`, `threads/`, `todos/`, `debug/`, `seeds/`, `codebase/`, `ui-reviews/`).
-2. **Run the deletion guard below. It is not optional.**
-3. Open the PR from `<branch>-pr`, not from the working branch.
-
-### ⛔ Deletion guard — upstream `pr-branch` over-deletes
-
-Its cherry-pick loop runs `git rm -r --cached ".planning/$dir/"`, which is **not scoped
-to the cherry-picked commit**. The PR branch is created from the base, so the index
-already holds the base's phase artifacts, and that `rm` stages every one of them for
-deletion. Measured on this repo 2026-08-26: **149 of 149** `.planning/phases/` files on
-`main` staged for removal. Merging such a branch deletes them from `main`.
-
-This is the same defect that cost 14 Phase 161.1 files in v0.74.0.0 — that was a
-hand-rolled version of the same filter applied to a working branch tip.
-
-Before pushing any `-pr` branch, prove it deletes nothing that exists on the base:
-
-```bash
-BASE=$(git rev-parse --abbrev-ref origin/HEAD | sed 's|origin/||')
-git diff --diff-filter=D --name-only "$BASE".."$(git branch --show-current)" -- .planning/
-```
-
-Any output is a **STOP**. A PR branch must never delete a `.planning/` file that the
-base already has. Re-create it with the `rm` scoped to the commit's own paths:
-
-```bash
-git diff-tree --no-commit-id --name-only -r "$HASH" \
-  | grep -E '^\.planning/(phases|quick|research|threads|todos|debug|seeds|codebase|ui-reviews)/' \
-  | xargs -r git rm -q --cached --ignore-unmatch
-```
-
-### What this does and does not buy
-
-It cleans reviewers' diffs. It does **not** keep artifacts off the public repo — phase
-dirs still reach `main` when `/gsd-complete-milestone` archives them into
-`.planning/milestones/v{X.Y}-phases/`, which is structural and always preserved. That
-archival is the intended destination; excluding artifacts from a PR is presentation, not
-privacy. Upstream's `pr_strict` mode would change that, and it is not in the installed
-version (local gsd-core `1.11.0` — `grep pr_strict` returns nothing).
-
-### ⛔ Reviewers run BEFORE the filter — and `/gsd-update` will silently undo this
-
-**Rule: the specialist/automated review pass runs on the WORKING branch, before
-`filter_planning_artifacts` builds the `-pr` branch.** Only the human reviewer-request
-prompt may run after the PR exists, because only that one needs a PR number.
-
-⚠️ MEASURED 2026-09-07 (Phase 164.2.1, PR #752), all three of these happened in one run:
-
-1. **Fixes landed on the wrong branch.** `filter_planning_artifacts` ends by checking out the
-   `-pr` branch and only returns via its own final `git checkout "$CURRENT_BRANCH"`. Miss that
-   line and every subsequent agent edits the derived `-pr` head, while the working branch —
-   the one carrying the full history — receives nothing.
-2. **A fixer could not find the file it was told to fix.** The filter strips
-   `.planning/phases/` from the `-pr` branch by design, so an agent asked to correct
-   `SECURITY.md` / `VERIFICATION.md` found no such path. It recovered only by building its own
-   worktree; the naive outcome is a fixer reporting "file not found" or, worse, recreating the
-   file empty.
-3. **The PR body described a tree that no longer existed.** `generate_pr_body` runs before the
-   fixes, so the PR narrated the pre-fix state and the fixes needed a force-push or trailing
-   commits on an open PR.
-
-**The global workflow was rewired on 2026-09-07** — `~/.claude/gsd-core/workflows/ship.md` now
-has a `specialist_review` step positioned before `filter_planning_artifacts`, and the
-success criteria assert the ordering plus a post-filter `git branch --show-current` check.
-
-⛔ **That edit lives in the GLOBAL install and `/gsd-update` OVERWRITES it.** This has already
-cost the same file its `optional_review` specialist edit once before. After every
-`/gsd-update`, re-apply it: move the `**Specialist reviewers…**` and
-`**External code review command…**` blocks out of `optional_review` into a new
-`specialist_review` step placed immediately before `<step name="filter_planning_artifacts">`,
-leaving only `**Manual review options:**` behind. A pre-rewire backup is kept at
-`~/.claude/gsd-core/workflows/ship.md.bak-preview-reorder` for diffing.
-
-**Cheap check that the ordering survived:**
-
-```bash
-grep -n '^<step name=' ~/.claude/gsd-core/workflows/ship.md \
-  | grep -E 'specialist_review|filter_planning_artifacts'
-```
-
-`specialist_review` MUST print a lower line number than `filter_planning_artifacts`. If it is
-missing entirely, `/gsd-update` has reverted the rewire.
+⛔ **`gsd-tools` state handlers CLOBBER `STATE.md` and `ROADMAP.md`.** `state.advance-plan`
+returns an error AND WRITES ANYWAY; `roadmap.update-plan-progress` injects stray bullets into
+unrelated phase sections. Both were hit in this repo. Prefer hand-editing those two files; if you
+use a handler, `git diff` the result and revert every collateral change before committing.
+Note `state.add-roadmap-evolution` also recomputes the `progress:` block from local disk as an
+undocumented side effect — that count under-reports phases whose `.planning/phases/` artifacts the
+`-pr` filter stripped from `main`.

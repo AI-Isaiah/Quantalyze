@@ -6,10 +6,10 @@ current_phase: 164.2.1
 current_phase_name: SESSIONID-FENCE
 status: verified
 stopped_at: "164.5-05 tasks 1-2 complete; STOPPED at task 3 blocking-human checkpoint:decision (ROADMAP criterion 5 wording)"
-last_updated: "2026-09-07T19:02:39.662Z"
+last_updated: "2026-09-08T11:24:57.563Z"
 last_activity: 2026-09-06
 last_activity_desc: "164.2 shipped as PR #749. Version bumped 0.77.15.0 -> 0.77.16.0 with a CHANGELOG entry (nothing in GSD or CI enforces either). Ship review: security auditor + 10 diff-scoped specialists; 5 file-disjoint fixers. TWO VACUITIES: the roster-render poster census compared a hand-typed length to a hand-typed literal while claiming to scan src/ (it read no files) — and that was the pin the founder's criterion-3 override explicitly rested on; and the PGRST204 assertion passed on the format string's static tail. Three more found while fixing: C-10's 400-day fixture could not detect the arm-swap it guarded, the provenance census's Rule C ran only on stamped sites, and a fixer caught its own draft assertion passing for the wrong reason. FOUR user-facing/data-integrity: the two SUCCESS writers sat outside the PGRST204 degrade while the docstring claimed full coverage (a succeeded compute was recorded failed, cash series heal-deleted, retry burned); durable writer sentences had made an internal table name + raw uuid and a Python exception class name reach user copy; validate-and-encrypt showed OUR stale service key as 'Unauthorized' on a key-connect form; the post-23505 read discarded both failure channels. Fixing stale anchors introduced 3 bare file:line cites that [SEAMPROSE-01] bans for going stale — caught by the full suite. Gates re-run by the orchestrator: vitest 14180/0 (Node 22), pytest 5430, mypy --strict 79 files, tsc clean, corpus 369 arms no defects. SECURITY.md added: 21/21 closed, threats_open 0, HIGH proven non-vacuous by three lane mutants that each abort the apply."
-state_head: b8c3cc9dab12785ee031c90a290cbbcc4dcc817a
+state_head: 75d01040992ae3feca35a3781c636f4d01b192fb
 
 # ⚠️ progress: HAND-SET 2026-09-06 against `origin/main`, NOT derived from this checkout.
 
@@ -126,19 +126,33 @@ state_head: b8c3cc9dab12785ee031c90a290cbbcc4dcc817a
 # session and did NOT touch it. Values restored to the 2026-09-06 census both times.
 
 # ⛔ RE-SET 2026-09-07 (Phase 164.5 wave 1). `state.advance-plan` BELONGS ON THE ⛔ LIST and
+
 # was not on it. FOUR of four wave-1 executors ran it from their own worktrees and ALL FOUR
+
 # reproduced the same failure independently: it returns
+
 # {"error":"Cannot parse Current Plan or Total Plans in Phase from STATE.md"} AND WRITES ANYWAY.
+
 # One measured 31 added / 7 removed, of which 24 were blank lines injected into this census
+
 # block. `state.update-progress` clobbered alongside it in the same runs, overwriting the
+
 # hand-set 123/126/62 with 97/109/32 derived from an incomplete worktree.
+
 # ⭐ THE GENERAL RULE, now measured four times over three phases: A FAILED HANDLER CALL IS NOT A
+
 # NO-OP HERE. An error return says nothing about whether the file was written. Check the diff,
+
 # never the exit status.
+
 # ⛔ FULL LIST as of 2026-09-07: update-progress, begin-phase, add-roadmap-evolution,
+
 # add-decision, record-metric, record-session, advance-plan. That is SEVEN, and it includes the
+
 # executor's standard state-update step. This banner wins over that step.
+
 # ⚠️ Restore with `git show HEAD:.planning/STATE.md` + `cp`, NOT `git checkout --` — the latter
+
 # destroys any uncommitted work in the file it restores.
 
 # ⛔ CORRECTION 2026-09-07 (164.2.1 plan 02 execution). The last sentence above is FALSE as
@@ -212,11 +226,11 @@ state_head: b8c3cc9dab12785ee031c90a290cbbcc4dcc817a
 # state-update step entirely, per this banner's own rule that it wins over that step.
 
 progress:
-  total_phases: 22
+  total_phases: 25
   completed_phases: 7
-  total_plans: 109
-  completed_plans: 97
-  percent: 32
+  total_plans: 107
+  completed_plans: 96
+  percent: 28
 ---
 
 # Project State — Quantalyze
@@ -1139,6 +1153,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.1 P05 | 17 min | 2 tasks | 2 files |
 | Phase 164.2.1 P01 | 35m | 3 tasks | 4 files |
 | Phase 164.2.1 P02 | 20m | 2 tasks | 4 files |
+| Phase 164.8 P01 | 22min | 2 tasks | 6 files |
+| Phase 164.8 P02 | (executor died before reporting) | 3 tasks | 1 file |
+| Phase 164.8 P03 | 33min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -1192,8 +1209,14 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.6 edited: carried in MYPY-MAINPY-01 from 164.1-02 deferred-items — goal item (9), success criterion 6, requirements entry; analytics-service/tests/ policy question deliberately excluded
 - Phase 164.2.1 inserted after Phase 164.2: SESSIONID-FENCE — stale wizardSessionId root cause; the 2026-09-05 re-partition dropped it from 164.2 as already satisfied, measured FALSE 2026-09-06 (URGENT)
 - Phase 164.6 edited: carried in PROBER-CALIBRATION-01 (commit `61aa8cf0`, 2026-09-06) — goal item (10), success criterion 7, requirements entry. Found BY HAND at the PR #748 merge gate, not by a gate: the arm named `CALIBRATION: an UNGUARDED exit 0 on the probe path is still caught` (`src/__tests__/prod-prober-wiring.test.ts:292`, shipped in PR #748 / v0.77.15.0) mutates the schedule guard and then asserts only that the text changed — it never re-runs the `guardAt`/`exitZeroAt` check at `:279-281` against the mutant, so it passes with `:279-281` deleted outright. NOT vacuous in effect (removing the guard IS caught by the `toContain` at `:277`), but the arm's name promises a proof it does not perform. Non-blocking by the stopping rule — neither user-facing nor data-integrity — so #748 landed at v0.77.15.0 with this booked rather than fixed. ⚠️ `61aa8cf0` touched ROADMAP.md ALONE; this STATE entry was added 2026-09-06 during the STATE reconciliation, because a scope amendment touching one file is incomplete.
-- Phase 164.8 inserted after Phase 164.6: TESTPREPROD — TEST becomes a real pre-prod. Founder decision 2026-09-06: bring the shared TEST project current, then apply migrations to TEST on merge BEFORE PROD. Closes the class where sql-tests goes red on migration PRs purely because the migration never reached TEST (nothing applies migrations to TEST today, so pre-apply gate SKIPs are permanent). Queued LAST in the 164.x series, after 164.6 — accepted cost: 164.7 and 164.5 each write forward migrations and will each hit the hand-apply path first. Current Phase pointer deliberately NOT moved (scheduled, not urgent-next; same precedent as the 164.1 insertion).
+- Phase 164.8 inserted after Phase 164.6: TESTPREPROD — TEST becomes a real pre-prod. Founder decision 2026-09-06: bring the shared TEST project current, then apply migrations to TEST on merge BEFORE PROD. Closes the class where sql-tests goes red on migration PRs purely because the migration never reached TEST (nothing applies migrations to TEST today, so pre-apply gate SKIPs are permanent). Queued LAST in the 164.x series, after 164.6 — accepted cost: 164.7 and 164.5 each write forward migrations and will each hit the hand-apply path first. Current Phase pointer deliberately NOT moved (scheduled, not urgent-next; same precedent as the 164.1 insertion). ⭐ **SUPERSEDED 2026-09-08 — 164.8 is PULLED FORWARD and runs NEXT, ahead of 164.5.1, 164.5.2 and 164.6.** The sentence above stays as the dated record of the 2026-09-06 decision; it is no longer the live ordering. Two things changed on 2026-09-08. (1) The accepted cost stopped being per-PR friction: VAC-08 enumerates EVERY repo migration against the TEST ledger on every `sql-tests` run, not just a PR's diff, so `main` itself is RED at `78cfaef4` and every PR opened until 164.8 lands inherits a red `sql-tests` + `frontend` that a human must hand-triage as "the known one". (2) 164.8's OWN design was found to break on the migration that caused it — `20260908120000` is a bare `DROP FUNCTION` with no `IF EXISTS` and TEST has ZERO overloads of the target, so BOTH halves of 164.8 (bring-TEST-current and apply-on-merge) hit `42883` and abort on a migration that is CORRECT for PROD. The former dependency was documented "ordering only — no code dependency", so nothing technical resisted. Booked as `[164.5-TEST-VAC08-DROP-UNAPPLIABLE]`.
 - Phase 164.6 edited: carried in CI-DOCSPATH-01 (2026-09-06, at the PR #750 merge gate) — goal item (12), success criterion 9, requirements entry, and a TODOS entry. MEASURED on PR #750 itself, not estimated: a four-file `.planning/`-only diff ran 21 jobs / ~3,001 job-seconds (~50 min), excluding `e2e-seeded` and `sql-tests` which were still running at census time; `sql-mutation` 559s, `python` 494s, `e2e` 405s. The mutex cost is the real one — `e2e-seeded` and `sql-tests` each take the shared-TEST-DB advisory lock, so a roadmap edit delays real code PRs on a database shared with other people's CI. ⛔ Booked in 164.6 rather than left in TODOS because a job-skipping path filter has the shape of a gate silently not running, which is this milestone's defect class: criterion 9 requires proof on a CODE push that everything still executes, not merely proof that a docs push got fast. ⚠️ STATE entry written BY HAND: `state.add-roadmap-evolution` recomputes the `progress:` block from local disk as an undocumented side effect (observed earlier the same day on the 164.8 insertion), and this checkout cannot see the filtered 164.2 plans.
+- Phase 164.9 inserted after Phase 164: TESTISOLATION — per-run isolation replaces global truth against the shared TEST project, closing FANOUT-GLOBAL-01. Inserted because two hardening items were deferred to no phase during 164.8 discuss. (URGENT)
+- Phase 164.10 inserted after Phase 164: BODYDRIFT — PROD runs an EARLIER revision of three function bodies than the migration chain renders; DRIFT-06 repaired under the three-reviewer rule. (URGENT)
+- Phase 164.9 moved after Phase 164.8: CORRECTION to the two entries above: phase.insert places a new decimal immediately after the named INTEGER phase, so 164.9 and 164.10 were written directly after Phase 164 — ahead of 164.7, 164.3, 164.5 and 164.8. Both sections were then RELOCATED BY HAND to the tail, after 164.8, because ROADMAP file order is the queue and 164.9 depends on the TEST restore that 164.8 delivers. Their 'inserted after Phase 164' wording above describes the tool call, NOT the final position.
+- Phase 164.8 moved after Phase 164.5: Section physically relocated to sit after 164.5 and before 164.5.1, so FILE ORDER matches the pull-forward decided earlier the same day. Until this move the phase was pulled forward in prose only, and roadmap.analyze walks file order — it would have returned 164.6 as next_phase. Prose is not the queue.
+- Phase 164.9 edited: edited fields: requirements — routed TODOS [164.8-DATA-DEPENDENT-MIGRATION-ESCAPE] here from Phase 164.8 plan-checker blocker B4 (restore is schema-only, so TEST mirrors PROD's catalogue not its data); 164.10 rejected as home, function-body scope only
+- Phase 164.8 edited: edited fields: plans — 5 to 6 after the plan-checker REVISE split plan 01's self-test harness into its own plan (W8, plan 01 was at 0.95 budget)
 
 ### Decisions
 
