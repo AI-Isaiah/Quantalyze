@@ -1455,6 +1455,32 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.6 to break down)
 
+### Phase 164.8.1: REFDATA — a schema-only restore destroys migration-seeded reference data while the ledger swears those migrations applied (INSERTED)
+
+**Goal:** Make the TEST restore reproduce the reference rows that migrations INSERT, and fail loud when it does not. After Phase 164.8 Plan 04's restore, TEST's ledger holds all 266 migrations while the rows several of them exist to insert are GONE — and `supabase db push` will never replay them, because it skips applied versions.
+
+⛔ **INSERTED 2026-09-09, founder decision, on MEASUREMENT not review.** Restore run `34274355596` committed; CI run `34280468314` then went red in two independent places, both tracing to the same cause:
+
+* `python` — `insert or update on table "compute_jobs" violates foreign key constraint "compute_jobs_kind_fkey"`, `Key (kind)=(sync_trades) is not present in table "compute_job_kinds"`.
+* `e2e-seeded` — `[seed] discovery_categories row for slug='crypto-sma' not found. The initial schema migration (20260405061911_initial_schema.sql) seeds this row — if it's missing the migration didn't run.` ⚠️ That seeder's inference is now FALSE and misleading: the migration DID run, and is in the ledger.
+
+⭐ **Why this is not "e2e will re-seed it".** Phase 164.8 Plan 04's threat table accepted `T-164.8-09` (irreversible data loss on TEST) on exactly that compensating control. The control does not exist: the e2e seeder is itself one of the two failing jobs, and it fails because it EXPECTS migration-seeded rows. `T-164.8-09` is reopened.
+
+⭐ **Why it is tractable, measured before planning:** the reference INSERTs are already idempotent — `compute_job_kinds` is written by 14 migrations, all `ON CONFLICT (name) DO NOTHING` — and every value is a LITERAL in the repo, not PROD data. So a replay carries no public-repo disclosure risk. `supabase/schema/baseline.sql` currently carries **0** data statements (562 GRANT/REVOKE, zero INSERT/COPY), which is why nothing puts them back.
+
+⛔ **The hard part is the ALLOWLIST, not the replay.** 39 distinct tables receive an INSERT somewhere in `supabase/migrations/`, and most are data backfills inside DO blocks rather than reference seeding. Deciding which are reference tables is per-table judgment and must not be done with a regex. Two are already established: `compute_job_kinds`, `discovery_categories`.
+
+⛔ **NOT in scope:** re-seeding shared TEST by hand to go green. Phase 164.8 Plan 06 already says such a failure must be NAMED rather than hand-seeded, and TEST is shared with other people's CI.
+
+**Requirements**: the reference-data half of `164.2-TEST-APPLY-PROVENANCE`, the reopened `T-164.8-09`, and TODOS `[164.8-TEST-DATA-RESEEDED]` (which Phase 164.8 Plan 06 owns creating — measured 2026-09-09: it does not exist in `TODOS.md` yet).
+**Depends on:** Phase 164.8 Plan 04 (its restore is what exposed this; the fix targets the same script).
+**Blocks:** a green `main`. Until this lands, `e2e-seeded` — the go-live badge gate — and `python` are red on every branch.
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.8.1 to break down)
+
 ### Phase 164.9: TESTISOLATION — a run's assertions against the shared TEST project stop being unreliable: per-run isolation replaces global truth (INSERTED)
 
 **Goal:** Close `FANOUT-GLOBAL-01`. TEST is shared with other people's CI, so a GLOBAL assertion there ("no stuck jobs exist", "the table is empty") is measuring other people's rows as well as ours and is unreliable by construction. Replace global truth with per-run isolation, so a run asserts about its OWN rows and nothing else.
