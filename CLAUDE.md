@@ -61,8 +61,14 @@ a failure fails the aggregate rather than passing quietly:
   line measured on the lane itself; pg_cron AVAILABLE with a NON-EMPTY lane-blocked class raises
   `lane-blocked-stale` and exits 1. That tripwire stays live for any future unannotated pg_cron
   gate even though the class is currently empty — it has been observed both firing and clearing.
-- **`sql-gate-lint`** — four static rules over `supabase/tests`, each shipped
-  with a red and a green fixture proving the rule can fire.
+- **`sql-gate-lint`** — **seven** static rules over `supabase/tests` (`R1-exception-handler-probe`,
+  `R2-functiondef-comment-strip`, `R3-additive-diagnostic-narrow`, `R4-tgtype-bitmask-completeness`,
+  `R5-fixture-shadows-migration-table`, `R6-fixture-shadows-fixture-table`, `R7-fixture-shadows-policy`),
+  each shipped with a red and a green fixture proving the rule can fire.
+  ⛔ Do not restate that count from memory — `node scripts/lint-sql-gates.mjs --self-test` prints
+  it (`lint-sql-gates self-test OK: 7 rules, red+green each.`). This file said "four" until
+  2026-09-08, while a paragraph below it already called the app-GUC linter "not an EIGHTH rule",
+  so the file contradicted itself for three rules' worth of drift.
 - **`plan-anchor-verify`** — re-resolves every `file:line` anchor and named
   symbol a pending PLAN.md asserts, and fails loud on a miss.
 
@@ -220,8 +226,19 @@ It cleans reviewers' diffs. It does **not** keep artifacts off the public repo �
 dirs still reach `main` when `/gsd-complete-milestone` archives them into
 `.planning/milestones/v{X.Y}-phases/`, which is structural and always preserved. That
 archival is the intended destination; excluding artifacts from a PR is presentation, not
-privacy. Upstream's `pr_strict` mode would change that, and it is not in the installed
-version (local gsd-core `1.11.0` — `grep pr_strict` returns nothing).
+privacy.
+
+⚠️ **CORRECTED 2026-09-08.** This paragraph used to say `pr_strict` "is not in the installed
+version (local gsd-core `1.11.0` — `grep pr_strict` returns nothing)". Both halves were wrong:
+the install is **1.12.0** (`gsd-tools runtime-identity --raw`) and `planning.pr_strict` EXISTS,
+default `false` — `true` drops EVERY `.planning/` path from the PR branch, where `false` keeps
+the structural state (STATE.md, ROADMAP.md, MILESTONES.md, PROJECT.md, REQUIREMENTS.md,
+`milestones/`). It is NOT set in `.planning/config.json`.
+⛔ **The conclusion above still stands, for a different reason than the one originally given:**
+`pr_strict` filters the PR BRANCH only. Phase artifacts still reach `main` when
+`/gsd-complete-milestone` archives them into `.planning/milestones/`, so enabling it would not
+buy privacy on a PUBLIC repo — it would only cost reviewers the structural state. Decide it on
+that basis, not on the false premise that the option does not exist.
 
 ### ⛔ Reviewers run BEFORE the filter — and `/gsd-update` will silently undo this
 
