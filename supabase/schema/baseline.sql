@@ -2615,91 +2615,6 @@ COMMENT ON FUNCTION "public"."compute_similarity"("a" "jsonb", "b" "jsonb") IS '
 
 
 
-CREATE OR REPLACE FUNCTION "public"."create_allocator_connected_strategy"("p_user_id" "uuid", "p_portfolio_id" "uuid", "p_exchange" "text", "p_label" "text", "p_strategy_name" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer) RETURNS TABLE("strategy_id" "uuid", "api_key_id" "uuid")
-    LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'public', 'pg_catalog'
-    AS $$
-DECLARE
-  v_auth_uid UUID := auth.uid();
-  v_key_id UUID;
-  v_strategy_id UUID;
-  v_portfolio_owner UUID;
-BEGIN
-  -- Verify the caller is writing for themselves.
-  IF v_auth_uid IS NULL THEN
-    RAISE EXCEPTION 'create_allocator_connected_strategy called without an auth session'
-      USING ERRCODE = 'insufficient_privilege';
-  END IF;
-
-  IF v_auth_uid <> p_user_id THEN
-    RAISE EXCEPTION 'create_allocator_connected_strategy: p_user_id (%) does not match auth.uid (%)',
-      p_user_id, v_auth_uid
-      USING ERRCODE = 'insufficient_privilege';
-  END IF;
-
-  -- Verify portfolio ownership.
-  SELECT user_id INTO v_portfolio_owner
-    FROM portfolios
-    WHERE id = p_portfolio_id;
-
-  IF v_portfolio_owner IS NULL THEN
-    RAISE EXCEPTION 'create_allocator_connected_strategy: portfolio % not found',
-      p_portfolio_id
-      USING ERRCODE = 'no_data_found';
-  END IF;
-
-  IF v_portfolio_owner <> p_user_id THEN
-    RAISE EXCEPTION 'create_allocator_connected_strategy: portfolio % not owned by user %',
-      p_portfolio_id, p_user_id
-      USING ERRCODE = 'insufficient_privilege';
-  END IF;
-
-  -- Insert the encrypted key row.
-  INSERT INTO api_keys (
-    user_id, exchange, label,
-    api_key_encrypted, api_secret_encrypted, passphrase_encrypted,
-    dek_encrypted, nonce, kek_version, is_active
-  )
-  VALUES (
-    p_user_id, p_exchange, p_label,
-    p_api_key_encrypted, p_api_secret_encrypted, p_passphrase_encrypted,
-    p_dek_encrypted, p_nonce, COALESCE(p_kek_version, 1), TRUE
-  )
-  RETURNING id INTO v_key_id;
-
-  -- Insert the strategy row. source='allocator_connected' means it won't
-  -- appear on Discovery. status='published' so it's immediately visible
-  -- in the allocator's portfolio.
-  INSERT INTO strategies (
-    user_id, api_key_id, name, status, source,
-    strategy_types, subtypes, markets, supported_exchanges
-  )
-  VALUES (
-    p_user_id, v_key_id, p_strategy_name, 'published', 'allocator_connected',
-    '{}', '{}', '{}', ARRAY[p_exchange]
-  )
-  RETURNING id INTO v_strategy_id;
-
-  -- Link to the allocator's portfolio.
-  INSERT INTO portfolio_strategies (
-    portfolio_id, strategy_id, current_weight, allocated_amount
-  )
-  VALUES (
-    p_portfolio_id, v_strategy_id, 0, 0
-  );
-
-  RETURN QUERY SELECT v_strategy_id, v_key_id;
-END;
-$$;
-
-
-ALTER FUNCTION "public"."create_allocator_connected_strategy"("p_user_id" "uuid", "p_portfolio_id" "uuid", "p_exchange" "text", "p_label" "text", "p_strategy_name" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer) OWNER TO "postgres";
-
-
-COMMENT ON FUNCTION "public"."create_allocator_connected_strategy"("p_user_id" "uuid", "p_portfolio_id" "uuid", "p_exchange" "text", "p_label" "text", "p_strategy_name" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer) IS 'Atomic api_keys + strategies (source=allocator_connected, status=published) + portfolio_strategies insert for allocator account connection. See migration 043.';
-
-
-
 CREATE OR REPLACE FUNCTION "public"."create_scenario_share"("p_scenario_id" "uuid", "p_token_hash" "text") RETURNS "uuid"
     LANGUAGE "plpgsql"
     SET "search_path" TO 'public', 'pg_temp'
@@ -14072,12 +13987,6 @@ GRANT ALL ON FUNCTION "public"."compute_jobs_set_updated_at"() TO "service_role"
 REVOKE ALL ON FUNCTION "public"."compute_similarity"("a" "jsonb", "b" "jsonb") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."compute_similarity"("a" "jsonb", "b" "jsonb") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."compute_similarity"("a" "jsonb", "b" "jsonb") TO "service_role";
-
-
-
-REVOKE ALL ON FUNCTION "public"."create_allocator_connected_strategy"("p_user_id" "uuid", "p_portfolio_id" "uuid", "p_exchange" "text", "p_label" "text", "p_strategy_name" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer) FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."create_allocator_connected_strategy"("p_user_id" "uuid", "p_portfolio_id" "uuid", "p_exchange" "text", "p_label" "text", "p_strategy_name" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer) TO "authenticated";
-GRANT ALL ON FUNCTION "public"."create_allocator_connected_strategy"("p_user_id" "uuid", "p_portfolio_id" "uuid", "p_exchange" "text", "p_label" "text", "p_strategy_name" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer) TO "service_role";
 
 
 

@@ -392,23 +392,28 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
-  {
-    name: "create_allocator_connected_strategy",
-    side: "baseline-only",
-    capturedAt: "2026-09-07",
-    clearedBy:
-      "a regeneration of supabase/schema/baseline.sql from PROD taken AFTER DRIFT-04's DROP has " +
-      "actually applied to PROD. ⚠️ ORDERING, re-stated 2026-09-07 because the first half of this " +
-      "sentence has already been spent: a regeneration was taken on 2026-09-07 and this row " +
-      "correctly SURVIVED it, because the DROP had not applied and the function was therefore " +
-      "still in the live catalogue it dumped. Regenerating again changes nothing here; dropping " +
-      "the function is what clears this row, and the re-dump only records it.",
-    reason:
-      "pending DRIFT-04. This function exists in PROD under NO migration — that is the entire " +
-      "defect DRIFT-04 names, and the founder's 2026-08-29 verdict is DROP, not adopt. It is " +
-      "therefore in the committed PROD dump and in no replayed migration. RE-CONFIRMED against " +
-      "the 2026-09-07 regeneration: still present in the fresh dump, still defined by no migration.",
-  },
+  // EMPTY, and that is a MEASURED state, not an unused feature.
+  //
+  // The single row this list ever held — `create_allocator_connected_strategy`,
+  // side `baseline-only`, captured 2026-09-07 — was deleted on 2026-09-08 the
+  // moment it stopped describing a disagreement, exactly as the contract above
+  // requires. Its own `clearedBy` named the condition: a regeneration of
+  // supabase/schema/baseline.sql taken AFTER DRIFT-04's DROP had actually
+  // applied to PROD. That happened (migration 20260908120000, PR #758), the
+  // re-dump removed the function's 91 lines, and the name went from
+  // `baseline-only` to present on NEITHER side.
+  //
+  // ⭐ The `ratchet-stale` arm was OBSERVED firing on this exact tree before the
+  // row was removed — `ratchet-stale: create_allocator_connected_strategy …
+  // present on NEITHER side. The row describes nothing: DELETE this
+  // NAME_SET_RATCHET entry.`, exit 1. The row was not deleted on the assumption
+  // that it had gone stale; the gate said so first.
+  //
+  // ⛔ An empty ratchet is the CORRECT resting state and must not be read as
+  // "this mechanism is unused". `diffNameSets` is still invoked on every
+  // `--check` run and its RED fixtures still run in `--self-test`. Do NOT add a
+  // row here to make a run green: a new disagreement means a migration or PROD
+  // moved, and recording it here records that you looked away.
 ];
 
 /**
