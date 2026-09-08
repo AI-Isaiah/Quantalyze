@@ -1247,10 +1247,55 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
     // and refused itself ("1 other client session(s) are not idle"; the 1 was ours).
     // Safe rather than a loophole: PGAPPNAME marks only the holder, and any session
     // carrying it is either ours or another run BLOCKED on the lock we hold.
+    // The label is COMPUTED, then excluded via NOT coalesce(...) — which is also
+    // NULL-safe, unlike the earlier `application_name <> '...'`: on a NULL
+    // application_name that comparison yields NULL and silently drops the row, the
+    // same three-valued trap behind the original A1 defect and the `state IN (...)`
+    // enumeration. Both halves are pinned so neither can quietly disappear.
     expect(
-      body.includes("application_name <> 'ci-shared-test-db-mutex'"),
-      "the activity gate no longer excludes the mutex holder. Without this it counts the background psql that HOLDS the advisory lock for this very act, so the count is never 0 and the gate can never pass — measured on run 34265750211.",
+      body.includes("(application_name = 'ci-shared-test-db-mutex') AS is_mutex_label"),
+      "the activity gate no longer computes the mutex-holder label. Without it the gate counts the background psql that HOLDS the advisory lock for this very act, so the count is never 0 and it can never pass — measured on run 34265750211.",
     ).toBe(true);
+    expect(
+      body.includes("NOT coalesce(is_mutex_label, false)"),
+      "the mutex-holder label is computed but no longer excluded from the count, or the exclusion lost its coalesce and is NULL-unsafe again.",
+    ).toBe(true);
+
+    // ⛔ AND it must exclude the holder by its REAL BACKEND PID, not only by label.
+    // A pooler sits between CI and Postgres; whether it forwards the client's startup
+    // `application_name` is its business, not ours. The pid is what the server itself
+    // reported (`pg_backend_pid()` inside the holder session), so it survives any
+    // rewriting. Runs 34265750211 and 34270157721 both refused with "1", and with no
+    // breakdown there was no way to tell our own holder from a foreign session.
+    expect(
+      body.includes("shared-test-db-mutex-backend-pid"),
+      "the activity gate no longer reads the mutex holder's backend pid. application_name alone is not reliable through a pooler, and without the pid the gate can be permanently unpassable while looking like a real refusal.",
+    ).toBe(true);
+    expect(
+      /pid = \$\{holder_pid\}|is_holder_pid/.test(body),
+      "the holder pid is read but never used in the predicate",
+    ).toBe(true);
+
+    // A refusal MUST say what it saw, or a real refusal is indistinguishable from a
+    // bug in the gate — measured twice before this was added.
+    expect(
+      body.includes("activity-gate breakdown"),
+      "the activity gate refuses without printing a breakdown. States and counts only — but without them, triage is guesswork.",
+    ).toBe(true);
+    // …and the breakdown must stay non-identifying: no query text, user, or host.
+    // Scanned over the SQL BLOCK ONLY. A whole-body check is wrong twice over: the
+    // comments legitimately discuss "query", and so does the refusal message
+    // ("they can carry query text"). Both fired before this was narrowed — a pin
+    // that trips on its own documentation gets deleted rather than heeded.
+    const sqlStart = body.indexOf("WITH others AS (");
+    expect(sqlStart, "the activity gate's probe SQL is no longer recognisable").toBeGreaterThan(-1);
+    const liveSql = body.slice(sqlStart, body.indexOf(';"', sqlStart));
+    for (const forbidden of ["query", "usename", "client_addr", "backend_start"]) {
+      expect(
+        liveSql.includes(forbidden),
+        `the activity gate breakdown selects \`${forbidden}\` from pg_stat_activity. This log is PUBLIC and TEST is shared with other people's CI — states and counts only.`,
+      ).toBe(false);
+    }
 
     // Plain `idle` is the one exclusion, and it must stay excluded: pooled PostgREST
     // connections park there permanently and would make the gate unpassable.

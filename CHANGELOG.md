@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.77.25.0] - 2026-09-08 — exclude the mutex holder by PID, and say what the gate saw
+
+Run 34270157721 (the first dispatch carrying the holder fix) refused again, with the
+same count of "1". Two refusals reporting the identical number, with no way to tell
+our own holder from a foreign session, is not a signal — it is a blind spot.
+
+- **The holder is now excluded by its REAL BACKEND PID**, which `Acquire shared-test-db
+  mutex` already writes to `RUNNER_TEMP` from the holder session's own
+  `pg_backend_pid()`. `application_name` alone is not something to rely on: a pooler
+  sits between CI and Postgres, and whether it forwards the client's startup
+  application_name is its business, not ours. The pid is what the SERVER reported.
+  Both exclusions are applied, so either one missing its target still leaves the other.
+- **A refusal now prints a breakdown** — `active [holder-pid] x1, idle in transaction x1`
+  — so a genuine refusal is distinguishable from a bug in the gate. STATE NAMES AND
+  COUNTS ONLY: never query text, never a user, never a host, and not
+  application_name values either, since a label is still attacker-controlled text on a
+  shared database. Pinned, and the pin is calibrated by leaking `query` into the SQL.
+- **The label exclusion became NULL-safe as a side effect.** It is now a computed
+  `is_mutex_label` excluded via `NOT coalesce(..., false)`. The previous
+  `application_name <> '...'` would yield NULL on a NULL application_name and silently
+  drop the row — the same three-valued trap behind the original A1 defect and the
+  `state IN (...)` enumeration. Third appearance of that class in this gate.
+
+Measured on a throwaway PG16 lane against the step's real bytes, with the holder's
+application_name deliberately REWRITTEN to simulate a pooler:
+  appname rewritten, no pid file  -> exit 1  (proves the pid is load-bearing)
+  appname rewritten, pid file     -> exit 0, breakdown marks it [holder-pid]
+  holder excluded + genuine session -> exit 1, counts the real one
+
+Two of my own pins fired on their own documentation while writing this and had to be
+narrowed to live SQL — a pin that trips on the prose explaining it gets deleted rather
+than heeded.
+
 ## [0.77.24.0] - 2026-09-08 — the activity gate counted its own mutex holder
 
 The first real dispatch of `mode=restore` (run 34265750211, on main at 20256c79)

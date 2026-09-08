@@ -827,17 +827,63 @@ jobs:
         run: |
           set -euo pipefail
           dsn="${TEST_DB_SESSION_URL}"
+
+          # THE HOLDER'S REAL BACKEND PID, exact and pooler-proof. `Acquire
+          # shared-test-db mutex` writes it here after MUTEX-ACQUIRED, from the
+          # holder session's own `pg_backend_pid()`. Excluding by
+          # `application_name` alone is NOT enough to rely on: a pooler sits
+          # between us and Postgres, and whether it forwards the client's
+          # startup application_name is its business, not ours. The pid is what
+          # the server itself reported. Both exclusions are applied — either one
+          # missing its target still leaves the other.
+          # Best effort by design (158-MUTEX-02): an absent pid file must not
+          # make the gate unpassable, so it degrades to -1 (matches no backend)
+          # and the application_name exclusion carries it.
+          holder_pid=""
+          if [ -f "${RUNNER_TEMP}/shared-test-db-mutex-backend-pid" ]; then
+            holder_pid="$(tr -cd '0-9' < "${RUNNER_TEMP}/shared-test-db-mutex-backend-pid")"
+          fi
+          [ -n "${holder_pid}" ] || holder_pid="-1"
+          echo "activity-gate: excluding our own mutex holder (backend pid ${holder_pid}) and application_name 'ci-shared-test-db-mutex'."
+
           rc=0
           # `-P pager=off` because a psql built with a pager can block on a tty-less
-          # runner. Count and detail come from ONE query so they cannot disagree.
-          busy="$(PGCONNECT_TIMEOUT=15 timeout 30 psql "${dsn}" -X -q -A -t -P pager=off -v ON_ERROR_STOP=1 \
-            -c "SELECT count(*) FROM pg_stat_activity
-                 WHERE datname = current_database()
-                   AND pid <> pg_backend_pid()
-                   AND backend_type = 'client backend'
-                   AND application_name <> 'ci-shared-test-db-mutex'
-                   AND (state IS NULL OR state <> 'idle');" \
+          # runner. ONE query returns the count AND a non-identifying breakdown, so
+          # they cannot disagree. The breakdown exists because a gate that refuses
+          # without saying WHAT it saw makes a real refusal indistinguishable from a
+          # bug in the gate — which is exactly what happened on runs 34265750211 and
+          # 34270157721, both reporting "1" with no way to tell whose session it was.
+          # It prints STATE NAMES and COUNTS only: never query text, never a user,
+          # never a host, never application_name values (a label is still attacker-
+          # controlled text on a shared database).
+          probe="$(PGCONNECT_TIMEOUT=15 timeout 30 psql "${dsn}" -X -q -A -t -P pager=off -v ON_ERROR_STOP=1 \
+            -c "WITH others AS (
+                  SELECT state, (application_name = 'ci-shared-test-db-mutex') AS is_mutex_label,
+                         (pid = ${holder_pid}) AS is_holder_pid
+                    FROM pg_stat_activity
+                   WHERE datname = current_database()
+                     AND pid <> pg_backend_pid()
+                     AND backend_type = 'client backend'
+                )
+                SELECT (SELECT count(*) FROM others
+                         WHERE NOT coalesce(is_mutex_label, false)
+                           AND NOT coalesce(is_holder_pid, false)
+                           AND (state IS NULL OR state <> 'idle'))
+                    || '|' ||
+                       coalesce((SELECT string_agg(t, ', ' ORDER BY t) FROM (
+                         SELECT st
+                                || CASE WHEN ml THEN ' [mutex-label]' ELSE '' END
+                                || CASE WHEN hp THEN ' [holder-pid]' ELSE '' END
+                                || ' x' || cnt::text AS t
+                           FROM (SELECT coalesce(state,'<null>') AS st,
+                                        coalesce(is_mutex_label,false) AS ml,
+                                        coalesce(is_holder_pid,false) AS hp,
+                                        count(*) AS cnt
+                                   FROM others GROUP BY 1,2,3) q) g),
+                         '(no other client backends)');" \
             2>"${RUNNER_TEMP}/activity.err")" || rc=$?
+          busy="${probe%%|*}"
+          breakdown="${probe#*|}"
           if [ "${rc}" -ne 0 ]; then
             # Same three redactions as every other psql site here: a connect failure
             # names the host, its IP and the DB user, and this log is public.
@@ -863,9 +909,11 @@ jobs:
               exit 1 ;;
           esac
           if [ "${busy}" -ne 0 ]; then
+            echo "activity-gate breakdown (states and counts only): ${breakdown}"
             echo "::error::shared TEST is NOT quiet: ${busy} other client session(s) are not idle. (If EVERY session reads busy, check track_activities: when it is off PostgreSQL reports state 'disabled' for all backends, and this gate deliberately treats an unobservable session as busy rather than quiet.) Refusing to restore — TEST is shared with other people's CI and this restore DROPs the public schema. Re-dispatch once the queue drains (docs/runbooks/shared-test-db-mutex.md §§ 2-3). Session details are withheld: they can carry query text, and this log is public."
             exit 1
           fi
+          echo "activity-gate breakdown (states and counts only): ${breakdown}"
           echo "activity-gate: 0 other active client session(s) — shared TEST is measurably quiet, inside the held mutex."
 
       # ── THE BACKUP. CONTEXT safety rule 3, and no wider than it. ────────────
