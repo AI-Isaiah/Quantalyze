@@ -67,11 +67,74 @@
 #
 # ── WHAT --self-test PROVES, AND WHAT IT DOES NOT ───────────────────────────
 # It boots a THROWAWAY PostgreSQL cluster the `scripts/pg-lane/run.sh` way and runs
-# the REAL `--run` dispatch against it. It never touches TEST or PROD. The pg-lane
-# has no `pg_net` and no `supabase_vault`, so the REAL dump cannot replay on it —
-# the self-test uses a baseline-SHAPED fixture. Whether the real dump applies to
-# hosted TEST is what `--mode preflight` measures, transactionally, against TEST
-# itself before anyone decides.
+# the REAL `--run` dispatch against it. It never touches TEST or PROD.
+#
+# IT PROVES THE MECHANISM: eighteen counted arms — seven refusals that fire before
+# any write, a preflight whose rollback is measured byte-for-byte, a restore that
+# commits the full shape, three survivor classes that round-trip, a fourth class
+# the derived census names and aborts on, a redaction check with a subject, a
+# whitelist tripwire, a default ACL that round-trips, and a calibration arm proving
+# the harness can say no. Every arm has a NAMED falsifier that was observed RED on
+# a scratch copy; the record is `164.8-02-SUMMARY.md`.
+#
+# ⛔ IT DOES NOT PROVE THAT THE REAL DUMP APPLIES. The pg-lane has no `pg_net` and
+# no `supabase_vault`, so `supabase/schema/baseline.sql` CANNOT replay on it; every
+# arm above runs against a baseline-SHAPED FIXTURE. Whether the real dump applies
+# to hosted TEST is a separate question, and the only honest way to answer it is
+# `--mode preflight` against TEST itself, inside a transaction that rolls back
+# (Plans 03/04). A green self-test is evidence about this script, never about TEST.
+#
+# The closing line, verbatim, MEASURED 2026-09-08 on macOS (11 s, exit 0) — the same
+# date that sits beside EXPECTED_ARMS below:
+#
+#   restore-test-from-baseline: self-test OK (18/18 arms — seven refusals fire
+#   before any write, preflight rolls back byte-for-byte, restore commits the full
+#   shape, survivors round-trip search_path-independently, the derived census names
+#   an unlisted dependent, redaction is checked with a subject, the census whitelist
+#   refuses an unresolvable class, default ACLs round-trip, harness calibrated)
+#
+# (wrapped for this comment; the script emits it on ONE line, which is what CI greps)
+#
+# ── TWO DESIGN CHOICES THAT LOOK LIKE HYGIENE AND ARE NOT ───────────────────
+# B1 — the census runs under `SET search_path = pg_catalog` because `pg_get_expr`
+# and `pg_get_triggerdef` OMIT the qualifier of anything on the reader's path, so
+# under the default path a survivor whose source spells `public.f()` unqualified
+# renders without `public.`, is never censused, is CASCADE-dropped, and a pre/post
+# key-set comparison agrees on a set that excludes it.
+#
+# B2 — the closure reads `pg_depend` and not the `drop cascades to` NOTICEs because
+# that channel truncates at 100 dependents (MAX_REPORTED_DEPS) and the real `public`
+# has 190+, so the survivors would be cut off the list — and a check that reads the
+# CASCADE's output necessarily runs after the drop, too late to refuse.
+#
+# ── THIS LOG IS PUBLIC ──────────────────────────────────────────────────────
+# The repo is public and Actions logs are world-readable. Everything this script
+# prints is NAMES AND COUNTS: object names, schema names, row counts, sha256 values,
+# epochs. NEVER a DSN, NEVER a password, NEVER a SQL body. The identity marker's
+# TEXT is withheld even when it is the reason for a refusal. `--self-test` enforces
+# this on itself: every arm's captured output is grepped for a DSN shape and for
+# dollar-quoted SQL, and arm 14 proves that grep fires on a real leak.
+#
+# ── TWO THINGS THIS SCRIPT DELIBERATELY DOES NOT DO ─────────────────────────
+# 1. IT DOES NOT BACK ANYTHING UP. The WORKFLOW takes the backup, BEFORE calling
+#    this script (Plan 03). Doing it here would put the backup inside the thing
+#    being tested, so a bug in this script could take the backup with it.
+# 2. IT DOES NOT TAKE THE MUTEX. It ASSERTS the shared-TEST advisory mutex is held
+#    by another session and refuses otherwise. A lock taken here would be released
+#    the moment this process exited — i.e. before the founder had finished reading
+#    the result — so the workflow's Acquire step holds it for the whole restore.
+#
+# ── ⛔ WHAT A RESTORE DESTROYS, AND WHAT IS NOT BACKED UP ────────────────────
+# `--mode restore` DROPs the `public` schema. That destroys EVERY ROW IN EVERY
+# `public` TABLE ON TEST — all of it, not a sample. The backup the workflow takes
+# is the LEDGER and the SCHEMA (CONTEXT safety rule 3 names those two, in those
+# words). It is NOT a data backup: the data is NOT reversible. Restoring the
+# backup gives back the shape of the old TEST and its migration history, and
+# gives back none of its contents.
+#
+# TEST is SHARED with other people's CI and we cannot see their runs. That is why
+# `--mode restore` is founder-executed or founder-approved AT THE MOMENT OF
+# EXECUTION, never an unattended job (CONTEXT safety rule 4).
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
