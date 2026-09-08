@@ -139,3 +139,128 @@ scripts/restore-test-from-baseline.sh: line 765: toast: command not found
   `workflow_dispatch` only runs FROM MAIN, so shipping it would require another founder merge
   between the preflight and the restore — spending the one-way door's timing on a lost code
   comment. Booked in this phase's deferred-items.md instead.
+
+================================================================================
+BLOCK 2 — ACTIVITY GATE (Task 2) — ⛔ NOT RUN. HALTED. NO RESTORE DISPATCHED.
+================================================================================
+
+activity-gate: NOT RUN — the executor has no Postgres credential for shared TEST, so the
+gate could not be MEASURED, and an unmeasured gate is not a passed gate.
+
+⛔ THE VERDICT IN ONE LINE: `mode=restore` was NOT dispatched. TEST is untouched. The
+decision returns to the founder, exactly as CONTEXT safety rule 4's amendment requires when
+the gate does not pass.
+
+--- WHY: what was measured, and what could not be --------------------------------
+
+The founder's amendment (2026-09-08, verbatim) is CONDITIONAL delegation:
+"Delegate, but only if TEST is measurably quiet." The condition is a MEASUREMENT, and its
+conditions (a)-(c) fix HOW it must be measured:
+
+  (a) acquire the shared-TEST advisory lock (key 61616158) FIRST, then probe while holding
+      it — probing first measures a window that has already closed;
+  (b) `idle in transaction` counts as ACTIVE;
+  (c) any non-zero count aborts and names every session.
+
+All three need a SESSION-mode Postgres connection to TEST. This executor has none. Measured,
+not assumed:
+
+  * /Users/…/.env.test.local declares exactly three variables and none is a DSN:
+      NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+    (names read with `sed -n 's/^\([A-Za-z_][A-Za-z_0-9]*\)=.*/\1/p'`; no value printed)
+  * /Users/…/.env.local likewise carries no Postgres DSN of any kind.
+  * ~/.pgpass — does not exist.  ~/.pg_service.conf — does not exist.
+  * macOS Keychain service `quantalyze-test` is an ACCOUNT, not a DSN:
+      acct = demo-allocator@quantalyze.test  (a login for e2e, created 2026-04-10)
+  * The credential exists ONLY as a GitHub repository secret, write-only from outside CI:
+      gh secret list --repo AI-Isaiah/Quantalyze
+      -> TEST_SUPABASE_DB_URL   2026-05-13T10:46:38Z
+  * `psql` IS installed locally (PostgreSQL 18.6) — the blocker is the credential, not the
+    client.
+
+--- THE THREE ROUTES CONSIDERED, AND WHY EACH WAS REFUSED ------------------------
+
+1. PROBE OVER PostgREST WITH THE TEST SERVICE-ROLE KEY (which this executor does hold).
+   REFUSED. `pg_stat_activity` is not exposed through PostgREST, and — decisively — every
+   PostgREST request is its own pooled session, so a SESSION advisory lock cannot be held
+   ACROSS the probe. That is condition (a) unsatisfiable by construction. A REST-only probe
+   would produce precisely the reading the founder's ordering rule exists to forbid: a
+   window that had already closed before it was read. It would LOOK like a passed gate.
+
+2. ADD A PROBE STEP TO CI SO THE GATE RUNS WHERE THE SECRET IS.
+   REFUSED on two grounds. It is a source edit to the CI pipeline outside this plan's
+   `files_modified`, i.e. deviation Rule 4 (architectural) → stop and ask, not auto-apply.
+   And it does not even work: a CI job releases the mutex at job teardown, minutes before
+   this executor could dispatch `mode=restore`, so the probe would again describe a window
+   the gate does not control.
+
+3. DISPATCH `mode=restore` ANYWAY, ON THE STRENGTH OF THE GREEN PREFLIGHT.
+   REFUSED, and this is the one that matters. The preflight proves the TRANSACTION is
+   correct; it says nothing about whether other people's CI is mid-run. Those are different
+   questions and the gate is the only thing that answers the second. Dispatching here would
+   convert an explicitly CONDITIONAL delegation into the blanket one the founder declined to
+   give.
+
+--- THE FALSIFIER WAS NOT OBSERVED EITHER, AND THAT IS PART OF THE HALT ----------
+
+Task 2's `<verify><manual>` requires the gate's falsifier to be OBSERVED: open a second psql
+session against TEST, leave it `idle in transaction`, re-run the probe, confirm it reports
+that session ACTIVE. That needs the same missing credential. So there is no evidence the
+predicate can distinguish a held-lock session from a quiet database — and per the plan's own
+words, "a gate that cannot see a held-lock session is the exact vacuity this phase exists to
+prevent." Recorded as NOT OBSERVED rather than waived.
+
+--- WHAT THE FOUNDER IS BEING ASKED FOR ------------------------------------------
+
+Either (A) or (B), whichever the founder prefers:
+
+  (A) RUN THE GATE YOURSELF, then dispatch. From a shell holding the TEST DSN — one session,
+      lock first, probe second, session exit releases the lock:
+
+        PGAPPNAME=164.8-04-activity-gate PGCONNECT_TIMEOUT=15 \
+        psql "$TEST_SUPABASE_DB_URL_SESSION_MODE" -X -A -v ON_ERROR_STOP=1 \
+          -c "SELECT shobj_description(oid,'pg_database') FROM pg_database WHERE datname = current_database();" \
+          -c "SET statement_timeout = '120s';" \
+          -c "SELECT pg_advisory_lock(61616158);" \
+          -c "SELECT pid, application_name, state, state_change, left(query, 80) AS q
+                FROM pg_stat_activity
+               WHERE datname = current_database()
+                 AND pid <> pg_backend_pid()
+                 AND backend_type = 'client backend'
+                 AND (state <> 'idle' OR state LIKE 'idle in transaction%');"
+
+      ⚠️ THE DSN MUST BE PORT 5432 (session mode), NOT the documented 6543 pooler port. On
+      6543 the pooler is in TRANSACTION mode and a SESSION advisory lock does not survive
+      between statements — the lock would be silently gone by the time the probe runs, and
+      the gate would report quiet because it was never actually holding anything. The restore
+      workflow performs exactly this 6543 -> 5432 rewrite in-job for the same reason.
+      ⚠️ Read the FIRST line before believing the last: if the marker is NULL or does not
+      name TEST, stop — CLAUDE.md rule 2, `current_database()` is `postgres` on both projects.
+      ⚠️ If the `pg_advisory_lock` statement TIMES OUT, that is itself a FAILED gate: someone
+      else holds the shared-TEST mutex, which is the opposite of quiet.
+
+      ZERO rows -> dispatch, with the confirm token computed from the file, not from this log:
+
+        gh workflow run test-restore-from-baseline.yml --ref main -f mode=restore -f confirm=27826b76
+
+      (27826b76 is the token the preflight itself printed for THIS tree. It goes stale the
+      moment supabase/schema/baseline.sql is regenerated — recompute from
+      supabase/schema/BASELINE.md if any time has passed.)
+
+  (B) GRANT THE EXECUTOR THE TEST DSN (session-mode, port 5432) and re-run this plan from
+      Task 2. Nothing in Blocks 1 is invalidated: the preflight rolled back byte-for-byte, so
+      TEST is in exactly the state it was in before run 34258614075, and the preflight can be
+      re-dispatched for a fresh reading at negligible cost if time has passed.
+
+--- STATE LEFT BEHIND ------------------------------------------------------------
+
+  * shared TEST : UNCHANGED. One preflight (rolled back, verdict recorded in Block 1) and
+                  zero writes. No advisory lock is held by this executor — none was ever
+                  taken.
+  * Task 3      : NOT STARTED. `scripts/vac08-ledger-baseline.txt` still carries its 31
+                  entries and `ENTRY_COUNT` is still 31 — correct, because those 31 are still
+                  MEASURED ABSENT from TEST's ledger. Emptying the ratchet before the restore
+                  would be the mute button its own header forbids, and VAC-08 would go red on
+                  `31 baseline entr(y/ies) are no longer MEASURED absent` the moment it ran.
+  * main / CI   : untouched by this halt. `sql-tests` stays exactly as green or red as it was
+                  before this plan started.
