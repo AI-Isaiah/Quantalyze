@@ -152,7 +152,10 @@
 # USING expression IS a SQL body, and on the real TEST those expressions name
 # tables, columns and role predicates. The honest statement is the narrow one above
 # plus the workflow's redaction step; do not restore the broad claim, and do not
-# rely on it. (Narrowing the cats is B-batch, in the workflow.)
+# rely on it. Narrowing these cats is BOOKED as threat T-164.8-21 in plan 05 —
+# print survivor KEYS here and leave the DDL in `survivors.sql` inside the
+# artifact. It is NOT closed by the workflow's redaction step, which covers the
+# artifact's channel files before upload and never touches this stdout.
 #
 # ── TWO THINGS THIS SCRIPT DELIBERATELY DOES NOT DO ─────────────────────────
 # 1. IT DOES NOT BACK ANYTHING UP. The WORKFLOW takes the backup, BEFORE calling
