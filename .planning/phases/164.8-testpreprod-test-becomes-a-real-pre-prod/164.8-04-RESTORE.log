@@ -165,10 +165,10 @@ conditions (a)-(c) fix HOW it must be measured:
 All three need a SESSION-mode Postgres connection to TEST. This executor has none. Measured,
 not assumed:
 
-  * /Users/…/.env.test.local declares exactly three variables and none is a DSN:
+  * .env.test.local (repo root) declares exactly three variables and none is a DSN:
       NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
     (names read with `sed -n 's/^\([A-Za-z_][A-Za-z_0-9]*\)=.*/\1/p'`; no value printed)
-  * /Users/…/.env.local likewise carries no Postgres DSN of any kind.
+  * .env.local (repo root) likewise carries no Postgres DSN of any kind.
   * ~/.pgpass — does not exist.  ~/.pg_service.conf — does not exist.
   * macOS Keychain service `quantalyze-test` is an ACCOUNT, not a DSN:
       acct = demo-allocator@quantalyze.test  (a login for e2e, created 2026-04-10)
