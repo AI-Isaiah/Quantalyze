@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.77.26.0] - 2026-09-08 — the VAC-08 ratchet is emptied by measurement, not by decree
+
+The restore ran (run 34274355596, head 88581b8b) and committed. TEST's ledger went
+243 -> 266 rows, matching the repo's 266 migrations exactly; all four function-body
+comparisons match byte-for-byte; TEST gained `pg_net`, which PROD has and TEST lacked.
+So the 31 names in `scripts/vac08-ledger-baseline.txt` are no longer MEASURED absent,
+and VAC-08 correctly refused with `31 baseline entr(y/ies) are no longer MEASURED absent`.
+
+The ratchet is now empty. The cause recorded is the RESTORE, never a hand-apply, and the
+header carries the run id, head sha, corroborating CI run, date and the founder decision
+that authorised it -- because an empty ratchet whose cause is not written down reads
+exactly like a deleted control.
+
+That risk is now pinned rather than trusted. A new lineage assertion requires the header
+to keep naming its evidence; stripping the run id turns the file RED with the missing
+element named. The `[SEC]` disclosure rule was re-cut as an AIM over a synthetic corpus so
+it survives losing its three subjects, and every assertion that went dormant at zero
+entries is labelled at its site with the condition that revives it.
+
+Not fixed here, booked instead: the post-COMMIT extension guard at
+`restore-test-from-baseline.sh:1090` fires on a GAIN and phrases it as a loss, and compares
+whole-database `pg_extension` while reasoning about `public`. The Supabase CLI post-verify
+has still never executed -- recorded NOT RUN, with the must_have it serves marked UNMET.
+
 ## [0.77.25.0] - 2026-09-08 — exclude the mutex holder by PID, and say what the gate saw
 
 Run 34270157721 (the first dispatch carrying the holder fix) refused again, with the
