@@ -48,17 +48,36 @@ SP-M03 records what happens when they drift apart.
 
 | | |
 |---|---|
-| Taken | 2026-09-07 |
+| Taken | 2026-09-08 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
 | Supabase CLI | 2.84.2 (CI pins 2.98.2 — see the caveat below) |
-| sha256 | `9fad9a1b4c3cedac17883933bed0c57392d3f675b38bd65d570172b96c99168f` |
-| Shape | 62 tables, 154 policies, 123 function statements (121 distinct names), **0 data statements** |
+| sha256 | `27826b7660026a5b6a7fbee9223265ab98f8fbf485b87237498881034c558ec7` |
+| Shape | 62 tables, 154 policies, 122 function statements (120 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
 `scripts/local-stack/REPLAY-SPIKE.md`: no DSN, no `\connect`, no `ALTER DATABASE`, no JWT,
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-09-08 — a PURE DELETION, 91 lines, nothing else moved
+
+The prior capture (2026-09-07, sha256 `9fad9a1b…`, 726 198 bytes, 123 function statements /
+121 distinct names) differs from this one by **91 removed lines and ZERO added lines**. That
+is the whole diff. It is the `create_allocator_connected_strategy` block and its attendant
+`GRANT` / `REVOKE` / `COMMENT` statements, removed from PROD by migration
+`20260908120000_drop_create_allocator_connected_strategy.sql` (PR #758).
+
+⭐ **The zero-added-lines reading is itself a measurement worth keeping**: it says PROD's
+catalogue moved in exactly one way since 2026-09-07 and in no other. Had any function body,
+policy or table drifted underneath us, this regeneration would have silently absorbed it —
+a pure-deletion diff is what rules that out. Table and policy counts are unchanged at
+62 / 154; function statements fall 123 → 122 and distinct names 121 → 120, the single
+overload that was dropped.
+
+Re-secret-scanned after the dump with the FULL five-class pattern under `grep -a`
+(the `-a` is not optional — this repository contains a measured NUL-bearing file and grep
+reports such a file as clean with exit 1): **no matches**.
 
 ### Regenerated 2026-09-07 — what moved, and what did NOT
 
