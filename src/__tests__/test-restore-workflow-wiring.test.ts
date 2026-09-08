@@ -646,19 +646,19 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       };
 
       const FIXTURE =
-        'psql: error: connection to server at "db.abcdefgh.supabase.co" (10.11.12.13), port 5432 failed: FATAL: password authentication failed for user "postgres.abcdefgh"\n' +
-        "DSN=postgresql://postgres.abcdefgh:s3cr3tpassw0rd@db.abcdefgh.supabase.co:5432/postgres\n" +
-        "host=db.abcdefgh.supabase.co user=postgres.abcdefgh\n";
+        'psql: error: connection to server at "db.exampleprojref.supabase.co" (10.11.12.13), port 5432 failed: FATAL: password authentication failed for user "postgres.exampleprojref"\n' +
+        "DSN=postgresql://postgres.exampleprojref:EXAMPLE-NOT-A-REAL-PASSWORD@db.exampleprojref.supabase.co:5432/postgres\n" +
+        "host=db.exampleprojref.supabase.co user=postgres.exampleprojref\n";
 
       const out = scrub(exprs, FIXTURE);
-      for (const secret of ["s3cr3tpassw0rd", "postgres.abcdefgh"]) {
+      for (const secret of ["EXAMPLE-NOT-A-REAL-PASSWORD", "postgres.exampleprojref"]) {
         expect(
           out.includes(secret),
           `the redaction left \`${secret}\` in the channel. This artifact is world-readable on a PUBLIC repo; the DB user and the password are exactly what must not survive.\n${out}`,
         ).toBe(false);
       }
       expect(
-        out.includes('server at "db.abcdefgh.supabase.co"'),
+        out.includes('server at "db.exampleprojref.supabase.co"'),
         "the redaction left psql's `server at \"<host>\" (<ip>)` shape intact — the TEST pooler host and its IP are disclosed",
       ).toBe(false);
       expect(out).toContain("***");
@@ -672,7 +672,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         "CALIBRATION: no expression matched the DSN shape, so the twin removes nothing",
       ).toBe(exprs.length - 1);
       expect(
-        scrub(withoutDsn, FIXTURE).includes("s3cr3tpassw0rd"),
+        scrub(withoutDsn, FIXTURE).includes("EXAMPLE-NOT-A-REAL-PASSWORD"),
         "CALIBRATION: the password survived neither program — the fixture does not exercise the DSN expression, so the pin above proves nothing",
       ).toBe(true);
     });
@@ -699,7 +699,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       const channels = ["psql.err", "dump.log", "transaction.out"];
       const keepers = ["schema.sql", "ledger.csv"];
       for (const f of [...channels, ...keepers]) {
-        writeFileSync(join(outdir, f), "host=db.abcdefgh.supabase.co\n");
+        writeFileSync(join(outdir, f), "host=db.exampleprojref.supabase.co\n");
       }
       const scriptFile = join(runnerTemp, "redact.sh");
       writeFileSync(scriptFile, forced);
@@ -1136,7 +1136,7 @@ describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
           ...process.env,
           PATH: `${bin}:${process.env.PATH ?? ""}`,
           RUNNER_TEMP: runnerTemp,
-          TEST_DB_SESSION_URL: "postgresql://u:p@h:5432/postgres",
+          TEST_DB_SESSION_URL: "postgresql://EXAMPLE_USER:EXAMPLE_PASSWORD@example.invalid:5432/postgres",
         },
       });
       rmSync(dir, { recursive: true, force: true });
