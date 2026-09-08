@@ -1348,7 +1348,7 @@ Plans:
 
 **Depends on:** nothing outstanding. ⭐ **RE-ORDERED 2026-09-08 — PULLED FORWARD, runs NEXT.** ⚠️ **The SECTION was physically MOVED on 2026-09-08 to sit here, immediately after Phase 164.5 and ahead of 164.5.1.** For several hours it was pulled forward in this prose only while the section still sat after 164.6 — which meant `roadmap.analyze`, which walks FILE ORDER and returns the first incomplete phase, would have handed the next session 164.6. Prose is not the queue; position is. If a phase is re-ordered, MOVE IT. This SUPERSEDES the 2026-09-06 founder decision that queued it LAST; that decision is preserved verbatim in the next sentence because it was taken deliberately and its reasoning still reads correctly for the world before 2026-09-08. It said: *"Queued LAST in the 164.x series by founder decision 2026-09-06, in full knowledge of the counter-argument: Phase 164.7 and Phase 164.5 each write forward migrations and will therefore each hit the hand-apply path this phase automates. That cost is accepted, not overlooked."* What changed is that the accepted cost stopped being a per-PR inconvenience and became a PERMANENTLY RED `main` (see the scope block below), and that the phase's own design was found to break on the migration that caused it. The former dependency on Phase 164.6 was documented as "ordering only — no code dependency", so nothing technical resisted the re-order.
 
-**Plans:** 5 plans
+**Plans:** 6 plans
 
 Plans:
 
@@ -1461,7 +1461,9 @@ Plans:
 
 ⛔ **NOT in scope:** raising Playwright workers above 1. Phase 164.8's ROADMAP entry already states that per-run isolation is the PRECONDITION for it and that parallelism must NOT be chased as an objective — measured, `e2e-seeded` sits behind `sql-mutation` so parallelism buys 1-2 min of wall clock. Isolation is worth doing for ASSERTION RELIABILITY; the parallelism it unlocks is a consequence, not a goal.
 
-**Requirements**: TBD (no v1.20 requirement IDs) + `FANOUT-GLOBAL-01` (prose only — see the warning above), and the per-run isolation item deferred out of Phase 164.8's `<deferred>` block — read `164.8-CONTEXT.md` before planning, do not re-derive.
+**Requirements**: TBD (no v1.20 requirement IDs) + `FANOUT-GLOBAL-01` (prose only — see the warning above), the per-run isolation item deferred out of Phase 164.8's `<deferred>` block, and TODOS entry `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` — read `164.8-CONTEXT.md` before planning, do not re-derive.
+
+⛔ **ROUTED HERE 2026-09-08 by Phase 164.8's plan-checker (B4).** 164.8 restores TEST from a SCHEMA-ONLY dump (`BASELINE.md`: 0 data statements), so TEST mirrors PROD's CATALOGUE, never its DATA. A migration whose DO block reads a PROD-populated table and RAISEs on an unexpected count applies cleanly to PROD and refuses on an empty TEST — and 164.8 Area 1 Q2 makes that BLOCK the PROD apply. The retired `TEST-NOT-APPLICABLE` pragma was the declared escape hatch, and 164.8 retires it. Interim remedy is revert-the-merge, never a YAML edit under deploy pressure. Phase 164.10 was considered and rejected as the home: it is function-body scope only.
 **Depends on:** Phase 164.8 (its restore settles the schema and ledger this phase isolates against).
 **Plans:** 0 plans
 
