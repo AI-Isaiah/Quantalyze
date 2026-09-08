@@ -885,11 +885,11 @@ main() {
 # transaction, against TEST itself (Plans 03/04).
 # ===========================================================================
 
-# ⛔ THE RATCHET. Introduced ONCE, at its final value, so it is never patched
-# across plans and can be read off one place.
-# MEASURED 2026-09-08 — eighteen arms, each with a NAMED falsifier observed RED on
-# a scratch copy and recorded in 164.8-02-SUMMARY.md. Raise it only together with
-# the arm that adds one; lowering it to make a run green is deleting a proof.
+# ⛔ THE RATCHET. Introduced ONCE, at its final value, so it is never patched across
+# plans and can be read off one place. Raise it only together with the arm that adds
+# one; lowering it to make a run green is deleting a proof. Eighteen arms, each with
+# a NAMED falsifier observed RED on a scratch copy, recorded in 164.8-02-SUMMARY.md.
+# MEASURED 2026-09-08 — `--self-test` prints 18/18 and exits 0 on a throwaway cluster.
 EXPECTED_ARMS=18
 
 SELFTEST_MUTEX_HOLDER_PID=""
