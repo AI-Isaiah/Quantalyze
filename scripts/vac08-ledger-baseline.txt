@@ -19,6 +19,13 @@
 #    baseline allowed to hold stale entries is a control that quietly stops
 #    controlling, which is what this phase exists to remove.
 #
+# ⛔ LEDGER PRESENCE IS NOT EFFECT PRESENCE, and for DML-bearing migrations it is
+#    FALSE BY CONSTRUCTION. baseline.sql carries 562 GRANT/REVOKE statements and
+#    ZERO INSERT/COPY, so a ledger row here evidences a migration's DDL and ACLs,
+#    NEVER its DML. Do not read `0 absent` as "the migrations ran on TEST".
+#    (The [SEC] trio below is unaffected — those are grants, and grants ARE in
+#    the dump.)
+#
 # ⚠️ LEDGER ABSENCE IS NOT OBJECT ABSENCE. A name on this list has no
 #    schema_migrations row under any of the four naming conventions. Whether its
 #    OBJECTS exist in TEST (hand-applied, or installed by a later migration) is a
@@ -70,7 +77,11 @@
 #    reserves removals to the founder was written about hand-applying migrations
 #    to shorten the list; this removal has a different cause and its own
 #    decision, both recorded here.
-#    ⚠️ ONE STEP OF THAT RUN DID NOT RUN, and it is recorded rather than assumed:
+#    ⚠️ PART OF THAT RUN DID NOT RUN, and it is recorded rather than assumed.
+#    The guard exits immediately, so it also skipped the TWO ownership-class
+#    comparisons that follow it in the same A12 block (nonpostgres_rel,
+#    nonpostgres_fn) — measured by hand from the backup artifact's census files
+#    instead, five changed lines, neither class moved. Beyond those:
 #    the restore step exited 1 AFTER the commit on a post-commit extension guard
 #    (`restore-test-from-baseline.sh:1090`) that compares a whole-database
 #    `count(*) FROM pg_extension` for equality. It fired on a GAIN — pg_net,
@@ -101,7 +112,12 @@
 #    that genuinely cannot reach TEST. Expect additions to be rare but NOT
 #    impossible. The restore was SCHEMA-ONLY: TEST mirrors PROD's CATALOGUE by
 #    construction and never its DATA. Every public table there started EMPTY at
-#    the restore and holds only what e2e seeds since. A migration that reads a
+#    the restore. ⛔ MEASURED 2026-09-08, AND IT IS WORSE THAN "e2e RE-SEEDS":
+#    reference rows INSERTed by migrations that the ledger marks APPLIED are
+#    GONE, and `supabase db push` will never replay them because it skips applied
+#    versions. compute_job_kinds (14 migrations seed it) and discovery_categories
+#    (initial_schema) came back EMPTY; CI run 34280468314 went red on the
+#    compute_jobs_kind_fkey FK and on the e2e seeder itself. A migration that reads a
 #    PROD-populated table and RAISEs on an unexpected count — this repo's house
 #    style for data-reading DO blocks — applies cleanly to PROD and refuses on
 #    TEST; under the apply-on-merge pipeline that BLOCKS the PROD apply by

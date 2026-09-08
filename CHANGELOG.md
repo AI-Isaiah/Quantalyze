@@ -14,10 +14,25 @@ that authorised it -- because an empty ratchet whose cause is not written down r
 exactly like a deleted control.
 
 That risk is now pinned rather than trusted. A new lineage assertion requires the header
-to keep naming its evidence; stripping the run id turns the file RED with the missing
-element named. The `[SEC]` disclosure rule was re-cut as an AIM over a synthetic corpus so
-it survives losing its three subjects, and every assertion that went dormant at zero
-entries is labelled at its site with the condition that revives it.
+to keep naming its evidence.
+
+⛔ CORRECTED 2026-09-09, and the correction matters more than the original claim. The first
+cut of that pin asked only whether each needle appeared ANYWHERE in the file. Three reviewers
+measured it and found three ways to satisfy it while gutting the record — the worst being a
+rewrite of the cause as a HAND-APPLY of 31 migrations to shared TEST, ids left intact, which
+is the exact act the header forbids in capitals. The pin is now POSITIONAL: needles must sit
+inside the 2026-09-08 block, the CAUSE is pinned explicitly, the authority match is
+case-insensitive (the real line is uppercase and the old needle matched a 2026-08 sentence
+about hand-applies instead), and the block may not shrink to a stub. All four attacks re-run
+and observed RED.
+
+The `[SEC]` disclosure rule was likewise enforced only against a fixture and never against
+the real file — a [SEC] entry with no disclosure passed 12/12. It is now invoked on the file
+and matches the rule as WRITTEN (`never received it|them`), so it cannot fire wrongly on the
+day it wakes. The strong-claim scanner was measured 42% blind, spared by a neighbouring
+heading's own "NOT"; the qualifier must now sit in the claim's own sentence. Every assertion
+that went dormant at zero entries is labelled at its site with the condition that revives it,
+and the malformed-name check now reads the name AS THE GATE PARSES IT rather than trimmed.
 
 Not fixed here, booked instead: the post-COMMIT extension guard at
 `restore-test-from-baseline.sh:1090` fires on a GAIN and phrases it as a loss, and compares

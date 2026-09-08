@@ -116,6 +116,8 @@ export interface Entry {
   name: string;
   /** Everything after the first `#`, trimmed. Empty when undispositioned. */
   reason: string;
+  /** The name AS THE GATE PARSES IT — trailing whitespace stripped, leading KEPT. */
+  gateName: string;
   dispositioned: boolean;
 }
 
@@ -128,6 +130,13 @@ export function rederive(text: string): Entry[] {
     out.push({
       line: i + 1,
       name: (hash === -1 ? raw : raw.slice(0, hash)).trim(),
+      // ⛔ ADDED 2026-09-09. The GATE strips TRAILING whitespace only
+      // (`sed 's/[[:space:]]*$//'`, test-ledger-drift-check.sh) while `name`
+      // above trims BOTH ends. An indented entry therefore looks fine here and
+      // matches nothing at the gate — reported at once as NEW drift AND as a
+      // stale baseline line. This field is the gate's view, so the malformed
+      // check below can see what the gate would.
+      gateName: (hash === -1 ? raw : raw.slice(0, hash)).replace(/\s+$/, ""),
       reason: hash === -1 ? "" : raw.slice(hash + 1).trim(),
       dispositioned: DISPOSITION.test(raw),
     });
@@ -145,15 +154,36 @@ export function rederive(text: string): Entry[] {
  * sentence, so the window spans the matching line and its two neighbours.
  */
 const STRONG_CLAIM = /zero unledgered migrations/i;
-const QUALIFIER = /\bnot\b|\bnever\b|\bcannot\b|\bmay not\b|\bwould\b|\bonly\b/i;
+// ⛔ NARROWED 2026-09-09 after review measured this scanner 42% blind. `would`
+// and `only` negate NOTHING and were dropped; they merely co-occurred.
+const QUALIFIER = /\bnot\b|\bnever\b|\bcannot\b|\bmay not\b|\brefuses\b|\bunearned\b/i;
 
-/** Occurrences of the strong claim with no negation anywhere in their window. */
+/**
+ * The window still spans three lines because the header wraps mid-sentence, but
+ * the qualifier must now sit in the SAME SENTENCE as the claim.
+ *
+ * ⛔ WHY, MEASURED: with a bare 3-line window, the paragraph heading
+ * `⚠️ WHAT IT DOES NOT BUY…` spared a bare false claim inserted directly beneath
+ * it — the prohibition's own `NOT` licensed the thing it forbids. 56 of 133
+ * insertion points (42%) were spared that way. Adjacency is not negation:
+ * prohibition prose and the forbidden phrase are NECESSARILY neighbours here,
+ * so proximity is the one signal that cannot mean anything.
+ */
 export function unqualifiedStrongClaims(text: string): string[] {
   const lines = text.split("\n");
   return lines
     .map((l, i) => ({ l, i }))
     .filter(({ l }) => STRONG_CLAIM.test(l))
-    .filter(({ i }) => !QUALIFIER.test(lines.slice(Math.max(0, i - 1), i + 2).join(" ")))
+    .filter(({ i }) => {
+      const window = lines
+        .slice(Math.max(0, i - 1), i + 2)
+        .map((l) => l.replace(/^#\s?/, ""))
+        .join(" ");
+      const sentence = window
+        .split(/(?<=\.)\s+/)
+        .find((sent) => STRONG_CLAIM.test(sent));
+      return !QUALIFIER.test(sentence ?? window);
+    })
     .map(({ i, l }) => `line ${i + 1}: ${l.trim()}`);
 }
 
@@ -180,11 +210,23 @@ const SEC_FIXTURE = [
   "20260203000000_not_a_sec_entry  # widens a CHECK constraint. UNAPPLIED to TEST.",
 ].join("\n");
 
+/**
+ * Fixture for the malformed-name rule. One indented entry and one bare `#`-less
+ * blank-name line. Kept SEPARATE from FIXTURE on purpose: FIXTURE's counts are
+ * load-bearing for the disposition AIM, and re-tuning them to carry an unrelated
+ * case is how a calibrated fixture quietly stops being calibrated.
+ */
+const MALFORMED_FIXTURE = [
+  "# a header comment, not an entry",
+  "20260301000000_clean  # fine.",
+  "  20260302000000_leading_space  # indented; the gate would NOT match this.",
+].join("\n");
+
 /** The `[SEC]` disclosure rule, re-derived so it can be driven by a fixture. */
 export function secEntriesMissingDisclosure(entries: Entry[]): string[] {
   return entries
     .filter((e) => e.reason.includes("[SEC]"))
-    .filter((e) => !e.reason.toLowerCase().includes("never received it"))
+    .filter((e) => !/never received (it|them)/i.test(e.reason))
     .map((e) => e.name);
 }
 
@@ -204,6 +246,21 @@ describe("VAC-08 ledger baseline — every entry is dispositioned by name", () =
   // `lane-blocked` class): a reader of a failure report sees the classifier
   // break before they see the file's emptiness asserted.
   describe("AIM — the re-derivation actually classifies", () => {
+    it("the malformed-name predicate sees what the GATE sees, not what trim() sees", () => {
+      // Without this the malformed check is a dormant assertion whose classifier
+      // no fixture ever drives — review found it was the one dormant arm with no
+      // AIM behind it. `name` (.trim()) would call the indented entry clean;
+      // `gateName` (trailing strip only, as the gate parses) must not.
+      const m = rederive(MALFORMED_FIXTURE);
+      expect(m.map((e) => e.name)).toEqual([
+        "20260301000000_clean",
+        "20260302000000_leading_space",
+      ]);
+      expect(m.filter((e) => e.gateName === "" || /\s/.test(e.gateName)).map((e) => e.gateName)).toEqual([
+        "  20260302000000_leading_space",
+      ]);
+    });
+
     it("finds exactly the four entries, ignoring comments and blanks", () => {
       expect(rederive(FIXTURE).map((e) => e.name)).toEqual([
         "20260101000000_dispositioned",
@@ -302,35 +359,64 @@ describe("VAC-08 ledger baseline — every entry is dispositioned by name", () =
   });
 
   it("the header carries the lineage that makes the emptiness a READING, not a default", () => {
-    // ⛔ THIS IS THE ASSERTION THAT DISTINGUISHES THIS FILE FROM A BARE EMPTY
-    // ONE, and it is LIVE — gutting the header reddens here even though every
-    // entry-level check above would stay green over zero rows. A ratchet emptied
-    // without its cause recorded is the mute button the file's own header
-    // forbids, and "the file is empty" cannot by itself tell the two apart.
-    const required: Array<[string, string]> = [
-      ["MUST ONLY SHRINK", "the ratchet contract itself"],
-      ["34274355596", "the restore run id that made the 31 entries present"],
-      [
-        "88581b8bc66415bfa86b7d5a019741b1cbd0ff49",
-        "the head sha that restore ran at",
-      ],
-      ["34274161551", "the CI run that MEASURED the 31 as no longer absent"],
-      ["2026-09-08", "the date of the founder decision to empty the ratchet"],
-      ["founder decision", "the authority the removal rests on"],
-      [
-        "DATA-DEPENDENT-MIGRATION-ESCAPE",
-        "the TODOS route for the OPEN general case (a migration that cannot reach TEST)",
-      ],
+    // ⛔ THIS IS THE ASSERTION THAT DISTINGUISHES THIS FILE FROM A BARE EMPTY ONE.
+    //
+    // ⛔ REWRITTEN 2026-09-09. The first cut asked only `text.includes(needle)`
+    // over the WHOLE file, and review measured three ways to satisfy it while
+    // gutting the record:
+    //   * deleting the FOUNDER DECISION paragraph  -> still green
+    //     ("founder decision" matched a 2026-08-30 sentence about hand-applies;
+    //      the real line is uppercase and matched NOTHING)
+    //   * deleting the restore-run bullet          -> still green
+    //     (the run id occurs twice; the second is in the [SEC] paragraph)
+    //   * rewriting the cause as a HAND-APPLY of 31 migrations to shared TEST,
+    //     ids intact                               -> still green
+    // The last one is the one that matters: the file could claim the exact act
+    // its own header forbids in capitals, and nothing here objected.
+    //
+    // So the needles must now live INSIDE the 2026-09-08 block, and the CAUSE
+    // is pinned explicitly rather than left to prose nobody checks.
+    const startRe = /^# ⭐ 2026-09-08 — 31 -> 0/m;
+    const startMatch = startRe.exec(text);
+    expect(
+      startMatch,
+      "scripts/vac08-ledger-baseline.txt no longer opens its 2026-09-08 lineage " +
+        "block. That block IS the record that the emptying was a reading; without " +
+        "it the file is indistinguishable from a ratchet somebody simply deleted.",
+    ).not.toBeNull();
+    const after = text.slice(startMatch!.index);
+    // The block ends at the next top-level ⚠️/⛔ heading.
+    const nextHeading = /\n# [⚠⛔]/.exec(after);
+    const block = nextHeading ? after.slice(0, nextHeading.index) : after;
+
+    const required: Array<[RegExp, string]> = [
+      [/BY RESTORE, NOT BY HAND-APPLY/, "THE CAUSE — the one claim this block exists to make"],
+      [/34274355596/, "the restore run id that made the 31 entries present"],
+      [/88581b8bc66415bfa86b7d5a019741b1cbd0ff49/, "the head sha the restore ran at"],
+      [/34274161551/, "the CI run that MEASURED the 31 as no longer absent"],
+      [/2026-09-08/, "the date of the founder decision"],
+      [/founder decision/i, "the authority the removal rests on (case-insensitive: the real line is uppercase)"],
     ];
     const missing = required
-      .filter(([needle]) => !text.includes(needle))
-      .map(([needle, why]) => `${JSON.stringify(needle)} (${why})`);
+      .filter(([re]) => !re.test(block))
+      .map(([re, why]) => `${String(re)} (${why})`);
     expect(
       missing,
       "scripts/vac08-ledger-baseline.txt lost part of the lineage that justifies its " +
-        "zero entries. An empty ratchet whose cause is not written down reads exactly " +
-        "like a deleted control.",
+        "zero entries, or moved it OUT of the 2026-09-08 block. An empty ratchet whose " +
+        "cause is not written down reads exactly like a deleted control — and an id " +
+        "that merely appears somewhere else in the file is not a record of the cause.",
     ).toEqual([]);
+
+    // The block must be substantial: a one-line stub carrying the ids satisfied
+    // the old pin. Measured — that exact stub is what prompted this rewrite.
+    expect(
+      block.split("\n").length,
+      "the 2026-09-08 lineage block shrank to a stub. The ids alone are not the record.",
+    ).toBeGreaterThan(12);
+
+    // The TODOS route for the OPEN general case lives outside the block.
+    expect(text).toContain("DATA-DEPENDENT-MIGRATION-ESCAPE");
   });
 
   it("every entry carries a trailing '#' disposition with non-empty prose", () => {
@@ -350,8 +436,13 @@ describe("VAC-08 ledger baseline — every entry is dispositioned by name", () =
 
   it("no entry name is empty or carries whitespace (the gate compares names verbatim)", () => {
     // DORMANT at zero entries; fires on the first malformed addition.
-    const malformed = entries.filter((e) => e.name === "" || /\s/.test(e.name));
-    expect(malformed.map((e) => `line ${e.line}: ${JSON.stringify(e.name)}`)).toEqual([]);
+    const malformed = entries.filter((e) => e.gateName === "" || /\s/.test(e.gateName));
+    expect(
+      malformed.map((e) => `line ${e.line}: ${JSON.stringify(e.gateName)}`),
+      "an entry name is empty or carries whitespace AS THE GATE PARSES IT. The gate " +
+        "compares names verbatim, so such a line is reported simultaneously as NEW " +
+        "drift and as a stale baseline entry — two failures with one cause.",
+    ).toEqual([]);
   });
 
   it("the [SEC] marker set on the live file is CLOSED and matches SEC_ENTRIES", () => {
@@ -378,6 +469,43 @@ describe("VAC-08 ledger baseline — every entry is dispositioned by name", () =
         `${name} is in SEC_ENTRIES but missing from the baseline`,
       ).toBeDefined();
     }
+
+    // ⛔ ADDED 2026-09-09. The disclosure rule was enforced ONLY against
+    // SEC_FIXTURE and never against this file — measured: a [SEC] entry added
+    // with no disclosure, with ENTRY_COUNT and SEC_ENTRIES updated exactly as a
+    // maintainer would, passed 12/12. The AIM proves the classifier CAN
+    // classify; only this line proves it is ever pointed at the real file.
+    // Dormant at zero entries, like its neighbours — but now true rather than
+    // aspirational on the day an entry returns.
+    expect(
+      secEntriesMissingDisclosure(entries),
+      "a [SEC] entry on the baseline is missing the never-received-it disclosure. " +
+        "A TEST-side test asserting that grant may be asserting it against a schema " +
+        "that never received it, and the line has to say so.",
+    ).toEqual([]);
+  });
+
+  it("the GATE still reads THIS file, and still cannot see dispositions", () => {
+    // ⛔ ADDED 2026-09-09. This whole test file's rationale — "dispositions are
+    // invisible to the gate, so a human-readable reason needs its own machine
+    // check" — was PROSE ONLY. Two facts it depends on were asserted nowhere:
+    //   * the gate's default baseline path. If it changes, this contract test
+    //     polices an orphaned file and stays green forever.
+    //   * the comment-stripping parse. If the gate ever starts READING
+    //     dispositions, the independence rationale silently stops being true.
+    // House precedent for pinning a sibling script's line: WR-04 in
+    // src/__tests__/drift-check-scripts.test.ts.
+    const gate = readFileSync(join(REPO_ROOT, "scripts", "test-ledger-drift-check.sh"), "utf8");
+    expect(
+      gate,
+      "the VAC-08 gate no longer defaults to vac08-ledger-baseline.txt. This test " +
+        "may now be policing a file the gate does not read.",
+    ).toContain('${LEDGER_BASELINE_FILE:-$(dirname "$0")/vac08-ledger-baseline.txt}');
+    expect(
+      gate,
+      "the VAC-08 gate no longer strips comments before comparing names. If it now " +
+        "READS dispositions, this file's reason for existing has changed.",
+    ).toContain(`sed 's/#.*//'`);
   });
 
   it("the file states the reading the gate CAN print", () => {
