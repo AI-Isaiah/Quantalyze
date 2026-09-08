@@ -9,7 +9,8 @@ consumers and zero gates: nothing read it, nothing checked it was current.
   resolved `BASELINE_FILE` to `${LANE_DIR}/baseline.sql`, the exact path `.gitignore` excluded, so
   the committed file had no reader at all. Proven by running it.
 - **Criterion 2** — a baseline/`BASELINE.md` co-edit staleness gate, four mutation arms, self-test
-  10/10, wired into `sql-function-snapshot.yml` with the self-test first.
+  12/12 across 9 sections (was 10/10 as shipped; iteration-2 findings IN-02/IN-03
+  added a declared-assertion count that fails loud on a mismatch, and one section), wired into `sql-function-snapshot.yml` with the self-test first.
 - **Criterion 4** — DRIFT-05 as TWO gates: (a) a hermetic name-set diff in `dump-sql-functions.ts
   --check` matching on name AND side; (b) `prod-body-drift-check.sh --baseline-live`, which exits 1
   when its credential is absent and never skips.
