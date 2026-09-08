@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.77.22.0] - 2026-09-08 — Phase 164.8 (plans 01-03): the TEST restore machinery, dispatch-only
+
+The stage that lets shared TEST be restored from the committed baseline, plus the
+self-test that holds it to its claims. Nothing here runs a restore: the workflow is
+`workflow_dispatch`-only, and no file under `supabase/migrations/**` changed, so there
+is no PROD auto-apply on merge.
+
+- **`scripts/restore-test-from-baseline.sh` with a 21-arm self-test.** Seven refusals fire
+  before any write and every branch of each is armed; preflight rolls back byte-for-byte;
+  restore commits the full shape; survivors round-trip search_path-independently and carry
+  their trigger enabled-state.
+- **A restore with ZERO censused survivors used to COMMIT SILENTLY.** `build_transaction`
+  emitted `NULL::text` for an empty census, and `NOT (r.key = ANY (ARRAY[NULL::text]))` is
+  NULL, which plpgsql treats as false — so the closure skipped its own refusal. Both
+  remedies landed (render `ARRAY[]::text[]`, wrap the test in `coalesce(..., false)`) and
+  each was measured to be INDEPENDENTLY sufficient: reverting either alone stays green,
+  reverting both reproduces `exited 0, expected 1`. New arm 19 + `arm-no-survivors.sql`.
+- **The identity gate could pass against a database with NO marker at all.** The marker read
+  used `2>&1`, so a psql warning on a SUCCESSFUL connect satisfied the EXPECT regex. That is
+  worse than skipping the NULL branch, which is how it was first described. stderr now goes
+  to a file and is never printed — it names the host, its IP and the DB user.
+- **Two assertions that could not fire, removed.** The mutex probe accepted a two-key
+  `pg_advisory_lock(0, KEY)` (now pins `objsubid = 1`; all seven callers use the one-key
+  form). And the post-verify's `grep -q 'Reverted'` FAILED OPEN: that capitalised token
+  occurs zero times in the pinned CLI 2.98.2, measured by installing that exact version
+  rather than trusting a local 2.84.2 proxy. Replaced with the CLI's real ErrMissingLocal
+  sentence and moved AHEAD of the generic `rc` branch, which was consuming the case and
+  reporting the wrong cause — the ordering was the defect, not the wording.
+- **Two `|| true` sites made their comparisons vacuous** (`'' = ''`) and hid a crashed
+  normalizer behind a diagnosis that blamed the dump. rc is captured and `MEASURE_FAIL`'d;
+  `|| true` 6 → 4 and `set +e` 3 → 6, both re-measured rather than restated.
+- **The workflow step named "Assert PROD's ledger equals the repo file set" now checks
+  content**, not only ancestry: `--diff-filter=A` over `supabase/migrations` in the window
+  between PROD's apply sha and HEAD. Redaction is fail-closed and destroys the channels it
+  could not scrub; both artifact files are secret-scanned BEFORE any write.
+- **Honesty, not cosmetics.** The backup README and the script header now state that a
+  restore destroys `schema_migrations.statements` — the only record of the SQL each
+  migration was applied with. Nothing repopulates it, VAC-08 does not read it so no gate
+  reddens, and the sole surviving copy expires with the artifact. The residual survivor-DDL
+  exposure in the public Actions log is booked as threat T-164.8-21 in plan 05 rather than
+  left as prose.
+
+41 review findings closed. Every new or changed assertion was calibrated — neutered,
+observed RED naming its own message, restored from a byte backup. Three places where the
+review itself was wrong were measured and pushed back on rather than applied.
+
 ## [0.77.21.0] - 2026-09-08 — DRIFT-04 closed: baseline regenerated, ratchet row retired
 
 The companion to 0.77.20.0, landed immediately after because DRIFT-05 gate (a) reads RED
