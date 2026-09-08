@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.77.23.0] - 2026-09-08 — the TEST activity gate moves INSIDE the mutex
+
+Phase 164.8 plan 04 halted at its own activity gate. The gate as specified could not
+be run, and — more importantly — could not have been sound if it had been.
+
+- **The gate is now a workflow step**, between `Acquire shared-test-db mutex` and
+  `Back up TEST before any write`. It was specified as an EXTERNAL probe: a human runs
+  psql, sees zero rows, then dispatches. That measures a window that has already closed
+  (the plan's own words) — other CI can start between the probe and the dispatch. Inside
+  the held advisory lock there is no window: a colliding run is either visible to the
+  query or still blocked on the mutex we hold.
+- **It also unblocks the plan.** The external probe needed a session-mode DSN that no
+  local executor has — `TEST_SUPABASE_DB_URL` exists only as a repo secret — which is
+  precisely why plan 04 halted. CI already holds it; no shared-database credential has
+  to reach a laptop.
+- **`idle in transaction` counts as active; plain `idle` does not.** A session holding an
+  open transaction holds locks and will write when it resumes. Plain `idle` is where
+  pooled PostgREST connections park permanently, so counting it would make the gate
+  unpassable and get it routed around rather than fixed.
+- **Falsifier observed, not assumed.** On a throwaway PostgreSQL 16 lane, against the
+  step's real bytes extracted from the YAML: a session genuinely `idle in transaction`
+  (state confirmed, not merely `active`) made the gate exit 1; a plain `idle` session did
+  not; an unreadable probe exited 1 rather than passing. A first attempt used server-side
+  `pg_sleep` and produced state `active` — it proved something weaker than claimed and was
+  redone.
+- **A host leak found and closed while testing.** The three-expression psql redaction
+  pattern copied from ci.yml does NOT match `could not translate host name "<host>"`, so a
+  DNS failure put the TEST pooler host in a public log. The password was stripped
+  (0 occurrences); the host was not. Closed here with a fourth expression; the shared
+  pattern still has the gap and it is booked as `[REDACT-HOSTNAME-01]` / T-164.8-22.
+
+Four pins added, each calibrated by neutering the workflow and observing RED. One neuter
+was caught by an existing softening-token pin before the new one ran, so the new
+fail-closed pin was re-calibrated separately rather than assumed proven.
+
 ## [0.77.22.0] - 2026-09-08 — Phase 164.8 (plans 01-03): the TEST restore machinery, dispatch-only
 
 The stage that lets shared TEST be restored from the committed baseline, plus the

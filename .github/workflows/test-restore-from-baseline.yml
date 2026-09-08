@@ -772,6 +772,77 @@ jobs:
           fi
           echo "which_database: OK — the marker names TEST and not PROD."
 
+      # ── THE ACTIVITY GATE (Phase 164.8 plan 04, Task 2). ───────────────────
+      # ⚖️ FOUNDER DECISION 2026-09-08, verbatim: "Delegate, but only if TEST is
+      # measurably quiet." This step is that condition, made executable.
+      #
+      # ⛔ WHY IT LIVES HERE AND NOT IN THE DISPATCHER. Plan 04 originally specified an
+      # EXTERNAL probe: a human runs psql, sees zero rows, then dispatches. That is
+      # unsound by construction and the plan says so in its own words — probing first
+      # "measures a window that has already closed". Between the probe and the dispatch,
+      # another repo's CI can start. Here the probe runs INSIDE the advisory-lock
+      # session taken by `Acquire shared-test-db mutex` above, so any run that would
+      # collide is either already visible to this query or is still blocked on the
+      # mutex we are holding. There is no window. It also removes the credential
+      # dependency that halted plan 04: CI already holds TEST_SUPABASE_DB_URL, and no
+      # session-mode DSN has to exist on anyone's laptop.
+      #
+      # ⚠️ `idle in transaction` COUNTS AS ACTIVE, and that is the whole point. A
+      # session holding an open transaction holds locks and will write when it resumes;
+      # a gate blind to it is the exact vacuity this phase exists to remove. Plain
+      # `idle` does NOT count — PostgREST keeps pooled connections parked there
+      # permanently, and counting them would make the gate unpassable rather than
+      # meaningful. `backend_type = 'client backend'` excludes autovacuum and the
+      # background workers, which are not other people's CI.
+      #
+      # Scope: restore only. `mode=preflight` rolls its transaction back and writes
+      # nothing, so blocking it would cost the cheap dry run its usefulness for no
+      # safety gain.
+      - name: Activity gate — is shared TEST measurably quiet?
+        if: inputs.mode == 'restore'
+        run: |
+          set -euo pipefail
+          dsn="${TEST_DB_SESSION_URL}"
+          rc=0
+          # `-P pager=off` because a psql built with a pager can block on a tty-less
+          # runner. Count and detail come from ONE query so they cannot disagree.
+          busy="$(PGCONNECT_TIMEOUT=15 timeout 30 psql "${dsn}" -X -q -A -t -P pager=off -v ON_ERROR_STOP=1 \
+            -c "SELECT count(*) FROM pg_stat_activity
+                 WHERE datname = current_database()
+                   AND pid <> pg_backend_pid()
+                   AND backend_type = 'client backend'
+                   AND state IN ('active','idle in transaction','idle in transaction (aborted)','fastpath function call');" \
+            2>"${RUNNER_TEMP}/activity.err")" || rc=$?
+          if [ "${rc}" -ne 0 ]; then
+            # Same three redactions as every other psql site here: a connect failure
+            # names the host, its IP and the DB user, and this log is public.
+            # ⚠️ FOUR expressions here, not the three ci.yml uses. MEASURED 2026-09-08
+            # against this step's real bytes: a DNS failure emits `could not translate
+            # host name "<host>" to address`, which NONE of the three standard patterns
+            # match, and the TEST pooler host survived into the output. The password is
+            # stripped by the first expression (verified: 0 occurrences); the host was
+            # not. The gap is not local to this step — it is in the shared ci.yml
+            # pattern — and is booked as [REDACT-HOSTNAME-01]; this fourth expression
+            # closes it HERE rather than shipping a known host leak on a public log.
+            sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
+                   -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
+                   -e 's#(could not translate host name )"[^"]*"#\1"***"#g' \
+                   -e 's#(for user )"[^"]*"#\1"***"#g' "${RUNNER_TEMP}/activity.err" >&2
+            echo "::error::the activity gate could not be MEASURED (psql exited ${rc}). Refusing to restore. A gate that cannot read is not a gate that passed — this failure is deliberately NOT tolerated, because tolerating it would restore shared TEST on the strength of an unanswered question."
+            exit 1
+          fi
+          busy="$(printf '%s' "${busy}" | tr -d '[:space:]')"
+          case "${busy}" in
+            ''|*[!0-9]*)
+              echo "::error::the activity gate returned a non-numeric count ('${busy}'). Refusing to restore rather than coerce an unreadable answer to zero."
+              exit 1 ;;
+          esac
+          if [ "${busy}" -ne 0 ]; then
+            echo "::error::shared TEST is NOT quiet: ${busy} other client session(s) are active or hold an open transaction. Refusing to restore — TEST is shared with other people's CI and this restore DROPs the public schema. Re-dispatch once the queue drains (docs/runbooks/shared-test-db-mutex.md §§ 2-3). Session details are withheld: they can carry query text, and this log is public."
+            exit 1
+          fi
+          echo "activity-gate: 0 other active client session(s) — shared TEST is measurably quiet, inside the held mutex."
+
       # ── THE BACKUP. CONTEXT safety rule 3, and no wider than it. ────────────
       # ⛔ WHAT THIS ARTIFACT HOLDS: TEST's migration ledger (CSV) and TEST's `public`
       # schema (a supabase db dump), plus the script's pre-drop census once it runs.
