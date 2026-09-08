@@ -64,25 +64,41 @@ name: TEST restore from baseline
 # ⚠️ FIRST: a `workflow_dispatch` workflow is dispatchable only once its file is on
 # the DEFAULT branch. Until this file is merged to `main`, `gh workflow run` returns
 # "could not find any workflows named …". Plan 04's first checkpoint is therefore
-# "merge this PR", not "dispatch".
+# "merge this PR", not "dispatch". MEASURED 2026-09-08 on the authoring branch:
+# `gh workflow list --all` does not list this workflow at all — that is the expected
+# reading before the merge, not a misconfiguration to debug.
 #
 #   (1) MEASURE. Preflight runs the WHOLE transaction and then ROLLS BACK, so it is
 #       the measurement the founder decides on — not a lighter check:
 #
 #           gh workflow run test-restore-from-baseline.yml --ref main -f mode=preflight
 #
-#       Read the run log for, in order:
-#         * `pre-census` — the counts and the survivor list as TEST is TODAY;
+#       Read the run log for these lines, in order. Every string below was checked
+#       against scripts/restore-test-from-baseline.sh on 2026-09-08 — the script's
+#       line numbers move, so grep the STRINGS, never a line number:
+#         * `── pre-census (read-only) ──`, then the counts, then one `survivor` line
+#           per censused object, then `survivors censused: <n>` — this is TEST as it
+#           is TODAY, and it is written to the backup artifact as `pre-census.txt`;
 #         * every `survivor` line whose key begins `pub:public.` — a realtime
 #           publication row naming a table `baseline.sql` does not re-create is a
 #           PRE-WRITE REFUSAL the preflight will name (W3). The remedy is a
 #           founder-run `ALTER PUBLICATION supabase_realtime DROP TABLE public.<t>`
 #           recorded in the RESTORE log, then re-preflight. This workflow will never
-#           drop a publication row by itself;
-#         * `expected shape` — the counts derived from the dump text;
-#         * `filtered:` — the one line class removed from the dump;
-#         * `post-census == pre-census (byte-for-byte)` and `mode=preflight` — the
-#           rollback MEASURED, which is the whole point of the mode.
+#           drop a publication row by itself, in either mode;
+#         * `expected shape from the dump text: tables=… policies=… functions=…` —
+#           the counts DERIVED from the dump text, which the transaction then compares
+#           against what it actually built, INSIDE the transaction;
+#         * `transaction assembled at … (filtered: <n> line(s) matching …)` — the one
+#           line class removed from the dump. ⚠️ A `filtered:` count of 0 against the
+#           REAL dump would mean the filter stopped matching, not that there was
+#           nothing to filter; it is 1 against the fixture;
+#         * the closing line, which the script emits on ONE line:
+#             preflight: post-census == pre-census (byte-for-byte) — the transaction
+#             ran to its ROLLBACK terminator and the database is unchanged;
+#             mode=preflight
+#           That byte-for-byte equality IS the rollback, measured rather than assumed,
+#           and it is the whole point of the mode. Anything else on that line — most
+#           of all a diff — means the database was modified: treat it as modified.
 #
 #   (2) DECIDE. The founder reads (1) and decides. There is no automatic promotion
 #       from a green preflight to a restore, by design.
