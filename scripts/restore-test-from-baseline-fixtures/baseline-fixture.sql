@@ -20,7 +20,13 @@
 --     Supabase that publication is owned by `supabase_admin` and `postgres` may not
 --     reassign it; ON THE LANE THE STATEMENT WOULD SUCCEED, which is exactly why
 --     the filter is asserted by COUNT and not by its effect;
---   * the schema GRANT lines (baseline.sql:13677-13680).
+--   * the schema GRANT lines (baseline.sql:13677-13680);
+--   * `ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public"` — the
+--     real dump carries 12 of these (4 grantees x 3 object types). ⚠️ NOTE THE
+--     QUOTES around the schema identifier: a grep written `IN SCHEMA public`
+--     matches zero lines and reads as "the dump omits these grants". Arm 18
+--     needs the dump to RE-CREATE the default ACL, or its round-trip would be
+--     a claim about a shape the fixture does not have.
 --
 -- Its measured shape — 2 CREATE TABLE lines, 1 CREATE POLICY line, 2 distinct
 -- function names — is what the self-test's exact summary line pins.
@@ -96,3 +102,5 @@ GRANT ALL ON TABLE "public"."fx_keep" TO "service_role";
 GRANT ALL ON TABLE "public"."fx_other" TO "anon";
 GRANT ALL ON TABLE "public"."fx_other" TO "authenticated";
 GRANT ALL ON TABLE "public"."fx_other" TO "service_role";
+
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT SELECT ON TABLES TO PUBLIC;

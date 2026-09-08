@@ -1,0 +1,29 @@
+-- ============================================================================
+-- ARM OVERLAY 18 — a default ACL on `public`, the class that would FALSELY
+-- abort the first real preflight.
+--
+-- Applied ON TOP OF old-test.sql by the self-test's `fresh_db <name>`.
+--
+-- ⭐ MEASURED ON SHARED TEST 2026-09-08 (read-only, marker verified):
+-- `pg_default_acl` holds 6 rows whose `defaclnamespace` is `public`. The
+-- reviewed PROD dump re-creates them with 12 `ALTER DEFAULT PRIVILEGES FOR ROLE
+-- "postgres" IN SCHEMA "public"` statements — 4 grantees x 3 object types.
+--
+-- ⚠️ THE DUMP QUOTES THE SCHEMA IDENTIFIER. A grep written `IN SCHEMA public`
+-- matches ZERO lines and reads as "the dump omits these grants entirely". That
+-- exact mistake was made and corrected during planning; grep for
+-- `ALTER DEFAULT PRIVILEGES` alone, or include the double quotes.
+--
+-- `ALTER DEFAULT PRIVILEGES … IN SCHEMA public` records a pg_depend row whose
+-- `classid` is `pg_default_acl` and whose `refobjid` is the `public` namespace.
+-- Without a CARRIER branch the closure cannot resolve its owning schema, falls
+-- through to `pg_describe_object()` text, matches no survivor key, and ABORTS —
+-- naming an object the dump WOULD have restored. A false abort, on the one run
+-- that most needs to be believed.
+--
+-- ⛔ Resolved by CARRIER (`pg_default_acl.defaclnamespace`), never by adding the
+-- class to an exclusion list: an exclusion would ALSO hide a default ACL in a
+-- non-public schema, which is a genuine survivor.
+-- ============================================================================
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC;

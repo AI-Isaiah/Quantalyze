@@ -72,9 +72,6 @@
 # the self-test uses a baseline-SHAPED fixture. Whether the real dump applies to
 # hosted TEST is what `--mode preflight` measures, transactionally, against TEST
 # itself before anyone decides.
-#
-# ⚠️ THIS IS THE SKELETON (Phase 164.8 plan 01): the two GREEN paths only. Plan 02
-# adds the RED arms, pins EXPECTED_ARMS at its final value and adds the vitest pin.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -548,6 +545,24 @@ BEGIN
                WHEN p.classid = 'pg_constraint'::regclass THEN (SELECT n.nspname FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE k.oid = p.objid)
                WHEN p.classid = 'pg_attrdef'::regclass THEN (SELECT n.nspname FROM pg_attrdef a JOIN pg_class c ON c.oid = a.adrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE a.oid = p.objid)
                WHEN p.classid = 'pg_publication_rel'::regclass THEN NULL
+               -- A DEFAULT ACL is not an object with a schema of its own either:
+               -- \`ALTER DEFAULT PRIVILEGES ... IN SCHEMA public\` records a
+               -- pg_default_acl row whose CARRIER is the namespace named in
+               -- \`defaclnamespace\`. Same carrier pattern as pg_trigger.tgrelid,
+               -- applied one class further again.
+               --
+               -- ⭐ MEASURED ON SHARED TEST 2026-09-08 (read-only, marker verified):
+               -- pg_default_acl holds 6 rows whose defaclnamespace is public, and
+               -- the reviewed dump re-creates them with 12 ALTER DEFAULT PRIVILEGES
+               -- statements. Without this branch own_schema is NULL, the key falls
+               -- through to pg_describe_object(), it matches no survivor, and the
+               -- closure ABORTS naming a default ACL the dump WOULD have restored —
+               -- a FALSE abort on the first real preflight.
+               --
+               -- ⛔ Resolved by CARRIER, never by excluding the class: an exclusion
+               -- would also hide a default ACL in a NON-public schema, which is a
+               -- genuine survivor. (Self-test arm 18.)
+               WHEN p.classid = 'pg_default_acl'::regclass THEN (SELECT n.nspname FROM pg_default_acl da JOIN pg_namespace n ON n.oid = da.defaclnamespace WHERE da.oid = p.objid)
                -- A TOAST relation is not an object in its own right: it lives in
                -- pg_toast but its CARRIER is the table whose reltoastrelid it is,
                -- and it is dropped and re-created with that table. Resolving it to
@@ -707,8 +722,17 @@ run_transaction() {
     > "$RESTORE_OUT_DIR/transaction.out" 2>&1 || rc=$?
   cat "$RESTORE_OUT_DIR/transaction.out"
   if [ "$rc" -ne 0 ]; then
+    # ⛔ [Rule 1] PREFER THE `ERROR:` LINE. psql prefixes NOTICEs with the same
+    # `psql:<file>:<line>: ` as errors, so a `^(psql:|ERROR:)` first-match reports
+    # `NOTICE: drop cascades to N other objects` as the abort point — MEASURED
+    # 2026-09-08 on the arm-7 and arm-9 falsifier runs. On the real TEST, whose
+    # public has 190+ direct dependents, that NOTICE is emitted by the DROP on
+    # EVERY abort, so the founder would be pointed at a cascade notice instead of
+    # the error that actually stopped the restore. The psql-prefixed fallback keeps
+    # a failure with no ERROR line from reporting nothing at all.
     local first
-    first=$(grep -a -m1 -E '^(psql:|ERROR:)' "$RESTORE_OUT_DIR/transaction.out" || true)
+    first=$(grep -a -m1 -E '(^|: )ERROR:' "$RESTORE_OUT_DIR/transaction.out" || true)
+    [ -n "$first" ] || first=$(grep -a -m1 -E '^psql:' "$RESTORE_OUT_DIR/transaction.out" || true)
     echo "::error::${GATE}: restore aborted at ${first:-<psql exited ${rc} with no ERROR line>}; the transaction was rolled back, the database is unchanged." >&2
     exit 1
   fi
@@ -830,12 +854,44 @@ main() {
 # measured cost when it was absent was 27 orphaned clusters and a disk-exhaustion
 # incident).
 #
-# ⚠️ SKELETON (Phase 164.8 plan 01): the two GREEN paths only, run end to end
-# through the real dispatch. Plan 02 adds the RED arms, introduces EXPECTED_ARMS
-# ONCE at its final value beside the vitest pin, and adds the redaction grep. The
-# ratchet is deliberately NOT introduced here — a floor patched across two plans is
-# a floor nobody can read off one place.
+# ── THE ARMS ────────────────────────────────────────────────────────────────
+# Every arm runs the REAL `--run` dispatch. Every arm asserts an EXIT CODE **and**
+# a NAMED OUTPUT LINE: a refusal that fires for the wrong reason exits 1 too, so
+# an exit-only arm cannot tell a working guard from a broken one.
+#
+#    1  RED  credential absent                    9  GREEN restore, commits
+#    2  RED  identity marker NULL                10  RED  survivor un-re-creatable
+#    3  RED  identity marker names PROD          11  RED  expected shape mismatch
+#    4  RED  baseline sha != BASELINE.md         12  GREEN unqualified survivor (B1)
+#    5  RED  baseline stale vs migrations        13  RED  derived-census orphan (B2)
+#    6  RED  shared-TEST mutex not held          14  ---- redaction check BITES
+#    7  RED  publication row w/o its table       15  RED  unknown argv
+#    8  GREEN preflight, rolls back              16  ---- harness calibration
+#                                                17  RED  unresolvable object class
+#                                                18  GREEN default ACL round-trips
+#
+# ── REDACTION IS A CHECK WITH A SUBJECT (T-164.8-05) ────────────────────────
+# Every arm's combined output is captured, and after EVERY arm the harness greps
+# that capture for a DSN shape and for dollar-quoted SQL. A hit FAILS the arm.
+# That predicate is worthless unless something proves it can see a real leak, so
+# arm 14 runs a scratch copy of this script that deliberately echoes the DSN and
+# PASSES only when the grep FIRES. (Plan 01 shipped the capture and the
+# failure-print mask; the check itself and its subject are this plan's.)
+#
+# ── WHAT IT PROVES, AND WHAT IT DOES NOT ────────────────────────────────────
+# It proves the MECHANISM on a baseline-SHAPED fixture. It CANNOT replay the real
+# dump: the pg-lane has no `pg_net` and no `supabase_vault`. Whether the real dump
+# applies to hosted TEST is measured by `--mode preflight` inside a rolled-back
+# transaction, against TEST itself (Plans 03/04).
 # ===========================================================================
+
+# ⛔ THE RATCHET. Introduced ONCE, at its final value, so it is never patched
+# across plans and can be read off one place.
+# MEASURED 2026-09-08 — eighteen arms, each with a NAMED falsifier observed RED on
+# a scratch copy and recorded in 164.8-02-SUMMARY.md. Raise it only together with
+# the arm that adds one; lowering it to make a run green is deleting a proof.
+EXPECTED_ARMS=18
+
 SELFTEST_MUTEX_HOLDER_PID=""
 SELFTEST_TMPD=""
 SELFTEST_PGD=""
@@ -867,8 +923,8 @@ self_test() {
   [ -d "$FIXTURES" ] || fail "fixtures not found at ${FIXTURES}."
 
   # The normalizer, resolved to an ABSOLUTE path: the arms run the script with a
-  # temp CWD-independent environment, and a scratch COPY of this script (the
-  # anti-vacuity neuter harness) sits outside the repo.
+  # temp CWD-independent environment, and the scratch COPIES this harness builds
+  # (arms 11 and 14) sit outside the repo.
   local norm="$NORMALIZER"
   [ -f "$norm" ] || norm="$SCRIPT_DIR/sql-body-normalize.mjs"
   [ -f "$norm" ] || fail "the shared normalizer was not found (tried '${NORMALIZER}' and '${SCRIPT_DIR}/sql-body-normalize.mjs'). Set NORMALIZER."
@@ -927,18 +983,31 @@ self_test() {
   # shape check-baseline-staleness.mjs's RECORDED_SHA_RE reads.
   local fixture_sha
   fixture_sha=$(shasum -a 256 "$FIXTURES/baseline-fixture.sql" | awk '{print $1}')
-  {
-    echo "# Self-test BASELINE doc (generated)"
-    echo
-    echo "| | |"
-    echo "|---|---|"
-    echo "| sha256 | \`${fixture_sha}\` |"
-  } > "$SELFTEST_TMPD/BASELINE.md"
+  write_selftest_doc() {
+    {
+      echo "# Self-test BASELINE doc (generated)"
+      echo
+      echo "| | |"
+      echo "|---|---|"
+      echo "| sha256 | \`${2}\` |"
+    } > "$1"
+  }
+  write_selftest_doc "$SELFTEST_TMPD/BASELINE.md" "$fixture_sha"
+
+  # Arm 4's doc: the SAME sha with its FIFTH character changed and nothing else.
+  # Changing exactly one character inside the first 8 is what lets arm 4's
+  # falsifier (compare only the first 4) be a real weakening rather than a rewrite.
+  local bad_c5="0"
+  [ "${fixture_sha:4:1}" = "0" ] && bad_c5="1"
+  local bad_sha="${fixture_sha:0:4}${bad_c5}${fixture_sha:5}"
+  [ "${#bad_sha}" -eq 64 ] || fail "MEASURE_FAIL: the arm-4 mutated sha is ${#bad_sha} chars, not 64 — BASELINE.md's sha row would not parse and arm 4 would fire for the wrong reason."
+  [ "$bad_sha" != "$fixture_sha" ] || fail "MEASURE_FAIL: the arm-4 mutated sha equals the real one; arm 4 would be measuring nothing."
+  write_selftest_doc "$SELFTEST_TMPD/BASELINE-bad.md" "$bad_sha"
 
   # The freshness seam. The fixtures are not the repo's baseline, so `git log` says
-  # nothing useful about them; the stub answers the question the real path asks
-  # (is the dump at least as fresh as the migrations?) with the GREEN answer. Plan
-  # 02's arm 5 proves the RED one.
+  # nothing useful about them; the GREEN stub answers the question the real path
+  # asks (is the dump at least as fresh as the migrations?) with yes, the STALE
+  # stub with no. Arm 5 is the RED one.
   cat > "$SELFTEST_TMPD/freshness.sh" <<'FRESHSTUB'
 #!/usr/bin/env bash
 case "$1" in
@@ -946,17 +1015,52 @@ case "$1" in
   *) echo 1000000000 ;;
 esac
 FRESHSTUB
-  chmod +x "$SELFTEST_TMPD/freshness.sh"
+  cat > "$SELFTEST_TMPD/freshness-stale.sh" <<'FRESHSTUB'
+#!/usr/bin/env bash
+case "$1" in
+  *baseline-fixture.sql) echo 1000000000 ;;
+  *) echo 2000000000 ;;
+esac
+FRESHSTUB
+  chmod +x "$SELFTEST_TMPD/freshness.sh" "$SELFTEST_TMPD/freshness-stale.sh"
+
+  # ── the two SCRATCH COPIES the arms need ──────────────────────────────────
+  # Both live under the harness's mktemp dir, never in the checkout, and both
+  # assert their anchor was found: an awk that matched nothing would produce a
+  # faithful copy and an arm that silently tests the unmutated script.
+  local leaky_script="$SELFTEST_TMPD/leaky-restore.sh"
+  awk '{ print }
+       !d && index($0, "psql is not on PATH.") > 0 { print "  echo \"$RESTORE_DB_URL\"  # arm 14: a DELIBERATE leak, scratch copy only"; d = 1 }
+       END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$leaky_script" \
+    || fail "MEASURE_FAIL: could not build arm 14's leaking scratch copy — the credential-assert anchor moved."
+  grep -aq 'echo "\$RESTORE_DB_URL"' "$leaky_script" \
+    || fail "MEASURE_FAIL: arm 14's scratch copy does not carry the injected leak, so the arm would assert the grep fires on a script that never leaks."
+
+  local shape_script="$SELFTEST_TMPD/shape-plus-one.sh"
+  awk '!d && index($0, "note \"expected shape from the dump text:") > 0 { print "  EXP_TABLES=$((EXP_TABLES + 1))  # arm 11: the EXPECTED derivation, mutated on a scratch copy"; d = 1 }
+       { print }
+       END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$shape_script" \
+    || fail "MEASURE_FAIL: could not build arm 11's shape-mismatch scratch copy — the derive_expected_shape anchor moved."
+  grep -aq 'EXP_TABLES=\$((EXP_TABLES + 1))' "$shape_script" \
+    || fail "MEASURE_FAIL: arm 11's scratch copy does not carry the mutated derivation."
 
   lane_q() { psql "$lane_dsn" -X -q -A -t -v ON_ERROR_STOP=1 -c "$1" | tr -d '[:space:]'; }
 
-  # EVERY arm starts from a freshly loaded fixture: the restore arms MUTATE.
+  # EVERY arm starts from a freshly loaded fixture: the restore arms MUTATE. An
+  # optional OVERLAY (`fixtures/arm-<name>.sql`) is loaded on top, which is how a
+  # single fixture serves eighteen arms without any of them seeing another's shape.
   fresh_db() {
+    local overlay="${1:-}"
     release_mutex
     psql "$admin_dsn" -X -q -v ON_ERROR_STOP=1 \
       -c "DROP DATABASE IF EXISTS ${lane_db} WITH (FORCE);" \
       -c "CREATE DATABASE ${lane_db};" >/dev/null
     psql "$lane_dsn" -X -q -v ON_ERROR_STOP=1 -f "$FIXTURES/old-test.sql" >/dev/null
+    if [ -n "$overlay" ]; then
+      [ -f "$FIXTURES/arm-${overlay}.sql" ] \
+        || { echo "MEASURE_FAIL: overlay ${FIXTURES}/arm-${overlay}.sql not found; the arm would run against the bare fixture and could pass for the wrong reason."; return 1; }
+      psql "$lane_dsn" -X -q -v ON_ERROR_STOP=1 -f "$FIXTURES/arm-${overlay}.sql" >/dev/null
+    fi
   }
 
   # The shared-TEST mutex, held the way .github/workflows/ci.yml's Acquire step
@@ -988,26 +1092,46 @@ FRESHSTUB
     fi
   }
 
-  setup_lane() { fresh_db && hold_mutex; }
+  setup_lane() { fresh_db "${1:-}" && hold_mutex; }
 
-  # Runs the REAL leg through the REAL dispatch; the arm env is a prefix, so nothing
-  # leaks between arms.
-  arm_env() {
-    local mode="$1"
+  # ── the arm environment ───────────────────────────────────────────────────
+  # Every value is a PREFIX assignment, so nothing leaks between arms. The four
+  # ARM_* seams below are what individual arms override with `local` (dynamic
+  # scope), so the default leg stays one expression that every arm shares.
+  local ARM_BASELINE_DOC="$SELFTEST_TMPD/BASELINE.md"
+  local ARM_FRESHNESS="bash $SELFTEST_TMPD/freshness.sh"
+  local ARM_REQUIRE_MUTEX=1
+
+  run_leg() {
+    local script="$1" mode="$2" tag="$3"
     RESTORE_DB_URL="$lane_dsn" \
     BASELINE_FILE="$FIXTURES/baseline-fixture.sql" \
-    BASELINE_DOC="$SELFTEST_TMPD/BASELINE.md" \
+    BASELINE_DOC="$ARM_BASELINE_DOC" \
     MIGRATIONS_DIR="$FIXTURES/migrations" \
     NORMALIZER="$norm" \
-    FRESHNESS_TS_CMD="bash $SELFTEST_TMPD/freshness.sh" \
-    RESTORE_OUT_DIR="$SELFTEST_TMPD/out-${mode}" \
-    RESTORE_REQUIRE_MUTEX=1 \
-      bash "$0" --run --mode "$mode"
+    FRESHNESS_TS_CMD="$ARM_FRESHNESS" \
+    RESTORE_OUT_DIR="$SELFTEST_TMPD/out-${tag}" \
+    RESTORE_REQUIRE_MUTEX="$ARM_REQUIRE_MUTEX" \
+      bash "$script" --run --mode "$mode"
   }
+  arm_env() { run_leg "$0" "$1" "${2:-$1}"; }
 
   local pass=0 total=0
   local -a results=()
 
+  # Per-arm knobs, reset by run_arm after every arm so one arm's exception cannot
+  # silently become the next arm's.
+  local ARM_OUT_PREFIX="arm"
+  local ARM_EXPECT_LEAK=0
+  local ARM_FORCE_INVERT=0
+
+  # ⛔ `want` IS THE ARM'S VERDICT, NOT THE SCRIPT'S EXIT CODE — uniformly 0. Every
+  # arm function returns 0 when the script behaved as DECLARED, and asserts the
+  # script's own exit code (1 for a refusal, 0 for a green path) BY NAME inside
+  # itself with a MEASURE_FAIL message, alongside the output line and the database
+  # state. An arm that only compared exit codes could not tell a refusal that fired
+  # for the right reason from one that fired for the wrong one.
+  #
   # ⚠️ `${3-…}` style traps do not apply here — run_arm takes a command, not
   # optional strings. Copied from scripts/test-ledger-drift-check.sh:604-619
   # including the --expect-inverted flip (which turns want 0 into 1 and 1 into 0,
@@ -1016,25 +1140,193 @@ FRESHSTUB
     local label="$1" want="$2"
     shift 2
     total=$((total + 1))
-    local out="$SELFTEST_TMPD/arm-${total}.out"
+    local out="$SELFTEST_TMPD/${ARM_OUT_PREFIX}-${total}.out"
     local rc=0
     ( "$@" ) > "$out" 2>&1 || rc=$?
-    if [ "$inverted" = "--expect-inverted" ]; then
+
+    local want_leak="$ARM_EXPECT_LEAK"
+    if [ "$inverted" = "--expect-inverted" ] || [ "$ARM_FORCE_INVERT" = "1" ]; then
       want=$(( want == 0 ? 1 : 0 ))
     fi
+    if [ "$inverted" = "--expect-inverted" ]; then
+      want_leak=$(( want_leak == 0 ? 1 : 0 ))
+    fi
+
+    # ⛔ THE REDACTION CHECK (T-164.8-05). This log is public. The arms' output is
+    # CAPTURED rather than discarded precisely so this can run: a DSN would be a
+    # credential in a public Actions log, and a dollar-quote would be a SQL body.
+    # It is a CHECK over every arm, and arm 14 is its SUBJECT — without that arm
+    # this would be a predicate nobody has ever seen fire.
+    local leaked=0
+    if grep -aqE 'postgres(ql)?://' "$out" || grep -aqE '\$[A-Za-z_0-9]*\$' "$out"; then leaked=1; fi
+
+    if [ "$ARM_EXPECT_LEAK" = "1" ]; then
+      # The leaking copy's capture is DELETED here, pass or fail: it contains a
+      # real DSN and nothing downstream may print it.
+      rm -f "$out"
+    fi
+
+    if [ "$leaked" -ne "$want_leak" ]; then
+      if [ "$want_leak" = "1" ]; then
+        results+=("  FAIL ${label} — the redaction grep did NOT fire on a script that echoes the DSN. The check is BLIND, so every other arm's redaction result is worthless.")
+      else
+        results+=("  FAIL ${label} — REDACTION: a DSN shape or dollar-quoted SQL reached this arm's captured output. Output withheld.")
+      fi
+      ARM_OUT_PREFIX="arm"; ARM_EXPECT_LEAK=0; ARM_FORCE_INVERT=0
+      return 0
+    fi
+
     if [ "$rc" -eq "$want" ]; then
       results+=("  ok   ${label} (exit ${rc})")
       pass=$((pass + 1))
     else
       results+=("  FAIL ${label} (exit ${rc}, expected ${want})")
-      results+=("       ---- captured output, last 80 lines, DSN-masked ----")
-      local line
-      while IFS= read -r line; do results+=("       ${line}"); done \
-        < <(sed -E 's#postgres(ql)?://[^[:space:]]*#<dsn-redacted>#g' "$out" | tail -80)
+      if [ "$ARM_EXPECT_LEAK" != "1" ]; then
+        results+=("       ---- captured output, last 80 lines, DSN- and body-masked ----")
+        local line
+        while IFS= read -r line; do results+=("       ${line}"); done \
+          < <(sed -E -e 's#postgres(ql)?://[^[:space:]]*#<dsn-redacted>#g' -e 's#\$[A-Za-z_0-9]*\$#<sql-body-redacted>#g' "$out" | tail -80)
+      fi
     fi
+    ARM_OUT_PREFIX="arm"; ARM_EXPECT_LEAK=0; ARM_FORCE_INVERT=0
   }
 
-  # ── G-preflight: the whole transaction runs and then ROLLS BACK ────────────
+  # ═══ ARM 1 — the credential ════════════════════════════════════════════════
+  # The raw leg, kept separate from the assertion so arm 16 can reuse it as a
+  # command that is KNOWN to exit 1.
+  arm_1_leg() {
+    env -u RESTORE_DB_URL \
+      BASELINE_FILE="$FIXTURES/baseline-fixture.sql" \
+      BASELINE_DOC="$SELFTEST_TMPD/BASELINE.md" \
+      MIGRATIONS_DIR="$FIXTURES/migrations" \
+      NORMALIZER="$norm" \
+      FRESHNESS_TS_CMD="bash $SELFTEST_TMPD/freshness.sh" \
+      RESTORE_OUT_DIR="$SELFTEST_TMPD/out-arm1" \
+      bash "$0" --run --mode preflight
+  }
+  arm_credential_absent() {
+    local out="$SELFTEST_TMPD/a1.out" rc=0
+    arm_1_leg > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: expected exit 1 for an absent credential, got ${rc}"; return 1; }
+    grep -aq 'RESTORE_DB_URL is required and is not set' "$out" \
+      || { echo "MEASURE_FAIL: the refusal does not name RESTORE_DB_URL — the script stopped for some OTHER reason"; return 1; }
+    grep -aq 'HARD FAILURE, not a skip' "$out" \
+      || { echo "MEASURE_FAIL: the refusal does not say it is a hard failure rather than a skip"; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 2 — the identity marker is NULL ═══════════════════════════════════
+  arm_marker_null() {
+    setup_lane || return 1
+    psql "$lane_dsn" -X -q -v ON_ERROR_STOP=1 -c "COMMENT ON DATABASE ${lane_db} IS NULL;" >/dev/null
+    local out="$SELFTEST_TMPD/a2.out" rc=0
+    arm_env preflight a2 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: a NULL identity marker exited ${rc}, expected 1"; return 1; }
+    grep -aq 'identity marker is NULL' "$out" \
+      || { echo "MEASURE_FAIL: the refusal does not name the NULL marker"; return 1; }
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — the marker refusal did NOT fire before the first write."; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 3 — the identity marker names PROD ════════════════════════════════
+  # The marker is written so it matches RESTORE_EXPECT_MARKER_RE **and**
+  # RESTORE_REFUSE_MARKER_RE. A marker that failed the EXPECT test first would
+  # exercise the wrong branch, and the PROD refusal would never be measured.
+  arm_marker_prod() {
+    setup_lane || return 1
+    psql "$lane_dsn" -X -q -v ON_ERROR_STOP=1 \
+      -c "COMMENT ON DATABASE ${lane_db} IS 'quantalyze TEST-shaped fixture that names PROD';" >/dev/null
+    local out="$SELFTEST_TMPD/a3.out" rc=0
+    arm_env preflight a3 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: a marker naming PROD exited ${rc}, expected 1"; return 1; }
+    grep -aq 'it names PRODUCTION' "$out" \
+      || { echo "MEASURE_FAIL: the refusal is not the PRODUCTION one — some other guard fired first, so the PROD branch is unmeasured"; return 1; }
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — the PROD refusal did NOT fire before the first write."; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 4 — the dump is not the reviewed one ══════════════════════════════
+  arm_sha_mismatch() {
+    setup_lane || return 1
+    local ARM_BASELINE_DOC="$SELFTEST_TMPD/BASELINE-bad.md"
+    local out="$SELFTEST_TMPD/a4.out" rc=0
+    arm_env preflight a4 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: a sha mismatch exited ${rc}, expected 1"; return 1; }
+    grep -aq "${fixture_sha:0:8}" "$out" \
+      || { echo "MEASURE_FAIL: the refusal does not carry the ACTUAL sha's first 8 chars (${fixture_sha:0:8})"; return 1; }
+    grep -aq "${bad_sha:0:8}" "$out" \
+      || { echo "MEASURE_FAIL: the refusal does not carry the RECORDED sha's first 8 chars (${bad_sha:0:8}) — it names only one side, so a reader cannot see which moved"; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 5 — the dump is stale against the migrations dir ══════════════════
+  arm_stale_baseline() {
+    setup_lane || return 1
+    local ARM_FRESHNESS="bash $SELFTEST_TMPD/freshness-stale.sh"
+    local out="$SELFTEST_TMPD/a5.out" rc=0
+    arm_env preflight a5 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: a stale baseline exited ${rc}, expected 1"; return 1; }
+    grep -aq 'baseline dump is STALE' "$out" || { echo "MEASURE_FAIL: the refusal is not the staleness one"; return 1; }
+    grep -aq 'epoch 1000000000' "$out" || { echo "MEASURE_FAIL: the refusal does not name the baseline epoch"; return 1; }
+    grep -aq '2000000000' "$out" || { echo "MEASURE_FAIL: the refusal does not name the migrations epoch — a reader cannot see which side is behind"; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 6 — the shared-TEST advisory mutex is not held ════════════════════
+  # `fresh_db` releases the holder and this arm deliberately does NOT re-take it.
+  arm_mutex_absent() {
+    fresh_db || return 1
+    local out="$SELFTEST_TMPD/a6.out" rc=0
+    arm_env preflight a6 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: an unheld mutex exited ${rc}, expected 1"; return 1; }
+    grep -aq "mutex (${MUTEX_KEY}) is not held" "$out" \
+      || { echo "MEASURE_FAIL: the refusal does not report the shared-TEST mutex ${MUTEX_KEY} as unheld"; return 1; }
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — the mutex refusal did NOT fire before the first write."; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 7 — a publication row for a table the dump does not re-create ═════
+  arm_stray_publication() {
+    setup_lane stray-publication || return 1
+    local out="$SELFTEST_TMPD/a7.out" rc=0
+    arm_env preflight a7 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: a publication row for an un-re-created table exited ${rc}, expected 1"; return 1; }
+    # ⛔ THE LINE, not merely the exit. Without the pre-write check the transaction
+    # runs and aborts INSIDE at the re-ADD with psql's own `relation ... does not
+    # exist` — still exit 1, but with no remedy and after the DROP.
+    grep -aq 'pub:public.e2e_leftover' "$out" \
+      || { echo "MEASURE_FAIL: the refusal does not name pub:public.e2e_leftover"; return 1; }
+    grep -aq 'ALTER PUBLICATION <pub> DROP TABLE public.<table>' "$out" \
+      || { echo "MEASURE_FAIL: the refusal does not carry the founder remedy sentence"; return 1; }
+    # PRE-WRITE, positively: the run must never have reached the transaction. The
+    # survivor KEY is printed by the pre-census either way, so a grep for the key
+    # alone cannot tell a pre-write refusal from an abort inside the transaction.
+    if grep -aq 'transaction (mode=' "$out"; then
+      echo "MEASURE_FAIL: the run REACHED the transaction — the publication row was not refused BEFORE the write, it aborted the restore from inside."
+      return 1
+    fi
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — the publication refusal did NOT fire before the transaction."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM supabase_migrations.schema_migrations;")
+    [ "$n" = "4" ] || { echo "MEASURE_FAIL: the ledger holds ${n} row(s), expected the fixture's 4 — the transaction ran."; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 8 — GREEN preflight: the whole transaction runs and ROLLS BACK ════
   arm_g_preflight() {
     setup_lane || return 1
     local out="$SELFTEST_TMPD/g-preflight.out"
@@ -1052,7 +1344,7 @@ FRESHSTUB
     return 0
   }
 
-  # ── G-restore: the whole transaction runs and COMMITS ──────────────────────
+  # ═══ ARM 9 — GREEN restore: the whole transaction runs and COMMITS ═════════
   arm_g_restore() {
     setup_lane || return 1
     local out="$SELFTEST_TMPD/g-restore.out"
@@ -1081,15 +1373,196 @@ FRESHSTUB
     return 0
   }
 
-  run_arm "G-preflight — the transaction runs and rolls back, the database is byte-identical" 0 arm_g_preflight
-  run_arm "G-restore  — the transaction runs and commits, all three survivor classes round-trip" 0 arm_g_restore
+  # ═══ ARM 10 — a CENSUSED survivor that cannot be RE-CREATED ════════════════
+  arm_unrecreatable_survivor() {
+    setup_lane unrecreatable-trigger || return 1
+    local out="$SELFTEST_TMPD/a10.out" rc=0
+    arm_env restore a10 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: a survivor that cannot be re-created exited ${rc}, expected 1"; return 1; }
+    grep -aq 'auth.users:on_auth_user_absent' "$out" \
+      || { echo "MEASURE_FAIL: the run never names the survivor auth.users:on_auth_user_absent"; return 1; }
+    grep -aq 'fx_absent' "$out" \
+      || { echo "MEASURE_FAIL: the abort does not name the missing function public.fx_absent — the transaction stopped for some OTHER reason"; return 1; }
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — the transaction COMMITTED a half-restored database instead of rolling back."; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 11 — the expected SHAPE disagrees with what the replay produced ═══
+  # ⛔ THE MUTATION IS ON THE **EXPECTED** SIDE, on a scratch copy, and NOT on the
+  # dump. The expected shape is DERIVED FROM THE DUMP TEXT while the database is
+  # built BY REPLAYING THAT SAME DUMP, so an extra CREATE TABLE line in a dump copy
+  # raises expected and actual EQUALLY and the assertion cannot fire — measured
+  # self-contradictory at plan-check iteration 2 and recorded so it is not
+  # reintroduced.
+  arm_shape_mismatch() {
+    setup_lane || return 1
+    local out="$SELFTEST_TMPD/a11.out" rc=0
+    run_leg "$shape_script" restore a11 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: an expected-shape mismatch exited ${rc}, expected 1"; return 1; }
+    grep -aq 'table(s) after the replay, expected 3' "$out" \
+      || { echo "MEASURE_FAIL: the abort does not report the TABLE count against the mutated expectation of 3"; return 1; }
+    grep -aq 'public holds 2 table(s)' "$out" \
+      || { echo "MEASURE_FAIL: the abort does not report the ACTUAL count of 2 — a reader cannot see which side moved"; return 1; }
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — a wrong shape COMMITTED instead of rolling back."; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 12 (B1) — a survivor whose stored expression carries no `public.` ══
+  arm_unqualified_survivor() {
+    setup_lane unqualified-policy || return 1
+    local out="$SELFTEST_TMPD/a12.out" rc=0
+    arm_env restore a12 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: the unqualified-survivor restore exited ${rc}, expected 0 — the census lost it and the derived closure aborted"; return 1; }
+    grep -aqxF 'restore: tables=2 policies=1 functions=2 ledger_rows=3 survivors=4/4 filtered=1 mode=restore' "$out" \
+      || { echo "MEASURE_FAIL: the summary line does not report survivors=4/4 — the fourth survivor was never censused"; return 1; }
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_policies WHERE schemaname='storage' AND tablename='objects' AND policyname='unqualified_ref';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the unqualified policy is absent after the restore (count=${n}) — B1 exactly: rendered under the default search_path it never entered the census."; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 13 (B2) — a dependent of a class no hand-listed census knows ══════
+  arm_derived_census_orphan() {
+    setup_lane orphan-view || return 1
+    local out="$SELFTEST_TMPD/a13.out" rc=0
+    arm_env restore a13 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: an unlisted dependent exited ${rc}, expected 1 — this is the SILENT COMMIT of plan 01's NEUTER 2"; return 1; }
+    grep -aq 'analytics.v_leftover' "$out" \
+      || { echo "MEASURE_FAIL: the abort does not NAME the lost dependent"; return 1; }
+    grep -aq 'NOT a censused survivor' "$out" \
+      || { echo "MEASURE_FAIL: the abort is not the derived-census closure's"; return 1; }
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_views WHERE schemaname='analytics' AND viewname='v_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: analytics.v_leftover is GONE (count=${n}) — it was CASCADE-dropped and the transaction committed anyway."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — the transaction did not roll back."; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 14 — the redaction check has a SUBJECT (W2) ═══════════════════════
+  # A scratch copy that echoes the DSN straight after the credential assert. The
+  # arm passes ONLY if run_arm's redaction grep FIRES on its captured output;
+  # run_arm deletes that capture afterwards, pass or fail.
+  arm_redaction_subject() {
+    setup_lane || return 1
+    run_leg "$leaky_script" preflight a14
+  }
+
+  # ═══ ARM 15 — unknown argv is a refusal, never a default ═══════════════════
+  arm_unknown_argv() {
+    local out="$SELFTEST_TMPD/a15.out" rc=0
+    RESTORE_DB_URL="$lane_dsn" bash "$0" --run --frobnicate > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: an unknown argument exited ${rc}, expected 1"; return 1; }
+    grep -aq 'unknown argument' "$out" \
+      || { echo "MEASURE_FAIL: the refusal does not say the argument is unknown — a typo'd flag was swallowed and some other branch reported"; return 1; }
+    grep -aq -- '--frobnicate' "$out" \
+      || { echo "MEASURE_FAIL: the refusal does not echo the offending argument"; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 16 — the harness itself can report a FAILURE ══════════════════════
+  # ⛔ WITHOUT THIS ARM every `ok` above is a claim about a harness nobody has seen
+  # say no. Both halves run `run_arm` in a SUBSHELL so their tallies cannot reach
+  # the real ones, on arm 1's leg — a command KNOWN to exit 1 — declared want 0.
+  arm_harness_calibration() {
+    local flipped plain
+    flipped=$( total=0; pass=0; results=(); ARM_OUT_PREFIX="calib-flip"; ARM_FORCE_INVERT=1
+               run_arm "calib" 0 arm_1_leg; printf '%s\n' "${results[@]}" )
+    plain=$(   total=0; pass=0; results=(); ARM_OUT_PREFIX="calib-plain"; ARM_FORCE_INVERT=0
+               run_arm "calib" 0 arm_1_leg; printf '%s\n' "${results[@]}" )
+    echo "calibration, flip ON  -> ${flipped}"
+    echo "calibration, flip OFF -> $(printf '%s' "$plain" | head -1)"
+    case "$flipped" in
+      *"  ok   calib"*) ;;
+      *) echo "MEASURE_FAIL: with the flip the harness did not report ok for a command that exits 1 against want 0 — --expect-inverted no longer inverts."; return 1 ;;
+    esac
+    case "$plain" in
+      *"  FAIL calib"*) ;;
+      *) echo "MEASURE_FAIL: WITHOUT the flip the harness did not report FAIL for a command that exits 1 against want 0. run_arm has stopped discriminating and every ok in this run is worthless."; return 1 ;;
+    esac
+    return 0
+  }
+
+  # ═══ ARM 17 — an object of a class the whitelist does NOT resolve ══════════
+  # The tripwire that makes the refclassid whitelist CLOSED BY MEASUREMENT: the
+  # classes it excludes are asserted empty on the LIVE database, inside the
+  # transaction, BEFORE the DROP.
+  arm_unresolvable_class() {
+    setup_lane public-operator || return 1
+    local out="$SELFTEST_TMPD/a17.out" rc=0
+    arm_env restore a17 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: an unresolvable object class exited ${rc}, expected 1"; return 1; }
+    grep -aq 'whitelist does not resolve' "$out" \
+      || { echo "MEASURE_FAIL: the abort is not the whitelist-emptiness assertion's — some later guard fired, so the whitelist is still assumed rather than measured"; return 1; }
+    grep -aq 'pg_operator' "$out" \
+      || { echo "MEASURE_FAIL: the abort does not NAME the class pg_operator"; return 1; }
+    grep -aq 'public holds 1 object(s) of class' "$out" \
+      || { echo "MEASURE_FAIL: the abort does not report HOW MANY objects of the class were found"; return 1; }
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_operator WHERE oprnamespace='public'::regnamespace;")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the operator is gone (count=${n}) — it was CASCADE-dropped and never re-created."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — the assertion did not fire before DROP SCHEMA public CASCADE."; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 18 — a default ACL on public ROUND-TRIPS instead of falsely aborting ═
+  arm_default_acl() {
+    setup_lane default-acl || return 1
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_default_acl WHERE defaclnamespace='public'::regnamespace;")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the overlay did not create a default ACL on public (count=${n}); the arm would prove nothing."; return 1; }
+    local out="$SELFTEST_TMPD/a18.out" rc=0
+    arm_env restore a18 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: a default ACL on public exited ${rc}, expected 0. Without the pg_default_acl CARRIER branch the closure cannot resolve its owning schema and ABORTS naming an object the dump WOULD have restored — a FALSE abort that stops the first real preflight."; return 1; }
+    grep -aqxF 'restore: tables=2 policies=1 functions=2 ledger_rows=3 survivors=3/3 filtered=1 mode=restore' "$out" \
+      || { echo "MEASURE_FAIL: the exact summary line is absent — a default ACL must not change the survivor accounting"; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_default_acl WHERE defaclnamespace='public'::regnamespace;")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the default ACL is absent after the restore (count=${n}) — the dump's ALTER DEFAULT PRIVILEGES line did not replay, so this arm's premise is broken."; return 1; }
+    return 0
+  }
+
+  run_arm "1  RED   credential absent — a missing DSN is a hard failure, never a skip" 0 arm_credential_absent
+  run_arm "2  RED   identity marker NULL — refused before any write" 0 arm_marker_null
+  run_arm "3  RED   identity marker names PROD — refused, loudly" 0 arm_marker_prod
+  run_arm "4  RED   baseline sha != BASELINE.md — the dump on disk is unattested" 0 arm_sha_mismatch
+  run_arm "5  RED   baseline STALE against the migrations dir" 0 arm_stale_baseline
+  run_arm "6  RED   shared-TEST advisory mutex not held" 0 arm_mutex_absent
+  run_arm "7  RED   publication row for a table the dump does not re-create (W3)" 0 arm_stray_publication
+  run_arm "8  GREEN preflight — the transaction runs and rolls back, the database is byte-identical" 0 arm_g_preflight
+  run_arm "9  GREEN restore — the transaction runs and commits, all three survivor classes round-trip" 0 arm_g_restore
+  run_arm "10 RED   a censused survivor cannot be re-created — abort INSIDE the transaction" 0 arm_unrecreatable_survivor
+  run_arm "11 RED   expected shape mismatch (mutated EXPECTED derivation, scratch copy)" 0 arm_shape_mismatch
+  run_arm "12 GREEN unqualified-reference survivor round-trips (B1)" 0 arm_unqualified_survivor
+  run_arm "13 RED   derived pg_depend census names an unlisted dependent (B2)" 0 arm_derived_census_orphan
+  ARM_EXPECT_LEAK=1
+  run_arm "14 ----- the redaction check BITES on a deliberately leaking scratch copy (W2)" 0 arm_redaction_subject
+  run_arm "15 RED   unknown argv is a refusal, never a default" 0 arm_unknown_argv
+  run_arm "16 ----- harness calibration: run_arm can report FAIL, and the flip inverts" 0 arm_harness_calibration
+  run_arm "17 RED   an object class the derived-census whitelist does not resolve" 0 arm_unresolvable_class
+  run_arm "18 GREEN a default ACL on public round-trips instead of falsely aborting" 0 arm_default_acl
 
   release_mutex
 
   printf '%s\n' "${results[@]}"
-  echo "${GATE}: self-test SKELETON ${pass}/${total} arms (green paths only — Plan 02 adds the red arms and pins EXPECTED_ARMS)"
-  if [ "$pass" -ne "$total" ] || [ "$total" -ne 2 ]; then
-    echo "SELF-TEST FAIL: ${pass}/${total} arms behaved as declared (this skeleton declares exactly 2)."
+  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — seven refusals fire before any write, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently, the derived census names an unlisted dependent, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, harness calibrated)"
+  if [ "$total" -ne "$EXPECTED_ARMS" ]; then
+    echo "SELF-TEST FAIL: ${total} arms ran but EXPECTED_ARMS is ${EXPECTED_ARMS}. An arm that disappeared is a RED, not a smaller PASSED."
+    return 1
+  fi
+  if [ "$pass" -ne "$total" ]; then
+    echo "SELF-TEST FAIL: ${pass}/${total} arms behaved as declared."
     return 1
   fi
   return 0
