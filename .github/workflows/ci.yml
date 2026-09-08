@@ -1046,7 +1046,14 @@ jobs:
       # "CI pastes these lines VERBATIM". Every sibling self-test in this repo is
       # wired (lint-sql-gates, lint-app-guc, baseline-content-drift, mutation
       # runner, verify-plan-anchors, check-baseline-staleness, dump-sql-functions,
-      # prod-prober); this one was the exception. ⚠️ THIS IS A RECURRENCE: the
+      # and the production prober); this one was the exception. ⛔ THE PROBER IS
+      # DELIBERATELY NOT NAMED HERE, not even in prose, and neither is its spec's
+      # path. `src/__tests__/` carries a D-18 invariant asserting this file holds
+      # NO reference to that tool, so a red prober can never block a deploy — and
+      # it is a raw substring check, so a COMMENT trips it exactly like a step
+      # would. MEASURED 2026-09-08: naming it once, in this very comment, cost a
+      # full-suite red that no file-scoped run could surface.
+      # ⚠️ THIS IS A RECURRENCE: the
       # comment at ~:1443 in this same file records the identical defect being
       # found and fixed for another gate.
       #
