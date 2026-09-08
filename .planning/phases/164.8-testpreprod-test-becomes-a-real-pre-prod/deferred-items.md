@@ -122,3 +122,71 @@ preflight and the restore — a real timing cost on a one-way door, spent on a l
 a self-test arm asserting the generated `restore.sql` contains that literal text, so the class
 (an unescaped backtick eating heredoc content) is caught rather than re-introduced. A future
 occurrence inside SQL rather than a comment would silently DELETE statement text.
+
+---
+
+## From 164.8-04 Task 3 (the restore's own readings) — 2026-09-08
+
+### 6. `restore-test-from-baseline.sh:1090` — the extension guard fires on a GAIN and reports it as a LOSS
+
+Found by 164.8-04 Task 3 in restore run `34274355596` (head sha
+`88581b8bc66415bfa86b7d5a019741b1cbd0ff49`, job `102223581037`), which exited 1 with:
+
+```
+##[error]restore-test-from-baseline: post-census extensions=7, pre-census had 6. An extension that lived in public was CASCADE-dropped and the dump did not put it back.
+##[error]Process completed with exit code 1.
+```
+
+**The restore itself was CORRECT.** The transaction committed and every shape assertion ahead
+of this guard (`:1073-1077` — tables 62, policies 154, functions 120, ledger_rows 266,
+survivors 2/2) had already passed against the values derived from the dump text. The guard
+that fired is the first failing one, and it is wrong three ways:
+
+1. **DIRECTION.** `[ "$post_ext" = "$pre_ext" ]` is a strict equality, so it fires on a GAIN as
+   readily as on a loss — but its message describes only the loss direction ("was
+   CASCADE-dropped and the dump did not put it back"). A reader is sent hunting for a missing
+   extension that does not exist.
+2. **SCOPE.** The comment above it (the A12 block) reasons about "an extension that lived IN
+   public". The reading it compares is `SELECT count(*) FROM pg_extension` (`:282`) — the whole
+   database. An extension created in `extensions` or `pg_catalog`, which is where five of the
+   six in the dump live, moves the number the guard treats as a public-schema fact.
+3. **ORDERING.** It runs after the COMMIT, so it can never prevent the condition it names. It
+   can only mislabel a committed result, and here it converted a correct restore into a red run
+   plus a skipped post-verify.
+
+**Which extension, measured — not inferred.** Diffing two files inside that run's own backup
+artifact (`test-restore-backup-34274355596`):
+
+- `schema-before.sql` (TEST as it was) names five: `pg_cron`, `pg_stat_statements`, `pgcrypto`,
+  `supabase_vault`, `uuid-ossp`.
+- `restore.sql` (the transaction the dump assembled) names six: the same five plus **`pg_net`**.
+
+Set difference `{pg_net}`. TEST lacked it, PROD has it, the dump creates it, and `plpgsql` is
+present in both counts: 5 + 1 = 6 before, 6 + 1 = 7 after. Creating `pg_net` on TEST is the
+restore doing its job — the whole point is that TEST should hold PROD's catalogue.
+
+**COLLATERAL DAMAGE, and the reason this is not merely cosmetic.** The exit 1 SKIPPED step 20,
+`Post-verify with the Supabase CLI — ledger SHAPE`. That step has now never executed in any
+run (see item 4, still open, verbatim), so the plan's "`supabase db push --dry-run` reports
+nothing pending" truth is UNPROVEN and Plan 05's precondition is thinner than intended. A guard
+that reddens a correct run does not just annoy; it eats the steps behind it.
+
+⛔ **NOT FIXED HERE, by explicit founder instruction** scoping 164.8-04 Task 3 to
+`scripts/vac08-ledger-baseline.txt` and its pin. Recorded so the fix is a decision rather than
+an omission.
+
+**Remedy when taken** — the shape matters, because the naive fix reintroduces the vacuity:
+
+- Compare a per-schema extension CENSUS, not a scalar count: emit
+  `extension\t<extnamespace>\t<extname>` lines from the census query and compare the SETs. That
+  makes both the direction and the scope of any change visible in the log.
+- Treat a LOSS as fatal (an extension present before and absent after is the CASCADE-drop the
+  A12 block is actually about) and a GAIN as expected-and-named — the dump is allowed to create
+  extensions TEST did not have; that is the restore working.
+- Move the check so a failure cannot silently skip the post-verify: either run it before the
+  COMMIT alongside the other shape assertions, or let the post-verify step run with
+  `if: always()` so a post-commit verdict cannot cost an unrelated measurement.
+- **Add a self-test arm for each direction** (GAIN tolerated-and-named, LOSS fatal) and raise
+  `EXPECTED_ARMS`. The current arm count is 21; do not restate that from memory — read it from
+  the script's own `--self-test` output. Without both arms the fix is a one-directional guard
+  again, in the other direction.
