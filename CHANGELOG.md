@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.77.20.0] - 2026-09-08 — DRIFT-04: the unowned PROD function is dropped
+
+`public.create_allocator_connected_strategy(uuid, uuid, text ×8, integer)` existed on
+PROD owned by no migration in this repository — the last object standing between the
+committed baseline and a fully-owned schema. One migration, one statement, no
+`IF EXISTS` and no `CASCADE`, transaction-wrapped with `lock_timeout`, and a self-verify
+block that inverts its assertion: a **surviving** row raises.
+
+The pre-flight (`scripts/preflight-drop-allocator-fn.sh --expect-present`) was re-run
+against PROD on the regenerated baseline immediately before the merge, exit 0, every
+assertion printing its own measurement: 1 overload with the baseline's 11 argument
+types; live body sha256 equal to the baseline's (`5d44b0e8…`, 0 differing lines);
+**0** `pg_depend` rows; **0** other `pg_proc` bodies naming it.
+
+⚠️ Assertion (c) reported "calls WERE observed" — 5 `pg_stat_statements` entries. Reading
+their query texts settles it: **all five are DDL from the migration that created the
+function** (COMMENT ON / REVOKE / GRANT / two comment blocks). The arm `ILIKE`-matches any
+query naming the function, so an object's own birth certificate reads as traffic. Zero RPC
+invocations in the window. The class the pre-flight covers nowhere — PostgREST callers —
+was checked repo-side by hand: no `.rpc()` call site exists.
+
 ## [0.77.19.0] - 2026-09-07 — Phase 164.5 BASELINE-SNAPSHOT (6/7 criteria)
 
 The committed `supabase/schema/baseline.sql` becomes load-bearing and gated. It had zero
