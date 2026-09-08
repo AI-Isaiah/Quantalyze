@@ -1218,21 +1218,31 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
     expect(gate).toBeLessThan(restore);
   });
 
-  it("counts `idle in transaction` as ACTIVE and plain `idle` as quiet", () => {
+  it("the busy predicate is INVERTED, not an enumeration — enumerating is fail-open", () => {
     const body = extractRunScript(WF, GATE);
-    // The falsifier's substance: an open transaction holds locks.
-    for (const state of ["'active'", "'idle in transaction'", "'idle in transaction (aborted)'"]) {
-      expect(
-        body.includes(state),
-        `the activity gate no longer counts ${state}. A session in that state holds locks and will write when it resumes; dropping it from the list makes the gate blind to exactly the collision it exists to catch.`,
-      ).toBe(true);
-    }
-    // Plain idle must NOT be its own list entry (pooled connections park there).
+
+    // ⛔ THE DEFECT THIS PIN EXISTS FOR, MEASURED. The first version enumerated the
+    // busy states: state IN ('active','idle in transaction',
+    // 'idle in transaction (aborted)','fastpath function call'). With
+    // track_activities=off, PostgreSQL 16 reports EVERY backend's state as `disabled`
+    // — on nobody's list — so a lane holding one genuinely idle-in-transaction session
+    // returned 0 and the gate printed "measurably quiet" and exited 0. Any unfamiliar
+    // future state does the same. The predicate must therefore say what is QUIET and
+    // treat everything else as busy, so an unknown state fails CLOSED.
     expect(
-      /IN \([^)]*'idle'[^)]*\)/.test(body.replace(/'idle in transaction[^']*'/g, "")),
-      "plain 'idle' was added to the activity gate's state list — pooled PostgREST connections sit there permanently, so the gate would never pass and would be routed around rather than fixed",
+      /state\s+IS\s+NULL\s+OR\s+state\s*<>\s*'idle'/.test(body),
+      "the activity gate's busy predicate is no longer the inverted form (state IS NULL OR state <> 'idle'). Enumerating busy states is fail-open: a state nobody listed — `disabled` under track_activities=off — reads as quiet while sessions hold locks.",
+    ).toBe(true);
+
+    // The enumeration must NOT come back.
+    expect(
+      /state\s+IN\s*\(/.test(body),
+      "the activity gate went back to `state IN (...)`. That shape is fail-open by construction — measured on a PG16 lane, a busy session with state 'disabled' passed the gate.",
     ).toBe(false);
-    // Scope: restore only. preflight writes nothing.
+
+    // Plain `idle` is the one exclusion, and it must stay excluded: pooled PostgREST
+    // connections park there permanently and would make the gate unpassable.
+    expect(body).toContain("'idle'");
     expect(stepBody(WF, GATE)).toContain("if: inputs.mode == 'restore'");
   });
 

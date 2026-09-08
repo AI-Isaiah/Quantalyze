@@ -787,13 +787,24 @@ jobs:
       # dependency that halted plan 04: CI already holds TEST_SUPABASE_DB_URL, and no
       # session-mode DSN has to exist on anyone's laptop.
       #
-      # ⚠️ `idle in transaction` COUNTS AS ACTIVE, and that is the whole point. A
-      # session holding an open transaction holds locks and will write when it resumes;
-      # a gate blind to it is the exact vacuity this phase exists to remove. Plain
-      # `idle` does NOT count — PostgREST keeps pooled connections parked there
-      # permanently, and counting them would make the gate unpassable rather than
-      # meaningful. `backend_type = 'client backend'` excludes autovacuum and the
-      # background workers, which are not other people's CI.
+      # ⚠️ THE PREDICATE IS INVERTED ON PURPOSE: everything EXCEPT plain `idle` counts
+      # as busy. Enumerating the busy states is FAIL-OPEN, and that is MEASURED, not
+      # theoretical. The first version of this step listed
+      # ('active','idle in transaction','idle in transaction (aborted)','fastpath function call').
+      # With `track_activities=off`, PostgreSQL 16 reports every backend's state as
+      # `disabled` — a value on nobody's list — so a lane holding one genuinely
+      # idle-in-transaction session returned count 0 and this gate printed "measurably
+      # quiet" and exited 0. Reproduced on a throwaway PG16 lane before this was
+      # rewritten. Any future state string we have not heard of would do the same.
+      # Inverted, an unrecognised state counts as BUSY and the gate refuses — the only
+      # direction a safety gate may fail.
+      #
+      # Plain `idle` is the ONE exclusion: PostgREST keeps pooled connections parked
+      # there permanently, so counting it would make the gate unpassable and get it
+      # routed around rather than fixed. An open transaction is NOT `idle` — it reads
+      # `idle in transaction`, holds locks, and will write when it resumes, so it counts.
+      # `backend_type = 'client backend'` excludes autovacuum and the background
+      # workers, which are not other people's CI.
       #
       # Scope: restore only. `mode=preflight` rolls its transaction back and writes
       # nothing, so blocking it would cost the cheap dry run its usefulness for no
@@ -811,7 +822,7 @@ jobs:
                  WHERE datname = current_database()
                    AND pid <> pg_backend_pid()
                    AND backend_type = 'client backend'
-                   AND state IN ('active','idle in transaction','idle in transaction (aborted)','fastpath function call');" \
+                   AND (state IS NULL OR state <> 'idle');" \
             2>"${RUNNER_TEMP}/activity.err")" || rc=$?
           if [ "${rc}" -ne 0 ]; then
             # Same three redactions as every other psql site here: a connect failure
@@ -838,7 +849,7 @@ jobs:
               exit 1 ;;
           esac
           if [ "${busy}" -ne 0 ]; then
-            echo "::error::shared TEST is NOT quiet: ${busy} other client session(s) are active or hold an open transaction. Refusing to restore — TEST is shared with other people's CI and this restore DROPs the public schema. Re-dispatch once the queue drains (docs/runbooks/shared-test-db-mutex.md §§ 2-3). Session details are withheld: they can carry query text, and this log is public."
+            echo "::error::shared TEST is NOT quiet: ${busy} other client session(s) are not idle. (If EVERY session reads busy, check track_activities: when it is off PostgreSQL reports state 'disabled' for all backends, and this gate deliberately treats an unobservable session as busy rather than quiet.) Refusing to restore — TEST is shared with other people's CI and this restore DROPs the public schema. Re-dispatch once the queue drains (docs/runbooks/shared-test-db-mutex.md §§ 2-3). Session details are withheld: they can carry query text, and this log is public."
             exit 1
           fi
           echo "activity-gate: 0 other active client session(s) — shared TEST is measurably quiet, inside the held mutex."

@@ -15,10 +15,17 @@ be run, and — more importantly — could not have been sound if it had been.
   local executor has — `TEST_SUPABASE_DB_URL` exists only as a repo secret — which is
   precisely why plan 04 halted. CI already holds it; no shared-database credential has
   to reach a laptop.
-- **`idle in transaction` counts as active; plain `idle` does not.** A session holding an
-  open transaction holds locks and will write when it resumes. Plain `idle` is where
-  pooled PostgREST connections park permanently, so counting it would make the gate
-  unpassable and get it routed around rather than fixed.
+- **The busy predicate is INVERTED, and the first version was fail-open.** It originally
+  enumerated the busy states — `('active','idle in transaction','idle in transaction
+  (aborted)','fastpath function call')`. Found by the pre-landing checklist and then
+  REPRODUCED: with `track_activities=off`, PostgreSQL 16 reports every backend's state as
+  `disabled`, a value on nobody's list, so a lane holding one genuinely
+  idle-in-transaction session returned count 0 and the gate printed "measurably quiet"
+  and exited 0. Any future state string we have not heard of would do the same. The
+  predicate now says what is QUIET — `state IS NULL OR state <> 'idle'` — so an
+  unrecognised state counts as busy and the gate refuses, the only direction a safety
+  gate may fail. Plain `idle` stays excluded: pooled PostgREST connections park there
+  permanently and counting them would make the gate unpassable and get it routed around.
 - **Falsifier observed, not assumed.** On a throwaway PostgreSQL 16 lane, against the
   step's real bytes extracted from the YAML: a session genuinely `idle in transaction`
   (state confirmed, not merely `active`) made the gate exit 1; a plain `idle` session did
