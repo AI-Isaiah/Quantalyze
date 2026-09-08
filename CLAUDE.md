@@ -42,7 +42,7 @@ enforces the thresholds on full-suite numbers. The `frontend` aggregator gates o
 ⛔ **Read the live thresholds from `vitest.config.ts`, never from a number restated here.** They
 are a RATCHET, set a few points under measured actual so a real regression fails CI but noise
 does not. When actual climbs durably, raise them to match. Target is 80%, matching the
-`--cov-fail-under=80` the `analytics-service/` Python suite enforces.
+`--cov-fail-under=80` the `analytics-service/` Python suite enforces (`.github/workflows/ci.yml:3819`).
 
 ## SQL gate integrity jobs (v0.77.0.0, Phase 164.3)
 
@@ -79,6 +79,9 @@ when their credential is absent — neither ever skips.
 
 ### Current reading — 2026-09-07, Phase 164.7 (a DATED reading, not a constant)
 
+⛔ **Regenerate, do not trust:** `node scripts/mutation-runner/run.mjs` prints every figure
+below. If it disagrees with this block, the RUN is right and this block is stale.
+
 `coverage: files 46/73` · `arms: 384/384/0` · `biting: 384` · `lane-invocations: 384` (the two
 independent tallies AGREE) · `lane-blocked: 0 file(s)` · `lane-probe: pg_cron AVAILABLE` ·
 `pending: 0` · `per-arm lane time: mean 1.1s` · `✅ No defects` · exit 0.
@@ -96,7 +99,7 @@ putting a precondition ahead of its dependants (`[REDUNDER-WAIVER-01]`), and wra
 in the exception idiom its own file already used, so a narrowed unique index reports a named arm
 instead of a raw 23505. Do not add a waiver; fix the cause.
 
-⛔ **Two floors, two layers.** `run.mjs` gates on `annotatedFiles < filesFloor` and
+⛔ **Two floors, two layers.** `scripts/mutation-runner/run.mjs` gates on `annotatedFiles < filesFloor` and
 `bitingArms < armsFloor`, so a floor set BELOW the corpus is invisible to it by construction.
 The stale-low direction is caught one layer up by `src/__tests__/mutation-runner-floors.test.ts`
 (`RATCHET STALE: … but FILES_FLOOR is still …`). Separating a floor "in both directions" means
@@ -106,11 +109,12 @@ the runner for the upper and the vitest ratchet for the lower.
 both pasted verbatim as a developer runs them. It is a SIBLING of `lint-sql-gates.mjs`, not an
 eighth rule of it, because that linter masks comments and string-literal contents while this gate
 must COUNT comments (decision D-05). The corpus step is at **0 findings** with five files
-annotated via a dated `-- APP-GUC-LINEAGE:` header AND an agreeing, count-pinned
+annotated (regenerate with `node scripts/lint-app-guc.mjs --self-test` then `node scripts/lint-app-guc.mjs`; do not
+trust this count) via a dated `-- APP-GUC-LINEAGE:` header AND an agreeing, count-pinned
 `LINEAGE_ALLOWLIST` entry. ⛔ A red corpus step is a regression and is NEVER cleared by widening
 the allowlist or relaxing `DETECT_RE`.
 
-**Timeout.** `sql-mutation`'s `timeout-minutes` is **20** and stays there: the rule's one
+**Timeout.** `sql-mutation`'s `timeout-minutes` is **20** (`.github/workflows/ci.yml:1259`, job at `:1069`) and stays there: the rule's one
 permitted raise was taken on 2026-09-05 and 20 is a declared CEILING. A future crossing is
 answered by `[REDUNDER-SUBSET-SPLIT]`, never by raising again (`ci.yml` carries the derivation).
 
@@ -173,14 +177,36 @@ undocumented side effect — that count under-reports phases whose `.planning/ph
 
 ## PR branches — always filter transient planning artifacts
 
-`.planning/` is TRACKED here (see `.gitignore:53-63` — untracked planning silently
-breaks parallel executor worktrees, which is not a preference but a GSD hard
-requirement, `gsd-core CONFIGURATION.md:670`). The consequence is that PR diffs carry
-PLAN/SUMMARY/CONTEXT/RESEARCH noise into review.
+`.planning/` is TRACKED here. The evidence is `.gitignore:53-63` itself, whose comment block
+records what the gitignored configuration cost: executor worktrees could not read their own
+PLAN.md (so waves ran sequentially and lost their purpose), the ledgers had no git backup, and
+we inherited upstream bug classes that only exist untracked. GSD's own default agrees —
+`planning.commit_docs` is `true` (`~/.claude/gsd-core/references/planning-config.md`).
+⚠️ **CORRECTED 2026-09-08:** this sentence used to attribute the rule to
+`gsd-core CONFIGURATION.md:670`. **No such file exists anywhere in gsd-core** — a phantom
+citation propping up a real conclusion. The conclusion stands on `.gitignore`'s own measured
+comment; the fake authority is gone.
+The consequence is that PR diffs carry PLAN/SUMMARY/CONTEXT/RESEARCH noise into review.
 
-GSD's tool for that is `/gsd-pr-branch`. **Nothing invokes it automatically** —
-`autonomous.md` has no ship step, and `ship.md` contains zero references to it. It runs
-only when a human or agent types it. This section is what makes it run.
+GSD's tool for that is `/gsd-pr-branch`.
+
+⚠️ **CORRECTED 2026-09-08.** This used to read *"Nothing invokes it automatically — `autonomous.md`
+has no ship step, and `ship.md` contains zero references to it."* That was measured on 2026-09-02
+and is **no longer true**: `~/.claude/gsd-core/workflows/ship.md` now carries a
+`<step name="filter_planning_artifacts">` (line 466) that delegates to `/gsd-pr-branch`, sets
+`SHIP_HEAD_BRANCH`, and is gated by `planning.pr_filter` (default `auto`).
+
+⛔ **But that step is a LOCAL edit to the GLOBAL install, and `/gsd-update` OVERWRITES it —
+exactly like the `specialist_review` rewire below.** So the manual procedure in this section is
+NOT obsolete; it is the FALLBACK for a wiped install. After every `/gsd-update`, check for BOTH:
+
+```bash
+grep -n '^<step name=' ~/.claude/gsd-core/workflows/ship.md \
+  | grep -E 'specialist_review|filter_planning_artifacts'
+```
+
+Two lines, `specialist_review` first. **Either one missing means `/gsd-update` reverted it** —
+re-apply the rewire below, and until you do, run the steps here by hand.
 
 ### The step
 
