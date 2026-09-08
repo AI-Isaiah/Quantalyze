@@ -548,7 +548,15 @@ BEGIN
                WHEN p.classid = 'pg_constraint'::regclass THEN (SELECT n.nspname FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE k.oid = p.objid)
                WHEN p.classid = 'pg_attrdef'::regclass THEN (SELECT n.nspname FROM pg_attrdef a JOIN pg_class c ON c.oid = a.adrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE a.oid = p.objid)
                WHEN p.classid = 'pg_publication_rel'::regclass THEN NULL
-               WHEN p.classid = 'pg_class'::regclass THEN (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = p.objid)
+               -- A TOAST relation is not an object in its own right: it lives in
+               -- pg_toast but its CARRIER is the table whose reltoastrelid it is,
+               -- and it is dropped and re-created with that table. Resolving it to
+               -- its own namespace would report every varlena-carrying public table
+               -- as a lost non-public dependent — MEASURED 2026-09-08, the first
+               -- run of this assertion named `toast table pg_toast.pg_toast_16428`
+               -- and rolled the whole restore back. Same carrier pattern as
+               -- pg_trigger.tgrelid above, applied one class further.
+               WHEN p.classid = 'pg_class'::regclass THEN (SELECT CASE WHEN c.relkind = 't' THEN (SELECT n2.nspname FROM pg_class o JOIN pg_namespace n2 ON n2.oid = o.relnamespace WHERE o.reltoastrelid = c.oid) ELSE n.nspname END FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = p.objid)
                WHEN p.classid = 'pg_proc'::regclass THEN (SELECT n.nspname FROM pg_proc pr JOIN pg_namespace n ON n.oid = pr.pronamespace WHERE pr.oid = p.objid)
                WHEN p.classid = 'pg_type'::regclass THEN (SELECT n.nspname FROM pg_type ty JOIN pg_namespace n ON n.oid = ty.typnamespace WHERE ty.oid = p.objid)
                ELSE NULL
@@ -811,6 +819,280 @@ main() {
     "") fail "no mode given. Usage: $0 --self-test | --run --mode preflight|restore | --help" ;;
     *) fail "unknown mode '${1}'. Usage: $0 --self-test | --run --mode preflight|restore | --help" ;;
   esac
+}
+
+# ===========================================================================
+# --self-test — the REAL `--run` dispatch, against a THROWAWAY cluster.
+#
+# ⛔ IT NEVER TOUCHES TEST OR PROD. It `initdb`s its own cluster, listens on
+# 127.0.0.1 only, and the EXIT trap stops and removes it in every outcome —
+# success, failure and interrupt (the scripts/pg-lane/run.sh D-04 shape, whose
+# measured cost when it was absent was 27 orphaned clusters and a disk-exhaustion
+# incident).
+#
+# ⚠️ SKELETON (Phase 164.8 plan 01): the two GREEN paths only, run end to end
+# through the real dispatch. Plan 02 adds the RED arms, introduces EXPECTED_ARMS
+# ONCE at its final value beside the vitest pin, and adds the redaction grep. The
+# ratchet is deliberately NOT introduced here — a floor patched across two plans is
+# a floor nobody can read off one place.
+# ===========================================================================
+SELFTEST_MUTEX_HOLDER_PID=""
+SELFTEST_TMPD=""
+SELFTEST_PGD=""
+SELFTEST_CREATED=""
+
+selftest_cleanup() {
+  status=$?
+  if [ -n "$SELFTEST_MUTEX_HOLDER_PID" ]; then
+    kill "$SELFTEST_MUTEX_HOLDER_PID" 2>/dev/null || true
+    wait "$SELFTEST_MUTEX_HOLDER_PID" 2>/dev/null || true
+  fi
+  if [ -n "$SELFTEST_CREATED" ] && [ -n "$SELFTEST_PGD" ] && [ -d "$SELFTEST_PGD/data" ]; then
+    if ! "$PGBIN/pg_ctl" -D "$SELFTEST_PGD/data" stop -m immediate -w >/dev/null 2>&1; then
+      echo "WARNING: pg_ctl stop FAILED for the self-test cluster at $SELFTEST_PGD/data; a postmaster may be ORPHANED." >&2
+      if [ -f "$SELFTEST_PGD/data/postmaster.pid" ]; then
+        _pm_pid=$(head -n 1 "$SELFTEST_PGD/data/postmaster.pid" 2>/dev/null || true)
+        case "$_pm_pid" in ''|*[!0-9]*) : ;; *) kill -9 "$_pm_pid" 2>/dev/null || true ;; esac
+      fi
+    fi
+  fi
+  if [ -n "$SELFTEST_TMPD" ] && [ -d "$SELFTEST_TMPD" ]; then rm -rf "$SELFTEST_TMPD"; fi
+  exit "$status"
+}
+
+self_test() {
+  local inverted="${1:-}"
+
+  command -v node >/dev/null 2>&1 || fail "node is not on PATH; the self-test needs it for port allocation and the shared normalizer."
+  [ -d "$FIXTURES" ] || fail "fixtures not found at ${FIXTURES}."
+
+  # The normalizer, resolved to an ABSOLUTE path: the arms run the script with a
+  # temp CWD-independent environment, and a scratch COPY of this script (the
+  # anti-vacuity neuter harness) sits outside the repo.
+  local norm="$NORMALIZER"
+  [ -f "$norm" ] || norm="$SCRIPT_DIR/sql-body-normalize.mjs"
+  [ -f "$norm" ] || fail "the shared normalizer was not found (tried '${NORMALIZER}' and '${SCRIPT_DIR}/sql-body-normalize.mjs'). Set NORMALIZER."
+  norm="$(cd "$(dirname "$norm")" && pwd)/$(basename "$norm")"
+
+  # Server binaries: ASK THE LANE which ones it would boot, rather than keeping a
+  # second, divergent opinion (scripts/pg-lane/run.sh --print-pgbin, added for
+  # exactly this reason). PGBIN in the environment wins, as it does for the lane.
+  if [ -z "${PGBIN:-}" ]; then
+    local cand
+    for cand in "$SCRIPT_DIR/pg-lane/run.sh" "scripts/pg-lane/run.sh"; do
+      if [ -f "$cand" ]; then PGBIN=$(bash "$cand" --print-pgbin) || fail "scripts/pg-lane/run.sh --print-pgbin could not resolve PostgreSQL server binaries."; break; fi
+    done
+  fi
+  [ -n "${PGBIN:-}" ] || fail "could not locate scripts/pg-lane/run.sh to resolve PGBIN. Set PGBIN=<dir> explicitly."
+  [ -x "$PGBIN/pg_ctl" ] || fail "PGBIN=$PGBIN has no executable pg_ctl"
+  [ -x "$PGBIN/postgres" ] || fail "PGBIN=$PGBIN has pg_ctl but no \`postgres\` server binary — that is a CLIENT-only keg, not a server"
+  export PATH="$PGBIN:$PATH"
+
+  SELFTEST_TMPD="$(mktemp -d)"
+  SELFTEST_PGD="$SELFTEST_TMPD/pgd"
+  # Registered BEFORE initdb and at the top of the function, so every `fail` below
+  # routes through one teardown path. INT/TERM go through EXIT.
+  trap selftest_cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  local port
+  port=$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>console.log(p));});') \
+    || fail "could not allocate a free port."
+  if ! node -e 'const s=require("net").createServer();s.once("error",()=>process.exit(1));s.listen(Number(process.argv[1]),"127.0.0.1",()=>s.close(()=>process.exit(0)));' "$port" 2>/dev/null; then
+    fail "something is already listening on 127.0.0.1:${port}. This self-test would DROP SCHEMA public on it. Refusing."
+  fi
+
+  mkdir -p "$SELFTEST_PGD"
+  SELFTEST_CREATED=1
+  initdb -D "$SELFTEST_PGD/data" -U postgres --auth=trust -E UTF8 >/dev/null
+  # -k '' => TCP only; a unix socket under a scratch path blows the 103-byte limit.
+  if ! pg_ctl -D "$SELFTEST_PGD/data" \
+       -o "-p $port -c listen_addresses=127.0.0.1 -k ''" \
+       -l "$SELFTEST_PGD/pg.log" -w start >/dev/null; then
+    fail "pg_ctl could not start the self-test cluster on 127.0.0.1:${port} (see ${SELFTEST_PGD}/pg.log)"
+  fi
+  local i
+  for i in $(seq 1 60); do pg_isready -h 127.0.0.1 -p "$port" -q 2>/dev/null && break; sleep 0.25; done
+  pg_isready -h 127.0.0.1 -p "$port" -q 2>/dev/null || fail "the self-test cluster on 127.0.0.1:${port} never became ready (see ${SELFTEST_PGD}/pg.log)"
+
+  local lane_db="restore_lane"
+  local admin_dsn="postgresql://postgres@127.0.0.1:${port}/postgres"
+  local lane_dsn="postgresql://postgres@127.0.0.1:${port}/${lane_db}"
+
+  psql "$admin_dsn" -X -q -v ON_ERROR_STOP=1 \
+    -c "CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN; CREATE ROLE service_role NOLOGIN BYPASSRLS;" >/dev/null
+
+  # A BASELINE.md-shaped doc carrying the FIXTURE's real sha, in the same table-row
+  # shape check-baseline-staleness.mjs's RECORDED_SHA_RE reads.
+  local fixture_sha
+  fixture_sha=$(shasum -a 256 "$FIXTURES/baseline-fixture.sql" | awk '{print $1}')
+  {
+    echo "# Self-test BASELINE doc (generated)"
+    echo
+    echo "| | |"
+    echo "|---|---|"
+    echo "| sha256 | \`${fixture_sha}\` |"
+  } > "$SELFTEST_TMPD/BASELINE.md"
+
+  # The freshness seam. The fixtures are not the repo's baseline, so `git log` says
+  # nothing useful about them; the stub answers the question the real path asks
+  # (is the dump at least as fresh as the migrations?) with the GREEN answer. Plan
+  # 02's arm 5 proves the RED one.
+  cat > "$SELFTEST_TMPD/freshness.sh" <<'FRESHSTUB'
+#!/usr/bin/env bash
+case "$1" in
+  *baseline-fixture.sql) echo 2000000000 ;;
+  *) echo 1000000000 ;;
+esac
+FRESHSTUB
+  chmod +x "$SELFTEST_TMPD/freshness.sh"
+
+  lane_q() { psql "$lane_dsn" -X -q -A -t -v ON_ERROR_STOP=1 -c "$1" | tr -d '[:space:]'; }
+
+  # EVERY arm starts from a freshly loaded fixture: the restore arms MUTATE.
+  fresh_db() {
+    release_mutex
+    psql "$admin_dsn" -X -q -v ON_ERROR_STOP=1 \
+      -c "DROP DATABASE IF EXISTS ${lane_db} WITH (FORCE);" \
+      -c "CREATE DATABASE ${lane_db};" >/dev/null
+    psql "$lane_dsn" -X -q -v ON_ERROR_STOP=1 -f "$FIXTURES/old-test.sql" >/dev/null
+  }
+
+  # The shared-TEST mutex, held the way .github/workflows/ci.yml's Acquire step
+  # holds it: a BACKGROUND psql that takes pg_advisory_lock and then sleeps. The
+  # script under test asserts the lock is held by SOMEONE ELSE; a lock it took
+  # itself would vanish the moment it exited.
+  hold_mutex() {
+    : > "$SELFTEST_TMPD/holder.log"
+    nohup psql "$lane_dsn" -X -q -A -t -v ON_ERROR_STOP=1 \
+      -c "SET statement_timeout = 0;" \
+      -c "SELECT pg_advisory_lock(${MUTEX_KEY});" \
+      -c "SELECT 'MUTEX-ACQUIRED';" \
+      -c "SELECT pg_sleep(600);" >> "$SELFTEST_TMPD/holder.log" 2>&1 &
+    SELFTEST_MUTEX_HOLDER_PID=$!
+    local j
+    for j in $(seq 1 80); do
+      grep -aq 'MUTEX-ACQUIRED' "$SELFTEST_TMPD/holder.log" && return 0
+      sleep 0.25
+    done
+    echo "MEASURE_FAIL: the background mutex holder never reported MUTEX-ACQUIRED." >&2
+    return 1
+  }
+
+  release_mutex() {
+    if [ -n "$SELFTEST_MUTEX_HOLDER_PID" ]; then
+      kill "$SELFTEST_MUTEX_HOLDER_PID" 2>/dev/null || true
+      wait "$SELFTEST_MUTEX_HOLDER_PID" 2>/dev/null || true
+      SELFTEST_MUTEX_HOLDER_PID=""
+    fi
+  }
+
+  setup_lane() { fresh_db && hold_mutex; }
+
+  # Runs the REAL leg through the REAL dispatch; the arm env is a prefix, so nothing
+  # leaks between arms.
+  arm_env() {
+    local mode="$1"
+    RESTORE_DB_URL="$lane_dsn" \
+    BASELINE_FILE="$FIXTURES/baseline-fixture.sql" \
+    BASELINE_DOC="$SELFTEST_TMPD/BASELINE.md" \
+    MIGRATIONS_DIR="$FIXTURES/migrations" \
+    NORMALIZER="$norm" \
+    FRESHNESS_TS_CMD="bash $SELFTEST_TMPD/freshness.sh" \
+    RESTORE_OUT_DIR="$SELFTEST_TMPD/out-${mode}" \
+    RESTORE_REQUIRE_MUTEX=1 \
+      bash "$0" --run --mode "$mode"
+  }
+
+  local pass=0 total=0
+  local -a results=()
+
+  # ⚠️ `${3-…}` style traps do not apply here — run_arm takes a command, not
+  # optional strings. Copied from scripts/test-ledger-drift-check.sh:604-619
+  # including the --expect-inverted flip (which turns want 0 into 1 and 1 into 0,
+  # so a harness that has stopped discriminating is itself detectable).
+  run_arm() {
+    local label="$1" want="$2"
+    shift 2
+    total=$((total + 1))
+    local out="$SELFTEST_TMPD/arm-${total}.out"
+    local rc=0
+    ( "$@" ) > "$out" 2>&1 || rc=$?
+    if [ "$inverted" = "--expect-inverted" ]; then
+      want=$(( want == 0 ? 1 : 0 ))
+    fi
+    if [ "$rc" -eq "$want" ]; then
+      results+=("  ok   ${label} (exit ${rc})")
+      pass=$((pass + 1))
+    else
+      results+=("  FAIL ${label} (exit ${rc}, expected ${want})")
+      results+=("       ---- captured output, last 80 lines, DSN-masked ----")
+      local line
+      while IFS= read -r line; do results+=("       ${line}"); done \
+        < <(sed -E 's#postgres(ql)?://[^[:space:]]*#<dsn-redacted>#g' "$out" | tail -80)
+    fi
+  }
+
+  # ── G-preflight: the whole transaction runs and then ROLLS BACK ────────────
+  arm_g_preflight() {
+    setup_lane || return 1
+    local out="$SELFTEST_TMPD/g-preflight.out"
+    local rc=0
+    arm_env preflight > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: --run --mode preflight exited ${rc}, expected 0"; return 1; }
+    grep -aq 'mode=preflight' "$out" || { echo "MEASURE_FAIL: the output does not carry 'mode=preflight'"; return 1; }
+    grep -aq 'post-census == pre-census' "$out" || { echo "MEASURE_FAIL: the preflight did not report 'post-census == pre-census'"; return 1; }
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table public.e2e_leftover is GONE after a preflight (count=${n}). The rollback did not roll back."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM supabase_migrations.schema_migrations;")
+    [ "$n" = "4" ] || { echo "MEASURE_FAIL: the ledger holds ${n} row(s) after a preflight, expected the fixture's 4."; return 1; }
+    return 0
+  }
+
+  # ── G-restore: the whole transaction runs and COMMITS ──────────────────────
+  arm_g_restore() {
+    setup_lane || return 1
+    local out="$SELFTEST_TMPD/g-restore.out"
+    local rc=0
+    arm_env restore > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: --run --mode restore exited ${rc}, expected 0"; return 1; }
+    grep -aqxF 'restore: tables=2 policies=1 functions=2 ledger_rows=3 survivors=3/3 filtered=1 mode=restore' "$out" \
+      || { echo "MEASURE_FAIL: the exact summary line is absent from the output"; return 1; }
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "0" ] || { echo "MEASURE_FAIL: the stray table public.e2e_leftover survived the restore (count=${n})."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace s ON s.oid=c.relnamespace WHERE NOT t.tgisinternal AND s.nspname='auth' AND c.relname='users' AND t.tgname='on_auth_user_created';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: survivor class (a) LOST — auth.users:on_auth_user_created is absent after the restore (count=${n})."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_policies WHERE schemaname='storage' AND tablename='objects' AND policyname='qualified_ref';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: survivor class (b) LOST — storage.objects:qualified_ref is absent after the restore (count=${n})."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_publication_tables WHERE schemaname='public' AND tablename='fx_keep';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: survivor class (c) LOST — the realtime publication row for public.fx_keep is absent after the restore (count=${n})."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version !~ '^[0-9]{14}\$';")
+    [ "$n" = "0" ] || { echo "MEASURE_FAIL: ${n} seeded ledger row(s) carry a version that is not the 14-digit filename prefix."; return 1; }
+    n=$(lane_q "SELECT string_agg(version || '|' || name, ' ' ORDER BY version) FROM supabase_migrations.schema_migrations;")
+    [ "$n" = "20260101000000|fixture_a20260102000000|fixture_b20260103000000|fixture_c" ] \
+      || { echo "MEASURE_FAIL: the seeded ledger is '${n}', not the three fixture files with description-only names."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE statements[1] LIKE '%was NOT executed on TEST';")
+    [ "$n" = "3" ] || { echo "MEASURE_FAIL: only ${n} of 3 seeded rows carry the provenance sentence; a seed that claims the SQL ran is a lie."; return 1; }
+    return 0
+  }
+
+  run_arm "G-preflight — the transaction runs and rolls back, the database is byte-identical" 0 arm_g_preflight
+  run_arm "G-restore  — the transaction runs and commits, all three survivor classes round-trip" 0 arm_g_restore
+
+  release_mutex
+
+  printf '%s\n' "${results[@]}"
+  echo "${GATE}: self-test SKELETON ${pass}/${total} arms (green paths only — Plan 02 adds the red arms and pins EXPECTED_ARMS)"
+  if [ "$pass" -ne "$total" ] || [ "$total" -ne 2 ]; then
+    echo "SELF-TEST FAIL: ${pass}/${total} arms behaved as declared (this skeleton declares exactly 2)."
+    return 1
+  fi
+  return 0
 }
 
 main "$@"
