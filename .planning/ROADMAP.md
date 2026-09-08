@@ -1475,11 +1475,14 @@ Plans:
 **Requirements**: the reference-data half of `164.2-TEST-APPLY-PROVENANCE`, the reopened `T-164.8-09`, and TODOS `[164.8-TEST-DATA-RESEEDED]` (which Phase 164.8 Plan 06 owns creating — measured 2026-09-09: it does not exist in `TODOS.md` yet).
 **Depends on:** Phase 164.8 Plan 04 (its restore is what exposed this; the fix targets the same script).
 **Blocks:** a green `main`. Until this lands, `e2e-seeded` — the go-live badge gate — and `python` are red on every branch.
-**Plans:** 0 plans
+**Plans:** 4 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.8.1 to break down)
+- [ ] 164.8.1-01-PLAN.md — (wave 1) the (file, table, count)-keyed allowlist, the refuse-by-default extractor with `--audit`/`--self-test`, the AIM-first contract test, and the audit wired self-test-first into `sql-gate-lint` and the restore workflow
+- [ ] 164.8.1-02-PLAN.md — (wave 2) the replay + fail-loud gate inside the restore transaction under a `SET LOCAL search_path` bracket, `refdata:` census rows, arms 22-24 (gate proven to bite on a scratch copy), `EXPECTED_ARMS` 21 → 24 with every vitest pin re-measured
+- [ ] 164.8.1-03-PLAN.md — (wave 1) the seeder's false "migration didn't run" inference corrected; the TEST-points-at-PROD-compute hazard booked as `[164.8.1-TEST-ANALYTICS-URL-PROD]` routed to Phase 164.9
+- [ ] 164.8.1-04-PLAN.md — (wave 3, checkpointed) first real run is `--mode preflight` on `main`; founder decides the restore on its `refdata:` readings; SHA-bound green `python` + `e2e-seeded` recorded
 
 ### Phase 164.9: TESTISOLATION — a run's assertions against the shared TEST project stop being unreliable: per-run isolation replaces global truth (INSERTED)
 
@@ -1493,7 +1496,7 @@ Plans:
 
 ⛔ **NOT in scope:** raising Playwright workers above 1. Phase 164.8's ROADMAP entry already states that per-run isolation is the PRECONDITION for it and that parallelism must NOT be chased as an objective — measured, `e2e-seeded` sits behind `sql-mutation` so parallelism buys 1-2 min of wall clock. Isolation is worth doing for ASSERTION RELIABILITY; the parallelism it unlocks is a consequence, not a goal.
 
-**Requirements**: TBD (no v1.20 requirement IDs) + `FANOUT-GLOBAL-01` (prose only — see the warning above), the per-run isolation item deferred out of Phase 164.8's `<deferred>` block, and TODOS entry `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` — read `164.8-CONTEXT.md` before planning, do not re-derive, plus the two restore-workflow items routed here from Phase 164.8 Plan 04 (see the ROUTED HERE block below).
+**Requirements**: TBD (no v1.20 requirement IDs) + `FANOUT-GLOBAL-01` (prose only — see the warning above), the per-run isolation item deferred out of Phase 164.8's `<deferred>` block, and TODOS entry `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` — read `164.8-CONTEXT.md` before planning, do not re-derive, plus the two restore-workflow items routed here from Phase 164.8 Plan 04 (see the ROUTED HERE block below), and `[164.8.1-TEST-ANALYTICS-URL-PROD]` routed here from Phase 164.8.1.
 
 ⛔ **ROUTED HERE 2026-09-08 by Phase 164.8's plan-checker (B4).** 164.8 restores TEST from a SCHEMA-ONLY dump (`BASELINE.md`: 0 data statements), so TEST mirrors PROD's CATALOGUE, never its DATA. A migration whose DO block reads a PROD-populated table and RAISEs on an unexpected count applies cleanly to PROD and refuses on an empty TEST — and 164.8 Area 1 Q2 makes that BLOCK the PROD apply. The retired `TEST-NOT-APPLICABLE` pragma was the declared escape hatch, and 164.8 retires it. Interim remedy is revert-the-merge, never a YAML edit under deploy pressure. Phase 164.10 was considered and rejected as the home: it is function-body scope only.
 ⛔ **ROUTED HERE 2026-09-08 by founder instruction, out of Phase 164.8's Plan 04.** Two items were found by RUNNING the restore (run `34274355596`, head `88581b8b`) rather than by review, and neither belongs in a ratchet PR. Both are discharged by ONE green `mode=restore` dispatch, so they are one unit of work:
@@ -1503,6 +1506,16 @@ Plans:
 2. **The Supabase CLI post-verify has NEVER executed** — `Post-verify with the Supabase CLI — ledger SHAPE`. It was skipped by item 1's exit 1, and was already recorded as never-run before that (`164.8/deferred-items.md` item 4). Its two asserted strings were measured against the LOCAL CLI **2.84.2**; CI pins **2.98.2**, where the wording is INFERRED, not executed. Phase 164.8 Plan 04 marks the must_have it serves (`coverage.D4b`) **UNMET** rather than claiming it passed — do not close that claim on anything but a run.
 
 ⚠️ **These two are topically about the RESTORE WORKFLOW, not per-run isolation.** They live here because this phase is the hardening deferrals' home and depends on 164.8's restore, not because they share its subject. Do not let them dilute `FANOUT-GLOBAL-01`, which remains this phase's reason to exist.
+
+⛔ **ROUTED HERE 2026-09-09, out of Phase 164.8.1's plan — `[164.8.1-TEST-ANALYTICS-URL-PROD]`: shared TEST's cron points at PROD compute.**
+
+`system_settings.analytics_service_url` is seeded with the PROD Railway host (`supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql:295`, the literal taken verbatim from `scripts/prod-prober/cron-manifest.json` jobid 1) and that row feeds `public.match_engine_cron_tick()`, a `pg_net` tick. So a TEST cron tick can POST to the PRODUCTION analytics service.
+
+⚠️ **PRE-EXISTING, NOT INTRODUCED — and that is the reason it is routed rather than fixed in 164.8.1.** The restore drops only `public` (`scripts/restore-test-from-baseline.sh:861`), so TEST's `cron.job` schedule was never touched; whatever TEST was doing before the restore, it still does. Phase 164.8.1 therefore replays the statement FAITHFULLY (founder call, 2026-09-09): omitting it would leave TEST missing a setting its own ledger claims applied, and the migration's own guard already requires an allowlisted https host.
+
+⛔ **Do NOT resolve this by editing 164.8.1's allowlist.** That would make the restore silently normalise the hazard, which is the failure class this whole line of work exists to remove. The fix belongs here, with per-run isolation, because "which service does a TEST tick talk to" is the same question as "whose rows is a TEST run asserting about".
+
+⚠️ Two traps for whoever takes it: `pg_net` is ASYNC, so a green cron row proves nothing about the HTTP result — seven days of 401s once hid behind one. And the marker check confirms which DATABASE you are on, never which SERVICE the tick calls.
 
 **Depends on:** Phase 164.8 (its restore settles the schema and ledger this phase isolates against).
 **Plans:** 0 plans
