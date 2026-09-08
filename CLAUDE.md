@@ -1,28 +1,48 @@
 @AGENTS.md
 
+## Which database am I on? (ask FIRST, every time)
+
+⛔ **This checkout's Supabase CLI is linked to PRODUCTION.** `supabase/.temp/project-ref` holds
+the same ref `src/lib/test-safety.ts:26` pins as prod. So `supabase db push`, `db reset --linked`,
+`--project-ref` and `--db-url` from this directory all target prod. The link is deliberate — the
+pre-flight migration gates diff against PROD on purpose — so do not "fix" it by unlinking.
+
+⛔ **`current_database()` is `postgres` on BOTH projects.** It proves nothing. Neither does a
+green query, a familiar-looking table, or the dashboard's own chrome. Before any statement that
+writes, run:
+
+```sql
+SELECT shobj_description(oid, 'pg_database') AS which_database
+  FROM pg_database WHERE datname = current_database();
+```
+
+Each project carries a hand-set `COMMENT ON DATABASE` naming itself. If it comes back NULL, the
+marker was lost — re-set it before writing, do not proceed on a guess.
+
+Guard coverage, measured 2026-09-01: the TS/e2e path is safe (`assertNotProductionSupabaseUrl`
+throws before any write via `getAdmin()`), and CI's `sql-tests` uses its own `TEST_SUPABASE_DB_URL`.
+The **CLI** and the **browser SQL editor** have no automated guard at all. The marker above is the
+only thing standing between a dashboard tab and production.
+
+⚠️ TEST is SHARED with other people's CI. A write there is not private, and a global assertion
+there is NOT reliable — "no stuck jobs exist", "the table is empty" measure other people's rows
+too. Assert about YOUR OWN rows.
+⛔ `FANOUT-GLOBAL-01` is NOT a `TODOS.md` id (measured 2026-09-08: 0 hits). It exists only as
+prose here and in the ROADMAP. **Phase 164.9 TESTISOLATION owns writing the real entry** — do not
+send a planner looking for a spec that was never written.
+
 ## Test Coverage
 
-The TypeScript test suite tracks coverage via `@vitest/coverage-v8`. Run
-`npm run test:coverage` to produce a v8 report (text + HTML + JSON
-summary in `coverage/`).
+`npm run test:coverage` → v8 report (text + HTML + JSON summary in `coverage/`).
 
-- **Gate (ratchet)**: lines 82 / statements 80 / functions 74 / branches 72,
-  configured as Vitest thresholds in `vitest.config.ts`. These are set a few
-  points under measured actual (2026-06-20: 85.2 / 83.3 / 77.4 / 75.5) so a
-  real regression fails CI but normal noise does not. When actual climbs
-  durably, raise the thresholds to match.
-- **Target**: 80%, matching the `--cov-fail-under=80` gate the
-  `analytics-service/` Python suite already enforces. Lines and statements
-  already clear it; functions and branches are the next ratchet.
+**Blocking CI gate.** The vitest shards in `.github/workflows/ci.yml` run with `--coverage` and
+emit blob reports; `frontend-coverage` merges them (`vitest run --merge-reports --coverage`) and
+enforces the thresholds on full-suite numbers. The `frontend` aggregator gates on it.
 
-Coverage is **a blocking CI gate** as of tech-debt #11 (2026-06-20): the
-vitest shards in `.github/workflows/ci.yml` run with `--coverage` and emit
-blob reports, and the `frontend-coverage` job merges them (`vitest run
---merge-reports --coverage`) and enforces the thresholds on the full-suite
-numbers; the aggregator `frontend` check gates branch protection on it.
-(Since 2026-07-02 the suite executes once, sharded — the old separate
-full-suite coverage run is gone. The prior 60% floor was enforced nowhere —
-CI ran vitest sharded without `--coverage`.)
+⛔ **Read the live thresholds from `vitest.config.ts`, never from a number restated here.** They
+are a RATCHET, set a few points under measured actual so a real regression fails CI but noise
+does not. When actual climbs durably, raise them to match. Target is 80%, matching the
+`--cov-fail-under=80` the `analytics-service/` Python suite enforces.
 
 ## SQL gate integrity jobs (v0.77.0.0, Phase 164.3)
 
@@ -92,33 +112,6 @@ answered by `[REDUNDER-SUBSET-SPLIT]`, never by raising again (`ci.yml` carries 
 superseded CURRENCY paragraph — now lives in `docs/sql-gate-lineage.md`.** It is history; nothing
 in it is a live constant.
 
-## Which database am I on? (ask FIRST, every time)
-
-⛔ **This checkout's Supabase CLI is linked to PRODUCTION.** `supabase/.temp/project-ref` holds
-the same ref `src/lib/test-safety.ts:26` pins as prod. So `supabase db push`, `db reset --linked`,
-`--project-ref` and `--db-url` from this directory all target prod. The link is deliberate — the
-pre-flight migration gates diff against PROD on purpose — so do not "fix" it by unlinking.
-
-⛔ **`current_database()` is `postgres` on BOTH projects.** It proves nothing. Neither does a
-green query, a familiar-looking table, or the dashboard's own chrome. Before any statement that
-writes, run:
-
-```sql
-SELECT shobj_description(oid, 'pg_database') AS which_database
-  FROM pg_database WHERE datname = current_database();
-```
-
-Each project carries a hand-set `COMMENT ON DATABASE` naming itself. If it comes back NULL, the
-marker was lost — re-set it before writing, do not proceed on a guess.
-
-Guard coverage, measured 2026-09-01: the TS/e2e path is safe (`assertNotProductionSupabaseUrl`
-throws before any write via `getAdmin()`), and CI's `sql-tests` uses its own `TEST_SUPABASE_DB_URL`.
-The **CLI** and the **browser SQL editor** have no automated guard at all. The marker above is the
-only thing standing between a dashboard tab and production.
-
-⚠️ TEST is SHARED with other people's CI. A write there is not private, and a global assertion
-there is not reliable (see `FANOUT-GLOBAL-01` in TODOS.md).
-
 ## Design System
 Always read DESIGN.md before making any visual or UI decisions.
 All font choices, colors, spacing, and aesthetic direction are defined there.
@@ -127,25 +120,50 @@ In QA mode, flag any code that doesn't match DESIGN.md.
 
 ## Skill routing
 
-When the user's request matches an available skill, ALWAYS invoke it using the Skill
-tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
-The skill has specialized workflows that produce better results than ad-hoc answers.
+When the user's request matches an available skill, invoke it with the Skill tool as your FIRST
+action. Do NOT answer directly, do NOT use other tools first.
 
-Key routing rules:
-- Product ideas, "is this worth building", brainstorming → invoke office-hours
-- Bugs, errors, "why is this broken", 500 errors → invoke investigate
-- Ship, deploy, push, create PR → invoke ship
-- QA, test the site, find bugs → invoke qa
-- Code review, check my diff → invoke review
-- Update docs after shipping → invoke document-release
-- Weekly retro → invoke retro
-- Design system, brand → invoke design-consultation
-- Visual audit, design polish → invoke design-review
-- Architecture review → invoke plan-eng-review
-- Save progress, checkpoint, resume → invoke checkpoint
-- Code quality, health check → invoke health
-- Tech debt, "what should we refactor", "code health", refactoring priorities, maintenance backlog → invoke engineering:tech-debt
-- Architecture decision, ADR, "how should we architect", evaluate architecture, system design review → invoke engineering:architecture
+⛔ **If this table and a founder decision recorded in memory disagree, the DECISION wins — and
+fix this table in the same turn.** Measured 2026-09-08: this table still said `ship` and `review`
+months after both were reversed, and it listed a `checkpoint` skill that does not exist on disk.
+A stale table here outranks a correct memory, because this file loads into every session.
+
+Routing:
+- Feature/milestone work, planning → `gsd-plan-phase` / `gsd-execute-phase` (see the GSD rules below)
+- Ship, deploy, push, create PR → **`gsd-ship`** (REVERSED 2026-09-02 — not gstack `/ship`; the specialist reviewers were ported into it)
+- Per-phase code review → **`gsd-code-review`** (+ `gsd-verify-work`). Standard GSD only per phase; save the big review for milestone end
+- Bugs, errors, "why is this broken", 500 errors → `investigate`
+- QA, test the site, find bugs → `qa`
+- Product ideas, "is this worth building" → `office-hours`
+- Update docs after shipping → `document-release`
+- Weekly retro → `retro`
+- Design system, brand → `design-consultation`; visual audit → `design-review`
+- Architecture review → `plan-eng-review`; ADR / system design → `engineering:architecture`
+- Tech debt, code health, refactoring priorities → `engineering:tech-debt`
+- Code quality / health check → `health`
+
+## GSD orchestration rules (measured 2026-09-08 — both of these cost time this session)
+
+⛔ **Never dispatch a `gsd-*` agent yourself. Run the WORKFLOW'S dispatch step, preamble
+included.** Invoking the Skill is NOT sufficient — you can invoke it and then hand-dispatch from
+inside it, which is what happened. In `execute-phase` the preamble resolves isolation via
+`gsd_run query dispatch-isolation`, and that call's SIDE EFFECT is writing
+`.gsd/dispatch-isolation-sentinel.json`, which the isolation guard hooks read. Skip it and the
+guard refuses the dispatch with a message that looks like a config bug and is not.
+Recovery: `worktree.reap-orphans`, honour `worktree.base-check` (it auto-degrades to `none` when
+`origin/HEAD` has diverged from `HEAD` — correct, since a harness worktree forks from
+`origin/HEAD` and would lack the branch's work), then
+`record-dispatch-isolation --isolation <verdict> --phase <n>`.
+⚠️ `inspect-dispatch-isolation` reports the HOST CAPABILITY, not the recorded verdict — read the
+sentinel FILE to confirm.
+
+⛔ **`gsd-tools` state handlers CLOBBER `STATE.md` and `ROADMAP.md`.** `state.advance-plan`
+returns an error AND WRITES ANYWAY; `roadmap.update-plan-progress` injects stray bullets into
+unrelated phase sections. Both were hit in this repo. Prefer hand-editing those two files; if you
+use a handler, `git diff` the result and revert every collateral change before committing.
+Note `state.add-roadmap-evolution` also recomputes the `progress:` block from local disk as an
+undocumented side effect — that count under-reports phases whose `.planning/phases/` artifacts the
+`-pr` filter stripped from `main`.
 
 ## PR branches — always filter transient planning artifacts
 
