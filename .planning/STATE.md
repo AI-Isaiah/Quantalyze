@@ -1154,6 +1154,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.2.1 P01 | 35m | 3 tasks | 4 files |
 | Phase 164.2.1 P02 | 20m | 2 tasks | 4 files |
 | Phase 164.8 P01 | 22min | 2 tasks | 6 files |
+| Phase 164.8 P02 | (executor died before reporting) | 3 tasks | 1 file |
+| Phase 164.8 P03 | 33min | 3 tasks | 2 files |
 
 ## Accumulated Context
 

@@ -1358,8 +1358,8 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 06 was missing entirely. Each bullet below is now taken from that plan file's own `<objective>`.
 
 - [x] 164.8-01-PLAN.md — `scripts/restore-test-from-baseline.sh`: the one-transaction drop+replay+survivors+ledger-seed mechanism with SEVEN pre-write refusals, a search_path-independent census (B1) and a derived `pg_depend` closure (B2), plus the `--self-test` SKELETON carrying the two GREEN arms. Writes NO byte to TEST or PROD
-- [ ] 164.8-02-PLAN.md — finish the proof: every RED path observed on a throwaway Postgres, `EXPECTED_ARMS` introduced ONCE at its final value, the constants pinned in vitest, the header written
-- [ ] 164.8-03-PLAN.md — `test-restore-from-baseline.yml`: dispatch-only, ref-guarded, `mode=preflight|restore` + `confirm` token, `environment: Test`, backup artifact BEFORE the script, whole-act mutex, CLI post-verify; line-exact wiring pins
+- [x] 164.8-02-PLAN.md — finish the proof: every RED path observed on a throwaway Postgres, `EXPECTED_ARMS` introduced ONCE at its final value, the constants pinned in vitest, the header written
+- [x] 164.8-03-PLAN.md — `test-restore-from-baseline.yml`: dispatch-only, ref-guarded, `mode=preflight|restore` + `confirm` token, `environment: Test`, backup artifact BEFORE the script, whole-act mutex, CLI post-verify; line-exact wiring pins
 - [ ] 164.8-04-PLAN.md — WAVE 1 EXECUTION, the one-way door: preflight → `checkpoint:decision` → restore → SHA-bound readings → `vac08-ledger-baseline.txt` emptied BESIDE AN AIM with `ENTRY_COUNT` 31 → 0 in the same commit
 - [ ] 164.8-05-PLAN.md — WAVE 2 PIPELINE: `apply-test` (`environment: Test`, mutex, marker, `db push --include-all --db-url`) + `apply-test-verdict` (`if: always()`, skipped = fault) gate PROD `apply`; pins; SHA-bound dispatch proof
 - [ ] 164.8-06-PLAN.md — WAVE 3 CLOSURE: record the verdicts and the SHA-bound readings, TODOS closures with run ids (incl. the `TEST-NOT-APPLICABLE` pragma recorded as DEAD SCOPE by measurement), first SHA-bound VAC-08 `0 absent` reading, CLAUDE.md + mutex runbook currency
@@ -1611,7 +1611,7 @@ Plans:
 | 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 0/? | Queued 2nd (row added 2026-09-06; the phase itself was created 2026-09-05 and had no summary row) | - |
 | 164.5 BASELINE-SNAPSHOT (baseline.sql load-bearing, DRIFT-04 drop, DRIFT-05, VAC08-LEDGER, VAC-07) | 7/7 built, crit 3 apply pending founder | Queued 3rd (created 2026-09-05) | - |
 | 164.6 GATE-HYGIENE (OPS-08 residue, composite-stamp twin, PROC-02/03, H-0001) | 0/? | Queued 4th (created 2026-09-05) | - |
-| 164.8 TESTPREPROD (TEST becomes a real pre-prod: bring it current, apply on merge to TEST before PROD) | 1/6 | Queued 5th — LAST in the 164.x series by founder decision 2026-09-06 (created 2026-09-06) | - |
+| 164.8 TESTPREPROD (TEST becomes a real pre-prod: bring it current, apply on merge to TEST before PROD) | 3/6 | Queued 5th — LAST in the 164.x series by founder decision 2026-09-06 (created 2026-09-06) | - |
 | 166. QSTATS-TRUTH | 0/? | Queued 6th (re-ordered ahead of 165, 2026-09-05) | - |
 | 165. DEPS dependabot campaign | 0/? | Queued LAST (after 166 — dependency churn lands last) | - |
 
