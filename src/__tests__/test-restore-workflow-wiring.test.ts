@@ -1172,3 +1172,129 @@ describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
     expect(generic.includes("remote migration versions with no local file")).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The ACTIVITY GATE (Phase 164.8 plan 04 Task 2, moved INTO the workflow).
+//
+// ⛔ WHY IT IS HERE AND NOT IN A HUMAN'S TERMINAL. Plan 04 specified an EXTERNAL
+// probe — a human runs psql, sees zero rows, then dispatches. That is unsound by
+// construction and the plan says so itself: probing first "measures a window that
+// has already closed". Inside the workflow the probe runs within the advisory-lock
+// session already held by `Acquire shared-test-db mutex`, so a colliding run is
+// either visible to the query or still blocked on the mutex. There is no window.
+//
+// ⚠️ `idle in transaction` MUST count as active. A session holding an open
+// transaction holds locks and will write when it resumes; a gate blind to it is the
+// exact vacuity this phase exists to remove. Plain `idle` must NOT count — pooled
+// PostgREST connections park there permanently and would make the gate unpassable.
+// Both directions are asserted below, and both were observed on a throwaway
+// PostgreSQL 16 lane before this pin was written (idle-in-transaction -> exit 1,
+// plain idle -> exit 0).
+// ---------------------------------------------------------------------------
+describe("the activity gate — measurably quiet, inside the held mutex", () => {
+  const GATE = "Activity gate — is shared TEST measurably quiet?";
+
+  it("runs AFTER the mutex is held and the identity is proven, and BEFORE any write", () => {
+    const idx = (name: string) => WF.indexOf(`- name: ${name}`);
+    const acquire = idx("Acquire shared-test-db mutex");
+    const marker = idx("Which database am I on");
+    const gate = idx(GATE);
+    const backup = idx("Back up TEST before any write (schema + ledger; NOT data)");
+    const restore = idx("Run the restore script");
+
+    expect(gate, `the workflow has no step named "${GATE}"`).toBeGreaterThan(-1);
+    expect(
+      gate,
+      "the activity gate no longer runs inside the held mutex — probing before the lock measures a window that has already closed, which is the unsound shape this step exists to replace",
+    ).toBeGreaterThan(acquire);
+    expect(
+      gate,
+      "the activity gate no longer runs after the identity marker check — it would be probing a database it has not proven is TEST",
+    ).toBeGreaterThan(marker);
+    expect(
+      gate,
+      "the activity gate no longer precedes the backup — a gate after the first write is not a gate",
+    ).toBeLessThan(backup);
+    expect(gate).toBeLessThan(restore);
+  });
+
+  it("the busy predicate is INVERTED, not an enumeration — enumerating is fail-open", () => {
+    const body = extractRunScript(WF, GATE);
+
+    // ⛔ THE DEFECT THIS PIN EXISTS FOR, MEASURED. The first version enumerated the
+    // busy states: state IN ('active','idle in transaction',
+    // 'idle in transaction (aborted)','fastpath function call'). With
+    // track_activities=off, PostgreSQL 16 reports EVERY backend's state as `disabled`
+    // — on nobody's list — so a lane holding one genuinely idle-in-transaction session
+    // returned 0 and the gate printed "measurably quiet" and exited 0. Any unfamiliar
+    // future state does the same. The predicate must therefore say what is QUIET and
+    // treat everything else as busy, so an unknown state fails CLOSED.
+    expect(
+      /state\s+IS\s+NULL\s+OR\s+state\s*<>\s*'idle'/.test(body),
+      "the activity gate's busy predicate is no longer the inverted form (state IS NULL OR state <> 'idle'). Enumerating busy states is fail-open: a state nobody listed — `disabled` under track_activities=off — reads as quiet while sessions hold locks.",
+    ).toBe(true);
+
+    // The enumeration must NOT come back.
+    expect(
+      /state\s+IN\s*\(/.test(body),
+      "the activity gate went back to `state IN (...)`. That shape is fail-open by construction — measured on a PG16 lane, a busy session with state 'disabled' passed the gate.",
+    ).toBe(false);
+
+    // Plain `idle` is the one exclusion, and it must stay excluded: pooled PostgREST
+    // connections park there permanently and would make the gate unpassable.
+    expect(body).toContain("'idle'");
+    expect(stepBody(WF, GATE)).toContain("if: inputs.mode == 'restore'");
+  });
+
+  it("EXECUTED — 0 passes, a positive count refuses, and an unreadable probe FAILS CLOSED", () => {
+    const body = extractRunScript(WF, GATE);
+    const runWithPsql = (stdout: string, rc: number): { out: string; code: number } => {
+      const dir = mkdtempSync(join(tmpdir(), "actgate-"));
+      const bin = join(dir, "bin");
+      const runnerTemp = join(dir, "tmp");
+      for (const d of [bin, runnerTemp]) mkdirSync(d, { recursive: true });
+      // Stub psql: the gate's decision logic is what is under test here, not libpq.
+      // `printf '%b'`, not '%s': with %s bash emits a literal backslash-n, the gate
+      // correctly rejects it as non-numeric, and the STUB looks like a gate failure.
+      // Measured while writing this test.
+      writeFileSync(join(bin, "psql"), `#!/bin/bash\nprintf '%b' ${JSON.stringify(stdout)}\nexit ${rc}\n`);
+      chmodSync(join(bin, "psql"), 0o755);
+      const script = join(dir, "gate.sh");
+      writeFileSync(script, body);
+      const r = spawnSync("bash", [script], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+          RUNNER_TEMP: runnerTemp,
+          // SCHEME (see its definition above) — a contiguous DSN literal trips the
+          // pre-push secret scanner on SHAPE, and bypassing that would disarm it for
+          // real credentials on every later push.
+          TEST_DB_SESSION_URL: `${SCHEME}EXAMPLE_USER:EXAMPLE_PASSWORD@example.invalid:5432/postgres`,
+        },
+      });
+      rmSync(dir, { recursive: true, force: true });
+      return { out: `${r.stdout ?? ""}${r.stderr ?? ""}`, code: r.status ?? -1 };
+    };
+
+    const quiet = runWithPsql("0\n", 0);
+    expect(quiet.code, `a zero count must pass.\n${quiet.out}`).toBe(0);
+    expect(quiet.out).toContain("measurably quiet");
+
+    const busy = runWithPsql("1\n", 0);
+    expect(busy.code, `a positive count must REFUSE.\n${busy.out}`).toBe(1);
+    expect(busy.out).toContain("is NOT quiet");
+
+    // FAIL CLOSED: an unreadable probe is not a passed probe.
+    const broken = runWithPsql("", 2);
+    expect(
+      broken.code,
+      "the activity gate tolerated a failed probe. A gate that cannot read must never answer 'safe' — tolerating this would restore shared TEST on an unanswered question.",
+    ).toBe(1);
+    expect(broken.out).toContain("could not be MEASURED");
+
+    // A non-numeric answer must not be coerced to zero.
+    const garbage = runWithPsql("ERROR\n", 0);
+    expect(garbage.code, "a non-numeric count was coerced rather than refused").toBe(1);
+  });
+});

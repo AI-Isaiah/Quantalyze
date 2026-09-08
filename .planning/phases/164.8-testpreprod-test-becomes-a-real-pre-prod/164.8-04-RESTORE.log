@@ -1,0 +1,266 @@
+# 164.8-04 — RESTORE evidence log
+
+Every reading below is pasted from a GitHub Actions job log, names and counts only.
+No DSN, no host, no password, no marker text. Each block names its run id and head sha.
+
+⛔ Nothing in this file may be restated from memory. If a number here disagrees with the
+run it cites, the RUN is right and this file is stale.
+
+================================================================================
+BLOCK 1 — PREFLIGHT (Task 1)
+================================================================================
+
+workflow      : TEST restore from baseline (.github/workflows/test-restore-from-baseline.yml)
+workflow id   : 353307364 (state=active)
+run id        : 34258614075
+run url       : https://github.com/AI-Isaiah/Quantalyze/actions/runs/34258614075
+job id        : 102170650431 (job name: restore)
+head sha      : e6c76832d12680d5fcf459aab2dde5fa55e3d012
+ref           : refs/heads/main
+event         : workflow_dispatch
+inputs        : mode=preflight   (confirm not supplied)
+conclusion    : success
+dispatched    : 2026-09-08T17:41:27Z
+finished      : 2026-09-08T17:42:58Z
+
+--- Task 1's human gate, recorded as SATISFIED before the dispatch -------------
+The gate was "merge the Wave 1-3 PR to main". Evidence, measured before dispatching:
+  * PR #760 merged (squash) as e6c76832d12680d5fcf459aab2dde5fa55e3d012; branch deleted.
+  * origin/main == e6c76832d12680d5fcf459aab2dde5fa55e3d012 (this executor's fork base).
+  * .github/workflows/test-restore-from-baseline.yml and scripts/restore-test-from-baseline.sh
+    are both present on main.
+  * The workflow is registered and dispatchable:
+      gh api repos/AI-Isaiah/Quantalyze/actions/workflows/test-restore-from-baseline.yml
+      -> {"id":353307364,"name":"TEST restore from baseline","state":"active"}
+  ⚠️ `gh workflow list | grep test-restore-from-baseline` returns NOTHING and that is NOT a
+     failure — the list prints DISPLAY NAMES ("TEST restore from baseline"), not file stems.
+     Match the display name, or query the API by file path as above.
+
+--- dispatch-guard ------------------------------------------------------------
+skipped (the `if: github.ref != 'refs/heads/main'` guard did not fire; the dispatch was
+on main, which is what the guard exists to require).
+
+--- confirm token -------------------------------------------------------------
+confirm not required for preflight (mode=preflight); for reference, this tree's restore token is 27826b76.
+
+--- PROD-ledger premise (the ancestry step's three readings) -------------------
+supabase-migrate.yml newest run on main: status=completed conclusion=success headSha=7146c5749a0fd81f59b9a0a2812c01f25de95f3a
+
+  status     = completed
+  conclusion = success
+  head_sha   = 7146c5749a0fd81f59b9a0a2812c01f25de95f3a
+
+PROD-ledger premise holds: supabase-migrate.yml concluded success at 7146c5749a0fd81f59b9a0a2812c01f25de95f3a, an ancestor of HEAD, and no migration file was added between that commit and HEAD.
+
+--- identity marker (CLAUDE.md rule 2 / CONTEXT safety rule 1) -----------------
+which_database: OK — the marker names TEST and not PROD.
+restore-test-from-baseline: which_database: OK — marker names TEST and not PROD
+
+--- pre-write gates -----------------------------------------------------------
+restore-test-from-baseline: baseline sha256 OK — supabase/schema/baseline.sql matches the row in supabase/schema/BASELINE.md
+restore-test-from-baseline: baseline freshness OK — baseline epoch 1788854882 >= migrations epoch 1788852989
+restore-test-from-baseline: migrations: 266 file(s) under supabase/migrations
+restore-test-from-baseline: shared-TEST mutex 61616158: held (1 session(s))
+
+--- backup taken BEFORE any write (CONTEXT safety rule 3) ---------------------
+backup: ledger_rows=243 ledger_bytes=1846550 schema_bytes=610369
+backup: SCHEMA AND LEDGER ARE REVERSIBLE from this artifact. DATA IS NOT — no data dump was taken.
+redacted 5 .err/.log/.out channel(s) in the backup directory; .sql and .csv are left byte-exact so the reversal recipe replays.
+
+artifact name : test-restore-backup-34258614075
+artifact id   : 10068956967
+artifact size : 774964 bytes (zip), sha256 6019ebae142546790e67b031555423833081d399314f6bbb807e0a4ccff33662
+artifact url  : https://github.com/AI-Isaiah/Quantalyze/actions/runs/34258614075/artifacts/10068956967
+retention     : 90 days
+
+--- pre-census (read-only) ----------------------------------------------------
+restore-test-from-baseline: ── pre-census (read-only) ──────────────────────────────────────────
+tables=61
+functions=117
+policies=151
+extensions=6
+ledger_rows=243
+ledger_bad_version=0
+survivor	trigger	auth.users:on_auth_user_created:O	CREATE TRIGGER on_auth_user_created AFTER INSERT ON auth.users FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+survivor	policy	storage.objects:gdpr_exports_admin_read	CREATE POLICY gdpr_exports_admin_read ON storage.objects AS PERMISSIVE FOR SELECT TO public USING (((bucket_id = 'gdpr-exports'::text) AND public.current_user_has_app_role(ARRAY['admin'::text])));
+restore-test-from-baseline: survivors censused: 2
+
+⭐ survivor keys carrying the `pub:public.<table>` prefix: NONE — zero such lines in the
+   census. The W3 pre-write refusal (a realtime publication row naming a table baseline.sql
+   does not re-create) therefore did NOT fire and no founder-run
+   `ALTER PUBLICATION supabase_realtime DROP TABLE public.<t>` is owed. Recorded as an
+   explicit measured ZERO rather than by silence, because "no line matched" and "the census
+   stopped emitting that class" read identically in a log.
+
+--- expected shape, derived from the dump TEXT --------------------------------
+restore-test-from-baseline: expected shape from the dump text: tables=62 policies=154 functions=120
+
+  (pre-census tables=61 / policies=151 / functions=117 are TEST AS IT IS TODAY; the three
+   deltas are what the restore adds. The transaction compares built-vs-expected inside
+   itself — this file does not have to do that arithmetic.)
+
+--- the one filtered line class -----------------------------------------------
+restore-test-from-baseline: transaction assembled at <RUNNER_TEMP>/test-backup/restore.sql (filtered: 1 line(s) matching ^ALTER PUBLICATION "supabase_realtime" OWNER TO)
+
+  filtered: 1 — non-zero, as required. A `filtered: 0` against the REAL dump would mean the
+  filter stopped matching, not that there was nothing to filter.
+
+--- transaction, then the ROLLBACK verdict ------------------------------------
+restore-test-from-baseline: ── transaction (mode=preflight) ──────────────────────────────────────
+psql:<RUNNER_TEMP>/test-backup/restore.sql:123: NOTICE:  drop cascades to 187 other objects
+
+restore-test-from-baseline: ── post-census (read-only) ─────────────────────────────────────────
+tables=61
+functions=117
+policies=151
+extensions=6
+ledger_rows=243
+ledger_bad_version=0
+survivor	trigger	auth.users:on_auth_user_created:O	CREATE TRIGGER on_auth_user_created AFTER INSERT ON auth.users FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+survivor	policy	storage.objects:gdpr_exports_admin_read	CREATE POLICY gdpr_exports_admin_read ON storage.objects AS PERMISSIVE FOR SELECT TO public USING (((bucket_id = 'gdpr-exports'::text) AND public.current_user_has_app_role(ARRAY['admin'::text])));
+
+preflight: post-census == pre-census (byte-for-byte) — the transaction ran to its ROLLBACK terminator and the database is unchanged; mode=preflight
+
+VERDICT: preflight GREEN. mode=preflight, post-census == pre-census. TEST is unchanged by
+this run, and the whole transaction — DROP SCHEMA public CASCADE included — was proven to
+execute and then roll back.
+
+--- one anomaly observed in the preflight log, assessed, NOT fixed here -------
+scripts/restore-test-from-baseline.sh: line 765: toast: command not found
+
+  WHAT IT IS: `scripts/restore-test-from-baseline.sh:821` carries an UNESCAPED backtick pair
+  inside the `<<TXN_CLOSURE` heredoc, whose delimiter is unquoted. Bash therefore ran
+  `toast table pg_toast.pg_toast_16428` as a command and substituted its (empty) output.
+  IMPACT, MEASURED not assumed: the backticks sit inside a single-line `--` SQL comment
+  (the sibling occurrences at :799/:801/:847/:849 ARE escaped as `\``), so the generated
+  transaction stays valid SQL and merely loses that comment's quoted text. The preflight ran
+  to a byte-for-byte-equal post-census with it present.
+  WHY IT IS NOT FIXED IN THIS PLAN: the fix is a source edit to a script that
+  `workflow_dispatch` only runs FROM MAIN, so shipping it would require another founder merge
+  between the preflight and the restore — spending the one-way door's timing on a lost code
+  comment. Booked in this phase's deferred-items.md instead.
+
+================================================================================
+BLOCK 2 — ACTIVITY GATE (Task 2) — ⛔ NOT RUN. HALTED. NO RESTORE DISPATCHED.
+================================================================================
+
+activity-gate: NOT RUN — the executor has no Postgres credential for shared TEST, so the
+gate could not be MEASURED, and an unmeasured gate is not a passed gate.
+
+⛔ THE VERDICT IN ONE LINE: `mode=restore` was NOT dispatched. TEST is untouched. The
+decision returns to the founder, exactly as CONTEXT safety rule 4's amendment requires when
+the gate does not pass.
+
+--- WHY: what was measured, and what could not be --------------------------------
+
+The founder's amendment (2026-09-08, verbatim) is CONDITIONAL delegation:
+"Delegate, but only if TEST is measurably quiet." The condition is a MEASUREMENT, and its
+conditions (a)-(c) fix HOW it must be measured:
+
+  (a) acquire the shared-TEST advisory lock (key 61616158) FIRST, then probe while holding
+      it — probing first measures a window that has already closed;
+  (b) `idle in transaction` counts as ACTIVE;
+  (c) any non-zero count aborts and names every session.
+
+All three need a SESSION-mode Postgres connection to TEST. This executor has none. Measured,
+not assumed:
+
+  * .env.test.local (repo root) declares exactly three variables and none is a DSN:
+      NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+    (names read with `sed -n 's/^\([A-Za-z_][A-Za-z_0-9]*\)=.*/\1/p'`; no value printed)
+  * .env.local (repo root) likewise carries no Postgres DSN of any kind.
+  * ~/.pgpass — does not exist.  ~/.pg_service.conf — does not exist.
+  * macOS Keychain service `quantalyze-test` is an ACCOUNT, not a DSN:
+      acct = demo-allocator@quantalyze.test  (a login for e2e, created 2026-04-10)
+  * The credential exists ONLY as a GitHub repository secret, write-only from outside CI:
+      gh secret list --repo AI-Isaiah/Quantalyze
+      -> TEST_SUPABASE_DB_URL   2026-05-13T10:46:38Z
+  * `psql` IS installed locally (PostgreSQL 18.6) — the blocker is the credential, not the
+    client.
+
+--- THE THREE ROUTES CONSIDERED, AND WHY EACH WAS REFUSED ------------------------
+
+1. PROBE OVER PostgREST WITH THE TEST SERVICE-ROLE KEY (which this executor does hold).
+   REFUSED. `pg_stat_activity` is not exposed through PostgREST, and — decisively — every
+   PostgREST request is its own pooled session, so a SESSION advisory lock cannot be held
+   ACROSS the probe. That is condition (a) unsatisfiable by construction. A REST-only probe
+   would produce precisely the reading the founder's ordering rule exists to forbid: a
+   window that had already closed before it was read. It would LOOK like a passed gate.
+
+2. ADD A PROBE STEP TO CI SO THE GATE RUNS WHERE THE SECRET IS.
+   REFUSED on two grounds. It is a source edit to the CI pipeline outside this plan's
+   `files_modified`, i.e. deviation Rule 4 (architectural) → stop and ask, not auto-apply.
+   And it does not even work: a CI job releases the mutex at job teardown, minutes before
+   this executor could dispatch `mode=restore`, so the probe would again describe a window
+   the gate does not control.
+
+3. DISPATCH `mode=restore` ANYWAY, ON THE STRENGTH OF THE GREEN PREFLIGHT.
+   REFUSED, and this is the one that matters. The preflight proves the TRANSACTION is
+   correct; it says nothing about whether other people's CI is mid-run. Those are different
+   questions and the gate is the only thing that answers the second. Dispatching here would
+   convert an explicitly CONDITIONAL delegation into the blanket one the founder declined to
+   give.
+
+--- THE FALSIFIER WAS NOT OBSERVED EITHER, AND THAT IS PART OF THE HALT ----------
+
+Task 2's `<verify><manual>` requires the gate's falsifier to be OBSERVED: open a second psql
+session against TEST, leave it `idle in transaction`, re-run the probe, confirm it reports
+that session ACTIVE. That needs the same missing credential. So there is no evidence the
+predicate can distinguish a held-lock session from a quiet database — and per the plan's own
+words, "a gate that cannot see a held-lock session is the exact vacuity this phase exists to
+prevent." Recorded as NOT OBSERVED rather than waived.
+
+--- WHAT THE FOUNDER IS BEING ASKED FOR ------------------------------------------
+
+Either (A) or (B), whichever the founder prefers:
+
+  (A) RUN THE GATE YOURSELF, then dispatch. From a shell holding the TEST DSN — one session,
+      lock first, probe second, session exit releases the lock:
+
+        PGAPPNAME=164.8-04-activity-gate PGCONNECT_TIMEOUT=15 \
+        psql "$TEST_SUPABASE_DB_URL_SESSION_MODE" -X -A -v ON_ERROR_STOP=1 \
+          -c "SELECT shobj_description(oid,'pg_database') FROM pg_database WHERE datname = current_database();" \
+          -c "SET statement_timeout = '120s';" \
+          -c "SELECT pg_advisory_lock(61616158);" \
+          -c "SELECT pid, application_name, state, state_change, left(query, 80) AS q
+                FROM pg_stat_activity
+               WHERE datname = current_database()
+                 AND pid <> pg_backend_pid()
+                 AND backend_type = 'client backend'
+                 AND (state <> 'idle' OR state LIKE 'idle in transaction%');"
+
+      ⚠️ THE DSN MUST BE PORT 5432 (session mode), NOT the documented 6543 pooler port. On
+      6543 the pooler is in TRANSACTION mode and a SESSION advisory lock does not survive
+      between statements — the lock would be silently gone by the time the probe runs, and
+      the gate would report quiet because it was never actually holding anything. The restore
+      workflow performs exactly this 6543 -> 5432 rewrite in-job for the same reason.
+      ⚠️ Read the FIRST line before believing the last: if the marker is NULL or does not
+      name TEST, stop — CLAUDE.md rule 2, `current_database()` is `postgres` on both projects.
+      ⚠️ If the `pg_advisory_lock` statement TIMES OUT, that is itself a FAILED gate: someone
+      else holds the shared-TEST mutex, which is the opposite of quiet.
+
+      ZERO rows -> dispatch, with the confirm token computed from the file, not from this log:
+
+        gh workflow run test-restore-from-baseline.yml --ref main -f mode=restore -f confirm=27826b76
+
+      (27826b76 is the token the preflight itself printed for THIS tree. It goes stale the
+      moment supabase/schema/baseline.sql is regenerated — recompute from
+      supabase/schema/BASELINE.md if any time has passed.)
+
+  (B) GRANT THE EXECUTOR THE TEST DSN (session-mode, port 5432) and re-run this plan from
+      Task 2. Nothing in Blocks 1 is invalidated: the preflight rolled back byte-for-byte, so
+      TEST is in exactly the state it was in before run 34258614075, and the preflight can be
+      re-dispatched for a fresh reading at negligible cost if time has passed.
+
+--- STATE LEFT BEHIND ------------------------------------------------------------
+
+  * shared TEST : UNCHANGED. One preflight (rolled back, verdict recorded in Block 1) and
+                  zero writes. No advisory lock is held by this executor — none was ever
+                  taken.
+  * Task 3      : NOT STARTED. `scripts/vac08-ledger-baseline.txt` still carries its 31
+                  entries and `ENTRY_COUNT` is still 31 — correct, because those 31 are still
+                  MEASURED ABSENT from TEST's ledger. Emptying the ratchet before the restore
+                  would be the mute button its own header forbids, and VAC-08 would go red on
+                  `31 baseline entr(y/ies) are no longer MEASURED absent` the moment it ran.
+  * main / CI   : untouched by this halt. `sql-tests` stays exactly as green or red as it was
+                  before this plan started.

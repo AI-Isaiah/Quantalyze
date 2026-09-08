@@ -95,3 +95,30 @@ The entry 164.8-03 owed the ledger, recorded here instead:
   change reddens instead of passing vacuously, and its own `::error::` tells the first reader to
   verify the 2.98.2 wording before concluding anything about the ledger. First real execution is
   Plan 04, behind the founder `checkpoint:decision`.
+
+### 5. `restore-test-from-baseline.sh:821` — unescaped backticks inside the `TXN_CLOSURE` heredoc
+
+Found by 164.8-04 while reading the preflight log (run 34258614075, head sha e6c76832), where
+the script emitted, on stderr, into a PUBLIC log:
+
+```
+scripts/restore-test-from-baseline.sh: line 765: toast: command not found
+```
+
+`cat >> "$out" <<TXN_CLOSURE` uses an UNQUOTED delimiter, so backticks inside the body are
+command substitutions. Line 821 quotes a measured object name in prose with bare backticks —
+`` `toast table pg_toast.pg_toast_16428` `` — and bash ran that as a command. The sibling
+occurrences at :799, :801, :847 and :849 are correctly escaped (`` \` ``); this one was missed.
+
+**Measured impact: cosmetic.** The backticks sit inside a single-line `--` SQL comment, so the
+generated transaction stays valid SQL and only loses that comment's quoted text. The preflight
+ran the whole transaction to a byte-for-byte-equal post-census with the defect present.
+
+**Why deferred rather than auto-fixed under Rule 1:** the script is only ever executed by
+`workflow_dispatch` FROM `main`, so any edit costs another founder merge sitting between the
+preflight and the restore — a real timing cost on a one-way door, spent on a lost code comment.
+
+**Remedy when taken:** escape the pair as ``\`toast table pg_toast.pg_toast_16428\` ``, and add
+a self-test arm asserting the generated `restore.sql` contains that literal text, so the class
+(an unescaped backtick eating heredoc content) is caught rather than re-introduced. A future
+occurrence inside SQL rather than a comment would silently DELETE statement text.
