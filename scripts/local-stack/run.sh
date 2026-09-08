@@ -54,7 +54,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LANE_DIR="${REPO_ROOT}/scripts/local-stack"
 ENV_FILE="${LANE_DIR}/.stack-env"
-BASELINE_FILE="${LANE_DIR}/baseline.sql"
+BASELINE_FILE="${REPO_ROOT}/supabase/schema/baseline.sql"
 CONFIG_TOML="${REPO_ROOT}/supabase/config.toml"
 
 # Lane-owned Supabase workdir, generated per run and gitignored.
@@ -218,9 +218,13 @@ EOF
     exit 1
   fi
 
-  log "loading baseline into local database"
+  # Name the file on the SUCCESS path too, not just in the FATAL above. Phase
+  # 164.5 criterion 1 is "the lane boots from the COMMITTED baseline, proven by
+  # running it" — and a log line reading only "baseline loaded" cannot tell a
+  # reader WHICH baseline. An unnamed source is not evidence of a source.
+  log "loading baseline into local database from ${BASELINE_FILE}"
   "$psql" "$db_url" -v ON_ERROR_STOP=1 -q -f "$BASELINE_FILE"
-  log "baseline loaded"
+  log "baseline loaded from ${BASELINE_FILE}"
 }
 
 # Prints the psql path, or nothing. Never exits — it runs in a command
@@ -236,9 +240,29 @@ resolve_psql() {
 # --- commands -----------------------------------------------------------------
 cmd_up() {
   local with_schema=1
-  if [ "${1:-}" = "--no-schema" ]; then
-    with_schema=0
+  # ⛔ REJECT an unrecognised argument rather than treating it as "load the schema".
+  # `up --no-shema` (typo) used to load the baseline silently — a safe DIRECTION, but
+  # the same class of lie the other gates this phase added refuse: a typo'd flag that
+  # quietly ran a different gate than the caller asked for.
+  # [IN-A] ⛔ ROOT CAUSE, not the symptom. The dispatcher used to call
+  # `cmd_up "${1:-}"`, which DROPPED $2 and beyond before this function could see
+  # them — so `up --no-schema --wat` ran the --no-schema path and silently ignored
+  # `--wat`. MEASURED 2026-09-08: a guard placed inside cmd_up could never fire,
+  # because `$#` was always 1; the stack booted for real. The dispatcher now
+  # forwards "$@" and the arity check lives here, ahead of everything that boots.
+  if [ "$#" -gt 1 ]; then
+    echo "FATAL: 'up' takes at most one argument; got $#: $*" >&2
+    exit 1
   fi
+  case "${1:-}" in
+    "") ;;
+    --no-schema) with_schema=0 ;;
+    *)
+      echo "FATAL: unknown argument to 'up': '$1'. Only --no-schema is accepted." >&2
+      exit 1
+      ;;
+  esac
+
 
   generate_stack_config
   arm_teardown
@@ -313,9 +337,16 @@ assert_no_surviving_containers() {
 
 cmd_self_test() {
   log "SELF-TEST: lifecycle + teardown"
+  # ⚠️ The reason clause here used to read "it is blocked on the baseline (see
+  # REPLAY-SPIKE.md)". Phase 164.5 wired the lane to the committed baseline, so
+  # that sentence became FALSE while still printing on every run. The SCOPE
+  # statement is unchanged and still true — this path runs `up --no-schema`, so
+  # it never exercises load_baseline() — but the reason is now "out of scope",
+  # not "blocked".
   log "SELF-TEST: scope is start/probe/stop. Schema load is NOT covered here —"
-  log "SELF-TEST: it is blocked on the baseline (see REPLAY-SPIKE.md). A green"
-  log "SELF-TEST: self-test does NOT mean the lane can run app specs yet."
+  log "SELF-TEST: this path runs 'up --no-schema', so load_baseline() never runs."
+  log "SELF-TEST: a green self-test does NOT mean the lane can run app specs;"
+  log "SELF-TEST: only 'run.sh up' (WITH schema) proves that."
 
   # Force teardown even on success: the self-test must leave nothing behind.
   LANE_FORCE_TEARDOWN=1
@@ -371,7 +402,7 @@ usage() {
 }
 
 case "${1:-}" in
-  up)          shift; cmd_up "${1:-}" ;;
+  up)          shift; cmd_up "$@" ;;
   down)        cmd_down ;;
   --self-test) cmd_self_test ;;
   # Runs ONLY the teardown assertion, against whatever `DOCKER_BIN` names.

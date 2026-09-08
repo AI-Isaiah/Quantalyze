@@ -25,6 +25,23 @@ name: SQL Function Snapshot — Drift Gate
 # SCOPE: functions only. Tables/columns/policies/triggers evolve via incremental
 # ALTERs that text-replay can't reconstruct; a full-schema snapshot needs the
 # Supabase local stack in CI (deferred — see docs/deferred-findings.md).
+#
+# ── Phase 164.5, criterion 2: this job ALSO carries the baseline CO-EDIT gate ──
+# `supabase/schema/baseline.sql` is the committed full-schema dump that closed
+# the gap above. MEASURED 2026-09-07: `.github/workflows/` contained **ZERO**
+# references to it, so a PR could move the dump by one byte and leave the sha256
+# in `supabase/schema/BASELINE.md` — the only record of where those bytes came
+# from — behind, with every check green. `BASELINE.md` said so about itself
+# ("no staleness check on this file yet"). The gate lands HERE rather than in a
+# new workflow because this job's `supabase/schema/**` trigger is already
+# exactly the path it guards, and it is already hermetic.
+#
+# ⚠️ STANDALONE — this workflow is NOT in `ci.yml`'s `frontend` aggregator.
+# `grep -n 'sql-function-snapshot\|snapshot-drift' .github/workflows/ci.yml`
+# returns NOTHING (re-measured 2026-09-07). It blocks a merge only through its
+# own `snapshot-drift` required-check status, so if that check is not in branch
+# protection it is advisory in practice. Stating this plainly rather than
+# letting a reader assume aggregator coverage it does not have.
 
 on:
   pull_request:
@@ -33,6 +50,12 @@ on:
       - 'supabase/migrations/**'
       - 'supabase/schema/**'
       - 'scripts/dump-sql-functions.ts'
+      # DRIFT-05 gate (a) derives BOTH name sets through `extractFunctionDefs`,
+      # imported from here by scripts/dump-sql-functions.ts — so an edit to this
+      # file changes this gate's verdict without running it. Same reason
+      # migration-drift-check.yml lists it for gate (b).
+      - 'scripts/sql-body-normalize.mjs'
+      - 'scripts/check-baseline-staleness.mjs'
       - '.github/workflows/sql-function-snapshot.yml'
   push:
     branches: [main]
@@ -40,6 +63,10 @@ on:
       - 'supabase/migrations/**'
       - 'supabase/schema/**'
       - 'scripts/dump-sql-functions.ts'
+      # Same reason as the pull_request list above: gate (a)'s two name sets
+      # are both produced by `extractFunctionDefs` from this file.
+      - 'scripts/sql-body-normalize.mjs'
+      - 'scripts/check-baseline-staleness.mjs'
       - '.github/workflows/sql-function-snapshot.yml'
   workflow_dispatch:
 
@@ -62,6 +89,32 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # ── Baseline CO-EDIT gate (Phase 164.5 crit 2) ────────────────────────
+      # Placed BEFORE `npm ci` on purpose: `check-baseline-staleness.mjs` has
+      # ZERO dependencies, so it reports on its own merits instead of behind a
+      # dependency install that can flake for reasons unrelated to the schema.
+      # It does not touch the `dump-sql-functions.ts` steps below; the two gates
+      # guard different artifacts (function bodies vs. the full-schema dump).
+      - name: Baseline gate self-test - every defect kind fires on synthetic input
+        # Runs BEFORE the real check on purpose, same reasoning as
+        # `ci.yml`'s `sql-gate-lint`: a check reporting "0 defects" says nothing
+        # unless it can still fire, and the self-test is what distinguishes a
+        # matching baseline from a defanged gate. MEASURED 2026-09-07 — with
+        # `judge()` stubbed to return `[]`, the step below printed
+        # "✅ No defects" and exited 0 while proving nothing; the self-test
+        # failed 8 of 9 assertions by name on that same tree.
+        # ⚠️ That "8 of 9" is the DATED 2026-09-07 reading and is kept as
+        # lineage, not as a current count. The self-test now declares 12
+        # assertions across 9 sections (IN-02/IN-03, 2026-09-08) and refuses to
+        # pass if the number that RAN disagrees with the number it declares —
+        # read the count off the run, never off this comment.
+        run: node scripts/check-baseline-staleness.mjs --self-test
+      - name: Baseline co-edit gate - baseline.sql matches the sha256 BASELINE.md records
+        # Mode identity (164.3-RESEARCH Pitfall 2): these two lines are the EXACT
+        # commands a developer runs locally, pasted verbatim from the script's
+        # own header. No wrapper, no flags, no npm alias — wrapping a run changes
+        # its result, and a CI-only invocation mode is a different program.
+        run: node scripts/check-baseline-staleness.mjs
       - name: Restore node_modules
         id: node_modules_cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0

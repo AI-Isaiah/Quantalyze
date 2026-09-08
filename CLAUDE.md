@@ -271,12 +271,12 @@ pre-existing edit-kind twins in those two files at the superseding migration
 biting AFTER the re-point — a twin left mutating a body that `CREATE OR REPLACE`
 overwrites has silently stopped being a test. Read off
 `node scripts/mutation-runner/run.mjs` at the final tree, **exit 0**:
-`coverage: files 46/73`, `arms: 380/380/0`, `biting: 380`,
-`lane-invocations: 380` (the two independent tallies AGREE), `lane-blocked: 0
+`coverage: files 46/73`, `arms: 384/384/0`, `biting: 384`,
+`lane-invocations: 384` (the two independent tallies AGREE), `lane-blocked: 0
 file(s)`, `lane-probe: pg_cron AVAILABLE`, `  pending: 0`,
 `per-arm lane time: mean 1.1s`, `✅ No defects`. 46 annotated + 0 lane-blocked +
 27 `unreachable:` + 0 pending = 73. `FILES_FLOOR` moved 45 → **46** and
-`ARMS_FLOOR` 369 → **380**; `WAIVED_CEILING` is still **0**.
+`ARMS_FLOOR` 369 → **384**; `WAIVED_CEILING` is still **0**.
 
 ⚠️ **The two floors are separated in DIFFERENT LAYERS, and this plan MEASURED
 that rather than inheriting the earlier paragraphs' wording.** A full-corpus run
@@ -304,6 +304,8 @@ with the five annotated files named**, by ANNOTATION — a dated
 entry, two edits in two files, whose five counts still SUM TO the same 12 sites.
 ⛔ A red corpus step from here is a regression and is never cleared by widening
 the allowlist or relaxing `DETECT_RE`.
+
+⚠️ **CORRECTION 2026-09-07 (Phase 164.5 planning):** the paragraph above originally read `ARMS_FLOOR` 369 → **380** with `arms: 380/380/0`. That was the reading BEFORE 164.7 plan 04 added arms K and L to each ledger gate; the shipped value is **384**, read by symbol from `export const ARMS_FLOOR` in `scripts/mutation-runner/run.mjs`. The prose and the constant had already diverged, which is exactly why this file says to read the constants by SYMBOL and never a number restated in prose. `FILES_FLOOR` is **46** and `WAIVED_CEILING` is still **0**.
 
 ⛔ **`sql-tests` and VAC-08 are expected RED on the 164.7 PR** for exactly the
 arms named in `TODOS.md` `[164.7-TEST-APPLY-APPSETTINGS]`, until the founder

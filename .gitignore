@@ -131,10 +131,26 @@ scripts/mark-reverified-closed.py
 # file is ignored so that NO key ever lands in a commit by construction rather
 # than by remembering (threat T-164.3-09).
 scripts/local-stack/.stack-env
-# baseline.sql is a schema dump. Ignored by default because a dump can carry a
-# DSN, host, or project ref. Committing one is a deliberate, reviewed act:
-# run the secret scan in scripts/local-stack/REPLAY-SPIKE.md first, then
-# `git add -f`. Never add it casually.
+# ⛔ RESTORED 2026-09-08 (code review WR-05). Phase 164.5 criterion 1 DELETED
+# this line, reasoning that the lane now reads the COMMITTED
+# `supabase/schema/baseline.sql` so the ignored path has no consumer left. That
+# is true of the lane and NOT true of the repository: `scripts/local-stack/
+# REPLAY-SPIKE.md` still carries a runnable `supabase db dump -f` command aimed
+# at this exact path, and greps that same file for `postgres://`, `@*.supabase.co`,
+# `\connect`, `ALTER DATABASE` and `eyJ…` — i.e. the document itself asserts the
+# file can carry a DSN, host or project ref. THIS REPO IS PUBLIC, so the
+# protection stays by construction rather than by remembering, exactly as
+# `.stack-env` above (threat T-164.3-09). What moved to
+# `supabase/schema/BASELINE.md` was the PROSE; this is the control.
+# Committing a dump remains a deliberate, reviewed act — and it goes to
+# `supabase/schema/baseline.sql`, which is NOT ignored, never to this path.
+#
+# ⚠️ This line is REAL, not a prose mention. `src/__tests__/baseline-wiring-claim
+# .test.ts` greps THIS file for this literal on its UNWIRED branch; that branch
+# is currently unreachable (MEASURED 2026-09-08: `run.sh --print-baseline-path`
+# resolves to `supabase/schema/baseline.sql`, so the test takes its WIRED
+# branch), and if the lane were ever un-wired the grep would find an ignore rule
+# that genuinely exists.
 scripts/local-stack/baseline.sql
 # Derived per-run Supabase workdir (a copy of supabase/config.toml with
 # [db.migrations] disabled). Generated, never authored.

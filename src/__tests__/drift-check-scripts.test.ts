@@ -972,6 +972,55 @@ describe("SP-C05 — 'absent from PROD' must be measured by an instrument that d
     expect(yml).toContain("- 'scripts/sql-function-names-naive.mjs'");
   });
 
+  it("WR-04: gate (b)'s SUBJECT re-runs gate (b) — baseline.sql is in migration-drift-check.yml's paths", () => {
+    // The gate's own failure text names regenerating `supabase/schema/
+    // baseline.sql` as the remedy for a red run. Without this path entry the
+    // regeneration PR is the ONE PR that does not re-run the gate that demanded
+    // it, and the operator learns whether the remedy worked from someone else's
+    // later migration PR, off a state stale again by then. MEASURED absent
+    // 2026-09-08.
+    const yml = readFileSync(
+      ".github/workflows/migration-drift-check.yml",
+      "utf8",
+    );
+    // ⛔ [WR-B, iteration 2] LINE-EXACT, matching the WR-03 pin twelve lines
+    // below. MEASURED 2026-09-08: a whole-file `toContain` left the suite at
+    // 405/405 with the entry COMMENTED OUT, while WR-03's `l.trim() === …`
+    // went RED under the identical mutation.
+    const hits = yml
+      .split("\n")
+      .filter((l) => l.trim() === "- 'supabase/schema/baseline.sql'");
+    expect(
+      hits.length,
+      "the entry must be a LIVE paths entry, not commented-out text — a commented entry does not trigger the workflow",
+    ).toBe(1);
+  });
+
+  it("WR-03: gate (a)'s normalizer dependency re-runs gate (a) — both trigger lists name it", () => {
+    // `scripts/dump-sql-functions.ts` imports `extractFunctionDefs` from
+    // `scripts/sql-body-normalize.mjs`, and BOTH of gate (a)'s name sets
+    // (baseline and migration-replay) are derived through it — so an edit there
+    // changes the gate's verdict. It was in NEITHER trigger list until
+    // 2026-09-08. Both lists are asserted: `pull_request` alone leaves the
+    // main-push arm blind.
+    const dumper = readFileSync("scripts/dump-sql-functions.ts", "utf8");
+    expect(
+      dumper,
+      "if the dumper stops importing the normalizer this pin is stale, not passing",
+    ).toContain('from "./sql-body-normalize.mjs"');
+    const yml = readFileSync(
+      ".github/workflows/sql-function-snapshot.yml",
+      "utf8",
+    );
+    const hits = yml.split("\n").filter((l) =>
+      l.trim() === "- 'scripts/sql-body-normalize.mjs'",
+    );
+    expect(
+      hits.length,
+      "the entry must appear in BOTH the pull_request and the push paths list",
+    ).toBe(2);
+  });
+
   it("SP-C06: a FAILING `git diff` is a MEASURE_FAIL, not 'no migration files changed'", () => {
     // ⛔ The line read `git diff … > changed.txt || true`, which converted
     // "could not list the changed files" into "the list is empty" and then into
@@ -1830,15 +1879,18 @@ describe("[VAC04-C2] GATE-LEVEL — the realpath guard driven THROUGH THE REAL G
 // proved that on the reader CLIs; this block drives it THROUGH THE REAL GATE
 // (SC-4), on the same P10 input, and asserts the gate's own output.
 //
-// WHICH SITE THE INPUT REACHES. The normalizer's `--function-names` call at
-// prod-body-drift-check.sh:207 is the FIRST reader call and the ONLY site this
-// input reaches: its `|| fail` wraps the refusal into
-// "could not extract function names from the changed migrations." and exits 1.
-// The naive reader's call at :221 is never executed on this input — so the
-// naive refusal's reachability AT GATE LEVEL on THIS input is a STATED
-// NON-COVERAGE, not a claim. What IS shown (the stated-bound `it` below) is
-// that with ONLY the normalizer's refusal disabled the naive refusal still
-// reaches the verdict through :221's `|| fail`, which is why the recorded
+// WHICH SITE THE INPUT REACHES. Cited by SYMBOL, not by line — these anchors
+// drifted the moment prod-body-drift-check.sh grew its --baseline-live leg
+// (Phase 164.5 plan 04). The normalizer's `--function-names` call guarded by
+// `|| fail "could not extract function names from the changed migrations."` is
+// the FIRST reader call and the ONLY site this input reaches: that `|| fail`
+// wraps the refusal and exits 1. The naive reader's call, guarded by
+// `|| fail "the independent name reader failed on the changed migrations."`,
+// is never executed on this input — so the naive refusal's reachability AT
+// GATE LEVEL on THIS input is a STATED NON-COVERAGE, not a claim. What IS
+// shown (the stated-bound `it` below) is that with ONLY the normalizer's
+// refusal disabled the naive refusal still reaches the verdict through its own
+// `|| fail`, which is why the recorded
 // neuter cycle C4-N1 (164.3.1-13-SUMMARY.md) disables BOTH members: a
 // single-member neuter cannot flip the gate's exit code.
 //

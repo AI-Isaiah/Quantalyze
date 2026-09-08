@@ -1,55 +1,98 @@
 # `baseline.sql` — committed full-schema snapshot
 
 **What it is:** a byte-identical `supabase db dump` (schema only, zero data statements)
-of the production catalogue. It exists to become the schema source for the VAC-07
-local-stack lane, which cannot use `supabase db reset` because the migration chain does
-not replay — see `scripts/local-stack/REPLAY-SPIKE.md` for that measurement.
+of the production catalogue. It is the schema source for the VAC-07 local-stack lane,
+which cannot use `supabase db reset` because the migration chain does not replay — see
+`scripts/local-stack/REPLAY-SPIKE.md` for that measurement.
 
-## ⛔ NOT WIRED YET — this file currently has NO consumer
+## ✅ WIRED 2026-09-07 (Phase 164.5, criterion 1) — the lane reads this file
 
-**Nothing reads it.** `scripts/local-stack/run.sh:50` sets
-`BASELINE_FILE="${LANE_DIR}/baseline.sql"` — that is `scripts/local-stack/baseline.sql`,
-a *different* path, which `.gitignore:138` ignores and which does not exist in a fresh
-checkout. MEASURED 2026-08-29: `bash scripts/local-stack/run.sh up` exits 1 with
-`FATAL: no schema baseline at .../scripts/local-stack/baseline.sql`. A grep across
-`scripts/`, `.github/`, `package.json` and `src/` for `supabase/schema/baseline.sql`
-returns only this document.
+`scripts/local-stack/run.sh` sets
+`BASELINE_FILE="${REPO_ROOT}/supabase/schema/baseline.sql"`, and `load_baseline()` feeds
+exactly that file to `psql -v ON_ERROR_STOP=1` against the local stack's `DB_URL`. Ask the
+lane rather than reading the assignment — that is what the seam is for:
 
-This section replaces a sentence that read *"It **is** the schema source for the VAC-07
-local-stack lane"* — present tense, about a wiring that does not exist. That is this
-phase's own defect class (a claim never compared to the thing) inside an artifact this
-phase shipped, so it is corrected here rather than papered over.
+```
+bash scripts/local-stack/run.sh --print-baseline-path
+# -> <repo>/supabase/schema/baseline.sql
+```
 
-**The wiring is deliberately NOT done in 164.3.** VAC-07 was deferred by founder decision
-on 2026-08-29 (`.planning/phases/164.3-…/164.3-07-DEFERRED.md`), and repointing `run.sh`
-now would change plan 04's shipped behaviour without plan 04's gates being re-run.
+`src/__tests__/baseline-wiring-claim.test.ts` pins this in BOTH directions: it resolves
+the lane's answer and this document's prose to absolute paths and fails if either moves
+without the other. This section exists because that test requires it — while the lane was
+unwired the document had to say so, and the moment the repoint landed the test went RED
+until this prose matched. The RED was observed, not assumed (`164.5-01-SUMMARY.md`).
 
-**Phase 164.5 (BASELINE-SNAPSHOT) owns all three steps**, together:
+**What is NOT claimed here.** Nothing in `.github/workflows/` invokes
+`scripts/local-stack/run.sh up`; the boot recorded in `164.5-01-SUMMARY.md` is a dated
+developer-box measurement, not a CI-enforced fact. And this wiring is not a staleness
+gate — see the UNGATED section below.
 
-1. repoint `BASELINE_FILE` at `supabase/schema/baseline.sql` (or add it as the fallback);
-2. drop `.gitignore:138`, which is what makes the lane-local path invisible;
-3. add the staleness gate below, including an assertion that the loaded baseline's
-   sha256 matches the one recorded here — so a silently-swapped baseline is a failure
-   rather than a load.
+### Committing a regenerated dump is a deliberate, reviewed act
 
-Until then the lane fails loud, which is the correct behaviour for a lane with no schema.
-It is not, and must not be described as, a lane that reads this file.
+**Relocated from `.gitignore` in this same commit** (Phase 164.5 P-05). A lane-local
+`baseline.sql` used to be gitignored, with the reasoning carried in a comment above the
+ignore line. The ignore line is gone — the lane no longer reads that path — but the
+reasoning is the asset, so it lives here now:
+
+> A schema dump can carry a DSN, a host, or a project ref. Committing one is therefore a
+> deliberate, reviewed act, never a casual `git add`. Run the secret scan recorded in
+> `scripts/local-stack/REPLAY-SPIKE.md` **first**, and treat any hit as **do not commit**
+> (threat T-164.3-09).
+
+⚠️ This repository is PUBLIC. The scan command and the five classes it must cover are in
+the *Regenerating* section below; keep the prose claim and the grep pattern identical —
+SP-M03 records what happens when they drift apart.
 
 ## Provenance
 
 | | |
 |---|---|
-| Taken | 2026-08-29 |
+| Taken | 2026-09-07 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
 | Supabase CLI | 2.84.2 (CI pins 2.98.2 — see the caveat below) |
-| sha256 | `514ba9bccd3181d925860576479e1d9ed623e429b3cb8d135f70a031e24a37fb` |
-| Shape | 61 tables, 152 policies, 121 function statements (119 distinct names), **0 data statements** |
+| sha256 | `9fad9a1b4c3cedac17883933bed0c57392d3f675b38bd65d570172b96c99168f` |
+| Shape | 62 tables, 154 policies, 123 function statements (121 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
 `scripts/local-stack/REPLAY-SPIKE.md`: no DSN, no `\connect`, no `ALTER DATABASE`, no JWT,
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-09-07 — what moved, and what did NOT
+
+The prior capture (2026-08-29, sha256 `514ba9bc…`, 14 921 lines / 701 524 bytes, 61 tables /
+152 policies / 121 function statements / 119 distinct names) stays here as dated lineage. It
+was regenerated on a founder decision because DRIFT-05 gate (b)'s first credentialed run went
+RED and was RIGHT: two functions existed in PROD and in no committed baseline.
+
+**The diff is 449 changed lines out of 15 260 (394 added, 55 removed) across 27 hunks, and
+NONE of it is cosmetic.** The same CLI (2.84.2) produced both files, and the unified diff's
+first hunk starts at line 3766 — there is no header, version, ordering or quoting churn
+anywhere in the file. Every hunk is content:
+
+| Change | Origin |
+|---|---|
+| `system_settings` table + 2 policies + URL allow-list constraint + grants + comments | Phase 164.7 `20260907120000` |
+| `match_engine_cron_tick()` + owner + grants + comment | Phase 164.7 `20260907120000` |
+| `enqueue_ledger_composite_refresh` / `enqueue_ledger_refresh_for_strategies` bodies re-based off the unsettable `app.*` GUC onto `public.system_flags` | Phase 164.7 `20260907130000` |
+| `strategy_analytics_drop_stale_error_provenance()` + its BEFORE UPDATE trigger + comments | Phase 164.2 `20260906120000` |
+| `strategy_analytics.computation_error_source` / `.computation_error_job_id` columns, comments, and their appearance in two `sync_strategy_analytics_status` INSERT column lists | Phase 164.2 `20260906120000` |
+
+Distinct function names went **119 → 121**, and the two additions are exactly the two names
+DRIFT-05 reported as `live-only`. That gate's verdict and this dump agree number-for-number.
+
+⛔ **The regeneration did NOT clear three drifting bodies, and that is the finding.**
+`check_fan_in_ready`, `reject_sentinel_writes` and `retention_delete_guard` were all pinned in
+`CONTENT_DRIFT_ALLOWLIST` with `clearedBy: "A regeneration of supabase/schema/baseline.sql
+from PROD"`. The regeneration happened and **their `snapshotHash` values did not move by a
+single bit** — PROD's bodies were never stale. PROD runs an EARLIER revision of each than the
+migration chain renders. `retention_delete_guard` is the cleanest specimen: exactly one
+migration in this repository defines it, and PROD's `RAISE` message is missing a clause that
+single defining migration contains, which a live catalogue cannot lag. That is a PROD-vs-REPO
+divergence of the DRIFT-04 family, not baseline staleness; it is tracked as **DRIFT-06** in
+`TODOS.md` and each allowlist row now records the measurement instead of the falsified claim.
 
 ## Why it exists rather than a migration replay
 
@@ -65,12 +108,32 @@ So the baseline is a dump, not a replay. **Derivation is a one-time act; it is n
 coupling.** This file is pinned in git and reviewed in a PR, so every developer and every CI
 run gets identical bytes — the same relationship a lockfile has to a registry.
 
-## ⚠️ UNGATED as of this commit — see WINDOWS.md 29
+## ✅ GATED as of 2026-09-07 (Phase 164.5) — WINDOWS.md 29 is closed
 
-There is **no staleness check on this file yet**. `sql-function-snapshot.yml` gates
-`supabase/schema/functions/`; nothing yet gates this. A snapshot with no drift gate is exactly
-the artifact that diverges quietly and then gets trusted, so treat the number above as "true on
-2026-08-29" and nothing more. Building the gate is Phase 164.5 scope.
+⚠️ **This section said the opposite until 2026-09-07 and the claim outlived its truth by nine
+days.** It read: *"There is no staleness check on this file yet … nothing yet gates this …
+Building the gate is Phase 164.5 scope."* That is exactly the defect class this phase exists to
+close — a claim never compared to the thing it describes — so it is corrected here rather than
+quietly overwritten.
+
+TWO gates now cover this file, and they cover DIFFERENT things:
+
+1. **`scripts/check-baseline-staleness.mjs`** (Phase 164.5 plan 02) — a CO-EDIT gate. It fails
+   when `supabase/schema/baseline.sql`'s sha256 stops matching the value recorded in THIS file,
+   and passes only when both move together. Wired into `.github/workflows/sql-function-snapshot.yml`,
+   self-test first. Defect kinds: `baseline-sha-mismatch`, `baseline-sha-absent`,
+   `baseline-sql-unreadable`.
+2. **`scripts/baseline-content-drift-check.mjs`** (Phase 164.5 plan 03) — a CONTENT gate pinning
+   this file to the MIGRATION CHAIN. The co-edit gate above cannot fire when a migration changes
+   a function body and `baseline.sql` is left untouched; this one can.
+
+⛔ **Neither gate makes the dump comprehensively current.** Gate 2 compares FUNCTION BODIES ONLY
+— not tables, columns, policies, triggers, grants, indexes, defaults or extensions — and its
+chain side is a hermetic text replay, not a live one (69 of 262 migrations fail to replay from
+empty, so a live replay is impossible here, not merely slow). Read its own SCOPE line, which it
+prints on every run. The provenance number above is still only "true on 2026-09-07" for
+everything outside function bodies — the regeneration refreshes WHEN that statement was taken,
+never WHAT it covers.
 
 **Version-skew caveat for whoever writes that gate:** the local CLI is 2.84.2, CI pins 2.98.2.
 If `pg_dump` output formatting differs between them, a `--check` authored against these bytes
@@ -96,7 +159,11 @@ of them. A future regeneration carrying a `\connect` line or a JWT would have pa
 documented check and landed in a PUBLIC repo. The pattern now covers all five, and `-a` is
 not optional — this repository contains a MEASURED NUL-bearing file, and grep reports a
 NUL-bearing file as clean with exit 1. Today's `baseline.sql` is clean under the FULL set
-(re-run independently 2026-08-29), so this is forward-looking, not a live exposure. If you
+(re-run independently 2026-08-29, and again on the 2026-09-07 regeneration — the nine NEW
+matches for those three words are two `vault.decrypted_secrets` / `decrypted_secret`
+IDENTIFIERS and three `COMMENT ON` bodies, carrying no secret VALUE and already shipping
+publicly in `supabase/migrations/20260907120000`), so this is forward-looking, not a live
+exposure. If you
 widen the prose, widen this line in the same edit — that mismatch is the defect class this
 whole phase exists to remove.
 

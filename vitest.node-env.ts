@@ -71,6 +71,10 @@ export const NODE_ENV_TEST_FILES: string[] = [
   "src/__tests__/gdpr-export-coverage-hook.test.ts",
   "src/__tests__/gdpr-export-redaction.test.ts",
   "src/__tests__/gitleaks-allowlist.test.ts",
+  // Phase 164.5 / VAC-07 — a pure fs + text guard over the local-stack lane's CI
+  // wiring. Zero DOM tokens. ⚠️ It must stay in the SHARDED run: it is what makes
+  // the lane's own (excluded) spec unable to become a tombstone.
+  "src/__tests__/local-stack-lane-wiring.test.ts",
   "src/__tests__/log-audit-event-service-rpc.test.ts",
   "src/__tests__/match-decisions-holding-endpoint-rls.test.ts",
   "src/__tests__/match-decisions-schema.test.ts",

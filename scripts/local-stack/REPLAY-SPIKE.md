@@ -125,15 +125,24 @@ secret-scan recorded in `supabase/schema/BASELINE.md`.
 
 Two things the block below gets wrong at HEAD:
 
-- it names `scripts/local-stack/baseline.sql`, the **gitignored** lane-local path
-  (`.gitignore:138`). The committed artifact is at `supabase/schema/baseline.sql`;
+- it names the lane-local `baseline.sql` path under this directory, which is gitignored
+  (deleted by 164.5, restored 2026-09-08 — see the correction below). The committed
+  artifact is at `supabase/schema/baseline.sql`;
 - it dumps from **TEST**, which its own closing paragraph warns re-couples a disposable
   lane to a shared environment's drift. The committed dump is from PROD, which settles
   that open question.
 
-⚠️ **The lane still does not read either file.** `run.sh:50` points at the gitignored
-lane path, so `run.sh up` exits 1 FATAL. Repointing it is Phase 164.5's, together with
-dropping `.gitignore:138` and adding the staleness gate — see `supabase/schema/BASELINE.md`.
+✅ **SUPERSEDED AGAIN 2026-09-07 (Phase 164.5 criterion 1) — the lane now READS the
+committed file.** `run.sh` sets `BASELINE_FILE="${REPO_ROOT}/supabase/schema/baseline.sql"`
+and the lane-local path has no consumer left. Its secret-scan reasoning was copied into
+`supabase/schema/BASELINE.md`. ⚠️ CORRECTION 2026-09-08 (code review WR-05): 164.5 also
+DELETED the `.gitignore` exclusion of the lane-local path, and that line has been
+RESTORED — the command at line 156 below still names that path, this repo is PUBLIC, and
+a dump can carry a DSN. The paragraph that stood here said *"the lane
+still does not read either file … `run.sh up` exits 1 FATAL"*, and that is no longer true;
+it is kept only in this sentence, as the record of what changed. Ask the lane rather than
+trusting either version: `bash scripts/local-stack/run.sh --print-baseline-path`. The
+staleness gate is still outstanding — see `supabase/schema/BASELINE.md`.
 
 ## ⛔ BLOCKING-HUMAN (HISTORICAL — see the block above before acting on any of this)
 

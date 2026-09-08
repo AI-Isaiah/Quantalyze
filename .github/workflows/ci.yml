@@ -492,6 +492,162 @@ jobs:
         # denominator and invalidate the baseline.
         run: npx vitest run --config vitest.redis.config.ts --reporter=dot
 
+  frontend-local-stack:
+    # Phase 164.5 / VAC-07 — THE LOCAL-STACK LANE. App-level specs against a REAL
+    # Supabase stack (Postgres + PostgREST + GoTrue), booted by
+    # `scripts/local-stack/run.sh up` from the committed `supabase/schema/baseline.sql`.
+    #
+    # WHY IT EXISTS. `src/__tests__/csv-finalize-concurrent-never-classified.test.ts`
+    # fires TWO concurrent `csv-finalize` POSTs on ONE never-classified
+    # `wizard_session_id` from two supabase-js clients with SEPARATE access tokens, and
+    # asserts exactly one applied receipt, one named refusal, and a `category_id`
+    # holding the winner. That guarantee lives in the database — the partial unique
+    # index `strategies_user_wizard_session_source_uniq` plus the route's
+    # compare-and-set — so a mocked client cannot open the race at all. Nor can the
+    # pg-lane `sql-mutation` uses: it is BARE POSTGRES, with no PostgREST and no
+    # GoTrue, and `scripts/local-stack/run.sh` states the boundary in its own header.
+    #
+    # ⛔ AND THIS JOB IS WHAT MAKES THAT SPEC EXECUTE AT ALL. The spec is deliberately
+    # EXCLUDED from `vitest.config.ts`'s jsdom project (`vitest.local-stack-files.ts`)
+    # so the sharded `frontend-test` job — which has no stack — does not redden. The
+    # consequence is exact: WITHOUT THIS JOB THE SPEC RUNS NOWHERE. That is the shape
+    # of `src/__tests__/csv-finalize-rpc.test.ts`'s tombstone — six live-DB cases that
+    # skipped silently in every CI shard, for months, over a function that had been
+    # DROPped — and the sentence recorded there is the standard this job clears:
+    # "Coverage that cannot execute is worse than absent coverage."
+    # `src/__tests__/local-stack-lane-wiring.test.ts` runs in the ORDINARY shards and
+    # fails if this job is renamed or removed, stops naming
+    # `vitest.local-stack.config.ts`, or drops out of either aggregator list.
+    #
+    # ⛔ THE SPEC FAILS — IT DOES NOT SKIP — WHEN THE STACK IS ABSENT, so a broken boot
+    # step cannot green-wash this job. Its setup throws a message naming
+    # `scripts/local-stack/.stack-env` and the command that writes it. MEASURED
+    # 2026-09-07 with the lane deliberately down: `Tests 2 failed (2)`, exit 1, and
+    # ZERO skipped — the word this file's tombstone is remembered by never appears.
+    #
+    # AGGREGATOR ROW — DECIDED HERE, NOT LEFT TO OMISSION. This job references NO
+    # secret and NO repository variable, carries NO `if:`, holds NO `needs:`, touches
+    # NO shared resource (its stack is Docker containers private to its own runner —
+    # `run.sh` REFUSES any non-local DSN, so it can reach neither shared TEST nor
+    # PROD), and waits on no mutex. It therefore runs identically on a fork PR, a
+    # same-repo PR, a push and a `workflow_dispatch`; it has no legitimate skip; and a
+    # `skipped` result is ALWAYS a real fault. ⇒ It takes the `frontend:` result
+    # loop's STRICT DEFAULT ARM with NO tolerance — the `frontend-seam-redis` /
+    # `sql-gate-lint` / `sql-mutation` reasoning, and the OPPOSITE of the `sql-tests` /
+    # `e2e-seeded` rows, whose tolerances exist only because those jobs consume a repo
+    # variable a fork cannot see.
+    # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply to this one:
+    # that ban exists because those jobs share the TEST advisory-lock mutex and their
+    # `if:` conditions diverge, so a chain edge can silently skip a dependent. This job
+    # shares no resource, waits on no mutex, and has no `needs:` of its own to skip
+    # through.
+    #
+    # ⚠️ `timeout-minutes` — A HEADROOM FIGURE OVER ONE UNMEASURED TERM, SAID SO.
+    # MEASURED 2026-09-07 on macOS/darwin-arm64 with all 13 stack images ALREADY
+    # CACHED: `run.sh up` (start + baseline load) 26-31 s, the spec itself 1-2 s,
+    # `down` 2-3 s — about 36 s of lane work. The UNMEASURED term is a COLD
+    # `supabase start` on a fresh ubuntu runner, which must pull those 13 images,
+    # plus `npm ci` on a node_modules cache miss. No SHA-bound ubuntu run of this job
+    # exists yet, so 20 is headroom over an unmeasured pull, NOT a measured total.
+    # ⛔ When the first green ubuntu run reports its wall clock, REPLACE this with a
+    # value derived from it. Do not answer a crossing by widening it again.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Restore node_modules
+        id: node_modules_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+      - name: npm ci (cache miss; retry transient network failures)
+        if: steps.node_modules_cache.outputs.cache-hit != 'true'
+        run: |
+          n=0
+          until npm ci --prefer-offline --no-audit --no-fund; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "npm ci failed after $n attempts"; exit 1; fi
+            echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
+      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+        with:
+          # ⚠️ SKEW, STATED RATHER THAN HIDDEN. This is the SAME pin every other
+          # workflow here uses (migration-drift-check, supabase-migrate and
+          # migration-policy among them), so the repo keeps ONE answer to "which
+          # CLI". ⛔ A FOURTH workflow carries the same pin and is deliberately NOT
+          # NAMED HERE — not even in prose, and neither is the spec that forbids it.
+          # Phase 164.1 / D-18 requires that THIS FILE hold no reference to that
+          # workflow, so that a red production probe can never block a deploy, and the
+          # spec enforcing it is a plain SUBSTRING match over ci.yml: a mention inside
+          # a YAML comment reddens it exactly as a real `needs:` edge would. MEASURED
+          # 2026-09-07 — an earlier draft of this very comment listed it among the
+          # workflows sharing the pin and turned that spec RED.
+          # The developer-box boot the timeout above is derived from used
+          # 2.84.2; whether 2.98.2 starts this stack and loads this dump is
+          # UNMEASURED, and an unmeasured thing is not a passing thing. If this job's
+          # first run dies inside `supabase start`, that is the live hypothesis.
+          version: 2.98.2
+      # `scripts/local-stack/run.sh` loads the committed baseline through `psql`,
+      # and `resolve_psql`'s ONLY fallback is /opt/homebrew/opt/postgresql@16 — a
+      # macOS keg that does not exist on this runner. A miss is not a skip: it is
+      # `FATAL: psql not found ...` and exit 1, on a job that is aggregator-BLOCKING
+      # from its first ever run. `sql-tests` in this same file installs the client
+      # explicitly for the same reason (see its "Install psql client" step).
+      # ⚠️ HONEST BOUND: this is insurance, not a measured absence — no ubuntu run
+      # of this job exists yet, so whether the image already ships `psql` is
+      # UNVERIFIED. ~10s to remove one of the two unmeasured terms in the job's own
+      # timeout note; if the first green run proves the image ships it, drop this
+      # step on that evidence rather than on assumption.
+      - name: Install psql client (the lane loads the baseline through it)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          psql --version
+      - name: Preflight - the lane must have a non-empty test corpus
+        # A green job that ran nothing is the silent-green this lane exists to
+        # eliminate. `passWithNoTests: false` in the config is the second control;
+        # this one fails EARLIER and prints what would have run. It only COLLECTS —
+        # no stack is needed, and none is running yet at this point.
+        run: |
+          set -euo pipefail
+          npx vitest list --config vitest.local-stack.config.ts | tee /tmp/lane-corpus.txt
+          if [ ! -s /tmp/lane-corpus.txt ]; then
+            echo "::error::vitest collected NO tests from vitest.local-stack.config.ts — the local-stack lane has no corpus. This job must never pass vacuously."
+            exit 1
+          fi
+      - name: Boot the local-stack lane (Supabase CLI stack + committed baseline)
+        # ⭐ FIRST AND ONLY CONSUMER of `scripts/local-stack/.stack-env` — the mode-600
+        # env handoff `run.sh up` writes (API_URL / ANON_KEY / SERVICE_ROLE_KEY / …).
+        # Nothing else in the tree reads it; the lane spec is what made it a seam
+        # rather than a promise. `up` asserts the stack reported a 127.0.0.1/localhost
+        # API URL and refuses otherwise, and the spec re-asserts it independently.
+        run: bash scripts/local-stack/run.sh up
+      - name: Run the local-stack lane
+        # NO --coverage, deliberately. `frontend-coverage` merges the two
+        # frontend-test shards' blob reports and enforces the ratchet on the merged
+        # numbers; a third blob from this lane would shift the denominator and
+        # invalidate the baseline. (Same rule as `frontend-seam-redis`.)
+        run: npm run test:local-stack
+      - name: Tear down the lane (and PROVE nothing survived)
+        # `if: always()`: `run.sh up` leaves the stack running on success by design, so
+        # a failed spec would otherwise orphan 13 containers. `--assert-teardown` is
+        # the control that MEASURE_FAILs rather than passing when `docker ps` cannot
+        # answer — "could not count" is not "counted zero".
+        if: always()
+        run: |
+          set -euo pipefail
+          bash scripts/local-stack/run.sh down
+          bash scripts/local-stack/run.sh --assert-teardown
+
   frontend-policy:
     # Banned-package check + GDPR export coverage. PR-C moved npm audit
     # to the nightly workflow because (a) it's a security signal, not a
@@ -821,6 +977,94 @@ jobs:
         run: node scripts/lint-app-guc.mjs --self-test
       - name: App-GUC gate - zero unannotated app-GUC reads in supabase/migrations
         run: node scripts/lint-app-guc.mjs
+      # ── Phase 164.5, criterion 7: BASELINE-CONTENT-DRIFT ──────────────────
+      # A THIRD SIBLING in this job, for the same reason the app-GUC gate is a
+      # sibling rather than a rule: different corpus (supabase/schema/, not
+      # supabase/tests/ or supabase/migrations/), different engine. It calls
+      # `diffFunctionBodies()` from scripts/sql-body-normalize.mjs — Phase
+      # 164.3's D-05 declared SINGLE shared normalizer — and writes no second
+      # one. Same hermetic contract (no DB, no Docker, no secrets, no network),
+      # same mode identity: these two lines are the EXACT commands a developer
+      # runs, pasted verbatim from the script's own header.
+      #
+      # WHAT IT CATCHES that nothing else does. Phase 164.5's co-edit gate fires
+      # on a BYTE CHANGE to supabase/schema/baseline.sql. It structurally cannot
+      # fire in the other direction — a migration moves a function body and the
+      # committed dump is left alone — which is exactly what Phase 164.7 did.
+      # This pins the dump to the chain and lands BEFORE any migration squash
+      # (decision D-04): squashing onto an unpinned, already-drifted baseline
+      # would freeze that drift into the new floor permanently.
+      #
+      # ⚠️ DATED 2026-09-07. This gate ships GREEN, not red-by-design. Its
+      # known drift — MEASURED 114 MATCH / 6 DRIFT / 2 SNAPSHOT_MISSING /
+      # 0 SNAPSHOT_ONLY / 0 UNCOMPARABLE — is carried as EIGHT dated rows in
+      # CONTENT_DRIFT_ALLOWLIST, each pinning the snapshotHash/candidateHash
+      # PAIR plus nargs and the differing-line count. That is plan 164.5-03's
+      # P-03 decision: PRECEDENT B (a ratchet) over PRECEDENT A (the declared
+      # red interval the app-GUC steps above ran for four plans). This phase
+      # exists because an artifact shipped with no staleness gate and no
+      # consumer; a gate that cannot block for an interval reproduces that same
+      # class in a smaller form.
+      #
+      # ⛔ THE ROWS MAY ONLY SHRINK, and a red corpus step from here is a
+      # REGRESSION. It is NEVER cleared by adding a row or by loosening the pin:
+      #   • a DIFFERENT drift on an already-pinned function fails
+      #     (`allowlist-hash-moved`) — the pin is the hash pair, never the name;
+      #   • a row that has stopped being true fails (`allowlist-stale`) and says
+      #     to DELETE it;
+      #   • a row missing either hash is refused at startup
+      #     (`allowlist-malformed`);
+      #   • UNCOMPARABLE is a MEASURE_FAIL, never a pass.
+      # `src/__tests__/baseline-content-drift-allowlist.test.ts` re-derives the
+      # row count and the name set from the script's own bytes and fails in
+      # BOTH directions, so neither growth nor un-recorded progress is silent.
+      #
+      # What DOES clear a row: a regeneration of supabase/schema/baseline.sql
+      # from PROD. That is a separate REVIEWED act on a credential-bearing
+      # surface, and it also moves the sha256 recorded in
+      # supabase/schema/BASELINE.md — three coupled edits, not a step inside a
+      # hermetic gate.
+      #
+      # ⚠️ STATED BLINDNESS, printed by the gate on every run: FUNCTION BODIES
+      # ONLY. No tables, columns, policies, triggers, grants or indexes. The
+      # chain side is supabase/schema/functions/*.sql, a hermetic TEXT-REPLAY
+      # rendering (its own currency gated by `tsx scripts/dump-sql-functions.ts
+      # --check` in sql-function-snapshot.yml), NOT a live replay — 69 of 262
+      # migrations fail to replay from empty, so a live replay is impossible
+      # here rather than merely slow.
+      - name: Baseline content-drift gate self-test - every finding kind fires on a synthetic corpus
+        # Runs BEFORE the corpus scan, for the same reason the two self-tests
+        # above do: a corpus scan reporting "findings 0" tells you nothing
+        # unless the rules can still fire.
+        run: node scripts/baseline-content-drift-check.mjs --self-test
+      - name: Baseline content-drift gate - committed baseline.sql agrees with the migration chain
+        run: node scripts/baseline-content-drift-check.mjs
+
+      # [CR-02] `prod-body-drift-check.sh --self-test` was invoked by NOTHING —
+      # eight hermetic arms, the only control that can tell a working DRIFT-05
+      # gate (b) from a defanged one, while the script's own header at :144 says
+      # "CI pastes these lines VERBATIM". Every sibling self-test in this repo is
+      # wired (lint-sql-gates, lint-app-guc, baseline-content-drift, mutation
+      # runner, verify-plan-anchors, check-baseline-staleness, dump-sql-functions,
+      # and the production prober); this one was the exception. ⛔ THE PROBER IS
+      # DELIBERATELY NOT NAMED HERE, not even in prose, and neither is its spec's
+      # path. `src/__tests__/` carries a D-18 invariant asserting this file holds
+      # NO reference to that tool, so a red prober can never block a deploy — and
+      # it is a raw substring check, so a COMMENT trips it exactly like a step
+      # would. MEASURED 2026-09-08: naming it once, in this very comment, cost a
+      # full-suite red that no file-scoped run could surface.
+      # ⚠️ THIS IS A RECURRENCE: the
+      # comment at ~:1443 in this same file records the identical defect being
+      # found and fixed for another gate.
+      #
+      # It belongs HERE rather than in migration-drift-check.yml, where gate (b)'s
+      # real `--baseline-live` leg runs, because the self-test is HERMETIC — it
+      # drives the arms with stub commands and needs no credential — so it must
+      # run on every PR, not only on the migration PRs that trigger that workflow.
+      # A gate whose control only runs when the gate itself runs cannot catch a
+      # commit that defangs it.
+      - name: DRIFT-05 gate (b) self-test - all eight arms fire with stub commands, no credential
+        run: bash scripts/prod-body-drift-check.sh --self-test
 
   sql-mutation:
     # Phase 164.3 / VAC-01 + VAC-02 — the RED-UNDER mutation runner over the
@@ -1921,6 +2165,30 @@ jobs:
     # banned because a skipped `needs:` job SKIPS its dependents; this job
     # carries `if: always()`, so an upstream skip reaches the loop below as a
     # RESULT to judge rather than skipping the gate.
+    #
+    # Phase 164.5 / VAC-07 (2026-09-07): `frontend-local-stack` is BLOCKING here,
+    # wired into BOTH places below — either one alone leaves it advisory, the trap
+    # SEAMCORE-09 recorded for `frontend-seam-redis`.
+    # ⭐ AND HERE IT IS MORE THAN THE USUAL TRAP. The spec that job runs is EXCLUDED
+    # from the sharded `frontend-test` run on purpose (`vitest.local-stack-files.ts`),
+    # so this row is not "one more gate" — it is the ONLY place that spec executes.
+    # An advisory row would leave the concurrent csv-finalize race asserted nowhere
+    # while reading as covered, which is `csv-finalize-rpc.test.ts`'s tombstone with a
+    # new name.
+    # It takes the loop's STRICT DEFAULT ARM and must NEVER be given a tolerance arm:
+    # it consumes no secret and no repository variable, carries no `if:` and no
+    # `needs:`, and hosts its own Supabase stack in Docker containers private to its
+    # runner (`scripts/local-stack/run.sh` REFUSES a non-local DSN, so it reaches
+    # neither shared TEST nor PROD). It therefore runs identically on a fork PR, a
+    # same-repo PR, a push and a workflow_dispatch, has no legitimate skip, and a
+    # `skipped` there is always a real fault — the `frontend-seam-redis` /
+    # `sql-gate-lint` / `sql-mutation` reasoning, and the OPPOSITE of the `sql-tests` /
+    # `e2e-seeded` rows.
+    # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply to it, for the
+    # same reason as `sql-mutation`: that ban exists because those jobs share the TEST
+    # advisory-lock mutex and their `if:` conditions diverge, so a chain edge can
+    # silently skip a dependent. This job shares no resource and waits on no mutex.
+    # The full argument, including the timeout derivation, is in the job's own header.
     runs-on: ubuntu-latest
     needs:
       - frontend-typecheck
@@ -1928,6 +2196,7 @@ jobs:
       - frontend-test
       - frontend-coverage
       - frontend-seam-redis
+      - frontend-local-stack
       - frontend-policy
       - frontend-build
       - e2e-seeded
@@ -1946,6 +2215,7 @@ jobs:
             "frontend-test=${{ needs.frontend-test.result }}" \
             "frontend-coverage=${{ needs.frontend-coverage.result }}" \
             "frontend-seam-redis=${{ needs.frontend-seam-redis.result }}" \
+            "frontend-local-stack=${{ needs.frontend-local-stack.result }}" \
             "frontend-policy=${{ needs.frontend-policy.result }}" \
             "frontend-build=${{ needs.frontend-build.result }}" \
             "e2e-seeded=${{ needs.e2e-seeded.result }}" \

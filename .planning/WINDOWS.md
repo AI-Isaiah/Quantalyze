@@ -1,10 +1,11 @@
 ---
 schema_version: 1
-open_count: 36
+open_count: 37
 waived_count: 0
 fixed_count: 10
-total_count: 46
-last_updated: 2026-09-07T12:29:08.213Z
+total_count: 47
+last_updated: 2026-09-07T19:11:20.760Z
+last_updated: 2026-09-07T19:04:26.108Z
 ---
 
 # Broken Windows Ledger
@@ -61,6 +62,10 @@ last_updated: 2026-09-07T12:29:08.213Z
 | 44 | 164.7 | unrun-verify | .github/workflows/ci.yml |  | sql-gate-lint's two new app-GUC steps have never run on ubuntu; the corpus step is RED by design (12 findings/5 files) until 164.7-05 annotates the tree, so no push or workflow_dispatch is permitted before then | open |  | 2026-09-07T10:11:28.312Z |  |
 | 45 | 164.7 | deviation | supabase/tests/test_analytics_service_settings_and_vault_tick.sql |  | MEASURED: a DROP POLICY <t>_service_all mutation twin is UNFALSIFIABLE repo-wide — service_role is BYPASSRLS on the pg-lane and on Supabase, so every *_service_all policy is belt-and-braces and no twin of that shape can bite (no-red R3, 164.7-02-NEUTER.log Part B2). Any existing arm relying on one is worth re-measuring. | open |  | 2026-09-07T10:18:29.567Z |  |
 | 46 | 164.7 | deviation | .planning/phases/164.7-appsettings-every-app-guc-reader-moves-to-a-mechanism-this-p/deferred-items.md |  | npm run lint is RED on the 164.7 branch: 86 planning-hygiene violations (ABSOLUTE-HOME-PATH / SCRATCH-HOME-PATH / LOCAL-USERNAME) across 13 of the phase's OWN plan, summary and neuter files, leaking the local username on a public repo. Predates plan 05 (git diff over those files vs d193e4cd is empty). Remedy edits three PENDING plans, so plan 05 recorded it instead of fixing it; owner is plan 06. See deferred-items.md D-164.7-05-1. | open |  | 2026-09-07T12:29:08.213Z |  |
+| 47 | 164.5 | unrun-verify | scripts/prod-body-drift-check.sh |  | DRIFT-05 gate (b) --baseline-live has never run against the real PROD credential; its first credentialed run is predicted red (see TODOS [DRIFT-05B-FIRST-RUN]) and that prediction is reasoning from dates, not a reading of PROD. | open |  | 2026-09-07T19:11:20.760Z |  |
+| 48 | 164.5 | unrun-verify | scripts/local-stack/run.sh |  | run.sh up boots and loads the committed baseline on Supabase CLI 2.84.2 (measured 2026-09-07, macOS, 4 legs exit 0), but NOTHING in .github/workflows/ invokes the lane and the CI-pinned CLI 2.98.2 has never started this stack or loaded this dump. Criterion 1 is proven on one developer box only. | open |  | 2026-09-07T19:02:48.367Z |  |
+| 49 | 164.5 | unrun-verify | .github/workflows/sql-function-snapshot.yml |  | The two new baseline co-edit gate steps have never been executed by GitHub Actions. actionlint 1.7.12 (exit 0) and a js-yaml parse prove the file is valid and the step order is intended; neither proves the snapshot-drift job runs green on ubuntu. A SHA-bound run is owed at PR time. | open |  | 2026-09-07T19:04:26.108Z |  |
+| 50 | 164.5 | unrun-verify | .planning/phases/164.5-baseline-snapshot-the-committed-prod-schema-baseline-becomes/164.5-03-PLAN.md |  | 164.5-03: full serialized vitest run NOT executed — the plan scopes it to before the wave merges and the box is shared with concurrent wave-1 executors (contention fakes regressions). Targeted, contracts/ and all ci.yml-reading suites were run instead. | open |  | 2026-09-07T19:07:20.161Z |  |
 
 ````json
 [
@@ -614,6 +619,54 @@ last_updated: 2026-09-07T12:29:08.213Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-07T12:29:08.213Z",
+    "resolved_at": null
+  },
+  {
+    "id": 47,
+    "kind": "unrun-verify",
+    "phase": "164.5",
+    "file": "scripts/prod-body-drift-check.sh",
+    "line": null,
+    "description": "DRIFT-05 gate (b) --baseline-live has never run against the real PROD credential; its first credentialed run is predicted red (see TODOS [DRIFT-05B-FIRST-RUN]) and that prediction is reasoning from dates, not a reading of PROD.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T19:11:20.760Z",
+    "resolved_at": null
+  },
+  {
+    "id": 48,
+    "kind": "unrun-verify",
+    "phase": "164.5",
+    "file": "scripts/local-stack/run.sh",
+    "line": null,
+    "description": "run.sh up boots and loads the committed baseline on Supabase CLI 2.84.2 (measured 2026-09-07, macOS, 4 legs exit 0), but NOTHING in .github/workflows/ invokes the lane and the CI-pinned CLI 2.98.2 has never started this stack or loaded this dump. Criterion 1 is proven on one developer box only.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T19:02:48.367Z",
+    "resolved_at": null
+  },
+  {
+    "id": 49,
+    "kind": "unrun-verify",
+    "phase": "164.5",
+    "file": ".github/workflows/sql-function-snapshot.yml",
+    "line": null,
+    "description": "The two new baseline co-edit gate steps have never been executed by GitHub Actions. actionlint 1.7.12 (exit 0) and a js-yaml parse prove the file is valid and the step order is intended; neither proves the snapshot-drift job runs green on ubuntu. A SHA-bound run is owed at PR time.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T19:04:26.108Z",
+    "resolved_at": null
+  },
+  {
+    "id": 50,
+    "kind": "unrun-verify",
+    "phase": "164.5",
+    "file": ".planning/phases/164.5-baseline-snapshot-the-committed-prod-schema-baseline-becomes/164.5-03-PLAN.md",
+    "line": null,
+    "description": "164.5-03: full serialized vitest run NOT executed \u2014 the plan scopes it to before the wave merges and the box is shared with concurrent wave-1 executors (contention fakes regressions). Targeted, contracts/ and all ci.yml-reading suites were run instead.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T19:07:20.161Z",
     "resolved_at": null
   }
 ]
