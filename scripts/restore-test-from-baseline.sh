@@ -614,9 +614,34 @@ REFDATA_ENTRY_N=0
 # self-test can point it at a fixture instead of at this script.
 refuse_backticks_in_txn_heredocs() {
   local src="${1:-$0}" hits
+  # ⛔ MATCH EVERY UNQUOTED HEREDOC, not just the `TXN_*` ones. The first cut of
+  # this guard keyed on /<<TXN_[A-Z_]+$/ and the phase verification walked past it
+  # FOUR ways on scratch fixtures: `<<-TXN_A`, `<<TXN_A ` (one trailing space),
+  # `<<TXN_Gate2` (a lowercase letter in the delimiter) and any delimiter that is
+  # simply not spelled TXN_. Nothing in this script triggered any of them, which is
+  # exactly why a guard named for a general property must MEASURE that property —
+  # a name that overclaims is how the next reader concludes they are covered.
+  #
+  # A QUOTED delimiter (<<'EOF' or <<"EOF") disables substitution entirely, so
+  # those bodies are safe by construction and are skipped, not scanned.
+  #
+  # The `$` anchor stays: a real opener ends its line. It is also what keeps the
+  # self-test's own fixture-writing `printf 'cat >> "$out" <<TXN_FIXTURE\n'` from
+  # reading as an opener.
   hits=$(awk '
-    /<<TXN_[A-Z_]+$/ { sub(/^.*<</, "", $0); term = $0; inside = 1; next }
-    inside && $0 == term { inside = 0; next }
+    !inside {
+      if (match($0, /<<-?[ \t]*("[A-Za-z_][A-Za-z0-9_]*"|'"'"'[A-Za-z_][A-Za-z0-9_]*'"'"'|[A-Za-z_][A-Za-z0-9_]*)[ \t]*$/)) {
+        tok = substr($0, RSTART, RLENGTH)
+        sub(/^<<-?[ \t]*/, "", tok)
+        sub(/[ \t]*$/, "", tok)
+        # Quoted delimiter => no expansion inside the body => nothing to refuse.
+        if (tok ~ /^["'"'"']/) next
+        term = tok; inside = 1; next
+      }
+      next
+    }
+    { line = $0; sub(/^[ \t]+/, "", line) }
+    inside && line == term { inside = 0; next }
     inside {
       # A BACKSLASH-ESCAPED backtick is LITERAL in an unquoted heredoc — no
       # substitution — and the oldest comments in these heredocs are written that
@@ -629,7 +654,7 @@ refuse_backticks_in_txn_heredocs() {
   ' "$src")
   if [ -n "$hits" ]; then
     printf '%s\n' "$hits" >&2
-    fail "restore aborted: a backtick appears inside an unquoted <<TXN_* heredoc in ${src} (lines above). The heredoc is unquoted so it can interpolate the gate's VALUES list, which means bash COMMAND-SUBSTITUTES every backticked span in it — SQL comments included — while assembling a destructive restore. Write plain prose inside these heredocs; do not quote the heredoc (that would break the interpolation the gate needs)."
+    fail "restore aborted: a backtick appears inside an UNQUOTED heredoc in ${src} (lines above). These heredocs are unquoted so they can interpolate the gate's VALUES list, which means bash COMMAND-SUBSTITUTES every backticked span in them — SQL comments included — while assembling a destructive restore, and a multi-line span swallows the following line's comment prefix. Write plain prose inside them, or backslash-escape the backtick (\\\` is literal here); do NOT quote the heredoc, that would break the interpolation the gate needs."
   fi
 }
 
@@ -2808,7 +2833,7 @@ FRESHSTUB
     out="$SELFTEST_TMPD/a26a.out"
     ( refuse_backticks_in_txn_heredocs "$d/dirty.sh" ) > "$out" 2>&1 && {
       echo "MEASURE_FAIL (a): a backtick inside an unquoted <<TXN_* heredoc was ACCEPTED. bash would command-substitute that span while assembling a destructive restore."; cat "$out"; return 1; }
-    grep -aq 'a backtick appears inside an unquoted' "$out" \
+    grep -aq 'a backtick appears inside an UNQUOTED heredoc' "$out" \
       || { echo "MEASURE_FAIL (a): something refused, but not this guard — so the guard is still unmeasured."; cat "$out"; return 1; }
     grep -aq 'RAISE' "$out" \
       || { echo "MEASURE_FAIL (a): the refusal does not print the offending LINE, so a reader is told a backtick exists somewhere and not where."; return 1; }
@@ -2826,6 +2851,37 @@ FRESHSTUB
     out="$SELFTEST_TMPD/a26b.out"
     ( refuse_backticks_in_txn_heredocs "$d/clean.sh" ) > "$out" 2>&1 \
       || { echo "MEASURE_FAIL (b): the guard refused a file whose backticks are all OUTSIDE the heredoc. It would make every shell comment in this script an error."; cat "$out"; return 1; }
+
+    # (d) ⛔ THE FOUR EVASIONS. The first cut of this guard keyed on
+    #     /<<TXN_[A-Z_]+$/ and the phase verification got a live backtick past it
+    #     four ways. Each is its own fixture here, because a guard named for a
+    #     general property while testing a narrow one is how the next reader
+    #     concludes they are covered. NONE of these shapes occurs in this script
+    #     today — which is precisely why nothing but this leg would notice.
+    local ev evname
+    for ev in 'X<<-TXN_A' 'X<<TXN_A ' 'X<<TXN_Gate2' 'X<<PLAIN_EOF'; do
+      evname=$(printf '%s' "$ev" | sed 's/^X//')
+      {
+        printf 'cat >> "$out" <%s\n' "${evname#<}"
+        printf -- '  -- prose carrying a live `RAISE` backtick\n'
+        printf '%s\n' "$(printf '%s' "$evname" | sed -E 's/^<<-?[ \t]*//; s/[ \t]*$//')"
+      } > "$d/evade.sh"
+      out="$SELFTEST_TMPD/a26d.out"
+      ( refuse_backticks_in_txn_heredocs "$d/evade.sh" ) > "$out" 2>&1 && {
+        echo "MEASURE_FAIL (d): the delimiter spelling '${evname}' walked a LIVE backtick past the guard. bash substitutes it all the same — the delimiter's spelling is not what makes a heredoc unquoted."; cat "$d/evade.sh"; return 1; }
+    done
+
+    # (e) A QUOTED delimiter disables substitution entirely, so its body is safe
+    #     by construction and must NOT be refused — otherwise the guard's fix is
+    #     'quote the heredoc', which would break the interpolation the gate needs.
+    {
+      printf 'cat >> "$out" <<%sQUOTED%s\n' "'" "'"
+      printf -- '  -- a `backtick` here is literal because the delimiter is quoted\n'
+      printf 'QUOTED\n'
+    } > "$d/quoted.sh"
+    out="$SELFTEST_TMPD/a26e.out"
+    ( refuse_backticks_in_txn_heredocs "$d/quoted.sh" ) > "$out" 2>&1 \
+      || { echo "MEASURE_FAIL (e): the guard refused a QUOTED heredoc, whose body bash never expands. It would push readers toward quoting the gate's heredoc, which cannot be quoted."; cat "$out"; return 1; }
 
     # (c) ⛔ THE POINT OF THE ARM — THIS SCRIPT ITSELF. Legs (a) and (b) only
     #     prove the detector discriminates; they say nothing about the file the
@@ -2912,7 +2968,7 @@ FRESHSTUB
   run_arm "23 RED   the reference-data gate BITES: no replay, no search_path, partial replay" 0 arm_refdata_gate_bites
   run_arm "24 RED   reference-data allowlist: count drift, empty, silent extractor" 0 arm_bad_refdata_allowlist
   run_arm "25 GREEN the preflight rollback view normalises mutable reference counts and NOTHING else (CR-01)" 0 arm_census_rollback_view
-  run_arm "26 RED   a backtick inside an unquoted <<TXN_* heredoc is refused, and THIS script is clean" 0 arm_backtick_in_txn_heredoc
+  run_arm "26 RED   a backtick inside ANY unquoted heredoc is refused — four evasions closed — and THIS script is clean" 0 arm_backtick_in_txn_heredoc
 
   release_mutex
 

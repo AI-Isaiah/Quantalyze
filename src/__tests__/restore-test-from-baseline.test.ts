@@ -191,6 +191,38 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
     expect(liveCount(region, 'if [ "$total" -ne "$EXPECTED_ARMS" ]; then')).toBe(1);
     expect(liveCount(region, 'if [ "$pass" -ne "$total" ]; then')).toBe(1);
 
+    // ⛔ THE MEASURED-DATE COMMENT MUST AGREE WITH THE CONSTANT IT SITS BESIDE.
+    // The phase verification's advisory (2026-09-09): SC-9 pins that a DATE is
+    // present, never that the COUNT in the same sentence is the current one. So
+    // rewriting `prints 26/26` to `prints 24/24` beside the constant left every
+    // ratchet leg green — the two can drift apart silently, and the prose is what
+    // a reader trusts. Derive the expected count from the constant rather than
+    // restating it here, so this assertion cannot itself go stale.
+    const armsLine = lines.find((l) => isLive(l) && /^EXPECTED_ARMS=\d+$/.test(l.trim()));
+    const arms = Number((armsLine ?? "").trim().split("=")[1]);
+    expect(Number.isInteger(arms) && arms > 0).toBe(true);
+    const printsClaims = SRC.split("\n").filter((l) => /prints \d+\/\d+/.test(l));
+    expect(
+      printsClaims.length,
+      "no `prints N/N` sentence found beside the ratchet. It is the human-readable half of the same fact and this pin exists to keep the two from drifting.",
+    ).toBeGreaterThan(0);
+    for (const claim of printsClaims) {
+      expect(
+        claim,
+        `a comment claims ${/prints \d+\/\d+/.exec(claim)?.[0]} while EXPECTED_ARMS is ${arms}. The prose and the constant have drifted, and SC-9's date check cannot see it.`,
+      ).toContain(`prints ${arms}/${arms}`);
+    }
+
+    // CALIBRATION for the pair above — move the constant and the prose must
+    // disagree, or this assertion is measuring nothing.
+    const moved = SRC.replace("\nEXPECTED_ARMS=26\n", "\nEXPECTED_ARMS=27\n");
+    expect(moved).not.toBe(SRC);
+    const movedArms = 27;
+    expect(
+      SRC.split("\n").filter((l) => /prints \d+\/\d+/.test(l)).every((l) => l.includes(`prints ${movedArms}/${movedArms}`)),
+      "the `prints N/N` prose still agrees with a MOVED constant, so the agreement check is vacuous.",
+    ).toBe(false);
+
     // CALIBRATION — comment the constant out; a whole-file `toContain` would
     // still pass, this pin must not.
     const commented = SRC.replace("\nEXPECTED_ARMS=26\n", "\n# EXPECTED_ARMS=26\n");

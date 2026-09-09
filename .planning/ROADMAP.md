@@ -1481,7 +1481,7 @@ Plans:
 Plans:
 
 - [x] 164.8.1-01-PLAN.md — (wave 1) the (file, table, count)-keyed allowlist, the refuse-by-default extractor with `--audit`/`--self-test`, the AIM-first contract test, and the audit wired self-test-first into `sql-gate-lint` and the restore workflow
-- [x] 164.8.1-02-PLAN.md — (wave 2) the replay + fail-loud gate inside the restore transaction under a `SET LOCAL search_path` bracket, `refdata:` census rows, arms 22-24 (gate proven to bite on a scratch copy), `EXPECTED_ARMS` 21 → 25 with every vitest pin re-measured (arm 23 gained leg (d), the SHORT branch's falsifier, and arm 25 the rollback view's, both at phase review)
+- [x] 164.8.1-02-PLAN.md — (wave 2) the replay + fail-loud gate inside the restore transaction under a `SET LOCAL search_path` bracket, `refdata:` census rows, arms 22-24 (gate proven to bite on a scratch copy), `EXPECTED_ARMS` 21 → 26 with every vitest pin re-measured (arm 23 gained leg (d), the SHORT branch's falsifier, and arm 25 the rollback view's, both at phase review; arm 26 and refusal 9 came out of the phase verification, which found bash command-substituting comment prose inside the unquoted TXN heredocs)
 - [x] 164.8.1-03-PLAN.md — (wave 1) the seeder's false "migration didn't run" inference corrected; the TEST-points-at-PROD-compute hazard booked as `[164.8.1-TEST-ANALYTICS-URL-PROD]` routed to Phase 164.9
 - [x] 164.8.1-04-PLAN.md — (wave 3, checkpointed) first real run is `--mode preflight` on `main`; founder decides the restore on its `refdata:` readings; SHA-bound green `python` + `e2e-seeded` recorded
 
