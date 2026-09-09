@@ -1369,6 +1369,36 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 - [ ] 164.8-06-PLAN.md — WAVE 3 CLOSURE: record the verdicts and the SHA-bound readings, TODOS closures with run ids (incl. the `TEST-NOT-APPLICABLE` pragma verdict), first SHA-bound VAC-08 `0 absent` reading, CLAUDE.md + mutex runbook currency
   ⛔ **CORRECTED 2026-09-09.** This bullet read "the `TEST-NOT-APPLICABLE` pragma recorded as DEAD SCOPE by measurement" — the verdict the plan-checker's B4 finding REVERSED on 2026-09-08, before plan 06 ran. The shipped verdict is two-part: unnecessary for `20260908120000` (narrow, evidenced), general case OPEN and routed to Phase 164.9 as `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`. A ROADMAP bullet still carrying the superseded half would send the next reader to close a hole that is open.
 
+### Phase 164.8.3: PROBERAUTH — the prod-prober names MT5 `-6` as what it is (the terminal has no authorized account) instead of collapsing it into the catch-all `mt5-terminal-error` whose remedy sends the operator to an error table (INSERTED)
+
+**Goal:** The prober's MT5 arm gives a dedicated defect kind to `-6`, so the five consecutive red `prod-prober` runs since 2026-09-07 say what is wrong and what to do. Today only `-10004` and `-10005` get their own kinds; everything else falls into `mt5-terminal-error`, whose remedy tells the operator to "read the reported code against the MT5 error table". `-6` has exactly one cause and exactly one remedy, so that instruction is the whole defect.
+
+⛔ **This phase does NOT clear the live outage.** The terminal has no authorized account; restoring it needs a VNC session and broker credentials and is a founder action. This phase makes the NEXT occurrence self-explanatory. Do not treat a green prober as this phase's acceptance signal — it is not in this phase's gift.
+
+⚠️ **MEASURED LIVE 2026-09-09 from this checkout, quoted so nobody re-derives it:**
+```
+$ ./scripts/mt5-diag.sh
+PROBE {"initialize": false, "last_error": [-6, "Terminal: Authorization failed"], "terminal_info": null}
+```
+`-6` is `RES_E_AUTH_FAILED`. The rpyc bridge answered (a dead bridge gives `-10004`), so the terminal is up and un-authorized — not a transport fault. The `mt5-gateway` deploy log at the minute of each failing prober run (`34387586781`, `34366806167`, `34340209991`, `34315451286`, `34296899495`) contains ONLY VNC session lines (`SLAVE/8001 accepted/welcome/goodbye`) and no MT5 login attempt at all — the absence is the evidence.
+
+**Success Criteria**:
+
+1. **`-6` reports as its own kind, never as `mt5-terminal-error`.** The kind's detail states what was measured (the bridge answered; no account is authorized), not a code the reader must look up.
+2. **The remedy names the action.** VNC to the gateway service, log the terminal back into the investor account with "Save password", and re-check the two Expert-Advisors options a login re-clears. ⛔ It must NOT route the operator to the MT5 error table — that instruction is what this phase removes.
+3. **The new kind ships with a red fixture, registered in the arm's `kinds` list**, exactly as `10004.txt` and `10005.txt` are. ⛔ A remedy without a fixture is the vacuity class this repo ranks above correctness: the registry asserts kind coverage, so an unregistered kind is a control that measures nothing.
+4. **`mt5-terminal-error` survives and keeps meaning something.** `terminal-info-null.txt` still maps to it — "the bridge answered and the terminal is the problem, cause not enumerated". Splitting `-6` out must not leave the catch-all empty, and the arm's own by-name absence assertions must still discriminate the two.
+5. ⛔ **Scope fence — `scripts/mt5-diag.sh` stays READ-ONLY.** It calls `initialize()` + `terminal_info()` and never `login()`, because a login is an "account change" and MT5 re-clears `[Experts] Enabled` on every account change while `Account=1` is armed — a probe that authenticated would re-break the thing it measures (the recorded 2026-08-13 incident, where each diagnostic round re-disabled algo trading). ⛔ Do not close this phase by making the probe log in.
+6. **Falsifier observed RED.** Neuter the `-6` branch, watch the fixture fall back to `mt5-terminal-error`, restore from pristine bytes. ⛔ Never `git checkout --` in the harness — it restores to HEAD and silently destroys uncommitted work.
+
+**Requirements**: TBD (no v1.20 requirement IDs) + GitHub issue #753 (`prod-prober` red since 2026-09-07)
+**Depends on:** Phase 164.1 (owns the prober's MT5 arm and its defect vocabulary)
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.8.3 to break down)
+
 ### Phase 164.8.2: GATEHARDENING — the five code-review warnings Phase 164.8 shipped: the VAC-08 frontier exemption gets a ceiling, the ledger drift-check gets an arms ratchet, the reverted-grep stops being NUL-blind, the destructive restore's artifact stops carrying unredacted policy text, and the softening-token scan reaches the workflow that can drop a schema (INSERTED)
 
 **Goal:** Close the five Warnings `gsd-code-reviewer` raised against Phase 164.8's own gates. Every one is a control that is weaker than it reads, and two of them are the SAME shape: the phase hardened one half of a twin pair and left the other. None was user-facing or data-integrity, so none blocked the ship — they are booked here rather than fixed under merge pressure.
@@ -1378,6 +1408,7 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 ⚠️ **Read the review before planning, do not re-derive:** `.planning/phases/164.8-testpreprod-test-becomes-a-real-pre-prod/164.8-REVIEW.md` carries each finding with its file:line, its failure scenario and the reviewer's own measurements. Seven Info findings are in the same file and are in scope for whoever plans this.
 
 **Success Criteria:**
+
 1. **WR-02 — the VAC-08 frontier exemption gets a ceiling.** `scripts/test-ledger-drift-check.sh:425-476`. Today the exemption is unbounded: one failed TEST apply (the booked `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`) leaves every later migration above the tip, so every one is exempted and the ledger-presence ratchet prints `0 NEW drift` indefinitely. Branch protection is deferred, so the bad merge stands. The fix needs a bound whose breach is LOUD.
 2. **WR-03 — the same script gets an arms ratchet.** `:815-819` has no `EXPECTED_ARMS`, so deleting an arm reads as a smaller PASSED. The three frontier arms are exactly the ones a cleanup would take, which would leave criterion 1 unarmed. ⭐ The sibling `restore-test-from-baseline.sh` already carries the correct shape — conform to the neighbour, do not invent a second one.
 3. **WR-04 — the reverted-grep stops being NUL-blind.** `.github/workflows/supabase-migrate.yml:858` is a NEGATIVE check without `-a`. This repo has a MEASURED rule that grep goes silently blind on a file the locale calls binary and that exit 1 then reads as clean. One byte from `supabase migration list` and `apply` pushes to PROD on a check that never read the file.
@@ -1387,11 +1418,15 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 
 **Requirements**: TBD (no v1.20 requirement IDs) + the five Warnings and seven Info findings in `164.8-REVIEW.md`
 **Depends on:** Phase 164.8
-**Plans:** 0 plans
+**Plans:** 5 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.8.2 to break down)
+- [ ] 164.8.2-01-PLAN.md — WR-03 arms ratchet then WR-02 `FRONTIER_EXEMPT_CEILING` in `scripts/test-ledger-drift-check.sh`, with vitest second layer + SC-9 registration (wave 1)
+- [ ] 164.8.2-02-PLAN.md — WR-04 `grep -a` on both C-0331 sites of `supabase-migrate.yml` with an executed NUL-fixture arm; IN-03, IN-04 (wave 1)
+- [ ] 164.8.2-03-PLAN.md — WR-05 artifact narrowing by an enumerated staging step (founder-amended set), four truthful comments, WR-04's two post-verify greps, IN-07 (wave 1)
+- [ ] 164.8.2-04-PLAN.md — WR-06 nine-token scan across the TRIPLET with an exact-set `2>/dev/null` allowlist (wave 2, after 02 and 03)
+- [ ] 164.8.2-05-PLAN.md — IN-06 MEASURE_FAIL wrap with a sourced-copy falsifier; IN-01, IN-02, IN-05 record corrections pinned by derivation (wave 2, after 03)
 
 ### Phase 164.5.1: CRONREPOINT — the live `match_engine_cron` row is repointed at the mechanism the repo actually describes, and the migration-vs-runbook rule is settled first (INSERTED)
 
