@@ -1053,23 +1053,41 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
      * affirmative block is not pinned by bytes at all — it is EXECUTED below, which is
      * strictly stronger, and a byte pin over a block that is under active review would
      * only teach the next reader to re-paste it.
+     *
+     * ⭐ MOVED ONCE SINCE, DELIBERATELY: 2026-09-09, Phase 164.8.2 WR-04, `grep -Eiq` →
+     * `grep -aEiq` on line 3 and nothing else. The reason is in the `it` message below,
+     * where a reader who reds this pin will actually meet it.
      */
     const PROD_C0331_TAIL = [
       '          echo "::group::Post-apply migration list verification (C-0331)"',
       "          supabase migration list --linked | tee /tmp/migration-list.txt",
-      "          if grep -Eiq '(^|[[:space:]|])reverted([[:space:]|]|$)' /tmp/migration-list.txt; then",
+      "          if grep -aEiq '(^|[[:space:]|])reverted([[:space:]|]|$)' /tmp/migration-list.txt; then",
       '            echo "::error::Reverted migrations detected after db push — see list above (C-0331)"',
       "            exit 1",
       "          fi",
       '          echo "::endgroup::"',
     ].join("\n");
 
-    it("the C-0331 reverted-grep tail is byte-identical to its pre-164.8-05 form", () => {
+    it("the C-0331 tail is its pre-164.8-05 form EXCEPT the `-a` added deliberately by 164.8.2", () => {
       expect(
         WF.includes(PROD_C0331_TAIL),
         "the PROD `Push migrations to production` C-0331 tail CHANGED. The one automatic " +
           "applier of DDL to production is not something to edit as a side effect of editing " +
-          "the job around it.",
+          "the job around it.\n\n" +
+          "⭐ ONE edit has been made to it since that pin was written, and it is named here so " +
+          "the pin and the file agree about WHY. Phase 164.8.2 (WR-04, 2026-09-09) changed " +
+          "`grep -Eiq` to `grep -aEiq` on the third line, and nothing else in the tail moved: " +
+          "`--linked`, `/tmp/migration-list.txt`, the `::error::` wording and the `exit 1` are " +
+          "byte-identical to their pre-164.8-05 form. The reason is the SAME one that closed " +
+          "the TEST twin: this is a NEGATIVE check, so a grep that declines to read a file it " +
+          "calls binary returns 1 and is indistinguishable from `no reverted row` — a PROD " +
+          "apply verified by a check that never read the list. `-a` is mandatory repo-wide.\n" +
+          "⚠️ MEASURED before the edit: on GNU grep 3.11 (what the runner has) and BSD grep " +
+          "2.6.0 the missing `-a` made NO difference to the verdict; on ugrep 7.8.4 it made " +
+          "the check read a NUL-bearing list as clean. The edit removes the flavour " +
+          "dependence; it is not a claim that the runner was blind.\n" +
+          "Any FURTHER change is what this pin exists to stop — move it deliberately, in its " +
+          "own commit, with its own reason, or do not move it.",
       ).toBe(true);
       calibrate(
         "the PROD C-0331 tail pin bites",
