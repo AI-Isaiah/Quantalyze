@@ -803,6 +803,167 @@ describe("restore-test-from-baseline.sh — the filter and the ledger seed", () 
   });
 });
 
+describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is DERIVED", () => {
+  // ⛔ WHY THESE THREE PINS EXIST AT ALL. Every one of them replaces a NUMBER OR A
+  // LIST A HUMAN TYPED. The W2 comment said `EIGHT` while the count was 9 and the
+  // line the script actually emits said `NINE`; the same comment's arm list stopped
+  // at 24 while arm 26 had already shipped; the `--help` contract — the thing an
+  // operator reads before running `DROP SCHEMA public CASCADE` — named 11 seams
+  // while the script declared 13. None of those is a bug in the code. All three are
+  // the defect the script's own comment names: a narrative that miscounts its own
+  // guards is the same class as a stale floor. So none of them is re-typed here
+  // either — each is derived from the file and compared with what the file says.
+
+  /** The English words the script's closing line uses. Extend, never drop a check. */
+  const WORDS = [
+    "ZERO", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN",
+    "EIGHT", "NINE", "TEN", "ELEVEN", "TWELVE",
+  ];
+
+  /** The W2 comment block plus the line it describes, up to and including the echo. */
+  function w2Block(text: string): string {
+    const lines = text.split("\n");
+    const a = lines.findIndex((l) => l.includes("W2 — THIS SENTENCE"));
+    if (a < 0) return "";
+    const b = lines.findIndex((l, i) => i > a && l.includes("self-test OK"));
+    return b < 0 ? "" : lines.slice(a, b + 1).join("\n");
+  }
+
+  it("IN-01 — the W2 comment's refusal WORD is the live `refuse_*() {` count, and so is the emitted line", () => {
+    const n = liveLines(SRC).filter(({ line }) => /^refuse_[a-z_]*\(\) \{/.test(line)).length;
+    const word = WORDS[n];
+    expect(
+      word,
+      `the script declares ${n} refusals, which is outside the ZERO…TWELVE table this pin maps through. EXTEND the table — dropping the check is how the comment drifted in the first place.`,
+    ).toBeDefined();
+
+    const block = w2Block(SRC);
+    expect(block, "the W2 block slicer found no anchor — every pin below it would be vacuous").not.toBe("");
+
+    const dated = block
+      .split("\n")
+      .filter((l) => /^\s*# \(\d{4}-\d{2}-\d{2}: /.test(l));
+    expect(
+      dated.length,
+      "the W2 block no longer carries exactly one dated `# (YYYY-MM-DD: WORD, after …)` line — the shape this pin and the plan's shell verify both read",
+    ).toBe(1);
+    expect(
+      dated[0],
+      `the W2 comment's refusal word disagrees with the live count of ${n}. Regenerate with \`grep -c '^refuse_[a-z_]*() {' ${SCRIPT}\` and write ${word} into the dated line.`,
+    ).toContain(`${word},`);
+
+    const emitted = block.split("\n").filter((l) => l.includes("self-test OK"));
+    expect(emitted.length).toBe(1);
+    expect(
+      emitted[0],
+      `the EMITTED closing line disagrees with the live count of ${n}. The comment and the sentence the operator actually reads must carry the same word — they did not, and that is IN-01.`,
+    ).toContain(`${word} refusals`);
+
+    // CALIBRATION — put the stale word back on a scratch string; both halves flip.
+    const stale = WORDS[n - 1];
+    const drifted = SRC.replace(`: ${word}, after`, () => `: ${stale}, after`);
+    expect(drifted, "the IN-01 calibration did not APPLY").not.toBe(SRC);
+    const dBlock = w2Block(drifted);
+    expect(dBlock.split("\n").filter((l) => /^\s*# \(\d{4}-\d{2}-\d{2}: /.test(l))[0]).not.toContain(
+      `${word},`,
+    );
+  });
+
+  it("IN-02 — the arm list names every arm it claims, and it names arm 26", () => {
+    // The sentence WRAPS across comment lines, so it is read as PROSE: each line's
+    // leading `# ` stripped and the lines rejoined with a space. Matching the raw
+    // block would bind to whatever happened not to wrap.
+    const prose = (text: string) =>
+      w2Block(text)
+        .split("\n")
+        .map((l) => l.replace(/^\s*#\s?/, ""))
+        .join(" ");
+    const block = prose(SRC);
+    // ⚠️ THE DERIVATION IS DELIBERATELY PARTIAL, AND SAYING SO IS THE POINT. Walking
+    // `run_arm` labels back to the refusal each leg greps for would be a parser of
+    // the self-test's own bash, which is more machinery than the finding is worth
+    // (the plan says so outright). What IS derived: every number the sentence names
+    // must exist as a real `run_arm "<n> …` label, so a list naming a phantom arm is
+    // red; and 26 — the arm that shipped with the ninth refusal and never reached
+    // this sentence — must be among them.
+    const m = block.match(/arms 1-7((?:,\s*\d+)*)\s*and\s*(\d+)/);
+    expect(
+      m,
+      "the W2 block's arm sentence no longer matches `arms 1-7, …, N and M` — this pin reads that shape",
+    ).not.toBeNull();
+    const listed = [
+      1, 2, 3, 4, 5, 6, 7,
+      ...(m![1].match(/\d+/g) ?? []).map(Number),
+      Number(m![2]),
+    ];
+    expect(listed).toContain(26);
+
+    const armNumbers = new Set(
+      liveLines(SRC)
+        .map(({ line }) => line.match(/run_arm "(\d+)\s/))
+        .filter((x): x is RegExpMatchArray => x !== null)
+        .map((x) => Number(x[1])),
+    );
+    const phantom = listed.filter((a) => !armNumbers.has(a));
+    expect(
+      phantom,
+      `the W2 sentence claims arm(s) ${phantom.join(", ")} assert a refusal's named message, and no \`run_arm\` label carries those numbers`,
+    ).toEqual([]);
+
+    // CALIBRATION — drop 26 off the end of the list on a scratch string.
+    const shortened = SRC.replace("20, 21, 24\n  # and 26.", () => "20, 21\n  # and 24.");
+    expect(shortened, "the IN-02 calibration did not APPLY").not.toBe(SRC);
+    const sm = prose(shortened).match(/arms 1-7((?:,\s*\d+)*)\s*and\s*(\d+)/);
+    expect([...(sm![1].match(/\d+/g) ?? []).map(Number), Number(sm![2])]).not.toContain(26);
+  });
+
+  it("IN-05 — every env seam the script DECLARES is named in the `--help` ENV SEAMS block", () => {
+    // ⛔ THE ONLY SANCTIONED EXCEPTION CHANNEL. A seam left out of the operator's
+    // contract has to be listed HERE, with a reason, so the omission is a reviewed
+    // line in a diff rather than an absence nobody can see. It is empty, and it
+    // should stay empty: `--help` is what an operator reads before running a
+    // destructive tool.
+    const UNDOCUMENTED_SEAMS: { name: string; why: string }[] = [];
+
+    const declared = [...SRC.matchAll(/^([A-Z_]+)="\$\{[A-Z_]+:-/gm)].map((x) => x[1]);
+    expect(
+      declared.length,
+      "no `NAME=\"${NAME:-…}\"` seam declarations were found — the derivation would pass vacuously",
+    ).toBeGreaterThan(5);
+
+    const lines = SRC.split("\n");
+    const a = lines.findIndex((l) => l.includes("── ENV SEAMS"));
+    expect(a, "the ENV SEAMS header rule is gone").toBeGreaterThan(-1);
+    const b = lines.findIndex((l, i) => i > a && l.startsWith("# ──"));
+    expect(b, "the ENV SEAMS block has no closing `# ──` rule").toBeGreaterThan(a);
+    const seams = lines.slice(a, b).join("\n");
+
+    const missing = declared.filter(
+      (name) =>
+        !UNDOCUMENTED_SEAMS.some((u) => u.name === name) &&
+        !new RegExp(`\\b${name}\\b`).test(seams),
+    );
+    expect(
+      missing,
+      `\`--help\`'s ENV SEAMS block does not name ${missing.join(", ")}, and the script reads ${missing.length === 1 ? "it" : "them"} from the environment. Either document ${missing.length === 1 ? "it" : "them"} or put ${missing.length === 1 ? "it" : "them"} in UNDOCUMENTED_SEAMS with a reason.`,
+    ).toEqual([]);
+
+    // CALIBRATION — remove one documented seam line from a scratch string.
+    const stripped = SRC.replace(
+      /^#   REFDATA_KIND_CHECK .*\n/m,
+      () => "",
+    );
+    expect(stripped, "the IN-05 calibration did not APPLY").not.toBe(SRC);
+    const sLines = stripped.split("\n");
+    const sa = sLines.findIndex((l) => l.includes("── ENV SEAMS"));
+    const sb = sLines.findIndex((l, i) => i > sa && l.startsWith("# ──"));
+    const sSeams = sLines.slice(sa, sb).join("\n");
+    expect(
+      declared.filter((name) => !new RegExp(`\\b${name}\\b`).test(sSeams)),
+    ).toEqual(["REFDATA_KIND_CHECK"]);
+  });
+});
+
 describe("restore-test-from-baseline.sh — IN-06: the filter grep's read is BOUNDED", () => {
   // ⛔ WHY THIS ARM IS EXECUTED AND NOT A GREP. What IN-06 names is an ABSENCE — an
   // unwrapped `grep -av` that died under `set -e` with no `::error::` — and a static
