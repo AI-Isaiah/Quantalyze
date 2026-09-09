@@ -61,6 +61,23 @@
 #                             points this at the workflow's backup artifact so the
 #                             pre-drop census survives an aborted transaction.
 #   RESTORE_REQUIRE_MUTEX     default 1
+#   REFDATA_ALLOWLIST         default scripts/restore-test-refdata-allowlist.txt —
+#                             the migration-seeded statements the restore replays
+#                             (Phase 164.8.1). An EMPTY allowlist is refused.
+#   REFDATA_EXTRACTOR         default scripts/extract-reference-inserts.mjs; run
+#                             TWICE — once to refuse before any write, once inside
+#                             `build_transaction` to emit refdata.sql
+#   REFDATA_KIND_REGISTRY     default public.compute_job_kinds
+#   REFDATA_KIND_REGISTRY_COL default name (measured; NOT `kind`)
+#   REFDATA_KIND_CHECK        default compute_jobs_kind_check
+#                             ⛔ THOSE LAST THREE REACH SQL TWICE EACH — as bare
+#                             identifiers AND inside string literals — in the
+#                             in-transaction partial-replay gate. That is why each
+#                             is CHARSET-REFUSED before any interpolation and
+#                             `sql_lit`-quoted at every literal site (W1, T-164.8-04),
+#                             and why they are seams at all: an invariant no arm
+#                             exercises is decorative, so the self-test points them
+#                             at `fx_keep_kind_check` over `public.fx_keep`.`label`.
 #   PGBIN                     (self-test only) server binaries for the throwaway lane
 #
 # ⚠️ psql's STDERR IS printed for the transaction — and it does NOT only name SQL
@@ -1158,7 +1175,16 @@ TXN_DROP
 
   # The dump, with exactly ONE line class removed. `grep -a` because a byte the
   # locale calls binary must not silently turn this filter into a no-op.
-  grep -av "$FILTER_PATTERN" "$BASELINE_FILE" >> "$out"
+  #
+  # ⛔ IN-06 — THE READ IS BOUNDED, NOT TRUSTED. Unwrapped, a grep that could not
+  # READ the dump (exit 2) died right here under `set -e` with no `::error::` at
+  # all: the operator saw a transaction that stopped mid-assembly and not one
+  # sentence saying why. `-le 1` and NOT `-eq 0` is the whole point of the bound —
+  # `grep -v` exits 1 when EVERY line matched the filter, i.e. an empty output,
+  # which is a legitimate reading; exit >= 2 is a broken instrument. This is the
+  # same shape as the `grep -ac` count above, and the two now fail the same way.
+  set +e; grep -av "$FILTER_PATTERN" "$BASELINE_FILE" >> "$out"; rc=$?; set -e
+  [ "$rc" -le 1 ] || fail "MEASURE_FAIL: could not read ${BASELINE_FILE} while filtering (grep exited ${rc}). An unreadable dump is not an empty one."
 
   # The dump ends with `set_config('search_path', '', false)` still in force. The
   # survivor DDL below is fully qualified and does not need a path — the ledger DDL
@@ -3067,17 +3093,24 @@ FRESHSTUB
   fi
   # ⛔ W2 — THIS SENTENCE'S NUMBER IS MEASURED, AND SO IS ITS CLAIM. Regenerate the
   # count with `grep -c '^refuse_[a-z_]*() {' scripts/restore-test-from-baseline.sh`
-  # (2026-09-09: EIGHT, after `refuse_bad_refdata_allowlist` joined the block). It
-  # read "seven" until this phase.
+  # (2026-09-09: NINE, after `refuse_backticks_in_txn_heredocs` joined the block). It
+  # read "seven" until Phase 164.8, and was one short AGAIN until 164.8.2: the ninth
+  # refusal arrived with arm 26 in PR #767 (06db9958), the emitted line below moved
+  # with it and this comment did not. So the number is now DERIVED rather than
+  # remembered — `restore-test-from-baseline.test.ts` reads the live
+  # `^refuse_[a-z_]*() {` count, maps it to the same English word table, and asserts
+  # THIS line and the emitted one both carry it. A drift in either is red.
   #
   # ⚠️ AND IT USED TO OVERCLAIM. The words were "every BRANCH of every one of them
   # is armed", which is false and was false before this phase: `refuse_wrong_baseline_sha`
   # alone has four `fail` exits and only the sha-mismatch one has an arm; the
   # "baseline dump not found", "provenance doc not found" and "no parseable sha256
   # row" branches have none. What IS true, and what is claimed here, is that every
-  # refusal has at least one arm asserting its NAMED message — arms 1-7, 20, 21 and
-  # 24. A narrative that miscounts or overstates its own guards is the same defect
-  # class as a stale floor, so it is corrected rather than extended.
+  # refusal has at least one arm asserting its NAMED message — arms 1-7, 20, 21, 24
+  # and 26. Arm 26 was MISSING from this list for the same reason the count was one
+  # short: `refuse_backticks_in_txn_heredocs` arrived with its arm and the sentence
+  # did not move. A narrative that miscounts or overstates its own guards is the same
+  # defect class as a stale floor, so it is corrected rather than extended.
   echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — NINE refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back — EMPTY, SHORT and row-level partial each by name, a bad allowlist is refused before any write, the preflight's rollback view normalises mutable reference counts and nothing else, harness calibrated)"
   return 0
 }
