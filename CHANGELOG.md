@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.77.27.0] - 2026-09-09 — the restore replays the reference rows it used to destroy
+
+Phase 164.8.1, waves 1-2. The schema-only restore dropped `public` and reloaded a dump
+carrying 562 GRANT/REVOKE and zero INSERT/COPY, while SEEDING the ledger so all 266
+migrations read as applied. `supabase db push` skips applied versions, so the rows those
+migrations INSERT were gone for good: `compute_job_kinds` and `discovery_categories` came
+back empty and took `python` and `e2e-seeded` red with them.
+
+The restore now replays an allowlisted set of reference statements inside the same
+transaction, under a `SET LOCAL search_path` bracket, and a gate aborts the transaction if
+an allowlisted table comes back empty or a kind-admission CHECK still admits a value its
+registry lost. Counts surface as `refdata:<schema.table>=<n>` census rows; the `restore:`
+summary line is byte-identical.
+
+The allowlist is keyed (migration file, table, pinned statement count), never by table:
+`public.strategies` is a DO-block fixture in many migrations and a required application
+singleton in exactly one, so a per-table key would either replay fixture rows — including
+encrypted `api_keys` blobs — into shared TEST, or lose that sentinel.
+
+Three defects were found by MEASUREMENT during execution, each before anything depended
+on it:
+
+* **A research assumption was false.** `maskSql` DOES split `DO` bodies at inner `;`, so a
+  body INSERT surfaces as its own top-level span. Trusting the assumption would have let an
+  `INSERT INTO api_keys` inside a DO block classify as replayable. Dollar-body ranges became
+  the primary mechanism, with its own RED falsifier.
+* **The plan's invariant sketch named the wrong column.** `compute_job_kinds` is keyed on
+  `name`, not `kind`; as drafted it would have raised `column k.kind does not exist` on
+  every real restore.
+* **The extractor exited 0 emitting NOTHING** when invoked by a path that was not its
+  realpath (macOS `/var` vs `/private/var`) — a tool whose job is producing the restore's
+  SQL, silently producing none. Found because a new zero-trailer refusal fired.
+
+Anti-vacuity: `EXPECTED_ARMS` 21 -> 24 with all eleven vitest literals re-measured, and
+eight neuters observed RED on scratch copies. One of them is the point of the exercise — a
+PARTIAL replay previously exited 0, so the kind-admission invariant was decorative until an
+arm exercised it.
+
+Also: the seeder no longer blames a migration that DID run, and TEST's cron pointing at
+PROD compute is booked as `[164.8.1-TEST-ANALYTICS-URL-PROD]`, routed to Phase 164.9 and
+explicitly not closable by editing the allowlist.
+
+Still open: the restore itself has not been re-run. Wave 3 is a blocking human checkpoint.
+
 ## [0.77.26.0] - 2026-09-08 — the VAC-08 ratchet is emptied by measurement, not by decree
 
 The restore ran (run 34274355596, head 88581b8b) and committed. TEST's ledger went
