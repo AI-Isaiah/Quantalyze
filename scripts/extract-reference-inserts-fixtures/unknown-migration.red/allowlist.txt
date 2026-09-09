@@ -1,0 +1,2 @@
+# fixture allowlist — unknown-migration.red
+20261231000000_absent.sql	public.fx_ref	1	# consumer: the extractor self-test
