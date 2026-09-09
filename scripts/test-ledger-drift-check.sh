@@ -118,6 +118,51 @@ set -euo pipefail
 
 GATE="VAC-08 repo-vs-TEST ledger and body drift gate"
 
+# ── ⛔ THE CEILING ON THE APPLY-ON-MERGE WINDOW (WR-02, Phase 164.8.2) ────────
+# WHAT IT BOUNDS. Migrations reach shared TEST only on the MERGE push
+# (supabase-migrate.yml, job `apply-test`), so a migration authored ABOVE the TEST
+# ledger's frontier tip cannot be present yet and is EXEMPTED from NEW drift below.
+# That exemption was UNBOUNDED: one failed `apply-test` exempts every later
+# migration forever while this gate keeps printing `0 NEW drift`. A tolerance with
+# no ceiling does not discriminate a timing artefact from a stalled pipeline — it
+# is a control that passes while measuring nothing.
+#
+# WHY 3. One migration above the tip is the ordinary artefact of a PR that adds a
+# migration (apply-on-merge, by construction). A handful is a stalled apply. Three
+# is "a handful has not happened yet"; the founder's own framing (CONTEXT Area 1)
+# was "N small, ~3".
+#
+# ⭐ IT IS A RATCHET. Lower it when reality allows. NEVER raise it to make a run
+# pass — that is deleting the measurement. Raising it is a reviewed edit to this
+# line, never a side effect of a green run. Conforms to `WAIVED_CEILING` in
+# scripts/mutation-runner/run.mjs (which sits at 0 and has survived two founder
+# decisions that each took the root-cause fix over an exception).
+#
+# HOW TO REGENERATE THE LIVE READING. Every `sql-tests` run prints
+# `  ledger frontier: tip=<ts>; N above-tip migration(s) exempted.` Read the newest:
+#   gh run list --workflow ci.yml --branch main --limit 3 --json databaseId
+#   gh run view <id> --job <sql-tests job id> --log | grep -a 'ledger frontier:'
+# (`gh run view --log` without `--job` truncates.)
+#
+# ⛔ WHAT THE SECOND LAYER CAN AND CANNOT DO, said plainly. CLAUDE.md's two-layer
+# rule is satisfied for a REPO corpus by re-deriving it from disk (see
+# src/__tests__/mutation-runner-floors.test.ts, `RATCHET STALE`). It CANNOT be
+# satisfied that way here: the exempt count is a property of a LIVE, shared ledger,
+# not of this repo, so a stale-HIGH ceiling is NOT re-derivable without a database.
+# The second layer here is therefore (a) SC-9 registration in
+# src/__tests__/gate-family-meta.test.ts's KNOWN_THRESHOLD_SITES, which makes any
+# change to this value a reviewed diff, and (b) the single-live-line and
+# positive-integer pins in src/__tests__/drift-check-scripts.test.ts. Lowering the
+# ceiling when reality allows remains a HUMAN act, recorded by the dated line below.
+#
+# MEASURED 2026-09-09 — the live above-tip exempt count on `main` is 0, well under
+# this ceiling: `ledger frontier: tip=20260908120000; 0 above-tip migration(s)
+# exempted.`, read from CI run 34390777698 (head 1ca4d4da, `sql-tests` job
+# 102600855496, success) at 19:01:34Z. The ceiling therefore reds nothing that is
+# green today; it is pinned at 3 rather than at 0 so an ordinary apply-on-merge
+# window does not red a PR that adds migrations.
+FRONTIER_EXEMPT_CEILING=3
+
 MIGRATIONS_DIR="${MIGRATIONS_DIR:-supabase/migrations}"
 SNAPSHOT_DIR="${SNAPSHOT_DIR:-supabase/schema/functions}"
 NORMALIZER="${NORMALIZER:-scripts/sql-body-normalize.mjs}"
@@ -417,6 +462,14 @@ check() {
   # before this block runs). A narrow, quiet lag is NOT caught here. That cost
   # is the price of the exemption and is booked as [164.8-PUSH-RACE-VAC08].
   #
+  # ⭐ CURRENCY 2026-09-09 (Phase 164.8.2, WR-02): the window's WIDTH is now
+  # bounded — more than FRONTIER_EXEMPT_CEILING exempted migrations is an
+  # `::error::` naming every one of them and a failing gate (see the check beside
+  # `local bad=0` below). What stays open and booked at [164.8-PUSH-RACE-VAC08] is
+  # the ORDERING coupling (ci.yml's `sql-tests` and supabase-migrate.yml's
+  # `apply-test` contend for the same advisory key with nothing ordering them),
+  # routed to Phase 164.9. A bounded width is not an ordered pipeline.
+  #
   # ⚠️ PLACEMENT vs THE `sed 's/#.*//'` SEAM. That sed strips comments from the
   # BASELINE FILE only, a dozen lines up. This block adds no baseline syntax and
   # reads no baseline text, so nothing written here passes through it. Verified
@@ -478,6 +531,17 @@ check() {
   stale_count="$(grep -ac '[^[:space:]]' "$stale_file" || true)"; stale_count="${stale_count:-0}"
 
   local bad=0
+  # ⛔ WR-02 — THE EXEMPT WINDOW HAS A WIDTH, AND THE WIDTH IS BOUNDED. Sets
+  # `bad=1` rather than exiting, so the run still reports its other findings and
+  # the file's single verdict (`if [ "$bad" = 1 ]`) decides the exit code — the
+  # same shape as the `stale_count` and `new_count` blocks below it.
+  if [ "$exempt_count" -gt "$FRONTIER_EXEMPT_CEILING" ]; then
+    echo "::error::${GATE}: FRONTIER_EXEMPT_CEILING exceeded: ${exempt_count} migration(s) above the ledger frontier (tip ${frontier_tip}) > ceiling ${FRONTIER_EXEMPT_CEILING}. That is a stalled apply, not an apply-on-merge window — supabase-migrate.yml's apply-test has stopped applying to TEST. Fix the apply; do NOT raise the ceiling (a reviewed edit to FRONTIER_EXEMPT_CEILING in scripts/test-ledger-drift-check.sh, never a side effect of a green run)."
+    # NAMED, not counted. A ceiling that reports only a number tells a reader that
+    # something is wrong and nothing about what; the versions are the evidence.
+    sed 's/^/::error::  exempt (above tip): /' "$exempt_file"
+    bad=1
+  fi
   if [ "$stale_count" -gt 0 ]; then
     # A baseline that may hold stale entries is a control that quietly stops
     # controlling. Shrinking it is progress and MUST be recorded.
@@ -735,8 +799,8 @@ STUB
   # live arm count with
   # `grep -av '^\s*#' scripts/test-ledger-drift-check.sh | grep -ac '^  run_arm "'`.
   # `--self-test --expect-inverted` exits 1. No database: the harness is stub-driven.
-  # MEASURED 2026-09-09 — `--self-test` prints 9/9 and exits 0.
-  EXPECTED_ARMS=9
+  # MEASURED 2026-09-09 — `--self-test` prints 11/11 and exits 0.
+  EXPECTED_ARMS=11
 
   run_arm() {
     local label="$1" want="$2"
@@ -773,6 +837,32 @@ STUB
   : > "$tmp/mig_frontier/20260301000000_above.sql"
   : > "$tmp/mig_tipeq/20260201000000_applied.sql"
   : > "$tmp/mig_tipeq/20260201000000_twin.sql"
+
+  # ── FRONTIER-CEILING corpora (WR-02, Phase 164.8.2) ───────────────────────
+  #   mig_ceil_over  one applied + FOUR above the tip  => exempt_count 4 > 3, RED
+  #   mig_ceil_edge  one applied + THREE above the tip => exempt_count 3 == 3, GREEN
+  #
+  # ⚠️ TWO CORPORA ARE REQUIRED — ONE WOULD MEASURE THE WRONG THING. The tip is
+  # the GREATEST PRESENT timestamp. Deriving the boundary case from the over-the-
+  # ceiling corpus by making one of the four above-tip files "present" would MOVE
+  # THE TIP UP, and the remaining three would then sit BELOW it: still red, but as
+  # below-frontier drift, not as a boundary that stays green. An arm that reds for
+  # the wrong reason is indistinguishable from one that works.
+  mkdir -p "$tmp/mig_ceil_over" "$tmp/mig_ceil_edge"
+  : > "$tmp/mig_ceil_over/20260201000000_applied.sql"
+  : > "$tmp/mig_ceil_over/20260301000000_above1.sql"
+  : > "$tmp/mig_ceil_over/20260401000000_above2.sql"
+  : > "$tmp/mig_ceil_over/20260501000000_above3.sql"
+  : > "$tmp/mig_ceil_over/20260601000000_above4.sql"
+  : > "$tmp/mig_ceil_edge/20260201000000_applied.sql"
+  : > "$tmp/mig_ceil_edge/20260301000000_above1.sql"
+  : > "$tmp/mig_ceil_edge/20260401000000_above2.sql"
+  : > "$tmp/mig_ceil_edge/20260501000000_above3.sql"
+  # MISSING_NAMES is printed by the stub with `printf '%s\n'`, so REAL newlines
+  # seed several missing names from one value.
+  local ceil_over_names ceil_edge_names
+  ceil_over_names=$'20260301000000_above1\n20260401000000_above2\n20260501000000_above3\n20260601000000_above4'
+  ceil_edge_names=$'20260301000000_above1\n20260401000000_above2\n20260501000000_above3'
 
   # An EMPTY baseline for every arm. Without it the self-test inherits the
   # repo's real vac08-ledger-baseline.txt, whose 31 entries are all "stale"
@@ -842,6 +932,50 @@ STUB
   # one did not, which is a defect rather than a timing artefact.
   run_arm "tip-equal-missing RED" 1 arm_env "$tmp/live" "20260201000000_twin" "selftest_fn" "$tmp/mig_tipeq"
 
+  # ── FRONTIER CEILING (WR-02, Phase 164.8.2) — over, and the boundary ───────
+  # RED 7 — four migrations above the tip is a stalled apply, not a window.
+  #
+  # ⛔ THIS ARM ASSERTS ON THE MESSAGE TEXT, NOT ON exit 1 ALONE. `run_arm`
+  # compares exit CODES, and this gate has several ways to exit 1 — the absurdity
+  # floor, below-frontier drift, a body mismatch. An `ok (exit 1)` earned by one of
+  # those would be a green arm proving nothing about the ceiling, which is the exact
+  # anti-vacuity trap this phase exists to close. It also requires EVERY exempted
+  # version to be named, because a ceiling that reports only a count tells a reader
+  # that something is wrong and nothing about what.
+  #
+  # (The absurdity floor cannot pre-empt it here: the stub prints nothing for
+  # `ledger_rows`, so the floor's >= 50-rows precondition is never met. That is read
+  # from the stub rather than assumed — and the text assertion makes it moot anyway.)
+  arm_frontier_ceiling_exceeded() {
+    local out rc=0 nm
+    out="$(arm_env "$tmp/live" "$ceil_over_names" "selftest_fn" "$tmp/mig_ceil_over" 2>&1)" || rc=$?
+    if [ "$rc" -ne 1 ]; then
+      echo "MEASURE_FAIL: the gate exited ${rc}, not 1, on a corpus with four migrations above the tip."
+      return 0
+    fi
+    if ! printf '%s' "$out" | grep -aq 'FRONTIER_EXEMPT_CEILING exceeded'; then
+      echo "MEASURE_FAIL: the gate exited 1 but never said FRONTIER_EXEMPT_CEILING exceeded — this arm was about to pass for the wrong reason."
+      return 0
+    fi
+    # ⛔ THE NAMES ARE ASSERTED ON THE `::error::` LINES, not anywhere in the
+    # output. The pre-existing `::notice::` block a few lines up ALSO prints
+    # `  exempt (above tip): <name>` for every exempted migration, so a bare
+    # `grep -F <name>` over the whole output would be satisfied by code this arm
+    # is not testing — it would stay green with the ceiling's own `sed` deleted.
+    for nm in 20260301000000_above1 20260401000000_above2 20260501000000_above3 20260601000000_above4; do
+      if ! printf '%s' "$out" | grep -aqF -e "::error::  exempt (above tip): ${nm}"; then
+        echo "MEASURE_FAIL: the ceiling ERROR did not NAME the exempted migration ${nm}."
+        return 0
+      fi
+    done
+    return 1
+  }
+  run_arm "frontier-ceiling-exceeded RED" 1 arm_frontier_ceiling_exceeded
+
+  # GREEN 3 — THE BOUNDARY. Exactly the ceiling stays green, in the spirit of
+  # `tip-equal-missing RED`: an off-by-one hides at the boundary and nowhere else.
+  run_arm "frontier-ceiling-boundary GREEN" 0 arm_env "$tmp/live" "$ceil_edge_names" "selftest_fn" "$tmp/mig_ceil_edge"
+
   # ── HARNESS CALIBRATION (WR-03, Phase 164.8.2) — the LAST arm ──────────────
   # ⛔ WITHOUT THIS ARM every `ok` above is a claim about a harness nobody has
   # seen say no. Both halves run `run_arm` in a SUBSHELL so their tallies cannot
@@ -897,7 +1031,13 @@ STUB
   # `total` and `EXPECTED_ARMS` are all equal by construction, so printing
   # `${total}` here would be indistinguishable from printing the constant — right
   # up until an arm vanished, which is the one moment the difference matters.
-  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — every red mode fires, both green paths pass, and the harness is calibrated)."
+  # ⛔ THE SENTENCE'S COUNT IS MEASURED, NOT RESTATED. Regenerate the green arms
+  # with `grep -av '^\s*#' scripts/test-ledger-drift-check.sh | grep -ac '^  run_arm "[^"]*\(GREEN\|green\)'`
+  # (2026-09-09: THREE, after `frontier-ceiling-boundary GREEN` joined). It read
+  # "both green paths" until this phase, which was true of two and became false at
+  # three — a narrative that miscounts its own arms is the same defect class as a
+  # stale ratchet.
+  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — every red mode fires, all THREE green paths pass, and the harness is calibrated)."
   return 0
 }
 
