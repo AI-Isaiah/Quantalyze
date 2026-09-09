@@ -1,5 +1,69 @@
 # Changelog
 
+## [0.77.31.2] - 2026-09-09 — the guard on the destructive restore was narrower than its name, a second time
+
+Six commits over three themes: a proven-live hole in a safety guard, two corrections of record,
+and the phase-closing artifacts. Phase 164.8 TESTPREPROD is complete.
+
+### Security
+- **`refuse_backticks_in_txn_heredocs` accepted a live backtick in three more shapes**
+  (`scripts/restore-test-from-baseline.sh`). The matcher anchored the heredoc delimiter to
+  end-of-line, so an opener whose delimiter is followed by a redirect or a pipe was not recognised
+  as an opener at all and its body was never scanned; separately, an indented terminator ended the
+  scan even for a plain `<<` opener, which bash does not treat as a terminator. This matters
+  because these heredocs are unquoted on purpose — they interpolate the gate's VALUES list — so
+  bash command-substitutes every backticked span in them, SQL comments included, while assembling
+  `DROP SCHEMA public CASCADE`.
+  ⛔ Proven, not argued: a fixture of the pipe shape carrying a backticked `echo` came out of bash
+  as `-- prose carrying a live PWNED3 backtick` — the echo had already run.
+  This is the SECOND widening of this guard. The first, earlier the same day, closed four
+  delimiter-spelling evasions; a guard named for a general property must measure that property,
+  and twice now it did not.
+
+### Tests
+- Arm 26 of the restore self-test gains **leg (f)** — the three shapes, each named in its own
+  `MEASURE_FAIL` — and **leg (g)**, the control that a `printf` which WRITES an opener still does
+  not read as one. Without (g), "match everything" would pass as a fix and refuse the file forever.
+- Calibration recorded: with the end-of-line anchor put back, arm 26 goes RED with
+  `MEASURE_FAIL (f): the opener trailer ' >/dev/null' walked a LIVE backtick past the guard.`
+  Restored from pristine bytes, sha256 identical; `self-test OK (26/26 arms …)` on a real
+  PostgreSQL 16 cluster afterwards.
+- ⚠️ Recorded because it cost a cycle: the first draft of the explanatory comment spelled two
+  example openers out literally, and the widened matcher read **its own documentation** as an
+  opener, scanned to EOF and refused the whole script. Leg (f) now BUILDS its fixtures rather than
+  writing them literally, and the comment says why.
+
+### Fixed
+- **Two destructive rebuilds of shared TEST were recorded nowhere.** Runs `34329459044`
+  (preflight) and `34330741339` (`mode=restore`, `success`), head `a622df27`, 2026-09-09, had zero
+  hits in `.planning/`. For a database other people's CI writes to, "who rebuilt it, from what,
+  and when" was unanswerable from the planning record. Both are now in the restore log with their
+  readings and actor. The ROADMAP also credited run `34274355596` without saying it concluded
+  `failure` — it committed, moving the ledger 243 → 266, and then exited 1 on the post-COMMIT
+  extension guard.
+- **Five places asserted the Supabase CLI post-verify "has never executed".** It executed: run
+  `34330741339` step 24, `success`, under the PINNED 2.98.2 — the exact uncertainty the claim was
+  written to name. True on 2026-09-08, false from 08:44 the next morning, still shipped ~8 hours
+  later when the books were closed without re-measuring. One of the five was scoping Phase 164.9's
+  routed work on that false sentence. Every superseded sentence is kept as dated lineage.
+
+### Notes
+- **Phase 164.8 is COMPLETE**, and one item is deliberately left OPEN rather than passed: the
+  applied-set comparison has still never run on a NON-EMPTY set. Both dispatch proofs ran at
+  266/266 on both ledgers, so `planned` and `applied` were both empty and the comparison held
+  trivially. Carried as `blocked` in the UAT and `human_judgment: true` in two coverage blocks.
+  Only a merge that actually carries a migration creates the occasion.
+- **Phase 164.8.2 GATEHARDENING inserted** for the five remaining code-review Warnings — an
+  unbounded VAC-08 frontier exemption, a missing arms ratchet, a NUL-blind negative grep,
+  unredacted policy text reaching a world-readable artifact, and a softening-token scan that was
+  widened for one workflow while the DESTRUCTIVE one stayed on the old list. Two of the five are
+  the same shape: one half of a twin pair hardened, the other left.
+- Phase artifacts added: `164.8-VERIFICATION.md` (verifier: 7/9, eight mutations each observed
+  RED), `164.8-REVIEW.md` (0 Critical, 6 Warning, 7 Info) and `164.8-UAT.md`. ⛔ The verification
+  status was flipped `gaps_found` → `passed` by the ORCHESTRATOR after closing both gaps, and the
+  file carries an appended section saying so — the verifier's verdict and readings are untouched
+  above it.
+
 ## [0.77.31.1] - 2026-09-09 — the books closed on TESTPREPROD, with run ids instead of assertions
 
 Five commits over two themes: the backlog ledger for Phase 164.8, and the three documents that
