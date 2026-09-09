@@ -6239,6 +6239,34 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   precisely 164.6's competence. ⛔ NOT in scope: changing WHICH gates exist or what they contain.
   Source: measured live at the PR #750 merge gate; see `.planning/ROADMAP.md` Phase 164.6 item (12).
 
+- [ ] **`[PLANANCHOR-SUMMARY-FILTER-01]` the `-pr` filter strips SUMMARY files, so every COMPLETED
+  plan reads as PENDING on `main` forever — and `plan-anchor-verify` keeps its `file:line` anchors
+  live against a tree that has moved on (logged 2026-09-09, at the PR #767 merge gate).**
+  MEASURED on PR #767. `plan-anchor-verify` treats a PLAN.md with no sibling SUMMARY.md as pending
+  and re-resolves every anchor it asserts. `/gsd-pr-branch` filters `.planning/phases/` out of the
+  PR head **by design**, so a plan's SUMMARY never reaches `main` while the PLAN itself — written
+  in an earlier, unfiltered commit — is already there. The pair is split permanently.
+  ⛔ **This is not cosmetic and not a PR-only artifact.** `164.8-05-PLAN.md` claimed
+  `supabase-migrate.yml:1-251` contains the `Push migrations to production` step. True on `main`
+  (:211). Phase 164.8 plan 05 and its review added ~870 lines to that workflow and moved the step
+  to :1038 — so the claim went stale ON `main` the moment the PR landed, and `plan-anchor-verify`
+  would have been RED on `main`, not merely on the PR. It was caught only because the filtered
+  branch happened to surface it first.
+  ⚠️ The blast radius is every future renumbering of any file a landed PLAN cites, and it GROWS:
+  each shipped phase adds more permanently-pending plans. The one-off fix applied at #767 was to
+  correct that single anchor and carry the corrected PLAN through the filter as a named exception
+  — which is a workaround, not a resolution, and it needs a filter exception every time.
+  Candidate directions, none chosen here: let the filter carry SUMMARY files (they are the
+  completion marker the gate reads); or mark a plan complete by something the filter preserves;
+  or have the gate treat a plan whose phase is `COMPLETE` in ROADMAP.md as not pending. ⛔ Do NOT
+  "fix" it by weakening `plan-anchor-verify` — a gate that stops resolving anchors is the silent-
+  gate class this milestone exists to remove.
+  **OWNER 2026-09-09: Phase 164.6 GATE-HYGIENE.** Routed there because "when is a gate invoked,
+  and can I prove it still bites" is exactly 164.6's competence, and it already owns the sibling
+  `[CI-DOCSPATH-01]`.
+  Source: measured live at the PR #767 merge gate; the corrected anchor and its dated reason are
+  in `.planning/phases/164.8-testpreprod-test-becomes-a-real-pre-prod/164.8-05-PLAN.md`.
+
 ## Phase 146.2 — recorded deferrals (logged 2026-08-19)
 
 *The founder rule: an item ABSORBED into a phase is deleted from this file, but an item the
