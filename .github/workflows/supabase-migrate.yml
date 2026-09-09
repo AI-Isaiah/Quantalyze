@@ -855,7 +855,10 @@ jobs:
           echo "::endgroup::"
           echo "::group::Post-apply migration list verification (C-0331 twin)"
           supabase migration list --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-migration-list.txt"
-          if grep -Eiq '(^|[[:space:]|])reverted([[:space:]|]|$)' "${RUNNER_TEMP}/test-migration-list.txt"; then
+          # `-a` is mandatory repo-wide: a tracked file carries a deliberate NUL byte and plain
+          # grep reports such input clean. This is a NEGATIVE check, so reading clean is
+          # indistinguishable from finding nothing — and this one green-lights the PROD apply.
+          if grep -aEiq '(^|[[:space:]|])reverted([[:space:]|]|$)' "${RUNNER_TEMP}/test-migration-list.txt"; then
             echo "::error::Reverted migrations detected after db push to TEST — see list above (C-0331 twin)"
             exit 1
           fi

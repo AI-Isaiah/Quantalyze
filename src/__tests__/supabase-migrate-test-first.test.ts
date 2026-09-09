@@ -129,9 +129,13 @@ const DRY_RUN_CMD =
 const PUSH_CMD =
   'supabase db push --include-all --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-push.txt"';
 
-/** The C-0331-twin reverted-grep condition and the echo that opens its branch. */
+/**
+ * The C-0331-twin reverted-grep condition and the echo that opens its branch.
+ * Moved 2026-09-09 for Phase 164.8.2 WR-04: `-Eiq` → `-aEiq` (`-a` is mandatory
+ * repo-wide on a NEGATIVE check; see the EXECUTED NUL-fixture arm below).
+ */
 const REVERTED_IF =
-  'if grep -Eiq \'(^|[[:space:]|])reverted([[:space:]|]|$)\' "${RUNNER_TEMP}/test-migration-list.txt"; then';
+  'if grep -aEiq \'(^|[[:space:]|])reverted([[:space:]|]|$)\' "${RUNNER_TEMP}/test-migration-list.txt"; then';
 const REVERTED_ECHO =
   '            echo "::error::Reverted migrations detected after db push to TEST — see list above (C-0331 twin)"';
 
@@ -325,7 +329,10 @@ function runScript(
   opts: {
     stubs?: Record<string, string>;
     unset?: readonly string[];
-    files?: Record<string, string>;
+    // A `Uint8Array` value is written VERBATIM. The WR-04 arm needs a fixture whose
+    // NUL is a real 0x00 byte and not an escape the fixture merely spells, so it hands
+    // this a `Buffer` — the whole property under test is what a byte does to `grep`.
+    files?: Record<string, string | Uint8Array>;
   } = {},
 ): { status: number; out: string } {
   const dir = mkdtempSync(join(tmpdir(), "sm-test-first-"));
@@ -1461,6 +1468,150 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
         "CALIBRATION: the step still exited non-zero on an empty push with its zero-applied " +
           "guard deleted — this test is not measuring the guard",
       ).toBe(0);
+    }, EXEC_TEST_TIMEOUT_MS);
+
+    /**
+     * ⛔ WR-04 (Phase 164.8.2). The C-0331 twin is a NEGATIVE check, and until
+     * 2026-09-09 it ran `grep -Eiq` with no `-a`. A grep that declines to read a file
+     * it calls binary returns 1, which this branch cannot tell from "no reverted row"
+     * — so ONE stray byte in `supabase migration list` output made the last check
+     * before the PROD apply pass without ever having read the list.
+     *
+     * This arm EXECUTES the group block over a fixture whose NUL is a real 0x00 byte.
+     * It asserts only the invariant that held on EVERY grep measured for this fix —
+     * WITH `-a`, a `| reverted |` row behind a NUL is found and the step exits 1 —
+     * because the WITHOUT-`-a` answer is grep-flavour dependent and a test that
+     * asserted it would be green on one machine and red on another for no code reason
+     * (RESEARCH Pitfall 4). The without-`-a` reading is OBSERVED and PRINTED below,
+     * and recorded per flavour in the plan SUMMARY, rather than asserted.
+     *
+     * MEASURED 2026-09-09 on the same block and pattern, `-Eiq` vs `-aEiq`:
+     *   ugrep 7.8.4 (this repo's local `grep`)  →  rc 1 vs 0  — the defect, reproduced
+     *   BSD grep 2.6.0-FreeBSD (/usr/bin/grep)  →  rc 0 vs 0  — no difference
+     *   GNU grep 3.11 (Debian; what CI runs)    →  rc 0 vs 0  — no difference, in
+     *     LC_ALL=C, C.UTF-8 and en_US.utf8, and for a NUL or a \xff before, on, or
+     *     after the matching line. So `-a` was NOT load-bearing on ubuntu-latest;
+     *     it is the repo-wide rule and it removes the flavour dependence entirely.
+     */
+    it("EXECUTED (TEST): the C-0331-twin reverted-grep READS a list carrying a NUL byte (WR-04)", () => {
+      const script = extractRunScript(WF, TEST_PUSH_STEP);
+      const OPEN = 'echo "::group::Post-apply migration list verification (C-0331 twin)"';
+      const CLOSE = 'echo "::endgroup::"';
+      const lines = script.split("\n");
+      const openIdx = lines.findIndex((l) => l.trim() === OPEN);
+      if (openIdx < 0) {
+        throw new Error(
+          `the C-0331-twin group opener is gone from "${TEST_PUSH_STEP}". This arm EXECUTES ` +
+            `that block, so a rename must throw rather than let the arm scan nothing and pass.`,
+        );
+      }
+      const closeIdx = lines.findIndex((l, i) => i > openIdx && l.trim() === CLOSE);
+      if (closeIdx < 0) {
+        throw new Error(
+          "the C-0331-twin group has no closing `::endgroup::` — the slice would run to the " +
+            "end of the step and this arm would stop measuring the branch it names.",
+        );
+      }
+      const group = `${lines.slice(openIdx, closeIdx + 1).join("\n")}\n`;
+
+      // Hermetic: the CLI line becomes a `cat` of a fixture. No `supabase`, no database.
+      const LIST_CMD =
+        'supabase migration list --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-migration-list.txt"';
+      const FIXTURE_CMD =
+        'cat "${RUNNER_TEMP}/${FIXTURE}" | tee "${RUNNER_TEMP}/test-migration-list.txt"';
+      const hermetic = group.replace(LIST_CMD, FIXTURE_CMD);
+      expect(
+        hermetic,
+        "the `supabase migration list | tee` line was not found to substitute — the block " +
+          "below would shell out to the real CLI, which this checkout points at PRODUCTION",
+      ).not.toBe(group);
+      const body = `set -euo pipefail\n${hermetic}`;
+      expect(body, "the C-0331-twin block lost its `-a` between the pin and this arm").toContain(
+        "grep -aEiq",
+      );
+
+      // A real 0x00 byte on a line BEFORE the `| reverted |` row — the review's shape.
+      // ⚠️ Spelled `\u0000` and NOT pasted as a raw byte: a literal NUL in this
+      // source would make THIS file the second one in the repo that plain grep silently
+      // skips (`src/lib/wizardErrors.test.ts` is the first), which is the very trap WR-04
+      // is about. Six source characters, one byte on disk — asserted immediately below.
+      const NUL_FIXTURE = Buffer.from(
+        "        Local      | Remote     | Time (UTC)\n" +
+          "        \u0000 stray\n" +
+          "   20260101000000 | reverted | 2026-01-01\n",
+        "utf8",
+      );
+      expect(
+        NUL_FIXTURE.includes(0),
+        "the fixture does not actually carry a 0x00 byte, so it is not the input this arm names",
+      ).toBe(true);
+      const CLEAN_FIXTURE =
+        "        Local      | Remote     | Time (UTC)\n" +
+        "   20260101000000 | 20260101000000 | 2026-01-01\n";
+
+      const FIXTURE_NAME = "wr04-list-fixture.txt";
+      const run = (fixture: string | Uint8Array, s: string = body) =>
+        runScript(s, { FIXTURE: FIXTURE_NAME }, { files: { [FIXTURE_NAME]: fixture } });
+
+      const dirty = run(NUL_FIXTURE);
+      expect(
+        dirty.status,
+        `⛔ THE WR-04 DEFECT. The C-0331 twin exited ${dirty.status} on a migration list that ` +
+          `CARRIES a reverted row — one stray byte earlier in the file was enough to make the ` +
+          `last check before the PROD apply read a list it never read. It must exit 1.\n` +
+          dirty.out,
+      ).toBe(1);
+      expect(
+        dirty.out,
+        "the step failed without naming the reverted rows — an operator cannot act on that",
+      ).toContain("Reverted migrations detected");
+
+      // CONTROL: the same block, a clean list. Proves the exit 1 above comes from the
+      // branch and not from the harness (a `set -euo pipefail` slip would red both).
+      const clean = run(CLEAN_FIXTURE);
+      expect(
+        clean.status,
+        `the C-0331 twin exited ${clean.status} on a CLEAN migration list. The arm above is ` +
+          `then not evidence: the harness reds whatever it is handed.\n${clean.out}`,
+      ).toBe(0);
+      expect(clean.out).not.toContain("Reverted migrations detected");
+
+      // CALIBRATION 1 (platform-safe): remove the branch's `exit 1`. The dirty fixture
+      // must then pass — i.e. this arm measures the BRANCH, not merely the grep.
+      const defanged = body.replace(
+        /(\n\s*echo "::error::Reverted migrations detected[^\n]*\n)\s*exit 1\n/,
+        "$1",
+      );
+      expect(defanged, "CALIBRATION: the reverted branch's `exit 1` was not found").not.toBe(body);
+      expect(
+        run(NUL_FIXTURE, defanged).status,
+        "CALIBRATION: the block still exited non-zero on the NUL fixture with its `exit 1` " +
+          "deleted — this arm is not measuring the branch's exit status",
+      ).toBe(0);
+
+      // CALIBRATION 2 (RECORDED, NOT ASSERTED — RESEARCH Pitfall 4 / [ASSUMED A1]).
+      // Strip the `a` and run the same fixture. The exit code is a property of whichever
+      // grep this machine has, so it is PRINTED for the record — on CI that line is the
+      // GNU reading — and never turned into an assertion.
+      const preFix = body.replace("grep -aEiq", "grep -Eiq");
+      expect(preFix, "CALIBRATION: the `-a` was not found to strip").not.toBe(body);
+      const preFixRun = run(NUL_FIXTURE, preFix);
+      const flavour =
+        spawnSync("bash", ["-c", "grep --version 2>&1 | head -1"], { encoding: "utf8" })
+          .stdout?.trim() ?? "unknown grep";
+      // PRINTED, so the reading lands in the run's log rather than only in a message
+      // nobody sees on a green run. `--reporter=verbose` (and any failure) shows it.
+      console.log(
+        `[WR-04 A1 OBSERVATION] pre-fix (\`grep -Eiq\`, no -a) on the NUL fixture: ` +
+          `step-rc=${preFixRun.status}, branch-fired=${
+            preFixRun.out.includes("Reverted migrations detected") ? "yes" : "NO (read it CLEAN)"
+          } — grep here is: ${flavour}. Recorded, not asserted: this is grep-flavour ` +
+          `dependent and the fixed line's exit 1 above is the invariant.`,
+      );
+      expect(
+        typeof preFixRun.status,
+        "the pre-fix observation did not produce an exit status at all",
+      ).toBe("number");
     }, EXEC_TEST_TIMEOUT_MS);
 
     it("EXECUTED (PROD): the same affirmative check guards the production apply", () => {
