@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.77.31.1] - 2026-09-09 — the books closed on TESTPREPROD, with run ids instead of assertions
+
+Five commits over two themes: the backlog ledger for Phase 164.8, and the three documents that
+tell the next reader which database they are on and who holds the mutex.
+
+### Notes
+- **Six TODOS entries closed, each against a run id or a sha rather than a claim.**
+  `[164.2-TEST-APPLY-PROVENANCE]`, `[164.7-TEST-APPLY-APPSETTINGS]`,
+  `[164.5-TEST-VAC08-DROP-UNAPPLIABLE]`, `[164.5-TEST-EXCEPT-DRIFT04]`, `CI-MIGRATE-01` and
+  `[VAC08-LEDGER-32]`. `CI-MIGRATE-01` closes on run `34367135073` (headSha `dbd13246`), where
+  `apply-test` → `apply-test-verdict` → `plan` → `apply` all concluded success with
+  `dispatch-ref-guard` correctly skipped.
+- **The `TEST-NOT-APPLICABLE` pragma verdict is settled in TWO parts, not one.** Narrow and
+  evidenced: nothing for a pragma to declare for `20260908120000`, because the restore made TEST a
+  copy of PROD's catalogue and VAC-08 prints its presence line with no pragma. General and OPEN:
+  the restore is schema-only, so TEST mirrors PROD's catalogue and never its data — a migration in
+  this repo's house style, a data-reading `DO` block that `RAISE EXCEPTION`s on an unexpected
+  count, applies cleanly to PROD and refuses on empty TEST, and under the locked Area 1 Q2 that
+  blocks the PROD apply. The earlier one-part verdict was reversed by the plan-checker's B4
+  finding on 2026-09-08 and does not ship anywhere.
+- **Four entries opened.** `[164.8-PUSH-RACE-VAC08]`, `[164.8-TEST-DATA-RESEEDED]` and
+  `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` are deferrals and each names Phase 164.9
+  TESTISOLATION as its owner with a trigger condition — a TODOS line alone has none of owner,
+  date or gate. `[164.8-TEST-ENVIRONMENT-KEPT]` is a decision record rather than a deferral: the
+  GitHub `Test` environment was kept for its durable Deployments audit trail over destructive
+  rebuilds of a shared database, and explicitly NOT for access control, which it was measured not
+  to provide.
+- **The first `sql-tests` run after the restore printed `0 absent` AND was red**, and is recorded
+  that way. Run `34329426898` @ `a622df27`: VAC-08 itself was clean; a stale constraint assertion
+  in `test_commit_scenario_batch_p1956_range.sql` failed, fixed separately by PR #765
+  (`b8951132`). Recording it as "the first green run" would have been false.
+
+### Changed
+- **`CLAUDE.md` gains a dated currency block for what shared TEST now is**, beside the older
+  paragraphs kept as lineage rather than replacing them. It narrows, and does not delete, the
+  guard-coverage sentence: the two CI jobs that WRITE to shared TEST (`apply-test` and the restore
+  workflow) each run the database-identity marker query as their first statement after the mutex
+  acquire, so the set of unguarded writers got smaller — but the developer CLI and the browser SQL
+  editor still have no automated guard at all.
+- **`docs/runbooks/shared-test-db-mutex.md`: three mutex holders became five.** `apply-test` and
+  `restore` now take key `61616158` and both write to shared TEST. The Phase 158 sentences that
+  say "three" are kept as lineage and marked as such, so a reader is not left reconciling a
+  contradiction; the holder list, the TTL table and the triage section are current.
+
 ## [0.77.31.0] - 2026-09-09 — the applied-set check could not fail, because the CLI echoes its own plan
 
 Two commits, two themes: a fix to a gate shipped one version ago, and the plan edit that routes it.

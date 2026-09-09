@@ -1,8 +1,12 @@
 # Runbook — The shared TEST-database CI mutex
 
-Phase 158 (OPS-01). The three CI jobs that touch the shared TEST Supabase
-project — `sql-tests`, `python`, `e2e-seeded` — must never run concurrently
-across runs. They used to be serialized by a GitHub Actions `concurrency` group
+Phase 158 (OPS-01). The CI jobs that touch the shared TEST Supabase project must
+never run concurrently across runs. Phase 158 named three — `sql-tests`,
+`python`, `e2e-seeded` — and **Phase 158's three became FIVE on 2026-09-09**:
+`apply-test` and `restore` were added by Phase 164.8 TESTPREPROD and are
+described in section 1. Every "three" below that was not updated is a Phase 158
+sentence kept as lineage; the holder list, the TTL table and section 3 are
+current. They used to be serialized by a GitHub Actions `concurrency` group
 named `shared-test-db`; they are now serialized by a **Postgres session advisory
 lock**. This page covers "what is holding the lock", "how do I break a stuck
 hold", "what happens on forks", and the drill that proves serialization still
@@ -61,6 +65,34 @@ queueing on) the lock as an immortal orphan ([158-MUTEX-02], resolved — see
 - **How to spot it:** the holder session sets `PGAPPNAME=ci-shared-test-db-mutex`,
   so it is identifiable in `pg_stat_activity` (the probe workflow uses a
   different name, `ci-mutex-probe`).
+
+⭐ **THERE ARE FIVE HOLDERS, NOT THREE — added 2026-09-09 by Phase 164.8 TESTPREPROD.**
+Two jobs outside `ci.yml` now take key `61616158`, and both write to shared TEST:
+
+4. **`apply-test`** (`.github/workflows/supabase-migrate.yml`) — runs on every push to
+   `main` that touches `supabase/migrations/**`, and on a `main`-only
+   `workflow_dispatch`. It holds the lock across **marker check → dry-run plan →
+   `supabase db push --include-all` → post-verify**, i.e. the whole apply, not per
+   statement. `environment: Test`, no reviewers. Proven end-to-end by dispatch run
+   `34367135073` at head `dbd1324690eb05f3d4a567e93eaca2323513ef3b`, which logged
+   `Acquired the shared-test-db advisory lock (key 61616158) after 5s (attempt 1/3).`
+5. **`restore`** (`.github/workflows/test-restore-from-baseline.yml`) — **dispatch-only**,
+   founder-approved, destructive. It holds the lock across **backup → the whole
+   drop/replay/ledger-seed transaction → post-verify**, deliberately spanning the act
+   rather than its statements, so no other job can observe TEST mid-rebuild. First and so
+   far only committed run: `34274355596` at head `88581b8b`.
+
+⚠️ **BOTH ARE INDISTINGUISHABLE FROM `sql-tests` IN `pg_stat_activity`, and that is a
+choice.** Each sets the *same* `PGAPPNAME=ci-shared-test-db-mutex`, because each acquire
+step is a byte-for-byte copy of `ci.yml`'s (the copy is deliberate and is pinned by
+`src/__tests__/critical-regressions.test.ts`, which asserts the acquire steps are pairwise
+identical). So in a census you can tell the five apart only by `query` and by timing, never
+by `application_name`. **That is acceptable** rather than an oversight: the release step's
+dead-holder witness and the `pg_locks`-guarded `pg_terminate_backend` are the same code in
+every holder, so triage and cleanup do not depend on knowing WHICH job you are looking at.
+Giving them distinct names would fork the byte-identical acquire step that the regression
+test exists to keep identical — a worse trade than a census you have to read one column
+further into.
 
 **Why the concurrency group had to go.** GitHub's concurrency layer holds
 exactly ONE pending entry per group and **cancels** the pending entry when a
@@ -172,6 +204,15 @@ each other; change one and you must re-derive the others.
 | Acquire wait cap (`ci.yml` acquire loop) | `3600` s | ≥ worst-case legitimate queue: 3 concurrent runs × ~20 min of lock-time each, minus the waiter's own hold ≈ 60 min. Reachable only because the session zeroes `statement_timeout` first — before [158-MUTEX-01] the wait died at 120 s/attempt, so effective tolerance was ~3×120 s, not this cap |
 | Job TTL (`timeout-minutes`) | `90` min | > setup + full acquire cap + the job's own work (~2 + 60 + ~12 ≈ 74 min) |
 | Holder idle sleep (`pg_sleep`) | `6000` s (100 min) | **>** the job TTL, so the job always dies first (WR-01) — holds only with the session-level `SET statement_timeout = 0` ([158-MUTEX-01]); an ORPHANED backend mid-sleep is bounded by `client_connection_check_interval = '30s'`, not by any statement timeout ([158-MUTEX-02]) |
+| Job TTL — `apply-test` (`supabase-migrate.yml:357`) | `90` min | Same derivation as the row above, copied rather than re-derived, so the acquire-cap arithmetic holds for this holder too (added 2026-09-09, Phase 164.8) |
+| Job TTL — `restore` (`test-restore-from-baseline.yml:216`) | `90` min | Same derivation, same reason (added 2026-09-09, Phase 164.8) |
+
+⛔ **"The three numbers" is now FIVE TTLs against ONE acquire cap.** Raising the acquire
+wait cap no longer moves three job timeouts — it moves **five**, in three files
+(`ci.yml`, `supabase-migrate.yml`, `test-restore-from-baseline.yml`), plus the
+`analytics-deploy-verify.yml` convergence window below. Nothing at runtime checks that
+they agree; the coupling is maintained by hand and by this table. Re-derive all of them
+together or none of them.
 
 Each CI run takes the lock three times — `python` (~7 min of pytest under the
 lock), `e2e-seeded` (~8-9 min, spanning `npm run build` *and* the Playwright
@@ -211,6 +252,22 @@ outlives its client by much more means the GUC did not stick to the session
 via section 3.
 
 ## 3. Manual unlock
+
+⛔ **NEW SINCE 2026-09-09 — A WEDGED HOLDER NOW DELAYS A PRODUCTION DEPLOY.** Before
+Phase 164.8, nothing about a PROD deploy depended on shared TEST; now
+`supabase-migrate.yml`'s PROD `apply` job carries `needs.apply-test.result == 'success'`,
+and `apply-test` cannot succeed while it is queued behind a wedged holder. So a stuck lock
+on a database **this project does not own** sits between a merge and production. That
+coupling was surfaced and ACCEPTED at decision time (Phase 164.8 `CONTEXT.md`, Area 1 Q2 ×
+Area 4 Q3); the escape hatches — a bounded acquire that proceeds with a loud warning,
+applying without the mutex, or gating PROD on apply FAILURE rather than apply
+UNAVAILABILITY — are **founder decisions, not operator ones**. Do not improvise one at
+3am.
+
+➡️ **Therefore: when `apply-test-verdict` reports a TIMEOUT, run the census in this
+section FIRST**, before touching the workflow or re-running the merge. It answers in one
+query whether you are looking at a wedge (kill it, Steps 1-3) or at ordinary queue depth
+(wait, and re-run once it drains) — and those two have opposite correct responses.
 
 **Step 1 — find the holder.** Against the TEST project:
 

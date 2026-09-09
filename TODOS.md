@@ -1375,7 +1375,7 @@ true for 146 and half of 142–145, and **false for 141**.
       The condition is recorded at the source in `scripts/prod-body-drift-check.sh`, in the
       `⛔ NO RATCHET HERE` block, so a reader of the refusal meets its own caveat.
 
-- [ ] **`[164.2-TEST-APPLY-PROVENANCE]` `test_sync_status_curated_sentence_survives.sql` is RED
+- [x] **`[164.2-TEST-APPLY-PROVENANCE]` `test_sync_status_curated_sentence_survives.sql` is RED
       on shared TEST from this PR's first CI run onward, BY DESIGN, and must be hand-applied
       (booked 2026-09-06, Phase 164.2 plan 10; the red is named in `164.2-07-SUMMARY.md` →
       `## Deploy notes`).**
@@ -1408,6 +1408,27 @@ true for 146 and half of 142–145, and **false for 141**.
       those targets prod from this directory. ⚠️ TEST is SHARED with other people's CI; this is a
       write to someone else's substrate, which is why plan 07 did not perform it and plan 10
       books it instead of doing it.
+      ✅ **CLOSED 2026-09-09 by Phase 164.8 TESTPREPROD — the migration reached TEST by the
+      RESTORE, and the hand-apply remedy above is superseded for every future migration.**
+      The restore ran as `test-restore-from-baseline.yml` **run `34274355596`, head
+      `88581b8bc66415bfa86b7d5a019741b1cbd0ff49`**, COMMITTED: `public` was dropped and rebuilt
+      from `supabase/schema/baseline.sql` at sha256 `27826b76…`, and that dump is a capture of
+      PROD taken AFTER this migration applied there — `BASELINE.md`'s "Regenerated 2026-09-07"
+      table names `20260906120000` twice by origin (the
+      `strategy_analytics_drop_stale_error_provenance()` trigger, and the
+      `computation_error_source` / `computation_error_job_id` columns). The ledger was re-seeded
+      to one row per repo migration file (243 → 266), so the row for `20260906120000` is present.
+      **Step 3's "record the first green run's SHA" is discharged**: `sql-tests` job
+      `102416204141` in CI run **`34335526540`, head `b895113264af79858f77682b20d539595df582b0`**
+      — conclusion `success`, VAC-08 printing `ledger presence: 0 absent, all 0 baselined (see
+      scripts/vac08-ledger-baseline.txt); 0 NEW drift.` SHA-bound, per the rule that a settled
+      green board can belong to an ancestor.
+      ⭐ **The remedy steps are not merely satisfied, they are retired.** Since PR #767 /
+      `supabase-migrate.yml`'s `apply-test` job (`[CI-MIGRATE-01]` below, proven end-to-end by
+      dispatch run `34367135073` at head `dbd1324690eb05f3d4a567e93eaca2323513ef3b`), every merge
+      touching `supabase/migrations/**` applies to TEST FIRST and PROD's `apply` will not run
+      unless it succeeded. No future migration needs the hand-apply this entry describes; the
+      steps stay above as the dated record of how it was done before the pipeline existed.
 
 - [x] **RESOLVED 2026-09-07 — both migrations (and a third) are now APPLIED to shared TEST.**
       Applied in ascending version order through the authenticated TEST connection, each gated by
@@ -1432,7 +1453,7 @@ true for 146 and half of 142–145, and **false for 141**.
       other eleven would have re-run their self-verify blocks against already-current state.
       The original entry follows, as the dated record of what was expected:
 
-- [ ] **`[164.5-TEST-VAC08-DROP-UNAPPLIABLE]` The DRIFT-04 drop migration is RED on VAC-08 from
+- [x] **`[164.5-TEST-VAC08-DROP-UNAPPLIABLE]` The DRIFT-04 drop migration is RED on VAC-08 from
       PR #758's first CI run onward, STRUCTURALLY and PERMANENTLY, and cannot be cleared by
       applying it (booked 2026-09-08, founder decision on the merge-red question).**
       ⚠️ **This is NOT the same shape as `[164.2-TEST-APPLY-PROVENANCE]` or
@@ -1460,6 +1481,57 @@ true for 146 and half of 142–145, and **false for 141**.
       a red/green fixture pair proving it fires AND proving it does not swallow a genuine missing
       apply. Until then this red is expected and is named here so nobody reads it as a coupling
       regression.
+
+      ✅ **CLOSED 2026-09-09 by Phase 164.8 TESTPREPROD — and the disposition this entry asked for
+      WAS NOT BUILT. That is deliberate, it is narrow, and the general case is left OPEN and
+      routed.** Two parts; do not read either half without the other.
+
+      **(1) NARROW — unnecessary for THIS migration, with the measurement that shows it.**
+      Area 3's pragma (`-- TEST-NOT-APPLICABLE: <reason>`) was designed for a TEST built from
+      `supabase/migrations/`, which therefore lacked a function that had only ever been
+      hand-created on PROD. Phase 164.8 replaced that TEST: restore run `34274355596`, head
+      `88581b8bc66415bfa86b7d5a019741b1cbd0ff49`, rebuilt `public` from the PROD dump
+      `supabase/schema/baseline.sql` (sha256 `27826b76…`) and re-seeded the ledger to one row per
+      repo migration file (243 → 266). That dump was regenerated on 2026-09-08 AFTER the DROP
+      applied to PROD — `BASELINE.md` records the regeneration as a **pure deletion of 91 lines
+      with ZERO added lines**, the deleted block being `create_allocator_connected_strategy` and
+      its attendant `GRANT` / `REVOKE` / `COMMENT` statements. So the object is in neither PROD,
+      nor the dump, nor the restored TEST, while the ledger row for `20260908120000` IS present.
+      Both halves are measured on runs, not argued: `164.8-04-SUMMARY.md` records the migration
+      appearing in NEITHER VAC-08 list — not "stale", not "NOT baselined" — and `sql-tests` job
+      `102416204141` (CI run `34335526540`, head `b895113264af79858f77682b20d539595df582b0`)
+      prints `ledger presence: 0 absent, all 0 baselined (see scripts/vac08-ledger-baseline.txt);
+      0 NEW drift.` with **no pragma anywhere in the repo**. There is nothing for a pragma to
+      declare about this migration.
+      ⚠️ **One reading in that chain is a DERIVATION, not a catalog read, and is labelled as one
+      at its source** (`164.8-04-RESTORE.log`): "`create_allocator_connected_strategy` has ZERO
+      overloads on TEST" AFTER the restore follows from `public` being dropped and rebuilt from a
+      dump containing zero occurrences of the name. Nobody ran `pg_proc` against TEST afterwards
+      to confirm it. It is quoted as a derivation because that is what it is.
+      **The three refused fixes above stay refused, and not one of them was needed**: no
+      `IF EXISTS` was added, no line entered `scripts/vac08-ledger-baseline.txt` (that file went
+      31 → 0 entries in the same phase, beside an AIM), and nothing was hand-applied.
+
+      **(2) GENERAL — OPEN, because the restore was SCHEMA-ONLY.** `BASELINE.md` records the dump
+      as "schema only, **0 data statements**". TEST therefore reproduces PROD's CATALOGUE and
+      never its ROWS: every `public` table came back empty at the restore and holds only what CI
+      writes afterwards. This repo's house style for a migration precondition is a data-reading
+      `DO` block that `RAISE EXCEPTION`s on an unexpected count — see
+      `supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql:925-935`,
+      `SELECT enabled INTO v_seeded …` followed directly by a `RAISE EXCEPTION`. A migration of
+      that shape reading a PROD-populated table applies cleanly to PROD and REFUSES on TEST, and
+      under Phase 164.8 Area 1 Q2 (a failed TEST apply BLOCKS the PROD apply — LOCKED, and not
+      reopened here) that refusal blocks a production deploy. **The retired pragma was precisely
+      the declared escape hatch for that moment.**
+      **Why it is still not built.** It has no consumer today — zero migrations in the repo need
+      it — and this milestone's own rule (164.8 `CONTEXT.md`) is that a mechanism nobody needs is
+      the vacuity the milestone exists to remove. A parser-only seam would be dead code behind a
+      passing test, which is the reasoning that closed `[REDUNDER-LANEBLOCKED-BLIND]` rather than
+      shipping a tripwire for an empty class.
+      ➡️ **Booked as `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`, routed to Phase 164.9 TESTISOLATION**
+      (Phase 164.8 section below), with its trigger condition, its interim remedy and its two
+      candidate shapes. Phase 164.10 BODYDRIFT was checked and rejected as the home: it is
+      function-body scope only.
 
 - [ ] **`[164.8.1-TEST-ANALYTICS-URL-PROD]` Shared TEST's cron can POST to the PRODUCTION
       analytics service: `system_settings.analytics_service_url` is seeded with the PROD Railway
@@ -1535,7 +1607,7 @@ true for 146 and half of 142–145, and **false for 141**.
       freshness gate; until one exists, a declaration for an RPC that has zero `.rpc()` call sites
       is dead weight, not a defect.
 
-- [ ] **`[164.7-TEST-APPLY-APPSETTINGS]` Two migrations from Phase 164.7 are RED on shared TEST
+- [x] **`[164.7-TEST-APPLY-APPSETTINGS]` Two migrations from Phase 164.7 are RED on shared TEST
       from this PR's first CI run onward, BY DESIGN, and must be hand-applied (booked 2026-09-07,
       Phase 164.7 plan 05; the reds are named in `164.7-02-SUMMARY.md` → "Expected reds, named
       before the PR" and in `164.7-04-SUMMARY.md`).**
@@ -1577,8 +1649,33 @@ true for 146 and half of 142–145, and **false for 141**.
       Supabase CLI is linked to **PRODUCTION** (`supabase/.temp/project-ref`), so every one of
       those targets prod from this directory. ⚠️ TEST is SHARED with other people's CI; this is a
       write to someone else's substrate, which is why plan 05 books it instead of doing it.
+      ✅ **CLOSED 2026-09-09 by Phase 164.8 TESTPREPROD — both migrations reached TEST by the
+      RESTORE, and the hand-apply remedy above is superseded for every future migration.**
+      Restore run `34274355596`, head `88581b8bc66415bfa86b7d5a019741b1cbd0ff49`, COMMITTED:
+      `public` rebuilt from `supabase/schema/baseline.sql` at sha256 `27826b76…`, a capture of
+      PROD taken after both migrations applied there. `BASELINE.md`'s "Regenerated 2026-09-07"
+      table names them by origin — `system_settings` + its two policies + the URL allow-list
+      constraint + `match_engine_cron_tick()` from `20260907120000`, and the two fan-out bodies
+      re-based onto `public.system_flags` from `20260907130000`. The ledger was re-seeded to one
+      row per repo migration file (243 → 266), so both rows are present and the step-4 VAC-08
+      `NOT baselined` red for both is gone.
+      **Step 4's "record the first green run's SHA" is discharged**: `sql-tests` job
+      `102416204141` in CI run **`34335526540`, head
+      `b895113264af79858f77682b20d539595df582b0`** — conclusion `success`, VAC-08 printing
+      `ledger presence: 0 absent, all 0 baselined (see scripts/vac08-ledger-baseline.txt);
+      0 NEW drift.` SHA-bound.
+      ⚠️ **The ONE UNKNOWN above — whether shared TEST has a `vault` schema the CI role may read —
+      is ANSWERED, and answered green:** the whole `sql-tests` job is `success` on that run, so
+      `test_analytics_service_settings_and_vault_tick.sql` did not turn `TEST FAILED (V1-SETUP)`
+      after the apply. Nothing was converted to a skip.
+      ⭐ **The remedy steps are retired, not merely satisfied.** Since `supabase-migrate.yml`'s
+      `apply-test` job (`[CI-MIGRATE-01]` below, proven end-to-end by dispatch run `34367135073`
+      at head `dbd1324690eb05f3d4a567e93eaca2323513ef3b`), every merge touching
+      `supabase/migrations/**` applies to TEST FIRST, in timestamp order, holding the shared-TEST
+      mutex, and PROD's `apply` will not run unless it succeeded. The ordered psql steps stay
+      above as the dated record of how this was done before the pipeline existed.
 
-- [ ] **`[164.5-TEST-EXCEPT-DRIFT04]` `20260908120000_drop_create_allocator_connected_strategy.sql`
+- [x] **`[164.5-TEST-EXCEPT-DRIFT04]` `20260908120000_drop_create_allocator_connected_strategy.sql`
       is a PERMANENT TEST EXCEPTION — never apply-debt — and Phase 164.8 TESTPREPROD must SKIP it
       BY NAME or it will WEDGE every later migration to shared TEST (booked 2026-09-07, Phase
       164.5 plan 06 review).**
@@ -1610,6 +1707,28 @@ true for 146 and half of 142–145, and **false for 141**.
       ⛔ Do NOT "fix" this by adding the existence-tolerant modifier. Doing so would make the
       file apply cleanly to TEST and **silently no-op on PROD** on any signature mismatch, which
       is the exact vacuous pass PROOF D reproduces on a real cluster.
+      ✅ **CLOSED 2026-09-09 — the EXPIRY CONDITION THIS ENTRY WROTE FOR ITSELF WAS MET, and no
+      exclusion-by-filename was ever built because none was needed.** The condition was: *"it
+      stops being an exception when `supabase/schema/baseline.sql` is next regenerated from PROD
+      after this removal applies."* That regeneration happened on **2026-09-08** — `BASELINE.md`
+      records it as a **pure deletion of 91 lines, zero added**, the removed block being exactly
+      `create_allocator_connected_strategy` and its `GRANT` / `REVOKE` / `COMMENT` statements, at
+      sha256 `27826b76…`. Phase 164.8 Plan 04 then restored TEST from that very file (run
+      `34274355596`, head `88581b8bc66415bfa86b7d5a019741b1cbd0ff49`), so the function is now in
+      neither PROD, nor the baseline, nor TEST, and there is nothing on any substrate for this
+      file to describe.
+      ⭐ **THE WEDGE CANNOT HAPPEN, and the reason is structural rather than a mitigation.**
+      Phase 164.8 did not build "an apply list that excludes this file by name" — there is no
+      apply list. `supabase-migrate.yml`'s `apply-test` runs `supabase db push --include-all`
+      natively against a TEST ledger that already holds a row for `20260908120000`, so the CLI
+      never selects the file and never executes the `DROP`. A `42883` batch abort has no
+      occasion to occur. This is the good outcome of the two the entry allowed for: the
+      exception expired instead of being permanently carried.
+      ⚠️ **The `|| true` hazard this entry warned about was never introduced.** Nothing in
+      `apply-test` swallows an error: a failed TEST apply is a red job, `apply-test-verdict`
+      turns even a SKIPPED one into a named red, and PROD's `apply` carries
+      `needs.apply-test.result == 'success'`. Proven end-to-end by dispatch run `34367135073` at
+      head `dbd1324690eb05f3d4a567e93eaca2323513ef3b`.
 
 - [ ] **`[164.7-VAULT-ABSENT-RULE]` The `vault-absent` cron-hygiene rule and a Phase 164.5 repoint
       of jobid 1 are in direct conflict, and must move in ONE change (booked 2026-09-07, Phase
@@ -2436,8 +2555,8 @@ five steps (install psql, preflight, acquire mutex, run, release) and NO migrati
 ⇒ TEST is whatever was last pushed by hand, so every migration self-check with a pre-apply
 tolerance is permanently silent there.
 
-- **[CI-MIGRATE-01] Add a migration-apply step to the `sql-tests` lane** (or a job it depends on),
-  so TEST is current before the SQL gates run.
+- [x] **[CI-MIGRATE-01] Add a migration-apply step to the `sql-tests` lane** (or a job it depends
+  on), so TEST is current before the SQL gates run.
 
 ⚠️ **This is NOT a one-line CI edit — three named hazards:**
 1. **TEST is shared and contended.** The lane already acquires a mutex and the DB has no worker.
@@ -2451,6 +2570,212 @@ tolerance is permanently silent there.
 
 ⭐ Until this lands, the standing rule stands: **a green `sql-tests` run is not evidence that a
 migration gate is armed.** Measure the catalog directly (`pg_get_functiondef` / `obj_description`).
+
+✅ **CLOSED 2026-09-09 by Phase 164.8 TESTPREPROD — but read the precision below before quoting
+this as "an apply step in the `sql-tests` lane", because that is NOT what shipped.**
+
+**What shipped.** `.github/workflows/supabase-migrate.yml` gained three jobs: `apply-test`
+(`environment: Test`, no reviewers, the same pinned Supabase CLI 2.98.2 and the same
+`db push --include-all` flags as the PROD job, holding advisory key `61616158` across marker
+check → dry-run → push → post-verify), `apply-test-verdict` (`if: always()`, converting a SKIPPED
+or FAILED TEST apply into a RED check that names its cause), and `dispatch-ref-guard` (a
+`workflow_dispatch` off a ref other than `main` exits 1 naming the ref — B3). PROD's `apply`
+carries `needs: [plan, apply-test]` **and** `needs.apply-test.result == 'success'`, so a skipped
+TEST apply blocks production instead of passing as grey.
+**Proven end-to-end, SHA-bound:** dispatch run **`34367135073`**, `event=workflow_dispatch`,
+`headSha=dbd1324690eb05f3d4a567e93eaca2323513ef3b` — `apply-test` success, `apply-test-verdict`
+success, `plan` success, `apply` success, `dispatch-ref-guard` correctly skipped. Mutex line
+verbatim: `Acquired the shared-test-db advisory lock (key 61616158) after 5s (attempt 1/3).`
+Identity line verbatim: `which_database: OK — the marker names TEST and not PROD.`
+
+⚠️ **THE PRECISION: the founder chose apply-ON-MERGE, not apply-before-`sql-tests`.** This entry's
+bullet asked for an apply inside (or upstream of) the `sql-tests` lane. Phase 164.8's Area 1 Q1
+answered differently and deliberately — the apply runs on merge to `main`, in the migrate
+workflow, because *a PR head is not the merge result*. The consequence is real and is not
+hand-waved: **on a PR that adds a migration, `sql-tests` gates carrying applied-ness probes stay
+RED until merge, by construction.** That, plus a merge-time mutex race between `sql-tests` and
+`apply-test`, is booked separately as `[164.8-PUSH-RACE-VAC08]` and routed to Phase 164.9.
+
+**The three named hazards above, each answered by measurement:**
+1. **Shared and contended** — `apply-test` takes the same advisory key `61616158` the `sql-tests`
+   lane takes (measured 2026-09-09: 7 occurrences in `supabase-migrate.yml`, 26 in `ci.yml`), and
+   holds it for the whole apply rather than per statement. It does not race a concurrent run; it
+   QUEUES with one. What it does not do is ORDER itself against one — see the new entry.
+2. **The first bulk apply surfaces accumulated drift** — it surfaced NOTHING, because the route
+   changed: TEST was made current by a RESTORE from the PROD dump (run `34274355596`, head
+   `88581b8b`) rather than by replaying a backlog, so by the time `apply-test` first ran there
+   was nothing outstanding to apply. Both dispatch proofs report `planned 0 migration version(s);
+   push reported 0.`
+3. **Applying arms every previously-silent gate at once** — it did, and the first honest run
+   turned that hazard into its intended information. CI run **`34329426898`** at head
+   **`a622df279dcdf4fe6f58d39f990eeaa008aaed99`** (the first `main` run after the restore PR
+   #764) had VAC-08 CLEAN — `ledger presence: 0 absent, all 0 baselined …; 0 NEW drift.` — while
+   `sql-tests` went RED on `test_commit_scenario_batch_p1956_range.sql` Test 5, an assertion that
+   had passed for four months against a stale TEST carrying a constraint dropped in May. The
+   restore did not break it; it revealed it. Fixed by PR #765 (`b8951132`), which re-based the
+   test onto the constraint the migration chain actually renders and ADDED a `100.01` leg so the
+   re-base is not a weakening. **That red was treated as information, exactly as hazard 3 asked.**
+
+**The first fully honest green:** `sql-tests` job `102416204141` in CI run **`34335526540`** at
+head **`b895113264af79858f77682b20d539595df582b0`**, conclusion `success`.
+⛔ **The standing rule above is now RETIRED for TEST-ledger presence and function bodies only** —
+VAC-08 measures both on every `sql-tests` run and printed `266 migration(s) checked against the
+ledger, 4 body comparison(s) over 3 named function(s)` clean. It is NOT retired for anything
+VAC-08 does not compare; for those, keep measuring the catalog directly.
+
+
+### Phase 164.8 TESTPREPROD — the NEW couplings the TEST-first pipeline creates, and the one disposition it deliberately did not build (booked 2026-09-09)
+
+Opened by Phase 164.8 plan 06 as it closed `CI-MIGRATE-01`, `[164.2-TEST-APPLY-PROVENANCE]`,
+`[164.7-TEST-APPLY-APPSETTINGS]`, `[164.5-TEST-EXCEPT-DRIFT04]`, `[164.5-TEST-VAC08-DROP-UNAPPLIABLE]`
+and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a problem** (founder rule
+2026-09-08: a TODOS line alone has no owner, no date and no gate).
+
+- [ ] **`[164.8-PUSH-RACE-VAC08]` `ci.yml`'s `sql-tests` and `supabase-migrate.yml`'s `apply-test`
+      contend for ONE advisory lock on the same merge push, in an order nothing specifies — and
+      a migration-adding PR is red at PR time by construction (booked 2026-09-09, Phase 164.8
+      plan 05; both halves are Area 1 Q1 consequences the founder ACCEPTED at decision time, not
+      defects discovered afterwards).**
+      **MECHANISM (a) — the merge-time race.** Advisory key `61616158` appears **7×** in
+      `.github/workflows/supabase-migrate.yml` and **26×** in `.github/workflows/ci.yml`
+      (measured 2026-09-09 at HEAD). On a merge to `main` BOTH workflows start, both take that
+      key, and no `needs:` edge, concurrency group or key split orders them. `apply-test` holds
+      it across marker → dry-run → push → post-verify; `sql-tests` holds it for the whole job.
+      When `sql-tests` wins, it measures a TEST the merge has not yet applied to; when it loses,
+      it queues. A waiter that exhausts the 3600 s acquire cap FAILS its job, `sql-tests` blocks
+      the `frontend` aggregator, and a `main` check-suite that is not green makes **Railway skip
+      the analytics deploy** until someone re-runs — the exact downstream damage
+      `docs/runbooks/shared-test-db-mutex.md` § 2 exists to describe.
+      **MECHANISM (b) — PR-time red by construction.** Apply-on-merge was chosen over
+      apply-on-PR ("a PR head is not the merge result"), so on a PR that ADDS a migration the
+      object it creates is not on TEST until the PR merges.
+      ⭐ **What Phase 164.8 already shipped against (b), and precisely how far it goes.** PR #767
+      added a **ledger-frontier exemption** to `scripts/test-ledger-drift-check.sh`: VAC-08
+      computes the newest timestamp actually PRESENT in TEST's ledger (the "tip") and exempts
+      from NEW-drift any absent migration authored ABOVE it, printing
+      `ledger frontier: tip=<ts>; N above-tip migration(s) exempted.` on EVERY run — including
+      runs that exempt nothing, so a silent exemption cannot pass for a working gate. It ships
+      with `below-frontier-missing RED`, `above-frontier-missing GREEN` and `tip-equal-missing
+      RED` self-test arms. **It makes VAC-08's ledger verdict order-independent. It removed the
+      CONSEQUENCE for that one gate; it did not remove the coupling.**
+      ⛔ **THE THREE RESIDUALS IT DOES NOT CLOSE — do not read the exemption as a fix:**
+      1. **The race itself is untouched.** Two jobs still take one key on one push with no
+         ordering. Everything in (a) after "no `needs:` edge" is unchanged, including the
+         Railway-skip tail.
+      2. **The exempt window widens silently with TEST's own lag.** The script says so at its
+         own source: if the ledger falls behind, the tip falls with it and the window widens by
+         the same amount. The ABSURDITY FLOOR catches only the GROSS form (a populated ledger
+         matching under half the repo → `MEASURE_FAIL` before the block runs). **A narrow, quiet
+         lag is not caught by anything**, and that cost is booked here by name in the code.
+      3. **The exemption covers VAC-08's ledger verdict ONLY — not the applied-ness probes.**
+         Each affected gate in `supabase/tests/test_*.sql` opens with an arm 0 that reads the
+         OBJECT and is absence-is-failure by design (see the closed `[164.2-TEST-APPLY-PROVENANCE]`
+         and `[164.7-TEST-APPLY-APPSETTINGS]` entries for the shape). VAC-08 exempts nothing on
+         their behalf, so a migration-adding PR whose gate probes its own object is STILL red
+         until merge. (b) is narrowed, not removed.
+      **CANDIDATE FIXES — none is chosen here.** Distinct advisory keys plus an explicit ordering
+      edge; or a `needs:`/workflow-completion edge that makes `sql-tests` on a `main` push wait
+      for `apply-test`; or applying to TEST in a job the `sql-tests` lane depends on, which is
+      what `CI-MIGRATE-01` originally asked for and Area 1 Q1 declined.
+      ⛔ **The escape hatches are FOUNDER decisions, not planner ones**, and 164.8's `CONTEXT.md`
+      already names them so nobody re-derives a softer answer under deploy pressure: a timeout on
+      mutex acquire that proceeds with a loud warning; applying without the mutex; or blocking
+      PROD only on apply FAILURE rather than on apply UNAVAILABILITY. ⛔ Do NOT quietly soften
+      Area 1 Q2 to resolve this — CONTEXT forbids it by name.
+      ✅ **Destination: Phase 164.9 TESTISOLATION.** Two jobs contending for one key on a
+      database shared with other people's CI is the `FANOUT-GLOBAL-01` family, and the fix shape
+      — distinct keys plus explicit ordering — is the same work as isolating TEST lanes. The
+      routing block is already written at `.planning/ROADMAP.md` under Phase 164.9
+      (`ROUTED HERE 2026-09-09`); this entry is the EVIDENCE half and that block is the ROUTING
+      half, deliberately not copies of each other.
+
+- [ ] **`[164.8-TEST-DATA-RESEEDED]` The restore destroyed every row in shared TEST's `public`
+      schema and that is NOT reversible; what TEST holds now is whatever CI has written since
+      (booked 2026-09-09, Phase 164.8 plan 04, recorded there as W6).**
+      **WHAT WAS LOST.** Restore run `34274355596`, head `88581b8bc66415bfa86b7d5a019741b1cbd0ff49`
+      dropped and rebuilt `public` from `supabase/schema/baseline.sql`, which `BASELINE.md`
+      records as "schema only, **0 data statements**". Every `public` table therefore came back
+      EMPTY. The backup artifact (`test-restore-backup-34274355596`, 90-day retention) holds the
+      old ledger byte-exact and the old SCHEMA — **it does not hold the old rows**, so this is a
+      one-way door by construction and not by oversight.
+      **WHAT RE-CREATED WHAT, read off the first `main` CI run after the restore PR (#764) rather
+      than predicted** — run **`34329426898`**, head **`a622df279dcdf4fe6f58d39f990eeaa008aaed99`**:
+      `e2e-seeded` **success**, `e2e` **success**, `python` **success**. The seed path is
+      `SEED_CONFIRM_STAGING=true npx tsx scripts/seed-demo-data.ts`, which re-populates the
+      8-strategy demo set the seed-gated Playwright specs require, inside the held mutex and
+      before the test-env build.
+      ✅ **NO spec failed for a missing pre-existing row.** That is the measurement this entry
+      was opened to record, and it came back clean: nothing was re-seeded by hand, and nothing
+      needs to be. The only red on that run was `sql-tests` on
+      `test_commit_scenario_batch_p1956_range.sql` Test 5 — a stale CONSTRAINT assertion the
+      restore revealed, not a missing row — fixed in PR #765 (`b8951132`).
+      ⚠️ **WHY THIS STAYS OPEN ANYWAY.** A green run proves the seeded set is sufficient for the
+      specs that ran; it does not establish a CONTRACT. Nothing today states what a run may
+      assume about TEST's rows, so the next spec that quietly depends on a row it did not create
+      will fail at the next restore rather than at review. ⚠️ Note also that PR #767
+      (Phase 164.8.1 REFDATA) landed AFTER this restore: a FUTURE restore replays allowlisted
+      migration-seeded reference data, so "every public table comes back empty" describes the
+      2026-09-08 restore and will not describe the next one.
+      ✅ **Destination: Phase 164.9 TESTISOLATION** — the per-run seed contract. "Whose rows is a
+      run asserting about" and "which rows may a run assume exist" are one question.
+
+- [ ] **`[164.8-TEST-ENVIRONMENT-KEPT]` The GitHub `Test` environment is KEPT for its Deployments
+      AUDIT RECORD, explicitly NOT for access control — founder decision 2026-09-08, taken after
+      reconsidering deletion.**
+      ⛔ **It adds NO access control, and that was measured rather than assumed.** A
+      `workflow_dispatch` runs the workflow FILE FROM THE SELECTED REF, so the environment's
+      branch policy and the `dispatch-ref-guard` job both fall to the same branch edit; an actor
+      who can push a branch can edit either. Reading the environment as a permission boundary
+      would be a false sense of one.
+      ✅ **What it DOES buy, and why it was kept:** a durable **Deployments** record — actor, ref,
+      sha, timestamp — for every destructive rebuild of a database shared with other people's CI.
+      That record outlives workflow-log retention, which is exactly the horizon over which "who
+      rebuilt TEST, from what, and when" stops being answerable from logs.
+      **Configured `main`-only, 0 reviewers, 0 secrets, 0 variables** — so it adds no per-merge
+      friction to `apply-test`, and it cannot SHADOW the repo-level `TEST_SUPABASE_DB_URL` that
+      **39** references depend on (measured 2026-09-09 at HEAD: 33 in `.github/workflows/ci.yml`,
+      6 in `.github/workflows/mutex-probe.yml`). ⛔ Adding an environment-level secret of that
+      name would silently repoint those references; do not.
+
+- [ ] **`[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` A migration that is VALID on PROD can REFUSE on
+      TEST because TEST has PROD's catalogue and none of its rows — and under the locked Area 1
+      Q2 rule that refusal BLOCKS the production deploy. There is no escape hatch (booked
+      2026-09-09, Phase 164.8 plan-checker finding B4).**
+      **WHY IT EXISTS.** TEST was restored from a SCHEMA-ONLY dump (`BASELINE.md`: **0 data
+      statements**), so it reproduces PROD's CATALOGUE and never its ROWS. This repo's house
+      style for a migration precondition is a data-reading `DO` block that `RAISE EXCEPTION`s on
+      an unexpected count — `supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql:925-935`
+      is the specimen (`SELECT enabled INTO v_seeded …` then `RAISE EXCEPTION`). Such a migration
+      reads a PROD-populated table, applies cleanly to PROD, and refuses on TEST.
+      ⛔ **Area 3's `TEST-NOT-APPLICABLE` header pragma was the declared escape hatch and was NOT BUILT**
+      — deliberately, because it has no consumer today (see the closed
+      `[164.5-TEST-VAC08-DROP-UNAPPLIABLE]` for the full two-part verdict).
+      **TRIGGER — the condition that says this entry has come due, stated so a human recognises
+      it under pressure:** `apply-test-verdict` reports **failure cause (3)** — `apply-test` RED
+      on a `RAISE` from a data-reading `DO` block — **while PROD's `plan` dry-run is CLEAN**. That
+      divergence is the signature; a failure that is red on BOTH sides is an ordinary bad
+      migration and is not this.
+      **INTERIM REMEDY — revert the merge.** ⛔ NOT an edit to `.github/workflows/supabase-migrate.yml`.
+      Area 1 Q2 (a failed TEST apply blocks the PROD apply) is LOCKED, and editing the pipeline
+      under deploy pressure to get a deploy out is precisely the failure mode this entry exists to
+      prevent. Reverting restores a known state and costs one merge.
+      **CANDIDATE SHAPES — decide in the destination phase, not by inertia:**
+      (i) the retired `-- TEST-NOT-APPLICABLE: <reason>` header pragma, parsed by ONE piece of
+      code that BOTH `apply-test` and VAC-08 read (two switches drift, and the apply would then
+      abort on exactly the migrations VAC-08 was told to forgive), shipped with the THREE-arm
+      proof 164.8 `CONTEXT.md` Area 3 specifies — RED for an unpragma'd genuine absence, GREEN for
+      the pragma'd migration, **RED for a pragma whose stated reason is FALSE**; arm 3 is what
+      stops a pragma becoming a mute button; or
+      (ii) a per-run SEED CONTRACT that makes the read valid on TEST, so the migration never
+      needs forgiving.
+      ✅ **Destination: Phase 164.9 TESTISOLATION.** That phase's goal is what a run may assume
+      about TEST's rows ("the restore changes what a clean starting state even means"), and a
+      data-reading migration refusing on TEST is exactly a claim about what TEST's rows are.
+      ⛔ **Phase 164.10 BODYDRIFT was checked and REJECTED as the home** — it is three PROD
+      function BODIES and carries no data-contract scope. Recorded so the rejection is not
+      re-litigated.
+      ⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the
+      three (founder rule 2026-09-08).
 
 
 ### CRON-DRIFT-01 / CRON-OBS-01 — a PROD cron job 401'd hourly for 7 DAYS behind a green cron history (booked 2026-09-01)
@@ -7061,10 +7386,41 @@ expires. Close them when 164.3.1 closes, not before.
 - [ ] **[MUT-I03] document that concurrent agents editing the tree make the mutation runner's own `dirty-checkout` gate red for unrelated reasons** (reviewer R4-I03, Info) — during round 4 the runner's `dirty-checkout` detector fired with `M src/__tests__/audit-coverage.test.ts`; the diff was another agent's uncommitted `it("PROBE multi-line template with unmatched slash-star", …)` with a `console.log` and no assertion, independently probing [AUDCOV-01]. Reverted, not at HEAD, not in the reviewed range. Two observations worth keeping: (1) `dirty-checkout` works and is worth keeping; (2) the next operator should not chase a red that belongs to a concurrent editor. **Fix:** one line in the runner's header naming the interaction.
 - [ ] **[MUT-W02] the per-job tolerance pin asserts ONE literal spelling, so an equivalently-written tolerance arm widens the aggregator silently** (reviewer R4-W02, Warning) — `src/__tests__/lint-sql-gates.test.ts:341-360`. The posture arm is the right design and the POPULATION half is genuinely derived from `ci.yml` (confirmed: it fails if a fourth job appears). The `tolerance: null` half is only ``const arm = new RegExp(`\\[ "\\$name" = "${job}" \\]`)``. That is one spelling; `[ "${name}" = "sql-mutation" ]`, `case "$name" in sql-mutation)`, `[[ $name == sql-mutation ]]`, or an `if:` on the job itself all install a tolerance the pin cannot see. All three arms in `ci.yml` use the pinned spelling today, so this is future drift, not a live hole — but "cannot silently widen" is the property the fixer claimed and it is not what is asserted. **Fix:** parse the aggregator's `if/elif` chain and range over its branch conditions (`/"\$\{?name\}?"?\s*(?:=|==)\s*"?([a-z0-9-]+)"?/g`), asserting `named.has(job) === (tolerance !== null)` per job, plus a `named.size > 2` floor so the arm cannot pass on an empty set.
 
-- [ ] **[VAC08-LEDGER-32] 31 repo migrations have no TEST ledger row — measured, baselined, ALL 31 DISPOSITIONED BY NAME 2026-09-07, and NOT yet applied** — surfaced 2026-08-30 by VAC-08's first working run (CI 33277829284, PR #724). The count fell 253 → 56 → 53 → 32 as each of four ledger naming conventions was found by the gate's own shape diagnostic; the enumeration is now closed (a basename is `<ts>_<desc>` and `name` has held the whole thing, the description, the timestamp, or nothing — there is no fifth substring), so **32 is real drift, not a join bug**. Arithmetic closes in both directions: 237 of 239 ledger rows now match a repo file and 230 of 262 repo files match a ledger row, leaving no spare rows to explain the 32. They are carried in `scripts/vac08-ledger-baseline.txt` as a dated RATCHET — the gate still fails loud on any *new* migration that misses TEST, and a baselined entry that later turns up present is a hard failure ("delete this line"), so the file can only shrink. ⚠️ **LEDGER ABSENCE IS NOT OBJECT ABSENCE.** These have no `schema_migrations` row; whether their objects exist in TEST (hand-applied, or installed by a later migration) is a different question this gate does not answer, and the body half of VAC-08 reports all four checked function bodies MATCHING the committed snapshot. Do not read the list as "TEST is missing 32 features". ⚠️ **Four are security migrations** — `20260529150000_lock_profile_privileged_columns`, `20260814120000_wizard_rpcs_revoke_authenticated`, `20260715120000_grant_anon_execute_current_user_has_app_role`, `20260823120000_revoke_api_keys_insert` — so any RLS/SQL test asserting those grants may be asserting them against a schema that never received them; worth a targeted object-level probe before trusting those tests. ⭐ **UPDATE 2026-09-07 — the count is now 31, and the caveat about `20260823120000_revoke_api_keys_insert` is FALSIFIED.** On founder instruction ("apply what is missing") that migration was applied to TEST and its baseline line deleted; it is the only line ever removed by an apply. It did NOT refuse: its census guard demands POSITIVE evidence of which database it is on, and TEST supplied the non-PROD signature it asks for (6,098 e2e-shaped rows, ZERO carrying the PROD mt5 census signature), so it took the lenient branch BY MEASUREMENT rather than by anything being softened. Its four structural post-verifies then passed on TEST exactly as on PROD — INSERT withdrawn from anon+authenticated, DELETE retained by authenticated, INSERT retained by service_role (now the only writer), SELECT allowlist intact. **The lesson generalises to the other three security migrations named above:** "may never be applicable" was a guess about a guard nobody had run, and the guard turned out to answer for itself. ⛔ **Do NOT hand-apply the remaining 31 to TEST to shorten the list** — TEST is shared with other people's CI; that stays a founder decision, not an agent one. Owner: Phase 164.5 (which already owns the drift-gate family), or a founder call to apply them.
+- [x] **[VAC08-LEDGER-32] 31 repo migrations have no TEST ledger row — measured, baselined, ALL 31 DISPOSITIONED BY NAME 2026-09-07, and NOT yet applied** — surfaced 2026-08-30 by VAC-08's first working run (CI 33277829284, PR #724). The count fell 253 → 56 → 53 → 32 as each of four ledger naming conventions was found by the gate's own shape diagnostic; the enumeration is now closed (a basename is `<ts>_<desc>` and `name` has held the whole thing, the description, the timestamp, or nothing — there is no fifth substring), so **32 is real drift, not a join bug**. Arithmetic closes in both directions: 237 of 239 ledger rows now match a repo file and 230 of 262 repo files match a ledger row, leaving no spare rows to explain the 32. They are carried in `scripts/vac08-ledger-baseline.txt` as a dated RATCHET — the gate still fails loud on any *new* migration that misses TEST, and a baselined entry that later turns up present is a hard failure ("delete this line"), so the file can only shrink. ⚠️ **LEDGER ABSENCE IS NOT OBJECT ABSENCE.** These have no `schema_migrations` row; whether their objects exist in TEST (hand-applied, or installed by a later migration) is a different question this gate does not answer, and the body half of VAC-08 reports all four checked function bodies MATCHING the committed snapshot. Do not read the list as "TEST is missing 32 features". ⚠️ **Four are security migrations** — `20260529150000_lock_profile_privileged_columns`, `20260814120000_wizard_rpcs_revoke_authenticated`, `20260715120000_grant_anon_execute_current_user_has_app_role`, `20260823120000_revoke_api_keys_insert` — so any RLS/SQL test asserting those grants may be asserting them against a schema that never received them; worth a targeted object-level probe before trusting those tests. ⭐ **UPDATE 2026-09-07 — the count is now 31, and the caveat about `20260823120000_revoke_api_keys_insert` is FALSIFIED.** On founder instruction ("apply what is missing") that migration was applied to TEST and its baseline line deleted; it is the only line ever removed by an apply. It did NOT refuse: its census guard demands POSITIVE evidence of which database it is on, and TEST supplied the non-PROD signature it asks for (6,098 e2e-shaped rows, ZERO carrying the PROD mt5 census signature), so it took the lenient branch BY MEASUREMENT rather than by anything being softened. Its four structural post-verifies then passed on TEST exactly as on PROD — INSERT withdrawn from anon+authenticated, DELETE retained by authenticated, INSERT retained by service_role (now the only writer), SELECT allowlist intact. **The lesson generalises to the other three security migrations named above:** "may never be applicable" was a guess about a guard nobody had run, and the guard turned out to answer for itself. ⛔ **Do NOT hand-apply the remaining 31 to TEST to shorten the list** — TEST is shared with other people's CI; that stays a founder decision, not an agent one. Owner: Phase 164.5 (which already owns the drift-gate family), or a founder call to apply them.
 
 
       ⭐ **UPDATE 2026-09-07 (Phase 164.5 plan 05 + founder decision).** The count is **31**, not 32 — `20260823120000_revoke_api_keys_insert` reached TEST on 2026-09-07. The entry ID keeps its `-32` suffix as a stable identifier. All 31 now carry a per-name disposition in `scripts/vac08-ledger-baseline.txt`, pinned by `src/__tests__/vac08-ledger-dispositions.test.ts` (which fails in BOTH directions: file grows without a disposition, or shrinks). ⚠️ MEASURED: adding the dispositions left the gate's own name-parse BYTE-IDENTICAL (`087de909…` before and after), because the seam `sed 's/#.*//'` at `scripts/test-ledger-drift-check.sh:361` strips comments — so this changed NOTHING about what VAC-08 detects. ⛔ Phase 164.5's criterion 5 was AMENDED by founder decision on 2026-09-07 to say `0 NEW drift` rather than "zero unledgered migrations", which was unsatisfiable on this route by construction. The stronger goal — TEST actually holding these 31 — moves to **Phase 164.8 TESTPREPROD**. This entry stays OPEN for that. ⚠️ Every disposition reads "UNAPPLIED to TEST": `supabase-migrate.yml` is the sole apply path and `sql-tests` has no apply step, so no other category was true. Three are tagged `[SEC]` — a TEST-side test asserting those grants may be asserting them against a schema that never received them. ⚠️ STILL UNKNOWN: ledger absence is not object absence. Whether these migrations' OBJECTS exist in TEST was not measured, and VAC-08's real credentialed reading has still never been observed.
+      ✅ **CLOSED 2026-09-09 by Phase 164.8 TESTPREPROD — 31 → 0, by ONE RESTORE and not by 31
+      hand-applies.** The prohibition above was honoured to the letter: no agent hand-applied any
+      of the 31. What happened instead was a founder-decided, founder-dispatched rebuild —
+      `test-restore-from-baseline.yml` run **`34274355596`**, head
+      **`88581b8bc66415bfa86b7d5a019741b1cbd0ff49`**, COMMITTED — which dropped and rebuilt
+      `public` from the PROD dump `supabase/schema/baseline.sql` (sha256 `27826b76…`) and
+      re-seeded `supabase_migrations.schema_migrations` to ONE ROW PER REPO MIGRATION FILE
+      (243 → 266). Every one of the 31 became present in the same transaction, so the list
+      collapsed rather than being worked down.
+      **`scripts/vac08-ledger-baseline.txt` now carries ZERO entries** (`grep -v '^#' … | grep -c .`
+      → `0`; `ENTRY_COUNT = 0` in `src/__tests__/vac08-ledger-dispositions.test.ts`, both in commit
+      `776c4dbb`). ⛔ It was NOT left as a bare empty file: it is empty BESIDE AN AIM, with a dated
+      lineage header naming the restore run id, the head sha, the dump sha and the founder
+      decision, and the AIM asserts those strings are present — the assertion was observed FAILING
+      before it was believed. That satisfies the file's own "MUST ONLY SHRINK" header rule in the
+      one direction the header always wanted.
+      **SHA-bound confirmation:** `sql-tests` job `102416204141` in CI run **`34335526540`** at
+      head **`b895113264af79858f77682b20d539595df582b0`** prints `ledger presence: 0 absent, all 0
+      baselined (see scripts/vac08-ledger-baseline.txt); 0 NEW drift.`
+      ⚠️ **The "LEDGER ABSENCE IS NOT OBJECT ABSENCE" caveat above is now inverted, and the new
+      caveat is the important one.** Ledger presence is no longer evidence of an execution on
+      TEST either: the re-seed writes ONE PROSE PROVENANCE SENTENCE into `statements[]` for every
+      row, replacing the SQL each migration had actually been applied with. TEST's `statements`
+      column is a provenance record, not evidence of execution — unlike PROD's, which stores the
+      applied SQL. The old TEST column survives only in the restore's 90-day backup artifact.
+      ⚠️ **The three remaining security migrations named above were never individually probed.**
+      They are present in the ledger because the ledger was re-seeded, and their objects are
+      present because `public` is a copy of PROD's catalogue — which is a STRONGER guarantee than
+      a per-migration apply would have given, but it is a different one. Nobody ran their
+      self-verify blocks on TEST.
+
 - [ ] **[VAC08-COUNT-SPM01] VAC-08's ledger ratchet reads its two gating counts with the exact `grep … || true` shape the SAME FILE documents as a false-clean (booked 2026-09-05)** — `scripts/test-ledger-drift-check.sh:304-318` carries an explicit `SP-M01` comment block: *"grep exits 0 with a count, 1 with no match, and >= 2 on an ERROR ... on >= 2 the substitution is EMPTY, `${:-0}` makes it `0` ... A gate that cannot read its own result must not report the result it wanted."* That site was FIXED — it captures `grep_rc` and calls `fail "MEASURE_FAIL: ... An uncountable result is not a count of zero."` Sixty lines later `:372-373` uses the UNFIXED pattern **twice**, for `new_count` and `stale_count`:
   `new_count="$(grep -ac '[^[:space:]]' "$new_file" || true)"; new_count="${new_count:-0}"` (and the same for `stale_count`).
   ⛔ **These two are the whole ledger half of the gate**: `bad` is set only by `stale_count>0` (:376), `new_count>0` (:386), body drift, or zero comparisons (:550-553) — `missing_count`, the one that IS rc-checked, never gates the exit. So a grep error on either temp file reads as zero and the gate prints "ledger and body checks clean" over unread NEW drift. Reachability is low (the files are written by the script moments earlier) which is why this is not Critical, but it is the precise shape this repo has been bitten by before and the fix idiom already exists 60 lines up.

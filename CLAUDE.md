@@ -23,6 +23,63 @@ Guard coverage, measured 2026-09-01: the TS/e2e path is safe (`assertNotProducti
 throws before any write via `getAdmin()`), and CI's `sql-tests` uses its own `TEST_SUPABASE_DB_URL`.
 The **CLI** and the **browser SQL editor** have no automated guard at all. The marker above is the
 only thing standing between a dashboard tab and production.
+⭐ **ADDENDUM 2026-09-09 (Phase 164.8) — that last sentence is now narrower, and only there.** The
+two CI jobs that WRITE to shared TEST both run the marker query themselves and abort on a NULL or
+non-TEST answer: `supabase-migrate.yml`'s `apply-test` and `test-restore-from-baseline.yml`. In
+both it is the first statement after the mutex acquire and before any dry-run, push or drop —
+run `34367135073` printed it verbatim as `which_database: OK — the marker names TEST and not
+PROD.` The **developer CLI** and the **browser SQL editor** still have NO automated guard. Nothing
+about them changed; the set of unguarded writers simply got smaller.
+
+### Currency 2026-09-09 — what shared TEST IS now (Phase 164.8 TESTPREPROD)
+
+⛔ **Regenerate rather than trust: every figure below is bound to a run id or a sha.** The
+paragraphs above stay as lineage; they describe the world before the restore and are still true
+about the CLI link and the marker.
+
+- **TEST's `public` schema is a copy of PROD's catalogue.** Restore run **`34274355596`**, head
+  **`88581b8bc66415bfa86b7d5a019741b1cbd0ff49`**, COMMITTED: `public` was dropped and rebuilt from
+  `supabase/schema/baseline.sql` at sha256 `27826b76…` (the sha recorded in `BASELINE.md`, not a
+  fresh dump), inside the held shared-TEST mutex, behind an activity gate and a backup artifact.
+- **Its migration ledger holds ONE ROW PER REPO MIGRATION FILE** (243 → 266 at the restore).
+  ⚠️ **`supabase_migrations.schema_migrations.statements` on TEST is a PROSE PROVENANCE SENTENCE,
+  not the SQL that ran.** The re-seed TRUNCATEd the table and wrote that sentence into every row.
+  This is the opposite of PROD, whose ledger stores the APPLIED SQL and is therefore usable as
+  evidence of execution — never read TEST's `statements` that way. The pre-restore TEST column
+  survives only inside the restore's backup artifact, which expires after 90 days.
+- ⚠️ **TEST mirrors PROD's CATALOGUE — never its DATA, and the distinction is load-bearing.** The
+  dump is schema-only (`BASELINE.md`: **0 data statements**), so every `public` table came back
+  EMPTY at the restore and holds only what CI has written since. **Consequence, by design and not
+  by accident:** a migration in this repo's house style — a data-reading `DO` block that
+  `RAISE EXCEPTION`s on an unexpected count — can apply cleanly to PROD and REFUSE on TEST, and
+  because a failed TEST apply blocks the PROD apply, that refusal blocks a production deploy.
+  Booked as `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`, routed to **Phase 164.9 TESTISOLATION**.
+  **Interim remedy: REVERT THE MERGE.** ⛔ Never edit `supabase-migrate.yml` to get a deploy out;
+  that is the failure mode the entry exists to prevent.
+  ⚠️ Since PR #767 (Phase 164.8.1 REFDATA, merged AFTER the restore above) a FUTURE restore
+  replays allowlisted migration-seeded reference data, so "every public table comes back empty"
+  describes the 2026-09-08 restore and will not describe the next one. Re-read the allowlist
+  rather than this sentence.
+- **Every merge touching `supabase/migrations/**` now applies to TEST FIRST.**
+  `supabase-migrate.yml`'s `apply-test` (`environment: Test`, no reviewers, and on
+  `workflow_dispatch` ref-guarded to `main` by a `dispatch-ref-guard` job whose `if:` is the exact
+  inverse of its own) runs `db push --include-all` against TEST holding advisory key `61616158`
+  across marker → dry-run → push → post-verify. PROD's `apply` carries
+  `needs.apply-test.result == 'success'` AND the `Production` environment's HUMAN reviewer gate —
+  both were approved by the founder in the GitHub UI on 2026-09-08. A skipped TEST apply is
+  turned into a named red check by `apply-test-verdict` rather than passing as grey.
+- **`scripts/vac08-ledger-baseline.txt` is EMPTY by measurement** (0 non-comment lines,
+  `ENTRY_COUNT = 0`), beside an AIM and a dated lineage header. It shrinks only; it grows only by
+  founder decision. VAC-08's SHA-bound reading, `sql-tests` job `102416204141` in run
+  **`34335526540`** at head **`b8951132`**: `ledger presence: 0 absent, all 0 baselined (see
+  scripts/vac08-ledger-baseline.txt); 0 NEW drift.`
+- ⚠️ **TWO NEW COUPLINGS, both accepted at decision time, both booked as
+  `[164.8-PUSH-RACE-VAC08]` and routed to Phase 164.9.** (a) On a merge push, `ci.yml`'s
+  `sql-tests` and `apply-test` contend for the SAME advisory key with nothing ordering them —
+  measured 2026-09-09: key `61616158` appears 7× in `supabase-migrate.yml` and 26× in `ci.yml`.
+  (b) On a PR that ADDS a migration, gates carrying applied-ness probes are RED until merge, by
+  construction, because apply-on-merge was chosen over apply-on-PR. A ledger-frontier exemption
+  (PR #767) narrows (b) for VAC-08's own verdict and for nothing else.
 
 ⚠️ TEST is SHARED with other people's CI. A write there is not private, and a global assertion
 there is NOT reliable — "no stuck jobs exist", "the table is empty" measure other people's rows
