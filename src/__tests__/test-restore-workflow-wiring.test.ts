@@ -765,6 +765,487 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     });
   });
 
+  // -------------------------------------------------------------------------
+  // WR-05 (Phase 164.8.2) — the world-readable artifact is an ENUMERATED
+  // allowlist, and every future file the restore script writes is OUT by default.
+  //
+  // ⛔ THE DEFECT. Until 164.8.2 the upload's `path:` was the backup DIRECTORY, so
+  // whatever the script happened to write was published on a PUBLIC repo for 90
+  // days. Ten of the eighteen names that reach that directory pass through NEITHER
+  // the backup step's secret scan (it runs BEFORE the script writes anything) NOR
+  // the redaction above (`*.err/*.log/*.out` only) — `pre-census.txt` and the two
+  // rollback views carry a reconstructed `CREATE POLICY … USING (<qual>)` and
+  // owner-named rows read off live shared TEST.
+  //
+  // ⭐ AND THE ARM IS EXECUTED, NOT GREPPED, for the reason the file's header gives:
+  // a string pin over the YAML goes green the moment someone keeps the step and
+  // guts its copy loop. The step's shell is lifted out and RUN over a fixture
+  // directory seeded with all eighteen REAL names (CONTEXT: "a falsifier must
+  // reproduce the real shape" — the redaction twin above deliberately uses
+  // `schema.sql`, a name this workflow never writes; that fixture is left alone as
+  // out of scope, this one uses the measured names).
+  // -------------------------------------------------------------------------
+  describe("WR-05 — the public artifact carries an enumerated allowlist, default-out", () => {
+    const STAGE = "Stage the public artifact (enumerated allowlist; default-out)";
+    const REDACT = "Redact connection metadata from the backup directory (public artifact)";
+    const UPLOAD = "Upload the pre-restore backup (schema + ledger; NOT data)";
+
+    // ⛔ REGENERATED 2026-09-09, NOT restated from the review (which said "seven
+    // unscanned" and was wrong) — from the WRITERS:
+    //   grep -oE 'RESTORE_OUT_DIR}?/[A-Za-z0-9_.-]+' scripts/restore-test-from-baseline.sh
+    //   grep -oE 'outdir}?/[A-Za-z0-9_.-]+'          .github/workflows/test-restore-from-baseline.yml
+    // If the script gains a file, this list goes stale — and the point of the
+    // allowlist is that a stale list here is SAFE: an unknown name is not staged.
+    const REAL_NAMES = [
+      "census.err",
+      "census.sql",
+      "dump.log",
+      "ledger.csv",
+      "ledger.err",
+      "marker.err",
+      "post-census.rollback-view.txt",
+      "post-census.txt",
+      "pre-census.rollback-view.txt",
+      "pre-census.txt",
+      "README.txt",
+      "refdata.err",
+      "refdata.sql",
+      "restore.sql",
+      "schema-before.sql",
+      "survivors.keys",
+      "survivors.sql",
+      "transaction.out",
+    ];
+    /** A name the script does not write today — the "future file" the rule is for. */
+    const UNEXPECTED = "future-thing.txt";
+    /** The DDL shape the finding is actually about, seeded so its absence is measurable. */
+    const POLICY_MARKER = "CREATE POLICY p ON t USING (owner = current_user)";
+    const DDL_BEARING = [
+      "pre-census.txt",
+      "post-census.txt",
+      "pre-census.rollback-view.txt",
+      "post-census.rollback-view.txt",
+      "survivors.sql",
+      "restore.sql",
+    ];
+
+    /**
+     * The by-NAME allowlist, parsed OUT of the step's own `for f in …; do` line.
+     *
+     * ⛔ WHY IT IS PARSED AND NOT RESTATED. A literal copy here would let the two
+     * lists drift, and a test asserting the staged set equals ITS OWN list while the
+     * workflow copies a different one is green over the wrong question. The literal
+     * below exists too — but only so the PARSE can be checked against it, and the
+     * parse is calibrated by mutating a name in the YAML.
+     */
+    function stagedNameList(text: string): string[] {
+      const body = stepBody(text, STAGE);
+      const m = body.match(/^\s*for f in ([^;\n]+); do$/m);
+      return m ? m[1].trim().split(/\s+/) : [];
+    }
+
+    /** The channel globs the step copies, as bare extensions (`err`/`log`/`out`). */
+    function stagedChannelExts(text: string): string[] {
+      const body = stepBody(text, STAGE);
+      const m = body.match(/^\s*for c in ([^;\n]+); do$/m);
+      if (!m) return [];
+      return [...m[1].matchAll(/\/\*\.([a-z]+)/g)].map((x) => x[1]);
+    }
+
+    /** What the workflow's OWN two lists say should be staged, given a seeded set. */
+    function expectedStaged(text: string, seeded: string[]): string[] {
+      const names = stagedNameList(text);
+      const exts = stagedChannelExts(text);
+      return seeded
+        .filter((f) => names.includes(f) || exts.some((e) => f.endsWith(`.${e}`)))
+        .sort();
+    }
+
+    /** Seed a fixture RUNNER_TEMP and run a (possibly mutated) copy of the step. */
+    function runStage(
+      script: string,
+      seed: string[],
+    ): { status: number | null; output: string; staged: string[]; stageExists: boolean } {
+      const runnerTemp = mkdtempSync(join(tmpdir(), "stage-run-"));
+      const outdir = join(runnerTemp, "test-backup");
+      mkdirSync(outdir, { recursive: true });
+      for (const f of seed) {
+        const extra = DDL_BEARING.includes(f) ? `${POLICY_MARKER}\n` : "";
+        writeFileSync(join(outdir, f), `MARKER-${f}\n${extra}`);
+      }
+      const scriptFile = join(runnerTemp, "stage.sh");
+      writeFileSync(scriptFile, script);
+      const r = spawnSync("bash", [scriptFile], {
+        encoding: "utf8",
+        env: { ...process.env, RUNNER_TEMP: runnerTemp },
+      });
+      const stageDir = join(runnerTemp, "test-backup-artifact");
+      let staged: string[] = [];
+      let stageExists = true;
+      try {
+        staged = readdirSync(stageDir).sort();
+      } catch {
+        stageExists = false;
+      }
+      rmSync(runnerTemp, { recursive: true, force: true });
+      return {
+        status: r.status,
+        output: `${r.stdout ?? ""}${r.stderr ?? ""}`,
+        staged,
+        stageExists,
+      };
+    }
+
+    it("the test's allowlist and the step's `for f in …` line are the SAME list", () => {
+      // The literal is the DECISION (founder amendment 2026-09-09): the reversal
+      // recipe plus the script's four named `.sql` files. `survivors.sql` is IN —
+      // pinned here precisely so nobody "completes" the narrowing by removing it,
+      // which is what the superseded research recommendation would have done.
+      const DECIDED = [
+        "ledger.csv",
+        "schema-before.sql",
+        "README.txt",
+        "census.sql",
+        "survivors.sql",
+        "restore.sql",
+        "refdata.sql",
+      ];
+      expect(
+        stagedNameList(WF),
+        "the staging step's `for f in …; do` line no longer copies exactly the decided allowlist. If a name was ADDED, the founder's default-out rule says say why in the step comment and update this list in the same edit; if `survivors.sql` was REMOVED, an aborted restore stops being reversible — that was rejected explicitly (CONTEXT Area 2, AMENDED 2026-09-09).",
+      ).toEqual(DECIDED);
+      expect(
+        stagedChannelExts(WF),
+        "the staging step no longer copies exactly the three redacted channel classes",
+      ).toEqual(["err", "log", "out"]);
+
+      // CALIBRATION — the PARSE must break when a name changes, or the agreement
+      // above is between two constants and measures nothing.
+      calibrate(
+        "the allowlist is parsed out of the step, not restated",
+        (s) => s.replace("for f in ledger.csv schema-before.sql", "for f in ledger.csv schema-AFTER.sql"),
+        (t) => stagedNameList(t).includes("schema-before.sql"),
+      );
+      // ⛔ A GLOB IS NOT AN ALLOWLIST. `*.sql` would re-admit every future `.sql` the
+      // script writes, which is the in-by-default shape WR-05 exists to remove.
+      expect(
+        stagedNameList(WF).some((n) => n.includes("*")),
+        "the by-name allowlist has been widened to a glob — every future file matching it is then IN by default, which is the exact defect this step replaced",
+      ).toBe(false);
+    });
+
+    it("EXECUTED — the staged set is exactly the allowlist over all 18 REAL names", () => {
+      const script = extractRunScript(WF, STAGE);
+      const seed = [...REAL_NAMES, UNEXPECTED];
+      const r = runStage(script, seed);
+
+      expect(
+        r.status,
+        `the staging step failed on a complete fixture directory (exit ${r.status}).\n${r.output}`,
+      ).toBe(0);
+      expect(
+        r.staged,
+        `the staged set is not what the step's own two lists say it should be.\n${r.output}`,
+      ).toEqual(expectedStaged(WF, seed));
+
+      // Named, so a failure says WHICH file leaked rather than printing two arrays.
+      for (const withheld of [
+        "pre-census.txt",
+        "post-census.txt",
+        "pre-census.rollback-view.txt",
+        "post-census.rollback-view.txt",
+        "survivors.keys",
+        UNEXPECTED,
+      ]) {
+        expect(
+          r.staged.includes(withheld),
+          `\`${withheld}\` reached the world-readable artifact. The census text files restate the survivor DDL with owner-named rows read off live shared TEST and have no reversal claim on it (T-164.8-21); \`survivors.keys\` is neither recipe nor channel; \`${UNEXPECTED}\` stands for every file the script gains tomorrow and must be OUT until someone names it.`,
+        ).toBe(false);
+      }
+      expect(
+        r.staged.includes("survivors.sql"),
+        "`survivors.sql` is NOT staged. It is the DDL that re-creates the non-public objects depending on `public`; without it an aborted restore is not reversible. Dropping it was considered and REJECTED (CONTEXT Area 2, AMENDED 2026-09-09) — do not 'complete' the narrowing this way.",
+      ).toBe(true);
+      // The count is derived, never restated: 18 real + 1 future, minus the five
+      // withheld and the future one.
+      expect(r.output).toContain(`staged ${r.staged.length} file(s) from`);
+
+      // ⭐ CALIBRATION 2 — THE OBSERVED RED. Replace the enumerated copy with the OLD
+      // shape (`cp -a` of the whole directory) and the arm must SEE it: `pre-census.txt`
+      // is staged again. Without this twin, "pre-census.txt is absent" could be
+      // reported by a fixture that never contained it.
+      const OLD_SHAPE_ANCHOR =
+        '  for f in ledger.csv schema-before.sql README.txt census.sql survivors.sql restore.sql refdata.sql; do\n' +
+        '    if [ -f "${outdir}/${f}" ]; then\n' +
+        '      cp -p "${outdir}/${f}" "${stage}/"\n' +
+        "    fi\n" +
+        "  done\n";
+      expect(
+        script.includes(OLD_SHAPE_ANCHOR),
+        "the staging step's enumerated copy loop is no longer the form this calibration mutates — re-anchor the mutation rather than deleting the twin, or the arm silently stops being evidence",
+      ).toBe(true);
+      const neutered = script.replace(OLD_SHAPE_ANCHOR, '  cp -a "${outdir}/." "${stage}/"\n');
+      expect(
+        neutered,
+        "CALIBRATION: the neuter produced an identical script, so it proves nothing",
+      ).not.toBe(script);
+      const old = runStage(neutered, seed);
+      expect(
+        old.staged.includes("pre-census.txt"),
+        `CALIBRATION: the whole-directory neuter did NOT put \`pre-census.txt\` in the artifact, so this arm cannot see the shape it exists to forbid.\n${old.output}`,
+      ).toBe(true);
+      expect(
+        old.staged.includes(UNEXPECTED),
+        "CALIBRATION: the whole-directory neuter did not stage the unexpected file either — the fixture is not exercising the default-out rule",
+      ).toBe(true);
+    });
+
+    it("EXECUTED — a forced failure inside the step FAILS CLOSED: exit 1, nothing staged", () => {
+      // ⛔ THE FAIL-CLOSED HALF. The upload is `if: always()`, so a staging step that
+      // merely failed would leave whatever it had already copied to be published. The
+      // trap removes the staging directory, and `if-no-files-found: error` then makes
+      // the upload red rather than quiet. `false` in place of `cp` is the redaction
+      // twin's idiom: deterministic on every platform.
+      const script = extractRunScript(WF, STAGE);
+      expect(
+        script.includes('cp -p "${outdir}/${f}" "${stage}/"'),
+        "the staging step's first `cp -p` is no longer the form this twin forces to fail — re-anchor it",
+      ).toBe(true);
+      const forced = script.replace('cp -p "${outdir}/${f}" "${stage}/"', 'false -p "${outdir}/${f}" "${stage}/"');
+      expect(forced, "CALIBRATION: the forced-failure mutation changed nothing").not.toBe(script);
+
+      const r = runStage(forced, REAL_NAMES);
+      expect(
+        r.status,
+        `a failed copy did not fail the staging step (exit ${r.status}). The upload is \`if: always()\`; a green staging step is the only thing that makes the artifact safe to publish.\n${r.output}`,
+      ).toBe(1);
+      expect(
+        r.stageExists && r.staged.length > 0,
+        `the staging directory SURVIVED a failed staging run with ${r.staged.length} file(s) in it (${r.staged.join(", ")}) — those would be uploaded. Fail-closed means the directory is REMOVED so \`if-no-files-found: error\` reddens the upload.`,
+      ).toBe(false);
+      expect(r.output).toContain("::error::");
+      expect(r.output).toContain("staging FAILED");
+    });
+
+    it("EXECUTED — a run that died before the backup step still stages a self-explaining note", () => {
+      // Not an error path: the run is ALREADY red for its own reason, and a second red
+      // from `if-no-files-found: error` would point the next reader at the artifact
+      // plumbing instead of the actual failure.
+      const script = extractRunScript(WF, STAGE);
+      const runnerTemp = mkdtempSync(join(tmpdir(), "stage-nobackup-"));
+      const scriptFile = join(runnerTemp, "stage.sh");
+      writeFileSync(scriptFile, script);
+      const r = spawnSync("bash", [scriptFile], {
+        encoding: "utf8",
+        env: { ...process.env, RUNNER_TEMP: runnerTemp },
+      });
+      const staged = readdirSync(join(runnerTemp, "test-backup-artifact")).sort();
+      const note = readFileSync(join(runnerTemp, "test-backup-artifact", "README.txt"), "utf8");
+      rmSync(runnerTemp, { recursive: true, force: true });
+
+      expect(r.status, `${r.stdout ?? ""}${r.stderr ?? ""}`).toBe(0);
+      expect(staged).toEqual(["README.txt"]);
+      expect(note).toContain("failed before the backup step");
+    });
+
+    it("the stage step runs on every outcome, and BETWEEN the redaction and the upload", () => {
+      // ⛔ ORDER IS THE CONTROL, exactly as it is for the redaction. All three steps
+      // are `if: always()` and `always()` steps run in FILE ORDER, so the only thing
+      // making the redaction a precondition of staging — and staging a precondition of
+      // the upload — is that they are written in that order.
+      const b = jobBlock(WF, RESTORE_JOB);
+      expect(stepIndex(b, STAGE), "the staging step is gone").toBeGreaterThan(-1);
+      expect(
+        liveLines(stepBody(WF, STAGE)).some((l) => l.trim() === "if: always()"),
+        "the staging step no longer carries `if: always()` — on an ABORTED run it would not run at all, and the aborted run is the one whose artifact matters most",
+      ).toBe(true);
+      expect(stepIndex(b, REDACT)).toBeLessThan(stepIndex(b, STAGE));
+      expect(stepIndex(b, STAGE)).toBeLessThan(stepIndex(b, UPLOAD));
+
+      calibrate(
+        "the staging step precedes the upload step",
+        (s) =>
+          s
+            .replace(`- name: ${STAGE}`, "- name: __SWAP__")
+            .replace(`- name: ${UPLOAD}`, `- name: ${STAGE}`)
+            .replace("- name: __SWAP__", `- name: ${UPLOAD}`),
+        (t) => {
+          const jb = jobBlock(t, RESTORE_JOB);
+          const st = stepIndex(jb, STAGE);
+          const up = stepIndex(jb, UPLOAD);
+          return st > -1 && up > -1 && st < up;
+        },
+      );
+      calibrate(
+        "the redaction precedes the staging, so only SCRUBBED channels are copied",
+        (s) =>
+          s
+            .replace(`- name: ${REDACT}`, "- name: __SWAP__")
+            .replace(`- name: ${STAGE}`, `- name: ${REDACT}`)
+            .replace("- name: __SWAP__", `- name: ${STAGE}`),
+        (t) => {
+          const jb = jobBlock(t, RESTORE_JOB);
+          const rd = stepIndex(jb, REDACT);
+          const st = stepIndex(jb, STAGE);
+          return rd > -1 && st > -1 && rd < st;
+        },
+      );
+      calibrate(
+        "the staging runs on an aborted run too",
+        (s) => s.replace(`      - name: ${STAGE}\n        if: always()\n`, `      - name: ${STAGE}\n`),
+        (t) => liveLines(stepBody(t, STAGE)).some((l) => l.trim() === "if: always()"),
+      );
+    });
+
+    /**
+     * The `README.txt` heredoc's "WHAT IS HERE" entries, as filename tokens.
+     *
+     * The README is INSIDE the artifact — it is the first thing whoever downloads it
+     * reads — so a README describing a file the artifact does not carry is the same
+     * defect as the SCOPE comment that cost Phase 164.8 eight hours, just shipped to a
+     * wider audience. Sliced from `WHAT IS HERE` to `DELIBERATELY NOT HERE` (the
+     * withheld list is prose ABOUT files that are absent and must not be read as
+     * contents). Entry lines carry exactly 12 leading spaces; continuations carry 30,
+     * and the description column is fixed at 30 — that fixed layout is what makes the
+     * filename field extractable without guessing which dotted token is a filename.
+     */
+    function readmeEntries(text: string): string[] {
+      const body = stepBody(text, "Back up TEST before any write (schema + ledger; NOT data)");
+      const from = body.indexOf("WHAT IS HERE");
+      if (from < 0) return [];
+      const rest = body.slice(from);
+      const to = rest.indexOf("DELIBERATELY NOT HERE");
+      const section = (to < 0 ? rest : rest.slice(0, to)).split("\n");
+      return section
+        .filter((l) => /^ {12}\S/.test(l))
+        .flatMap((l) => l.slice(12, 30).trim().split(/\s+/))
+        .filter((t) => t.length > 0);
+    }
+
+    it("the README inside the artifact describes only files the artifact carries", () => {
+      const names = stagedNameList(WF);
+      const exts = stagedChannelExts(WF);
+      const carried = (entry: string): boolean =>
+        names.includes(entry) ||
+        (/^\*\.[a-z]+$/.test(entry) && exts.includes(entry.slice(2)));
+
+      const entries = readmeEntries(WF);
+      expect(
+        entries.length,
+        "the README's WHAT IS HERE list could not be parsed — an empty list would make the agreement below vacuously true",
+      ).toBeGreaterThan(4);
+      const lying = entries.filter((e) => !carried(e));
+      expect(
+        lying,
+        `the README shipped INSIDE the artifact names ${lying.length} file(s) the staging step does not copy. Whoever downloads this artifact reads that list first; describing a file that is not there is the same false-assurance defect as the SCOPE comment WR-05 was raised about.`,
+      ).toEqual([]);
+
+      // CALIBRATION — put `pre-census.txt` back into the README (as an entry line, at
+      // the real column) and the predicate must flip. Without this the check could be
+      // satisfied by a parser that returns nothing useful.
+      calibrate(
+        "the README-vs-allowlist agreement bites on a re-inserted pre-census.txt",
+        (s) =>
+          s.replace(
+            "            census.sql        the catalogue query the restore script ran to take its\n",
+            "            pre-census.txt    the restore script's pre-drop census, if it got that far.\n" +
+              "            census.sql        the catalogue query the restore script ran to take its\n",
+          ),
+        (t) => {
+          const n = stagedNameList(t);
+          const e = stagedChannelExts(t);
+          return readmeEntries(t).every(
+            (x) => n.includes(x) || (/^\*\.[a-z]+$/.test(x) && e.includes(x.slice(2))),
+          );
+        },
+      );
+    });
+
+    /**
+     * The contiguous `#` comment block immediately ABOVE a step's `- name:` line.
+     *
+     * ⚠️ `stepHead()` starts AT the `- name:` line, so it cannot see this — measured
+     * while writing this arm: the first version used `stepHead` and reported a missing
+     * sentence that was present four lines higher. The comment being pinned lives
+     * above the step, which is where this file's convention puts the reasoning.
+     */
+    function precedingComment(text: string, name: string): string {
+      const lines = text.split("\n");
+      const i = lines.findIndex((l) => l.trim() === `- name: ${name}`);
+      if (i < 0) return "";
+      const out: string[] = [];
+      for (let k = i - 1; k >= 0 && /^\s*#/.test(lines[k]); k -= 1) out.unshift(lines[k]);
+      return out.join("\n");
+    }
+
+    it("the SCOPE comment no longer claims a scan scope the code does not have", () => {
+      // ⛔ THE COMMENT IS THE FINDING. WR-05 is not only about which bytes ship — the
+      // step comment asserted that `ledger.csv` and "the two .sql files" were
+      // secret-scanned when they were written. There are FIVE `.sql` files in that
+      // directory and the scan runs BEFORE four of them exist. A reader who trusted it
+      // had no reason to look further, which is how the census text shipped for a phase.
+      const scope = precedingComment(WF, REDACT);
+      expect(
+        scope,
+        "the redaction step's preceding comment block could not be sliced — the pin below would be vacuous",
+      ).not.toBe("");
+      expect(scope).toContain("SCOPE");
+
+      const DEAD = [
+        "They are the only files that can carry connection metadata",
+        "two .sql files are left byte-exact by design, and are secret-SCANNED at the point",
+      ];
+      for (const dead of DEAD) {
+        expect(
+          WF.includes(dead),
+          `the false SCOPE sentence ${JSON.stringify(dead)} is back in the workflow. It describes a control the code does not have: the secret scan runs in the BACKUP step, before four of the five .sql files exist.`,
+        ).toBe(false);
+      }
+      // CALIBRATION — an absence assertion proves nothing unless the presence of the
+      // thing can be detected. Re-insert the sentence on a scratch copy.
+      calibrate(
+        "the dead SCOPE sentence would be caught if it came back",
+        (s) => s.replace("      # ⚠️ SCOPE — CORRECTED", `      # ${DEAD[0]}\n      # ⚠️ SCOPE — CORRECTED`),
+        (t) => DEAD.every((d) => !t.includes(d)),
+      );
+
+      // And it must name what ACTUALLY withholds the rest — the staging step — so the
+      // next reader is sent to the real mechanism rather than to this one.
+      calibrate(
+        "the SCOPE comment names the staging step as the control that withholds the rest",
+        (s) =>
+          s.replace(
+            "      #     `Stage the public artifact (enumerated allowlist; default-out)` step below,",
+            "      #     a step below,",
+          ),
+        (t) =>
+          precedingComment(t, REDACT).includes(
+            "Stage the public artifact (enumerated allowlist; default-out)",
+          ),
+      );
+    });
+
+    it("the upload publishes the STAGING directory, never the raw backup directory", () => {
+      const body = stepBody(WF, UPLOAD);
+      expect(
+        liveLines(body).some((l) => l.trim() === "path: ${{ runner.temp }}/test-backup-artifact"),
+        "the upload's `path:` no longer points at the staging directory. Pointed back at `${{ runner.temp }}/test-backup` it publishes every file the restore script wrote — the pre-drop census included — which is the finding this step closed.",
+      ).toBe(true);
+      calibrate(
+        "the upload does not publish the un-enumerated backup directory",
+        (s) =>
+          s.replace(
+            "          path: ${{ runner.temp }}/test-backup-artifact\n",
+            "          path: ${{ runner.temp }}/test-backup\n",
+          ),
+        (t) =>
+          liveLines(stepBody(t, UPLOAD)).some(
+            (l) => l.trim() === "path: ${{ runner.temp }}/test-backup-artifact",
+          ),
+      );
+    });
+  });
+
   describe("B4 — the workflow's marker gate is coupled to the script's constants", () => {
     it("both hard-coded regexes still equal the script's RESTORE_*_MARKER_RE defaults", () => {
       // ⛔ THE FAILURE DIRECTION. The workflow hard-codes COPIES of two script
@@ -1194,6 +1675,191 @@ describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
     const generic = runWithStub("Connection refused", 1);
     expect(generic.includes("The CLI could not read the ledger")).toBe(true);
     expect(generic.includes("remote migration versions with no local file")).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // WR-04 remainder (Phase 164.8.2) — the two bare `grep -q` lines in THIS step.
+  //
+  // ⛔ THE CONTRADICTION. Three lines above them the step states the rule verbatim:
+  // "`-a` is mandatory repo-wide: a tracked file carries a deliberate NUL byte and
+  // plain grep reports such input clean." The `grep -aqF` on the ErrMissingLocal
+  // sentence obeys it; the two below it did not. A rule with a counter-example in its
+  // own step is not a rule, and the second of the two is a NEGATIVE check — the shape
+  // where NUL-blindness turns "the CLI did not print it" into a red for the wrong
+  // reason and hides whatever the ledger actually says.
+  // -------------------------------------------------------------------------
+  it("both remaining post-verify greps carry -a, so the step's own rule has no counter-example", () => {
+    const live = extractRunScript(WF, STEP)
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("#"));
+    const greps = live.filter((l) => /\bgrep\b/.test(l));
+    expect(greps.length, "the post-verify step no longer greps at all").toBeGreaterThan(2);
+    const bare = greps.filter((l) => /\bgrep -[a-zA-Z]*q/.test(l) && !/\bgrep -[a-zA-Z]*a/.test(l));
+    expect(
+      bare,
+      `${bare.length} post-verify grep(s) still omit \`-a\` while the step's own comment calls it mandatory repo-wide. The NEGATIVE one is the dangerous half: without \`-a\` a single NUL byte makes "the CLI did not print 'Remote database is up to date.'" true for a reason that has nothing to do with the ledger.`,
+    ).toEqual([]);
+  });
+
+  it("EXECUTED — the positive check READS a dry-run file carrying a NUL byte", () => {
+    // ⚠️ WHAT THIS ASSERTS AND WHAT IT DELIBERATELY DOES NOT. It asserts the direction
+    // that holds on EVERY grep measured for this repo (ugrep 7.8.4, BSD 2.6.0, and
+    // GNU on the runner): with `-a`, a NUL-bearing file is READ and the positive check
+    // is satisfied, so the step exits 0. It does NOT assert the pre-fix failure, because
+    // that outcome is PLATFORM-DEPENDENT — measured 2026-09-09, ugrep reads such a file
+    // as CLEAN (rc=1) while BSD grep reads it fine (rc=0). A calibration stripping the
+    // `a` would therefore pass on one developer's machine and fail on another's, which
+    // is a flaky test rather than evidence. The pre-fix observation is recorded per
+    // flavour in the plan's SUMMARY instead (RESEARCH assumption A1).
+    const body = extractRunScript(WF, STEP);
+    const CLI_LINE =
+      'supabase db push --include-all --dry-run --db-url "${dsn}" >"${raw}" 2>&1 || rc=$?';
+    expect(
+      body.includes(CLI_LINE),
+      "the post-verify's CLI invocation is no longer the line this fixture replaces — re-anchor it rather than dropping the arm",
+    ).toBe(true);
+
+    const dir = mkdtempSync(join(tmpdir(), "postverify-nul-"));
+    const runnerTemp = join(dir, "tmp");
+    mkdirSync(runnerTemp, { recursive: true });
+    // A NUL byte BEFORE the sentence the positive check looks for — the shape the
+    // repo's rule is written about (src/lib/wizardErrors.test.ts carries a deliberate
+    // one, which is why the rule exists at all).
+    const fixture = join(dir, "dry-run.fixture");
+    // ⚠️ The NUL is written as an ESCAPE, never as a raw byte in this source file.
+    // A raw NUL here would make THIS file NUL-bearing, and the repo's standing
+    // measurement is that grep goes silently blind to such a file — the first draft
+    // of this arm did exactly that and `grep -n` reported the line absent.
+    const NUL = "\u0000";
+    const fixtureBytes =
+      `Connecting to remote database...\n${NUL}stray\nRemote database is up to date.\n`;
+    expect(
+      fixtureBytes.includes(NUL),
+      "the fixture carries no NUL byte, so it does not exercise the rule this arm exists for",
+    ).toBe(true);
+    writeFileSync(fixture, fixtureBytes);
+    const patched = body.replace(CLI_LINE, `cat "${fixture}" >"\${raw}" 2>&1 || rc=$?`);
+    expect(patched, "the fixture substitution changed nothing").not.toBe(body);
+    const scriptFile = join(dir, "step.sh");
+    writeFileSync(scriptFile, patched);
+    const r = spawnSync("bash", [scriptFile], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        RUNNER_TEMP: runnerTemp,
+        TEST_DB_SESSION_URL: `${SCHEME}EXAMPLE_USER:EXAMPLE_PASSWORD@example.invalid:5432/postgres`,
+      },
+    });
+    rmSync(dir, { recursive: true, force: true });
+    const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+
+    expect(
+      r.status,
+      `a clean dry-run whose bytes include a NUL did not pass the post-verify (exit ${r.status}). With \`-a\` the positive check must READ the file; without it the step reds claiming the CLI never printed the sentence it did print.\n${out}`,
+    ).toBe(0);
+    expect(
+      out.includes("the CLI did not print 'Remote database is up to date.'"),
+      "the NEGATIVE check fired on a file that DOES contain the sentence — the grep did not read past the NUL byte",
+    ).toBe(false);
+    expect(out).toContain("ledger SHAPE is consistent");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IN-07 (Phase 164.8.2) — three readers of ONE provenance row must agree.
+//
+// ⛔ THE DEFECT. `BASELINE.md` carries a `| sha256 | `<64 hex>` |` row, and THREE
+// places read it: `scripts/check-baseline-staleness.mjs`'s `RECORDED_SHA_RE`, the
+// restore script's own `sed`, and this workflow's confirm-token `sed`. The workflow's
+// copy was ANCHORED with `^` while the other two were not, under a comment claiming
+// it was "the SAME provenance row … spelled for sed". On an INDENTED row the anchored
+// copy reads nothing and the workflow refuses with "carries no parseable sha256
+// provenance row" — about a file the other two gates read without complaint.
+// ---------------------------------------------------------------------------
+describe("IN-07 — the confirm token and the staleness gate read the SAME row", () => {
+  const SHA = "a".repeat(40) + "b".repeat(24); // 64 hex chars, obviously synthetic
+  // Indented, and preceded by a decoy row without `sha256` — the shape that split the
+  // three readers. A flush-left fixture would be read identically by all three and
+  // would prove nothing.
+  const FIXTURE =
+    "| field | value |\n" +
+    "| --- | --- |\n" +
+    "| source | supabase db dump |\n" +
+    `  | sha256 | \`${SHA}\` |\n`;
+
+  /** The sed program out of a `sed -nE '<program>' …` line in a file. */
+  function sedProgram(text: string, anchor: string): string {
+    const line = text.split("\n").find((l) => l.includes(anchor));
+    if (!line) return "";
+    const m = line.match(/sed -nE '([^']*)'/);
+    return m ? m[1] : "";
+  }
+
+  const runSed = (program: string, input: string): string => {
+    const dir = mkdtempSync(join(tmpdir(), "sha3-"));
+    const f = join(dir, "BASELINE.md");
+    writeFileSync(f, input);
+    const r = spawnSync("sed", ["-nE", program, f], { encoding: "utf8" });
+    rmSync(dir, { recursive: true, force: true });
+    if (r.status !== 0) throw new Error(`sed failed: ${r.stderr}`);
+    return (r.stdout ?? "").split("\n")[0] ?? "";
+  };
+
+  it("all three readers extract the same sha from an INDENTED provenance row", async () => {
+    // Imported from the SCRIPT module rather than restated — the convention this repo
+    // uses for a constant that must not have a second copy.
+    const { RECORDED_SHA_RE } = await import("../../scripts/check-baseline-staleness.mjs");
+
+    const wfProgram = sedProgram(WF, 'sha="$(sed -nE');
+    expect(
+      wfProgram,
+      `${WF_PATH}'s confirm-token step no longer reads the sha with a \`sed -nE '…'\` program — re-anchor this fixture rather than deleting it`,
+    ).not.toBe("");
+    const scriptProgram = sedProgram(SCRIPT, "recorded=$(sed -nE");
+    expect(
+      scriptProgram,
+      `${SCRIPT_PATH} no longer reads the sha with a \`sed -nE '…'\` program`,
+    ).not.toBe("");
+    // ⚠️ The local sed is BSD. Both programs are `-nE` with POSIX classes and are
+    // portable; asserted rather than assumed, and nothing is skipped silently.
+    for (const p of [wfProgram, scriptProgram]) {
+      expect(p, "a sed program lost its `p` flag and would print nothing").toContain("/p");
+    }
+    expect(
+      wfProgram.startsWith("s/^"),
+      "the workflow's confirm-token sed is ANCHORED again. RECORDED_SHA_RE and the restore script's sed are both unanchored, so an indented provenance row would split the three readers — which is exactly IN-07.",
+    ).toBe(false);
+
+    const fromRegex = RECORDED_SHA_RE.exec(FIXTURE)?.[1] ?? "";
+    const fromWorkflow = runSed(wfProgram, FIXTURE);
+    const fromScript = runSed(scriptProgram, FIXTURE);
+
+    expect(fromRegex, "RECORDED_SHA_RE did not read the fixture — the fixture is wrong, not the gate").toBe(SHA);
+    expect(
+      fromWorkflow,
+      `the workflow's sed read ${JSON.stringify(fromWorkflow)} from an indented row that RECORDED_SHA_RE reads as ${SHA}. The workflow would refuse the dispatch with "carries no parseable sha256 provenance row" about a file the staleness gate accepts.`,
+    ).toBe(SHA);
+    expect(fromScript, "the restore script's sed disagrees with the other two").toBe(SHA);
+
+    // CALIBRATION — restore the PRE-FIX program (`s/^\|…` in place of `s/.*\|…`) and it
+    // must go BLANK on the indented row while the other two still read it. This is the
+    // divergence itself, observed rather than described.
+    // ⚠️ The mutation replaces the leading `.*` with `^`; replacing only the `s/` with
+    // `s/^` does NOT reproduce it — `^.*` still matches the leading spaces, so that
+    // mutant is green and the calibration would prove nothing (measured while writing
+    // this arm: the first version did exactly that and reported a passing RED).
+    expect(
+      wfProgram.startsWith("s/.*\\|"),
+      "the workflow's sed program no longer begins `s/.*\\|`, so this calibration cannot reconstruct the anchored form — re-anchor the mutation",
+    ).toBe(true);
+    const reanchored = `s/^\\|${wfProgram.slice("s/.*\\|".length)}`;
+    expect(reanchored, "CALIBRATION: re-anchoring changed nothing").not.toBe(wfProgram);
+    expect(
+      runSed(reanchored, FIXTURE),
+      "CALIBRATION: the re-anchored program STILL matched the indented row, so this fixture does not exercise the anchor and the agreement above proves nothing",
+    ).toBe("");
+    expect(RECORDED_SHA_RE.exec(FIXTURE)?.[1]).toBe(SHA);
+    expect(runSed(scriptProgram, FIXTURE)).toBe(SHA);
   });
 });
 

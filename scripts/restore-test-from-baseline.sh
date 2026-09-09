@@ -156,6 +156,13 @@
 # print survivor KEYS here and leave the DDL in `survivors.sql` inside the
 # artifact. It is NOT closed by the workflow's redaction step, which covers the
 # artifact's channel files before upload and never touches this stdout.
+# ⭐ 2026-09-09 (Phase 164.8.2, WR-05): T-164.8-21 IS NOW HALF CLOSED, and only half.
+# The ARTIFACT half is done, by the workflow's `Stage the public artifact (enumerated
+# allowlist; default-out)` step: `pre-census.txt`, `post-census.txt` and both
+# `*-rollback-view.txt` files no longer ship, while `survivors.sql` does — the intent
+# quoted above, implemented. The STDOUT half is UNCHANGED and still booked: this script
+# still cats the WHOLE pre-census, DDL column included, to the public Actions log, and
+# no staging step can reach that.
 #
 # ── TWO THINGS THIS SCRIPT DELIBERATELY DOES NOT DO ─────────────────────────
 # 1. IT DOES NOT BACK ANYTHING UP. The WORKFLOW takes the backup, BEFORE calling

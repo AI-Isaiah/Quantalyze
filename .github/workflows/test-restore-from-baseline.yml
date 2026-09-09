@@ -299,7 +299,15 @@ jobs:
           fi
           # The SAME provenance row scripts/check-baseline-staleness.mjs's
           # RECORDED_SHA_RE reads, spelled for sed. First match wins, as there.
-          sha="$(sed -nE 's/^\|[[:space:]]*sha256[[:space:]]*\|[[:space:]]*`([0-9a-f]{64})`[[:space:]]*\|.*$/\1/p' "${doc}" | head -1)"
+          # ⛔ UNANCHORED, and that is what makes the sentence above TRUE (IN-07, fixed
+          # 2026-09-09). This program carried a leading `^` until then, while
+          # RECORDED_SHA_RE (`/\|\s*sha256\s*\|\s*`([0-9a-f]{64})`\s*\|/`) and the
+          # script's own sed (restore-test-from-baseline.sh, `recorded=$(sed -nE …`)
+          # are both unanchored. On an INDENTED provenance row the anchored copy read
+          # nothing while the other two read the sha — three readers, two answers, and
+          # the divergence would surface as "carries no parseable sha256 provenance row"
+          # on a file the other two gates accept. Keep all three unanchored.
+          sha="$(sed -nE 's/.*\|[[:space:]]*sha256[[:space:]]*\|[[:space:]]*`([0-9a-f]{64})`[[:space:]]*\|.*$/\1/p' "${doc}" | head -1)"
           if [ "${#sha}" -ne 64 ]; then
             echo "::error::${doc} carries no parseable sha256 provenance row (matched ${#sha} chars, expected 64)."
             echo "::error::The confirm token is DERIVED from that row. An unparseable provenance row is"
@@ -1041,9 +1049,16 @@ jobs:
       # step list cannot miss it.
       #
       # RESTORE_OUT_DIR is pointed at this same directory, so the script's pre-drop
-      # census (`pre-census.txt`, `survivors.keys`, `survivors.sql`) lands in the
-      # artifact as well — including when the transaction aborts, which is exactly the
-      # run where it is worth having.
+      # census lands here too — including when the transaction aborts, which is exactly
+      # the run where it is worth having in the JOB LOG.
+      # ⛔ SINCE PHASE 164.8.2 THIS DIRECTORY IS NOT THE ARTIFACT. Only the enumerated
+      # allowlist copied by `Stage the public artifact (enumerated allowlist;
+      # default-out)` is published; the rest stays in the job's temp dir and dies with
+      # the runner. `survivors.sql` — the DDL that re-creates the non-public objects
+      # depending on `public` — IS in the artifact, because without it an aborted restore
+      # is not reversible. `pre-census.txt`, `post-census.txt`, the two
+      # `*-rollback-view.txt` files and `survivors.keys` are NOT: they restate that same
+      # DDL with owner-named rows and have no reversal claim on it (T-164.8-21).
       - name: Back up TEST before any write (schema + ledger; NOT data)
         run: |
           set -euo pipefail
@@ -1134,10 +1149,26 @@ jobs:
                               as it stood immediately BEFORE the restore.
             schema-before.sql `supabase db dump` of TEST's schema, same pinned CLI (2.98.2)
                               that produced supabase/schema/baseline.sql. NO data statements.
-            pre-census.txt    the restore script's pre-drop census, if it got that far.
-            survivors.keys    the non-public objects depending on `public` that the restore
-            survivors.sql     re-creates, and the DDL it re-creates them with.
-            transaction.out   psql's output for the transaction, redacted.
+            census.sql        the catalogue query the restore script ran to take its
+                              pre-drop census.
+            survivors.sql     the non-public objects depending on `public` that the
+                              restore re-creates, and the DDL it re-creates them with.
+                              The ONLY place that policy/trigger DDL appears here as a
+                              standalone file. Without it an aborted restore is not
+                              reversible, which is why it is in this artifact.
+            restore.sql       the full transaction as it was assembled and handed to
+                              psql. It EMBEDS survivors.sql and refdata.sql, so the
+                              survivor DDL appears twice across these files; this one is
+                              the record of what was actually attempted.
+            refdata.sql       the allowlisted migration-seeded reference data replayed
+                              after the schema is rebuilt.
+            *.err *.log *.out the diagnostic channels, redacted (see below).
+
+            DELIBERATELY NOT HERE: pre-census.txt, post-census.txt and the two
+            *-rollback-view.txt files. They restate the same survivor DDL alongside
+            owner-named rows read off the live shared TEST database, with no claim on
+            being the reversal recipe, and this artifact is world-readable. They stay in
+            the job's temp directory and are visible in the run log only.
 
           REVERSING THE SCHEMA AND THE LEDGER (a founder act, deliberately manual)
             1. Take the shared-TEST advisory mutex (key 61616158) — see
@@ -1299,11 +1330,11 @@ jobs:
             echo "::error::supabase db push --dry-run exited ${rc} against the restored TEST ledger. The CLI could not read the ledger it is supposed to push against; the redacted output is above."
             exit 1
           fi
-          if grep -q 'Would push these migrations:' "${out}"; then
+          if grep -aq 'Would push these migrations:' "${out}"; then
             echo "::error::the restored ledger leaves migrations PENDING — the seed did not write one row per repo migration file, or the CLI parses the versions differently than the seed spelled them."
             exit 1
           fi
-          if ! grep -q 'Remote database is up to date.' "${out}"; then
+          if ! grep -aq 'Remote database is up to date.' "${out}"; then
             echo "::error::the CLI did not print 'Remote database is up to date.'. Either the ledger is not CLI-consistent, or the pinned CLI's wording changed between 2.84.2 (where both strings were measured) and 2.98.2. Verify the wording before concluding anything about the ledger — this assertion is deliberately positive so a wording change reddens instead of passing vacuously."
             exit 1
           fi
@@ -1404,11 +1435,29 @@ jobs:
       # artifact.
       # The `trap ... ERR` is what makes that total: `set -e` alone would abort at the
       # failing command, BEFORE any cleanup, which is precisely the leak.
-      # ⚠️ SCOPE: only the .err/.log/.out channels are removed, not the whole directory.
-      # They are the only files that can carry connection metadata — ledger.csv and the
-      # two .sql files are left byte-exact by design, and are secret-SCANNED at the point
-      # they are written (see the backup step). So a failed redaction costs the run's
-      # diagnostics, never its reversal recipe.
+      # ⚠️ SCOPE — CORRECTED 2026-09-09 (Phase 164.8.2, WR-05). THIS STEP TOUCHES ONLY
+      # THE .err/.log/.out CHANNELS, and it is NOT what keeps the rest of the directory
+      # out of the public artifact. Read the previous version of this paragraph as a
+      # warning: it claimed the channels were "the only files that can carry connection
+      # metadata" and that "the two .sql files" were "secret-SCANNED at the point they
+      # are written". Both were false, and the false assurance is what let the census
+      # text files ship for a phase. What is TRUE:
+      #   - `ledger.csv` and `schema-before.sql` are left byte-exact here (a substitution
+      #     would corrupt the very bytes the reversal recipe replays) and they ARE
+      #     secret-scanned — in the BACKUP step, at the point they are written.
+      #   - The script-written files are scanned by NOTHING and redacted by NOTHING. The
+      #     backup step's scan runs BEFORE the script exists to write them. There are
+      #     FIVE `.sql` files in this directory, not two: `schema-before.sql` plus the
+      #     script's `census.sql`, `survivors.sql`, `restore.sql` and `refdata.sql`, and
+      #     only the first is scanned.
+      #   - What keeps the unscanned ones out of the world-readable artifact is the
+      #     `Stage the public artifact (enumerated allowlist; default-out)` step below,
+      #     which copies an enumerated list into a separate directory. It ADMITS the four
+      #     script `.sql` files above (`restore.sql` embeds `survivors.sql` by `cat`, so
+      #     that DDL is staged twice — stated, not glossed) and EXCLUDES the census text
+      #     files and `survivors.keys`.
+      # So a failed redaction costs the run's diagnostics, never its reversal recipe —
+      # and a failed STAGING costs the artifact entirely, which is the safe direction.
       - name: Redact connection metadata from the backup directory (public artifact)
         if: always()
         run: |
@@ -1457,16 +1506,97 @@ jobs:
             echo "redacted ${redacted} .err/.log/.out channel(s) in the backup directory; .sql and .csv are left byte-exact so the reversal recipe replays."
           fi
 
+      # ── WHAT THE WORLD ACTUALLY GETS (Phase 164.8.2, WR-05). ────────────────
+      # ⛔ THE ALLOWLIST IS BY NAME, NEVER BY GLOB, AND THAT IS THE WHOLE POINT.
+      # Before this step the upload pointed at `${RUNNER_TEMP}/test-backup` whole, so
+      # every file the restore script happened to write was published on a PUBLIC repo
+      # for 90 days — in by default. Ten of the eighteen names that reach that
+      # directory passed through NEITHER the backup step's secret scan (which runs
+      # before the script writes anything) NOR the redaction above (`*.err/*.log/*.out`
+      # only). Copying an ENUMERATED list into a fresh directory inverts that: a file
+      # the script gains tomorrow is OUT until someone adds its name here and says why.
+      # `*.sql` would re-create the defect one extension at a time, which is precisely
+      # the shape the finding is about, so the four script-written `.sql` files are
+      # spelled out individually.
+      #
+      # WHAT STAYS, AND WHY (founder decision 2026-09-09, threat T-164.8-21):
+      #   `survivors.sql`  — the non-public objects depending on `public` and the DDL
+      #                      that re-creates them. It carries `pg_get_triggerdef(...)`
+      #                      and a reconstructed `CREATE POLICY … USING (<qual>)`, i.e.
+      #                      the very bytes the finding is about — and WITHOUT it an
+      #                      aborted restore is not reversible, a capability Phase 164.8
+      #                      built deliberately. The DDL lives in the file that needs it.
+      #   `restore.sql`    — the transaction as psql actually ran it. `build_transaction`
+      #                      `cat`s `survivors.sql` (and `refdata.sql`) into it, so the
+      #                      survivor DDL is present TWICE among the staged files. That
+      #                      is stated rather than glossed: the claim is NOT "the DDL
+      #                      appears exactly once", it is that each file carrying it has
+      #                      its own claim on being here — one is the recipe, the other
+      #                      is the record of what was attempted.
+      #   `census.sql`, `refdata.sql` — the queries the script ran, forward inputs a
+      #                      post-mortem needs to reproduce a reading.
+      # WHAT LEAVES: `pre-census.txt`, `post-census.txt`, `pre-census.rollback-view.txt`
+      # and `post-census.rollback-view.txt` — they restate that SAME DDL with
+      # owner-named rows read off live shared TEST and have no reversal claim on it —
+      # and `survivors.keys`, which is neither recipe nor channel and so is out under
+      # the default-out rule rather than by a judgement of its own.
+      #
+      # FAIL-CLOSED, the redaction step's discipline applied to this new boundary: any
+      # failure REMOVES the staging directory, so the `if: always()` upload below finds
+      # nothing and `if-no-files-found: error` reddens it. Nothing is ever uploaded from
+      # `${outdir}` directly any more.
+      - name: Stage the public artifact (enumerated allowlist; default-out)
+        if: always()
+        run: |
+          set -euo pipefail
+          outdir="${RUNNER_TEMP}/test-backup"
+          stage="${RUNNER_TEMP}/test-backup-artifact"
+          trap 'rc=$?; rm -rf "${stage}"; echo "::error::staging FAILED (exit ${rc}) — the staging directory was REMOVED so the upload finds nothing (if-no-files-found: error) rather than publishing an un-enumerated directory. Nothing is uploaded from ${outdir} directly."; exit 1' ERR
+          mkdir -p "${stage}"
+          # This branch exists so a run that died BEFORE the backup step reddens on its
+          # own cause rather than on `if-no-files-found: error`. The run is already red;
+          # a second red from the upload would point at the artifact plumbing and send
+          # the next reader to the wrong step. The note ships in place of the backup.
+          if [ ! -d "${outdir}" ]; then
+            printf '%s\n' "This run failed before the backup step ran, so there is no pre-restore backup to publish." > "${stage}/README.txt"
+            echo "staged 1 file(s) from a MISSING ${outdir} — the run failed before the backup step; the note above is the whole artifact."
+          else
+            # Guarded with `if [ -f ]` rather than `&&` chains: an ABORTED run legitimately
+            # has fewer files, and that must not be an error, while a `cp` that genuinely
+            # FAILS must still reach the trap. The softening idioms this job's wiring test
+            # scans for are banned here and would defeat exactly that — deliberately NOT
+            # spelled out, because a comment quoting a banned token is itself a hit (the
+            # class recorded in Phase 164.8: a widened matcher read its own example).
+            for f in ledger.csv schema-before.sql README.txt census.sql survivors.sql restore.sql refdata.sql; do
+              if [ -f "${outdir}/${f}" ]; then
+                cp -p "${outdir}/${f}" "${stage}/"
+              fi
+            done
+            # The diagnostic channels, AFTER the redaction step above has scrubbed them.
+            for c in "${outdir}"/*.err "${outdir}"/*.log "${outdir}"/*.out; do
+              if [ -f "${c}" ]; then
+                cp -p "${c}" "${stage}/"
+              fi
+            done
+            echo "staged manifest:"
+            ls -1 "${stage}" | sed 's/^/  /'
+            staged_n="$(ls -1 "${stage}" | wc -l | tr -d ' ')"
+            echo "staged ${staged_n} file(s) from ${outdir}; everything else the script wrote stays in the job's temp dir and never enters the artifact."
+          fi
+
       # `if: always()` so an ABORTED script still leaves the backup behind — that is
       # the run where the artifact matters most. Placed after the script rather than
       # immediately after the backup step so the script's pre-drop census is inside it
       # too; the backup FILES are written before the script either way, which is the
       # ordering the wiring test pins.
+      # ⛔ `path:` is the STAGED set, not the raw backup directory. Since Phase 164.8.2
+      # the pre-drop census text files are deliberately NOT in this artifact (they were,
+      # before) — see the staging step above for what is carried and why.
       - name: Upload the pre-restore backup (schema + ledger; NOT data)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: test-restore-backup-${{ github.run_id }}
-          path: ${{ runner.temp }}/test-backup
+          path: ${{ runner.temp }}/test-backup-artifact
           retention-days: 90
           if-no-files-found: error
