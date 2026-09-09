@@ -1,60 +1,100 @@
 # Changelog
 
-## [0.77.29.0] - 2026-09-09 — migrations reach TEST before PROD, and the restore is closed with its evidence
+## [0.77.30.0] - 2026-09-09 — migrations reach TEST before PROD, and the restore is closed with its evidence
 
-Four commits, four themes; every one is represented below.
+Nine commits on this branch, six themes; every commit is represented below. This
+entry REPLACES the earlier 0.77.29.0 one, which covered the first four and
+carried a claim that turned out to be false (noted under Root cause).
 
 ### Added
 - **Migrations now apply to shared TEST before they can reach PROD** (`f748842e`,
   `.github/workflows/supabase-migrate.yml`). A new `apply-test` job runs the chain against
   TEST, an `apply-test-verdict` job turns its outcome into a single answer, and the PROD
   `apply` is gated on BOTH — it cannot start until TEST has proven the chain. A
-  `dispatch-ref-guard` refuses a dispatch aimed at the wrong ref. This is the mechanism the
-  2026-09-09 restore did NOT replace: the restore repaired TEST once, this keeps it current,
-  and a stale TEST is what let a gate test assert a constraint that had been dropped in May.
-- **A pinning suite for that wiring** (`78d44e6d`, `src/__tests__/supabase-migrate-test-first.test.ts`,
-  new, plus `critical-regressions.test.ts`). Line-exact pins, cross-file mutex identity, and
-  the deciding shell scripts EXECUTED rather than read. **Ten mutations of the real workflow
-  were each observed RED with the correct arm named** — `apply.needs`, `apply.if`, an
-  `apply-test` that gains `needs: plan`, the ref clause, the verdict's skip exit, the mutex
-  key, the environment, the PROD push body, the credential assertion's `if:`, and the guard's
-  own `exit 1`. Restored by writing pristine bytes back, never `git checkout --`.
+  `dispatch-ref-guard` refuses a dispatch aimed at the wrong ref.
+- **The TEST restore now replays the reference rows migrations INSERT** — a
+  `(file, table, pinned statement count)` allowlist, a refuse-by-default extractor with
+  `--audit` and `--self-test`, and a replay bracketed by `SET LOCAL search_path` INSIDE the
+  restore transaction. Before this, a restore left TEST's ledger claiming 266 migrations had
+  applied while the rows several of them exist to insert were gone.
+- **`refuse_backticks_in_txn_heredocs`** (refusal 9, `3811b221`) — see Root cause.
+- **A VAC-08 ledger frontier** (`c5caa799`, `scripts/test-ledger-drift-check.sh`). A PR that
+  ADDS a migration was RED by construction, since VAC-08 diffs the repo's migration set
+  against TEST's ledger and the new migration cannot have applied yet. Migrations authored
+  strictly above the tip of measured-present ones are now exempt. ⛔ Keyed on the AUTHORING
+  timestamp, not `max(schema_migrations.version)` — `version` is re-stamped at apply time,
+  so the ledger's own maximum is not a frontier.
+
+### Changed
+- The restore's reference-data gate compares `count(*) >= <pinned statements>`, not merely
+  non-empty, and reports EMPTY and SHORT as separate diagnoses. It now collects first and
+  raises once, so a wholly lost replay names every affected table rather than the first
+  (`24b0c927`).
+- `--mode preflight`'s rollback proof reads the census through `census_rollback_view`
+  (`24b0c927`). See Root cause.
+- The seeder's "migration didn't run" inference corrected, and its error message no longer
+  contradicts itself about whether the restore replays DML.
 
 ### Fixed
-- **Three ROADMAP claims that measurement contradicted** (`14859fdd`). Phase 164.5's DRIFT-04
-  plan still read `NOT APPLIED — the pre-flight SCRIPT must run against PROD first` a full day
-  after it shipped; the v1.20 progress row repeated it as "crit 3 apply pending founder"; and
-  Phase 164.10 claimed to be "the only remaining 164.x item that writes PRODUCTION" when
-  164.5.1 also writes PROD, on a credential-bearing cron row. A plan record that under-reports
-  finished work sends the next reader to redo it — the same record-vs-reality failure this
-  milestone exists to remove, appearing in the planning artifacts instead of the database.
+- The extractor refused an `ON CONFLICT` action that is not `DO NOTHING`. A `DO UPDATE` arm
+  would have been replayed into `auth.users` — the one table outside `public`, whose rows
+  SURVIVE the restore and belong to other people on shared TEST.
+- The extractor's head regex was blind to the quoted spelling (`INSERT INTO "public"."t"`)
+  that `supabase/schema/baseline.sql` uses throughout, and to CTE-prefixed INSERTs. Both were
+  **silently skipped** — the one behaviour `--audit` exists to prevent. Quoted is now
+  classified; the CTE form is refused by name.
+- `process.exitCode` instead of `process.exit()`, so a refusal written to a pipe cannot be
+  truncated into an exit 1 with no printed reason.
+- `sql_lit` at three RAISE string-literal sites the file already claimed were quoted.
+
+### Root cause
+- **A perfectly rolled-back preflight could report the database as modified.** The phase
+  added `refdata:<table>=<count>` lines to the census that `--mode preflight` compares
+  BYTE-FOR-BYTE to prove its rollback. But `auth.users` lives outside `public`, so
+  `DROP SCHEMA public CASCADE` never locks it; the flag tables are runtime-mutable by the
+  allowlist's own description; and shared TEST runs other people's CI. A row count cannot
+  evidence a rollback. `census_rollback_view` normalises the counts to `present` and keeps
+  `absent` — which is what DROP SCHEMA produces and what a rollback must undo.
+- **Bash was executing SQL comment prose while assembling a destructive restore.** The
+  `TXN_*` heredocs are unquoted by necessity (they interpolate the gate's VALUES list), so
+  every backtick inside them is command substitution, and a multi-line span swallowed the
+  following line's `--` prefix. Six spans, two of them older than the finding. Refusal 9
+  fails the run; escaped backticks stay legal, since that is how the oldest comments there
+  were already written.
+- **The previous entry's "`EXPECTED_ARMS` 21 -> 24 with all eleven vitest literals
+  re-measured" was FALSE.** The literals were not re-measured; the pin sat at 24 while the
+  script moved to 25, and the calibration mutation that exists to prove the pin can fail had
+  become a silent no-op. Now 21 -> 26 with all eleven re-measured, and evidenced by the FULL
+  suite (853 files, 14507 tests) rather than a hand-picked selection — the hand-picking is
+  what hid it.
+- **The floor's stated derivation was wrong twice**, the second time in the fix for the
+  first: `compute_job_kinds` is pinned at 15 statements yielding 16 rows, not the reverse.
+  The corrected comment names the allowlist and `--audit` as the authority instead of itself.
+
+### Tests
+- Self-test arms 21 -> 26. Arm 23 gained leg (d), the SHORT branch's ONLY falsifier at any
+  layer: reverting `t.n < t.expected` to `t.n = 0` had turned nothing red. Arming it required
+  reshaping the fixture to 2 statements over 3 rows — the gate compares ROWS against
+  STATEMENTS, so at 1-over-2 the floor could never bite. Arm 25 pins the rollback view's
+  normalisation in both directions; arm 26 the heredoc guard, including that THIS script is
+  clean.
+- Extractor self-test kinds 16 -> 19. `supabase-migrate.yml`'s controls were converted from
+  assertions ABOUT text to executions OF behaviour: the marker step, the credential gate and
+  both applies are extracted from the YAML and run against stubs (`78d44e6d`, `e416e3d8`).
+- ⛔ Nothing was applied and nothing pushed: the version-set comparison the PROD apply now
+  performs assumes a `supabase db push` output shape that only a real run can confirm.
 
 ### Notes
-- **Phase 164.8.1 is closed with its evidence** (`14859fdd`, `38e511c1`). `164.8.1-04-RESTORE.log`
-  and the two SUMMARYs carry the preflight and restore censuses, the run ids and the
-  independent verification, written from the runs rather than reconstructed later. RESEARCH A1
-  is ANSWERED: 23 statements, 15 of them into a FORCE-RLS table with a SELECT-only policy,
-  completed with no 42501 — a measurement the self-test lane structurally cannot make, because
-  its `postgres` is initdb's superuser.
-- **The proof was kept falsifiable on purpose.** Reference rows were NOT hand-seeded while CI
-  was red and shared TEST was blocking other teams. Re-running the same commit's failed jobs
-  after the restore — only the database changed — took `python` and `e2e-seeded` from failure
-  to success. Hand-seeding would have made CI green and destroyed the pre-census that makes
-  the replay provable.
-- **CHANGELOG discipline is now a project rule** (`14859fdd`, `CLAUDE.md`). Every ship writes
-  an entry, using the commit-CHECKLIST mechanism from gstack's `/ship`: enumerate every commit,
-  group by theme, and cross-check that each one maps to at least one bullet. The previous
-  guidance was three sentences with no mechanism, which is how a 672-line commit shipped with
-  no entry while a smaller one the same day got both.
-
-### Known limits, stated rather than omitted
-- **`apply-test` has never run.** Every green tick above is over YAML text and extracted shell
-  scripts. Its first real execution is also the first measurement of TEST's ledger against the
-  chain, and it may legitimately be RED — that would be the phase working, not failing.
-- The BYPASSRLS assertion added to the restore transaction is satisfied on hosted TEST but has
-  never been observed RED: neither the throwaway lane nor TEST offers a role without BYPASSRLS.
-- `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` (the replay reproduces INSERTs, not the UPDATEs that
-  followed them) and `[164.8.1-TEST-ANALYTICS-URL-PROD]` are routed to Phase 164.9.
+- Plan 04's restore ran and committed; the falsification is that re-running the SAME commit's
+  failed jobs afterwards took `python` and `e2e-seeded` green (`14859fdd`, `38e511c1`,
+  `21222a04`). It also surfaced a four-month-old gate test asserting a constraint dropped in
+  May — standing green because nothing applies migrations to shared TEST.
+- Four workflows now take the TEST advisory mutex, not three, and the new one APPLIES
+  MIGRATIONS while holding it.
+- Routed to Phase 164.9: `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` (the replay reproduces INSERTs,
+  not the UPDATEs that followed them), `[164.8.1-TEST-ANALYTICS-URL-PROD]` and
+  `[164.8-PUSH-RACE-VAC08]`.
+- Phase 164.8-05 Task 3 remains halted at a human checkpoint.
 
 ## [0.77.28.0] - 2026-09-09
 
