@@ -1066,6 +1066,38 @@ jobs:
       - name: DRIFT-05 gate (b) self-test - all eight arms fire with stub commands, no credential
         run: bash scripts/prod-body-drift-check.sh --self-test
 
+      # ── Phase 164.8.1: the reference-data allowlist audit ─────────────────
+      # A FOURTH SIBLING in this job, and — like the app-GUC gate and the
+      # baseline content-drift gate before it — NOT an eighth rule of
+      # lint-sql-gates. Different corpus (supabase/migrations, not
+      # supabase/tests), different question: does the TEST restore's
+      # reference-data allowlist still cover every reference statement the
+      # migrations carry? Same hermetic contract — no database, no Docker, no
+      # secrets, no network — which is what earns it a place in the job the
+      # `frontend` aggregator gates with NO tolerance.
+      #
+      # WHAT IT CATCHES that nothing else does. `supabase/schema/baseline.sql`
+      # is schema-only, and the restore SEEDS the migration ledger from the repo
+      # file list — so after a restore every migration reads as applied while
+      # every row it INSERTed is gone. `scripts/restore-test-refdata-allowlist.txt`
+      # names the statements that have to come back. A static list cannot see
+      # its own drift: this step reddens when a new migration adds a top-level
+      # literal INSERT into an allowlisted table with no allowlist line, and
+      # when a pinned count stops matching the file it pins.
+      #
+      # ⛔ A RED AUDIT IS CLEARED BY ADDING THE ALLOWLIST LINE WITH ITS
+      # CONSUMER, or by understanding the migration edit that moved a pinned
+      # count — NEVER by relaxing the classifier and never by hand-seeding
+      # shared TEST. Mode identity: these two lines are the EXACT commands a
+      # developer runs locally, pasted verbatim from the script's own header.
+      - name: Reference-data extractor self-test - every refusal fires on its red fixture
+        # Self-test FIRST, corpus second, for the same reason the rule self-test
+        # above runs first: an audit that reports "no drift" tells you nothing
+        # unless its refusals can still fire.
+        run: node scripts/extract-reference-inserts.mjs --self-test
+      - name: Reference-data allowlist audit - no unlisted top-level reference INSERT in supabase/migrations
+        run: node scripts/extract-reference-inserts.mjs --audit
+
   sql-mutation:
     # Phase 164.3 / VAC-01 + VAC-02 — the RED-UNDER mutation runner over the
     # annotated SQL gate corpus. THE ON-EVERY-PUSH DETECTOR THIS PHASE EXISTS

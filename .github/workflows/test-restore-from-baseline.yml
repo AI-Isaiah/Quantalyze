@@ -468,6 +468,26 @@ jobs:
       - name: Baseline co-edit gate
         run: node scripts/check-baseline-staleness.mjs
 
+      # ── Phase 164.8.1: the reference-data allowlist audit ─────────────────
+      # Same pair, same order, same reason as the co-edit gate above, and it runs
+      # HERE — before the server-binaries probe, before the mutex, before
+      # anything connects to TEST. The restore replays the statements
+      # `scripts/restore-test-refdata-allowlist.txt` names, inside the same
+      # transaction as the schema load; an unlisted reference INSERT or a pinned
+      # count that stopped matching its migration is therefore a NAMED red in
+      # this log rather than a table that silently comes back empty on a database
+      # shared with other people's CI.
+      #
+      # It duplicates the step in ci.yml's `sql-gate-lint` on purpose, the way
+      # the co-edit gate is duplicated: the two answer one question at different
+      # sampling rates, and a gate that only runs on PRs cannot protect a
+      # workflow_dispatch of THIS workflow from a corpus it never saw.
+      - name: Reference-data extractor self-test - every refusal fires on its red fixture
+        run: node scripts/extract-reference-inserts.mjs --self-test
+
+      - name: Reference-data allowlist audit - no unlisted top-level reference INSERT in supabase/migrations
+        run: node scripts/extract-reference-inserts.mjs --audit
+
       # Copied from ci.yml's `- name: Probe - the runner image's PostgreSQL server
       # binaries resolve` (the sql-mutation job). The restore script's --self-test
       # boots a THROWAWAY cluster the scripts/pg-lane/run.sh way, which needs SERVER
