@@ -1,0 +1,2 @@
+# fixture allowlist — no-consumer.red: field 4 cites nothing.
+20260101000000_fx_a.sql	public.fx_ref	1	#   

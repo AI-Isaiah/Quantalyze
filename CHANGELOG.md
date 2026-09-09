@@ -1,5 +1,88 @@
 # Changelog
 
+## [0.77.27.0] - 2026-09-09 — the restore replays the reference rows it used to destroy
+
+Phase 164.8.1, waves 1-2. The schema-only restore dropped `public` and reloaded a dump
+carrying 562 GRANT/REVOKE and zero INSERT/COPY, while SEEDING the ledger so all 266
+migrations read as applied. `supabase db push` skips applied versions, so the rows those
+migrations INSERT were gone for good: `compute_job_kinds` and `discovery_categories` came
+back empty and took `python` and `e2e-seeded` red with them.
+
+The restore now replays an allowlisted set of reference statements inside the same
+transaction, under a `SET LOCAL search_path` bracket, and a gate aborts the transaction if
+an allowlisted table comes back empty or a kind-admission CHECK still admits a value its
+registry lost. Counts surface as `refdata:<schema.table>=<n>` census rows; the `restore:`
+summary line is byte-identical.
+
+The allowlist is keyed (migration file, table, pinned statement count), never by table:
+`public.strategies` is a DO-block fixture in many migrations and a required application
+singleton in exactly one, so a per-table key would either replay fixture rows — including
+encrypted `api_keys` blobs — into shared TEST, or lose that sentinel.
+
+Three defects were found by MEASUREMENT during execution, each before anything depended
+on it:
+
+* **A research assumption was false.** `maskSql` DOES split `DO` bodies at inner `;`, so a
+  body INSERT surfaces as its own top-level span. Trusting the assumption would have let an
+  `INSERT INTO api_keys` inside a DO block classify as replayable. Dollar-body ranges became
+  the primary mechanism, with its own RED falsifier.
+* **The plan's invariant sketch named the wrong column.** `compute_job_kinds` is keyed on
+  `name`, not `kind`; as drafted it would have raised `column k.kind does not exist` on
+  every real restore.
+* **The extractor exited 0 emitting NOTHING** when invoked by a path that was not its
+  realpath (macOS `/var` vs `/private/var`) — a tool whose job is producing the restore's
+  SQL, silently producing none. Found because a new zero-trailer refusal fired.
+
+Anti-vacuity: `EXPECTED_ARMS` 21 -> 24 with all eleven vitest literals re-measured, and
+eight neuters observed RED on scratch copies. One of them is the point of the exercise — a
+PARTIAL replay previously exited 0, so the kind-admission invariant was decorative until an
+arm exercised it.
+
+Also: the seeder no longer blames a migration that DID run, and TEST's cron pointing at
+PROD compute is booked as `[164.8.1-TEST-ANALYTICS-URL-PROD]`, routed to Phase 164.9 and
+explicitly not closable by editing the allowlist.
+
+Still open: the restore itself has not been re-run. Wave 3 is a blocking human checkpoint.
+
+## [0.77.26.0] - 2026-09-08 — the VAC-08 ratchet is emptied by measurement, not by decree
+
+The restore ran (run 34274355596, head 88581b8b) and committed. TEST's ledger went
+243 -> 266 rows, matching the repo's 266 migrations exactly; all four function-body
+comparisons match byte-for-byte; TEST gained `pg_net`, which PROD has and TEST lacked.
+So the 31 names in `scripts/vac08-ledger-baseline.txt` are no longer MEASURED absent,
+and VAC-08 correctly refused with `31 baseline entr(y/ies) are no longer MEASURED absent`.
+
+The ratchet is now empty. The cause recorded is the RESTORE, never a hand-apply, and the
+header carries the run id, head sha, corroborating CI run, date and the founder decision
+that authorised it -- because an empty ratchet whose cause is not written down reads
+exactly like a deleted control.
+
+That risk is now pinned rather than trusted. A new lineage assertion requires the header
+to keep naming its evidence.
+
+⛔ CORRECTED 2026-09-09, and the correction matters more than the original claim. The first
+cut of that pin asked only whether each needle appeared ANYWHERE in the file. Three reviewers
+measured it and found three ways to satisfy it while gutting the record — the worst being a
+rewrite of the cause as a HAND-APPLY of 31 migrations to shared TEST, ids left intact, which
+is the exact act the header forbids in capitals. The pin is now POSITIONAL: needles must sit
+inside the 2026-09-08 block, the CAUSE is pinned explicitly, the authority match is
+case-insensitive (the real line is uppercase and the old needle matched a 2026-08 sentence
+about hand-applies instead), and the block may not shrink to a stub. All four attacks re-run
+and observed RED.
+
+The `[SEC]` disclosure rule was likewise enforced only against a fixture and never against
+the real file — a [SEC] entry with no disclosure passed 12/12. It is now invoked on the file
+and matches the rule as WRITTEN (`never received it|them`), so it cannot fire wrongly on the
+day it wakes. The strong-claim scanner was measured 42% blind, spared by a neighbouring
+heading's own "NOT"; the qualifier must now sit in the claim's own sentence. Every assertion
+that went dormant at zero entries is labelled at its site with the condition that revives it,
+and the malformed-name check now reads the name AS THE GATE PARSES IT rather than trimmed.
+
+Not fixed here, booked instead: the post-COMMIT extension guard at
+`restore-test-from-baseline.sh:1090` fires on a GAIN and phrases it as a loss, and compares
+whole-database `pg_extension` while reasoning about `public`. The Supabase CLI post-verify
+has still never executed -- recorded NOT RUN, with the must_have it serves marked UNMET.
+
 ## [0.77.25.0] - 2026-09-08 — exclude the mutex holder by PID, and say what the gate saw
 
 Run 34270157721 (the first dispatch carrying the holder fix) refused again, with the

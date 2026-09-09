@@ -914,8 +914,14 @@ async function main() {
   if (catErr || !cryptoCatRow) {
     throw new Error(
       `[seed] discovery_categories row for slug='crypto-sma' not found. ` +
-        `The initial schema migration (20260405061911_initial_schema.sql) ` +
-        `seeds this row — if it's missing the migration didn't run. ` +
+        `20260405061911_initial_schema.sql seeds it and the TEST restore ` +
+        `replays it (scripts/restore-test-from-baseline.sh, Phase 164.8.1). ` +
+        `A ledger row for that migration does NOT prove the row exists: the ` +
+        `restore loads a schema-only dump, so it reseeds the ledger but ` +
+        `replays no DML of its own. On TEST, read the ` +
+        `refdata:public.discovery_categories census row from the last ` +
+        `test-restore-from-baseline run — a 0 there is a restore defect to ` +
+        `NAME, not a reason to hand-seed shared TEST (Phase 164.8 Plan 06). ` +
         `Error: ${catErr?.message ?? "no rows"}`,
     );
   }

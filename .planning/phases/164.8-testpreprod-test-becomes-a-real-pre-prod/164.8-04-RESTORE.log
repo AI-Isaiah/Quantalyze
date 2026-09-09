@@ -264,3 +264,229 @@ Either (A) or (B), whichever the founder prefers:
                   `31 baseline entr(y/ies) are no longer MEASURED absent` the moment it ran.
   * main / CI   : untouched by this halt. `sql-tests` stays exactly as green or red as it was
                   before this plan started.
+
+================================================================================
+BLOCK 3 — RESTORE (Task 3). DISPATCHED BY THE FOUNDER. THE TRANSACTION COMMITTED.
+================================================================================
+
+⛔ Read BLOCK 2 first. It halted; it was NOT resolved by anything this executor
+did. The founder dispatched `mode=restore` themselves, which is what BLOCK 2
+option (A) asked for. Nothing below was measured by a laptop — every reading is
+pasted from the run's own job log or from that run's own backup artifact.
+
+workflow      : TEST restore from baseline (.github/workflows/test-restore-from-baseline.yml)
+run id        : 34274355596
+run url       : https://github.com/AI-Isaiah/Quantalyze/actions/runs/34274355596
+job id        : 102223581037 (job name: restore)
+head sha      : 88581b8bc66415bfa86b7d5a019741b1cbd0ff49
+ref           : main
+event         : workflow_dispatch
+inputs        : mode=restore, confirm supplied
+conclusion    : failure   ⚠️ SEE "THE EXIT 1" BELOW — it is a POST-COMMIT guard,
+                not a failed restore. The transaction committed.
+dispatched    : 2026-09-08T20:21:51Z
+finished      : 2026-09-08T20:37:56Z
+
+--- confirm token -------------------------------------------------------------
+confirm token matches supabase/schema/BASELINE.md's sha row (27826b76) — the destructive mode is authorised for THIS tree.
+
+--- PROD-ledger premise (the ancestry step, unchanged from the preflight) ------
+supabase-migrate.yml newest run on main: status=completed conclusion=success headSha=7146c5749a0fd81f59b9a0a2812c01f25de95f3a
+PROD-ledger premise holds: supabase-migrate.yml concluded success at 7146c5749a0fd81f59b9a0a2812c01f25de95f3a, an ancestor of HEAD, and no migration file was added between that commit and HEAD.
+
+--- identity marker -----------------------------------------------------------
+which_database: OK — the marker names TEST and not PROD.
+
+--- ⭐ THE ACTIVITY GATE PASSED, AND IT PASSED WHERE BLOCK 2 SAID IT MUST -------
+Step 17, `Activity gate — is shared TEST measurably quiet?`, conclusion success.
+It ran INSIDE the held mutex (step 15 acquired it at 20:22:46 and waited 840s
+for another run to release it — the wait is itself evidence that the gate's
+ordering rule is not theoretical). Verbatim, with the backend pid redacted:
+
+  activity-gate: excluding our own mutex holder (backend pid <redacted>) and application_name 'ci-shared-test-db-mutex'.
+  activity-gate breakdown (states and counts only): active [holder-pid] x1, idle x14
+  activity-gate: 0 other active client session(s) — shared TEST is measurably quiet, inside the held mutex.
+
+  ⭐ The breakdown is the reading BLOCK 2 could not obtain: 14 idle sessions and
+     exactly one active one, which is this job's own mutex holder, excluded BY
+     PID. `0 other active` is therefore a discriminated zero, not an empty query.
+     This is the first time this gate has ever passed.
+
+--- backup taken BEFORE any write ---------------------------------------------
+backup: ledger_rows=243 ledger_bytes=1846550 schema_bytes=610369
+backup: SCHEMA AND LEDGER ARE REVERSIBLE from this artifact. DATA IS NOT — no data dump was taken.
+redacted 5 .err/.log/.out channel(s) in the backup directory; .sql and .csv are left byte-exact so the reversal recipe replays.
+
+artifact name : test-restore-backup-34274355596
+artifact id   : 10075679381
+artifact size : 774957 bytes (zip)
+retention     : 90 days
+
+--- pre-write gates -----------------------------------------------------------
+restore-test-from-baseline: baseline sha256 OK — supabase/schema/baseline.sql matches the row in supabase/schema/BASELINE.md
+restore-test-from-baseline: baseline freshness OK — baseline epoch 1788854882 >= migrations epoch 1788852989
+restore-test-from-baseline: migrations: 266 file(s) under supabase/migrations
+restore-test-from-baseline: which_database: OK — marker names TEST and not PROD
+restore-test-from-baseline: shared-TEST mutex 61616158: held (1 session(s))
+
+--- pre-census / expected shape / post-census ---------------------------------
+restore-test-from-baseline: ── pre-census (read-only) ──────────────────────────────────────────
+tables=61
+functions=117
+policies=151
+extensions=6
+ledger_rows=243
+ledger_bad_version=0
+restore-test-from-baseline: survivors censused: 2
+
+restore-test-from-baseline: expected shape from the dump text: tables=62 policies=154 functions=120
+restore-test-from-baseline: transaction assembled at <RUNNER_TEMP>/test-backup/restore.sql (filtered: 1 line(s) matching ^ALTER PUBLICATION "supabase_realtime" OWNER TO)
+restore-test-from-baseline: ── transaction (mode=restore) ──────────────────────────────────────
+psql:<RUNNER_TEMP>/test-backup/restore.sql:123: NOTICE:  drop cascades to 187 other objects
+
+restore-test-from-baseline: ── post-census (read-only) ─────────────────────────────────────────
+tables=62
+functions=120
+policies=154
+extensions=7
+ledger_rows=266
+ledger_bad_version=0
+survivor	trigger	auth.users:on_auth_user_created:O	CREATE TRIGGER on_auth_user_created AFTER INSERT ON auth.users FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+survivor	policy	storage.objects:gdpr_exports_admin_read	CREATE POLICY gdpr_exports_admin_read ON storage.objects AS PERMISSIVE FOR SELECT TO public USING (((bucket_id = 'gdpr-exports'::text) AND public.current_user_has_app_role(ARRAY['admin'::text])));
+
+  tables 61 -> 62, functions 117 -> 120, policies 151 -> 154 land EXACTLY on the
+  shape the script derived from the dump TEXT before it wrote anything
+  (62/154/120). ledger_rows 243 -> 266 == the 266 files under
+  supabase/migrations. survivors 2 -> 2, both round-tripped byte-identically.
+
+  ⭐ AND THE TWO OWNERSHIP CLASSES DID NOT MOVE EITHER, which the script itself
+     never got to check (its `nonpostgres_rel` / `nonpostgres_fn` comparison sits
+     AFTER the guard that exited). Measured here instead, by diffing the two
+     census files inside this run's own backup artifact: `diff pre-census.txt
+     post-census.txt` reports exactly five changed lines — tables, functions,
+     policies, extensions, ledger_rows — and nothing else. Both survivor lines,
+     ledger_bad_version, and both ownership classes are byte-identical across
+     the restore.
+
+--- ⛔ THE `restore:` SUMMARY LINE DOES NOT EXIST FOR THIS RUN -----------------
+The plan asks this file to quote `restore: tables=… ledger_rows=266 … mode=restore`
+verbatim. IT WAS NEVER PRINTED. `scripts/restore-test-from-baseline.sh:1097` emits
+it, and the run exited at `:1090` — seven lines earlier. Recorded as ABSENT rather
+than reconstructed: a line assembled from the numbers it was supposed to attest
+would be a fabricated measurement, which is the defect class this phase exists to
+remove. Every field that line would have carried is above, from the census the
+script itself wrote.
+
+--- ⛔ THE EXIT 1: A DEFECTIVE POST-COMMIT GUARD, NOT A FAILED RESTORE ---------
+##[error]restore-test-from-baseline: post-census extensions=7, pre-census had 6. An extension that lived in public was CASCADE-dropped and the dump did not put it back.
+##[error]Process completed with exit code 1.
+
+  WHAT FIRED: `scripts/restore-test-from-baseline.sh:1090`, an equality check on
+  a WHOLE-DATABASE `SELECT count(*) FROM pg_extension` (`:282`).
+
+  WHY IT IS DEFECTIVE, three ways, all measured:
+    1. DIRECTION. It fired on a GAIN (6 -> 7) and reported it in the language of
+       a LOSS ("was CASCADE-dropped and the dump did not put it back"). A reader
+       of that message is sent to look for a missing extension.
+    2. SCOPE. Its comment reasons about "an extension that lived IN public", but
+       the count it compares is every row of pg_extension in the database, so an
+       extension created in `extensions` or `pg_catalog` moves the number.
+    3. ORDERING. It runs AFTER the COMMIT, so it cannot prevent anything; it can
+       only mislabel a committed result. The five shape assertions ahead of it
+       (tables / policies / functions / ledger_rows / survivors, `:1073-1077`)
+       had ALL already passed — the guard that fired is the first failing one.
+
+  WHICH EXTENSION, IDENTIFIED BY DIFFING TWO FILES IN THIS RUN'S OWN BACKUP
+  ARTIFACT (test-restore-backup-34274355596), not by inference:
+    schema-before.sql (TEST as it was) CREATE EXTENSION set — 5 named:
+      pg_cron, pg_stat_statements, pgcrypto, supabase_vault, uuid-ossp
+    restore.sql (the transaction the dump assembled) — 6 named:
+      pg_cron, pg_net, pg_stat_statements, pgcrypto, supabase_vault, uuid-ossp
+  The set difference is exactly {pg_net}. TEST lacked it; PROD has it; the dump
+  creates it. 5 + plpgsql = 6 before, 6 + plpgsql = 7 after. The restore did the
+  correct thing and the guard called it a drop.
+
+  ⛔ NOT FIXED HERE. `scripts/restore-test-from-baseline.sh` is out of scope for
+  this task by founder instruction; booked as deferred-items.md item 6.
+
+--- ⛔ NOT RUN, AND RECORDED AS NOT RUN ----------------------------------------
+Step 20, `Post-verify with the Supabase CLI — ledger SHAPE`, conclusion SKIPPED —
+a direct consequence of step 19's exit 1. So:
+
+  * `supabase db push --include-all --dry-run --db-url …` has STILL never been
+    executed against TEST, in this run or any other. deferred-items.md item 4
+    stays open verbatim: its two asserted strings were measured on local CLI
+    v2.84.2 and CI pins v2.98.2, where the wording remains INFERRED.
+  * The plan's truth "…and `supabase db push --dry-run --db-url` reports nothing
+    pending (ledger SHAPE — W4)" is therefore UNPROVEN. It is not claimed here.
+  * Plan 05's precondition wanted that CLI reading. What exists instead is the
+    ledger-row count and VAC-08's own 266-of-266 presence check, below. Whether
+    that is sufficient is Plan 05's call, not this task's.
+
+--- THE FOUR READ-ONLY CATALOG READINGS THE PLAN ASKED FOR ---------------------
+⚠️ This executor holds NO Postgres credential for TEST (BLOCK 2 measured that and
+nothing has changed), and was instructed not to run `supabase` or write to any
+database. So NONE of the four was taken as a fresh psql read. Each is recorded
+with what DID measure it, and one is a derivation rather than a measurement:
+
+  1. `count(*) FROM supabase_migrations.schema_migrations` — expected 266.
+     MEASURED = 266, by the restore job's own census query, post-commit
+     (`ledger_rows=266` above). CORROBORATED INDEPENDENTLY by CI run
+     34274161551: `Repo migrations: 266`, and VAC-08 found every one present.
+  2. `… WHERE version !~ '^[0-9]{14}$'` — expected 0.
+     MEASURED = 0 (`ledger_bad_version=0` in the post-census).
+  3. `count(*) … proname='create_allocator_connected_strategy'` in public —
+     expected 0. ⚠️ NOT MEASURED. DERIVED: the transaction DROPs schema public
+     CASCADE and rebuilds it from baseline.sql, which contains ZERO occurrences
+     of that name (`grep -c` = 0), so no path in the transaction creates it.
+     The derivation is sound only if the dump is the sole source of public
+     objects in that transaction, which is the script's design. Flagged as a
+     derivation so Plan 06 does not quote it as a catalog read.
+  4. `tgname FROM pg_trigger WHERE tgrelid='auth.users'` — expected
+     on_auth_user_created. MEASURED: the post-census survivor line above carries
+     `auth.users:on_auth_user_created:O`, re-created from the pre-census DDL and
+     round-tripped with its enabled-state.
+
+--- ⭐ THE 31 ARE NOW MEASURED PRESENT — CI RUN 34274161551 --------------------
+run id   : 34274161551 (push, rerun of failed jobs), head sha 88581b8b, job
+           102229710127 `sql-tests`. Run AFTER the restore.
+
+  Repo migrations: 266
+  ##[error]VAC-08 repo-vs-TEST ledger and body drift gate: 31 baseline entr(y/ies) are no longer MEASURED absent.
+  ##[error]Either the migration reached TEST, or its file left the repo. Both mean the
+  ##[error]same thing: the line is stale. The baseline may only shrink — delete these
+  ##[error]lines from scripts/vac08-ledger-baseline.txt:
+  [all 31 names printed — they are exactly the 31 lines this task deleted]
+    _enqueue_compute_job_internal/7:  TEST body matches the committed body
+    _enqueue_compute_job_internal/10: TEST body matches the committed body
+    sanitize_user/1:                  TEST body matches the committed body
+    mark_compute_job_done/2:          TEST body matches the committed body
+  VAC-08 repo-vs-TEST ledger and body drift gate: 266 migration(s) checked against the ledger, 4 body comparison(s) over 3 named function(s).
+
+  ⭐ TWO THINGS THIS RUN SETTLES:
+    (a) the 31 are STALE BY MEASUREMENT. `stale_count > 0` is the ratchet's own
+        HARD FAILURE branch (test-ledger-drift-check.sh, RATCHET block) and its
+        remedy sentence is "delete these lines". Deleting them OBEYS the file's
+        rule; it does not silence it. The gate would have stayed red for as long
+        as they sat there.
+    (b) `20260908120000_drop_create_allocator_connected_strategy` — the migration
+        that opened this whole phase — is ABSENT from the stale list AND absent
+        from the "NOT baselined" list, i.e. its ledger row is present and it
+        needs no pragma. Recorded as a measured ABSENCE from both lists.
+
+  ⚠️ ZERO NEW DRIFT is NOT separately printed by this run: the gate prints its
+     `ledger presence: … 0 NEW drift.` green sentence only in the `elif` branch
+     where stale_count is 0. With 31 stale it took the error branch instead. The
+     first SHA-bound green sentence is owed to the run after this PR merges, and
+     Plan 06 records it. Nothing here claims to have seen it.
+
+--- STATE LEFT BEHIND ----------------------------------------------------------
+  * shared TEST : RESTORED and COMMITTED. public rebuilt from baseline.sql
+                  (27826b76…); ledger seeded to 266 CLI-shaped rows; pg_net
+                  created; all pre-existing DATA in public is GONE and is not
+                  recoverable from the backup artifact by design.
+  * repo        : scripts/vac08-ledger-baseline.txt is header-only (0 entries)
+                  and src/__tests__/vac08-ledger-dispositions.test.ts pins
+                  ENTRY_COUNT = 0 beside an AIM, in ONE commit.
+  * unfinished  : the CLI post-verify (never executed) and the extension guard
+                  (defective) — deferred-items.md items 4 and 6.

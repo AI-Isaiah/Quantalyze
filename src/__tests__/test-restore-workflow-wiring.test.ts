@@ -238,8 +238,32 @@ function headerBlock(text: string): string {
 
 /** ci.yml's step names, read from ci.yml rather than restated here. */
 const CI_LINES = CI.split("\n");
-const CRON_STEP_NAME = (CI_LINES[1271] ?? "").replace(/^\s*- name:\s*/, "").trim();
-const PROBE_STEP_NAME = (CI_LINES[1376] ?? "").replace(/^\s*- name:\s*/, "").trim();
+
+// ⛔ RESOLVED BY UNIQUE TOKEN, NOT BY LINE INDEX (2026-09-09, Phase 164.8.1).
+// These two were `CI_LINES[1303]` / `CI_LINES[1408]`, and an absolute index into
+// ci.yml is a pin that rots on any edit ABOVE it — which is not hypothetical:
+// they were re-anchored +32 earlier in THIS SAME PHASE when the extractor's
+// self-test pair landed in `sql-gate-lint`, and the next edit in the same phase
+// broke them again by +95. Two forced re-anchors in one phase is the signal that
+// the mechanism is wrong, not that the numbers were unlucky.
+//
+// The token is a SHORT, STABLE substring; the full step NAME is still read from
+// ci.yml rather than restated here, so a renamed step still reds. The lookup
+// REFUSES on zero or multiple matches, so it can never silently resolve to the
+// wrong step — the failure mode a line index has by construction.
+function ciStepNameContaining(token: string): string {
+  const hits = CI_LINES.filter(
+    (l) => /^\s*- name:\s*/.test(l) && l.includes(token),
+  ).map((l) => l.replace(/^\s*- name:\s*/, "").trim());
+  expect(
+    hits.length,
+    `ci.yml must carry EXACTLY ONE '- name:' step whose text contains ${JSON.stringify(token)}; found ${hits.length}${hits.length ? ` (${hits.join(" | ")})` : ""}. A token that matches none or many cannot identify a step — widen or narrow the token, do not pick one of the matches.`,
+  ).toBe(1);
+  return hits[0] as string;
+}
+
+const CRON_STEP_NAME = ciStepNameContaining("Provision pg_cron");
+const PROBE_STEP_NAME = ciStepNameContaining("PostgreSQL server binaries resolve");
 
 // ---------------------------------------------------------------------------
 // Calibration harness.
@@ -471,11 +495,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     it("W9 — no pg_cron provisioning step; the server-binaries probe precedes the self-test", () => {
       expect(
         CRON_STEP_NAME,
-        "ci.yml line 1272 is no longer the pg_cron provisioning step's `- name:` line — this pin reads it from ci.yml on purpose, so re-anchor it rather than restating the name here",
+        "ci.yml line 1304 is no longer the pg_cron provisioning step's `- name:` line — this pin reads it from ci.yml on purpose, so re-anchor it rather than restating the name here",
       ).toContain("pg_cron");
       expect(
         PROBE_STEP_NAME,
-        "ci.yml line 1377 is no longer the PostgreSQL server-binaries probe's `- name:` line",
+        "ci.yml line 1409 is no longer the PostgreSQL server-binaries probe's `- name:` line",
       ).toContain("PostgreSQL server binaries");
       calibrate(
         "the pg_cron provisioning step is NOT copied (Plan 01's fixtures create no cron job)",

@@ -227,6 +227,46 @@ RESTORE_EXPECT_MARKER_RE="${RESTORE_EXPECT_MARKER_RE:-(^|[^[:alnum:]_])test([^[:
 RESTORE_REFUSE_MARKER_RE="${RESTORE_REFUSE_MARKER_RE:-prod}"
 RESTORE_REQUIRE_MUTEX="${RESTORE_REQUIRE_MUTEX:-1}"
 
+# ── REFERENCE DATA (Phase 164.8.1) ─────────────────────────────────────────
+# ⛔ WHY THE RESTORE REPLAYS ROWS AT ALL. LEDGER PRESENCE IS NOT EFFECT PRESENCE.
+# `supabase/schema/baseline.sql` is SCHEMA-ONLY (562 GRANT/REVOKE, zero
+# INSERT/COPY), and the seed below writes one ledger row per repo migration file.
+# So without this replay every migration reads as applied while every row those
+# migrations INSERTed is gone — `compute_job_kinds` empty behind a ledger swearing
+# its seed migration ran. `scripts/restore-test-refdata-allowlist.txt` names the
+# statements that have to come back; `scripts/extract-reference-inserts.mjs` turns
+# that list into SQL and REFUSES anything it cannot prove safe.
+REFDATA_ALLOWLIST="${REFDATA_ALLOWLIST:-scripts/restore-test-refdata-allowlist.txt}"
+REFDATA_EXTRACTOR="${REFDATA_EXTRACTOR:-scripts/extract-reference-inserts.mjs}"
+
+# ⛔ W1 — THESE THREE ARE SEAMS BECAUSE AN INVARIANT NO ARM EXERCISES IS
+# DECORATIVE. The gate's second leg refuses a PARTIAL replay: a kind-admission
+# CHECK that admits a value its registry table does not carry. On the real
+# database that pair is `compute_jobs_kind_check` (a flat `kind = ANY (ARRAY[…])`
+# list) over `public.compute_job_kinds`, whose registry column is `name` and NOT
+# `kind` (supabase/migrations/20260411144407_compute_jobs_queue.sql:86-88 —
+# measured, not remembered; a leg written against `kind` would error rather than
+# refuse).
+#
+# ⚠️ THE CHECK'S AUTHORITY IS THE SHIPPED CONSTRAINT, NOT A MIGRATION PICKED AT
+# RANDOM. Five migrations re-declare `compute_jobs_kind_check` with
+# `ALTER TABLE compute_jobs ADD CONSTRAINT …`, and this repo's re-base rule says
+# the LATEST declaration wins. MEASURED 2026-09-09: latest is
+# supabase/migrations/20260717233529_allocator_equity_derived_surface.sql:140 and
+# the shipped shape is supabase/schema/baseline.sql:1334, carrying SIXTEEN kinds
+# (… 'stitch_composite', 'derive_allocator_equity'). This comment cited
+# 20260710130000_stitch_composite_kind.sql:53 until 2026-09-09; that declaration
+# was SUPERSEDED and carries FIFTEEN — one short — so a reader checking the leg
+# against it would have measured the wrong list.
+# Neither object exists on the throwaway lane, so pointed at its defaults the leg
+# would be a permanent no-op there and could never be observed firing. The
+# self-test points them at `fx_keep_kind_check` over `public.fx_keep`.`label`,
+# which baseline-fixture.sql carries for exactly this reason, and arm 23 leg (c)
+# makes the leg RAISE.
+REFDATA_KIND_REGISTRY="${REFDATA_KIND_REGISTRY:-public.compute_job_kinds}"
+REFDATA_KIND_REGISTRY_COL="${REFDATA_KIND_REGISTRY_COL:-name}"
+REFDATA_KIND_CHECK="${REFDATA_KIND_CHECK:-compute_jobs_kind_check}"
+
 OWNED_OUT_DIR=""
 cleanup_out_dir() {
   status=$?
@@ -400,6 +440,30 @@ SELECT 'survivor' || chr(9) || 'publication' || chr(9)
    AND NOT p.puballtables
  ORDER BY 1;
 CENSUS_SQL
+
+  # ── reference-data rows (Phase 164.8.1) ──────────────────────────────────
+  # ⛔ WHY THE READING LIVES HERE AND NOT IN A POST-RESTORE `echo`. Nothing after
+  # the extension/ownership guards in `run_restore` runs on TEST today — the mode
+  # returns or fails before it — and the `restore:` summary line is pinned
+  # byte-for-byte by self-test arms 9, 12 and 18, so it must not grow a field.
+  # The census is the ONE artifact both modes emit, both times, and `--mode
+  # preflight` compares it pre/post BYTE-FOR-BYTE, so putting the counts here also
+  # keeps a preflight's "nothing changed" claim covering the replay.
+  #
+  # APPENDED with printf rather than interpolated into the heredoc above: that
+  # heredoc is QUOTED, and unquoting it to reach one variable would put every `$`
+  # and backtick in ~90 lines of catalogue SQL at the mercy of the shell
+  # (.planning/phases/164.8-testpreprod-test-becomes-a-real-pre-prod/deferred-items.md:99).
+  #
+  # `to_regclass` + `query_to_xml` for the same reason `ledger_rows` uses it: a
+  # table the dump has not created yet must read `absent`, not raise a parse error
+  # that looks like a broken instrument. Every name here survived the charset
+  # refusal in `refuse_bad_refdata_allowlist` before reaching `sql_lit`.
+  local rt
+  for rt in ${REFDATA_TABLES[@]+"${REFDATA_TABLES[@]}"}; do
+    printf "SELECT 'refdata:%s=' || CASE\n         WHEN to_regclass('%s') IS NULL THEN 'absent'\n         ELSE (xpath('/row/c/text()',\n                query_to_xml('SELECT count(*)::text AS c FROM %s', false, true, '')))[1]::text\n       END;\n" \
+      "$(sql_lit "$rt")" "$(sql_lit "$rt")" "$(sql_lit "$rt")" >> "$1"
+  done
 }
 
 # `'` -> `''`. Every identifier that reaches SQL through this function has already
@@ -481,6 +545,115 @@ refuse_bad_migration_corpus() {
     fail "no migration files found under ${MIGRATIONS_DIR}. The repo-side list is EMPTY, so the ledger seed would be empty — that is not a restore."
   fi
   note "migrations: ${#MIGRATION_BASENAMES[@]} file(s) under ${MIGRATIONS_DIR}"
+}
+
+# 8 — the reference-data allowlist (Phase 164.8.1). Filesystem-only, like refusal
+# 4, so it fires before the first connection and long before the first write.
+#
+# It runs the extractor to a mktemp file IT OWNS, because `RESTORE_OUT_DIR` does
+# not exist yet at this point in `run_restore`; only the exit code and the parsed
+# `-- refdata-expect:` trailers survive. The emitted SQL is thrown away and
+# re-generated inside `build_transaction`, which is where it is actually used.
+#
+# ⛔ THE TABLE NAMES REACH SQL TWICE — the census's `to_regclass` rows and the
+# in-transaction gate's VALUES list — so they are charset-refused HERE, before any
+# interpolation, and `sql_lit`-quoted at each site. Belt AND braces (T-164.8-04),
+# the same pairing refusal 4 uses for migration basenames.
+#
+# ⚠️ AND SO DO THE THREE KIND-REGISTRY SEAMS. `REFDATA_KIND_REGISTRY`,
+# `REFDATA_KIND_REGISTRY_COL` and `REFDATA_KIND_CHECK` reach the in-transaction
+# gate too — twice as bare identifiers and twice inside SQL string literals — and
+# until 2026-09-09 they carried NEITHER half of that discipline while the
+# paragraph above declared it. Exploiting that needs control of this script's
+# environment, so it was never an open hole; it was the stated discipline applied
+# to one variable and silently skipped for three, which is how a reader learns the
+# wrong rule. They are charset-refused here and `sql_lit`-quoted at every
+# string-literal site below.
+#
+# ⛔ AND THE EXPECTED COUNT IS KEPT, NOT DISCARDED. The extractor's trailer is
+# `<schema.table>=<statement count>`; this parser took the table half and threw
+# the count away, leaving the in-transaction gate testing `n = 0` alone. A replay
+# that lost ONE of `public.system_flags`'s two statements — or one of the two
+# `20260420213754` compute_job_kinds statements — leaves the table NON-EMPTY and
+# passed that gate, which is precisely the partial-replay shape the gate exists to
+# catch. Both halves are parsed now, and a count that is absent or non-numeric is
+# refused the same way a bad table name is.
+#
+# ⚠️ `rc=0; node … || rc=$?` and NOT `set +e`: the `--run` region's softening-token
+# exact-set pin (src/__tests__/restore-test-from-baseline.test.ts) counts both
+# `set +e` and `|| true` at a MEASURED number, and every reading below is captured
+# and then CHECKED, which is the opposite of softening. The `awk` counters exit 0
+# by construction, so neither token is needed to read them.
+REFDATA_TABLES=()
+REFDATA_EXPECT=()
+REFDATA_ENTRY_N=0
+refuse_bad_refdata_allowlist() {
+  [ -f "$REFDATA_ALLOWLIST" ] || fail "reference-data allowlist not found at ${REFDATA_ALLOWLIST}."
+  [ -f "$REFDATA_EXTRACTOR" ] || fail "reference-data extractor not found at ${REFDATA_EXTRACTOR}."
+  command -v node >/dev/null 2>&1 || fail "node is not on PATH; the reference-data extractor cannot run, and a restore that skips the replay is the defect this gate exists to remove."
+
+  # THE THREE KIND-REGISTRY SEAMS, refused with the SAME charset the table names
+  # get — filesystem-only like the rest of this refusal, so they fire before the
+  # first connection. A relation name may carry a schema dot; a column name may
+  # not, so it gets the narrower class.
+  case "$REFDATA_KIND_REGISTRY" in
+    ''|*[!a-z0-9_.]*) fail "REFDATA_KIND_REGISTRY is '${REFDATA_KIND_REGISTRY}' — this script refuses to interpolate that into SQL. It reaches the in-transaction gate both as a bare identifier and inside a string literal." ;;
+  esac
+  case "$REFDATA_KIND_REGISTRY_COL" in
+    ''|*[!a-z0-9_]*) fail "REFDATA_KIND_REGISTRY_COL is '${REFDATA_KIND_REGISTRY_COL}' — this script refuses to interpolate that into SQL. A column name carries no schema dot." ;;
+  esac
+  case "$REFDATA_KIND_CHECK" in
+    ''|*[!a-z0-9_.]*) fail "REFDATA_KIND_CHECK is '${REFDATA_KIND_CHECK}' — this script refuses to interpolate that into SQL." ;;
+  esac
+
+  # EMPTY IS AN ERROR, and it is checked HERE rather than left to the extractor:
+  # the extractor's own empty-allowlist refusal is a second reading of the same
+  # fact, and a guard whose only arm reaches the OTHER layer is unmeasured.
+  REFDATA_ENTRY_N=$(awk '!/^[[:space:]]*(#|$)/ { c++ } END { print c+0 }' "$REFDATA_ALLOWLIST")
+  if [ "$REFDATA_ENTRY_N" -eq 0 ]; then
+    fail "the reference-data allowlist ${REFDATA_ALLOWLIST} carries ZERO entries. An empty allowlist replays NOTHING, so this restore would commit a database whose ledger swears every seed migration applied while every table those migrations seeded is EMPTY — that is the Phase 164.8 defect, not a clean run."
+  fi
+
+  local tmp rc=0
+  tmp="$(mktemp)"
+  node "$REFDATA_EXTRACTOR" --allowlist "$REFDATA_ALLOWLIST" --migrations "$MIGRATIONS_DIR" \
+    > "$tmp" 2> "${tmp}.err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    cat "${tmp}.err" >&2
+    rm -f "$tmp" "${tmp}.err"
+    fail "reference-data extraction refused (exit ${rc}); nothing was replayed and no transaction was assembled."
+  fi
+
+  REFDATA_TABLES=()
+  REFDATA_EXPECT=()
+  local line trailer tbl expect
+  while IFS= read -r line; do
+    trailer="${line#-- refdata-expect: }"
+    tbl="${trailer%%=*}"
+    case "$trailer" in
+      *=*) expect="${trailer##*=}" ;;
+      *)   expect="" ;;
+    esac
+    case "$tbl" in
+      ''|*[!a-z0-9_.]*) rm -f "$tmp" "${tmp}.err"; fail "the reference-data extractor named table '${tbl}' — this script refuses to interpolate that into SQL." ;;
+    esac
+    case "$expect" in
+      ''|*[!0-9]*) rm -f "$tmp" "${tmp}.err"; fail "the reference-data extractor emitted the trailer '${line}', whose count half is '${expect}'. This script needs BOTH halves — '<schema.table>=<statement count>' — because the in-transaction gate compares the table's row count against that number; without it the gate degrades to a bare emptiness test that a partial replay passes." ;;
+    esac
+    REFDATA_TABLES+=("$tbl")
+    REFDATA_EXPECT+=("$expect")
+  done < <(awk '/^-- refdata-expect: /' "$tmp")
+  rm -f "$tmp" "${tmp}.err"
+
+  # A SECOND, INDEPENDENT EMPTINESS READING, of the extractor's OUTPUT rather than
+  # the allowlist's bytes. A stubbed or half-working extractor that exits 0 and
+  # emits no trailer would leave the in-transaction gate with an empty VALUES list
+  # — a gate that passes vacuously — and the restore would commit unguarded. Arm
+  # 24 leg (c) drives exactly that through the REFDATA_EXTRACTOR seam.
+  if [ "${#REFDATA_TABLES[@]}" -eq 0 ]; then
+    fail "the reference-data extractor exited 0 but emitted NO \`-- refdata-expect:\` trailer for ${REFDATA_ALLOWLIST}. With no table list the in-transaction gate has nothing to count and would pass vacuously; refusing rather than restoring unguarded."
+  fi
+  note "refdata: ${#REFDATA_TABLES[@]} table(s) from ${REFDATA_ENTRY_N} allowlist line(s) under ${REFDATA_ALLOWLIST}, each with a pinned statement count"
 }
 
 # 5 — WHICH DATABASE AM I ON. The first statement this script sends. CLAUDE.md
@@ -874,6 +1047,150 @@ SET LOCAL search_path = pg_catalog;
 TXN_MID
   cat "$RESTORE_OUT_DIR/survivors.sql" >> "$out"
 
+  # ── reference data: the replay (Phase 164.8.1, decision L-01) ────────────
+  # Position is the whole design. AFTER the dump (the tables must exist) and the
+  # survivors, BEFORE the ledger seed (the ledger must not claim a migration
+  # applied until this transaction's rows are in), and INSIDE the transaction, so
+  # a failure here rolls the restore back rather than leaving TEST half-seeded.
+  #
+  # The extractor runs a SECOND time here rather than reusing the temp file
+  # `refuse_bad_refdata_allowlist` made: that one is deleted with its mktemp, and
+  # a `refdata.sql` that lives beside `restore.sql` is what arm 23 mutates and
+  # what a human reads after a failed run.
+  local refdata_rc=0 refdata_n
+  node "$REFDATA_EXTRACTOR" --allowlist "$REFDATA_ALLOWLIST" --migrations "$MIGRATIONS_DIR" \
+    > "$RESTORE_OUT_DIR/refdata.sql" 2> "$RESTORE_OUT_DIR/refdata.err" || refdata_rc=$?
+  if [ "$refdata_rc" -ne 0 ]; then
+    cat "$RESTORE_OUT_DIR/refdata.err" >&2
+    fail "reference-data extraction refused (exit ${refdata_rc}); nothing was replayed and no transaction was assembled."
+  fi
+  refdata_n=$(awk '/^-- refdata: /{ c++ } END { print c+0 }' "$RESTORE_OUT_DIR/refdata.sql")
+
+  # ⛔ PITFALL 1 — THE SEARCH_PATH BRACKET IS LOAD-BEARING, NOT HYGIENE. At this
+  # point in the stream the session's path is `pg_catalog` (the TXN_MID line
+  # above, itself recovering from the dump's own `set_config('search_path','',
+  # false)`). The replayed statements are the migrations' ORIGINAL bytes and the
+  # migrations were written for a `public`-first path, so most of them name their
+  # target UNQUALIFIED — under `pg_catalog` alone every one of them would abort
+  # with "relation does not exist" and the whole restore would roll back.
+  # `pg_catalog` is restored immediately after, BEFORE the ledger DDL, because
+  # everything below is written expecting it.
+  #
+  # ⛔ PITFALL 2 — THE REPLAY RELIES ON THE CONNECTING ROLE BYPASSING RLS, AND
+  # THAT RELIANCE IS ASSERTED RATHER THAN ASSUMED. `public.compute_job_kinds` is
+  # FORCE ROW LEVEL SECURITY (supabase/schema/baseline.sql:9578) and its ONLY
+  # policy is `compute_job_kinds_read … FOR SELECT USING (true)`
+  # (baseline.sql:13012) — MEASURED 2026-09-09. There is no INSERT policy, and
+  # FORCE removes the owner exemption, so every replayed INSERT into that table
+  # lands ONLY because the role bypasses RLS. Undeclared, that is a fact the
+  # self-test cannot falsify: the lane's `postgres` is initdb's SUPERUSER. So the
+  # transaction states it as a precondition and RAISEs with a named diagnosis
+  # instead of surfacing a bare 42501 on the first run against real TEST, and the
+  # fixture dump now carries FORCE ROW LEVEL SECURITY on `public.fx_keep` so the
+  # green arms EXERCISE the bypass rather than assuming it.
+  cat >> "$out" <<'TXN_REFDATA_HEAD'
+DO $rlsguard$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_roles
+     WHERE rolname = current_user AND (rolbypassrls OR rolsuper)
+  ) THEN
+    RAISE EXCEPTION 'restore aborted: % neither bypasses RLS nor is a superuser. The reference-data replay INSERTs into tables that are FORCE ROW LEVEL SECURITY with read-only policies (public.compute_job_kinds is the shipped case), so every one of those INSERTs would fail 42501 with no policy to point at. Connect as a role with BYPASSRLS rather than weakening the policies (Phase 164.8.1)', current_user;
+  END IF;
+END
+$rlsguard$;
+SET LOCAL search_path = public, pg_catalog;
+TXN_REFDATA_HEAD
+  cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"
+  cat >> "$out" <<'TXN_REFDATA_TAIL'
+SET LOCAL search_path = pg_catalog;
+TXN_REFDATA_TAIL
+
+  # ── reference data: the gate ─────────────────────────────────────────────
+  # The TXN_WHITELIST shape (loop over a VALUES list, RAISE on the first row that
+  # matches) with the predicate INVERTED: there it aborts on a class that is
+  # non-empty, here on a reference table that is EMPTY.
+  #
+  # ⛔ PLAIN `count(*)`, NO `to_regclass` GUARD. Inside this transaction the dump
+  # has just created these tables; a guard would turn "the table is missing" —
+  # the loudest possible symptom — into a silent pass, which is precisely the
+  # softening this phase exists to remove.
+  #
+  # ⛔ THE PINNED COUNT IS CARRIED INTO THE GATE, NOT JUST INTO THE EXTRACTOR.
+  # `count(*) >= <statements>` is a SOUND FLOOR, not a guess: the DROP immediately
+  # above emptied every one of these tables, and each replayed statement is an
+  # allowlisted INSERT that puts AT LEAST one row into the table its trailer names
+  # — so a table carrying fewer rows than its statement count has lost at least one
+  # statement. Until 2026-09-09 this gate tested `n = 0` alone, and a replay that
+  # dropped one of `public.system_flags`'s two statements left the table non-empty
+  # and PASSED — the exact partial-replay shape the gate is for. EMPTY and SHORT
+  # RAISE separately because they are different diagnoses: nothing replayed at all
+  # versus some of it did.
+  local refdata_values="" rtq i=0
+  for rtq in ${REFDATA_TABLES[@]+"${REFDATA_TABLES[@]}"}; do
+    refdata_values="${refdata_values}${refdata_values:+,
+      }('$(sql_lit "$rtq")', (SELECT count(*) FROM ${rtq}), ${REFDATA_EXPECT[$i]})"
+    i=$((i + 1))
+  done
+  cat >> "$out" <<TXN_REFDATA_GATE
+DO \$restore\$
+DECLARE
+  r         record;
+  v_missing text[];
+BEGIN
+  FOR r IN
+    SELECT * FROM (VALUES
+      ${refdata_values}
+    ) AS t(tbl, n, expected)
+    WHERE t.n = 0 OR t.n < t.expected
+    ORDER BY 1
+  LOOP
+    IF r.n = 0 THEN
+      RAISE EXCEPTION 'restore aborted: reference table % is EMPTY after the replay — the ledger would say its seed migration applied while its rows are gone; fix the allowlist line or the extractor, never hand-seed shared TEST (Phase 164.8.1)', r.tbl;
+    ELSE
+      RAISE EXCEPTION 'restore aborted: reference table % is SHORT after the replay — % row(s) for % allowlisted statement(s), and each of those statements inserts at least one row into a table the DROP had just emptied, so at least one statement did not land. A PARTIAL replay commits a ledger that swears its seed migration applied; fix the allowlist line or the extractor, never hand-seed shared TEST (Phase 164.8.1)', r.tbl, r.n, r.expected;
+    END IF;
+  END LOOP;
+
+  -- The SECOND partial-replay leg, and it is INDEPENDENT of the count floor
+  -- above: the floor sees a table that lost a whole statement, this sees a
+  -- registry that lost individual ROWS its own admission CHECK still admits.
+  -- Neither substitutes for the other — a statement whose row count survives
+  -- (ON CONFLICT DO NOTHING against a stale row) is invisible to the floor, and
+  -- a table with no admission CHECK is invisible to this. Both must stand.
+  --
+  -- ⛔ ABSENCE IS LOUD, NOT INERT. This used to be wrapped in
+  -- `IF to_regclass(...) IS NOT NULL AND EXISTS (... pg_constraint ...) THEN`, so
+  -- a rename, a typo in the seam, or a dropped constraint turned the leg into a
+  -- permanent no-op and the restore COMMITTED — on real TEST this is the only
+  -- detector of a partial replay that leaves its tables non-empty, and it would
+  -- have gone quiet with nothing in the log. The configured pair is REQUIRED to
+  -- exist: both objects are on real TEST, and on the self-test lane the seam
+  -- points at `public.fx_keep` / `fx_keep_kind_check`, which baseline-fixture.sql
+  -- creates for exactly this reason. Each RAISE names WHICH of the two is gone.
+  IF to_regclass('$(sql_lit "$REFDATA_KIND_REGISTRY")') IS NULL THEN
+    RAISE EXCEPTION 'restore aborted: the configured kind registry ${REFDATA_KIND_REGISTRY} (REFDATA_KIND_REGISTRY) does not exist after the replay. This is the only leg that can see a partial replay whose tables are non-empty; skipping it would commit an unguarded restore (Phase 164.8.1)';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '$(sql_lit "$REFDATA_KIND_CHECK")') THEN
+    RAISE EXCEPTION 'restore aborted: the configured kind-admission CHECK ${REFDATA_KIND_CHECK} (REFDATA_KIND_CHECK) does not exist after the replay. This is the only leg that can see a partial replay whose tables are non-empty; skipping it would commit an unguarded restore (Phase 164.8.1)';
+  END IF;
+  SELECT array_agg(DISTINCT m.caps[1] ORDER BY m.caps[1]) INTO v_missing
+    FROM pg_constraint c
+    CROSS JOIN LATERAL regexp_matches(pg_get_constraintdef(c.oid), '''([a-z_]+)''', 'g') AS m(caps)
+   WHERE c.conname = '$(sql_lit "$REFDATA_KIND_CHECK")'
+     AND NOT EXISTS (
+           SELECT 1 FROM ${REFDATA_KIND_REGISTRY} k
+            WHERE k.${REFDATA_KIND_REGISTRY_COL}::text = m.caps[1]
+         );
+  IF v_missing IS NOT NULL AND array_length(v_missing, 1) > 0 THEN
+    RAISE EXCEPTION 'restore aborted: ${REFDATA_KIND_CHECK} admits kind(s) % that ${REFDATA_KIND_REGISTRY} does not carry — a partial replay', array_to_string(v_missing, ', ');
+  END IF;
+END
+\$restore\$;
+TXN_REFDATA_GATE
+
+  note "refdata: ${refdata_n} statement(s) replayed into ${#REFDATA_TABLES[@]} table(s), gated inside the transaction against each table's pinned statement count (count(*) >= expected, not merely non-empty) and against ${REFDATA_KIND_CHECK} over ${REFDATA_KIND_REGISTRY}"
+
   # ── the ledger ───────────────────────────────────────────────────────────
   # The DDL is the CLI's OWN (supabase/cli v2.98.2, its migration-history package).
   # A ledger this script invented would be a ledger `supabase db push` does not read.
@@ -1015,6 +1332,10 @@ run_restore() {
   refuse_wrong_baseline_sha
   refuse_stale_baseline
   refuse_bad_migration_corpus
+  # AFTER the corpus refusal: this one runs the extractor against MIGRATIONS_DIR,
+  # so the dir must already be proven present, non-empty and safely named. It must
+  # also precede `write_census_sql`, which reads the table list it parses.
+  refuse_bad_refdata_allowlist
 
   if [ -z "${RESTORE_OUT_DIR:-}" ]; then
     RESTORE_OUT_DIR="$(mktemp -d)"
@@ -1156,6 +1477,9 @@ main() {
 #                                                19  RED  ZERO censused survivors (A1)
 #                                                20  RED  marker names neither (A2)
 #                                                21  RED  migration corpus (A3)
+#                                                22  GREEN reference data replayed
+#                                                23  RED  the refdata gate BITES
+#                                                24  RED  refdata allowlist refused
 #
 # Several arms carry more than one LEG, because one guard can be false in more than
 # one way and an arm that measures the easy way is not measuring the guard:
@@ -1168,6 +1492,21 @@ main() {
 #            pg_get_triggerdef() does not emit, and asserts the state round-trips.
 #   arm 21 — (a) a filename the interpolation gate refuses, (b) an EMPTY corpus,
 #            (c) an ABSENT migrations dir.
+#   arm 23 — three SCRATCH COPIES, one per link of the reference-data chain:
+#            (a) the replay concatenation deleted -> the emptiness leg names the
+#            table; (b) the `SET LOCAL search_path = public, pg_catalog` bracket
+#            deleted -> the migrations' unqualified targets stop resolving
+#            (RESEARCH Pitfall 1); (c) one registry row DELETEd inside the
+#            transaction after the replay -> the table is NOT empty and only the
+#            kind-admission invariant can see it. Every leg also asserts
+#            `e2e_leftover` is STILL THERE: a refusal that does not roll back has
+#            left shared TEST half-restored.
+#   arm 24 — (a) a pinned count that stopped matching, (b) an EMPTY allowlist,
+#            (c) an extractor that exits 0 emitting nothing. Each also asserts the
+#            pre-census banner never printed, so "before any write" is measured;
+#            arm 8 pins that same literal POSITIVELY, because a check that only
+#            ever asserts a string's ABSENCE goes green when the string is merely
+#            reworded.
 #
 # ── REDACTION IS A CHECK WITH A SUBJECT (T-164.8-05) ────────────────────────
 # Every arm's combined output is captured, and after EVERY arm the harness greps
@@ -1190,8 +1529,14 @@ main() {
 # the record is 164.8-02-SUMMARY.md for arms 1-18 and this phase's review-fix report
 # for arms 19-21 (the empty survivor census, the foreign identity marker, and the
 # three unarmed exits of the migration-corpus refusal).
-# MEASURED 2026-09-08 — `--self-test` prints 21/21 and exits 0 on a throwaway cluster.
-EXPECTED_ARMS=21
+#
+# Arms 22-24 are Phase 164.8.1's. Their falsifiers were observed RED on SCRATCH
+# COPIES under the harness's mktemp dir — never a byte backup and never
+# `git checkout --`, which restores to HEAD and silently destroys uncommitted work
+# (L-04) — and each observation, with its scratch path and verbatim output, is
+# recorded in 164.8.1-02-SUMMARY.md.
+# MEASURED 2026-09-09 — `--self-test` prints 24/24 and exits 0 on a throwaway cluster.
+EXPECTED_ARMS=24
 
 SELFTEST_MUTEX_HOLDER_PID=""
 SELFTEST_TMPD=""
@@ -1403,13 +1748,28 @@ FRESHSTUB
   setup_lane() { fresh_db "${1:-}" && hold_mutex; }
 
   # ── the arm environment ───────────────────────────────────────────────────
-  # Every value is a PREFIX assignment, so nothing leaks between arms. The four
-  # ARM_* seams below are what individual arms override with `local` (dynamic
-  # scope), so the default leg stays one expression that every arm shares.
+  # Every value is a PREFIX assignment, so nothing leaks between arms. The ARM_*
+  # seams below are what individual arms override with `local` (dynamic scope), so
+  # the default leg stays one expression that every arm shares. (No numeral here:
+  # a count spelled in prose beside a list that grows is a count that will
+  # disagree with it — `grep -c 'local ARM_' ` is the reading.)
   local ARM_BASELINE_DOC="$SELFTEST_TMPD/BASELINE.md"
   local ARM_FRESHNESS="bash $SELFTEST_TMPD/freshness.sh"
   local ARM_REQUIRE_MUTEX=1
   local ARM_MIGRATIONS_DIR="$FIXTURES/migrations"
+  # ⛔ THE REFDATA SEAMS ARE NOT OPTIONAL POLISH (PATTERNS §2). Left at their repo
+  # defaults, EVERY arm would inherit the real allowlist — which names
+  # `public.compute_job_kinds`, `public.discovery_categories` and six more tables
+  # the baseline FIXTURE dump never creates — and the in-transaction gate would
+  # abort all of them on a table the fixture was never supposed to have.
+  local ARM_REFDATA_ALLOWLIST="$FIXTURES/refdata-allowlist.txt"
+  local ARM_REFDATA_EXTRACTOR="$SCRIPT_DIR/extract-reference-inserts.mjs"
+  # The W1 pair, pointed at the fixture analog: `fx_keep_kind_check` (declared in
+  # baseline-fixture.sql) over `public.fx_keep`.`label`, whose admitted labels are
+  # exactly the rows the fixture's one allowlisted INSERT replays.
+  local ARM_KIND_REGISTRY="public.fx_keep"
+  local ARM_KIND_REGISTRY_COL="label"
+  local ARM_KIND_CHECK="fx_keep_kind_check"
 
   run_leg() {
     local script="$1" mode="$2" tag="$3"
@@ -1421,6 +1781,11 @@ FRESHSTUB
     FRESHNESS_TS_CMD="$ARM_FRESHNESS" \
     RESTORE_OUT_DIR="$SELFTEST_TMPD/out-${tag}" \
     RESTORE_REQUIRE_MUTEX="$ARM_REQUIRE_MUTEX" \
+    REFDATA_ALLOWLIST="$ARM_REFDATA_ALLOWLIST" \
+    REFDATA_EXTRACTOR="$ARM_REFDATA_EXTRACTOR" \
+    REFDATA_KIND_REGISTRY="$ARM_KIND_REGISTRY" \
+    REFDATA_KIND_REGISTRY_COL="$ARM_KIND_REGISTRY_COL" \
+    REFDATA_KIND_CHECK="$ARM_KIND_CHECK" \
       bash "$script" --run --mode "$mode"
   }
   arm_env() { run_leg "$0" "$1" "${2:-$1}"; }
@@ -1511,6 +1876,8 @@ FRESHSTUB
       NORMALIZER="$norm" \
       FRESHNESS_TS_CMD="bash $SELFTEST_TMPD/freshness.sh" \
       RESTORE_OUT_DIR="$SELFTEST_TMPD/out-arm1" \
+      REFDATA_ALLOWLIST="$FIXTURES/refdata-allowlist.txt" \
+      REFDATA_EXTRACTOR="$SCRIPT_DIR/extract-reference-inserts.mjs" \
       bash "$0" --run --mode preflight
   }
   arm_credential_absent() {
@@ -1700,6 +2067,16 @@ FRESHSTUB
     [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: --run --mode preflight exited ${rc}, expected 0"; return 1; }
     grep -aq 'mode=preflight' "$out" || { echo "MEASURE_FAIL: the output does not carry 'mode=preflight'"; return 1; }
     grep -aq 'post-census == pre-census' "$out" || { echo "MEASURE_FAIL: the preflight did not report 'post-census == pre-census'"; return 1; }
+    # ⛔ THE POSITIVE HALF OF ARM 24's `no_write_check` (2026-09-09 review fix).
+    # Arm 24 asserts the literal `pre-census (read-only)` is ABSENT; a pure
+    # negative assertion goes green when the banner is merely REWORDED, so it
+    # could pass for the wrong reason forever. Nothing else pinned that string.
+    # This is the leg where the banner MUST print — a preflight that reaches the
+    # database — so the pair together proves the string exists and is absent only
+    # when it should be. ⚠️ Reword the banner and this arm goes RED first, which
+    # is the point.
+    grep -aq 'pre-census (read-only)' "$out" \
+      || { echo "MEASURE_FAIL: a preflight that ran to completion did not print the 'pre-census (read-only)' banner. Arm 24's no-write assertion greps for that exact literal, so if it no longer prints, arm 24 is passing vacuously."; return 1; }
     local n
     n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
     [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table public.e2e_leftover is GONE after a preflight (count=${n}). The rollback did not roll back."; return 1; }
@@ -2023,6 +2400,232 @@ FRESHSTUB
     return 0
   }
 
+  # ═══ ARM 22 — GREEN: reference data is replayed, gated and CENSUSED ════════
+  # The end-to-end shape of Phase 164.8.1: the fixture's one allowlisted INSERT
+  # lands, the gate finds the table non-empty, the transaction COMMITS, and the
+  # reading survives in the census rather than on the `restore:` summary line.
+  #
+  # ⛔ THE CENSUS FILES, NOT THE INTERLEAVED LOG. `pre-census.txt` and
+  # `post-census.txt` are two runs of ONE program, so `=0` then `=2` is a
+  # before/after of the same measurement. Grepping the combined stdout would let a
+  # `=2` from either side satisfy both halves.
+  arm_g_refdata_replay() {
+    setup_lane || return 1
+    local n0
+    n0=$(lane_q "SELECT count(*) FROM public.fx_keep;")
+    [ "$n0" = "0" ] || { echo "MEASURE_FAIL: the premise is broken — public.fx_keep already holds ${n0} row(s) before the restore, so a post-restore count of 2 would not evidence the replay."; return 1; }
+    local out="$SELFTEST_TMPD/a22.out" rc=0
+    arm_env restore a22 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: the reference-data restore exited ${rc}, expected 0"; return 1; }
+    grep -aqxF 'refdata:public.fx_keep=0' "$SELFTEST_TMPD/out-a22/pre-census.txt" \
+      || { echo "MEASURE_FAIL: the PRE-census does not read refdata:public.fx_keep=0. Either the census row is missing or the table was already seeded, and the post-census reading below would evidence nothing."; return 1; }
+    grep -aqxF 'refdata:public.fx_keep=2' "$SELFTEST_TMPD/out-a22/post-census.txt" \
+      || { echo "MEASURE_FAIL: the POST-census does not read refdata:public.fx_keep=2 — the replay did not land, or its reading never reached the census."; return 1; }
+    local n
+    n=$(lane_q "SELECT count(*) FROM public.fx_keep;")
+    [ "$n" = "2" ] || { echo "MEASURE_FAIL: public.fx_keep holds ${n} row(s) after the restore, expected the 2 the allowlisted INSERT replays. A census row is a reading; this is the database."; return 1; }
+    n=$(lane_q "SELECT string_agg(label, ',' ORDER BY label) FROM public.fx_keep;")
+    [ "$n" = "ref_a,ref_b" ] || { echo "MEASURE_FAIL: public.fx_keep carries '${n}', not the two labels the migration's ORIGINAL bytes insert — the replay is not byte-faithful."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "0" ] || { echo "MEASURE_FAIL: the stray table survived (count=${n}) — this arm did not run a real restore."; return 1; }
+    # The summary line must be BYTE-IDENTICAL to arm 9's: counts belong in the
+    # census, and a `refdata=` field here would break three arms' exact pins.
+    grep -aqxF 'restore: tables=2 policies=1 functions=2 ledger_rows=3 survivors=3/3 filtered=1 mode=restore' "$out" \
+      || { echo "MEASURE_FAIL: the exact summary line changed — the reference-data replay must not add a field to it"; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 23 — RED: the gate BITES, on scratch copies, and rolls back ═══════
+  # ⛔ THE PHASE'S FALSIFIER. Three legs, each mutating a DIFFERENT link of the
+  # chain on its own copy of this script under the harness's mktemp dir — never
+  # the checkout, never a byte backup, never `git checkout --` (L-04).
+  #
+  # ⛔ THE MUTATION IS ON THE **OBSERVED** SIDE, never the expected one. The
+  # allowlist still names public.fx_keep and the gate still counts it; only the
+  # replay, its search_path bracket or the completeness of the rows is broken. A
+  # mutation of the allowlist would move both sides at once and the gate could not
+  # fire — the same self-contradiction arm 11 records for the shape derivation.
+  arm_refdata_gate_bites() {
+    local out rc n copy
+
+    # (a) THE REPLAY IS GONE. The one line that concatenates the extractor's SQL
+    #     into the transaction is deleted; everything else, gate included, stands.
+    copy="$SELFTEST_TMPD/refdata-no-replay.sh"
+    awk '!d && index($0, "cat \"$RESTORE_OUT_DIR/refdata.sql\" >> \"$out\"") > 0 { d = 1; next }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
+      || { echo "MEASURE_FAIL (a): could not build the no-replay scratch copy — the replay anchor moved."; return 1; }
+    if grep -aq 'cat "\$RESTORE_OUT_DIR/refdata.sql" >> "\$out"' "$copy"; then
+      echo "MEASURE_FAIL (a): the scratch copy STILL carries the replay line, so this leg would test the unmutated script."
+      return 1
+    fi
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a23a.out"; rc=0
+    run_leg "$copy" restore a23a > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (a): a restore whose reference replay was deleted exited ${rc}, expected 1. This is the Phase 164.8 defect committing: a ledger that swears every seed migration applied over tables with no rows."; return 1; }
+    grep -aq 'reference table public.fx_keep is EMPTY after the replay' "$out" \
+      || { echo "MEASURE_FAIL (a): the abort is not the reference-data gate's, and does not NAME the empty table — some other guard fired, so the gate is still unmeasured"; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL (a): the stray table is gone (count=${n}) — the gate REFUSED but the transaction did not ROLL BACK, so TEST was left half-restored."; return 1; }
+
+    # (b) THE SEARCH_PATH BRACKET IS GONE (RESEARCH Pitfall 1). The replayed
+    #     statements are the migrations' original bytes and name their target
+    #     UNQUALIFIED; with the path left at `pg_catalog` every one of them fails
+    #     to resolve. Without this leg the bracket is an assertion nobody has seen
+    #     matter — it would look like hygiene and be deleted by the next reader.
+    copy="$SELFTEST_TMPD/refdata-no-searchpath.sh"
+    awk '!d && $0 == "SET LOCAL search_path = public, pg_catalog;" { d = 1; next }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
+      || { echo "MEASURE_FAIL (b): could not build the no-search_path scratch copy — the bracket anchor moved."; return 1; }
+    if grep -aqxF 'SET LOCAL search_path = public, pg_catalog;' "$copy"; then
+      echo "MEASURE_FAIL (b): the scratch copy STILL carries the search_path bracket."
+      return 1
+    fi
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a23b.out"; rc=0
+    run_leg "$copy" restore a23b > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (b): a restore whose replay ran under \`pg_catalog\` alone exited ${rc}, expected 1"; return 1; }
+    grep -aq 'relation "fx_keep" does not exist' "$out" \
+      || { echo "MEASURE_FAIL (b): the abort does not report an unresolvable unqualified target, so the bracket's absence is not what stopped this run and Pitfall 1 is still unmeasured"; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL (b): the stray table is gone (count=${n}) — the failed replay did not roll back."; return 1; }
+
+    # (c) A PARTIAL REPLAY — the W1 leg. One registry row is deleted INSIDE the
+    #     transaction, immediately after the replay, so the table is NOT empty and
+    #     leg (a)'s loop cannot see it. Only the kind-admission invariant can:
+    #     `fx_keep_kind_check` still admits `ref_b` and `public.fx_keep` no longer
+    #     carries it. Without this leg that invariant would be decorative — on the
+    #     lane its two objects would not exist, `v_missing` would be NULL forever,
+    #     and it would pass vacuously for the life of the script.
+    copy="$SELFTEST_TMPD/refdata-partial.sh"
+    awk '{ print }
+         !d && index($0, "cat \"$RESTORE_OUT_DIR/refdata.sql\" >> \"$out\"") > 0 {
+           print "  echo \"DELETE FROM public.fx_keep WHERE label = \047ref_b\047;\" >> \"$out\"  # arm 23(c): a PARTIAL replay, scratch copy only"
+           d = 1
+         }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
+      || { echo "MEASURE_FAIL (c): could not build the partial-replay scratch copy — the replay anchor moved."; return 1; }
+    grep -aq 'DELETE FROM public.fx_keep WHERE label' "$copy" \
+      || { echo "MEASURE_FAIL (c): the scratch copy does not carry the injected DELETE, so this leg would test an intact replay."; return 1; }
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a23c.out"; rc=0
+    run_leg "$copy" restore a23c > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (c): a PARTIAL replay exited ${rc}, expected 1. The registry lost a row its admission CHECK still admits and the restore COMMITTED anyway — the invariant is decorative."; return 1; }
+    grep -aq 'fx_keep_kind_check admits kind(s) ref_b that public.fx_keep does not carry' "$out" \
+      || { echo "MEASURE_FAIL (c): the abort is not the partial-replay invariant's, or does not NAME the missing kind — an invariant that fires without saying what is missing cannot be acted on"; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL (c): the stray table is gone (count=${n}) — the invariant refused but the transaction did not roll back."; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 24 — RED: a bad reference-data allowlist, refused BEFORE any write ═
+  # ⛔ THIS COMMENT'S NUMBERS ARE MEASURED, AND SO IS THE GAP THEY ADMIT. It said
+  # "refusal 8 has three reason branches and this arm drives each by name" until
+  # 2026-09-09; refusal 8 had SEVEN then, and has ELEVEN now that the review added
+  # the kind-registry seam refusals and the trailer's count half. Regenerate with
+  #
+  #   awk '/^refuse_bad_refdata_allowlist\(\)/,/^}/' scripts/restore-test-from-baseline.sh | grep -c 'fail "'
+  #
+  # (2026-09-09: ELEVEN). This is the same over-claim class the W2 block at the
+  # foot of this file exists to correct, so it is corrected the same way rather
+  # than extended.
+  #
+  # THIS ARM DRIVES THREE OF THE ELEVEN, each by its named message: (a) the
+  # extractor's own refusal being surfaced, (b) an allowlist with zero entries,
+  # (c) an extractor that exits 0 emitting no trailer.
+  #
+  # EIGHT HAVE NO ARM, and saying so is the point: allowlist file not found;
+  # extractor file not found; node not on PATH; the extractor naming a table
+  # outside `[a-z0-9_.]`; a trailer whose count half is absent or non-numeric;
+  # and the three seam refusals on REFDATA_KIND_REGISTRY,
+  # REFDATA_KIND_REGISTRY_COL and REFDATA_KIND_CHECK. What IS claimed for refusal
+  # 8, and what the self-test line at the foot of this file claims, is that it has
+  # at least one arm asserting a NAMED message — not that every branch is armed.
+  #
+  # All three driven branches are pure filesystem, so they fire before the first
+  # connection: the arm asserts the pre-census banner NEVER PRINTED, which is what
+  # makes "before any write" a measurement rather than a claim about ordering in
+  # the source. ⚠️ That is a NEGATIVE assertion and cannot stand alone — arm 8
+  # pins the same literal POSITIVELY on a preflight that must print it, so a
+  # reworded banner goes RED there instead of silently greening this arm.
+  arm_bad_refdata_allowlist() {
+    local out rc
+    local scratch="$SELFTEST_TMPD/refdata-arm24"
+    rm -rf "$scratch"
+    mkdir -p "$scratch"
+
+    # `if`, not `grep … && { … }`: under `set -e` a failing grep at the head of an
+    # AND-list is the list's status, and the whole function would die on the
+    # PASSING case.
+    no_write_check() {
+      if grep -aq 'pre-census (read-only)' "$1"; then
+        echo "MEASURE_FAIL ($2): the pre-census RAN. The refusal did not fire before the first read of the database, let alone before the first write."
+        return 1
+      fi
+      return 0
+    }
+
+    # (a) A PINNED COUNT THAT NO LONGER MATCHES. The extractor refuses; this
+    #     script must surface that refusal rather than restore without the rows.
+    printf '20260103000000_fixture_c.sql\tpublic.fx_keep\t2\t# arm 24(a): pins 2 where 1 is measured\n' \
+      > "$scratch/count-drift.txt"
+    local ARM_REFDATA_ALLOWLIST="$scratch/count-drift.txt"
+    out="$SELFTEST_TMPD/a24a.out"; rc=0
+    arm_env preflight a24a > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (a): an allowlist whose pinned count is wrong exited ${rc}, expected 1"; return 1; }
+    grep -aq 'reference-data extraction refused' "$out" \
+      || { echo "MEASURE_FAIL (a): this script did not report the extraction as REFUSED — a non-zero extractor was swallowed"; return 1; }
+    grep -aq 'pins 2 top-level statement(s) but 1 were measured' "$out" \
+      || { echo "MEASURE_FAIL (a): the extractor's own stderr was not echoed, so a reader sees that something was refused but not WHICH number moved"; return 1; }
+    if [ -e "$SELFTEST_TMPD/out-a24a/refdata.sql" ]; then
+      echo "MEASURE_FAIL (a): refdata.sql exists under the out dir — the extraction ran to a file despite being refused."
+      return 1
+    fi
+    no_write_check "$out" a || return 1
+
+    # (b) AN EMPTY ALLOWLIST. Zero entries replays nothing, and a restore that
+    #     replays nothing is the Phase 164.8 defect wearing a green tick. Checked
+    #     by THIS script rather than delegated: the extractor's own empty-allowlist
+    #     refusal is a second reading of the same fact, and a branch whose only arm
+    #     reaches the other layer is unmeasured.
+    : > "$scratch/empty.txt"
+    ARM_REFDATA_ALLOWLIST="$scratch/empty.txt"
+    out="$SELFTEST_TMPD/a24b.out"; rc=0
+    arm_env preflight a24b > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (b): an EMPTY reference-data allowlist exited ${rc}, expected 1"; return 1; }
+    grep -aq 'carries ZERO entries' "$out" \
+      || { echo "MEASURE_FAIL (b): the refusal is not this script's empty-allowlist one"; return 1; }
+    grep -aq 'that is the Phase 164.8 defect, not a clean run' "$out" \
+      || { echo "MEASURE_FAIL (b): the refusal does not say what emptiness would silently produce"; return 1; }
+    no_write_check "$out" b || return 1
+
+    # (c) AN EXTRACTOR THAT EXITS 0 AND EMITS NOTHING. Not a hypothetical: a copy
+    #     of the real extractor under a symlinked temp dir did exactly this until
+    #     2026-09-09, because its main guard compared path SPELLINGS. Left
+    #     unrefused, the gate's VALUES list would be EMPTY and the gate would pass
+    #     vacuously on every future restore — green, having done nothing.
+    printf '#!/usr/bin/env node\nprocess.exit(0);\n' > "$scratch/silent-extractor.mjs"
+    ARM_REFDATA_ALLOWLIST="$FIXTURES/refdata-allowlist.txt"
+    local ARM_REFDATA_EXTRACTOR="$scratch/silent-extractor.mjs"
+    out="$SELFTEST_TMPD/a24c.out"; rc=0
+    arm_env preflight a24c > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (c): an extractor that exits 0 emitting nothing was ACCEPTED (exit ${rc}), so the in-transaction gate would have been built over an empty table list and passed vacuously"; return 1; }
+    grep -aq 'emitted NO `-- refdata-expect:` trailer' "$out" \
+      || { echo "MEASURE_FAIL (c): the refusal is not the zero-trailer one"; return 1; }
+    grep -aq 'would pass vacuously' "$out" \
+      || { echo "MEASURE_FAIL (c): the refusal does not say WHY an empty table list is unacceptable"; return 1; }
+    no_write_check "$out" c || return 1
+    return 0
+  }
+
   run_arm "1  RED   credential absent — a missing DSN is a hard failure, never a skip" 0 arm_credential_absent
   run_arm "2  RED   identity marker NULL — refused before any write" 0 arm_marker_null
   run_arm "3  RED   identity marker names PROD — refused, loudly" 0 arm_marker_prod
@@ -2045,6 +2648,9 @@ FRESHSTUB
   run_arm "19 RED   ZERO censused survivors — the closure still refuses (A1)" 0 arm_empty_survivor_census
   run_arm "20 RED   identity marker names neither TEST nor PROD (A2)" 0 arm_marker_foreign
   run_arm "21 RED   migration corpus: bad charset, empty, absent (A3)" 0 arm_bad_migration_corpus
+  run_arm "22 GREEN reference data replayed, gated and censused — the transaction commits" 0 arm_g_refdata_replay
+  run_arm "23 RED   the reference-data gate BITES: no replay, no search_path, partial replay" 0 arm_refdata_gate_bites
+  run_arm "24 RED   reference-data allowlist: count drift, empty, silent extractor" 0 arm_bad_refdata_allowlist
 
   release_mutex
 
@@ -2052,7 +2658,8 @@ FRESHSTUB
   # ⛔ A4 — THE SUCCESS LINE PRINTS ONLY AFTER BOTH FAILURE CHECKS HAVE PASSED.
   # It used to print ABOVE them, so a 15-of-18 run emitted a full success
   # narrative — "seven refusals fire before any write, preflight rolls back
-  # byte-for-byte …" — and only then the FAIL line. Both sibling gates order it
+  # byte-for-byte …", the line's wording AT THAT TIME; it says eight now — and
+  # only then the FAIL line. Both sibling gates order it
   # this way (scripts/test-ledger-drift-check.sh:667-671,
   # scripts/prod-body-drift-check.sh:560-564). Below both checks, `pass`, `total`
   # and EXPECTED_ARMS are all equal by construction, so the denominator is the
@@ -2065,7 +2672,20 @@ FRESHSTUB
     echo "SELF-TEST FAIL: ${pass}/${total} arms behaved as declared."
     return 1
   fi
-  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — seven refusals fire before any write and every branch of every one of them is armed, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, harness calibrated)"
+  # ⛔ W2 — THIS SENTENCE'S NUMBER IS MEASURED, AND SO IS ITS CLAIM. Regenerate the
+  # count with `grep -c '^refuse_[a-z_]*() {' scripts/restore-test-from-baseline.sh`
+  # (2026-09-09: EIGHT, after `refuse_bad_refdata_allowlist` joined the block). It
+  # read "seven" until this phase.
+  #
+  # ⚠️ AND IT USED TO OVERCLAIM. The words were "every BRANCH of every one of them
+  # is armed", which is false and was false before this phase: `refuse_wrong_baseline_sha`
+  # alone has four `fail` exits and only the sha-mismatch one has an arm; the
+  # "baseline dump not found", "provenance doc not found" and "no parseable sha256
+  # row" branches have none. What IS true, and what is claimed here, is that every
+  # refusal has at least one arm asserting its NAMED message — arms 1-7, 20, 21 and
+  # 24. A narrative that miscounts or overstates its own guards is the same defect
+  # class as a stale floor, so it is corrected rather than extended.
+  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — eight refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back, a bad allowlist is refused before any write, harness calibrated)"
   return 0
 }
 
