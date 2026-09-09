@@ -1041,9 +1041,16 @@ jobs:
       # step list cannot miss it.
       #
       # RESTORE_OUT_DIR is pointed at this same directory, so the script's pre-drop
-      # census (`pre-census.txt`, `survivors.keys`, `survivors.sql`) lands in the
-      # artifact as well — including when the transaction aborts, which is exactly the
-      # run where it is worth having.
+      # census lands here too — including when the transaction aborts, which is exactly
+      # the run where it is worth having in the JOB LOG.
+      # ⛔ SINCE PHASE 164.8.2 THIS DIRECTORY IS NOT THE ARTIFACT. Only the enumerated
+      # allowlist copied by `Stage the public artifact (enumerated allowlist;
+      # default-out)` is published; the rest stays in the job's temp dir and dies with
+      # the runner. `survivors.sql` — the DDL that re-creates the non-public objects
+      # depending on `public` — IS in the artifact, because without it an aborted restore
+      # is not reversible. `pre-census.txt`, `post-census.txt`, the two
+      # `*-rollback-view.txt` files and `survivors.keys` are NOT: they restate that same
+      # DDL with owner-named rows and have no reversal claim on it (T-164.8-21).
       - name: Back up TEST before any write (schema + ledger; NOT data)
         run: |
           set -euo pipefail
@@ -1134,10 +1141,26 @@ jobs:
                               as it stood immediately BEFORE the restore.
             schema-before.sql `supabase db dump` of TEST's schema, same pinned CLI (2.98.2)
                               that produced supabase/schema/baseline.sql. NO data statements.
-            pre-census.txt    the restore script's pre-drop census, if it got that far.
-            survivors.keys    the non-public objects depending on `public` that the restore
-            survivors.sql     re-creates, and the DDL it re-creates them with.
-            transaction.out   psql's output for the transaction, redacted.
+            census.sql        the catalogue query the restore script ran to take its
+                              pre-drop census.
+            survivors.sql     the non-public objects depending on `public` that the
+                              restore re-creates, and the DDL it re-creates them with.
+                              The ONLY place that policy/trigger DDL appears here as a
+                              standalone file. Without it an aborted restore is not
+                              reversible, which is why it is in this artifact.
+            restore.sql       the full transaction as it was assembled and handed to
+                              psql. It EMBEDS survivors.sql and refdata.sql, so the
+                              survivor DDL appears twice across these files; this one is
+                              the record of what was actually attempted.
+            refdata.sql       the allowlisted migration-seeded reference data replayed
+                              after the schema is rebuilt.
+            *.err *.log *.out the diagnostic channels, redacted (see below).
+
+            DELIBERATELY NOT HERE: pre-census.txt, post-census.txt and the two
+            *-rollback-view.txt files. They restate the same survivor DDL alongside
+            owner-named rows read off the live shared TEST database, with no claim on
+            being the reversal recipe, and this artifact is world-readable. They stay in
+            the job's temp directory and are visible in the run log only.
 
           REVERSING THE SCHEMA AND THE LEDGER (a founder act, deliberately manual)
             1. Take the shared-TEST advisory mutex (key 61616158) — see
@@ -1404,11 +1427,29 @@ jobs:
       # artifact.
       # The `trap ... ERR` is what makes that total: `set -e` alone would abort at the
       # failing command, BEFORE any cleanup, which is precisely the leak.
-      # ⚠️ SCOPE: only the .err/.log/.out channels are removed, not the whole directory.
-      # They are the only files that can carry connection metadata — ledger.csv and the
-      # two .sql files are left byte-exact by design, and are secret-SCANNED at the point
-      # they are written (see the backup step). So a failed redaction costs the run's
-      # diagnostics, never its reversal recipe.
+      # ⚠️ SCOPE — CORRECTED 2026-09-09 (Phase 164.8.2, WR-05). THIS STEP TOUCHES ONLY
+      # THE .err/.log/.out CHANNELS, and it is NOT what keeps the rest of the directory
+      # out of the public artifact. Read the previous version of this paragraph as a
+      # warning: it claimed the channels were "the only files that can carry connection
+      # metadata" and that "the two .sql files" were "secret-SCANNED at the point they
+      # are written". Both were false, and the false assurance is what let the census
+      # text files ship for a phase. What is TRUE:
+      #   - `ledger.csv` and `schema-before.sql` are left byte-exact here (a substitution
+      #     would corrupt the very bytes the reversal recipe replays) and they ARE
+      #     secret-scanned — in the BACKUP step, at the point they are written.
+      #   - The script-written files are scanned by NOTHING and redacted by NOTHING. The
+      #     backup step's scan runs BEFORE the script exists to write them. There are
+      #     FIVE `.sql` files in this directory, not two: `schema-before.sql` plus the
+      #     script's `census.sql`, `survivors.sql`, `restore.sql` and `refdata.sql`, and
+      #     only the first is scanned.
+      #   - What keeps the unscanned ones out of the world-readable artifact is the
+      #     `Stage the public artifact (enumerated allowlist; default-out)` step below,
+      #     which copies an enumerated list into a separate directory. It ADMITS the four
+      #     script `.sql` files above (`restore.sql` embeds `survivors.sql` by `cat`, so
+      #     that DDL is staged twice — stated, not glossed) and EXCLUDES the census text
+      #     files and `survivors.keys`.
+      # So a failed redaction costs the run's diagnostics, never its reversal recipe —
+      # and a failed STAGING costs the artifact entirely, which is the safe direction.
       - name: Redact connection metadata from the backup directory (public artifact)
         if: always()
         run: |

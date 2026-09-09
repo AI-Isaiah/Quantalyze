@@ -1097,6 +1097,134 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       );
     });
 
+    /**
+     * The `README.txt` heredoc's "WHAT IS HERE" entries, as filename tokens.
+     *
+     * The README is INSIDE the artifact — it is the first thing whoever downloads it
+     * reads — so a README describing a file the artifact does not carry is the same
+     * defect as the SCOPE comment that cost Phase 164.8 eight hours, just shipped to a
+     * wider audience. Sliced from `WHAT IS HERE` to `DELIBERATELY NOT HERE` (the
+     * withheld list is prose ABOUT files that are absent and must not be read as
+     * contents). Entry lines carry exactly 12 leading spaces; continuations carry 30,
+     * and the description column is fixed at 30 — that fixed layout is what makes the
+     * filename field extractable without guessing which dotted token is a filename.
+     */
+    function readmeEntries(text: string): string[] {
+      const body = stepBody(text, "Back up TEST before any write (schema + ledger; NOT data)");
+      const from = body.indexOf("WHAT IS HERE");
+      if (from < 0) return [];
+      const rest = body.slice(from);
+      const to = rest.indexOf("DELIBERATELY NOT HERE");
+      const section = (to < 0 ? rest : rest.slice(0, to)).split("\n");
+      return section
+        .filter((l) => /^ {12}\S/.test(l))
+        .flatMap((l) => l.slice(12, 30).trim().split(/\s+/))
+        .filter((t) => t.length > 0);
+    }
+
+    it("the README inside the artifact describes only files the artifact carries", () => {
+      const names = stagedNameList(WF);
+      const exts = stagedChannelExts(WF);
+      const carried = (entry: string): boolean =>
+        names.includes(entry) ||
+        (/^\*\.[a-z]+$/.test(entry) && exts.includes(entry.slice(2)));
+
+      const entries = readmeEntries(WF);
+      expect(
+        entries.length,
+        "the README's WHAT IS HERE list could not be parsed — an empty list would make the agreement below vacuously true",
+      ).toBeGreaterThan(4);
+      const lying = entries.filter((e) => !carried(e));
+      expect(
+        lying,
+        `the README shipped INSIDE the artifact names ${lying.length} file(s) the staging step does not copy. Whoever downloads this artifact reads that list first; describing a file that is not there is the same false-assurance defect as the SCOPE comment WR-05 was raised about.`,
+      ).toEqual([]);
+
+      // CALIBRATION — put `pre-census.txt` back into the README (as an entry line, at
+      // the real column) and the predicate must flip. Without this the check could be
+      // satisfied by a parser that returns nothing useful.
+      calibrate(
+        "the README-vs-allowlist agreement bites on a re-inserted pre-census.txt",
+        (s) =>
+          s.replace(
+            "            census.sql        the catalogue query the restore script ran to take its\n",
+            "            pre-census.txt    the restore script's pre-drop census, if it got that far.\n" +
+              "            census.sql        the catalogue query the restore script ran to take its\n",
+          ),
+        (t) => {
+          const n = stagedNameList(t);
+          const e = stagedChannelExts(t);
+          return readmeEntries(t).every(
+            (x) => n.includes(x) || (/^\*\.[a-z]+$/.test(x) && e.includes(x.slice(2))),
+          );
+        },
+      );
+    });
+
+    /**
+     * The contiguous `#` comment block immediately ABOVE a step's `- name:` line.
+     *
+     * ⚠️ `stepHead()` starts AT the `- name:` line, so it cannot see this — measured
+     * while writing this arm: the first version used `stepHead` and reported a missing
+     * sentence that was present four lines higher. The comment being pinned lives
+     * above the step, which is where this file's convention puts the reasoning.
+     */
+    function precedingComment(text: string, name: string): string {
+      const lines = text.split("\n");
+      const i = lines.findIndex((l) => l.trim() === `- name: ${name}`);
+      if (i < 0) return "";
+      const out: string[] = [];
+      for (let k = i - 1; k >= 0 && /^\s*#/.test(lines[k]); k -= 1) out.unshift(lines[k]);
+      return out.join("\n");
+    }
+
+    it("the SCOPE comment no longer claims a scan scope the code does not have", () => {
+      // ⛔ THE COMMENT IS THE FINDING. WR-05 is not only about which bytes ship — the
+      // step comment asserted that `ledger.csv` and "the two .sql files" were
+      // secret-scanned when they were written. There are FIVE `.sql` files in that
+      // directory and the scan runs BEFORE four of them exist. A reader who trusted it
+      // had no reason to look further, which is how the census text shipped for a phase.
+      const scope = precedingComment(WF, REDACT);
+      expect(
+        scope,
+        "the redaction step's preceding comment block could not be sliced — the pin below would be vacuous",
+      ).not.toBe("");
+      expect(scope).toContain("SCOPE");
+
+      const DEAD = [
+        "They are the only files that can carry connection metadata",
+        "two .sql files are left byte-exact by design, and are secret-SCANNED at the point",
+      ];
+      for (const dead of DEAD) {
+        expect(
+          WF.includes(dead),
+          `the false SCOPE sentence ${JSON.stringify(dead)} is back in the workflow. It describes a control the code does not have: the secret scan runs in the BACKUP step, before four of the five .sql files exist.`,
+        ).toBe(false);
+      }
+      // CALIBRATION — an absence assertion proves nothing unless the presence of the
+      // thing can be detected. Re-insert the sentence on a scratch copy.
+      calibrate(
+        "the dead SCOPE sentence would be caught if it came back",
+        (s) => s.replace("      # ⚠️ SCOPE — CORRECTED", `      # ${DEAD[0]}\n      # ⚠️ SCOPE — CORRECTED`),
+        (t) => DEAD.every((d) => !t.includes(d)),
+      );
+
+      // And it must name what ACTUALLY withholds the rest — the staging step — so the
+      // next reader is sent to the real mechanism rather than to this one.
+      calibrate(
+        "the SCOPE comment names the staging step as the control that withholds the rest",
+        (s) =>
+          s.replace(
+            "      #     `Stage the public artifact (enumerated allowlist; default-out)` step below,",
+            "      #     a step below,",
+          ),
+        (t) =>
+          precedingComment(t, REDACT).includes(
+            "Stage the public artifact (enumerated allowlist; default-out)",
+          ),
+      );
+    });
+
     it("the upload publishes the STAGING directory, never the raw backup directory", () => {
       const body = stepBody(WF, UPLOAD);
       expect(
