@@ -2,9 +2,10 @@
 
 ## [0.77.30.0] - 2026-09-09 — migrations reach TEST before PROD, and the restore is closed with its evidence
 
-Nine commits on this branch, six themes; every commit is represented below. This
-entry REPLACES the earlier 0.77.29.0 one, which covered the first four and
-carried a claim that turned out to be false (noted under Root cause).
+Fifteen commits on this branch, six themes; every commit is represented below and
+each was checked off against `git log origin/main..HEAD`. This entry REPLACES the
+earlier 0.77.29.0 one, which covered the first four and carried a claim that
+turned out to be false (noted under Root cause).
 
 ### Added
 - **Migrations now apply to shared TEST before they can reach PROD** (`f748842e`,
@@ -69,7 +70,17 @@ carried a claim that turned out to be false (noted under Root cause).
   what hid it.
 - **The floor's stated derivation was wrong twice**, the second time in the fix for the
   first: `compute_job_kinds` is pinned at 15 statements yielding 16 rows, not the reverse.
-  The corrected comment names the allowlist and `--audit` as the authority instead of itself.
+  The corrected comment names the allowlist and `--audit` as the authority instead of itself
+  — and then forbade, three lines later, the worked example it had just given (`d3734ac4`).
+- **The heredoc guard was narrower than its own name** (`6b0cdbad`). It keyed on the
+  `TXN_[A-Z_]+` spelling, so a live backtick walked past it four ways — `<<-TXN_A`,
+  `<<TXN_A ` with one trailing space, `<<TXN_Gate2`, and any delimiter not spelled `TXN_`.
+  None occurs in the script, which is exactly the problem: a guard named for a general
+  property while testing a narrow one reads as coverage. It now matches every unquoted
+  heredoc and skips quoted ones, whose bodies bash never expands.
+- **SC-9 pins a measurement DATE beside a constant, never the COUNT in the same sentence**
+  (`6b0cdbad`). `prints 26/26` could be rewritten to `prints 24/24` with every ratchet leg
+  green. A new leg derives the count FROM the constant and asserts the prose agrees.
 
 ### Tests
 - Self-test arms 21 -> 26. Arm 23 gained leg (d), the SHORT branch's ONLY falsifier at any
@@ -95,6 +106,17 @@ carried a claim that turned out to be false (noted under Root cause).
   not the UPDATEs that followed them), `[164.8.1-TEST-ANALYTICS-URL-PROD]` and
   `[164.8-PUSH-RACE-VAC08]`.
 - Phase 164.8-05 Task 3 remains halted at a human checkpoint.
+- Phase 164.8.1 closed with its records swept rather than left dated: the ROADMAP status and
+  plan bullet, `STATE.md`'s Current Position (which had pointed at Phase 164.2 since
+  2026-09-06), the phase SUMMARY and the review's own gate list (`f140589d`, `6b0cdbad`).
+- The phase UAT (`46efd95d`) records six checkpoints, every one evidenced by a named CI run
+  or self-test transcript and **none claimed as human-observed** — this phase ships no UI.
+  The one judgement that needed a person, authorising the destructive restore on the
+  preflight's readings, was taken in Plan 04 and is recorded there.
+- `164.8.1-VERIFICATION.md` carries an explicit ORCHESTRATOR RESOLUTION section: the
+  verifier's verdict was `human_needed` on four convention calls it declined to make, those
+  calls were then made and implemented, and the status was flipped by the orchestrator —
+  said in the file itself rather than left to look like the verifier's own conclusion.
 
 ## [0.77.28.0] - 2026-09-09
 
