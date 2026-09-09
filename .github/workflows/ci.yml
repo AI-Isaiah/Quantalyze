@@ -2933,6 +2933,21 @@ jobs:
           # promise "assertions enforce once the test DB catches up" named a
           # mechanism that does not exist.
           #
+          # ⚠️ CURRENCY 2026-09-09: the paragraph above is kept for the lineage
+          # rather than deleted, because its CONCLUSION still holds and its
+          # STATED REASON no longer does. Phase 164.8 plan 05 landed an
+          # `apply-test` job in .github/workflows/supabase-migrate.yml, so TEST
+          # now receives every merged migration AUTOMATICALLY — it is no longer
+          # "migrated BY HAND", and supabase-migrate.yml no longer "targets the
+          # PRODUCTION project only". The consequence is exact: a whole-file
+          # `NOTICE:  SKIP:` bail-out CAN now re-arm itself, because the object
+          # it bails on will genuinely arrive on the next merge. What stops it
+          # is no longer the absence of a mechanism; it is ONLY the marker check
+          # below, which fails the step on the bail-out line itself. ⛔ Do not
+          # read the paragraph above as a second, independent reason to trust
+          # this step — it has been reduced to one, and removing the marker
+          # check would now leave nothing.
+          #
           # Three files were fixed individually (they now RAISE EXCEPTION on an
           # absent object). This block is the mechanical closure for the rest and
           # the stop for new ones: capture each file's output and fail the step

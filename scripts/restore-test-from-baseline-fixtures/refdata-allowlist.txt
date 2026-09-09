@@ -15,4 +15,10 @@
 #
 # ONE entry, on purpose: the fixture proves the MECHANISM (extract → replay under a
 # public search_path → gate non-empty → census) end to end, not the corpus.
-20260103000000_fixture_c.sql	public.fx_keep	1	# 20260103000000_fixture_c.sql:19 — read by baseline-fixture.sql's `fx_keep_kind_check`, whose admitted labels are exactly these rows; arm 22 counts them, arm 23 proves the gate bites when the replay is deleted
+#
+# ⛔ THE PINNED COUNT IS 2 STATEMENTS OVER 3 ROWS, AND THE GAP IS DELIBERATE. The
+# gate compares rows against STATEMENTS, so the fixture must be able to lose a row
+# and still clear the floor (arm 23 leg (c), which must reach the registry/CHECK
+# invariant) AND to lose two and fall under it (leg (d), the SHORT branch's only
+# falsifier). See the header of 20260103000000_fixture_c.sql before changing it.
+20260103000000_fixture_c.sql	public.fx_keep	2	# 20260103000000_fixture_c.sql:34 and :36 — read by baseline-fixture.sql's `fx_keep_kind_check`, whose admitted labels are exactly these rows; arm 22 counts them, arm 23 proves the gate bites when the replay is deleted (leg a), when a row is lost (leg c) and when a whole statement is (leg d)

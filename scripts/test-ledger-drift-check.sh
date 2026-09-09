@@ -368,6 +368,111 @@ check() {
     echo "::warning::${GATE}: no ledger baseline at ${baseline} — every measured absence is treated as new."
   fi
 
+  # ── APPLY-ON-MERGE FRONTIER EXEMPTION (Phase 164.8 plan 05, 2026-09-09) ────
+  # ⛔ READ THE ORDERING BEFORE TOUCHING THIS.
+  #
+  # PR #766 added an `apply-test` job to supabase-migrate.yml, so migrations now
+  # reach shared TEST — but only ON THE MERGE PUSH. That makes two things true
+  # BY CONSTRUCTION, and neither is a defect this gate is entitled to report:
+  #   (a) On the PR itself the new migration FILE exists and nothing has applied
+  #       it anywhere. Counting it as NEW drift reddens EVERY migration-adding
+  #       PR with no remedy the rules permit — the baseline may only shrink, and
+  #       hand-applying to shared TEST is forbidden two blocks up.
+  #   (b) On the merge push this gate (`sql-tests`) and `apply-test` take the
+  #       SAME advisory lock 61616158. Whichever wins decides whether the ledger
+  #       is read before or after the apply, so without this the verdict is a
+  #       coin flip on lock order.
+  # The exemption makes the verdict ORDER-INDEPENDENT. It is not a tolerance —
+  # it removes a quantity the gate was never measuring.
+  #
+  # THE FRONTIER, AND WHY IT IS DERIVED FROM THE REPO, NOT FROM `version`.
+  # `schema_migrations.version` is RE-STAMPED at apply time (the ⛔ block at the
+  # top of this file, measured 2026-08-28). So `max(version)` is an APPLY clock,
+  # and comparing an AUTHORING timestamp against it compares two different
+  # quantities. The tip used here is instead
+  #     tip = the greatest AUTHORING timestamp among repo migrations MEASURED
+  #           PRESENT in the ledger
+  # i.e. the newest migration the ledger has actually got, expressed in repo
+  # terms. It is computed from data this gate already holds: no new query, no
+  # stub to keep in sync, and immune to re-stamping.
+  #
+  # ⛔ THE RATCHET IS NOT WEAKENED, AND THIS IS THE SENTENCE THAT SAYS WHY.
+  # A migration that is missing while a STRICTLY NEWER one is present cannot be
+  # explained by apply-on-merge: the pipeline that applied the newer one walked
+  # straight past this one. That is the real defect class and it stays RED. Only
+  # the strictly-above window — where nothing applied is newer, so no pipeline
+  # has yet had the chance to apply it — is exempt.
+  #
+  # BOUNDARY, DECIDED: `> tip` exempts; `== tip` DOES NOT.
+  # Equality is reachable only when two repo files share a timestamp and one of
+  # them IS present. Its sibling applied in the same run and this one did not —
+  # a defect, not a timing artefact. Stated explicitly because an off-by-one
+  # here silently exempts a real failure, and pinned by the
+  # `tip-equal-missing RED` self-test arm.
+  #
+  # ⚠️ WHAT THIS DOES NOT COVER, said plainly rather than implied. If TEST's
+  # ledger falls behind, the tip falls with it and the exempt window widens by
+  # the same amount. The ABSURDITY FLOOR above catches the GROSS form (a
+  # populated ledger matching under half the repo is MEASURE_FAIL and exits
+  # before this block runs). A narrow, quiet lag is NOT caught here. That cost
+  # is the price of the exemption and is booked as [164.8-PUSH-RACE-VAC08].
+  #
+  # ⚠️ PLACEMENT vs THE `sed 's/#.*//'` SEAM. That sed strips comments from the
+  # BASELINE FILE only, a dozen lines up. This block adds no baseline syntax and
+  # reads no baseline text, so nothing written here passes through it. Verified
+  # by the `above-frontier-missing GREEN` arm, whose baseline file is empty.
+  local frontier_tip="" ts
+  for nm in "${repo_names[@]}"; do
+    # Present == not on the measured-missing list.
+    if grep -aqFx -e "$nm" "$missing_file"; then continue; fi
+    ts="${nm%%_*}"
+    case "$ts" in ""|*[!0-9]*) continue ;; esac
+    [ "${#ts}" -le 18 ] || continue   # keep the arithmetic below inside int64
+    if [ -z "$frontier_tip" ] || [ "$((10#$ts))" -gt "$((10#$frontier_tip))" ]; then
+      frontier_tip="$ts"
+    fi
+  done
+
+  local exempt_file="${tmp}/exempt.frontier.txt" kept_file="${tmp}/missing.new.kept.txt"
+  : > "$exempt_file"; : > "$kept_file"
+  local nline nts is_exempt
+  while IFS= read -r nline; do
+    [ -n "$nline" ] || continue
+    nts="${nline%%_*}"
+    is_exempt=0
+    # No present migration at all => no frontier => exemption DISABLED, and
+    # every measured absence stays a finding. An undefined tip must never read
+    # as "everything is ahead of the tip".
+    if [ -n "$frontier_tip" ]; then
+      case "$nts" in
+        ""|*[!0-9]*) ;;
+        *) if [ "${#nts}" -le 18 ] && [ "$((10#$nts))" -gt "$((10#$frontier_tip))" ]; then is_exempt=1; fi ;;
+      esac
+    fi
+    if [ "$is_exempt" = 1 ]; then
+      printf '%s\n' "$nline" >> "$exempt_file"
+    else
+      printf '%s\n' "$nline" >> "$kept_file"
+    fi
+  done < "$new_file"
+  mv "$kept_file" "$new_file"
+
+  # A SILENT exemption is indistinguishable from a gate that stopped working.
+  # The tip is printed on EVERY run — including runs that exempt nothing — so
+  # the width of the window is readable without re-deriving it, and a tip that
+  # has fallen behind is visible in the log rather than only in its effect.
+  local exempt_count
+  exempt_count="$(grep -ac '[^[:space:]]' "$exempt_file" || true)"; exempt_count="${exempt_count:-0}"
+  echo "  ledger frontier: tip=${frontier_tip:-<none - no repo migration is present, exemption DISABLED>}; ${exempt_count} above-tip migration(s) exempted."
+  if [ "$exempt_count" -gt 0 ]; then
+    echo "::notice::${GATE}: ${exempt_count} repo migration(s) EXEMPTED from NEW drift — authored ABOVE the TEST ledger's frontier (tip ${frontier_tip})."
+    echo "  WHY: migrations reach shared TEST only on the MERGE push (supabase-migrate.yml, job 'apply-test'),"
+    echo "  so a migration NEWER than every migration the ledger already holds cannot be present yet. Counting"
+    echo "  it would measure the pipeline's timing, not a defect. A missing migration AT or BELOW the tip is"
+    echo "  still NEW drift and still fails this gate."
+    sed 's/^/  exempt (above tip): /' "$exempt_file"
+  fi
+
   local new_count stale_count
   new_count="$(grep -ac '[^[:space:]]' "$new_file" || true)"; new_count="${new_count:-0}"
   stale_count="$(grep -ac '[^[:space:]]' "$stale_file" || true)"; stale_count="${stale_count:-0}"
@@ -402,7 +507,12 @@ check() {
     echo "::error::migrations to TEST to make this gate green — TEST is shared."
     bad=1
   elif [ "$stale_count" -eq 0 ]; then
-    echo "  ledger presence: ${missing_count} absent, all ${missing_count} baselined (see ${baseline}); 0 NEW drift."
+    # ⛔ The two dispositions are NAMED SEPARATELY. This line used to read
+    # "all N baselined", which became FALSE the moment the frontier exemption
+    # landed: an above-tip absence is not in the baseline file and never
+    # appears there. A clean summary that misattributes WHY an absence was
+    # tolerated is a gate reporting a control that did not act.
+    echo "  ledger presence: ${missing_count} absent — $(( missing_count - exempt_count )) baselined (see ${baseline}), ${exempt_count} exempt as above the ledger frontier; 0 NEW drift."
   fi
 
   # Advisory only — squashes and CLI-era rows make this direction noisy.
@@ -618,6 +728,21 @@ STUB
     fi
   }
 
+  # ── FRONTIER-EXEMPTION corpora (Phase 164.8 plan 05) ──────────────────────
+  # Half 1 reads BASENAMES only, so these files' contents are irrelevant; the
+  # body half is driven by the same snapshot/live pair as every other arm.
+  #   mig_frontier  three timestamps, so "below the tip" and "above the tip" are
+  #                 both reachable in the SAME corpus by moving only which name
+  #                 the stub reports missing.
+  #   mig_tipeq     two files sharing ONE timestamp, which is the only way to
+  #                 land a missing migration EXACTLY on the tip.
+  mkdir -p "$tmp/mig_frontier" "$tmp/mig_tipeq"
+  : > "$tmp/mig_frontier/20260101000000_below.sql"
+  : > "$tmp/mig_frontier/20260201000000_applied.sql"
+  : > "$tmp/mig_frontier/20260301000000_above.sql"
+  : > "$tmp/mig_tipeq/20260201000000_applied.sql"
+  : > "$tmp/mig_tipeq/20260201000000_twin.sql"
+
   # An EMPTY baseline for every arm. Without it the self-test inherits the
   # repo's real vac08-ledger-baseline.txt, whose 31 entries are all "stale"
   # against a one-migration fixture — the harness would be measuring production
@@ -627,7 +752,11 @@ STUB
   printf '# self-test: intentionally empty\n' > "$tmp/baseline.txt"
 
   arm_env() {
-    MIGRATIONS_DIR="$tmp/migrations" \
+    # $4 is the migrations dir, defaulting to the one-file corpus every
+    # pre-164.8 arm was written against. The frontier arms below need a corpus
+    # with more than one migration in it — a single missing migration leaves NO
+    # present migration, hence no frontier, hence no exemption.
+    MIGRATIONS_DIR="${4:-$tmp/migrations}" \
     SNAPSHOT_DIR="$tmp/snapshot" \
     LEDGER_BASELINE_FILE="$tmp/baseline.txt" \
     LIVE_DIR="$1" \
@@ -663,12 +792,31 @@ STUB
   printf '%s\n' "$body" > "$tmp/live/selftest_fn.sql"
   run_arm "green path" 0 arm_env "$tmp/live" ""
 
+  # ── FRONTIER EXEMPTION (Phase 164.8 plan 05) — red, green, and the boundary ─
+  # RED 5 — a missing migration BELOW the frontier still fails. This is the arm
+  # that proves the exemption did not weaken the ratchet: 20260201000000_applied
+  # and 20260301000000_above are present, so the tip is 20260301000000 and the
+  # missing 20260101000000_below sits under it. A migration that should have
+  # applied and did not is exactly the class the gate exists for.
+  run_arm "below-frontier-missing RED" 1 arm_env "$tmp/live" "20260101000000_below" "selftest_fn" "$tmp/mig_frontier"
+
+  # GREEN 2 — the SAME corpus, missing the NEWEST name instead. Nothing applied
+  # is newer than it, so under apply-on-merge it cannot be present yet; it is
+  # exempted by name and the gate passes.
+  run_arm "above-frontier-missing GREEN" 0 arm_env "$tmp/live" "20260301000000_above" "selftest_fn" "$tmp/mig_frontier"
+
+  # RED 6 — THE BOUNDARY. 20260201000000_twin shares its timestamp with the
+  # present 20260201000000_applied, so it sits EXACTLY on the tip. `> tip`
+  # exempts and `== tip` does not: its sibling applied in the same run and this
+  # one did not, which is a defect rather than a timing artefact.
+  run_arm "tip-equal-missing RED" 1 arm_env "$tmp/live" "20260201000000_twin" "selftest_fn" "$tmp/mig_tipeq"
+
   printf '%s\n' "${results[@]}"
   if [ "$pass" -ne "$total" ]; then
     echo "SELF-TEST FAIL: ${pass}/${total} arms behaved as declared."
     return 1
   fi
-  echo "${GATE}: self-test OK (${pass}/${total} arms — all four red modes fire and the green path passes)."
+  echo "${GATE}: self-test OK (${pass}/${total} arms — every red mode fires and both green paths pass)."
   return 0
 }
 

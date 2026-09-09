@@ -6,12 +6,23 @@ name: Supabase Migrate
 # Flow:
 #   1. `plan` job prints `supabase db push --include-all --dry-run` so the
 #      EXACT command + flags the apply step will run are visible in the run
-#      log first. NOTE: on the auto-push path there is no human approval gate
-#      between plan and apply (required reviewers are a scale-stage TODO
-#      below) — the dry-run is an audit-log record of what the apply runs,
-#      not a pre-apply sign-off.
-#   2. `apply` job runs the same command without --dry-run on the
-#      `Production` GitHub Environment.
+#      log first. The dry-run is an audit-log record of what the apply runs,
+#      not a pre-apply sign-off — the human gate is the `Production`
+#      environment's required reviewer (see the dated note below).
+#   2. `apply-test` job applies the SAME merged migrations to the shared TEST
+#      database first, with the same pinned CLI and the same flags, holding the
+#      shared-TEST advisory mutex across marker check → dry-run → apply →
+#      post-verify. Phase 164.8: TEST is the stage every migration crosses
+#      before PROD. It is bound to the `Test` environment and needs no
+#      approval, so a reviewer can see it GREEN before approving PROD.
+#   3. `apply-test-verdict` turns a skipped or failed TEST apply into a RED
+#      check with a named cause, instead of a grey `apply` that "did not run".
+#   4. `apply` job runs the same command without --dry-run on the
+#      `Production` GitHub Environment — gated on BOTH `plan` and a SUCCEEDED
+#      `apply-test`.
+#   0. `dispatch-ref-guard` refuses a `workflow_dispatch` from any ref but
+#      `main` (B3), because `apply-test` writes to a database other people's
+#      CI uses and must apply only what is already merged.
 #
 # Backdated-migration policy is enforced at PR-time, NOT here. See
 # `.github/workflows/migration-policy.yml` — that workflow runs on
@@ -21,21 +32,35 @@ name: Supabase Migrate
 # too late to prevent the bad merge and instead blocks legitimate
 # unapplied legacy migrations from applying via `--include-all`.
 #
-# Safety story (BUILD stage — required-reviewer gates NOT yet configured):
+# Safety story:
 #   - Auto-applies on push to main touching supabase/migrations/** (push
 #     trigger re-enabled by PR-Y2 2026-05-25 after timestamp-drift
 #     reconciliation); migration-drift-check.yml gates drift at PR-time
 #   - Backdated-migration safety guard runs at PR-time in
 #     migration-policy.yml (the right place to block the addition)
+#   - TEST IS APPLIED FIRST AND PROD WAITS ON IT (Phase 164.8). The
+#     `apply-test` job pushes the merged migrations to the shared TEST
+#     database with the same pinned CLI and the same flags; `apply` carries
+#     `needs: [plan, apply-test]` AND requires `apply-test` to have SUCCEEDED,
+#     so a TEST apply that failed or was skipped blocks PROD. The
+#     `apply-test-verdict` job names the cause so the block is a red check
+#     rather than a grey one.
+#   - B3: A DISPATCH OFF `main` NEVER REACHES TEST. `apply-test` runs on push
+#     and on workflow_dispatch only when the ref is refs/heads/main;
+#     `dispatch-ref-guard` exits 1 naming the ref otherwise. Shared TEST may
+#     only ever receive code that is already merged and reviewed.
 #   - Two-step plan-then-apply: the plan step uses --dry-run with the same
 #     --include-all flag, so the logged plan IS exactly what the apply runs
-#     (command fidelity for the audit trail — not a human pre-apply gate;
-#     see the required-reviewer TODO below)
-#   - At scale (>=10 active clients), add required-reviewer protection to
-#     the `Production` GitHub Environment per ADR-0009 (TODO). The
-#     `environment: Production` lines below already pin the job to that
-#     environment, so future protection-rule changes apply without further
-#     workflow edits.
+#     (command fidelity for the audit trail)
+#   - ⚠️ DATED 2026-09-08, MEASURED via `gh api repos/:owner/:repo/environments`:
+#     the `Production` environment NOW CARRIES `required_reviewers`. The
+#     ADR-0009 item that the rest of this file calls a scale-stage TODO is
+#     DONE — every statement below claiming "required-reviewer gates NOT yet
+#     configured" describes the pre-2026-09-08 state and is superseded by this
+#     paragraph. No YAML change was needed: the `environment: Production` lines
+#     already pinned both jobs to it, exactly as those comments predicted.
+#     The `Test` environment deliberately carries NO reviewers (founder
+#     decision), which is why `apply-test` needs `dispatch-ref-guard`.
 #
 # Required GitHub repo configuration (one-time setup):
 #   - Secret `SUPABASE_ACCESS_TOKEN`: a personal access token with
@@ -44,9 +69,35 @@ name: Supabase Migrate
 #   - Secret `SUPABASE_DB_PASSWORD`: the database password for the target
 #     project (Supabase dashboard -> Project -> Settings -> Database).
 #   - Variable `SUPABASE_PROJECT_REF`: the project ref (e.g. `khslejtfbuezsmvmtsdn`).
-#   - Environment `Production` (Settings -> Environments). At BUILD stage
-#     no protection rules are configured; reviewers should be added
-#     per ADR-0009 when client count justifies the operational overhead.
+#   - Environment `Production` (Settings -> Environments). ⚠️ DATED 2026-09-08:
+#     it now carries `required_reviewers`, so the `plan` and `apply` jobs wait
+#     for a human. The ADR-0009 item is DONE, not pending.
+#   - Environment `Test` (Settings -> Environments). EXISTS as of 2026-09-08.
+#     ⛔ By founder decision it carries NO required reviewers and no secrets —
+#     do not add any. It is here for the durable Deployments audit record, not
+#     as an approval gate; the approval surface for the TEST apply is that the
+#     code is already merged, plus `dispatch-ref-guard`.
+#     ⛔ IT DOES, HOWEVER, CARRY A DEPLOYMENT BRANCH POLICY, AND THAT ONE IS NOT
+#     DECORATIVE — DO NOT DELETE IT. Measured 2026-09-09 via
+#     `gh api repos/:owner/:repo/environments` and
+#     `.../environments/Test/deployment-branch-policies`:
+#       protection_rules: [{type: branch_policy}]
+#       deployment_branch_policy: {protected_branches: false, custom_branch_policies: true}
+#       branch_policies: exactly one, name "main", type "branch"
+#     That is a THIRD, GitHub-side enforcement of B3, independent of the two in
+#     this file (`apply-test.if` and `dispatch-ref-guard`): a job bound to
+#     `environment: Test` cannot start at all from a ref other than `main`. It is
+#     recorded here because it is invisible in the YAML — someone tidying the
+#     environment settings would otherwise remove a live safety rule believing it
+#     to be leftover configuration. "No reviewers" and "no branch policy" are NOT
+#     the same statement, and only the first is the founder decision.
+#   - Secret `TEST_SUPABASE_DB_URL`: the Supavisor pooler DSN for the shared
+#     TEST project, rewritten to the session-mode port 5432 in-job exactly as
+#     `ci.yml` rewrites it. ⛔ It is a REPOSITORY-level secret and must STAY
+#     one: many sites in `ci.yml` and `mutex-probe.yml` read it from jobs that
+#     declare no environment, and an environment secret of the same name would
+#     shadow it for environment-bound jobs only — one name resolving to two
+#     databases depending on the job.
 #
 # Security note: this workflow consumes only repository secrets and
 # variables. No untrusted github.event.* fields (PR titles, commit
@@ -67,6 +118,13 @@ on:
   #      BEHIND prod (lag, not drift) - that is a separate follow-up and
   #      does NOT block this trigger flip because the workflow only
   #      writes to prod (SUPABASE_PROJECT_REF=khslejtfbuezsmvmtsdn).
+  #      ⚠️ CURRENCY 2026-09-08: the two sentences above no longer describe
+  #      TEST, and are kept for the lineage rather than deleted. Phase 164.8
+  #      rebuilt shared TEST from the PROD dump (restore run 34274355596 at
+  #      head 88581b8b) and seeded its ledger CLI-shaped, one row per repo
+  #      migration file; the `apply-test` job below then applies every merge
+  #      to it. "38 BEHIND" and "the workflow only writes to prod" were both
+  #      true when written and are both false now.
   #   3. workflow_dispatch run #26391083742 (against PR-Y2 branch) showed
   #      `supabase db push --include-all --dry-run` is a true no-op:
   #      plan + apply both completed clean.
@@ -99,21 +157,94 @@ concurrency:
 # the PR-time backdated-migration policy enforced by
 # `.github/workflows/migration-policy.yml` — all orthogonal to
 # GITHUB_TOKEN scope. (Required-reviewer protection on the `Production`
-# environment is a TODO per ADR-0009.)
+# environment is CONFIGURED — measured 2026-09-09 via
+# `gh api repos/:owner/:repo/environments`: Production carries one
+# `required_reviewers` rule. The ADR-0009 item is DONE. This sentence used to
+# call it a TODO; it was corrected rather than left to the blanket supersession
+# clause above, because `dispatch-ref-guard`'s entire rationale is load-bearing
+# on the reviewer gate existing.)
 permissions:
   contents: read
 
 jobs:
+  # ── B3: NO REF BUT `main` MAY REACH SHARED TEST THROUGH THIS WORKFLOW ──
+  # The `workflow_dispatch:` trigger above carries no branch restriction, and the
+  # `apply-test` job below WRITES to the shared TEST database — the one other
+  # people's CI uses. Without this guard, `gh workflow run supabase-migrate.yml
+  # --ref <branch>` would apply that branch's `supabase/migrations/**` to shared
+  # TEST with no PR, no review and no merge.
+  #
+  # Mirrors `dispatch-guard` in `.github/workflows/test-restore-from-baseline.yml`
+  # (Phase 164.8 plan 03). It is the CODE half of a question the marker step
+  # downstream cannot answer: `Which database am I on` proves the right DATABASE,
+  # and only the ref proves the right CODE. Neither substitutes for the other.
+  #
+  # ⚠️ WHY TEST NEEDS THIS GUARD AND PROD DOES NOT. The `plan` and `apply` jobs are
+  # bound to the `Production` GitHub Environment, which carries `required_reviewers`
+  # since 2026-09-08 (measured via `gh api repos/:owner/:repo/environments`), so an
+  # off-main dispatch of those two waits for a human before it can touch PROD. The
+  # `Test` environment deliberately carries NO reviewers (founder decision), so
+  # `apply-test` has no human between a dispatch and a write. This job is that
+  # otherwise-missing gate.
+  #
+  # ⛔ It exits 1 where `mutex-probe.yml`'s guard deliberately exits 0: here the ref
+  # IS the safety property, and a silent green would teach the operator that the
+  # dispatch worked.
+  #
+  # ⛔ WHAT THIS JOB IS *NOT*: IT IS NOT THE ENFORCEMENT. It is in NO other job's
+  # `needs:`, so its `exit 1` produces a red check and stops nothing — `plan` still
+  # runs on an off-main dispatch. Stated plainly so nobody reads the paragraphs above
+  # as "the guard blocks the run". B3 is enforced by three OTHER things, and this job
+  # is the operator-facing MESSAGE that explains their silence:
+  #   1. `apply-test.if` — the exact inverse of this job's `if:`, so the TEST write
+  #      simply does not run off main. THIS is the enforcement for shared TEST.
+  #   2. The `Test` environment's deployment branch policy (single policy `main`,
+  #      measured 2026-09-09 — see the header). GitHub refuses to start an
+  #      `environment: Test` job from any other ref, independently of this file.
+  #   3. The `Production` environment's `required_reviewers` (measured 2026-09-09),
+  #      which puts a human in front of `plan` and `apply` on every path.
+  # ⚠️ Deleting this job would therefore lose the EXPLANATION, not the protection —
+  # and an operator staring at a run where nothing ran and nothing was red is the
+  # cost this job was added to remove. Wiring it into `plan`'s `needs:` was
+  # considered and rejected: the guard is skipped on every push, so `needs:` would
+  # skip `plan` on the ONLY path that matters.
+  #
+  # ${GITHUB_REF} is the runner-provided environment variable, not a `${{ }}`
+  # expansion into a `run:` body — no interpolation surface at all.
+  dispatch-ref-guard:
+    if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Explain why nothing ran, and fail
+        run: |
+          set -euo pipefail
+          echo "::error::Supabase Migrate did NOT run: ref '${GITHUB_REF}' is not refs/heads/main."
+          echo "The apply-test job in this workflow writes to the SHARED TEST database, so it"
+          echo "applies only what is ALREADY MERGED to main. Off main the migrations on this ref"
+          echo "are unreviewed, so the dispatch is refused rather than quietly ignored — a green"
+          echo "check here would read as 'it ran and found nothing to do'."
+          echo ""
+          echo "Dispatch it against main:"
+          echo ""
+          echo "    gh workflow run supabase-migrate.yml --ref main"
+          echo ""
+          echo "The Production-environment reviewer gate covers the PROD jobs on an off-main"
+          echo "dispatch; the Test environment has no reviewers by design, which is why the TEST"
+          echo "apply needs this job instead."
+          exit 1
+
   plan:
     runs-on: ubuntu-latest
     # retro-PR179-M-env-gate: the plan job consumes SUPABASE_DB_PASSWORD
     # to run `supabase link --project-ref` (which writes the password
     # into a local supabase config file). Both jobs are pinned to the
-    # `Production` GitHub Environment so any future protection-rule
-    # additions (required reviewers per ADR-0009) take effect uniformly
-    # across plan + apply without further workflow edits. At BUILD
-    # stage `Production` has no protection rules — the safety story
-    # is workflow_dispatch-only + PR-time backdated-migration policy
+    # `Production` GitHub Environment so protection-rule additions
+    # (required reviewers per ADR-0009) take effect uniformly across
+    # plan + apply without further workflow edits — which is exactly what
+    # happened: measured 2026-09-09, `Production` carries one
+    # `required_reviewers` rule and no YAML change was needed. The rest of
+    # the safety story is the PR-time backdated-migration policy
     # (`.github/workflows/migration-policy.yml`).
     environment: Production
     outputs:
@@ -178,15 +309,711 @@ jobs:
         # Plan output IS what apply runs, modulo --dry-run: this plan step
         # logs the exact `db push --include-all` command + flags the apply
         # step runs (command-fidelity invariant, red-team HIGH conf-8). On
-        # the auto-push path this fidelity feeds the audit trail; it is NOT a
-        # human pre-apply gate (required reviewers are a scale-stage TODO).
+        # the auto-push path this fidelity feeds the audit trail; the human
+        # pre-apply gate is the `Production` environment's required reviewer,
+        # which is CONFIGURED (measured 2026-09-09), not a scale-stage TODO.
         run: |
           supabase link --project-ref "$SUPABASE_PROJECT_REF"
           supabase db push --include-all --dry-run
 
+  # ── TEST IS THE STAGE EVERY MIGRATION CROSSES BEFORE PROD ───────────────
+  # Phase 164.8, CONTEXT Area 1 (all four decisions) and Area 4 Q3/Q4. Plan 04
+  # rebuilt shared TEST from the PROD baseline and seeded its ledger CLI-shaped,
+  # so `supabase db push --include-all` now runs NATIVELY against TEST: same CLI,
+  # same flags, same post-apply `migration list` cross-check as the PROD `apply`
+  # job below. No bespoke applier and no cut.
+  #
+  # ⛔ NO `needs:` — DELIBERATE, AND LOAD-BEARING. `plan` is bound to the
+  # `Production` environment, which waits for a required reviewer since
+  # 2026-09-08. A `needs: plan` here would make the TEST apply wait on a human
+  # approval of a PROD job — inverting the whole point of the phase, which is
+  # that the reviewer sees `apply-test` GREEN before approving PROD. On the push
+  # path the code is already merged and `plan` is a dry-run audit record, not a
+  # review gate, so there is nothing for this job to wait on.
+  #
+  # B3 — the `if:` is the exact inverse of `dispatch-ref-guard`'s, on BOTH
+  # predicates:
+  #     guard:      event_name == 'workflow_dispatch' && ref != 'refs/heads/main'
+  #     apply-test: event_name != 'workflow_dispatch' || ref == 'refs/heads/main'
+  # so a dispatch off main runs the guard and NOT this job, and every push (which
+  # the trigger above restricts to `branches: [main]`) runs this job.
+  #
+  # `timeout-minutes: 90` is the runbook § 2 derivation, copied rather than
+  # re-derived: the mutex holder's `pg_sleep(6000)` (100 min) must OUTLIVE this
+  # job's TTL or the lock is released while the job still does DB work, and the
+  # acquire cap is 3600 s (60 min) of queueing. 90 < 100 holds, with headroom for
+  # setup and the apply itself above the cap.
+  # ⛔ If you RAISE this past 100 min, raise the holder's sleep in ci.yml's acquire
+  # step FIRST — and the copy below is then no longer byte-identical to ci.yml's,
+  # which the wiring test will say out loud.
+  #
+  # `environment: Test` exists (measured 2026-09-08) and carries no reviewers and
+  # no secrets by founder decision. It is NOT an approval gate; it is here for the
+  # durable Deployments audit record.
+  apply-test:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: Test
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      # NO `if:` ON THIS STEP, deliberately, and on EVERY event — the newer
+      # migration-drift-check.yml:102-121 shape, not the older `configured` output
+      # the PROD `plan` job above keeps. That older shape tolerates an
+      # unconfigured `workflow_dispatch` clone (Phase 142.1 D-02/R1). This job may
+      # not: a green TEST apply that applied NOTHING is exactly "a freshly-deployed
+      # worker meets an OLD schema" one environment over, and it would then let the
+      # PROD apply proceed on the strength of a stage nothing crossed.
+      - name: Assert TEST credential is configured
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+            echo "::error::secrets.TEST_SUPABASE_DB_URL is not configured."
+            echo "::error::This is a HARD FAILURE, not a skip. Every step below reads from, or"
+            echo "::error::writes to, the shared TEST database; without the credential this job"
+            echo "::error::can prove nothing and must not conclude success — the PROD apply is"
+            echo "::error::gated on THIS job's result. It is a REPOSITORY secret shared with"
+            echo "::error::ci.yml: do not add a same-named secret to the Test environment, which"
+            echo "::error::would shadow it for environment-bound jobs only."
+            exit 1
+          fi
+          echo "TEST_SUPABASE_DB_URL is present (value never printed)."
+
+      - name: Derive the session-mode TEST DSN (once, for every step below)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          dsn="${TEST_SUPABASE_DB_URL}"
+          case "${dsn}" in
+            *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+          esac
+          # ⚠️ THIS ASSERTS THE SHAPE OF THE DERIVED DSN, NOT THAT IT IS NON-EMPTY.
+          # The emptiness check that stood here could not fire: `dsn` is assigned
+          # verbatim from TEST_SUPABASE_DB_URL, the step above hard-exits when that is
+          # empty, and the `case` rewrite cannot empty a non-empty string. It read as
+          # validation and tested a property already proven, while the case that CAN
+          # occur — a secret that is not a postgres URL at all, or one still pointing at
+          # the transaction-mode port — passed straight through to psql and the CLI.
+          #   - scheme: a secret that is not a postgres:// URL makes every psql below
+          #     connect to a libpq DEFAULT instead of TEST.
+          #   - `:5432/`, and NOT `:6543/`: session mode is the documented shape of this
+          #     secret and the mutex protocol's precondition — a SESSION advisory lock
+          #     does not survive between statements on the 6543 transaction-mode pooler,
+          #     so a 6543 DSN here would run the whole job UNSERIALIZED against a
+          #     database other people's CI writes to, with a green mutex step.
+          # ⛔ If this fires, the fix lives in the SECRET (re-point it at the pooler and
+          # re-dispatch) — never in a YAML transform here, which would diverge this
+          # job's DSN handling from the ~39 other sites in ci.yml and mutex-probe.yml
+          # that read the same secret. The DSN itself is NEVER printed: it is masked
+          # above, and this log is public.
+          case "${dsn}" in
+            postgres://*|postgresql://*) ;;
+            *)
+              echo "::error::the TEST DSN is not a postgres:// or postgresql:// URL. Every psql and every CLI call below would connect to a libpq DEFAULT rather than to TEST, so this run stops here rather than proving something about the wrong database. Fix secrets.TEST_SUPABASE_DB_URL; the value is withheld because this log is public."
+              exit 1
+              ;;
+          esac
+          # ⚠️ `:6543` WITHOUT THE TRAILING SLASH, deliberately. The rewrite above keys
+          # on `:6543/`, so keying this check on `:6543/` too would make it unreachable
+          # by construction — the same defect as the dead emptiness check it replaces. A
+          # DSN ending `...:6543` (no path) is not rewritten and IS the case that must be
+          # caught.
+          case "${dsn}" in
+            *":6543"*)
+              echo "::error::the session-mode rewrite did NOT take: the derived DSN still names the transaction-mode port 6543. A SESSION advisory lock does not survive between statements there, so the shared-test-db mutex below would report success while serializing nothing."
+              exit 1
+              ;;
+          esac
+          case "${dsn}" in
+            *":5432/"*) ;;
+            *)
+              echo "::error::the derived TEST DSN carries no explicit :5432/ port, so nothing here proves it reaches the SESSION-mode endpoint the mutex protocol requires. The documented shape of secrets.TEST_SUPABASE_DB_URL is the Supavisor pooler DSN on :6543/, rewritten to :5432/ in-job exactly as ci.yml rewrites it. Fix the SECRET, not this workflow."
+              exit 1
+              ;;
+          esac
+          echo "::add-mask::${dsn}"
+          printf 'TEST_DB_SESSION_URL=%s\n' "${dsn}" >> "${GITHUB_ENV}"
+          echo "session-mode DSN derived once and masked; the value is never printed."
+
+
+      # Pinned to the SAME CLI version the PROD `plan` and `apply` jobs pin, for the
+      # same reason: CLI-version drift must not silently change
+      # `db push --include-all` semantics between the stage and the thing it stages
+      # for. One tool applies to TEST and to PROD, or the stage proves nothing.
+      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+        with:
+          version: 2.98.2
+
+      - name: Install psql client
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          psql --version
+
+      # ── THE SHARED-TEST ADVISORY MUTEX, HELD ACROSS THE WHOLE ACT ──────────
+      # CONTEXT Area 4 Q3. Acquired HERE and released only after the post-apply
+      # verification, so marker check → dry-run → apply → `migration list` is ONE
+      # serialized span rather than four raceable ones against a database other
+      # people's CI writes to.
+      #
+      # This step is a COPY of `- name: Acquire shared-test-db mutex` from
+      # .github/workflows/ci.yml, with EXACTLY ONE deliberate difference: ci.yml's
+      # fork-PR early exit — which prints a notice and `exit 0` — is replaced by a
+      # fail-loud credential assert. This workflow has no `pull_request` trigger and
+      # can never run on a fork, so an absent credential here is a FAULT, and an
+      # `exit 0` would hand the PROD gate a green from a job that locked nothing.
+      # ⛔ Everything from the `if ! command -v psql` line to the end of this step is
+      # BYTE-IDENTICAL to ci.yml's and to test-restore-from-baseline.yml's, and
+      # src/__tests__/supabase-migrate-test-first.test.ts asserts that three-way
+      # identity: if the mutex protocol changes in ci.yml, this file goes RED until
+      # the copy is re-synced. Do not edit the suffix here.
+      #
+      # ⚠️ THE ACCEPTED COUPLING (CONTEXT). A foreign wedged holder now sits between
+      # a merge and the PROD deploy, for up to the 3600 s acquire cap. That is the
+      # decided consequence of applying TEST first, not a defect to soften; the
+      # escape hatches are founder decisions (docs/runbooks/shared-test-db-mutex.md
+      # §§ 2-3).
+      - name: Acquire shared-test-db mutex
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+            echo "::error::TEST_SUPABASE_DB_URL is empty at the mutex acquire. This workflow has no pull_request trigger and can never run on a fork, so this is a FAULT, not a fork — a HARD FAILURE, not a skip. Proceeding would apply merged DDL to a SHARED database with no mutual exclusion."
+            exit 1
+          fi
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          # Session-mode DSN. The documented secret points at the Supavisor
+          # pooler on port 6543 = TRANSACTION mode, where a SESSION advisory lock
+          # does not survive between statements; session mode is served on 5432
+          # of the same host. Derived by parameter expansion and NEVER echoed —
+          # this repository is public and the derived string is not a value
+          # GitHub can mask for us.
+          dsn="${TEST_SUPABASE_DB_URL}"
+          case "${dsn}" in
+            *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+          esac
+          # [158-MUTEX-01 F2] libpq keepalives on the holder path. During the
+          # contended pg_advisory_lock wait and the pg_sleep hold this
+          # connection carries ZERO traffic, and Linux's default first TCP
+          # keepalive fires at 7200s — never, on these timescales — so a
+          # runner-side NAT idle expiry would zombify the holder invisibly:
+          # the backend keeps the lock long after the job is gone. 60s
+          # keepalives keep the NAT mapping fresh AND let the client detect a
+          # dead path in ~2min (15s x 4), so psql dies and the release step's
+          # dead-holder witness fires instead of a silent wedge. The secret's
+          # shape is NOT assumed: append with '&' if the DSN already carries a
+          # query string, '?' otherwise.
+          keepalive_params="keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4"
+          case "${dsn}" in
+            *\?*) dsn="${dsn}&${keepalive_params}" ;;
+            *)    dsn="${dsn}?${keepalive_params}" ;;
+          esac
+          log="${RUNNER_TEMP}/shared-test-db-mutex.log"
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          # 158-REVIEW WR-01: the idle sleep MUST outlive this job's
+          # `timeout-minutes`, or the holder session ends — releasing the lock —
+          # while the job is still doing DB work, and another run walks straight
+          # in. The old value (3300s = 55min) was SHORTER than the then-60min
+          # TTL, so any job that acquired early and ran long silently lost mutual
+          # exclusion for its last ~5 minutes. 6000s = 100min sits above this
+          # job's `timeout-minutes` with headroom, so the JOB always dies first
+          # and teardown is the only thing that ever releases this lock.
+          # ⛔ If you lower `timeout-minutes`, this stays valid. If you RAISE it,
+          # raise this too — the invariant is sleep > TTL, and nothing else
+          # enforces it.
+          # [158-MUTEX-01] (holder death at 120s; 2026-08-20/21 runs, e.g.
+          # 32424762495): sleep > TTL is NECESSARY but not SUFFICIENT — the
+          # holder session must ALSO disable the server statement_timeout. The
+          # TEST project sets a server-wide statement_timeout=120000, and both
+          # the contended pg_advisory_lock wait and the pg_sleep are single
+          # statements, so the server killed the holder ~120s after acquiring:
+          # psql exited, the session dropped, the lock silently released, and
+          # the job's remaining DB work ran UNSERIALIZED (the release step's
+          # dead-holder ::error:: fired on every long-job run). That is why the
+          # holder's FIRST -c statement below zeroes statement_timeout, before
+          # pg_advisory_lock — session-level SET is permitted for any role and
+          # overrides the configuration-file default, exempting both the lock
+          # wait and the idle sleep. Third invariant leg, pinned in
+          # critical-regressions.test.ts.
+          # [158-MUTEX-02] (orphaned holder backend; run 32457330139): killing
+          # the psql CLIENT does not kill its SERVER backend — neither pg_sleep
+          # nor a pg_advisory_lock wait ever reads the client socket, so the
+          # release step's client-side kill left a backend holding the lock for
+          # its full 6000s sleep and starved e2e-seeded past the 3600s cap.
+          # Before 158-MUTEX-01 the server statement_timeout was the ACCIDENTAL
+          # janitor for such orphans; client_connection_check_interval is the
+          # real one — the backend polls its client socket during query
+          # execution AND lock waits, aborting within ~30s of the client dying.
+          # Covers both the sleeping holder and a lock-waiting contender whose
+          # client died (a job-timeout kill mid-wait leaves the same zombie).
+          # HOLDER-BACKEND-PID feeds the release step's guarded server-side
+          # pg_terminate_backend, which frees the lock immediately rather than
+          # after the ~30s check interval. Both GUCs and the marker MUST stay
+          # before pg_advisory_lock, so the lock wait itself is covered.
+          start_holder() {
+            : > "${log}"
+            PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
+              nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+                -c "SET statement_timeout = 0;" \
+                -c "SET client_connection_check_interval = '30s';" \
+                -c "SELECT 'HOLDER-BACKEND-PID ' || pg_backend_pid();" \
+                -c "SELECT pg_advisory_lock(61616158);" \
+                -c "SELECT 'MUTEX-ACQUIRED';" \
+                -c "SELECT pg_sleep(6000);" \
+                >> "${log}" 2>&1 &
+            holder=$!
+            echo "${holder}" > "${pidfile}"
+          }
+          # 158-REVIEW CR-04: the cap absorbs legitimate cross-run QUEUE DEPTH,
+          # not just a wedge. Three simultaneous runs put ~8 other holds ahead of
+          # the last waiter (~60m at the measured ~20m of lock-time per run), and
+          # the phase's success criterion is that all three still pass. 2700s was
+          # comparable to the work it had to absorb, so ordinary contention —
+          # which this repo's history records as NORMAL — surfaced as a red
+          # sql-tests → red `frontend` → skipped Railway deploy.
+          #
+          # 158-REVIEW WR-13: retry a DEAD SESSION, never a full wait. Every
+          # other network op in this file retries by explicit flakiness-audit
+          # decision (`npm ci`, `pip install`, the lychee download, the SRH
+          # readiness poll); this one did not, so a single transient connect
+          # blip inside PGCONNECT_TIMEOUT killed the backgrounded psql and
+          # exited 1 — now a red REQUIRED check, and on main a skipped Railway
+          # deploy. The two failure modes are deliberately kept distinct:
+          # "session died" is retryable (below), "waited past the cap" is NOT
+          # (that is contention, and retrying would just re-queue at the back).
+          # `waited` is CUMULATIVE across attempts, so retries can never extend
+          # the total wait beyond the cap the TTL was sized against.
+          waited=0
+          for attempt in 1 2 3; do
+            start_holder
+            while [ "${waited}" -lt 3600 ]; do
+              if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+                # [158-MUTEX-02] best effort: an absent/empty pid file only
+                # forfeits the release step's immediate server-side reap — the
+                # ccci GUC above still bounds an orphaned backend at ~30s.
+                sed -n 's/^HOLDER-BACKEND-PID \([0-9]\{1,\}\)$/\1/p' "${log}" | head -n 1 \
+                  > "${RUNNER_TEMP}/shared-test-db-mutex-backend-pid" || true
+                echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s (attempt ${attempt}/3)."
+                exit 0
+              fi
+              if ! kill -0 "${holder}" 2>/dev/null; then
+                echo "::warning::mutex acquire attempt ${attempt}/3 lost its psql session after ${waited}s (redacted output follows)."
+                # 158-REVIEW WR-08: psql NEVER echoes the DSN on failure, so the
+                # userinfo pattern alone matched nothing and the raw text — the
+                # TEST pooler host, its resolved IP, and the DB username /
+                # project-ref — went straight into a PUBLIC Actions log, against
+                # this mutex's own stated invariant ("never a DSN, host,
+                # username, or password, in any CI log line"). Redact the shapes
+                # psql actually emits:
+                #   connection to server at "<host>" (<ip>), port <n> failed
+                #   FATAL:  password authentication failed for user "<user>"
+                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
+                       -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
+                       -e 's#(for user )"[^"]*"#\1"***"#g' "${log}" >&2 || true
+                break
+              fi
+              sleep 5
+              waited=$(( waited + 5 ))
+              if [ $(( waited % 60 )) -eq 0 ]; then
+                echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
+              fi
+            done
+            # Cap exhausted => contention, not a transient. Stop retrying and
+            # fall through to the census + timeout diagnostic below.
+            if [ "${waited}" -ge 3600 ]; then
+              break
+            fi
+            # The session is dead; drop its pid so the release step cannot kill
+            # an unrelated process that inherits the number.
+            rm -f "${pidfile}"
+            # 158-REVIEW WR-02 (iter 3): back off ONLY when a retry actually
+            # follows. Unguarded, the last iteration printed "retrying the mutex
+            # acquire in 15s" and then slept 15s before falling out of the loop
+            # to the "after 3 attempts" error — telling the operator a fourth
+            # attempt was coming when none was, which this repo's
+            # fail-loud-and-ACCURATE doctrine counts as a real cost. Worse, that
+            # phantom 15s was added to `waited`, and `waited` is the variable the
+            # cap-vs-session-fault branch below is chosen by: a run that
+            # legitimately queued to 3585s and then lost its session could be
+            # pushed over 3600 by backoff bookkeeping alone and misreported as
+            # contention rather than as the session fault it actually was.
+            if [ "${attempt}" -lt 3 ]; then
+              backoff=$(( attempt * 5 ))
+              echo "retrying the mutex acquire in ${backoff}s"
+              sleep "${backoff}"
+              waited=$(( waited + backoff ))
+            fi
+          done
+          if [ "${waited}" -lt 3600 ]; then
+            echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). Two causes fit: (1) a CONNECT/session fault — check the TEST project's session-mode pooler (port 5432); or (2) something killed the session MID-WAIT while it contended for the lock — before 158-MUTEX-01 the server-wide statement_timeout did exactly that at 120s per attempt (the holder now zeroes statement_timeout as its first statement, so that specific kill should no longer occur). If the redacted output shows 'canceling statement due to statement timeout', that is NOT lock contention: the holder zeroes statement_timeout as its very first statement, so post-158-MUTEX-01 that signature can only mean the SET never stuck to this session's backend — the session-mode DSN rewrite regressed, the secret's shape changed, or a pooler is intercepting SET. Triage it as a pooler/session fault."
+            exit 1
+          fi
+          # 158-REVIEW CR-04: do NOT assert "a holder is wedged" — measure, then
+          # name both causes. From inside this loop a deep waiter queue and a
+          # wedged holder are indistinguishable, and the old message confidently
+          # named the rarer one, sending the operator hunting for a wedge that
+          # may not exist. Counts ONLY: no pids, no host, no DSN, and stderr is
+          # discarded outright — this log is public.
+          #
+          # 158-REVIEW WR-01 (iter 3): the census MUST be bounded. PGCONNECT_TIMEOUT
+          # bounds only the CONNECT; once connected, an unbounded query against a sick
+          # TEST Postgres/pooler blocks until this job's `timeout-minutes` kills the
+          # runner — so the operator gets LESS information than before the census
+          # existed (a bare "exceeded the maximum execution time"), and the job squats
+          # a runner for ~30 more minutes while holding no lock. A sick backend is
+          # precisely the condition under which this timeout fires, and this repo's
+          # history records a wedged TEST backend as a MEASURED event, not a
+          # hypothetical. Both bounds are needed because they cover different faults:
+          # `statement_timeout` is server-side (a slow or lock-blocked query) and
+          # `timeout` is client-side (a black-holed connection the server never hears
+          # about, where a server-side timeout can never fire). A diagnostic must
+          # never outlive the thing it diagnoses. `${census:-unavailable}` below
+          # already handles the empty result, so the message stays honest either way.
+          census="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+            -c "SET statement_timeout = '10s';" \
+            -c "SELECT count(*) FILTER (WHERE granted) || ' granted, ' || count(*) FILTER (WHERE NOT granted) || ' waiting' FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158;" \
+            2>/dev/null | tr -d '\r' | tail -1)" || true
+          echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158). Lock census: ${census:-unavailable}. TWO causes are possible and this step cannot distinguish them: (1) QUEUE DEPTH — concurrent runs each hold the lock ~20m, which is a NORMAL condition in this repo; re-run once the queue drains. (2) A WEDGED holder whose runner is gone. Triage (count the waiters first) and manual unlock: docs/runbooks/shared-test-db-mutex.md sections 2-3."
+          exit 1
+      # CLAUDE.md § "Which database am I on? (ask FIRST, every time)". Copied
+      # VERBATIM from test-restore-from-baseline.yml, including its two hard-coded
+      # marker regexes. `current_database()` is 'postgres' on BOTH projects and
+      # proves nothing; this marker is the only thing standing between this job and
+      # a write to the wrong database.
+      # ⛔ The marker TEXT is never printed, not even when it is the reason to refuse
+      # — this log is public.
+      # ⚠️ It proves the right DATABASE and says NOTHING about the right CODE; that
+      # is `dispatch-ref-guard`'s job, above.
+      - name: Which database am I on
+        run: |
+          set -euo pipefail
+          # The session-mode DSN derived ONCE, in `Derive the session-mode TEST DSN`.
+          # `set -u` makes an absent variable a hard failure here rather than a psql
+          # connection to a libpq default. The acquire step ALSO appends libpq
+          # keepalives; those are for a connection that carries zero traffic for 100
+          # minutes and are deliberately omitted from the short-lived connections below.
+          dsn="${TEST_DB_SESSION_URL}"
+          rc=0
+          marker="$(PGCONNECT_TIMEOUT=15 timeout 30 psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+            -c "SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database();" \
+            2>"${RUNNER_TEMP}/marker.err")" || rc=$?
+          if [ "${rc}" -ne 0 ]; then
+            # psql's connect/auth failures name the host, its IP and the DB user.
+            # Same three redactions as ci.yml's acquire step (158-REVIEW WR-08).
+            sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
+                   -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
+                   -e 's#(for user )"[^"]*"#\1"***"#g' "${RUNNER_TEMP}/marker.err" >&2
+            echo "::error::the database identity marker could not be read (psql exited ${rc}). Refusing to back up or restore a database this workflow cannot identify. current_database() is 'postgres' on BOTH projects and proves nothing."
+            exit 1
+          fi
+          marker="$(printf '%s' "${marker}" | tr -d '\r')"
+          if [ -z "${marker}" ]; then
+            echo "::error::the database identity marker is NULL. A NULL marker means the COMMENT ON DATABASE was LOST, not that this is TEST. Re-set it before any write (CLAUDE.md)."
+            exit 1
+          fi
+          if ! printf '%s' "${marker}" | grep -Eiq '(^|[^[:alnum:]_])test([^[:alnum:]_]|$)'; then
+            echo "::error::the database identity marker does not name TEST as a whole word. Refusing. The marker text is withheld: this log is public."
+            exit 1
+          fi
+          if printf '%s' "${marker}" | grep -Eiq 'prod'; then
+            echo "::error::the database identity marker names PRODUCTION. Refusing, loudly. The marker text is withheld: this log is public."
+            exit 1
+          fi
+          echo "which_database: OK — the marker names TEST and not PROD."
+
+
+      # Command-fidelity twin of the PROD `plan` job's dry-run: the exact
+      # `db push --include-all` command and flags the push step below runs, minus
+      # `--dry-run`, logged first. Like PROD's, this is an audit-log record of what
+      # the apply runs — NOT a gate.
+      #
+      # ⭐ IT IS ALSO THE EXPECTED SET for the affirmative post-apply check in
+      # `Push migrations to TEST` below, which is why the output is TEE'd to a file
+      # rather than only logged: "the push applied what the plan planned" is a
+      # comparison, and it needs both halves.
+      - name: Plan — dry-run apply (TEST)
+        run: |
+          set -euo pipefail
+          # The session-mode DSN derived ONCE, in `Derive the session-mode TEST DSN`.
+          # `set -u` makes an absent variable a hard failure here rather than a CLI
+          # connection to a libpq default. NEVER echoed: this log is public.
+          dsn="${TEST_DB_SESSION_URL}"
+          supabase db push --include-all --dry-run --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-dry-run.txt"
+
+      # ⚠️ THE ONE DELIBERATE DEVIATION FROM THE PROD APPLY'S SHAPE, stated out loud:
+      # the CREDENTIAL MODE. PROD runs `supabase link --project-ref` with
+      # SUPABASE_ACCESS_TOKEN + SUPABASE_DB_PASSWORD; this job passes the existing
+      # repo secret TEST_SUPABASE_DB_URL through `--db-url` (rewritten to the
+      # session-mode port), with no `supabase link` and no access token. Everything
+      # else is the same: same pinned CLI, same `--include-all`, same post-apply
+      # `migration list` reverted-grep (C-0331).
+      # ⛔ The DSN handed to the CLI must be PERCENT-ENCODED. If the CLI rejects it,
+      # the fix lives in the SECRET (re-encode and re-dispatch) — never in a YAML
+      # transform here, which would diverge this job's DSN handling from the ~39
+      # other sites in ci.yml and mutex-probe.yml that read the same secret.
+      #
+      # C-0331 twin: `set -euo pipefail` aborts on any sub-command failure, and the
+      # post-apply `migration list` is the authoritative ground truth — the CLI can
+      # return exit 0 while a migration body is silently skipped, so a "Reverted" row
+      # after the push is a hard failure.
+      #
+      # ⭐ AND AN AFFIRMATIVE CHECK, BECAUSE THE REVERTED-GREP IS A NEGATIVE ONE. A
+      # pattern that matches NOTHING returns 1 and reads as CLEAN, so `grep -Eiq
+      # reverted` alone cannot tell "the merge applied" from "the push applied ZERO
+      # migrations" — and it green-lights the PROD apply either way. That is not
+      # hypothetical here: Phase 164.8-04 seeded TEST's ledger with 266 CLI-shaped
+      # rows whose `statements` column is a PROVENANCE SENTENCE, never a claim the SQL
+      # executed on TEST, and `db push --include-all` SKIPS any version already in
+      # `schema_migrations`. The phase's central claim is "TEST is the stage every
+      # migration crosses before PROD"; without the comparison below, nothing in this
+      # workflow measures the crossing.
+      # Two assertions, both fail-loud:
+      #   (1) SET EQUALITY — the versions the dry-run planned must equal the versions
+      #       the push reports. Both halves come from the same CLI on the same
+      #       connection moments apart, so a difference means the push did something
+      #       other than the plan that was logged as its audit record.
+      #   (2) NON-EMPTY ON A `push` EVENT — the trigger's `paths:` filter is
+      #       `supabase/migrations/**`, so a push run means a migration file genuinely
+      #       changed and an empty applied set is the ledger-shadow failure above.
+      #       ⚠️ KNOWN, ACCEPTED FALSE POSITIVE: editing a COMMENT inside an
+      #       already-applied migration file also trips the paths filter and legitimately
+      #       applies nothing. That run fails here. The escape is a
+      #       `workflow_dispatch` re-run against main, where an empty set is reported
+      #       and tolerated — chosen deliberately over softening the push path, because
+      #       the push path is the one that gates PROD.
+      # Versions are extracted with awk, not `grep -o ... || true`: grep exits 1 on no
+      # match, `set -e` would abort, and the `|| true` that fixes it is exactly the
+      # softening token the wiring test bans in this job.
+      - name: Push migrations to TEST
+        env:
+          IS_PUSH: ${{ github.event_name == 'push' }}
+        run: |
+          set -euo pipefail
+          # The session-mode DSN derived ONCE, in `Derive the session-mode TEST DSN`.
+          dsn="${TEST_DB_SESSION_URL}"
+          supabase db push --include-all --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-push.txt"
+          echo "::group::Post-apply applied-set verification (affirmative)"
+          versions_of() {
+            awk '{ while (match($0, /[0-9]{14}/)) { print substr($0, RSTART, RLENGTH); $0 = substr($0, RSTART + RLENGTH) } }' "$1" | sort -u
+          }
+          planned="$(versions_of "${RUNNER_TEMP}/test-dry-run.txt")"
+          applied="$(versions_of "${RUNNER_TEMP}/test-push.txt")"
+          planned_n="$(printf '%s' "${planned}" | awk 'NF { n++ } END { print n + 0 }')"
+          applied_n="$(printf '%s' "${applied}" | awk 'NF { n++ } END { print n + 0 }')"
+          echo "planned ${planned_n} migration version(s); push reported ${applied_n}."
+          if [ "${planned}" != "${applied}" ]; then
+            echo "::error::the TEST push did NOT apply the set its own dry-run planned. Planned versions:"
+            printf '%s\n' "${planned}"
+            echo "::error::versions the push reported:"
+            printf '%s\n' "${applied}"
+            echo "::error::These two come from the same CLI on the same connection moments apart, so a difference is not drift — it means the apply diverged from the plan that was logged as its audit record. The PROD apply is gated on this job and must not proceed."
+            exit 1
+          fi
+          if [ "${IS_PUSH}" = "true" ] && [ "${applied_n}" -eq 0 ]; then
+            echo "::error::the TEST push applied ZERO migrations on a push-to-main run. This workflow's push trigger is filtered to supabase/migrations/**, so a migration file genuinely changed and TEST should have moved. The likeliest cause is a schema_migrations row that RECORDS a version whose SQL never executed on TEST — Phase 164.8-04 seeded 266 such rows and 'db push --include-all' skips any version already in the ledger. Refusing to green-light the PROD apply on a stage nothing crossed. If the change was genuinely a no-op (a comment edit inside an already-applied migration file), re-run via 'gh workflow run supabase-migrate.yml --ref main', where an empty set is tolerated."
+            exit 1
+          fi
+          if [ "${applied_n}" -eq 0 ]; then
+            echo "The push applied nothing and this is not a push event — tolerated (see the step comment)."
+          fi
+          echo "::endgroup::"
+          echo "::group::Post-apply migration list verification (C-0331 twin)"
+          supabase migration list --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-migration-list.txt"
+          if grep -Eiq '(^|[[:space:]|])reverted([[:space:]|]|$)' "${RUNNER_TEMP}/test-migration-list.txt"; then
+            echo "::error::Reverted migrations detected after db push to TEST — see list above (C-0331 twin)"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+      # Best-effort EARLY release, copied VERBATIM (including its `if: always()`) from
+      # `- name: Release shared-test-db mutex (best effort)` in .github/workflows/ci.yml.
+      # Job teardown drops the psql session anyway; killing it here hands the lock to
+      # the next waiter a little sooner. It must never redden a job whose real work
+      # passed, which is why it is the ONE step in this job allowed to end without a
+      # non-zero exit — and why the wiring test's softening-token scan excludes it.
+      - name: Release shared-test-db mutex (best effort)
+        if: always()
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          if [ ! -f "${pidfile}" ]; then
+            echo "No mutex pid recorded (fork PR / acquire skipped) — nothing to release."
+            exit 0
+          fi
+          holder="$(cat "${pidfile}")"
+          if kill "${holder}" 2>/dev/null; then
+            echo "Released the shared-test-db mutex (terminated psql pid ${holder})."
+          else
+            # 158-REVIEW WR-01: reaching here is a FAULT, not housekeeping. A
+            # pidfile exists, so the acquire step really did start a holder — and
+            # that holder is now dead while this job was still running. Every DB
+            # step between its death and now ran with the mutex RELEASED, i.e.
+            # potentially concurrently with another run against the shared TEST
+            # project. The previous message ("was already gone — the session drop
+            # released the lock") described this as normal and printed on exactly
+            # the failure path it was supposed to surface.
+            # [158-MUTEX-01]: the once-common cause (the server-wide
+            # statement_timeout killing pg_sleep at ~120s) is fixed — the holder
+            # zeroes statement_timeout — so a dead holder here is now UNEXPECTED
+            # and always worth investigating.
+            # Annotation only: this step is `if: always()` and must never redden a
+            # job whose real work passed, and `echo ::error::` does not change the
+            # exit status. Job teardown remains the guaranteed release path.
+            echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
+          fi
+          # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
+          # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
+          # so it kept the lock and starved the other jobs' acquires for its
+          # full 6000s sleep. Terminate the recorded backend server-side too;
+          # the pg_locks guard (same key, same pid) makes it a no-op if that
+          # backend already exited or the pid was recycled — never a blind
+          # terminate. Best effort like the rest of this step: ccci bounds any
+          # survivor at ~30s, and nothing here may redden the job.
+          backendpidfile="${RUNNER_TEMP}/shared-test-db-mutex-backend-pid"
+          backend="$(cat "${backendpidfile}" 2>/dev/null || true)"
+          case "${backend}" in
+            ''|*[!0-9]*)
+              echo "No server backend pid recorded — leaving any orphan to client_connection_check_interval."
+              ;;
+            *)
+              if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+                echo "TEST_SUPABASE_DB_URL withheld — skipping the server-side backend reap."
+              else
+                # Session-mode DSN, derived exactly as in the acquire step and
+                # never echoed; bounded like the acquire step's census query.
+                dsn="${TEST_SUPABASE_DB_URL}"
+                case "${dsn}" in
+                  *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+                esac
+                reaped="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+                  -c "SET statement_timeout = '10s';" \
+                  -c "SELECT pg_terminate_backend(${backend}) FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158 AND pid = ${backend};" \
+                  2>/dev/null | tr -d '\r' | tail -1)" || true
+                if [ "${reaped}" = "t" ]; then
+                  echo "Server-side reap: backend ${backend} was STILL on key 61616158 — pg_terminate_backend sent (the client kill alone had not freed the lock)."
+                else
+                  echo "Server-side reap: backend ${backend} no longer on key 61616158 (already exited, or the census was unavailable) — nothing to terminate."
+                fi
+              fi
+              ;;
+          esac
+
+  # ── A SKIPPED OR FAILED TEST APPLY IS A NAMED RED, NOT A GREY JOB ───────
+  # `apply` below is gated on `needs.apply-test.result == 'success'`, which BLOCKS
+  # correctly — but a blocked `apply` shows on the Actions board as a grey job that
+  # "did not run", with no cause and nothing red. That is the same reasoning
+  # ci.yml's `frontend` aggregator records at :2187-2191: a bare `needs:` chain
+  # propagates the block without ever naming what happened, so this job is the
+  # `if: always()` verdict that turns the block into a red check with a cause.
+  #
+  # Its script is EXTRACTED and EXECUTED under all three results by
+  # src/__tests__/supabase-migrate-test-first.test.ts, so it cannot be defanged
+  # while keeping the strings.
+  apply-test-verdict:
+    needs: [apply-test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Judge the TEST apply
+        env:
+          APPLY_TEST_RESULT: ${{ needs.apply-test.result }}
+        run: |
+          set -euo pipefail
+          echo "apply-test=${APPLY_TEST_RESULT}"
+          case "${APPLY_TEST_RESULT}" in
+            success)
+              echo "The TEST apply succeeded. Every merged migration crossed the shared TEST"
+              echo "database before the PROD apply is allowed to start."
+              ;;
+            skipped)
+              echo "::error::the TEST apply DID NOT RUN, so nothing crossed TEST before PROD. The PROD apply is blocked. Three causes, cheapest first:"
+              echo "::error::  (1) the workflow was dispatched from a ref other than main, so apply-test's if: excluded it — the dispatch-ref-guard job in this same run already printed the ref and the correct 'gh workflow run supabase-migrate.yml --ref main' (B3)."
+              echo "::error::  (2) apply-test's if:/needs: were edited so the job no longer runs on this event. Read the job's conditions in .github/workflows/supabase-migrate.yml; the wiring test pins both lines, so a green test suite means this is not it."
+              echo "::error::  (3) the workflow run was cancelled while apply-test was still queued."
+              exit 1
+              ;;
+            *)
+              echo "::error::the TEST apply concluded '${APPLY_TEST_RESULT}'. The PROD apply is blocked, by design (CONTEXT Area 1 Q2 — warn-only was rejected). Three causes:"
+              echo "::error::  (1) the shared-test-db mutex acquire timed out at the 3600 s cap. That step prints a lock census naming the two possibilities it cannot distinguish — queue depth (NORMAL in this repo) versus a wedged holder whose runner is gone. Triage: docs/runbooks/shared-test-db-mutex.md sections 2-3. A foreign holder delaying the PROD deploy is the ACCEPTED coupling of this design, not a defect."
+              echo "::error::  (2) the migration itself FAILED on TEST. Read the 'Push migrations to TEST' step: the CLI's 'At statement:' line names the migration file. This is the entire purpose of the phase — the failure was caught against a real Postgres instead of against customers. Fix the migration and merge the fix."
+              echo "::error::  (3) the migration RAISEd from a data-reading DO block that is valid on PROD's rows and not on TEST's — the open case booked as [164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]. The interim remedy is to REVERT THE MERGE, never to edit this workflow to let it through."
+              exit 1
+              ;;
+          esac
+
+  # ── TEST AHEAD OF PROD IS A NAMED RED, NOT AN ALL-GREEN BOARD ───────────
+  # THE DIVERGENCE, spelled out: a `workflow_dispatch` against main on a clone (or on
+  # this repo after a secret rotation dropped one of the three PROD values) produces
+  #   plan        → GREEN, `configured=false` plus a ::notice::  (Phase 142.1 D-02/R1
+  #                 deliberately tolerates the unconfigured state on a DISPATCH)
+  #   apply-test  → GREEN, and it really did APPLY to the shared TEST database
+  #   verdict     → GREEN, because apply-test succeeded
+  #   apply       → grey, its `if:` false on `needs.plan.outputs.configured`
+  # Every check green or grey, and shared TEST is now AHEAD of PROD with nothing
+  # anywhere saying so. The D-02/R1 tolerance was written when this workflow wrote to
+  # PROD ONLY, where "configured=false" meant nothing happened at all; Phase 164.8
+  # gave the run a second database it writes to REGARDLESS of the PROD credentials,
+  # and the tolerance did not move with it.
+  #
+  # ⛔ WHY THIS IS A SEPARATE JOB AND NOT A CLAUSE IN `apply-test-verdict`. Reading
+  # `needs.plan.outputs.configured` requires `plan` in `needs:`, and `plan` is bound
+  # to the `Production` environment, which waits for a required reviewer. A verdict
+  # that waits on a human would be PENDING — not red — at exactly the moment a failed
+  # `apply-test` most needs to be red, which is the grey-job defect the verdict job
+  # exists to fix. This job may wait: it has nothing to say until `plan` concludes.
+  #
+  # It is deliberately SILENT on every other combination — a failed `apply-test` is
+  # the verdict job's to name, and a failed `plan` is already red on its own.
+  prod-credential-divergence-verdict:
+    needs: [plan, apply-test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Refuse an all-green run that left TEST ahead of PROD
+        env:
+          APPLY_TEST_RESULT: ${{ needs.apply-test.result }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PLAN_CONFIGURED: ${{ needs.plan.outputs.configured }}
+        run: |
+          set -euo pipefail
+          echo "apply-test=${APPLY_TEST_RESULT} plan=${PLAN_RESULT} configured=${PLAN_CONFIGURED}"
+          if [ "${APPLY_TEST_RESULT}" != "success" ]; then
+            echo "The TEST apply did not succeed, so nothing was written to TEST that PROD is now behind. apply-test-verdict owns naming that; this job has nothing to add."
+          elif [ "${PLAN_RESULT}" != "success" ]; then
+            echo "The TEST apply succeeded and the plan job concluded '${PLAN_RESULT}'. TEST may now be ahead of PROD, but the plan job is already RED in this run — the divergence is visible without a second red check, and naming a cause this job cannot measure would be a guess."
+          elif [ "${PLAN_CONFIGURED}" = "true" ]; then
+            echo "PROD credentials are configured; the apply job decides on its own merits. No divergence."
+          else
+            echo "::error::SHARED TEST IS NOW AHEAD OF PRODUCTION, and every other check in this run is green or grey."
+            echo "::error::The apply-test job APPLIED the merged migrations to the shared TEST database, and it succeeded. The PROD apply then SKIPPED, because the plan job reported configured=false: one or more of SUPABASE_PROJECT_REF (var), SUPABASE_ACCESS_TOKEN (secret) and SUPABASE_DB_PASSWORD (secret) is unset. Which ones are named in the plan job's ::notice::."
+            echo "::error::That tolerance (Phase 142.1 D-02/R1) is correct for a DISPATCH on an unconfigured clone and was written when this workflow wrote to PROD only. It is not correct once the same run has already written to a second, SHARED database: TEST carries schema PROD does not, other people's CI runs against it, and no check anywhere says so."
+            echo "::error::Two remedies, both fine: configure the three PROD values and re-dispatch, or restore TEST from the baseline (.github/workflows/test-restore-from-baseline.yml). Do NOT silence this job — the asymmetry it names is real for as long as it holds."
+            exit 1
+          fi
+
   apply:
-    needs: plan
-    if: needs.plan.outputs.configured == 'true'
+    # Area 1 Q2, LOCKED: a TEST apply that FAILED or was SKIPPED blocks the PROD
+    # apply. `needs:` blocks on failure by default; the `if:` clause is what blocks
+    # on a SKIP, which `needs:` alone does not. `apply-test-verdict` above is where
+    # the cause is printed — without it this job would simply be grey.
+    # ⛔ Warn-only was considered and rejected: a PROD apply that proceeds past a
+    # TEST apply nobody watched is the pre-phase behaviour with extra log noise.
+    needs: [plan, apply-test]
+    if: needs.plan.outputs.configured == 'true' && needs.apply-test.result == 'success'
     runs-on: ubuntu-latest
     environment: Production
     steps:
@@ -213,11 +1040,12 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
           SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          IS_PUSH: ${{ github.event_name == 'push' }}
         # --include-all is required to apply migrations that gap-fill earlier timestamp slots
         # (e.g. when a history-only restoration like PR #176 lands before subsequent additions).
         # Without it, db push refuses with "Found local migration ... that is below remote tip".
         #
-        # Safety story (BUILD stage — required reviewers NOT yet configured):
+        # Safety story:
         #   - Auto-applies on push to main touching supabase/migrations/**
         #     (push trigger re-enabled by PR-Y2 2026-05-25); drift is gated
         #     at PR-time by migration-drift-check.yml
@@ -226,8 +1054,13 @@ jobs:
         #     `.github/migrate-backdated-allowlist.txt` exception channel
         #   - Two-step plan-then-apply with `--dry-run` on plan so the operator sees the
         #     EXACT command output before approving apply
-        #   - At scale (>=10 active clients), add required-reviewer protection to the
-        #     `Production` environment per ADR-0009 (TODO).
+        #   - REQUIRED-REVIEWER PROTECTION ON `Production` IS CONFIGURED, measured
+        #     2026-09-09 via `gh api repos/:owner/:repo/environments`: one
+        #     `required_reviewers` rule. The ADR-0009 "at scale, add it" TODO that stood
+        #     here is DONE and was date-corrected rather than deleted, because this
+        #     comment block is part of the file's safety argument.
+        #   - Every merged migration crossed the shared TEST database first: this job
+        #     `needs: [plan, apply-test]` and its `if:` requires apply-test SUCCESS.
         #
         # C-0331 (audit-2026-05-07): `set -euo pipefail` ensures any sub-command
         # failure aborts the step. After `db push`, we run `supabase migration
@@ -235,13 +1068,50 @@ jobs:
         # status — the CLI can return exit 0 while a migration body is silently
         # skipped (e.g. wrapped in a SQL exception the CLI swallows), and the
         # post-apply list is the authoritative ground-truth we cross-check.
+        #
+        # ⭐ THE AFFIRMATIVE TWIN of the TEST apply's check, and the reason the
+        # dry-run is repeated here rather than read from the `plan` job: `plan` is a
+        # different job on a different runner, so its output would have to travel as
+        # an artifact, and a stale artifact would make the comparison lie. A second
+        # `--dry-run` costs one CLI round-trip and compares like with like on the same
+        # linked project. The reverted-grep below is a NEGATIVE check — a pattern that
+        # matches nothing returns 1 and reads as CLEAN — so on its own it cannot tell
+        # an applied merge from a push that applied zero migrations. See the long
+        # derivation on `Push migrations to TEST`; the same reasoning, one environment
+        # over, on the environment where being wrong is not recoverable by a re-run.
         # All interpolations are repo-admin-controlled secrets/vars (not
         # attacker-supplied event fields), and they flow through env: not
         # inline ${{ }} expansion — no script-injection surface.
         run: |
           set -euo pipefail
           supabase link --project-ref "$SUPABASE_PROJECT_REF"
-          supabase db push --include-all
+          supabase db push --include-all --dry-run | tee /tmp/prod-dry-run.txt
+          supabase db push --include-all | tee /tmp/prod-push.txt
+          echo "::group::Post-apply applied-set verification (affirmative)"
+          versions_of() {
+            awk '{ while (match($0, /[0-9]{14}/)) { print substr($0, RSTART, RLENGTH); $0 = substr($0, RSTART + RLENGTH) } }' "$1" | sort -u
+          }
+          planned="$(versions_of /tmp/prod-dry-run.txt)"
+          applied="$(versions_of /tmp/prod-push.txt)"
+          planned_n="$(printf '%s' "${planned}" | awk 'NF { n++ } END { print n + 0 }')"
+          applied_n="$(printf '%s' "${applied}" | awk 'NF { n++ } END { print n + 0 }')"
+          echo "planned ${planned_n} migration version(s); push reported ${applied_n}."
+          if [ "${planned}" != "${applied}" ]; then
+            echo "::error::the PROD push did NOT apply the set its own dry-run planned. Planned versions:"
+            printf '%s\n' "${planned}"
+            echo "::error::versions the push reported:"
+            printf '%s\n' "${applied}"
+            echo "::error::The dry-run immediately above ran on the same linked project moments earlier, so a difference is not drift — the apply diverged from the plan logged as its audit record."
+            exit 1
+          fi
+          if [ "${IS_PUSH}" = "true" ] && [ "${applied_n}" -eq 0 ]; then
+            echo "::error::the PROD push applied ZERO migrations on a push-to-main run. The push trigger is filtered to supabase/migrations/**, so a migration file genuinely changed and PROD should have moved. A green run that applied nothing is exactly how a freshly-deployed worker meets an OLD PROD schema (PGRST204) while every dashboard stays green — the D-02/R1 failure this workflow already fails loud on for ABSENT SECRETS, one step later in the chain. If the change was genuinely a no-op (a comment edit inside an already-applied migration file), re-run via 'gh workflow run supabase-migrate.yml --ref main', where an empty set is tolerated."
+            exit 1
+          fi
+          if [ "${applied_n}" -eq 0 ]; then
+            echo "The push applied nothing and this is not a push event — tolerated (same rule as the TEST apply)."
+          fi
+          echo "::endgroup::"
           echo "::group::Post-apply migration list verification (C-0331)"
           supabase migration list --linked | tee /tmp/migration-list.txt
           if grep -Eiq '(^|[[:space:]|])reverted([[:space:]|]|$)' /tmp/migration-list.txt; then

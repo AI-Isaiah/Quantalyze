@@ -169,39 +169,71 @@ describe("restore-test-from-baseline.sh — the regions are real", () => {
 });
 
 describe("restore-test-from-baseline.sh — the arm ratchet", () => {
-  it("EXPECTED_ARMS=24 is a live line, exactly once, with its MEASURED date beside it", () => {
+  it("EXPECTED_ARMS=26 is a live line, exactly once, with its MEASURED date beside it", () => {
     const region = selfTestRegion(SRC);
     expect(
-      liveCount(region, "EXPECTED_ARMS=24"),
-      "the arm ratchet is no longer a single live `EXPECTED_ARMS=24` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
+      liveCount(region, "EXPECTED_ARMS=26"),
+      "the arm ratchet is no longer a single live `EXPECTED_ARMS=26` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
     ).toBe(1);
 
     // SC-9 (`gate-family-meta.test.ts:18-30`): a threshold constant needs a
     // measurement token AND a date beside it, or nobody can tell a measured floor
     // from a guessed one.
     const lines = region.split("\n");
-    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=24"));
+    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=26"));
     const beside = `${lines[at - 1] ?? ""}\n${lines[at]}`;
     expect(
       beside,
-      "EXPECTED_ARMS=24 carries no MEASURED date on its own or the preceding line — SC-9",
+      "EXPECTED_ARMS=26 carries no MEASURED date on its own or the preceding line — SC-9",
     ).toContain("MEASURED 2026-09-09");
 
     // The harness must ASSERT the count, not merely print it.
     expect(liveCount(region, 'if [ "$total" -ne "$EXPECTED_ARMS" ]; then')).toBe(1);
     expect(liveCount(region, 'if [ "$pass" -ne "$total" ]; then')).toBe(1);
 
+    // ⛔ THE MEASURED-DATE COMMENT MUST AGREE WITH THE CONSTANT IT SITS BESIDE.
+    // The phase verification's advisory (2026-09-09): SC-9 pins that a DATE is
+    // present, never that the COUNT in the same sentence is the current one. So
+    // rewriting `prints 26/26` to `prints 24/24` beside the constant left every
+    // ratchet leg green — the two can drift apart silently, and the prose is what
+    // a reader trusts. Derive the expected count from the constant rather than
+    // restating it here, so this assertion cannot itself go stale.
+    const armsLine = lines.find((l) => isLive(l) && /^EXPECTED_ARMS=\d+$/.test(l.trim()));
+    const arms = Number((armsLine ?? "").trim().split("=")[1]);
+    expect(Number.isInteger(arms) && arms > 0).toBe(true);
+    const printsClaims = SRC.split("\n").filter((l) => /prints \d+\/\d+/.test(l));
+    expect(
+      printsClaims.length,
+      "no `prints N/N` sentence found beside the ratchet. It is the human-readable half of the same fact and this pin exists to keep the two from drifting.",
+    ).toBeGreaterThan(0);
+    for (const claim of printsClaims) {
+      expect(
+        claim,
+        `a comment claims ${/prints \d+\/\d+/.exec(claim)?.[0]} while EXPECTED_ARMS is ${arms}. The prose and the constant have drifted, and SC-9's date check cannot see it.`,
+      ).toContain(`prints ${arms}/${arms}`);
+    }
+
+    // CALIBRATION for the pair above — move the constant and the prose must
+    // disagree, or this assertion is measuring nothing.
+    const moved = SRC.replace("\nEXPECTED_ARMS=26\n", "\nEXPECTED_ARMS=27\n");
+    expect(moved).not.toBe(SRC);
+    const movedArms = 27;
+    expect(
+      SRC.split("\n").filter((l) => /prints \d+\/\d+/.test(l)).every((l) => l.includes(`prints ${movedArms}/${movedArms}`)),
+      "the `prints N/N` prose still agrees with a MOVED constant, so the agreement check is vacuous.",
+    ).toBe(false);
+
     // CALIBRATION — comment the constant out; a whole-file `toContain` would
     // still pass, this pin must not.
-    const commented = SRC.replace("\nEXPECTED_ARMS=24\n", "\n# EXPECTED_ARMS=24\n");
+    const commented = SRC.replace("\nEXPECTED_ARMS=26\n", "\n# EXPECTED_ARMS=26\n");
     expect(commented).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=24")).toBe(0);
+    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=26")).toBe(0);
 
     // CALIBRATION — a second copy of the constant is a disagreement waiting to
     // happen, and must fail the "exactly once" leg.
-    const doubled = SRC.replace("\nEXPECTED_ARMS=24\n", "\nEXPECTED_ARMS=24\nEXPECTED_ARMS=24\n");
+    const doubled = SRC.replace("\nEXPECTED_ARMS=26\n", "\nEXPECTED_ARMS=26\nEXPECTED_ARMS=26\n");
     expect(doubled).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=24")).toBe(2);
+    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=26")).toBe(2);
   });
 
   it("plan 01's interim closing line is GONE — the word it used appears nowhere", () => {
@@ -220,8 +252,8 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — re-insert the interim line; the pin must flip.
     const restored = SRC.replace(
-      "\nEXPECTED_ARMS=24\n",
-      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=24\n`,
+      "\nEXPECTED_ARMS=26\n",
+      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=26\n`,
     );
     expect(restored).not.toBe(SRC);
     expect(restored.includes(interimWord)).toBe(true);

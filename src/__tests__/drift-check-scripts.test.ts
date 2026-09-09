@@ -2688,7 +2688,15 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
       // reported missing, and NAMED — the union is not so wide that it
       // matches everything.
       withTempDir((dir) => {
-        const stray = "20260105000000_join_no_match";
+        // ⛔ THE STRAY MUST SIT BELOW THE FRONTIER. Phase 164.8 plan 05 added
+        // the apply-on-merge exemption: a measured-missing migration authored
+        // ABOVE the newest PRESENT one is exempt, because nothing has yet had
+        // the chance to apply it. The stray was `20260105000000_…`, one tick
+        // ABOVE all four fixtures, so it became exempt and this arm went green
+        // for a reason that has nothing to do with the join key it exists to
+        // test. Dated BELOW them instead, so the only thing deciding this arm
+        // is still whether the row matches a convention.
+        const stray = "20251231000000_join_no_match";
         const strayRow: LedgerRow = { version: "20260105999999", name: "unrelated_row" };
         for (const c of conv) expect(c.matches(strayRow, stray), `the stray row matches under ${c.id}; it must match under nothing`).toBe(false);
         const env = scaffoldJoinCase(
@@ -2952,7 +2960,12 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
     });
   });
 
-  it("--self-test proves ALL FOUR red modes and the green path, and exits 0", () => {
+  // ⛔ The arm labels are pinned BY NAME, not by count. Phase 164.8 plan 05
+  // added three: a below-frontier RED (the ratchet is intact), an above-frontier
+  // GREEN (the apply-on-merge window is exempt) and the tip-EQUAL RED (the
+  // boundary, where an off-by-one would silently exempt a real defect). Deleting
+  // any one of them reds this test on the missing label rather than on a number.
+  it("--self-test proves every red mode and both green paths, and exits 0", () => {
     const res = spawnSync("bash", [LEDGER_GATE, "--self-test"], {
       cwd: process.cwd(),
       encoding: "utf8",
@@ -2964,6 +2977,9 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
     expect(out).toContain("empty-body-check-list RED");
     expect(out).toContain("zero-comparisons RED");
     expect(out).toContain("green path");
+    expect(out).toContain("below-frontier-missing RED");
+    expect(out).toContain("above-frontier-missing GREEN");
+    expect(out).toContain("tip-equal-missing RED");
   });
 
   it("--self-test FAILS when the gate is neutered (the self-test itself can fail)", () => {

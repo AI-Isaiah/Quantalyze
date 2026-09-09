@@ -201,8 +201,17 @@ FIXTURES="$SCRIPT_DIR/restore-test-from-baseline-fixtures"
 #
 #   grep -c 'pg_advisory_lock(61616158)' .github/workflows/*.yml
 #
-# Three workflows CALL it: `ci.yml` (3 call sites), `mutex-probe.yml` (3) and
-# `test-restore-from-baseline.yml` (1 — the Acquire step this script runs inside).
+# FOUR workflows CALL it (re-measured 2026-09-09; it was three until the TEST-first
+# apply landed): `ci.yml` (3 call sites), `mutex-probe.yml` (3),
+# `test-restore-from-baseline.yml` (1 — the Acquire step this script runs inside)
+# and `supabase-migrate.yml` (1).
+#
+# ⛔ THE NEW TAKER IS THE MOST CONSEQUENTIAL ONE. `supabase-migrate.yml`'s
+# `apply-test` job holds this key while it runs `supabase db push` AGAINST SHARED
+# TEST — a migration APPLY, not a read. This paragraph is the reader's answer to
+# "who else can be writing to TEST while this restore holds the lock", so it is
+# safety-relevant and dated on purpose: re-run the grep above rather than trusting
+# the sentence (review finding WR-08).
 # ⚠️ `analytics-deploy-verify.yml` matches the INTEGER twice and calls it ZERO
 # times (a comment at :93 and an issue-body string at :178), and
 # `main-ci-cancelled-watcher.yml` does not contain the integer at all. This comment
@@ -446,9 +455,15 @@ CENSUS_SQL
   # the extension/ownership guards in `run_restore` runs on TEST today — the mode
   # returns or fails before it — and the `restore:` summary line is pinned
   # byte-for-byte by self-test arms 9, 12 and 18, so it must not grow a field.
-  # The census is the ONE artifact both modes emit, both times, and `--mode
-  # preflight` compares it pre/post BYTE-FOR-BYTE, so putting the counts here also
-  # keeps a preflight's "nothing changed" claim covering the replay.
+  # The census is the ONE artifact both modes emit, both times, so this is where a
+  # reading that must exist in BOTH modes belongs.
+  #
+  # ⛔ IT DOES NOT EXTEND THE PREFLIGHT'S "nothing changed" CLAIM TO THE ROW
+  # COUNTS, and this comment claimed it did until 2026-09-09 (review finding
+  # CR-01). `--mode preflight` compares the census through `census_rollback_view`,
+  # which normalises these counts away precisely because they are mutable on
+  # shared TEST; read that function for why a count cannot evidence a rollback.
+  # What the counts are for is the RESTORE mode's reading and the audit trail.
   #
   # APPENDED with printf rather than interpolated into the heredoc above: that
   # heredoc is QUOTED, and unquoting it to reach one variable would put every `$`
@@ -587,6 +602,62 @@ refuse_bad_migration_corpus() {
 REFDATA_TABLES=()
 REFDATA_EXPECT=()
 REFDATA_ENTRY_N=0
+# ⛔ REFUSAL 9 — no backtick may appear inside an UNQUOTED `<<TXN_*` heredoc.
+# Those heredocs interpolate shell variables by design, so bash also performs
+# COMMAND SUBSTITUTION inside them — including inside SQL `--` comments, where a
+# reader's eye reads documentation and bash reads a command. A multi-line span
+# additionally swallows the next line's `--`, turning prose into SQL in a script
+# whose job is to DROP SCHEMA public CASCADE. Found in five places on 2026-09-09,
+# two of them older than the finding, which is why this is a gate and not a note.
+#
+# Filesystem-only and pre-write, like refusals 1-8. Takes the file to scan so the
+# self-test can point it at a fixture instead of at this script.
+refuse_backticks_in_txn_heredocs() {
+  local src="${1:-$0}" hits
+  # ⛔ MATCH EVERY UNQUOTED HEREDOC, not just the `TXN_*` ones. The first cut of
+  # this guard keyed on /<<TXN_[A-Z_]+$/ and the phase verification walked past it
+  # FOUR ways on scratch fixtures: `<<-TXN_A`, `<<TXN_A ` (one trailing space),
+  # `<<TXN_Gate2` (a lowercase letter in the delimiter) and any delimiter that is
+  # simply not spelled TXN_. Nothing in this script triggered any of them, which is
+  # exactly why a guard named for a general property must MEASURE that property —
+  # a name that overclaims is how the next reader concludes they are covered.
+  #
+  # A QUOTED delimiter (<<'EOF' or <<"EOF") disables substitution entirely, so
+  # those bodies are safe by construction and are skipped, not scanned.
+  #
+  # The `$` anchor stays: a real opener ends its line. It is also what keeps the
+  # self-test's own fixture-writing `printf 'cat >> "$out" <<TXN_FIXTURE\n'` from
+  # reading as an opener.
+  hits=$(awk '
+    !inside {
+      if (match($0, /<<-?[ \t]*("[A-Za-z_][A-Za-z0-9_]*"|'"'"'[A-Za-z_][A-Za-z0-9_]*'"'"'|[A-Za-z_][A-Za-z0-9_]*)[ \t]*$/)) {
+        tok = substr($0, RSTART, RLENGTH)
+        sub(/^<<-?[ \t]*/, "", tok)
+        sub(/[ \t]*$/, "", tok)
+        # Quoted delimiter => no expansion inside the body => nothing to refuse.
+        if (tok ~ /^["'"'"']/) next
+        term = tok; inside = 1; next
+      }
+      next
+    }
+    { line = $0; sub(/^[ \t]+/, "", line) }
+    inside && line == term { inside = 0; next }
+    inside {
+      # A BACKSLASH-ESCAPED backtick is LITERAL in an unquoted heredoc — no
+      # substitution — and the oldest comments in these heredocs are written that
+      # way on purpose. Strip those first; a backtick still standing is live.
+      line = $0
+      k = index(line, "\\`")
+      while (k > 0) { line = substr(line, 1, k - 1) substr(line, k + 2); k = index(line, "\\`") }
+      if (index(line, "`") > 0) printf "%d: %s\n", NR, $0
+    }
+  ' "$src")
+  if [ -n "$hits" ]; then
+    printf '%s\n' "$hits" >&2
+    fail "restore aborted: a backtick appears inside an UNQUOTED heredoc in ${src} (lines above). These heredocs are unquoted so they can interpolate the gate's VALUES list, which means bash COMMAND-SUBSTITUTES every backticked span in them — SQL comments included — while assembling a destructive restore, and a multi-line span swallows the following line's comment prefix. Write plain prose inside them, or backslash-escape the backtick (\\\` is literal here); do NOT quote the heredoc, that would break the interpolation the gate needs."
+  fi
+}
+
 refuse_bad_refdata_allowlist() {
   [ -f "$REFDATA_ALLOWLIST" ] || fail "reference-data allowlist not found at ${REFDATA_ALLOWLIST}."
   [ -f "$REFDATA_EXTRACTOR" ] || fail "reference-data extractor not found at ${REFDATA_EXTRACTOR}."
@@ -769,6 +840,29 @@ refuse_publication_row_without_table() {
 # CENSUS
 # ---------------------------------------------------------------------------
 census_val() { awk -F= -v k="$2" '$1 == k { print $2; exit }' "$1"; }
+
+# ⛔ CR-01 — THE ROLLBACK PROOF READS A NARROWER CENSUS THAN THE REPORT DOES.
+# `--mode preflight` proves the transaction rolled back by comparing the pre- and
+# post-census BYTE-FOR-BYTE. Phase 164.8.1 added `refdata:<table>=<count>` lines to
+# that census, and a ROW COUNT is not admissible evidence of a rollback:
+#
+#   * `auth.users` lives OUTSIDE `public`, so `DROP SCHEMA public CASCADE` never
+#     locks it and a concurrent writer can change it mid-transaction;
+#   * `public.feature_flags` and `public.system_flags` are described by this
+#     phase's own allowlist as RUNTIME-MUTABLE, and shared TEST runs other
+#     people's CI (CLAUDE.md) — their counts move under us by design.
+#
+# A byte-compare over those lines makes a PERFECTLY rolled-back preflight able to
+# abort with `Treat this database as modified.` — on the one instrument the
+# destructive restore is gated on. So the compared VIEW normalises every refdata
+# count to `present`, which keeps the part of the reading that IS structural (the
+# table existing at all — `absent` is what `DROP SCHEMA` produces, and a rollback
+# must restore it) and drops the part that is not. The full census, counts and
+# all, is still printed and still written to disk; only the equality test reads
+# the view. Arm 25 falsifies the normalisation in both directions.
+census_rollback_view() {
+  sed -E 's/^(refdata:[^=]+=)[0-9]+$/\1present/' "$1"
+}
 
 # Every line of a census class, sorted — the shape used to compare a LIST pre/post
 # rather than a count. awk, not grep: awk exits 0 on zero matches, so an empty
@@ -991,7 +1085,7 @@ BEGIN
                -- and it is dropped and re-created with that table. Resolving it to
                -- its own namespace would report every varlena-carrying public table
                -- as a lost non-public dependent — MEASURED 2026-09-08, the first
-               -- run of this assertion named `toast table pg_toast.pg_toast_16428`
+               -- run of this assertion named \`toast table pg_toast.pg_toast_16428\`
                -- and rolled the whole restore back. Same carrier pattern as
                -- pg_trigger.tgrelid above, applied one class further.
                WHEN p.classid = 'pg_class'::regclass THEN (SELECT CASE WHEN c.relkind = 't' THEN (SELECT n2.nspname FROM pg_class o JOIN pg_namespace n2 ON n2.oid = o.relnamespace WHERE o.reltoastrelid = c.oid) ELSE n.nspname END FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = p.objid)
@@ -1122,35 +1216,81 @@ TXN_REFDATA_TAIL
   # allowlisted INSERT that puts AT LEAST one row into the table its trailer names
   # — so a table carrying fewer rows than its statement count has lost at least one
   # statement. Until 2026-09-09 this gate tested `n = 0` alone, and a replay that
-  # dropped one of `public.system_flags`'s two statements left the table non-empty
-  # and PASSED — the exact partial-replay shape the gate is for. EMPTY and SHORT
-  # RAISE separately because they are different diagnoses: nothing replayed at all
-  # versus some of it did.
+  # dropped a statement from a multi-statement table left it non-empty and PASSED
+  # — the exact partial-replay shape the gate is for. EMPTY and SHORT RAISE
+  # separately because they are different diagnoses: nothing replayed at all versus
+  # some of it did.
+  #
+  # ⛔ THE FLOOR IS LOOSE BY CONSTRUCTION, AND HOW LOOSE IS A PROPERTY OF THE
+  # CORPUS, NOT OF THIS CODE. It compares ROWS against STATEMENTS, so a table whose
+  # rows exceed its statements absorbs that many lost rows before the floor bites,
+  # and a statement inserting zero NEW rows is invisible to it in both directions.
+  # Both shapes are live in the real allowlist. MEASURED 2026-09-09:
+  # public.compute_job_kinds is pinned at 15 statements and yields 16 distinct
+  # kind names, so ROWS EXCEED STATEMENTS there and the floor absorbs one lost
+  # row before it bites. One of those statements (20260510175507) is a deliberate
+  # ON CONFLICT DO NOTHING duplicate of a row an earlier migration already
+  # inserts, so it contributes no new row at all and is invisible to the floor in
+  # both directions.
+  #
+  # ⛔ THIS PARAGRAPH HAS NOW BEEN WRONG TWICE. It carried a false worked example
+  # until the phase review (WR-02), and the fix for that inverted BOTH figures --
+  # it said 16 statements yielding 15 rows -- until the phase verification caught
+  # it the same day. The authority is scripts/restore-test-refdata-allowlist.txt
+  # and the --audit that re-measures it, never this sentence.
+  #
+  # The compute_job_kinds figures above are here as the ONE worked example that
+  # shows BOTH shapes at once, and they are re-derivable in two commands. That is
+  # the whole licence: do not add a second table's derivation
+  # here — the pinned counts live in the allowlist and are re-measured by
+  # `--audit` on every run. The floor's job is to catch a replay that lost a WHOLE
+  # statement's worth of rows, not to be an exact row oracle. The row-level gap it
+  # cannot see is what the kind-admission invariant below is for; neither
+  # substitutes for the other.
   local refdata_values="" rtq i=0
   for rtq in ${REFDATA_TABLES[@]+"${REFDATA_TABLES[@]}"}; do
     refdata_values="${refdata_values}${refdata_values:+,
       }('$(sql_lit "$rtq")', (SELECT count(*) FROM ${rtq}), ${REFDATA_EXPECT[$i]})"
     i=$((i + 1))
   done
+  # ⛔ THIS HEREDOC IS UNQUOTED — it has to be, it interpolates ${refdata_values}.
+  # So a BACKTICK anywhere inside it, including inside an SQL `--` comment, is
+  # COMMAND SUBSTITUTION: bash runs the quoted prose while assembling a DESTRUCTIVE
+  # restore, the substitution's (empty) output replaces it, and a multi-line span
+  # swallows the following line's `--` prefix, turning comment text into SQL. Found
+  # by the phase verification on 2026-09-09 in five places, two of them older than
+  # the finding. `refuse_backticks_in_txn_heredocs` below fails the run rather than
+  # trusting a reader to remember; write plain prose in here, never markup.
   cat >> "$out" <<TXN_REFDATA_GATE
 DO \$restore\$
 DECLARE
-  r         record;
+  v_empty   text;
+  v_short   text;
   v_missing text[];
 BEGIN
-  FOR r IN
-    SELECT * FROM (VALUES
+  -- ⛔ COLLECT FIRST, RAISE ONCE. A RAISE inside the loop aborts on the FIRST
+  -- offending table, so the likeliest real failure — the whole replay lost, which
+  -- is arm 23 leg (a)'s shape — used to tell the operator about ONE table out of
+  -- eight and gave them no way to tell "one table regressed" from "nothing
+  -- replayed at all". The census carries the full picture, but on a
+  -- --mode restore abort the post-census never runs, so this message is all
+  -- there is
+  -- (review finding WR-09). EMPTY and SHORT stay SEPARATE aggregates because they
+  -- remain different diagnoses.
+  SELECT string_agg(t.tbl, ', ' ORDER BY t.tbl) FILTER (WHERE t.n = 0),
+         string_agg(format('%s (%s row(s) for %s statement(s))', t.tbl, t.n, t.expected), ', ' ORDER BY t.tbl)
+           FILTER (WHERE t.n > 0 AND t.n < t.expected)
+    INTO v_empty, v_short
+    FROM (VALUES
       ${refdata_values}
-    ) AS t(tbl, n, expected)
-    WHERE t.n = 0 OR t.n < t.expected
-    ORDER BY 1
-  LOOP
-    IF r.n = 0 THEN
-      RAISE EXCEPTION 'restore aborted: reference table % is EMPTY after the replay — the ledger would say its seed migration applied while its rows are gone; fix the allowlist line or the extractor, never hand-seed shared TEST (Phase 164.8.1)', r.tbl;
-    ELSE
-      RAISE EXCEPTION 'restore aborted: reference table % is SHORT after the replay — % row(s) for % allowlisted statement(s), and each of those statements inserts at least one row into a table the DROP had just emptied, so at least one statement did not land. A PARTIAL replay commits a ledger that swears its seed migration applied; fix the allowlist line or the extractor, never hand-seed shared TEST (Phase 164.8.1)', r.tbl, r.n, r.expected;
-    END IF;
-  END LOOP;
+    ) AS t(tbl, n, expected);
+
+  IF v_empty IS NOT NULL THEN
+    RAISE EXCEPTION 'restore aborted: reference table(s) % are EMPTY after the replay — the ledger would say their seed migrations applied while their rows are gone; fix the allowlist line or the extractor, never hand-seed shared TEST (Phase 164.8.1). Short-but-not-empty in the same run: %', v_empty, coalesce(v_short, 'none');
+  END IF;
+  IF v_short IS NOT NULL THEN
+    RAISE EXCEPTION 'restore aborted: reference table(s) are SHORT after the replay — %, and each allowlisted statement inserts at least one row into a table the DROP had just emptied, so at least one statement did not land. A PARTIAL replay commits a ledger that swears its seed migration applied; fix the allowlist line or the extractor, never hand-seed shared TEST (Phase 164.8.1)', v_short;
+  END IF;
 
   -- The SECOND partial-replay leg, and it is INDEPENDENT of the count floor
   -- above: the floor sees a table that lost a whole statement, this sees a
@@ -1160,19 +1300,19 @@ BEGIN
   -- a table with no admission CHECK is invisible to this. Both must stand.
   --
   -- ⛔ ABSENCE IS LOUD, NOT INERT. This used to be wrapped in
-  -- `IF to_regclass(...) IS NOT NULL AND EXISTS (... pg_constraint ...) THEN`, so
+  -- IF to_regclass(...) IS NOT NULL AND EXISTS (... pg_constraint ...) THEN, so
   -- a rename, a typo in the seam, or a dropped constraint turned the leg into a
   -- permanent no-op and the restore COMMITTED — on real TEST this is the only
   -- detector of a partial replay that leaves its tables non-empty, and it would
   -- have gone quiet with nothing in the log. The configured pair is REQUIRED to
   -- exist: both objects are on real TEST, and on the self-test lane the seam
-  -- points at `public.fx_keep` / `fx_keep_kind_check`, which baseline-fixture.sql
+  -- points at public.fx_keep / fx_keep_kind_check, which baseline-fixture.sql
   -- creates for exactly this reason. Each RAISE names WHICH of the two is gone.
   IF to_regclass('$(sql_lit "$REFDATA_KIND_REGISTRY")') IS NULL THEN
-    RAISE EXCEPTION 'restore aborted: the configured kind registry ${REFDATA_KIND_REGISTRY} (REFDATA_KIND_REGISTRY) does not exist after the replay. This is the only leg that can see a partial replay whose tables are non-empty; skipping it would commit an unguarded restore (Phase 164.8.1)';
+    RAISE EXCEPTION 'restore aborted: the configured kind registry $(sql_lit "$REFDATA_KIND_REGISTRY") (REFDATA_KIND_REGISTRY) does not exist after the replay. This is the only leg that can see a partial replay whose tables are non-empty; skipping it would commit an unguarded restore (Phase 164.8.1)';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '$(sql_lit "$REFDATA_KIND_CHECK")') THEN
-    RAISE EXCEPTION 'restore aborted: the configured kind-admission CHECK ${REFDATA_KIND_CHECK} (REFDATA_KIND_CHECK) does not exist after the replay. This is the only leg that can see a partial replay whose tables are non-empty; skipping it would commit an unguarded restore (Phase 164.8.1)';
+    RAISE EXCEPTION 'restore aborted: the configured kind-admission CHECK $(sql_lit "$REFDATA_KIND_CHECK") (REFDATA_KIND_CHECK) does not exist after the replay. This is the only leg that can see a partial replay whose tables are non-empty; skipping it would commit an unguarded restore (Phase 164.8.1)';
   END IF;
   SELECT array_agg(DISTINCT m.caps[1] ORDER BY m.caps[1]) INTO v_missing
     FROM pg_constraint c
@@ -1183,7 +1323,7 @@ BEGIN
             WHERE k.${REFDATA_KIND_REGISTRY_COL}::text = m.caps[1]
          );
   IF v_missing IS NOT NULL AND array_length(v_missing, 1) > 0 THEN
-    RAISE EXCEPTION 'restore aborted: ${REFDATA_KIND_CHECK} admits kind(s) % that ${REFDATA_KIND_REGISTRY} does not carry — a partial replay', array_to_string(v_missing, ', ');
+    RAISE EXCEPTION 'restore aborted: $(sql_lit "$REFDATA_KIND_CHECK") admits kind(s) % that $(sql_lit "$REFDATA_KIND_REGISTRY") does not carry — a partial replay', array_to_string(v_missing, ', ');
   END IF;
 END
 \$restore\$;
@@ -1336,6 +1476,7 @@ run_restore() {
   # so the dir must already be proven present, non-empty and safely named. It must
   # also precede `write_census_sql`, which reads the table list it parses.
   refuse_bad_refdata_allowlist
+  refuse_backticks_in_txn_heredocs
 
   if [ -z "${RESTORE_OUT_DIR:-}" ]; then
     RESTORE_OUT_DIR="$(mktemp -d)"
@@ -1376,11 +1517,13 @@ run_restore() {
   if [ "$mode" = "preflight" ]; then
     # The rollback is MEASURED, not assumed. A preflight that changed anything is a
     # defect, and it is the one thing a preflight is for.
-    if ! cmp -s "$RESTORE_OUT_DIR/pre-census.txt" "$RESTORE_OUT_DIR/post-census.txt"; then
-      diff "$RESTORE_OUT_DIR/pre-census.txt" "$RESTORE_OUT_DIR/post-census.txt" >&2 || true
+    census_rollback_view "$RESTORE_OUT_DIR/pre-census.txt"  > "$RESTORE_OUT_DIR/pre-census.rollback-view.txt"
+    census_rollback_view "$RESTORE_OUT_DIR/post-census.txt" > "$RESTORE_OUT_DIR/post-census.rollback-view.txt"
+    if ! cmp -s "$RESTORE_OUT_DIR/pre-census.rollback-view.txt" "$RESTORE_OUT_DIR/post-census.rollback-view.txt"; then
+      diff "$RESTORE_OUT_DIR/pre-census.rollback-view.txt" "$RESTORE_OUT_DIR/post-census.rollback-view.txt" >&2 || true
       fail "post-census != pre-census. The transaction was supposed to ROLL BACK and the database is NOT byte-for-byte unchanged. Treat this database as modified."
     fi
-    echo "preflight: post-census == pre-census (byte-for-byte) — the transaction ran to its ROLLBACK terminator and the database is unchanged; mode=preflight"
+    echo "preflight: post-census == pre-census (byte-for-byte over the rollback view; reference-data row COUNTS are normalised to \`present\` because they are mutable on shared TEST and cannot evidence a rollback — see census_rollback_view) — the transaction ran to its ROLLBACK terminator and the database is unchanged; mode=preflight"
     return 0
   fi
 
@@ -1480,6 +1623,7 @@ main() {
 #                                                22  GREEN reference data replayed
 #                                                23  RED  the refdata gate BITES
 #                                                24  RED  refdata allowlist refused
+#                                                25  GREEN rollback view normalises
 #
 # Several arms carry more than one LEG, because one guard can be false in more than
 # one way and an arm that measures the easy way is not measuring the guard:
@@ -1497,8 +1641,14 @@ main() {
 #            table; (b) the `SET LOCAL search_path = public, pg_catalog` bracket
 #            deleted -> the migrations' unqualified targets stop resolving
 #            (RESEARCH Pitfall 1); (c) one registry row DELETEd inside the
-#            transaction after the replay -> the table is NOT empty and only the
-#            kind-admission invariant can see it. Every leg also asserts
+#            transaction after the replay -> the table is NOT empty, the count
+#            floor still holds, and only the kind-admission invariant can see it;
+#            (d) TWO rows DELETEd -> the table is still NOT empty but now carries
+#            fewer rows than its pinned statement count, so the `t.n < t.expected`
+#            floor is what fires and names it. (c) and (d) are DIFFERENT gates on
+#            the same table and the fixture's 2-statements-over-3-rows shape is
+#            what keeps both reachable — see 20260103000000_fixture_c.sql. Every
+#            leg also asserts
 #            `e2e_leftover` is STILL THERE: a refusal that does not roll back has
 #            left shared TEST half-restored.
 #   arm 24 — (a) a pinned count that stopped matching, (b) an EMPTY allowlist,
@@ -1507,6 +1657,11 @@ main() {
 #            arm 8 pins that same literal POSITIVELY, because a check that only
 #            ever asserts a string's ABSENCE goes green when the string is merely
 #            reworded.
+#   arm 25 — (a) a mutable reference count moved -> the rollback view must NOT
+#            see it; (b) a reference table went ABSENT -> it MUST; (c) a
+#            structural line moved -> it MUST; (d) the normalisation actually
+#            rewrote something, so (a) cannot pass vacuously. No lane: the
+#            function under test is pure text.
 #
 # ── REDACTION IS A CHECK WITH A SUBJECT (T-164.8-05) ────────────────────────
 # Every arm's combined output is captured, and after EVERY arm the harness greps
@@ -1530,13 +1685,14 @@ main() {
 # for arms 19-21 (the empty survivor census, the foreign identity marker, and the
 # three unarmed exits of the migration-corpus refusal).
 #
-# Arms 22-24 are Phase 164.8.1's. Their falsifiers were observed RED on SCRATCH
+# Arms 22-26 are Phase 164.8.1's (22-24 at first write; 25 and 26 were added by
+# the phase's own review and verification). Their falsifiers were observed RED on SCRATCH
 # COPIES under the harness's mktemp dir — never a byte backup and never
 # `git checkout --`, which restores to HEAD and silently destroys uncommitted work
 # (L-04) — and each observation, with its scratch path and verbatim output, is
 # recorded in 164.8.1-02-SUMMARY.md.
-# MEASURED 2026-09-09 — `--self-test` prints 24/24 and exits 0 on a throwaway cluster.
-EXPECTED_ARMS=24
+# MEASURED 2026-09-09 — `--self-test` prints 26/26 and exits 0 on a throwaway cluster.
+EXPECTED_ARMS=26
 
 SELFTEST_MUTEX_HOLDER_PID=""
 SELFTEST_TMPD=""
@@ -2420,13 +2576,13 @@ FRESHSTUB
     [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: the reference-data restore exited ${rc}, expected 0"; return 1; }
     grep -aqxF 'refdata:public.fx_keep=0' "$SELFTEST_TMPD/out-a22/pre-census.txt" \
       || { echo "MEASURE_FAIL: the PRE-census does not read refdata:public.fx_keep=0. Either the census row is missing or the table was already seeded, and the post-census reading below would evidence nothing."; return 1; }
-    grep -aqxF 'refdata:public.fx_keep=2' "$SELFTEST_TMPD/out-a22/post-census.txt" \
-      || { echo "MEASURE_FAIL: the POST-census does not read refdata:public.fx_keep=2 — the replay did not land, or its reading never reached the census."; return 1; }
+    grep -aqxF 'refdata:public.fx_keep=3' "$SELFTEST_TMPD/out-a22/post-census.txt" \
+      || { echo "MEASURE_FAIL: the POST-census does not read refdata:public.fx_keep=3 — the replay did not land, or its reading never reached the census."; return 1; }
     local n
     n=$(lane_q "SELECT count(*) FROM public.fx_keep;")
-    [ "$n" = "2" ] || { echo "MEASURE_FAIL: public.fx_keep holds ${n} row(s) after the restore, expected the 2 the allowlisted INSERT replays. A census row is a reading; this is the database."; return 1; }
+    [ "$n" = "3" ] || { echo "MEASURE_FAIL: public.fx_keep holds ${n} row(s) after the restore, expected the 3 the two allowlisted INSERTs replay. A census row is a reading; this is the database."; return 1; }
     n=$(lane_q "SELECT string_agg(label, ',' ORDER BY label) FROM public.fx_keep;")
-    [ "$n" = "ref_a,ref_b" ] || { echo "MEASURE_FAIL: public.fx_keep carries '${n}', not the two labels the migration's ORIGINAL bytes insert — the replay is not byte-faithful."; return 1; }
+    [ "$n" = "ref_a,ref_b,ref_c" ] || { echo "MEASURE_FAIL: public.fx_keep carries '${n}', not the three labels the migration's ORIGINAL bytes insert — the replay is not byte-faithful."; return 1; }
     n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
     [ "$n" = "0" ] || { echo "MEASURE_FAIL: the stray table survived (count=${n}) — this arm did not run a real restore."; return 1; }
     # The summary line must be BYTE-IDENTICAL to arm 9's: counts belong in the
@@ -2465,7 +2621,7 @@ FRESHSTUB
     run_leg "$copy" restore a23a > "$out" 2>&1 || rc=$?
     cat "$out"
     [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (a): a restore whose reference replay was deleted exited ${rc}, expected 1. This is the Phase 164.8 defect committing: a ledger that swears every seed migration applied over tables with no rows."; return 1; }
-    grep -aq 'reference table public.fx_keep is EMPTY after the replay' "$out" \
+    grep -aq 'reference table(s) public.fx_keep are EMPTY after the replay' "$out" \
       || { echo "MEASURE_FAIL (a): the abort is not the reference-data gate's, and does not NAME the empty table — some other guard fired, so the gate is still unmeasured"; return 1; }
     n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
     [ "$n" = "1" ] || { echo "MEASURE_FAIL (a): the stray table is gone (count=${n}) — the gate REFUSED but the transaction did not ROLL BACK, so TEST was left half-restored."; return 1; }
@@ -2520,6 +2676,44 @@ FRESHSTUB
       || { echo "MEASURE_FAIL (c): the abort is not the partial-replay invariant's, or does not NAME the missing kind — an invariant that fires without saying what is missing cannot be acted on"; return 1; }
     n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
     [ "$n" = "1" ] || { echo "MEASURE_FAIL (c): the stray table is gone (count=${n}) — the invariant refused but the transaction did not roll back."; return 1; }
+
+    # (d) A WHOLE STATEMENT'S WORTH OF ROWS IS GONE — the SHORT branch's ONLY
+    #     falsifier. Leg (c) above deletes ONE row and leaves 2 rows against 2
+    #     pinned statements, so the count floor still holds and the registry
+    #     invariant is what fires. This leg deletes TWO, taking the table to 1 row
+    #     against 2 statements: the floor BITES, and it bites FIRST, before the
+    #     invariant leg (c) measures.
+    #
+    # ⛔ WHY THIS ARM EXISTS AT ALL (review finding WR-01). The `t.n < t.expected`
+    #     half of the gate — this phase's headline fix, the one that catches a
+    #     partial replay leaving its tables NON-EMPTY — shipped on 2026-09-09 with
+    #     no permanent arm anywhere in this suite and no source-text pin. It had
+    #     been driven RED once, by hand, on a scratch copy that was then thrown
+    #     away. Reverting the comparison to `t.n = 0` turned NOTHING red. That is
+    #     the defect class this whole phase exists to remove, reproduced inside the
+    #     phase's own new code. Delete this leg and the SHORT branch goes
+    #     unfalsifiable again.
+    copy="$SELFTEST_TMPD/refdata-short.sh"
+    awk '{ print }
+         !d && index($0, "cat \"$RESTORE_OUT_DIR/refdata.sql\" >> \"$out\"") > 0 {
+           print "  echo \"DELETE FROM public.fx_keep WHERE label IN (\047ref_b\047, \047ref_c\047);\" >> \"$out\"  # arm 23(d): a SHORT replay, scratch copy only"
+           d = 1
+         }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
+      || { echo "MEASURE_FAIL (d): could not build the short-replay scratch copy — the replay anchor moved."; return 1; }
+    grep -aq "DELETE FROM public.fx_keep WHERE label IN" "$copy" \
+      || { echo "MEASURE_FAIL (d): the scratch copy does not carry the injected two-row DELETE, so this leg would test an intact replay."; return 1; }
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a23d.out"; rc=0
+    run_leg "$copy" restore a23d > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (d): a SHORT replay exited ${rc}, expected 1. The table lost a whole statement's worth of rows and stayed NON-EMPTY, and the restore COMMITTED — the \`t.n < t.expected\` half of the gate is not biting, which is exactly the state that made this arm necessary."; return 1; }
+    grep -aq 'reference table(s) are SHORT after the replay' "$out" \
+      || { echo "MEASURE_FAIL (d): the abort is not the SHORT branch's, or does not NAME the short table. If it reads EMPTY instead, the fixture lost too many rows and this leg is measuring the n=0 branch leg (a) already covers."; return 1; }
+    grep -aq 'public.fx_keep (1 row(s) for 2 statement(s))' "$out" \
+      || { echo "MEASURE_FAIL (d): the SHORT abort does not report the measured rows against the pinned statements, so the diagnosis it exists to give is missing."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL (d): the stray table is gone (count=${n}) — the floor refused but the transaction did not roll back."; return 1; }
     return 0
   }
 
@@ -2572,7 +2766,7 @@ FRESHSTUB
 
     # (a) A PINNED COUNT THAT NO LONGER MATCHES. The extractor refuses; this
     #     script must surface that refusal rather than restore without the rows.
-    printf '20260103000000_fixture_c.sql\tpublic.fx_keep\t2\t# arm 24(a): pins 2 where 1 is measured\n' \
+    printf '20260103000000_fixture_c.sql\tpublic.fx_keep\t3\t# arm 24(a): pins 3 where 2 is measured\n' \
       > "$scratch/count-drift.txt"
     local ARM_REFDATA_ALLOWLIST="$scratch/count-drift.txt"
     out="$SELFTEST_TMPD/a24a.out"; rc=0
@@ -2581,7 +2775,7 @@ FRESHSTUB
     [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (a): an allowlist whose pinned count is wrong exited ${rc}, expected 1"; return 1; }
     grep -aq 'reference-data extraction refused' "$out" \
       || { echo "MEASURE_FAIL (a): this script did not report the extraction as REFUSED — a non-zero extractor was swallowed"; return 1; }
-    grep -aq 'pins 2 top-level statement(s) but 1 were measured' "$out" \
+    grep -aq 'pins 3 top-level statement(s) but 2 were measured' "$out" \
       || { echo "MEASURE_FAIL (a): the extractor's own stderr was not echoed, so a reader sees that something was refused but not WHICH number moved"; return 1; }
     if [ -e "$SELFTEST_TMPD/out-a24a/refdata.sql" ]; then
       echo "MEASURE_FAIL (a): refdata.sql exists under the out dir — the extraction ran to a file despite being refused."
@@ -2626,6 +2820,131 @@ FRESHSTUB
     return 0
   }
 
+  # ═══ ARM 26 — backticks in an unquoted TXN heredoc ════════════════════════
+  # Two legs, and the SECOND is the one that matters: a refusal that fires on a
+  # fixture proves the detector works, not that the file it guards is clean.
+  arm_backtick_in_txn_heredoc() {
+    local d="$SELFTEST_TMPD/a26"; mkdir -p "$d" out=""
+
+    # (a) THE DETECTOR FIRES. A fixture carrying the exact shape found on
+    #     2026-09-09: a backtick inside an SQL comment inside an unquoted heredoc.
+    {
+      printf 'cat >> "$out" <<TXN_FIXTURE\n'
+      printf -- '  -- a comment mentioning `RAISE` inside the body\n'
+      printf 'TXN_FIXTURE\n'
+    } > "$d/dirty.sh"
+    out="$SELFTEST_TMPD/a26a.out"
+    ( refuse_backticks_in_txn_heredocs "$d/dirty.sh" ) > "$out" 2>&1 && {
+      echo "MEASURE_FAIL (a): a backtick inside an unquoted <<TXN_* heredoc was ACCEPTED. bash would command-substitute that span while assembling a destructive restore."; cat "$out"; return 1; }
+    grep -aq 'a backtick appears inside an UNQUOTED heredoc' "$out" \
+      || { echo "MEASURE_FAIL (a): something refused, but not this guard — so the guard is still unmeasured."; cat "$out"; return 1; }
+    grep -aq 'RAISE' "$out" \
+      || { echo "MEASURE_FAIL (a): the refusal does not print the offending LINE, so a reader is told a backtick exists somewhere and not where."; return 1; }
+
+    # (b) IT DOES NOT FIRE ON PROSE OUTSIDE A HEREDOC, or every shell comment in
+    #     this file would be an error and the guard would be reverted on sight.
+    {
+      printf '# a shell comment mentioning `RAISE`, outside any heredoc\n'
+      printf 'cat >> "$out" <<TXN_FIXTURE\n'
+      printf -- '  -- plain prose, no markup\n'
+      printf -- '  -- an ESCAPED \\`backtick\\` is literal in an unquoted heredoc and must be ACCEPTED\n'
+      printf 'TXN_FIXTURE\n'
+      printf '# another backticked `comment` after it closed\n'
+    } > "$d/clean.sh"
+    out="$SELFTEST_TMPD/a26b.out"
+    ( refuse_backticks_in_txn_heredocs "$d/clean.sh" ) > "$out" 2>&1 \
+      || { echo "MEASURE_FAIL (b): the guard refused a file whose backticks are all OUTSIDE the heredoc. It would make every shell comment in this script an error."; cat "$out"; return 1; }
+
+    # (d) ⛔ THE FOUR EVASIONS. The first cut of this guard keyed on
+    #     /<<TXN_[A-Z_]+$/ and the phase verification got a live backtick past it
+    #     four ways. Each is its own fixture here, because a guard named for a
+    #     general property while testing a narrow one is how the next reader
+    #     concludes they are covered. NONE of these shapes occurs in this script
+    #     today — which is precisely why nothing but this leg would notice.
+    local ev evname
+    for ev in 'X<<-TXN_A' 'X<<TXN_A ' 'X<<TXN_Gate2' 'X<<PLAIN_EOF'; do
+      evname=$(printf '%s' "$ev" | sed 's/^X//')
+      {
+        printf 'cat >> "$out" <%s\n' "${evname#<}"
+        printf -- '  -- prose carrying a live `RAISE` backtick\n'
+        printf '%s\n' "$(printf '%s' "$evname" | sed -E 's/^<<-?[ \t]*//; s/[ \t]*$//')"
+      } > "$d/evade.sh"
+      out="$SELFTEST_TMPD/a26d.out"
+      ( refuse_backticks_in_txn_heredocs "$d/evade.sh" ) > "$out" 2>&1 && {
+        echo "MEASURE_FAIL (d): the delimiter spelling '${evname}' walked a LIVE backtick past the guard. bash substitutes it all the same — the delimiter's spelling is not what makes a heredoc unquoted."; cat "$d/evade.sh"; return 1; }
+    done
+
+    # (e) A QUOTED delimiter disables substitution entirely, so its body is safe
+    #     by construction and must NOT be refused — otherwise the guard's fix is
+    #     'quote the heredoc', which would break the interpolation the gate needs.
+    {
+      printf 'cat >> "$out" <<%sQUOTED%s\n' "'" "'"
+      printf -- '  -- a `backtick` here is literal because the delimiter is quoted\n'
+      printf 'QUOTED\n'
+    } > "$d/quoted.sh"
+    out="$SELFTEST_TMPD/a26e.out"
+    ( refuse_backticks_in_txn_heredocs "$d/quoted.sh" ) > "$out" 2>&1 \
+      || { echo "MEASURE_FAIL (e): the guard refused a QUOTED heredoc, whose body bash never expands. It would push readers toward quoting the gate's heredoc, which cannot be quoted."; cat "$out"; return 1; }
+
+    # (c) ⛔ THE POINT OF THE ARM — THIS SCRIPT ITSELF. Legs (a) and (b) only
+    #     prove the detector discriminates; they say nothing about the file the
+    #     restore actually assembles its transaction from.
+    out="$SELFTEST_TMPD/a26c.out"
+    ( refuse_backticks_in_txn_heredocs "$0" ) > "$out" 2>&1 \
+      || { echo "MEASURE_FAIL (c): THIS script carries a backtick inside an unquoted <<TXN_* heredoc."; cat "$out"; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 25 — the rollback VIEW normalises counts and nothing else ═════════
+  # ⛔ THE FALSIFIER FOR CR-01'S FIX. `census_rollback_view` decides what the
+  # preflight's "the database is unchanged" claim is allowed to notice. Get it too
+  # WIDE and a mutable row count can abort a correctly rolled-back preflight (the
+  # defect it was written for); get it too NARROW — say `s/^refdata:.*/x/` — and
+  # the view stops noticing a reference table that VANISHED, which a rollback is
+  # supposed to restore and which is the failure this instrument exists to catch.
+  # Both directions are driven here, on fixtures, with no lane: the function is
+  # pure text and deserves a pure-text arm.
+  arm_census_rollback_view() {
+    local d="$SELFTEST_TMPD/a25"; mkdir -p "$d"
+
+    printf 'tables=2\npolicies=1\nrefdata:public.fx_keep=3\nrefdata:auth.users=7\nledger_rows=3\n' > "$d/pre.txt"
+
+    # (a) A MUTABLE COUNT MOVED — the shared-TEST reality. The view must NOT see
+    #     it, or a preflight that rolled back perfectly aborts.
+    printf 'tables=2\npolicies=1\nrefdata:public.fx_keep=3\nrefdata:auth.users=9\nledger_rows=3\n' > "$d/post-count.txt"
+    census_rollback_view "$d/pre.txt"        > "$d/v-pre.txt"
+    census_rollback_view "$d/post-count.txt" > "$d/v-count.txt"
+    cmp -s "$d/v-pre.txt" "$d/v-count.txt" \
+      || { echo "MEASURE_FAIL (a): the rollback view still DIFFERS when only a reference row count moved. auth.users is outside \`public\` and feature/system flags are runtime-mutable on shared TEST, so this makes a correctly rolled-back preflight abort with 'Treat this database as modified.' — CR-01, unfixed."; diff "$d/v-pre.txt" "$d/v-count.txt"; return 1; }
+
+    # (b) A REFERENCE TABLE VANISHED. `absent` is exactly what DROP SCHEMA leaves
+    #     behind, and a rollback must undo it. The view MUST still see this.
+    printf 'tables=2\npolicies=1\nrefdata:public.fx_keep=absent\nrefdata:auth.users=7\nledger_rows=3\n' > "$d/post-absent.txt"
+    census_rollback_view "$d/post-absent.txt" > "$d/v-absent.txt"
+    if cmp -s "$d/v-pre.txt" "$d/v-absent.txt"; then
+      echo "MEASURE_FAIL (b): the rollback view does NOT differ when a reference table went ABSENT. The normalisation is too wide — it has stopped noticing the very thing DROP SCHEMA does, and the preflight would call a half-dropped database unchanged."
+      return 1
+    fi
+
+    # (c) A STRUCTURAL COUNT MOVED. Nothing outside the refdata lines may be
+    #     normalised, or the view stops proving the rollback at all.
+    printf 'tables=3\npolicies=1\nrefdata:public.fx_keep=3\nrefdata:auth.users=7\nledger_rows=3\n' > "$d/post-tables.txt"
+    census_rollback_view "$d/post-tables.txt" > "$d/v-tables.txt"
+    if cmp -s "$d/v-pre.txt" "$d/v-tables.txt"; then
+      echo "MEASURE_FAIL (c): the rollback view does NOT differ when \`tables=\` moved. The normalisation is eating structural census lines and the preflight proves nothing."
+      return 1
+    fi
+
+    # (d) THE NORMALISATION IS VISIBLE, not a no-op that (a) would pass vacuously.
+    grep -aqxF 'refdata:public.fx_keep=present' "$d/v-pre.txt" \
+      || { echo "MEASURE_FAIL (d): the view did not rewrite a refdata count to \`present\`. If it rewrote nothing, leg (a) passed because the two files were already equal — it measured nothing."; return 1; }
+    grep -aqxF 'refdata:public.fx_keep=absent' "$d/v-absent.txt" \
+      || { echo "MEASURE_FAIL (d): the view rewrote \`absent\`, which is not a count. Leg (b) would then be passing for the wrong reason."; return 1; }
+    grep -aqxF 'tables=2' "$d/v-pre.txt" \
+      || { echo "MEASURE_FAIL (d): the view altered a structural line."; return 1; }
+    return 0
+  }
+
   run_arm "1  RED   credential absent — a missing DSN is a hard failure, never a skip" 0 arm_credential_absent
   run_arm "2  RED   identity marker NULL — refused before any write" 0 arm_marker_null
   run_arm "3  RED   identity marker names PROD — refused, loudly" 0 arm_marker_prod
@@ -2651,6 +2970,8 @@ FRESHSTUB
   run_arm "22 GREEN reference data replayed, gated and censused — the transaction commits" 0 arm_g_refdata_replay
   run_arm "23 RED   the reference-data gate BITES: no replay, no search_path, partial replay" 0 arm_refdata_gate_bites
   run_arm "24 RED   reference-data allowlist: count drift, empty, silent extractor" 0 arm_bad_refdata_allowlist
+  run_arm "25 GREEN the preflight rollback view normalises mutable reference counts and NOTHING else (CR-01)" 0 arm_census_rollback_view
+  run_arm "26 RED   a backtick inside ANY unquoted heredoc is refused — four evasions closed — and THIS script is clean" 0 arm_backtick_in_txn_heredoc
 
   release_mutex
 
@@ -2685,7 +3006,7 @@ FRESHSTUB
   # refusal has at least one arm asserting its NAMED message — arms 1-7, 20, 21 and
   # 24. A narrative that miscounts or overstates its own guards is the same defect
   # class as a stale floor, so it is corrected rather than extended.
-  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — eight refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back, a bad allowlist is refused before any write, harness calibrated)"
+  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — NINE refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back — EMPTY, SHORT and row-level partial each by name, a bad allowlist is refused before any write, the preflight's rollback view normalises mutable reference counts and nothing else, harness calibrated)"
   return 0
 }
 

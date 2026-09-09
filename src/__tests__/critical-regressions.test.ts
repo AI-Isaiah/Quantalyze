@@ -1063,6 +1063,51 @@ describe("Critical regression guards", () => {
           "supabase-migrate apply job lost the environment: Production gate — required-reviewer protection bypass",
         );
       });
+
+      // Phase 164.8 plan 05: there is now a THIRD job in the same file, and it is
+      // bound to a DIFFERENT environment on purpose. `apply-test` applies the merged
+      // migrations to the shared TEST database before PROD is touched at all, so the
+      // env-gate question this describe asks — "which environment routes this job's
+      // credential?" — has a third answer that must not silently become Production
+      // (which would route a TEST apply through the PROD reviewer gate and its PROD
+      // secrets) or nothing (which would drop the Deployments audit record).
+      // The full wiring — the ref guard, the verdict job's exit codes, the mutex
+      // byte-identity — is pinned in src/__tests__/supabase-migrate-test-first.test.ts.
+      // These two exist so THIS file, the repo's central CI-hardening pin, knows the
+      // third job exists at all.
+      it("supabase-migrate.yml apply-test job declares environment: Test", () => {
+        const src = readText(".github/workflows/supabase-migrate.yml");
+        const applyTestJob = findOrFail(
+          src,
+          /^ {2}apply-test:\s*\n([\s\S]*?)(?=\n {2}[a-z])/m,
+          "supabase-migrate.yml: apply-test job not found — Phase 164.8 put the shared TEST database in front of the PROD apply; if that job is gone, PROD is applied to first again",
+        );
+        expectMatch(
+          applyTestJob,
+          /environment:\s*Test/,
+          "supabase-migrate apply-test job lost the environment: Test binding — it must be Test, never Production (which would route the TEST apply through the PROD reviewer gate) and never absent (which drops the Deployments audit record)",
+        );
+      });
+
+      it("supabase-migrate.yml apply job waits for apply-test", () => {
+        const src = readText(".github/workflows/supabase-migrate.yml");
+        const applyIdx = src.search(/^ {2}apply:\s*\n/m);
+        expect(
+          applyIdx,
+          "supabase-migrate.yml: apply job not found",
+        ).toBeGreaterThanOrEqual(0);
+        const applyJob = src.slice(applyIdx);
+        expectMatch(
+          applyJob,
+          /needs:\s*\[plan,\s*apply-test\]/,
+          "supabase-migrate apply job no longer needs apply-test — merged DDL would reach PROD without ever crossing the shared TEST database (Phase 164.8, CONTEXT Area 1 Q2)",
+        );
+        expectMatch(
+          applyJob,
+          /needs\.apply-test\.result\s*==\s*'success'/,
+          "supabase-migrate apply job's if: no longer requires apply-test to have SUCCEEDED — `needs:` alone blocks on FAILURE but not on a SKIP, and a skipped apply-test is exactly what a wrong-ref dispatch produces",
+        );
+      });
     });
 
     // Phase 142.1 D-02/R1: supabase-migrate is the ONLY automatic applier of

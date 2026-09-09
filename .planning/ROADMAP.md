@@ -1311,7 +1311,8 @@ Plans:
 - [x] 164.5-03-PLAN.md — crit 7: BASELINE-CONTENT-DRIFT gate over the existing `sql-body-normalize.mjs --diff-bodies`, hash-pinned ratchet for the measured 6 DRIFT + 2 SNAPSHOT_MISSING, wired into `ci.yml`'s aggregator-blocking `sql-gate-lint` (wave 1)
 - [x] 164.5-04-PLAN.md — crit 4: DRIFT-05 as TWO gates — (a) hermetic name-set diff inside `dump-sql-functions.ts --check` with a red fixture in each direction, (b) baseline-vs-LIVE on VAC-04's credentialed job, exit 1 on an absent credential (wave 1)
 - [x] 164.5-05-PLAN.md — crit 5: disposition all 31 unledgered migrations by name, pin them with an independent vitest, and amend criterion 5's wording to the `0 NEW drift` reading the gate can actually print (wave 1)
-- [~] 164.5-06-PLAN.md — crit 3 / DRIFT-04: BUILT + REVIEWED (3 reviewers, every finding fixed) + PROD pre-flight measurements taken read-only, all four assertions pass. ⛔ NOT APPLIED — the gate script has never run against PROD and the apply is the founder's. Held back from PR #757. ⛔ **FOUNDER 2026-09-07: NOT authorised on hand-taken measurements — the pre-flight SCRIPT must run against PROD first** (needs its four credentials + `ALLOC_EXPECT_DB_MARKER=PRODUCTION`). ⭐ **SEQUENCE, revised 2026-09-07:** PR 1 = the DROP ONLY; PR 2 = regenerate `baseline.sql` from the now-correct PROD **AND** delete the `NAME_SET_RATCHET` row, both together, immediately after — a red window on gate (b) exists between them.
+- [x] 164.5-06-PLAN.md — crit 3 / DRIFT-04: **APPLIED AND SHIPPED 2026-09-08**, in the revised two-PR sequence exactly as specified: PR 1 the DROP only (CHANGELOG `[0.77.20.0]` — "DRIFT-04: the unowned PROD function is dropped"), PR 2 the baseline regeneration plus the `NAME_SET_RATCHET` row deletion together (`[0.77.21.0]` — "DRIFT-04 closed: baseline regenerated, ratchet row retired"). The migration is `supabase/migrations/20260908120000_drop_create_allocator_connected_strategy.sql`; `create_allocator_connected_strategy` now appears ZERO times in `supabase/schema/baseline.sql`, and the row is in TEST's ledger.
+  ⛔ **CORRECTED 2026-09-09.** This line read `[~] … NOT APPLIED … the pre-flight SCRIPT must run against PROD first` for a full day after the apply landed. A ROADMAP that under-reports finished work sends the next reader to redo it, or makes the queue look longer than it is — the same record-vs-reality class this milestone exists to remove, in the planning artifacts rather than the database. Re-measure a status line before trusting it; three independent sources (CHANGELOG, the migration file, the TEST ledger) disagreed with this one.
 - [x] 164.5-07-PLAN.md — crit 6 / VAC-07: two-client concurrent csv-finalize race spec on the local-stack lane (NOT the pg-lane), observed RED-then-GREEN, made to EXECUTE in CI, then VAC-07 flips to Complete (wave 2, depends on plan 01)
 
 ### Phase 164.8: TESTPREPROD — TEST becomes a real pre-prod: every migration is proven on a real Postgres before it reaches a customer (INSERTED)
@@ -1476,13 +1477,14 @@ Plans:
 **Depends on:** Phase 164.8 Plan 04 (its restore is what exposed this; the fix targets the same script).
 **Blocks:** a green `main`. Until this lands, `e2e-seeded` — the go-live badge gate — and `python` are red on every branch.
 **Plans:** 4 plans
+**Status**: ✅ **COMPLETE** — 4/4 plans; `gsd-verifier` **13/13 must-haves, no gaps**. `gsd-code-reviewer` found **1 blocker + 10 warnings, all fixed**; the verification then found **3 further gaps + 4 record items, all closed**. ⭐ The blocker (CR-01) was on the phase's own instrument: this phase added mutable `refdata:<table>=<count>` rows to the census that `--mode preflight` compares BYTE-FOR-BYTE to prove its rollback — but `auth.users` is outside `public` so `DROP SCHEMA public CASCADE` never locks it, and shared TEST runs other people's CI, so a PERFECT rollback could report `Treat this database as modified.` ⛔ Two anti-vacuity defects were found INSIDE this phase's own new code and are the reason it took two review rounds: the count-aware SHORT branch shipped with **no falsifier at any layer** (reverting it turned nothing red), and the arm ratchet's calibration mutation had become a silent no-op while `EXPECTED_ARMS` moved on. Both are now armed — `EXPECTED_ARMS` 21 → 26, extractor kinds 16 → 19. Separately, bash was **command-substituting SQL comment prose** inside the unquoted `TXN_*` heredocs while assembling the destructive restore; refusal 9 + arm 26 close that, including four delimiter spellings that walked past the guard's first cut.
 
 Plans:
 
-- [ ] 164.8.1-01-PLAN.md — (wave 1) the (file, table, count)-keyed allowlist, the refuse-by-default extractor with `--audit`/`--self-test`, the AIM-first contract test, and the audit wired self-test-first into `sql-gate-lint` and the restore workflow
-- [ ] 164.8.1-02-PLAN.md — (wave 2) the replay + fail-loud gate inside the restore transaction under a `SET LOCAL search_path` bracket, `refdata:` census rows, arms 22-24 (gate proven to bite on a scratch copy), `EXPECTED_ARMS` 21 → 24 with every vitest pin re-measured
-- [ ] 164.8.1-03-PLAN.md — (wave 1) the seeder's false "migration didn't run" inference corrected; the TEST-points-at-PROD-compute hazard booked as `[164.8.1-TEST-ANALYTICS-URL-PROD]` routed to Phase 164.9
-- [ ] 164.8.1-04-PLAN.md — (wave 3, checkpointed) first real run is `--mode preflight` on `main`; founder decides the restore on its `refdata:` readings; SHA-bound green `python` + `e2e-seeded` recorded
+- [x] 164.8.1-01-PLAN.md — (wave 1) the (file, table, count)-keyed allowlist, the refuse-by-default extractor with `--audit`/`--self-test`, the AIM-first contract test, and the audit wired self-test-first into `sql-gate-lint` and the restore workflow
+- [x] 164.8.1-02-PLAN.md — (wave 2) the replay + fail-loud gate inside the restore transaction under a `SET LOCAL search_path` bracket, `refdata:` census rows, arms 22-24 (gate proven to bite on a scratch copy), `EXPECTED_ARMS` 21 → 26 with every vitest pin re-measured (arm 23 gained leg (d), the SHORT branch's falsifier, and arm 25 the rollback view's, both at phase review; arm 26 and refusal 9 came out of the phase verification, which found bash command-substituting comment prose inside the unquoted TXN heredocs)
+- [x] 164.8.1-03-PLAN.md — (wave 1) the seeder's false "migration didn't run" inference corrected; the TEST-points-at-PROD-compute hazard booked as `[164.8.1-TEST-ANALYTICS-URL-PROD]` routed to Phase 164.9
+- [x] 164.8.1-04-PLAN.md — (wave 3, checkpointed) first real run is `--mode preflight` on `main`; founder decides the restore on its `refdata:` readings; SHA-bound green `python` + `e2e-seeded` recorded
 
 ### Phase 164.9: TESTISOLATION — a run's assertions against the shared TEST project stop being unreliable: per-run isolation replaces global truth (INSERTED)
 
@@ -1496,7 +1498,7 @@ Plans:
 
 ⛔ **NOT in scope:** raising Playwright workers above 1. Phase 164.8's ROADMAP entry already states that per-run isolation is the PRECONDITION for it and that parallelism must NOT be chased as an objective — measured, `e2e-seeded` sits behind `sql-mutation` so parallelism buys 1-2 min of wall clock. Isolation is worth doing for ASSERTION RELIABILITY; the parallelism it unlocks is a consequence, not a goal.
 
-**Requirements**: TBD (no v1.20 requirement IDs) + `FANOUT-GLOBAL-01` (prose only — see the warning above), the per-run isolation item deferred out of Phase 164.8's `<deferred>` block, and TODOS entry `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` — read `164.8-CONTEXT.md` before planning, do not re-derive, plus the two restore-workflow items routed here from Phase 164.8 Plan 04 (see the ROUTED HERE block below), and `[164.8.1-TEST-ANALYTICS-URL-PROD]` plus `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` routed here from Phase 164.8.1 (see their ROUTED HERE blocks below).
+**Requirements**: TBD (no v1.20 requirement IDs) + `FANOUT-GLOBAL-01` (prose only — see the warning above), the per-run isolation item deferred out of Phase 164.8's `<deferred>` block, and TODOS entry `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` — read `164.8-CONTEXT.md` before planning, do not re-derive, plus the two restore-workflow items routed here from Phase 164.8 Plan 04 (see the ROUTED HERE block below), and `[164.8.1-TEST-ANALYTICS-URL-PROD]` plus `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` routed here from Phase 164.8.1, and `[164.8-PUSH-RACE-VAC08]` routed here from Phase 164.8 plan 05 (see their ROUTED HERE blocks below).
 
 ⛔ **ROUTED HERE 2026-09-08 by Phase 164.8's plan-checker (B4).** 164.8 restores TEST from a SCHEMA-ONLY dump (`BASELINE.md`: 0 data statements), so TEST mirrors PROD's CATALOGUE, never its DATA. A migration whose DO block reads a PROD-populated table and RAISEs on an unexpected count applies cleanly to PROD and refuses on an empty TEST — and 164.8 Area 1 Q2 makes that BLOCK the PROD apply. The retired `TEST-NOT-APPLICABLE` pragma was the declared escape hatch, and 164.8 retires it. Interim remedy is revert-the-merge, never a YAML edit under deploy pressure. Phase 164.10 was considered and rejected as the home: it is function-body scope only.
 ⛔ **ROUTED HERE 2026-09-08 by founder instruction, out of Phase 164.8's Plan 04.** Two items were found by RUNNING the restore (run `34274355596`, head `88581b8b`) rather than by review, and neither belongs in a ratchet PR. Both are discharged by ONE green `mode=restore` dispatch, so they are one unit of work:
@@ -1525,6 +1527,14 @@ A migration seeds a row, a LATER migration UPDATEs it, and after a restore the r
 
 ⚠️ **Bounded, which is why it was routed rather than allowed to block 164.8.1.** All five UPDATEs land on the teaser trio (`profiles`, `strategies`); none touch the FK- and CHECK-bearing reference tables. The fix is a THIRD gate leg pinning expected column VALUES, beside the emptiness and count-floor legs 164.8.1 ships.
 
+⛔ **ROUTED HERE 2026-09-09, out of Phase 164.8 plan 05's review — `[164.8-PUSH-RACE-VAC08]`: `sql-tests` (VAC-08) and `supabase-migrate.yml`'s `apply-test` share ONE advisory lock on the merge push, so their order is undefined.**
+
+MEASURED 2026-09-09: advisory key `61616158` appears 7× in `supabase-migrate.yml` and 26× in `ci.yml`. On a merge both workflows start, both take that key, and nothing orders them. Plan 05 shipped a frontier exemption that makes VAC-08's VERDICT order-independent and stops every migration-adding PR from being red by construction — but it removed the CONSEQUENCE, not the coupling. **The evidence, the three residuals it did not close, and the candidate fixes live in the TODOS entry and are not restated here.**
+
+✅ **Why THIS phase.** Two jobs contending for one lock on a database shared with other people's CI is literally the `FANOUT-GLOBAL-01` family, and the fix shape — distinct keys plus explicit ordering — is the same work as isolating TEST lanes. Two of the three residuals are gate-integrity riders that would sit equally well in a hygiene phase, but they are cheap alongside the first, and splitting them would create the sequential-ratchet-patched-in-one-place hazard this repo has already paid for once.
+
+⛔ **Do not close this by widening the exemption.** It is already the widest thing in that gate.
+
 **Depends on:** Phase 164.8 (its restore settles the schema and ledger this phase isolates against).
 **Plans:** 0 plans
 
@@ -1550,7 +1560,8 @@ Plans:
 ⛔ **THE THREE-REVIEWER RULE APPLIES IN FULL.** Any repair writes PROD function bodies, so it goes through `migration-reviewer` + `rls-policy-auditor` + `silent-failure-hunter`, findings fixed, BEFORE asking to apply. This is why it is its own phase rather than an item inside Phase 164.6 GATE-HYGIENE — that phase's other twelve items are lint rules and comment corrections, and folding production DDL in would give the riskiest item the lightest review posture.
 
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS entry `DRIFT-06` — read it before planning, do not re-derive.
-**Depends on:** nothing outstanding. ⚠️ Ordering is DELIBERATE: queued after 164.9 because it is the only remaining 164.x item that writes PRODUCTION, and the milestone's gate work should be finished before another PROD apply is attempted.
+**Depends on:** nothing outstanding. ⚠️ Ordering is DELIBERATE: queued after 164.9 because the milestone's gate work should be finished before another PROD apply is attempted.
+⛔ **CORRECTED 2026-09-09.** This sentence claimed 164.10 was "the only remaining 164.x item that writes PRODUCTION". It is not: **Phase 164.5.1 CRONREPOINT also writes PROD**, and on a more sensitive surface — production DDL on `cron.job` jobid 1, which carries `decrypted_secrets` and whose own success criterion 5 already demands three reviewers before any apply. The ordering principle is unchanged and now applies to BOTH: gate work (164.9) precedes every remaining PROD apply, not just this one.
 **Plans:** 0 plans
 
 Plans:
@@ -1664,7 +1675,7 @@ Plans:
 | 164.4 REDUNDER-BACKFILL (39 idiom files annotated; 5 pg_cron-blocked files handed to 164.4.1) | 12/12 | Complete | v0.77.12.0 |
 | 164.4.1 PGCRON-LANE (pg_cron on the lane; 5 deferred gates annotated; lane-blocked 0; ARMS_FLOOR 361) | 6/6 | Complete — PR #744 merged `e01cc2e6`, ubuntu-measured | v0.77.13.0 |
 | 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 0/? | Queued 2nd (row added 2026-09-06; the phase itself was created 2026-09-05 and had no summary row) | - |
-| 164.5 BASELINE-SNAPSHOT (baseline.sql load-bearing, DRIFT-04 drop, DRIFT-05, VAC08-LEDGER, VAC-07) | 7/7 built, crit 3 apply pending founder | Queued 3rd (created 2026-09-05) | - |
+| 164.5 BASELINE-SNAPSHOT (baseline.sql load-bearing, DRIFT-04 drop, DRIFT-05, VAC08-LEDGER, VAC-07) | 7/7 | Complete — DRIFT-04 applied and shipped 2026-09-08 in the two-PR sequence (row corrected 2026-09-09; it read "crit 3 apply pending founder" for a day after the apply) | v0.77.21.0 |
 | 164.6 GATE-HYGIENE (OPS-08 residue, composite-stamp twin, PROC-02/03, H-0001) | 0/? | Queued 4th (created 2026-09-05) | - |
 | 164.8 TESTPREPROD (TEST becomes a real pre-prod: bring it current, apply on merge to TEST before PROD) | 3/6 | Queued 5th — LAST in the 164.x series by founder decision 2026-09-06 (created 2026-09-06) | - |
 | 166. QSTATS-TRUTH | 0/? | Queued 6th (re-ordered ahead of 165, 2026-09-05) | - |

@@ -75,7 +75,7 @@ COMMENT ON SCHEMA "public" IS 'standard public schema';
 CREATE TABLE IF NOT EXISTS "public"."fx_keep" (
     "id" integer NOT NULL,
     "label" "text",
-    CONSTRAINT "fx_keep_kind_check" CHECK (("label" = ANY (ARRAY['ref_a'::"text", 'ref_b'::"text"])))
+    CONSTRAINT "fx_keep_kind_check" CHECK (("label" = ANY (ARRAY['ref_a'::"text", 'ref_b'::"text", 'ref_c'::"text"])))
 );
 
 ALTER TABLE "public"."fx_keep" OWNER TO "postgres";

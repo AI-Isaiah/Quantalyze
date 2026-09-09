@@ -43,7 +43,7 @@ const SCRIPT = join(REPO_ROOT, "scripts", "extract-reference-inserts.mjs");
 
 /**
  * Every refusal kind the extractor shipped on 2026-09-09, MEASURED from
- * `node scripts/extract-reference-inserts.mjs --self-test` → `OK: 16 kinds`.
+ * `node scripts/extract-reference-inserts.mjs --self-test` → `OK: 19 kinds`.
  * Each entry is a distinct way the extractor refuses; losing any of them means
  * a shape it used to refuse becomes replayable into shared TEST silently.
  */
