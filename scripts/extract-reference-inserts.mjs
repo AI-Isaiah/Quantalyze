@@ -48,8 +48,16 @@
  *    INSERT that is not the body's first statement surfaces as its own
  *    top-level-looking span. `dollarBodyRanges()` below is A4's stated fallback:
  *    an independent dollar-depth scan of the ORIGINAL text that excludes those
- *    spans. The `c1-dollar-body` self-test kind is its falsifier — delete the
- *    `insideBody()` guard and that red leg goes green.
+ *    spans. The `c1-dollar-body` self-test kind is its falsifier, and the line it
+ *    falsifies is the SCAN, not the guard. MEASURED 2026-09-09 on a scratch copy
+ *    (review finding WR-04): neutering `dollarBodyRanges()` to `{ranges: []}` makes
+ *    the red fixture EMIT its body INSERT and exit 0, while removing ONLY
+ *    `insideBody()` still exits 1 — via the independent `hasTag` refusal, with a
+ *    different message the leg's `expect` string tells apart. `hasTag` provably
+ *    subsumes `insideBody` (for any span inside a body, `r[0] <= first <= end <
+ *    r[1]`, so the overlap test always holds), so `insideBody()` adds no exclusion
+ *    power; it is kept for the better diagnosis, and the header used to claim it
+ *    was the falsified line.
  * 4. It says nothing about whether the rows are on TEST right now. It says
  *    which statements the restore replays.
  *
@@ -304,6 +312,19 @@ export function literalCheck(maskedStatement) {
   }
   const v = /\bVALUES\b/i.exec(maskedStatement);
   if (!v) return "carries no VALUES keyword — not a literal VALUES (C2)";
+  // ⛔ C2 IS ENFORCED OVER THE VALUES TUPLE ONLY, so the ON CONFLICT ACTION HAS TO
+  // BE CHECKED SEPARATELY — the slice below deliberately throws it away. Against a
+  // table the DROP just emptied a `DO UPDATE` arm is a no-op (nothing conflicts),
+  // but `auth.users` is this phase's one C3 exception precisely because its row
+  // SURVIVES the restore: a `DO UPDATE` there would MUTATE a pre-existing row on
+  // shared TEST inside a transaction that then commits. Measured 2026-09-09: all 22
+  // ON CONFLICT clauses in the emitted corpus are DO NOTHING, so this was latent
+  // (review finding WR-05). The allowlist's C4 idiom is idempotent seeds; anything
+  // else is a human's call.
+  const conflict = /\bON\s+CONFLICT\b([\s\S]*)$/i.exec(maskedStatement);
+  if (conflict && !/\bDO\s+NOTHING\b/i.test(conflict[1])) {
+    return "the ON CONFLICT action is not DO NOTHING — a DO UPDATE arm MUTATES a pre-existing row, and `auth.users` (the one C3 exception) SURVIVES the restore, so on shared TEST that row is somebody else's (C2)";
+  }
   let region = maskedStatement.slice(v.index + v[0].length);
   const stop = /\bON\s+CONFLICT\b|\bRETURNING\b/i.exec(region);
   if (stop) region = region.slice(0, stop.index);
@@ -356,13 +377,50 @@ export function prepareFile(src) {
   return { spans, lineOf };
 }
 
+// `"?id"?` — the QUOTED spelling has to match too. `maskSql` deliberately does not
+// blank quoted identifiers ("Quoted identifiers are CODE, not data"), so the masked
+// text still carries the `"`, and an unquoted-only head regex simply does not match
+// `INSERT INTO "public"."compute_job_kinds" …`. That is the spelling
+// `supabase/schema/baseline.sql` is written in from end to end — the house style one
+// directory over. A non-match here is SILENT (`modeAudit` `continue`s on a file with
+// neither an ok nor a rejected hit), so this blind spot would have looked exactly
+// like a clean audit. Measured 2026-09-09: zero migrations use it today, which is
+// why this was latent and not live (review finding WR-06).
+//
+// `(?![A-Za-z0-9_])` rather than `\b`: `\b` after a `"` is a word boundary against
+// the quote itself, so `fx_ref"` would match a table named `fx_ref_old` spelled
+// `"fx_ref_old"`. The negative lookahead is anchored on the character class the
+// identifier is actually made of.
+function quotedId(id) {
+  return `"?${id}"?`;
+}
+
 function headRe(schema, table) {
-  return schema === "public"
-    ? new RegExp(`^INSERT[\\t\\n ]+INTO[\\t\\n ]+(?:public[\\t\\n ]*\\.[\\t\\n ]*)?${table}\\b`, "i")
-    : new RegExp(
-        `^INSERT[\\t\\n ]+INTO[\\t\\n ]+${schema}[\\t\\n ]*\\.[\\t\\n ]*${table}\\b`,
-        "i",
-      );
+  const pfx =
+    schema === "public"
+      ? `(?:${quotedId("public")}[\\t\\n ]*\\.[\\t\\n ]*)?`
+      : `${quotedId(schema)}[\\t\\n ]*\\.[\\t\\n ]*`;
+  return new RegExp(
+    `^INSERT[\\t\\n ]+INTO[\\t\\n ]+${pfx}${quotedId(table)}(?![A-Za-z0-9_])`,
+    "i",
+  );
+}
+
+// A CTE-prefixed INSERT (`WITH x AS (…) INSERT INTO t …`) does not start with
+// INSERT, so `headRe` never matches it and the statement is SKIPPED IN SILENCE —
+// the one behaviour `--audit` exists to prevent. It is refused by name instead:
+// whether such a statement is replayable reference data is a judgement this script
+// is not equipped to make (the CTE can read existing rows, which is C2's whole
+// concern), so it must reach a human rather than a `continue`.
+function cteHeadRe(schema, table) {
+  const pfx =
+    schema === "public"
+      ? `(?:${quotedId("public")}[\\t\\n ]*\\.[\\t\\n ]*)?`
+      : `${quotedId(schema)}[\\t\\n ]*\\.[\\t\\n ]*`;
+  return new RegExp(
+    `^WITH\\b[\\s\\S]*\\bINSERT[\\t\\n ]+INTO[\\t\\n ]+${pfx}${quotedId(table)}(?![A-Za-z0-9_])`,
+    "i",
+  );
 }
 
 /**
@@ -375,11 +433,21 @@ function headRe(schema, table) {
 export function matchTable(src, prep, qualified) {
   const dot = qualified.indexOf(".");
   const re = headRe(qualified.slice(0, dot), qualified.slice(dot + 1));
+  const cteRe = cteHeadRe(qualified.slice(0, dot), qualified.slice(dot + 1));
   const ok = [];
   const body = [];
   const rejected = [];
   for (const s of prep.spans) {
-    if (!re.test(s.masked)) continue;
+    if (!re.test(s.masked)) {
+      if (!s.inBody && cteRe.test(s.masked)) {
+        rejected.push({
+          line: s.line,
+          reason:
+            "the statement is a CTE-prefixed INSERT (`WITH … INSERT INTO`) — a CTE can read existing rows, so whether this is literal reference data is not a judgement this extractor can make; classify it by hand rather than let it be skipped in silence (WR-06)",
+        });
+      }
+      continue;
+    }
     if (s.inBody) {
       body.push({ line: s.line });
       continue;
@@ -729,7 +797,7 @@ function modeAudit(io, allowlistPath, migrationsDir) {
  * 16 kinds, red+green each.`, exit 0. Raise this constant when the corpus grows
  * durably; never lower it to clear a red.
  */
-export const SELF_TEST_KINDS_FLOOR = 16;
+export const SELF_TEST_KINDS_FLOOR = 19;
 
 /**
  * @type {Array<{id:string, why:string, audit?:boolean, expect:string, greenStdout?:RegExp, greenAbsent?:RegExp}>}
@@ -739,6 +807,22 @@ export const SELF_TEST_KINDS = [
     id: "c1-dollar-body",
     why: "an allowlisted (file, table) whose only INSERT sits inside a DO body (C1). ⛔ This is RESEARCH A4's falsifier: remove insideBody() and this leg goes GREEN while a fixture INSERT becomes replayable.",
     expect: "inside a dollar-quoted body",
+  },
+  {
+    id: "c2-on-conflict-do-update",
+    why: "an ON CONFLICT arm that is not DO NOTHING MUTATES a pre-existing row, and `auth.users` survives the restore (C2, WR-05)",
+    expect: "the ON CONFLICT action is not DO NOTHING",
+  },
+  {
+    id: "quoted-identifier-head",
+    why: "the baseline.sql quoted spelling `INSERT INTO \"public\".\"t\"` must be CLASSIFIED, not silently skipped; the red leg pins that the head regex still discriminates by table (WR-06)",
+    expect: "no top-level literal INSERT INTO public.fx_ref found, but the allowlist pins 1",
+    greenStdout: /INSERT INTO "public"\."fx_ref"/,
+  },
+  {
+    id: "cte-prefixed-insert",
+    why: "`WITH … INSERT INTO t` does not start with INSERT, so it evades the head regex; it must be REFUSED by name rather than skipped in silence (WR-06)",
+    expect: "CTE-prefixed INSERT",
   },
   {
     id: "c2-insert-select",
@@ -965,7 +1049,14 @@ const ENTRY = process.argv[1];
 if (ENTRY !== undefined) {
   const self = fileURLToPath(import.meta.url);
   if (resolve(ENTRY) === resolve(self) || samePath(ENTRY, self)) {
-    process.exit(main(process.argv.slice(2)));
+    // `process.exitCode`, not `process.exit()`: writes to a PIPE are asynchronous
+    // in node, and exiting on the next tick can drop buffered bytes. The paths that
+    // matter most redirect to files (synchronous) — but the two bare
+    // `run: node scripts/extract-reference-inserts.mjs --self-test|--audit` steps
+    // write into the Actions log pipe, and `exit 1 with no reason printed` is
+    // precisely the "could not measure is never a pass" mode this file is built
+    // around (review finding WR-10). Setting the code lets the event loop drain.
+    process.exitCode = main(process.argv.slice(2));
   } else if (basename(resolve(ENTRY)) === basename(self)) {
     process.stderr.write(
       [
