@@ -1,0 +1,189 @@
+# 164.8.1-04-RESTORE.log — the replay run for real, preflight first
+#
+# ⛔ NAMES AND COUNTS ONLY. `.planning/` is TRACKED and this repo is PUBLIC: no host,
+#    no DSN, no credential, no row VALUES. Every line below is reproducible from the
+#    two run logs via `gh api repos/:owner/:repo/actions/jobs/<job-id>/logs`
+#    (NEVER `gh run view --log`, which truncates and makes a failure read as a hang).
+#
+# Written 2026-09-09 by the orchestrator, from the two workflow runs named below.
+
+## 0. What this run had to settle
+
+RESEARCH A1 — whether the connecting role can INSERT into `public.compute_job_kinds`
+on HOSTED TEST — is the one thing the self-test lane CANNOT prove: the lane's
+`postgres` is initdb's SUPERUSER, so `rolsuper` is always true there and the
+BYPASSRLS assertion can be satisfied but never falsified. `public.compute_job_kinds`
+carries FORCE ROW LEVEL SECURITY (supabase/schema/baseline.sql:9578) and its ONLY
+policy is SELECT-only (`compute_job_kinds_read`, :13012), so FORCE removes the owner
+exemption and an INSERT without BYPASSRLS aborts with 42501. Only a full transaction
+against hosted TEST measures it. That is what `--mode preflight` is for.
+
+## 1. PREFLIGHT — the whole transaction, rolled back
+
+mode:            preflight
+run:             34329459044
+head sha:        a622df27            (the merge commit of PR #764)
+conclusion:      success
+
+which_database:  OK — the marker names TEST and not PROD
+                 (`shobj_description(oid,'pg_database')`; `current_database()` is
+                  `postgres` on BOTH projects and proves nothing)
+
+gates ahead of the write, all green:
+  PROD-ledger premise holds: supabase-migrate.yml concluded success at 7146c574,
+    an ancestor of HEAD, and no migration file was added between that commit and HEAD
+  baseline sha256 OK — supabase/schema/baseline.sql matches the row in BASELINE.md
+  baseline freshness OK — baseline epoch 1788854882 >= migrations epoch 1788852989
+  migrations: 266 file(s) under supabase/migrations
+  extract-reference-inserts self-test OK: 16 kinds, red+green each.
+  extract-reference-inserts audit OK: 22 entr(ies), 19 file(s), 8 table(s),
+    23 statement(s); every pinned count re-measured, no unlisted top-level reference INSERT
+  restore-test-from-baseline: self-test OK (24/24 arms)
+  shared-TEST mutex 61616158: held (1 session(s))
+
+refuse_bad_refdata_allowlist note line:
+  refdata: 8 table(s) from 22 allowlist line(s) under
+  scripts/restore-test-refdata-allowlist.txt, each with a pinned statement count
+
+pre-census (read-only):
+  tables=62  functions=120  policies=154  ledger_rows=266  ledger_bad_version=0
+  refdata:auth.users=30015
+  refdata:public.compute_job_kinds=0
+  refdata:public.discovery_categories=0
+  refdata:public.feature_flags=0
+  refdata:public.profiles=7
+  refdata:public.strategies=0
+  refdata:public.system_flags=0
+  refdata:public.system_settings=0
+  survivors censused: 2
+  expected shape from the dump text: tables=62 policies=154 functions=120
+
+transaction (mode=preflight):
+  refdata: 23 statement(s) replayed into 8 table(s), gated inside the transaction
+  against each table's pinned statement count (count(*) >= expected, not merely
+  non-empty) and against compute_jobs_kind_check over public.compute_job_kinds
+  → ran to its ROLLBACK terminator. NO `relation … does not exist`. NO
+    `violates row-level security`. NO `permission denied`. NO ERROR line at all.
+
+post-census (read-only): byte-identical to the pre-census above.
+verdict: preflight: post-census == pre-census (byte-for-byte) — the transaction ran
+         to its ROLLBACK terminator and the database is unchanged; mode=preflight
+
+⭐ A1 ANSWERED. The full statement stream, including 23 INSERTs of which 15 target
+   `compute_job_kinds` under FORCE RLS, completed without an RLS error. Had the role
+   lacked BYPASSRLS the first such INSERT would have raised 42501 and taken the
+   transaction with it. It did not. A1 HOLDS on hosted TEST — measured, not assumed.
+
+## 2. RESTORE — the same stream, committed
+
+mode:            restore
+confirm token:   27826b76   (re-derived at this ref from sha256(baseline.sql); NOT
+                             pasted from memory. Unchanged by this phase, as L-01
+                             predicted: the replay lives in the script, not the dump —
+                             `git log` shows no commit of this phase touching baseline.sql)
+run:             34330741339
+head sha:        a622df27
+conclusion:      success — EVERY step green, none skipped
+
+activity gate:   success (skipped under preflight; ARMED here, and quiet)
+post-verify with the Supabase CLI — ledger SHAPE: success
+                 ⚠️ This step was SKIPPED in run 34274355596 (2026-09-08) because the
+                 restore step failed ahead of it on the post-commit extension guard.
+                 This is its first execution.
+
+pre-census: identical to the preflight's, above.
+
+transaction (mode=restore): committed.
+
+post-census (read-only):
+  tables=62  functions=120  policies=154  ledger_rows=266  ledger_bad_version=0
+  refdata:auth.users=30015                      (unchanged — other schema, survives)
+  refdata:public.compute_job_kinds=16           (was 0)
+  refdata:public.discovery_categories=5         (was 0)
+  refdata:public.feature_flags=1                (was 0)
+  refdata:public.profiles=1                     (was 7 — see the note below)
+  refdata:public.strategies=1                   (was 0)
+  refdata:public.system_flags=2                 (was 0)
+  refdata:public.system_settings=1              (was 0)
+
+summary line:
+  restore: tables=62 policies=154 functions=120 ledger_rows=266 survivors=2/2
+           filtered=1 mode=restore
+
+ERROR lines in the run: none. The post-commit extension guard did NOT fire this time
+  (it fired on 2026-09-08 on a GAIN — pg_net — reported in the language of a loss; that
+  guard's defect is booked separately and is NOT in this phase's scope).
+
+Two counts that look wrong and are not:
+  * compute_job_kinds = 16 from 15 statements. The 15 statements yield 16 DISTINCT
+    kind names, and `compute_jobs_kind_check` admits exactly those 16
+    (supabase/schema/baseline.sql:1334). The gate's second leg compared the two sets
+    INSIDE the transaction and did not fire.
+  * profiles 7 → 1. This is the DEFINITION of a restore, not a loss:
+    `DROP SCHEMA public CASCADE` removes the table with all 7 rows, the schema-only
+    dump recreates it empty, and the replay re-inserts exactly the ONE allowlisted
+    sentinel. The other 6 were runtime rows from other CI runs on this SHARED
+    database — which is why the activity gate ran armed here and reported quiet.
+
+## 3. INDEPENDENT VERIFICATION — not the script's word for it
+
+(a) Direct read of TEST after the run, targeted at the two rows the failing jobs
+    named BY NAME rather than at aggregate counts:
+      which_database        ✅ TEST
+      compute_job_kinds     16      sync_trades present:  1
+      discovery_categories   5      crypto-sma  present:  1
+      feature_flags          1
+      system_flags           2
+      system_settings        1
+
+(b) ⭐ THE FALSIFIABLE TEST. CI run 34329426898 on sha a622df27 was RED before the
+    restore. Its failed jobs were re-run AFTER the restore — SAME COMMIT, same tests,
+    only the DATABASE changed in between (run started 08:29:51Z, restore finished
+    08:47:39Z):
+
+      python        failure → success     27 failures, 26 of them
+                                          `compute_jobs_kind_fkey` violations
+                                          (`Key (kind)=(sync_trades) is not present
+                                          in table "compute_job_kinds"`), 1
+                                          `PGRST116 … 0 rows` on feature_flags.
+                                          ⚠️ Coverage was NEVER the problem:
+                                          `Required test coverage of 80% reached.
+                                          Total coverage: 90.97%`.
+      e2e-seeded    failure → success     `discovery_categories row for
+                                          slug='crypto-sma' not found`
+
+    This is why the reference rows were NOT hand-seeded when CI was red and other
+    teams were blocked. Hand-seeding would have made CI green and destroyed the
+    pre-census that makes the replay PROVABLE. The allowlist forbids it in writing
+    ("a missing reference row is a NAMED failure of the restore's own gate; it is
+    never fixed by a hand-run INSERT") and so does the seeder's own error message.
+
+(c) ⚠️ THE RESTORE ALSO REVEALED A DEFECT, and it is a finding rather than damage.
+    With `python` green, `sql-tests` ran for the FIRST time in this sequence
+    (`P1956` appears ZERO times in the 2026-09-08 sql-tests log, which died earlier
+    at the ledger stage) and
+    `supabase/tests/test_commit_scenario_batch_p1956_range.sql` failed: it asserted
+    that `bridge_outcomes.percent_allocated` REJECTS 100 and 0, citing mig-059's
+    inline CHECK — which
+    `20260528223200_drop_stale_bridge_outcomes_percent_inline_check.sql:53` DROPPED
+    in May, its own filename calling it stale. The test had stood green for four
+    months because nothing applies migrations to shared TEST, so TEST still carried
+    the dropped constraint. Fixed and shipped as v0.77.28.0 (PR #765); the re-base
+    added a leg at 100.01 so flipping two legs to ACCEPT does not leave `-1` as the
+    only rejecting arm. FULL CI GREEN afterwards, with the test executing:
+      `Test 5 passed: P1956 range CHECK boundaries verified — -1 and 100.01
+       REJECTED, 0 and 100 ACCEPTED`
+
+## 4. What is NOT closed by this run
+
+* `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` — the replay reproduces INSERTs, not the
+  UPDATEs that later migrations applied to the same rows. The sentinel profile comes
+  back with `manager_status` at the column default while the ledger holds a row for
+  `20260521150000`. Bounded: all five measured UPDATEs land on the teaser trio, none
+  on the FK/CHECK-bearing tables. Routed to Phase 164.9 via `/gsd-phase --edit 164.9`.
+* `[164.8.1-TEST-ANALYTICS-URL-PROD]` — TEST's cron can POST to the PROD analytics
+  service. Pre-existing, replayed faithfully by founder decision L-03, routed to 164.9.
+* The BYPASSRLS assertion added to the transaction preamble is now SATISFIED on hosted
+  TEST but has never been observed RED: neither the lane (superuser) nor TEST offers a
+  role without BYPASSRLS. Recorded rather than claimed as armed.
+* The post-commit extension guard's equality-on-count defect is untouched by design.

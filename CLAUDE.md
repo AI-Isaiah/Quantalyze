@@ -122,6 +122,56 @@ answered by `[REDUNDER-SUBSET-SPLIT]`, never by raising again (`ci.yml` carries 
 superseded CURRENCY paragraph — now lives in `docs/sql-gate-lineage.md`.** It is history; nothing
 in it is a live constant.
 
+## CHANGELOG discipline (founder instruction, 2026-09-09)
+
+⛔ **EVERY ship writes a CHANGELOG entry. No exceptions, and this OVERRIDES the three-sentence
+CHANGELOG step in `gsd-core/workflows/ship.md`.** That step is taste guidance with no mechanism —
+whether a commit reaches the entry depends on the model's attention. MEASURED 2026-09-09: commit
+`8677c790` shipped 672 changed lines, two rebuilt gates and a new routed deferral with **no entry
+and no version bump**, while a smaller commit the same day got both. A step that cannot fail did
+not fail; it was simply skipped.
+
+**THE MECHANISM — adopted from `~/.claude/skills/gstack/ship/sections/changelog.md`, which has
+one and is therefore the better instruction. Run it in this order:**
+
+1. `git log <base>..HEAD --oneline` — enumerate EVERY commit on the branch. **Count them.**
+   This list is a CHECKLIST, not background reading.
+2. `git diff <base>...HEAD` — read the full diff. What a commit *says* and what it *changed*
+   diverge, and this repo has a dated record of that class.
+3. **Group by theme BEFORE writing a line.** New capability · behaviour change · bug fix ·
+   removal · infrastructure/tooling/tests · refactor.
+4. Write ONE unified entry per version, newest first, `## [X.Y.Z.B] - YYYY-MM-DD`. If entries
+   for earlier commits on the same branch already exist, REPLACE them with the unified one.
+5. ⛔ **CROSS-CHECK, and treat a miss as a defect:** every commit from step 1 must map to at
+   least one bullet. N commits over K themes ⇒ all K themes present. An unrepresented commit is
+   not "minor", it is an unshipped fact.
+6. Never ask the founder to describe the changes. Infer them from the diff and the history.
+
+**Section vocabulary — this repo's own, NOT keep-a-changelog's four.** Measured across
+`CHANGELOG.md`: `### Fixed` (205), `### Added` (141), `### Changed` (140), `### Removed` (24),
+`### Tests` (20), `### Notes` (17), `### Security` (11), `### Root cause` (6), `### Why` (4).
+Use the one that fits; do not flatten a root-cause note into "Fixed".
+
+⚠️ **ONE gstack rule deliberately NOT adopted, so the divergence is a decision and not drift.**
+gstack says *"lead with what the user can now do … never mention TODOS.md, internal tracking, or
+contributor-facing details."* That fits a product changelog and fights this one: the entries here
+are largely infrastructure — SQL gates, mutation runners, restore lanes — with no end-user verb,
+and they deliberately name phases, TODOS ids and routed deferrals so the release notes and the
+ledger agree. Keep THIS repo's voice: say what changed, what it means for whoever reads it next,
+and carry the known limits and anything recorded-rather-than-fixed. Import gstack's MECHANISM,
+not its audience.
+
+⛔ **The entry is written BEFORE the push, in the same commit as the VERSION bump**
+(`chore(release): vX.Y.Z.B — <name>`), so a filtered `-pr` branch cherry-picks it: VERSION,
+package.json and CHANGELOG.md are non-planning paths and always survive the filter.
+⚠️ `VERSION` and `package.json` must be BYTE-EQUAL 4-digit strings — `src/__tests__/critical-regressions.test.ts`
+asserts it. Never run `npm version` (it rewrites the lockfile and can normalise to 3 digits).
+
+⚠️ **Nothing in CI enforces any of this yet**, which is why it lives HERE rather than only in the
+global workflow file — `/gsd-update` overwrites `~/.claude/gsd-core/workflows/ship.md` and has
+already eaten one edit to it. The durable backstop is a repo-owned gate that fails a PR touching
+non-planning paths without moving `VERSION`; until that exists, this section is the rule.
+
 ## Design System
 Always read DESIGN.md before making any visual or UI decisions.
 All font choices, colors, spacing, and aesthetic direction are defined there.
