@@ -1031,6 +1031,70 @@ describe("Critical regression guards", () => {
     // mirror apply; without a test the asymmetry can re-emerge in a
     // future rebase.
     describe("supabase-migrate plan/apply env-gate symmetry", () => {
+      /**
+       * ⛔ IN-04 (164.8-REVIEW, closed 2026-09-09). The two `apply:` pins below used to
+       * read `src.slice(applyIdx)` — everything from the job header to END OF FILE. That
+       * is correct ONLY while `apply` happens to be the last job in the workflow, which
+       * is a fact about today's file and not a property anyone maintains. The moment a
+       * job is appended after it, both pins start matching `environment: Production`,
+       * `needs: [plan, apply-test]` and the `if:` result clause ANYWHERE in that
+       * successor — so `apply` could lose its reviewer gate entirely and these pins would
+       * go on passing on a neighbour's text. A pin that reads past its subject is not
+       * pinning its subject.
+       *
+       * The bound is the `jobBlock` shape from `test-restore-workflow-wiring.test.ts:85`
+       * — the next 2-space job key — COPIED here rather than imported. The repo's wiring
+       * tests are deliberately self-contained files (see the header of
+       * `supabase-migrate-test-first.test.ts`): a shared helper module that only wiring
+       * tests import buys nothing and couples pins that must be able to fail
+       * independently. The calibration below appends a fake trailing job and proves the
+       * bound excludes it while the old unbounded slice swallowed it.
+       */
+      const APPLY_JOB_RE = /^ {2}apply:\s*\n/m;
+      const NEXT_JOB_RE = /\n {2}[A-Za-z_][\w-]*:\n/;
+      const applyJobBlock = (src: string, applyIdx: number): string => {
+        const bodyStart = src.indexOf("\n", applyIdx) + 1;
+        const after = src.slice(bodyStart);
+        const next = after.match(NEXT_JOB_RE);
+        return (
+          src.slice(applyIdx, bodyStart) + (next ? after.slice(0, next.index) : after)
+        );
+      };
+
+      it("CALIBRATION (IN-04): the apply-job slice stops at the next top-level job", () => {
+        const src = readText(".github/workflows/supabase-migrate.yml");
+        const applyIdx = src.search(APPLY_JOB_RE);
+        expect(applyIdx, "supabase-migrate.yml: apply job not found").toBeGreaterThanOrEqual(0);
+
+        // `apply` is the LAST job today, so on the real file bounded === unbounded and
+        // the bound cannot be shown to bite. Seed the condition it exists for.
+        const FAKE = "\n  zz_after_apply:\n    needs: [plan, apply-test]\n    if: needs.apply-test.result == 'success'\n";
+        const seeded = `${src.trimEnd()}\n${FAKE}`;
+        expect(seeded, "CALIBRATION: the fake trailing job was not appended").not.toBe(src);
+
+        const seededIdx = seeded.search(APPLY_JOB_RE);
+        expect(
+          seeded.slice(seededIdx),
+          "CALIBRATION: the UNBOUNDED slice does not contain the fake job — the calibration " +
+            "is seeded on the wrong string and proves nothing about the bound",
+        ).toContain("zz_after_apply");
+        expect(
+          applyJobBlock(seeded, seededIdx),
+          "the bounded apply-job slice reaches into the job that FOLLOWS apply. Both pins " +
+            "below would then be satisfiable by a successor's text — `apply` could lose its " +
+            "environment: Production reviewer gate and its needs/if wiring while they stay " +
+            "green (IN-04)",
+        ).not.toContain("zz_after_apply");
+
+        // …and the bound must not cut the subject short: the real block still carries the
+        // lines the two pins ask about.
+        const real = applyJobBlock(src, applyIdx);
+        expect(real, "the bounded slice lost the apply job's own body").toMatch(
+          /environment:\s*Production/,
+        );
+        expect(real).toMatch(/needs:\s*\[plan,\s*apply-test\]/);
+      });
+
       it("supabase-migrate.yml plan job declares environment: Production", () => {
         const src = readText(".github/workflows/supabase-migrate.yml");
         // Anchor on the start-of-line `  plan:` job key followed by its
@@ -1051,12 +1115,13 @@ describe("Critical regression guards", () => {
         // Apply is the last top-level job; capture from `^  apply:` to EOF.
         // The `$` anchor in multiline mode only matches end-of-line, so use
         // a lookahead that matches either the next top-level job or EOL+EOF.
-        const applyIdx = src.search(/^ {2}apply:\s*\n/m);
+        const applyIdx = src.search(APPLY_JOB_RE);
         expect(
           applyIdx,
           "supabase-migrate.yml: apply job not found",
         ).toBeGreaterThanOrEqual(0);
-        const applyJob = src.slice(applyIdx);
+        // Bounded at the next top-level job (IN-04) — see the note above this describe.
+        const applyJob = applyJobBlock(src, applyIdx);
         expectMatch(
           applyJob,
           /environment:\s*Production/,
@@ -1091,12 +1156,13 @@ describe("Critical regression guards", () => {
 
       it("supabase-migrate.yml apply job waits for apply-test", () => {
         const src = readText(".github/workflows/supabase-migrate.yml");
-        const applyIdx = src.search(/^ {2}apply:\s*\n/m);
+        const applyIdx = src.search(APPLY_JOB_RE);
         expect(
           applyIdx,
           "supabase-migrate.yml: apply job not found",
         ).toBeGreaterThanOrEqual(0);
-        const applyJob = src.slice(applyIdx);
+        // Bounded at the next top-level job (IN-04) — see the note above this describe.
+        const applyJob = applyJobBlock(src, applyIdx);
         expectMatch(
           applyJob,
           /needs:\s*\[plan,\s*apply-test\]/,
