@@ -711,13 +711,44 @@ STUB
   local rc pass=0 total=0
   local -a results=()
 
+  # ⛔ THE ARMS RATCHET (WR-03, Phase 164.8.2). Without it the tally below read
+  # `self-test OK (${pass}/${total} arms …)` — a denominator that MOVES WITH THE
+  # CORPUS. Delete an arm and the run printed a smaller PASSED and exited 0, so a
+  # cleanup could remove the frontier arms and the gate would report success for
+  # having tested less. A vanished arm is a RED, not a smaller PASSED.
+  #
+  # ⭐ Raise it only TOGETHER with the arm that adds one; never lower it to make a
+  # run green — that is deleting a proof.
+  #
+  # ⚠️ THIS CONSTANT IS A DELIBERATE COPY of `EXPECTED_ARMS` in
+  # scripts/restore-test-from-baseline.sh (whose own `run_arm` comment records that
+  # it was copied FROM this file — the twins stay twins by copy). Separate constants
+  # per file is this repo's wiring convention, stated outright in Phase 164.8 Plan 05
+  # Task 2: the self-tests are self-contained. Do NOT "fix" this into a shared module.
+  #
+  # ⚠️ `EXPECTED_ARMS` is OUTSIDE gate-family-meta.test.ts's threshold name class
+  # (no FLOOR/MIN/CEILING/MAX/LIMIT), so SC-9 will never see it. The date below is
+  # kept honest ONLY by src/__tests__/drift-check-scripts.test.ts, which pins this
+  # line live-exactly-once and pins the `prints N/N` sentence against the value.
+  #
+  # Regenerate with `bash scripts/test-ledger-drift-check.sh --self-test`, and the
+  # live arm count with
+  # `grep -av '^\s*#' scripts/test-ledger-drift-check.sh | grep -ac '^  run_arm "'`.
+  # `--self-test --expect-inverted` exits 1. No database: the harness is stub-driven.
+  # MEASURED 2026-09-09 — `--self-test` prints 9/9 and exits 0.
+  EXPECTED_ARMS=9
+
   run_arm() {
     local label="$1" want="$2"
     shift 2
     total=$((total + 1))
     rc=0
     ( "$@" ) >/dev/null 2>&1 || rc=$?
-    if [ "$inverted" = "--expect-inverted" ]; then
+    # ⚠️ The `ARM_FORCE_INVERT` clause is the sibling's one extra `||`
+    # (scripts/restore-test-from-baseline.sh, `run_arm`). It exists for the
+    # harness-calibration arm below, which must be able to turn the flip on for
+    # ONE subshell without setting `--expect-inverted` for the whole run.
+    if [ "$inverted" = "--expect-inverted" ] || [ "${ARM_FORCE_INVERT:-0}" = "1" ]; then
       want=$(( want == 0 ? 1 : 0 ))
     fi
     if [ "$rc" -eq "$want" ]; then
@@ -811,12 +842,62 @@ STUB
   # one did not, which is a defect rather than a timing artefact.
   run_arm "tip-equal-missing RED" 1 arm_env "$tmp/live" "20260201000000_twin" "selftest_fn" "$tmp/mig_tipeq"
 
+  # ── HARNESS CALIBRATION (WR-03, Phase 164.8.2) — the LAST arm ──────────────
+  # ⛔ WITHOUT THIS ARM every `ok` above is a claim about a harness nobody has
+  # seen say no. Both halves run `run_arm` in a SUBSHELL so their tallies cannot
+  # reach the real `total`/`pass`, against a leg KNOWN to exit 1, declared want 0.
+  # With the flip ON that must read `ok`; with it OFF it must read `FAIL`.
+  #
+  # ⚠️ BELT-AND-BRACES, NOT LOAD-BEARING for WR-03. `--expect-inverted` is already
+  # driven externally at the WHOLE-RUN level by
+  # src/__tests__/drift-check-scripts.test.ts ("--self-test FAILS when the gate is
+  # neutered"), which is what proves the arms are not decorative. This arm proves
+  # the narrower thing that check cannot isolate: `run_arm`'s FAIL branch is
+  # reachable. It is the shape CONTEXT Area 3 names, copied from
+  # scripts/restore-test-from-baseline.sh's `arm_harness_calibration`.
+  arm_calib_leg() {
+    # The `missing-ledger-row RED` invocation — the gate's own red mode, so this
+    # leg's exit 1 is a measured property of the gate and not an invented failure.
+    arm_env "$tmp/live" "20260829000000_selftest"
+  }
+  arm_harness_calibration() {
+    local flipped plain
+    flipped=$( total=0; pass=0; results=(); ARM_FORCE_INVERT=1
+               run_arm "calib" 0 arm_calib_leg; printf '%s\n' "${results[@]}" )
+    plain=$(   total=0; pass=0; results=(); ARM_FORCE_INVERT=0
+               run_arm "calib" 0 arm_calib_leg; printf '%s\n' "${results[@]}" )
+    echo "calibration, flip ON  -> ${flipped}"
+    echo "calibration, flip OFF -> $(printf '%s' "$plain" | head -1)"
+    case "$flipped" in
+      *"  ok   calib"*) ;;
+      *) echo "MEASURE_FAIL: with the flip the harness did not report ok for a command that exits 1 against want 0 — the inversion no longer inverts."; return 1 ;;
+    esac
+    case "$plain" in
+      *"  FAIL calib"*) ;;
+      *) echo "MEASURE_FAIL: WITHOUT the flip the harness did not report FAIL for a command that exits 1 against want 0. run_arm has stopped discriminating and every ok in this run is worthless."; return 1 ;;
+    esac
+    return 0
+  }
+  run_arm "harness calibration: run_arm can report FAIL, and the flip inverts" 0 arm_harness_calibration
+
   printf '%s\n' "${results[@]}"
+  # ⛔ THE COUNT CHECK COMES FIRST, and the success line comes LAST — the
+  # sibling's ordering (scripts/restore-test-from-baseline.sh). A run that lost an
+  # arm must not be able to print a success narrative at all, and a run that lost
+  # an arm AND passed the rest must not read as PASSED.
+  if [ "$total" -ne "$EXPECTED_ARMS" ]; then
+    echo "SELF-TEST FAIL: ${total} arms ran but EXPECTED_ARMS is ${EXPECTED_ARMS}. An arm that disappeared is a RED, not a smaller PASSED."
+    return 1
+  fi
   if [ "$pass" -ne "$total" ]; then
     echo "SELF-TEST FAIL: ${pass}/${total} arms behaved as declared."
     return 1
   fi
-  echo "${GATE}: self-test OK (${pass}/${total} arms — every red mode fires and both green paths pass)."
+  # ⛔ THE DENOMINATOR IS THE RATCHET, AND SAYS SO. Below both checks `pass`,
+  # `total` and `EXPECTED_ARMS` are all equal by construction, so printing
+  # `${total}` here would be indistinguishable from printing the constant — right
+  # up until an arm vanished, which is the one moment the difference matters.
+  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — every red mode fires, both green paths pass, and the harness is calibrated)."
   return 0
 }
 

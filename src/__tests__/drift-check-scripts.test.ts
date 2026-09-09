@@ -2965,6 +2965,7 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
   // GREEN (the apply-on-merge window is exempt) and the tip-EQUAL RED (the
   // boundary, where an off-by-one would silently exempt a real defect). Deleting
   // any one of them reds this test on the missing label rather than on a number.
+  // Phase 164.8.2 added the harness-calibration arm (WR-03).
   it("--self-test proves every red mode and both green paths, and exits 0", () => {
     const res = spawnSync("bash", [LEDGER_GATE, "--self-test"], {
       cwd: process.cwd(),
@@ -2980,6 +2981,132 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
     expect(out).toContain("below-frontier-missing RED");
     expect(out).toContain("above-frontier-missing GREEN");
     expect(out).toContain("tip-equal-missing RED");
+    expect(out).toContain("harness calibration: run_arm can report FAIL, and the flip inverts");
+  });
+
+  // ── WR-03 (Phase 164.8.2) — THE ARM RATCHET IS A LIVE, DATED, SINGLE LINE ──
+  // ⚠️ THIS BLOCK IS A DELIBERATE HAND COPY of the twin in
+  // src/__tests__/restore-test-from-baseline.test.ts ("EXPECTED_ARMS=26 is a live
+  // line, exactly once, with its MEASURED date beside it"), including its region
+  // slicer. This repo's wiring tests are self-contained files by convention
+  // (Phase 164.8 Plan 05 Task 2) — do NOT extract a shared helper.
+  //
+  // ⛔ WHY THE COPY EXISTS AT ALL: `EXPECTED_ARMS` does not match
+  // gate-family-meta.test.ts's threshold name class (no FLOOR/MIN/CEILING/MAX/
+  // LIMIT), so SC-9's bare-measurement scan will never see it. These legs are the
+  // ONLY thing keeping the constant single, live, and its date honest.
+  //
+  // ⛔ AND WHY THE COUNT IS DERIVED, NOT RESTATED: the sibling hardcodes the
+  // needle, which reds on any bump and forces a reviewed test edit. Here the same
+  // job is done by the `prints N/N` AGREEMENT leg — you cannot move the constant
+  // without also moving the dated MEASURED sentence beside it. That is the leg the
+  // sibling had to ADD after its date check proved blind to a count drift.
+  it("WR-03: EXPECTED_ARMS is a live line, exactly once, with its MEASURED date and an agreeing `prints N/N`", () => {
+    const SRC = readFileSync(LEDGER_GATE, "utf8");
+
+    /** A line is LIVE when its first non-blank character does not open a `#` comment. */
+    const isLive = (l: string) => {
+      const t = l.trim();
+      return t !== "" && !t.startsWith("#");
+    };
+    /** How many LIVE lines of `text` contain `needle`. */
+    const liveCount = (text: string, needle: string) =>
+      text.split("\n").filter((l) => isLive(l) && l.includes(needle)).length;
+    /**
+     * `self_test() {` to the closing `}` before the `case "${1:-}"` dispatcher.
+     * Sliced rather than asserted whole-file: `EXPECTED_ARMS` must live INSIDE the
+     * harness it ratchets, and a needle found in the dispatcher would be prose.
+     */
+    const selfTestRegion = (text: string): string => {
+      const lines = text.split("\n");
+      const a = lines.findIndex((l) => l.startsWith("self_test() {"));
+      if (a < 0) return "";
+      const b = lines.findIndex((l, i) => i > a && l.startsWith('case "${1:-}"'));
+      return b < 0 ? "" : lines.slice(a, b).join("\n");
+    };
+
+    const region = selfTestRegion(SRC);
+    expect(
+      region.split("\n").length,
+      "the self_test() region is empty — its anchor moved, and every pin below is now vacuously true",
+    ).toBeGreaterThan(20);
+
+    // (a) EXACTLY ONE live constant. A commented-out ratchet is not a ratchet,
+    // and two of them can disagree.
+    const armsLines = region
+      .split("\n")
+      .filter((l) => isLive(l) && /^EXPECTED_ARMS=\d+$/.test(l.trim()));
+    expect(
+      armsLines.length,
+      "the arm ratchet is no longer a single live `EXPECTED_ARMS=<n>` line inside self_test()",
+    ).toBe(1);
+    const ARMS = Number(armsLines[0].trim().split("=")[1]);
+    expect(ARMS > 0).toBe(true);
+    const NEEDLE = `EXPECTED_ARMS=${ARMS}`;
+    expect(liveCount(region, NEEDLE)).toBe(1);
+
+    // (b) SC-9's shape, applied by hand because SC-9 itself cannot see this name:
+    // a MEASURED token AND a date on the line or the one above it.
+    const lines = region.split("\n");
+    const at = lines.findIndex((l) => isLive(l) && /^EXPECTED_ARMS=\d+$/.test(l.trim()));
+    const beside = `${lines[at - 1] ?? ""}\n${lines[at]}`;
+    expect(beside, "EXPECTED_ARMS carries no MEASURED token beside it").toContain("MEASURED");
+    expect(beside, "EXPECTED_ARMS carries no date beside it").toMatch(/\b20\d\d-\d\d-\d\d\b/);
+
+    // (c) The harness must ASSERT the count, and assert it BEFORE the pass check.
+    expect(liveCount(region, 'if [ "$total" -ne "$EXPECTED_ARMS" ]; then')).toBe(1);
+    expect(liveCount(region, 'if [ "$pass" -ne "$total" ]; then')).toBe(1);
+    const countAt = lines.findIndex((l) => isLive(l) && l.includes('-ne "$EXPECTED_ARMS"'));
+    const passAt = lines.findIndex((l) => isLive(l) && l.includes('if [ "$pass" -ne "$total" ]'));
+    expect(
+      countAt,
+      "the pass check runs before the count check — a run that lost an arm would report a smaller PASSED first",
+    ).toBeLessThan(passAt);
+
+    // (d) The SUCCESS LINE's denominator is the RATCHET, not the running total.
+    expect(
+      liveCount(region, "${pass}/${EXPECTED_ARMS} arms"),
+      "the success line no longer prints the constant as its denominator — `${total}` moves with the corpus and reads as a pass for having tested less",
+    ).toBe(1);
+    expect(liveCount(region, "${pass}/${total} arms —")).toBe(0);
+
+    // (e) THE PROSE AGREES WITH THE CONSTANT. Derived from the constant so this
+    // assertion cannot itself go stale.
+    const printsClaims = SRC.split("\n").filter((l) => /prints \d+\/\d+/.test(l));
+    expect(
+      printsClaims.length,
+      "no `prints N/N` sentence beside the ratchet — it is the human-readable half of the same fact and this leg exists to keep the two from drifting",
+    ).toBeGreaterThan(0);
+    for (const claim of printsClaims) {
+      expect(
+        claim,
+        `a comment claims ${/prints \d+\/\d+/.exec(claim)?.[0]} while EXPECTED_ARMS is ${ARMS}`,
+      ).toContain(`prints ${ARMS}/${ARMS}`);
+    }
+
+    // ── CALIBRATIONS. Each mutation is asserted to have APPLIED first: a neuter
+    // that does not apply reads as GREEN, which is the defect class this whole
+    // phase is about.
+    // MOVED — the value-exact needle must stop matching, and the prose must disagree.
+    const moved = SRC.replace(`\n  ${NEEDLE}\n`, `\n  EXPECTED_ARMS=${ARMS + 1}\n`);
+    expect(moved).not.toBe(SRC);
+    expect(liveCount(selfTestRegion(moved), NEEDLE)).toBe(0);
+    expect(
+      SRC.split("\n")
+        .filter((l) => /prints \d+\/\d+/.test(l))
+        .every((l) => l.includes(`prints ${ARMS + 1}/${ARMS + 1}`)),
+      "the `prints N/N` prose still agrees with a MOVED constant, so the agreement leg is vacuous",
+    ).toBe(false);
+
+    // COMMENTED OUT — a whole-file `toContain` would still pass; this pin must not.
+    const commented = SRC.replace(`\n  ${NEEDLE}\n`, `\n  # ${NEEDLE}\n`);
+    expect(commented).not.toBe(SRC);
+    expect(liveCount(selfTestRegion(commented), NEEDLE)).toBe(0);
+
+    // DOUBLED — two ratchets are a disagreement waiting to happen.
+    const doubled = SRC.replace(`\n  ${NEEDLE}\n`, `\n  ${NEEDLE}\n  ${NEEDLE}\n`);
+    expect(doubled).not.toBe(SRC);
+    expect(liveCount(selfTestRegion(doubled), NEEDLE)).toBe(2);
   });
 
   it("--self-test FAILS when the gate is neutered (the self-test itself can fail)", () => {
