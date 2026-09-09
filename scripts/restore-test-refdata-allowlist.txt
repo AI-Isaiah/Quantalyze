@@ -1,0 +1,141 @@
+# Reference-data allowlist for the TEST restore — Phase 164.8.1.
+#
+# DATED 2026-09-09. Every count below was MEASURED at this HEAD by
+# `node scripts/extract-reference-inserts.mjs --audit`, which prints the census
+# this file must agree with. ⛔ Regenerate; never trust a number restated in
+# prose. If the run disagrees with a line here, the RUN is right.
+#
+# ── WHAT AN ENTRY IS ───────────────────────────────────────────────────────
+# One line = one (migration file, target table, pinned top-level statement
+# count) triple, plus the consumer that reads the row.
+#
+#     <basename>.sql <TAB> <schema.table> <TAB> <n> <TAB> # <anchor + consumer>
+#
+# ⛔ NEVER A BARE TABLE (decision L-02). Reference-ness is a property of a
+#    STATEMENT, not of a table. `public.strategies` is a DO-block fixture in
+#    many migrations and a required application singleton in exactly ONE
+#    (20260515095804_teaser_anchor_strategy.sql:78-90). A per-table allowlist
+#    would either replay fixture rows — including encrypted `api_keys` blobs —
+#    into shared TEST, or lose that sentinel. Neither is acceptable, so the key
+#    is (file, table, count) and the extractor refuses anything else.
+#
+# ── WHY THIS FILE EXISTS ───────────────────────────────────────────────────
+# ⛔ LEDGER PRESENCE IS NOT EFFECT PRESENCE, and for DML-bearing migrations it is
+#    FALSE BY CONSTRUCTION. baseline.sql carries 562 GRANT/REVOKE statements and
+#    ZERO INSERT/COPY, so a ledger row here evidences a migration's DDL and ACLs,
+#    NEVER its DML.
+#    (The same sentence, in the same words, is at scripts/vac08-ledger-baseline.txt:22-25
+#    and in CLAUDE.md. The three must stay in agreement; they describe one fact.)
+#    The TEST restore drops `public`, reloads a schema-only dump, and SEEDS the
+#    migration ledger from the repo file list — so every migration reads as
+#    applied while every row it INSERTed is gone. This file names the rows that
+#    have to come back.
+#
+# ── THE CRITERION (C1-C4). A statement is reference data iff ALL FOUR hold ──
+# C1  TOP-LEVEL — not inside a `DO $$…$$`, a `CREATE FUNCTION … AS $$…$$`, or a
+#     `cron.schedule($cron$…$cron$)` body. Every fixture, probe and backfill in
+#     this corpus lives in a body; every reference seed is bare.
+# C2  LITERALS ONLY — `INSERT INTO t (cols) VALUES (…)` with no SELECT/FROM and
+#     no identifier in the tuple beyond a cast, NULL/TRUE/FALSE, now() or
+#     gen_random_uuid(). An `INSERT … SELECT` is a backfill of existing data by
+#     construction: on an empty table it inserts nothing.
+# C3  TARGET IN `public` — the restore drops ONLY `public`
+#     (scripts/restore-test-from-baseline.sh:861), so rows in other schemas
+#     survive and need no replay. `storage.buckets` is OUT for this reason.
+#     ⚠️ ONE NAMED EXCEPTION, and only one: `auth.users` in
+#     20260515095804_teaser_anchor_strategy.sql. That row is the FK head of the
+#     teaser trio and it SURVIVES the restore, so replaying it is a no-op via its
+#     own `ON CONFLICT (id) DO NOTHING`. It is kept because `public.profiles` and
+#     `public.strategies` below it do NOT survive, and keeping the head makes the
+#     trio FK-self-contained on a lane that starts empty. The extractor accepts
+#     `auth.users` and NO other non-public target; any other schema is refused by
+#     name. A reviewer who reads C3 and then finds this line has not found a
+#     contradiction — this paragraph IS the exception.
+# C4  A CONSUMER READS THE ROW BY KEY — an FK, a CHECK, a slug lookup, or a
+#     constant in application code. Human judgement; cite it in the entry.
+#     Idempotence (`ON CONFLICT DO NOTHING`) is a strong SIGNAL and NOT a
+#     criterion: `discovery_categories` has none and is unquestionably reference,
+#     while a backfill in 20260408113028_disclosure_and_tenancy.sql:152-156
+#     carries one and is not.
+#
+# ── DIRECTION ──────────────────────────────────────────────────────────────
+# ⛔ THIS FILE GROWS when a new reference statement is AUTHORED, and SHRINKS only
+#    when the CONSUMER that reads the row is gone — never to make something go
+#    green. State which consumer went away in the commit message.
+# ⛔ A PINNED COUNT MOVES ONLY WHEN AN APPLIED MIGRATION IS EDITED. Migrations are
+#    immutable once applied, so a count never drifts on its own; a count that
+#    stopped matching means someone edited applied SQL, which is precisely the
+#    event that should fail loud. Clear it by understanding the edit, not by
+#    re-pinning the number.
+# ⛔ DO NOT HAND-SEED SHARED TEST TO SHORTEN THIS FILE. TEST is shared with other
+#    people's CI. A missing reference row is a NAMED failure of the restore's own
+#    gate; it is never fixed by a hand-run INSERT (CONTEXT, out of scope).
+# ⛔ A RED `--audit` IS CLEARED BY ADDING THE ALLOWLIST LINE WITH ITS CONSUMER,
+#    never by relaxing the classifier.
+#
+# ── KNOWN LIMITATIONS, STATED RATHER THAN HIDDEN ───────────────────────────
+# 1. `--audit` sees ONLY the tables this file already names. It closes "a new
+#    `*_kind.sql` migration merged with no allowlist line". It CANNOT see a
+#    brand-new reference TABLE (a future `foo_kinds`) — that remains a human
+#    call, made against C1-C4 above, at review time.
+# 2. `--audit` classifies with C1+C2. A future top-level `INSERT … SELECT` into
+#    an allowlisted table is therefore SKIPPED, not flagged. That is deliberate
+#    (it is a backfill by C2), and it is the second thing a reviewer must decide
+#    by hand rather than expect the gate to raise.
+# 3. This file says nothing about whether the rows are on TEST right now. It says
+#    which statements the restore replays. The restore's own in-transaction gate
+#    and its `refdata:` census rows are what report presence.
+#
+# ── L-03: `system_settings.analytics_service_url` IS REPLAYED FAITHFULLY ────
+# ⚠️ Founder decision, 2026-09-09. The seed in
+#    20260907120000_analytics_service_settings_and_vault_tick.sql:294-296 carries
+#    the PRODUCTION analytics host (read it at that anchor; it is not repeated
+#    here) and feeds `match_engine_cron_tick()`, a pg_net tick. It is replayed AS
+#    THE MIGRATION WROTE IT: the value is PRE-EXISTING on TEST, the restore drops
+#    only `public` so TEST's `cron.job` schedule is untouched, and omitting it
+#    would leave TEST missing a setting its own ledger claims applied.
+# ⛔ THAT TEST'S TICK THEN TARGETS PROD COMPUTE IS A REAL HAZARD AND IS NOT
+#    RESOLVED HERE. It is booked as TODOS `[164.8.1-TEST-ANALYTICS-URL-PROD]`.
+#    ⚠️ That id is CREATED by this phase's Plan 03, which runs after this file was
+#    written; a missing TODOS entry while Plan 03 is in flight is not an error.
+#    The allowlist is NEVER the place that hazard gets resolved — editing this
+#    line out would silently normalise the hazard into "TEST just lacks a row".
+#
+# ── DATED READING, 2026-09-09 (a measurement, not a constant) ──────────────
+# The 15 `public.compute_job_kinds` statements below yield 16 DISTINCT kind
+# names, and `compute_jobs_kind_check` (supabase/schema/baseline.sql:1334) admits
+# exactly those same 16. The two lists were compared this session and are EQUAL.
+# That equality is what makes a PARTIAL replay detectable: `compute_jobs.kind` is
+# an FK onto this table (20260411144407_compute_jobs_queue.sql:110), so a subset
+# would let the CHECK admit a kind the registry does not carry.
+# ⛔ Re-derive it; do not cite this paragraph as authority.
+#
+# ── THE ENTRIES ────────────────────────────────────────────────────────────
+# 8 tables, in migration-filename order. Derive the file count with
+#   cut -f1 scripts/restore-test-refdata-allowlist.txt | grep -v '^#' | sort -u | wc -l
+# and the entry count with
+#   grep -v '^#' scripts/restore-test-refdata-allowlist.txt | grep -c .
+# ⛔ Neither number is restated here on purpose.
+
+20260405061911_initial_schema.sql	public.discovery_categories	1	# :146-151, plain multi-row VALUES, no ON CONFLICT. Consumers: scripts/seed-demo-data.ts slug='crypto-sma' lookup; strategies.category_id FK (supabase/schema/baseline.sql:12610).
+20260407164606_perfect_match.sql	public.system_flags	1	# :55-56 match_engine_enabled=true. Consumer: policy system_flags_match_engine_public_read (supabase/schema/baseline.sql:13519).
+20260411144407_compute_jobs_queue.sql	public.compute_job_kinds	1	# :90-94 (3 rows). Consumer: compute_jobs.kind FK declared at :110 of this same file.
+20260412094452_poll_positions_kind.sql	public.compute_job_kinds	1	# :42-44. Consumer: the compute_jobs.kind FK.
+20260416081039_funding_fees.sql	public.compute_job_kinds	1	# :176-177. Consumer: the compute_jobs.kind FK.
+20260416125429_reconciliation.sql	public.compute_job_kinds	1	# :97-98. Consumer: the compute_jobs.kind FK.
+20260416125430_contact_request_metadata.sql	public.compute_job_kinds	1	# :110-111. Consumer: the compute_jobs.kind FK.
+20260418194206_scoring_weight_overrides.sql	public.compute_job_kinds	1	# :141-142. Consumer: the compute_jobs.kind FK.
+20260420073003_allocator_holdings.sql	public.compute_job_kinds	1	# :279-280. The :18 mention is a COMMENT, and the :965/:1020 api_keys fixtures are inside the :149-377 DO body — both excluded by C1. Consumer: the compute_jobs.kind FK.
+20260420213754_allocator_equity_snapshots.sql	public.compute_job_kinds	2	# :144-147 — TWO statements in one file (reconstruct_allocator_history, refresh_allocator_equity_daily). Consumer: the compute_jobs.kind FK.
+20260510173005_process_key_long_idempotency_drain.sql	public.compute_job_kinds	1	# :105-106 process_key_long. Consumer: the compute_jobs.kind FK.
+20260510173005_process_key_long_idempotency_drain.sql	public.feature_flags	1	# :279-281, ON CONFLICT (flag_key) DO NOTHING. Consumer: /api/cron/flag-monitor, per the COMMENT at :284 of this same file.
+20260510175507_process_key_long_compute_job_kinds_repair.sql	public.compute_job_kinds	1	# :33-34. A deliberate duplicate of the row above — the file says so at :1-17. Consumer: the compute_jobs.kind FK.
+20260515095804_teaser_anchor_strategy.sql	auth.users	1	# :48-53. THE C3 EXCEPTION, see the C3 paragraph above: FK head of the teaser trio; the row survives the restore so the replay is a no-op via ON CONFLICT (id) DO NOTHING; kept so the trio is FK-self-contained. Consumer: the two rows below it.
+20260515095804_teaser_anchor_strategy.sql	public.profiles	1	# :60-73 sentinel profile ...0000. Consumers: src/lib/phase-19-constants.ts:21; analytics-service/routers/process_key.py:1121.
+20260515095804_teaser_anchor_strategy.sql	public.strategies	1	# :78-90 sentinel strategy ...0001. THE ONE reference `strategies` statement in the corpus. Consumers: src/lib/phase-19-constants.ts:21; analytics-service/routers/process_key.py:1121 writes strategy_verifications FK rows against it.
+20260522111858_compute_analytics_from_csv_kind.sql	public.compute_job_kinds	1	# :23-24. Consumer: the compute_jobs.kind FK.
+20260614120000_derive_broker_dailies_kind.sql	public.compute_job_kinds	1	# :32-33. Consumer: the compute_jobs.kind FK.
+20260710130000_stitch_composite_kind.sql	public.compute_job_kinds	1	# :44-45. Consumer: the compute_jobs.kind FK.
+20260717233529_allocator_equity_derived_surface.sql	public.compute_job_kinds	1	# :134-135 derive_allocator_equity. The :47 mention is a COMMENT (C1). Consumer: the compute_jobs.kind FK.
+20260907120000_analytics_service_settings_and_vault_tick.sql	public.system_settings	1	# :294-296 analytics_service_url. Consumer: match_engine_cron_tick() at :301+ of this same file. ⚠️ See the L-03 block above before touching this line.
+20260907130000_ledger_refresh_switch_to_system_flags.sql	public.system_flags	1	# :188-190 ledger_refresh_enabled=FALSE. Consumer: the fan-out function in this same file.

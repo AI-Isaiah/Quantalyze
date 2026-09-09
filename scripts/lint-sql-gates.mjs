@@ -331,7 +331,7 @@ const DOLLAR_TAG = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/;
 /**
  * @returns {{ code: string } | { error: string, line: number }}
  */
-function maskSql(src) {
+export function maskSql(src) {
   const out = src.split("");
   const n = src.length;
   const blank = (a, b) => {
@@ -530,7 +530,7 @@ function blockStructure(code, lineOf) {
 }
 
 /** Statement spans of the masked code, split on top-level `;`. */
-function statements(code) {
+export function statements(code) {
   const out = [];
   let start = 0;
   for (let i = 0; i < code.length; i++) {
