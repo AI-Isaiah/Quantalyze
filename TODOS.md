@@ -1461,6 +1461,39 @@ true for 146 and half of 142–145, and **false for 141**.
       apply. Until then this red is expected and is named here so nobody reads it as a coupling
       regression.
 
+- [ ] **`[164.8.1-TEST-ANALYTICS-URL-PROD]` Shared TEST's cron can POST to the PRODUCTION
+      analytics service: `system_settings.analytics_service_url` is seeded with the PROD Railway
+      host and that row feeds `public.match_engine_cron_tick()`, a `pg_net` tick (booked
+      2026-09-09, founder decision in Phase 164.8.1's `CONTEXT.md` `<specifics>`).**
+      The seed is `supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql:294-296`
+      — cite the anchor, do not repeat the host: this repo is PUBLIC and so is every restore log.
+      ✅ **Destination: Phase 164.9 TESTISOLATION** — the ROADMAP's declared home for hardening
+      deferrals that depend on 164.8's restore, and the natural one: "which service does a TEST
+      tick talk to" is the same question as "whose rows is a TEST run asserting about". The
+      routing block is already written at `.planning/ROADMAP.md` under Phase 164.9
+      (`ROUTED HERE 2026-09-09`); the orchestrator confirms it with the founder via
+      `/gsd-phase --edit 164.9`.
+      ⚠️ **PRE-EXISTING, NOT INTRODUCED, and that is precisely why Phase 164.8.1 replays it
+      faithfully (L-03) rather than fixing it.** The same migration seeded the same value on TEST
+      when it applied; the restore drops only `public` (`scripts/restore-test-from-baseline.sh:861`),
+      so TEST's `cron.job` schedule was never touched and whatever TEST was doing before the
+      restore it still does. Omitting the row would instead leave TEST missing a setting its own
+      ledger claims applied — a second lie on top of the first.
+      ⛔ **This is NOT an allowlist question and MUST NOT be closed by editing
+      `scripts/restore-test-refdata-allowlist.txt`.** Dropping the entry would make the restore
+      silently normalise the hazard, which is the exact failure class Phase 164.8.1 exists to
+      remove: a restore that quietly changes what TEST is, instead of reproducing it and naming
+      what is wrong. The real fix is a TEST-SIDE VALUE — the migration's own CHECK admits
+      `http://127.0.0.1:9` as a deliberate sink (`supabase/schema/baseline.sql:10881`, whose
+      `COMMENT ON CONSTRAINT` at `:10892` states the intent), or a
+      TEST-scoped Railway service — applied by a founder-run statement or by a migration guarded
+      on the `pg_database` identity marker, and decided in its destination phase.
+      ⚠️ **Two traps for whoever takes it.** (i) `pg_net` is ASYNC: a green `cron.job_run_details`
+      row proves the tick fired, never what the far end answered — seven days of 401s once hid
+      behind one, so verify at the SERVICE, not at the cron row. (ii) The `COMMENT ON DATABASE`
+      marker check confirms which DATABASE you are connected to; it says nothing about which
+      SERVICE the tick calls. They are different questions and only the first has a guard.
+
 - [ ] **`[164.5-STALE-GENERATED-TYPES]` `src/lib/database.types.ts` keeps a generated declaration
       for `create_allocator_connected_strategy` after PR #758 drops it (booked 2026-09-08).**
       Inert, and deliberately left rather than hand-edited: **nothing generates or gates this
