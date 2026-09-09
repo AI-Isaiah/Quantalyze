@@ -25,7 +25,17 @@ implementation plan at `docs/superpowers/plans/2026-04-07-perfect-match-engine.m
 1a-bis. The match-engine cron's mechanism — same correction, same cause:
    - The hourly `match_engine_cron` job no longer resolves anything from `app.*`. PROD's jobid 1 was hand-repaired on 2026-09-01 onto a `DO` block reading the key from `vault.decrypted_secrets`, and the repo now describes that mechanism as `public.match_engine_cron_tick()` in `20260907120000_analytics_service_settings_and_vault_tick.sql` — key from Vault, URL from `public.system_settings`, a loud `RAISE` on either absence.
    - ⚠️ **The LIVE `cron.job` row is not yet pointed at that function.** Repointing it is Phase 164.5 item (7), against the captured `scripts/prod-prober/cron-manifest.json`. Until then the repo and the live row agree in MECHANISM but not in TEXT, and the Phase 164.1 `cron-drift` arm is the instrument that says so.
-   - ⚠️ `[ASSUMED — A1]`, carried forward from `164.7-RESEARCH.md` and NOT yet measured: that a `SECURITY DEFINER` function owned by `postgres` may read the real encrypted `vault.decrypted_secrets` view on a hosted Supabase project. The pg-lane's vault is a plaintext stand-in by construction, so no lane run can answer it. It is cheap to falsify on TEST and it gates the 164.5 repoint — do not treat the callable as proven against real Vault until someone has.
+   - ✅ **`[A1]` MEASURED 2026-09-09 on shared TEST — the assumption HELD, and it no longer gates the repoint.** The question was whether a `SECURITY DEFINER` function owned by `postgres` may read the real encrypted `vault.decrypted_secrets` view on a hosted Supabase project. Read in the TEST SQL editor by the founder:
+
+     ```sql
+     SELECT has_schema_privilege('postgres','vault','USAGE')                   AS usage,      -- true
+            has_table_privilege('postgres','vault.decrypted_secrets','SELECT') AS can_select; -- true
+     ```
+
+     Conditions that make the reading load-bearing rather than incidental, measured in the same session: `supabase_vault` is installed, `vault.decrypted_secrets` is owned by **`supabase_admin`** (not by `postgres`), and `postgres` is **NOT** a superuser there — i.e. the hosted-platform constraint the assumption was about is genuinely present, not bypassed by an over-privileged role. `SECURITY DEFINER` executes as the function's OWNER, so `postgres` holding both privileges is exactly what the callable needs.
+     ⭐ Independent corroboration, different instrument: PROD's live jobid 1 already performs this same Vault read hourly as `username: postgres` and succeeds (`net._http_response` id 3485 → 200, 2026-09-01). ACL and runtime therefore agree.
+     ⚠️ **What is still NOT proven, stated so nobody upgrades it by retelling:** no `SECURITY DEFINER` wrapper was actually executed against the real Vault — the ACL was read, the function was not called. Calling the shipped `public.match_engine_cron_tick()` would fire a real `net.http_post` at the production analytics service, which is why it was not called. The wrapper is expected to be a no-op on role (definer `postgres`, caller `postgres`), but that is an argument, not a measurement.
+     ⛔ The pg-lane cannot answer this class at all — its vault is a plaintext stand-in by construction. Do not "confirm" A1 from a lane run.
    - To change the analytics URL without touching secrets, behind the which-database marker from `CLAUDE.md`: `UPDATE public.system_settings SET value = '<host>', updated_at = now() WHERE key = 'analytics_service_url';`
 1a. Migration 014 applied to staging:
    - Run `20260408155411_strategy_codename.sql` (adds nullable `strategies.codename`).
