@@ -968,7 +968,40 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
   });
 
   describe("cross-file: the mutex protocol is ci.yml's, byte for byte, in all THREE workflows", () => {
-    const suffix = (s: string): string => s.slice(s.indexOf(SUFFIX_ANCHOR));
+    /**
+     * ⛔ IN-03 (164.8-REVIEW, closed 2026-09-09). This used to be
+     * `s.slice(s.indexOf(SUFFIX_ANCHOR))`, and `indexOf` returns -1 when the anchor is
+     * absent — so `slice(-1)` made a BYTE-IDENTITY pin over a whole mutex protocol
+     * degrade into comparing the last CHARACTER of two steps. Both end in a newline,
+     * so the pin would have gone on passing while measuring nothing. A silent
+     * degradation by construction: the failure mode is a PASS.
+     */
+    const suffix = (s: string): string => {
+      const i = s.indexOf(SUFFIX_ANCHOR);
+      if (i < 0) {
+        throw new Error(
+          "SUFFIX_ANCHOR not found — the byte-identity pin has no subject. The anchor " +
+            `(${JSON.stringify(SUFFIX_ANCHOR)}) is the line the copied mutex protocol begins ` +
+            "at; if the copy was re-indented or that line was reworded, re-derive the anchor " +
+            "rather than letting this comparison fall back to a suffix nobody chose.",
+        );
+      }
+      return s.slice(i);
+    };
+
+    it("CALIBRATION (IN-03): `suffix()` throws on a missing anchor instead of degrading", () => {
+      expect(() => suffix("no anchor here")).toThrow(/SUFFIX_ANCHOR/);
+      // The positive case, on the real input the pins below use: it must NOT throw, and
+      // it must return the anchor-led suffix rather than a one-character tail.
+      const ciStep = CI.match(ACQUIRE_RE)?.[0] ?? "";
+      expect(ciStep, "ci.yml's Acquire step could not be extracted").not.toBe("");
+      expect(suffix(ciStep).startsWith(SUFFIX_ANCHOR)).toBe(true);
+      expect(
+        suffix(ciStep).length,
+        "the suffix is a single character — this is the -1 degradation IN-03 names, and it " +
+          "is what a passing byte-identity pin looked like before the throw was added",
+      ).toBeGreaterThan(1);
+    });
 
     it("the acquire suffix is identical across ci.yml, the restore workflow and this one", () => {
       const ciStep = CI.match(ACQUIRE_RE)?.[0] ?? "";
