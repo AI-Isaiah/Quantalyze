@@ -490,3 +490,30 @@ run id   : 34274161551 (push, rerun of failed jobs), head sha 88581b8b, job
                   ENTRY_COUNT = 0 beside an AIM, in ONE commit.
   * unfinished  : the CLI post-verify (never executed) and the extension guard
                   (defective) — deferred-items.md items 4 and 6.
+
+--- AMENDMENT 2026-09-09 -------------------------------------------------------
+  Added by the Phase 164.8 verifier's finding, confirmed independently by the
+  orchestrator. This log described ONE restore. There were TWO, and the second is
+  the one that left shared TEST as it stands today.
+
+  * 34329459044  mode=preflight   head a622df27  2026-09-09T08:30Z  actor AI-Isaiah
+  * 34330741339  mode=restore     head a622df27  2026-09-09T08:44Z  actor AI-Isaiah
+                 conclusion=success (confirm token enforced)
+
+  Measured before this amendment: `grep -rn "34330741339\|34329459044" .planning/`
+  returned ZERO hits. For a database other people's CI writes to, "who rebuilt it,
+  from what, and when" was not answerable from the planning record.
+
+  ⛔ CORRECTION to "unfinished" above: the CLI post-verify is NO LONGER unexecuted.
+  Step 24 of 34330741339 concluded `success`, printing verbatim:
+
+      post-verify: the pinned CLI parses the seeded ledger and reports nothing
+      pending — ledger SHAPE is consistent.
+
+  Both asserted strings held under the PINNED 2.98.2 — the exact uncertainty
+  deferred-items item 4 exists to name. The extension guard (item 6) IS still
+  defective and stays unfinished.
+
+  ⚠️ The earlier run this log describes, 34274355596, concluded `failure`: it
+  committed (which is why the ledger moved 243 -> 266) and then exited 1 on that
+  same post-COMMIT extension guard.
