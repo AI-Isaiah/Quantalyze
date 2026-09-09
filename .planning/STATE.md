@@ -6,10 +6,10 @@ current_phase: 164.2.1
 current_phase_name: SESSIONID-FENCE
 status: verified
 stopped_at: "164.5-05 tasks 1-2 complete; STOPPED at task 3 blocking-human checkpoint:decision (ROADMAP criterion 5 wording)"
-last_updated: "2026-09-09T19:47:12.744Z"
+last_updated: "2026-09-09T21:12:02.280Z"
 last_activity: 2026-09-06
 last_activity_desc: "164.2 shipped as PR #749. Version bumped 0.77.15.0 -> 0.77.16.0 with a CHANGELOG entry (nothing in GSD or CI enforces either). Ship review: security auditor + 10 diff-scoped specialists; 5 file-disjoint fixers. TWO VACUITIES: the roster-render poster census compared a hand-typed length to a hand-typed literal while claiming to scan src/ (it read no files) — and that was the pin the founder's criterion-3 override explicitly rested on; and the PGRST204 assertion passed on the format string's static tail. Three more found while fixing: C-10's 400-day fixture could not detect the arm-swap it guarded, the provenance census's Rule C ran only on stamped sites, and a fixer caught its own draft assertion passing for the wrong reason. FOUR user-facing/data-integrity: the two SUCCESS writers sat outside the PGRST204 degrade while the docstring claimed full coverage (a succeeded compute was recorded failed, cash series heal-deleted, retry burned); durable writer sentences had made an internal table name + raw uuid and a Python exception class name reach user copy; validate-and-encrypt showed OUR stale service key as 'Unauthorized' on a key-connect form; the post-23505 read discarded both failure channels. Fixing stale anchors introduced 3 bare file:line cites that [SEAMPROSE-01] bans for going stale — caught by the full suite. Gates re-run by the orchestrator: vitest 14180/0 (Node 22), pytest 5430, mypy --strict 79 files, tsc clean, corpus 369 arms no defects. SECURITY.md added: 21/21 closed, threats_open 0, HIGH proven non-vacuous by three lane mutants that each abort the apply."
-state_head: 9563705e4eeaf7a9911f7bbcd1c2a25b0a83a732
+state_head: e2645ebf4bb7676e6f6ffe33aa687a4e25904f72
 
 # ⚠️ progress: HAND-SET 2026-09-06 against `origin/main`, NOT derived from this checkout.
 
@@ -229,7 +229,7 @@ progress:
   total_phases: 28
   completed_phases: 8
   total_plans: 116
-  completed_plans: 105
+  completed_plans: 108
   percent: 29
 ---
 
@@ -1253,6 +1253,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.8 edited: edited fields: plans — 5 to 6 after the plan-checker REVISE split plan 01's self-test harness into its own plan (W8, plan 01 was at 0.95 budget)
 - Phase 164.9 edited: routed [164.8.1-REPLAY-INSERT-ONLY-SCOPE] here from Phase 164.8.1 PR review: requirements line + ROUTED HERE block
 - Phase 164.9 edited: routed [164.8-PUSH-RACE-VAC08] here from Phase 164.8 plan 05: VAC-08 and apply-test share advisory key 61616158
+- Phase 164.5.1 edited: A1 measured on shared TEST (Vault read permitted) — gate lifted; migration-vs-runbook narrowed to the rebuild statement
 
 ### Decisions
 
