@@ -2965,7 +2965,9 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
   // GREEN (the apply-on-merge window is exempt) and the tip-EQUAL RED (the
   // boundary, where an off-by-one would silently exempt a real defect). Deleting
   // any one of them reds this test on the missing label rather than on a number.
-  // Phase 164.8.2 added the harness-calibration arm (WR-03).
+  // Phase 164.8.2 added three more: the harness-calibration arm (WR-03), and the
+  // ceiling pair `frontier-ceiling-exceeded RED` / `frontier-ceiling-boundary
+  // GREEN` (WR-02 — over the ceiling, and exactly AT it).
   it("--self-test proves every red mode and both green paths, and exits 0", () => {
     const res = spawnSync("bash", [LEDGER_GATE, "--self-test"], {
       cwd: process.cwd(),
@@ -2981,6 +2983,8 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
     expect(out).toContain("below-frontier-missing RED");
     expect(out).toContain("above-frontier-missing GREEN");
     expect(out).toContain("tip-equal-missing RED");
+    expect(out).toContain("frontier-ceiling-exceeded RED");
+    expect(out).toContain("frontier-ceiling-boundary GREEN");
     expect(out).toContain("harness calibration: run_arm can report FAIL, and the flip inverts");
   });
 
@@ -3107,6 +3111,159 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
     const doubled = SRC.replace(`\n  ${NEEDLE}\n`, `\n  ${NEEDLE}\n  ${NEEDLE}\n`);
     expect(doubled).not.toBe(SRC);
     expect(liveCount(selfTestRegion(doubled), NEEDLE)).toBe(2);
+  });
+
+  // ── WR-02 (Phase 164.8.2) — THE FRONTIER EXEMPTION HAS A CEILING ──────────
+  // The exemption tolerates migrations authored above the TEST ledger's frontier
+  // tip, because under apply-on-merge they cannot be present yet. That tolerance
+  // was UNBOUNDED: a stalled `apply-test` exempted every later migration forever
+  // while the gate printed `0 NEW drift`.
+  describe("WR-02 — the frontier exemption's count ceiling", () => {
+    // ⛔ ALL READS GO THROUGH `node:fs`, NEVER A SHELL GREP. This repo has a
+    // measured NUL-blind tracked file (`src/lib/wizardErrors.test.ts`) where grep
+    // exits 1 and the absence reads as "clean".
+    const SRC = readFileSync(LEDGER_GATE, "utf8");
+    const isLive = (l: string) => {
+      const t = l.trim();
+      return t !== "" && !t.startsWith("#");
+    };
+    const liveCount = (text: string, needle: string) =>
+      text.split("\n").filter((l) => isLive(l) && l.includes(needle)).length;
+
+    /**
+     * The ceiling, READ FROM THE SCRIPT rather than restated here. The two driven
+     * arms below size their corpora from it (ceiling+1 breaches, ceiling is the
+     * boundary), so LOWERING the ratchet — the one direction it is allowed to
+     * move — keeps them measuring the boundary instead of silently measuring a
+     * number that used to be the boundary.
+     */
+    const CEILING = Number(
+      (SRC.split("\n").find((l) => isLive(l) && /^FRONTIER_EXEMPT_CEILING=\d+$/.test(l.trim())) ?? "=0")
+        .trim()
+        .split("=")[1],
+    );
+
+    // ⛔ WHAT THIS LAYER DOES NOT COVER, said plainly. CLAUDE.md's two-layer rule
+    // is satisfied for a REPO corpus by re-deriving it from disk — that is what
+    // `mutation-runner-floors.test.ts` does for FILES_FLOOR ("RATCHET STALE: …").
+    // It CANNOT be done here: the exempt count is a property of a LIVE, shared
+    // ledger, not of this repo, so a ceiling left STALE-HIGH relative to reality
+    // is not detectable without a database. What this block does cover is that
+    // the ceiling EXISTS, is single, is live, could ever fire, and is compared.
+    // Lowering it when reality allows stays a human act, recorded by the dated
+    // MEASURED line beside the constant and by its KNOWN_THRESHOLD_SITES entry.
+    it("FRONTIER_EXEMPT_CEILING is a single live line, a positive integer, and is actually compared", () => {
+      const ceilLines = SRC.split("\n").filter(
+        (l) => isLive(l) && /^FRONTIER_EXEMPT_CEILING=\d+$/.test(l.trim()),
+      );
+      expect(
+        ceilLines.length,
+        "the ceiling is not a single live top-level `FRONTIER_EXEMPT_CEILING=<digits>` line. 0 means it is missing, commented out, or spelled `${…:-3}` (which hands CI a knob that raises the ceiling with no reviewed diff, and which gate-family-meta's threshold scanner cannot see at all); 2 means it was doubled and two of them can disagree",
+      ).toBe(1);
+
+      // Copied idiom from mutation-runner-floors.test.ts ("is a positive integer
+      // — a floor of 0 could never fire"). Here the failure runs the other way: a
+      // ceiling of 0 would refuse EVERY exemption and red every migration-adding
+      // PR by construction, re-opening what [164.8-PUSH-RACE-VAC08] recorded.
+      const ceiling = Number(ceilLines[0].trim().split("=")[1]);
+      expect(Number.isInteger(ceiling)).toBe(true);
+      expect(
+        ceiling,
+        "a ceiling of 0 disables the apply-on-merge exemption entirely",
+      ).toBeGreaterThan(0);
+
+      // A constant nothing compares is decoration.
+      expect(
+        liveCount(SRC, 'if [ "$exempt_count" -gt "$FRONTIER_EXEMPT_CEILING" ]; then'),
+        "the ceiling is declared but never compared, or the comparison was rewritten against a literal",
+      ).toBe(1);
+
+      // CALIBRATIONS. Each mutation is asserted to have APPLIED first — a neuter
+      // that does not apply reads as GREEN.
+      const envKnob = SRC.replace(
+        `\nFRONTIER_EXEMPT_CEILING=${ceiling}\n`,
+        `\nFRONTIER_EXEMPT_CEILING="\${FRONTIER_EXEMPT_CEILING:-${ceiling}}"\n`,
+      );
+      expect(envKnob).not.toBe(SRC);
+      expect(
+        envKnob.split("\n").filter((l) => isLive(l) && /^FRONTIER_EXEMPT_CEILING=\d+$/.test(l.trim())).length,
+      ).toBe(0);
+
+      const commented = SRC.replace(
+        `\nFRONTIER_EXEMPT_CEILING=${ceiling}\n`,
+        `\n# FRONTIER_EXEMPT_CEILING=${ceiling}\n`,
+      );
+      expect(commented).not.toBe(SRC);
+      expect(
+        commented.split("\n").filter((l) => isLive(l) && /^FRONTIER_EXEMPT_CEILING=\d+$/.test(l.trim())).length,
+      ).toBe(0);
+
+      const comparisonGone = SRC.replace(
+        'if [ "$exempt_count" -gt "$FRONTIER_EXEMPT_CEILING" ]; then',
+        'if [ "$exempt_count" -gt 999 ]; then',
+      );
+      expect(comparisonGone).not.toBe(SRC);
+      expect(liveCount(comparisonGone, 'if [ "$exempt_count" -gt "$FRONTIER_EXEMPT_CEILING" ]; then')).toBe(0);
+    });
+
+    /**
+     * A migrations corpus of ONE applied file plus `above` files above its
+     * timestamp, written where the gate will read it.
+     *
+     * ⚠️ TWO CORPORA, NOT ONE — the same trap the script's own arms carry. The tip
+     * is the greatest PRESENT timestamp, so deriving the boundary case by making
+     * one above-tip file "present" in the over-the-ceiling corpus would MOVE THE
+     * TIP UP and turn the rest into BELOW-tip absences: still red, but as
+     * below-frontier drift rather than as a ceiling breach.
+     */
+    const ceilingCorpus = (dir: string, name: string, above: number) => {
+      const d = join(dir, name);
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, "20260201000000_applied.sql"), "");
+      const names: string[] = [];
+      for (let i = 1; i <= above; i++) {
+        const n = `2026${String(i + 2).padStart(2, "0")}01000000_above${i}`;
+        writeFileSync(join(d, `${n}.sql`), "");
+        names.push(n);
+      }
+      return { dir: d, names };
+    };
+
+    it("RED: more exempted migrations than the ceiling fails the gate and NAMES every one of them", () => {
+      expect(CEILING, "the ceiling could not be read from the script — every arm below would be vacuous").toBeGreaterThan(0);
+      withTempDir((dir) => {
+        const corpus = ceilingCorpus(dir, "mig_ceil_over", CEILING + 1);
+        const env = scaffoldLedgerCase(dir, { missing: corpus.names });
+        const { status, out } = run(LEDGER_GATE, { ...env, MIGRATIONS_DIR: corpus.dir });
+
+        expect(status).toBe(1);
+        expect(out).toContain("FRONTIER_EXEMPT_CEILING exceeded");
+        // ⛔ It must not merely refuse — it must say WHAT is exempted, and say it
+        // on the ERROR channel. The pre-existing `::notice::` block prints the
+        // same names, so a bare `toContain(name)` would stay green with the
+        // ceiling's own naming `sed` deleted.
+        for (const n of corpus.names) {
+          expect(out).toContain(`::error::  exempt (above tip): ${n}`);
+        }
+        // And it must tell the reader the fix is the apply, not the ceiling.
+        expect(out).toContain("do NOT raise the ceiling");
+      });
+    });
+
+    it("GREEN: exactly the ceiling stays green — and the carried count stays VISIBLE", () => {
+      expect(CEILING).toBeGreaterThan(0);
+      withTempDir((dir) => {
+        const corpus = ceilingCorpus(dir, "mig_ceil_edge", CEILING);
+        const env = scaffoldLedgerCase(dir, { missing: corpus.names });
+        const { status, out } = run(LEDGER_GATE, { ...env, MIGRATIONS_DIR: corpus.dir });
+
+        expect(status).toBe(0);
+        expect(out).not.toContain("FRONTIER_EXEMPT_CEILING exceeded");
+        // A ratchet that hides the gap it carries is a mute button.
+        expect(out).toContain(`${CEILING} above-tip migration(s) exempted`);
+        expect(out).toContain("0 NEW drift");
+      });
+    });
   });
 
   it("--self-test FAILS when the gate is neutered (the self-test itself can fail)", () => {
