@@ -83,7 +83,10 @@
 #    nonpostgres_fn) — measured by hand from the backup artifact's census files
 #    instead, five changed lines, neither class moved. Beyond those:
 #    the restore step exited 1 AFTER the commit on a post-commit extension guard
-#    (`restore-test-from-baseline.sh:1090`) that compares a whole-database
+#    — the one whose message reads `post-census extensions=… pre-census had …`
+#    in `restore-test-from-baseline.sh`; CITED BY MESSAGE, NOT BY LINE, because
+#    the `:1090` written here on 2026-09-08 was correct at the merge-base and had
+#    drifted to unrelated code by this PR's HEAD — that compares a whole-database
 #    `count(*) FROM pg_extension` for equality. It fired on a GAIN — pg_net,
 #    which TEST lacked and the dump creates — and reported it in the language of
 #    a loss. The guard is defective and is booked as separate work; the shape
@@ -122,9 +125,14 @@
 #    style for data-reading DO blocks — applies cleanly to PROD and refuses on
 #    TEST; under the apply-on-merge pipeline that BLOCKS the PROD apply by
 #    design, and the interim remedy is a revert of the merge, never a YAML edit.
-#    The general disposition for that case is OPEN: TODOS
-#    [164.8-DATA-DEPENDENT-MIGRATION-ESCAPE] (routed by Phase 164.8 Plan 06)
-#    carries it to a phase. The TEST-NOT-APPLICABLE pragma was NOT built in
+#    The general disposition for that case is OPEN AND NOT YET BOOKED. The id
+#    [164.8-DATA-DEPENDENT-MIGRATION-ESCAPE] is the NAME reserved for it; writing
+#    the TODOS entry is Phase 164.8 Plan 06's job and that plan has not run.
+#    ⛔ 2026-09-09: this paragraph used to present the id as an existing entry
+#    that "carries it to a phase" — `grep -c` in TODOS.md returns 0. That is the
+#    FANOUT-GLOBAL-01 failure mode CLAUDE.md warns about: a planner sent looking
+#    for a spec nobody wrote. Do not cite this id as resolvable until Plan 06
+#    lands it. The TEST-NOT-APPLICABLE pragma was NOT built in
 #    164.8, because THIS migration (20260908120000) needed none — its object is
 #    in neither PROD, the dump, nor TEST, and its ledger row is present.
 #

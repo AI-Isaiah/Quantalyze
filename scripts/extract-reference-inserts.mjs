@@ -68,7 +68,7 @@
 import { readFileSync, readdirSync, existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { maskSql, statements } from "./lint-sql-gates.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -582,9 +582,35 @@ function modeAudit(io, allowlistPath, migrationsDir) {
   let bad = 0;
   let scanned = 0;
 
+  // ⛔ [164.8.1 review, finding 3] ONE CLASSIFICATION PATH, not two. The
+  // "every listed pair was reached" loop below used to re-read and re-lex files
+  // this loop had already read and classified in the same run. It was cheap
+  // (`--audit` measured 0.173 s), but cost is not the objection: two derivations
+  // of the same verdict are two places the classification can drift, which is
+  // the defect class the whole 164.x programme exists for. `prepareFile` and
+  // `matchTable` are pure functions of the file bytes, so memoising them is
+  // behaviour-identical by construction — re-measured against the pre-change
+  // census, byte-for-byte, 2026-09-09.
+  const fileCache = new Map(); // file -> {src, prep}
+  const matchCache = new Map(); // `${file}|${qualified}` -> matchTable() result
+  const readFile = (file) => {
+    if (!fileCache.has(file)) {
+      const src = readFileSync(join(migrationsDir, file), "utf8");
+      fileCache.set(file, { src, prep: prepareFile(src) });
+    }
+    return fileCache.get(file);
+  };
+  const matchOf = (file, qualified) => {
+    const key = `${file}|${qualified}`;
+    if (!matchCache.has(key)) {
+      const { src, prep } = readFile(file);
+      matchCache.set(key, matchTable(src, prep, qualified));
+    }
+    return matchCache.get(key);
+  };
+
   for (const file of corpus) {
-    const src = readFileSync(join(migrationsDir, file), "utf8");
-    const prep = prepareFile(src);
+    const { prep } = readFile(file);
     scanned++;
     if (prep.error) {
       refuse(io, {
@@ -596,7 +622,7 @@ function modeAudit(io, allowlistPath, migrationsDir) {
       continue;
     }
     for (const qualified of tables) {
-      const m = matchTable(src, prep, qualified);
+      const m = matchOf(file, qualified);
       if (m.ok.length === 0 && m.rejected.length === 0) continue;
       const e = listed.get(`${file}|${qualified}`);
       if (!e) {
@@ -633,10 +659,9 @@ function modeAudit(io, allowlistPath, migrationsDir) {
   // Every listed pair must have been reached (a pair whose table never appears
   // is a zero-span refusal, not a silently absent row in the census).
   for (const e of entries) {
-    const src = readFileSync(join(migrationsDir, e.file), "utf8");
-    const prep = prepareFile(src);
+    const { prep } = readFile(e.file);
     if (prep.error) continue; // already refused above
-    const m = matchTable(src, prep, e.qualified);
+    const m = matchOf(e.file, e.qualified);
     if (m.ok.length === 0) {
       refuse(io, {
         file: e.file,
@@ -681,6 +706,30 @@ function modeAudit(io, allowlistPath, migrationsDir) {
 // stays silent on its GREEN twin. A leg that fires for the WRONG reason is a
 // failure, not a pass — the `expect` string is what distinguishes them.
 // ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * ⛔ THE SELF-TEST CORPUS IS RATCHETED, in the TWO LAYERS this repo already uses
+ * for `scripts/mutation-runner/run.mjs` (see CLAUDE.md, "Two floors, two
+ * layers"). Until 2026-09-09 `SELF_TEST_KINDS.length` was PRINTED and compared
+ * to NOTHING: deleting the `c1-dollar-body` kind — the leg that falsifies
+ * RESEARCH A4, i.e. the one proving `maskSql` splits DO bodies at inner `;` and
+ * that `dollarBodyRanges()` is the correct independent scan — still printed
+ * `self-test OK: 15 kinds` and exited 0, green in both workflows. A corpus that
+ * can shrink to nothing without a single red is not a control.
+ *
+ *   layer 1 (HERE): `selfTest()` refuses when the corpus is BELOW this floor,
+ *     so a deletion reddens CI with no vitest involved. By construction a floor
+ *     set below the corpus is invisible to it —
+ *   layer 2: `src/__tests__/extract-reference-inserts-selftest-floor.test.ts`
+ *     catches exactly that stale-LOW direction (`RATCHET STALE: …`) and pins
+ *     the load-bearing kind IDs by name, so a delete-one-add-one nets zero on
+ *     the count and still reddens.
+ *
+ * MEASURED 2026-09-09 on a clean tree: `extract-reference-inserts self-test OK:
+ * 16 kinds, red+green each.`, exit 0. Raise this constant when the corpus grows
+ * durably; never lower it to clear a red.
+ */
+export const SELF_TEST_KINDS_FLOOR = 16;
 
 /**
  * @type {Array<{id:string, why:string, audit?:boolean, expect:string, greenStdout?:RegExp, greenAbsent?:RegExp}>}
@@ -793,6 +842,11 @@ function selfTest(io) {
     io.err.push(`SELF-TEST FAIL: ${msg}`);
     bad = 1;
   };
+  if (SELF_TEST_KINDS.length < SELF_TEST_KINDS_FLOOR) {
+    fail(
+      `SELF_TEST_KINDS_FLOOR regression: the corpus declares ${SELF_TEST_KINDS.length} kind(s), below the pinned floor of ${SELF_TEST_KINDS_FLOOR}. A refusal kind was deleted — restore it, or lower the floor DELIBERATELY in review with the reason. Clearing this by lowering the floor retires the control the deletion just removed.`,
+    );
+  }
   for (const kind of SELF_TEST_KINDS) {
     const red = runLeg(kind, "red");
     if (red.code !== 1) {
@@ -883,9 +937,46 @@ const samePath = (a, b) => {
     return false;
   }
 };
-if (process.argv[1]) {
+// ⛔ [164.8.1 review, finding 2] AND A GUARD THAT MATCHES NOTHING IS LOUD.
+// The realpath fix above closed the symlink SPELLING, but not the failure MODE:
+// any `argv[1]` that names this file and still fails both comparisons falls off
+// the end of the module and the process exits 0 having emitted NOTHING — and
+// the two CI steps that run this script asserted only its exit code, so a
+// silent no-op satisfied both. So the entry decision is now three-way, not two.
+//
+// HOW AN IMPORT IS TOLD FROM A PROGRAM, and how it was MEASURED (2026-09-09,
+// node v25 and node 22 on this checkout):
+//   * `process.argv[1]` ABSENT ⇒ node was handed no script to run, so this
+//     module was reached through `--eval` / `--import` / the REPL / a loader —
+//     it CANNOT be the entry point. Silent, no exit. MEASURED: `node -e
+//     "process.argv"` prints a one-element argv, and ci.yml already relies on
+//     this exact property to read constants out of a sibling script with
+//     `node -e` ("`node -e` leaves `process.argv[1]` undefined, so importing the
+//     module does not trip its CLI entry point").
+//   * `argv[1]` present and NOT naming this file (vitest's binary, another
+//     script) ⇒ a normal import. Silent, no exit — this is how
+//     src/__tests__/ imports `SELF_TEST_KINDS`.
+//   * `argv[1]` present and its BASENAME is ours while neither path comparison
+//     matches ⇒ we were invoked as a program and could not recognise ourselves.
+//     That is the incident above, and there is no third reading of it. Diagnose
+//     to stderr and exit 2 — a code distinct from the `refuse()` exit 1, so a
+//     harness fault is never read as a classification refusal.
+const ENTRY = process.argv[1];
+if (ENTRY !== undefined) {
   const self = fileURLToPath(import.meta.url);
-  if (resolve(process.argv[1]) === resolve(self) || samePath(process.argv[1], self)) {
+  if (resolve(ENTRY) === resolve(self) || samePath(ENTRY, self)) {
     process.exit(main(process.argv.slice(2)));
+  } else if (basename(resolve(ENTRY)) === basename(self)) {
+    process.stderr.write(
+      [
+        "extract-reference-inserts: REFUSING TO EXIT SILENTLY. This module was invoked as a program " +
+          `("${basename(self)}" is the entry point's own basename) but the entry point does not resolve to this file, ` +
+          "so the CLI never ran and NOTHING was emitted.",
+        `  entry (process.argv[1]): ${ENTRY}`,
+        `  this module:             ${self}`,
+        "  Exit 0 here would be a restore replaying an EMPTY reference-data section while every migration reads as applied.",
+      ].join("\n") + "\n",
+    );
+    process.exit(2);
   }
 }

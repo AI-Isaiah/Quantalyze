@@ -9,9 +9,15 @@
 #       grep -vE '^[[:space:]]*(#|$)' scripts/restore-test-refdata-allowlist.txt \
 #         | cut -f1 | sort -u | wc -l
 #    22 ENTRIES over 19 FILES over 8 TABLES, and the pinned counts sum to 23
-#    STATEMENTS. All four numbers differ, on purpose: 20260510173005 carries TWO
-#    entries (compute_job_kinds AND feature_flags), and 20260420213754 pins 2
-#    statements. A first draft said "20 files" by restating instead of counting.
+#    STATEMENTS. All four numbers differ, and the gaps RECONCILE EXACTLY:
+#      entries - files = 3, from the two multi-entry migrations —
+#        20260510173005 carries TWO   (compute_job_kinds, feature_flags)   -> +1
+#        20260515095804 carries THREE (auth.users, profiles, strategies)   -> +2
+#      statements - entries = 1, from 20260420213754, which pins 2.
+#    ⛔ 2026-09-09: an earlier draft of this paragraph named only 20260510173005
+#    and so explained 1 of the 3 surplus entries. It read as arithmetic and was
+#    not. If you cannot make these numbers reconcile, distrust the PROSE and
+#    re-run `--audit`, which prints statements and files per table.
 #
 # ── WHAT AN ENTRY IS ───────────────────────────────────────────────────────
 # One line = one (migration file, target table, pinned top-level statement
@@ -32,8 +38,12 @@
 #    FALSE BY CONSTRUCTION. baseline.sql carries 562 GRANT/REVOKE statements and
 #    ZERO INSERT/COPY, so a ledger row here evidences a migration's DDL and ACLs,
 #    NEVER its DML.
-#    (The same sentence, in the same words, is at scripts/vac08-ledger-baseline.txt:22-25
-#    and in CLAUDE.md. The three must stay in agreement; they describe one fact.)
+#    (The same sentence, in the same words, is at
+#    scripts/vac08-ledger-baseline.txt:22-25. The TWO must stay in agreement; they
+#    describe one fact. ⛔ 2026-09-09: this note used to claim a third copy in
+#    CLAUDE.md; `grep -in 'ledger presence\|EFFECT PRESENCE' CLAUDE.md` returns
+#    NOTHING, so a reader sent there to check agreement found no copy and could
+#    not tell whether it had been deleted or never written.)
 #    The TEST restore drops `public`, reloads a schema-only dump, and SEEDS the
 #    migration ledger from the repo file list — so every migration reads as
 #    applied while every row it INSERTed is gone. This file names the rows that
@@ -47,9 +57,14 @@
 #     no identifier in the tuple beyond a cast, NULL/TRUE/FALSE, now() or
 #     gen_random_uuid(). An `INSERT … SELECT` is a backfill of existing data by
 #     construction: on an empty table it inserts nothing.
-# C3  TARGET IN `public` — the restore drops ONLY `public`
-#     (scripts/restore-test-from-baseline.sh:861), so rows in other schemas
-#     survive and need no replay. `storage.buckets` is OUT for this reason.
+# C3  TARGET IN `public` — the restore drops ONLY `public` (the
+#     `DROP SCHEMA public CASCADE` in the TXN_DROP heredoc of
+#     scripts/restore-test-from-baseline.sh), so rows in other schemas
+#     survive and need no replay.
+#     ⛔ CITED BY SYMBOL, NOT BY LINE, ON PURPOSE. This read `:861` until
+#     2026-09-09; that line had drifted to an unrelated census row within this
+#     one PR, which added ~490 lines above it. C3 decides which schemas get
+#     replayed, so its anchor must not rot. `storage.buckets` is OUT for this reason.
 #     ⚠️ ONE NAMED EXCEPTION, and only one: `auth.users` in
 #     20260515095804_teaser_anchor_strategy.sql. That row is the FK head of the
 #     teaser trio and it SURVIVES the restore, so replaying it is a no-op via its
@@ -65,6 +80,48 @@
 #     criterion: `discovery_categories` has none and is unquestionably reference,
 #     while a backfill in 20260408113028_disclosure_and_tenancy.sql:152-156
 #     carries one and is not.
+#
+# ── SCOPE BOUNDARY: THE REPLAY REPRODUCES INSERTS, NOT SUBSEQUENT EDITS ────
+# ⛔ MEASURED 2026-09-09. C1-C4 select INSERT statements, so the replay restores
+#    the rows a migration INSERTed — it does NOT re-apply UPDATE or DELETE
+#    effects that LATER migrations applied to those same rows, while the ledger
+#    swears every one of them ran. The emptiness and count gates cannot see this:
+#    the row is present, just not in the state the ledger implies.
+#    The five top-level UPDATEs against allowlisted tables, measured at this HEAD:
+#      20260521150000_universal_signup_approval_gate.sql:23,28,33  -> profiles
+#      20260716120000_backfill_staff_role_both.sql:72              -> profiles
+#      20260530120000_admin_role_mutate.sql:291                    -> profiles
+#      20260521190243_canonicalize_supported_exchanges.sql:32      -> strategies
+#      20260709130000_strategies_asset_class.sql:30                -> strategies
+#    NONE touch compute_job_kinds / system_flags / feature_flags / system_settings
+#    / discovery_categories, so the divergence is confined to the teaser trio.
+#    WORKED CASE: the sentinel profile is replayed with `role='manager'`
+#    (20260515095804:60-73); 20260521150000:28-31 then sets
+#    `manager_status='verified' WHERE role IN ('manager','both')`. After a restore
+#    that row carries the column DEFAULT while the ledger has a row for
+#    20260521150000.
+#    ⚠️ NOT resolved here, and NOT resolvable by editing this file: pinning
+#    post-seed column VALUES is a THIRD gate leg, booked as TODOS
+#    `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` against Phase 164.9 TESTISOLATION.
+#
+# ── L-04: THE TWO FLAG TABLES ARE RESET TO THEIR SEED VALUES ───────────────
+# ⚠️ Decision, 2026-09-09, recorded because the behaviour is a real one and was
+#    previously undocumented. `feature_flags` and `system_flags` are RUNTIME-
+#    MUTABLE operational switches. `DROP SCHEMA public CASCADE` empties them and
+#    the replay writes the SEED values back:
+#      feature_flags.process_key_unified_backbone = 'off'  (20260510173005:279-281)
+#      system_flags.match_engine_enabled          = true   (20260407164606:55-56)
+#      system_flags.ledger_refresh_enabled        = FALSE  (20260907130000:188-190)
+#    Whatever an operator or another CI run had set ON SHARED TEST is discarded —
+#    including the unified-backbone flag, which decides composite finalize routing.
+# ⛔ REPLAY-TO-SEED IS THE CHOICE, not an oversight. A restore exists to bring TEST
+#    to the state the repo DECLARES; preserving live flag values would make the
+#    result depend on who touched TEST last, which is the non-determinism the
+#    restore removes. Capturing and re-applying pre-DROP values was considered and
+#    REFUSED for that reason.
+# ⚠️ That this silently changes shared TEST under another team's CI run is the
+#    SHARED-TEST hazard, not a flag-table hazard, and it belongs to Phase 164.9
+#    TESTISOLATION with the rest of that class.
 #
 # ── DIRECTION ──────────────────────────────────────────────────────────────
 # ⛔ THIS FILE GROWS when a new reference statement is AUTHORED, and SHRINKS only
@@ -119,11 +176,21 @@
 # ⛔ Re-derive it; do not cite this paragraph as authority.
 #
 # ── THE ENTRIES ────────────────────────────────────────────────────────────
-# 8 tables, in migration-filename order. Derive the file count with
-#   cut -f1 scripts/restore-test-refdata-allowlist.txt | grep -v '^#' | sort -u | wc -l
+# 8 tables, in migration-filename order. Derive the file count with the W3
+# recipe at the top of this file — it is the ONLY correct spelling:
+#   grep -vE '^[[:space:]]*(#|$)' scripts/restore-test-refdata-allowlist.txt \
+#     | cut -f1 | sort -u | wc -l                                   # -> 19
 # and the entry count with
-#   grep -v '^#' scripts/restore-test-refdata-allowlist.txt | grep -c .
-# ⛔ Neither number is restated here on purpose.
+#   grep -vE '^[[:space:]]*(#|$)' scripts/restore-test-refdata-allowlist.txt | wc -l
+# ⛔ 2026-09-09 — THE ORDER OF THE FILTERS IS LOAD-BEARING. A variant that ran
+#   `cut -f1` BEFORE `grep -v '^#'` stood here and returned 20: `cut` turns the
+#   blank separator line into an empty field that `grep -v '^#'` then keeps, and
+#   it counts as a 20th distinct "file". That is the exact "20 files vs 19"
+#   defect the masthead above says it fixed, re-introduced as a command a reader
+#   would trust over the prose. Filter comments and blanks FIRST, then cut.
+# ⚠️ The masthead DOES carry the four numbers, deliberately — as a DATED
+#   MEASURED reading (see the header), not as a constant. Re-derive with the
+#   recipes above; where a recipe and the prose disagree, the RECIPE is right.
 
 20260405061911_initial_schema.sql	public.discovery_categories	1	# :146-151, plain multi-row VALUES, no ON CONFLICT. Consumers: scripts/seed-demo-data.ts slug='crypto-sma' lookup; strategies.category_id FK (supabase/schema/baseline.sql:12610).
 20260407164606_perfect_match.sql	public.system_flags	1	# :55-56 match_engine_enabled=true. Consumer: policy system_flags_match_engine_public_read (supabase/schema/baseline.sql:13519).
@@ -133,13 +200,13 @@
 20260416125429_reconciliation.sql	public.compute_job_kinds	1	# :97-98. Consumer: the compute_jobs.kind FK.
 20260416125430_contact_request_metadata.sql	public.compute_job_kinds	1	# :110-111. Consumer: the compute_jobs.kind FK.
 20260418194206_scoring_weight_overrides.sql	public.compute_job_kinds	1	# :141-142. Consumer: the compute_jobs.kind FK.
-20260420073003_allocator_holdings.sql	public.compute_job_kinds	1	# :279-280. The :18 mention is a COMMENT, and the :965/:1020 api_keys fixtures are inside the :149-377 DO body — both excluded by C1. Consumer: the compute_jobs.kind FK.
+20260420073003_allocator_holdings.sql	public.compute_job_kinds	1	# :279-280. The :18 mention is a COMMENT, and the :965/:1020 api_keys fixtures are inside the DO bodies at :953-999 and :1007-1067 — both excluded by C1 (confirmed by the extractor's insideBody() scan; the old ":149-377" here was impossible, 965 is not inside 149-377, and :149 is a plain comment). Consumer: the compute_jobs.kind FK.
 20260420213754_allocator_equity_snapshots.sql	public.compute_job_kinds	2	# :144-147 — TWO statements in one file (reconstruct_allocator_history, refresh_allocator_equity_daily). Consumer: the compute_jobs.kind FK.
 20260510173005_process_key_long_idempotency_drain.sql	public.compute_job_kinds	1	# :105-106 process_key_long. Consumer: the compute_jobs.kind FK.
 20260510173005_process_key_long_idempotency_drain.sql	public.feature_flags	1	# :279-281, ON CONFLICT (flag_key) DO NOTHING. Consumer: /api/cron/flag-monitor, per the COMMENT at :284 of this same file.
 20260510175507_process_key_long_compute_job_kinds_repair.sql	public.compute_job_kinds	1	# :33-34. A deliberate duplicate of the row above — the file says so at :1-17. Consumer: the compute_jobs.kind FK.
 20260515095804_teaser_anchor_strategy.sql	auth.users	1	# :48-53. THE C3 EXCEPTION, see the C3 paragraph above: FK head of the teaser trio; the row survives the restore so the replay is a no-op via ON CONFLICT (id) DO NOTHING; kept so the trio is FK-self-contained. Consumer: the two rows below it.
-20260515095804_teaser_anchor_strategy.sql	public.profiles	1	# :60-73 sentinel profile ...0000. Consumers: src/lib/phase-19-constants.ts:21; analytics-service/routers/process_key.py:1121.
+20260515095804_teaser_anchor_strategy.sql	public.profiles	1	# :60-73 sentinel profile ...0000. Consumer: public.strategies.user_id on the row below (:78-90) — this row is the FK MIDDLE of the teaser trio. ⛔ It used to cite phase-19-constants.ts:21, which is TEASER_ANCHOR_STRATEGY_ID = ...0001, the STRATEGY sentinel, not this row; no application constant names ...0000.
 20260515095804_teaser_anchor_strategy.sql	public.strategies	1	# :78-90 sentinel strategy ...0001. THE ONE reference `strategies` statement in the corpus. Consumers: src/lib/phase-19-constants.ts:21; analytics-service/routers/process_key.py:1121 writes strategy_verifications FK rows against it.
 20260522111858_compute_analytics_from_csv_kind.sql	public.compute_job_kinds	1	# :23-24. Consumer: the compute_jobs.kind FK.
 20260614120000_derive_broker_dailies_kind.sql	public.compute_job_kinds	1	# :32-33. Consumer: the compute_jobs.kind FK.

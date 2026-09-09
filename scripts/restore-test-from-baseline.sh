@@ -243,10 +243,21 @@ REFDATA_EXTRACTOR="${REFDATA_EXTRACTOR:-scripts/extract-reference-inserts.mjs}"
 # DECORATIVE. The gate's second leg refuses a PARTIAL replay: a kind-admission
 # CHECK that admits a value its registry table does not carry. On the real
 # database that pair is `compute_jobs_kind_check` (a flat `kind = ANY (ARRAY[…])`
-# list, supabase/migrations/20260710130000_stitch_composite_kind.sql:53) over
-# `public.compute_job_kinds`, whose registry column is `name` and NOT `kind`
-# (supabase/migrations/20260411144407_compute_jobs_queue.sql:86-88 — measured, not
-# remembered; a leg written against `kind` would error rather than refuse).
+# list) over `public.compute_job_kinds`, whose registry column is `name` and NOT
+# `kind` (supabase/migrations/20260411144407_compute_jobs_queue.sql:86-88 —
+# measured, not remembered; a leg written against `kind` would error rather than
+# refuse).
+#
+# ⚠️ THE CHECK'S AUTHORITY IS THE SHIPPED CONSTRAINT, NOT A MIGRATION PICKED AT
+# RANDOM. Five migrations re-declare `compute_jobs_kind_check` with
+# `ALTER TABLE compute_jobs ADD CONSTRAINT …`, and this repo's re-base rule says
+# the LATEST declaration wins. MEASURED 2026-09-09: latest is
+# supabase/migrations/20260717233529_allocator_equity_derived_surface.sql:140 and
+# the shipped shape is supabase/schema/baseline.sql:1334, carrying SIXTEEN kinds
+# (… 'stitch_composite', 'derive_allocator_equity'). This comment cited
+# 20260710130000_stitch_composite_kind.sql:53 until 2026-09-09; that declaration
+# was SUPERSEDED and carries FIFTEEN — one short — so a reader checking the leg
+# against it would have measured the wrong list.
 # Neither object exists on the throwaway lane, so pointed at its defaults the leg
 # would be a permanent no-op there and could never be observed firing. The
 # self-test points them at `fx_keep_kind_check` over `public.fx_keep`.`label`,
@@ -549,17 +560,51 @@ refuse_bad_migration_corpus() {
 # interpolation, and `sql_lit`-quoted at each site. Belt AND braces (T-164.8-04),
 # the same pairing refusal 4 uses for migration basenames.
 #
+# ⚠️ AND SO DO THE THREE KIND-REGISTRY SEAMS. `REFDATA_KIND_REGISTRY`,
+# `REFDATA_KIND_REGISTRY_COL` and `REFDATA_KIND_CHECK` reach the in-transaction
+# gate too — twice as bare identifiers and twice inside SQL string literals — and
+# until 2026-09-09 they carried NEITHER half of that discipline while the
+# paragraph above declared it. Exploiting that needs control of this script's
+# environment, so it was never an open hole; it was the stated discipline applied
+# to one variable and silently skipped for three, which is how a reader learns the
+# wrong rule. They are charset-refused here and `sql_lit`-quoted at every
+# string-literal site below.
+#
+# ⛔ AND THE EXPECTED COUNT IS KEPT, NOT DISCARDED. The extractor's trailer is
+# `<schema.table>=<statement count>`; this parser took the table half and threw
+# the count away, leaving the in-transaction gate testing `n = 0` alone. A replay
+# that lost ONE of `public.system_flags`'s two statements — or one of the two
+# `20260420213754` compute_job_kinds statements — leaves the table NON-EMPTY and
+# passed that gate, which is precisely the partial-replay shape the gate exists to
+# catch. Both halves are parsed now, and a count that is absent or non-numeric is
+# refused the same way a bad table name is.
+#
 # ⚠️ `rc=0; node … || rc=$?` and NOT `set +e`: the `--run` region's softening-token
 # exact-set pin (src/__tests__/restore-test-from-baseline.test.ts) counts both
 # `set +e` and `|| true` at a MEASURED number, and every reading below is captured
 # and then CHECKED, which is the opposite of softening. The `awk` counters exit 0
 # by construction, so neither token is needed to read them.
 REFDATA_TABLES=()
+REFDATA_EXPECT=()
 REFDATA_ENTRY_N=0
 refuse_bad_refdata_allowlist() {
   [ -f "$REFDATA_ALLOWLIST" ] || fail "reference-data allowlist not found at ${REFDATA_ALLOWLIST}."
   [ -f "$REFDATA_EXTRACTOR" ] || fail "reference-data extractor not found at ${REFDATA_EXTRACTOR}."
   command -v node >/dev/null 2>&1 || fail "node is not on PATH; the reference-data extractor cannot run, and a restore that skips the replay is the defect this gate exists to remove."
+
+  # THE THREE KIND-REGISTRY SEAMS, refused with the SAME charset the table names
+  # get — filesystem-only like the rest of this refusal, so they fire before the
+  # first connection. A relation name may carry a schema dot; a column name may
+  # not, so it gets the narrower class.
+  case "$REFDATA_KIND_REGISTRY" in
+    ''|*[!a-z0-9_.]*) fail "REFDATA_KIND_REGISTRY is '${REFDATA_KIND_REGISTRY}' — this script refuses to interpolate that into SQL. It reaches the in-transaction gate both as a bare identifier and inside a string literal." ;;
+  esac
+  case "$REFDATA_KIND_REGISTRY_COL" in
+    ''|*[!a-z0-9_]*) fail "REFDATA_KIND_REGISTRY_COL is '${REFDATA_KIND_REGISTRY_COL}' — this script refuses to interpolate that into SQL. A column name carries no schema dot." ;;
+  esac
+  case "$REFDATA_KIND_CHECK" in
+    ''|*[!a-z0-9_.]*) fail "REFDATA_KIND_CHECK is '${REFDATA_KIND_CHECK}' — this script refuses to interpolate that into SQL." ;;
+  esac
 
   # EMPTY IS AN ERROR, and it is checked HERE rather than left to the extractor:
   # the extractor's own empty-allowlist refusal is a second reading of the same
@@ -580,14 +625,23 @@ refuse_bad_refdata_allowlist() {
   fi
 
   REFDATA_TABLES=()
-  local line tbl
+  REFDATA_EXPECT=()
+  local line trailer tbl expect
   while IFS= read -r line; do
-    tbl="${line#-- refdata-expect: }"
-    tbl="${tbl%%=*}"
+    trailer="${line#-- refdata-expect: }"
+    tbl="${trailer%%=*}"
+    case "$trailer" in
+      *=*) expect="${trailer##*=}" ;;
+      *)   expect="" ;;
+    esac
     case "$tbl" in
       ''|*[!a-z0-9_.]*) rm -f "$tmp" "${tmp}.err"; fail "the reference-data extractor named table '${tbl}' — this script refuses to interpolate that into SQL." ;;
     esac
+    case "$expect" in
+      ''|*[!0-9]*) rm -f "$tmp" "${tmp}.err"; fail "the reference-data extractor emitted the trailer '${line}', whose count half is '${expect}'. This script needs BOTH halves — '<schema.table>=<statement count>' — because the in-transaction gate compares the table's row count against that number; without it the gate degrades to a bare emptiness test that a partial replay passes." ;;
+    esac
     REFDATA_TABLES+=("$tbl")
+    REFDATA_EXPECT+=("$expect")
   done < <(awk '/^-- refdata-expect: /' "$tmp")
   rm -f "$tmp" "${tmp}.err"
 
@@ -599,7 +653,7 @@ refuse_bad_refdata_allowlist() {
   if [ "${#REFDATA_TABLES[@]}" -eq 0 ]; then
     fail "the reference-data extractor exited 0 but emitted NO \`-- refdata-expect:\` trailer for ${REFDATA_ALLOWLIST}. With no table list the in-transaction gate has nothing to count and would pass vacuously; refusing rather than restoring unguarded."
   fi
-  note "refdata: ${#REFDATA_TABLES[@]} table(s) from ${REFDATA_ENTRY_N} allowlist line(s) under ${REFDATA_ALLOWLIST}"
+  note "refdata: ${#REFDATA_TABLES[@]} table(s) from ${REFDATA_ENTRY_N} allowlist line(s) under ${REFDATA_ALLOWLIST}, each with a pinned statement count"
 }
 
 # 5 — WHICH DATABASE AM I ON. The first statement this script sends. CLAUDE.md
@@ -1021,7 +1075,30 @@ TXN_MID
   # with "relation does not exist" and the whole restore would roll back.
   # `pg_catalog` is restored immediately after, BEFORE the ledger DDL, because
   # everything below is written expecting it.
+  #
+  # ⛔ PITFALL 2 — THE REPLAY RELIES ON THE CONNECTING ROLE BYPASSING RLS, AND
+  # THAT RELIANCE IS ASSERTED RATHER THAN ASSUMED. `public.compute_job_kinds` is
+  # FORCE ROW LEVEL SECURITY (supabase/schema/baseline.sql:9578) and its ONLY
+  # policy is `compute_job_kinds_read … FOR SELECT USING (true)`
+  # (baseline.sql:13012) — MEASURED 2026-09-09. There is no INSERT policy, and
+  # FORCE removes the owner exemption, so every replayed INSERT into that table
+  # lands ONLY because the role bypasses RLS. Undeclared, that is a fact the
+  # self-test cannot falsify: the lane's `postgres` is initdb's SUPERUSER. So the
+  # transaction states it as a precondition and RAISEs with a named diagnosis
+  # instead of surfacing a bare 42501 on the first run against real TEST, and the
+  # fixture dump now carries FORCE ROW LEVEL SECURITY on `public.fx_keep` so the
+  # green arms EXERCISE the bypass rather than assuming it.
   cat >> "$out" <<'TXN_REFDATA_HEAD'
+DO $rlsguard$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_roles
+     WHERE rolname = current_user AND (rolbypassrls OR rolsuper)
+  ) THEN
+    RAISE EXCEPTION 'restore aborted: % neither bypasses RLS nor is a superuser. The reference-data replay INSERTs into tables that are FORCE ROW LEVEL SECURITY with read-only policies (public.compute_job_kinds is the shipped case), so every one of those INSERTs would fail 42501 with no policy to point at. Connect as a role with BYPASSRLS rather than weakening the policies (Phase 164.8.1)', current_user;
+  END IF;
+END
+$rlsguard$;
 SET LOCAL search_path = public, pg_catalog;
 TXN_REFDATA_HEAD
   cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"
@@ -1038,10 +1115,22 @@ TXN_REFDATA_TAIL
   # has just created these tables; a guard would turn "the table is missing" —
   # the loudest possible symptom — into a silent pass, which is precisely the
   # softening this phase exists to remove.
-  local refdata_values="" rtq
+  #
+  # ⛔ THE PINNED COUNT IS CARRIED INTO THE GATE, NOT JUST INTO THE EXTRACTOR.
+  # `count(*) >= <statements>` is a SOUND FLOOR, not a guess: the DROP immediately
+  # above emptied every one of these tables, and each replayed statement is an
+  # allowlisted INSERT that puts AT LEAST one row into the table its trailer names
+  # — so a table carrying fewer rows than its statement count has lost at least one
+  # statement. Until 2026-09-09 this gate tested `n = 0` alone, and a replay that
+  # dropped one of `public.system_flags`'s two statements left the table non-empty
+  # and PASSED — the exact partial-replay shape the gate is for. EMPTY and SHORT
+  # RAISE separately because they are different diagnoses: nothing replayed at all
+  # versus some of it did.
+  local refdata_values="" rtq i=0
   for rtq in ${REFDATA_TABLES[@]+"${REFDATA_TABLES[@]}"}; do
     refdata_values="${refdata_values}${refdata_values:+,
-      }('$(sql_lit "$rtq")', (SELECT count(*) FROM ${rtq}))"
+      }('$(sql_lit "$rtq")', (SELECT count(*) FROM ${rtq}), ${REFDATA_EXPECT[$i]})"
+    i=$((i + 1))
   done
   cat >> "$out" <<TXN_REFDATA_GATE
 DO \$restore\$
@@ -1052,38 +1141,55 @@ BEGIN
   FOR r IN
     SELECT * FROM (VALUES
       ${refdata_values}
-    ) AS t(tbl, n)
-    WHERE t.n = 0
+    ) AS t(tbl, n, expected)
+    WHERE t.n = 0 OR t.n < t.expected
     ORDER BY 1
   LOOP
-    RAISE EXCEPTION 'restore aborted: reference table % is EMPTY after the replay — the ledger would say its seed migration applied while its rows are gone; fix the allowlist line or the extractor, never hand-seed shared TEST (Phase 164.8.1)', r.tbl;
+    IF r.n = 0 THEN
+      RAISE EXCEPTION 'restore aborted: reference table % is EMPTY after the replay — the ledger would say its seed migration applied while its rows are gone; fix the allowlist line or the extractor, never hand-seed shared TEST (Phase 164.8.1)', r.tbl;
+    ELSE
+      RAISE EXCEPTION 'restore aborted: reference table % is SHORT after the replay — % row(s) for % allowlisted statement(s), and each of those statements inserts at least one row into a table the DROP had just emptied, so at least one statement did not land. A PARTIAL replay commits a ledger that swears its seed migration applied; fix the allowlist line or the extractor, never hand-seed shared TEST (Phase 164.8.1)', r.tbl, r.n, r.expected;
+    END IF;
   END LOOP;
 
-  -- The PARTIAL-replay leg. A kind-admission CHECK that admits a value its
-  -- registry table does not carry means some of the replay landed and some did
-  -- not — the emptiness loop above cannot see that, because the table is not
-  -- empty. Guarded on BOTH objects existing so the leg is inert where the pair
-  -- does not exist, and pointed by seam at a pair that DOES exist on the
-  -- self-test lane, so it is observed firing rather than assumed to work.
-  IF to_regclass('${REFDATA_KIND_REGISTRY}') IS NOT NULL
-     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '$(sql_lit "$REFDATA_KIND_CHECK")') THEN
-    SELECT array_agg(DISTINCT m.caps[1] ORDER BY m.caps[1]) INTO v_missing
-      FROM pg_constraint c
-      CROSS JOIN LATERAL regexp_matches(pg_get_constraintdef(c.oid), '''([a-z_]+)''', 'g') AS m(caps)
-     WHERE c.conname = '$(sql_lit "$REFDATA_KIND_CHECK")'
-       AND NOT EXISTS (
-             SELECT 1 FROM ${REFDATA_KIND_REGISTRY} k
-              WHERE k.${REFDATA_KIND_REGISTRY_COL}::text = m.caps[1]
-           );
-    IF v_missing IS NOT NULL AND array_length(v_missing, 1) > 0 THEN
-      RAISE EXCEPTION 'restore aborted: ${REFDATA_KIND_CHECK} admits kind(s) % that ${REFDATA_KIND_REGISTRY} does not carry — a partial replay', array_to_string(v_missing, ', ');
-    END IF;
+  -- The SECOND partial-replay leg, and it is INDEPENDENT of the count floor
+  -- above: the floor sees a table that lost a whole statement, this sees a
+  -- registry that lost individual ROWS its own admission CHECK still admits.
+  -- Neither substitutes for the other — a statement whose row count survives
+  -- (ON CONFLICT DO NOTHING against a stale row) is invisible to the floor, and
+  -- a table with no admission CHECK is invisible to this. Both must stand.
+  --
+  -- ⛔ ABSENCE IS LOUD, NOT INERT. This used to be wrapped in
+  -- `IF to_regclass(...) IS NOT NULL AND EXISTS (... pg_constraint ...) THEN`, so
+  -- a rename, a typo in the seam, or a dropped constraint turned the leg into a
+  -- permanent no-op and the restore COMMITTED — on real TEST this is the only
+  -- detector of a partial replay that leaves its tables non-empty, and it would
+  -- have gone quiet with nothing in the log. The configured pair is REQUIRED to
+  -- exist: both objects are on real TEST, and on the self-test lane the seam
+  -- points at `public.fx_keep` / `fx_keep_kind_check`, which baseline-fixture.sql
+  -- creates for exactly this reason. Each RAISE names WHICH of the two is gone.
+  IF to_regclass('$(sql_lit "$REFDATA_KIND_REGISTRY")') IS NULL THEN
+    RAISE EXCEPTION 'restore aborted: the configured kind registry ${REFDATA_KIND_REGISTRY} (REFDATA_KIND_REGISTRY) does not exist after the replay. This is the only leg that can see a partial replay whose tables are non-empty; skipping it would commit an unguarded restore (Phase 164.8.1)';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '$(sql_lit "$REFDATA_KIND_CHECK")') THEN
+    RAISE EXCEPTION 'restore aborted: the configured kind-admission CHECK ${REFDATA_KIND_CHECK} (REFDATA_KIND_CHECK) does not exist after the replay. This is the only leg that can see a partial replay whose tables are non-empty; skipping it would commit an unguarded restore (Phase 164.8.1)';
+  END IF;
+  SELECT array_agg(DISTINCT m.caps[1] ORDER BY m.caps[1]) INTO v_missing
+    FROM pg_constraint c
+    CROSS JOIN LATERAL regexp_matches(pg_get_constraintdef(c.oid), '''([a-z_]+)''', 'g') AS m(caps)
+   WHERE c.conname = '$(sql_lit "$REFDATA_KIND_CHECK")'
+     AND NOT EXISTS (
+           SELECT 1 FROM ${REFDATA_KIND_REGISTRY} k
+            WHERE k.${REFDATA_KIND_REGISTRY_COL}::text = m.caps[1]
+         );
+  IF v_missing IS NOT NULL AND array_length(v_missing, 1) > 0 THEN
+    RAISE EXCEPTION 'restore aborted: ${REFDATA_KIND_CHECK} admits kind(s) % that ${REFDATA_KIND_REGISTRY} does not carry — a partial replay', array_to_string(v_missing, ', ');
   END IF;
 END
 \$restore\$;
 TXN_REFDATA_GATE
 
-  note "refdata: ${refdata_n} statement(s) replayed into ${#REFDATA_TABLES[@]} table(s), gated non-empty inside the transaction"
+  note "refdata: ${refdata_n} statement(s) replayed into ${#REFDATA_TABLES[@]} table(s), gated inside the transaction against each table's pinned statement count (count(*) >= expected, not merely non-empty) and against ${REFDATA_KIND_CHECK} over ${REFDATA_KIND_REGISTRY}"
 
   # ── the ledger ───────────────────────────────────────────────────────────
   # The DDL is the CLI's OWN (supabase/cli v2.98.2, its migration-history package).
@@ -1397,7 +1503,10 @@ main() {
 #            left shared TEST half-restored.
 #   arm 24 — (a) a pinned count that stopped matching, (b) an EMPTY allowlist,
 #            (c) an extractor that exits 0 emitting nothing. Each also asserts the
-#            pre-census banner never printed, so "before any write" is measured.
+#            pre-census banner never printed, so "before any write" is measured;
+#            arm 8 pins that same literal POSITIVELY, because a check that only
+#            ever asserts a string's ABSENCE goes green when the string is merely
+#            reworded.
 #
 # ── REDACTION IS A CHECK WITH A SUBJECT (T-164.8-05) ────────────────────────
 # Every arm's combined output is captured, and after EVERY arm the harness greps
@@ -1958,6 +2067,16 @@ FRESHSTUB
     [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: --run --mode preflight exited ${rc}, expected 0"; return 1; }
     grep -aq 'mode=preflight' "$out" || { echo "MEASURE_FAIL: the output does not carry 'mode=preflight'"; return 1; }
     grep -aq 'post-census == pre-census' "$out" || { echo "MEASURE_FAIL: the preflight did not report 'post-census == pre-census'"; return 1; }
+    # ⛔ THE POSITIVE HALF OF ARM 24's `no_write_check` (2026-09-09 review fix).
+    # Arm 24 asserts the literal `pre-census (read-only)` is ABSENT; a pure
+    # negative assertion goes green when the banner is merely REWORDED, so it
+    # could pass for the wrong reason forever. Nothing else pinned that string.
+    # This is the leg where the banner MUST print — a preflight that reaches the
+    # database — so the pair together proves the string exists and is absent only
+    # when it should be. ⚠️ Reword the banner and this arm goes RED first, which
+    # is the point.
+    grep -aq 'pre-census (read-only)' "$out" \
+      || { echo "MEASURE_FAIL: a preflight that ran to completion did not print the 'pre-census (read-only)' banner. Arm 24's no-write assertion greps for that exact literal, so if it no longer prints, arm 24 is passing vacuously."; return 1; }
     local n
     n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
     [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table public.e2e_leftover is GONE after a preflight (count=${n}). The rollback did not roll back."; return 1; }
@@ -2405,10 +2524,35 @@ FRESHSTUB
   }
 
   # ═══ ARM 24 — RED: a bad reference-data allowlist, refused BEFORE any write ═
-  # Refusal 8 has three reason branches and this arm drives each by name. All
-  # three are pure filesystem, so they fire before the first connection: the arm
-  # asserts the pre-census banner NEVER PRINTED, which is what makes "before any
-  # write" a measurement rather than a claim about ordering in the source.
+  # ⛔ THIS COMMENT'S NUMBERS ARE MEASURED, AND SO IS THE GAP THEY ADMIT. It said
+  # "refusal 8 has three reason branches and this arm drives each by name" until
+  # 2026-09-09; refusal 8 had SEVEN then, and has ELEVEN now that the review added
+  # the kind-registry seam refusals and the trailer's count half. Regenerate with
+  #
+  #   awk '/^refuse_bad_refdata_allowlist\(\)/,/^}/' scripts/restore-test-from-baseline.sh | grep -c 'fail "'
+  #
+  # (2026-09-09: ELEVEN). This is the same over-claim class the W2 block at the
+  # foot of this file exists to correct, so it is corrected the same way rather
+  # than extended.
+  #
+  # THIS ARM DRIVES THREE OF THE ELEVEN, each by its named message: (a) the
+  # extractor's own refusal being surfaced, (b) an allowlist with zero entries,
+  # (c) an extractor that exits 0 emitting no trailer.
+  #
+  # EIGHT HAVE NO ARM, and saying so is the point: allowlist file not found;
+  # extractor file not found; node not on PATH; the extractor naming a table
+  # outside `[a-z0-9_.]`; a trailer whose count half is absent or non-numeric;
+  # and the three seam refusals on REFDATA_KIND_REGISTRY,
+  # REFDATA_KIND_REGISTRY_COL and REFDATA_KIND_CHECK. What IS claimed for refusal
+  # 8, and what the self-test line at the foot of this file claims, is that it has
+  # at least one arm asserting a NAMED message — not that every branch is armed.
+  #
+  # All three driven branches are pure filesystem, so they fire before the first
+  # connection: the arm asserts the pre-census banner NEVER PRINTED, which is what
+  # makes "before any write" a measurement rather than a claim about ordering in
+  # the source. ⚠️ That is a NEGATIVE assertion and cannot stand alone — arm 8
+  # pins the same literal POSITIVELY on a preflight that must print it, so a
+  # reworded banner goes RED there instead of silently greening this arm.
   arm_bad_refdata_allowlist() {
     local out rc
     local scratch="$SELFTEST_TMPD/refdata-arm24"

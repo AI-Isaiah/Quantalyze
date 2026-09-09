@@ -238,14 +238,32 @@ function headerBlock(text: string): string {
 
 /** ci.yml's step names, read from ci.yml rather than restated here. */
 const CI_LINES = CI.split("\n");
-// ⚠️ RE-ANCHORED 2026-09-09 (Phase 164.8.1 Plan 01): +32 each, because that
-// plan added the reference-data extractor's self-test/audit pair to
-// `sql-gate-lint`, which sits ABOVE `sql-mutation` in ci.yml. The pins were
-// RE-MEASURED against the file, not re-derived from the shift — the assertions
-// below name what each line must contain, so a wrong re-anchor reds rather than
-// silently reading a comment.
-const CRON_STEP_NAME = (CI_LINES[1303] ?? "").replace(/^\s*- name:\s*/, "").trim();
-const PROBE_STEP_NAME = (CI_LINES[1408] ?? "").replace(/^\s*- name:\s*/, "").trim();
+
+// ⛔ RESOLVED BY UNIQUE TOKEN, NOT BY LINE INDEX (2026-09-09, Phase 164.8.1).
+// These two were `CI_LINES[1303]` / `CI_LINES[1408]`, and an absolute index into
+// ci.yml is a pin that rots on any edit ABOVE it — which is not hypothetical:
+// they were re-anchored +32 earlier in THIS SAME PHASE when the extractor's
+// self-test pair landed in `sql-gate-lint`, and the next edit in the same phase
+// broke them again by +95. Two forced re-anchors in one phase is the signal that
+// the mechanism is wrong, not that the numbers were unlucky.
+//
+// The token is a SHORT, STABLE substring; the full step NAME is still read from
+// ci.yml rather than restated here, so a renamed step still reds. The lookup
+// REFUSES on zero or multiple matches, so it can never silently resolve to the
+// wrong step — the failure mode a line index has by construction.
+function ciStepNameContaining(token: string): string {
+  const hits = CI_LINES.filter(
+    (l) => /^\s*- name:\s*/.test(l) && l.includes(token),
+  ).map((l) => l.replace(/^\s*- name:\s*/, "").trim());
+  expect(
+    hits.length,
+    `ci.yml must carry EXACTLY ONE '- name:' step whose text contains ${JSON.stringify(token)}; found ${hits.length}${hits.length ? ` (${hits.join(" | ")})` : ""}. A token that matches none or many cannot identify a step — widen or narrow the token, do not pick one of the matches.`,
+  ).toBe(1);
+  return hits[0] as string;
+}
+
+const CRON_STEP_NAME = ciStepNameContaining("Provision pg_cron");
+const PROBE_STEP_NAME = ciStepNameContaining("PostgreSQL server binaries resolve");
 
 // ---------------------------------------------------------------------------
 // Calibration harness.

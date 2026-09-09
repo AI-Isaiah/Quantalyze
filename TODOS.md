@@ -1475,7 +1475,9 @@ true for 146 and half of 142–145, and **false for 141**.
       `/gsd-phase --edit 164.9`.
       ⚠️ **PRE-EXISTING, NOT INTRODUCED, and that is precisely why Phase 164.8.1 replays it
       faithfully (L-03) rather than fixing it.** The same migration seeded the same value on TEST
-      when it applied; the restore drops only `public` (`scripts/restore-test-from-baseline.sh:861`),
+      when it applied; the restore drops only `public` (the `DROP SCHEMA public CASCADE` in that script's
+      TXN_DROP heredoc — cited by symbol because `:861`, written here on 2026-09-09, had already
+      drifted to an unrelated census row inside the same PR),
       so TEST's `cron.job` schedule was never touched and whatever TEST was doing before the
       restore it still does. Omitting the row would instead leave TEST missing a setting its own
       ledger claims applied — a second lie on top of the first.
@@ -1493,6 +1495,35 @@ true for 146 and half of 142–145, and **false for 141**.
       behind one, so verify at the SERVICE, not at the cron row. (ii) The `COMMENT ON DATABASE`
       marker check confirms which DATABASE you are connected to; it says nothing about which
       SERVICE the tick calls. They are different questions and only the first has a guard.
+
+- [ ] **`[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` The TEST restore's reference-data replay reproduces
+      INSERT effects only, so post-seed UPDATEs from LATER migrations are never re-applied while
+      the ledger swears they ran (booked 2026-09-09, found by review of Phase 164.8.1's PR).**
+      C1-C4 in `scripts/restore-test-refdata-allowlist.txt` select `INSERT … VALUES` statements
+      BY CONSTRUCTION, which is correct for what the criterion is for. The gap is that a row can
+      come back present but in the WRONG STATE, and neither the emptiness leg nor the count leg of
+      the in-transaction gate can see it — both measure `count(*)`, and the row is there.
+      **Worked case, measured at HEAD 2026-09-09.** The teaser sentinel profile is replayed with
+      `role='manager'` (`20260515095804_teaser_anchor_strategy.sql:60-73`);
+      `20260521150000_universal_signup_approval_gate.sql:28-31` then sets
+      `manager_status='verified' WHERE role IN ('manager','both')`. After a restore that row
+      carries the column default while the ledger holds a row for `20260521150000`.
+      **Bounded, and that is why it is a deferral and not a blocker.** The five top-level UPDATEs
+      against allowlisted tables all target `profiles` or `strategies` — the teaser trio —
+      (`20260521150000:23,28,33`, `20260716120000:72`, `20260530120000:291`,
+      `20260521190243:32`, `20260709130000:30`). NONE touch `compute_job_kinds`, `system_flags`,
+      `feature_flags`, `system_settings` or `discovery_categories`, so the FK/CHECK-bearing
+      reference tables — the ones a failed restore actually breaks — are unaffected.
+      ✅ **Destination: Phase 164.9 TESTISOLATION** — routed there 2026-09-09 via
+      `/gsd-phase --edit 164.9`; that phase's `ROUTED HERE` block carries the routing decision and
+      why 164.9 is the right home. ⛔ This entry is the EVIDENCE half and the ROADMAP block is the
+      ROUTING half — deliberately not copies of each other. Keep it that way: two records of the
+      same sentence rot apart, which is the defect class this PR spent its review budget on.
+      ⛔ **Not closable by editing the allowlist.** Allowlisting the post-seed UPDATEs would break
+      C2 (an `UPDATE … WHERE` is not a literal INSERT) and would replay a backfill against rows
+      that may legitimately differ. The scope boundary is now STATED in the allowlist's own
+      "SCOPE BOUNDARY" block; deleting that block to make this look resolved is the failure this
+      entry exists to prevent.
 
 - [ ] **`[164.5-STALE-GENERATED-TYPES]` `src/lib/database.types.ts` keeps a generated declaration
       for `create_allocator_connected_strategy` after PR #758 drops it (booked 2026-09-08).**

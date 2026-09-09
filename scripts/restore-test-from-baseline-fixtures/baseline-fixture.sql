@@ -36,8 +36,19 @@
 -- beyond "no allowlisted reference table is empty": a CHECK constraint that
 -- admits a kind the registry table does not carry is a PARTIAL replay, and on
 -- the real database that pair is `compute_jobs_kind_check` over
--- `public.compute_job_kinds` (supabase/migrations/20260710130000_stitch_composite_kind.sql:53,
--- supabase/migrations/20260411144407_compute_jobs_queue.sql:86). Neither object
+-- `public.compute_job_kinds`.
+--
+-- ⚠️ CITE THE SHIPPED CONSTRAINT, NOT AN ARBITRARY MIGRATION. Nine migrations
+-- name `compute_jobs_kind_check` and five of them re-declare it with
+-- `ALTER TABLE compute_jobs ADD CONSTRAINT …`, so — the repo's re-base rule —
+-- only the LATEST declaration is authoritative. MEASURED 2026-09-09: that is
+-- supabase/migrations/20260717233529_allocator_equity_derived_surface.sql:140,
+-- and the shipped shape is supabase/schema/baseline.sql:1334 with SIXTEEN kinds
+-- (… 'stitch_composite', 'derive_allocator_equity'). The cite this comment
+-- carried until 2026-09-09 —
+-- 20260710130000_stitch_composite_kind.sql:53 — was SUPERSEDED and one kind
+-- short. The registry column is `name`
+-- (supabase/migrations/20260411144407_compute_jobs_queue.sql:86). Neither object
 -- exists on this lane, so WITHOUT this constraint that leg would be a no-op here
 -- and would pass vacuously forever — an invariant no arm exercises is decorative.
 -- The seams `REFDATA_KIND_REGISTRY` / `REFDATA_KIND_REGISTRY_COL` /
@@ -101,6 +112,20 @@ ALTER TABLE ONLY "public"."fx_other"
     ADD CONSTRAINT "fx_other_pkey" PRIMARY KEY ("id");
 
 ALTER TABLE "public"."fx_keep" ENABLE ROW LEVEL SECURITY;
+
+-- ⛔ FORCE, AND A READ-ONLY POLICY, BECAUSE THE REPLAY RELIES ON BYPASSING RLS.
+-- The real target of the replay is `public.compute_job_kinds`, which is FORCE ROW
+-- LEVEL SECURITY (supabase/schema/baseline.sql:9578) and whose ONLY policy is
+-- `compute_job_kinds_read … FOR SELECT USING (true)` (baseline.sql:13012) —
+-- MEASURED 2026-09-09. There is no INSERT policy, and FORCE removes the owner's
+-- exemption, so the replayed INSERTs land only because the connecting role
+-- bypasses RLS. Without FORCE here the fixture would carry a WEAKER shape than
+-- production and the lane could never falsify that reliance; the restore's
+-- in-transaction preamble now asserts it by name. `fx_keep_read` below is the
+-- SELECT-only analog of `compute_job_kinds_read`, and it is the same one line
+-- arms 9/12/18 already pin as `policies=1` — FORCE adds no policy and no table,
+-- so those exact summary lines are unchanged.
+ALTER TABLE ONLY "public"."fx_keep" FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY "fx_keep_read" ON "public"."fx_keep" FOR SELECT USING (true);
 

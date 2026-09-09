@@ -485,8 +485,101 @@ jobs:
       - name: Reference-data extractor self-test - every refusal fires on its red fixture
         run: node scripts/extract-reference-inserts.mjs --self-test
 
+      # ⛔ [164.8.1 review, finding 2] THE EXIT CODE IS NOT THE MEASUREMENT, and
+      # this is the ci.yml `sql-gate-lint` block copied as ONE TEXT (the way the
+      # mutex steps in this job are ci.yml's, byte for byte). A module whose main
+      # guard does not fire exits 0 having emitted NOTHING — the script's own
+      # tail records the macOS `/var` -> `/private/var` case where exactly that
+      # happened — so the bare step above, which reads only the exit code, was
+      # satisfied by a silent no-op. Here the command is re-run with its stdout
+      # captured and the census line it must PRINT is asserted. Only the stdout
+      # fd differs; argv is byte-identical to the bare line above, which stays as
+      # the mode-identity pin src/__tests__/refdata-allowlist.test.ts reads.
+      #
+      # ⛔ NO `|| true` AND NO BARE ZERO-STATUS `exit` in this block — this job's
+      # softening-token scan (src/__tests__/test-restore-workflow-wiring.test.ts)
+      # refuses both. `set -uo pipefail` WITHOUT `-e` is what makes that
+      # possible: a non-matching `grep` yields the empty string instead of
+      # aborting the step, so an absent line reaches its own MEASURE_FAIL.
+      - name: Assert the extractor self-test PRINTED its kind census and cleared the floor
+        env:
+          REFDATA_SELFTEST_LOG: ${{ runner.temp }}/extract-reference-inserts-selftest.log
+        run: |
+          set -uo pipefail
+          node scripts/extract-reference-inserts.mjs --self-test > "$REFDATA_SELFTEST_LOG" 2>&1
+          status=$?
+          cat "$REFDATA_SELFTEST_LOG"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the reference-data extractor self-test failed (exit $status)."
+            exit "$status"
+          fi
+          ok_line=$(grep -a -m1 -E '^extract-reference-inserts self-test OK: [0-9]+ kinds, red\+green each\.$' "$REFDATA_SELFTEST_LOG")
+          if [ -z "$ok_line" ]; then
+            echo "::error::MEASURE_FAIL: the self-test exited 0 but printed NO 'extract-reference-inserts self-test OK: N kinds, red+green each.' line. A zero status with no output is what a main guard that never fired looks like; it is not a passing self-test."
+            exit 1
+          fi
+          kinds=$(echo "$ok_line" | sed -E 's|^extract-reference-inserts self-test OK: ([0-9]+) kinds.*|\1|')
+          case "$kinds" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the kind count out of '$ok_line'."; exit 1;; esac
+          # The floor is READ FROM THE SCRIPT BY SYMBOL, never restated here.
+          # `node -e` leaves `process.argv[1]` undefined, so importing the module
+          # does not trip its CLI entry point.
+          floor=$(node -e 'import("./scripts/extract-reference-inserts.mjs").then(m => console.log(m.SELF_TEST_KINDS_FLOOR))')
+          case "$floor" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read SELF_TEST_KINDS_FLOOR from scripts/extract-reference-inserts.mjs (got '$floor')."; exit 1;; esac
+          if [ "$kinds" -lt "$floor" ]; then
+            echo "::error::SELF_TEST_KINDS_FLOOR regression: the self-test ran $kinds kind(s), below the floor of $floor. A refusal kind was deleted — restore it, do not lower the floor to clear this."
+            exit 1
+          fi
+          echo "self-test census: $kinds kind(s) against floor $floor."
+
       - name: Reference-data allowlist audit - no unlisted top-level reference INSERT in supabase/migrations
         run: node scripts/extract-reference-inserts.mjs --audit
+
+      # Same reasoning as the self-test assertion above: an audit that measured
+      # NOTHING and an audit that found nothing wrong are both exit 0, and this
+      # step is the only thing that tells them apart. It matters more here than
+      # in ci.yml — this workflow WRITES to shared TEST, and the statements this
+      # census counts are the ones the restore replays inside the schema-load
+      # transaction.
+      - name: Assert the allowlist audit PRINTED its census over a non-empty corpus
+        env:
+          REFDATA_AUDIT_LOG: ${{ runner.temp }}/extract-reference-inserts-audit.log
+        run: |
+          set -uo pipefail
+          node scripts/extract-reference-inserts.mjs --audit > "$REFDATA_AUDIT_LOG" 2>&1
+          status=$?
+          cat "$REFDATA_AUDIT_LOG"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the reference-data allowlist audit failed (exit $status)."
+            exit "$status"
+          fi
+          census=$(grep -a -m1 -E '^extract-reference-inserts audit OK: [0-9]+ entr\(ies\), [0-9]+ file\(s\), [0-9]+ table\(s\), [0-9]+ statement\(s\);' "$REFDATA_AUDIT_LOG")
+          if [ -z "$census" ]; then
+            echo "::error::MEASURE_FAIL: the audit exited 0 but printed NO 'extract-reference-inserts audit OK: …' census line. An audit that measured nothing is not an audit that found nothing."
+            exit 1
+          fi
+          scanned_line=$(grep -a -m1 -E '^ +migrations scanned: +[0-9]+$' "$REFDATA_AUDIT_LOG")
+          if [ -z "$scanned_line" ]; then
+            echo "::error::MEASURE_FAIL: the audit printed no 'migrations scanned: N' line, so how much of supabase/migrations it read is unknown."
+            exit 1
+          fi
+          scanned=$(echo "$scanned_line" | sed -E 's|^ +migrations scanned: +([0-9]+)$|\1|')
+          case "$scanned" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the scanned-migration count out of '$scanned_line'."; exit 1;; esac
+          if [ "$scanned" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the audit scanned 0 migrations. An empty corpus audits clean BY CONSTRUCTION — a wrong --migrations path reads exactly like a repository with no drift."
+            exit 1
+          fi
+          entries=$(echo "$census" | sed -E 's|^extract-reference-inserts audit OK: ([0-9]+) entr\(ies\).*|\1|')
+          case "$entries" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the entry count out of '$census'."; exit 1;; esac
+          if [ "$entries" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the audit reports 0 allowlist entr(ies), so the restore would replay nothing while every migration still reads as applied."
+            exit 1
+          fi
+          echo "$scanned_line"
+          echo "$census"
 
       # Copied from ci.yml's `- name: Probe - the runner image's PostgreSQL server
       # binaries resolve` (the sql-mutation job). The restore script's --self-test

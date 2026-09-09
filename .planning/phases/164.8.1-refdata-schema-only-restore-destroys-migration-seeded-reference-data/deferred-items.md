@@ -11,7 +11,8 @@ reach PROD compute. ⛔ The host literal is deliberately NOT repeated here: this
 this file is tracked, and the restore's log is world-readable. Cite the anchor.
 
 **PRE-EXISTING, not introduced by this phase — measured, not assumed.** The restore drops only
-`public` (`scripts/restore-test-from-baseline.sh:861` — `DROP SCHEMA public CASCADE;`), so TEST's
+`public` (the `DROP SCHEMA public CASCADE;` in `scripts/restore-test-from-baseline.sh`'s TXN_DROP
+heredoc — by symbol; the `:861` here drifted within the PR that wrote it), so TEST's
 `cron.job` schedule is never touched; whatever TEST was doing before the restore, it still does.
 The same migration seeded the same value on TEST when it applied.
 

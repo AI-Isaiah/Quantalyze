@@ -67,11 +67,15 @@ const RESTORE_WF = join(REPO_ROOT, ".github", "workflows", "test-restore-from-ba
  *           reference row is a NAMED failure of the restore's own gate, never a
  *           hand-run INSERT against shared TEST.
  *
- * ⛔ Do not restate the file's other cardinalities here. 22 entries span 19
- * files and 8 tables and pin 23 statements — four different numbers, because
- * one migration carries two entries and one entry pins two statements.
- * `node scripts/extract-reference-inserts.mjs --audit` prints all four; this
- * test re-derives the ones it asserts.
+ * ⛔ Do not restate the file's other cardinalities here — and that injunction
+ * used to be followed by a restatement, which is why this paragraph now carries
+ * none. `node scripts/extract-reference-inserts.mjs --audit` prints entries,
+ * files, tables and statements; the allowlist's own masthead carries them as a
+ * dated reading. This test re-derives only the ones it asserts.
+ * (The deleted sentence explained the entries-over-files gap with "one migration
+ * carries two entries", which accounts for ONE of the three surplus entries:
+ * 20260515095804 carries THREE. Wrong arithmetic in a comment that forbids
+ * arithmetic in comments.)
  */
 export const ENTRY_COUNT = 22;
 
