@@ -625,22 +625,42 @@ refuse_backticks_in_txn_heredocs() {
   # A QUOTED delimiter (<<'EOF' or <<"EOF") disables substitution entirely, so
   # those bodies are safe by construction and are skipped, not scanned.
   #
-  # The `$` anchor stays: a real opener ends its line. It is also what keeps the
-  # self-test's own fixture-writing `printf 'cat >> "$out" <<TXN_FIXTURE\n'` from
-  # reading as an opener.
+  # ⛔ WIDENED 2026-09-09 (code review WR-01), and the widening was PROVEN needed,
+  # not argued: the previous pattern anchored the delimiter with `[ \t]*$`, so an
+  # opener whose delimiter is FOLLOWED by a redirect or a pipe on the same line was
+  # not recognised as an opener AT ALL and its body was never scanned. A fixture
+  # whose SQL comment carried a live backticked echo came out of bash with the echo
+  # already executed: the substitution really runs there. Trailing content is now
+  # allowed, but ONLY when it begins with a shell operator, which preserves the
+  # original anchor's purpose — the self-test's own fixture-writing printf has a
+  # backslash-n and a quote after the token, not an operator, so it still does not
+  # read as an opener.
+  #
+  # ⚠️ Do NOT write an example opener literally in this comment. The first draft of
+  # this paragraph spelled two of them out and the widened matcher promptly read
+  # ITS OWN COMMENT as an opener, scanned to EOF and refused the whole script. The
+  # trap this guard exists for is shell-looking text inside prose; the guard's own
+  # documentation is not exempt from it.
+  #
+  # ⛔ SECOND SHAPE, same review: an INDENTED terminator closes the scan but does
+  # NOT close a real heredoc unless the opener was `<<-`. Stripping indentation
+  # unconditionally therefore ended the scan early and let every backtick after
+  # that point through. The dash is now tracked, and only `<<-` accepts an
+  # indented terminator — the same rule bash itself applies.
   hits=$(awk '
     !inside {
-      if (match($0, /<<-?[ \t]*("[A-Za-z_][A-Za-z0-9_]*"|'"'"'[A-Za-z_][A-Za-z0-9_]*'"'"'|[A-Za-z_][A-Za-z0-9_]*)[ \t]*$/)) {
+      if (match($0, /<<-?[ \t]*("[A-Za-z_][A-Za-z0-9_]*"|'"'"'[A-Za-z_][A-Za-z0-9_]*'"'"'|[A-Za-z_][A-Za-z0-9_]*)[ \t]*([<>|&].*)?$/)) {
         tok = substr($0, RSTART, RLENGTH)
+        dash = (tok ~ /^<<-/)
         sub(/^<<-?[ \t]*/, "", tok)
-        sub(/[ \t]*$/, "", tok)
+        sub(/[ \t]*([<>|&].*)?$/, "", tok)
         # Quoted delimiter => no expansion inside the body => nothing to refuse.
         if (tok ~ /^["'"'"']/) next
         term = tok; inside = 1; next
       }
       next
     }
-    { line = $0; sub(/^[ \t]+/, "", line) }
+    { line = $0; if (dash) sub(/^[ \t]+/, "", line) }
     inside && line == term { inside = 0; next }
     inside {
       # A BACKSLASH-ESCAPED backtick is LITERAL in an unquoted heredoc — no
@@ -2886,6 +2906,51 @@ FRESHSTUB
     ( refuse_backticks_in_txn_heredocs "$d/quoted.sh" ) > "$out" 2>&1 \
       || { echo "MEASURE_FAIL (e): the guard refused a QUOTED heredoc, whose body bash never expands. It would push readers toward quoting the gate's heredoc, which cannot be quoted."; cat "$out"; return 1; }
 
+    # (f) ⛔ THE THREE SHAPES CODE REVIEW WR-01 PROVED LIVE ON 2026-09-09, after
+    #     leg (d) had already closed four others. The matcher anchored the
+    #     delimiter to end-of-line, so an opener whose delimiter is followed by a
+    #     redirect or a pipe was not seen as an opener and its body went unscanned;
+    #     and an indented terminator ended the scan even for a plain (non-dash)
+    #     opener, which bash does not treat as a terminator at all. Measured, not
+    #     argued: a fixture of the pipe shape carrying a live backticked echo came
+    #     out of bash with the echo already executed.
+    #     ⚠️ The fixtures are BUILT here rather than written literally, because a
+    #     literal example opener in this file would itself read as one — that
+    #     happened while fixing WR-01 and the widened matcher refused the whole
+    #     script.
+    local tail3 body3
+    for tail3 in ' >/dev/null' ' | cat' 'INDENT'; do
+      {
+        if [ "$tail3" = 'INDENT' ]; then
+          printf 'cat >> "$out" <%s%s\n' '<' 'TXN_WR01'
+          printf -- '  -- prose carrying a live `RAISE` backtick\n'
+          printf '    TXN_WR01\n'
+          printf -- '  -- a SECOND live `RAISE` after the indented line\n'
+          printf 'TXN_WR01\n'
+        else
+          printf 'cat >> "$out" <%s%s%s\n' '<' 'TXN_WR01' "$tail3"
+          printf -- '  -- prose carrying a live `RAISE` backtick\n'
+          printf 'TXN_WR01\n'
+        fi
+      } > "$d/wr01.sh"
+      out="$SELFTEST_TMPD/a26f.out"
+      ( refuse_backticks_in_txn_heredocs "$d/wr01.sh" ) > "$out" 2>&1 && {
+        echo "MEASURE_FAIL (f): the opener trailer '${tail3}' walked a LIVE backtick past the guard. bash command-substitutes it while this script assembles a destructive restore; WR-01 proved the substitution executes."; cat "$d/wr01.sh"; return 1; }
+    done
+
+    # (g) THE CONTROL FOR (f). Widening the matcher must not make a printf that
+    #     WRITES an opener read as one — that is what the end-of-line anchor was
+    #     protecting, and this arm's own fixtures are written by exactly such a
+    #     printf. Without this leg the fix for (f) could be "match everything",
+    #     which would refuse this file forever.
+    {
+      printf "printf 'cat >> \"\$out\" <%s%s\\\\n'\n" '<' 'TXN_FIXTURE'
+      printf -- '# a backtick `here` is outside any heredoc\n'
+    } > "$d/printf.sh"
+    out="$SELFTEST_TMPD/a26g.out"
+    ( refuse_backticks_in_txn_heredocs "$d/printf.sh" ) > "$out" 2>&1 \
+      || { echo "MEASURE_FAIL (g): a printf that WRITES an opener was read AS one, so the widened matcher now refuses files that contain no heredoc at all — including this script's own self-test fixtures."; cat "$out"; return 1; }
+
     # (c) ⛔ THE POINT OF THE ARM — THIS SCRIPT ITSELF. Legs (a) and (b) only
     #     prove the detector discriminates; they say nothing about the file the
     #     restore actually assembles its transaction from.
@@ -2971,7 +3036,7 @@ FRESHSTUB
   run_arm "23 RED   the reference-data gate BITES: no replay, no search_path, partial replay" 0 arm_refdata_gate_bites
   run_arm "24 RED   reference-data allowlist: count drift, empty, silent extractor" 0 arm_bad_refdata_allowlist
   run_arm "25 GREEN the preflight rollback view normalises mutable reference counts and NOTHING else (CR-01)" 0 arm_census_rollback_view
-  run_arm "26 RED   a backtick inside ANY unquoted heredoc is refused — four evasions closed — and THIS script is clean" 0 arm_backtick_in_txn_heredoc
+  run_arm "26 RED   a backtick inside ANY unquoted heredoc is refused — SEVEN evasions closed — and THIS script is clean" 0 arm_backtick_in_txn_heredoc
 
   release_mutex
 
