@@ -1368,6 +1368,30 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 - [ ] 164.8-06-PLAN.md — WAVE 3 CLOSURE: record the verdicts and the SHA-bound readings, TODOS closures with run ids (incl. the `TEST-NOT-APPLICABLE` pragma verdict), first SHA-bound VAC-08 `0 absent` reading, CLAUDE.md + mutex runbook currency
   ⛔ **CORRECTED 2026-09-09.** This bullet read "the `TEST-NOT-APPLICABLE` pragma recorded as DEAD SCOPE by measurement" — the verdict the plan-checker's B4 finding REVERSED on 2026-09-08, before plan 06 ran. The shipped verdict is two-part: unnecessary for `20260908120000` (narrow, evidenced), general case OPEN and routed to Phase 164.9 as `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`. A ROADMAP bullet still carrying the superseded half would send the next reader to close a hole that is open.
 
+### Phase 164.8.2: GATEHARDENING — the five code-review warnings Phase 164.8 shipped: the VAC-08 frontier exemption gets a ceiling, the ledger drift-check gets an arms ratchet, the reverted-grep stops being NUL-blind, the destructive restore's artifact stops carrying unredacted policy text, and the softening-token scan reaches the workflow that can drop a schema (INSERTED)
+
+**Goal:** Close the five Warnings `gsd-code-reviewer` raised against Phase 164.8's own gates. Every one is a control that is weaker than it reads, and two of them are the SAME shape: the phase hardened one half of a twin pair and left the other. None was user-facing or data-integrity, so none blocked the ship — they are booked here rather than fixed under merge pressure.
+
+⛔ **INSERTED 2026-09-09 at Phase 164.8's review gate.** The sixth Warning, WR-01, is NOT here: it was a proven-live command substitution in a script that assembles `DROP SCHEMA public CASCADE`, so it was fixed in 164.8 itself (`ec94788b`) with arm 26 legs (f) and (g). The five below are real but not acutely exploitable.
+
+⚠️ **Read the review before planning, do not re-derive:** `.planning/phases/164.8-testpreprod-test-becomes-a-real-pre-prod/164.8-REVIEW.md` carries each finding with its file:line, its failure scenario and the reviewer's own measurements. Seven Info findings are in the same file and are in scope for whoever plans this.
+
+**Success Criteria:**
+1. **WR-02 — the VAC-08 frontier exemption gets a ceiling.** `scripts/test-ledger-drift-check.sh:425-476`. Today the exemption is unbounded: one failed TEST apply (the booked `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`) leaves every later migration above the tip, so every one is exempted and the ledger-presence ratchet prints `0 NEW drift` indefinitely. Branch protection is deferred, so the bad merge stands. The fix needs a bound whose breach is LOUD.
+2. **WR-03 — the same script gets an arms ratchet.** `:815-819` has no `EXPECTED_ARMS`, so deleting an arm reads as a smaller PASSED. The three frontier arms are exactly the ones a cleanup would take, which would leave criterion 1 unarmed. ⭐ The sibling `restore-test-from-baseline.sh` already carries the correct shape — conform to the neighbour, do not invent a second one.
+3. **WR-04 — the reverted-grep stops being NUL-blind.** `.github/workflows/supabase-migrate.yml:858` is a NEGATIVE check without `-a`. This repo has a MEASURED rule that grep goes silently blind on a file the locale calls binary and that exit 1 then reads as clean. One byte from `supabase migration list` and `apply` pushes to PROD on a check that never read the file.
+4. **WR-05 — the destructive restore's artifact stops carrying unredacted text.** `.github/workflows/test-restore-from-baseline.yml:1407-1411`. Seven script-written files reach the world-readable artifact through neither the secret scan (which runs BEFORE they are written) nor the redaction (whose globs are `*.err/*.log/*.out`). `pre-census.txt` carries reconstructed `CREATE POLICY … USING (<qual>)` and owner-named rows read off live shared TEST. ⛔ The step comment currently states the opposite scope — fix the comment with the code, or the next reader inherits the same false assurance.
+5. **WR-06 — the softening-token scan reaches the workflow that can drop a schema.** `src/__tests__/test-restore-workflow-wiring.test.ts:210`. Phase 164.8 widened the scan 5 → 9 tokens for `supabase-migrate.yml` and left the DESTRUCTIVE workflow on the 5-token list. The asymmetry is backwards: the restore workflow is the one that cannot be undone by a re-run.
+6. **Every fix carries a falsifier that was observed RED.** ⛔ Not negotiable here: four of these five findings are controls that pass while measuring nothing, so a fix without an arm that bites reproduces the exact defect class. Neuter, observe RED, restore from pristine bytes — never `git checkout --`.
+
+**Requirements**: TBD (no v1.20 requirement IDs) + the five Warnings and seven Info findings in `164.8-REVIEW.md`
+**Depends on:** Phase 164.8
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.8.2 to break down)
+
 ### Phase 164.5.1: CRONREPOINT — the live `match_engine_cron` row is repointed at the mechanism the repo actually describes, and the migration-vs-runbook rule is settled first (INSERTED)
 
 **Goal:** Close `CRON-DRIFT-01`'s LIVE-ROW half: PROD's `cron.job` jobid 1 runs a hand-repaired 2026-09-01 command that exists in no migration, so a rebuild from migrations reproduces the *unrunnable* GUC-reading job that `20260408215026_schedule_match_cron_hourly.sql` writes. ⛔ **This phase was SPLIT OUT of Phase 164.5 on 2026-09-07 by founder decision, because it is the ONLY item that sits on an unresolved conflict — and nothing should be built on one.**
@@ -1559,6 +1583,7 @@ Plans:
 ⛔ **INSERTED 2026-09-08 by the same founder instruction as Phase 164.9.** `DRIFT-06` was booked in `TODOS.md` on 2026-09-07 and had no phase, no date and no gate for a full day while the milestone worked on its sibling `DRIFT-04`.
 
 ⚠️ **THIS IS NOT COSMETIC, and the three differ in kind — plan them separately:**
+
 - **`check_fan_in_ready` is EXECUTABLE drift.** The chain declares `v_row_found BOOLEAN` and SELECTs `true` into it to distinguish "no parent row" from "a parent row of NULLs". PROD has neither. Behaviour differs.
 - **`reject_sentinel_writes` is MESSAGE TEXT only.** The guard logic — which sentinel values are refused, on which three tables — is identical on both sides; PROD carries the shorter 2026-05-13 `RAISE` wording.
 - ⭐ **`retention_delete_guard` is the specimen that rules out the innocent explanation.** EXACTLY ONE migration in this repository defines it (`20260515113853_retention_crons_safe`), so there is no later revision for PROD to be behind — yet PROD's `RAISE` omits a clause that single defining migration contains. **A live catalogue cannot lag a migration it is the only definition of.**
