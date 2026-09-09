@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.77.29.0] - 2026-09-09 — migrations reach TEST before PROD, and the restore is closed with its evidence
+
+Four commits, four themes; every one is represented below.
+
+### Added
+- **Migrations now apply to shared TEST before they can reach PROD** (`f748842e`,
+  `.github/workflows/supabase-migrate.yml`). A new `apply-test` job runs the chain against
+  TEST, an `apply-test-verdict` job turns its outcome into a single answer, and the PROD
+  `apply` is gated on BOTH — it cannot start until TEST has proven the chain. A
+  `dispatch-ref-guard` refuses a dispatch aimed at the wrong ref. This is the mechanism the
+  2026-09-09 restore did NOT replace: the restore repaired TEST once, this keeps it current,
+  and a stale TEST is what let a gate test assert a constraint that had been dropped in May.
+- **A pinning suite for that wiring** (`78d44e6d`, `src/__tests__/supabase-migrate-test-first.test.ts`,
+  new, plus `critical-regressions.test.ts`). Line-exact pins, cross-file mutex identity, and
+  the deciding shell scripts EXECUTED rather than read. **Ten mutations of the real workflow
+  were each observed RED with the correct arm named** — `apply.needs`, `apply.if`, an
+  `apply-test` that gains `needs: plan`, the ref clause, the verdict's skip exit, the mutex
+  key, the environment, the PROD push body, the credential assertion's `if:`, and the guard's
+  own `exit 1`. Restored by writing pristine bytes back, never `git checkout --`.
+
+### Fixed
+- **Three ROADMAP claims that measurement contradicted** (`14859fdd`). Phase 164.5's DRIFT-04
+  plan still read `NOT APPLIED — the pre-flight SCRIPT must run against PROD first` a full day
+  after it shipped; the v1.20 progress row repeated it as "crit 3 apply pending founder"; and
+  Phase 164.10 claimed to be "the only remaining 164.x item that writes PRODUCTION" when
+  164.5.1 also writes PROD, on a credential-bearing cron row. A plan record that under-reports
+  finished work sends the next reader to redo it — the same record-vs-reality failure this
+  milestone exists to remove, appearing in the planning artifacts instead of the database.
+
+### Notes
+- **Phase 164.8.1 is closed with its evidence** (`14859fdd`, `38e511c1`). `164.8.1-04-RESTORE.log`
+  and the two SUMMARYs carry the preflight and restore censuses, the run ids and the
+  independent verification, written from the runs rather than reconstructed later. RESEARCH A1
+  is ANSWERED: 23 statements, 15 of them into a FORCE-RLS table with a SELECT-only policy,
+  completed with no 42501 — a measurement the self-test lane structurally cannot make, because
+  its `postgres` is initdb's superuser.
+- **The proof was kept falsifiable on purpose.** Reference rows were NOT hand-seeded while CI
+  was red and shared TEST was blocking other teams. Re-running the same commit's failed jobs
+  after the restore — only the database changed — took `python` and `e2e-seeded` from failure
+  to success. Hand-seeding would have made CI green and destroyed the pre-census that makes
+  the replay provable.
+- **CHANGELOG discipline is now a project rule** (`14859fdd`, `CLAUDE.md`). Every ship writes
+  an entry, using the commit-CHECKLIST mechanism from gstack's `/ship`: enumerate every commit,
+  group by theme, and cross-check that each one maps to at least one bullet. The previous
+  guidance was three sentences with no mechanism, which is how a 672-line commit shipped with
+  no entry while a smaller one the same day got both.
+
+### Known limits, stated rather than omitted
+- **`apply-test` has never run.** Every green tick above is over YAML text and extracted shell
+  scripts. Its first real execution is also the first measurement of TEST's ledger against the
+  chain, and it may legitimately be RED — that would be the phase working, not failing.
+- The BYPASSRLS assertion added to the restore transaction is satisfied on hosted TEST but has
+  never been observed RED: neither the throwaway lane nor TEST offers a role without BYPASSRLS.
+- `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` (the replay reproduces INSERTs, not the UPDATEs that
+  followed them) and `[164.8.1-TEST-ANALYTICS-URL-PROD]` are routed to Phase 164.9.
+
 ## [0.77.28.0] - 2026-09-09
 
 ### Fixed
