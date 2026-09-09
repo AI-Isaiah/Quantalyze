@@ -594,7 +594,7 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       ).toBe(1);
       expect(empty.out).toContain("::error::");
 
-      const secret = "postgres://user:pw@db.example.invalid:5432/postgres";
+      const secret = "postgres://user@db.example.invalid:5432/postgres";
       const configured = runScript(script, { [TEST_SECRET]: secret });
       expect(
         configured.status,
@@ -643,7 +643,7 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
         return { ...r, exported };
       };
 
-      const pooler = derive("postgres://u:pw@aws-0-eu.pooler.example.invalid:6543/postgres");
+      const pooler = derive("postgres://u@aws-0-eu.pooler.example.invalid:6543/postgres");
       expect(
         pooler.status,
         `the derivation refused the documented secret shape (pooler DSN on :6543/): ` +
@@ -673,8 +673,8 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       ).toEqual([]);
 
       // Already session-mode: unchanged, still accepted.
-      expect(derive("postgres://u:pw@db.example.invalid:5432/postgres").status).toBe(0);
-      expect(derive("postgresql://u:pw@db.example.invalid:5432/postgres").status).toBe(0);
+      expect(derive("postgres://u@db.example.invalid:5432/postgres").status).toBe(0);
+      expect(derive("postgresql://u@db.example.invalid:5432/postgres").status).toBe(0);
 
       for (const [label, url, needle] of [
         ["not a postgres URL at all", "db.example.invalid:5432/postgres", "postgres://"],
@@ -1166,7 +1166,7 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       runScript(
         script,
         {
-          TEST_DB_SESSION_URL: "postgres://u:pw@pooler.example.invalid:5432/postgres",
+          TEST_DB_SESSION_URL: "postgres://u@pooler.example.invalid:5432/postgres",
           MARKER_STUB_MODE: mode,
           MARKER_STUB_TEXT: text,
         },
@@ -1347,7 +1347,7 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
         runScript(
           script,
           {
-            TEST_DB_SESSION_URL: "postgres://u:pw@pooler.example.invalid:5432/postgres",
+            TEST_DB_SESSION_URL: "postgres://u@pooler.example.invalid:5432/postgres",
             IS_PUSH: isPush ? "true" : "false",
             STUB_PUSH_VERSIONS: pushed.join(" "),
           },
@@ -1412,7 +1412,7 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       const defangedRun = runScript(
         defanged,
         {
-          TEST_DB_SESSION_URL: "postgres://u:pw@pooler.example.invalid:5432/postgres",
+          TEST_DB_SESSION_URL: "postgres://u@pooler.example.invalid:5432/postgres",
           IS_PUSH: "true",
           STUB_PUSH_VERSIONS: "",
         },
