@@ -794,7 +794,7 @@ function modeAudit(io, allowlistPath, migrationsDir) {
  *     the count and still reddens.
  *
  * MEASURED 2026-09-09 on a clean tree: `extract-reference-inserts self-test OK:
- * 16 kinds, red+green each.`, exit 0. Raise this constant when the corpus grows
+ * 19 kinds, red+green each.`, exit 0. Raise this constant when the corpus grows
  * durably; never lower it to clear a red.
  */
 export const SELF_TEST_KINDS_FLOOR = 19;

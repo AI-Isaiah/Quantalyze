@@ -602,6 +602,37 @@ refuse_bad_migration_corpus() {
 REFDATA_TABLES=()
 REFDATA_EXPECT=()
 REFDATA_ENTRY_N=0
+# ⛔ REFUSAL 9 — no backtick may appear inside an UNQUOTED `<<TXN_*` heredoc.
+# Those heredocs interpolate shell variables by design, so bash also performs
+# COMMAND SUBSTITUTION inside them — including inside SQL `--` comments, where a
+# reader's eye reads documentation and bash reads a command. A multi-line span
+# additionally swallows the next line's `--`, turning prose into SQL in a script
+# whose job is to DROP SCHEMA public CASCADE. Found in five places on 2026-09-09,
+# two of them older than the finding, which is why this is a gate and not a note.
+#
+# Filesystem-only and pre-write, like refusals 1-8. Takes the file to scan so the
+# self-test can point it at a fixture instead of at this script.
+refuse_backticks_in_txn_heredocs() {
+  local src="${1:-$0}" hits
+  hits=$(awk '
+    /<<TXN_[A-Z_]+$/ { sub(/^.*<</, "", $0); term = $0; inside = 1; next }
+    inside && $0 == term { inside = 0; next }
+    inside {
+      # A BACKSLASH-ESCAPED backtick is LITERAL in an unquoted heredoc — no
+      # substitution — and the oldest comments in these heredocs are written that
+      # way on purpose. Strip those first; a backtick still standing is live.
+      line = $0
+      k = index(line, "\\`")
+      while (k > 0) { line = substr(line, 1, k - 1) substr(line, k + 2); k = index(line, "\\`") }
+      if (index(line, "`") > 0) printf "%d: %s\n", NR, $0
+    }
+  ' "$src")
+  if [ -n "$hits" ]; then
+    printf '%s\n' "$hits" >&2
+    fail "restore aborted: a backtick appears inside an unquoted <<TXN_* heredoc in ${src} (lines above). The heredoc is unquoted so it can interpolate the gate's VALUES list, which means bash COMMAND-SUBSTITUTES every backticked span in it — SQL comments included — while assembling a destructive restore. Write plain prose inside these heredocs; do not quote the heredoc (that would break the interpolation the gate needs)."
+  fi
+}
+
 refuse_bad_refdata_allowlist() {
   [ -f "$REFDATA_ALLOWLIST" ] || fail "reference-data allowlist not found at ${REFDATA_ALLOWLIST}."
   [ -f "$REFDATA_EXTRACTOR" ] || fail "reference-data extractor not found at ${REFDATA_EXTRACTOR}."
@@ -1029,7 +1060,7 @@ BEGIN
                -- and it is dropped and re-created with that table. Resolving it to
                -- its own namespace would report every varlena-carrying public table
                -- as a lost non-public dependent — MEASURED 2026-09-08, the first
-               -- run of this assertion named `toast table pg_toast.pg_toast_16428`
+               -- run of this assertion named \`toast table pg_toast.pg_toast_16428\`
                -- and rolled the whole restore back. Same carrier pattern as
                -- pg_trigger.tgrelid above, applied one class further.
                WHEN p.classid = 'pg_class'::regclass THEN (SELECT CASE WHEN c.relkind = 't' THEN (SELECT n2.nspname FROM pg_class o JOIN pg_namespace n2 ON n2.oid = o.relnamespace WHERE o.reltoastrelid = c.oid) ELSE n.nspname END FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = p.objid)
@@ -1169,12 +1200,20 @@ TXN_REFDATA_TAIL
   # CORPUS, NOT OF THIS CODE. It compares ROWS against STATEMENTS, so a table whose
   # rows exceed its statements absorbs that many lost rows before the floor bites,
   # and a statement inserting zero NEW rows is invisible to it in both directions.
-  # Both shapes are live in the real allowlist: `public.compute_job_kinds` is
-  # pinned at 16 statements, one of which (20260510175507) is a deliberate
-  # `ON CONFLICT DO NOTHING` duplicate of a row an earlier migration already
-  # inserts, so 16 statements yield 15 rows and the floor for that table is
-  # satisfied by 15. This comment carried a worked example claiming the opposite
-  # until 2026-09-09 (review finding WR-02); do NOT restate a per-table derivation
+  # Both shapes are live in the real allowlist. MEASURED 2026-09-09:
+  # public.compute_job_kinds is pinned at 15 statements and yields 16 distinct
+  # kind names, so ROWS EXCEED STATEMENTS there and the floor absorbs one lost
+  # row before it bites. One of those statements (20260510175507) is a deliberate
+  # ON CONFLICT DO NOTHING duplicate of a row an earlier migration already
+  # inserts, so it contributes no new row at all and is invisible to the floor in
+  # both directions.
+  #
+  # ⛔ THIS PARAGRAPH HAS NOW BEEN WRONG TWICE. It carried a false worked example
+  # until the phase review (WR-02), and the fix for that inverted BOTH figures --
+  # it said 16 statements yielding 15 rows -- until the phase verification caught
+  # it the same day. The authority is scripts/restore-test-refdata-allowlist.txt
+  # and the --audit that re-measures it, never this sentence. Do NOT restate a
+  # per-table derivation
   # here — the pinned counts live in the allowlist and are re-measured by
   # `--audit` on every run. The floor's job is to catch a replay that lost a WHOLE
   # statement's worth of rows, not to be an exact row oracle. The row-level gap it
@@ -1186,6 +1225,14 @@ TXN_REFDATA_TAIL
       }('$(sql_lit "$rtq")', (SELECT count(*) FROM ${rtq}), ${REFDATA_EXPECT[$i]})"
     i=$((i + 1))
   done
+  # ⛔ THIS HEREDOC IS UNQUOTED — it has to be, it interpolates ${refdata_values}.
+  # So a BACKTICK anywhere inside it, including inside an SQL `--` comment, is
+  # COMMAND SUBSTITUTION: bash runs the quoted prose while assembling a DESTRUCTIVE
+  # restore, the substitution's (empty) output replaces it, and a multi-line span
+  # swallows the following line's `--` prefix, turning comment text into SQL. Found
+  # by the phase verification on 2026-09-09 in five places, two of them older than
+  # the finding. `refuse_backticks_in_txn_heredocs` below fails the run rather than
+  # trusting a reader to remember; write plain prose in here, never markup.
   cat >> "$out" <<TXN_REFDATA_GATE
 DO \$restore\$
 DECLARE
@@ -1193,12 +1240,13 @@ DECLARE
   v_short   text;
   v_missing text[];
 BEGIN
-  -- ⛔ COLLECT FIRST, RAISE ONCE. A `RAISE` inside the loop aborts on the FIRST
+  -- ⛔ COLLECT FIRST, RAISE ONCE. A RAISE inside the loop aborts on the FIRST
   -- offending table, so the likeliest real failure — the whole replay lost, which
   -- is arm 23 leg (a)'s shape — used to tell the operator about ONE table out of
   -- eight and gave them no way to tell "one table regressed" from "nothing
-  -- replayed at all". The census carries the full picture, but on a `--mode
-  -- restore` abort the post-census never runs, so this message is all there is
+  -- replayed at all". The census carries the full picture, but on a
+  -- --mode restore abort the post-census never runs, so this message is all
+  -- there is
   -- (review finding WR-09). EMPTY and SHORT stay SEPARATE aggregates because they
   -- remain different diagnoses.
   SELECT string_agg(t.tbl, ', ' ORDER BY t.tbl) FILTER (WHERE t.n = 0),
@@ -1224,13 +1272,13 @@ BEGIN
   -- a table with no admission CHECK is invisible to this. Both must stand.
   --
   -- ⛔ ABSENCE IS LOUD, NOT INERT. This used to be wrapped in
-  -- `IF to_regclass(...) IS NOT NULL AND EXISTS (... pg_constraint ...) THEN`, so
+  -- IF to_regclass(...) IS NOT NULL AND EXISTS (... pg_constraint ...) THEN, so
   -- a rename, a typo in the seam, or a dropped constraint turned the leg into a
   -- permanent no-op and the restore COMMITTED — on real TEST this is the only
   -- detector of a partial replay that leaves its tables non-empty, and it would
   -- have gone quiet with nothing in the log. The configured pair is REQUIRED to
   -- exist: both objects are on real TEST, and on the self-test lane the seam
-  -- points at `public.fx_keep` / `fx_keep_kind_check`, which baseline-fixture.sql
+  -- points at public.fx_keep / fx_keep_kind_check, which baseline-fixture.sql
   -- creates for exactly this reason. Each RAISE names WHICH of the two is gone.
   IF to_regclass('$(sql_lit "$REFDATA_KIND_REGISTRY")') IS NULL THEN
     RAISE EXCEPTION 'restore aborted: the configured kind registry $(sql_lit "$REFDATA_KIND_REGISTRY") (REFDATA_KIND_REGISTRY) does not exist after the replay. This is the only leg that can see a partial replay whose tables are non-empty; skipping it would commit an unguarded restore (Phase 164.8.1)';
@@ -1400,6 +1448,7 @@ run_restore() {
   # so the dir must already be proven present, non-empty and safely named. It must
   # also precede `write_census_sql`, which reads the table list it parses.
   refuse_bad_refdata_allowlist
+  refuse_backticks_in_txn_heredocs
 
   if [ -z "${RESTORE_OUT_DIR:-}" ]; then
     RESTORE_OUT_DIR="$(mktemp -d)"
@@ -1608,13 +1657,14 @@ main() {
 # for arms 19-21 (the empty survivor census, the foreign identity marker, and the
 # three unarmed exits of the migration-corpus refusal).
 #
-# Arms 22-24 are Phase 164.8.1's. Their falsifiers were observed RED on SCRATCH
+# Arms 22-26 are Phase 164.8.1's (22-24 at first write; 25 and 26 were added by
+# the phase's own review and verification). Their falsifiers were observed RED on SCRATCH
 # COPIES under the harness's mktemp dir — never a byte backup and never
 # `git checkout --`, which restores to HEAD and silently destroys uncommitted work
 # (L-04) — and each observation, with its scratch path and verbatim output, is
 # recorded in 164.8.1-02-SUMMARY.md.
-# MEASURED 2026-09-09 — `--self-test` prints 24/24 and exits 0 on a throwaway cluster.
-EXPECTED_ARMS=25
+# MEASURED 2026-09-09 — `--self-test` prints 26/26 and exits 0 on a throwaway cluster.
+EXPECTED_ARMS=26
 
 SELFTEST_MUTEX_HOLDER_PID=""
 SELFTEST_TMPD=""
@@ -2742,6 +2792,50 @@ FRESHSTUB
     return 0
   }
 
+  # ═══ ARM 26 — backticks in an unquoted TXN heredoc ════════════════════════
+  # Two legs, and the SECOND is the one that matters: a refusal that fires on a
+  # fixture proves the detector works, not that the file it guards is clean.
+  arm_backtick_in_txn_heredoc() {
+    local d="$SELFTEST_TMPD/a26"; mkdir -p "$d" out=""
+
+    # (a) THE DETECTOR FIRES. A fixture carrying the exact shape found on
+    #     2026-09-09: a backtick inside an SQL comment inside an unquoted heredoc.
+    {
+      printf 'cat >> "$out" <<TXN_FIXTURE\n'
+      printf -- '  -- a comment mentioning `RAISE` inside the body\n'
+      printf 'TXN_FIXTURE\n'
+    } > "$d/dirty.sh"
+    out="$SELFTEST_TMPD/a26a.out"
+    ( refuse_backticks_in_txn_heredocs "$d/dirty.sh" ) > "$out" 2>&1 && {
+      echo "MEASURE_FAIL (a): a backtick inside an unquoted <<TXN_* heredoc was ACCEPTED. bash would command-substitute that span while assembling a destructive restore."; cat "$out"; return 1; }
+    grep -aq 'a backtick appears inside an unquoted' "$out" \
+      || { echo "MEASURE_FAIL (a): something refused, but not this guard — so the guard is still unmeasured."; cat "$out"; return 1; }
+    grep -aq 'RAISE' "$out" \
+      || { echo "MEASURE_FAIL (a): the refusal does not print the offending LINE, so a reader is told a backtick exists somewhere and not where."; return 1; }
+
+    # (b) IT DOES NOT FIRE ON PROSE OUTSIDE A HEREDOC, or every shell comment in
+    #     this file would be an error and the guard would be reverted on sight.
+    {
+      printf '# a shell comment mentioning `RAISE`, outside any heredoc\n'
+      printf 'cat >> "$out" <<TXN_FIXTURE\n'
+      printf -- '  -- plain prose, no markup\n'
+      printf -- '  -- an ESCAPED \\`backtick\\` is literal in an unquoted heredoc and must be ACCEPTED\n'
+      printf 'TXN_FIXTURE\n'
+      printf '# another backticked `comment` after it closed\n'
+    } > "$d/clean.sh"
+    out="$SELFTEST_TMPD/a26b.out"
+    ( refuse_backticks_in_txn_heredocs "$d/clean.sh" ) > "$out" 2>&1 \
+      || { echo "MEASURE_FAIL (b): the guard refused a file whose backticks are all OUTSIDE the heredoc. It would make every shell comment in this script an error."; cat "$out"; return 1; }
+
+    # (c) ⛔ THE POINT OF THE ARM — THIS SCRIPT ITSELF. Legs (a) and (b) only
+    #     prove the detector discriminates; they say nothing about the file the
+    #     restore actually assembles its transaction from.
+    out="$SELFTEST_TMPD/a26c.out"
+    ( refuse_backticks_in_txn_heredocs "$0" ) > "$out" 2>&1 \
+      || { echo "MEASURE_FAIL (c): THIS script carries a backtick inside an unquoted <<TXN_* heredoc."; cat "$out"; return 1; }
+    return 0
+  }
+
   # ═══ ARM 25 — the rollback VIEW normalises counts and nothing else ═════════
   # ⛔ THE FALSIFIER FOR CR-01'S FIX. `census_rollback_view` decides what the
   # preflight's "the database is unchanged" claim is allowed to notice. Get it too
@@ -2818,6 +2912,7 @@ FRESHSTUB
   run_arm "23 RED   the reference-data gate BITES: no replay, no search_path, partial replay" 0 arm_refdata_gate_bites
   run_arm "24 RED   reference-data allowlist: count drift, empty, silent extractor" 0 arm_bad_refdata_allowlist
   run_arm "25 GREEN the preflight rollback view normalises mutable reference counts and NOTHING else (CR-01)" 0 arm_census_rollback_view
+  run_arm "26 RED   a backtick inside an unquoted <<TXN_* heredoc is refused, and THIS script is clean" 0 arm_backtick_in_txn_heredoc
 
   release_mutex
 
@@ -2852,7 +2947,7 @@ FRESHSTUB
   # refusal has at least one arm asserting its NAMED message — arms 1-7, 20, 21 and
   # 24. A narrative that miscounts or overstates its own guards is the same defect
   # class as a stale floor, so it is corrected rather than extended.
-  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — eight refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back — EMPTY, SHORT and row-level partial each by name, a bad allowlist is refused before any write, the preflight's rollback view normalises mutable reference counts and nothing else, harness calibrated)"
+  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — NINE refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back — EMPTY, SHORT and row-level partial each by name, a bad allowlist is refused before any write, the preflight's rollback view normalises mutable reference counts and nothing else, harness calibrated)"
   return 0
 }
 
