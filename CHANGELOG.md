@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.77.30.1] - 2026-09-09 — a shipped plan keeps its anchors live on main forever, booked and routed
+
+Documentation and backlog only; no code changed. One commit, one theme.
+
+### Notes
+- **`[PLANANCHOR-SUMMARY-FILTER-01]` booked in `TODOS.md` and routed to Phase 164.6
+  GATE-HYGIENE** via the phase-edit workflow, with a success criterion of its own.
+  `/gsd-pr-branch` strips `.planning/phases/` from the PR head by design, so a plan's
+  SUMMARY never reaches `main` while the PLAN — written in an earlier, unfiltered commit —
+  is already there. `plan-anchor-verify` treats a PLAN with no SUMMARY as pending, so it
+  keeps re-resolving that plan's `file:line` anchors on `main` against a tree that moves.
+
+### Root cause
+- Found at the PR #767 merge gate, and it is a class rather than an incident.
+  `164.8-05-PLAN.md` claimed `supabase-migrate.yml:1-251` holds the
+  `Push migrations to production` step — true on `main` (:211). That PR moved it to :1038,
+  so the claim went stale ON `main` the moment it landed; the gate would have been RED on
+  `main`, not merely on the PR. It surfaced early only because the filtered branch happens
+  to make more plans read as pending. The remedy applied there — fix the anchor, carry the
+  corrected PLAN through the filter as a named exception — is a workaround that needs
+  repeating every time, and the blast radius grows with every shipped phase.
+- ⛔ The routed criterion names the trap in the fix: a change that makes the gate resolve
+  FEWER anchors fails by definition, because that is the silent-gate class this milestone
+  exists to remove. The fix belongs in how "pending" is decided, never in anchor resolution.
+
 ## [0.77.30.0] - 2026-09-09 — migrations reach TEST before PROD, and the restore is closed with its evidence
 
 Fifteen commits on this branch, six themes; every commit is represented below and
