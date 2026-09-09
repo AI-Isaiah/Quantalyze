@@ -1237,8 +1237,11 @@ TXN_REFDATA_TAIL
   # until the phase review (WR-02), and the fix for that inverted BOTH figures --
   # it said 16 statements yielding 15 rows -- until the phase verification caught
   # it the same day. The authority is scripts/restore-test-refdata-allowlist.txt
-  # and the --audit that re-measures it, never this sentence. Do NOT restate a
-  # per-table derivation
+  # and the --audit that re-measures it, never this sentence.
+  #
+  # The compute_job_kinds figures above are here as the ONE worked example that
+  # shows BOTH shapes at once, and they are re-derivable in two commands. That is
+  # the whole licence: do not add a second table's derivation
   # here — the pinned counts live in the allowlist and are re-measured by
   # `--audit` on every run. The floor's job is to catch a replay that lost a WHOLE
   # statement's worth of rows, not to be an exact row oracle. The row-level gap it
