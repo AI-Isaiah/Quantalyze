@@ -91,3 +91,40 @@ the adjacent "improvement" that hides which line actually moved in a review. And
 `grep -rn prettier .github/workflows/*.yml package.json` finds no `--check` step and no format
 script, so there is no gate to go green. If prettier should gate this repo, that is its own
 decision with its own PR, not a side effect of a four-line error-message fix.
+
+---
+
+### 5. Five refusal BRANCHES in `restore-test-from-baseline.sh` have no arm — PRE-EXISTING, overclaim retracted, arming deferred
+
+Found while discharging W2 (Plan 02). The self-test's closing line claimed *"every branch of every
+one of them is armed"*. Measured 2026-09-09, it was **already false before this phase** — the arms
+cover one exit per refusal, not every exit:
+
+| Refusal | Unarmed `fail` branch |
+|---|---|
+| `refuse_absent_credential` | `psql` is not on PATH |
+| `refuse_wrong_baseline_sha` | the baseline dump is not found |
+| `refuse_wrong_baseline_sha` | the provenance doc is not found |
+| `refuse_wrong_baseline_sha` | the doc carries no parseable `sha256` row |
+| `refuse_stale_baseline` | `FRESHNESS_TS_CMD` printed no epoch (either side) |
+
+**Fixed here:** the false SENTENCE. The line now claims only that each refusal is armed by a
+named-message arm, which is true and checkable, and the comment above it carries the
+`refuse_wrong_baseline_sha` counter-example so the stronger claim is not re-introduced. Plan 02's
+own refusal 8 has all three of its reason branches armed (arm 24 legs a/b/c).
+
+⛔ **Arming the five is NOT done here, and the reason is scope, not difficulty.** They are cheap
+(all filesystem, no lane) but each is a new arm, and every new arm moves `EXPECTED_ARMS` and the
+eleven vitest literals that read it. Plan 02 already moves that ratchet 21 → 24 in one commit
+because CI is red between a ratchet and its pins; folding five more arms into the same commit would
+mean landing ten unreviewed arms behind a plan whose subject is reference data.
+
+**Destination — needs a founder/orchestrator call, and this file is not a queue.** Per the
+"every deferral must name a PHASE" rule the options are (a) fold into **Phase 164.9 TESTISOLATION**,
+which already owns work in this script's neighbourhood, or (b) a small dedicated phase via
+`/gsd-phase --edit`. Recommendation: **(a)**, because 164.9 will be reading this harness anyway and
+five filesystem-only arms are a natural rider rather than a phase of their own.
+
+⚠️ **Until then the retraction is the mitigation.** The gate does not overstate itself, so nobody
+reads "every branch is armed" and skips checking. That is the difference between a known gap and a
+false claim.
