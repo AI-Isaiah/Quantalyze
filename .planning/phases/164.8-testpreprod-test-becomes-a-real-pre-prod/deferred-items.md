@@ -87,8 +87,20 @@ node gsd-tools.cjs windows append --kind unrun-verify --phase 164.8 …
 Identical to the refusal `164.8-01` recorded (item 1 above), same numbers — nothing has moved.
 The entry 164.8-03 owed the ledger, recorded here instead:
 
-- `unrun-verify` / `.github/workflows/test-restore-from-baseline.yml` — the CLI post-verify step
-  (`supabase db push --include-all --dry-run --db-url …`) has NEVER run. It asserts on two
+✅ **ITEM 4 IS DISCHARGED — CORRECTED 2026-09-09. The step RAN and PASSED under the pinned CLI.**
+Run **`34330741339`**, head `a622df27`, `mode=restore`, 2026-09-09T08:44Z, step 24 → `success`,
+printing verbatim `post-verify: the pinned CLI parses the seeded ledger and reports nothing
+pending — ledger SHAPE is consistent.` Both asserted strings held under **2.98.2**, which is
+precisely the uncertainty this item was written to name. Found by the Phase 164.8 verifier,
+confirmed independently by the orchestrator (`gh run view 34330741339` → `conclusion=success`).
+⚠️ This item stayed shipped as OPEN for ~8 hours across plan 06's book-closing, and it was also
+still scoping Phase 164.9's routed item 2 — a false sentence planning work that may not be needed.
+The text below is kept as lineage; it was true when written 2026-09-08. **Item 6 (the extension
+guard) is NOT discharged.**
+
+- `unrun-verify` / `.github/workflows/test-restore-from-baseline.yml` — ~~the CLI post-verify step
+  (`supabase db push --include-all --dry-run --db-url …`) has NEVER run~~ (superseded, see above).
+  It asserts on two
   strings measured in the LOCAL Supabase CLI binary v2.84.2 on 2026-09-08
   (`Would push these migrations:` and `Remote database is up to date.`); **CI pins 2.98.2**, where
   the wording is inferred, not executed. The step asserts BOTH directions on purpose so a wording
@@ -166,10 +178,14 @@ present in both counts: 5 + 1 = 6 before, 6 + 1 = 7 after. Creating `pg_net` on 
 restore doing its job — the whole point is that TEST should hold PROD's catalogue.
 
 **COLLATERAL DAMAGE, and the reason this is not merely cosmetic.** The exit 1 SKIPPED step 20,
-`Post-verify with the Supabase CLI — ledger SHAPE`. That step has now never executed in any
-run (see item 4, still open, verbatim), so the plan's "`supabase db push --dry-run` reports
-nothing pending" truth is UNPROVEN and Plan 05's precondition is thinner than intended. A guard
-that reddens a correct run does not just annoy; it eats the steps behind it.
+`Post-verify with the Supabase CLI — ledger SHAPE`. ⛔ **CORRECTED 2026-09-09:** this paragraph
+went on to say that step "has now never executed in any run", making the plan's
+"`supabase db push --dry-run` reports nothing pending" truth UNPROVEN. That was true on
+2026-09-08 and is **no longer**: the next morning's restore, run `34330741339` at head
+`a622df27`, reached the step and concluded `success` under the pinned 2.98.2 — see item 4, now
+DISCHARGED. The collateral-damage point still stands as the reason THIS item matters: a guard
+that reddens a correct run does not just annoy, it eats the steps behind it, and on
+2026-09-08 it ate exactly this one. What is corrected is the consequence, not the diagnosis.
 
 ⛔ **NOT FIXED HERE, by explicit founder instruction** scoping 164.8-04 Task 3 to
 `scripts/vac08-ledger-baseline.txt` and its pin. Recorded so the fix is a decision rather than
