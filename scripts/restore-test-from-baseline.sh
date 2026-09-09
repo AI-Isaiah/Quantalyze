@@ -1158,7 +1158,16 @@ TXN_DROP
 
   # The dump, with exactly ONE line class removed. `grep -a` because a byte the
   # locale calls binary must not silently turn this filter into a no-op.
-  grep -av "$FILTER_PATTERN" "$BASELINE_FILE" >> "$out"
+  #
+  # ⛔ IN-06 — THE READ IS BOUNDED, NOT TRUSTED. Unwrapped, a grep that could not
+  # READ the dump (exit 2) died right here under `set -e` with no `::error::` at
+  # all: the operator saw a transaction that stopped mid-assembly and not one
+  # sentence saying why. `-le 1` and NOT `-eq 0` is the whole point of the bound —
+  # `grep -v` exits 1 when EVERY line matched the filter, i.e. an empty output,
+  # which is a legitimate reading; exit >= 2 is a broken instrument. This is the
+  # same shape as the `grep -ac` count above, and the two now fail the same way.
+  set +e; grep -av "$FILTER_PATTERN" "$BASELINE_FILE" >> "$out"; rc=$?; set -e
+  [ "$rc" -le 1 ] || fail "MEASURE_FAIL: could not read ${BASELINE_FILE} while filtering (grep exited ${rc}). An unreadable dump is not an empty one."
 
   # The dump ends with `set_config('search_path', '', false)` still in force. The
   # survivor DDL below is fully qualified and does not need a path — the ledger DDL
