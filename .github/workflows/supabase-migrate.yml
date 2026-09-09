@@ -77,6 +77,20 @@ name: Supabase Migrate
 #     do not add any. It is here for the durable Deployments audit record, not
 #     as an approval gate; the approval surface for the TEST apply is that the
 #     code is already merged, plus `dispatch-ref-guard`.
+#     ⛔ IT DOES, HOWEVER, CARRY A DEPLOYMENT BRANCH POLICY, AND THAT ONE IS NOT
+#     DECORATIVE — DO NOT DELETE IT. Measured 2026-09-09 via
+#     `gh api repos/:owner/:repo/environments` and
+#     `.../environments/Test/deployment-branch-policies`:
+#       protection_rules: [{type: branch_policy}]
+#       deployment_branch_policy: {protected_branches: false, custom_branch_policies: true}
+#       branch_policies: exactly one, name "main", type "branch"
+#     That is a THIRD, GitHub-side enforcement of B3, independent of the two in
+#     this file (`apply-test.if` and `dispatch-ref-guard`): a job bound to
+#     `environment: Test` cannot start at all from a ref other than `main`. It is
+#     recorded here because it is invisible in the YAML — someone tidying the
+#     environment settings would otherwise remove a live safety rule believing it
+#     to be leftover configuration. "No reviewers" and "no branch policy" are NOT
+#     the same statement, and only the first is the founder decision.
 #   - Secret `TEST_SUPABASE_DB_URL`: the Supavisor pooler DSN for the shared
 #     TEST project, rewritten to the session-mode port 5432 in-job exactly as
 #     `ci.yml` rewrites it. ⛔ It is a REPOSITORY-level secret and must STAY
@@ -143,7 +157,12 @@ concurrency:
 # the PR-time backdated-migration policy enforced by
 # `.github/workflows/migration-policy.yml` — all orthogonal to
 # GITHUB_TOKEN scope. (Required-reviewer protection on the `Production`
-# environment is a TODO per ADR-0009.)
+# environment is CONFIGURED — measured 2026-09-09 via
+# `gh api repos/:owner/:repo/environments`: Production carries one
+# `required_reviewers` rule. The ADR-0009 item is DONE. This sentence used to
+# call it a TODO; it was corrected rather than left to the blanket supersession
+# clause above, because `dispatch-ref-guard`'s entire rationale is load-bearing
+# on the reviewer gate existing.)
 permissions:
   contents: read
 
@@ -171,6 +190,24 @@ jobs:
   # ⛔ It exits 1 where `mutex-probe.yml`'s guard deliberately exits 0: here the ref
   # IS the safety property, and a silent green would teach the operator that the
   # dispatch worked.
+  #
+  # ⛔ WHAT THIS JOB IS *NOT*: IT IS NOT THE ENFORCEMENT. It is in NO other job's
+  # `needs:`, so its `exit 1` produces a red check and stops nothing — `plan` still
+  # runs on an off-main dispatch. Stated plainly so nobody reads the paragraphs above
+  # as "the guard blocks the run". B3 is enforced by three OTHER things, and this job
+  # is the operator-facing MESSAGE that explains their silence:
+  #   1. `apply-test.if` — the exact inverse of this job's `if:`, so the TEST write
+  #      simply does not run off main. THIS is the enforcement for shared TEST.
+  #   2. The `Test` environment's deployment branch policy (single policy `main`,
+  #      measured 2026-09-09 — see the header). GitHub refuses to start an
+  #      `environment: Test` job from any other ref, independently of this file.
+  #   3. The `Production` environment's `required_reviewers` (measured 2026-09-09),
+  #      which puts a human in front of `plan` and `apply` on every path.
+  # ⚠️ Deleting this job would therefore lose the EXPLANATION, not the protection —
+  # and an operator staring at a run where nothing ran and nothing was red is the
+  # cost this job was added to remove. Wiring it into `plan`'s `needs:` was
+  # considered and rejected: the guard is skipped on every push, so `needs:` would
+  # skip `plan` on the ONLY path that matters.
   #
   # ${GITHUB_REF} is the runner-provided environment variable, not a `${{ }}`
   # expansion into a `run:` body — no interpolation surface at all.
@@ -202,11 +239,12 @@ jobs:
     # retro-PR179-M-env-gate: the plan job consumes SUPABASE_DB_PASSWORD
     # to run `supabase link --project-ref` (which writes the password
     # into a local supabase config file). Both jobs are pinned to the
-    # `Production` GitHub Environment so any future protection-rule
-    # additions (required reviewers per ADR-0009) take effect uniformly
-    # across plan + apply without further workflow edits. At BUILD
-    # stage `Production` has no protection rules — the safety story
-    # is workflow_dispatch-only + PR-time backdated-migration policy
+    # `Production` GitHub Environment so protection-rule additions
+    # (required reviewers per ADR-0009) take effect uniformly across
+    # plan + apply without further workflow edits — which is exactly what
+    # happened: measured 2026-09-09, `Production` carries one
+    # `required_reviewers` rule and no YAML change was needed. The rest of
+    # the safety story is the PR-time backdated-migration policy
     # (`.github/workflows/migration-policy.yml`).
     environment: Production
     outputs:
@@ -271,8 +309,9 @@ jobs:
         # Plan output IS what apply runs, modulo --dry-run: this plan step
         # logs the exact `db push --include-all` command + flags the apply
         # step runs (command-fidelity invariant, red-team HIGH conf-8). On
-        # the auto-push path this fidelity feeds the audit trail; it is NOT a
-        # human pre-apply gate (required reviewers are a scale-stage TODO).
+        # the auto-push path this fidelity feeds the audit trail; the human
+        # pre-apply gate is the `Production` environment's required reviewer,
+        # which is CONFIGURED (measured 2026-09-09), not a scale-stage TODO.
         run: |
           supabase link --project-ref "$SUPABASE_PROJECT_REF"
           supabase db push --include-all --dry-run
@@ -354,10 +393,50 @@ jobs:
           case "${dsn}" in
             *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
           esac
-          if [ -z "${dsn}" ]; then
-            echo "::error::the session-mode DSN derived EMPTY. Every step below would connect to a libpq default instead of TEST, so this run stops here rather than proving something about the wrong database."
-            exit 1
-          fi
+          # ⚠️ THIS ASSERTS THE SHAPE OF THE DERIVED DSN, NOT THAT IT IS NON-EMPTY.
+          # The emptiness check that stood here could not fire: `dsn` is assigned
+          # verbatim from TEST_SUPABASE_DB_URL, the step above hard-exits when that is
+          # empty, and the `case` rewrite cannot empty a non-empty string. It read as
+          # validation and tested a property already proven, while the case that CAN
+          # occur — a secret that is not a postgres URL at all, or one still pointing at
+          # the transaction-mode port — passed straight through to psql and the CLI.
+          #   - scheme: a secret that is not a postgres:// URL makes every psql below
+          #     connect to a libpq DEFAULT instead of TEST.
+          #   - `:5432/`, and NOT `:6543/`: session mode is the documented shape of this
+          #     secret and the mutex protocol's precondition — a SESSION advisory lock
+          #     does not survive between statements on the 6543 transaction-mode pooler,
+          #     so a 6543 DSN here would run the whole job UNSERIALIZED against a
+          #     database other people's CI writes to, with a green mutex step.
+          # ⛔ If this fires, the fix lives in the SECRET (re-point it at the pooler and
+          # re-dispatch) — never in a YAML transform here, which would diverge this
+          # job's DSN handling from the ~39 other sites in ci.yml and mutex-probe.yml
+          # that read the same secret. The DSN itself is NEVER printed: it is masked
+          # above, and this log is public.
+          case "${dsn}" in
+            postgres://*|postgresql://*) ;;
+            *)
+              echo "::error::the TEST DSN is not a postgres:// or postgresql:// URL. Every psql and every CLI call below would connect to a libpq DEFAULT rather than to TEST, so this run stops here rather than proving something about the wrong database. Fix secrets.TEST_SUPABASE_DB_URL; the value is withheld because this log is public."
+              exit 1
+              ;;
+          esac
+          # ⚠️ `:6543` WITHOUT THE TRAILING SLASH, deliberately. The rewrite above keys
+          # on `:6543/`, so keying this check on `:6543/` too would make it unreachable
+          # by construction — the same defect as the dead emptiness check it replaces. A
+          # DSN ending `...:6543` (no path) is not rewritten and IS the case that must be
+          # caught.
+          case "${dsn}" in
+            *":6543"*)
+              echo "::error::the session-mode rewrite did NOT take: the derived DSN still names the transaction-mode port 6543. A SESSION advisory lock does not survive between statements there, so the shared-test-db mutex below would report success while serializing nothing."
+              exit 1
+              ;;
+          esac
+          case "${dsn}" in
+            *":5432/"*) ;;
+            *)
+              echo "::error::the derived TEST DSN carries no explicit :5432/ port, so nothing here proves it reaches the SESSION-mode endpoint the mutex protocol requires. The documented shape of secrets.TEST_SUPABASE_DB_URL is the Supavisor pooler DSN on :6543/, rewritten to :5432/ in-job exactly as ci.yml rewrites it. Fix the SECRET, not this workflow."
+              exit 1
+              ;;
+          esac
           echo "::add-mask::${dsn}"
           printf 'TEST_DB_SESSION_URL=%s\n' "${dsn}" >> "${GITHUB_ENV}"
           echo "session-mode DSN derived once and masked; the value is never printed."
@@ -658,6 +737,11 @@ jobs:
       # `db push --include-all` command and flags the push step below runs, minus
       # `--dry-run`, logged first. Like PROD's, this is an audit-log record of what
       # the apply runs — NOT a gate.
+      #
+      # ⭐ IT IS ALSO THE EXPECTED SET for the affirmative post-apply check in
+      # `Push migrations to TEST` below, which is why the output is TEE'd to a file
+      # rather than only logged: "the push applied what the plan planned" is a
+      # comparison, and it needs both halves.
       - name: Plan — dry-run apply (TEST)
         run: |
           set -euo pipefail
@@ -665,7 +749,7 @@ jobs:
           # `set -u` makes an absent variable a hard failure here rather than a CLI
           # connection to a libpq default. NEVER echoed: this log is public.
           dsn="${TEST_DB_SESSION_URL}"
-          supabase db push --include-all --dry-run --db-url "${dsn}"
+          supabase db push --include-all --dry-run --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-dry-run.txt"
 
       # ⚠️ THE ONE DELIBERATE DEVIATION FROM THE PROD APPLY'S SHAPE, stated out loud:
       # the CREDENTIAL MODE. PROD runs `supabase link --project-ref` with
@@ -683,12 +767,67 @@ jobs:
       # post-apply `migration list` is the authoritative ground truth — the CLI can
       # return exit 0 while a migration body is silently skipped, so a "Reverted" row
       # after the push is a hard failure.
+      #
+      # ⭐ AND AN AFFIRMATIVE CHECK, BECAUSE THE REVERTED-GREP IS A NEGATIVE ONE. A
+      # pattern that matches NOTHING returns 1 and reads as CLEAN, so `grep -Eiq
+      # reverted` alone cannot tell "the merge applied" from "the push applied ZERO
+      # migrations" — and it green-lights the PROD apply either way. That is not
+      # hypothetical here: Phase 164.8-04 seeded TEST's ledger with 266 CLI-shaped
+      # rows whose `statements` column is a PROVENANCE SENTENCE, never a claim the SQL
+      # executed on TEST, and `db push --include-all` SKIPS any version already in
+      # `schema_migrations`. The phase's central claim is "TEST is the stage every
+      # migration crosses before PROD"; without the comparison below, nothing in this
+      # workflow measures the crossing.
+      # Two assertions, both fail-loud:
+      #   (1) SET EQUALITY — the versions the dry-run planned must equal the versions
+      #       the push reports. Both halves come from the same CLI on the same
+      #       connection moments apart, so a difference means the push did something
+      #       other than the plan that was logged as its audit record.
+      #   (2) NON-EMPTY ON A `push` EVENT — the trigger's `paths:` filter is
+      #       `supabase/migrations/**`, so a push run means a migration file genuinely
+      #       changed and an empty applied set is the ledger-shadow failure above.
+      #       ⚠️ KNOWN, ACCEPTED FALSE POSITIVE: editing a COMMENT inside an
+      #       already-applied migration file also trips the paths filter and legitimately
+      #       applies nothing. That run fails here. The escape is a
+      #       `workflow_dispatch` re-run against main, where an empty set is reported
+      #       and tolerated — chosen deliberately over softening the push path, because
+      #       the push path is the one that gates PROD.
+      # Versions are extracted with awk, not `grep -o ... || true`: grep exits 1 on no
+      # match, `set -e` would abort, and the `|| true` that fixes it is exactly the
+      # softening token the wiring test bans in this job.
       - name: Push migrations to TEST
+        env:
+          IS_PUSH: ${{ github.event_name == 'push' }}
         run: |
           set -euo pipefail
           # The session-mode DSN derived ONCE, in `Derive the session-mode TEST DSN`.
           dsn="${TEST_DB_SESSION_URL}"
-          supabase db push --include-all --db-url "${dsn}"
+          supabase db push --include-all --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-push.txt"
+          echo "::group::Post-apply applied-set verification (affirmative)"
+          versions_of() {
+            awk '{ while (match($0, /[0-9]{14}/)) { print substr($0, RSTART, RLENGTH); $0 = substr($0, RSTART + RLENGTH) } }' "$1" | sort -u
+          }
+          planned="$(versions_of "${RUNNER_TEMP}/test-dry-run.txt")"
+          applied="$(versions_of "${RUNNER_TEMP}/test-push.txt")"
+          planned_n="$(printf '%s' "${planned}" | awk 'NF { n++ } END { print n + 0 }')"
+          applied_n="$(printf '%s' "${applied}" | awk 'NF { n++ } END { print n + 0 }')"
+          echo "planned ${planned_n} migration version(s); push reported ${applied_n}."
+          if [ "${planned}" != "${applied}" ]; then
+            echo "::error::the TEST push did NOT apply the set its own dry-run planned. Planned versions:"
+            printf '%s\n' "${planned}"
+            echo "::error::versions the push reported:"
+            printf '%s\n' "${applied}"
+            echo "::error::These two come from the same CLI on the same connection moments apart, so a difference is not drift — it means the apply diverged from the plan that was logged as its audit record. The PROD apply is gated on this job and must not proceed."
+            exit 1
+          fi
+          if [ "${IS_PUSH}" = "true" ] && [ "${applied_n}" -eq 0 ]; then
+            echo "::error::the TEST push applied ZERO migrations on a push-to-main run. This workflow's push trigger is filtered to supabase/migrations/**, so a migration file genuinely changed and TEST should have moved. The likeliest cause is a schema_migrations row that RECORDS a version whose SQL never executed on TEST — Phase 164.8-04 seeded 266 such rows and 'db push --include-all' skips any version already in the ledger. Refusing to green-light the PROD apply on a stage nothing crossed. If the change was genuinely a no-op (a comment edit inside an already-applied migration file), re-run via 'gh workflow run supabase-migrate.yml --ref main', where an empty set is tolerated."
+            exit 1
+          fi
+          if [ "${applied_n}" -eq 0 ]; then
+            echo "The push applied nothing and this is not a push event — tolerated (see the step comment)."
+          fi
+          echo "::endgroup::"
           echo "::group::Post-apply migration list verification (C-0331 twin)"
           supabase migration list --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-migration-list.txt"
           if grep -Eiq '(^|[[:space:]|])reverted([[:space:]|]|$)' "${RUNNER_TEMP}/test-migration-list.txt"; then
@@ -815,6 +954,57 @@ jobs:
               ;;
           esac
 
+  # ── TEST AHEAD OF PROD IS A NAMED RED, NOT AN ALL-GREEN BOARD ───────────
+  # THE DIVERGENCE, spelled out: a `workflow_dispatch` against main on a clone (or on
+  # this repo after a secret rotation dropped one of the three PROD values) produces
+  #   plan        → GREEN, `configured=false` plus a ::notice::  (Phase 142.1 D-02/R1
+  #                 deliberately tolerates the unconfigured state on a DISPATCH)
+  #   apply-test  → GREEN, and it really did APPLY to the shared TEST database
+  #   verdict     → GREEN, because apply-test succeeded
+  #   apply       → grey, its `if:` false on `needs.plan.outputs.configured`
+  # Every check green or grey, and shared TEST is now AHEAD of PROD with nothing
+  # anywhere saying so. The D-02/R1 tolerance was written when this workflow wrote to
+  # PROD ONLY, where "configured=false" meant nothing happened at all; Phase 164.8
+  # gave the run a second database it writes to REGARDLESS of the PROD credentials,
+  # and the tolerance did not move with it.
+  #
+  # ⛔ WHY THIS IS A SEPARATE JOB AND NOT A CLAUSE IN `apply-test-verdict`. Reading
+  # `needs.plan.outputs.configured` requires `plan` in `needs:`, and `plan` is bound
+  # to the `Production` environment, which waits for a required reviewer. A verdict
+  # that waits on a human would be PENDING — not red — at exactly the moment a failed
+  # `apply-test` most needs to be red, which is the grey-job defect the verdict job
+  # exists to fix. This job may wait: it has nothing to say until `plan` concludes.
+  #
+  # It is deliberately SILENT on every other combination — a failed `apply-test` is
+  # the verdict job's to name, and a failed `plan` is already red on its own.
+  prod-credential-divergence-verdict:
+    needs: [plan, apply-test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Refuse an all-green run that left TEST ahead of PROD
+        env:
+          APPLY_TEST_RESULT: ${{ needs.apply-test.result }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PLAN_CONFIGURED: ${{ needs.plan.outputs.configured }}
+        run: |
+          set -euo pipefail
+          echo "apply-test=${APPLY_TEST_RESULT} plan=${PLAN_RESULT} configured=${PLAN_CONFIGURED}"
+          if [ "${APPLY_TEST_RESULT}" != "success" ]; then
+            echo "The TEST apply did not succeed, so nothing was written to TEST that PROD is now behind. apply-test-verdict owns naming that; this job has nothing to add."
+          elif [ "${PLAN_RESULT}" != "success" ]; then
+            echo "The TEST apply succeeded and the plan job concluded '${PLAN_RESULT}'. TEST may now be ahead of PROD, but the plan job is already RED in this run — the divergence is visible without a second red check, and naming a cause this job cannot measure would be a guess."
+          elif [ "${PLAN_CONFIGURED}" = "true" ]; then
+            echo "PROD credentials are configured; the apply job decides on its own merits. No divergence."
+          else
+            echo "::error::SHARED TEST IS NOW AHEAD OF PRODUCTION, and every other check in this run is green or grey."
+            echo "::error::The apply-test job APPLIED the merged migrations to the shared TEST database, and it succeeded. The PROD apply then SKIPPED, because the plan job reported configured=false: one or more of SUPABASE_PROJECT_REF (var), SUPABASE_ACCESS_TOKEN (secret) and SUPABASE_DB_PASSWORD (secret) is unset. Which ones are named in the plan job's ::notice::."
+            echo "::error::That tolerance (Phase 142.1 D-02/R1) is correct for a DISPATCH on an unconfigured clone and was written when this workflow wrote to PROD only. It is not correct once the same run has already written to a second, SHARED database: TEST carries schema PROD does not, other people's CI runs against it, and no check anywhere says so."
+            echo "::error::Two remedies, both fine: configure the three PROD values and re-dispatch, or restore TEST from the baseline (.github/workflows/test-restore-from-baseline.yml). Do NOT silence this job — the asymmetry it names is real for as long as it holds."
+            exit 1
+          fi
+
   apply:
     # Area 1 Q2, LOCKED: a TEST apply that FAILED or was SKIPPED blocks the PROD
     # apply. `needs:` blocks on failure by default; the `if:` clause is what blocks
@@ -850,11 +1040,12 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
           SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          IS_PUSH: ${{ github.event_name == 'push' }}
         # --include-all is required to apply migrations that gap-fill earlier timestamp slots
         # (e.g. when a history-only restoration like PR #176 lands before subsequent additions).
         # Without it, db push refuses with "Found local migration ... that is below remote tip".
         #
-        # Safety story (BUILD stage — required reviewers NOT yet configured):
+        # Safety story:
         #   - Auto-applies on push to main touching supabase/migrations/**
         #     (push trigger re-enabled by PR-Y2 2026-05-25); drift is gated
         #     at PR-time by migration-drift-check.yml
@@ -863,8 +1054,13 @@ jobs:
         #     `.github/migrate-backdated-allowlist.txt` exception channel
         #   - Two-step plan-then-apply with `--dry-run` on plan so the operator sees the
         #     EXACT command output before approving apply
-        #   - At scale (>=10 active clients), add required-reviewer protection to the
-        #     `Production` environment per ADR-0009 (TODO).
+        #   - REQUIRED-REVIEWER PROTECTION ON `Production` IS CONFIGURED, measured
+        #     2026-09-09 via `gh api repos/:owner/:repo/environments`: one
+        #     `required_reviewers` rule. The ADR-0009 "at scale, add it" TODO that stood
+        #     here is DONE and was date-corrected rather than deleted, because this
+        #     comment block is part of the file's safety argument.
+        #   - Every merged migration crossed the shared TEST database first: this job
+        #     `needs: [plan, apply-test]` and its `if:` requires apply-test SUCCESS.
         #
         # C-0331 (audit-2026-05-07): `set -euo pipefail` ensures any sub-command
         # failure aborts the step. After `db push`, we run `supabase migration
@@ -872,13 +1068,50 @@ jobs:
         # status — the CLI can return exit 0 while a migration body is silently
         # skipped (e.g. wrapped in a SQL exception the CLI swallows), and the
         # post-apply list is the authoritative ground-truth we cross-check.
+        #
+        # ⭐ THE AFFIRMATIVE TWIN of the TEST apply's check, and the reason the
+        # dry-run is repeated here rather than read from the `plan` job: `plan` is a
+        # different job on a different runner, so its output would have to travel as
+        # an artifact, and a stale artifact would make the comparison lie. A second
+        # `--dry-run` costs one CLI round-trip and compares like with like on the same
+        # linked project. The reverted-grep below is a NEGATIVE check — a pattern that
+        # matches nothing returns 1 and reads as CLEAN — so on its own it cannot tell
+        # an applied merge from a push that applied zero migrations. See the long
+        # derivation on `Push migrations to TEST`; the same reasoning, one environment
+        # over, on the environment where being wrong is not recoverable by a re-run.
         # All interpolations are repo-admin-controlled secrets/vars (not
         # attacker-supplied event fields), and they flow through env: not
         # inline ${{ }} expansion — no script-injection surface.
         run: |
           set -euo pipefail
           supabase link --project-ref "$SUPABASE_PROJECT_REF"
-          supabase db push --include-all
+          supabase db push --include-all --dry-run | tee /tmp/prod-dry-run.txt
+          supabase db push --include-all | tee /tmp/prod-push.txt
+          echo "::group::Post-apply applied-set verification (affirmative)"
+          versions_of() {
+            awk '{ while (match($0, /[0-9]{14}/)) { print substr($0, RSTART, RLENGTH); $0 = substr($0, RSTART + RLENGTH) } }' "$1" | sort -u
+          }
+          planned="$(versions_of /tmp/prod-dry-run.txt)"
+          applied="$(versions_of /tmp/prod-push.txt)"
+          planned_n="$(printf '%s' "${planned}" | awk 'NF { n++ } END { print n + 0 }')"
+          applied_n="$(printf '%s' "${applied}" | awk 'NF { n++ } END { print n + 0 }')"
+          echo "planned ${planned_n} migration version(s); push reported ${applied_n}."
+          if [ "${planned}" != "${applied}" ]; then
+            echo "::error::the PROD push did NOT apply the set its own dry-run planned. Planned versions:"
+            printf '%s\n' "${planned}"
+            echo "::error::versions the push reported:"
+            printf '%s\n' "${applied}"
+            echo "::error::The dry-run immediately above ran on the same linked project moments earlier, so a difference is not drift — the apply diverged from the plan logged as its audit record."
+            exit 1
+          fi
+          if [ "${IS_PUSH}" = "true" ] && [ "${applied_n}" -eq 0 ]; then
+            echo "::error::the PROD push applied ZERO migrations on a push-to-main run. The push trigger is filtered to supabase/migrations/**, so a migration file genuinely changed and PROD should have moved. A green run that applied nothing is exactly how a freshly-deployed worker meets an OLD PROD schema (PGRST204) while every dashboard stays green — the D-02/R1 failure this workflow already fails loud on for ABSENT SECRETS, one step later in the chain. If the change was genuinely a no-op (a comment edit inside an already-applied migration file), re-run via 'gh workflow run supabase-migrate.yml --ref main', where an empty set is tolerated."
+            exit 1
+          fi
+          if [ "${applied_n}" -eq 0 ]; then
+            echo "The push applied nothing and this is not a push event — tolerated (same rule as the TEST apply)."
+          fi
+          echo "::endgroup::"
           echo "::group::Post-apply migration list verification (C-0331)"
           supabase migration list --linked | tee /tmp/migration-list.txt
           if grep -Eiq '(^|[[:space:]|])reverted([[:space:]|]|$)' /tmp/migration-list.txt; then
