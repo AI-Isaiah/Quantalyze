@@ -1155,7 +1155,7 @@ jobs:
           echo "::endgroup::"
           echo "::group::Post-apply migration list verification (C-0331)"
           supabase migration list --linked | tee /tmp/migration-list.txt
-          if grep -Eiq '(^|[[:space:]|])reverted([[:space:]|]|$)' /tmp/migration-list.txt; then
+          if grep -aEiq '(^|[[:space:]|])reverted([[:space:]|]|$)' /tmp/migration-list.txt; then
             echo "::error::Reverted migrations detected after db push — see list above (C-0331)"
             exit 1
           fi
