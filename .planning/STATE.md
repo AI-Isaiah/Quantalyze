@@ -6,10 +6,10 @@ current_phase: 164.2.1
 current_phase_name: SESSIONID-FENCE
 status: verified
 stopped_at: "164.5-05 tasks 1-2 complete; STOPPED at task 3 blocking-human checkpoint:decision (ROADMAP criterion 5 wording)"
-last_updated: "2026-09-09T10:34:24.862Z"
+last_updated: "2026-09-09T12:27:34.260Z"
 last_activity: 2026-09-06
 last_activity_desc: "164.2 shipped as PR #749. Version bumped 0.77.15.0 -> 0.77.16.0 with a CHANGELOG entry (nothing in GSD or CI enforces either). Ship review: security auditor + 10 diff-scoped specialists; 5 file-disjoint fixers. TWO VACUITIES: the roster-render poster census compared a hand-typed length to a hand-typed literal while claiming to scan src/ (it read no files) — and that was the pin the founder's criterion-3 override explicitly rested on; and the PGRST204 assertion passed on the format string's static tail. Three more found while fixing: C-10's 400-day fixture could not detect the arm-swap it guarded, the provenance census's Rule C ran only on stamped sites, and a fixer caught its own draft assertion passing for the wrong reason. FOUR user-facing/data-integrity: the two SUCCESS writers sat outside the PGRST204 degrade while the docstring claimed full coverage (a succeeded compute was recorded failed, cash series heal-deleted, retry burned); durable writer sentences had made an internal table name + raw uuid and a Python exception class name reach user copy; validate-and-encrypt showed OUR stale service key as 'Unauthorized' on a key-connect form; the post-23505 read discarded both failure channels. Fixing stale anchors introduced 3 bare file:line cites that [SEAMPROSE-01] bans for going stale — caught by the full suite. Gates re-run by the orchestrator: vitest 14180/0 (Node 22), pytest 5430, mypy --strict 79 files, tsc clean, corpus 369 arms no defects. SECURITY.md added: 21/21 closed, threats_open 0, HIGH proven non-vacuous by three lane mutants that each abort the apply."
-state_head: 27d519e2a54a6653a69e71e7211168bf33819501
+state_head: 193ae89b8a34f848bbb60e3d7d934d1816812cdf
 
 # ⚠️ progress: HAND-SET 2026-09-06 against `origin/main`, NOT derived from this checkout.
 
@@ -226,11 +226,11 @@ state_head: 27d519e2a54a6653a69e71e7211168bf33819501
 # state-update step entirely, per this banner's own rule that it wins over that step.
 
 progress:
-  total_phases: 25
-  completed_phases: 7
-  total_plans: 107
-  completed_plans: 96
-  percent: 28
+  total_phases: 26
+  completed_phases: 8
+  total_plans: 111
+  completed_plans: 105
+  percent: 31
 ---
 
 # Project State — Quantalyze
@@ -401,6 +401,7 @@ substituting SQL comment prose inside the unquoted `TXN_*` heredocs while assemb
 destructive restore. All closed and each falsified by neutering.
 
 ⛔ **NEXT, and both are gates, not suggestions:**
+
 1. **Phase 164.8 plan 05 Task 3** is halted at a human checkpoint — merge the PR, then
    dispatch `supabase-migrate.yml` on `main`, selecting the run by `headSha == MERGE_SHA`.
    The TEST-first apply's version-set comparison assumes a `supabase db push` output shape
@@ -412,7 +413,6 @@ destructive restore. All closed and each falsified by neutering.
 Routed OUT of 164.8.1 to Phase 164.9 (all three carry ROUTED HERE blocks in the ROADMAP):
 `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]`, `[164.8.1-TEST-ANALYTICS-URL-PROD]`,
 `[164.8-PUSH-RACE-VAC08]`.
-
 
 Phase: 164.2 (CURATED-COPY) — IN PROGRESS, planning not started
 Plan: none authored yet — `/gsd-plan-phase 164.2` has not run, so the plan count is UNKNOWN
@@ -1252,6 +1252,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.8 edited: edited fields: plans — 5 to 6 after the plan-checker REVISE split plan 01's self-test harness into its own plan (W8, plan 01 was at 0.95 budget)
 - Phase 164.9 edited: routed [164.8.1-REPLAY-INSERT-ONLY-SCOPE] here from Phase 164.8.1 PR review: requirements line + ROUTED HERE block
 - Phase 164.9 edited: routed [164.8-PUSH-RACE-VAC08] here from Phase 164.8 plan 05: VAC-08 and apply-test share advisory key 61616158
+- Phase 164.6 edited: success criterion 10 + Requirements: [PLANANCHOR-SUMMARY-FILTER-01] routed here from the PR #767 merge gate
 
 ### Decisions
 
