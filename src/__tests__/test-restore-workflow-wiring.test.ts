@@ -206,8 +206,44 @@ function redactExpressions(text: string): string[] {
   return [...body.slice(a, b).matchAll(/-e '([^']*)'/g)].map((m) => m[1]);
 }
 
-/** Every shape that could turn a failure into a pass, reported BY NAME. */
-const SOFTENING_TOKENS = ["continue-on-error", "|| true", "exit 0", "::warning", "set +e"];
+/**
+ * Every shape that could turn a failure into a pass, reported BY NAME.
+ *
+ * ⚠️ THE LAST FOUR WERE ADDED IN PHASE 164.8.2 (WR-06) because the first five were
+ * not a class, they were five spellings of a class, and the ones missing were the
+ * ones that fit these workflows:
+ *   - `|| :`            a drop-in for the banned `|| true`, and shorter to type.
+ *   - `2>/dev/null`     the exact shape that would swallow the marker step's psql
+ *                       stderr — the step whose stderr IS the evidence that the
+ *                       database could not be identified. On THIS workflow that is
+ *                       the worst of the nine: `Which database am I on` is the gate
+ *                       standing between a dashboard-shaped mistake and a DROP
+ *                       SCHEMA on the wrong database, and a run it cannot be undone.
+ *   - `set +o pipefail` re-enables the "a piped command's exit status is discarded"
+ *                       bug that `set -euo pipefail` exists here to prevent.
+ *   - `|| exit 0`       an explicit "and if that failed, succeed anyway".
+ *
+ * ⛔ THREE COPIES, KEPT LEVEL BY HAND, ON PURPOSE. The identical list lives in
+ * `src/__tests__/supabase-migrate-test-first.test.ts` (which widened first, in
+ * Phase 164.8) and in `src/__tests__/prod-prober-wiring.test.ts` (the ORIGIN of the
+ * idiom, and the last of the three to widen). It is restated rather than imported
+ * for the self-containment reason in this file's header — Phase 164.8 Plan 05
+ * Task 2 states the convention outright, and CONTEXT Area 3 re-affirmed it for this
+ * phase: no shared helper module that only wiring tests import. The length pin
+ * below is the tripwire that makes the duplication survivable — widen one copy and
+ * the other two go red naming this file.
+ */
+const SOFTENING_TOKENS = [
+  "continue-on-error",
+  "|| true",
+  "exit 0",
+  "::warning",
+  "set +e",
+  "|| :",
+  "2>/dev/null",
+  "set +o pipefail",
+  "|| exit 0",
+];
 
 /**
  * The `restore:` job with the two ci.yml-copied mutex steps sliced out.
@@ -225,9 +261,67 @@ function scannableRestoreBlock(text: string): string {
   return jobBlock(text, RESTORE_JOB).replace(ACQUIRE_RE, "").replace(RELEASE_RE, "");
 }
 
+/**
+ * The one token this block is allowed to carry, as an EXACT COUNT — the
+ * `restore-test-from-baseline.test.ts` / `gate-family-meta.test.ts` idiom, and for the
+ * same reason: eight of the nine must be absent outright, but `2>/dev/null` has
+ * legitimate sites here, and "absent outright" would therefore be a rule that could
+ * only be satisfied by deleting working code. A count is the alternative that still
+ * bites — a NEW site is red, and so is a VANISHED one (a site disappearing means an
+ * exit status that used to be checked stopped being checked, or the slicing moved and
+ * the scan is now looking at less than it thinks).
+ *
+ * ⛔ REGENERATED, NOT CARRIED. The number below came out of THIS file's own slicing —
+ * `liveLines(scannableRestoreBlock(WF)).join("\n").split("2>/dev/null").length - 1` —
+ * not from the plan text and not from a whole-file `grep -c` (the file carries 11;
+ * six of them are inside the excluded mutex copies or in comments).
+ *
+ * ⭐ RE-MEASURED 2026-09-09, Phase 164.8.2 Plan 04, on the workflow AS IT IS AFTER
+ * Plan 03 added the `Stage the public artifact` step to this same job. That step
+ * contributes ZERO: it reads every optional file with `if [ -f ]` guards precisely so
+ * that an aborted run's missing file is not an error and a genuinely failed `cp` still
+ * reaches its `trap … ERR`. Had it contributed, the staging step would have been the
+ * defect and this allowlist would not have been the place to absorb it.
+ *
+ * `2>/dev/null` x5 — every one a PROBE whose exit status is consumed by the line it
+ *                    sits on, so the suppressed channel is noise and never evidence:
+ *   1. `Assert PROD's apply ran on an ancestor of this checkout` —
+ *      `if ! git merge-base --is-ancestor "${APPLY_HEAD_SHA}" HEAD 2>/dev/null; then`.
+ *      The exit code IS the answer and it is branched on; git's stderr here would only
+ *      restate "not a valid object" for a sha the `case` above has already accepted as
+ *      hex. A non-ancestor appends to `failed` and the step exits 1.
+ *   2-4. `Probe - the runner image's PostgreSQL server binaries resolve` — the
+ *      `pg_config --bindir`, `ls -d …/bin` and `ls -l …/initdb …/pg_ctl` lines. This
+ *      whole step is a DIAGNOSTIC ECHO, non-fatal by design (see its own comment: the
+ *      pg-lane resolution chain owns the judgement, a second divergent opinion would be
+ *      worse than none). Each swallowed stderr is paired with an `|| echo '(absent)'`
+ *      that prints the absence, so the log says what was not found either way.
+ *   5. `Back up TEST's schema and ledger …` — the `SELECT count(*) FROM
+ *      supabase_migrations.schema_migrations;` row count. Its rc IS captured
+ *      (`… 2>/dev/null | tr -d '\r' | tail -1)" || rc=$?`) and the very next branch
+ *      turns a non-zero into `::error::` + `exit 1`. psql's connect/auth stderr names
+ *      the host, its IP and the DB user, and this job's log is PUBLIC — so here the
+ *      suppression is a redaction, and the failure is still loud.
+ *
+ * ⛔ A count that moves in EITHER direction is red. Do not edit the number to make a
+ * run pass: a new one has to earn its place in this allowlist with a justification.
+ */
+const ALLOWED: Record<string, number> = { "2>/dev/null": 5 };
+
 function softeningOffenders(text: string): string[] {
   const live = liveLines(scannableRestoreBlock(text)).join("\n");
-  return SOFTENING_TOKENS.filter((t) => live.includes(t));
+  const offenders: string[] = [];
+  for (const token of SOFTENING_TOKENS) {
+    const n = live.split(token).length - 1;
+    const allowed = ALLOWED[token] ?? 0;
+    if (n === allowed) continue;
+    offenders.push(
+      allowed === 0
+        ? `${token} (${n}) — forbidden outright in the scannable restore block`
+        : `${token} (${n}, the allowlist admits exactly ${allowed}) — a new one has to earn its place in this allowlist with a justification, and a vanished one means an exit status that used to be checked stopped being checked`,
+    );
+  }
+  return offenders;
 }
 
 /** The file's header — everything before the `on:` key. */
@@ -1322,6 +1416,86 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           ),
         (t) => softeningOffenders(t).length === 0,
       );
+
+      // ⛔ THE ONE THIS PHASE EXISTS FOR (WR-06). Before the list went to nine, this
+      // exact mutation was measured GREEN: a `psql … 2>/dev/null` on the ONE step whose
+      // stderr is the evidence that the database could not be identified was invisible
+      // to this scan. The shape is not invented — it is the marker step's own stderr
+      // redirect, pointed at /dev/null instead of at marker.err, which is what a
+      // "quieten the log" edit would actually look like.
+      calibrate(
+        "the softening scan bites on a `2>/dev/null` swallowing the MARKER step's psql stderr",
+        (s) => s.replace('2>"${RUNNER_TEMP}/marker.err"', "2>/dev/null"),
+        (t) => softeningOffenders(t).length === 0,
+      );
+      // …and it is named, with the count that moved, not merely counted.
+      const softenedMarker = WF.replace('2>"${RUNNER_TEMP}/marker.err"', "2>/dev/null");
+      expect(softenedMarker, "the marker-step mutation changed nothing").not.toBe(WF);
+      const markerOffenders = softeningOffenders(softenedMarker);
+      expect(markerOffenders.length, "the softened marker step went unreported").toBeGreaterThan(0);
+      expect(
+        markerOffenders.join(" | "),
+        "the offender is not named `2>/dev/null` — a count with no name sends the next reader to the wrong step",
+      ).toContain("2>/dev/null");
+      expect(
+        markerOffenders.join(" | "),
+        `the reported count is not ${(ALLOWED["2>/dev/null"] as number) + 1}: the allowlist is not counting the new site, it is matching something else`,
+      ).toContain(`(${(ALLOWED["2>/dev/null"] as number) + 1},`);
+
+      calibrate(
+        "the softening scan bites on a `|| :` — the drop-in for the banned `|| true`",
+        (s) =>
+          s.replace(
+            '          set -euo pipefail\n          export RESTORE_DB_URL=',
+            '          set -euo pipefail\n          command -v supabase >/dev/null || :\n          export RESTORE_DB_URL=',
+          ),
+        (t) => softeningOffenders(t).length === 0,
+      );
+      calibrate(
+        "the softening scan bites on a `set +o pipefail` re-enabling the discarded-status bug",
+        (s) =>
+          s.replace(
+            '          set -euo pipefail\n          export RESTORE_DB_URL=',
+            '          set -euo pipefail\n          set +o pipefail\n          export RESTORE_DB_URL=',
+          ),
+        (t) => softeningOffenders(t).length === 0,
+      );
+    });
+
+    it("the token list is NINE, and its two hand-kept siblings must move with it", () => {
+      expect(
+        SOFTENING_TOKENS,
+        "SOFTENING_TOKENS moved off nine. This list is one of THREE hand-kept copies — the others are in `src/__tests__/supabase-migrate-test-first.test.ts` and `src/__tests__/prod-prober-wiring.test.ts`, and they are duplicated deliberately (CONTEXT Area 3, LOCKED: no shared helper module that only wiring tests import). Widen or narrow ALL THREE in the same commit, or the class this phase closed re-opens as 'one of three hardened'.",
+      ).toHaveLength(9);
+      expect(new Set(SOFTENING_TOKENS).size, "a token is listed twice").toBe(
+        SOFTENING_TOKENS.length,
+      );
+    });
+
+    it("the `2>/dev/null` allowlist is an exact set, and it reds in BOTH directions", () => {
+      // The count is pinned above with a per-site justification. This arm proves the
+      // pin is a pin: a site ADDED and a site REMOVED must each be reported. A rule
+      // that only catches additions would let the slicing silently narrow — the scan
+      // would then be looking at less than it thinks and would still read green.
+      expect(Object.keys(ALLOWED), "the allowlist admits a token other than `2>/dev/null`").toEqual([
+        "2>/dev/null",
+      ]);
+      const live = liveLines(scannableRestoreBlock(WF)).join("\n");
+      expect(
+        live.split("2>/dev/null").length - 1,
+        "the live `2>/dev/null` count in the scannable restore block moved off its re-measured 5",
+      ).toBe(ALLOWED["2>/dev/null"]);
+
+      // DOWN: delete one of the five justified sites.
+      const narrowed = WF.replace(
+        ' 2>/dev/null || echo "(no /usr/lib/postgresql/*/bin)"',
+        ' || echo "(no /usr/lib/postgresql/*/bin)"',
+      );
+      expect(narrowed, "the site-removal mutation changed nothing").not.toBe(WF);
+      expect(
+        softeningOffenders(narrowed).join(" | "),
+        "a VANISHED allowlisted site went unreported — the count is not an exact set, it is a ceiling",
+      ).toContain("2>/dev/null (4,");
     });
   });
 
