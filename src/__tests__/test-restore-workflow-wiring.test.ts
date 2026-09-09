@@ -1676,6 +1676,191 @@ describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
     expect(generic.includes("The CLI could not read the ledger")).toBe(true);
     expect(generic.includes("remote migration versions with no local file")).toBe(false);
   });
+
+  // -------------------------------------------------------------------------
+  // WR-04 remainder (Phase 164.8.2) — the two bare `grep -q` lines in THIS step.
+  //
+  // ⛔ THE CONTRADICTION. Three lines above them the step states the rule verbatim:
+  // "`-a` is mandatory repo-wide: a tracked file carries a deliberate NUL byte and
+  // plain grep reports such input clean." The `grep -aqF` on the ErrMissingLocal
+  // sentence obeys it; the two below it did not. A rule with a counter-example in its
+  // own step is not a rule, and the second of the two is a NEGATIVE check — the shape
+  // where NUL-blindness turns "the CLI did not print it" into a red for the wrong
+  // reason and hides whatever the ledger actually says.
+  // -------------------------------------------------------------------------
+  it("both remaining post-verify greps carry -a, so the step's own rule has no counter-example", () => {
+    const live = extractRunScript(WF, STEP)
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("#"));
+    const greps = live.filter((l) => /\bgrep\b/.test(l));
+    expect(greps.length, "the post-verify step no longer greps at all").toBeGreaterThan(2);
+    const bare = greps.filter((l) => /\bgrep -[a-zA-Z]*q/.test(l) && !/\bgrep -[a-zA-Z]*a/.test(l));
+    expect(
+      bare,
+      `${bare.length} post-verify grep(s) still omit \`-a\` while the step's own comment calls it mandatory repo-wide. The NEGATIVE one is the dangerous half: without \`-a\` a single NUL byte makes "the CLI did not print 'Remote database is up to date.'" true for a reason that has nothing to do with the ledger.`,
+    ).toEqual([]);
+  });
+
+  it("EXECUTED — the positive check READS a dry-run file carrying a NUL byte", () => {
+    // ⚠️ WHAT THIS ASSERTS AND WHAT IT DELIBERATELY DOES NOT. It asserts the direction
+    // that holds on EVERY grep measured for this repo (ugrep 7.8.4, BSD 2.6.0, and
+    // GNU on the runner): with `-a`, a NUL-bearing file is READ and the positive check
+    // is satisfied, so the step exits 0. It does NOT assert the pre-fix failure, because
+    // that outcome is PLATFORM-DEPENDENT — measured 2026-09-09, ugrep reads such a file
+    // as CLEAN (rc=1) while BSD grep reads it fine (rc=0). A calibration stripping the
+    // `a` would therefore pass on one developer's machine and fail on another's, which
+    // is a flaky test rather than evidence. The pre-fix observation is recorded per
+    // flavour in the plan's SUMMARY instead (RESEARCH assumption A1).
+    const body = extractRunScript(WF, STEP);
+    const CLI_LINE =
+      'supabase db push --include-all --dry-run --db-url "${dsn}" >"${raw}" 2>&1 || rc=$?';
+    expect(
+      body.includes(CLI_LINE),
+      "the post-verify's CLI invocation is no longer the line this fixture replaces — re-anchor it rather than dropping the arm",
+    ).toBe(true);
+
+    const dir = mkdtempSync(join(tmpdir(), "postverify-nul-"));
+    const runnerTemp = join(dir, "tmp");
+    mkdirSync(runnerTemp, { recursive: true });
+    // A NUL byte BEFORE the sentence the positive check looks for — the shape the
+    // repo's rule is written about (src/lib/wizardErrors.test.ts carries a deliberate
+    // one, which is why the rule exists at all).
+    const fixture = join(dir, "dry-run.fixture");
+    // ⚠️ The NUL is written as an ESCAPE, never as a raw byte in this source file.
+    // A raw NUL here would make THIS file NUL-bearing, and the repo's standing
+    // measurement is that grep goes silently blind to such a file — the first draft
+    // of this arm did exactly that and `grep -n` reported the line absent.
+    const NUL = "\u0000";
+    const fixtureBytes =
+      `Connecting to remote database...\n${NUL}stray\nRemote database is up to date.\n`;
+    expect(
+      fixtureBytes.includes(NUL),
+      "the fixture carries no NUL byte, so it does not exercise the rule this arm exists for",
+    ).toBe(true);
+    writeFileSync(fixture, fixtureBytes);
+    const patched = body.replace(CLI_LINE, `cat "${fixture}" >"\${raw}" 2>&1 || rc=$?`);
+    expect(patched, "the fixture substitution changed nothing").not.toBe(body);
+    const scriptFile = join(dir, "step.sh");
+    writeFileSync(scriptFile, patched);
+    const r = spawnSync("bash", [scriptFile], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        RUNNER_TEMP: runnerTemp,
+        TEST_DB_SESSION_URL: `${SCHEME}EXAMPLE_USER:EXAMPLE_PASSWORD@example.invalid:5432/postgres`,
+      },
+    });
+    rmSync(dir, { recursive: true, force: true });
+    const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+
+    expect(
+      r.status,
+      `a clean dry-run whose bytes include a NUL did not pass the post-verify (exit ${r.status}). With \`-a\` the positive check must READ the file; without it the step reds claiming the CLI never printed the sentence it did print.\n${out}`,
+    ).toBe(0);
+    expect(
+      out.includes("the CLI did not print 'Remote database is up to date.'"),
+      "the NEGATIVE check fired on a file that DOES contain the sentence — the grep did not read past the NUL byte",
+    ).toBe(false);
+    expect(out).toContain("ledger SHAPE is consistent");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IN-07 (Phase 164.8.2) — three readers of ONE provenance row must agree.
+//
+// ⛔ THE DEFECT. `BASELINE.md` carries a `| sha256 | `<64 hex>` |` row, and THREE
+// places read it: `scripts/check-baseline-staleness.mjs`'s `RECORDED_SHA_RE`, the
+// restore script's own `sed`, and this workflow's confirm-token `sed`. The workflow's
+// copy was ANCHORED with `^` while the other two were not, under a comment claiming
+// it was "the SAME provenance row … spelled for sed". On an INDENTED row the anchored
+// copy reads nothing and the workflow refuses with "carries no parseable sha256
+// provenance row" — about a file the other two gates read without complaint.
+// ---------------------------------------------------------------------------
+describe("IN-07 — the confirm token and the staleness gate read the SAME row", () => {
+  const SHA = "a".repeat(40) + "b".repeat(24); // 64 hex chars, obviously synthetic
+  // Indented, and preceded by a decoy row without `sha256` — the shape that split the
+  // three readers. A flush-left fixture would be read identically by all three and
+  // would prove nothing.
+  const FIXTURE =
+    "| field | value |\n" +
+    "| --- | --- |\n" +
+    "| source | supabase db dump |\n" +
+    `  | sha256 | \`${SHA}\` |\n`;
+
+  /** The sed program out of a `sed -nE '<program>' …` line in a file. */
+  function sedProgram(text: string, anchor: string): string {
+    const line = text.split("\n").find((l) => l.includes(anchor));
+    if (!line) return "";
+    const m = line.match(/sed -nE '([^']*)'/);
+    return m ? m[1] : "";
+  }
+
+  const runSed = (program: string, input: string): string => {
+    const dir = mkdtempSync(join(tmpdir(), "sha3-"));
+    const f = join(dir, "BASELINE.md");
+    writeFileSync(f, input);
+    const r = spawnSync("sed", ["-nE", program, f], { encoding: "utf8" });
+    rmSync(dir, { recursive: true, force: true });
+    if (r.status !== 0) throw new Error(`sed failed: ${r.stderr}`);
+    return (r.stdout ?? "").split("\n")[0] ?? "";
+  };
+
+  it("all three readers extract the same sha from an INDENTED provenance row", async () => {
+    // Imported from the SCRIPT module rather than restated — the convention this repo
+    // uses for a constant that must not have a second copy.
+    const { RECORDED_SHA_RE } = await import("../../scripts/check-baseline-staleness.mjs");
+
+    const wfProgram = sedProgram(WF, 'sha="$(sed -nE');
+    expect(
+      wfProgram,
+      `${WF_PATH}'s confirm-token step no longer reads the sha with a \`sed -nE '…'\` program — re-anchor this fixture rather than deleting it`,
+    ).not.toBe("");
+    const scriptProgram = sedProgram(SCRIPT, "recorded=$(sed -nE");
+    expect(
+      scriptProgram,
+      `${SCRIPT_PATH} no longer reads the sha with a \`sed -nE '…'\` program`,
+    ).not.toBe("");
+    // ⚠️ The local sed is BSD. Both programs are `-nE` with POSIX classes and are
+    // portable; asserted rather than assumed, and nothing is skipped silently.
+    for (const p of [wfProgram, scriptProgram]) {
+      expect(p, "a sed program lost its `p` flag and would print nothing").toContain("/p");
+    }
+    expect(
+      wfProgram.startsWith("s/^"),
+      "the workflow's confirm-token sed is ANCHORED again. RECORDED_SHA_RE and the restore script's sed are both unanchored, so an indented provenance row would split the three readers — which is exactly IN-07.",
+    ).toBe(false);
+
+    const fromRegex = RECORDED_SHA_RE.exec(FIXTURE)?.[1] ?? "";
+    const fromWorkflow = runSed(wfProgram, FIXTURE);
+    const fromScript = runSed(scriptProgram, FIXTURE);
+
+    expect(fromRegex, "RECORDED_SHA_RE did not read the fixture — the fixture is wrong, not the gate").toBe(SHA);
+    expect(
+      fromWorkflow,
+      `the workflow's sed read ${JSON.stringify(fromWorkflow)} from an indented row that RECORDED_SHA_RE reads as ${SHA}. The workflow would refuse the dispatch with "carries no parseable sha256 provenance row" about a file the staleness gate accepts.`,
+    ).toBe(SHA);
+    expect(fromScript, "the restore script's sed disagrees with the other two").toBe(SHA);
+
+    // CALIBRATION — restore the PRE-FIX program (`s/^\|…` in place of `s/.*\|…`) and it
+    // must go BLANK on the indented row while the other two still read it. This is the
+    // divergence itself, observed rather than described.
+    // ⚠️ The mutation replaces the leading `.*` with `^`; replacing only the `s/` with
+    // `s/^` does NOT reproduce it — `^.*` still matches the leading spaces, so that
+    // mutant is green and the calibration would prove nothing (measured while writing
+    // this arm: the first version did exactly that and reported a passing RED).
+    expect(
+      wfProgram.startsWith("s/.*\\|"),
+      "the workflow's sed program no longer begins `s/.*\\|`, so this calibration cannot reconstruct the anchored form — re-anchor the mutation",
+    ).toBe(true);
+    const reanchored = `s/^\\|${wfProgram.slice("s/.*\\|".length)}`;
+    expect(reanchored, "CALIBRATION: re-anchoring changed nothing").not.toBe(wfProgram);
+    expect(
+      runSed(reanchored, FIXTURE),
+      "CALIBRATION: the re-anchored program STILL matched the indented row, so this fixture does not exercise the anchor and the agreement above proves nothing",
+    ).toBe("");
+    expect(RECORDED_SHA_RE.exec(FIXTURE)?.[1]).toBe(SHA);
+    expect(runSed(scriptProgram, FIXTURE)).toBe(SHA);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -299,7 +299,15 @@ jobs:
           fi
           # The SAME provenance row scripts/check-baseline-staleness.mjs's
           # RECORDED_SHA_RE reads, spelled for sed. First match wins, as there.
-          sha="$(sed -nE 's/^\|[[:space:]]*sha256[[:space:]]*\|[[:space:]]*`([0-9a-f]{64})`[[:space:]]*\|.*$/\1/p' "${doc}" | head -1)"
+          # ⛔ UNANCHORED, and that is what makes the sentence above TRUE (IN-07, fixed
+          # 2026-09-09). This program carried a leading `^` until then, while
+          # RECORDED_SHA_RE (`/\|\s*sha256\s*\|\s*`([0-9a-f]{64})`\s*\|/`) and the
+          # script's own sed (restore-test-from-baseline.sh, `recorded=$(sed -nE …`)
+          # are both unanchored. On an INDENTED provenance row the anchored copy read
+          # nothing while the other two read the sha — three readers, two answers, and
+          # the divergence would surface as "carries no parseable sha256 provenance row"
+          # on a file the other two gates accept. Keep all three unanchored.
+          sha="$(sed -nE 's/.*\|[[:space:]]*sha256[[:space:]]*\|[[:space:]]*`([0-9a-f]{64})`[[:space:]]*\|.*$/\1/p' "${doc}" | head -1)"
           if [ "${#sha}" -ne 64 ]; then
             echo "::error::${doc} carries no parseable sha256 provenance row (matched ${#sha} chars, expected 64)."
             echo "::error::The confirm token is DERIVED from that row. An unparseable provenance row is"
@@ -1322,11 +1330,11 @@ jobs:
             echo "::error::supabase db push --dry-run exited ${rc} against the restored TEST ledger. The CLI could not read the ledger it is supposed to push against; the redacted output is above."
             exit 1
           fi
-          if grep -q 'Would push these migrations:' "${out}"; then
+          if grep -aq 'Would push these migrations:' "${out}"; then
             echo "::error::the restored ledger leaves migrations PENDING — the seed did not write one row per repo migration file, or the CLI parses the versions differently than the seed spelled them."
             exit 1
           fi
-          if ! grep -q 'Remote database is up to date.' "${out}"; then
+          if ! grep -aq 'Remote database is up to date.' "${out}"; then
             echo "::error::the CLI did not print 'Remote database is up to date.'. Either the ledger is not CLI-consistent, or the pinned CLI's wording changed between 2.84.2 (where both strings were measured) and 2.98.2. Verify the wording before concluding anything about the ledger — this assertion is deliberately positive so a wording change reddens instead of passing vacuously."
             exit 1
           fi
