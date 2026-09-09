@@ -1477,6 +1477,7 @@ Plans:
 **Depends on:** Phase 164.8 Plan 04 (its restore is what exposed this; the fix targets the same script).
 **Blocks:** a green `main`. Until this lands, `e2e-seeded` — the go-live badge gate — and `python` are red on every branch.
 **Plans:** 4 plans
+**Status**: ✅ **COMPLETE** — 4/4 plans; `gsd-verifier` **13/13 must-haves, no gaps**. `gsd-code-reviewer` found **1 blocker + 10 warnings, all fixed**; the verification then found **3 further gaps + 4 record items, all closed**. ⭐ The blocker (CR-01) was on the phase's own instrument: this phase added mutable `refdata:<table>=<count>` rows to the census that `--mode preflight` compares BYTE-FOR-BYTE to prove its rollback — but `auth.users` is outside `public` so `DROP SCHEMA public CASCADE` never locks it, and shared TEST runs other people's CI, so a PERFECT rollback could report `Treat this database as modified.` ⛔ Two anti-vacuity defects were found INSIDE this phase's own new code and are the reason it took two review rounds: the count-aware SHORT branch shipped with **no falsifier at any layer** (reverting it turned nothing red), and the arm ratchet's calibration mutation had become a silent no-op while `EXPECTED_ARMS` moved on. Both are now armed — `EXPECTED_ARMS` 21 → 26, extractor kinds 16 → 19. Separately, bash was **command-substituting SQL comment prose** inside the unquoted `TXN_*` heredocs while assembling the destructive restore; refusal 9 + arm 26 close that, including four delimiter spellings that walked past the guard's first cut.
 
 Plans:
 

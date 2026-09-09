@@ -381,6 +381,39 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
+⭐ **RECONCILED 2026-09-09. THIS block is the current position and SUPERSEDES everything
+below it in this section, including the 2026-09-06 `Phase: 164.2 (CURATED-COPY)` pointer
+that reconciled the block before it. Nothing below is deleted — it is lineage.**
+
+Phase: **164.8.1 (REFDATA) — COMPLETE**, 4 of 4 plans.
+Branch: `phase-164.8-05-test-first-migrate` (carries Phase 164.8 plan 05 AND 164.8.1's
+close-out; 12 commits ahead of `origin/main`, NOT yet pushed).
+Version: `0.77.30.0` (VERSION and package.json byte-equal), one unified CHANGELOG entry
+covering every commit on the branch.
+
+**How it closed, because the shape matters more than the verdict.** `gsd-code-reviewer`
+returned 1 blocker + 10 warnings; the fixes went in; `gsd-verifier` then found 3 further
+gaps + 4 record items in the FIXES. Two of the defects were anti-vacuity failures inside
+this phase's own new code — the count-aware SHORT branch shipped with no falsifier at any
+layer, and the arm ratchet's calibration mutation had silently become a no-op — which is
+the class this repo ranks above correctness. A third was live: bash was command-
+substituting SQL comment prose inside the unquoted `TXN_*` heredocs while assembling the
+destructive restore. All closed and each falsified by neutering.
+
+⛔ **NEXT, and both are gates, not suggestions:**
+1. **Phase 164.8 plan 05 Task 3** is halted at a human checkpoint — merge the PR, then
+   dispatch `supabase-migrate.yml` on `main`, selecting the run by `headSha == MERGE_SHA`.
+   The TEST-first apply's version-set comparison assumes a `supabase db push` output shape
+   that ONLY a real run can confirm; until that run, that is an unverified assumption in a
+   path that gates PROD.
+2. **Phase 164.8 plan 06** still owns writing `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`
+   and `[164.8-TEST-DATA-RESEEDED]` — measured 2026-09-09: neither exists in `TODOS.md`.
+
+Routed OUT of 164.8.1 to Phase 164.9 (all three carry ROUTED HERE blocks in the ROADMAP):
+`[164.8.1-REPLAY-INSERT-ONLY-SCOPE]`, `[164.8.1-TEST-ANALYTICS-URL-PROD]`,
+`[164.8-PUSH-RACE-VAC08]`.
+
+
 Phase: 164.2 (CURATED-COPY) — IN PROGRESS, planning not started
 Plan: none authored yet — `/gsd-plan-phase 164.2` has not run, so the plan count is UNKNOWN
 ⛔ 2026-09-06: this line deliberately carries NO `N of M` pair. Written as `0 of 0` it parsed, and
