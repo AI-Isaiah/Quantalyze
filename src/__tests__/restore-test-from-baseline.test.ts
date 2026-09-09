@@ -32,7 +32,10 @@
  * absence reads as "clean".
  */
 import { describe, expect, it } from "vitest";
-import { readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const SCRIPT = "scripts/restore-test-from-baseline.sh";
 const FIXTURES = "scripts/restore-test-from-baseline-fixtures";
@@ -665,6 +668,17 @@ describe("restore-test-from-baseline.sh — every refusal precedes the first wri
     // pinned at the measured number so a NEW one is a red rather than an
     // unnoticed widening.
     //
+    // ⭐ RE-MEASURED 2026-09-09 (Phase 164.8.2 IN-06): `set +e` moves 6 → 7 and
+    // `|| true` stays at 4. The SEVENTH site is the `grep -av` in
+    // `build_transaction` that assembles the dump into `restore.sql` — the ONE
+    // reading in this region whose rc was neither captured nor checked. Unwrapped,
+    // a grep that could not READ the dump (exit 2) killed the script under `set -e`
+    // with no `::error::` and no sentence for the operator. Its rc is now captured
+    // and CHECKED against the same `-le 1` bound the count site uses, so the
+    // widening buys a NAMED failure where there was a silent one. The executed
+    // proof is the IN-06 arm below, whose calibration reverts this exact wrap and
+    // observes the silent death return.
+    //
     // ⭐ RE-MEASURED 2026-09-09, after Phase 164.8.1 added the reference-data
     // refusal, replay and gate to this region: BOTH counts are UNCHANGED at 4 and 6.
     // That is a reading, not an assumption — the new code deliberately reads every
@@ -686,12 +700,15 @@ describe("restore-test-from-baseline.sh — every refusal precedes the first wri
     //                 preflight is a failure (diff exits 1 on difference — the very
     //                 case being reported, and `fail` fires on the next line either
     //                 way), and one `shift || true` on the last argv token.
-    // `set +e`   x6 — six measurements whose rc is captured and then CHECKED: five
-    //                 `grep -ac` counts (`[ "$rc" -le 1 ] || fail MEASURE_FAIL …`) and
+    // `set +e`   x7 — seven measurements whose rc is captured and then CHECKED: five
+    //                 `grep -ac` counts (`[ "$rc" -le 1 ] || fail MEASURE_FAIL …`),
     //                 the shared normalizer's `--function-names` run
-    //                 (`[ "$frc" -eq 0 ] || fail MEASURE_FAIL …`). That is the
-    //                 OPPOSITE of softening: it turns a broken grep or a crashed
-    //                 normalizer into a hard failure instead of a silent zero.
+    //                 (`[ "$frc" -eq 0 ] || fail MEASURE_FAIL …`), and the
+    //                 `grep -av` filter in `build_transaction` that writes the dump
+    //                 into `restore.sql` (IN-06). That is the OPPOSITE of softening:
+    //                 it turns a broken grep or a crashed normalizer into a hard
+    //                 failure instead of a silent zero — or, for the seventh, instead
+    //                 of no diagnosis at all.
     const run = runRegion(SRC);
     const runLive = liveLines(run).map(({ line }) => line).join("\n");
     for (const token of ["continue-on-error", "exit 0", "::warning"]) {
@@ -700,7 +717,7 @@ describe("restore-test-from-baseline.sh — every refusal precedes the first wri
         `the --run region now carries the softening token \`${token}\``,
       ).toBe(false);
     }
-    const ALLOWED: Record<string, number> = { "|| true": 4, "set +e": 6 };
+    const ALLOWED: Record<string, number> = { "|| true": 4, "set +e": 7 };
     for (const [token, n] of Object.entries(ALLOWED)) {
       expect(
         runLive.split(token).length - 1,
@@ -716,6 +733,17 @@ describe("restore-test-from-baseline.sh — every refusal precedes the first wri
     expect(widened).not.toBe(SRC);
     const wLive = liveLines(runRegion(widened)).map(({ line }) => line).join("\n");
     expect(wLive.split("|| true").length - 1).toBe(5);
+
+    // MIRROR CALIBRATION — the same for `set +e`. Both halves of the exact set are
+    // now calibrated: a pin that only ever flips on one of the two tokens is
+    // evidence about that token alone.
+    const softened = SRC.replace(
+      '  refuse_wrong_database\n  refuse_without_mutex',
+      '  set +e; :; set -e\n  refuse_wrong_database\n  refuse_without_mutex',
+    );
+    expect(softened).not.toBe(SRC);
+    const sLive = liveLines(runRegion(softened)).map(({ line }) => line).join("\n");
+    expect(sLive.split("set +e").length - 1).toBe(8);
   });
 });
 
@@ -772,6 +800,120 @@ describe("restore-test-from-baseline.sh — the filter and the ledger seed", () 
         .filter(({ line }) => line.includes("INSERT INTO supabase_migrations.schema_migrations"))[0]
         .line.includes("schema_migrations(version, name, statements)"),
     ).toBe(false);
+  });
+});
+
+describe("restore-test-from-baseline.sh — IN-06: the filter grep's read is BOUNDED", () => {
+  // ⛔ WHY THIS ARM IS EXECUTED AND NOT A GREP. What IN-06 names is an ABSENCE — an
+  // unwrapped `grep -av` that died under `set -e` with no `::error::` — and a static
+  // pin for the wrap's TEXT would stay green against a wrap that fires on the wrong
+  // bound. So the script is SOURCED (the WR-01 technique: the final `main "$@"`
+  // dispatch removed, leaving definitions only) and `build_transaction` is called
+  // directly. No cluster, no database, no DSN — the literal `stub-never-used` is the
+  // only thing put in RESTORE_DB_URL, and it is never dialled.
+  //
+  // ⚠️ THE READ FAILURE IS INJECTED AT THE CALL SITE, NOT BY DELETING THE DUMP, AND
+  // THAT IS A MEASUREMENT RATHER THAN A PREFERENCE. An absent BASELINE_FILE never
+  // reaches this line: the `grep -ac` COUNT ~170 lines above reads the same path and
+  // fails FIRST with its own message. Measured 2026-09-09 against the pre-fix bytes,
+  // exactly as the plan's literal harness would have run it:
+  //   exit=1 · `MEASURE_FAIL: could not count the filtered line class in …`
+  // An arm built on a missing file is therefore red BEFORE and AFTER the fix — it
+  // measures the count site, not this one. A `grep` shell function returning 2 for
+  // the `-v` invocation and delegating every other one to `command grep` reproduces
+  // the real shape (a read that failed HERE while the count succeeded) and binds to
+  // the site under test.
+  const HARNESS = [
+    'source "$COPY"',
+    "grep() {",
+    '  for a in "$@"; do',
+    '    case "$a" in -*v*) return 2 ;; esac',
+    "  done",
+    '  command grep "$@"',
+    "}",
+    "build_transaction restore",
+    "",
+  ].join("\n");
+
+  /** The wrapped filter read, verbatim. Both halves, so the calibration is exact. */
+  const WRAPPED =
+    '  set +e; grep -av "$FILTER_PATTERN" "$BASELINE_FILE" >> "$out"; rc=$?; set -e\n' +
+    '  [ "$rc" -le 1 ] || fail "MEASURE_FAIL: could not read ${BASELINE_FILE} while filtering (grep exited ${rc}). An unreadable dump is not an empty one."\n';
+  /** What the line was before IN-06 — the shape the calibration restores. */
+  const BARE = '  grep -av "$FILTER_PATTERN" "$BASELINE_FILE" >> "$out"\n';
+
+  function runBuildTransaction(scriptText: string): { status: number; out: string } {
+    const dir = mkdtempSync(join(tmpdir(), "restore-in06-"));
+    try {
+      const stripped = scriptText.replace(/\nmain "\$@"\n?$/, "\n");
+      expect(
+        stripped,
+        'the script no longer ends with its `main "$@"` dispatch — sourcing the copy would RUN the real thing',
+      ).not.toBe(scriptText);
+      expect(
+        stripped.trimEnd().endsWith("}"),
+        "the sourced copy does not end on a closing function brace — the tail strip took more than the dispatch line",
+      ).toBe(true);
+      const copy = join(dir, "copy.sh");
+      writeFileSync(copy, stripped);
+      writeFileSync(join(dir, "harness.sh"), HARNESS);
+      mkdirSync(join(dir, "out"));
+      writeFileSync(join(dir, "out", "survivors.keys"), "");
+      writeFileSync(
+        join(dir, "baseline.sql"),
+        'CREATE TABLE x();\nALTER PUBLICATION "supabase_realtime" OWNER TO postgres;\n',
+      );
+      const r = spawnSync("bash", [join(dir, "harness.sh")], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          COPY: copy,
+          RESTORE_OUT_DIR: join(dir, "out"),
+          BASELINE_FILE: join(dir, "baseline.sql"),
+          BASELINE_SHA: "deadbeef",
+          RESTORE_DB_URL: "stub-never-used",
+        },
+      });
+      return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("EXECUTED — a grep that cannot READ the dump is a NAMED MEASURE_FAIL, not a silent death", () => {
+    expect(
+      SRC.split(WRAPPED).length - 1,
+      "the wrapped filter read is not in the script exactly once — the calibration below would neuter nothing",
+    ).toBe(1);
+
+    const fixed = runBuildTransaction(SRC);
+    expect(
+      fixed.out,
+      `build_transaction said nothing about an unreadable dump. Combined output:\n${fixed.out}`,
+    ).toContain("MEASURE_FAIL: could not read");
+    expect(
+      fixed.status,
+      `build_transaction did not exit 1 on an unreadable dump. Combined output:\n${fixed.out}`,
+    ).toBe(1);
+
+    // CALIBRATION — put the bare line back and watch the named failure vanish.
+    // Observed 2026-09-09 on the pre-fix bytes: exit 2 and NOTHING on either
+    // channel. That silence is the defect; this half of the arm is what keeps it
+    // from coming back unnoticed.
+    const unwrappedSrc = SRC.replace(WRAPPED, () => BARE);
+    expect(
+      unwrappedSrc,
+      "the IN-06 calibration did not APPLY — a neuter that changes nothing reads as a passing RED",
+    ).not.toBe(SRC);
+    const unwrapped = runBuildTransaction(unwrappedSrc);
+    expect(
+      unwrapped.out,
+      "the unwrapped filter grep named a MEASURE_FAIL it cannot name — the calibration is measuring the wrong site",
+    ).not.toContain("MEASURE_FAIL: could not read");
+    expect(
+      unwrapped.status,
+      `the unwrapped grep did not die of its own exit 2 under \`set -e\`. Combined output:\n${unwrapped.out}`,
+    ).toBe(2);
   });
 });
 
