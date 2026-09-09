@@ -169,23 +169,23 @@ describe("restore-test-from-baseline.sh — the regions are real", () => {
 });
 
 describe("restore-test-from-baseline.sh — the arm ratchet", () => {
-  it("EXPECTED_ARMS=21 is a live line, exactly once, with its MEASURED date beside it", () => {
+  it("EXPECTED_ARMS=24 is a live line, exactly once, with its MEASURED date beside it", () => {
     const region = selfTestRegion(SRC);
     expect(
-      liveCount(region, "EXPECTED_ARMS=21"),
-      "the arm ratchet is no longer a single live `EXPECTED_ARMS=21` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
+      liveCount(region, "EXPECTED_ARMS=24"),
+      "the arm ratchet is no longer a single live `EXPECTED_ARMS=24` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
     ).toBe(1);
 
     // SC-9 (`gate-family-meta.test.ts:18-30`): a threshold constant needs a
     // measurement token AND a date beside it, or nobody can tell a measured floor
     // from a guessed one.
     const lines = region.split("\n");
-    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=21"));
+    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=24"));
     const beside = `${lines[at - 1] ?? ""}\n${lines[at]}`;
     expect(
       beside,
-      "EXPECTED_ARMS=21 carries no MEASURED date on its own or the preceding line — SC-9",
-    ).toContain("MEASURED 2026-09-08");
+      "EXPECTED_ARMS=24 carries no MEASURED date on its own or the preceding line — SC-9",
+    ).toContain("MEASURED 2026-09-09");
 
     // The harness must ASSERT the count, not merely print it.
     expect(liveCount(region, 'if [ "$total" -ne "$EXPECTED_ARMS" ]; then')).toBe(1);
@@ -193,15 +193,15 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — comment the constant out; a whole-file `toContain` would
     // still pass, this pin must not.
-    const commented = SRC.replace("\nEXPECTED_ARMS=21\n", "\n# EXPECTED_ARMS=21\n");
+    const commented = SRC.replace("\nEXPECTED_ARMS=24\n", "\n# EXPECTED_ARMS=24\n");
     expect(commented).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=21")).toBe(0);
+    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=24")).toBe(0);
 
     // CALIBRATION — a second copy of the constant is a disagreement waiting to
     // happen, and must fail the "exactly once" leg.
-    const doubled = SRC.replace("\nEXPECTED_ARMS=21\n", "\nEXPECTED_ARMS=21\nEXPECTED_ARMS=21\n");
+    const doubled = SRC.replace("\nEXPECTED_ARMS=24\n", "\nEXPECTED_ARMS=24\nEXPECTED_ARMS=24\n");
     expect(doubled).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=21")).toBe(2);
+    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=24")).toBe(2);
   });
 
   it("plan 01's interim closing line is GONE — the word it used appears nowhere", () => {
@@ -220,11 +220,113 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — re-insert the interim line; the pin must flip.
     const restored = SRC.replace(
-      "\nEXPECTED_ARMS=21\n",
-      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=21\n`,
+      "\nEXPECTED_ARMS=24\n",
+      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=24\n`,
     );
     expect(restored).not.toBe(SRC);
     expect(restored.includes(interimWord)).toBe(true);
+  });
+});
+
+describe("restore-test-from-baseline.sh — L-01: the reference-data replay's position", () => {
+  it("the bracket, the replay, the path restore, the gate and the ledger DDL are emitted IN THAT ORDER", () => {
+    // ⛔ THIS ORDERING IS THE WHOLE DESIGN, AND EVERY STEP OF IT IS SILENT WHEN
+    // WRONG. `SET LOCAL search_path = public, pg_catalog` must precede the replay
+    // because the replayed statements are the migrations' ORIGINAL bytes and name
+    // their targets UNQUALIFIED; `pg_catalog` must be restored before the ledger
+    // DDL because everything below is written expecting it; and the GATE must sit
+    // ABOVE the ledger seed, because a gate below it aborts a transaction whose
+    // ledger rows were already written — same rollback, but the artifact a reader
+    // inspects afterwards says the seed was the last thing attempted.
+    //
+    // A `toContain` pin cannot see any of this: all five needles stay present and
+    // live under every reordering. Self-test arms 22 and 23 measure the BEHAVIOUR
+    // on a lane; this measures the ORDER in the source, which is what an
+    // "improvement" that moves a block would break without turning a single arm
+    // red on the day it lands.
+    const txn = txnRegion(SRC);
+    expect(
+      txn.split("\n").filter(isLive).length,
+      "the build_transaction region is empty — every ordering pin below would be vacuously true",
+    ).toBeGreaterThan(3);
+
+    const STEPS = [
+      ["the search_path bracket", "SET LOCAL search_path = public, pg_catalog;"],
+      ["the replay concatenation", 'cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"'],
+      ["the path restore", "TXN_REFDATA_TAIL"],
+      ["the gate", "TXN_REFDATA_GATE"],
+      ["the ledger DDL", "TXN_LEDGER_DDL"],
+    ] as const;
+
+    const at = STEPS.map(([name, needle]) => {
+      const i = liveIndexOf(txn, needle);
+      expect(i, `build_transaction no longer emits ${name} (${needle})`).toBeGreaterThanOrEqual(0);
+      return { name, i };
+    });
+    for (let k = 1; k < at.length; k++) {
+      expect(
+        at[k - 1].i,
+        `${at[k - 1].name} is emitted at line ${at[k - 1].i} but ${at[k].name} at ${at[k].i} — the reference-data block is out of the order decision L-01 locked`,
+      ).toBeLessThan(at[k].i);
+    }
+
+    // CALIBRATION — move the gate BELOW the ledger DDL on an in-memory copy. The
+    // needles are all still present and live; only the order changed.
+    const gateStart = SRC.indexOf('  cat >> "$out" <<TXN_REFDATA_GATE\n');
+    expect(gateStart, "the gate heredoc's opening line moved").toBeGreaterThanOrEqual(0);
+    const gateEnd = SRC.indexOf("\nTXN_REFDATA_GATE\n", gateStart);
+    expect(gateEnd, "the gate heredoc's terminator moved").toBeGreaterThan(gateStart);
+    const gateBlock = SRC.slice(gateStart, gateEnd + "\nTXN_REFDATA_GATE\n".length);
+    // The needle is the heredoc's TERMINATOR line, not its opening `cat >>` line
+    // (which ends in a quote), so the block lands strictly BELOW the ledger DDL.
+    const ledgerEnd = "\nTXN_LEDGER_DDL\n";
+    expect(SRC.split(ledgerEnd).length - 1, "the ledger heredoc terminator moved").toBe(1);
+    const moved = SRC.replace(gateBlock, "").replace(ledgerEnd, () => `${ledgerEnd}${gateBlock}`);
+    expect(moved).not.toBe(SRC);
+    const mTxn = txnRegion(moved);
+    expect(liveIndexOf(mTxn, "TXN_REFDATA_GATE")).toBeGreaterThan(liveIndexOf(mTxn, "TXN_LEDGER_DDL"));
+
+    // CALIBRATION 2 — the bracket alone, demoted below the replay. This is the
+    // reordering that costs nothing to make and breaks every unqualified target.
+    const bracket = "SET LOCAL search_path = public, pg_catalog;\n";
+    const replay = '  cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"\n';
+    const demoted = SRC.replace(bracket, "").replace(replay, () => `${replay}${bracket}`);
+    expect(demoted).not.toBe(SRC);
+    const dTxn = txnRegion(demoted);
+    expect(liveIndexOf(dTxn, "SET LOCAL search_path = public, pg_catalog;")).toBeGreaterThan(
+      liveIndexOf(dTxn, 'cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"'),
+    );
+  });
+
+  it("the reference-data refusal is CALLED before the census is written, and the census carries the rows", () => {
+    // A refusal defined early and called late refuses nothing (the W3 lesson at
+    // `refuse_publication_row_without_table`). This one must also precede
+    // `write_census_sql`, which reads the table list it parses — call it after and
+    // the census silently emits ZERO refdata rows while every arm still passes.
+    const body = functionBody(SRC, "run_restore");
+    const refuseAt = liveIndexOf(body, "refuse_bad_refdata_allowlist");
+    const censusAt = liveIndexOf(body, 'write_census_sql "$RESTORE_OUT_DIR/census.sql"');
+    const buildAt = liveIndexOf(body, 'build_transaction "$mode"');
+    expect(refuseAt, "run_restore no longer calls the reference-data refusal").toBeGreaterThanOrEqual(0);
+    expect(censusAt, "run_restore no longer writes the census SQL").toBeGreaterThanOrEqual(0);
+    expect(
+      refuseAt,
+      `the reference-data refusal is called at ${refuseAt} but the census is written at ${censusAt} — the census would emit no refdata rows and nothing would say so`,
+    ).toBeLessThan(censusAt);
+    expect(refuseAt).toBeLessThan(buildAt);
+
+    // The census emits ONE row per allowlisted table, and it is the census — not
+    // the `restore:` summary line — that carries the reading. A `refdata=` field on
+    // that line would break the byte-exact pins in self-test arms 9, 12 and 18.
+    expect(liveCount(SRC, "SELECT 'refdata:%s=' || CASE")).toBe(1);
+    const summary = liveLines(runRegion(SRC))
+      .filter(({ line }) => line.includes('echo "restore: tables='))
+      .map(({ line }) => line);
+    expect(summary.length, "the restore summary line is no longer emitted exactly once").toBe(1);
+    expect(
+      summary[0].includes("refdata"),
+      "the `restore:` summary line grew a refdata field — arms 9, 12 and 18 pin it with `grep -aqxF`, and counts belong in the census",
+    ).toBe(false);
   });
 });
 
@@ -530,6 +632,13 @@ describe("restore-test-from-baseline.sh — every refusal precedes the first wri
     // EXACT-SET COUNT with a justification, the `gate-family-meta.test.ts` idiom —
     // pinned at the measured number so a NEW one is a red rather than an
     // unnoticed widening.
+    //
+    // ⭐ RE-MEASURED 2026-09-09, after Phase 164.8.1 added the reference-data
+    // refusal, replay and gate to this region: BOTH counts are UNCHANGED at 4 and 6.
+    // That is a reading, not an assumption — the new code deliberately reads every
+    // subprocess result with `rc=0; node … || rc=$?` and counts lines with `awk`
+    // (which exits 0 by construction) rather than reaching for `set +e` or
+    // `|| true`, so the exact set did not have to move and was not widened.
     //
     // ⭐ RE-MEASURED 2026-09-08, after A7/A8 converted the two counts-followed-by-a-
     // comparison sites from `|| true` to explicit rc capture + MEASURE_FAIL. That
