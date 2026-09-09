@@ -1315,6 +1315,29 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
      * phase's central claim is "TEST is the stage every migration crosses before
      * PROD"; before this check, nothing measured the crossing.
      */
+    /**
+     * ⛔ THE PUSH BRANCH ECHOES THE CONFIRMATION PROMPT, AND THAT IS THE WHOLE POINT.
+     * It did not, until 2026-09-09, and that omission made the partial-apply arm below
+     * a FICTION: with no prompt echo in the push log, a whole-stdout scrape of `applied`
+     * happened to return only the versions that really applied, so the mismatch was
+     * detected and the arm went RED for a reason the real CLI would never have produced.
+     * MEASURED: reverting the workflow to that scrape with this stub prompt-less leaves
+     * the partial-apply arm below GREEN; with the echo restored, the same revert reddens
+     * it. Run 34200188676 (push, 2026-09-08 — the last run that actually applied a
+     * migration) shows what a non-interactive `supabase db push` really prints:
+     *
+     *   Connecting to remote database...
+     *   Do you want to push these migrations to the remote database?
+     *    • 20260908120000_drop_create_allocator_connected_strategy.sql
+     *
+     *    [Y/n]
+     *   Applying migration 20260908120000_drop_create_allocator_connected_strategy.sql...
+     *   Finished supabase db push.
+     *
+     * — i.e. the PLANNED set appears in the push log verbatim, whatever was applied. A
+     * no-op push prints "Remote database is up to date." and nothing else, which is why
+     * the empty case is modelled as its own branch and not as an empty bullet list.
+     */
     const SUPABASE_STUB = [
       "#!/usr/bin/env bash",
       'if [ "$1" = "link" ]; then echo "Finished supabase link."; exit 0; fi',
@@ -1324,11 +1347,21 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       "fi",
       "dry=0",
       'for a in "$@"; do if [ "$a" = "--dry-run" ]; then dry=1; fi; done',
+      'echo "Connecting to remote database..."',
+      'if [ -z "${STUB_PLAN_VERSIONS:-}" ]; then',
+      '  echo "Remote database is up to date."',
+      "  exit 0",
+      "fi",
       "if [ \"${dry}\" = \"1\" ]; then",
+      '  echo "Would push these migrations:"',
       '  for v in ${STUB_PLAN_VERSIONS:-}; do echo " • ${v}_stub.sql"; done',
       '  echo "Finished supabase db push."',
       "  exit 0",
       "fi",
+      'echo "Do you want to push these migrations to the remote database?"',
+      '  for v in ${STUB_PLAN_VERSIONS:-}; do echo " • ${v}_stub.sql"; done',
+      'echo ""',
+      'echo " [Y/n]"',
       '  for v in ${STUB_PUSH_VERSIONS:-}; do echo "Applying migration ${v}_stub.sql..."; done',
       'echo "Finished supabase db push."',
       "",
@@ -1349,6 +1382,11 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
           {
             TEST_DB_SESSION_URL: "postgres://u@pooler.example.invalid:5432/postgres",
             IS_PUSH: isPush ? "true" : "false",
+            // The PLANNED set reaches the stub as well as the dry-run FILE: the push log
+            // the stub emits echoes the confirmation prompt, and that prompt lists the
+            // plan. Without this the echo would be empty and the partial-apply scenario
+            // would stop resembling the CLI it is modelling.
+            STUB_PLAN_VERSIONS: plan.join(" "),
             STUB_PUSH_VERSIONS: pushed.join(" "),
           },
           {
@@ -1476,6 +1514,295 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
         run([], [], false).status,
         "the PROD push step refused a no-op workflow_dispatch; the escape hatch must stay open",
       ).toBe(0);
+    }, EXEC_TEST_TIMEOUT_MS);
+  });
+
+  // ---------------------------------------------------------------------------
+  // `applied` is scraped from the APPLY LINES, never from the whole push stdout.
+  // EXECUTED, at both sites, over the CLI output that was actually measured.
+  // ---------------------------------------------------------------------------
+  describe("the applied set is read from `Applying migration` lines, not the prompt echo", () => {
+    /**
+     * ⛔ THE DEFECT THIS PINS, shipped in PR #767 and measured on 2026-09-09 at BOTH
+     * sites. `applied` was scraped from the WHOLE push stdout with the same
+     * `versions_of` awk as `planned`. But a non-interactive `supabase db push` ECHOES
+     * its confirmation prompt — "Do you want to push these migrations to the remote
+     * database?" followed by a bullet list of the PLANNED set — into that same stdout
+     * (run 34200188676, apply job 101977043055). Every planned version therefore
+     * appeared in `applied` regardless of what was applied, `applied` was always a
+     * superset of `planned`, and `[ "$planned" != "$applied" ]` could not fire on the
+     * partial apply it exists to catch.
+     *
+     * ⚠️ AND THE FALSIFIER HAS A TRAP, WHICH WAS WALKED INTO ONCE ON 2026-09-09: a
+     * partial-apply fixture that OMITS the prompt echo goes RED against the old scrape
+     * too, and looks like proof that the old scrape worked. Fixture (b) below therefore
+     * carries the prompt echo listing BOTH planned versions while only ONE
+     * `Applying migration` line is present, and this test asserts BOTH directions — the
+     * fixed scrape calls it DISAGREE, and the old whole-stdout scrape calls the SAME
+     * BYTES agree. That second assertion is what records the defect so a revert to it
+     * cannot read as a refactor.
+     */
+    const APPLIED_FN = "applied_versions_of() {";
+    const APPLIED_AWK =
+      "awk '/Applying migration/ { while (match($0, /[0-9]{14}/)) { print substr($0, RSTART, RLENGTH); $0 = substr($0, RSTART + RLENGTH) } }' \"$1\" | sort -u";
+
+    const SITES = [
+      {
+        label: "the TEST apply",
+        job: TEST_JOB,
+        step: TEST_PUSH_STEP,
+        planned: 'planned="$(versions_of "${RUNNER_TEMP}/test-dry-run.txt")"',
+        applied: 'applied="$(applied_versions_of "${RUNNER_TEMP}/test-push.txt")"',
+        dryFile: "test-dry-run.txt",
+        pushFile: "test-push.txt",
+      },
+      {
+        label: "the PROD apply",
+        job: APPLY_JOB,
+        step: PROD_PUSH_STEP,
+        planned: 'planned="$(versions_of /tmp/prod-dry-run.txt)"',
+        applied: 'applied="$(applied_versions_of /tmp/prod-push.txt)"',
+        dryFile: "/tmp/prod-dry-run.txt",
+        pushFile: "/tmp/prod-push.txt",
+      },
+    ] as const;
+
+    it("both sites define the apply-line scrape and bind it to `applied` alone", () => {
+      expect(
+        WF.split("\n").filter((l) => l.trim() === APPLIED_FN).length,
+        "the apply-line scrape is not defined at BOTH sites. Fixing one only would leave the " +
+          "other comparing the plan against itself — and the other one is production, which " +
+          "this workflow's own comment calls the environment where being wrong is not " +
+          "recoverable by a re-run.",
+      ).toBe(2);
+
+      for (const site of SITES) {
+        const block = jobBlock(WF, site.job);
+        expect(liveLineCount(block, APPLIED_FN), `${site.label} lost the apply-line scrape`).toBe(1);
+        expect(
+          liveLineCount(block, APPLIED_AWK),
+          `${site.label}'s apply-line scrape is no longer the measured awk one-liner. It must ` +
+            `stay awk and not \`grep -o ... || true\`: grep exits 1 on no match, \`set -e\` ` +
+            `aborts, and the \`|| true\` that repairs it is a softening token this job bans.`,
+        ).toBe(1);
+        expect(
+          liveLineCount(block, site.planned),
+          `${site.label}: \`planned\` no longer reads the DRY-RUN log with the whole-stdout ` +
+            `scrape. The dry-run's bullet list IS the plan; that half was never the defect.`,
+        ).toBe(1);
+        expect(
+          liveLineCount(block, site.applied),
+          `${site.label}: \`applied\` no longer reads the PUSH log with the apply-line scrape.`,
+        ).toBe(1);
+
+        calibrate(
+          `${site.label} binds \`applied\` to the apply-line scrape`,
+          (t) => t.replace(site.applied, site.applied.replace("applied_versions_of", "versions_of")),
+          (t) => liveLineCount(jobBlock(t, site.job), site.applied) === 1,
+        );
+      }
+
+      // ⛔ The regression pinned by ABSENCE, at FILE scope rather than per job: a third
+      // site added later with the old scrape is caught here even though no per-site
+      // assertion above knows it exists.
+      const reverted = WF.split("\n").filter(
+        (l) => !/^\s*#/.test(l) && l.includes('applied="$(versions_of'),
+      );
+      expect(
+        reverted,
+        `the whole-stdout scrape is back on \`applied\`:\n${reverted.join("\n")}`,
+      ).toEqual([]);
+    });
+
+    /**
+     * Slice the two scrape functions and their two assignments out of a step, so this
+     * test EXECUTES the shipped bytes — including WHICH function is bound to WHICH set,
+     * which is the entire defect — rather than grepping for their names.
+     */
+    function extractScrapeFragment(stepName: string): string {
+      const lines = extractRunScript(WF, stepName).split("\n");
+      const start = lines.findIndex((l) => l.trim() === "versions_of() {");
+      const end = lines.findIndex((l) => l.trimStart().startsWith('applied="$('));
+      if (start < 0 || end < start) {
+        throw new Error(
+          `could not slice the planned/applied scrape out of "${stepName}". This test EXECUTES ` +
+            `those functions over measured CLI logs rather than grepping for them, so a rewrite ` +
+            `makes the extraction THROW instead of silently passing over nothing.`,
+        );
+      }
+      return `${lines.slice(start, end + 1).join("\n")}\n`;
+    }
+
+    const VERDICT_TAIL = [
+      'if [ "${planned}" != "${applied}" ]; then echo "VERDICT: DISAGREE"; else echo "VERDICT: AGREE"; fi',
+      'printf "planned=[%s]\\n" "${planned}"',
+      'printf "applied=[%s]\\n" "${applied}"',
+      "",
+    ].join("\n");
+
+    const runScrape = (
+      fragment: string,
+      files: Record<string, string>,
+    ): { status: number; out: string } =>
+      runScript(`set -euo pipefail\n${fragment}${VERDICT_TAIL}`, {}, { files });
+
+    /**
+     * ⛔ THE FIXTURE BODIES ARE THE MEASURED CLI OUTPUT of run 34200188676 (push,
+     * 2026-09-08 — the last run that actually applied a migration), not a shape chosen
+     * to make the assertion come out right. That run's real migration filename is
+     * carried verbatim; the synthetic versions used by the partial-apply arm keep the
+     * same line shapes.
+     */
+    const FILE_OF: Record<string, string> = {
+      "20260908120000": "20260908120000_drop_create_allocator_connected_strategy.sql",
+    };
+    const fileOf = (v: string): string => FILE_OF[v] ?? `${v}_partial_apply_fixture.sql`;
+
+    /** A no-op run prints this and nothing else — run 34354619770, headSha 06db9958. */
+    const NOOP_LOG = "Connecting to remote database...\nRemote database is up to date.\n";
+
+    const dryRunLog = (planned: readonly string[]): string =>
+      planned.length === 0
+        ? NOOP_LOG
+        : [
+            "DRY RUN: migrations will *not* be pushed to the database.",
+            "Connecting to remote database...",
+            "Would push these migrations:",
+            ...planned.map((v) => ` • ${fileOf(v)}`),
+            "Finished supabase db push.",
+            "",
+          ].join("\n");
+
+    const pushLog = (planned: readonly string[], applied: readonly string[]): string =>
+      planned.length === 0
+        ? NOOP_LOG
+        : [
+            "Connecting to remote database...",
+            // ⛔ THE PROMPT ECHO. It restates the PLANNED set verbatim, and it is the
+            // reason the whole-stdout scrape could not fail. A fixture without this
+            // line proves nothing about the defect.
+            "Do you want to push these migrations to the remote database?",
+            ...planned.map((v) => ` • ${fileOf(v)}`),
+            "",
+            " [Y/n]",
+            ...applied.map((v) => `Applying migration ${fileOf(v)}...`),
+            "Finished supabase db push.",
+            "",
+          ].join("\n");
+
+    const REAL = "20260908120000";
+    const W1 = "20260101000000";
+    const W2 = "20260102000000";
+
+    it("EXECUTED: agrees on a real apply, DISAGREES on a partial one the OLD scrape called green", () => {
+      for (const site of SITES) {
+        const fragment = extractScrapeFragment(site.step);
+        const oldScrape = fragment.replace(
+          /applied="\$\(applied_versions_of/,
+          'applied="$(versions_of',
+        );
+        expect(
+          oldScrape,
+          `CALIBRATION (${site.label}): the pre-fix whole-stdout scrape could not be ` +
+            `reconstructed, so the "the old one called this GREEN" arm below proves nothing`,
+        ).not.toBe(fragment);
+
+        const files = (
+          planned: readonly string[],
+          applied: readonly string[],
+        ): Record<string, string> => ({
+          [site.dryFile]: dryRunLog(planned),
+          [site.pushFile]: pushLog(planned, applied),
+        });
+
+        // (a) THE REAL NON-EMPTY PAIR — one planned, one applied, prompt echo present.
+        const real = runScrape(fragment, files([REAL], [REAL]));
+        expect(real.status, `${site.label}: the scrape exited ${real.status}\n${real.out}`).toBe(0);
+        expect(
+          real.out,
+          `${site.label}: the scrapes DISAGREED on the run that really did apply what it ` +
+            `planned (run 34200188676). A check that reddens a correct apply gets softened.` +
+            `\n${real.out}`,
+        ).toContain("VERDICT: AGREE");
+        expect(real.out).toContain(`applied=[${REAL}]`);
+
+        // Calibration for (a): blind the apply-line pattern and the agreement must
+        // collapse — otherwise this arm is not reading the push log at all.
+        const blinded = runScrape(
+          fragment.replace("/Applying migration/", "/Applying migration NEVER-MATCHES/"),
+          files([REAL], [REAL]),
+        );
+        expect(
+          blinded.out,
+          `CALIBRATION (${site.label}): the scrapes still AGREED with the apply-line pattern ` +
+            `blinded, so arm (a) is not measuring the apply lines\n${blinded.out}`,
+        ).toContain("VERDICT: DISAGREE");
+
+        // (b) THE PARTIAL APPLY — the arm that proves this control can fail. TWO
+        // planned, BOTH echoed by the prompt, only ONE actually applied.
+        const partial = runScrape(fragment, files([W1, W2], [W1]));
+        expect(
+          partial.out,
+          `⛔ ${site.label}: the scrapes AGREED on a push that applied ONE of the TWO versions ` +
+            `its own dry-run planned. This is the exact state the comparison exists to catch, ` +
+            `and half a migration set on a database is worse than none.\n${partial.out}`,
+        ).toContain("VERDICT: DISAGREE");
+        expect(partial.out).toContain(`applied=[${W1}]`);
+        expect(partial.out, `${site.label}: the missing version is not named`).toContain(W2);
+
+        // ⛔ AND THE RECORD OF WHAT WAS BROKEN: the SAME BYTES, through the pre-fix
+        // whole-stdout scrape, come back AGREE.
+        const partialOld = runScrape(oldScrape, files([W1, W2], [W1]));
+        expect(
+          partialOld.out,
+          `CALIBRATION (${site.label}): the pre-fix whole-stdout scrape did NOT call the ` +
+            `partial-apply fixture green. Either the fixture lost its confirmation-prompt echo ` +
+            `— the trap this test exists to avoid — or the reconstruction of the old scrape is ` +
+            `wrong. Either way this arm is not recording the defect.\n${partialOld.out}`,
+        ).toContain("VERDICT: AGREE");
+        expect(
+          partialOld.out,
+          "the pre-fix scrape read the MISSING version straight out of the prompt echo — that " +
+            "is the defect, stated as a value",
+        ).toContain(`applied=[${W1}\n${W2}]`);
+
+        // (c) THE NO-OP PAIR — the branch this fix must leave alone. Run 34354619770.
+        const noop = runScrape(fragment, files([], []));
+        expect(
+          noop.status,
+          `${site.label}: the scrape exited ${noop.status} on a no-op run. An awk pattern that ` +
+            `matches nothing must not abort the step under \`set -euo pipefail\`.\n${noop.out}`,
+        ).toBe(0);
+        expect(noop.out).toContain("VERDICT: AGREE");
+        expect(noop.out).toContain("planned=[]");
+        expect(noop.out).toContain("applied=[]");
+
+        // ⚠️ THE HONEST LIMIT OF ARM (c), stated rather than left implied. It is a
+        // NON-REGRESSION arm and it CANNOT be calibrated against the code: a no-op log
+        // carries no 14-digit version anywhere, so the old scrape and the new one both
+        // return the empty set and NO mutation of the scrape flips this verdict — which
+        // is asserted, not assumed, on the next line. What arm (c) does prove is that
+        // the new pattern does not abort the step on an empty match. The BEHAVIOURAL
+        // evidence for the empty branch — hard-fail on `push`, tolerated on
+        // `workflow_dispatch` — lives in the EXECUTED full-step tests above, which run
+        // the whole step and assert exit 1 and exit 0.
+        expect(
+          runScrape(oldScrape, files([], [])).out,
+          "the old scrape DISAGREED on a no-op pair, so the empty branch did change behaviour " +
+            "and the claim in the step comment is false",
+        ).toContain("VERDICT: AGREE");
+        // Calibration that this arm reads its fixtures at all: give the same no-op
+        // dry-run a push log with an apply line and the verdict must flip.
+        const noopProbe = runScrape(fragment, {
+          [site.dryFile]: dryRunLog([]),
+          [site.pushFile]: pushLog([W1], [W1]),
+        });
+        expect(
+          noopProbe.out,
+          `CALIBRATION (${site.label}): arm (c) did not flip when the push log gained an apply ` +
+            `line, so it is not reading its fixtures\n${noopProbe.out}`,
+        ).toContain("VERDICT: DISAGREE");
+      }
     }, EXEC_TEST_TIMEOUT_MS);
   });
 

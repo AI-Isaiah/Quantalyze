@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.77.31.0] - 2026-09-09 — the applied-set check could not fail, because the CLI echoes its own plan
+
+Two commits, two themes: a fix to a gate shipped one version ago, and the plan edit that routes it.
+
+### Root cause
+- **`supabase db push` echoes its confirmation prompt, and the prompt restates the PLANNED
+  set verbatim.** The applied-set verification added in `0.77.30.0` scraped `applied` from
+  the whole push stdout with the same awk as `planned`, so every planned version appeared in
+  `applied` no matter what the push actually did. `applied` was therefore always a superset
+  of `planned`, and `[ "$planned" != "$applied" ]` could not fire on the partial-apply case
+  it exists to catch. Measured on run `34200188676` (job `101977043055`), the last run that
+  really applied a migration: the push log carries `Do you want to push these migrations to
+  the remote database?` with the bullet list, then a single `Applying migration …` line.
+- The dispatch that was supposed to exercise this (run `34354619770`, headSha `06db9958`)
+  applied nothing on either database — `planned 0 migration version(s); push reported 0.` —
+  so it exercised the comparison VACUOUSLY and proved only the wiring.
+
+### Fixed
+- **`applied_versions_of` at BOTH the TEST and the PROD push step** of
+  `.github/workflows/supabase-migrate.yml`: `applied` is now derived from `Applying migration`
+  lines alone, while `planned` keeps reading the dry-run's bullet list. Both sites, because
+  the two blocks are deliberate twins and PROD is the one the step comment calls "where being
+  wrong is not recoverable by a re-run". `awk`, not `grep -o … || true` — `grep` exits 1 on no
+  match and `set -euo pipefail` would abort the step, and the `|| true` that repairs it is a
+  softening token this job's own pins ban.
+- The empty/no-op branch is unchanged: a no-op push prints `Remote database is up to date.`
+  with no apply line, so both sets stay empty and the existing `applied_n = 0` handling (hard
+  fail on `push`, tolerated on `workflow_dispatch`) still applies. The step comment records
+  this and cites the run that measured it.
+
+### Tests
+- A new describe in `src/__tests__/supabase-migrate-test-first.test.ts` **extracts both scrape
+  functions from the shipped step bytes and executes them** over three measured fixtures:
+  the real non-empty pair (AGREE), the partial-apply pair (DISAGREE), and the no-op pair
+  (AGREE). The partial-apply arm additionally asserts that the OLD whole-stdout scrape called
+  the same fixture GREEN, so the pin records the defect and a revert cannot pass quietly.
+- **The shared `supabase` CLI stub now emits the confirmation prompt.** It did not before
+  (measured: 0 occurrences of the prompt string in the file at `31e7e577^`), which made the
+  pre-existing full-step partial-apply arms go red for a reason the real CLI never produces —
+  the same trap one layer down. With the echo present and the fix reverted, the full-step arm
+  goes green, so the stub change is what makes a revert visible to those tests.
+- Known limit, recorded rather than papered over: the no-op arm is **not calibratable against
+  the code**. A no-op log contains no 14-digit version at all, so old and new scrape both
+  return the empty set and no mutation of the scrape flips that verdict. The arm calibrates
+  only that it reads its fixtures; what it genuinely proves is that an awk pattern matching
+  nothing does not abort the step under `set -euo pipefail`.
+
+### Notes
+- `164.8-05-PLAN.md` gains this work as Task 3, ahead of the end-to-end dispatch proof, which
+  becomes Task 4 — proving a pipeline against a check that cannot fail certifies nothing. The
+  plan also records that dispatch `34354619770` was cancelled at the `plan` job while it waited
+  on the Production reviewer gate; that run is the wiring reading it produced, not the proof
+  Task 4 requires.
+
 ## [0.77.30.1] - 2026-09-09 — a shipped plan keeps its anchors live on main forever, booked and routed
 
 Documentation and backlog only; no code changed. One commit, one theme.
