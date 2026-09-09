@@ -1,0 +1,18 @@
+# Self-test reference-data allowlist — the FIXTURE twin of
+# scripts/restore-test-refdata-allowlist.txt, loaded through the ARM_REFDATA_ALLOWLIST
+# seam by every self-test arm.
+#
+# ⛔ WHY A FIXTURE ALLOWLIST AND NOT THE REAL ONE. The real file names eight tables
+# (auth.users, public.compute_job_kinds, public.discovery_categories, …) that the
+# baseline FIXTURE dump never creates. Pointed at the lane, its in-transaction gate
+# would count a relation that does not exist and abort EVERY arm on a table the
+# fixture was never supposed to have. The seam is what keeps the mechanism under
+# test and the corpus out of it.
+#
+# The grammar is the real file's, byte for byte:
+#
+#     <basename>.sql <TAB> <schema.table> <TAB> <n> <TAB> # <anchor + consumer>
+#
+# ONE entry, on purpose: the fixture proves the MECHANISM (extract → replay under a
+# public search_path → gate non-empty → census) end to end, not the corpus.
+20260103000000_fixture_c.sql	public.fx_keep	1	# 20260103000000_fixture_c.sql:19 — read by baseline-fixture.sql's `fx_keep_kind_check`, whose admitted labels are exactly these rows; arm 22 counts them, arm 23 proves the gate bites when the replay is deleted

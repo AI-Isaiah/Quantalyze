@@ -227,6 +227,35 @@ RESTORE_EXPECT_MARKER_RE="${RESTORE_EXPECT_MARKER_RE:-(^|[^[:alnum:]_])test([^[:
 RESTORE_REFUSE_MARKER_RE="${RESTORE_REFUSE_MARKER_RE:-prod}"
 RESTORE_REQUIRE_MUTEX="${RESTORE_REQUIRE_MUTEX:-1}"
 
+# ── REFERENCE DATA (Phase 164.8.1) ─────────────────────────────────────────
+# ⛔ WHY THE RESTORE REPLAYS ROWS AT ALL. LEDGER PRESENCE IS NOT EFFECT PRESENCE.
+# `supabase/schema/baseline.sql` is SCHEMA-ONLY (562 GRANT/REVOKE, zero
+# INSERT/COPY), and the seed below writes one ledger row per repo migration file.
+# So without this replay every migration reads as applied while every row those
+# migrations INSERTed is gone — `compute_job_kinds` empty behind a ledger swearing
+# its seed migration ran. `scripts/restore-test-refdata-allowlist.txt` names the
+# statements that have to come back; `scripts/extract-reference-inserts.mjs` turns
+# that list into SQL and REFUSES anything it cannot prove safe.
+REFDATA_ALLOWLIST="${REFDATA_ALLOWLIST:-scripts/restore-test-refdata-allowlist.txt}"
+REFDATA_EXTRACTOR="${REFDATA_EXTRACTOR:-scripts/extract-reference-inserts.mjs}"
+
+# ⛔ W1 — THESE THREE ARE SEAMS BECAUSE AN INVARIANT NO ARM EXERCISES IS
+# DECORATIVE. The gate's second leg refuses a PARTIAL replay: a kind-admission
+# CHECK that admits a value its registry table does not carry. On the real
+# database that pair is `compute_jobs_kind_check` (a flat `kind = ANY (ARRAY[…])`
+# list, supabase/migrations/20260710130000_stitch_composite_kind.sql:53) over
+# `public.compute_job_kinds`, whose registry column is `name` and NOT `kind`
+# (supabase/migrations/20260411144407_compute_jobs_queue.sql:86-88 — measured, not
+# remembered; a leg written against `kind` would error rather than refuse).
+# Neither object exists on the throwaway lane, so pointed at its defaults the leg
+# would be a permanent no-op there and could never be observed firing. The
+# self-test points them at `fx_keep_kind_check` over `public.fx_keep`.`label`,
+# which baseline-fixture.sql carries for exactly this reason, and arm 23 leg (c)
+# makes the leg RAISE.
+REFDATA_KIND_REGISTRY="${REFDATA_KIND_REGISTRY:-public.compute_job_kinds}"
+REFDATA_KIND_REGISTRY_COL="${REFDATA_KIND_REGISTRY_COL:-name}"
+REFDATA_KIND_CHECK="${REFDATA_KIND_CHECK:-compute_jobs_kind_check}"
+
 OWNED_OUT_DIR=""
 cleanup_out_dir() {
   status=$?
@@ -400,6 +429,30 @@ SELECT 'survivor' || chr(9) || 'publication' || chr(9)
    AND NOT p.puballtables
  ORDER BY 1;
 CENSUS_SQL
+
+  # ── reference-data rows (Phase 164.8.1) ──────────────────────────────────
+  # ⛔ WHY THE READING LIVES HERE AND NOT IN A POST-RESTORE `echo`. Nothing after
+  # the extension/ownership guards in `run_restore` runs on TEST today — the mode
+  # returns or fails before it — and the `restore:` summary line is pinned
+  # byte-for-byte by self-test arms 9, 12 and 18, so it must not grow a field.
+  # The census is the ONE artifact both modes emit, both times, and `--mode
+  # preflight` compares it pre/post BYTE-FOR-BYTE, so putting the counts here also
+  # keeps a preflight's "nothing changed" claim covering the replay.
+  #
+  # APPENDED with printf rather than interpolated into the heredoc above: that
+  # heredoc is QUOTED, and unquoting it to reach one variable would put every `$`
+  # and backtick in ~90 lines of catalogue SQL at the mercy of the shell
+  # (.planning/phases/164.8-testpreprod-test-becomes-a-real-pre-prod/deferred-items.md:99).
+  #
+  # `to_regclass` + `query_to_xml` for the same reason `ledger_rows` uses it: a
+  # table the dump has not created yet must read `absent`, not raise a parse error
+  # that looks like a broken instrument. Every name here survived the charset
+  # refusal in `refuse_bad_refdata_allowlist` before reaching `sql_lit`.
+  local rt
+  for rt in ${REFDATA_TABLES[@]+"${REFDATA_TABLES[@]}"}; do
+    printf "SELECT 'refdata:%s=' || CASE\n         WHEN to_regclass('%s') IS NULL THEN 'absent'\n         ELSE (xpath('/row/c/text()',\n                query_to_xml('SELECT count(*)::text AS c FROM %s', false, true, '')))[1]::text\n       END;\n" \
+      "$(sql_lit "$rt")" "$(sql_lit "$rt")" "$(sql_lit "$rt")" >> "$1"
+  done
 }
 
 # `'` -> `''`. Every identifier that reaches SQL through this function has already
@@ -481,6 +534,72 @@ refuse_bad_migration_corpus() {
     fail "no migration files found under ${MIGRATIONS_DIR}. The repo-side list is EMPTY, so the ledger seed would be empty — that is not a restore."
   fi
   note "migrations: ${#MIGRATION_BASENAMES[@]} file(s) under ${MIGRATIONS_DIR}"
+}
+
+# 8 — the reference-data allowlist (Phase 164.8.1). Filesystem-only, like refusal
+# 4, so it fires before the first connection and long before the first write.
+#
+# It runs the extractor to a mktemp file IT OWNS, because `RESTORE_OUT_DIR` does
+# not exist yet at this point in `run_restore`; only the exit code and the parsed
+# `-- refdata-expect:` trailers survive. The emitted SQL is thrown away and
+# re-generated inside `build_transaction`, which is where it is actually used.
+#
+# ⛔ THE TABLE NAMES REACH SQL TWICE — the census's `to_regclass` rows and the
+# in-transaction gate's VALUES list — so they are charset-refused HERE, before any
+# interpolation, and `sql_lit`-quoted at each site. Belt AND braces (T-164.8-04),
+# the same pairing refusal 4 uses for migration basenames.
+#
+# ⚠️ `rc=0; node … || rc=$?` and NOT `set +e`: the `--run` region's softening-token
+# exact-set pin (src/__tests__/restore-test-from-baseline.test.ts) counts both
+# `set +e` and `|| true` at a MEASURED number, and every reading below is captured
+# and then CHECKED, which is the opposite of softening. The `awk` counters exit 0
+# by construction, so neither token is needed to read them.
+REFDATA_TABLES=()
+REFDATA_ENTRY_N=0
+refuse_bad_refdata_allowlist() {
+  [ -f "$REFDATA_ALLOWLIST" ] || fail "reference-data allowlist not found at ${REFDATA_ALLOWLIST}."
+  [ -f "$REFDATA_EXTRACTOR" ] || fail "reference-data extractor not found at ${REFDATA_EXTRACTOR}."
+  command -v node >/dev/null 2>&1 || fail "node is not on PATH; the reference-data extractor cannot run, and a restore that skips the replay is the defect this gate exists to remove."
+
+  # EMPTY IS AN ERROR, and it is checked HERE rather than left to the extractor:
+  # the extractor's own empty-allowlist refusal is a second reading of the same
+  # fact, and a guard whose only arm reaches the OTHER layer is unmeasured.
+  REFDATA_ENTRY_N=$(awk '!/^[[:space:]]*(#|$)/ { c++ } END { print c+0 }' "$REFDATA_ALLOWLIST")
+  if [ "$REFDATA_ENTRY_N" -eq 0 ]; then
+    fail "the reference-data allowlist ${REFDATA_ALLOWLIST} carries ZERO entries. An empty allowlist replays NOTHING, so this restore would commit a database whose ledger swears every seed migration applied while every table those migrations seeded is EMPTY — that is the Phase 164.8 defect, not a clean run."
+  fi
+
+  local tmp rc=0
+  tmp="$(mktemp)"
+  node "$REFDATA_EXTRACTOR" --allowlist "$REFDATA_ALLOWLIST" --migrations "$MIGRATIONS_DIR" \
+    > "$tmp" 2> "${tmp}.err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    cat "${tmp}.err" >&2
+    rm -f "$tmp" "${tmp}.err"
+    fail "reference-data extraction refused (exit ${rc}); nothing was replayed and no transaction was assembled."
+  fi
+
+  REFDATA_TABLES=()
+  local line tbl
+  while IFS= read -r line; do
+    tbl="${line#-- refdata-expect: }"
+    tbl="${tbl%%=*}"
+    case "$tbl" in
+      ''|*[!a-z0-9_.]*) rm -f "$tmp" "${tmp}.err"; fail "the reference-data extractor named table '${tbl}' — this script refuses to interpolate that into SQL." ;;
+    esac
+    REFDATA_TABLES+=("$tbl")
+  done < <(awk '/^-- refdata-expect: /' "$tmp")
+  rm -f "$tmp" "${tmp}.err"
+
+  # A SECOND, INDEPENDENT EMPTINESS READING, of the extractor's OUTPUT rather than
+  # the allowlist's bytes. A stubbed or half-working extractor that exits 0 and
+  # emits no trailer would leave the in-transaction gate with an empty VALUES list
+  # — a gate that passes vacuously — and the restore would commit unguarded. Arm
+  # 24 leg (c) drives exactly that through the REFDATA_EXTRACTOR seam.
+  if [ "${#REFDATA_TABLES[@]}" -eq 0 ]; then
+    fail "the reference-data extractor exited 0 but emitted NO \`-- refdata-expect:\` trailer for ${REFDATA_ALLOWLIST}. With no table list the in-transaction gate has nothing to count and would pass vacuously; refusing rather than restoring unguarded."
+  fi
+  note "refdata: ${#REFDATA_TABLES[@]} table(s) from ${REFDATA_ENTRY_N} allowlist line(s) under ${REFDATA_ALLOWLIST}"
 }
 
 # 5 — WHICH DATABASE AM I ON. The first statement this script sends. CLAUDE.md
@@ -874,6 +993,98 @@ SET LOCAL search_path = pg_catalog;
 TXN_MID
   cat "$RESTORE_OUT_DIR/survivors.sql" >> "$out"
 
+  # ── reference data: the replay (Phase 164.8.1, decision L-01) ────────────
+  # Position is the whole design. AFTER the dump (the tables must exist) and the
+  # survivors, BEFORE the ledger seed (the ledger must not claim a migration
+  # applied until this transaction's rows are in), and INSIDE the transaction, so
+  # a failure here rolls the restore back rather than leaving TEST half-seeded.
+  #
+  # The extractor runs a SECOND time here rather than reusing the temp file
+  # `refuse_bad_refdata_allowlist` made: that one is deleted with its mktemp, and
+  # a `refdata.sql` that lives beside `restore.sql` is what arm 23 mutates and
+  # what a human reads after a failed run.
+  local refdata_rc=0 refdata_n
+  node "$REFDATA_EXTRACTOR" --allowlist "$REFDATA_ALLOWLIST" --migrations "$MIGRATIONS_DIR" \
+    > "$RESTORE_OUT_DIR/refdata.sql" 2> "$RESTORE_OUT_DIR/refdata.err" || refdata_rc=$?
+  if [ "$refdata_rc" -ne 0 ]; then
+    cat "$RESTORE_OUT_DIR/refdata.err" >&2
+    fail "reference-data extraction refused (exit ${refdata_rc}); nothing was replayed and no transaction was assembled."
+  fi
+  refdata_n=$(awk '/^-- refdata: /{ c++ } END { print c+0 }' "$RESTORE_OUT_DIR/refdata.sql")
+
+  # ⛔ PITFALL 1 — THE SEARCH_PATH BRACKET IS LOAD-BEARING, NOT HYGIENE. At this
+  # point in the stream the session's path is `pg_catalog` (the TXN_MID line
+  # above, itself recovering from the dump's own `set_config('search_path','',
+  # false)`). The replayed statements are the migrations' ORIGINAL bytes and the
+  # migrations were written for a `public`-first path, so most of them name their
+  # target UNQUALIFIED — under `pg_catalog` alone every one of them would abort
+  # with "relation does not exist" and the whole restore would roll back.
+  # `pg_catalog` is restored immediately after, BEFORE the ledger DDL, because
+  # everything below is written expecting it.
+  cat >> "$out" <<'TXN_REFDATA_HEAD'
+SET LOCAL search_path = public, pg_catalog;
+TXN_REFDATA_HEAD
+  cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"
+  cat >> "$out" <<'TXN_REFDATA_TAIL'
+SET LOCAL search_path = pg_catalog;
+TXN_REFDATA_TAIL
+
+  # ── reference data: the gate ─────────────────────────────────────────────
+  # The TXN_WHITELIST shape (loop over a VALUES list, RAISE on the first row that
+  # matches) with the predicate INVERTED: there it aborts on a class that is
+  # non-empty, here on a reference table that is EMPTY.
+  #
+  # ⛔ PLAIN `count(*)`, NO `to_regclass` GUARD. Inside this transaction the dump
+  # has just created these tables; a guard would turn "the table is missing" —
+  # the loudest possible symptom — into a silent pass, which is precisely the
+  # softening this phase exists to remove.
+  local refdata_values="" rtq
+  for rtq in ${REFDATA_TABLES[@]+"${REFDATA_TABLES[@]}"}; do
+    refdata_values="${refdata_values}${refdata_values:+,
+      }('$(sql_lit "$rtq")', (SELECT count(*) FROM ${rtq}))"
+  done
+  cat >> "$out" <<TXN_REFDATA_GATE
+DO \$restore\$
+DECLARE
+  r         record;
+  v_missing text[];
+BEGIN
+  FOR r IN
+    SELECT * FROM (VALUES
+      ${refdata_values}
+    ) AS t(tbl, n)
+    WHERE t.n = 0
+    ORDER BY 1
+  LOOP
+    RAISE EXCEPTION 'restore aborted: reference table % is EMPTY after the replay — the ledger would say its seed migration applied while its rows are gone; fix the allowlist line or the extractor, never hand-seed shared TEST (Phase 164.8.1)', r.tbl;
+  END LOOP;
+
+  -- The PARTIAL-replay leg. A kind-admission CHECK that admits a value its
+  -- registry table does not carry means some of the replay landed and some did
+  -- not — the emptiness loop above cannot see that, because the table is not
+  -- empty. Guarded on BOTH objects existing so the leg is inert where the pair
+  -- does not exist, and pointed by seam at a pair that DOES exist on the
+  -- self-test lane, so it is observed firing rather than assumed to work.
+  IF to_regclass('${REFDATA_KIND_REGISTRY}') IS NOT NULL
+     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '$(sql_lit "$REFDATA_KIND_CHECK")') THEN
+    SELECT array_agg(DISTINCT m.caps[1] ORDER BY m.caps[1]) INTO v_missing
+      FROM pg_constraint c
+      CROSS JOIN LATERAL regexp_matches(pg_get_constraintdef(c.oid), '''([a-z_]+)''', 'g') AS m(caps)
+     WHERE c.conname = '$(sql_lit "$REFDATA_KIND_CHECK")'
+       AND NOT EXISTS (
+             SELECT 1 FROM ${REFDATA_KIND_REGISTRY} k
+              WHERE k.${REFDATA_KIND_REGISTRY_COL}::text = m.caps[1]
+           );
+    IF v_missing IS NOT NULL AND array_length(v_missing, 1) > 0 THEN
+      RAISE EXCEPTION 'restore aborted: ${REFDATA_KIND_CHECK} admits kind(s) % that ${REFDATA_KIND_REGISTRY} does not carry — a partial replay', array_to_string(v_missing, ', ');
+    END IF;
+  END IF;
+END
+\$restore\$;
+TXN_REFDATA_GATE
+
+  note "refdata: ${refdata_n} statement(s) replayed into ${#REFDATA_TABLES[@]} table(s), gated non-empty inside the transaction"
+
   # ── the ledger ───────────────────────────────────────────────────────────
   # The DDL is the CLI's OWN (supabase/cli v2.98.2, its migration-history package).
   # A ledger this script invented would be a ledger `supabase db push` does not read.
@@ -1015,6 +1226,10 @@ run_restore() {
   refuse_wrong_baseline_sha
   refuse_stale_baseline
   refuse_bad_migration_corpus
+  # AFTER the corpus refusal: this one runs the extractor against MIGRATIONS_DIR,
+  # so the dir must already be proven present, non-empty and safely named. It must
+  # also precede `write_census_sql`, which reads the table list it parses.
+  refuse_bad_refdata_allowlist
 
   if [ -z "${RESTORE_OUT_DIR:-}" ]; then
     RESTORE_OUT_DIR="$(mktemp -d)"
@@ -1403,13 +1618,28 @@ FRESHSTUB
   setup_lane() { fresh_db "${1:-}" && hold_mutex; }
 
   # ── the arm environment ───────────────────────────────────────────────────
-  # Every value is a PREFIX assignment, so nothing leaks between arms. The four
-  # ARM_* seams below are what individual arms override with `local` (dynamic
-  # scope), so the default leg stays one expression that every arm shares.
+  # Every value is a PREFIX assignment, so nothing leaks between arms. The ARM_*
+  # seams below are what individual arms override with `local` (dynamic scope), so
+  # the default leg stays one expression that every arm shares. (No numeral here:
+  # a count spelled in prose beside a list that grows is a count that will
+  # disagree with it — `grep -c 'local ARM_' ` is the reading.)
   local ARM_BASELINE_DOC="$SELFTEST_TMPD/BASELINE.md"
   local ARM_FRESHNESS="bash $SELFTEST_TMPD/freshness.sh"
   local ARM_REQUIRE_MUTEX=1
   local ARM_MIGRATIONS_DIR="$FIXTURES/migrations"
+  # ⛔ THE REFDATA SEAMS ARE NOT OPTIONAL POLISH (PATTERNS §2). Left at their repo
+  # defaults, EVERY arm would inherit the real allowlist — which names
+  # `public.compute_job_kinds`, `public.discovery_categories` and six more tables
+  # the baseline FIXTURE dump never creates — and the in-transaction gate would
+  # abort all of them on a table the fixture was never supposed to have.
+  local ARM_REFDATA_ALLOWLIST="$FIXTURES/refdata-allowlist.txt"
+  local ARM_REFDATA_EXTRACTOR="$SCRIPT_DIR/extract-reference-inserts.mjs"
+  # The W1 pair, pointed at the fixture analog: `fx_keep_kind_check` (declared in
+  # baseline-fixture.sql) over `public.fx_keep`.`label`, whose admitted labels are
+  # exactly the rows the fixture's one allowlisted INSERT replays.
+  local ARM_KIND_REGISTRY="public.fx_keep"
+  local ARM_KIND_REGISTRY_COL="label"
+  local ARM_KIND_CHECK="fx_keep_kind_check"
 
   run_leg() {
     local script="$1" mode="$2" tag="$3"
@@ -1421,6 +1651,11 @@ FRESHSTUB
     FRESHNESS_TS_CMD="$ARM_FRESHNESS" \
     RESTORE_OUT_DIR="$SELFTEST_TMPD/out-${tag}" \
     RESTORE_REQUIRE_MUTEX="$ARM_REQUIRE_MUTEX" \
+    REFDATA_ALLOWLIST="$ARM_REFDATA_ALLOWLIST" \
+    REFDATA_EXTRACTOR="$ARM_REFDATA_EXTRACTOR" \
+    REFDATA_KIND_REGISTRY="$ARM_KIND_REGISTRY" \
+    REFDATA_KIND_REGISTRY_COL="$ARM_KIND_REGISTRY_COL" \
+    REFDATA_KIND_CHECK="$ARM_KIND_CHECK" \
       bash "$script" --run --mode "$mode"
   }
   arm_env() { run_leg "$0" "$1" "${2:-$1}"; }
@@ -1511,6 +1746,8 @@ FRESHSTUB
       NORMALIZER="$norm" \
       FRESHNESS_TS_CMD="bash $SELFTEST_TMPD/freshness.sh" \
       RESTORE_OUT_DIR="$SELFTEST_TMPD/out-arm1" \
+      REFDATA_ALLOWLIST="$FIXTURES/refdata-allowlist.txt" \
+      REFDATA_EXTRACTOR="$SCRIPT_DIR/extract-reference-inserts.mjs" \
       bash "$0" --run --mode preflight
   }
   arm_credential_absent() {

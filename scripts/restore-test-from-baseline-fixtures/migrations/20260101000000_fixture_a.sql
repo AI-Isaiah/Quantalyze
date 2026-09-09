@@ -1,5 +1,11 @@
--- Self-test fixture migration. NEVER executed by anything: the restore SEEDS the
--- ledger from the FILE LIST, it does not run these. Its only job is to be one of
--- three enumerable `<14-digit>_<description>.sql` names, so the seeded ledger can be
+-- Self-test fixture migration. The restore SEEDS the ledger from the FILE LIST,
+-- so nothing here is executed for that purpose. Its job is to be one of three
+-- enumerable `<14-digit>_<description>.sql` names, so the seeded ledger can be
 -- checked for 14-digit versions and description-only names.
+--
+-- ⚠️ "NEVER executed by anything" WAS TRUE UNTIL PHASE 164.8.1 AND IS NOT ANYMORE.
+-- The restore now replays the reference INSERTs that `../refdata-allowlist.txt`
+-- names, and NOTHING ELSE, inside the same transaction as the schema load. This
+-- file is named by no allowlist entry, so none of its statements run;
+-- 20260103000000_fixture_c.sql carries the one statement that does.
 SELECT 1;

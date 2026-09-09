@@ -30,6 +30,20 @@
 --
 -- Its measured shape — 2 CREATE TABLE lines, 1 CREATE POLICY line, 2 distinct
 -- function names — is what the self-test's exact summary line pins.
+--
+-- ⭐ `fx_keep_kind_check` IS THE FIXTURE ANALOG OF `compute_jobs_kind_check`
+-- (Phase 164.8.1, W1). The restore's in-transaction gate carries a second leg
+-- beyond "no allowlisted reference table is empty": a CHECK constraint that
+-- admits a kind the registry table does not carry is a PARTIAL replay, and on
+-- the real database that pair is `compute_jobs_kind_check` over
+-- `public.compute_job_kinds` (supabase/migrations/20260710130000_stitch_composite_kind.sql:53,
+-- supabase/migrations/20260411144407_compute_jobs_queue.sql:86). Neither object
+-- exists on this lane, so WITHOUT this constraint that leg would be a no-op here
+-- and would pass vacuously forever — an invariant no arm exercises is decorative.
+-- The seams `REFDATA_KIND_REGISTRY` / `REFDATA_KIND_REGISTRY_COL` /
+-- `REFDATA_KIND_CHECK` point the leg at this constraint and at `public.fx_keep`'s
+-- own `label` column, and arm 23 leg (c) makes it FIRE. It costs no CREATE TABLE
+-- line, so the exact summary lines arms 9/12/18 pin are unchanged.
 -- ============================================================================
 
 SET statement_timeout = 0;
@@ -49,7 +63,8 @@ COMMENT ON SCHEMA "public" IS 'standard public schema';
 
 CREATE TABLE IF NOT EXISTS "public"."fx_keep" (
     "id" integer NOT NULL,
-    "label" "text"
+    "label" "text",
+    CONSTRAINT "fx_keep_kind_check" CHECK (("label" = ANY (ARRAY['ref_a'::"text", 'ref_b'::"text"])))
 );
 
 ALTER TABLE "public"."fx_keep" OWNER TO "postgres";

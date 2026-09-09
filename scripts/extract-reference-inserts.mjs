@@ -65,7 +65,7 @@
  *     node scripts/extract-reference-inserts.mjs --audit
  *     node scripts/extract-reference-inserts.mjs            # emit to stdout
  */
-import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { dirname, join, relative, resolve } from "node:path";
@@ -555,12 +555,20 @@ function modeAudit(io, allowlistPath, migrationsDir) {
   const entries = loadEntries(io, allowlistPath, migrationsDir);
   if (!entries) return 1;
 
-  const listed = new Map(); // `${file} ${qualified}` -> entry
+  // ⛔ `|` AND NOT A RAW NUL. This key was built with a literal U+0000 separator,
+  // which src/__tests__/drift-check-scripts.test.ts refuses in any scanned script:
+  // an invisible byte cannot be seen in review and it trips secret/injection
+  // scanners — and `grep` treats the whole file as binary, so a search for any line
+  // here reads as "no match" (MEASURED 2026-09-09, the gate was red on this file).
+  // `|` is safe as a separator because neither component can contain it: field 1 is
+  // `[A-Za-z0-9_.-]+\.sql` (BASENAME_RE) and field 2 is `[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*`
+  // (QUALIFIED_RE), both charset-refused at parse time.
+  const listed = new Map(); // `${file}|${qualified}` -> entry
   const tables = new Set();
   const files = new Set();
   let pinnedSum = 0;
   for (const e of entries) {
-    listed.set(`${e.file} ${e.qualified}`, e);
+    listed.set(`${e.file}|${e.qualified}`, e);
     tables.add(e.qualified);
     files.add(e.file);
     pinnedSum += e.count;
@@ -590,7 +598,7 @@ function modeAudit(io, allowlistPath, migrationsDir) {
     for (const qualified of tables) {
       const m = matchTable(src, prep, qualified);
       if (m.ok.length === 0 && m.rejected.length === 0) continue;
-      const e = listed.get(`${file} ${qualified}`);
+      const e = listed.get(`${file}|${qualified}`);
       if (!e) {
         if (m.ok.length === 0) continue; // limitation 2: an unlisted non-literal is a backfill
         refuse(io, {
@@ -859,6 +867,25 @@ function main(argv) {
   return code;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
-  process.exit(main(process.argv.slice(2)));
+// ⛔ [164.8.1-02, Rule 1] THE MAIN GUARD COMPARES REAL PATHS, NOT SPELLINGS.
+// MEASURED 2026-09-09: `import.meta.url` is the module's REALPATH, while
+// `process.argv[1]` is whatever the caller typed. On macOS `mktemp -d` hands back
+// `/var/folders/…` and `/var` is a symlink to `/private/var`, so a string compare
+// of the two was FALSE for every copy of this script under a temp dir — and this
+// file then exited 0 having emitted NOTHING. Green, having done nothing, from a
+// tool whose whole job is to produce the SQL a restore replays. `realpathSync` on
+// both sides is the fix; the `try` keeps a deleted or unreadable argv[1] from
+// turning a comparison into a crash at module load.
+const samePath = (a, b) => {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
+};
+if (process.argv[1]) {
+  const self = fileURLToPath(import.meta.url);
+  if (resolve(process.argv[1]) === resolve(self) || samePath(process.argv[1], self)) {
+    process.exit(main(process.argv.slice(2)));
+  }
 }
