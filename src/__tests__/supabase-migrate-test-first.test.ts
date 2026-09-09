@@ -179,9 +179,22 @@ function stepHead(text: string, name: string): string {
 }
 
 /**
- * Every shape that could turn a failure into a pass, reported BY NAME. A superset of
- * the list `test-restore-workflow-wiring.test.ts` scans with, restated rather than
- * imported for the self-containment reason in this file's header.
+ * Every shape that could turn a failure into a pass, reported BY NAME.
+ *
+ * ⛔ IT IS NO LONGER A SUPERSET — corrected 2026-09-09, Phase 164.8.2 (WR-06). This
+ * comment used to read "A superset of the list `test-restore-workflow-wiring.test.ts`
+ * scans with", and that sentence was the record of a HALF-DONE widening: this copy
+ * went to nine in Phase 164.8 and the other copies stayed on five, so the destructive
+ * workflow — the one whose run cannot be undone — was scanned by the WEAKER list.
+ * As of Phase 164.8.2 there are THREE EQUAL COPIES:
+ *   - `src/__tests__/test-restore-workflow-wiring.test.ts` (which additionally carries
+ *     an exact-set `2>/dev/null` allowlist, because that workflow has five justified
+ *     sites and this one's all sit inside the sliced-out mutex copies),
+ *   - `src/__tests__/prod-prober-wiring.test.ts` (the ORIGIN of the idiom).
+ * ⭐ THE RULE: keep the three level BY HAND; no shared helper (Phase 164.8 Plan 05
+ * Task 2, re-affirmed as CONTEXT Area 3 LOCKED for Phase 164.8.2). Restated rather
+ * than imported for the self-containment reason in this file's header. The length pin
+ * in each of the three is what turns a one-sided widening into three red files.
  *
  * ⚠️ THE LAST FOUR WERE ADDED because the first five were not a class, they were five
  * spellings of a class, and the ones missing were the ones that fit this workflow:
@@ -738,6 +751,16 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
           (t) => softeningOffenders(t).length === 0,
         );
       }
+    });
+
+    it("the token list is NINE, and its two hand-kept siblings must move with it", () => {
+      expect(
+        SOFTENING_TOKENS,
+        "SOFTENING_TOKENS moved off nine. This list is one of THREE hand-kept copies — the others are in `src/__tests__/test-restore-workflow-wiring.test.ts` and `src/__tests__/prod-prober-wiring.test.ts`, and they are duplicated deliberately (CONTEXT Area 3, LOCKED: no shared helper module that only wiring tests import). Widen or narrow ALL THREE in the same commit, or the class Phase 164.8.2 closed re-opens as 'one of three hardened' — which is exactly how this copy came to be a SUPERSET of the other two for a whole phase.",
+      ).toHaveLength(9);
+      expect(new Set(SOFTENING_TOKENS).size, "a token is listed twice").toBe(
+        SOFTENING_TOKENS.length,
+      );
     });
 
     it("the three CLI commands are LIVE run: lines, in order, after the marker and the mutex", () => {

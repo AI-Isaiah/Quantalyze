@@ -89,8 +89,48 @@ function probeJobText(text: string): string {
   return start < 0 ? "" : text.slice(start);
 }
 
-/** Every shape that could turn a failure into a pass, reported BY NAME. */
-const SOFTENING_TOKENS = ["continue-on-error", "|| true", "exit 0", "::warning", "set +e"];
+/**
+ * Every shape that could turn a failure into a pass, reported BY NAME.
+ *
+ * ⭐ THIS FILE IS THE ORIGIN OF THE IDIOM, and it was the LAST of the three to widen.
+ * The five-token list started here (Phase 164.1) and was copied out to
+ * `src/__tests__/supabase-migrate-test-first.test.ts` and to
+ * `src/__tests__/test-restore-workflow-wiring.test.ts`. Phase 164.8 widened the
+ * migrate copy to nine; Phase 164.8.2 widened the restore copy and, on measuring the
+ * class rather than the review's file list, found this third copy still on five.
+ * "One of three hardened" is the same defect as "one half of a twin pair hardened".
+ *
+ * ⚠️ THE LAST FOUR ARE HERE BECAUSE the first five were not a class, they were five
+ * spellings of a class:
+ *   - `|| :`            a drop-in for the banned `|| true`, and shorter to type.
+ *   - `2>/dev/null`     swallows the stderr that is the evidence a command failed.
+ *   - `set +o pipefail` re-enables the "a piped command's exit status is discarded"
+ *                       bug — the exact bug the comment above the self-test step in
+ *                       `prod-prober.yml` says the file-then-`cat` shape exists to
+ *                       avoid.
+ *   - `|| exit 0`       an explicit "and if that failed, succeed anyway".
+ *
+ * ⛔ Widening this list cost NOTHING to triage, and that was MEASURED, not assumed:
+ * `prod-prober.yml` carries 0 occurrences of all four (`grep -cF`, 2026-09-09), so
+ * unlike the restore workflow this file needs no exact-set allowlist. Regenerate that
+ * reading before trusting it.
+ *
+ * ⛔ THREE COPIES, KEPT LEVEL BY HAND, ON PURPOSE — restated rather than imported for
+ * the self-containment reason these wiring tests are built on (Phase 164.8 Plan 05
+ * Task 2; CONTEXT Area 3, LOCKED for Phase 164.8.2). No shared helper module that only
+ * wiring tests import. The length pin below is what makes the duplication survivable.
+ */
+const SOFTENING_TOKENS = [
+  "continue-on-error",
+  "|| true",
+  "exit 0",
+  "::warning",
+  "set +e",
+  "|| :",
+  "2>/dev/null",
+  "set +o pipefail",
+  "|| exit 0",
+];
 function softeningOffenders(text: string): string[] {
   return SOFTENING_TOKENS.filter((t) => text.includes(t));
 }
@@ -318,6 +358,80 @@ describe("[164.1-05] nothing softens a failure", () => {
     const mutant = WORKFLOW_TEXT.replace(SELF_TEST_RUN_LINE, `${SELF_TEST_RUN_LINE} || true`);
     expect(mutant, "the softening must actually change the text").not.toBe(WORKFLOW_TEXT);
     expect(softeningOffenders(mutant)).toContain("|| true");
+  });
+
+  // ── The four tokens Phase 164.8.2 (WR-06) added, one calibration each. ──────
+  // A widened list that is never shown to bite is a list that reads harder and is
+  // not, which is the precise defect class this phase closes. Each mutant is
+  // inserted INSIDE the scanned `probe:` region and each asserts the mutation
+  // actually changed the text first — a replace whose anchor has moved leaves the
+  // string identical, and an unreported identical string reads as a passing arm.
+
+  it("CALIBRATION (164.8.2/WR-06): an `|| :` after the self-test is reported by name", () => {
+    const mutant = WORKFLOW_TEXT.replace(SELF_TEST_RUN_LINE, `${SELF_TEST_RUN_LINE} || :`);
+    expect(mutant, "the softening must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(softeningOffenders(probeJobText(mutant))).toContain("|| :");
+  });
+
+  it("CALIBRATION (164.8.2/WR-06): a `2>/dev/null` on the self-test is reported by name", () => {
+    // The self-test's whole job is to prove the detector can still fire. Swallow its
+    // stderr and a BROKEN prober reports nothing while the step still exits 0 on the
+    // happy path — the same shape that makes `2>/dev/null` the worst of the nine on
+    // the restore workflow's database-identity step.
+    const mutant = WORKFLOW_TEXT.replace(SELF_TEST_RUN_LINE, `${SELF_TEST_RUN_LINE} 2>/dev/null`);
+    expect(mutant, "the softening must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(softeningOffenders(probeJobText(mutant))).toContain("2>/dev/null");
+  });
+
+  it("CALIBRATION (164.8.2/WR-06): a `set +o pipefail` inside a probe step is reported by name", () => {
+    // Anchored on the Railway-CLI step's own `set -euo pipefail`, which is inside the
+    // `probe:` job and is the shape a real re-enabling edit would take.
+    const anchor = '          set -euo pipefail\n          asset="railway';
+    expect(
+      WORKFLOW_TEXT.split(anchor).length - 1,
+      "the Railway-CLI step's `set -euo pipefail` anchor moved; the mutation below would be a no-op",
+    ).toBe(1);
+    const mutant = WORKFLOW_TEXT.replace(
+      anchor,
+      '          set -euo pipefail\n          set +o pipefail\n          asset="railway',
+    );
+    expect(mutant, "the softening must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(softeningOffenders(probeJobText(mutant))).toContain("set +o pipefail");
+  });
+
+  it("CALIBRATION (164.8.2/WR-06): an `|| exit 0` after the self-test is reported by name", () => {
+    const mutant = WORKFLOW_TEXT.replace(SELF_TEST_RUN_LINE, `${SELF_TEST_RUN_LINE} || exit 0`);
+    expect(mutant, "the softening must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(softeningOffenders(probeJobText(mutant))).toContain("|| exit 0");
+    // ⚠️ And it is NOT absorbed by the measured schedule-path posture. That exemption
+    // is for the ONE guarded `exit 0` inside the schedule branch; an `|| exit 0` on
+    // the self-test line is a different site and must survive the same filter the
+    // posture arm above applies.
+    expect(
+      softeningOffenders(probeJobText(mutant)).filter((o) => o !== "exit 0" && o !== "::warning"),
+    ).toContain("|| exit 0");
+  });
+
+  it("the token list is NINE, and its two hand-kept siblings must move with it", () => {
+    expect(
+      SOFTENING_TOKENS,
+      "SOFTENING_TOKENS moved off nine. This list is one of THREE hand-kept copies — the others are in `src/__tests__/supabase-migrate-test-first.test.ts` and `src/__tests__/test-restore-workflow-wiring.test.ts`, and they are duplicated deliberately (CONTEXT Area 3, LOCKED: no shared helper module that only wiring tests import). Widen or narrow ALL THREE in the same commit, or the class Phase 164.8.2 closed re-opens as 'one of three hardened'.",
+    ).toHaveLength(9);
+    expect(new Set(SOFTENING_TOKENS).size, "a token is listed twice").toBe(SOFTENING_TOKENS.length);
+  });
+
+  it("the four tokens added in 164.8.2 are still ABSENT from prod-prober.yml, so no allowlist is owed", () => {
+    // The premise of the "widening this list is free" amendment (CONTEXT Area 3),
+    // made executable rather than left as a dated sentence. If a legitimate site ever
+    // appears here, this arm reds and the answer is an exact-set allowlist with a
+    // per-site justification — the `test-restore-workflow-wiring.test.ts` shape — not
+    // dropping the token from the list.
+    for (const token of ["|| :", "2>/dev/null", "set +o pipefail", "|| exit 0"]) {
+      expect(
+        WORKFLOW_TEXT.split(token).length - 1,
+        `prod-prober.yml gained a \`${token}\` site. This file has NO allowlist because the count was measured at 0 on 2026-09-09; a new site needs a justified exact-set count, not a narrower token list.`,
+      ).toBe(0);
+    }
   });
 
   it("the credential-assert step has NO `if:` and names all eight identifiers (D-06)", () => {
