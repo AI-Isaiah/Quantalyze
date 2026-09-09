@@ -5,6 +5,14 @@
 # this file must agree with. ⛔ Regenerate; never trust a number restated in
 # prose. If the run disagrees with a line here, the RUN is right.
 #
+# ⛔ W3 — DERIVE THE FILE COUNT, NEVER RESTATE IT:
+#       grep -vE '^[[:space:]]*(#|$)' scripts/restore-test-refdata-allowlist.txt \
+#         | cut -f1 | sort -u | wc -l
+#    22 ENTRIES over 19 FILES over 8 TABLES, and the pinned counts sum to 23
+#    STATEMENTS. All four numbers differ, on purpose: 20260510173005 carries TWO
+#    entries (compute_job_kinds AND feature_flags), and 20260420213754 pins 2
+#    statements. A first draft said "20 files" by restating instead of counting.
+#
 # ── WHAT AN ENTRY IS ───────────────────────────────────────────────────────
 # One line = one (migration file, target table, pinned top-level statement
 # count) triple, plus the consumer that reads the row.
