@@ -765,6 +765,359 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     });
   });
 
+  // -------------------------------------------------------------------------
+  // WR-05 (Phase 164.8.2) — the world-readable artifact is an ENUMERATED
+  // allowlist, and every future file the restore script writes is OUT by default.
+  //
+  // ⛔ THE DEFECT. Until 164.8.2 the upload's `path:` was the backup DIRECTORY, so
+  // whatever the script happened to write was published on a PUBLIC repo for 90
+  // days. Ten of the eighteen names that reach that directory pass through NEITHER
+  // the backup step's secret scan (it runs BEFORE the script writes anything) NOR
+  // the redaction above (`*.err/*.log/*.out` only) — `pre-census.txt` and the two
+  // rollback views carry a reconstructed `CREATE POLICY … USING (<qual>)` and
+  // owner-named rows read off live shared TEST.
+  //
+  // ⭐ AND THE ARM IS EXECUTED, NOT GREPPED, for the reason the file's header gives:
+  // a string pin over the YAML goes green the moment someone keeps the step and
+  // guts its copy loop. The step's shell is lifted out and RUN over a fixture
+  // directory seeded with all eighteen REAL names (CONTEXT: "a falsifier must
+  // reproduce the real shape" — the redaction twin above deliberately uses
+  // `schema.sql`, a name this workflow never writes; that fixture is left alone as
+  // out of scope, this one uses the measured names).
+  // -------------------------------------------------------------------------
+  describe("WR-05 — the public artifact carries an enumerated allowlist, default-out", () => {
+    const STAGE = "Stage the public artifact (enumerated allowlist; default-out)";
+    const REDACT = "Redact connection metadata from the backup directory (public artifact)";
+    const UPLOAD = "Upload the pre-restore backup (schema + ledger; NOT data)";
+
+    // ⛔ REGENERATED 2026-09-09, NOT restated from the review (which said "seven
+    // unscanned" and was wrong) — from the WRITERS:
+    //   grep -oE 'RESTORE_OUT_DIR}?/[A-Za-z0-9_.-]+' scripts/restore-test-from-baseline.sh
+    //   grep -oE 'outdir}?/[A-Za-z0-9_.-]+'          .github/workflows/test-restore-from-baseline.yml
+    // If the script gains a file, this list goes stale — and the point of the
+    // allowlist is that a stale list here is SAFE: an unknown name is not staged.
+    const REAL_NAMES = [
+      "census.err",
+      "census.sql",
+      "dump.log",
+      "ledger.csv",
+      "ledger.err",
+      "marker.err",
+      "post-census.rollback-view.txt",
+      "post-census.txt",
+      "pre-census.rollback-view.txt",
+      "pre-census.txt",
+      "README.txt",
+      "refdata.err",
+      "refdata.sql",
+      "restore.sql",
+      "schema-before.sql",
+      "survivors.keys",
+      "survivors.sql",
+      "transaction.out",
+    ];
+    /** A name the script does not write today — the "future file" the rule is for. */
+    const UNEXPECTED = "future-thing.txt";
+    /** The DDL shape the finding is actually about, seeded so its absence is measurable. */
+    const POLICY_MARKER = "CREATE POLICY p ON t USING (owner = current_user)";
+    const DDL_BEARING = [
+      "pre-census.txt",
+      "post-census.txt",
+      "pre-census.rollback-view.txt",
+      "post-census.rollback-view.txt",
+      "survivors.sql",
+      "restore.sql",
+    ];
+
+    /**
+     * The by-NAME allowlist, parsed OUT of the step's own `for f in …; do` line.
+     *
+     * ⛔ WHY IT IS PARSED AND NOT RESTATED. A literal copy here would let the two
+     * lists drift, and a test asserting the staged set equals ITS OWN list while the
+     * workflow copies a different one is green over the wrong question. The literal
+     * below exists too — but only so the PARSE can be checked against it, and the
+     * parse is calibrated by mutating a name in the YAML.
+     */
+    function stagedNameList(text: string): string[] {
+      const body = stepBody(text, STAGE);
+      const m = body.match(/^\s*for f in ([^;\n]+); do$/m);
+      return m ? m[1].trim().split(/\s+/) : [];
+    }
+
+    /** The channel globs the step copies, as bare extensions (`err`/`log`/`out`). */
+    function stagedChannelExts(text: string): string[] {
+      const body = stepBody(text, STAGE);
+      const m = body.match(/^\s*for c in ([^;\n]+); do$/m);
+      if (!m) return [];
+      return [...m[1].matchAll(/\/\*\.([a-z]+)/g)].map((x) => x[1]);
+    }
+
+    /** What the workflow's OWN two lists say should be staged, given a seeded set. */
+    function expectedStaged(text: string, seeded: string[]): string[] {
+      const names = stagedNameList(text);
+      const exts = stagedChannelExts(text);
+      return seeded
+        .filter((f) => names.includes(f) || exts.some((e) => f.endsWith(`.${e}`)))
+        .sort();
+    }
+
+    /** Seed a fixture RUNNER_TEMP and run a (possibly mutated) copy of the step. */
+    function runStage(
+      script: string,
+      seed: string[],
+    ): { status: number | null; output: string; staged: string[]; stageExists: boolean } {
+      const runnerTemp = mkdtempSync(join(tmpdir(), "stage-run-"));
+      const outdir = join(runnerTemp, "test-backup");
+      mkdirSync(outdir, { recursive: true });
+      for (const f of seed) {
+        const extra = DDL_BEARING.includes(f) ? `${POLICY_MARKER}\n` : "";
+        writeFileSync(join(outdir, f), `MARKER-${f}\n${extra}`);
+      }
+      const scriptFile = join(runnerTemp, "stage.sh");
+      writeFileSync(scriptFile, script);
+      const r = spawnSync("bash", [scriptFile], {
+        encoding: "utf8",
+        env: { ...process.env, RUNNER_TEMP: runnerTemp },
+      });
+      const stageDir = join(runnerTemp, "test-backup-artifact");
+      let staged: string[] = [];
+      let stageExists = true;
+      try {
+        staged = readdirSync(stageDir).sort();
+      } catch {
+        stageExists = false;
+      }
+      rmSync(runnerTemp, { recursive: true, force: true });
+      return {
+        status: r.status,
+        output: `${r.stdout ?? ""}${r.stderr ?? ""}`,
+        staged,
+        stageExists,
+      };
+    }
+
+    it("the test's allowlist and the step's `for f in …` line are the SAME list", () => {
+      // The literal is the DECISION (founder amendment 2026-09-09): the reversal
+      // recipe plus the script's four named `.sql` files. `survivors.sql` is IN —
+      // pinned here precisely so nobody "completes" the narrowing by removing it,
+      // which is what the superseded research recommendation would have done.
+      const DECIDED = [
+        "ledger.csv",
+        "schema-before.sql",
+        "README.txt",
+        "census.sql",
+        "survivors.sql",
+        "restore.sql",
+        "refdata.sql",
+      ];
+      expect(
+        stagedNameList(WF),
+        "the staging step's `for f in …; do` line no longer copies exactly the decided allowlist. If a name was ADDED, the founder's default-out rule says say why in the step comment and update this list in the same edit; if `survivors.sql` was REMOVED, an aborted restore stops being reversible — that was rejected explicitly (CONTEXT Area 2, AMENDED 2026-09-09).",
+      ).toEqual(DECIDED);
+      expect(
+        stagedChannelExts(WF),
+        "the staging step no longer copies exactly the three redacted channel classes",
+      ).toEqual(["err", "log", "out"]);
+
+      // CALIBRATION — the PARSE must break when a name changes, or the agreement
+      // above is between two constants and measures nothing.
+      calibrate(
+        "the allowlist is parsed out of the step, not restated",
+        (s) => s.replace("for f in ledger.csv schema-before.sql", "for f in ledger.csv schema-AFTER.sql"),
+        (t) => stagedNameList(t).includes("schema-before.sql"),
+      );
+      // ⛔ A GLOB IS NOT AN ALLOWLIST. `*.sql` would re-admit every future `.sql` the
+      // script writes, which is the in-by-default shape WR-05 exists to remove.
+      expect(
+        stagedNameList(WF).some((n) => n.includes("*")),
+        "the by-name allowlist has been widened to a glob — every future file matching it is then IN by default, which is the exact defect this step replaced",
+      ).toBe(false);
+    });
+
+    it("EXECUTED — the staged set is exactly the allowlist over all 18 REAL names", () => {
+      const script = extractRunScript(WF, STAGE);
+      const seed = [...REAL_NAMES, UNEXPECTED];
+      const r = runStage(script, seed);
+
+      expect(
+        r.status,
+        `the staging step failed on a complete fixture directory (exit ${r.status}).\n${r.output}`,
+      ).toBe(0);
+      expect(
+        r.staged,
+        `the staged set is not what the step's own two lists say it should be.\n${r.output}`,
+      ).toEqual(expectedStaged(WF, seed));
+
+      // Named, so a failure says WHICH file leaked rather than printing two arrays.
+      for (const withheld of [
+        "pre-census.txt",
+        "post-census.txt",
+        "pre-census.rollback-view.txt",
+        "post-census.rollback-view.txt",
+        "survivors.keys",
+        UNEXPECTED,
+      ]) {
+        expect(
+          r.staged.includes(withheld),
+          `\`${withheld}\` reached the world-readable artifact. The census text files restate the survivor DDL with owner-named rows read off live shared TEST and have no reversal claim on it (T-164.8-21); \`survivors.keys\` is neither recipe nor channel; \`${UNEXPECTED}\` stands for every file the script gains tomorrow and must be OUT until someone names it.`,
+        ).toBe(false);
+      }
+      expect(
+        r.staged.includes("survivors.sql"),
+        "`survivors.sql` is NOT staged. It is the DDL that re-creates the non-public objects depending on `public`; without it an aborted restore is not reversible. Dropping it was considered and REJECTED (CONTEXT Area 2, AMENDED 2026-09-09) — do not 'complete' the narrowing this way.",
+      ).toBe(true);
+      // The count is derived, never restated: 18 real + 1 future, minus the five
+      // withheld and the future one.
+      expect(r.output).toContain(`staged ${r.staged.length} file(s) from`);
+
+      // ⭐ CALIBRATION 2 — THE OBSERVED RED. Replace the enumerated copy with the OLD
+      // shape (`cp -a` of the whole directory) and the arm must SEE it: `pre-census.txt`
+      // is staged again. Without this twin, "pre-census.txt is absent" could be
+      // reported by a fixture that never contained it.
+      const OLD_SHAPE_ANCHOR =
+        '  for f in ledger.csv schema-before.sql README.txt census.sql survivors.sql restore.sql refdata.sql; do\n' +
+        '    if [ -f "${outdir}/${f}" ]; then\n' +
+        '      cp -p "${outdir}/${f}" "${stage}/"\n' +
+        "    fi\n" +
+        "  done\n";
+      expect(
+        script.includes(OLD_SHAPE_ANCHOR),
+        "the staging step's enumerated copy loop is no longer the form this calibration mutates — re-anchor the mutation rather than deleting the twin, or the arm silently stops being evidence",
+      ).toBe(true);
+      const neutered = script.replace(OLD_SHAPE_ANCHOR, '  cp -a "${outdir}/." "${stage}/"\n');
+      expect(
+        neutered,
+        "CALIBRATION: the neuter produced an identical script, so it proves nothing",
+      ).not.toBe(script);
+      const old = runStage(neutered, seed);
+      expect(
+        old.staged.includes("pre-census.txt"),
+        `CALIBRATION: the whole-directory neuter did NOT put \`pre-census.txt\` in the artifact, so this arm cannot see the shape it exists to forbid.\n${old.output}`,
+      ).toBe(true);
+      expect(
+        old.staged.includes(UNEXPECTED),
+        "CALIBRATION: the whole-directory neuter did not stage the unexpected file either — the fixture is not exercising the default-out rule",
+      ).toBe(true);
+    });
+
+    it("EXECUTED — a forced failure inside the step FAILS CLOSED: exit 1, nothing staged", () => {
+      // ⛔ THE FAIL-CLOSED HALF. The upload is `if: always()`, so a staging step that
+      // merely failed would leave whatever it had already copied to be published. The
+      // trap removes the staging directory, and `if-no-files-found: error` then makes
+      // the upload red rather than quiet. `false` in place of `cp` is the redaction
+      // twin's idiom: deterministic on every platform.
+      const script = extractRunScript(WF, STAGE);
+      expect(
+        script.includes('cp -p "${outdir}/${f}" "${stage}/"'),
+        "the staging step's first `cp -p` is no longer the form this twin forces to fail — re-anchor it",
+      ).toBe(true);
+      const forced = script.replace('cp -p "${outdir}/${f}" "${stage}/"', 'false -p "${outdir}/${f}" "${stage}/"');
+      expect(forced, "CALIBRATION: the forced-failure mutation changed nothing").not.toBe(script);
+
+      const r = runStage(forced, REAL_NAMES);
+      expect(
+        r.status,
+        `a failed copy did not fail the staging step (exit ${r.status}). The upload is \`if: always()\`; a green staging step is the only thing that makes the artifact safe to publish.\n${r.output}`,
+      ).toBe(1);
+      expect(
+        r.stageExists && r.staged.length > 0,
+        `the staging directory SURVIVED a failed staging run with ${r.staged.length} file(s) in it (${r.staged.join(", ")}) — those would be uploaded. Fail-closed means the directory is REMOVED so \`if-no-files-found: error\` reddens the upload.`,
+      ).toBe(false);
+      expect(r.output).toContain("::error::");
+      expect(r.output).toContain("staging FAILED");
+    });
+
+    it("EXECUTED — a run that died before the backup step still stages a self-explaining note", () => {
+      // Not an error path: the run is ALREADY red for its own reason, and a second red
+      // from `if-no-files-found: error` would point the next reader at the artifact
+      // plumbing instead of the actual failure.
+      const script = extractRunScript(WF, STAGE);
+      const runnerTemp = mkdtempSync(join(tmpdir(), "stage-nobackup-"));
+      const scriptFile = join(runnerTemp, "stage.sh");
+      writeFileSync(scriptFile, script);
+      const r = spawnSync("bash", [scriptFile], {
+        encoding: "utf8",
+        env: { ...process.env, RUNNER_TEMP: runnerTemp },
+      });
+      const staged = readdirSync(join(runnerTemp, "test-backup-artifact")).sort();
+      const note = readFileSync(join(runnerTemp, "test-backup-artifact", "README.txt"), "utf8");
+      rmSync(runnerTemp, { recursive: true, force: true });
+
+      expect(r.status, `${r.stdout ?? ""}${r.stderr ?? ""}`).toBe(0);
+      expect(staged).toEqual(["README.txt"]);
+      expect(note).toContain("failed before the backup step");
+    });
+
+    it("the stage step runs on every outcome, and BETWEEN the redaction and the upload", () => {
+      // ⛔ ORDER IS THE CONTROL, exactly as it is for the redaction. All three steps
+      // are `if: always()` and `always()` steps run in FILE ORDER, so the only thing
+      // making the redaction a precondition of staging — and staging a precondition of
+      // the upload — is that they are written in that order.
+      const b = jobBlock(WF, RESTORE_JOB);
+      expect(stepIndex(b, STAGE), "the staging step is gone").toBeGreaterThan(-1);
+      expect(
+        liveLines(stepBody(WF, STAGE)).some((l) => l.trim() === "if: always()"),
+        "the staging step no longer carries `if: always()` — on an ABORTED run it would not run at all, and the aborted run is the one whose artifact matters most",
+      ).toBe(true);
+      expect(stepIndex(b, REDACT)).toBeLessThan(stepIndex(b, STAGE));
+      expect(stepIndex(b, STAGE)).toBeLessThan(stepIndex(b, UPLOAD));
+
+      calibrate(
+        "the staging step precedes the upload step",
+        (s) =>
+          s
+            .replace(`- name: ${STAGE}`, "- name: __SWAP__")
+            .replace(`- name: ${UPLOAD}`, `- name: ${STAGE}`)
+            .replace("- name: __SWAP__", `- name: ${UPLOAD}`),
+        (t) => {
+          const jb = jobBlock(t, RESTORE_JOB);
+          const st = stepIndex(jb, STAGE);
+          const up = stepIndex(jb, UPLOAD);
+          return st > -1 && up > -1 && st < up;
+        },
+      );
+      calibrate(
+        "the redaction precedes the staging, so only SCRUBBED channels are copied",
+        (s) =>
+          s
+            .replace(`- name: ${REDACT}`, "- name: __SWAP__")
+            .replace(`- name: ${STAGE}`, `- name: ${REDACT}`)
+            .replace("- name: __SWAP__", `- name: ${STAGE}`),
+        (t) => {
+          const jb = jobBlock(t, RESTORE_JOB);
+          const rd = stepIndex(jb, REDACT);
+          const st = stepIndex(jb, STAGE);
+          return rd > -1 && st > -1 && rd < st;
+        },
+      );
+      calibrate(
+        "the staging runs on an aborted run too",
+        (s) => s.replace(`      - name: ${STAGE}\n        if: always()\n`, `      - name: ${STAGE}\n`),
+        (t) => liveLines(stepBody(t, STAGE)).some((l) => l.trim() === "if: always()"),
+      );
+    });
+
+    it("the upload publishes the STAGING directory, never the raw backup directory", () => {
+      const body = stepBody(WF, UPLOAD);
+      expect(
+        liveLines(body).some((l) => l.trim() === "path: ${{ runner.temp }}/test-backup-artifact"),
+        "the upload's `path:` no longer points at the staging directory. Pointed back at `${{ runner.temp }}/test-backup` it publishes every file the restore script wrote — the pre-drop census included — which is the finding this step closed.",
+      ).toBe(true);
+      calibrate(
+        "the upload does not publish the un-enumerated backup directory",
+        (s) =>
+          s.replace(
+            "          path: ${{ runner.temp }}/test-backup-artifact\n",
+            "          path: ${{ runner.temp }}/test-backup\n",
+          ),
+        (t) =>
+          liveLines(stepBody(t, UPLOAD)).some(
+            (l) => l.trim() === "path: ${{ runner.temp }}/test-backup-artifact",
+          ),
+      );
+    });
+  });
+
   describe("B4 — the workflow's marker gate is coupled to the script's constants", () => {
     it("both hard-coded regexes still equal the script's RESTORE_*_MARKER_RE defaults", () => {
       // ⛔ THE FAILURE DIRECTION. The workflow hard-codes COPIES of two script
