@@ -16,9 +16,12 @@
 --      defense-in-depth backstop actually fires — the migration's DO
 --      block only proves the constraint EXISTS, not that it REJECTS.
 --   4. A direct INSERT with percent_allocated = 25 (legal range) is
---      ACCEPTED. Pre-existing mig-059 CHECK already gates 50.0 as the
---      ceiling, so we test a value that satisfies BOTH constraints to
---      isolate the new CHECK from regressions on the old one.
+--      ACCEPTED. ⛔ RE-BASED 2026-09-09: this line used to read "Pre-existing
+--      mig-059 CHECK already gates 50.0 as the ceiling, so we test a value that
+--      satisfies BOTH constraints". That inline CHECK was DROPPED by
+--      20260528223200_drop_stale_bridge_outcomes_percent_inline_check.sql:53,
+--      which calls it stale in its own filename. Only mig-128's named range
+--      CHECK [0, 100] survives, so 25 is legal under ONE constraint, not two.
 --   5. NULL percent_allocated (kind='rejected' rows per mig 081) is
 --      ACCEPTED — the new CHECK explicitly allows NULL.
 --
@@ -282,6 +285,7 @@ DECLARE
   mig128_check_valid BOOLEAN;
   err_state TEXT;
   raised BOOLEAN;
+  n_rows INTEGER;
 BEGIN
   -- (a) Confirm mig-128's named CHECK is present + validated.
   SELECT EXISTS (
@@ -327,8 +331,14 @@ BEGIN
   VALUES (test_uid, test_sid, 'snoozed', test_uid, 'voluntary_add')
   RETURNING id INTO test_md_id;
 
-  -- (c) percent_allocated = -1 → MUST raise 23514 (both constraints reject).
-  raised := FALSE;
+  -- ⛔ RESET BOTH per leg. `raised` was reset and `err_state` was NOT, so a leg
+  -- that did not raise reported the PREVIOUS leg's SQLSTATE. Measured 2026-09-09:
+  -- leg (d) failed with `raised=f, state=23514` — a message that reads as a
+  -- contradiction and names a code this run never produced. A diagnostic that
+  -- misidentifies the cause is worse than a bare failure.
+
+  -- (c) percent_allocated = -1 → below the range CHECK's lower bound. MUST raise.
+  raised := FALSE; err_state := NULL;
   BEGIN
     INSERT INTO bridge_outcomes (
       allocator_id, strategy_id, match_decision_id, kind,
@@ -343,9 +353,25 @@ BEGIN
       raised, err_state;
   END IF;
 
-  -- (d) percent_allocated = 100 → mig-128 accepts [0..100], mig-059 rejects
-  --     [0.1..50]. MUST raise 23514 (mig-059 fires before disk).
-  raised := FALSE;
+  -- ⛔ RE-BASED 2026-09-09. Legs (d) and (e) asserted mig-059's INLINE column
+  -- CHECK (`percent_allocated >= 0.1 AND <= 50`, 20260418060747_bridge_outcomes.sql:57).
+  -- `20260528223200_drop_stale_bridge_outcomes_percent_inline_check.sql:53` DROPS
+  -- that constraint — its own filename calls it stale (NEW-C18-02). So the chain's
+  -- END STATE is mig-128's named range CHECK alone, `[0, 100]` inclusive, and 100
+  -- and 0 are LEGAL. The old expectation stood green only because shared TEST was
+  -- STALE and still carried the dropped constraint; the 2026-09-09 restore brought
+  -- TEST to the schema the chain actually renders and the assertion fell over.
+  -- ⚠️ That is the finding, not the damage: a boundary test cannot be evidence
+  -- about a constraint that no longer exists.
+  --
+  -- ⛔ EACH ACCEPTED ROW IS DELETED AGAIN. `bridge_outcomes_allocator_match_decision_unique`
+  -- is UNIQUE (allocator_id, match_decision_id), and every leg reuses one
+  -- match_decision. While all three legs REJECTED, the collision could not occur;
+  -- the moment two legs accept, the second would fail 23505 and be read as a
+  -- range-CHECK verdict.
+
+  -- (d) percent_allocated = 100 → the range CHECK's upper bound, INCLUSIVE. MUST be accepted.
+  raised := FALSE; err_state := NULL;
   BEGIN
     INSERT INTO bridge_outcomes (
       allocator_id, strategy_id, match_decision_id, kind,
@@ -354,15 +380,22 @@ BEGIN
   EXCEPTION WHEN check_violation THEN
     raised := TRUE; err_state := SQLSTATE;
   END;
-  IF NOT raised OR err_state <> '23514' THEN
+  IF raised THEN
     RAISE EXCEPTION
-      'Test 5 failed (P1956 boundary): percent_allocated=100 should raise 23514 (mig-059 cap=50), raised=%, state=%',
-      raised, err_state;
+      'Test 5 failed (P1956 boundary): percent_allocated=100 is the range CHECK''s INCLUSIVE upper bound and must be ACCEPTED, but a check_violation was raised (state=%). Either the range CHECK was narrowed, or mig-059''s dropped inline CHECK is back.',
+      err_state;
+  END IF;
+  DELETE FROM bridge_outcomes
+   WHERE allocator_id = test_uid AND match_decision_id = test_md_id;
+  GET DIAGNOSTICS n_rows = ROW_COUNT;
+  IF n_rows <> 1 THEN
+    RAISE EXCEPTION
+      'Test 5 failed (P1956 boundary): percent_allocated=100 raised nothing but left % row(s), expected exactly 1. The INSERT did not land, so "accepted" was not measured.',
+      n_rows;
   END IF;
 
-  -- (e) percent_allocated = 0 → mig-128 accepts [>=0], mig-059 rejects
-  --     [>=0.1]. MUST raise 23514.
-  raised := FALSE;
+  -- (e) percent_allocated = 0 → the range CHECK's lower bound, INCLUSIVE. MUST be accepted.
+  raised := FALSE; err_state := NULL;
   BEGIN
     INSERT INTO bridge_outcomes (
       allocator_id, strategy_id, match_decision_id, kind,
@@ -371,9 +404,38 @@ BEGIN
   EXCEPTION WHEN check_violation THEN
     raised := TRUE; err_state := SQLSTATE;
   END;
+  IF raised THEN
+    RAISE EXCEPTION
+      'Test 5 failed (P1956 boundary): percent_allocated=0 is the range CHECK''s INCLUSIVE lower bound and must be ACCEPTED, but a check_violation was raised (state=%).',
+      err_state;
+  END IF;
+  DELETE FROM bridge_outcomes
+   WHERE allocator_id = test_uid AND match_decision_id = test_md_id;
+  GET DIAGNOSTICS n_rows = ROW_COUNT;
+  IF n_rows <> 1 THEN
+    RAISE EXCEPTION
+      'Test 5 failed (P1956 boundary): percent_allocated=0 raised nothing but left % row(s), expected exactly 1.',
+      n_rows;
+  END IF;
+
+  -- (f) percent_allocated = 100.01 → JUST above the upper bound. MUST raise 23514.
+  -- ⛔ THIS LEG IS WHY THE RE-BASE IS NOT A WEAKENING. Flipping (d) and (e) to
+  -- ACCEPT would otherwise leave `-1` as the only rejecting arm, and a one-sided
+  -- boundary test cannot tell a correct `[0, 100]` from a CHECK that lost its
+  -- ceiling entirely — the exact defect this file exists to catch. 100.01 fits
+  -- NUMERIC(5,2), so a 22003 overflow cannot masquerade as the verdict.
+  raised := FALSE; err_state := NULL;
+  BEGIN
+    INSERT INTO bridge_outcomes (
+      allocator_id, strategy_id, match_decision_id, kind,
+      percent_allocated, allocated_at
+    ) VALUES (test_uid, test_sid, test_md_id, 'allocated', 100.01, CURRENT_DATE);
+  EXCEPTION WHEN check_violation THEN
+    raised := TRUE; err_state := SQLSTATE;
+  END;
   IF NOT raised OR err_state <> '23514' THEN
     RAISE EXCEPTION
-      'Test 5 failed (P1956 boundary): percent_allocated=0 should raise 23514 (mig-059 min=0.1), raised=%, state=%',
+      'Test 5 failed (P1956 boundary): percent_allocated=100.01 is ABOVE the range CHECK''s upper bound and must raise 23514, raised=%, state=%. The ceiling is gone.',
       raised, err_state;
   END IF;
 
@@ -385,7 +447,7 @@ BEGIN
   -- shape works; the assertion-(g) in mig 128's own STEP-3 DO block
   -- already proves the new CHECK is named, present, and validated.
 
-  RAISE NOTICE 'Test 5 passed: P1956 CHECK boundaries verified at -1/0/100';
+  RAISE NOTICE 'Test 5 passed: P1956 range CHECK boundaries verified — -1 and 100.01 REJECTED, 0 and 100 ACCEPTED (inclusive [0,100]; mig-059''s inline CHECK is dropped, see 20260528223200)';
 
   DELETE FROM match_decisions WHERE id = test_md_id;
   DELETE FROM strategies WHERE id = test_sid;

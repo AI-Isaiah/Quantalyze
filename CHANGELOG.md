@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.77.28.0] - 2026-09-09
+
+### Fixed
+- **A SQL gate test asserted a constraint that a migration deliberately dropped in May, and stood green because shared TEST was stale.** `supabase/tests/test_commit_scenario_batch_p1956_range.sql` Test 5 required `bridge_outcomes.percent_allocated` to REJECT `100` and `0`, citing mig-059's inline column CHECK (`>= 0.1 AND <= 50`, `20260418060747_bridge_outcomes.sql:57`). `20260528223200_drop_stale_bridge_outcomes_percent_inline_check.sql:53` DROPS that constraint — its own filename calls it stale (NEW-C18-02). The chain's end state is mig-128's named range CHECK alone, `[0, 100]` inclusive, so both values are legal. The assertion survived only because nothing applies migrations to shared TEST, so TEST still carried the dropped constraint; the 2026-09-09 restore brought TEST to the schema the chain renders and the test fell over on its first real execution. Legs (d) and (e) now assert ACCEPTANCE and delete the row they insert (`bridge_outcomes_allocator_match_decision_unique` is UNIQUE over the reused match_decision, so two accepting legs would otherwise collide with 23505 and read as a range verdict).
+- **The re-base is not a weakening:** a new leg (f) at `100.01` asserts the upper bound still raises 23514. Without it, flipping (d) and (e) would have left `-1` as the only rejecting arm, and a one-sided boundary test cannot distinguish a correct `[0, 100]` from a CHECK that lost its ceiling. All four boundaries were evaluated read-only against the live constraint predicate on TEST before the change was committed: -1 and 100.01 reject, 0 and 100 accept.
+- **A diagnostic that named the wrong cause.** The same block reset `raised` per leg but never `err_state`, so a leg that did not raise reported the PREVIOUS leg's SQLSTATE. The observed failure read `raised=f, state=23514` — a message that contradicts itself and names a code that run never produced. Both are now reset per leg.
+
+### Notes
+- The gate corpus is unchanged: this file carries no `RED-UNDER` annotation and stays in `UNREACHABLE_27`, so `sql-mutation`'s `FILES_FLOOR`/`ARMS_FLOOR` are untouched. `lint-sql-gates` (7 rules, 73 files) and `lint-app-guc` both report 0 findings.
+
 ## [0.77.27.0] - 2026-09-09 — the restore replays the reference rows it used to destroy
 
 Phase 164.8.1, waves 1-2. The schema-only restore dropped `public` and reloaded a dump
