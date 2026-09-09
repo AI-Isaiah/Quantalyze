@@ -662,7 +662,7 @@ describe("restore-test-from-baseline.sh — every refusal precedes the first wri
   });
 
   it("the --run region carries no unaccounted softening token", () => {
-    // The restated list from `prod-prober-wiring.test.ts:93-96`. Three must be
+    // The restated list from `prod-prober-wiring.test.ts:123-133`. Three must be
     // ABSENT outright; two are legitimate rc-handling in this script and are an
     // EXACT-SET COUNT with a justification, the `gate-family-meta.test.ts` idiom —
     // pinned at the measured number so a NEW one is a red rather than an
