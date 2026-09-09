@@ -795,6 +795,28 @@ jobs:
       # Versions are extracted with awk, not `grep -o ... || true`: grep exits 1 on no
       # match, `set -e` would abort, and the `|| true` that fixes it is exactly the
       # softening token the wiring test bans in this job.
+      #
+      # ⛔ AND THE TWO SETS ARE SCRAPED DIFFERENTLY, ON PURPOSE. `planned` reads
+      # every 14-digit version out of the dry-run log — the dry-run's bullet list IS the
+      # plan. `applied` reads ONLY the CLI's "Applying migration" lines. Measured on run
+      # 34200188676 (push, 2026-09-08 — the last run that actually applied a migration):
+      # a non-interactive `supabase db push` ECHOES its confirmation prompt, "Do you want
+      # to push these migrations to the remote database?" followed by a bullet list of
+      # the PLANNED set, and only afterwards prints "Applying migration <version>...".
+      # So a whole-stdout scrape of the push log re-reads the PLAN back out of the prompt
+      # echo: `applied` came back a superset of `planned` no matter what the push did,
+      # and assertion (1) could not fire on the partial apply it exists to catch. That is
+      # what shipped in PR #767 and what is corrected here. The wiring test executes both
+      # scrapes over a partial-apply fixture that CARRIES the prompt echo, and records
+      # that the whole-stdout one called that fixture GREEN, so this cannot silently
+      # revert.
+      # ⚠️ The EMPTY case is deliberately UNCHANGED: a no-op push prints "Remote database
+      # is up to date." and no "Applying migration" line at all, so both sets stay empty,
+      # assertion (1) still agrees and assertion (2) keeps its behaviour — hard-fail on a
+      # `push` event, tolerated on `workflow_dispatch`. Proven by run 34354619770
+      # (workflow_dispatch, 2026-09-09, headSha 06db9958), which printed
+      # "planned 0 migration version(s); push reported 0." — and which, for exactly that
+      # reason, exercised assertion (1) VACUOUSLY and is not evidence that it works.
       - name: Push migrations to TEST
         env:
           IS_PUSH: ${{ github.event_name == 'push' }}
@@ -807,8 +829,11 @@ jobs:
           versions_of() {
             awk '{ while (match($0, /[0-9]{14}/)) { print substr($0, RSTART, RLENGTH); $0 = substr($0, RSTART + RLENGTH) } }' "$1" | sort -u
           }
+          applied_versions_of() {
+            awk '/Applying migration/ { while (match($0, /[0-9]{14}/)) { print substr($0, RSTART, RLENGTH); $0 = substr($0, RSTART + RLENGTH) } }' "$1" | sort -u
+          }
           planned="$(versions_of "${RUNNER_TEMP}/test-dry-run.txt")"
-          applied="$(versions_of "${RUNNER_TEMP}/test-push.txt")"
+          applied="$(applied_versions_of "${RUNNER_TEMP}/test-push.txt")"
           planned_n="$(printf '%s' "${planned}" | awk 'NF { n++ } END { print n + 0 }')"
           applied_n="$(printf '%s' "${applied}" | awk 'NF { n++ } END { print n + 0 }')"
           echo "planned ${planned_n} migration version(s); push reported ${applied_n}."
@@ -1079,6 +1104,16 @@ jobs:
         # an applied merge from a push that applied zero migrations. See the long
         # derivation on `Push migrations to TEST`; the same reasoning, one environment
         # over, on the environment where being wrong is not recoverable by a re-run.
+        #
+        # ⛔ THE TWO SCRAPES ARE NOT THE SAME FUNCTION, AND THE ASYMMETRY IS THE POINT.
+        # `planned` reads every version out of the dry-run log; `applied` reads ONLY the
+        # "Applying migration" lines, because `db push` echoes its confirmation prompt
+        # with the PLANNED bullet list into the same stdout (measured on run
+        # 34200188676, 2026-09-08). A whole-stdout scrape therefore compared the plan
+        # against itself and could not fail. Fixed at BOTH sites in the same commit: a
+        # fix to TEST alone would have left production — the environment this very
+        # comment calls unrecoverable by a re-run — with the weaker check. The empty
+        # case is unchanged (run 34354619770 printed "planned 0 ... push reported 0.").
         # All interpolations are repo-admin-controlled secrets/vars (not
         # attacker-supplied event fields), and they flow through env: not
         # inline ${{ }} expansion — no script-injection surface.
@@ -1091,8 +1126,11 @@ jobs:
           versions_of() {
             awk '{ while (match($0, /[0-9]{14}/)) { print substr($0, RSTART, RLENGTH); $0 = substr($0, RSTART + RLENGTH) } }' "$1" | sort -u
           }
+          applied_versions_of() {
+            awk '/Applying migration/ { while (match($0, /[0-9]{14}/)) { print substr($0, RSTART, RLENGTH); $0 = substr($0, RSTART + RLENGTH) } }' "$1" | sort -u
+          }
           planned="$(versions_of /tmp/prod-dry-run.txt)"
-          applied="$(versions_of /tmp/prod-push.txt)"
+          applied="$(applied_versions_of /tmp/prod-push.txt)"
           planned_n="$(printf '%s' "${planned}" | awk 'NF { n++ } END { print n + 0 }')"
           applied_n="$(printf '%s' "${applied}" | awk 'NF { n++ } END { print n + 0 }')"
           echo "planned ${planned_n} migration version(s); push reported ${applied_n}."
