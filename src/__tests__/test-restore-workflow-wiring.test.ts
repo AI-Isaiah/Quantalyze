@@ -71,11 +71,46 @@ const GUARD_JOB = "dispatch-guard";
  * files cannot disagree about what "the step" is. The release variant also stops at a
  * job header, because in `ci.yml` that step is the last one in `sql-tests`.
  */
-const ACQUIRE_RE = /^ {6}- name: Acquire shared-test-db mutex\n[\s\S]*?(?=\n {6}[-#])/m;
+const ACQUIRE_RE =
+  /^ {6}- name: Acquire shared-test-db mutex\n[\s\S]*?(?=\n {6}[-#])/m;
 const RELEASE_RE =
   /^ {6}- name: Release shared-test-db mutex \(best effort\)\n[\s\S]*?(?=\n {6}[-#]|\n {2}\S)/m;
 /** The line the byte-identical suffix begins at. Everything before it is ours. */
 const SUFFIX_ANCHOR = "          if ! command -v psql";
+
+/**
+ * ⛔ IN-03 REMAINDER (Phase 164.8.2). Both of these used to be written inline as
+ * `s.slice(s.indexOf(SUFFIX_ANCHOR))` and `s.slice(0, s.indexOf(SUFFIX_ANCHOR))`.
+ * `String.indexOf` returns -1 when the anchor is ABSENT, and a negative index does
+ * not fail — it counts from the end. So the byte-identity pin over the whole copied
+ * mutex protocol degraded into comparing the LAST CHARACTER of two steps (both end
+ * in a newline, so any two steps compared EQUAL), and the prefix half silently
+ * WIDENED to nearly the entire step, so `exit 0` assertions scoped to our own
+ * credential branch began inspecting text they were never scoped to. Both failure
+ * modes are a PASS, in a file that guards a workflow performing
+ * `DROP SCHEMA public CASCADE`.
+ *
+ * The sibling `supabase-migrate-test-first.test.ts` carries the same pair, with the
+ * same anchor and the same reasoning; IN-03 fixed one copy of one half, which is how
+ * this became a half-class fix. Both halves, both files, throw now.
+ */
+function anchorIndex(s: string, half: "suffix" | "prefix"): number {
+  const i = s.indexOf(SUFFIX_ANCHOR);
+  if (i < 0) {
+    throw new Error(
+      `SUFFIX_ANCHOR not found — the ${half} pin has no subject. The anchor ` +
+        `(${JSON.stringify(SUFFIX_ANCHOR)}) is the line the copied mutex protocol begins ` +
+        "at; if the copy was re-indented or that line was reworded, re-derive the anchor " +
+        "rather than letting this comparison fall back to a slice nobody chose.",
+    );
+  }
+  return i;
+}
+/** The step text from the anchor onwards — the bytes that must equal ci.yml's. */
+const anchoredSuffix = (s: string): string => s.slice(anchorIndex(s, "suffix"));
+/** The step text before the anchor — OUR half, the one allowed to differ. */
+const anchoredPrefix = (s: string): string =>
+  s.slice(0, anchorIndex(s, "prefix"));
 
 // ---------------------------------------------------------------------------
 // Predicates. Every one takes TEXT, so each can be run against a mutant.
@@ -119,7 +154,11 @@ function modeInput(text: string): {
 } {
   const lines = onBlockLines(text);
   const i = lines.findIndex((l) => l === "      mode:");
-  const spec = { type: null as string | null, options: [] as string[], default: null as string | null };
+  const spec = {
+    type: null as string | null,
+    options: [] as string[],
+    default: null as string | null,
+  };
   if (i < 0) return spec;
   let inOptions = false;
   for (let k = i + 1; k < lines.length; k += 1) {
@@ -135,7 +174,8 @@ function modeInput(text: string): {
     }
     inOptions = false;
     if (t.startsWith("type:")) spec.type = t.slice("type:".length).trim();
-    if (t.startsWith("default:")) spec.default = t.slice("default:".length).trim();
+    if (t.startsWith("default:"))
+      spec.default = t.slice("default:".length).trim();
   }
   return spec;
 }
@@ -198,7 +238,14 @@ function stepBody(text: string, name: string): string {
  * program would make "the DSN was scrubbed" vacuously reportable.
  */
 function redactExpressions(text: string): string[] {
-  const body = text.slice(text.indexOf("- name: Redact connection metadata"));
+  // ⛔ The step index is checked BEFORE it narrows anything (Phase 164.8.2 class
+  // sweep). `indexOf` returns -1 on an absent step and a negative index counts from
+  // the END, so the unguarded form silently made `body` the step's LAST CHARACTER —
+  // whereupon both anchors below are absent, this returns [], and the caller's
+  // "non-empty exact length" assertion is the only thing that would have noticed.
+  const at = text.indexOf("- name: Redact connection metadata");
+  if (at < 0) return [];
+  const body = text.slice(at);
   const a = body.indexOf("if sed -i -E");
   if (a < 0) return [];
   const b = body.indexOf("; then", a);
@@ -258,7 +305,9 @@ const SOFTENING_TOKENS = [
  * which is strictly stronger than a token scan over the same bytes.
  */
 function scannableRestoreBlock(text: string): string {
-  return jobBlock(text, RESTORE_JOB).replace(ACQUIRE_RE, "").replace(RELEASE_RE, "");
+  return jobBlock(text, RESTORE_JOB)
+    .replace(ACQUIRE_RE, "")
+    .replace(RELEASE_RE, "");
 }
 
 /**
@@ -359,7 +408,9 @@ function softeningOffenders(text: string): string[] {
     if (token === SITE_ALLOWLISTED_TOKEN) continue;
     const n = live.split(token).length - 1;
     if (n === 0) continue;
-    offenders.push(`${token} (${n}) — forbidden outright in the scannable restore block`);
+    offenders.push(
+      `${token} (${n}) — forbidden outright in the scannable restore block`,
+    );
   }
 
   // ⭐ ATTRIBUTED TO A STEP, not merely quoted. Measured while writing this: the marker
@@ -623,7 +674,9 @@ function ciStepNameContaining(token: string): string {
 }
 
 const CRON_STEP_NAME = ciStepNameContaining("Provision pg_cron");
-const PROBE_STEP_NAME = ciStepNameContaining("PostgreSQL server binaries resolve");
+const PROBE_STEP_NAME = ciStepNameContaining(
+  "PostgreSQL server binaries resolve",
+);
 
 // ---------------------------------------------------------------------------
 // Calibration harness.
@@ -639,7 +692,10 @@ function calibrate(
     mutant,
     `CALIBRATION ${label}: the mutation produced an identical string, so the twin proves nothing`,
   ).not.toBe(text);
-  expect(predicate(text), `${label}: the predicate is FALSE on the real file`).toBe(true);
+  expect(
+    predicate(text),
+    `${label}: the predicate is FALSE on the real file`,
+  ).toBe(true);
   expect(
     predicate(mutant),
     `CALIBRATION ${label}: the predicate did NOT flip on the mutant — it cannot fail, so it is not evidence`,
@@ -678,11 +734,22 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
   describe("triggers and inputs: the destructive path cannot be reached by accident", () => {
     it("the on: block declares workflow_dispatch and NOTHING else", () => {
       expect(triggerKeys(WF)).toEqual(["workflow_dispatch"]);
-      for (const trigger of ["push", "schedule", "pull_request", "pull_request_target"]) {
+      for (const trigger of [
+        "push",
+        "schedule",
+        "pull_request",
+        "pull_request_target",
+      ]) {
         calibrate(
           `on: only workflow_dispatch (twin: ${trigger})`,
-          (s) => s.replace("\non:\n", `\non:\n  ${trigger}:\n    branches: [main]\n`),
-          (s) => triggerKeys(s).length === 1 && triggerKeys(s)[0] === "workflow_dispatch",
+          (s) =>
+            s.replace(
+              "\non:\n",
+              `\non:\n  ${trigger}:\n    branches: [main]\n`,
+            ),
+          (s) =>
+            triggerKeys(s).length === 1 &&
+            triggerKeys(s)[0] === "workflow_dispatch",
         );
       }
     });
@@ -694,7 +761,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       expect(spec.default).toBe("preflight");
       calibrate(
         "mode defaults to preflight",
-        (s) => s.replace("        default: preflight\n", "        default: restore\n"),
+        (s) =>
+          s.replace(
+            "        default: preflight\n",
+            "        default: restore\n",
+          ),
         (s) => modeInput(s).default === "preflight",
       );
       calibrate(
@@ -707,14 +778,28 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     it("the guard job's if: is the exact negation of the restore job's", () => {
       const guard = jobBlock(WF, GUARD_JOB);
       const restore = jobBlock(WF, RESTORE_JOB);
-      expect(liveLineCount(guard, "if: github.ref != 'refs/heads/main'")).toBe(1);
-      expect(liveLineCount(restore, "if: github.ref == 'refs/heads/main'")).toBe(1);
+      expect(liveLineCount(guard, "if: github.ref != 'refs/heads/main'")).toBe(
+        1,
+      );
+      expect(
+        liveLineCount(restore, "if: github.ref == 'refs/heads/main'"),
+      ).toBe(1);
       calibrate(
         "guard if: is the negation of the restore if:",
-        (s) => s.replace("if: github.ref != 'refs/heads/main'", "if: github.ref != 'refs/heads/develop'"),
         (s) =>
-          liveLineCount(jobBlock(s, GUARD_JOB), "if: github.ref != 'refs/heads/main'") === 1 &&
-          liveLineCount(jobBlock(s, RESTORE_JOB), "if: github.ref == 'refs/heads/main'") === 1,
+          s.replace(
+            "if: github.ref != 'refs/heads/main'",
+            "if: github.ref != 'refs/heads/develop'",
+          ),
+        (s) =>
+          liveLineCount(
+            jobBlock(s, GUARD_JOB),
+            "if: github.ref != 'refs/heads/main'",
+          ) === 1 &&
+          liveLineCount(
+            jobBlock(s, RESTORE_JOB),
+            "if: github.ref == 'refs/heads/main'",
+          ) === 1,
       );
     });
 
@@ -732,16 +817,20 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     it("environment: Test is a LIVE line inside the restore job, exactly once", () => {
       calibrate(
         "environment: Test",
-        (s) => s.replace("    environment: Test\n", "    # environment: Test\n"),
-        (s) => liveLineCount(jobBlock(s, RESTORE_JOB), "environment: Test") === 1,
+        (s) =>
+          s.replace("    environment: Test\n", "    # environment: Test\n"),
+        (s) =>
+          liveLineCount(jobBlock(s, RESTORE_JOB), "environment: Test") === 1,
       );
     });
 
     it("timeout-minutes: 90 is a LIVE line inside the restore job", () => {
       calibrate(
         "timeout-minutes: 90 (the runbook's TTL leg — the holder sleeps 6000s = 100min)",
-        (s) => s.replace("    timeout-minutes: 90\n", "    timeout-minutes: 900\n"),
-        (s) => liveLineCount(jobBlock(s, RESTORE_JOB), "timeout-minutes: 90") === 1,
+        (s) =>
+          s.replace("    timeout-minutes: 90\n", "    timeout-minutes: 900\n"),
+        (s) =>
+          liveLineCount(jobBlock(s, RESTORE_JOB), "timeout-minutes: 90") === 1,
       );
     });
 
@@ -753,7 +842,9 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         "an `if:` appeared between the credential step's name and its run body — that is supabase-migrate.yml's OLDER tolerant shape, which reports success having restored nothing",
       ).toBe(false);
       const body = stepBody(WF, "Assert TEST credential is configured");
-      expect(body).toContain("::error::secrets.TEST_SUPABASE_DB_URL is not configured.");
+      expect(body).toContain(
+        "::error::secrets.TEST_SUPABASE_DB_URL is not configured.",
+      );
       expect(body).toContain("exit 1");
       calibrate(
         "credential step has no if:",
@@ -762,7 +853,8 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
             "      - name: Assert TEST credential is configured\n",
             "      - name: Assert TEST credential is configured\n        if: vars.CONFIGURED == 'true'\n",
           ),
-        (s) => !/^\s*if:/m.test(stepHead(s, "Assert TEST credential is configured")),
+        (s) =>
+          !/^\s*if:/m.test(stepHead(s, "Assert TEST credential is configured")),
       );
     });
   });
@@ -817,7 +909,8 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         staleSelf: "node scripts/check-baseline-staleness.mjs --self-test",
         stale: "node scripts/check-baseline-staleness.mjs",
         scriptSelf: "bash scripts/restore-test-from-baseline.sh --self-test",
-        scriptRun: 'bash scripts/restore-test-from-baseline.sh --run --mode "$MODE"',
+        scriptRun:
+          'bash scripts/restore-test-from-baseline.sh --run --mode "$MODE"',
       };
       for (const [key, cmd] of Object.entries(cmds)) {
         expect(
@@ -835,7 +928,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       ).toBeLessThan(liveCommandIndex(b, cmds.scriptRun));
       calibrate(
         "the restore script's --run is EXECUTED, not mentioned",
-        (s) => s.replace(`          ${cmds.scriptRun}`, `          # ${cmds.scriptRun}`),
+        (s) =>
+          s.replace(
+            `          ${cmds.scriptRun}`,
+            `          # ${cmds.scriptRun}`,
+          ),
         (t) => liveCommandIndex(jobBlock(t, RESTORE_JOB), cmds.scriptRun) > -1,
       );
       calibrate(
@@ -847,7 +944,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
             .replace("run: __SWAP__", `run: ${cmds.stale}`),
         (t) => {
           const b2 = jobBlock(t, RESTORE_JOB);
-          return liveCommandIndex(b2, cmds.staleSelf) < liveCommandIndex(b2, cmds.stale);
+          return (
+            liveCommandIndex(b2, cmds.staleSelf) <
+            liveCommandIndex(b2, cmds.stale)
+          );
         },
       );
     });
@@ -886,10 +986,16 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     it("the backup step's own NAME says what the artifact does not hold", () => {
       calibrate(
         "the backup step name says `NOT data`",
-        (s) => s.replace(`- name: ${BACKUP}`, "- name: Back up TEST before any write"),
+        (s) =>
+          s.replace(
+            `- name: ${BACKUP}`,
+            "- name: Back up TEST before any write",
+          ),
         (t) => {
           const b = jobBlock(t, RESTORE_JOB);
-          const i = b.split("\n").findIndex((l) => /^\s*- name: Back up TEST/.test(l));
+          const i = b
+            .split("\n")
+            .findIndex((l) => /^\s*- name: Back up TEST/.test(l));
           return i > -1 && b.split("\n")[i].includes("NOT data");
         },
       );
@@ -898,7 +1004,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     it("the upload survives an aborted run and refuses to upload nothing", () => {
       const body = stepBody(WF, UPLOAD);
       expect(body, "the backup upload step is gone").not.toBe("");
-      for (const key of ["if: always()", "retention-days: 90", "if-no-files-found: error"]) {
+      for (const key of [
+        "if: always()",
+        "retention-days: 90",
+        "if-no-files-found: error",
+      ]) {
         expect(
           liveLines(body).some((l) => l.trim() === key),
           `the backup upload step no longer carries \`${key}\``,
@@ -906,8 +1016,15 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       }
       calibrate(
         "the backup artifact is retained for 90 days",
-        (s) => s.replace("          retention-days: 90\n", "          retention-days: 7\n"),
-        (t) => liveLines(stepBody(t, UPLOAD)).some((l) => l.trim() === "retention-days: 90"),
+        (s) =>
+          s.replace(
+            "          retention-days: 90\n",
+            "          retention-days: 7\n",
+          ),
+        (t) =>
+          liveLines(stepBody(t, UPLOAD)).some(
+            (l) => l.trim() === "retention-days: 90",
+          ),
       );
       calibrate(
         "an empty backup directory is an ERROR, never a quiet upload of nothing",
@@ -917,7 +1034,9 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
             "          if-no-files-found: warn\n",
           ),
         (t) =>
-          liveLines(stepBody(t, UPLOAD)).some((l) => l.trim() === "if-no-files-found: error"),
+          liveLines(stepBody(t, UPLOAD)).some(
+            (l) => l.trim() === "if-no-files-found: error",
+          ),
       );
       calibrate(
         "the upload runs even when the script aborted",
@@ -926,7 +1045,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
             `      - name: ${UPLOAD}\n        if: always()\n`,
             `      - name: ${UPLOAD}\n`,
           ),
-        (t) => liveLines(stepBody(t, UPLOAD)).some((l) => l.trim() === "if: always()"),
+        (t) =>
+          liveLines(stepBody(t, UPLOAD)).some(
+            (l) => l.trim() === "if: always()",
+          ),
       );
     });
 
@@ -942,7 +1064,8 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
   });
 
   describe("the redaction is fail-closed: nothing unredacted reaches a PUBLIC artifact", () => {
-    const REDACT = "Redact connection metadata from the backup directory (public artifact)";
+    const REDACT =
+      "Redact connection metadata from the backup directory (public artifact)";
     const UPLOAD = "Upload the pre-restore backup (schema + ledger; NOT data)";
 
     it("the redaction step exists, runs on every outcome, and runs BEFORE the upload", () => {
@@ -952,10 +1075,17 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // written above it. Drift the upload above the redaction and every assertion
       // about scrubbing stays true while the unredacted channels ship anyway.
       const b = jobBlock(WF, RESTORE_JOB);
-      expect(stepIndex(b, REDACT), "the redaction step is gone").toBeGreaterThan(-1);
-      expect(stepIndex(b, UPLOAD), "the upload step is gone").toBeGreaterThan(-1);
       expect(
-        liveLines(stepBody(WF, REDACT)).some((l) => l.trim() === "if: always()"),
+        stepIndex(b, REDACT),
+        "the redaction step is gone",
+      ).toBeGreaterThan(-1);
+      expect(stepIndex(b, UPLOAD), "the upload step is gone").toBeGreaterThan(
+        -1,
+      );
+      expect(
+        liveLines(stepBody(WF, REDACT)).some(
+          (l) => l.trim() === "if: always()",
+        ),
         "the redaction step no longer carries `if: always()` — on an ABORTED run it would not run at all, and the aborted run is exactly the one whose channels hold a psql connect failure naming the TEST pooler host",
       ).toBe(true);
       calibrate(
@@ -979,8 +1109,15 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // an identical string" assertion, which is what that assertion is for.
       calibrate(
         "the redaction runs on an aborted run too",
-        (s) => s.replace("        id: redact\n        if: always()\n", "        id: redact\n"),
-        (t) => liveLines(stepBody(t, REDACT)).some((l) => l.trim() === "if: always()"),
+        (s) =>
+          s.replace(
+            "        id: redact\n        if: always()\n",
+            "        id: redact\n",
+          ),
+        (t) =>
+          liveLines(stepBody(t, REDACT)).some(
+            (l) => l.trim() === "if: always()",
+          ),
       );
     });
 
@@ -992,8 +1129,12 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // redact loop are pinned, because a widened destroy loop is a reversal recipe
       // deleted on the way to the artifact.
       const body = stepBody(WF, REDACT);
-      expect(body, "the redaction step body could not be extracted").not.toBe("");
-      const globLines = liveLines(body).filter((l) => l.includes('"${outdir}"/*.'));
+      expect(body, "the redaction step body could not be extracted").not.toBe(
+        "",
+      );
+      const globLines = liveLines(body).filter((l) =>
+        l.includes('"${outdir}"/*.'),
+      );
       expect(
         globLines.length,
         "the redaction step no longer has exactly two channel-glob loops (withhold_channels and the redact loop)",
@@ -1031,16 +1172,20 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       const exprs = redactExpressions(WF);
       expect(
         exprs.length,
-        "the redaction step's sed program no longer carries its five expressions (DSN credentials, host=, user=, `server at \"…\"`, `for user \"…\"`)",
+        'the redaction step\'s sed program no longer carries its five expressions (DSN credentials, host=, user=, `server at "…"`, `for user "…"`)',
       ).toBe(5);
 
       const scrub = (program: string[], input: string): string => {
         const dir = mkdtempSync(join(tmpdir(), "redact-"));
         const f = join(dir, "psql.err");
         writeFileSync(f, input);
-        const r = spawnSync("sed", ["-E", ...program.flatMap((e) => ["-e", e]), f], {
-          encoding: "utf8",
-        });
+        const r = spawnSync(
+          "sed",
+          ["-E", ...program.flatMap((e) => ["-e", e]), f],
+          {
+            encoding: "utf8",
+          },
+        );
         rmSync(dir, { recursive: true, force: true });
         if (r.status !== 0) throw new Error(`sed failed: ${r.stderr}`);
         return r.stdout ?? "";
@@ -1052,7 +1197,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         "host=db.exampleprojref.supabase.co user=postgres.exampleprojref\n";
 
       const out = scrub(exprs, FIXTURE);
-      for (const secret of ["EXAMPLE-NOT-A-REAL-PASSWORD", "postgres.exampleprojref"]) {
+      for (const secret of [
+        "EXAMPLE-NOT-A-REAL-PASSWORD",
+        "postgres.exampleprojref",
+      ]) {
         expect(
           out.includes(secret),
           `the redaction left \`${secret}\` in the channel. This artifact is world-readable on a PUBLIC repo; the DB user and the password are exactly what must not survive.\n${out}`,
@@ -1060,7 +1208,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       }
       expect(
         out.includes('server at "db.exampleprojref.supabase.co"'),
-        "the redaction left psql's `server at \"<host>\" (<ip>)` shape intact — the TEST pooler host and its IP are disclosed",
+        'the redaction left psql\'s `server at "<host>" (<ip>)` shape intact — the TEST pooler host and its IP are disclosed',
       ).toBe(false);
       expect(out).toContain("***");
 
@@ -1151,8 +1299,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
   // out of scope, this one uses the measured names).
   // -------------------------------------------------------------------------
   describe("WR-05 — the public artifact carries an enumerated allowlist, default-out", () => {
-    const STAGE = "Stage the public artifact (enumerated allowlist; default-out)";
-    const REDACT = "Redact connection metadata from the backup directory (public artifact)";
+    const STAGE =
+      "Stage the public artifact (enumerated allowlist; default-out)";
+    const REDACT =
+      "Redact connection metadata from the backup directory (public artifact)";
     const UPLOAD = "Upload the pre-restore backup (schema + ledger; NOT data)";
     /** The step that takes the backup, writes the README and runs the secret scan. */
     const BACKUP = "Back up TEST before any write (schema + ledger; NOT data)";
@@ -1280,7 +1430,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       writeFileSync(scriptFile, script);
       const r = spawnSync("bash", [scriptFile], {
         encoding: "utf8",
-        env: { ...process.env, RUNNER_TEMP: runnerTemp, REDACT_OUTCOME: redactOutcome },
+        env: {
+          ...process.env,
+          RUNNER_TEMP: runnerTemp,
+          REDACT_OUTCOME: redactOutcome,
+        },
       });
       const stageDir = join(runnerTemp, "test-backup-artifact");
       let staged: string[] = [];
@@ -1295,7 +1449,8 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // and "the file is named in the manifest" is a weaker claim than "the file is
       // in the artifact and here is the policy line inside it".
       const contents: Record<string, string> = {};
-      for (const f of staged) contents[f] = readFileSync(join(stageDir, f), "utf8");
+      for (const f of staged)
+        contents[f] = readFileSync(join(stageDir, f), "utf8");
       rmSync(runnerTemp, { recursive: true, force: true });
       return {
         status: r.status,
@@ -1353,7 +1508,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // the agreement above is between two constants.
       calibrate(
         "the channel allowlist is parsed out of the step, not restated",
-        (s) => s.replace("for c in census.err ledger.err", "for c in census.ERR ledger.err"),
+        (s) =>
+          s.replace(
+            "for c in census.err ledger.err",
+            "for c in census.ERR ledger.err",
+          ),
         (t) => stagedChannelNames(t).includes("census.err"),
       );
 
@@ -1361,7 +1520,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // above is between two constants and measures nothing.
       calibrate(
         "the allowlist is parsed out of the step, not restated",
-        (s) => s.replace("for f in ledger.csv schema-before.sql", "for f in ledger.csv schema-AFTER.sql"),
+        (s) =>
+          s.replace(
+            "for f in ledger.csv schema-before.sql",
+            "for f in ledger.csv schema-AFTER.sql",
+          ),
         (t) => stagedNameList(t).includes("schema-before.sql"),
       );
       // ⛔ A GLOB IS NOT AN ALLOWLIST. `*.sql` would re-admit every future `.sql` the
@@ -1414,7 +1577,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // is staged again. Without this twin, "pre-census.txt is absent" could be
       // reported by a fixture that never contained it.
       const OLD_SHAPE_ANCHOR =
-        '  for f in ledger.csv schema-before.sql README.txt census.sql survivors.sql restore.sql refdata.sql; do\n' +
+        "  for f in ledger.csv schema-before.sql README.txt census.sql survivors.sql restore.sql refdata.sql; do\n" +
         '    if [ -f "${outdir}/${f}" ]; then\n' +
         '      cp -p "${outdir}/${f}" "${stage}/"\n' +
         "    fi\n" +
@@ -1423,7 +1586,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         script.includes(OLD_SHAPE_ANCHOR),
         "the staging step's enumerated copy loop is no longer the form this calibration mutates — re-anchor the mutation rather than deleting the twin, or the arm silently stops being evidence",
       ).toBe(true);
-      const neutered = script.replace(OLD_SHAPE_ANCHOR, '  cp -a "${outdir}/." "${stage}/"\n');
+      const neutered = script.replace(
+        OLD_SHAPE_ANCHOR,
+        '  cp -a "${outdir}/." "${stage}/"\n',
+      );
       expect(
         neutered,
         "CALIBRATION: the neuter produced an identical script, so it proves nothing",
@@ -1489,8 +1655,14 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         script.includes('cp -p "${outdir}/${f}" "${stage}/"'),
         "the staging step's first `cp -p` is no longer the form this twin forces to fail — re-anchor it",
       ).toBe(true);
-      const forced = script.replace('cp -p "${outdir}/${f}" "${stage}/"', 'false -p "${outdir}/${f}" "${stage}/"');
-      expect(forced, "CALIBRATION: the forced-failure mutation changed nothing").not.toBe(script);
+      const forced = script.replace(
+        'cp -p "${outdir}/${f}" "${stage}/"',
+        'false -p "${outdir}/${f}" "${stage}/"',
+      );
+      expect(
+        forced,
+        "CALIBRATION: the forced-failure mutation changed nothing",
+      ).not.toBe(script);
 
       const r = runStage(forced, REAL_NAMES);
       expect(
@@ -1524,13 +1696,22 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         "the redaction step lost its `id: redact`, so `steps.redact.outcome` evaluates to the empty string and the staging step's guard would silently withhold every channel on EVERY run — a control that always fires is as uninformative as one that never does",
       ).toBe(true);
       expect(
-        stepHead(WF, STAGE).includes("REDACT_OUTCOME: ${{ steps.redact.outcome }}"),
+        stepHead(WF, STAGE).includes(
+          "REDACT_OUTCOME: ${{ steps.redact.outcome }}",
+        ),
         "the staging step no longer receives the redaction step's outcome. Without it the channel loop is back to copying whatever survived a FAILED redaction into a world-readable artifact (review WR-06).",
       ).toBe(true);
       calibrate(
         "the staging step reads the redaction step's outcome",
-        (s) => s.replace("REDACT_OUTCOME: ${{ steps.redact.outcome }}", "REDACT_OUTCOME: success"),
-        (t) => stepHead(t, STAGE).includes("REDACT_OUTCOME: ${{ steps.redact.outcome }}"),
+        (s) =>
+          s.replace(
+            "REDACT_OUTCOME: ${{ steps.redact.outcome }}",
+            "REDACT_OUTCOME: success",
+          ),
+        (t) =>
+          stepHead(t, STAGE).includes(
+            "REDACT_OUTCOME: ${{ steps.redact.outcome }}",
+          ),
       );
       calibrate(
         "the redaction step carries the id the staging step names",
@@ -1550,9 +1731,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       ).toBe(0);
 
       const channels = stagedChannelNames(WF);
-      expect(channels.length, "no channel names parsed — the assertion below would be vacuous").toBe(
-        6,
-      );
+      expect(
+        channels.length,
+        "no channel names parsed — the assertion below would be vacuous",
+      ).toBe(6);
       for (const c of channels) {
         expect(
           r.staged.includes(c),
@@ -1563,7 +1745,15 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         r.staged,
         "the reversal recipe did not survive a failed redaction. ledger.csv, schema-before.sql and the four script `.sql` files carry no connection metadata; withholding them would turn a lost diagnostic into a lost undo.",
       ).toEqual(
-        ["ledger.csv", "schema-before.sql", "README.txt", "census.sql", "survivors.sql", "restore.sql", "refdata.sql"].sort(),
+        [
+          "ledger.csv",
+          "schema-before.sql",
+          "README.txt",
+          "census.sql",
+          "survivors.sql",
+          "restore.sql",
+          "refdata.sql",
+        ].sort(),
       );
       expect(
         r.output,
@@ -1585,7 +1775,8 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // mutation removes the whole chain. A regex that silently matched nothing would
       // leave a dangling `elif`, and the twin would fail as "broke the shell" instead
       // of as evidence — which is how this re-anchor was found.
-      const ELIF_ANCHOR = /^ {2}elif \[ -z "\$\{REDACT_OUTCOME:-\}" \]; then\n[\s\S]*?\n {2}fi\n/m;
+      const ELIF_ANCHOR =
+        /^ {2}elif \[ -z "\$\{REDACT_OUTCOME:-\}" \]; then\n[\s\S]*?\n {2}fi\n/m;
       expect(
         ELIF_ANCHOR.test(script),
         "the staging step's redaction-verdict chain is no longer the form this calibration strips — re-anchor the mutation rather than deleting the twin",
@@ -1629,7 +1820,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
 
     /** The pre-fix state: the verdict guard denies, but never fails the step. */
     function withoutTheExit(script: string): string {
-      const out = script.split("\n").filter((l) => l.trim() !== "wiring_fault=1").join("\n");
+      const out = script
+        .split("\n")
+        .filter((l) => l.trim() !== "wiring_fault=1")
+        .join("\n");
       expect(
         out,
         "CALIBRATION: no `wiring_fault=1` line was removed, so the twin does not reproduce the pre-fix silent deny",
@@ -1657,9 +1851,15 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       ).toBe(false);
 
       const channels = stagedChannelNames(WF);
-      expect(channels.length, "no channel names parsed — the assertion below would be vacuous").toBe(6);
+      expect(
+        channels.length,
+        "no channel names parsed — the assertion below would be vacuous",
+      ).toBe(6);
       for (const c of channels) {
-        expect(r.staged.includes(c), `\`${c}\` was published on an UNREAD redaction verdict`).toBe(false);
+        expect(
+          r.staged.includes(c),
+          `\`${c}\` was published on an UNREAD redaction verdict`,
+        ).toBe(false);
       }
       expect(
         r.staged,
@@ -1696,7 +1896,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       ).toBe(1);
       expect(r.output).toContain("none of success/failure/cancelled/skipped");
       for (const c of stagedChannelNames(WF)) {
-        expect(r.staged.includes(c), `\`${c}\` was published on an unrecognised verdict`).toBe(false);
+        expect(
+          r.staged.includes(c),
+          `\`${c}\` was published on an unrecognised verdict`,
+        ).toBe(false);
       }
     });
 
@@ -1714,7 +1917,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           r.output.includes("MEASURE_FAIL"),
           `outcome '${outcome}' was reported as a MEASURE_FAIL — it is a legitimate non-success, not an unread verdict`,
         ).toBe(false);
-        expect(r.staged, `the reversal recipe did not survive outcome '${outcome}'`).toEqual(RECIPE);
+        expect(
+          r.staged,
+          `the reversal recipe did not survive outcome '${outcome}'`,
+        ).toEqual(RECIPE);
       }
     });
 
@@ -1730,8 +1936,13 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         encoding: "utf8",
         env: { ...process.env, RUNNER_TEMP: runnerTemp },
       });
-      const staged = readdirSync(join(runnerTemp, "test-backup-artifact")).sort();
-      const note = readFileSync(join(runnerTemp, "test-backup-artifact", "README.txt"), "utf8");
+      const staged = readdirSync(
+        join(runnerTemp, "test-backup-artifact"),
+      ).sort();
+      const note = readFileSync(
+        join(runnerTemp, "test-backup-artifact", "README.txt"),
+        "utf8",
+      );
       rmSync(runnerTemp, { recursive: true, force: true });
 
       expect(r.status, `${r.stdout ?? ""}${r.stderr ?? ""}`).toBe(0);
@@ -1745,7 +1956,9 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // making the redaction a precondition of staging — and staging a precondition of
       // the upload — is that they are written in that order.
       const b = jobBlock(WF, RESTORE_JOB);
-      expect(stepIndex(b, STAGE), "the staging step is gone").toBeGreaterThan(-1);
+      expect(stepIndex(b, STAGE), "the staging step is gone").toBeGreaterThan(
+        -1,
+      );
       expect(
         liveLines(stepBody(WF, STAGE)).some((l) => l.trim() === "if: always()"),
         "the staging step no longer carries `if: always()` — on an ABORTED run it would not run at all, and the aborted run is the one whose artifact matters most",
@@ -1783,8 +1996,15 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       );
       calibrate(
         "the staging runs on an aborted run too",
-        (s) => s.replace(`      - name: ${STAGE}\n        if: always()\n`, `      - name: ${STAGE}\n`),
-        (t) => liveLines(stepBody(t, STAGE)).some((l) => l.trim() === "if: always()"),
+        (s) =>
+          s.replace(
+            `      - name: ${STAGE}\n        if: always()\n`,
+            `      - name: ${STAGE}\n`,
+          ),
+        (t) =>
+          liveLines(stepBody(t, STAGE)).some(
+            (l) => l.trim() === "if: always()",
+          ),
       );
     });
 
@@ -1861,7 +2081,9 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     function scannedFiles(text: string): string[] {
       const body = stepBody(text, BACKUP);
       return [
-        ...body.matchAll(/^\s*scan_for_secrets "\$\{outdir\}\/([A-Za-z0-9_.-]+)"/gm),
+        ...body.matchAll(
+          /^\s*scan_for_secrets "\$\{outdir\}\/([A-Za-z0-9_.-]+)"/gm,
+        ),
       ].map((m) => m[1]);
     }
 
@@ -1918,12 +2140,33 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // is stale the first time a name is added, and a stale numeral beside a corrected
       // paragraph is how WR-02 happened in the first place.
       const WORDS = [
-        "ZERO", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE",
-        "TEN", "ELEVEN", "TWELVE", "THIRTEEN", "FOURTEEN", "FIFTEEN", "SIXTEEN",
-        "SEVENTEEN", "EIGHTEEN", "NINETEEN", "TWENTY",
+        "ZERO",
+        "ONE",
+        "TWO",
+        "THREE",
+        "FOUR",
+        "FIVE",
+        "SIX",
+        "SEVEN",
+        "EIGHT",
+        "NINE",
+        "TEN",
+        "ELEVEN",
+        "TWELVE",
+        "THIRTEEN",
+        "FOURTEEN",
+        "FIFTEEN",
+        "SIXTEEN",
+        "SEVENTEEN",
+        "EIGHTEEN",
+        "NINETEEN",
+        "TWENTY",
       ];
       const word = WORDS[staged.length];
-      expect(word, `no numeral word for a ${staged.length}-file artifact — extend WORDS`).toBeTruthy();
+      expect(
+        word,
+        `no numeral word for a ${staged.length}-file artifact — extend WORDS`,
+      ).toBeTruthy();
       expect(
         section,
         `the README's scan-scope heading no longer says how many files this artifact carries, or says the wrong number. The staging step's two lists now carry ${staged.length}, so the heading must read "THESE ${word}".`,
@@ -1951,7 +2194,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // version of it did exactly that and reported a twin that does not bite.
       calibrate(
         "the scan-scope rule bites when a staged file stops being named as unscanned",
-        (s) => s.replace("census.err, ledger.err, marker.err", "ledger.err, marker.err"),
+        (s) =>
+          s.replace(
+            "census.err, ledger.err, marker.err",
+            "ledger.err, marker.err",
+          ),
         (t) => {
           const sec = readmeScanSection(t);
           const sc = scannedFiles(t);
@@ -1980,14 +2227,19 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // ⛔ AND THE SUPERSEDED SENTENCE MUST NOT COME BACK. "both files were scanned"
       // was true of a two-file artifact and false of this one; an absence assertion is
       // only evidence if the presence of the thing can be detected, hence the twin.
-      const DEAD = "was allowed to proceed to any write, both files were scanned";
+      const DEAD =
+        "was allowed to proceed to any write, both files were scanned";
       expect(
         WF.includes(DEAD),
         `the superseded README sentence ${JSON.stringify(DEAD)} is back. It describes a two-file artifact; this one carries ${staged.length} files, ${unscanned.length} of them scanned by nothing.`,
       ).toBe(false);
       calibrate(
         "the dead 'both files were scanned' sentence would be caught if it came back",
-        (s) => s.replace("⚠️ WHAT WAS SCANNED", `${DEAD}\n          ⚠️ WHAT WAS SCANNED`),
+        (s) =>
+          s.replace(
+            "⚠️ WHAT WAS SCANNED",
+            `${DEAD}\n          ⚠️ WHAT WAS SCANNED`,
+          ),
         (t) => !t.includes(DEAD),
       );
     });
@@ -2005,7 +2257,8 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       const i = lines.findIndex((l) => l.trim() === `- name: ${name}`);
       if (i < 0) return "";
       const out: string[] = [];
-      for (let k = i - 1; k >= 0 && /^\s*#/.test(lines[k]); k -= 1) out.unshift(lines[k]);
+      for (let k = i - 1; k >= 0 && /^\s*#/.test(lines[k]); k -= 1)
+        out.unshift(lines[k]);
       return out.join("\n");
     }
 
@@ -2036,7 +2289,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // thing can be detected. Re-insert the sentence on a scratch copy.
       calibrate(
         "the dead SCOPE sentence would be caught if it came back",
-        (s) => s.replace("      # ⚠️ SCOPE — CORRECTED", `      # ${DEAD[0]}\n      # ⚠️ SCOPE — CORRECTED`),
+        (s) =>
+          s.replace(
+            "      # ⚠️ SCOPE — CORRECTED",
+            `      # ${DEAD[0]}\n      # ⚠️ SCOPE — CORRECTED`,
+          ),
         (t) => DEAD.every((d) => !t.includes(d)),
       );
 
@@ -2059,7 +2316,9 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     it("the upload publishes the STAGING directory, never the raw backup directory", () => {
       const body = stepBody(WF, UPLOAD);
       expect(
-        liveLines(body).some((l) => l.trim() === "path: ${{ runner.temp }}/test-backup-artifact"),
+        liveLines(body).some(
+          (l) => l.trim() === "path: ${{ runner.temp }}/test-backup-artifact",
+        ),
         "the upload's `path:` no longer points at the staging directory. Pointed back at `${{ runner.temp }}/test-backup` it publishes every file the restore script wrote — the pre-drop census included — which is the finding this step closed.",
       ).toBe(true);
       calibrate(
@@ -2118,10 +2377,14 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         "RESTORE_REFUSE_MARKER_RE:-prod",
         "RESTORE_REFUSE_MARKER_RE:-prod|production",
       );
-      expect(tightened, "CALIBRATION: the mutation changed nothing").not.toBe(SCRIPT);
-      const mutatedRefuse = (tightened.match(
-        /^RESTORE_REFUSE_MARKER_RE="\$\{RESTORE_REFUSE_MARKER_RE:-(.*)\}"$/m,
-      ) as RegExpMatchArray)[1];
+      expect(tightened, "CALIBRATION: the mutation changed nothing").not.toBe(
+        SCRIPT,
+      );
+      const mutatedRefuse = (
+        tightened.match(
+          /^RESTORE_REFUSE_MARKER_RE="\$\{RESTORE_REFUSE_MARKER_RE:-(.*)\}"$/m,
+        ) as RegExpMatchArray
+      )[1];
       expect(
         greps[1] === mutatedRefuse,
         "CALIBRATION: the workflow's copy matched the TIGHTENED script default too, so the pin cannot see a one-sided tightening",
@@ -2166,10 +2429,19 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         (t) => softeningOffenders(t).length === 0,
       );
       // …and it is named, with the count that moved, not merely counted.
-      const softenedMarker = WF.replace('2>"${RUNNER_TEMP}/marker.err"', "2>/dev/null");
-      expect(softenedMarker, "the marker-step mutation changed nothing").not.toBe(WF);
+      const softenedMarker = WF.replace(
+        '2>"${RUNNER_TEMP}/marker.err"',
+        "2>/dev/null",
+      );
+      expect(
+        softenedMarker,
+        "the marker-step mutation changed nothing",
+      ).not.toBe(WF);
       const markerOffenders = softeningOffenders(softenedMarker);
-      expect(markerOffenders.length, "the softened marker step went unreported").toBeGreaterThan(0);
+      expect(
+        markerOffenders.length,
+        "the softened marker step went unreported",
+      ).toBeGreaterThan(0);
       expect(
         markerOffenders.join(" | "),
         "the offender is not named `2>/dev/null` — a count with no name sends the next reader to the wrong step",
@@ -2187,8 +2459,8 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         "the softening scan bites on a `|| :` — the drop-in for the banned `|| true`",
         (s) =>
           s.replace(
-            '          set -euo pipefail\n          export RESTORE_DB_URL=',
-            '          set -euo pipefail\n          command -v supabase >/dev/null || :\n          export RESTORE_DB_URL=',
+            "          set -euo pipefail\n          export RESTORE_DB_URL=",
+            "          set -euo pipefail\n          command -v supabase >/dev/null || :\n          export RESTORE_DB_URL=",
           ),
         (t) => softeningOffenders(t).length === 0,
       );
@@ -2196,8 +2468,8 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         "the softening scan bites on a `set +o pipefail` re-enabling the discarded-status bug",
         (s) =>
           s.replace(
-            '          set -euo pipefail\n          export RESTORE_DB_URL=',
-            '          set -euo pipefail\n          set +o pipefail\n          export RESTORE_DB_URL=',
+            "          set -euo pipefail\n          export RESTORE_DB_URL=",
+            "          set -euo pipefail\n          set +o pipefail\n          export RESTORE_DB_URL=",
           ),
         (t) => softeningOffenders(t).length === 0,
       );
@@ -2238,7 +2510,9 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         "          set -euo pipefail\n          # The session-mode DSN derived ONCE",
         "          set -uo pipefail\n          # The session-mode DSN derived ONCE",
       );
-      expect(softened, "the `-e`-dropping mutation changed nothing").not.toBe(WF);
+      expect(softened, "the `-e`-dropping mutation changed nothing").not.toBe(
+        WF,
+      );
       expect(
         softeningOffenders(softened),
         "CALIBRATION: the NINE-TOKEN scan already caught a step that simply never sets `-e`, so F3 was not a gap and this whole check is buying nothing",
@@ -2249,8 +2523,14 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       ).toContain('NO ERREXIT in step "Which database am I on"');
 
       // ⭐ AND THE OTHER DIRECTION: an exemption that stopped being needed.
-      const tightened = WF.replace("          set -uo pipefail\n", "          set -euo pipefail\n");
-      expect(tightened, "the exemption-staling mutation changed nothing").not.toBe(WF);
+      const tightened = WF.replace(
+        "          set -uo pipefail\n",
+        "          set -euo pipefail\n",
+      );
+      expect(
+        tightened,
+        "the exemption-staling mutation changed nothing",
+      ).not.toBe(WF);
       expect(
         errexitOffenders(tightened).join(" | "),
         "a step that now sets `-e` kept its exemption and nothing said so — a standing permission to soften it again later, granted by nobody",
@@ -2281,7 +2561,9 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
      */
     it("no workflow overrides the runner's `bash -e {0}` shell", () => {
       const dir = ".github/workflows";
-      const files = readdirSync(join(ROOT, dir)).filter((f) => /\.ya?ml$/.test(f));
+      const files = readdirSync(join(ROOT, dir)).filter((f) =>
+        /\.ya?ml$/.test(f),
+      );
       expect(
         files.length,
         `${dir} yielded ${files.length} workflow file(s) — the scan below would be vacuously green`,
@@ -2297,7 +2579,8 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       ).toEqual([]);
       calibrate(
         "no `shell:` anywhere under .github/workflows",
-        (t) => t.replace("        run: |\n", "        shell: sh\n        run: |\n"),
+        (t) =>
+          t.replace("        run: |\n", "        shell: sh\n        run: |\n"),
         (t) => shellDecls(t).length === 0,
       );
     });
@@ -2327,7 +2610,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           INSERT_AT,
           `      - name: A folded step (${style})\n        run: ${style}\n          echo one\n          echo two\n${INSERT_AT}`,
         );
-        expect(mutant, `CALIBRATION (${style}): the mutation changed nothing`).not.toBe(WF);
+        expect(
+          mutant,
+          `CALIBRATION (${style}): the mutation changed nothing`,
+        ).not.toBe(WF);
         expect(
           legacyRunBlockCount(mutant),
           `CALIBRATION (\`run: ${style}\`): the SUPERSEDED default-out collector already counted this step, so it was never dropped and A4 is not a finding`,
@@ -2345,7 +2631,9 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
      * Its only caller is the arm below, which is what turns "the loop re-entered the body"
      * from a claim into a measurement.
      */
-    function legacyRunBlocksNoAdvance(text: string): { step: string; live: string[] }[] {
+    function legacyRunBlocksNoAdvance(
+      text: string,
+    ): { step: string; live: string[] }[] {
       const lines = scannableRestoreBlock(text).split("\n");
       const out: { step: string; live: string[] }[] = [];
       let step = "(unnamed)";
@@ -2392,7 +2680,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
 
       // 1. A body line that reads as a BARE `run:` key — the post-throw failure mode.
       const bare = WF.replace(ANCHOR, `${ANCHOR}          run:\n`);
-      expect(bare, "CALIBRATION: the bare-`run:` injection changed nothing").not.toBe(WF);
+      expect(
+        bare,
+        "CALIBRATION: the bare-`run:` injection changed nothing",
+      ).not.toBe(WF);
       expect(
         () => legacyRunBlocksNoAdvance(bare),
         "CALIBRATION: the SUPERSEDED collector did NOT abort on a `run:`-shaped body line, so re-entering the body was never a defect and this arm proves nothing",
@@ -2401,13 +2692,17 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         () => runBlocks(bare),
         "a line INSIDE a `run: |` body aborted the whole scan, naming a step it does not belong to — the collector is reading step bodies as step keys again",
       ).not.toThrow();
-      expect(runBlocks(bare).length, "the injected body line changed the block count").toBe(
-        baseline,
-      );
+      expect(
+        runBlocks(bare).length,
+        "the injected body line changed the block count",
+      ).toBe(baseline);
 
       // 2. A body line that reads as a BLOCK-SCALAR key — the pre-throw failure mode.
       const nested = WF.replace(ANCHOR, `${ANCHOR}          run: |\n`);
-      expect(nested, "CALIBRATION: the nested-`run: |` injection changed nothing").not.toBe(WF);
+      expect(
+        nested,
+        "CALIBRATION: the nested-`run: |` injection changed nothing",
+      ).not.toBe(WF);
       expect(
         legacyRunBlocksNoAdvance(nested).length,
         "CALIBRATION: the SUPERSEDED collector did not double-collect the nested key, so this fixture does not reproduce the class",
@@ -2453,7 +2748,8 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           );
           continue;
         }
-        const name = region.match(/^\s*- name: (.+)$/m)?.[1]?.trim() ?? "(unnamed)";
+        const name =
+          region.match(/^\s*- name: (.+)$/m)?.[1]?.trim() ?? "(unnamed)";
         seen.push(name);
         const live = liveLines(region);
         const setsE = live.some((l) => ERREXIT_RE.test(l));
@@ -2484,7 +2780,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // First: prove they really are invisible to the main rule, or this arm is
       // duplicating a check that already exists rather than closing a hole.
       const scannableSteps = runBlocks(WF).map((b) => b.step);
-      for (const name of ["Acquire shared-test-db mutex", ...MUTEX_NO_ERREXIT]) {
+      for (const name of [
+        "Acquire shared-test-db mutex",
+        ...MUTEX_NO_ERREXIT,
+      ]) {
         expect(
           scannableSteps.includes(name),
           `"${name}" is now INSIDE the scannable block, so \`errexitOffenders\` covers it and this narrower rule is redundant — delete it rather than keeping two opinions about one step.`,
@@ -2508,8 +2807,14 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         WF.split(ACQUIRE_ANCHOR).length - 1,
         "the acquire step's `set -euo pipefail` is no longer uniquely anchored here — re-anchor rather than deleting the twin",
       ).toBe(1);
-      const softAcquire = WF.replace(ACQUIRE_ANCHOR, ACQUIRE_ANCHOR.replace("set -euo pipefail", "set -uo pipefail"));
-      expect(softAcquire, "CALIBRATION: the acquire-softening mutation changed nothing").not.toBe(WF);
+      const softAcquire = WF.replace(
+        ACQUIRE_ANCHOR,
+        ACQUIRE_ANCHOR.replace("set -euo pipefail", "set -uo pipefail"),
+      );
+      expect(
+        softAcquire,
+        "CALIBRATION: the acquire-softening mutation changed nothing",
+      ).not.toBe(WF);
       expect(
         errexitOffenders(softAcquire),
         "CALIBRATION: the MAIN errexit rule reported the acquire step, so it is not excluded after all and this narrower rule buys nothing",
@@ -2517,11 +2822,14 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       expect(
         mutexErrexitOffenders(softAcquire).join(" | "),
         "the acquire step — which holds advisory key 61616158 across marker, dry-run, push and post-verify — dropped `-e` and NOTHING reported it",
-      ).toContain('NO ERREXIT in EXCLUDED mutex step "Acquire shared-test-db mutex"');
+      ).toContain(
+        'NO ERREXIT in EXCLUDED mutex step "Acquire shared-test-db mutex"',
+      );
 
       // ⭐ CALIBRATION 2 — the other direction: the release step gains `-e` and its
       // exemption must not outlive the need for it.
-      const RELEASE_ANCHOR = '        run: |\n          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"';
+      const RELEASE_ANCHOR =
+        '        run: |\n          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"';
       expect(
         WF.split(RELEASE_ANCHOR).length - 1,
         "the release step's `run: |` is no longer uniquely anchored here",
@@ -2530,11 +2838,16 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         RELEASE_ANCHOR,
         '        run: |\n          set -euo pipefail\n          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"',
       );
-      expect(tightRelease, "CALIBRATION: the release-tightening mutation changed nothing").not.toBe(WF);
+      expect(
+        tightRelease,
+        "CALIBRATION: the release-tightening mutation changed nothing",
+      ).not.toBe(WF);
       expect(
         mutexErrexitOffenders(tightRelease).join(" | "),
         "the release step started setting `-e` and kept its exemption — a standing permission to soften it again, granted by nobody",
-      ).toContain('STALE MUTEX EXEMPTION for "Release shared-test-db mutex (best effort)"');
+      ).toContain(
+        'STALE MUTEX EXEMPTION for "Release shared-test-db mutex (best effort)"',
+      );
     });
 
     it("the token list is NINE, and its two hand-kept siblings must move with it", () => {
@@ -2554,7 +2867,9 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         SOFTENING_TOKENS.includes(SITE_ALLOWLISTED_TOKEN),
         "the site-allowlisted token is not in the scanned list at all, so the site rule governs nothing",
       ).toBe(true);
-      for (const token of SOFTENING_TOKENS.filter((t) => t !== SITE_ALLOWLISTED_TOKEN)) {
+      for (const token of SOFTENING_TOKENS.filter(
+        (t) => t !== SITE_ALLOWLISTED_TOKEN,
+      )) {
         const mutant = WF.replace(
           "          set -euo pipefail\n          export RESTORE_DB_URL=",
           `          set -euo pipefail\n          command -v supabase >/dev/null ${token}\n          export RESTORE_DB_URL=`,
@@ -2585,8 +2900,13 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       ).toEqual([]);
 
       // UP: a NEW site, on the step whose stderr is the evidence.
-      const widened = WF.replace('2>"${RUNNER_TEMP}/marker.err"', SITE_ALLOWLISTED_TOKEN);
-      expect(widened, "the site-addition mutation changed nothing").not.toBe(WF);
+      const widened = WF.replace(
+        '2>"${RUNNER_TEMP}/marker.err"',
+        SITE_ALLOWLISTED_TOKEN,
+      );
+      expect(widened, "the site-addition mutation changed nothing").not.toBe(
+        WF,
+      );
       expect(
         softeningOffenders(widened).join(" | "),
         "a NEW unlisted site went unreported",
@@ -2597,7 +2917,9 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         ' 2>/dev/null || echo "(no /usr/lib/postgresql/*/bin)"',
         ' || echo "(no /usr/lib/postgresql/*/bin)"',
       );
-      expect(narrowed, "the site-removal mutation changed nothing").not.toBe(WF);
+      expect(narrowed, "the site-removal mutation changed nothing").not.toBe(
+        WF,
+      );
       expect(
         softeningOffenders(narrowed).join(" | "),
         "a VANISHED allowlisted site went unreported — the rule is a ceiling, not an exact set",
@@ -2608,8 +2930,14 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // psql. Four in, four out. Under the superseded count rule the scan reported
       // ZERO offenders while the step standing between a dashboard-shaped mistake and
       // a DROP SCHEMA on the wrong database went quiet.
-      const swapped = narrowed.replace('2>"${RUNNER_TEMP}/marker.err"', SITE_ALLOWLISTED_TOKEN);
-      expect(swapped, "the swap mutation changed nothing beyond the deletion").not.toBe(narrowed);
+      const swapped = narrowed.replace(
+        '2>"${RUNNER_TEMP}/marker.err"',
+        SITE_ALLOWLISTED_TOKEN,
+      );
+      expect(
+        swapped,
+        "the swap mutation changed nothing beyond the deletion",
+      ).not.toBe(narrowed);
       const swappedLive = liveLines(scannableRestoreBlock(swapped)).join("\n");
       expect(
         swappedLive.split(SITE_ALLOWLISTED_TOKEN).length - 1,
@@ -2630,7 +2958,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       ).toContain("VANISHED OR DUPLICATED SITE");
       expect(
         swapOffenders.join(" | "),
-        "the report does not name the step whose stderr went quiet — the offending line is a bare continuation (`2>/dev/null)\" || rc=$?`), so without the step name the report is true and useless",
+        'the report does not name the step whose stderr went quiet — the offending line is a bare continuation (`2>/dev/null)" || rc=$?`), so without the step name the report is true and useless',
       ).toContain('UNLISTED SITE in step "Which database am I on"');
 
       // And a second suppression riding in on an allowlisted line's justification.
@@ -2638,7 +2966,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         "ls -d /usr/lib/postgresql/*/bin 2>/dev/null",
         "ls -d /usr/lib/postgresql/*/bin 2>/dev/null 2>/dev/null",
       );
-      expect(doubled, "the double-suppression mutation changed nothing").not.toBe(WF);
+      expect(
+        doubled,
+        "the double-suppression mutation changed nothing",
+      ).not.toBe(WF);
       expect(
         softeningOffenders(doubled).join(" | "),
         "two suppressions on one allowlisted line were accepted — the second is riding in on the first's justification",
@@ -2647,18 +2978,92 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
   });
 
   describe("cross-file: the mutex protocol is ci.yml's, byte for byte", () => {
+    it("CALIBRATION (IN-03 remainder): BOTH anchored halves throw on a missing anchor", () => {
+      // The mutation, asserted APPLIED before the flip is asserted — a subject that
+      // still contains the anchor would make both expectations below vacuous, which
+      // is the very disease this fix cures.
+      const ciStep = CI.match(ACQUIRE_RE)?.[0] ?? "";
+      expect(ciStep, "ci.yml's Acquire step could not be extracted").not.toBe(
+        "",
+      );
+      const anchorless = ciStep
+        .split(SUFFIX_ANCHOR)
+        .join("          if ! command -v RENAMED");
+      expect(
+        anchorless,
+        "CALIBRATION: removing the anchor changed nothing, so the subject is not anchorless",
+      ).not.toBe(ciStep);
+      expect(
+        anchorless.includes(SUFFIX_ANCHOR),
+        "CALIBRATION: the anchor SURVIVED the mutation — the arms below would be measuring the real thing, not an absent anchor",
+      ).toBe(false);
+      // ⭐ THE DEGRADATION, DEMONSTRATED RATHER THAN DESCRIBED. Two steps that differ
+      // in the advisory key itself — the one token whose drift this pin exists to
+      // catch — compare EQUAL under the old `-1` narrowing, because it kept only the
+      // last character. That is what a passing byte-identity pin used to mean.
+      const drifted = anchorless.split("61616158").join("61616159");
+      expect(
+        drifted,
+        "CALIBRATION: the key-drift mutation changed nothing",
+      ).not.toBe(anchorless);
+      expect(
+        anchorless.slice(-1),
+        "CALIBRATION: the two subjects no longer share a last character, so this no longer reproduces the degradation it documents",
+      ).toBe(drifted.slice(-1));
+
+      expect(() => anchoredSuffix(anchorless)).toThrow(
+        /SUFFIX_ANCHOR not found/,
+      );
+      expect(() => anchoredPrefix(anchorless)).toThrow(
+        /SUFFIX_ANCHOR not found/,
+      );
+
+      // THE CONTROL: on the real steps neither half throws, and neither degenerates.
+      const wfStep = WF.match(ACQUIRE_RE)?.[0] ?? "";
+      expect(
+        wfStep,
+        `${WF_PATH}'s Acquire step could not be extracted`,
+      ).not.toBe("");
+      for (const [label, step] of [
+        [CI_PATH, ciStep],
+        [WF_PATH, wfStep],
+      ] as const) {
+        expect(
+          anchoredSuffix(step).startsWith(SUFFIX_ANCHOR),
+          `${label}: suffix`,
+        ).toBe(true);
+        expect(
+          anchoredSuffix(step).length,
+          `${label}: the suffix is a single character — that IS the -1 degradation, and it is what a passing byte-identity pin looked like before the throw`,
+        ).toBeGreaterThan(1);
+        expect(
+          anchoredPrefix(step).endsWith("\n"),
+          `${label}: the prefix does not end at a line boundary, so it is not the anchor-led split`,
+        ).toBe(true);
+        expect(
+          anchoredPrefix(step).length + anchoredSuffix(step).length,
+          `${label}: the two halves do not reconstruct the step`,
+        ).toBe(step.length);
+      }
+    });
+
     it("the acquire suffix is byte-identical to ci.yml's, and our prefix fails loud", () => {
       const ciStep = CI.match(ACQUIRE_RE)?.[0] ?? "";
       const wfStep = WF.match(ACQUIRE_RE)?.[0] ?? "";
-      expect(ciStep, "ci.yml's Acquire step could not be extracted").not.toBe("");
-      expect(wfStep, `${WF_PATH}'s Acquire step could not be extracted`).not.toBe("");
-      const suffix = (s: string): string => s.slice(s.indexOf(SUFFIX_ANCHOR));
+      expect(ciStep, "ci.yml's Acquire step could not be extracted").not.toBe(
+        "",
+      );
+      expect(
+        wfStep,
+        `${WF_PATH}'s Acquire step could not be extracted`,
+      ).not.toBe("");
+      const suffix = anchoredSuffix;
       expect(
         suffix(wfStep),
         "the copied mutex protocol has DRIFTED from ci.yml's. Every invariant in that step (session-mode DSN, libpq keepalives, statement_timeout=0, client_connection_check_interval, the 3600s cap, the two-cause error) was reasoned about once and is applied everywhere; a one-site drift means this destructive workflow runs a DIFFERENT protocol than the three CI jobs it shares the lock with. Re-sync the copy — do not edit it here.",
       ).toBe(suffix(ciStep));
 
-      const prefix = wfStep.slice(0, wfStep.indexOf(SUFFIX_ANCHOR));
+      const prefix = anchoredPrefix(wfStep);
       expect(
         prefix.includes("exit 0"),
         "the fork-PR early exit SURVIVED in the credential branch. ci.yml's copy may exit 0 there because a fork PR legitimately has no secret; this workflow has no pull_request trigger, so an absent credential is a FAULT — and exiting 0 would hand a DESTRUCTIVE job an unlocked shared database.",
@@ -2670,7 +3075,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
 
       calibrate(
         "the byte-identity pin bites on a one-token drift",
-        (s) => s.replace("SELECT pg_advisory_lock(61616158);", "SELECT pg_advisory_lock(61616159);"),
+        (s) =>
+          s.replace(
+            "SELECT pg_advisory_lock(61616158);",
+            "SELECT pg_advisory_lock(61616159);",
+          ),
         (t) => {
           const w = t.match(ACQUIRE_RE)?.[0] ?? "";
           return w !== "" && suffix(w) === suffix(ciStep);
@@ -2685,7 +3094,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           ),
         (t) => {
           const w = t.match(ACQUIRE_RE)?.[0] ?? "";
-          return !w.slice(0, w.indexOf(SUFFIX_ANCHOR)).includes("exit 0");
+          return !anchoredPrefix(w).includes("exit 0");
         },
       );
     });
@@ -2700,7 +3109,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       ).toBe(ciStep);
       calibrate(
         "the release byte-identity pin bites",
-        (s) => s.replace("      - name: Release shared-test-db mutex (best effort)\n        if: always()\n", "      - name: Release shared-test-db mutex (best effort)\n"),
+        (s) =>
+          s.replace(
+            "      - name: Release shared-test-db mutex (best effort)\n        if: always()\n",
+            "      - name: Release shared-test-db mutex (best effort)\n",
+          ),
         (t) => (t.match(RELEASE_RE)?.[0] ?? "") === ciStep,
       );
     });
@@ -2713,8 +3126,12 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         "gh workflow run test-restore-from-baseline.yml --ref main -f mode=preflight";
       const restore =
         "gh workflow run test-restore-from-baseline.yml --ref main -f mode=restore -f confirm=";
-      expect(header, "the header lost the preflight dispatch recipe").toContain(preflight);
-      expect(header, "the header lost the restore dispatch recipe").toContain(restore);
+      expect(header, "the header lost the preflight dispatch recipe").toContain(
+        preflight,
+      );
+      expect(header, "the header lost the restore dispatch recipe").toContain(
+        restore,
+      );
       expect(
         jobBlock(WF, GUARD_JOB),
         "the dispatch-guard no longer prints the correct dispatch — that message is the one thing an operator reads at the moment they mis-dispatched",
@@ -2768,7 +3185,8 @@ exit 64
   const repo = mkdtempSync(join(tmpdir(), "w5-repo-"));
   const git = (args: string[]): string => {
     const r = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
-    if (r.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
+    if (r.status !== 0)
+      throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
     return (r.stdout ?? "").trim();
   };
   git(["init", "-q", "-b", "main"]);
@@ -2818,10 +3236,17 @@ exit 64
       const eq = line.indexOf("=");
       if (eq > 0) outputs[line.slice(0, eq)] = line.slice(eq + 1);
     }
-    return { code: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, outputs };
+    return {
+      code: r.status,
+      out: `${r.stdout ?? ""}${r.stderr ?? ""}`,
+      outputs,
+    };
   }
 
-  function runAsserter(outputs: Record<string, string>): { code: number | null; out: string } {
+  function runAsserter(outputs: Record<string, string>): {
+    code: number | null;
+    out: string;
+  } {
     const r = spawnSync("bash", [asserterPath], {
       cwd: repo,
       encoding: "utf8",
@@ -2852,7 +3277,10 @@ exit 64
       head_sha: ANCESTOR_SHA,
     });
     const asserted = runAsserter(reader.outputs);
-    expect(asserted.code, `asserter failed on the GREEN reading: ${asserted.out}`).toBe(0);
+    expect(
+      asserted.code,
+      `asserter failed on the GREEN reading: ${asserted.out}`,
+    ).toBe(0);
     expect(asserted.out).toContain("PROD-ledger premise holds");
   });
 
@@ -2974,7 +3402,8 @@ exit 64
     '    if [ ! -f "${ancestry_err}" ] || [ ! -r "${ancestry_err}" ]; then\n';
   const FALSE_VERDICT = "is not an ancestor of this checkout's HEAD";
   /** `chmod 0444` is not a barrier to root, so that one fixture states its precondition. */
-  const NOT_ROOT = typeof process.getuid === "function" && process.getuid() !== 0;
+  const NOT_ROOT =
+    typeof process.getuid === "function" && process.getuid() !== 0;
 
   /**
    * Run an arbitrary variant of the asserter under `bash -e` — the runner spells every
@@ -3042,7 +3471,10 @@ exit 64
     // ⭐ CALIBRATION — STRIP ONLY THE SENTINEL GUARD. Nothing else in the step defends
     // this, and this is the measurement round three replaced with a sentence.
     const unguarded = script.replace(SENTINEL_GUARD, "    if false; then\n");
-    expect(unguarded, "CALIBRATION: the un-guarding mutation changed nothing").not.toBe(script);
+    expect(
+      unguarded,
+      "CALIBRATION: the un-guarding mutation changed nothing",
+    ).not.toBe(script);
     expect(
       runAsserterScript(unguarded, { RUNNER_TEMP: deadEnd }).out,
       "CALIBRATION: with the sentinel guard removed the step STILL did not print the false ancestry verdict, so this fixture does not reproduce the class and the assertion above proves nothing",
@@ -3059,7 +3491,9 @@ exit 64
       PROBE_LINE,
       '    rm -f "${ancestry_err}" && mkdir "${ancestry_err}"\n' + PROBE_LINE,
     );
-    expect(injected, "CALIBRATION: the fault injection did not apply").not.toBe(script);
+    expect(injected, "CALIBRATION: the fault injection did not apply").not.toBe(
+      script,
+    );
 
     const rt = freshRunnerTemp();
     const fixed = runAsserterScript(injected, { RUNNER_TEMP: rt });
@@ -3071,10 +3505,15 @@ exit 64
       fixed.out,
       `[ -r <directory> ] is TRUE, so the round-three guard passed this straight through and printed "${FALSE_VERDICT}" about a sha git was never asked about`,
     ).not.toContain(FALSE_VERDICT);
-    expect(fixed.out, "the broken channel was not named").toContain("MEASURE_FAIL");
+    expect(fixed.out, "the broken channel was not named").toContain(
+      "MEASURE_FAIL",
+    );
 
     const unguarded = injected.replace(SENTINEL_GUARD, "    if false; then\n");
-    expect(unguarded, "CALIBRATION: the un-guarding mutation changed nothing").not.toBe(injected);
+    expect(
+      unguarded,
+      "CALIBRATION: the un-guarding mutation changed nothing",
+    ).not.toBe(injected);
     expect(
       runAsserterScript(unguarded, { RUNNER_TEMP: freshRunnerTemp() }).out,
       "CALIBRATION: with the sentinel guard removed this fixture did not print the false ancestry verdict, so it does not reproduce the class",
@@ -3092,10 +3531,18 @@ exit 64
         PROBE_LINE,
         '    chmod 0444 "${ancestry_err}"\n' + PROBE_LINE,
       );
-      expect(injected, "CALIBRATION: the fault injection did not apply").not.toBe(script);
+      expect(
+        injected,
+        "CALIBRATION: the fault injection did not apply",
+      ).not.toBe(script);
 
-      const fixed = runAsserterScript(injected, { RUNNER_TEMP: freshRunnerTemp() });
-      expect(fixed.code, `a probe-time EACCES was accepted.\n${fixed.out}`).toBe(1);
+      const fixed = runAsserterScript(injected, {
+        RUNNER_TEMP: freshRunnerTemp(),
+      });
+      expect(
+        fixed.code,
+        `a probe-time EACCES was accepted.\n${fixed.out}`,
+      ).toBe(1);
       expect(fixed.out).not.toContain(FALSE_VERDICT);
       expect(
         fixed.out,
@@ -3104,8 +3551,14 @@ exit 64
 
       // ⭐ CALIBRATION — drop ONLY the sentinel clause, keeping `-f` and `-r`. Both stay
       // TRUE on this fixture, so a guard without the sentinel waves it through.
-      const clauseless = injected.replace(SENTINEL_GUARD, GUARD_WITHOUT_SENTINEL_CLAUSE);
-      expect(clauseless, "CALIBRATION: the clause removal did not apply").not.toBe(injected);
+      const clauseless = injected.replace(
+        SENTINEL_GUARD,
+        GUARD_WITHOUT_SENTINEL_CLAUSE,
+      );
+      expect(
+        clauseless,
+        "CALIBRATION: the clause removal did not apply",
+      ).not.toBe(injected);
       expect(
         runAsserterScript(clauseless, { RUNNER_TEMP: freshRunnerTemp() }).out,
         "CALIBRATION: with the sentinel clause gone the `-f`/`-r` clauses still caught this, so this fixture does not isolate the sentinel and the assertion above proves nothing",
@@ -3139,7 +3592,12 @@ exit 64
   });
 
   it("a reading with ZERO runs is exit 1 at the READER, before any judgement", () => {
-    const reader = runReader({ STUB_EMPTY: "1", STUB_STATUS: "", STUB_CONCLUSION: "", STUB_SHA: "" });
+    const reader = runReader({
+      STUB_EMPTY: "1",
+      STUB_STATUS: "",
+      STUB_CONCLUSION: "",
+      STUB_SHA: "",
+    });
     expect(
       reader.code,
       "gh returning no supabase-migrate.yml runs on main was tolerated — that reading means PROD has never applied a migration through that workflow, i.e. there is NO evidence for the parity the seed claims",
@@ -3148,7 +3606,9 @@ exit 64
   });
 
   it("the premise steps are the ones the workflow actually runs (extraction is not a mock)", () => {
-    expect(extractRunScript(WF, ASSERTER)).toContain("git merge-base --is-ancestor");
+    expect(extractRunScript(WF, ASSERTER)).toContain(
+      "git merge-base --is-ancestor",
+    );
     expect(extractRunScript(WF, READER)).toContain(
       "gh run list --workflow supabase-migrate.yml --branch main -L 1",
     );
@@ -3175,7 +3635,8 @@ exit 64
 // ---------------------------------------------------------------------------
 describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
   const STEP = "Post-verify with the Supabase CLI — ledger SHAPE";
-  const SENTENCE = "Remote migration versions not found in local migrations directory.";
+  const SENTENCE =
+    "Remote migration versions not found in local migrations directory.";
 
   it("the CLI's own ErrMissingLocal sentence is tested BEFORE the generic rc branch", () => {
     const body = extractRunScript(WF, STEP);
@@ -3209,7 +3670,10 @@ describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
       const bin = join(dir, "bin");
       const runnerTemp = join(dir, "tmp");
       for (const d of [bin, runnerTemp]) mkdirSync(d, { recursive: true });
-      writeFileSync(join(bin, "supabase"), `#!/bin/bash\ncat <<'EOF'\n${stdout}\nEOF\nexit ${rc}\n`);
+      writeFileSync(
+        join(bin, "supabase"),
+        `#!/bin/bash\ncat <<'EOF'\n${stdout}\nEOF\nexit ${rc}\n`,
+      );
       chmodSync(join(bin, "supabase"), 0o755);
       const script = join(dir, "step.sh");
       writeFileSync(script, body);
@@ -3226,7 +3690,10 @@ describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
       return `${r.stdout ?? ""}${r.stderr ?? ""}`;
     };
 
-    const out = runWithStub(`${SENTENCE}\nTry supabase migration repair --status reverted`, 1);
+    const out = runWithStub(
+      `${SENTENCE}\nTry supabase migration repair --status reverted`,
+      1,
+    );
     expect(
       out.includes("remote migration versions with no local file"),
       `a missing-local dry run did not produce the specific diagnosis. If it produced the generic "could not read the ledger" instead, the two branches have been reordered.\n${out}`,
@@ -3240,7 +3707,9 @@ describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
     // branch, so the pin above is measuring ORDER and not just string presence.
     const generic = runWithStub("Connection refused", 1);
     expect(generic.includes("The CLI could not read the ledger")).toBe(true);
-    expect(generic.includes("remote migration versions with no local file")).toBe(false);
+    expect(
+      generic.includes("remote migration versions with no local file"),
+    ).toBe(false);
   });
 
   // -------------------------------------------------------------------------
@@ -3259,8 +3728,13 @@ describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
       .split("\n")
       .filter((l) => !l.trim().startsWith("#"));
     const greps = live.filter((l) => /\bgrep\b/.test(l));
-    expect(greps.length, "the post-verify step no longer greps at all").toBeGreaterThan(2);
-    const bare = greps.filter((l) => /\bgrep -[a-zA-Z]*q/.test(l) && !/\bgrep -[a-zA-Z]*a/.test(l));
+    expect(
+      greps.length,
+      "the post-verify step no longer greps at all",
+    ).toBeGreaterThan(2);
+    const bare = greps.filter(
+      (l) => /\bgrep -[a-zA-Z]*q/.test(l) && !/\bgrep -[a-zA-Z]*a/.test(l),
+    );
     expect(
       bare,
       `${bare.length} post-verify grep(s) still omit \`-a\` while the step's own comment calls it mandatory repo-wide. The NEGATIVE one is the dangerous half: without \`-a\` a single NUL byte makes "the CLI did not print 'Remote database is up to date.'" true for a reason that has nothing to do with the ledger.`,
@@ -3297,14 +3771,16 @@ describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
     // measurement is that grep goes silently blind to such a file — the first draft
     // of this arm did exactly that and `grep -n` reported the line absent.
     const NUL = "\u0000";
-    const fixtureBytes =
-      `Connecting to remote database...\n${NUL}stray\nRemote database is up to date.\n`;
+    const fixtureBytes = `Connecting to remote database...\n${NUL}stray\nRemote database is up to date.\n`;
     expect(
       fixtureBytes.includes(NUL),
       "the fixture carries no NUL byte, so it does not exercise the rule this arm exists for",
     ).toBe(true);
     writeFileSync(fixture, fixtureBytes);
-    const patched = body.replace(CLI_LINE, `cat "${fixture}" >"\${raw}" 2>&1 || rc=$?`);
+    const patched = body.replace(
+      CLI_LINE,
+      `cat "${fixture}" >"\${raw}" 2>&1 || rc=$?`,
+    );
     expect(patched, "the fixture substitution changed nothing").not.toBe(body);
     const scriptFile = join(dir, "step.sh");
     writeFileSync(scriptFile, patched);
@@ -3374,7 +3850,8 @@ describe("IN-07 — the confirm token and the staleness gate read the SAME row",
   it("all three readers extract the same sha from an INDENTED provenance row", async () => {
     // Imported from the SCRIPT module rather than restated — the convention this repo
     // uses for a constant that must not have a second copy.
-    const { RECORDED_SHA_RE } = await import("../../scripts/check-baseline-staleness.mjs");
+    const { RECORDED_SHA_RE } =
+      await import("../../scripts/check-baseline-staleness.mjs");
 
     const wfProgram = sedProgram(WF, 'sha="$(sed -nE');
     expect(
@@ -3389,7 +3866,10 @@ describe("IN-07 — the confirm token and the staleness gate read the SAME row",
     // ⚠️ The local sed is BSD. Both programs are `-nE` with POSIX classes and are
     // portable; asserted rather than assumed, and nothing is skipped silently.
     for (const p of [wfProgram, scriptProgram]) {
-      expect(p, "a sed program lost its `p` flag and would print nothing").toContain("/p");
+      expect(
+        p,
+        "a sed program lost its `p` flag and would print nothing",
+      ).toContain("/p");
     }
     expect(
       wfProgram.startsWith("s/^"),
@@ -3400,12 +3880,18 @@ describe("IN-07 — the confirm token and the staleness gate read the SAME row",
     const fromWorkflow = runSed(wfProgram, FIXTURE);
     const fromScript = runSed(scriptProgram, FIXTURE);
 
-    expect(fromRegex, "RECORDED_SHA_RE did not read the fixture — the fixture is wrong, not the gate").toBe(SHA);
+    expect(
+      fromRegex,
+      "RECORDED_SHA_RE did not read the fixture — the fixture is wrong, not the gate",
+    ).toBe(SHA);
     expect(
       fromWorkflow,
       `the workflow's sed read ${JSON.stringify(fromWorkflow)} from an indented row that RECORDED_SHA_RE reads as ${SHA}. The workflow would refuse the dispatch with "carries no parseable sha256 provenance row" about a file the staleness gate accepts.`,
     ).toBe(SHA);
-    expect(fromScript, "the restore script's sed disagrees with the other two").toBe(SHA);
+    expect(
+      fromScript,
+      "the restore script's sed disagrees with the other two",
+    ).toBe(SHA);
 
     // CALIBRATION — restore the PRE-FIX program (`s/^\|…` in place of `s/.*\|…`) and it
     // must go BLANK on the indented row while the other two still read it. This is the
@@ -3419,7 +3905,9 @@ describe("IN-07 — the confirm token and the staleness gate read the SAME row",
       "the workflow's sed program no longer begins `s/.*\\|`, so this calibration cannot reconstruct the anchored form — re-anchor the mutation",
     ).toBe(true);
     const reanchored = `s/^\\|${wfProgram.slice("s/.*\\|".length)}`;
-    expect(reanchored, "CALIBRATION: re-anchoring changed nothing").not.toBe(wfProgram);
+    expect(reanchored, "CALIBRATION: re-anchoring changed nothing").not.toBe(
+      wfProgram,
+    );
     expect(
       runSed(reanchored, FIXTURE),
       "CALIBRATION: the re-anchored program STILL matched the indented row, so this fixture does not exercise the anchor and the agreement above proves nothing",
@@ -3455,10 +3943,14 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
     const acquire = idx("Acquire shared-test-db mutex");
     const marker = idx("Which database am I on");
     const gate = idx(GATE);
-    const backup = idx("Back up TEST before any write (schema + ledger; NOT data)");
+    const backup = idx(
+      "Back up TEST before any write (schema + ledger; NOT data)",
+    );
     const restore = idx("Run the restore script");
 
-    expect(gate, `the workflow has no step named "${GATE}"`).toBeGreaterThan(-1);
+    expect(gate, `the workflow has no step named "${GATE}"`).toBeGreaterThan(
+      -1,
+    );
     expect(
       gate,
       "the activity gate no longer runs inside the held mutex — probing before the lock measures a window that has already closed, which is the unsound shape this step exists to replace",
@@ -3509,7 +4001,9 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
     // same three-valued trap behind the original A1 defect and the `state IN (...)`
     // enumeration. Both halves are pinned so neither can quietly disappear.
     expect(
-      body.includes("(application_name = 'ci-shared-test-db-mutex') AS is_mutex_label"),
+      body.includes(
+        "(application_name = 'ci-shared-test-db-mutex') AS is_mutex_label",
+      ),
       "the activity gate no longer computes the mutex-holder label. Without it the gate counts the background psql that HOLDS the advisory lock for this very act, so the count is never 0 and it can never pass — measured on run 34265750211.",
     ).toBe(true);
     expect(
@@ -3544,9 +4038,22 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
     // ("they can carry query text"). Both fired before this was narrowed — a pin
     // that trips on its own documentation gets deleted rather than heeded.
     const sqlStart = body.indexOf("WITH others AS (");
-    expect(sqlStart, "the activity gate's probe SQL is no longer recognisable").toBeGreaterThan(-1);
-    const liveSql = body.slice(sqlStart, body.indexOf(';"', sqlStart));
-    for (const forbidden of ["query", "usename", "client_addr", "backend_start"]) {
+    expect(
+      sqlStart,
+      "the activity gate's probe SQL is no longer recognisable",
+    ).toBeGreaterThan(-1);
+    const sqlEnd = body.indexOf(';"', sqlStart);
+    expect(
+      sqlEnd,
+      "the activity gate's probe SQL has no `;\"` terminator after its opening — an unchecked -1 here would quietly drop the last character instead of failing, and the scan below would run over a slice nobody chose",
+    ).toBeGreaterThan(sqlStart);
+    const liveSql = body.slice(sqlStart, sqlEnd);
+    for (const forbidden of [
+      "query",
+      "usename",
+      "client_addr",
+      "backend_start",
+    ]) {
       expect(
         liveSql.includes(forbidden),
         `the activity gate breakdown selects \`${forbidden}\` from pg_stat_activity. This log is PUBLIC and TEST is shared with other people's CI — states and counts only.`,
@@ -3561,7 +4068,10 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
 
   it("EXECUTED — 0 passes, a positive count refuses, and an unreadable probe FAILS CLOSED", () => {
     const body = extractRunScript(WF, GATE);
-    const runWithPsql = (stdout: string, rc: number): { out: string; code: number } => {
+    const runWithPsql = (
+      stdout: string,
+      rc: number,
+    ): { out: string; code: number } => {
       const dir = mkdtempSync(join(tmpdir(), "actgate-"));
       const bin = join(dir, "bin");
       const runnerTemp = join(dir, "tmp");
@@ -3570,7 +4080,10 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
       // `printf '%b'`, not '%s': with %s bash emits a literal backslash-n, the gate
       // correctly rejects it as non-numeric, and the STUB looks like a gate failure.
       // Measured while writing this test.
-      writeFileSync(join(bin, "psql"), `#!/bin/bash\nprintf '%b' ${JSON.stringify(stdout)}\nexit ${rc}\n`);
+      writeFileSync(
+        join(bin, "psql"),
+        `#!/bin/bash\nprintf '%b' ${JSON.stringify(stdout)}\nexit ${rc}\n`,
+      );
       chmodSync(join(bin, "psql"), 0o755);
       const script = join(dir, "gate.sh");
       writeFileSync(script, body);
@@ -3587,7 +4100,10 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
         },
       });
       rmSync(dir, { recursive: true, force: true });
-      return { out: `${r.stdout ?? ""}${r.stderr ?? ""}`, code: r.status ?? -1 };
+      return {
+        out: `${r.stdout ?? ""}${r.stderr ?? ""}`,
+        code: r.status ?? -1,
+      };
     };
 
     const quiet = runWithPsql("0\n", 0);
@@ -3608,7 +4124,10 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
 
     // A non-numeric answer must not be coerced to zero.
     const garbage = runWithPsql("ERROR\n", 0);
-    expect(garbage.code, "a non-numeric count was coerced rather than refused").toBe(1);
+    expect(
+      garbage.code,
+      "a non-numeric count was coerced rather than refused",
+    ).toBe(1);
   });
 });
 
@@ -3644,7 +4163,8 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
 describe("164.8-03 A1 — the reference-data assertions' MEASURE_FAILs are reachable under `bash -e`", () => {
   const SELFTEST_STEP =
     "Assert the extractor self-test PRINTED its kind census and cleared the floor";
-  const AUDIT_STEP = "Assert the allowlist audit PRINTED its census over a non-empty corpus";
+  const AUDIT_STEP =
+    "Assert the allowlist audit PRINTED its census over a non-empty corpus";
 
   const workdir = mkdtempSync(join(tmpdir(), "a1-"));
   const bindir = join(workdir, "bin");
@@ -3670,7 +4190,10 @@ exit 64
   afterAll(() => rmSync(workdir, { recursive: true, force: true }));
 
   let seq = 0;
-  function runStep(script: string, stub: Record<string, string>): { code: number | null; out: string } {
+  function runStep(
+    script: string,
+    stub: Record<string, string>,
+  ): { code: number | null; out: string } {
     seq += 1;
     const dir = mkdtempSync(join(workdir, `run-${seq}-`));
     const scriptFile = join(dir, "step.sh");
@@ -3699,9 +4222,10 @@ exit 64
       ).toBe(true);
       out = out.split(b).join("");
     }
-    expect(out, "CALIBRATION: removing the bounds changed nothing, so the twin proves nothing").not.toBe(
-      script,
-    );
+    expect(
+      out,
+      "CALIBRATION: removing the bounds changed nothing, so the twin proves nothing",
+    ).not.toBe(script);
     return out;
   }
 
@@ -3727,9 +4251,16 @@ exit 64
     ).toBe(0);
     // And `set -uo pipefail` does NOT undo `-e` — the sentence the workflow used to
     // assert. Measured here rather than asserted, because it is the load-bearing fact.
-    const probe = spawnSync("bash", ["-ec", 'set -uo pipefail; case "$-" in *e*) echo ON;; *) echo OFF;; esac'], {
-      encoding: "utf8",
-    });
+    const probe = spawnSync(
+      "bash",
+      [
+        "-ec",
+        'set -uo pipefail; case "$-" in *e*) echo ON;; *) echo OFF;; esac',
+      ],
+      {
+        encoding: "utf8",
+      },
+    );
     expect(
       (probe.stdout ?? "").trim(),
       "`set -uo pipefail` under `bash -e` turned errexit OFF — the workflow's old comment would then have been right, and this whole fix is wrong",
@@ -3739,10 +4270,14 @@ exit 64
   describe(SELFTEST_STEP, () => {
     const script = extractRunScript(WF, SELFTEST_STEP);
     const BOUNDS = [" || status=$?", " || ok_rc=$?", " || floor_rc=$?"];
-    const OK_LINE = "extract-reference-inserts self-test OK: 9 kinds, red+green each.\n";
+    const OK_LINE =
+      "extract-reference-inserts self-test OK: 9 kinds, red+green each.\n";
 
     it("GREEN — a printed census at or above the floor exits 0", () => {
-      const r = runStep(script, { STUB_SELFTEST_OUT: OK_LINE, STUB_FLOOR: "2" });
+      const r = runStep(script, {
+        STUB_SELFTEST_OUT: OK_LINE,
+        STUB_FLOOR: "2",
+      });
       expect(r.code, r.out).toBe(0);
       expect(r.out).toContain("self-test census: 9 kind(s) against floor 2.");
     });
@@ -3755,19 +4290,27 @@ exit 64
         "the silent-no-op MEASURE_FAIL did not print — the branch the author wrote is still unreachable",
       ).toContain("printed NO 'extract-reference-inserts self-test OK");
 
-      const pre = runStep(unbind(script, BOUNDS), { STUB_SELFTEST_OUT: "", STUB_FLOOR: "2" });
+      const pre = runStep(unbind(script, BOUNDS), {
+        STUB_SELFTEST_OUT: "",
+        STUB_FLOOR: "2",
+      });
       expect(
         pre.out.includes("printed NO 'extract-reference-inserts self-test OK"),
         "CALIBRATION: the UNBOUNDED script printed the MEASURE_FAIL too, so the bounding is not what makes it reachable and this arm is measuring nothing",
       ).toBe(false);
-      expect(pre.code, "CALIBRATION: the unbounded script did not even go red").not.toBe(0);
+      expect(
+        pre.code,
+        "CALIBRATION: the unbounded script did not even go red",
+      ).not.toBe(0);
     });
 
     it("a NON-ZERO self-test reaches its named error AND its log (pre-fix: neither)", () => {
       const stub = { STUB_SELFTEST_OUT: "boom\n", STUB_SELFTEST_RC: "3" };
       const r = runStep(script, stub);
       expect(r.code, r.out).toBe(3);
-      expect(r.out).toContain("the reference-data extractor self-test failed (exit 3).");
+      expect(r.out).toContain(
+        "the reference-data extractor self-test failed (exit 3).",
+      );
       expect(
         r.out,
         "the captured log was never `cat`ted, so the operator gets a status with no output — the whole reason the log is captured rather than streamed",
@@ -3795,11 +4338,17 @@ exit 64
         pre.out.includes("the floor is UNKNOWN"),
         "CALIBRATION: the unbounded script reported the unread floor too",
       ).toBe(false);
-      expect(pre.code, "CALIBRATION: the unbounded script did not go red").not.toBe(0);
+      expect(
+        pre.code,
+        "CALIBRATION: the unbounded script did not go red",
+      ).not.toBe(0);
     });
 
     it("a floor ABOVE the printed census is still a named regression", () => {
-      const r = runStep(script, { STUB_SELFTEST_OUT: OK_LINE, STUB_FLOOR: "12" });
+      const r = runStep(script, {
+        STUB_SELFTEST_OUT: OK_LINE,
+        STUB_FLOOR: "12",
+      });
       expect(r.code, r.out).toBe(1);
       expect(r.out).toContain("SELF_TEST_KINDS_FLOOR regression");
     });
@@ -3828,14 +4377,19 @@ exit 64
         pre.out.includes("An audit that measured nothing"),
         "CALIBRATION: the unbounded script printed the MEASURE_FAIL too",
       ).toBe(false);
-      expect(pre.code, "CALIBRATION: the unbounded script did not go red").not.toBe(0);
+      expect(
+        pre.code,
+        "CALIBRATION: the unbounded script did not go red",
+      ).not.toBe(0);
     });
 
     it("a NON-ZERO audit reaches its named error AND its log (pre-fix: neither)", () => {
       const stub = { STUB_AUDIT_OUT: "kaboom\n", STUB_AUDIT_RC: "5" };
       const r = runStep(script, stub);
       expect(r.code, r.out).toBe(5);
-      expect(r.out).toContain("the reference-data allowlist audit failed (exit 5).");
+      expect(r.out).toContain(
+        "the reference-data allowlist audit failed (exit 5).",
+      );
       expect(r.out).toContain("kaboom");
 
       const pre = runStep(unbind(script, BOUNDS), stub);
@@ -3860,7 +4414,10 @@ exit 64
         pre.out.includes("migrations scanned: N' line"),
         "CALIBRATION: the unbounded script reported the missing coverage line too",
       ).toBe(false);
-      expect(pre.code, "CALIBRATION: the unbounded script did not go red").not.toBe(0);
+      expect(
+        pre.code,
+        "CALIBRATION: the unbounded script did not go red",
+      ).not.toBe(0);
     });
 
     it("a zero SCANNED count and a zero ENTRY count are each refused by name", () => {
@@ -3868,7 +4425,9 @@ exit 64
         STUB_AUDIT_OUT: `${CENSUS}  migrations scanned: 0\n`,
       });
       expect(zeroScan.code, zeroScan.out).toBe(1);
-      expect(zeroScan.out).toContain("An empty corpus audits clean BY CONSTRUCTION");
+      expect(zeroScan.out).toContain(
+        "An empty corpus audits clean BY CONSTRUCTION",
+      );
 
       const zeroEntries = runStep(script, {
         STUB_AUDIT_OUT: `extract-reference-inserts audit OK: 0 entr(ies), 4 file(s), 2 table(s), 9 statement(s); all listed.\n${SCANNED}`,
@@ -3876,5 +4435,283 @@ exit 64
       expect(zeroEntries.code, zeroEntries.out).toBe(1);
       expect(zeroEntries.out).toContain("the restore would replay nothing");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WR-04 SCOPE WIDENING (Phase 164.8.2) — `grep -a` is a WORKFLOW-WIDE rule, and
+// the arm that enforced it was scoped to ONE step.
+//
+// ⛔ THE NAMED DEFECT CLASS: a rule narrower than the convention it claims to
+// enforce. The post-verify arm above asserts every grep in the
+// "Post-verify with the Supabase CLI — ledger SHAPE" step carries `-a`, quoting
+// that step's own comment — "`-a` is mandatory repo-wide: a tracked file carries a
+// deliberate NUL byte and plain grep reports such input clean." REPO-WIDE. Yet a
+// grep added to a DIFFERENT step of the same workflow was covered by nothing, and
+// on 2026-09-10 exactly that happened: the ancestry probe's sentinel check landed
+// as a bare `grep -q`, in the same branch-set as two greps this phase had just
+// given `-a` to. The rule did not fail; it was not asked.
+//
+// SCOPE, BY CONSTRUCTION RATHER THAN BY ENUMERATION — a new grep anywhere in this
+// workflow is in scope the day it is written:
+//   · every LIVE line of the workflow (comments are not code),
+//   · MINUS heredoc bodies — the backup README is prose that documents regeneration
+//     recipes, and a recipe in a text file is not an invocation,
+//   · MINUS the two byte-copied mutex steps. `ACQUIRE_RE`'s body carries
+//     `grep -q 'MUTEX-ACQUIRED'`, and it is ci.yml's text byte for byte, pinned as
+//     such above. Adding `-a` here would BREAK that pin; the fix belongs in ci.yml,
+//     where every copy inherits it. This is the same exclusion, for the same
+//     reason, that `scannableRestoreBlock` already applies to the token scan.
+//   · MINUS greps fed from a PIPE. `-a` is about reading a FILE whose bytes include
+//     a NUL; `printf '%s' "${marker}" | grep -Eiq …` has no file operand, and a
+//     bash variable cannot hold a NUL in the first place, so the rule has nothing
+//     to bite on there. Note `||` is not a pipe: `… || grep -q … "${file}"` reads a
+//     file and stays IN scope.
+// ---------------------------------------------------------------------------
+describe("WR-04 — the `-a` rule is workflow-wide, not post-verify-wide", () => {
+  /** Heredoc bodies removed: `cat > x <<'DELIM'` … up to a line that is DELIM. */
+  function stripHeredocs(text: string): string {
+    const out: string[] = [];
+    let terminator: string | null = null;
+    for (const line of text.split("\n")) {
+      if (terminator !== null) {
+        if (line.trim() === terminator) terminator = null;
+        continue;
+      }
+      const m = line.match(/<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*$/);
+      if (m) terminator = m[2];
+      out.push(line);
+    }
+    return out.join("\n");
+  }
+
+  /**
+   * Every grep INVOCATION in a piece of workflow text. An invocation is `grep` at a
+   * command position (line start, after `|`/`(`/`;`/`&`/`!`, or after a shell keyword)
+   * whose next token is a flag or a quoted pattern. That last condition is what keeps
+   * PROSE out: the workflow's own MEASURE_FAIL messages say "(grep exited ${rc})",
+   * which sits after a `(` and would otherwise read as a command.
+   */
+  function grepInvocations(
+    text: string,
+  ): { line: string; flags: string; stdin: boolean }[] {
+    const found: { line: string; flags: string; stdin: boolean }[] = [];
+    for (const line of liveLines(stripHeredocs(text))) {
+      const re =
+        /((?:^|[|(;&!]|\b(?:if|then|elif|else|do|while|until)\b)\s*)grep\s+(?=[-'"])/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(line)) !== null) {
+        const before = line.slice(0, m.index + m[1].length).trimEnd();
+        const rest = line.slice(m.index + m[0].length);
+        found.push({
+          line: line.trim(),
+          flags: rest.match(/^(?:-[A-Za-z]+\s+)*/)?.[0] ?? "",
+          stdin: before.endsWith("|") && !before.endsWith("||"),
+        });
+      }
+    }
+    return found;
+  }
+
+  /** In-scope invocations whose flag cluster carries no `a`. */
+  function bareGreps(text: string): string[] {
+    const scannable = text.replace(ACQUIRE_RE, "").replace(RELEASE_RE, "");
+    return grepInvocations(scannable)
+      .filter((g) => !g.stdin && !/-[A-Za-z]*a/.test(g.flags))
+      .map((g) => g.line);
+  }
+
+  /**
+   * ⚠️ ONE EXEMPTION, DATED, AND A CEILING RATHER THAN A SET — the
+   * `ALLOWED_SITES` idiom above, for the same reason: an allowlist that only has to
+   * be a superset can rot silently. This entry must match EXACTLY ONE live bare
+   * grep; if the workflow gains `-a` there, this test goes RED telling you to
+   * DELETE the entry, so the exemption cannot outlive the defect.
+   *
+   * ⛔ WHY IT IS EXEMPT AND NOT FIXED: this test file does not own
+   * `.github/workflows/test-restore-from-baseline.yml`. The fix is one character,
+   * and it matters — the check is NEGATIVE in effect ("the sentinel is GONE,
+   * therefore git ran and truncated the channel"), so a NUL-blind grep reporting a
+   * NUL-bearing stderr as clean makes the guard conclude git ran when it may not
+   * have. Booked as a follow-up on the workflow, not waived.
+   */
+  const BARE_GREP_EXEMPTIONS: readonly string[] = [
+    "grep -q 'ANCESTRY-PROBE-SENTINEL'",
+  ];
+
+  function unexemptedBareGreps(text: string): string[] {
+    const bare = bareGreps(text);
+    const offenders = bare
+      .filter((l) => !BARE_GREP_EXEMPTIONS.some((e) => l.includes(e)))
+      .map((l) => `BARE GREP (no \`-a\`): ${l}`);
+    for (const e of BARE_GREP_EXEMPTIONS) {
+      const n = bare.filter((l) => l.includes(e)).length;
+      if (n !== 1) {
+        offenders.push(
+          `STALE EXEMPTION (matched ${n} bare grep(s), want exactly 1) — if it gained \`-a\`, DELETE the entry: ${e}`,
+        );
+      }
+    }
+    return offenders;
+  }
+
+  it("every file-reading grep in the workflow carries `-a`, bar one dated exemption", () => {
+    const invocations = grepInvocations(
+      WF.replace(ACQUIRE_RE, "").replace(RELEASE_RE, ""),
+    );
+    expect(
+      invocations.length,
+      "the scanner found no grep invocations at all — it is measuring nothing, which is how a rule silently stops being a rule",
+    ).toBeGreaterThan(5);
+    expect(
+      invocations.filter((g) => !g.stdin).length,
+      "no FILE-reading grep was classified in scope, so the `-a` rule has no subject",
+    ).toBeGreaterThan(3);
+    expect(
+      unexemptedBareGreps(WF).join("\n"),
+      "a grep reading a FILE omits `-a` while this workflow's own comment calls it mandatory repo-wide. A tracked file in this repo carries a deliberate NUL byte and plain grep reports such input CLEAN (exit 1) — so the check does not fail, it fails OPEN.",
+    ).toBe("");
+  });
+
+  it("CALIBRATION — the widened rule bites where the post-verify-scoped one could not", () => {
+    // (a) The direction the OLD rule was blind to: a bare grep in a step that is not
+    //     the post-verify. Mutate the reference-data audit's grep, which carries `-a`
+    //     today and lives in a different step entirely.
+    const WITH_A = "census=$(grep -a -m1 -E";
+    expect(
+      WF,
+      "the mutation's anchor is gone — re-anchor it rather than dropping the arm",
+    ).toContain(WITH_A);
+    const mutant = WF.replace(WITH_A, "census=$(grep -m1 -E");
+    expect(mutant, "CALIBRATION: the mutation changed nothing").not.toBe(WF);
+    expect(
+      mutant.includes(WITH_A),
+      "CALIBRATION: the `-a` SURVIVED the mutation, so the flip below would prove nothing",
+    ).toBe(false);
+    expect(
+      unexemptedBareGreps(mutant).join("\n"),
+      "CALIBRATION: a bare grep OUTSIDE the post-verify step went unreported — the rule is still post-verify-wide",
+    ).toContain("BARE GREP");
+
+    // (b) The exemption is a ceiling: fixing the exempted site must go RED, so the
+    //     entry is deleted rather than left standing over nothing.
+    const fixed = WF.replace(
+      "grep -q 'ANCESTRY-PROBE-SENTINEL'",
+      "grep -aq 'ANCESTRY-PROBE-SENTINEL'",
+    );
+    expect(
+      fixed,
+      "CALIBRATION: the exempted site could not be fixed in the mutant",
+    ).not.toBe(WF);
+    expect(
+      unexemptedBareGreps(fixed).join("\n"),
+      "CALIBRATION: the exemption survived its own site being fixed — an allowlist that never expires is a waiver",
+    ).toContain("STALE EXEMPTION");
+
+    // (c) The out-of-scope classifications are DELIBERATE, and each is proved to be
+    //     the reason claimed rather than an accident of the scanner.
+    expect(
+      bareGreps(WF).some((l) => l.includes("MUTEX-ACQUIRED")),
+      "the byte-copied mutex step was scanned — its bare grep is ci.yml's text, pinned byte-identical above, so flagging it here would make two requirements contradict",
+    ).toBe(false);
+    expect(
+      grepInvocations(WF).some(
+        (g) => g.stdin && g.line.includes("grep -Eiq 'prod'"),
+      ),
+      "the marker gate's piped grep was not classified as stdin-fed — the scanner's pipe detection is not doing what its comment says",
+    ).toBe(true);
+    expect(
+      grepInvocations(WF).some(
+        (g) => g.line.includes("ANCESTRY-PROBE-SENTINEL") && !g.stdin,
+      ),
+      "`||` was mistaken for a pipe: the sentinel grep reads a FILE and must stay in scope",
+    ).toBe(true);
+    expect(
+      grepInvocations(WF).some((g) => g.line.includes("grep exited")),
+      "a MEASURE_FAIL message mentioning grep was read as an INVOCATION — prose is not code",
+    ).toBe(false);
+    expect(
+      grepInvocations(WF).some((g) =>
+        g.line.includes("grep -clE 'ALTER DATABASE'"),
+      ),
+      "a regeneration recipe inside the backup README heredoc was read as an invocation — that text is written to a file, not run",
+    ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE CLASS RULE (Phase 164.8.2). IN-03 fixed ONE of the four places where a
+// `String.indexOf` result was handed straight to a slice. The other three went on
+// degrading. This arm pins the CLASS instead of the instances: in these two files,
+// an index derived from `indexOf` must be checked for the -1 case before it can
+// narrow anything. A negative index does not throw — it counts from the END — so
+// every one of these is a pin that passes when its subject is gone.
+// ---------------------------------------------------------------------------
+describe("no `indexOf` result reaches a slice unchecked, in either mutex-pin file", () => {
+  const PIN_FILES = [
+    "src/__tests__/test-restore-workflow-wiring.test.ts",
+    "src/__tests__/supabase-migrate-test-first.test.ts",
+  ];
+
+  /**
+   * Comments are stripped first, and that is load-bearing, not tidiness: BOTH files
+   * carry the offending expression VERBATIM inside the comment that records why it
+   * was removed. That note is the thing a future reader most needs, so the scanner
+   * must read code only. `[^:]` keeps a `://` inside a string from being read as a
+   * line comment.
+   */
+  const stripComments = (src: string): string =>
+    src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/gm, "$1");
+
+  // Assembled from fragments so this file does not match its own rule. Same idiom,
+  // and same reason, as the `SCHEME` needle at the top of the file.
+  const NARROW = "sl" + "ice";
+  const FIND = "index" + "Of";
+  // ⛔ NO `g` FLAG. A global regex carries `lastIndex` across `.test()` calls, so the
+  // scanner would skip every second match — a rule that misses half of what it looks
+  // at, which is the same "passes when it should not" shape as the defect it pins.
+  // Measured: with `g`, the calibration's second subject came back clean.
+  const UNCHECKED = new RegExp(`\\.${NARROW}\\(\\s*[^()]*?\\.${FIND}\\(`);
+
+  const offenders = (src: string): string[] =>
+    stripComments(src)
+      .split("\n")
+      .filter((l) => UNCHECKED.test(`${l}\n`))
+      .map((l) => l.trim());
+
+  it("CALIBRATION — the lexical rule fires on the exact expression IN-03 removed", () => {
+    const bad = `const s2 = s.${NARROW}(s.${FIND}(A));`;
+    const bad2 = `const p = s.${NARROW}(0, s.${FIND}(A));`;
+    for (const subject of [bad, bad2]) {
+      expect(
+        offenders(subject),
+        `CALIBRATION: the rule did not fire on ${subject} — it cannot fail, so it is not evidence`,
+      ).toEqual([subject]);
+    }
+    // And it does NOT fire on the checked form the fix uses, or the rule would be
+    // satisfiable only by deleting working code.
+    const good = `const i = s.${FIND}(A);\nif (i < 0) throw new Error("x");\nreturn s.${NARROW}(i);`;
+    expect(
+      offenders(good),
+      "the rule fires on the CHECKED form — it is not a rule, it is a ban",
+    ).toEqual([]);
+    // The comment strip is what makes the real scan meaningful: prove it removes the
+    // offending expression when it appears inside a comment, not by inspection.
+    expect(offenders(`// const s2 = s.${NARROW}(s.${FIND}(A));`)).toEqual([]);
+    expect(offenders(`/** x: s.${NARROW}(s.${FIND}(A)) */`)).toEqual([]);
+  });
+
+  it("neither file feeds a raw index into a narrowing call", () => {
+    for (const rel of PIN_FILES) {
+      const src = read(rel);
+      expect(
+        src.includes(FIND),
+        `${rel} no longer performs the lookup this rule is about — if it was rewritten, re-derive the rule rather than letting it pass over an absent subject`,
+      ).toBe(true);
+      expect(
+        offenders(src).join("\n"),
+        `${rel} hands a raw lookup index to a narrowing call. -1 does not throw: it counts from the END, so the pin degrades into comparing a one-character tail (or silently widening a prefix) and its failure mode is a PASS. Check the index and throw, as the two anchored helpers do.`,
+      ).toBe("");
+    }
   });
 });
