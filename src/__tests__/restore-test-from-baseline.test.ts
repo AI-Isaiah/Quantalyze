@@ -2380,8 +2380,15 @@ describe("restore-test-from-baseline.test.ts — no lookup index reaches a narro
    * because that note is what a future reader most needs. `[^:]` keeps a `://`
    * inside a string literal from being read as a line comment.
    */
-  const stripComments = (src: string): string =>
-    src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/gm, "$1");
+  const stripComments = (src: string): string => {
+    // ⛔ BLANKED, NOT DELETED. Removing a block comment removes its NEWLINES, and
+    // then every line number the scan reports is wrong from the first comment
+    // onwards. Same-shaped characters out, same line structure back.
+    const blank = (s: string): string => s.replace(/[^\n]/g, " ");
+    return src
+      .replace(/\/\*[\s\S]*?\*\//g, blank)
+      .replace(/(^|[^:])\/\/[^\n]*/gm, (m: string, p1: string) => `${p1}${blank(m.slice(p1.length))}`);
+  };
 
   // Assembled from fragments so this rule does not match its own source, the same
   // idiom (and the same reason) as the `SKELETON` and whole-file-flag needles above.
@@ -2392,11 +2399,29 @@ describe("restore-test-from-baseline.test.ts — no lookup index reaches a narro
   // the same "passes when it should not" shape as the defect it pins.
   const UNCHECKED = new RegExp(`\\.${NARROW}\\(\\s*[^()]*?\\.${FIND}\\(`);
 
-  const offenders = (src: string): string[] =>
-    stripComments(src)
-      .split("\n")
-      .filter((l) => UNCHECKED.test(`${l}\n`))
-      .map((l) => l.trim());
+  /**
+   * ⛔ SCANS THE JOINED TEXT, NOT LINE BY LINE. A line-scoped filter is blind to
+   * the realistic future offender: prettier wraps a long call with a long anchor
+   * name across three lines, and a `--write` over this file would produce exactly
+   * that shape (the two sibling gate files were reformatted to 80 columns on
+   * 2026-09-10, which is how the blindness was found).
+   * `[^()]` already matches a newline, so the needle needs nothing — the SPLIT was
+   * the bug, measured in the sibling rule (`test-restore-workflow-wiring.test.ts`)
+   * on 2026-09-10 and fixed there the same day. Line numbers survive the strip, so
+   * a match offset still names the real line of the real file.
+   */
+  const offenders = (src: string): string[] => {
+    const code = stripComments(src);
+    const lines = code.split("\n");
+    // A FRESH regex per scan. The `g` flag is safe here and ONLY here: `lastIndex`
+    // is state that a shared global regex would carry between calls, skipping every
+    // second match. This object never outlives the call.
+    const scan = new RegExp(UNCHECKED.source, "g");
+    return [...code.matchAll(scan)].map((m) => {
+      const line = code.slice(0, m.index).split("\n").length;
+      return `line ${line}: ${lines[line - 1].trim()}`;
+    });
+  };
 
   it("CALIBRATION — the lexical rule fires on both removed expressions and not on the fix", () => {
     const bad = [`const r = e.${NARROW}(e.${FIND}("|") + 1);`, `const n = e.${NARROW}(0, e.${FIND}("|"));`];
@@ -2404,7 +2429,7 @@ describe("restore-test-from-baseline.test.ts — no lookup index reaches a narro
       expect(
         offenders(subject),
         `CALIBRATION: the rule did not fire on ${subject} — it cannot fail, so it is not evidence`,
-      ).toEqual([subject]);
+      ).toEqual([`line 1: ${subject}`]);
     }
     // It must NOT fire on the checked form, or it is a ban rather than a rule.
     const good = `const at = e.${FIND}("|");\nif (at < 0) throw new Error("x");\nreturn e.${NARROW}(at + 1);`;
@@ -2414,6 +2439,47 @@ describe("restore-test-from-baseline.test.ts — no lookup index reaches a narro
     // And the comment strip is proven, not assumed.
     expect(offenders(`// const r = e.${NARROW}(e.${FIND}("|") + 1);`)).toEqual([]);
     expect(offenders(`/** e.${NARROW}(e.${FIND}("|") + 1) */`)).toEqual([]);
+  });
+
+  it("CALIBRATION — a formatter-wrapped offender is caught, and located", () => {
+    // What prettier does to a long call with a long anchor name — the realistic
+    // future offender, and the exact shape a `--write` over this file would produce.
+    // The arm exists because the line-scoped form of this scan could not see it.
+    const wrapped = [
+      "const first = 1;",
+      "const someVeryLongVariableName = someOtherText.${N}(",
+      "  someOtherText.${F}(ANCHOR_WITH_A_LONG_NAME) + 1,",
+      ");",
+    ]
+      .join("\n")
+      .split("${N}")
+      .join(NARROW)
+      .split("${F}")
+      .join(FIND);
+    const found = offenders(wrapped);
+    expect(
+      found.length,
+      "a wrapped offender is invisible — the scan went line-scoped again, and the formatter puts real offenders out of its reach",
+    ).toBe(1);
+    expect(
+      found[0].startsWith("line 2:"),
+      `the reported location is wrong (${found[0]}) — a location that does not name the line the match starts on is not a location`,
+    ).toBe(true);
+
+    // CALIBRATION OF THE CALIBRATION — the line-scoped filter this replaced, kept
+    // as a SUBJECT and asserted to still MISS the same string. Without it the arm
+    // above proves only that something fired, not that the joining is what fired it.
+    const lineScoped = stripComments(wrapped)
+      .split("\n")
+      .filter((l) => new RegExp(UNCHECKED.source).test(`${l}\n`));
+    expect(
+      lineScoped,
+      "the line-scoped scan now catches the wrapped form too, so this arm has no live subject — re-derive it",
+    ).toEqual([]);
+
+    // …and the blanking strip preserved the line structure, which is what makes the
+    // location above readable at all.
+    expect(stripComments(wrapped).split("\n").length).toBe(wrapped.split("\n").length);
   });
 
   it("this file feeds no raw lookup index into a narrowing call", () => {
@@ -2433,9 +2499,18 @@ describe("restore-test-from-baseline.test.ts — no lookup index reaches a narro
     const site = `    const res = entries.map((e) => e.${NARROW}(e.${FIND}("|") + 1));`;
     const regressed = `${src}\n${site}\n`;
     expect(regressed, "the class-scan calibration did not APPLY").not.toBe(src);
+    const found = offenders(regressed);
     expect(
-      offenders(regressed),
+      found.length,
       "the scan did NOT name a re-introduced site — it is measuring nothing",
-    ).toEqual([site.trim()]);
+    ).toBe(1);
+    expect(
+      found[0].endsWith(site.trim()),
+      `the scan named something else (${found[0]}) than the site it was handed`,
+    ).toBe(true);
+    expect(
+      found[0].startsWith(`line ${src.split("\n").length + 1}:`),
+      `the reported location (${found[0]}) does not name the line the site was appended at — a location that is not the line is not a location`,
+    ).toBe(true);
   });
 });
