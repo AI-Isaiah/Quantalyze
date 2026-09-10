@@ -46,6 +46,49 @@ const FAKE_CREDS = {
   SUPABASE_DB_PASSWORD: "stub-password",
 };
 
+// ---------------------------------------------------------------------------
+// ⛔ ANCHOR DISCIPLINE (Phase 164.8.2 / WR-07). READ THIS BEFORE WRITING A SLICE.
+//
+// `String.indexOf`/`lastIndexOf` return -1 on a miss, and JavaScript's `slice`
+// reads a negative index FROM THE END: `s.slice(-1)` is the LAST CHARACTER and
+// `s.slice(0, -1)` is nearly the WHOLE string. A narrowing slice whose anchor has
+// been renamed therefore does not fail — it degenerates into a subject an
+// assertion sails straight over. MEASURED on this branch: a byte-identity pin
+// over an entire mutex protocol comparing `"\n"` to `"\n"` and PASSING.
+//
+// ⛔ AN ABSENT ANCHOR IS A FINDING, NOT A VALUE. No `?? ''`, no `|| 0`, no
+// `Math.max(0, i)` — a defaulted anchor is the same defect wearing a hat. Throw,
+// and NAME the anchor. Restated per-file rather than imported, matching the
+// self-containment convention these gate-proof files are built on.
+// ---------------------------------------------------------------------------
+
+/** `text.indexOf(anchor)`, but a miss THROWS by name instead of returning -1. */
+function anchorIndex(text: string, anchor: string, from = 0): number {
+  const at = text.indexOf(anchor, from);
+  if (at < 0) {
+    throw new Error(
+      `ANCHOR MISSING: ${JSON.stringify(anchor)} is not present in the subject text. ` +
+        `The narrowing slice that wanted it would have degenerated (slice(-1) is the LAST ` +
+        `CHARACTER, slice(0, -1) is nearly the WHOLE string) and every assertion over the ` +
+        `result would have passed vacuously. Fix the anchor or the subject — do not default it.`,
+    );
+  }
+  return at;
+}
+
+/** `text.lastIndexOf(anchor)`, same discipline: a miss THROWS by name. */
+function lastAnchorIndex(text: string, anchor: string): number {
+  const at = text.lastIndexOf(anchor);
+  if (at < 0) {
+    throw new Error(
+      `ANCHOR MISSING (last): ${JSON.stringify(anchor)} is not present in the subject text. ` +
+        `The narrowing slice that wanted it would have degenerated and every assertion over ` +
+        `the result would have passed vacuously. Fix the anchor or the subject.`,
+    );
+  }
+  return at;
+}
+
 function withTempDir<T>(fn: (dir: string) => T): T {
   const dir = mkdtempSync(join(tmpdir(), "drift-check-"));
   try {
@@ -995,7 +1038,10 @@ describe("SP-C05 — 'absent from PROD' must be measured by an instrument that d
     expect(xcheck).toContain("sql-function-names-naive.mjs");
     // All three read the SAME dump — the disagreement must be about the
     // READING, never about looking at two different things.
-    const dumpOf = (cmd: string) => cmd.slice(cmd.lastIndexOf(" ") + 1);
+    // ⛔ WR-07: `lastIndexOf(" ")` on a command that lost its arguments returns
+    // -1 and `slice(0)` hands back the WHOLE command, so two single-token
+    // commands would "agree about their dump" while naming no dump at all.
+    const dumpOf = (cmd: string) => cmd.slice(lastAnchorIndex(cmd, " ") + 1);
     expect(dumpOf(xcheck)).toBe(dumpOf(primary));
     expect(dumpOf(fetch)).toBe(dumpOf(primary));
     // An edit to the new reader must re-run the gate that depends on it.
@@ -2755,8 +2801,12 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
       /** A ledger row shaped the way the ledger REALLY stores this convention. */
       rowFor: (fname: string) => LedgerRow;
     };
-    const tsOf = (f: string) => f.slice(0, f.indexOf("_"));
-    const descOf = (f: string) => f.slice(f.indexOf("_") + 1);
+    // ⛔ WR-07: a migration basename with no `_` used to make `tsOf` return
+    // nearly the WHOLE name (`slice(0, -1)`) and `descOf` return ALL of it
+    // (`slice(0)`), so the fixture rows below would have been built out of
+    // garbage that still looked like a timestamp/description pair.
+    const tsOf = (f: string) => f.slice(0, anchorIndex(f, "_"));
+    const descOf = (f: string) => f.slice(anchorIndex(f, "_") + 1);
 
     // One entry per convention the script's header documents (:39-51). The row
     // shapes are the MEASURED ones from those lines, not invented: an old row
@@ -4198,13 +4248,16 @@ describe("IN-04 — the scratch directory does not survive a fail() path", () =>
     // tallies are COUNTED against each other, so a sixth arm that skips without
     // tallying fails.
     const src = readFileSync("scripts/pg-lane/run.sh", "utf8");
-    const start = src.indexOf("self_test() {");
+    // ⛔ WR-07: unanchored, a renamed `self_test()` made `start` -1 and the slice
+    // below returned an empty body whose only symptom was a length assertion.
+    // Fail on the ANCHOR, naming it, rather than on a downstream consequence.
+    const start = anchorIndex(src, "self_test() {");
     // ⚠️ COMMENTS STRIPPED FIRST. A first version searched the raw text and
     // matched "SELF-TEST PASSED (5/5)" inside the very comment that explains
     // this fix — the same trap the trap-ordering arm above records. The subject
     // is the CODE.
     const body = src
-      .slice(start, src.indexOf("\n# ---", start))
+      .slice(start, anchorIndex(src, "\n# ---", start))
       .split("\n")
       .filter((l) => !/^\s*#/.test(l))
       .join("\n");
@@ -4973,5 +5026,46 @@ describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()
       report,
       "a `set +e` whose captured status is never read went unreported — the bound proves capture and restoration and calls that consumption",
     ).toContain("captures `ledger_rows_discarded_rc` and then never reads it");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⛔ WR-07 CALIBRATION — the anchor check must BITE.
+//
+// A guard added and never shown to fire is the same defect it was added to
+// close, so both helpers are driven with the anchor ABSENT (asserting the
+// mutation actually removed it FIRST, so a no-op replace cannot read as a pass)
+// and then with the real subject as a control.
+// ---------------------------------------------------------------------------
+describe("[164.8.2-WR-07] slice anchors fail loud instead of degenerating", () => {
+  it("anchorIndex throws BY NAME on a missing anchor and stays silent on a present one", () => {
+    const basename = "20260828061901_add_thing.sql";
+    // Control: the real shape resolves, so the check is a check and not a refusal.
+    expect(basename.slice(0, anchorIndex(basename, "_"))).toBe("20260828061901");
+    expect(() => anchorIndex(basename, "_")).not.toThrow();
+
+    // Mutant: the separator is GONE. Assert the mutation applied before the flip.
+    const mutant = basename.split("_").join("-");
+    expect(mutant, "the mutation must actually change the subject").not.toBe(basename);
+    expect(mutant.includes("_"), "the mutation must actually REMOVE the anchor").toBe(false);
+    expect(() => anchorIndex(mutant, "_")).toThrow(/ANCHOR MISSING: "_"/);
+    // ⚠️ And the degenerate value the old code returned is exactly the trap: an
+    // unchecked `slice(0, -1)` here is nearly the WHOLE basename, which still
+    // looks like a plausible timestamp to every assertion downstream.
+    expect(mutant.slice(0, mutant.indexOf("_"))).toBe("20260828061901-add-thing.sq");
+  });
+
+  it("lastAnchorIndex throws BY NAME when the command has no argument separator", () => {
+    const cmd = "psql -Atc script.sql /tmp/dump.sql";
+    expect(cmd.slice(lastAnchorIndex(cmd, " ") + 1)).toBe("/tmp/dump.sql");
+    expect(() => lastAnchorIndex(cmd, " ")).not.toThrow();
+
+    const mutant = cmd.split(" ").join("");
+    expect(mutant, "the mutation must actually change the subject").not.toBe(cmd);
+    expect(mutant.includes(" "), "the mutation must actually REMOVE the anchor").toBe(false);
+    expect(() => lastAnchorIndex(mutant, " ")).toThrow(/ANCHOR MISSING \(last\): " "/);
+    // The trap it replaces: `slice(-1 + 1)` is `slice(0)` — the WHOLE command,
+    // so two argument-less commands would "agree about their dump" naming none.
+    expect(mutant.slice(mutant.lastIndexOf(" ") + 1)).toBe(mutant);
   });
 });
