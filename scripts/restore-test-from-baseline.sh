@@ -181,6 +181,18 @@
 # still cats the WHOLE pre-census, DDL column included, to the public Actions log, and
 # no staging step can reach that.
 #
+# ⭐ 2026-09-10 (Phase 164.8.2 review-fix): AND THE FOUR STAGED `.sql` FILES ARE NOW
+# SCANNED FOR A DSN — by `assert_public_sql_dsn_free`, between `build_transaction`
+# and `run_transaction`, so a hit refuses with the database untouched. The FILE SET
+# is unchanged and is not up for re-narrowing: admitting `census.sql`,
+# `survivors.sql`, `restore.sql` and `refdata.sql` is a founder decision and is
+# already narrower than what it replaced. What was missing was that NOTHING asserted
+# they were credential-free — the workflow's redaction step runs before this script
+# writes them, and `--self-test`'s redaction grep reads an arm's captured OUTPUT, not
+# these files. That gap is closed for DSN shapes and for nothing else: the
+# dollar-quote half of the arm check would refuse every run, because these files are
+# SQL. Deliberate SQL BODIES in `survivors.sql` remain in scope of T-164.8-21 above.
+#
 # ── TWO THINGS THIS SCRIPT DELIBERATELY DOES NOT DO ─────────────────────────
 # 1. IT DOES NOT BACK ANYTHING UP. The WORKFLOW takes the backup, BEFORE calling
 #    this script (Plan 03). Doing it here would put the backup inside the thing
@@ -1489,6 +1501,60 @@ TXN_ASSERT
   note "transaction assembled at ${out} (filtered: ${FILTERED_N} line(s) matching ${FILTER_PATTERN})"
 }
 
+# ---------------------------------------------------------------------------
+# ⛔ THE FOUR SCRIPT-WRITTEN .sql FILES ARE PUBLISHED, AND UNTIL NOW NOTHING
+# ASSERTED THEY CARRY NO CREDENTIAL.
+#
+# `census.sql`, `survivors.sql`, `restore.sql` and `refdata.sql` are written by
+# THIS script into RESTORE_OUT_DIR, and the calling workflow's staging step admits
+# all four into the world-readable backup artifact. That set is a FOUNDER DECISION
+# and is deliberately not re-narrowed here: they are the reversal recipe
+# (T-164.8-21), and the artifact is where they belong.
+#
+# What was missing is a MEASUREMENT. The workflow's redaction step runs BEFORE
+# this script writes these files — its own comment says they are "scanned by
+# NOTHING and redacted by NOTHING" — and `--self-test`'s redaction grep reads an
+# arm's CAPTURED OUTPUT, never these files. So the one class that must never be
+# published anywhere was asserted about the LOG and about nothing else, and a DSN
+# reaching one of these files would have shipped for 90 days on a public repo with
+# every gate green.
+#
+# ⛔ IT IS ABOUT DSN SHAPES AND NOTHING ELSE, and the narrowness is the point. The
+# arm redaction check has a SECOND half — a dollar-quote, i.e. a SQL body — that is
+# deliberately NOT applied here: these files ARE SQL and are full of dollar-quoted
+# bodies by construction, so that half would refuse every legitimate run. The
+# pattern is the same `postgres(ql)?://` the arm check uses, so both readings of
+# "a DSN" in this script are one string.
+#
+# ⛔ THE MATCH IS NEVER PRINTED. A hit IS the credential; the refusal names the
+# FILE and stops. Same discipline as the identity marker, whose text is withheld
+# even when it is the reason for the refusal.
+#
+# ⚠️ IT IS NOT NAMED `refuse_*`, and that is a measured choice rather than a
+# style one. The `refuse_*() {` count is DERIVED — by `--self-test`'s closing line
+# and by `restore-test-from-baseline.test.ts` — into the claim that every refusal
+# fires before a write AND is armed by a named-message arm. This check runs after
+# the census has already connected, and it has no cluster arm (arming it needs the
+# throwaway lane). Joining that family would have made a true sentence false.
+#
+# Called AFTER `build_transaction` and BEFORE `run_transaction`, so a hit refuses
+# with the database still untouched.
+# ---------------------------------------------------------------------------
+assert_public_sql_dsn_free() {
+  local f rc hits=""
+  for f in census.sql survivors.sql restore.sql refdata.sql; do
+    [ -f "$RESTORE_OUT_DIR/$f" ] || continue
+    rc=0
+    grep -acE 'postgres(ql)?://' "$RESTORE_OUT_DIR/$f" >/dev/null || rc=$?
+    [ "$rc" -le 1 ] || fail "MEASURE_FAIL: could not scan ${f} for a DSN shape (grep exited ${rc}). An unreadable file is not a clean one, and this file is published."
+    if [ "$rc" -eq 0 ]; then hits="${hits}${hits:+, }${f}"; fi
+  done
+  if [ -n "$hits" ]; then
+    fail "a DSN shape appears in ${hits}, which the calling workflow stages into a WORLD-READABLE artifact for 90 days. The match is NOT printed — it would be the credential. Refusing before the transaction runs; the database is untouched."
+  fi
+  note "public .sql files carry no DSN shape (census.sql, survivors.sql, restore.sql, refdata.sql)"
+}
+
 run_transaction() {
   local rc=0
   psql "$RESTORE_DB_URL" -X -q -v ON_ERROR_STOP=1 -f "$RESTORE_OUT_DIR/restore.sql" \
@@ -1559,6 +1625,10 @@ run_restore() {
 
   derive_expected_shape
   build_transaction "$mode"
+  # Every file the workflow publishes now exists. Scan them BEFORE the psql
+  # session runs, so a credential in a to-be-published file stops the restore
+  # rather than being discovered in the artifact afterwards.
+  assert_public_sql_dsn_free
 
   note "── transaction (mode=${mode}) ──────────────────────────────────────"
   run_transaction

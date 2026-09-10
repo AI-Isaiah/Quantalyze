@@ -1373,3 +1373,148 @@ describe("restore-test-from-baseline-fixtures — the arm corpus is a DIRECTORY 
     expect(read("supabase/schema/baseline.sql").split("\nALTER DEFAULT PRIVILEGES").length - 1).toBe(12);
   });
 });
+
+describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are scanned for a DSN", () => {
+  // ⛔ WHAT THIS ARM IS ABOUT, AND WHAT IT IS DELIBERATELY NOT ABOUT. The calling
+  // workflow stages `census.sql`, `survivors.sql`, `restore.sql` and `refdata.sql`
+  // into a world-readable artifact that lives for 90 days on a PUBLIC repo. That
+  // FILE SET is a founder decision and is not in scope here — it is already
+  // narrower than what it replaced, and re-narrowing it is explicitly out of
+  // bounds. The gap this arm closes is that NOTHING asserted the four were
+  // credential-free: the workflow's redaction step runs BEFORE the script writes
+  // them, and `--self-test`'s redaction grep reads an arm's captured OUTPUT rather
+  // than these files.
+  //
+  // ⛔ SO THE PREDICATE IS ABOUT DSN SHAPES, NOT ABOUT WHICH FILES EXIST. A pin
+  // over the file list would go red the next time the set legitimately changes and
+  // would say nothing about credentials either way.
+  //
+  // ⚠️ EXECUTED, not grepped, and with NO CLUSTER AND NO DATABASE. A static pin on
+  // the guard's TEXT would stay green against a guard that scans the wrong
+  // directory or swallows grep's rc. The script is SOURCED the way the IN-06 arm
+  // does it (`main "$@"` stripped, definitions only) and the function is called
+  // directly against a seeded RESTORE_OUT_DIR. `RESTORE_DB_URL` is the literal
+  // `stub-never-used` and is never dialled.
+  const DSN_HARNESS = ['source "$COPY"', "assert_public_sql_dsn_free", ""].join("\n");
+
+  /** The four names the workflow stages. */
+  const STAGED = ["census.sql", "survivors.sql", "restore.sql", "refdata.sql"];
+
+  function runDsnAssert(files: Record<string, string>): { status: number; out: string } {
+    const dir = mkdtempSync(join(tmpdir(), "restore-dsnscan-"));
+    try {
+      const stripped = SRC.replace(/\nmain "\$@"\n?$/, "\n");
+      expect(
+        stripped,
+        'the script no longer ends with its `main "$@"` dispatch — sourcing the copy would RUN the real thing',
+      ).not.toBe(SRC);
+      const copy = join(dir, "copy.sh");
+      writeFileSync(copy, stripped);
+      writeFileSync(join(dir, "harness.sh"), DSN_HARNESS);
+      const out = join(dir, "out");
+      mkdirSync(out);
+      for (const [name, body] of Object.entries(files)) writeFileSync(join(out, name), body);
+      const r = spawnSync("bash", [join(dir, "harness.sh")], {
+        encoding: "utf8",
+        env: { ...process.env, COPY: copy, RESTORE_OUT_DIR: out, RESTORE_DB_URL: "stub-never-used" },
+      });
+      return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("is WIRED — called between build_transaction and run_transaction, so a hit refuses pre-write", () => {
+    const body = functionBody(SRC, "run_restore");
+    const buildAt = liveIndexOf(body, 'build_transaction "$mode"');
+    const scanAt = liveIndexOf(body, "assert_public_sql_dsn_free");
+    const txnAt = liveIndexOf(body, "run_transaction");
+    expect(scanAt, "run_restore no longer scans the published .sql files").toBeGreaterThanOrEqual(0);
+    expect(
+      scanAt,
+      "the DSN scan runs BEFORE the transaction is assembled, so restore.sql and refdata.sql do not exist yet and it would scan two files instead of four",
+    ).toBeGreaterThan(buildAt);
+    expect(
+      scanAt,
+      "the DSN scan runs AFTER the transaction, so a credential in a published file is discovered only once the database has already been written to",
+    ).toBeLessThan(txnAt);
+
+    // CALIBRATION — move the call after run_transaction on a scratch copy.
+    const moved = SRC.replace("  assert_public_sql_dsn_free\n", "").replace(
+      "  run_transaction\n",
+      "  run_transaction\n  assert_public_sql_dsn_free\n",
+    );
+    expect(moved, "the wiring calibration did not APPLY").not.toBe(SRC);
+    const mBody = functionBody(moved, "run_restore");
+    expect(liveIndexOf(mBody, "assert_public_sql_dsn_free")).toBeGreaterThan(
+      liveIndexOf(mBody, "run_transaction"),
+    );
+  });
+
+  it("EXECUTED — clean files pass, and a DSN in ANY ONE of the four is a named refusal", () => {
+    const clean: Record<string, string> = Object.fromEntries(
+      STAGED.map((f) => [f, "CREATE TABLE public.x ();\nSELECT $$a dollar-quoted body$$;\n"]),
+    );
+    const green = runDsnAssert(clean);
+    expect(green.status, `the guard refused four DSN-free files. Output:\n${green.out}`).toBe(0);
+    expect(green.out).toContain("carry no DSN shape");
+
+    // ⛔ THE FALSIFIER, ONE FILE AT A TIME. A guard that scans `restore.sql` and
+    // nothing else would pass three of these four.
+    for (const target of STAGED) {
+      const seeded = {
+        ...clean,
+        [target]: `${clean[target]}-- postgresql://u:p@db.example:5432/postgres\n`,
+      };
+      const red = runDsnAssert(seeded);
+      expect(
+        red.status,
+        `a DSN in ${target} did NOT refuse — that file reaches a world-readable artifact unscanned. Output:\n${red.out}`,
+      ).toBe(1);
+      expect(red.out, `the refusal for ${target} does not name the file`).toContain(target);
+      // The match itself is the credential and must never be printed.
+      expect(
+        red.out.includes("db.example"),
+        `the refusal for ${target} ECHOED the matched DSN — the refusal is itself the leak`,
+      ).toBe(false);
+    }
+  });
+
+  it("EXECUTED — an UNREADABLE published file is a named MEASURE_FAIL, never a clean read", () => {
+    // grep's rc>=2 must not collapse to "no match". The harness replaces grep with
+    // one that returns 2 for the scan and delegates everything else.
+    const dir = mkdtempSync(join(tmpdir(), "restore-dsnscan-rc-"));
+    try {
+      const copy = join(dir, "copy.sh");
+      writeFileSync(copy, SRC.replace(/\nmain "\$@"\n?$/, "\n"));
+      writeFileSync(
+        join(dir, "harness.sh"),
+        [
+          'source "$COPY"',
+          "grep() {",
+          '  for a in "$@"; do',
+          '    case "$a" in -*c*) return 2 ;; esac',
+          "  done",
+          '  command grep "$@"',
+          "}",
+          "assert_public_sql_dsn_free",
+          "",
+        ].join("\n"),
+      );
+      const out = join(dir, "out");
+      mkdirSync(out);
+      for (const f of STAGED) writeFileSync(join(out, f), "SELECT 1;\n");
+      const r = spawnSync("bash", [join(dir, "harness.sh")], {
+        encoding: "utf8",
+        env: { ...process.env, COPY: copy, RESTORE_OUT_DIR: out, RESTORE_DB_URL: "stub-never-used" },
+      });
+      const combined = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+      expect(combined, `an unreadable file read as clean. Output:\n${combined}`).toContain(
+        "MEASURE_FAIL: could not scan",
+      );
+      expect(r.status, `the guard did not exit 1 on an unreadable file. Output:\n${combined}`).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
