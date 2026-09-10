@@ -4788,11 +4788,29 @@ describe("no `indexOf` result reaches a slice unchecked, in either mutex-pin fil
   // Measured: with `g`, the calibration's second subject came back clean.
   const UNCHECKED = new RegExp(`\\.${NARROW}\\(\\s*[^()]*?\\.${FIND}\\(`);
 
-  const offenders = (src: string): string[] =>
-    stripComments(src)
-      .split("\n")
-      .filter((l) => UNCHECKED.test(`${l}\n`))
-      .map((l) => l.trim());
+  /**
+   * ⛔ SCANS THE JOINED TEXT, NOT LINE BY LINE. The first version filtered
+   * `stripComments(src).split("\n")`, and the very commit that introduced it
+   * reformatted ~1100 lines of these two files to 80 columns. A long call with a
+   * long anchor name — the realistic future offender — is wrapped by the formatter
+   * across three lines and was invisible to a line-scoped filter. `[^()]` already
+   * matches a newline, so the needle itself needed nothing; the SPLIT was the bug.
+   *
+   * Line numbers survive the strip (comments are blanked, not deleted), so the
+   * match offset still names the real line in the real file.
+   */
+  const offenders = (src: string): string[] => {
+    const code = stripComments(src);
+    const lines = code.split("\n");
+    // A FRESH regex per scan. The `g` flag is safe here and ONLY here: `lastIndex`
+    // is state, and a shared global regex skips every second match (measured — see
+    // the note on UNCHECKED above). This object never outlives the call.
+    const scan = new RegExp(UNCHECKED.source, "g");
+    return [...code.matchAll(scan)].map((m) => {
+      const line = code.slice(0, m.index).split("\n").length;
+      return `line ${line}: ${lines[line - 1].trim()}`;
+    });
+  };
 
   it("CALIBRATION — the lexical rule fires on the exact expression IN-03 removed", () => {
     const bad = `const s2 = s.${NARROW}(s.${FIND}(A));`;
@@ -4801,7 +4819,7 @@ describe("no `indexOf` result reaches a slice unchecked, in either mutex-pin fil
       expect(
         offenders(subject),
         `CALIBRATION: the rule did not fire on ${subject} — it cannot fail, so it is not evidence`,
-      ).toEqual([subject]);
+      ).toEqual([`line 1: ${subject}`]);
     }
     // And it does NOT fire on the checked form the fix uses, or the rule would be
     // satisfiable only by deleting working code.
@@ -4831,6 +4849,40 @@ describe("no `indexOf` result reaches a slice unchecked, in either mutex-pin fil
     }
     throw new Error("no code line found — the stripper blanked the entire file");
   };
+
+  it("CALIBRATION — a formatter-wrapped offender is caught, and located", () => {
+    // What prettier does to a long call with a long anchor name, which is the
+    // realistic future offender in files this very commit reformatted to 80 cols.
+    const wrapped = [
+      "const first = 1;",
+      "const someVeryLongVariableName = someOtherText.${N}(",
+      "  someOtherText.${F}(ANCHOR_WITH_A_LONG_NAME),",
+      ");",
+    ]
+      .join("\n")
+      .split("${N}")
+      .join(NARROW)
+      .split("${F}")
+      .join(FIND);
+    const found = offenders(wrapped);
+    expect(
+      found.length,
+      "a wrapped offender is invisible — the scan is line-scoped again, and the formatter puts real offenders out of its reach",
+    ).toBe(1);
+    expect(
+      found[0].startsWith("line 2:"),
+      `the reported location is wrong (${found[0]}) — a location that does not name the line the match starts on is not a location`,
+    ).toBe(true);
+    // CALIBRATION: the line-scoped filter this replaced, kept as a SUBJECT, misses
+    // the same string. Without this the arm above proves only that something fired.
+    const lineScoped = stripComments(wrapped)
+      .split("\n")
+      .filter((l) => new RegExp(UNCHECKED.source).test(`${l}\n`));
+    expect(
+      lineScoped,
+      "the line-scoped scan now catches the wrapped form too, so this arm has no live subject — re-derive it",
+    ).toEqual([]);
+  });
 
   it("CALIBRATION — the anti-vacuity floor is NOT satisfiable by comments alone", () => {
     // A corpus whose only lookup lives in a comment: the scan has nothing to look
