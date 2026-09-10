@@ -4469,3 +4469,393 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     expect(Number(arms.stdout.trim())).toBeGreaterThanOrEqual(1);
   });
 });
+
+// ── B3 (Phase 164.8.2) — THE LEDGER GATE'S SOFTENINGS ARE AN EXACT SET OF SITES
+//
+// `scripts/restore-test-from-baseline.sh` has a softening-token scan over its
+// `--run` region. This gate had NONE. F5 bounded five `|| true` reads with
+// `set +e; …; rc=$?; set -e`, F7 bounded a sixth, and every one of those `set +e`
+// sites was then governed by nothing at all: a seventh could be added tomorrow,
+// unbounded, and no gate in this repo would notice. A softening that nobody
+// counts is exactly the shape this phase exists to remove — the control weaker
+// than the sentence beside it.
+//
+// ⛔ SITES, NOT A COUNT, and the distinction is load-bearing. A count is blind to
+// a ONE-FOR-ONE SWAP: delete a benign suppression and add a dangerous one and the
+// tally never moves. The swap calibration below performs exactly that — it takes
+// the ADVISORY extra-ledger direction's `2>/dev/null` away and puts one back on
+// the `ledger_rows` read, which is F7's defect, restored — and asserts that the
+// SUPERSEDED count rule (kept here as a reference oracle) reports NOTHING while
+// the site rule reports both halves. "The new control is stronger" is a claim;
+// that arm is what makes it a measurement.
+//
+// ⚠️ THE TOKEN LIST IS DELIBERATELY *NOT* A FOURTH COPY of the nine-token YAML
+// list in `test-restore-workflow-wiring.test.ts` / `supabase-migrate-test-first.test.ts`
+// / `prod-prober-wiring.test.ts` — that trio pins its own length at nine and says
+// so, and a silent fourth copy would make their sentence false. This one governs a
+// BASH FILE, where the legitimate idioms differ: `set +e` is not banned here (it is
+// the SP-M01 BOUND), `continue-on-error` cannot occur, and `>/dev/null 2>&1` on a
+// `command -v … || fail` probe is the canonical presence check. Same mechanism,
+// different corpus, stated rather than blended.
+describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()", () => {
+  const SRC = readFileSync(LEDGER_GATE, "utf8");
+
+  /**
+   * The GATE PROPER: `check() {` up to `self_test() {`. Sliced rather than scanned
+   * whole-file for the reason the sibling slices out its mutex steps — the
+   * self-test harness legitimately writes stub scripts containing `exit 0` into a
+   * heredoc, and scanning them would make two requirements contradict.
+   */
+  const checkRegion = (text: string): string => {
+    const lines = text.split("\n");
+    const a = lines.findIndex((l) => l.startsWith("check() {"));
+    if (a < 0) return "";
+    const b = lines.findIndex((l, i) => i > a && l.startsWith("self_test() {"));
+    return b < 0 ? "" : lines.slice(a, b).join("\n");
+  };
+  const liveLines = (block: string): string[] =>
+    block.split("\n").filter((l) => l.trim() !== "" && !l.trim().startsWith("#"));
+
+  /**
+   * ⛔ FOUR OF THESE ARE FORBIDDEN OUTRIGHT (they have no entry in ALLOWED_SITES):
+   * `|| :`, `|| exit 0`, `set +o pipefail`, and a bare `exit 0`. This gate's whole
+   * contract is that a work step with nothing to say still exits 1 — a zero-status
+   * escape inside `check()` would be the SKIP-01 shape returning by the back door.
+   */
+  const SOFTENING_TOKENS = [
+    "|| true",
+    "|| :",
+    "|| exit 0",
+    "exit 0",
+    "set +e",
+    "set +o pipefail",
+    "2>/dev/null",
+    ">/dev/null 2>&1",
+    "::warning",
+  ];
+
+  /**
+   * Every softening `check()` is allowed to carry, as the distinguishing text of
+   * its SITE, WITH THE REASON IT IS THERE.
+   *
+   * ⛔ A SITE IS MATCHED AGAINST A TWO-LINE WINDOW (the token line and the next live
+   * line), because three of the `set +e` sites are the bare string `set +e` and are
+   * distinguishable only by the read they bound. The window is what lets the entry
+   * name that read, which is also the only thing that makes the list readable.
+   *
+   * ⛔ THE RULE IS A BIJECTION. A new softening is red (UNLISTED SITE) and a vanished
+   * one is red too (VANISHED SITE) — a site disappearing means either an exit status
+   * that used to be handled stopped being handled, or the slicing moved and the scan
+   * is looking at less than it thinks.
+   */
+  const ALLOWED_SITES: readonly { token: string; site: string; why: string }[] = [
+    // ── `|| true` — ONE site, and it is the only one F5/F7 left standing ──────
+    {
+      token: "|| true",
+      site: "sed 's/^/::error::  /' || true",
+      why: "the shape DIAGNOSTIC re-emitted on the absurdity floor's own failure path. The `exit 1` is on the next line and does not depend on it; a shape probe that cannot run must not convert a decided RED into a shell error that hides the verdict.",
+    },
+    // ── `set +e` — EIGHT sites, every one the SP-M01 BOUND, not a softening ───
+    {
+      token: "set +e",
+      site: `missing_count="$(grep -ac '[^[:space:]]' "$missing_file")"`,
+      why: "SP-M01. Bounds the missing-row count so grep's rc >= 2 becomes a MEASURE_FAIL instead of a count of zero.",
+    },
+    {
+      token: "set +e",
+      site: 'ledger_rows="$(run_ledger_query ledger_rows "$names_csv" 2>"$ledger_rows_err")"',
+      why: "F7. Bounds the ABSURDITY FLOOR's own input. Unbounded, an unreadable count left the floor INERT rather than red.",
+    },
+    {
+      token: "set +e",
+      site: 'grep -aFxv -f "$base_names" "$missing_file"',
+      why: "F5. Bounds the NEW-drift filter: rc 1 is the ordinary clean case, rc >= 2 is unreadable, and an empty `$new_file` is this gate's CLEAN verdict.",
+    },
+    {
+      token: "set +e",
+      site: 'grep -aFxv -f "$missing_file" "$base_names"',
+      why: "F5. Bounds the STALE-baseline filter, on the same rc 1 vs rc >= 2 distinction.",
+    },
+    {
+      token: "set +e",
+      site: 'exempt_count="$(grep -ac',
+      why: "F5. Bounds the frontier-exemption count, which feeds FRONTIER_EXEMPT_CEILING — 0 is the one value that ceiling can never fire on.",
+    },
+    {
+      token: "set +e",
+      site: 'new_count="$(grep -ac',
+      why: "F5. Bounds the count that IS the verdict: 0 prints `0 NEW drift` and exits 0.",
+    },
+    {
+      token: "set +e",
+      site: 'stale_count="$(grep -ac',
+      why: "F5. Bounds the stale-baseline count; an uncountable result is not a baseline with nothing stale in it.",
+    },
+    {
+      token: "set +e",
+      site: `extra_count="$(grep -ac '[^[:space:]]' "$extra_file")"`,
+      why: "F5. Bounds the ADVISORY extra-ledger count. This direction warns rather than failing, but it is still never allowed to read as 'counted zero, nothing to report'.",
+    },
+    // ── `2>/dev/null` — THREE sites, each a psql channel that can name a host ─
+    {
+      token: "2>/dev/null",
+      site: "2>/dev/null | sed 's/^/::error::  /' || true",
+      why: "the absurdity floor's shape diagnostic. psql's stderr can carry a DSN, host or username and this job's log is PUBLIC (NON-NEGOTIABLES, top of the script); the probe's STDOUT is the evidence and is printed.",
+    },
+    {
+      token: "2>/dev/null",
+      site: 'if run_ledger_query shape "$names_csv" 2>/dev/null',
+      why: "the same shape diagnostic on the NEW-drift path — and here the rc IS consumed: the `if` prints `(shape probe failed — the ledger could not be described)` on the else branch.",
+    },
+    {
+      token: "2>/dev/null",
+      site: '> "$extra_file" 2>/dev/null',
+      why: "the ADVISORY extra-ledger direction. Its rc is consumed by the `if` that wraps it, so the suppressed channel is redaction and never evidence.",
+    },
+    // ── `>/dev/null 2>&1` — TWO sites, both `command -v … || fail` ────────────
+    {
+      token: ">/dev/null 2>&1",
+      site: "command -v node >/dev/null 2>&1",
+      why: "a presence probe whose status is consumed by the `|| fail` on the same line. The suppressed channel is the path echo, not a diagnosis.",
+    },
+    {
+      token: ">/dev/null 2>&1",
+      site: "command -v psql >/dev/null 2>&1",
+      why: "the same probe for psql, with the same `|| fail` on the same line.",
+    },
+    // ── `::warning` — TWO sites, both DECLARED-advisory, neither a verdict ────
+    {
+      token: "::warning",
+      site: "no ledger baseline at",
+      why: "an absent baseline file makes every measured absence NEW — which is the strict direction, so the run still fails on drift. The warning explains the strictness; it does not soften a finding.",
+    },
+    {
+      token: "::warning",
+      site: "could not count the advisory extra-ledger rows",
+      why: "the extra direction is ADVISORY BY DESIGN (squashes and CLI-era rows make it noisy), so an uncountable result warns rather than failing — and the warning says outright that it reported nothing because it could not read.",
+    },
+  ];
+
+  /** The token line joined with the next live line — see ALLOWED_SITES. */
+  const siteWindows = (text: string, token: string) => {
+    const lines = liveLines(checkRegion(text));
+    const out: { line: string; ctx: string }[] = [];
+    lines.forEach((l, i) => {
+      if (l.includes(token)) out.push({ line: l, ctx: `${l}\n${lines[i + 1] ?? ""}` });
+    });
+    return out;
+  };
+
+  function softeningOffenders(text: string): string[] {
+    const offenders: string[] = [];
+    for (const token of SOFTENING_TOKENS) {
+      const entries = ALLOWED_SITES.filter((e) => e.token === token);
+      const hits = siteWindows(text, token);
+      if (entries.length === 0) {
+        if (hits.length > 0) {
+          offenders.push(
+            `${token} (${hits.length}) — FORBIDDEN OUTRIGHT in check(): ${hits
+              .map((h) => h.line.trim())
+              .join(" | ")}`,
+          );
+        }
+        continue;
+      }
+      for (const h of hits) {
+        const matched = entries.filter((e) => h.ctx.includes(e.site));
+        if (matched.length !== 1) {
+          offenders.push(
+            `${token} (UNLISTED SITE, matched ${matched.length} allowlist entr(ies)) — a new softening has to earn its place in ALLOWED_SITES with a per-site reason: ${h.line.trim()}`,
+          );
+          continue;
+        }
+        const n = h.line.split(token).length - 1;
+        if (n !== 1) {
+          offenders.push(
+            `${token} (${n} on ONE allowlisted line — the extra one is riding in on its neighbour's justification): ${h.line.trim()}`,
+          );
+        }
+      }
+      for (const e of entries) {
+        const n = hits.filter((h) => h.ctx.includes(e.site)).length;
+        if (n !== 1) {
+          offenders.push(
+            `${token} (VANISHED OR DUPLICATED SITE, matched ${n} live site(s), want exactly 1): ${e.site}`,
+          );
+        }
+      }
+    }
+    return offenders;
+  }
+
+  /**
+   * The SUPERSEDED count rule, kept as a REFERENCE ORACLE and nothing else. Its
+   * only caller is the swap calibration, which asserts this reports NOTHING on a
+   * mutant the site rule reports twice.
+   */
+  function countRuleOffenders(text: string): string[] {
+    const live = liveLines(checkRegion(text)).join("\n");
+    const out: string[] = [];
+    for (const token of SOFTENING_TOKENS) {
+      const want = ALLOWED_SITES.filter((e) => e.token === token).length;
+      const n = live.split(token).length - 1;
+      if (n !== want) out.push(`${token}: ${n}, want ${want}`);
+    }
+    return out;
+  }
+
+  /**
+   * Every `set +e` must be BOUNDED — an rc capture and a `set -e` within its own
+   * four live lines. The site list says each one is a bound; this measures it, so
+   * the control is not weaker than the sentence beside it.
+   */
+  function unboundedSetE(text: string): string[] {
+    const lines = liveLines(checkRegion(text));
+    const out: string[] = [];
+    lines.forEach((l, i) => {
+      if (!l.includes("set +e")) return;
+      const win = lines.slice(i, i + 4).join("\n");
+      const missing: string[] = [];
+      if (!/=\$\?/.test(win)) missing.push("no `rc=$?` capture");
+      if (!/set -e\b/.test(win)) missing.push("never turns `-e` back on");
+      if (missing.length > 0) {
+        out.push(`UNBOUNDED \`set +e\` (${missing.join(", ")}): ${l.trim()}`);
+      }
+    });
+    return out;
+  }
+
+  it("the scanned region is the gate proper, and it is not empty", () => {
+    // Without this every pin below is vacuously true — the anchor moved and the
+    // scan is looking at nothing.
+    expect(
+      liveLines(checkRegion(SRC)).length,
+      "the check() region did not slice — its anchors moved and the whole scan is vacuous",
+    ).toBeGreaterThan(150);
+    // And the harness's own stub heredocs are OUT, deliberately: they carry the
+    // `exit 0` that is forbidden inside check().
+    expect(checkRegion(SRC)).not.toContain("STUB");
+  });
+
+  it("the real script satisfies its own site allowlist, and every `set +e` is bounded", () => {
+    expect(softeningOffenders(SRC), "check() carries a softening nobody wrote down").toEqual([]);
+    expect(unboundedSetE(SRC), "a `set +e` in check() is not bounded").toEqual([]);
+    // The allowlist is a set of distinct entries, not a list with a duplicate in it.
+    expect(new Set(ALLOWED_SITES.map((e) => `${e.token}::${e.site}`)).size).toBe(
+      ALLOWED_SITES.length,
+    );
+    for (const e of ALLOWED_SITES) {
+      expect(e.why.length, `the site \`${e.site}\` carries no reason`).toBeGreaterThan(40);
+      expect(SOFTENING_TOKENS, `\`${e.token}\` is allowlisted but never scanned`).toContain(e.token);
+    }
+  });
+
+  it("UP: a NEW softening site is reported as UNLISTED", () => {
+    // On the F7 read — the one whose suppression made the absurdity floor inert.
+    const widened = SRC.replace('2>"$ledger_rows_err"', '2>/dev/null');
+    expect(widened, "the site-addition mutation changed nothing").not.toBe(SRC);
+    expect(softeningOffenders(widened).join(" | "), "a NEW unlisted site went unreported").toContain(
+      "UNLISTED SITE",
+    );
+  });
+
+  it("DOWN: a VANISHED allowlisted site is reported too — the rule is a set, not a ceiling", () => {
+    const narrowed = SRC.replace('> "$extra_file" 2>/dev/null', '> "$extra_file"');
+    expect(narrowed, "the site-removal mutation changed nothing").not.toBe(SRC);
+    expect(
+      softeningOffenders(narrowed).join(" | "),
+      "a VANISHED allowlisted site went unreported",
+    ).toContain("VANISHED OR DUPLICATED SITE");
+  });
+
+  it("⭐ SWAP: the shape a COUNT cannot see — one benign suppression out, F7's back in", () => {
+    // The ADVISORY extra-ledger direction loses its (justified, rc-consumed)
+    // `2>/dev/null`, and the `ledger_rows` read — the ABSURDITY FLOOR's own input —
+    // gains one. Three in, three out. This is F7 restored, wearing a count that
+    // never moved.
+    const narrowed = SRC.replace('> "$extra_file" 2>/dev/null', '> "$extra_file"');
+    const swapped = narrowed.replace('2>"$ledger_rows_err"', '2>/dev/null');
+    expect(swapped, "the swap mutation changed nothing beyond the deletion").not.toBe(narrowed);
+
+    expect(
+      liveLines(checkRegion(swapped)).join("\n").split("2>/dev/null").length - 1,
+      "CALIBRATION: the swap did NOT preserve the count, so it is not exercising the direction a count is blind to",
+    ).toBe(ALLOWED_SITES.filter((e) => e.token === "2>/dev/null").length);
+    expect(
+      countRuleOffenders(swapped),
+      "CALIBRATION: the SUPERSEDED count rule already caught this swap, so the site set is not buying anything and B3 was not a finding",
+    ).toEqual([]);
+
+    const offenders = softeningOffenders(swapped);
+    expect(
+      offenders.join(" | "),
+      "the count-preserving swap went unreported by the SITE rule too — the new mechanism is no stronger than the one it replaced",
+    ).toContain("UNLISTED SITE");
+    expect(
+      offenders.join(" | "),
+      "the swap's VANISHED half went unreported — only half a bijection is being checked",
+    ).toContain("VANISHED OR DUPLICATED SITE");
+  });
+
+  it("a token with NO allowlisted site is forbidden outright, wherever it lands", () => {
+    const forbidden = SOFTENING_TOKENS.filter((t) => !ALLOWED_SITES.some((e) => e.token === t));
+    // ⛔ An empty loop passes. The four are `|| :`, `|| exit 0`, `exit 0` and
+    // `set +o pipefail`; if a future edit gives one of them a site, this leg must
+    // be re-read rather than allowed to iterate over nothing.
+    expect(forbidden, "no token is forbidden outright any more — this arm would loop zero times and pass").toEqual([
+      "|| :",
+      "|| exit 0",
+      "exit 0",
+      "set +o pipefail",
+    ]);
+    for (const token of forbidden) {
+      const mutant = SRC.replace(
+        '  echo "Repo migrations: ${#repo_names[@]}"',
+        `  echo "Repo migrations: \${#repo_names[@]}" ${token}`,
+      );
+      expect(mutant, `the ${token} mutation changed nothing`).not.toBe(SRC);
+      expect(
+        softeningOffenders(mutant).join(" | "),
+        `\`${token}\` was tolerated inside check(). It has no allowlisted site and must be refused outright.`,
+      ).toContain("FORBIDDEN OUTRIGHT");
+    }
+  });
+
+  it("a SECOND suppression on an allowlisted line does not ride in on the first's reason", () => {
+    const doubled = SRC.replace(
+      '> "$extra_file" 2>/dev/null; then',
+      '> "$extra_file" 2>/dev/null 2>/dev/null; then',
+    );
+    expect(doubled, "the double-suppression mutation changed nothing").not.toBe(SRC);
+    expect(
+      softeningOffenders(doubled).join(" | "),
+      "two suppressions on one allowlisted line were accepted",
+    ).toContain("on ONE allowlisted line");
+  });
+
+  it("an UNBOUNDED `set +e` is reported even when its site is allowlisted", () => {
+    // The exact shape B3 exists for: a seventh `set +e` added tomorrow, or an
+    // existing bound quietly losing its `set -e`. The SITE is unchanged, so the
+    // allowlist alone would stay green — this is the leg that makes the list's
+    // word "bound" mean something.
+    const unset = SRC.replace(
+      '  ledger_rows_rc=$?\n  set -e\n',
+      '  ledger_rows_rc=$?\n',
+    );
+    expect(unset, "the `set -e` removal changed nothing").not.toBe(SRC);
+    expect(softeningOffenders(unset), "the SITE rule alone should not see this").toEqual([]);
+    expect(unboundedSetE(unset).join(" | "), "a `set +e` that never restores `-e` went unreported").toContain(
+      "never turns `-e` back on",
+    );
+
+    const uncaptured = SRC.replace(
+      '  ledger_rows="$(run_ledger_query ledger_rows "$names_csv" 2>"$ledger_rows_err")"\n  ledger_rows_rc=$?\n',
+      '  ledger_rows="$(run_ledger_query ledger_rows "$names_csv" 2>"$ledger_rows_err")"\n',
+    );
+    expect(uncaptured, "the rc-capture removal changed nothing").not.toBe(SRC);
+    expect(
+      unboundedSetE(uncaptured).join(" | "),
+      "a `set +e` whose status is never captured went unreported — that is the discarded exit code the bound exists to keep",
+    ).toContain("no `rc=$?` capture");
+  });
+});
