@@ -1307,7 +1307,16 @@ jobs:
             restore script exists to write anything — so it cannot have read a file the
             script produced. Specifically:
               survivors.sql, restore.sql, refdata.sql and census.sql are written by the
-                restore script: scanned by nothing and redacted by nothing. survivors.sql
+                restore script, so THIS step's scan above cannot have read them — it
+                finishes before the script exists to write them. Corrected again
+                2026-09-10: they are no longer scanned by nothing. The script scans them
+                ITSELF, in refuse_credential_in_published_sql, over the SAME six classes
+                schema-before.sql gets, before the transaction runs; a hit REFUSES the run
+                and names the file and the class without printing the match, and a tally
+                short of `scanned 4 of 4` is its own MEASURE_FAIL rather than a clean
+                verdict over files it never opened. They are still redacted by NOTHING —
+                refusal is not masking, so a hit costs the run, it does not sanitise the
+                file. survivors.sql
                 and restore.sql deliberately carry pg_get_triggerdef(...) and
                 reconstructed CREATE POLICY ... USING (<qual>) for objects on live shared
                 TEST. That is the reversal recipe, and it is here on purpose (threat
