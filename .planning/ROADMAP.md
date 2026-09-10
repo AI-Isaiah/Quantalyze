@@ -1587,7 +1587,7 @@ Plans:
 
 ⛔ **NOT in scope:** raising Playwright workers above 1. Phase 164.8's ROADMAP entry already states that per-run isolation is the PRECONDITION for it and that parallelism must NOT be chased as an objective — measured, `e2e-seeded` sits behind `sql-mutation` so parallelism buys 1-2 min of wall clock. Isolation is worth doing for ASSERTION RELIABILITY; the parallelism it unlocks is a consequence, not a goal.
 
-**Requirements**: TBD (no v1.20 requirement IDs) + `FANOUT-GLOBAL-01` (prose only — see the warning above), the per-run isolation item deferred out of Phase 164.8's `<deferred>` block, and TODOS entry `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` — read `164.8-CONTEXT.md` before planning, do not re-derive, plus the two restore-workflow items routed here from Phase 164.8 Plan 04 (see the ROUTED HERE block below), and `[164.8.1-TEST-ANALYTICS-URL-PROD]` plus `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` routed here from Phase 164.8.1, and `[164.8-PUSH-RACE-VAC08]` routed here from Phase 164.8 plan 05 (see their ROUTED HERE blocks below).
+**Requirements**: TBD (no v1.20 requirement IDs) + `FANOUT-GLOBAL-01` (prose only — see the warning above), the per-run isolation item deferred out of Phase 164.8's `<deferred>` block, and TODOS entry `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` — read `164.8-CONTEXT.md` before planning, do not re-derive, plus the two restore-workflow items routed here from Phase 164.8 Plan 04 (see the ROUTED HERE block below), and `[164.8.1-TEST-ANALYTICS-URL-PROD]` plus `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` routed here from Phase 164.8.1, and `[164.8-PUSH-RACE-VAC08]` routed here from Phase 164.8 plan 05, plus `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]` and `[164.8.2-VAC08-FATAL-ON-TRANSIENT]` routed here 2026-09-10 out of Phase 164.8.2's round-three review — ⚠️ the second is the same root as `[164.8-PUSH-RACE-VAC08]` and must be planned WITH it (see their ROUTED HERE blocks below).
 
 ⛔ **ROUTED HERE 2026-09-08 by Phase 164.8's plan-checker (B4).** 164.8 restores TEST from a SCHEMA-ONLY dump (`BASELINE.md`: 0 data statements), so TEST mirrors PROD's CATALOGUE, never its DATA. A migration whose DO block reads a PROD-populated table and RAISEs on an unexpected count applies cleanly to PROD and refuses on an empty TEST — and 164.8 Area 1 Q2 makes that BLOCK the PROD apply. The retired `TEST-NOT-APPLICABLE` pragma was the declared escape hatch, and 164.8 retires it. Interim remedy is revert-the-merge, never a YAML edit under deploy pressure. Phase 164.10 was considered and rejected as the home: it is function-body scope only.
 ⛔ **ROUTED HERE 2026-09-08 by founder instruction, out of Phase 164.8's Plan 04.** Two items were found by RUNNING the restore (run `34274355596`, head `88581b8b`) rather than by review, and neither belongs in a ratchet PR. Both are discharged by ONE green `mode=restore` dispatch, so they are one unit of work:
@@ -1624,6 +1624,24 @@ MEASURED 2026-09-09: advisory key `61616158` appears 7× in `supabase-migrate.ym
 ✅ **Why THIS phase.** Two jobs contending for one lock on a database shared with other people's CI is literally the `FANOUT-GLOBAL-01` family, and the fix shape — distinct keys plus explicit ordering — is the same work as isolating TEST lanes. Two of the three residuals are gate-integrity riders that would sit equally well in a hygiene phase, but they are cheap alongside the first, and splitting them would create the sequential-ratchet-patched-in-one-place hazard this repo has already paid for once.
 
 ⛔ **Do not close this by widening the exemption.** It is already the widest thing in that gate.
+
+⛔ **ROUTED HERE 2026-09-10, out of Phase 164.8.2's round-three review — `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]`: the `missing`-direction ledger read leaves psql stderr unredirected into a PUBLIC Actions log.**
+
+`scripts/test-ledger-drift-check.sh` — the `missing` read is `run_ledger_query missing … || fail "…"`, with no redirect. psql's connect and auth failures name the TEST pooler HOST, its USER and sometimes the DSN, and this repository is PUBLIC, so that text is world-readable for the life of the run's logs. The file's own NON-NEGOTIABLES forbid exactly this, and the sibling `ledger_rows` read three screens below now captures its stderr to a temp file and reports only the LINE COUNT — the correct idiom already exists in the same function.
+
+⚠️ **Pre-existing, and deliberately NOT bundled.** Found while closing the `ledger_rows` half; six self-test arms depend on that path's current shape, so changing it is its own unit of work with its own calibrations, not a rider on a fix that was already three rounds deep.
+
+✅ **Why THIS phase.** A credential channel that is public because the database is SHARED is the `FANOUT-GLOBAL-01` family: the leak exists because the run is not isolated, and the same work that gives a run its own lane gives it its own diagnostics.
+
+⛔ **ROUTED HERE 2026-09-10, same review — `[164.8.2-VAC08-FATAL-ON-TRANSIENT]`: an unreadable ledger row count now reds the WHOLE VAC-08 gate, where it used to cost only the absurdity floor.**
+
+This is a CONSEQUENCE of a fix that was correct and must NOT be reverted, recorded so that the next person to see VAC-08 flake looks in the right place. Before 164.8.2 the read was `… 2>/dev/null || echo ""` and an unreadable count silently disabled the absurdity floor — the control that tells a wrong join key from real drift, and whose absence sends a reader to hand-apply migrations to shared TEST. It is now three named MEASURE_FAILs that exit 1.
+
+⚠️ **The exposure this creates.** A transient pooler blip on shared TEST that previously cost one control now fails the entire gate — on a gate that ALREADY contends for advisory key `61616158` with `apply-test` on every merge push (see `[164.8-PUSH-RACE-VAC08]` above; the two are the same root and should be planned together).
+
+⛔ **The remedy is NEVER to restore the `|| echo ""`.** That is the defect, not the mitigation. If flakiness is measured rather than feared, the answer is a bounded retry around the read, or the per-run isolation this phase exists to build — both of which keep an unreadable input distinguishable from a clean one.
+
+✅ **Why THIS phase.** It is the same advisory-key contention on the same shared database as `[164.8-PUSH-RACE-VAC08]`, and the durable fix for both is isolation rather than tolerance.
 
 **Depends on:** Phase 164.8 (its restore settles the schema and ledger this phase isolates against).
 **Plans:** 0 plans

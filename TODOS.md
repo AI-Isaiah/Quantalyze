@@ -2631,6 +2631,48 @@ Opened by Phase 164.8 plan 06 as it closed `CI-MIGRATE-01`, `[164.2-TEST-APPLY-P
 and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a problem** (founder rule
 2026-09-08: a TODOS line alone has no owner, no date and no gate).
 
+- [ ] **`[164.8.2-LEDGER-STDERR-PUBLIC-LOG]` the `missing`-direction ledger read leaves psql
+      stderr UNREDIRECTED into a PUBLIC Actions log (booked 2026-09-10, Phase 164.8.2 round-three
+      review; routed to Phase 164.9).**
+      **MECHANISM.** In `scripts/test-ledger-drift-check.sh`, the `missing` read is
+      `run_ledger_query missing … || fail "…"` with no redirect at all. psql names the TEST pooler
+      HOST, its USER and sometimes the DSN on a connect or auth failure, and this repository is
+      PUBLIC — so that text is world-readable for the life of the run's logs. The same file's
+      NON-NEGOTIABLES forbid exactly this.
+      **THE CORRECT IDIOM ALREADY EXISTS THREE SCREENS BELOW.** The sibling `ledger_rows` read
+      captures its stderr to `${tmp}/ledger_rows.err` and reports only the LINE COUNT, with the
+      text WITHHELD. This is a conform-to-the-neighbour fix, not a new pattern.
+      ⚠️ **Pre-existing, and deliberately NOT bundled.** Found while closing the `ledger_rows`
+      half. SIX self-test arms depend on the `missing` path's current shape, so changing it is its
+      own unit of work with its own calibrations — not a rider on a fix already three rounds deep.
+      ⛔ **Do not "fix" it with a bare `2>/dev/null`.** That trades a credential leak for a blind
+      gate, which is the defect class this whole phase family exists to remove. Capture, count,
+      withhold.
+
+- [ ] **`[164.8.2-VAC08-FATAL-ON-TRANSIENT]` an unreadable ledger row count now reds the WHOLE
+      VAC-08 gate, where it used to cost only the absurdity floor (booked 2026-09-10, Phase
+      164.8.2; routed to Phase 164.9 — ⚠️ SAME ROOT as `[164.8-PUSH-RACE-VAC08]`, plan them
+      together).**
+      ⭐ **This is the CONSEQUENCE of a correct fix, recorded so the next person to see VAC-08
+      flake looks in the right place. It is NOT a request to revert.**
+      **BEFORE.** `ledger_rows="$(run_ledger_query ledger_rows … 2>/dev/null || echo "")"` followed
+      by `[ -n "$ledger_rows" ] && …`. An unreadable count collapsed to empty and SILENTLY
+      disabled the absurdity floor — the control that tells a wrong join key from real drift, and
+      whose absence sends a reader to hand-apply migrations to SHARED TEST. That is the 2026-08-29
+      defect shape: the gate reported "253 of 262 migrations are not present" against a database
+      that was passing.
+      **AFTER.** Three separated, named MEASURE_FAILs — query failed (with rc), exited 0 with NO
+      ROW, answer not a number — each exiting 1.
+      **THE EXPOSURE THIS CREATES.** A transient pooler blip on shared TEST that previously cost
+      one control now fails the entire gate, on a gate that ALREADY contends for advisory key
+      `61616158` with `apply-test` on every merge push.
+      ⛔ **THE REMEDY IS NEVER TO RESTORE THE `|| echo ""`.** That is the defect, not the
+      mitigation. If flakiness is MEASURED rather than feared, the answer is a bounded retry around
+      the read, or the per-run isolation Phase 164.9 exists to build — both keep an unreadable
+      input distinguishable from a clean one.
+      **Measured at booking:** the pre-fix gate already exited 1 on a failing query, so
+      `status === 1` is a vacuous assertion here; every arm binds to the SENTENCE instead.
+
 - [ ] **`[164.8-PUSH-RACE-VAC08]` `ci.yml`'s `sql-tests` and `supabase-migrate.yml`'s `apply-test`
       contend for ONE advisory lock on the same merge push, in an order nothing specifies — and
       a migration-adding PR is red at PR time by construction (booked 2026-09-09, Phase 164.8
