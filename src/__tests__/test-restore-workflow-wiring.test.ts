@@ -283,20 +283,26 @@ function scannableRestoreBlock(text: string): string {
  * reaches its `trap … ERR`. Had it contributed, the staging step would have been the
  * defect and this allowlist would not have been the place to absorb it.
  *
- * `2>/dev/null` x5 — every one a PROBE whose exit status is consumed by the line it
+ * ⭐ RE-MEASURED AGAIN 2026-09-10 — 5 → 4. Silent-failure review F4 removed what was
+ * site 1, and the justification below is what it removed: the ancestry probe's
+ * `2>/dev/null` was written up here as "git's stderr would only restate 'not a valid
+ * object' for a sha the `case` above has already accepted as hex", which conceded the
+ * defect while calling it a reason. `--is-ancestor` exits 0, 1 AND 128; the `case`
+ * checks hex SHAPE, never existence; and that discarded stderr was the only channel
+ * separating "not an ancestor" from "there is no such commit". It now redirects to
+ * `${RUNNER_TEMP}/ancestry.err` and the 128 is reported as a MEASURE_FAIL. ⛔ THE
+ * ALLOWLIST WENT DOWN, WHICH IS THE GOOD DIRECTION — a justification that reads as an
+ * argument for suppressing evidence is a finding, not an entry.
+ *
+ * `2>/dev/null` x4 — every one a PROBE whose exit status is consumed by the line it
  *                    sits on, so the suppressed channel is noise and never evidence:
- *   1. `Assert PROD's apply ran on an ancestor of this checkout` —
- *      `if ! git merge-base --is-ancestor "${APPLY_HEAD_SHA}" HEAD 2>/dev/null; then`.
- *      The exit code IS the answer and it is branched on; git's stderr here would only
- *      restate "not a valid object" for a sha the `case` above has already accepted as
- *      hex. A non-ancestor appends to `failed` and the step exits 1.
- *   2-4. `Probe - the runner image's PostgreSQL server binaries resolve` — the
+ *   1-3. `Probe - the runner image's PostgreSQL server binaries resolve` — the
  *      `pg_config --bindir`, `ls -d …/bin` and `ls -l …/initdb …/pg_ctl` lines. This
  *      whole step is a DIAGNOSTIC ECHO, non-fatal by design (see its own comment: the
  *      pg-lane resolution chain owns the judgement, a second divergent opinion would be
  *      worse than none). Each swallowed stderr is paired with an `|| echo '(absent)'`
  *      that prints the absence, so the log says what was not found either way.
- *   5. `Back up TEST's schema and ledger …` — the `SELECT count(*) FROM
+ *   4. `Back up TEST's schema and ledger …` — the `SELECT count(*) FROM
  *      supabase_migrations.schema_migrations;` row count. Its rc IS captured
  *      (`… 2>/dev/null | tr -d '\r' | tail -1)" || rc=$?`) and the very next branch
  *      turns a non-zero into `::error::` + `exit 1`. psql's connect/auth stderr names
@@ -306,22 +312,204 @@ function scannableRestoreBlock(text: string): string {
  * ⛔ A count that moves in EITHER direction is red. Do not edit the number to make a
  * run pass: a new one has to earn its place in this allowlist with a justification.
  */
-const ALLOWED: Record<string, number> = { "2>/dev/null": 5 };
+const SITE_ALLOWLISTED_TOKEN = "2>/dev/null";
+
+/**
+ * The four justified `2>/dev/null` SITES, as the distinguishing text of the line each
+ * one sits on — in the order of the enumeration above.
+ *
+ * ⛔ SITES, NOT A COUNT (Phase 164.8.2, silent-failure review F2). This was
+ * `const ALLOWED = { "2>/dev/null": 5 }` with `if (n === allowed) continue`, which is
+ * satisfied by ANY five occurrences. The shape it could not see is a ONE-FOR-ONE SWAP:
+ * delete one of the benign probe suppressions in the deliberately-non-fatal PostgreSQL
+ * binaries step and add one on `Which database am I on`'s psql, and the count is
+ * unchanged, the scan reports zero offenders, and the step whose stderr IS the evidence
+ * that the wrong database was identified goes quiet. That step is the gate standing
+ * between a dashboard-shaped mistake and a DROP SCHEMA on PROD.
+ *
+ * Both of the calibrations this file already carried MOVE the count — one to 6, one to
+ * 4 — so neither exercised the count-preserving direction, which is by construction the
+ * one a count cannot see. The site list is not new information either: all of it was
+ * already written out as prose in the enumeration above. It is now executable.
+ *
+ * ⛔ THE RULE IS A BIJECTION, and both halves matter: every live `2>/dev/null` line must
+ * match exactly one entry (a NEW site is red) and every entry must match exactly one
+ * live line (a VANISHED site is red — a site disappearing means an exit status that used
+ * to be checked stopped being checked, or the slicing moved and the scan is now looking
+ * at less than it thinks).
+ */
+const ALLOWED_SITES: readonly string[] = [
+  "pg_config --bindir 2>/dev/null",
+  "ls -d /usr/lib/postgresql/*/bin 2>/dev/null",
+  "/usr/lib/postgresql/*/bin/initdb /usr/lib/postgresql/*/bin/pg_ctl 2>/dev/null",
+  'FROM supabase_migrations.schema_migrations;" 2>/dev/null',
+];
 
 function softeningOffenders(text: string): string[] {
-  const live = liveLines(scannableRestoreBlock(text)).join("\n");
+  const lines = liveLines(scannableRestoreBlock(text));
+  const live = lines.join("\n");
   const offenders: string[] = [];
   for (const token of SOFTENING_TOKENS) {
+    if (token === SITE_ALLOWLISTED_TOKEN) continue;
     const n = live.split(token).length - 1;
-    const allowed = ALLOWED[token] ?? 0;
-    if (n === allowed) continue;
-    offenders.push(
-      allowed === 0
-        ? `${token} (${n}) — forbidden outright in the scannable restore block`
-        : `${token} (${n}, the allowlist admits exactly ${allowed}) — a new one has to earn its place in this allowlist with a justification, and a vanished one means an exit status that used to be checked stopped being checked`,
-    );
+    if (n === 0) continue;
+    offenders.push(`${token} (${n}) — forbidden outright in the scannable restore block`);
+  }
+
+  // ⭐ ATTRIBUTED TO A STEP, not merely quoted. Measured while writing this: the marker
+  // step's stderr redirect sits on its OWN continuation line, so the offending text is
+  // `2>/dev/null)" || rc=$?` — true, and useless. The step name is what tells the next
+  // reader that the quietened channel belongs to `Which database am I on`. It is the
+  // nearest preceding `- name:` line.
+  //
+  // ⛔ THE STEP NAME IS FOR THE MESSAGE ONLY — THE MATCH STAYS PER-LINE. Widening the
+  // match to "anywhere in an allowlisted step" was written and then reverted here: it
+  // would let a SECOND suppression anywhere inside, say, the backup step ride in on
+  // site 4's justification, which is the same ride-in the per-line count check below
+  // exists to stop, one scope up.
+  const siteLines: { line: string; step: string }[] = [];
+  let step = "(before the first step)";
+  for (const l of lines) {
+    const m = l.match(/^\s*- name: (.+)$/);
+    if (m) step = m[1].trim();
+    if (l.includes(SITE_ALLOWLISTED_TOKEN)) siteLines.push({ line: l, step });
+  }
+
+  for (const { line: l, step: st } of siteLines) {
+    const hits = ALLOWED_SITES.filter((s) => l.includes(s));
+    if (hits.length !== 1) {
+      offenders.push(
+        `${SITE_ALLOWLISTED_TOKEN} (UNLISTED SITE in step "${st}", matched ${hits.length} allowlist entr(ies)) — a new suppression has to earn its place in ALLOWED_SITES with a per-site justification: ${l.trim()}`,
+      );
+      continue;
+    }
+    const n = l.split(SITE_ALLOWLISTED_TOKEN).length - 1;
+    if (n !== 1) {
+      offenders.push(
+        `${SITE_ALLOWLISTED_TOKEN} (${n} suppressions on ONE allowlisted line in step "${st}" — the extra one is riding in on its neighbour's justification): ${l.trim()}`,
+      );
+    }
+  }
+  for (const s of ALLOWED_SITES) {
+    const n = siteLines.filter(({ line: l }) => l.includes(s)).length;
+    if (n !== 1) {
+      offenders.push(
+        `${SITE_ALLOWLISTED_TOKEN} (VANISHED OR DUPLICATED SITE, matched ${n} live line(s), want exactly 1): ${s}`,
+      );
+    }
   }
   return offenders;
+}
+
+/**
+ * Every `run: |` block in the scannable restore block, with the step it belongs to.
+ *
+ * Flow-scalar `run: <cmd>` steps are deliberately NOT collected: a one-command step
+ * fails when its command fails, with or without `set -e`, so there is nothing there to
+ * soften. Only a block scalar can quietly run five commands and report the last one's
+ * status.
+ */
+function runBlocks(text: string): { step: string; live: string[] }[] {
+  const lines = scannableRestoreBlock(text).split("\n");
+  const out: { step: string; live: string[] }[] = [];
+  let step = "(unnamed)";
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = lines[i].match(/^\s*- name: (.+)$/);
+    if (m) step = m[1].trim();
+    if (!/^\s*run: \|-?\s*$/.test(lines[i])) continue;
+    const indent = lines[i].length - lines[i].trimStart().length;
+    const body: string[] = [];
+    for (let k = i + 1; k < lines.length; k += 1) {
+      if (lines[k].trim() === "") continue;
+      if (lines[k].length - lines[k].trimStart().length <= indent) break;
+      body.push(lines[k]);
+    }
+    out.push({ step, live: body.filter((l) => !/^\s*#/.test(l)) });
+  }
+  return out;
+}
+
+/** A live line that turns `-e` ON. `set -uo pipefail` does not match; that is the point. */
+const ERREXIT_RE = /^\s*set\s+(-[a-zA-Z]*e[a-zA-Z]*(\s|$)|-o\s+errexit)/;
+
+/**
+ * The `run: |` blocks that deliberately never turn `-e` on, BY STEP NAME.
+ *
+ * ⛔ WHY THIS EXISTS (Phase 164.8.2, silent-failure review F3). `set +e` is banned
+ * outright by the nine-token scan. `set -uo pipefail` — a block that simply never turns
+ * `-e` ON — is functionally the SAME softening over the whole step, contains none of the
+ * nine tokens, and was invisible. The scan's own stated purpose is that "the first five
+ * were not a class, they were five spellings of a class"; this is a sixth spelling.
+ *
+ * ⚠️ ALL THREE OF TODAY'S SITES ARE DEFENSIBLE AND WERE RE-CHECKED, one at a time —
+ * this closes a coverage gap, it does not report a live defect:
+ *   1-2. the extractor self-test / allowlist audit assertions. Both capture `status=$?`
+ *      explicitly on the very next line and route EVERY path to a named `::error::` and
+ *      an `exit`. Their own comment says omitting `-e` is what lets them avoid `|| true`
+ *      — a non-matching `grep` yields the empty string instead of aborting the step, so
+ *      an absent line reaches its own MEASURE_FAIL instead of dying before it.
+ *   3. the PostgreSQL server-binaries probe, a DIAGNOSTIC ECHO that is non-fatal by
+ *      design (pg-lane's four-step resolution chain owns the judgement; a second
+ *      divergent opinion would be worse than none).
+ *
+ * ⛔ THE EXEMPTION IS A BIJECTION, like ALLOWED_SITES. An entry that matches no block, or
+ * matches a block that DOES set `-e`, is reported: a stale exemption is a standing
+ * permission for a future softening of that step, granted by nobody.
+ */
+const NO_ERREXIT_SITES: readonly string[] = [
+  "Assert the extractor self-test PRINTED its kind census and cleared the floor",
+  "Assert the allowlist audit PRINTED its census over a non-empty corpus",
+  "Probe - the runner image's PostgreSQL server binaries resolve",
+];
+
+/**
+ * MEASURED 2026-09-10, Phase 164.8.2: the scannable restore block holds 16 `run: |`
+ * blocks, 13 of which set `-e`. A FLOOR, not an equality — a step added later must not
+ * have to touch this number, but a parser that silently starts returning nothing must.
+ * An empty list would make the rule below vacuously green, which is the failure shape
+ * this whole file exists to refuse.
+ */
+const RUN_BLOCK_FLOOR = 16;
+
+function errexitOffenders(text: string): string[] {
+  const blocks = runBlocks(text);
+  const offenders: string[] = [];
+  for (const { step, live } of blocks) {
+    const setsE = live.some((l) => ERREXIT_RE.test(l));
+    const exempt = NO_ERREXIT_SITES.includes(step);
+    if (!setsE && !exempt) {
+      offenders.push(
+        `NO ERREXIT in step "${step}" — its \`run: |\` block never turns \`-e\` on, which softens every command in it exactly as \`set +e\` would while carrying none of the nine banned tokens. Fix the step, or add it to NO_ERREXIT_SITES with the per-site justification the others carry.`,
+      );
+    }
+    if (setsE && exempt) {
+      offenders.push(
+        `STALE EXEMPTION for step "${step}" — it sets \`-e\` and is still listed in NO_ERREXIT_SITES. An exemption nobody needs is a standing permission to soften that step later, granted by nobody. Remove the entry.`,
+      );
+    }
+  }
+  for (const site of NO_ERREXIT_SITES) {
+    const n = blocks.filter((b) => b.step === site).length;
+    if (n !== 1) {
+      offenders.push(
+        `DANGLING EXEMPTION "${site}" — matched ${n} \`run: |\` block(s), want exactly 1. The step was renamed or removed and the exemption outlived it.`,
+      );
+    }
+  }
+  return offenders;
+}
+
+/**
+ * The SUPERSEDED count rule, kept as a REFERENCE ORACLE and nothing else.
+ *
+ * Its only caller is the swap calibration below, which asserts that this reports
+ * NOTHING on a mutant the site rule reports twice. "The new control is stronger" is a
+ * claim, and this is what makes it a measurement.
+ */
+function countRuleOffenderCount(text: string, allowed: number): number {
+  const live = liveLines(scannableRestoreBlock(text)).join("\n");
+  const n = live.split(SITE_ALLOWLISTED_TOKEN).length - 1;
+  return n === allowed ? 0 : 1;
 }
 
 /** The file's header — everything before the `on:` key. */
@@ -706,9 +894,14 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           return r > -1 && u > -1 && r < u;
         },
       );
+      // ⚠️ RE-ANCHORED 2026-09-10 (Phase 164.8.2, review WR-06). This mutation used to
+      // splice on `- name: <REDACT>\n        if: always()\n`; the WR-06 fix put an
+      // `id: redact` (and its reasoning) between those two lines, so the replace
+      // silently became a no-op — caught by `calibrate()`'s own "the mutation produced
+      // an identical string" assertion, which is what that assertion is for.
       calibrate(
         "the redaction runs on an aborted run too",
-        (s) => s.replace(`      - name: ${REDACT}\n        if: always()\n`, `      - name: ${REDACT}\n`),
+        (s) => s.replace("        id: redact\n        if: always()\n", "        id: redact\n"),
         (t) => liveLines(stepBody(t, REDACT)).some((l) => l.trim() === "if: always()"),
       );
     });
@@ -883,6 +1076,8 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     const STAGE = "Stage the public artifact (enumerated allowlist; default-out)";
     const REDACT = "Redact connection metadata from the backup directory (public artifact)";
     const UPLOAD = "Upload the pre-restore backup (schema + ledger; NOT data)";
+    /** The step that takes the backup, writes the README and runs the secret scan. */
+    const BACKUP = "Back up TEST before any write (schema + ledger; NOT data)";
 
     // ⛔ REGENERATED 2026-09-09, NOT restated from the review (which said "seven
     // unscanned" and was wrong) — from the WRITERS:
@@ -912,6 +1107,19 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     ];
     /** A name the script does not write today — the "future file" the rule is for. */
     const UNEXPECTED = "future-thing.txt";
+    /**
+     * The SAME rule, in the three extension classes the step used to admit by GLOB.
+     *
+     * ⛔ WHY A SECOND FUTURE FILE (Phase 164.8.2, review WR-01). `UNEXPECTED` above is a
+     * `.txt`, so until 2026-09-10 the default-out rule was PROVEN for one extension and
+     * merely ASSERTED for the rest — while the step's channel loop was
+     * `for c in "${outdir}"/*.err "${outdir}"/*.log "${outdir}"/*.out`, i.e. in-by-default
+     * for three whole classes. The reviewer executed the shipped step with a seeded
+     * `future-census.out` carrying `CREATE POLICY … USING (<qual>)` and watched it reach
+     * the world-readable artifact. This fixture is that file, and it is seeded with the
+     * same DDL marker so its presence is measurable and not merely a name in a list.
+     */
+    const UNEXPECTED_CHANNEL = "future-census.out";
     /** The DDL shape the finding is actually about, seeded so its absence is measurable. */
     const POLICY_MARKER = "CREATE POLICY p ON t USING (owner = current_user)";
     const DDL_BEARING = [
@@ -921,6 +1129,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       "post-census.rollback-view.txt",
       "survivors.sql",
       "restore.sql",
+      UNEXPECTED_CHANNEL,
     ];
 
     /**
@@ -938,28 +1147,50 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       return m ? m[1].trim().split(/\s+/) : [];
     }
 
-    /** The channel globs the step copies, as bare extensions (`err`/`log`/`out`). */
-    function stagedChannelExts(text: string): string[] {
+    /**
+     * The diagnostic-channel allowlist, parsed OUT of the step's own `for c in …; do`
+     * line — the same discipline, and the same parse, as `stagedNameList` above.
+     *
+     * ⛔ IT RETURNS THE RAW TOKENS, GLOBS INCLUDED, ON PURPOSE (Phase 164.8.2, WR-01).
+     * The predecessor of this function returned bare EXTENSIONS (`err`/`log`/`out`)
+     * scraped out of `"${outdir}"/*.err`, which meant every predicate built on it
+     * asked "does this file's extension match?" — and a predicate that can only ask
+     * that cannot report the defect that a whole extension class is admitted. Reading
+     * the tokens verbatim lets the arm below assert that none of them contains `*`,
+     * which is the actual rule.
+     */
+    function stagedChannelNames(text: string): string[] {
       const body = stepBody(text, STAGE);
       const m = body.match(/^\s*for c in ([^;\n]+); do$/m);
-      if (!m) return [];
-      return [...m[1].matchAll(/\/\*\.([a-z]+)/g)].map((x) => x[1]);
+      return m ? m[1].trim().split(/\s+/) : [];
     }
 
     /** What the workflow's OWN two lists say should be staged, given a seeded set. */
     function expectedStaged(text: string, seeded: string[]): string[] {
-      const names = stagedNameList(text);
-      const exts = stagedChannelExts(text);
-      return seeded
-        .filter((f) => names.includes(f) || exts.some((e) => f.endsWith(`.${e}`)))
-        .sort();
+      const carriedBy = [...stagedNameList(text), ...stagedChannelNames(text)];
+      return seeded.filter((f) => carriedBy.includes(f)).sort();
     }
 
-    /** Seed a fixture RUNNER_TEMP and run a (possibly mutated) copy of the step. */
+    /**
+     * Seed a fixture RUNNER_TEMP and run a (possibly mutated) copy of the step.
+     *
+     * `redactOutcome` is the value CI passes in through `env: REDACT_OUTCOME:
+     * ${{ steps.redact.outcome }}`. It defaults to `"success"` because that is the
+     * only outcome under which the artifact is publishable at all; the arms that care
+     * about the other direction pass it explicitly (Phase 164.8.2, review WR-06).
+     */
     function runStage(
       script: string,
       seed: string[],
-    ): { status: number | null; output: string; staged: string[]; stageExists: boolean } {
+      redactOutcome = "success",
+    ): {
+      status: number | null;
+      output: string;
+      staged: string[];
+      stageExists: boolean;
+      /** The staged files' BYTES, read before the fixture is torn down. */
+      contents: Record<string, string>;
+    } {
       const runnerTemp = mkdtempSync(join(tmpdir(), "stage-run-"));
       const outdir = join(runnerTemp, "test-backup");
       mkdirSync(outdir, { recursive: true });
@@ -971,7 +1202,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       writeFileSync(scriptFile, script);
       const r = spawnSync("bash", [scriptFile], {
         encoding: "utf8",
-        env: { ...process.env, RUNNER_TEMP: runnerTemp },
+        env: { ...process.env, RUNNER_TEMP: runnerTemp, REDACT_OUTCOME: redactOutcome },
       });
       const stageDir = join(runnerTemp, "test-backup-artifact");
       let staged: string[] = [];
@@ -981,12 +1212,19 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       } catch {
         stageExists = false;
       }
+      // Read the BYTES before the teardown: an arm that asks "did the leaked file
+      // actually carry the DDL" cannot ask it of a directory that no longer exists,
+      // and "the file is named in the manifest" is a weaker claim than "the file is
+      // in the artifact and here is the policy line inside it".
+      const contents: Record<string, string> = {};
+      for (const f of staged) contents[f] = readFileSync(join(stageDir, f), "utf8");
       rmSync(runnerTemp, { recursive: true, force: true });
       return {
         status: r.status,
         output: `${r.stdout ?? ""}${r.stderr ?? ""}`,
         staged,
         stageExists,
+        contents,
       };
     }
 
@@ -1008,10 +1246,38 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         stagedNameList(WF),
         "the staging step's `for f in …; do` line no longer copies exactly the decided allowlist. If a name was ADDED, the founder's default-out rule says say why in the step comment and update this list in the same edit; if `survivors.sql` was REMOVED, an aborted restore stops being reversible — that was rejected explicitly (CONTEXT Area 2, AMENDED 2026-09-09).",
       ).toEqual(DECIDED);
+      // ⛔ THE CHANNELS ARE A LIST OF NAMES, NOT A LIST OF CLASSES (Phase 164.8.2,
+      // WR-01). These six are the complete set of `.err`/`.log`/`.out` files written
+      // into `${RUNNER_TEMP}/test-backup`, REGENERATED from the two writers rather
+      // than carried from the review:
+      //   grep -oE 'RESTORE_OUT_DIR}?/[A-Za-z0-9_.-]+\.(err|log|out)' scripts/restore-test-from-baseline.sh
+      //   grep -oE 'outdir}?/[A-Za-z0-9_.-]+\.(err|log|out)'          .github/workflows/test-restore-from-baseline.yml
+      // A channel this job gains tomorrow is OUT until it is named here and in the
+      // step, which is the same default-out rule the content files have always had —
+      // and, until this phase, the one thing the channels did not.
+      const DECIDED_CHANNELS = [
+        "census.err",
+        "ledger.err",
+        "marker.err",
+        "refdata.err",
+        "dump.log",
+        "transaction.out",
+      ];
       expect(
-        stagedChannelExts(WF),
-        "the staging step no longer copies exactly the three redacted channel classes",
-      ).toEqual(["err", "log", "out"]);
+        stagedChannelNames(WF),
+        "the staging step's `for c in …; do` line no longer copies exactly the decided channel allowlist. It was a GLOB over three whole extension classes until 2026-09-10 (review WR-01, proven by executing the step against a seeded `future-census.out` carrying reconstructed CREATE POLICY DDL, which reached the artifact). Do not restore the glob: name the channel and say why.",
+      ).toEqual(DECIDED_CHANNELS);
+      expect(
+        stagedChannelNames(WF).some((n) => n.includes("*")),
+        "the channel allowlist has been widened back to a glob — every future `.err`/`.log`/`.out` file is then IN by default, which is the defect review WR-01 measured by execution",
+      ).toBe(false);
+      // CALIBRATION — the channel PARSE must break when a channel name changes, or
+      // the agreement above is between two constants.
+      calibrate(
+        "the channel allowlist is parsed out of the step, not restated",
+        (s) => s.replace("for c in census.err ledger.err", "for c in census.ERR ledger.err"),
+        (t) => stagedChannelNames(t).includes("census.err"),
+      );
 
       // CALIBRATION — the PARSE must break when a name changes, or the agreement
       // above is between two constants and measures nothing.
@@ -1030,7 +1296,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
 
     it("EXECUTED — the staged set is exactly the allowlist over all 18 REAL names", () => {
       const script = extractRunScript(WF, STAGE);
-      const seed = [...REAL_NAMES, UNEXPECTED];
+      const seed = [...REAL_NAMES, UNEXPECTED, UNEXPECTED_CHANNEL];
       const r = runStage(script, seed);
 
       expect(
@@ -1050,10 +1316,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         "post-census.rollback-view.txt",
         "survivors.keys",
         UNEXPECTED,
+        UNEXPECTED_CHANNEL,
       ]) {
         expect(
           r.staged.includes(withheld),
-          `\`${withheld}\` reached the world-readable artifact. The census text files restate the survivor DDL with owner-named rows read off live shared TEST and have no reversal claim on it (T-164.8-21); \`survivors.keys\` is neither recipe nor channel; \`${UNEXPECTED}\` stands for every file the script gains tomorrow and must be OUT until someone names it.`,
+          `\`${withheld}\` reached the world-readable artifact. The census text files restate the survivor DDL with owner-named rows read off live shared TEST and have no reversal claim on it (T-164.8-21); \`survivors.keys\` is neither recipe nor channel; \`${UNEXPECTED}\` and \`${UNEXPECTED_CHANNEL}\` stand for every file the job gains tomorrow — a content file and a DIAGNOSTIC CHANNEL — and both must be OUT until someone names them. \`${UNEXPECTED_CHANNEL}\` is seeded with ${JSON.stringify(POLICY_MARKER)}: review WR-01 proved by execution that the channel loop's glob published exactly this.`,
         ).toBe(false);
       }
       expect(
@@ -1092,6 +1359,45 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         old.staged.includes(UNEXPECTED),
         "CALIBRATION: the whole-directory neuter did not stage the unexpected file either — the fixture is not exercising the default-out rule",
       ).toBe(true);
+
+      // ⭐ CALIBRATION 3 — THE SHIPPED DEFECT, RE-RUN (Phase 164.8.2, review WR-01).
+      // Calibration 2 above mutates the CONTENT loop, so it could only ever prove the
+      // default-out rule for the by-name half. Put the channel loop's GLOB back — the
+      // exact three-class form that shipped — and the seeded `future-census.out`
+      // returns to the world-readable artifact with its CREATE POLICY line intact.
+      // That is the reviewer's measurement, kept as a standing twin so the glob cannot
+      // come back quietly.
+      const CHANNEL_LOOP_ANCHOR =
+        "    for c in census.err ledger.err marker.err refdata.err dump.log transaction.out; do\n" +
+        '      if [ -f "${outdir}/${c}" ]; then\n' +
+        '        cp -p "${outdir}/${c}" "${stage}/"\n' +
+        "      fi\n" +
+        "    done\n";
+      expect(
+        script.includes(CHANNEL_LOOP_ANCHOR),
+        "the staging step's enumerated CHANNEL loop is no longer the form this calibration mutates — re-anchor the mutation rather than deleting the twin, or the arm silently stops being evidence",
+      ).toBe(true);
+      const globbed = script.replace(
+        CHANNEL_LOOP_ANCHOR,
+        '    for c in "${outdir}"/*.err "${outdir}"/*.log "${outdir}"/*.out; do\n' +
+          '      if [ -f "${c}" ]; then\n' +
+          '        cp -p "${c}" "${stage}/"\n' +
+          "      fi\n" +
+          "    done\n",
+      );
+      expect(
+        globbed,
+        "CALIBRATION: the channel-glob neuter produced an identical script, so it proves nothing",
+      ).not.toBe(script);
+      const leaked = runStage(globbed, seed);
+      expect(
+        leaked.staged.includes(UNEXPECTED_CHANNEL),
+        `CALIBRATION: restoring the channel GLOB did not put \`${UNEXPECTED_CHANNEL}\` in the artifact, so this arm cannot see the shape review WR-01 measured. Without this twin, "the future channel is absent" could be reported by a fixture that never contained it.`,
+      ).toBe(true);
+      expect(
+        leaked.contents[UNEXPECTED_CHANNEL] ?? "",
+        "CALIBRATION: the leaked future channel did not carry the policy marker, so the fixture is not exercising the byte class the finding is about",
+      ).toContain(POLICY_MARKER);
     });
 
     it("EXECUTED — a forced failure inside the step FAILS CLOSED: exit 1, nothing staged", () => {
@@ -1119,6 +1425,103 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       ).toBe(false);
       expect(r.output).toContain("::error::");
       expect(r.output).toContain("staging FAILED");
+    });
+
+    // -----------------------------------------------------------------------
+    // WR-06 (Phase 164.8.2) — a FAILED redaction must not be followed by the
+    // publication of the very channels its own error message says not to publish.
+    //
+    // ⛔ THE DEFECT. `withhold_channels()` prints, verbatim, "Do NOT publish this
+    // run's artifact: treat the TEST pooler host, its IP and the DB user as
+    // disclosed." The staging step runs `if: always()`, consulted nothing, and
+    // copied whatever `*.err/*.log/*.out` survived — after which the `if: always()`
+    // upload published them. The workflow shipped exactly what it told the operator
+    // not to ship. The trigger (an `rm -f` that fails) is low-realism, but it is
+    // explicitly coded for, and the whole point of the fail-closed trap next door is
+    // that the unlikely path is the one worth wiring.
+    // -----------------------------------------------------------------------
+    it("the staging step is WIRED to the redaction step's outcome, by id", () => {
+      expect(
+        stepHead(WF, REDACT).includes("\n        id: redact\n"),
+        "the redaction step lost its `id: redact`, so `steps.redact.outcome` evaluates to the empty string and the staging step's guard would silently withhold every channel on EVERY run — a control that always fires is as uninformative as one that never does",
+      ).toBe(true);
+      expect(
+        stepHead(WF, STAGE).includes("REDACT_OUTCOME: ${{ steps.redact.outcome }}"),
+        "the staging step no longer receives the redaction step's outcome. Without it the channel loop is back to copying whatever survived a FAILED redaction into a world-readable artifact (review WR-06).",
+      ).toBe(true);
+      calibrate(
+        "the staging step reads the redaction step's outcome",
+        (s) => s.replace("REDACT_OUTCOME: ${{ steps.redact.outcome }}", "REDACT_OUTCOME: success"),
+        (t) => stepHead(t, STAGE).includes("REDACT_OUTCOME: ${{ steps.redact.outcome }}"),
+      );
+      calibrate(
+        "the redaction step carries the id the staging step names",
+        (s) => s.replace("\n        id: redact\n", "\n"),
+        (t) => stepHead(t, REDACT).includes("\n        id: redact\n"),
+      );
+    });
+
+    it("EXECUTED — a FAILED redaction stages NO channel, and still stages the reversal recipe", () => {
+      const script = extractRunScript(WF, STAGE);
+      const seed = [...REAL_NAMES, UNEXPECTED, UNEXPECTED_CHANNEL];
+
+      const r = runStage(script, seed, "failure");
+      expect(
+        r.status,
+        `the staging step failed outright on a failed redaction (exit ${r.status}). A failed redaction costs the run's DIAGNOSTICS, never its reversal recipe — that is the discipline the redaction step's own comment states.\n${r.output}`,
+      ).toBe(0);
+
+      const channels = stagedChannelNames(WF);
+      expect(channels.length, "no channel names parsed — the assertion below would be vacuous").toBe(
+        6,
+      );
+      for (const c of channels) {
+        expect(
+          r.staged.includes(c),
+          `\`${c}\` was published after a FAILED redaction. \`withhold_channels()\` prints "Do NOT publish this run's artifact: treat the TEST pooler host, its IP and the DB user as disclosed" — and this step then published it anyway (review WR-06).`,
+        ).toBe(false);
+      }
+      expect(
+        r.staged,
+        "the reversal recipe did not survive a failed redaction. ledger.csv, schema-before.sql and the four script `.sql` files carry no connection metadata; withholding them would turn a lost diagnostic into a lost undo.",
+      ).toEqual(
+        ["ledger.csv", "schema-before.sql", "README.txt", "census.sql", "survivors.sql", "restore.sql", "refdata.sql"].sort(),
+      );
+      expect(
+        r.output,
+        "the withheld channels were withheld SILENTLY — an operator reading the artifact would not know the diagnostics are missing rather than absent",
+      ).toContain("::error::");
+      expect(r.output).toContain("did not succeed");
+
+      // ⭐ CALIBRATION — THE OBSERVED RED. Strip the guard, leaving the unconditional
+      // loop that shipped, and the channels come straight back on the same failed
+      // redaction. Without this twin, "no channel is staged" could be reported by a
+      // fixture that staged nothing for an unrelated reason.
+      const GUARD_ANCHOR = '  if [ "${REDACT_OUTCOME:-}" = "success" ]; then\n';
+      expect(
+        script.includes(GUARD_ANCHOR),
+        "the staging step's redaction-outcome guard is no longer the form this calibration strips — re-anchor the mutation rather than deleting the twin",
+      ).toBe(true);
+      const ungated = script
+        .replace(GUARD_ANCHOR, "")
+        .replace(
+          /^ {2}else\n {4}echo "::error::the redaction step did not succeed[\s\S]*?\n {2}fi\n/m,
+          "",
+        );
+      expect(
+        ungated,
+        "CALIBRATION: the un-gating mutation changed nothing, so it proves nothing",
+      ).not.toBe(script);
+      const leaked = runStage(ungated, seed, "failure");
+      expect(
+        leaked.status,
+        `CALIBRATION: the un-gated script did not even run (exit ${leaked.status}) — the mutation broke the shell rather than removing the control, so the arm is not evidence.\n${leaked.output}`,
+      ).toBe(0);
+      const leakedChannels = channels.filter((c) => leaked.staged.includes(c));
+      expect(
+        leakedChannels,
+        "CALIBRATION: removing the guard did NOT republish the channels on a failed redaction, so this arm cannot see the shape review WR-06 is about",
+      ).toEqual(channels);
     });
 
     it("EXECUTED — a run that died before the backup step still stages a self-explaining note", () => {
@@ -1204,7 +1607,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
      * filename field extractable without guessing which dotted token is a filename.
      */
     function readmeEntries(text: string): string[] {
-      const body = stepBody(text, "Back up TEST before any write (schema + ledger; NOT data)");
+      const body = stepBody(text, BACKUP);
       const from = body.indexOf("WHAT IS HERE");
       if (from < 0) return [];
       const rest = body.slice(from);
@@ -1217,11 +1620,12 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     }
 
     it("the README inside the artifact describes only files the artifact carries", () => {
-      const names = stagedNameList(WF);
-      const exts = stagedChannelExts(WF);
-      const carried = (entry: string): boolean =>
-        names.includes(entry) ||
-        (/^\*\.[a-z]+$/.test(entry) && exts.includes(entry.slice(2)));
+      // ⛔ NO `*.<ext>` ESCAPE HATCH ANY MORE (Phase 164.8.2, WR-01). This predicate
+      // used to admit a `*.err`-shaped entry whenever the step globbed that extension,
+      // which is how the README came to describe three whole classes as "here". Both
+      // lists are now sets of NAMES, so the agreement is name-for-name.
+      const carriedBy = [...stagedNameList(WF), ...stagedChannelNames(WF)];
+      const carried = (entry: string): boolean => carriedBy.includes(entry);
 
       const entries = readmeEntries(WF);
       expect(
@@ -1246,12 +1650,151 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
               "            census.sql        the catalogue query the restore script ran to take its\n",
           ),
         (t) => {
-          const n = stagedNameList(t);
-          const e = stagedChannelExts(t);
-          return readmeEntries(t).every(
-            (x) => n.includes(x) || (/^\*\.[a-z]+$/.test(x) && e.includes(x.slice(2))),
-          );
+          const c = [...stagedNameList(t), ...stagedChannelNames(t)];
+          return readmeEntries(t).every((x) => c.includes(x));
         },
+      );
+    });
+
+    /**
+     * The files the backup step actually SECRET-SCANS, read off its own calls.
+     *
+     * ⛔ PARSED, NEVER RESTATED — the whole finding (WR-02) is that a restated scan
+     * scope drifted away from the code. A literal `["ledger.csv", "schema-before.sql"]`
+     * here would be the same defect one layer up: the test would agree with itself
+     * while the workflow scanned something else.
+     */
+    function scannedFiles(text: string): string[] {
+      const body = stepBody(text, BACKUP);
+      return [
+        ...body.matchAll(/^\s*scan_for_secrets "\$\{outdir\}\/([A-Za-z0-9_.-]+)"/gm),
+      ].map((m) => m[1]);
+    }
+
+    /** The README's `⚠️ WHAT WAS SCANNED` section, verbatim. */
+    function readmeScanSection(text: string): string {
+      const body = stepBody(text, BACKUP);
+      const from = body.indexOf("⚠️ WHAT WAS SCANNED");
+      if (from < 0) return "";
+      const rest = body.slice(from);
+      const to = rest.indexOf("⛔ WHAT CANNOT BE REVERSED");
+      return to < 0 ? rest : rest.slice(0, to);
+    }
+
+    it("the README's scan-scope section NAMES every staged file that nothing scanned", () => {
+      // ⛔ THE FINDING (Phase 164.8.2, review WR-02). Plan 03 rewrote `WHAT IS HERE` to
+      // advertise seven files and left the section immediately below saying "both files
+      // were scanned" — "both" being ledger.csv and schema-before.sql. The four
+      // script-written `.sql` files pass through NO secret scan and NO redaction; the
+      // phase established that itself and wrote it into the maintainer-facing SCOPE
+      // comment, and the correction never reached the document that ships INSIDE the
+      // world-readable artifact. That is the same false-assurance shape WR-05 was
+      // raised about, relocated from a maintainer-facing comment to a world-facing one.
+      //
+      // The rule below is DERIVED, so it cannot drift again: whatever the staging step
+      // carries, minus whatever `scan_for_secrets` is actually called on, must be named
+      // in the section. Add a file to the artifact without saying it is unscanned and
+      // this reds.
+      const scanned = scannedFiles(WF);
+      expect(
+        scanned,
+        "the backup step's `scan_for_secrets` calls could not be parsed, or it stopped scanning the two files the README's guarantee is about — an empty list would make the rule below vacuously satisfiable by a README that says nothing",
+      ).toEqual(["ledger.csv", "schema-before.sql"]);
+
+      const section = readmeScanSection(WF);
+      expect(
+        section,
+        "the README's `⚠️ WHAT WAS SCANNED` section could not be sliced — the assertion below would be vacuous",
+      ).not.toBe("");
+
+      const staged = [...stagedNameList(WF), ...stagedChannelNames(WF)];
+      const unscanned = staged.filter((f) => !scanned.includes(f));
+      expect(
+        unscanned.length,
+        "every staged file is scanned, which cannot be true — the derivation is broken, not the workflow",
+      ).toBeGreaterThan(0);
+      const unnamed = unscanned.filter((f) => !section.includes(f));
+      expect(
+        unnamed,
+        `the README that ships INSIDE the world-readable artifact does not tell its reader that ${unnamed.length} of the file(s) it carries went through NO secret scan: ${unnamed.join(", ")}. The scan runs in the backup step, before the restore script exists to write them. survivors.sql and restore.sql carry pg_get_triggerdef(...) and a reconstructed CREATE POLICY … USING (<qual>) read off live shared TEST, and this artifact is public for 90 days.`,
+      ).toEqual([]);
+
+      // ⛔ AND THE SECTION'S OWN NUMERAL IS DERIVED FROM THE ALLOWLIST, not restated.
+      // The heading says how many files this artifact carries; a hand-typed word there
+      // is stale the first time a name is added, and a stale numeral beside a corrected
+      // paragraph is how WR-02 happened in the first place.
+      const WORDS = [
+        "ZERO", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE",
+        "TEN", "ELEVEN", "TWELVE", "THIRTEEN", "FOURTEEN", "FIFTEEN", "SIXTEEN",
+        "SEVENTEEN", "EIGHTEEN", "NINETEEN", "TWENTY",
+      ];
+      const word = WORDS[staged.length];
+      expect(word, `no numeral word for a ${staged.length}-file artifact — extend WORDS`).toBeTruthy();
+      expect(
+        section,
+        `the README's scan-scope heading no longer says how many files this artifact carries, or says the wrong number. The staging step's two lists now carry ${staged.length}, so the heading must read "THESE ${word}".`,
+      ).toContain(`THESE ${word}`);
+      calibrate(
+        "the scan-scope heading's file count is derived from the allowlist, not typed",
+        (s) =>
+          s.replace(
+            "for f in ledger.csv schema-before.sql README.txt census.sql",
+            "for f in ledger.csv schema-before.sql README.txt survivors.keys census.sql",
+          ),
+        (t) => {
+          const n = [...stagedNameList(t), ...stagedChannelNames(t)].length;
+          return readmeScanSection(t).includes(`THESE ${WORDS[n]}`);
+        },
+      );
+
+      // CALIBRATION 1 — delete one name from the section and the rule must flip.
+      // Without this, "nothing is unnamed" could be reported by a section that
+      // happens to contain every word.
+      // ⚠️ `census.err` and NOT `survivors.sql`, deliberately: survivors.sql is named
+      // TWICE in this section (once in the enumeration, once in the sentence about the
+      // DDL it carries), so deleting one mention leaves the other and the mutation is
+      // a no-op the predicate cannot see. Measured while writing this arm — the first
+      // version of it did exactly that and reported a twin that does not bite.
+      calibrate(
+        "the scan-scope rule bites when a staged file stops being named as unscanned",
+        (s) => s.replace("census.err, ledger.err, marker.err", "ledger.err, marker.err"),
+        (t) => {
+          const sec = readmeScanSection(t);
+          const sc = scannedFiles(t);
+          return [...stagedNameList(t), ...stagedChannelNames(t)]
+            .filter((f) => !sc.includes(f))
+            .every((f) => sec.includes(f));
+        },
+      );
+      // CALIBRATION 2 — the direction that actually caused WR-02: a file is ADDED to
+      // the artifact and the scan-scope paragraph is left alone.
+      calibrate(
+        "the scan-scope rule bites on a file added to the artifact but not to the section",
+        (s) =>
+          s.replace(
+            "for f in ledger.csv schema-before.sql README.txt census.sql survivors.sql restore.sql refdata.sql; do",
+            "for f in ledger.csv schema-before.sql README.txt census.sql survivors.sql restore.sql refdata.sql pre-census.txt; do",
+          ),
+        (t) => {
+          const sec = readmeScanSection(t);
+          const sc = scannedFiles(t);
+          return [...stagedNameList(t), ...stagedChannelNames(t)]
+            .filter((f) => !sc.includes(f))
+            .every((f) => sec.includes(f));
+        },
+      );
+      // ⛔ AND THE SUPERSEDED SENTENCE MUST NOT COME BACK. "both files were scanned"
+      // was true of a two-file artifact and false of this one; an absence assertion is
+      // only evidence if the presence of the thing can be detected, hence the twin.
+      const DEAD = "was allowed to proceed to any write, both files were scanned";
+      expect(
+        WF.includes(DEAD),
+        `the superseded README sentence ${JSON.stringify(DEAD)} is back. It describes a two-file artifact; this one carries ${staged.length} files, ${unscanned.length} of them scanned by nothing.`,
+      ).toBe(false);
+      calibrate(
+        "the dead 'both files were scanned' sentence would be caught if it came back",
+        (s) => s.replace("⚠️ WHAT WAS SCANNED", `${DEAD}\n          ⚠️ WHAT WAS SCANNED`),
+        (t) => !t.includes(DEAD),
       );
     });
 
@@ -1439,8 +1982,12 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       ).toContain("2>/dev/null");
       expect(
         markerOffenders.join(" | "),
-        `the reported count is not ${(ALLOWED["2>/dev/null"] as number) + 1}: the allowlist is not counting the new site, it is matching something else`,
-      ).toContain(`(${(ALLOWED["2>/dev/null"] as number) + 1},`);
+        "the offender is not reported as an UNLISTED SITE — since 2026-09-10 the rule is over sites, not over a count, so a new suppression must be named as a site that is not in ALLOWED_SITES (silent-failure review F2)",
+      ).toContain("UNLISTED SITE");
+      expect(
+        markerOffenders.join(" | "),
+        "the offender does not quote the offending LINE — a report that says only 'a site appeared' sends the next reader to the wrong step, and this is the step that decides TEST from PROD",
+      ).toContain('UNLISTED SITE in step "Which database am I on"');
 
       calibrate(
         "the softening scan bites on a `|| :` — the drop-in for the banned `|| true`",
@@ -1462,6 +2009,71 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       );
     });
 
+    it("every `run: |` in the restore job turns `-e` ON, except three named blocks", () => {
+      // ⛔ THE TENTH CHECK, AND IT IS STRUCTURAL RATHER THAN LEXICAL (silent-failure
+      // review F3). The nine-token scan looks for spellings; this one asks the question
+      // the spellings are proxies for — "can a failing command in this block go
+      // unnoticed?" A step written `set -uo pipefail` answers yes while matching none
+      // of the nine.
+      const blocks = runBlocks(WF);
+      expect(
+        blocks.length,
+        `only ${blocks.length} \`run: |\` block(s) were parsed out of the scannable restore block (floor ${RUN_BLOCK_FLOOR}, measured 2026-09-10). A parser returning too few makes the rule below vacuously green — the exact failure this file exists to refuse.`,
+      ).toBeGreaterThanOrEqual(RUN_BLOCK_FLOOR);
+      // ⚠️ `> 0`, DELIBERATELY, AND NOT A SECOND FLOOR. This guard exists only to catch
+      // an ERREXIT_RE that matches nothing (which would make every block an offender or
+      // none). A tighter bound here — e.g. `>= RUN_BLOCK_FLOOR - NO_ERREXIT_SITES.length`
+      // — was written first and SHADOWED the finding: neutering the marker step failed
+      // on "expected 12 to be >= 13" instead of on the offender that names the step.
+      // A guard that fires before the rule it guards is a worse message, not a stronger
+      // check.
+      expect(
+        blocks.filter((b) => b.live.some((l) => ERREXIT_RE.test(l))).length,
+        "no `run: |` block sets `-e` at all — ERREXIT_RE is not matching what it thinks it is, so this rule is measuring nothing",
+      ).toBeGreaterThan(0);
+      expect(
+        errexitOffenders(WF),
+        "a `run: |` block in the restore job never turns `-e` on and is not a named exception",
+      ).toEqual([]);
+
+      // ⭐ THE FALSIFIER, AND THE PROOF THAT THE NINE-TOKEN SCAN CANNOT SEE IT.
+      // Soften the WHOLE of `Which database am I on` — the gate standing between a
+      // dashboard-shaped mistake and a DROP SCHEMA on the wrong database — by dropping
+      // one letter. No banned token appears anywhere in the mutant.
+      const softened = WF.replace(
+        "          set -euo pipefail\n          # The session-mode DSN derived ONCE",
+        "          set -uo pipefail\n          # The session-mode DSN derived ONCE",
+      );
+      expect(softened, "the `-e`-dropping mutation changed nothing").not.toBe(WF);
+      expect(
+        softeningOffenders(softened),
+        "CALIBRATION: the NINE-TOKEN scan already caught a step that simply never sets `-e`, so F3 was not a gap and this whole check is buying nothing",
+      ).toEqual([]);
+      expect(
+        errexitOffenders(softened).join(" | "),
+        "dropping `-e` from the marker step's `run: |` went unreported — that is `set +e` by another spelling, over the step that decides TEST from PROD",
+      ).toContain('NO ERREXIT in step "Which database am I on"');
+
+      // ⭐ AND THE OTHER DIRECTION: an exemption that stopped being needed.
+      const tightened = WF.replace("          set -uo pipefail\n", "          set -euo pipefail\n");
+      expect(tightened, "the exemption-staling mutation changed nothing").not.toBe(WF);
+      expect(
+        errexitOffenders(tightened).join(" | "),
+        "a step that now sets `-e` kept its exemption and nothing said so — a standing permission to soften it again later, granted by nobody",
+      ).toContain("STALE EXEMPTION");
+
+      // ⭐ AND A RENAMED EXEMPTION MUST NOT OUTLIVE ITS STEP.
+      const renamed = WF.replace(
+        `- name: ${NO_ERREXIT_SITES[2]}`,
+        "- name: Probe - the runner image's PostgreSQL server binaries resolve (renamed)",
+      );
+      expect(renamed, "the rename mutation changed nothing").not.toBe(WF);
+      expect(
+        errexitOffenders(renamed).join(" | "),
+        "an exemption survived the step it exempts being renamed, and the renamed step was then unreported as well",
+      ).toContain("DANGLING EXEMPTION");
+    });
+
     it("the token list is NINE, and its two hand-kept siblings must move with it", () => {
       expect(
         SOFTENING_TOKENS,
@@ -1470,23 +2082,54 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       expect(new Set(SOFTENING_TOKENS).size, "a token is listed twice").toBe(
         SOFTENING_TOKENS.length,
       );
+      // ⛔ EXACTLY ONE token has an allowlist, and the other eight are forbidden
+      // OUTRIGHT. This replaces the superseded `expect(Object.keys(ALLOWED)).toEqual(
+      // ["2>/dev/null"])` (silent-failure review F2 removed the count map). Proven by
+      // mutation rather than by reading the code: give each of the other eight a live
+      // occurrence and every one of them must be reported.
+      expect(
+        SOFTENING_TOKENS.includes(SITE_ALLOWLISTED_TOKEN),
+        "the site-allowlisted token is not in the scanned list at all, so the site rule governs nothing",
+      ).toBe(true);
+      for (const token of SOFTENING_TOKENS.filter((t) => t !== SITE_ALLOWLISTED_TOKEN)) {
+        const mutant = WF.replace(
+          "          set -euo pipefail\n          export RESTORE_DB_URL=",
+          `          set -euo pipefail\n          command -v supabase >/dev/null ${token}\n          export RESTORE_DB_URL=`,
+        );
+        expect(mutant, `the ${token} mutation changed nothing`).not.toBe(WF);
+        expect(
+          softeningOffenders(mutant).join(" | "),
+          `\`${token}\` was tolerated in the scannable restore block. Only \`${SITE_ALLOWLISTED_TOKEN}\` has an allowlist; the other eight are forbidden outright.`,
+        ).toContain(token);
+      }
     });
 
-    it("the `2>/dev/null` allowlist is an exact set, and it reds in BOTH directions", () => {
-      // The count is pinned above with a per-site justification. This arm proves the
-      // pin is a pin: a site ADDED and a site REMOVED must each be reported. A rule
-      // that only catches additions would let the slicing silently narrow — the scan
-      // would then be looking at less than it thinks and would still read green.
-      expect(Object.keys(ALLOWED), "the allowlist admits a token other than `2>/dev/null`").toEqual([
-        "2>/dev/null",
-      ]);
-      const live = liveLines(scannableRestoreBlock(WF)).join("\n");
+    it("the `2>/dev/null` allowlist is an exact set OF SITES, and it reds in BOTH directions AND on a swap", () => {
+      // ⛔ THE TITLE USED TO OVERSTATE THE CONTROL (silent-failure review F2). It said
+      // "an exact set" while the exactness was over TOKENS
+      // (`expect(Object.keys(ALLOWED)).toEqual(["2>/dev/null"])`); the SITES existed
+      // only as a five-item prose enumeration in the doc comment. They are executable
+      // now, and this arm proves the bijection in all three directions.
+      const live = liveLines(scannableRestoreBlock(WF));
+      const siteLines = live.filter((l) => l.includes(SITE_ALLOWLISTED_TOKEN));
       expect(
-        live.split("2>/dev/null").length - 1,
-        "the live `2>/dev/null` count in the scannable restore block moved off its re-measured 5",
-      ).toBe(ALLOWED["2>/dev/null"]);
+        siteLines.length,
+        "the live `2>/dev/null` site count in the scannable restore block moved off its re-measured 4 (it was 5 until 2026-09-10; F4 removed the ancestry probe's suppression). A count is no longer the rule, but a count that disagrees with the site list means the slicing moved.",
+      ).toBe(ALLOWED_SITES.length);
+      expect(
+        softeningOffenders(WF),
+        "the real workflow does not satisfy its own site allowlist",
+      ).toEqual([]);
 
-      // DOWN: delete one of the five justified sites.
+      // UP: a NEW site, on the step whose stderr is the evidence.
+      const widened = WF.replace('2>"${RUNNER_TEMP}/marker.err"', SITE_ALLOWLISTED_TOKEN);
+      expect(widened, "the site-addition mutation changed nothing").not.toBe(WF);
+      expect(
+        softeningOffenders(widened).join(" | "),
+        "a NEW unlisted site went unreported",
+      ).toContain("UNLISTED SITE");
+
+      // DOWN: delete one of the justified sites.
       const narrowed = WF.replace(
         ' 2>/dev/null || echo "(no /usr/lib/postgresql/*/bin)"',
         ' || echo "(no /usr/lib/postgresql/*/bin)"',
@@ -1494,8 +2137,49 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       expect(narrowed, "the site-removal mutation changed nothing").not.toBe(WF);
       expect(
         softeningOffenders(narrowed).join(" | "),
-        "a VANISHED allowlisted site went unreported — the count is not an exact set, it is a ceiling",
-      ).toContain("2>/dev/null (4,");
+        "a VANISHED allowlisted site went unreported — the rule is a ceiling, not an exact set",
+      ).toContain("VANISHED OR DUPLICATED SITE");
+
+      // ⭐ THE SHAPE A COUNT CANNOT SEE, AND THE REASON THIS ARM WAS REWRITTEN.
+      // One benign probe suppression deleted, one added on `Which database am I on`'s
+      // psql. Four in, four out. Under the superseded count rule the scan reported
+      // ZERO offenders while the step standing between a dashboard-shaped mistake and
+      // a DROP SCHEMA on the wrong database went quiet.
+      const swapped = narrowed.replace('2>"${RUNNER_TEMP}/marker.err"', SITE_ALLOWLISTED_TOKEN);
+      expect(swapped, "the swap mutation changed nothing beyond the deletion").not.toBe(narrowed);
+      const swappedLive = liveLines(scannableRestoreBlock(swapped)).join("\n");
+      expect(
+        swappedLive.split(SITE_ALLOWLISTED_TOKEN).length - 1,
+        "CALIBRATION: the swap did NOT preserve the count, so it is not exercising the direction a count is blind to",
+      ).toBe(ALLOWED_SITES.length);
+      expect(
+        countRuleOffenderCount(swapped, ALLOWED_SITES.length),
+        "CALIBRATION: the SUPERSEDED count rule already caught this swap, so the site allowlist is not buying anything and F2 was not a finding",
+      ).toBe(0);
+      const swapOffenders = softeningOffenders(swapped);
+      expect(
+        swapOffenders.join(" | "),
+        "the count-preserving swap went unreported by the SITE rule too — the new mechanism is no stronger than the one it replaced",
+      ).toContain("UNLISTED SITE");
+      expect(
+        swapOffenders.join(" | "),
+        "the swap's VANISHED half went unreported — only half a bijection is being checked",
+      ).toContain("VANISHED OR DUPLICATED SITE");
+      expect(
+        swapOffenders.join(" | "),
+        "the report does not name the step whose stderr went quiet — the offending line is a bare continuation (`2>/dev/null)\" || rc=$?`), so without the step name the report is true and useless",
+      ).toContain('UNLISTED SITE in step "Which database am I on"');
+
+      // And a second suppression riding in on an allowlisted line's justification.
+      const doubled = WF.replace(
+        "ls -d /usr/lib/postgresql/*/bin 2>/dev/null",
+        "ls -d /usr/lib/postgresql/*/bin 2>/dev/null 2>/dev/null",
+      );
+      expect(doubled, "the double-suppression mutation changed nothing").not.toBe(WF);
+      expect(
+        softeningOffenders(doubled).join(" | "),
+        "two suppressions on one allowlisted line were accepted — the second is riding in on the first's justification",
+      ).toContain("on ONE allowlisted line");
     });
   });
 
@@ -1680,6 +2364,10 @@ exit 64
       encoding: "utf8",
       env: {
         ...process.env,
+        // The runner always sets this; the step writes git's stderr into it rather
+        // than into /dev/null so an UNANSWERED ancestry question can be told apart
+        // from a NEGATIVE answer (silent-failure review F4).
+        RUNNER_TEMP: workdir,
         APPLY_STATUS: outputs.status ?? "",
         APPLY_CONCLUSION: outputs.conclusion ?? "",
         APPLY_HEAD_SHA: outputs.head_sha ?? "",
@@ -1734,6 +2422,52 @@ exit 64
       "a green PROD apply at a sha this checkout does NOT descend from was accepted — the premise is about THIS tree, not about any green run",
     ).toBe(1);
     expect(asserted.out).toContain("ancestor");
+  });
+
+  // -------------------------------------------------------------------------
+  // F4 (Phase 164.8.2 silent-failure review) — rc 1 and rc >= 2 are DIFFERENT
+  // answers, and one of them is not an answer at all.
+  //
+  // ⛔ `git merge-base --is-ancestor` exits 0 (ancestor), 1 (not an ancestor) and
+  // 128 (bad object / not a commit). The `case` above this line checks only that
+  // APPLY_HEAD_SHA is HEX-SHAPED, never that the object exists — so a sha that was
+  // force-pushed away, or one `gh` returned from a different ref, used to produce
+  // "X is not an ancestor of this checkout's HEAD": a FALSE STATEMENT ABOUT PROD'S
+  // APPLY, with git's own "Not a valid commit name" thrown into /dev/null.
+  //
+  // Same shape as IN-06 in the restore script (`-le 1`, not `-eq 0`, because "an
+  // unreadable dump is not an empty one"). The run was always going to be red;
+  // what was wrong is what it told the operator to go and fix.
+  // -------------------------------------------------------------------------
+  it("(success, completed, a hex sha that is NOT A COMMIT) → MEASURE_FAIL, not a false ancestry verdict", () => {
+    // Hex-shaped and 40 long, so the shape `case` admits it; no such object exists
+    // in the throwaway repo, so git exits 128.
+    const GHOST = `${"0".repeat(39)}1`;
+    const asserted = runAsserter({
+      status: "completed",
+      conclusion: "success",
+      head_sha: GHOST,
+    });
+    expect(
+      asserted.code,
+      `an unanswerable ancestry question was accepted (exit ${asserted.code}).\n${asserted.out}`,
+    ).toBe(1);
+    expect(
+      asserted.out,
+      "the step did not report that the ancestry question went UNANSWERED — it is reporting a verdict it never obtained",
+    ).toContain("MEASURE_FAIL");
+    expect(
+      asserted.out,
+      `the step told the operator that ${GHOST} "is not an ancestor of this checkout's HEAD". git never said that: it exited 128 because the object does not exist. A false statement about PROD's apply sends the reader to land migrations that are already landed.`,
+    ).not.toContain("is not an ancestor of this checkout's HEAD");
+    expect(
+      asserted.out,
+      "git exited non-zero-non-one and the step did not name the exit code, so the next reader cannot tell a bad object from a broken checkout",
+    ).toContain("128");
+    expect(
+      asserted.out,
+      "git's stderr was discarded — that channel is the ONLY thing that distinguishes 'no such object' from every other 128, and the previous version sent it to /dev/null",
+    ).toMatch(/not a valid/i);
   });
 
   it("(status still in progress) → exit 1 naming `status`", () => {
