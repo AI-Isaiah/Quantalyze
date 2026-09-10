@@ -477,8 +477,17 @@ const ERREXIT_RE = /^\s*set\s+(-[a-zA-Z]*e[a-zA-Z]*(\s|$)|-o\s+errexit)/;
  *    empty string instead of aborting the step, so an absent line reaches its own
  *    MEASURE_FAIL instead of dying before it."
  *
- * MEASURED: GitHub Actions runs every `run:` as `bash -e {0}`, and neither this workflow
- * nor ci.yml declares `shell:` or `defaults:` (0 hits in both). `set -uo pipefail` turns
+ * MEASURED, AND THE CORRECTIVE MEASUREMENT ITSELF WAS WRONG ONCE (review F2). This
+ * paragraph read "neither this workflow nor ci.yml declares `shell:` or `defaults:`
+ * (0 hits in both)" — in a file whose whole thesis is that a control must be no weaker
+ * than the sentence beside it, while `.github/workflows/ci.yml:3666` DOES declare
+ * `defaults: / run: / working-directory: analytics-service`. That is 1 hit, not 0.
+ * What actually carries the conclusion is narrower and is now ASSERTED rather than
+ * counted in prose: NO workflow under `.github/workflows/` declares `shell:` anywhere
+ * (the arm "no workflow overrides the runner's `bash -e {0}` shell" scans every file and
+ * calibrates on a mutant), and a `defaults.run.working-directory` selects a DIRECTORY,
+ * never an interpreter. So GitHub Actions runs every `run:` here as `bash -e {0}`.
+ * `set -uo pipefail` turns
  * `-u` and pipefail ON; it does NOT turn `-e` off (`bash -e` + `set -uo pipefail` reports
  * `shellopts=ehuB`). Errexit was on the whole time, so in both steps the unbounded
  * `status=$?` capture and every `grep` substitution ABORTED the step on a non-zero
@@ -2240,6 +2249,40 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         errexitOffenders(renamed).join(" | "),
         "an exemption survived the step it exempts being renamed, and the renamed step was then unreported as well",
       ).toContain("DANGLING EXEMPTION");
+    });
+
+    /**
+     * F2 — the `bash -e {0}` PREMISE, measured instead of restated.
+     *
+     * Every re-decision in NO_ERREXIT_SITES above rests on the runner invoking each
+     * `run:` as `bash -e {0}`: it is why a block that only says `set -uo pipefail` is
+     * still under errexit, and why the MEASURE_FAIL branches under an unbounded capture
+     * were dead code. The premise fails if ANY workflow declares a `shell:` — at the
+     * step, the job's `defaults:`, or the workflow's — so the claim is a scan over the
+     * whole directory rather than a count typed into a comment. A `defaults:` block is
+     * NOT disqualifying on its own: ci.yml carries one, and it sets a working directory.
+     */
+    it("no workflow overrides the runner's `bash -e {0}` shell", () => {
+      const dir = ".github/workflows";
+      const files = readdirSync(join(ROOT, dir)).filter((f) => /\.ya?ml$/.test(f));
+      expect(
+        files.length,
+        `${dir} yielded ${files.length} workflow file(s) — the scan below would be vacuously green`,
+      ).toBeGreaterThan(1);
+      const shellDecls = (text: string): string[] =>
+        text.split("\n").filter((l) => /^\s*shell:/.test(l));
+      const offenders = files.flatMap((f) =>
+        shellDecls(read(`${dir}/${f}`)).map((l) => `${f}: ${l.trim()}`),
+      );
+      expect(
+        offenders,
+        "a workflow declares `shell:`, so `bash -e {0}` is no longer the shell every `run:` gets — every errexit argument in this file rests on that premise and has to be re-decided against the shell that step ACTUALLY runs under",
+      ).toEqual([]);
+      calibrate(
+        "no `shell:` anywhere under .github/workflows",
+        (t) => t.replace("        run: |\n", "        shell: sh\n        run: |\n"),
+        (t) => shellDecls(t).length === 0,
+      );
     });
 
     /** The SUPERSEDED default-OUT collector, kept as a REFERENCE ORACLE and nothing else. */
