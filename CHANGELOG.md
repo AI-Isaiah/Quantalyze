@@ -1,5 +1,132 @@
 # Changelog
 
+## [0.77.32.0] - 2026-09-10 — five controls that read stronger than they were, and the two the fixes re-opened
+
+Fifty-six commits over seven themes. Phase 164.8.2 GATEHARDENING closes the five Warnings the
+review raised against Phase 164.8's own gates, plus the twelve findings two reviewers raised
+against *those* fixes. Every gate in this entry was proven by executing the defect, not by
+reading the code — including three cases where a fix shipped by this phase re-opened the class
+it was written to close.
+
+### Security
+- **A file nobody named reached the world-readable CI artifact.** The Phase-164.8.2 staging step
+  in `test-restore-from-baseline.yml` enumerated the `.sql` files by name but left the diagnostic
+  channels default-IN by glob. Proven by execution: a seeded `future-census.out` carrying
+  `CREATE POLICY p ON t USING (owner = current_user)` was staged and announced by the step's own
+  sentence "everything else … never enters the artifact". The six channels are now named
+  individually, which makes three shipped statements true as written instead of deleting them.
+- **A failed redaction no longer publishes what it forbids.** `withhold_channels()` prints
+  "Do NOT publish this run's artifact"; the staging step ran `if: always()` and copied anyway.
+  Now gated on the redaction outcome, default-DENY — a failed redaction costs the run its
+  diagnostics, never its undo recipe (`survivors.sql` still stages).
+- **The four published `.sql` files are scanned for a DSN** before the transaction runs. They are
+  scanned by nothing else, by design, and nothing asserted they were connection-string-free.
+- **The local home path and username were scrubbed from six tracked planning files.** The repo is
+  public and `.planning/` is tracked. Four of the six were summaries written by worktree-isolated
+  fix agents, which name their own artifacts by absolute path — a repeatable source, not a
+  one-off. Caught by `check-planning-hygiene` on the merged branch, before the push.
+
+### Fixed
+- **The check that green-lights the PRODUCTION apply could not fail.** `C-0331` in
+  `supabase-migrate.yml` (both the `apply-test` and `apply` sites) was purely negative: a CLI that
+  exits 0 and prints an empty, header-only or reworded list makes `grep -q` exit 1, the branch is
+  skipped, and `needs.apply-test.result == 'success'` releases the PROD apply. A positive floor now
+  runs first — the list must carry at least one 14-digit version, with grep's rc bounded — matching
+  the shape this phase's own sibling in `test-restore-from-baseline.yml` already used.
+- **VAC-08's ledger drift-check reported a pass it had not earned.** Five reads used `|| true`, so
+  a `grep` exiting 2 on an unreadable file collapsed to empty, then to `0`, which is this gate's
+  *clean* verdict. Driven with a real `grep` shim exiting 2, `exit 1` became
+  `exit 0 ::notice:: ledger and body checks clean` — including on a run where the new ceiling had
+  been exceeded. The review that found it rated it "no false green"; that half was wrong and the
+  runs are in the summary.
+- **The ancestry probe stated a falsehood instead of an error.** `git merge-base --is-ancestor …
+  2>/dev/null` collapsed rc 1 and rc ≥ 2, so a force-pushed-away sha produced "X is not an ancestor
+  of this checkout's HEAD" — a false claim about PROD's apply — with git's `fatal: Not a valid
+  commit name` discarded. Bounded at `-le 1`.
+- **`grep` no longer goes blind on a NUL-bearing file** at four sites across both workflows
+  (`-a` on the two C-0331 reverted-greps and the two post-verify greps).
+- **The bounded `applyJob` slice stops degrading to slice-to-EOF.** A successor job key carrying a
+  trailing comment or a trailing space was not matched and the slice ran to end-of-file — the
+  unbounded shape the bound was added to close. It now throws, the discipline its sibling nine
+  lines away already used. The review undercounted the sites: there are two, not one.
+- **The `--help` seam pin was blind to 3 of 16 seams, `RESTORE_DB_URL` among them** — the DSN of a
+  script that assembles `DROP SCHEMA public CASCADE`. All three share one mechanism: no literal
+  default, so each is read as `${NAME:-}`, which a declaration-anchored regex cannot see. The arm
+  now deletes all sixteen entries in turn.
+- `suffix()` fails loud instead of returning a silent `slice(-1)`; an unanchored confirm-token
+  `sed` is anchored; the presence summary no longer prints a clean verdict beside its own
+  `::error::`; the arms ratchet names the direction it actually measured.
+
+### Added
+- **`FRONTIER_EXEMPT_CEILING=3`** bounds VAC-08's frontier exemption, which was unbounded: one
+  failed TEST apply left every later migration above the tip, so every one was exempted and the
+  ratchet printed `0 NEW drift` indefinitely. A bare top-level assignment on purpose — never
+  `${…:-3}`, never `local` — so CI cannot raise a ceiling without a reviewed diff.
+- **An `EXPECTED_ARMS` ratchet** on the same script, so deleting an arm reads as a failure rather
+  than a smaller PASS. It fails in both directions.
+- **The softening-token scan goes from five spellings to nine across all three copies** —
+  `test-restore-workflow-wiring`, `supabase-migrate-test-first`, `prod-prober-wiring`. Phase 164.8
+  had widened one and left the destructive workflow on the short list, which is backwards: a
+  migration apply can be re-run, a `DROP SCHEMA public CASCADE` cannot. Proven: inserting
+  `2>/dev/null` on the psql line that asks *which database am I on* was GREEN under the five-token
+  scan and is RED under nine.
+- **The `2>/dev/null` allowlist is a set of SITES, not a count.** As a count, deleting one benign
+  suppression and adding one on the database-identity step left the total unchanged and reported
+  zero offenders. The superseded count rule is kept as a reference oracle so the arm *measures*
+  that the new control is stronger rather than claiming it.
+- **A tenth, structural check: every `run:` block must turn `-e` on.** `set -uo pipefail` is the
+  same softening over a whole step and contains none of the nine tokens.
+- **A `MEASURE_FAIL` wrap** on the dump filter's read, so an unreadable baseline is loud rather
+  than indistinguishable from an empty one, and a failing self-test arm re-emits its own
+  `MEASURE_FAIL` sentence instead of discarding it to `/dev/null`.
+
+### Changed
+- The public artifact holds an enumerated allowlist instead of a glob sweep: `survivors.sql` stays
+  because it is the reversal recipe; `pre-census.txt`, `post-census.txt` and both
+  `*-rollback-view.txt` leave. The artifact's own README no longer says the scan story is complete,
+  and its file list is derived from the staging step rather than restated.
+- Four comments and one runtime echo that described the old artifact now describe the new one.
+- `supabase-migrate.yml` no longer asserts that plain grep reads NUL-bearing input clean — see
+  Root cause.
+
+### Root cause
+- **The repo's own model of the Supabase CLI was the defect.** `SUPABASE_STUB`'s `migration list`
+  printed the header and nothing else, i.e. the hermetic double already *was* the header-only shape
+  that C-0331 could not distinguish from clean. Adding the positive floor reddened three existing
+  arms at once.
+- **WR-04's premise did not reproduce on the runner.** GNU grep 3.11 — the CI runner's own family —
+  was measured across three locales × four fixture shapes, and `-a` changed the verdict in none of
+  the twelve. ugrep 7.8.4 *is* blind, so the fix stands as a repo-wide rule and for the flavour
+  dependence that bites locally; the workflow comment now states the measurement instead of
+  claiming a closed production exposure.
+
+### Tests
+- 14,561 passing across 872 files at the merge, with `tsc`, `eslint`, both gate linters
+  (`lint-sql-gates` 7 rules, `lint-app-guc` 0 findings) and `verify-plan-anchors` green.
+- Every fix carries a falsifier that was observed RED and restored from pristine bytes. Four
+  neuters were caught *not applying* before their RED was believed — a `perl -0pi` that matched
+  nothing, a calibration whose mutation left `^.*` still matching, a deletion of a name that
+  appears twice, and a vacuity guard that shadowed the finding it protected.
+
+### Notes
+- **Parallel executor waves work again on this repo.** `gsd worktree base-check` had been
+  degrading every phase to sequential on the grounds that the Claude Code harness forks worktrees
+  from the default branch — true once, fixed upstream in 2.1.128, and never re-measured. Measured
+  here on 2.1.265: `CLAUDE_BASE` equals the orchestrator HEAD and branch-only plan files are
+  visible in the worktree. Reported as `open-gsd/gsd-core#4588`; four of this phase's five plans
+  and all four review-fix batches ran two-at-a-time.
+- **Roadmap work landed alongside:** Phase 164.8.3 PROBERAUTH inserted (the prober names MT5 `-6`
+  as an unauthorized terminal instead of a catch-all whose remedy is "read the error table"), and
+  Phase 164.5.1 CRONREPOINT made decision-free — its `[A1]` Vault gate was measured on shared TEST
+  and held, and its premise that a rebuild-from-migrations reproduces the broken cron job was
+  **falsified**: the migration skips scheduling entirely and writes a `cron_runs` error row.
+- **Recorded, not fixed:** `T-164.8-21`'s stdout half stays open — the restore script still cats
+  the pre-census to the public Actions log, and its header now says exactly that. A lane arm for
+  `assert_public_sql_dsn_free` is the stronger instrument and is why that function sits outside the
+  `refuse_*` family. `.planning/WINDOWS.md` carries a pre-existing count inconsistency. The
+  six-name channel allowlist can go stale — a future `.err` will not publish until someone adds it,
+  which is the safe direction but means a diagnostic can now be silently absent.
+
 ## [0.77.31.2] - 2026-09-09 — the guard on the destructive restore was narrower than its name, a second time
 
 Six commits over three themes: a proven-live hole in a safety guard, two corrections of record,
