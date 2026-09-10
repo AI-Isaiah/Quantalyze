@@ -345,6 +345,29 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
+/**
+ * 164.8.2 — an index lookup whose MISS is a finding, not a value.
+ *
+ * `indexOf` returns -1 on a miss, and every consumer of that -1 in this file was
+ * a silent degeneracy: `src.slice(mountIdx, -1)` is the whole rest of the FILE
+ * (so a mount-block assertion silently re-aims at unrelated source), and
+ * `Math.abs(-1 - 0)` is `1` (so an adjacency assertion passes precisely when one
+ * of the two labels it is about is MISSING). Both shapes pass for a reason
+ * unrelated to what they claim. There is deliberately no default here — an
+ * absent anchor means the subject is not the shape the assertion assumes.
+ *
+ * Calibrated by "CALIBRATION (164.8.2) — requireIndex bites…" below.
+ */
+function requireIndex(index: number, anchor: string): number {
+  if (index < 0) {
+    throw new Error(
+      `requireIndex: anchor ${JSON.stringify(anchor)} is ABSENT from the ` +
+        "subject, so the narrowing that follows would read something else",
+    );
+  }
+  return index;
+}
+
 // --- localStorage mock (vi.stubGlobal — Phase 08 / 06a precedent) --------
 
 const lsStore = new Map<string, string>();
@@ -4291,8 +4314,13 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(order.length).toBe(3);
     // The two correlated legs (BTC, ETH) must be ADJACENT; SOL is the outlier
     // (either end), never wedged between them.
-    const btcIdx = order.indexOf(kBtc);
-    const ethIdx = order.indexOf(kEth);
+    // 164.8.2: `Math.abs(btcIdx - ethIdx) === 1` is TRUE when one of the two is
+    // -1 and the other is 0 — i.e. this arm used to pass exactly when a leg it
+    // is about had vanished from the axis. `order.length === 3` does not close
+    // it: three entries drawn from three allowed labels can repeat one and drop
+    // another. Require both anchors before measuring the distance between them.
+    const btcIdx = requireIndex(order.indexOf(kBtc), kBtc);
+    const ethIdx = requireIndex(order.indexOf(kEth), kEth);
     expect(Math.abs(btcIdx - ethIdx)).toBe(1);
   });
 
@@ -7902,9 +7930,21 @@ describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
     );
     // The composer mount block for ScenarioFactsheetChart must not pass persist
     // nor thread the coverage window into it.
-    const mountIdx = src.indexOf("<ScenarioFactsheetChart");
-    expect(mountIdx).toBeGreaterThan(-1);
-    const mountBlock = src.slice(mountIdx, src.indexOf("/>", mountIdx));
+    // 164.8.2: the `expect(mountIdx).toBeGreaterThan(-1)` that stood here is now
+    // `requireIndex`'s job (same condition, named message). The CLOSING anchor
+    // was never checked at all: `src.indexOf("/>", mountIdx)` misses to -1 and
+    // `slice(mountIdx, -1)` is the rest of the file, so the two NEGATIVE matches
+    // below would have been aimed at unrelated source — passing or failing for
+    // reasons having nothing to do with the mount block.
+    const mountIdx = requireIndex(
+      src.indexOf("<ScenarioFactsheetChart"),
+      "<ScenarioFactsheetChart",
+    );
+    const mountEnd = requireIndex(
+      src.indexOf("/>", mountIdx),
+      "/> closing <ScenarioFactsheetChart",
+    );
+    const mountBlock = src.slice(mountIdx, mountEnd);
     expect(mountBlock).not.toMatch(/persist=/);
     expect(mountBlock).not.toMatch(/winStart|winEnd|coverageWindow/);
     // The brush-zoom stays persist=false inside ScenarioFactsheetChart itself.
@@ -7919,6 +7959,75 @@ describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
       "utf8",
     );
     expect(chartSrc).toMatch(/persist=\{false\}/);
+  });
+
+  it("CALIBRATION (164.8.2) — requireIndex bites on BOTH shapes the -1 used to feed", () => {
+    const src = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "ScenarioComposer.tsx"),
+      "utf8",
+    );
+
+    // --- shape 1: the missing CLOSING anchor of the mount block --------------
+    const noSelfClose = src.replaceAll("/>", "/ >");
+    expect(noSelfClose, "mutation 1 did not apply").not.toBe(src);
+    expect(
+      noSelfClose.includes("/>"),
+      "mutation 1 left the anchor present",
+    ).toBe(false);
+    const mutantMountIdx = noSelfClose.indexOf("<ScenarioFactsheetChart");
+    expect(mutantMountIdx).toBeGreaterThan(-1);
+    // MEASURED: the old form kept going, slicing to the end of the FILE.
+    const oldBlock = noSelfClose.slice(
+      mutantMountIdx,
+      noSelfClose.indexOf("/>", mutantMountIdx),
+    );
+    // Exactly "from the mount to the end of the file, minus one character" —
+    // the signature of `slice(start, -1)`.
+    expect(oldBlock.length).toBe(noSelfClose.length - mutantMountIdx - 1);
+    // The real narrowing is a named finding instead.
+    expect(() =>
+      requireIndex(
+        noSelfClose.indexOf("/>", mutantMountIdx),
+        "/> closing <ScenarioFactsheetChart",
+      ),
+    ).toThrow(/is ABSENT from the subject/);
+    // CONTROL — the real source still yields a bounded mount block.
+    const realIdx = requireIndex(
+      src.indexOf("<ScenarioFactsheetChart"),
+      "<ScenarioFactsheetChart",
+    );
+    const realBlock = src.slice(
+      realIdx,
+      requireIndex(src.indexOf("/>", realIdx), "/> closing"),
+    );
+    expect(realBlock).toContain("<ScenarioFactsheetChart");
+    // …and it is a BOUNDED block, orders of magnitude short of the file tail
+    // the degenerate form produced.
+    expect(realBlock.length * 10).toBeLessThan(src.length - realIdx);
+
+    // --- shape 2: the missing ARRAY label the adjacency check is about -------
+    // CORR-02's oracle. A three-entry axis that repeated one leg and dropped
+    // another satisfied `order.length === 3`, and `Math.abs(-1 - 0)` is 1, so
+    // the adjacency assertion was GREEN over a subject missing the very leg it
+    // names. That is the vacuity this fix removes.
+    const dropped = ["key ETH", "key ETH", "key SOL"];
+    expect(dropped.includes("key BTC"), "the anchor is still present").toBe(
+      false,
+    );
+    expect(Math.abs(dropped.indexOf("key BTC") - dropped.indexOf("key ETH"))).toBe(
+      1,
+    ); // ⛔ the old form's GREEN
+    expect(() => requireIndex(dropped.indexOf("key BTC"), "key BTC")).toThrow(
+      /is ABSENT from the subject/,
+    );
+    // CONTROL — a real, complete axis passes through untouched.
+    const intact = ["key BTC", "key ETH", "key SOL"];
+    expect(
+      Math.abs(
+        requireIndex(intact.indexOf("key BTC"), "key BTC") -
+          requireIndex(intact.indexOf("key ETH"), "key ETH"),
+      ),
+    ).toBe(1);
   });
 
   it("POLISH-01: changing the coverage window leaves rollingWindow and per-strategy startDates untouched", () => {
