@@ -1,12 +1,16 @@
 # Changelog
 
-## [0.77.32.0] - 2026-09-10 — five controls that read stronger than they were, and the two the fixes re-opened
+## [0.77.32.0] - 2026-09-10 — controls that read stronger than they were, through three rounds of it
 
-Fifty-nine commits over seven themes. Phase 164.8.2 GATEHARDENING closes the five Warnings the
-review raised against Phase 164.8's own gates, plus the twelve findings two reviewers raised
-against *those* fixes. Every gate in this entry was proven by executing the defect, not by
-reading the code — including three cases where a fix shipped by this phase re-opened the class
-it was written to close.
+Seventy-two commits over seven themes. Phase 164.8.2 GATEHARDENING closes the five Warnings the
+review raised against Phase 164.8's own gates, the twelve findings two reviewers raised against
+*those* fixes, and then five blockers a third round found against **those**. Every gate in this
+entry was proven by executing the defect, not by reading the code.
+
+⚠️ **The lesson of this entry is the recursion, not any one gate.** Each round of fixes was itself
+unreviewed until someone looked, and each round re-opened the class it was written to close — the
+last one by shipping a false sentence about the runner shell that this repo already had recorded
+correctly in two other workflows. A fix is not evidence. Running it is.
 
 ### Security
 - **A file nobody named reached the world-readable CI artifact.** The Phase-164.8.2 staging step
@@ -27,6 +31,63 @@ it was written to close.
   one-off. Caught by `check-planning-hygiene` on the merged branch, before the push.
 
 ### Fixed
+- **Round three: five controls the second round's fixers shipped weaker than the sentence beside
+  them.** Found by a read-only re-review of the fixers' own output — the step that had been
+  skipped twice.
+  - **A false model of the runner shell, and the dead code it produced.** A fix asserted that
+    `set -uo pipefail` leaves errexit off, so a non-matching `grep` would reach its own
+    `MEASURE_FAIL`. Measured: GitHub Actions invokes `run:` as `bash -e {0}`, neither workflow
+    declares `shell:` or `defaults:`, and a probe prints `shellopts=ehuB` — errexit is ON and the
+    command substitution ABORTS. An entire family of named diagnostics in
+    `test-restore-from-baseline.yml` was unreachable. The reads are now bounded with `|| rc=$?`
+    (never `|| true`, which that file's own scan refuses), and the three `NO_ERREXIT` exemptions
+    were RE-DECIDED against the correct model: two revoked, one kept on a different basis.
+    ⛔ `ci.yml` and `cassette-refresh.yml` already carried the right model — the repo contradicted
+    itself for a full round.
+  - **An empty `REDACT_OUTCOME` was a permanent silent deny on a GREEN board.** The guard's own
+    comment enumerated four reaching values including "an `env:` wiring that went missing, which
+    reads as the empty string" — then treated all four identically, printing `::error::` and
+    exiting 0. An annotation does not fail a job. Lose `id: redact` and every subsequent run
+    publishes an artifact with zero diagnostics while the guard has silently become unconditional.
+    Empty and unrecognised are now each a named `MEASURE_FAIL` that exits 1; `failure`,
+    `cancelled` and `skipped` keep the non-fatal deny, and the reversal recipe still uploads.
+  - **The sixth `|| true` — the only one that failed toward SILENCE.** Five were closed; the
+    absurdity floor's own input was missed. An unreadable count collapsed to empty and the
+    `[ -n … ]` guard then made the floor INERT, so the gate would report drift-shaped nonsense
+    with full confidence and send a reader to hand-apply migrations to shared TEST. Now three
+    separated, named causes: query failed (with rc), exited 0 with NO ROW, answer not a number.
+    Measured first: the pre-fix gate ALREADY exited 1, so `status === 1` would have been a vacuous
+    assertion — every arm binds to the sentence instead.
+  - **"Four clean files" was indistinguishable from "no files at all".** The published-`.sql` scan
+    skipped missing files silently, then printed a clean verdict naming all four. Found
+    independently by two reviewers. It now reports a measured `scanned N of 4` and refuses on a
+    short count, and covers the SIX classes the artifact README claims rather than the one it
+    implemented.
+  - **A slice-bound throw that only fired when NO successor matched.** `applyJobBlock` consulted
+    its permissive detector only on `next === null`, so an unrecognised job key FOLLOWED by a
+    recognised one still let the slice swallow a neighbour. Now compares positions. The existing
+    calibration could not reach it: it seeded the unmatched key last, the one arrangement where
+    `next` is null.
+  - **And five smaller ones of the same shape, each a control narrower than its own claim.** The
+    ancestry probe could reintroduce the false "is not an ancestor" through the file handle its
+    own fix had just added — a failed redirection returns 1 without ever running `git`, which
+    routes straight into the not-an-ancestor arm; the channel is now opened and proven writable
+    first. `runBlocks` collected only `run: |` and `run: |-`, so a step written `run: >` would have
+    dropped out of the `-e` corpus entirely rather than being reported — it is default-IN now and
+    THROWS on an unrecognised scalar, and the two mutex steps it structurally cannot see are
+    covered by a second, narrower bijection instead of being left invisible. The ledger gate's
+    `set +e` sites were governed by nothing at all, so a sixth could have been added unbounded;
+    they are now a SITE SET with a stated reason each, not a count — a count is blind to a
+    one-for-one swap, and the retained superseded rule MEASURES that blindness rather than
+    asserting it. The arms-ratchet message that names the direction it measured was applied to the
+    `DROP SCHEMA public CASCADE` script too, where telling an operator an arm DISAPPEARED when one
+    was ADDED costs the most. And three restated arm-count literals now read the constant by
+    symbol.
+- **A bare conclusion caught across file boundaries.** The new NO-ROW `MEASURE_FAIL` printed a
+  verdict with no runtime value. `gate-family-meta.test.ts` (D-12/SC-7) named the site and refused
+  the allowlist escape. It now reports the captured stderr line count — the quantity its own block
+  comment said the diagnosis must separate — with the text still WITHHELD, because psql names host
+  and user and this log is public.
 - **The check that green-lights the PRODUCTION apply could not fail.** `C-0331` in
   `supabase-migrate.yml` (both the `apply-test` and `apply` sites) was purely negative: a CLI that
   exits 0 and prints an empty, header-only or reworded list makes `grep -q` exit 1, the branch is
@@ -151,9 +212,14 @@ it was written to close.
   and held, and its premise that a rebuild-from-migrations reproduces the broken cron job was
   **falsified**: the migration skips scheduling entirely and writes a `cron_runs` error row.
 - **Recorded, not fixed:** `T-164.8-21`'s stdout half stays open — the restore script still cats
-  the pre-census to the public Actions log, and its header now says exactly that. A lane arm for
-  `assert_public_sql_dsn_free` is the stronger instrument and is why that function sits outside the
-  `refuse_*` family. `.planning/WINDOWS.md` carries a pre-existing count inconsistency. The
+  the pre-census to the public Actions log, and its header now says exactly that.
+  ✅ **Superseded within this ship:** the lane arm for that scan now EXISTS (arm 27,
+  `EXPECTED_ARMS` 26 → 27), so the function was renamed `refuse_credential_in_published_sql` and
+  joined the `refuse_*` family it had been named to stay out of — it no longer sits outside a
+  derived claim it would have falsified. `.planning/WINDOWS.md` carries a pre-existing count
+  inconsistency. ⚠️ **Newly recorded, not fixed:** the `missing`-direction ledger read leaves psql
+  stderr unredirected into the public Actions log, contradicting the same file's own
+  NON-NEGOTIABLE. Pre-existing, six arms depend on that path, routed rather than bundled. The
   six-name channel allowlist can go stale — a future `.err` will not publish until someone adds it,
   which is the safe direction but means a diagnostic can now be silently absent.
 
