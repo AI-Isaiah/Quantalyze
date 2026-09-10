@@ -312,22 +312,106 @@ function scannableRestoreBlock(text: string): string {
  * ⛔ A count that moves in EITHER direction is red. Do not edit the number to make a
  * run pass: a new one has to earn its place in this allowlist with a justification.
  */
-const ALLOWED: Record<string, number> = { "2>/dev/null": 4 };
+const SITE_ALLOWLISTED_TOKEN = "2>/dev/null";
+
+/**
+ * The four justified `2>/dev/null` SITES, as the distinguishing text of the line each
+ * one sits on — in the order of the enumeration above.
+ *
+ * ⛔ SITES, NOT A COUNT (Phase 164.8.2, silent-failure review F2). This was
+ * `const ALLOWED = { "2>/dev/null": 5 }` with `if (n === allowed) continue`, which is
+ * satisfied by ANY five occurrences. The shape it could not see is a ONE-FOR-ONE SWAP:
+ * delete one of the benign probe suppressions in the deliberately-non-fatal PostgreSQL
+ * binaries step and add one on `Which database am I on`'s psql, and the count is
+ * unchanged, the scan reports zero offenders, and the step whose stderr IS the evidence
+ * that the wrong database was identified goes quiet. That step is the gate standing
+ * between a dashboard-shaped mistake and a DROP SCHEMA on PROD.
+ *
+ * Both of the calibrations this file already carried MOVE the count — one to 6, one to
+ * 4 — so neither exercised the count-preserving direction, which is by construction the
+ * one a count cannot see. The site list is not new information either: all of it was
+ * already written out as prose in the enumeration above. It is now executable.
+ *
+ * ⛔ THE RULE IS A BIJECTION, and both halves matter: every live `2>/dev/null` line must
+ * match exactly one entry (a NEW site is red) and every entry must match exactly one
+ * live line (a VANISHED site is red — a site disappearing means an exit status that used
+ * to be checked stopped being checked, or the slicing moved and the scan is now looking
+ * at less than it thinks).
+ */
+const ALLOWED_SITES: readonly string[] = [
+  "pg_config --bindir 2>/dev/null",
+  "ls -d /usr/lib/postgresql/*/bin 2>/dev/null",
+  "/usr/lib/postgresql/*/bin/initdb /usr/lib/postgresql/*/bin/pg_ctl 2>/dev/null",
+  'FROM supabase_migrations.schema_migrations;" 2>/dev/null',
+];
 
 function softeningOffenders(text: string): string[] {
-  const live = liveLines(scannableRestoreBlock(text)).join("\n");
+  const lines = liveLines(scannableRestoreBlock(text));
+  const live = lines.join("\n");
   const offenders: string[] = [];
   for (const token of SOFTENING_TOKENS) {
+    if (token === SITE_ALLOWLISTED_TOKEN) continue;
     const n = live.split(token).length - 1;
-    const allowed = ALLOWED[token] ?? 0;
-    if (n === allowed) continue;
-    offenders.push(
-      allowed === 0
-        ? `${token} (${n}) — forbidden outright in the scannable restore block`
-        : `${token} (${n}, the allowlist admits exactly ${allowed}) — a new one has to earn its place in this allowlist with a justification, and a vanished one means an exit status that used to be checked stopped being checked`,
-    );
+    if (n === 0) continue;
+    offenders.push(`${token} (${n}) — forbidden outright in the scannable restore block`);
+  }
+
+  // ⭐ ATTRIBUTED TO A STEP, not merely quoted. Measured while writing this: the marker
+  // step's stderr redirect sits on its OWN continuation line, so the offending text is
+  // `2>/dev/null)" || rc=$?` — true, and useless. The step name is what tells the next
+  // reader that the quietened channel belongs to `Which database am I on`. It is the
+  // nearest preceding `- name:` line.
+  //
+  // ⛔ THE STEP NAME IS FOR THE MESSAGE ONLY — THE MATCH STAYS PER-LINE. Widening the
+  // match to "anywhere in an allowlisted step" was written and then reverted here: it
+  // would let a SECOND suppression anywhere inside, say, the backup step ride in on
+  // site 4's justification, which is the same ride-in the per-line count check below
+  // exists to stop, one scope up.
+  const siteLines: { line: string; step: string }[] = [];
+  let step = "(before the first step)";
+  for (const l of lines) {
+    const m = l.match(/^\s*- name: (.+)$/);
+    if (m) step = m[1].trim();
+    if (l.includes(SITE_ALLOWLISTED_TOKEN)) siteLines.push({ line: l, step });
+  }
+
+  for (const { line: l, step: st } of siteLines) {
+    const hits = ALLOWED_SITES.filter((s) => l.includes(s));
+    if (hits.length !== 1) {
+      offenders.push(
+        `${SITE_ALLOWLISTED_TOKEN} (UNLISTED SITE in step "${st}", matched ${hits.length} allowlist entr(ies)) — a new suppression has to earn its place in ALLOWED_SITES with a per-site justification: ${l.trim()}`,
+      );
+      continue;
+    }
+    const n = l.split(SITE_ALLOWLISTED_TOKEN).length - 1;
+    if (n !== 1) {
+      offenders.push(
+        `${SITE_ALLOWLISTED_TOKEN} (${n} suppressions on ONE allowlisted line in step "${st}" — the extra one is riding in on its neighbour's justification): ${l.trim()}`,
+      );
+    }
+  }
+  for (const s of ALLOWED_SITES) {
+    const n = siteLines.filter(({ line: l }) => l.includes(s)).length;
+    if (n !== 1) {
+      offenders.push(
+        `${SITE_ALLOWLISTED_TOKEN} (VANISHED OR DUPLICATED SITE, matched ${n} live line(s), want exactly 1): ${s}`,
+      );
+    }
   }
   return offenders;
+}
+
+/**
+ * The SUPERSEDED count rule, kept as a REFERENCE ORACLE and nothing else.
+ *
+ * Its only caller is the swap calibration below, which asserts that this reports
+ * NOTHING on a mutant the site rule reports twice. "The new control is stronger" is a
+ * claim, and this is what makes it a measurement.
+ */
+function countRuleOffenderCount(text: string, allowed: number): number {
+  const live = liveLines(scannableRestoreBlock(text)).join("\n");
+  const n = live.split(SITE_ALLOWLISTED_TOKEN).length - 1;
+  return n === allowed ? 0 : 1;
 }
 
 /** The file's header — everything before the `on:` key. */
@@ -1800,8 +1884,12 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       ).toContain("2>/dev/null");
       expect(
         markerOffenders.join(" | "),
-        `the reported count is not ${(ALLOWED["2>/dev/null"] as number) + 1}: the allowlist is not counting the new site, it is matching something else`,
-      ).toContain(`(${(ALLOWED["2>/dev/null"] as number) + 1},`);
+        "the offender is not reported as an UNLISTED SITE — since 2026-09-10 the rule is over sites, not over a count, so a new suppression must be named as a site that is not in ALLOWED_SITES (silent-failure review F2)",
+      ).toContain("UNLISTED SITE");
+      expect(
+        markerOffenders.join(" | "),
+        "the offender does not quote the offending LINE — a report that says only 'a site appeared' sends the next reader to the wrong step, and this is the step that decides TEST from PROD",
+      ).toContain('UNLISTED SITE in step "Which database am I on"');
 
       calibrate(
         "the softening scan bites on a `|| :` — the drop-in for the banned `|| true`",
@@ -1831,25 +1919,54 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       expect(new Set(SOFTENING_TOKENS).size, "a token is listed twice").toBe(
         SOFTENING_TOKENS.length,
       );
+      // ⛔ EXACTLY ONE token has an allowlist, and the other eight are forbidden
+      // OUTRIGHT. This replaces the superseded `expect(Object.keys(ALLOWED)).toEqual(
+      // ["2>/dev/null"])` (silent-failure review F2 removed the count map). Proven by
+      // mutation rather than by reading the code: give each of the other eight a live
+      // occurrence and every one of them must be reported.
+      expect(
+        SOFTENING_TOKENS.includes(SITE_ALLOWLISTED_TOKEN),
+        "the site-allowlisted token is not in the scanned list at all, so the site rule governs nothing",
+      ).toBe(true);
+      for (const token of SOFTENING_TOKENS.filter((t) => t !== SITE_ALLOWLISTED_TOKEN)) {
+        const mutant = WF.replace(
+          "          set -euo pipefail\n          export RESTORE_DB_URL=",
+          `          set -euo pipefail\n          command -v supabase >/dev/null ${token}\n          export RESTORE_DB_URL=`,
+        );
+        expect(mutant, `the ${token} mutation changed nothing`).not.toBe(WF);
+        expect(
+          softeningOffenders(mutant).join(" | "),
+          `\`${token}\` was tolerated in the scannable restore block. Only \`${SITE_ALLOWLISTED_TOKEN}\` has an allowlist; the other eight are forbidden outright.`,
+        ).toContain(token);
+      }
     });
 
-    it("the `2>/dev/null` allowlist is an exact set, and it reds in BOTH directions", () => {
-      // The count is pinned above with a per-site justification. This arm proves the
-      // pin is a pin: a site ADDED and a site REMOVED must each be reported. A rule
-      // that only catches additions would let the slicing silently narrow — the scan
-      // would then be looking at less than it thinks and would still read green.
-      expect(Object.keys(ALLOWED), "the allowlist admits a token other than `2>/dev/null`").toEqual([
-        "2>/dev/null",
-      ]);
-      const live = liveLines(scannableRestoreBlock(WF)).join("\n");
+    it("the `2>/dev/null` allowlist is an exact set OF SITES, and it reds in BOTH directions AND on a swap", () => {
+      // ⛔ THE TITLE USED TO OVERSTATE THE CONTROL (silent-failure review F2). It said
+      // "an exact set" while the exactness was over TOKENS
+      // (`expect(Object.keys(ALLOWED)).toEqual(["2>/dev/null"])`); the SITES existed
+      // only as a five-item prose enumeration in the doc comment. They are executable
+      // now, and this arm proves the bijection in all three directions.
+      const live = liveLines(scannableRestoreBlock(WF));
+      const siteLines = live.filter((l) => l.includes(SITE_ALLOWLISTED_TOKEN));
       expect(
-        live.split("2>/dev/null").length - 1,
-        "the live `2>/dev/null` count in the scannable restore block moved off its re-measured 4 (it was 5 until 2026-09-10; silent-failure review F4 removed the ancestry probe's suppression)",
-      ).toBe(ALLOWED["2>/dev/null"]);
+        siteLines.length,
+        "the live `2>/dev/null` site count in the scannable restore block moved off its re-measured 4 (it was 5 until 2026-09-10; F4 removed the ancestry probe's suppression). A count is no longer the rule, but a count that disagrees with the site list means the slicing moved.",
+      ).toBe(ALLOWED_SITES.length);
+      expect(
+        softeningOffenders(WF),
+        "the real workflow does not satisfy its own site allowlist",
+      ).toEqual([]);
 
-      // DOWN: delete one of the justified sites. The expected count is DERIVED from
-      // the allowlist, not typed — a literal here goes stale the moment a site is
-      // added or (as in F4) removed, and a stale twin reads exactly like a passing one.
+      // UP: a NEW site, on the step whose stderr is the evidence.
+      const widened = WF.replace('2>"${RUNNER_TEMP}/marker.err"', SITE_ALLOWLISTED_TOKEN);
+      expect(widened, "the site-addition mutation changed nothing").not.toBe(WF);
+      expect(
+        softeningOffenders(widened).join(" | "),
+        "a NEW unlisted site went unreported",
+      ).toContain("UNLISTED SITE");
+
+      // DOWN: delete one of the justified sites.
       const narrowed = WF.replace(
         ' 2>/dev/null || echo "(no /usr/lib/postgresql/*/bin)"',
         ' || echo "(no /usr/lib/postgresql/*/bin)"',
@@ -1857,8 +1974,49 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       expect(narrowed, "the site-removal mutation changed nothing").not.toBe(WF);
       expect(
         softeningOffenders(narrowed).join(" | "),
-        "a VANISHED allowlisted site went unreported — the count is not an exact set, it is a ceiling",
-      ).toContain(`2>/dev/null (${(ALLOWED["2>/dev/null"] as number) - 1},`);
+        "a VANISHED allowlisted site went unreported — the rule is a ceiling, not an exact set",
+      ).toContain("VANISHED OR DUPLICATED SITE");
+
+      // ⭐ THE SHAPE A COUNT CANNOT SEE, AND THE REASON THIS ARM WAS REWRITTEN.
+      // One benign probe suppression deleted, one added on `Which database am I on`'s
+      // psql. Four in, four out. Under the superseded count rule the scan reported
+      // ZERO offenders while the step standing between a dashboard-shaped mistake and
+      // a DROP SCHEMA on the wrong database went quiet.
+      const swapped = narrowed.replace('2>"${RUNNER_TEMP}/marker.err"', SITE_ALLOWLISTED_TOKEN);
+      expect(swapped, "the swap mutation changed nothing beyond the deletion").not.toBe(narrowed);
+      const swappedLive = liveLines(scannableRestoreBlock(swapped)).join("\n");
+      expect(
+        swappedLive.split(SITE_ALLOWLISTED_TOKEN).length - 1,
+        "CALIBRATION: the swap did NOT preserve the count, so it is not exercising the direction a count is blind to",
+      ).toBe(ALLOWED_SITES.length);
+      expect(
+        countRuleOffenderCount(swapped, ALLOWED_SITES.length),
+        "CALIBRATION: the SUPERSEDED count rule already caught this swap, so the site allowlist is not buying anything and F2 was not a finding",
+      ).toBe(0);
+      const swapOffenders = softeningOffenders(swapped);
+      expect(
+        swapOffenders.join(" | "),
+        "the count-preserving swap went unreported by the SITE rule too — the new mechanism is no stronger than the one it replaced",
+      ).toContain("UNLISTED SITE");
+      expect(
+        swapOffenders.join(" | "),
+        "the swap's VANISHED half went unreported — only half a bijection is being checked",
+      ).toContain("VANISHED OR DUPLICATED SITE");
+      expect(
+        swapOffenders.join(" | "),
+        "the report does not name the step whose stderr went quiet — the offending line is a bare continuation (`2>/dev/null)\" || rc=$?`), so without the step name the report is true and useless",
+      ).toContain('UNLISTED SITE in step "Which database am I on"');
+
+      // And a second suppression riding in on an allowlisted line's justification.
+      const doubled = WF.replace(
+        "ls -d /usr/lib/postgresql/*/bin 2>/dev/null",
+        "ls -d /usr/lib/postgresql/*/bin 2>/dev/null 2>/dev/null",
+      );
+      expect(doubled, "the double-suppression mutation changed nothing").not.toBe(WF);
+      expect(
+        softeningOffenders(doubled).join(" | "),
+        "two suppressions on one allowlisted line were accepted — the second is riding in on the first's justification",
+      ).toContain("on ONE allowlisted line");
     });
   });
 
