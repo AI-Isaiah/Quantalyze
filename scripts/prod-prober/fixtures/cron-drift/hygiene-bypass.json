@@ -1,0 +1,91 @@
+[
+  {
+    "shape": "(a) dollar-quoted value — one token, nothing to split",
+    "jobname": "bypass_dollar_quoted_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', $q$FAKE-key-0123456789ab$q$), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "(b) chr() chain — zero literals at all",
+    "jobname": "bypass_chr_chain_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', chr(65)||chr(66)||chr(67)||chr(68)||chr(69)||chr(70)||chr(71)||chr(72)||chr(73)||chr(74)||chr(75)||chr(76)||chr(77)||chr(78)||chr(79)||chr(80)), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "(c) concat()",
+    "jobname": "bypass_concat_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', concat('FAKE-key-','012345','6789ab')), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "(d) format()",
+    "jobname": "bypass_format_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', format('%s%s%s','FAKE-key-','012345','6789ab')), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "(e) convert_from(decode(…,'base64'),'utf8')",
+    "jobname": "bypass_base64_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', convert_from(decode('RkFLRS1rZXktMDEyMzQ1Njc4OWFi','base64'),'utf8')), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "(f) U&'…' unicode escapes",
+    "jobname": "bypass_unicode_escape_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', U&'\\0046\\0041\\004B\\0045\\002D\\006B\\0065\\0079\\002D\\0030\\0031\\0032'), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "(g) quote_literal(…) || …",
+    "jobname": "bypass_quote_literal_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', quote_literal('FAKE-key-0123456789') || '0123'), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "(j) ||-split value under a header name outside the three anchored ones",
+    "jobname": "bypass_nonanchored_split_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Auth', 'FAKE-key-0123456789' || 'abcdef0123456789'), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "criterion 4: an apostrophe INSIDE a dollar-quoted literal is not a delimiter",
+    "jobname": "pair_apostrophe",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Trace', $q$FAKE-don't-0123456789-0123456789-0123$q$), body := '{}'::jsonb)",
+    "expect_any_of": [
+      "long-literal-in-headers"
+    ],
+    "expect_same_verdict_as": "pair_no_apostrophe"
+  },
+  {
+    "shape": "criterion 4: the same value spelled without the apostrophe",
+    "jobname": "pair_no_apostrophe",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Trace', $q$FAKE-dont-0123456789-0123456789-0123$q$), body := '{}'::jsonb)",
+    "expect_any_of": [
+      "long-literal-in-headers"
+    ],
+    "expect_same_verdict_as": "pair_apostrophe"
+  }
+]
