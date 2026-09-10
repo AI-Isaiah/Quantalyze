@@ -4657,9 +4657,9 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
   /**
    * ⛔ TWO LISTS, TWO JOBS — DO NOT MERGE THEM.
    *
-   * SCAN_FILES is the SURFACE the rule polices: every `src/__tests__/*.test.ts`,
-   * READ FROM THE DIRECTORY rather than hand-listed, because a hand list is a
-   * file that silently stops covering the next test somebody adds.
+   * SCAN_FILES is the SURFACE the rule polices: every `src/__tests__/*.test.ts`
+   * and `*.test.tsx`, READ FROM THE DIRECTORY rather than hand-listed, because a
+   * hand list is a file that silently stops covering the next test somebody adds.
    * ⛔ THE SURFACE IS THE DIRECTORY AND NOTHING ELSE. It briefly also carried
    * `src/test/helpers/degenerate-narrow.ts`, hand-added so the rule could police
    * the one file that writes the trap on purpose — which forced a
@@ -4677,12 +4677,21 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
    * scan is one strip plus one regex per file, 137 files in ~0.35 s.
    *
    * ⚠️ THE SURFACE STOPS AT THIS DIRECTORY, AND THAT IS A MEASURED CHOICE, NOT
-   * AN OVERSIGHT. Running the same scan over every OTHER `*.test.ts` in the repo
-   * (372 files: `src/**` outside this directory, `scripts/**`, `tests/**`) found
-   * FOUR more sites on 2026-09-10 — `src/app/api/strategies/[id]/share/route.test.ts`
-   * line 257, `src/lib/pdf-render-token.test.ts` line 74,
-   * `src/lib/resilient-fetch.wiring.test.ts` line 684 and
-   * `src/lib/seam-venue-vocabulary.invariant.test.ts` line 494.
+   * AN OVERSIGHT. Running the same scan over every OTHER test file in the repo
+   * found SIX more sites on 2026-09-10 — regenerate with
+   * `git ls-files '*.test.ts' '*.test.tsx'` fed through `stripComments` and
+   * `UNCHECKED`, exactly as `scanOffenders` does:
+   *   `src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx` line 7907
+   *   `src/app/(dashboard)/compare/loading.test.tsx` line 128
+   *   `src/app/api/strategies/[id]/share/route.test.ts` line 257
+   *   `src/lib/pdf-render-token.test.ts` line 74
+   *   `src/lib/resilient-fetch.wiring.test.ts` line 684
+   *   `src/lib/seam-venue-vocabulary.invariant.test.ts` line 494
+   * ⛔ THIS CENSUS SAID **FOUR** UNTIL 2026-09-10, AND THE TWO IT MISSED ARE THE
+   * `.tsx` PAIR — the census had been derived with the same `.test.ts`-only
+   * filter that this rule's own SCAN_FILES carried, so the record reproduced the
+   * defect it was recording. That is this branch's thesis one level up: a scope
+   * that looks complete and is not. Re-derive over BOTH extensions or not at all.
    * They are real and they are UNFIXED: colocated suites are a different blast radius than this
    * structural-gate directory, and widening the surface and fixing four unrelated
    * files in one change would make neither reviewable. Recorded here rather than
@@ -4713,7 +4722,7 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
   const DEGENERATE_HELPER = "src/test/helpers/degenerate-narrow.ts";
 
   const SCAN_FILES = readdirSync(join(ROOT, "src", "__tests__"))
-    .filter((f) => f.endsWith(".test.ts"))
+    .filter((f) => /\.test\.tsx?$/.test(f))
     .sort()
     .map((f) => `src/__tests__/${f}`);
 
@@ -5095,18 +5104,67 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
     }
   });
 
-  it("FLOOR — the scan reads the whole directory, and reads CODE", () => {
-    // Anti-vacuity, both directions. A scan of a hand-list that stopped growing,
-    // or of a corpus with no lookups left in it, reports zero for the same
-    // reason a clean corpus does.
+  it("FLOOR — the scan covers the whole directory, and the strip leaves its code standing", () => {
+    // ⚠️ WHAT THIS FIRST ASSERTION MEASURES, STATED HONESTLY: a `readdir` count,
+    // and nothing else. It is structurally immune to any stripper regression —
+    // the stripper could blank every file in the directory and this number would
+    // not move. It catches exactly two things: tests DELETED wholesale, and the
+    // extension filter narrowing again. The per-file strip assertions below are
+    // the ones that stand between "the rule found nothing" and "the rule looked
+    // at nothing".
     expect(
       SCAN_FILES.length,
-      "the scan lost files — it is a directory read, so this means tests were DELETED, or the glob stopped matching",
+      "the scan lost files — it is a directory read, so this means tests were DELETED, or the extension filter stopped matching",
     ).toBeGreaterThan(130);
     for (const rel of CALIBRATION_FILES) expect(SCAN_FILES).toContain(rel);
-    // MEASURED 2026-09-10: 29 of the 137 scanned test files perform one of these
-    // lookups IN CODE. A floor under that is what stands between "the rule found
-    // nothing" and "the rule looked at nothing".
+    // ⛔ THE `.tsx` HALF, PINNED BY NAME. MEASURED 2026-09-10: the filter read
+    // `.endsWith(".test.ts")` while the heading claimed the whole directory, so
+    // these two files were silently unscanned. Narrowing the filter back to
+    // `.test.ts` turns this red instead of turning the scan quiet.
+    for (const rel of [
+      "src/__tests__/admin-width.test.tsx",
+      "src/__tests__/phase-52-container-tabular-nums.test.tsx",
+    ]) {
+      expect(
+        SCAN_FILES,
+        `${rel} is not scanned — the extension filter narrowed and the surface went quiet without saying so`,
+      ).toContain(rel);
+    }
+    // ⭐ THE STRIP, MEASURED ON EVERY SCANNED FILE — the only detector that
+    // catches a stripper desync in the 137 files no calibration injects into.
+    // A desync (the quote/template/regex walker losing its place) shows up as
+    // real code being blanked, and blanked code is a corpus the scan cannot see.
+    const commentish = /^\s*(\/\/|\/\*|\*)/;
+    for (const rel of SCAN_FILES) {
+      const src = read(rel);
+      const code = stripComments(src);
+      expect(
+        code.split("\n").length,
+        `${rel}: the strip changed the LINE COUNT, so every reported location in this file is wrong`,
+      ).toBe(src.split("\n").length);
+      const raw = src.split("\n");
+      const stripped = code.split("\n");
+      const blanked = raw
+        .map((l, j) => ({ l, j }))
+        .filter(
+          ({ l, j }) =>
+            l.trim() !== "" &&
+            stripped[j].trim() === "" &&
+            !commentish.test(l),
+        )
+        .map(({ l, j }) => `line ${j + 1}: ${l.trim()}`);
+      expect(
+        blanked.join("\n"),
+        `${rel}: the strip blanked ${blanked.length} line(s) that do not begin as a comment. That is the 2026-09-09 defect's shape — a \`/*\` inside a quoted string opening a block comment — and the scan reports clean over everything it ate.`,
+      ).toBe("");
+    }
+    // MEASURED 2026-09-10: 29 of the 139 scanned test files perform one of these
+    // lookups IN CODE. This is a CORPUS-EXISTENCE floor and NOT a stripper floor,
+    // and the difference was measured: run the same count under the naive strip
+    // that ate 858 lines and it returns the IDENTICAL number, because a file
+    // keeps at least one live lookup even after most of it is swallowed. It
+    // catches only the other direction — a corpus with no lookups left in it,
+    // which reports zero for the same reason a clean corpus does.
     const withLookups = SCAN_FILES.filter((rel) =>
       new RegExp(`\\.(?:${FINDERS.join("|")})\\(`).test(
         stripComments(read(rel)),
@@ -5114,7 +5172,7 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
     );
     expect(
       withLookups.length,
-      `only ${withLookups.length} scanned files perform a lookup in code (29 when this floor was set) — the corpus this rule polices has evaporated, so its zero means nothing`,
+      `only ${withLookups.length} scanned files perform a lookup in code (29 of 139 when this floor was set) — the corpus this rule polices has evaporated, so its zero means nothing`,
     ).toBeGreaterThanOrEqual(20);
   });
 
@@ -5138,7 +5196,8 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
     }
     // ⭐ WIDENED 2026-09-10 (W2): the assertion below used to run over the two
     // pin files only. The two-file scope hid two real, multi-line offenders.
-    // No tolerance is subtracted here any more: the
+    // Widened again the same day to `.test.tsx` — the `.test.ts` filter had been
+    // hiding two more files, and no tolerance is subtracted here any more: the
     // one file that writes the trap on purpose is simply not in the surface.
     const found = SCAN_FILES.flatMap((rel) =>
       scanOffenders(read(rel)).map((o) => `${rel} line ${o.line}: ${o.text}`),
