@@ -2,7 +2,12 @@
 
 ## [0.77.32.0] - 2026-09-10 — controls that read stronger than they were, through three rounds of it
 
-Eighty-two commits over seven themes. Phase 164.8.2 GATEHARDENING closes the five Warnings the
+Seven themes, over every commit on the branch. ⚠️ This line said "Eighty-two commits" and was
+already stale when the fourth review round landed — re-derive with
+`git log <base>..HEAD --oneline | wc -l` rather than reading a numeral here. The count is a
+CHECKLIST for CLAUDE.md's cross-check step (every commit must map to a bullet), not a fact about
+the release, and a branch that keeps moving falsifies it on every push. Phase 164.8.2 GATEHARDENING
+closes the five Warnings the
 review raised against Phase 164.8's own gates, the twelve findings two reviewers raised against
 *those* fixes, and then five blockers a third round found against **those**. Every gate in this
 entry was proven by executing the defect, not by reading the code.
@@ -173,6 +178,34 @@ correctly in two other workflows. A fix is not evidence. Running it is.
 - `suffix()` fails loud instead of returning a silent `slice(-1)`; an unanchored confirm-token
   `sed` is anchored; the presence summary no longer prints a clean verdict beside its own
   `::error::`; the arms ratchet names the direction it actually measured.
+- **ROUND FIVE — a comment audit re-derived every measured claim on the branch, and eight were
+  wrong.** The class is the same one all four earlier rounds found: a sentence claiming more than
+  the code enforces. The corrections, each with its regenerating command beside it now:
+  - The artifact's own README still said the `ALTER DATABASE` census was **"6 lines across 4
+    files"** — review F3 re-measured the maintainer-facing comment and left the world-facing copy
+    of the same sentence untouched. It is 3 files.
+  - That README's scan-scope heading said **"TWO FILES OF THESE THIRTEEN, AND THAT IS ALL"**, which
+    stopped being true when the restore script gained its own scan of the four published `.sql`
+    files. Six are scanned now, by two controls with two different consequences, and the README
+    says which is which.
+  - The workflow called the baseline secret scan **"the five-class scan"** and then listed six
+    names — the SP-M03 shape (claim exceeds command) inside the fix for SP-M03.
+  - The DNS-redaction site read **"same three redactions as every other psql site here"**
+    immediately above the paragraph explaining that it has four.
+  - `test-restore-workflow-wiring.test.ts` carried the **exact false shell-model sentence review F2
+    had corrected 3,100 lines above it in the same file** — `ci.yml` does declare `defaults:`. F2
+    fixed one copy; the second survived.
+  - The `2>/dev/null` allowlist's derivation said the file **"carries 11"**; F4's removal took it to
+    10, and only the allowlist half of that arithmetic reached the prose.
+  - `gate-family-meta.test.ts` had one row calling `WAIVED_CEILING` **"the family's only UPPER
+    bound"** and the row above it calling itself **"the family's SECOND upper bound"**, plus a
+    header saying **"9 sites … one per site"** over a ten-entry list.
+  - `critical-regressions.test.ts` said `npm ci --prefer-offline` **"appears 7x elsewhere"**; it is
+    13. The numeral was never load-bearing, so it is now a regeneration rather than a constant.
+- **Two `file:line` anchors in the destructive script's header resolved to the wrong lines** — one
+  of them already wrong on `main`. `plan-anchor-verify` re-resolves anchors a pending PLAN.md
+  asserts and never one in a source comment, so both are now SYMBOLS and
+  `restore-test-from-baseline.test.ts` asserts each resolves, with a calibration.
 
 ### Added
 - **`FRONTIER_EXEMPT_CEILING=3`** bounds VAC-08's frontier exemption, which was unbounded: one
@@ -267,6 +300,26 @@ correctly in two other workflows. A fix is not evidence. Running it is.
   NON-NEGOTIABLE. Pre-existing, six arms depend on that path, routed rather than bundled. The
   six-name channel allowlist can go stale — a future `.err` will not publish until someone adds it,
   which is the safe direction but means a diagnostic can now be silently absent.
+- ⚠️ **Newly recorded by round five's comment audit, not fixed — `refuse_credential_in_published_sql`
+  refuses the RUN without WITHHOLDING the file.** Its sibling scan in the backup step does
+  `rm -f "${f}"` and says so; this one does not, and the `Stage the public artifact` step is
+  `if: always()`, so on a hit the flagged `.sql` is still staged and still published to a
+  world-readable artifact for 90 days. The function protects the DATABASE (it refuses before the
+  transaction) and every future run; it does not protect this run's artifact. Closing the gap means
+  destroying the reversal recipe (`T-164.8-21`) on exactly the run whose restore was refused —
+  a decision with a real cost on both sides, so it is NAMED in the script, in the artifact's own
+  README where whoever downloads it will read it, and here, rather than taken quietly.
+- ⚠️ **`[REDACT-HOSTNAME-01]` is not a `TODOS.md` id.** A workflow comment said the shared psql
+  redaction gap was "booked as" it; measured at HEAD, `grep -rn 'REDACT-HOSTNAME-01' TODOS.md
+  .planning/ROADMAP.md` returns 0 hits. It exists as `T-164.8-22` in a phase plan's threat table
+  and as a CHANGELOG sentence — neither of which carries an owner, a date or a gate. Exactly the
+  shape `CLAUDE.md` records for `FANOUT-GLOBAL-01`. The comment now says where it actually lives;
+  the real entry, and the phase that owns fixing the SHARED pattern, still need writing.
+- ⚠️ **The `file:line` anchors in source comments are an unguarded class.** `grep -noE
+  '[A-Za-z0-9_./-]+\.(ts|sh|yml|mjs|sql|md):[0-9]+'` over the ten files in this entry's scope finds
+  roughly thirty, and a spot-check found several that do not resolve — including two on `main`.
+  Two load-bearing ones were converted to symbols and pinned by an arm here; the class as a whole
+  wants a repo-owned gate, the way `plan-anchor-verify` covers PLAN.md.
 
 ## [0.77.31.2] - 2026-09-09 — the guard on the destructive restore was narrower than its name, a second time
 
