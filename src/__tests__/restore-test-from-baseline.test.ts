@@ -2342,17 +2342,40 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
 });
 
 // ---------------------------------------------------------------------------
-// THE `-1` CLASS, IN THIS FILE (Phase 164.8.2). The class rule shipped with the
-// two mutex-pin files scans only those two. THIS file — the one that phase also
-// edited — carried three sites of the very defect the rule was written to catch:
-// two halves of a `name|regex` split and its calibration's copy. A lookup index is
-// -1 on a miss, a negative index does not throw, and both narrowings then produce
-// text nobody chose: `slice(0, -1)` is nearly the whole string and `slice(-1 + 1)`
-// is all of it. Any `.not.toContain` or joined-equality over that passes vacuously.
+// THE `-1` CLASS, IN THIS FILE (Phase 164.8.2).
+//
+// ⛔ THE LOCAL CLASS RULE THAT USED TO LIVE HERE IS DELETED, AND THAT IS A
+// TIGHTENING RATHER THAN A LOSS. Commit `1f910bdf` added it as a SECOND copy of
+// the sibling's rule and gave it the NAIVE stripper — the exact stripper that
+// sibling had already diagnosed and replaced IN THE SAME BRANCH. It blanks
+// instead of deleting, so line numbers survived; the `/*`-inside-a-string-literal
+// hole did not close. MEASURED 2026-09-10 on this file: one quoted shell glob of
+// the `"${outdir}"/*.err` shape — a shape this file already quotes in its own
+// prose, so the trigger is realistic and not theoretical — blanked 21,856 of
+// 61,543 non-whitespace bytes, 35.5% of the code, and the scan over the
+// hollowed-out remainder reported CLEAN.
+//
+// Its anti-vacuity floor could not notice, because it read the RAW text: the
+// docblock above `splitClassEntry` writes the offending expression VERBATIM by
+// design (measured the same day: the lookup appears 8x raw / 3x in code), so the
+// floor was green forever regardless of what the code did. There was no
+// strip-share floor and no hollowing floor here, and the scan's own calibration
+// appended its re-introduced site at EOF, which survives any mid-file blanking.
+//
+// ⭐ THE CLASS IS STILL ENFORCED FOR THIS FILE, by the widened rule in
+// `src/__tests__/test-restore-workflow-wiring.test.ts` — the describe named
+// "no lookup index reaches a narrowing call unchecked, anywhere in src/__tests__".
+// Its `SCAN_FILES` is a `readdirSync` over `src/__tests__` filtered to
+// `*.test.ts`, so THIS file is scanned, with the literal-aware stripper and with
+// the strip-share, line-count and injection-depth floors this copy never had.
+// ⛔ Do not re-add a local copy: a second stripper is a second thing to maintain,
+// and this one was the wrong one.
+//
+// WHAT STAYS: the `-1` FIXES themselves — `splitClassEntry` and its call sites —
+// and the calibration below, which measures THIS file's own helper and is covered
+// by no cross-file lexical rule.
 // ---------------------------------------------------------------------------
-describe("restore-test-from-baseline.test.ts — no lookup index reaches a narrowing call unchecked", () => {
-  const SELF = "src/__tests__/restore-test-from-baseline.test.ts";
-
+describe("restore-test-from-baseline.test.ts — splitClassEntry fails loud rather than narrowing from the END", () => {
   it("CALIBRATION — splitClassEntry THROWS on a missing separator, and splits a real one", () => {
     // The predicate the three fixed sites now run, exercised on both subjects. The
     // shape it replaced could not fail here: it would have returned a name of
@@ -2372,189 +2395,5 @@ describe("restore-test-from-baseline.test.ts — no lookup index reaches a narro
     // from memory, so this comment cannot drift away from the language.
     expect("dsn".slice(0, -1)).toBe("ds");
     expect("dsn".slice(-1 + 1)).toBe("dsn");
-  });
-
-  /**
-   * Comments are stripped first, and that is load-bearing rather than tidy: the
-   * comment above `splitClassEntry` records the offending expression VERBATIM,
-   * because that note is what a future reader most needs. `[^:]` keeps a `://`
-   * inside a string literal from being read as a line comment.
-   */
-  const stripComments = (src: string): string => {
-    // ⛔ BLANKED, NOT DELETED. Removing a block comment removes its NEWLINES, and
-    // then every line number the scan reports is wrong from the first comment
-    // onwards. Same-shaped characters out, same line structure back.
-    const blank = (s: string): string => s.replace(/[^\n]/g, " ");
-    return src
-      .replace(/\/\*[\s\S]*?\*\//g, blank)
-      .replace(/(^|[^:])\/\/[^\n]*/gm, (m: string, p1: string) => `${p1}${blank(m.slice(p1.length))}`);
-  };
-
-  // Assembled from fragments so this rule does not match its own source, the same
-  // idiom (and the same reason) as the `SKELETON` and whole-file-flag needles above.
-  const NARROW = "sl" + "ice";
-  const FIND = "index" + "Of";
-  // ⭐ THE RULE MATCHES ITS OWN SENTENCE. This describe's name says a LOOKUP INDEX
-  // must be checked before it can narrow anything; pinning exactly one narrowing
-  // call and exactly one lookup would deliver less than the title claims, and the
-  // gap between a gate's sentence and its regex is this repo's worst defect class.
-  // Every form below has IDENTICAL -1 semantics — `search` and `lastIndexOf` miss
-  // with -1 exactly as `indexOf` does, `substring`/`substr` narrow exactly as
-  // `slice` does — so a rewrite into any of them degrades the same silent way.
-  // (Adopted from the sibling rule, `test-restore-workflow-wiring.test.ts`.)
-  const NARROWERS = [NARROW, "sub" + "string", "sub" + "str"];
-  const FINDERS = [FIND, "last" + "Index" + "Of", "sea" + "rch"];
-  // ⛔ NO `g` FLAG: a global regex carries `lastIndex` across `.test()` calls and
-  // would skip every second match — a rule that reads half of what it looks at is
-  // the same "passes when it should not" shape as the defect it pins.
-  // ⚠️ DOCUMENTED LIMIT, stated rather than implied: `[^()]` forbids parentheses
-  // between the two calls, so `s.slice(f(s.indexOf(A)))` — a lookup passed through
-  // ANY intervening call — is out of reach of a lexical rule, as is the
-  // store-then-narrow form where the index is bound to a variable first. Reaching
-  // those needs dataflow, not a regex. The arm below pins both misses, so the limit
-  // is a measured fact rather than a hope.
-  const UNCHECKED = new RegExp(
-    `\\.(?:${NARROWERS.join("|")})\\(\\s*[^()]*?\\.(?:${FINDERS.join("|")})\\(`,
-  );
-
-  /**
-   * ⛔ SCANS THE JOINED TEXT, NOT LINE BY LINE. A line-scoped filter is blind to
-   * the realistic future offender: prettier wraps a long call with a long anchor
-   * name across three lines, and a `--write` over this file would produce exactly
-   * that shape (the two sibling gate files were reformatted to 80 columns on
-   * 2026-09-10, which is how the blindness was found).
-   * `[^()]` already matches a newline, so the needle needs nothing — the SPLIT was
-   * the bug, measured in the sibling rule (`test-restore-workflow-wiring.test.ts`)
-   * on 2026-09-10 and fixed there the same day. Line numbers survive the strip, so
-   * a match offset still names the real line of the real file.
-   */
-  const offenders = (src: string): string[] => {
-    const code = stripComments(src);
-    const lines = code.split("\n");
-    // A FRESH regex per scan. The `g` flag is safe here and ONLY here: `lastIndex`
-    // is state that a shared global regex would carry between calls, skipping every
-    // second match. This object never outlives the call.
-    const scan = new RegExp(UNCHECKED.source, "g");
-    return [...code.matchAll(scan)].map((m) => {
-      const line = code.slice(0, m.index).split("\n").length;
-      return `line ${line}: ${lines[line - 1].trim()}`;
-    });
-  };
-
-  it("CALIBRATION — the lexical rule fires on both removed expressions and not on the fix", () => {
-    const bad = [`const r = e.${NARROW}(e.${FIND}("|") + 1);`, `const n = e.${NARROW}(0, e.${FIND}("|"));`];
-    for (const subject of bad) {
-      expect(
-        offenders(subject),
-        `CALIBRATION: the rule did not fire on ${subject} — it cannot fail, so it is not evidence`,
-      ).toEqual([`line 1: ${subject}`]);
-    }
-    // It must NOT fire on the checked form, or it is a ban rather than a rule.
-    const good = `const at = e.${FIND}("|");\nif (at < 0) throw new Error("x");\nreturn e.${NARROW}(at + 1);`;
-    expect(offenders(good), "the rule fires on the CHECKED form — that is a ban, not a rule").toEqual(
-      [],
-    );
-    // And the comment strip is proven, not assumed.
-    expect(offenders(`// const r = e.${NARROW}(e.${FIND}("|") + 1);`)).toEqual([]);
-    expect(offenders(`/** e.${NARROW}(e.${FIND}("|") + 1) */`)).toEqual([]);
-  });
-
-  it("CALIBRATION — every narrow/lookup pair fires, and the two out-of-reach forms are pinned as MISSED", () => {
-    expect(
-      NARROWERS.length * FINDERS.length,
-      "the cross product changed — re-derive the pairs below rather than trusting the count",
-    ).toBe(9);
-    for (const narrow of NARROWERS) {
-      for (const find of FINDERS) {
-        const subject = `const r = e.${narrow}(e.${find}("|") + 1);`;
-        expect(
-          offenders(subject),
-          `CALIBRATION: the rule did not fire on ${narrow}/${find} — the describe's own sentence covers it, so a rewrite into that pair would degrade unseen`,
-        ).toEqual([`line 1: ${subject}`]);
-      }
-    }
-    // THE DOCUMENTED LIMIT, measured. If either of these ever fires, the docblock
-    // above is wrong and this red arm is what says so.
-    expect(
-      offenders(`const r = e.${NARROW}(f(e.${FIND}("|")));`),
-      "a lookup through an intervening call is now caught — update the documented limit",
-    ).toEqual([]);
-    expect(
-      offenders(`const at = e.${FIND}("|");\nconst r = e.${NARROW}(at + 1);`),
-      "the store-then-narrow form is now caught — update the documented limit",
-    ).toEqual([]);
-  });
-
-  it("CALIBRATION — a formatter-wrapped offender is caught, and located", () => {
-    // What prettier does to a long call with a long anchor name — the realistic
-    // future offender, and the exact shape a `--write` over this file would produce.
-    // The arm exists because the line-scoped form of this scan could not see it.
-    const wrapped = [
-      "const first = 1;",
-      "const someVeryLongVariableName = someOtherText.${N}(",
-      "  someOtherText.${F}(ANCHOR_WITH_A_LONG_NAME) + 1,",
-      ");",
-    ]
-      .join("\n")
-      .split("${N}")
-      .join(NARROW)
-      .split("${F}")
-      .join(FIND);
-    const found = offenders(wrapped);
-    expect(
-      found.length,
-      "a wrapped offender is invisible — the scan went line-scoped again, and the formatter puts real offenders out of its reach",
-    ).toBe(1);
-    expect(
-      found[0].startsWith("line 2:"),
-      `the reported location is wrong (${found[0]}) — a location that does not name the line the match starts on is not a location`,
-    ).toBe(true);
-
-    // CALIBRATION OF THE CALIBRATION — the line-scoped filter this replaced, kept
-    // as a SUBJECT and asserted to still MISS the same string. Without it the arm
-    // above proves only that something fired, not that the joining is what fired it.
-    const lineScoped = stripComments(wrapped)
-      .split("\n")
-      .filter((l) => new RegExp(UNCHECKED.source).test(`${l}\n`));
-    expect(
-      lineScoped,
-      "the line-scoped scan now catches the wrapped form too, so this arm has no live subject — re-derive it",
-    ).toEqual([]);
-
-    // …and the blanking strip preserved the line structure, which is what makes the
-    // location above readable at all.
-    expect(stripComments(wrapped).split("\n").length).toBe(wrapped.split("\n").length);
-  });
-
-  it("this file feeds no raw lookup index into a narrowing call", () => {
-    const src = read(SELF);
-    expect(
-      src.includes(FIND),
-      `${SELF} no longer performs the lookup this rule is about — if it was rewritten, re-derive the rule rather than letting it pass over an absent subject`,
-    ).toBe(true);
-    expect(
-      offenders(src).join("\n"),
-      `${SELF} hands a raw lookup index to a narrowing call. -1 does not throw: it counts from the END, so the pin degrades into a silently widened slice and its failure mode is a PASS. Check the index and throw, as splitClassEntry does.`,
-    ).toBe("");
-
-    // CALIBRATION — re-introduce one of the removed sites on a scratch copy and the
-    // scan must name it. Without this, a rule that matched nothing would read the
-    // same as a file that is clean.
-    const site = `    const res = entries.map((e) => e.${NARROW}(e.${FIND}("|") + 1));`;
-    const regressed = `${src}\n${site}\n`;
-    expect(regressed, "the class-scan calibration did not APPLY").not.toBe(src);
-    const found = offenders(regressed);
-    expect(
-      found.length,
-      "the scan did NOT name a re-introduced site — it is measuring nothing",
-    ).toBe(1);
-    expect(
-      found[0].endsWith(site.trim()),
-      `the scan named something else (${found[0]}) than the site it was handed`,
-    ).toBe(true);
-    expect(
-      found[0].startsWith(`line ${src.split("\n").length + 1}:`),
-      `the reported location (${found[0]}) does not name the line the site was appended at — a location that is not the line is not a location`,
-    ).toBe(true);
   });
 });
