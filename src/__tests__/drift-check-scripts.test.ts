@@ -2329,11 +2329,29 @@ describe("VAC-04 absurdity floor — a tiny PROD index is a broken reader, not a
 // ── VAC-08 ───────────────────────────────────────────────────────────────────
 
 /** A stub ledger query: emits the names it was told are MISSING from the ledger. */
+/**
+ * The row count every arm gets unless it asks for another, and the reason it is
+ * SMALL rather than absent.
+ *
+ * ⛔ F7 (Phase 164.8.2). This used to default to `null` — the stub printed
+ * NOTHING for `ledger_rows` — under the comment "an unreadable row count leaves
+ * the absurdity floor silent rather than letting it decide anything". That
+ * sentence described the defect and called it a convenience: an unreadable count
+ * did not leave the floor silent, it left the floor INERT, which is the one
+ * outcome a control must never have. The gate now MEASURE_FAILs on an empty
+ * answer, so the scaffold hands it a real one. 12 sits UNDER the floor's `>= 50`
+ * precondition, so every arm that was written against a silent floor keeps
+ * failing or passing for exactly the reason its own comment claims.
+ */
+const DEFAULT_STUB_LEDGER_ROWS = "12";
+
 function writeStubLedger(
   dir: string,
   missing: string[],
   advisory: string[] = [],
-  ledgerRows: string | null = null,
+  ledgerRows: string | null = DEFAULT_STUB_LEDGER_ROWS,
+  /** Non-zero => the `ledger_rows` direction FAILS, with stderr, like a real psql would. */
+  ledgerRowsRc = 0,
 ): string {
   const p = join(dir, "stub-ledger.sh");
   writeFileSync(
@@ -2342,10 +2360,11 @@ function writeStubLedger(
       "#!/usr/bin/env bash",
       '# $1 = "missing" | "extra" | "ledger_rows" | "shape"',
       'if [ "$1" = "ledger_rows" ]; then',
-      // Absent by default, so every pre-existing arm keeps its old behaviour:
-      // an unreadable row count leaves the absurdity floor silent rather than
-      // letting it decide anything.
-      ledgerRows === null ? "  exit 0" : `  echo "${ledgerRows}"`,
+      ledgerRowsRc !== 0
+        ? `  echo "psql: error: connection to server at \"db.example\" failed" >&2\n  exit ${ledgerRowsRc}`
+        : ledgerRows === null
+          ? "  exit 0"
+          : `  echo "${ledgerRows}"`,
       'elif [ "$1" = "shape" ]; then',
       '  echo "rows_total=stub"',
       'elif [ "$1" = "missing" ]; then',
@@ -2368,7 +2387,10 @@ function scaffoldLedgerCase(
     missing?: string[];
     testBody?: string;
     snapshot?: boolean;
+    /** `undefined` => `DEFAULT_STUB_LEDGER_ROWS`; `null` => the query prints NOTHING. */
     ledgerRows?: string | null;
+    /** Non-zero => the `ledger_rows` query itself fails. */
+    ledgerRowsRc?: number;
   },
 ): Record<string, string> {
   mkdirSync(join(dir, "snapshot"), { recursive: true });
@@ -2396,7 +2418,13 @@ function scaffoldLedgerCase(
   return {
     LEDGER_BASELINE_FILE: emptyBaseline,
     TEST_SUPABASE_DB_URL: "stub-dsn-never-used",
-    LEDGER_QUERY_CMD: `bash ${writeStubLedger(dir, opts.missing ?? [], [], opts.ledgerRows ?? null)}`,
+    LEDGER_QUERY_CMD: `bash ${writeStubLedger(
+      dir,
+      opts.missing ?? [],
+      [],
+      opts.ledgerRows === undefined ? DEFAULT_STUB_LEDGER_ROWS : opts.ledgerRows,
+      opts.ledgerRowsRc ?? 0,
+    )}`,
     BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
     MIGRATIONS_DIR: join(dir, "migrations"),
     SNAPSHOT_DIR: join(dir, "snapshot"),
@@ -2508,6 +2536,116 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
         expect(status).toBe(1);
         expect(out).not.toContain("MEASURE_FAIL");
         expect(out).toContain("not present in the TEST ledger");
+      });
+    });
+
+    // ── F7 (Phase 164.8.2) — THE FLOOR'S OWN INPUT WAS UNREADABLE-SAFE ───────
+    // Every arm above proves the absurdity floor fires, stays silent, and is
+    // bounded — on the assumption that `ledger_rows` was READ. It was not: the
+    // count came from
+    //   `ledger_rows="$(run_ledger_query ledger_rows … 2>/dev/null || echo "")"`
+    // and `[ -n "$ledger_rows" ]` gated the whole floor on it. That is the sixth
+    // `|| true` in this script and the only one that failed toward SILENCE: the
+    // five F5 bounded make the gate RED, this one made the CONTROL NOT ACT.
+    //
+    // ⛔ EVERY LEG ASSERTS ON THE SENTENCE, NEVER ON `exit 1` ALONE, and it has
+    // to. MEASURED 2026-09-10 against the PRE-FIX script (`git show HEAD:…`) with
+    // a stub whose `ledger_rows` direction exits 3: the gate printed
+    //   `::error::… 1 repo migration(s) are not present in the TEST ledger and are
+    //    NOT baselined:` … exit 1
+    // — red, with the floor switched off and the reader pointed at hand-applying
+    // a migration to a SHARED database, which is the outcome the floor's own
+    // comment exists to prevent. An arm binding to the exit code would have
+    // passed against that.
+    describe("F7 — an unreadable ledger row count is a MEASURE_FAIL, not a disabled floor", () => {
+      /** The floor's own red mode: a populated ledger matching under half the repo. */
+      const FLOOR_FIXTURE = { missing: ["20260829120000_demo"], ledgerRows: "239" };
+
+      /**
+       * The control every leg below runs FIRST. It proves the fixture reaches the
+       * ABSURDITY FLOOR and reddens THERE, so a leg that then breaks the count
+       * cannot be satisfied by one of this gate's several other exit-1 paths.
+       */
+      const expectFloorFiresOn = (dir: string) => {
+        const control = run(LEDGER_GATE, scaffoldLedgerCase(dir, FLOOR_FIXTURE));
+        expect(
+          control.status,
+          "the fixture does not reach the absurdity floor, so breaking its input below would prove nothing",
+        ).toBe(1);
+        expect(control.out).toContain("this is the GATE failing, not the database");
+      };
+
+      it("RED: a ledger_rows query that FAILS is named — the floor is never left to decide on a count nobody read", () => {
+        withTempDir((dir) => {
+          expectFloorFiresOn(dir);
+
+          const { status, out } = run(
+            LEDGER_GATE,
+            scaffoldLedgerCase(dir, { ...FLOOR_FIXTURE, ledgerRowsRc: 3 }),
+          );
+          expect(status).toBe(1);
+          expect(out).toContain("could not read the TEST ledger row count");
+          expect(out, "the failing query's exit status is not reported").toContain("exited 3");
+          // The pre-fix behaviour, pinned as an ABSENCE: the floor went inert and
+          // the run reported drift instead, on a shared database.
+          expect(
+            out,
+            "the gate still reported drift on a run whose absurdity floor could not be evaluated — that is the 2026-08-29 defect with the control switched off",
+          ).not.toContain("are not present in the TEST ledger and are NOT baselined");
+          expect(out).not.toContain("ledger and body checks clean");
+          // Public-log redaction: the captured stderr is counted, never echoed.
+          expect(out, "the withheld stderr leaked into a PUBLIC job log").not.toContain(
+            "connection to server",
+          );
+        });
+      });
+
+      it("RED: a ledger_rows query that exits 0 and returns NO ROW is a broken read, not a ledger of zero rows", () => {
+        withTempDir((dir) => {
+          expectFloorFiresOn(dir);
+
+          const { status, out } = run(
+            LEDGER_GATE,
+            // `null` is exactly what the stub did for every arm before this fix.
+            scaffoldLedgerCase(dir, { ...FLOOR_FIXTURE, ledgerRows: null }),
+          );
+          expect(status).toBe(1);
+          expect(out).toContain("returned NO ROW");
+          expect(out).not.toContain("are not present in the TEST ledger and are NOT baselined");
+          expect(out).not.toContain("ledger and body checks clean");
+        });
+      });
+
+      it("RED: a ledger_rows answer that is not a number is a MEASURE_FAIL, and its value is withheld", () => {
+        withTempDir((dir) => {
+          expectFloorFiresOn(dir);
+
+          const { status, out } = run(
+            LEDGER_GATE,
+            // A failed psql can print connection detail on STDOUT; before the fix
+            // the `case` silently rewrote exactly this into the inert empty string.
+            scaffoldLedgerCase(dir, { ...FLOOR_FIXTURE, ledgerRows: "FATAL: no pg_hba.conf entry" }),
+          );
+          expect(status).toBe(1);
+          expect(out).toContain("returned something that is not a number");
+          expect(out, "the unparseable answer was echoed into a PUBLIC job log").not.toContain(
+            "pg_hba.conf",
+          );
+          expect(out).not.toContain("ledger and body checks clean");
+        });
+      });
+
+      it("CONTROL: a READABLE count still decides — the floor fires above 50 and a clean run stays green", () => {
+        // The other direction, and it is load-bearing: without it the fix could be
+        // "MEASURE_FAIL on every count", which would satisfy all three legs above
+        // while turning the gate into a permanent red.
+        withTempDir((dir) => {
+          expectFloorFiresOn(dir);
+          const { status, out } = run(LEDGER_GATE, scaffoldLedgerCase(dir, {}));
+          expect(status).toBe(0);
+          expect(out).not.toContain("MEASURE_FAIL");
+          expect(out).toContain("ledger and body checks clean");
+        });
       });
     });
   });
