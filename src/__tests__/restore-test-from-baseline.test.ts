@@ -1020,8 +1020,7 @@ describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is 
     // The sentence WRAPS across comment lines, so it is read as PROSE: each line's
     // leading `# ` stripped and the lines rejoined with a space. Matching the raw
     // block would bind to whatever happened not to wrap.
-    const prose = w2Prose;
-    const block = prose(SRC);
+    const block = w2Prose(SRC);
     // ⚠️ THE DERIVATION IS DELIBERATELY PARTIAL, AND SAYING SO IS THE POINT. Walking
     // `run_arm` labels back to the refusal each leg greps for would be a parser of
     // the self-test's own bash, which is more machinery than the finding is worth
@@ -1059,7 +1058,7 @@ describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is 
     // CALIBRATION — drop 27 off the end of the list on a scratch string.
     const shortened = SRC.replace("20, 21, 24,\n  # 26 and 27.", () => "20, 21,\n  # 24 and 26.");
     expect(shortened, "the IN-02 calibration did not APPLY").not.toBe(SRC);
-    const sm = prose(shortened).match(/arms 1-7((?:,\s*\d+)*)\s*and\s*(\d+)/);
+    const sm = w2Prose(shortened).match(/arms 1-7((?:,\s*\d+)*)\s*and\s*(\d+)/);
     expect([...(sm![1].match(/\d+/g) ?? []).map(Number), Number(sm![2])]).not.toContain(27);
   });
 
@@ -1563,6 +1562,10 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
   // level up — code and README agreeing about CLASSES while disagreeing about FILES.
   const STAGED = stagedFromScript(SRC);
 
+  /** Every staged file seeded with the same clean body — the base fixture each arm overrides one entry of. */
+  const allStaged = (body: string): Record<string, string> =>
+    Object.fromEntries(STAGED.map((f) => [f, body]));
+
   /** The scan's own `staged=(…)` array, read out of the live script. */
   function stagedFromScript(src: string): string[] {
     const m = /\n  local -a staged=\(([^)]*)\)\n/.exec(src);
@@ -1840,7 +1843,7 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
     // (a) In `refdata.sql` it must PASS — and the clean line must name the pair, or a
     //     green log claims a cell was read that never was.
     const green = runDsnAssert({
-      ...Object.fromEntries(STAGED.map((f) => [f, body])),
+      ...allStaged(body),
       "refdata.sql": `${body}${RECIPE}`,
     });
     expect(
@@ -1856,7 +1859,7 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
     //     REFUSE, or (a) is passing because the class was dropped outright.
     for (const target of STAGED.filter((f) => f !== "refdata.sql")) {
       const red = runDsnAssert({
-        ...Object.fromEntries(STAGED.map((f) => [f, body])),
+        ...allStaged(body),
         [target]: `${body}ALTER DATABASE postgres SET app.k = 'v';\n`,
       });
       expect(
@@ -1872,7 +1875,7 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
     //     scanned for the other five, or the entry above quietly excused the file.
     const dsn = ["postgre", "sql://u", ":p@db.example:5432/postgres"].join("");
     const stillScanned = runDsnAssert({
-      ...Object.fromEntries(STAGED.map((f) => [f, body])),
+      ...allStaged(body),
       "refdata.sql": `${body}-- ${dsn}\n`,
     });
     expect(
@@ -1888,7 +1891,7 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
     // taken, beside a control that no longer implements it. That is the defect class
     // this whole block exists to answer, so it is refused rather than ignored.
     const body = "CREATE TABLE public.x ();\n";
-    const clean = Object.fromEntries(STAGED.map((f) => [f, body]));
+    const clean = allStaged(body);
 
     for (const [bad, why] of [
       ["refdata.sqll|ALTER DATABASE", "file"],
@@ -1955,7 +1958,7 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
     ];
 
     const body = "CREATE TABLE public.x ();\nSELECT $$a dollar-quoted body$$;\n";
-    const clean = Object.fromEntries(STAGED.map((f) => [f, body]));
+    const clean = allStaged(body);
     expect(runDsnAssert(clean).status, "the six-class scan refuses clean SQL").toBe(0);
 
     for (const { cls, needle, text } of CASES) {
@@ -1988,7 +1991,7 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
     // world-readable 90-day artifact: the calling workflow stages the file whether
     // or not this scan could find it, so an unfound file ships UNSCANNED.
     const body = "CREATE TABLE public.x ();\n";
-    const all = Object.fromEntries(STAGED.map((f) => [f, body]));
+    const all = allStaged(body);
 
     // ONE AT A TIME — a floor that only notices the all-four-gone case would still
     // let three of four ship unscanned.
