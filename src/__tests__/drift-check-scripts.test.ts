@@ -2630,6 +2630,52 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
         });
       });
 
+      it("⭐ G2: the count in that MEASURE_FAIL is TOTAL — an uncountable stderr renders `?`, never a blank", () => {
+        // The failure message that reports the channel is gone used to read its
+        // count FROM that channel, inline: `$(wc -l < "$ledger_rows_err" | tr …)`.
+        // If the substitution failed BECAUSE the redirect target was gone, the
+        // diagnosis reached the operator with a HOLE where its one quantity
+        // belongs. Driven with the SP-M01 PATH-shim idiom: a `wc` that fails on
+        // exactly the `wc -l` this message takes, and delegates everything else.
+        withTempDir((dir) => {
+          expectFloorFiresOn(dir);
+
+          // CONTROL: red for ITS OWN reason — the ledger_rows MEASURE_FAIL — and
+          // carrying a REAL count, so the leg below cannot be satisfied by one of
+          // this gate's several other exit-1 paths, nor by a `?` that was always
+          // there.
+          const env = scaffoldLedgerCase(dir, { ...FLOOR_FIXTURE, ledgerRowsRc: 3 });
+          const control = run(LEDGER_GATE, env);
+          expect(control.status).toBe(1);
+          expect(control.out).toContain("could not read the TEST ledger row count");
+          expect(
+            control.out,
+            "the control did not print a countable stderr, so breaking `wc` below proves nothing",
+          ).toContain("1 line(s) of stderr captured");
+
+          const PATH = withPathShim(dir, "wc", [
+            // Only the single-argument `wc -l` the diagnosis uses; everything else
+            // delegates to the real binary.
+            'if [ "$#" -eq 1 ] && [ "$1" = "-l" ]; then exit 7; fi',
+          ]);
+          const { status, out } = run(LEDGER_GATE, { ...env, PATH });
+          expect(status).toBe(1);
+          // CALIBRATION: the shim APPLIED — the control's real count is gone.
+          expect(out, "the `wc` shim did not bite; the count is still the real one").not.toContain(
+            "1 line(s) of stderr captured",
+          );
+          expect(out).toContain("could not read the TEST ledger row count");
+          expect(
+            out,
+            "the diagnosis rendered a BLANK where its count belongs — the operator is handed a sentence with a hole in it (D-12/SC-7)",
+          ).not.toContain("; line(s) of stderr captured");
+          expect(
+            out,
+            "an uncountable stderr must still SAY something — `?` is the count that could not be taken",
+          ).toContain("? line(s) of stderr captured");
+        });
+      });
+
       it("RED: a ledger_rows query that exits 0 and returns NO ROW is a broken read, not a ledger of zero rows", () => {
         withTempDir((dir) => {
           expectFloorFiresOn(dir);
@@ -4596,7 +4642,8 @@ describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()
       site: `extra_count="$(grep -ac '[^[:space:]]' "$extra_file")"`,
       why: "F5. Bounds the ADVISORY extra-ledger count. This direction warns rather than failing, but it is still never allowed to read as 'counted zero, nothing to report'.",
     },
-    // ── `2>/dev/null` — THREE sites, each a psql channel that can name a host ─
+    // ── `2>/dev/null` — FOUR sites: three psql channels that can name a host, ─
+    // ── and one `wc` whose suppression is what keeps a DIAGNOSIS from blanking ─
     {
       token: "2>/dev/null",
       site: "2>/dev/null | sed 's/^/::error::  /' || true",
@@ -4606,6 +4653,11 @@ describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()
       token: "2>/dev/null",
       site: 'if run_ledger_query shape "$names_csv" 2>/dev/null',
       why: "the same shape diagnostic on the NEW-drift path — and here the rc IS consumed: the `if` prints `(shape probe failed — the ledger could not be described)` on the else branch.",
+    },
+    {
+      token: "2>/dev/null",
+      site: `wc -l < "$ledger_rows_err" 2>/dev/null || echo '?'`,
+      why: "G2. The ONLY site here where suppression is the strict direction: this `wc` counts the stderr the two ledger_rows MEASURE_FAILs report, and an unreadable `$tmp` made `wc` fail INSIDE the message, rendering a BLANK where the operator's one quantity belongs. `|| echo '?'` makes the count total; letting `wc`'s own error through would buy nothing and cost the diagnosis its number (D-12/SC-7).",
     },
     {
       token: "2>/dev/null",
