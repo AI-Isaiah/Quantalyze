@@ -1068,7 +1068,19 @@ STUB
   # arm must not be able to print a success narrative at all, and a run that lost
   # an arm AND passed the rest must not read as PASSED.
   if [ "$total" -ne "$EXPECTED_ARMS" ]; then
-    echo "SELF-TEST FAIL: ${total} arms ran but EXPECTED_ARMS is ${EXPECTED_ARMS}. An arm that disappeared is a RED, not a smaller PASSED."
+    # ⛔ IN-01 (Phase 164.8.2) — THE MESSAGE NAMES THE DIRECTION IT MEASURED.
+    # One sentence covered both, and it named the WRONG one half the time:
+    # MEASURED 2026-09-10 with a `run_arm` line DUPLICATED, the gate printed
+    # "12 arms ran but EXPECTED_ARMS is 11. An arm that disappeared is a RED" —
+    # the count right, the reader sent looking for a deletion that never
+    # happened. The two directions also have OPPOSITE remedies, which is why one
+    # sentence could not carry both: a vanished arm is restored, an added arm is
+    # ratcheted.
+    if [ "$total" -lt "$EXPECTED_ARMS" ]; then
+      echo "SELF-TEST FAIL: ${total} arms ran but EXPECTED_ARMS is ${EXPECTED_ARMS}. An arm DISAPPEARED — that is a RED, not a smaller PASSED. RESTORE the arm. Never lower EXPECTED_ARMS to make a run green; that is deleting a proof."
+    else
+      echo "SELF-TEST FAIL: ${total} arms ran but EXPECTED_ARMS is ${EXPECTED_ARMS}. An arm was ADDED without raising the ratchet. RAISE EXPECTED_ARMS in the SAME commit as the arm, and move the dated MEASURED line and the \`prints N/N\` sentence beside it."
+    fi
     return 1
   fi
   if [ "$pass" -ne "$total" ]; then

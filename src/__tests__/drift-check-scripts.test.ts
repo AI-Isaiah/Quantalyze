@@ -3454,6 +3454,66 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
     });
   });
 
+  // ── IN-01 (Phase 164.8.2) — THE ARMS RATCHET NAMES THE DIRECTION IT SAW ───
+  // The ratchet fired correctly in both directions and described only one of
+  // them. MEASURED 2026-09-10 with a `run_arm` line DUPLICATED against the
+  // pre-fix script: `12 arms ran but EXPECTED_ARMS is 11. An arm that
+  // disappeared is a RED, not a smaller PASSED.` — the count right, the reader
+  // sent looking for a deletion that never happened.
+  //
+  // ⛔ BOTH LEGS DRIVE THE REAL HARNESS. A static read of the two message
+  // strings would pass on a script where the `-lt` branch is unreachable.
+  describe("IN-01 — the arms ratchet says which direction it measured", () => {
+    const SRC = readFileSync(LEDGER_GATE, "utf8");
+    /** One whole `run_arm` invocation, unique in the file. */
+    const ARM_LINE = '  run_arm "green path" 0 arm_env "$tmp/live" ""\n';
+
+    /** Runs `--self-test` on a scratch copy carrying `mutated`. */
+    const selfTest = (mutated: string) =>
+      withTempDir((dir) => {
+        const copy = join(dir, "gate-arm-count.sh");
+        writeFileSync(copy, mutated);
+        chmodSync(copy, 0o755);
+        const res = spawnSync("bash", [copy, "--self-test"], {
+          cwd: process.cwd(),
+          encoding: "utf8",
+        });
+        return { status: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
+      });
+
+    it("an ADDED arm is reported as ADDED — with the remedy that fits it", () => {
+      expect(
+        occurrences(SRC, ARM_LINE),
+        "the arm line this mutation duplicates is not unique — the neuter would not apply cleanly",
+      ).toBe(1);
+      const doubled = SRC.replace(ARM_LINE, ARM_LINE + ARM_LINE);
+      expect(doubled, "the neuter did not change the script").not.toBe(SRC);
+      expect(occurrences(doubled, ARM_LINE)).toBe(2);
+
+      const { status, out } = selfTest(doubled);
+      expect(status).toBe(1);
+      expect(out).toContain("12 arms ran but EXPECTED_ARMS is 11");
+      expect(
+        out,
+        "an ADDED arm is still described as one that disappeared — the reader is sent looking for a deletion that never happened",
+      ).toContain("An arm was ADDED without raising the ratchet");
+      expect(out).not.toContain("An arm DISAPPEARED");
+    });
+
+    it("a VANISHED arm is reported as vanished — and the ratchet is not offered as the fix", () => {
+      const deleted = SRC.replace(ARM_LINE, "");
+      expect(deleted, "the neuter did not change the script").not.toBe(SRC);
+      expect(occurrences(deleted, ARM_LINE)).toBe(0);
+
+      const { status, out } = selfTest(deleted);
+      expect(status).toBe(1);
+      expect(out).toContain("10 arms ran but EXPECTED_ARMS is 11");
+      expect(out).toContain("An arm DISAPPEARED");
+      expect(out).toContain("Never lower EXPECTED_ARMS");
+      expect(out).not.toContain("An arm was ADDED");
+    });
+  });
+
   // ── F6 (Phase 164.8.2) — A FAILING ARM MUST SAY WHY ───────────────────────
   // `run_arm` ran every arm as `( "$@" ) >/dev/null 2>&1`. The exit-code
   // contract was correct — `arm_frontier_ceiling_exceeded` is `want 1` and
