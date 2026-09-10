@@ -219,7 +219,9 @@ default_ledger_query() {
       # DIAGNOSTIC ONLY — never decides pass/fail. A gate that fails must print
       # enough for the next reader to diagnose it without a database of their
       # own; otherwise the failure is a claim about the ledger that cannot be
-      # checked. Emits row counts and five sample (version, name) pairs.
+      # checked. Emits row counts, the FIVE newest (version, name) pairs and the
+      # THREE oldest — eight rows, not the "five sample pairs" this comment claimed
+      # until 2026-09-10. Read the `-c` queries below rather than this sentence.
       # Migration filenames are already public in this repo, so this discloses
       # nothing the tree does not.
       psql "$TEST_SUPABASE_DB_URL" -X -q -A -t -v ON_ERROR_STOP=1 \

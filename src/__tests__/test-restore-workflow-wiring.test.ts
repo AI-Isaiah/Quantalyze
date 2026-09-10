@@ -273,8 +273,14 @@ function scannableRestoreBlock(text: string): string {
  *
  * ⛔ REGENERATED, NOT CARRIED. The number below came out of THIS file's own slicing —
  * `liveLines(scannableRestoreBlock(WF)).join("\n").split("2>/dev/null").length - 1` —
- * not from the plan text and not from a whole-file `grep -c` (the file carries 11;
- * six of them are inside the excluded mutex copies or in comments).
+ * not from the plan text and not from a whole-file `grep -c`. ⚠️ RE-MEASURED
+ * 2026-09-10 by the comment audit: the whole-file count is 10, not the 11 this line
+ * carried. Review F4's removal of site 1 took the allowlist 5 -> 4 and the whole-file
+ * count 11 -> 10, and only the first half of that reached the prose. Regenerate both
+ * rather than trusting either:
+ *   grep -c '2>/dev/null' .github/workflows/test-restore-from-baseline.yml   # 10
+ * Six of the ten are inside the excluded mutex copies or in comments, which is what
+ * leaves the four below.
  *
  * ⭐ RE-MEASURED 2026-09-09, Phase 164.8.2 Plan 04, on the workflow AS IT IS AFTER
  * Plan 03 added the `Stage the public artifact` step to this same job. That step
@@ -3613,8 +3619,17 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
 /**
  * ⛔ RUN WITH `bash -e`, NOT BARE `bash`, AND THAT IS THE WHOLE POINT.
  *
- * GitHub Actions invokes every `run:` as `bash -e {0}`; neither this workflow nor
- * ci.yml declares `shell:` or `defaults:`. A harness that spawns bare `bash` models a
+ * GitHub Actions invokes every `run:` as `bash -e {0}`, and NO workflow under
+ * `.github/workflows/` declares `shell:` — the only key that changes which interpreter
+ * a `run:` gets. ⚠️ CORRECTED 2026-09-10 by the comment audit: this sentence read
+ * "neither this workflow nor ci.yml declares `shell:` or `defaults:`", which is the
+ * exact false claim review F2 corrected 3,100 lines above in this same file —
+ * `.github/workflows/ci.yml:3666` DOES declare `defaults: / run: / working-directory:
+ * analytics-service`. F2 fixed one copy of the sentence and this one survived. A
+ * `defaults.run.working-directory` selects a DIRECTORY, never an interpreter, so the
+ * conclusion stands on the `shell:` half alone — which the arm "the shell model this
+ * arm depends on is the one the workflow declares" ASSERTS rather than restating.
+ * A harness that spawns bare `bash` models a
  * shell the runner does not have, and under it the pre-fix scripts would look fine —
  * which is exactly how the false claim in the workflow's own comment survived. The
  * other executed arms in this file spawn bare `bash` and are unaffected because every
