@@ -406,18 +406,36 @@ check() {
   # spoke and refused" from "psql is not there" from "the query returned no row"
   # — and not the text. What it must never do again is discard the channel and
   # then decide.
-  local ledger_rows matched ledger_rows_rc=0
+  local ledger_rows matched ledger_rows_rc=0 err_lines
   local ledger_rows_err="${tmp}/ledger_rows.err"
   set +e
   ledger_rows="$(run_ledger_query ledger_rows "$names_csv" 2>"$ledger_rows_err")"
   ledger_rows_rc=$?
   set -e
+  # ⛔ G2 (Phase 164.8.2) — THE COUNT IS COMPUTED ONCE, AND IT IS TOTAL. Both
+  # MEASURE_FAILs below used to interpolate `$(wc -l < "$ledger_rows_err" | tr …)`
+  # INLINE, inside the very message that fires when the read went wrong. If the
+  # substitution failed BECAUSE the redirect target was gone (a removed `$tmp`),
+  # `wc` never ran, the substitution rendered EMPTY, and the diagnosis reached the
+  # operator as "…; line(s) of stderr captured and WITHHELD…" — a hole exactly
+  # where the one number they were handed belongs. It fails in the loud direction,
+  # but D-12/SC-7 (see src/__tests__/gate-family-meta.test.ts) is that every
+  # failure emission prints a runtime VALUE, and a blank is not one.
+  #
+  # ⚠️ THE `2>/dev/null` HERE IS CORRECT — DO NOT "FIX" IT BACK. This is one of
+  # the rare sites where suppressing a channel is right, because the alternative
+  # is a blank inside a diagnosis: `wc`'s own "No such file" would land in the log
+  # AND leave the count empty, whereas `|| echo '?'` makes the count total — it
+  # always says something, and `?` tells the reader the count itself could not be
+  # taken. The braces matter: `wc … || echo '?'` must be grouped BEFORE the pipe,
+  # or `tr` succeeds on nothing and the fallback never fires.
+  err_lines="$( { wc -l < "$ledger_rows_err" 2>/dev/null || echo '?'; } | tr -d '[:space:]' )"
   if [ "$ledger_rows_rc" -ne 0 ]; then
-    fail "MEASURE_FAIL: could not read the TEST ledger row count (the ledger_rows query exited ${ledger_rows_rc}; $(wc -l < "$ledger_rows_err" | tr -d '[:space:]') line(s) of stderr captured and WITHHELD — it can carry a DSN, host or username). The ABSURDITY FLOOR below is the control that tells a wrong join key from real drift, and it can only fire on a count that was READ; an unreadable one leaves it INERT while the gate reports drift with full confidence. An unreadable input is not a clean one."
+    fail "MEASURE_FAIL: could not read the TEST ledger row count (the ledger_rows query exited ${ledger_rows_rc}; ${err_lines} line(s) of stderr captured and WITHHELD — it can carry a DSN, host or username). The ABSURDITY FLOOR below is the control that tells a wrong join key from real drift, and it can only fire on a count that was READ; an unreadable one leaves it INERT while the gate reports drift with full confidence. An unreadable input is not a clean one."
   fi
   case "$ledger_rows" in
     "")
-      fail "MEASURE_FAIL: the TEST ledger row-count query exited 0 and returned NO ROW ($(wc -l < "$ledger_rows_err" | tr -d '[:space:]') line(s) of stderr captured and WITHHELD — it can carry a DSN, host or username). A count query returns exactly one number, so an empty answer is a read that did not happen, not a ledger holding zero rows — and zero is one of the values the ABSURDITY FLOOR below can never fire on."
+      fail "MEASURE_FAIL: the TEST ledger row-count query exited 0 and returned NO ROW (${err_lines} line(s) of stderr captured and WITHHELD — it can carry a DSN, host or username). A count query returns exactly one number, so an empty answer is a read that did not happen, not a ledger holding zero rows — and zero is one of the values the ABSURDITY FLOOR below can never fire on."
       ;;
     *[!0-9]*)
       fail "MEASURE_FAIL: the TEST ledger row-count query exited 0 and returned something that is not a number (${#ledger_rows} character(s), value WITHHELD — a failed psql can print connection detail on stdout). A count that cannot be compared is not a count of zero; the ABSURDITY FLOOR below would have gone INERT on it."
