@@ -875,7 +875,11 @@ describe("Critical regression guards", () => {
       it("ci.yml docs-link-check lychee step runs --offline (external URLs intentionally NOT checked)", () => {
         const src = readText(".github/workflows/ci.yml");
         // Scope to the docs-link-check job's run block, NOT a global grep —
-        // `npm ci --prefer-offline` appears 7x elsewhere and would vacuously pass.
+        // `npm ci --prefer-offline` appears elsewhere in the file and would vacuously
+        // pass. ⚠️ RE-MEASURED 2026-09-10: 13 occurrences, not the 7 this line said.
+        // The count is not load-bearing — "more than zero elsewhere" is what makes the
+        // scoping necessary — so it is stated as a regeneration rather than a constant:
+        //   grep -c 'npm ci --prefer-offline' .github/workflows/ci.yml
         const stepRe =
           /-\s*name:\s*Link-check docs[^\n]*\n\s*run:\s*\|\n([\s\S]*?)(?=\n\s{4,6}\S|\n\S|$)/;
         const m = src.match(stepRe);

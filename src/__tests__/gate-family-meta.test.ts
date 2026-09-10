@@ -854,10 +854,18 @@ export const KNOWN_THRESHOLD_SITES: readonly string[] = [
   // this file added: 8 sites over 6 files, NEEDLE_MIN_LENGTH was BARE (no date)
   // until its measurement was recorded. RE-MEASURED 2026-09-02 at HEAD after
   // the name class widened past `FLOOR|MIN`: 9 sites over the same 6 files
-  // (8 name-class constants + 1 shell literal comparison), all 9 justified —
-  // the entries below, one per site. The known count IS the non-vacuity
-  // floor: an exact set both directions is strictly stronger than `>= 6`, and
-  // a threshold leaving this family is a decision worth a red, not churn.
+  // (8 name-class constants + 1 shell literal comparison), all 9 justified.
+  // ⚠️ CURRENCY 2026-09-10 (Phase 164.8.2): the list now holds TEN entries —
+  // `FRONTIER_EXEMPT_CEILING=3` joined it with WR-02. The "9 sites" reading above
+  // is the 2026-09-02 measurement and is kept as dated lineage; the sentence
+  // "the entries below, one per site" was left standing when the tenth landed and
+  // is corrected here rather than re-dated. Regenerate rather than trust either
+  // numeral — this arm reports the live tally when run with the list EMPTY, and
+  // `awk '/^export const KNOWN_THRESHOLD_SITES/,/^\];/' src/__tests__/gate-family-meta.test.ts | grep -cE '^\s*"'`
+  // prints the registration count. One entry per site. The known count IS the
+  // non-vacuity floor: an exact set both directions is strictly stronger than
+  // `>= 6`, and a threshold leaving this family is a decision worth a red, not
+  // churn.
   "scripts/test-ledger-drift-check.sh :: ledger_rows -ge 50", //  VAC-08 absurdity floor: 'scored' + 2026-08-29
   // The family's SECOND upper bound, and the first whose reality is NOT in this
   // repo. It caps the apply-on-merge frontier exemption (WR-02, Phase 164.8.2):
@@ -873,7 +881,11 @@ export const KNOWN_THRESHOLD_SITES: readonly string[] = [
   "scripts/prod-body-drift-check.sh :: SNAPSHOT_MIN=50", //         VAC-04 absurdity floor: 'measured' + 2026-09-01
   "scripts/mutation-runner/run.mjs :: FILES_FLOOR=46", //           coverage ratchet: MEASURED + 2026-09-07 (45 -> 46 at phase 164.7 plan 02, which added supabase/tests/test_analytics_service_settings_and_vault_tick.sql; the denominator moved with it, 72 -> 73. Unmoved by the SQL-fixer pass later the same day, which grew that file's ARMS but added no FILE)
   "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=384", //           biting ratchet: MEASURED + 2026-09-07 (369 -> 380 across phase 164.7 plans 02 and 04, then 380 -> 384 in the SQL-fixer pass, which took test_analytics_service_settings_and_vault_tick.sql from 7 arms to 11. SEPARATED in both directions on real full-corpus lane runs: 385 gives "ARMS_FLOOR regression: 384 biting arm(s) < floor 385" and exit 1; 384 gives 0 defects and exit 0, with arms/biting/lane-invocations all reading 384. WAIVED_CEILING still 0)
-  // The family's only UPPER bound. Invisible to this arm until the name class
+  // The family's FIRST upper bound. ⚠️ This line read "the family's only UPPER
+  // bound" until 2026-09-10, while the FRONTIER_EXEMPT_CEILING entry added above it
+  // on this same branch already called itself "the family's SECOND upper bound" —
+  // two rows of one list disagreeing about the same fact. There are TWO now.
+  // Invisible to this arm until the name class
   // widened past FLOOR|MIN on 2026-09-02 — registered here on the run that
   // first saw it, with its measurement at run.mjs:201-227 and the constant
   // itself at run.mjs:228 (MEASURED + a dated --parse-only run at 8969513e
