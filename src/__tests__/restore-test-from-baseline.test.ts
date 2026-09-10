@@ -192,7 +192,21 @@ function headerRegion(text: string): string {
   const end = lines.findIndex(
     (l, i) => i > 0 && l.trim() !== "" && !l.trimStart().startsWith("#"),
   );
-  return end < 0 ? "" : lines.slice(0, end).join("\n");
+  // ⛔ THROW, NEVER `end < 0 ? "" : …`. MEASURED 2026-09-10: this helper carried
+  // the exact shape `prod-prober-wiring.test.ts`'s docblock BANS by name, and
+  // whose three instances commit `7879299c` removed there — it survived here. An
+  // empty header makes `resolves(HEADER, …)` false, so today the pointer arms go
+  // red; but "the whole script is a comment block" is a FINDING about the slicer,
+  // not a header with no pointers in it, and the two must not report the same way.
+  if (end < 0) {
+    throw new Error(
+      "the header slicer found NO live line in the script: every line below the " +
+        "shebang is blank or a comment. That is a finding about the slicer or the " +
+        "script, not an empty header — returning \"\" would hand every pin below a " +
+        "region that cannot contain what it asserts, and a slicer must say so.",
+    );
+  }
+  return lines.slice(0, end).join("\n");
 }
 
 const SRC = read(SCRIPT);
@@ -326,6 +340,34 @@ describe("restore-test-from-baseline.sh — the header's cross-file pointers res
     expect(early, "the header-region calibration did not APPLY").not.toBe(SRC);
     expect(headerRegion(early)).toBe("#!/usr/bin/env bash");
     expect(headerRegion(early).split("\n").length).toBe(1);
+  });
+
+  it("the header slicer THROWS when the script has no live line, rather than returning \"\"", () => {
+    // ⛔ THE BANNED SHAPE, PINNED. `prod-prober-wiring.test.ts`'s docblock bans the
+    // `start < 0 ? "" : …` form by name and commit `7879299c` removed three of them
+    // there; this helper still carried it on 2026-09-10. An empty return makes a
+    // BROKEN slicer look like a header with nothing in it, and the arms above
+    // ("non-empty", "starts at the shebang") would then be reporting the wrong fact.
+    //
+    // CALIBRATION FIRST: comment out every live line, assert the mutation APPLIED
+    // and that the mutant really has no live line — otherwise the throw below could
+    // be raised by something else entirely.
+    const commented = SRC.split("\n")
+      .map((l, i) => (i === 0 || l.trim() === "" || l.trimStart().startsWith("#") ? l : `# ${l}`))
+      .join("\n");
+    expect(commented, "the no-live-line calibration did not APPLY").not.toBe(SRC);
+    expect(
+      commented.split("\n").filter((l, i) => i > 0 && l.trim() !== "" && !l.trimStart().startsWith("#")),
+      "CALIBRATION: the mutant still carries a live line, so it is not the subject this arm needs",
+    ).toEqual([]);
+
+    expect(
+      () => headerRegion(commented),
+      "the header slicer returned instead of throwing on a script with no live line — the banned `< 0 ? \"\" : …` shape is back, and a broken slicer now reads as an empty header",
+    ).toThrow(/found NO live line/);
+    // …and the control: the real script still slices, so the throw above is the
+    // mutant's doing and not a helper that throws unconditionally.
+    expect(headerRegion(SRC)).toBe(HEADER);
   });
 
   it("every symbol the header sends a reader to exists in the file it names", () => {
