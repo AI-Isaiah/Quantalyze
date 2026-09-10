@@ -13,21 +13,20 @@
  * ⭐ WHY A HELPER AND NOT AN EXEMPTION LIST. The lint rule in
  * `src/__tests__/test-restore-workflow-wiring.test.ts` scans every
  * `src/__tests__/*.test.ts`, and the calibrations that measure this trap write
- * the offending expression DELIBERATELY. A `file:line` allowlist rots on the
- * next reformat (this branch carries a dated record of exactly that), and
- * fragment assembly — `"sl" + "ice"` — would make the demonstrations
- * unreadable, and the demonstrations ARE the evidence. Routing them through one
- * named function leaves the rule exactly ONE site to tolerate, and that
- * tolerance is pinned to this file AND this function name, not to a pattern.
+ * the offending expression DELIBERATELY. A `file:line`
+ * allowlist rots on the next reformat (this branch carries a dated record of
+ * exactly that), and fragment assembly — `"sl" + "ice"` — would make the
+ * demonstrations unreadable, and the demonstrations ARE the evidence. Routing
+ * them through one named function moves every such write OUT of the scanned
+ * directory, so the rule needs no exemption at all.
+ * ⚠️ MEASURED 2026-09-10: this file was itself briefly hand-added to that
+ * scan, which forced a file+function tolerance and a brace-matching span
+ * helper onto the gate. Both are gone. This file is NOT scanned — do not
+ * re-add it, and do not re-introduce a tolerance to make that possible.
  *
  * ⚠️ Every branch below writes the offending expression LITERALLY. That is
- * deliberate: the rule must be able to see it here (the tolerance would
- * otherwise be pinning nothing, and an arm asserts it is not), and a reader
- * comparing a calibration to the old code needs the old code in front of them.
- *
- * ⚠️ No braces inside the string literals here — the rule locates this
- * function's body by brace-matching the COMMENT-STRIPPED source, and that
- * scanner keeps string literals verbatim.
+ * deliberate: a reader comparing a calibration to the old code needs the old
+ * code in front of them.
  */
 
 /**
