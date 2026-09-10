@@ -1162,7 +1162,21 @@ jobs:
                               the record of what was actually attempted.
             refdata.sql       the allowlisted migration-seeded reference data replayed
                               after the schema is rebuilt.
-            *.err *.log *.out the diagnostic channels, redacted (see below).
+            census.err        stderr of the pre-drop catalogue census query.
+            ledger.err        stderr of the \copy that wrote ledger.csv.
+            marker.err        stderr of the database-identity marker read. It is
+                              REDACTED rather than echoed: it is psql's connect/auth
+                              channel for the step that decides TEST from PROD.
+            refdata.err       stderr of the reference-data extractor.
+            dump.log          stdout+stderr of `supabase db dump`.
+            transaction.out   stdout+stderr of the psql run of restore.sql.
+                              Those six diagnostic channels are the only files here
+                              that were redacted (see below), and since 2026-09-10
+                              they are named ONE BY ONE in the staging step rather
+                              than admitted as `*.err`/`*.log`/`*.out`. A channel this
+                              job gains tomorrow is NOT in this artifact until someone
+                              adds its name — the same default-out rule the files
+                              above have.
 
             DELIBERATELY NOT HERE: pre-census.txt, post-census.txt and the two
             *-rollback-view.txt files. They restate the same survivor DDL alongside
@@ -1508,6 +1522,21 @@ jobs:
 
       # ── WHAT THE WORLD ACTUALLY GETS (Phase 164.8.2, WR-05). ────────────────
       # ⛔ THE ALLOWLIST IS BY NAME, NEVER BY GLOB, AND THAT IS THE WHOLE POINT.
+      # ⚠️ THAT SENTENCE WAS FALSE FOR THREE DAYS — CORRECTED 2026-09-10, review WR-01.
+      # The by-name loop below was only ever half the step. Underneath it sat
+      # `for c in "${outdir}"/*.err "${outdir}"/*.log "${outdir}"/*.out`, which is
+      # default-IN for three whole extension classes, and the reviewer PROVED it by
+      # extracting this step and running it: a seeded `future-census.out` carrying
+      # `CREATE POLICY p ON t USING (owner=current_user)` — nobody's decision, a file
+      # this job does not write — was copied into the world-readable artifact. The
+      # channels are now enumerated by name too, so the sentence above is TRUE of the
+      # whole step rather than of one loop in it. The six names were regenerated from
+      # the writers, not carried from the finding:
+      #   grep -oE 'RESTORE_OUT_DIR}?/[A-Za-z0-9_.-]+\.(err|log|out)' scripts/restore-test-from-baseline.sh
+      #   grep -oE 'outdir}?/[A-Za-z0-9_.-]+\.(err|log|out)'          .github/workflows/test-restore-from-baseline.yml
+      # ⛔ Do not restore the glob to save six words. A whole-class admission is exactly
+      # the shape this step replaced, and it re-opened here one extension family at a
+      # time — which is what the `*.sql` sentence further down already warned about.
       # Before this step the upload pointed at `${RUNNER_TEMP}/test-backup` whole, so
       # every file the restore script happened to write was published on a PUBLIC repo
       # for 90 days — in by default. Ten of the eighteen names that reach that
@@ -1535,6 +1564,15 @@ jobs:
       #                      is the record of what was attempted.
       #   `census.sql`, `refdata.sql` — the queries the script ran, forward inputs a
       #                      post-mortem needs to reproduce a reading.
+      #   the six CHANNELS — `census.err`, `ledger.err`, `marker.err`, `refdata.err`,
+      #                      `dump.log`, `transaction.out`. Named individually since
+      #                      2026-09-10 (WR-01). They are the only files here that
+      #                      pass through the redaction step above, and a run's
+      #                      diagnosis is usually the whole reason to open this
+      #                      artifact. ⚠️ `marker.err` is the one to think twice about
+      #                      before widening this list: it is psql's stderr from the
+      #                      step that decides TEST from PROD, which is why it is
+      #                      redacted rather than echoed.
       # WHAT LEAVES: `pre-census.txt`, `post-census.txt`, `pre-census.rollback-view.txt`
       # and `post-census.rollback-view.txt` — they restate that SAME DDL with
       # owner-named rows read off live shared TEST and have no reversal claim on it —
@@ -1572,10 +1610,14 @@ jobs:
                 cp -p "${outdir}/${f}" "${stage}/"
               fi
             done
-            # The diagnostic channels, AFTER the redaction step above has scrubbed them.
-            for c in "${outdir}"/*.err "${outdir}"/*.log "${outdir}"/*.out; do
-              if [ -f "${c}" ]; then
-                cp -p "${c}" "${stage}/"
+            # The diagnostic channels, AFTER the redaction step above has scrubbed
+            # them — BY NAME, under the same default-out rule as the content files
+            # above. This loop was `for c in "${outdir}"/*.err "${outdir}"/*.log
+            # "${outdir}"/*.out` until 2026-09-10; see the WR-01 paragraph in the
+            # comment block above this step for what that cost.
+            for c in census.err ledger.err marker.err refdata.err dump.log transaction.out; do
+              if [ -f "${outdir}/${c}" ]; then
+                cp -p "${outdir}/${c}" "${stage}/"
               fi
             done
             echo "staged manifest:"
