@@ -1,0 +1,193 @@
+# 164.8.1 Plan 04 — RESTORE LOG
+
+**Written:** 2026-09-11, RECONSTRUCTED from the two runs' own job logs.
+⛔ **This is a record written after the fact. The runs are real and SHA-bound; the
+lateness of the record is the defect, not the readings.** Both were dispatched
+2026-09-09 and no artifact was written at the time, which is why the phase read as
+having an open founder checkpoint for two days. See "Why this was written late".
+
+## The two runs
+
+| | preflight | restore |
+|---|---|---|
+| run id | **34329459044** | **34330741339** |
+| head sha | `a622df279dcdf4fe6f58d39f990eeaa008aaed99` | `a622df279dcdf4fe6f58d39f990eeaa008aaed99` |
+| ref / branch | `main` | `main` |
+| event | `workflow_dispatch` | `workflow_dispatch` |
+| created → updated (UTC) | 08:30:12 → 08:38:27 | 08:44:05 → 08:47:39 |
+| conclusion | success | success |
+| mode (from the log, not the dispatch form) | `mode=preflight` | `mode=restore` |
+| `dispatch-guard` job | skipped — correct | skipped — correct |
+
+⭐ **`dispatch-guard: skipped` is not a missing check.** Its `if:` is
+`github.ref != 'refs/heads/main'` and `restore`'s is the exact inverse
+`github.ref == 'refs/heads/main'`. Both runs were on `main`, so the guard correctly
+stood down and `restore` ran. The guard is a refuse-job whose only purpose is to turn
+a dispatch OFF main into a loud red, because `--ref <branch>` checks out that branch's
+`supabase/schema/` and would restore shared TEST from an unreviewed dump. It exits 1
+where `mutex-probe.yml`'s guard deliberately exits 0 — opposite concerns, both
+deliberate (a red check on a main-HEAD sha makes Railway skip the analytics deploy,
+issue #616).
+
+## P0 — the which-database marker, both runs
+
+```
+which_database: OK — the marker names TEST and not PROD.
+restore-test-from-baseline: which_database: OK — marker names TEST and not PROD
+```
+
+Printed BEFORE any write, in both runs. Not NULL, not inferred.
+
+## Self-test, both runs
+
+```
+restore-test-from-baseline: self-test OK (24/24 arms — eight refusals fire before any
+write and each is armed by a named-message arm, preflight rolls back byte-for-byte,
+restore commits the full shape, survivors round-trip search_path-independently and
+carry their trigger enabled-state, the derived census refuses an unlisted dependent
+with a full census AND with an empty one, redaction is checked with a subject, the
+census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted
+reference data is replayed and gated INSIDE the transaction, the gate bites on a
+scratch copy and rolls back, a bad allowlist is refused before any write, harness
+calibrated)
+```
+
+```
+self-test census: 16 kind(s) against floor 16.
+```
+
+## The activity gate and the mutex (restore run)
+
+```
+Acquired the shared-test-db advisory lock (key 61616158) after 5s (attempt 1/3).
+activity-gate: excluding our own mutex holder (backend pid 1204291) and
+               application_name 'ci-shared-test-db-mutex'.
+activity-gate breakdown (states and counts only): active [holder-pid] x1, idle x5
+activity-gate: 0 other active client session(s) — shared TEST is measurably quiet,
+               inside the held mutex.
+restore-test-from-baseline: baseline freshness OK — baseline epoch 1788854882
+               >= migrations epoch 1788852989
+restore-test-from-baseline: shared-TEST mutex 61616158: held (1 session(s))
+Released the shared-test-db mutex (terminated psql pid 6829).
+Server-side reap: backend 1204291 was STILL on key 61616158 — pg_terminate_backend
+               sent (the client kill alone had not freed the lock).
+```
+
+⚠️ The server-side reap line is worth keeping: the client kill alone did NOT free the
+lock. That is the `[PG-ORPHANED-BACKEND]` class this repo already books — the reap is
+what actually released it.
+
+## PREFLIGHT — run 34329459044 — the measurement, rolled back
+
+```
+confirm not required for preflight (mode=preflight); for reference, this tree's
+restore token is 27826b76.
+```
+
+pre-census and post-census, verbatim:
+
+```
+             pre-census        post-census
+refdata:auth.users                  =30015    =30015
+refdata:public.compute_job_kinds    =0        =0
+refdata:public.discovery_categories =0        =0
+refdata:public.feature_flags        =0        =0
+refdata:public.profiles             =7        =7
+refdata:public.strategies           =0        =0
+refdata:public.system_flags         =0        =0
+refdata:public.system_settings      =0        =0
+```
+
+```
+preflight: post-census == pre-census (byte-for-byte) — the transaction ran to its
+ROLLBACK terminator and the database is unchanged; mode=preflight
+```
+
+⭐ **RESEARCH A1 is ANSWERED by this run.** The open question was whether hosted TEST's
+`postgres` role bypasses `FORCE ROW LEVEL SECURITY` on `compute_job_kinds` under
+`row_security = off` — the one thing the throwaway lane could not prove. The whole
+transaction ran to its terminator with no RLS error and no `relation … does not exist`,
+so it does. Nothing was written to find that out.
+
+## RESTORE — run 34330741339 — committed
+
+```
+restore-test-from-baseline: refdata: 8 table(s) from 22 allowlist line(s) under
+scripts/restore-test-refdata-allowlist.txt, each with a pinned statement count
+```
+
+```
+             pre-census        post-census (COMMITTED)
+refdata:auth.users                  =30015    =30015
+refdata:public.compute_job_kinds    =0        =16
+refdata:public.discovery_categories =0        =5
+refdata:public.feature_flags        =0        =1
+refdata:public.profiles             =7        =1
+refdata:public.strategies           =0        =1
+refdata:public.system_flags         =0        =2
+refdata:public.system_settings      =0        =1
+```
+
+```
+restore: tables=62 policies=154 functions=120 ledger_rows=266 survivors=2/2
+         filtered=1 mode=restore
+```
+
+```
+DRY RUN: migrations will *not* be pushed to the database.
+Remote database is up to date.
+post-verify: the pinned CLI parses the seeded ledger and reports nothing pending —
+ledger SHAPE is consistent. This says NOTHING about object presence.
+```
+
+⚠️ **`public.profiles` went 7 → 1, and that is COMMITTED DATA LOSS on shared TEST.**
+It is inherent to a restore — `public` is dropped and rebuilt, so the 7 rows CI had
+accumulated are gone and only the migration-seeded row came back. It is exactly what
+`T-164.8-09` describes and it is recorded here rather than buried under the six rows
+that went up. TEST is shared, so some of those 7 rows may not have been ours.
+
+## Must-have #3 — the loop this phase opened, closed SHA-bound
+
+The two jobs whose failure INSERTED this phase:
+
+| main CI run | head sha | `python` | `e2e-seeded` |
+|---|---|---|---|
+| **34352474787** — first `main` run at/after the restore | `06db9958` | **success** | **success** |
+| **34491157097** — latest `main` run | `eeb8e731` | **success** | **success** |
+
+⛔ Green here is meaningless unless SHA-bound, so both shas are named. `06db9958` is the
+merge of PR #767, which is at/after the 08:47Z restore.
+
+**`T-164.8-09` (irreversible data loss on TEST, reopened in this phase's ROADMAP entry)
+is CLOSED — on a control that now exists and has been exercised end to end**, rather
+than on the e2e re-seeder, which was itself one of the two failing jobs.
+
+## Why this was written late — recorded, not smoothed over
+
+Both runs happened 2026-09-09. No `RESTORE.log` and no `SUMMARY.md` were written, so
+for two days the phase had three executed plans and a fourth that looked like a pending
+`checkpoint:decision`. A founder-checkpoint inventory on 2026-09-11 listed it as
+requiring a founder dispatch that had, in fact, already been made.
+
+⭐ **The inventory inferred the absence of the ACTION from the absence of the ARTIFACT.**
+That inference does not hold, and it is the same shape as the reconstruction defect
+`164.7-REVIEWS.md` records: rounding a record off to the shape you already believe. The
+correction came from reading the two runs' job logs rather than the phase directory.
+
+⚠️ A second error was made and corrected in the same session: the replay was first
+declared ABSENT at `a622df27` on the strength of `git cat-file -e` against
+`scripts/test-restore-replay-refdata.mjs` — **a filename that has never existed in this
+repo**. The real files (`scripts/restore-test-refdata-allowlist.txt`,
+`scripts/extract-reference-inserts.mjs`, `src/__tests__/refdata-allowlist.test.ts`)
+were all present at that sha. An absence proved against a wrong name reads like a
+finding and is not one. PR #767 was a HARDENING pass over the replay, not its
+introduction.
+
+⚠️ **`gh api …/actions/jobs/<id>/logs` needs `--allow-escape-sequences`** or it exits 1
+with EMPTY stdout, and an empty log reads as "nothing there" (booked in
+`164.7-06-SUMMARY.md`). Every reading above was taken with that flag, from logs of
+1581 and 1725 lines. ⚠️ The runner ECHOES each script line prefixed with an ANSI colour
+code, so a naive grep matches the SOURCE of an `echo` rather than its OUTPUT — the
+first read of these logs mistook the echoed `mode=restore requires -f confirm=…` error
+string for evidence of the mode. Every mode reading above comes from a line with the
+echo prefix filtered OUT.

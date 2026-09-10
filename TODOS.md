@@ -1568,6 +1568,31 @@ true for 146 and half of 142–145, and **false for 141**.
       marker check confirms which DATABASE you are connected to; it says nothing about which
       SERVICE the tick calls. They are different questions and only the first has a guard.
 
+- [ ] **`[164.8.1-DISPATCH-RECORD-GAP]` A founder-dispatched `workflow_dispatch` leaves its
+      evidence in GitHub Actions and NOTHING in `.planning/`, so a phase's record depends on
+      someone remembering to write it afterwards (booked 2026-09-11, found while closing
+      Phase 164.8.1 plan 04).**
+      ⛔ **MEASURED, not hypothetical.** Plan 04's preflight (run `34329459044`) and restore
+      (run `34330741339`) both completed on `main` at 2026-09-09 08:47:39Z, green, under the
+      held mutex, with the which-database marker printed. No `SUMMARY.md` and no `RESTORE.log`
+      were written. For two days the phase therefore carried three executed plans and a fourth
+      that read as a pending `checkpoint:decision` — and a founder-checkpoint inventory on
+      2026-09-11 duly reported it as awaiting a founder dispatch that had already been made.
+      ⭐ **The defect is the INFERENCE the missing artifact invites:** absence of the artifact
+      read as absence of the action. Same shape as the reconstruction defect
+      `164.7-REVIEWS.md` records. Only reading the two runs' own job logs corrected it.
+      ⚠️ Compounding trap, measured the same session: the Actions runner ECHOES each script
+      line with an ANSI colour prefix, so a naive grep over a job log matches the SOURCE of an
+      `echo` rather than its OUTPUT — the first read mistook the echoed string
+      `mode=restore requires -f confirm=…` for evidence of a run's mode. Filter `\[36;1m`
+      lines out before concluding what a run printed. (`--allow-escape-sequences` is still
+      required at all, per `164.7-06-SUMMARY.md`.)
+      **Remedy shape (not yet decided):** either the workflow itself commits a machine-written
+      run record, or the phase gate refuses to close a plan whose must-haves name a run id
+      that no artifact cites. <deferred>Phase 164.9 TESTISOLATION</deferred>
+      **Evidence:** `.planning/phases/164.8.1-refdata-.../164.8.1-04-RESTORE.log`,
+      `164.8.1-04-SUMMARY.md`.
+
 - [ ] **`[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` The TEST restore's reference-data replay reproduces
       INSERT effects only, so post-seed UPDATEs from LATER migrations are never re-applied while
       the ledger swears they ran (booked 2026-09-09, found by review of Phase 164.8.1's PR).**
