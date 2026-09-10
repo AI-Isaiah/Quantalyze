@@ -48,5 +48,65 @@
     "rule": "long-literal-in-headers",
     "jobname": "fixture_longlit_job",
     "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Trace', 'FAKE-0123456789-0123456789-0123456789'), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "header-unparseable",
+    "jobname": "fixture_unbalanced_headers_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Trace', 'a'"
+  },
+  {
+    "rule": "x-service-key-literal",
+    "jobname": "fixture_split_key_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', 'FAKE-key-' || '0123456789ab'), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "x-service-key-literal",
+    "jobname": "fixture_concat_key_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', concat('FAKE-key-','0123456789ab')), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "x-service-key-literal",
+    "jobname": "fixture_format_key_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', format('%s%s','FAKE-key-','0123456789ab')), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "x-service-key-literal",
+    "jobname": "fixture_chr_key_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', chr(65)||chr(66)||chr(67)||chr(68)||chr(69)||chr(70)||chr(71)||chr(72)||chr(73)||chr(74)||chr(75)||chr(76)||chr(77)||chr(78)||chr(79)||chr(80)), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "x-service-key-literal",
+    "jobname": "fixture_decode_key_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', convert_from(decode('RkFLRS1rZXktMDE=','base64'),'utf8')), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "x-service-key-literal",
+    "jobname": "fixture_quote_literal_key_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', quote_literal('FAKE-key-0123456789ab')), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "x-service-key-literal",
+    "jobname": "fixture_dollar_quoted_key_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', $q$FAKE-key-0123456789ab$q$), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "long-literal-in-headers",
+    "jobname": "fixture_nonanchored_split_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Auth', 'FAKE-key-0123456789' || 'abcdef0123456789'), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "pg-password",
+    "jobname": "fixture_plpgsql_pw_job",
+    "command": "DO $$ DECLARE v_password text; BEGIN v_password := 'FAKEpw'; END $$"
+  },
+  {
+    "rule": "pg-password",
+    "jobname": "fixture_libpq_uri_job",
+    "command": "SELECT dblink_connect('postgres://u:FAKEpw@db.invalid/db')"
+  },
+  {
+    "rule": "pg-password",
+    "jobname": "fixture_pgpassword_colon_job",
+    "command": "SELECT set_config('x', 'PGPASSWORD: FAKEpw', false)"
   }
 ]

@@ -18,5 +18,13 @@
   {
     "jobname": "fixture_sweep_job",
     "command": "SELECT retention_sweep()"
+  },
+  {
+    "jobname": "fixture_do_language_job",
+    "command": "DO LANGUAGE plpgsql $$ DECLARE k text; BEGIN SELECT decrypted_secret INTO k FROM vault.decrypted_secrets WHERE name = 'analytics_service_key'; PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', k), body := '{}'::jsonb); END $$"
+  },
+  {
+    "jobname": "fixture_short_split_headers_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('Content-Type', 'application/' || 'json', 'X-Trace', 'FAKE-' || '01'), body := '{}'::jsonb)"
   }
 ]
