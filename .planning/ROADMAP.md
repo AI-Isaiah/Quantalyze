@@ -1369,6 +1369,48 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 - [ ] 164.8-06-PLAN.md — WAVE 3 CLOSURE: record the verdicts and the SHA-bound readings, TODOS closures with run ids (incl. the `TEST-NOT-APPLICABLE` pragma verdict), first SHA-bound VAC-08 `0 absent` reading, CLAUDE.md + mutex runbook currency
   ⛔ **CORRECTED 2026-09-09.** This bullet read "the `TEST-NOT-APPLICABLE` pragma recorded as DEAD SCOPE by measurement" — the verdict the plan-checker's B4 finding REVERSED on 2026-09-08, before plan 06 ran. The shipped verdict is two-part: unnecessary for `20260908120000` (narrow, evidenced), general case OPEN and routed to Phase 164.9 as `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`. A ROADMAP bullet still carrying the superseded half would send the next reader to close a hole that is open.
 
+### Phase 164.8.6: VAULTTICKFIX — the forward migration Phase 164.7 earned: the verification check that cannot fail is re-run correctly, the Vault read becomes single-row-safe, the whitespace-key guard learns btrim, and the SECURITY DEFINER grant set is asserted whole instead of two names deep (INSERTED)
+
+**Goal:** One forward migration repairs every SQL-side finding Phase 164.7's post-merge audit produced, including a verification check that CANNOT FAIL — shipped through this repo's full migration discipline, not around it.
+**Requirements**: [164.7-CR05-VACUOUS-MIGRATION-CHECK], [164.7-WR01-VAULT-NOT-STRICT], [164.7-WR02-SERVICE-ROLE-EXECUTE], [VAULTTICK-EMPTYKEY-01], [164.7-MIGRATION-COMMENT-DRIFT]
+**Depends on:** Phase 164.8
+**Plans:** 0 plans
+
+**Success Criteria**:
+
+1. `20260907120000`'s check 6 is re-run in a form that CAN fail: deleting the settings read while keeping the `RAISE EXCEPTION` text must make it RED. ⭐ The correct idiom is already in the repo at `20260907130000:766` — match the sibling rather than inventing one.
+2. `match_engine_cron_tick()`'s Vault read is single-row-safe (`STRICT` or an explicit cardinality check), so a duplicate secret name RAISEs by name instead of posting an arbitrary key.
+3. The whitespace-key guard tests `btrim(v_key) = ''`, with a gate arm that stores a single space and asserts the function RAISEs by name — ⚠️ that arm moves `ARMS_FLOOR`, so separate the floor in BOTH directions on a real full-corpus lane run before pinning, per the runner's own derivation block.
+4. Both migrations' verification blocks assert the WHOLE grantee set of all three SECURITY DEFINER functions, not the `anon`/`authenticated` subset — `service_role`'s EXECUTE is the grant that survived precisely because it was never checked.
+5. ⛔ Before ANY comment-only edit to an applied migration, take the reading nobody has taken: does a comment-only edit change what `supabase-migrate`'s plan job plans? (PATTERNS TRAP A, recorded in `164.7-06-SUMMARY.md`; Phase 164.5.1 criterion 6 is blocked on the same question.) If the answer is yes, annotate BESIDE the file rather than editing it.
+6. ⛔ The three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) run BEFORE the PR exists, and their findings are fixed — not after, and not in the PR body.
+7. ⚠️ Read `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` first: a data-reading `DO` block that RAISEs on an unexpected count can apply to PROD and REFUSE on the empty TEST, and a failed TEST apply BLOCKS the PROD apply. The interim remedy is to revert the merge, never to edit `supabase-migrate.yml`.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.8.6 to break down)
+
+### Phase 164.8.5: PROBERPARSE — the prod-prober hygiene rules stop being dodgeable and its parser stops dropping rows silently: the ||-split service key and the dollar-quoted literal both go RED, an unreadable oracle no longer disables the live credential scan, a malformed cron.job record becomes a measure-fail instead of a continue, and the app-GUC linter successor check stops accepting any readable file (INSERTED)
+
+**Goal:** Every control this phase touches is one a machine can DODGE today, and each fix ships with a red fixture proving the dodge now fails. The reviewer's verdict on Phase 164.7 is the brief: *"the SQL in this phase is careful and genuinely fail-closed; the verification code shipped alongside it is not."*
+**Requirements**: [164.7-CR03-HYGIENE-BYPASS], [164.7-WR04-HYGIENE-BELOW-ORACLE], [164.7-WR05-PARSER-DROPS-ROWS], [164.7-APPGUC-SUCCESSOR-VACUOUS], [164.7-REVIEW-INFO-FOUR], [APPGUC-DETECT-DOUBLEQUOTE-01], [APPGUC-UTF16-01]
+**Depends on:** Phase 164.8
+**Plans:** 0 plans
+
+**Success Criteria**:
+
+1. `hygieneViolations` returns a NON-EMPTY list for a command whose service key is split across a `||` concatenation, and a red fixture in `fixtures/cron-drift/` proves it — neutering the fix must turn the self-test RED naming that fixture. ⛔ NOT by lowering `HEADER_LITERAL_MIN`: the docstring explains why the threshold exists and lowering it fires on the green Vault-backed shape.
+2. The literal scanner skips `$tag$ … $tag$` regions wholesale, so `$q$don't$q$` and `$q$dont$q$` in the headers list produce the SAME verdict. Both spellings ship as fixtures.
+3. A live `cron.job` command carrying a credential is reported as `cron-secret-in-command` EVEN WHEN the oracle is missing, unparseable, or has a bumped `schema_version` — the property the file header already claims and does not have.
+4. A malformed `cron.job` record raises a `measure-fail` naming the count instead of `continue`. A row the parser could not read is not a row that is not there.
+5. `lint-app-guc`'s successor check rejects a successor that is not a real successor, and `DETECT_RE` matches all four missed spellings — each with a red fixture in the gate's own `--self-test`. ⚠️ The corpus stays at 0 findings: a fix that moves that number is matching something else.
+6. The four Info findings are swept in the same pass (`--files` allowlist enforcement, `sqlFilesUnder` symlinks + `.SQL` case, `parseLineageHeader`'s first-marker-wins, `pg-password`'s plpgsql assignment forms).
+7. `node scripts/prod-prober/run.mjs --self-test` exits 0 with `SELF_TEST_SCENARIOS` bumped in the SAME edit as any added scenario, and `src/__tests__/prod-prober-wiring.test.ts` agrees.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.8.5 to break down)
+
 ### Phase 164.8.4: GATERESIDUE — every deferral Phase 164.8.2's four review rounds produced: the shared-TEST credential channels that still reach a public log, the artifact that publishes the file it refuses over, and the gate-integrity leftovers each below the bar that blocked the ship (INSERTED)
 
 **Goal:** Discharge every deferral Phase 164.8.2 produced and nothing else. Four review rounds over that phase's own fixes found ten items that were each, individually, below the bar that would have blocked the ship — and the reason they are one phase rather than ten TODOS lines is that **eight of them are the same defect**: a control narrower than the sentence beside it. 164.8.2 proved three times over that fixing the instance a reviewer named, rather than the class, produces a half-class that the next round finds again.
@@ -1399,6 +1441,7 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 - `[WINDOWS-LEDGER-DRIFT]` — NOT 164.8.2 residue. Logged 2026-09-02 in Plan 164.4-00 and carried with **no owner, no date and no gate for eight days**. `.planning/WINDOWS.md` refuses every append while its frontmatter counts and its entries disagree. It fits here because a ledger that rejects writes because its own header is stale is a control disagreeing with the thing it describes.
 
 **Success Criteria**:
+
 1. The class-lint's file set is DERIVED from its own scope sentence, or the sentence is derived from the set — one of the two, so a fourth axis (depth, extension, location, symlink) cannot open without something going red. ⛔ A third hand-widening that closes only the depth axis does NOT satisfy this.
 2. A calibration proves the mechanism by opening a new axis on a scratch tree and observing RED — not by asserting today's count.
 3. The two inline degeneracy demonstrations are routed through `degenerateNarrow`, and an arm asserts no NEW inline demonstration can be added outside it without being reported.
@@ -1677,6 +1720,7 @@ Plans:
 ⛔ **NOT in scope:** raising Playwright workers above 1. Phase 164.8's ROADMAP entry already states that per-run isolation is the PRECONDITION for it and that parallelism must NOT be chased as an objective — measured, `e2e-seeded` sits behind `sql-mutation` so parallelism buys 1-2 min of wall clock. Isolation is worth doing for ASSERTION RELIABILITY; the parallelism it unlocks is a consequence, not a goal.
 
 **Success Criteria**:
+
 1. ⛔ **`FANOUT-GLOBAL-01` gets a REAL TODOS entry first.** CLAUDE.md records that it is NOT a TODOS id (measured 2026-09-08: 0 hits) and exists only as prose here and in the ROADMAP, and that THIS phase owns writing it. Planning starts by making the phase's own subject a booked item — everything below depends on it having one.
 2. A CI run asserts only about the rows IT created on shared TEST. A global assertion ("no stuck jobs exist", "the table is empty") is replaced, not narrowed — and a calibration proves it by seeding a foreign row and showing the assertion stays GREEN where the old one would have gone red for someone else's work.
 3. `[164.8-PUSH-RACE-VAC08]` and `[164.8.2-VAC08-FATAL-ON-TRANSIENT]` are planned as ONE unit: they share one root (two jobs contending for advisory key `61616158` with nothing ordering them). ⛔ Splitting them creates the sequential-ratchet-patched-in-one-place hazard this repo has already paid for once.

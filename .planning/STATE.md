@@ -6,10 +6,10 @@ current_phase: 164.8.2
 current_phase_name: GATEHARDENING
 status: verified
 stopped_at: "164.5-05 tasks 1-2 complete; STOPPED at task 3 blocking-human checkpoint:decision (ROADMAP criterion 5 wording)"
-last_updated: "2026-09-10T14:12:59.000Z"
+last_updated: "2026-09-10T17:38:53.212Z"
 last_activity: 2026-09-10
 last_activity_desc: "164.8.2 GATEHARDENING shipped as PR #772 (head 0c160c28, filtered branch phase-164.8.2-gatehardening-pr, 102 commits picked = 102 on-branch, CODE IDENTICAL 15965 lines, 0 forbidden paths, deletion-guard 0). ZERO migrations — supabase-migrate.yml's paths: filter means the merge applies nothing to any database. Closed the five code-review warnings Phase 164.8 shipped, then SIX review rounds: rounds 1-5 EACH found a control weaker than the sentence beside it, INCLUDING inside the previous round's fixes; round 6 was the first clean one and both reviewers reached it by rebuilding the shipped logic and re-deriving over all 874 test files rather than reading code. THE CLASS: String.indexOf returns -1, so s.slice(-1) is the LAST CHARACTER and s.slice(0,-1) is nearly the whole string — a byte-identity pin over an entire mutex protocol was comparing one newline literal to another; an arm asserting 'the credential gate carries no if:' passed BECAUSE THE STEP NO LONGER EXISTED; an adjacency check Math.abs(a.indexOf(x)-a.indexOf(y))===1 was true when one index was -1 and the other 0. Twelve sites across eleven files, each behind a helper that THROWS naming the missing anchor — no ?? '', no || 0, no Math.max(0,i). The standing gate was rebuilt three times then CUT BACK: its regex comment stripper deleted 858 lines (18%) of its own subject because these files quote shell globs verbatim and \"${outdir}\"/*.err opens a block comment; its scope claimed a class and delivered 2 files, then 137 while silently skipping 346 .test.tsx; its own anti-vacuity floor read the RAW source where both pinned files carry the offending expression in comments BY DESIGN. Then 96 lines of self-referential tolerance whose calibration legs could not fail were deleted, a duplicate rule copy deleted after proving coverage by five-depth injection, and a 4718-line strip subject replaced by a 201-line synthetic. Gates re-run by the orchestrator on the merged tree: vitest 853 files / 14644 tests / 0 failed, restore-test-from-baseline --self-test 27/27, test-ledger-drift-check --self-test 11/11, tsc clean, eslint clean. SECURITY.md: 24/24 closed, threats_open 0, ASVS 1, block_on high. Every assertion added or changed was neutered, observed RED and restored FROM A BYTE BACKUP. 14 residuals booked in TODOS.md, each naming exactly one destination phase (164.8.4 GATERESIDUE, 164.9 TESTISOLATION); none CARDINAL. The one with a CONFIRMED INCIDENT rather than a latent path: a local wrapper's bun shebang auto-loaded .env.local into a child vitest and produced REAL INSERTs against shared TEST — PROD provably untouched."
-state_head: d52d1e93ceb2966dffee1f50344092164b5e73d7
+state_head: 84b21cb5363f8e09fe8c842a087ee66232e54284
 
 # ⚠️ progress: HAND-SET 2026-09-06 against `origin/main`, NOT derived from this checkout.
 
@@ -250,11 +250,11 @@ state_head: d52d1e93ceb2966dffee1f50344092164b5e73d7
 #                                was lost — a lower percent here is the roadmap growing.
 
 progress:
-  total_phases: 29
+  total_phases: 31
   completed_phases: 15
   total_plans: 141
   completed_plans: 137
-  percent: 52
+  percent: 48
 ---
 
 # Project State — Quantalyze
@@ -1280,6 +1280,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.9 edited: routed [164.8.1-REPLAY-INSERT-ONLY-SCOPE] here from Phase 164.8.1 PR review: requirements line + ROUTED HERE block
 - Phase 164.9 edited: routed [164.8-PUSH-RACE-VAC08] here from Phase 164.8 plan 05: VAC-08 and apply-test share advisory key 61616158
 - Phase 164.5.1 edited: A1 measured on shared TEST (Vault read permitted) — gate lifted; migration-vs-runbook narrowed to the rebuild statement
+- Phase 164.8.5 inserted after Phase 164.8: PROBERPARSE — the prober's dodgeable hygiene rules and silently-dropping parser, from Phase 164.7's post-merge code review (URGENT)
+- Phase 164.8.6 inserted after Phase 164.8: VAULTTICKFIX — the forward migration for Phase 164.7's SQL-side findings, including a verification check that cannot fail (URGENT)
 
 ### Decisions
 
