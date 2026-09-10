@@ -404,10 +404,20 @@ check() {
     # Baselined names, comments and blank lines stripped.
     local base_names="${tmp}/baseline.names.txt"
     sed 's/#.*//' "$baseline" | sed 's/[[:space:]]*$//' | sed '/^$/d' > "$base_names"
+    # ⛔ F5 (Phase 164.8.2) — SP-M01's BOUND, ON THE FILTER SITES TOO. `|| true`
+    # cannot tell grep's rc 1 (every line filtered away — legitimate, and the
+    # ORDINARY clean case here) from rc >= 2 (could not read). An unreadable
+    # `$missing_file` wrote an EMPTY `$new_file`, and an empty `$new_file` is
+    # this gate's CLEAN verdict: `0 NEW drift`, exit 0, green board. `-le 1` and
+    # NOT `-eq 0` is the whole point of the bound. Same shape and same sentence
+    # as scripts/restore-test-from-baseline.sh's IN-06 wrap, so the twins fail
+    # the same way.
     # NEW drift = measured missing, not baselined.
-    grep -aFxv -f "$base_names" "$missing_file" > "$new_file" || true
+    set +e; grep -aFxv -f "$base_names" "$missing_file" > "$new_file"; grep_rc=$?; set -e
+    [ "$grep_rc" -le 1 ] || fail "MEASURE_FAIL: could not filter the measured-missing rows against ${baseline} (grep exited ${grep_rc}). An unreadable input is not a run with no new drift."
     # STALE baseline = baselined, but NOT measured missing any more.
-    grep -aFxv -f "$missing_file" "$base_names" > "$stale_file" || true
+    set +e; grep -aFxv -f "$missing_file" "$base_names" > "$stale_file"; grep_rc=$?; set -e
+    [ "$grep_rc" -le 1 ] || fail "MEASURE_FAIL: could not filter ${baseline} against the measured-missing rows (grep exited ${grep_rc}). An unreadable input is not a baseline with no stale entries."
   else
     cp "$missing_file" "$new_file"
     echo "::warning::${GATE}: no ledger baseline at ${baseline} — every measured absence is treated as new."
@@ -514,8 +524,16 @@ check() {
   # The tip is printed on EVERY run — including runs that exempt nothing — so
   # the width of the window is readable without re-deriving it, and a tip that
   # has fallen behind is visible in the log rather than only in its effect.
+  #
+  # ⛔ F5 — AND THE COUNT IS BOUNDED. `|| true` here was worse than at the two
+  # sites above, because `exempt_count` feeds the FRONTIER_EXEMPT_CEILING check
+  # below: an uncountable exemption read as 0, which is simultaneously this
+  # gate's clean verdict AND a number no ceiling can ever exceed. The control
+  # would have reported nothing while measuring nothing.
   local exempt_count
-  exempt_count="$(grep -ac '[^[:space:]]' "$exempt_file" || true)"; exempt_count="${exempt_count:-0}"
+  set +e; exempt_count="$(grep -ac '[^[:space:]]' "$exempt_file")"; grep_rc=$?; set -e
+  [ "$grep_rc" -le 1 ] || fail "MEASURE_FAIL: could not count the frontier-exempted migrations (grep exited ${grep_rc} on ${exempt_file}). An uncountable exemption is not an exemption of zero, and zero is the one value FRONTIER_EXEMPT_CEILING can never fire on."
+  exempt_count="${exempt_count:-0}"
   echo "  ledger frontier: tip=${frontier_tip:-<none - no repo migration is present, exemption DISABLED>}; ${exempt_count} above-tip migration(s) exempted."
   if [ "$exempt_count" -gt 0 ]; then
     echo "::notice::${GATE}: ${exempt_count} repo migration(s) EXEMPTED from NEW drift — authored ABOVE the TEST ledger's frontier (tip ${frontier_tip})."
@@ -526,9 +544,16 @@ check() {
     sed 's/^/  exempt (above tip): /' "$exempt_file"
   fi
 
+  # ⛔ F5 — the two verdict counts, bounded on the same shape. `new_count` IS the
+  # verdict: 0 prints `0 NEW drift` and exits 0. A gate that cannot read its own
+  # result must not report the result it wanted.
   local new_count stale_count
-  new_count="$(grep -ac '[^[:space:]]' "$new_file" || true)"; new_count="${new_count:-0}"
-  stale_count="$(grep -ac '[^[:space:]]' "$stale_file" || true)"; stale_count="${stale_count:-0}"
+  set +e; new_count="$(grep -ac '[^[:space:]]' "$new_file")"; grep_rc=$?; set -e
+  [ "$grep_rc" -le 1 ] || fail "MEASURE_FAIL: could not count the NEW-drift rows (grep exited ${grep_rc} on ${new_file}). An uncountable result is not a count of zero, and zero here is this gate's clean verdict."
+  new_count="${new_count:-0}"
+  set +e; stale_count="$(grep -ac '[^[:space:]]' "$stale_file")"; grep_rc=$?; set -e
+  [ "$grep_rc" -le 1 ] || fail "MEASURE_FAIL: could not count the stale-baseline rows (grep exited ${grep_rc} on ${stale_file}). An uncountable result is not a baseline with nothing stale in it."
+  stale_count="${stale_count:-0}"
 
   local bad=0
   # ⛔ WR-02 — THE EXEMPT WINDOW HAS A WIDTH, AND THE WIDTH IS BOUNDED. Sets
