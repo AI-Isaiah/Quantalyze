@@ -159,6 +159,36 @@ function occurrences(haystack: string, needle: string): number {
 }
 
 /**
+ * The VAC-08 self-test's arm ratchet, READ FROM THE SCRIPT BY SYMBOL.
+ *
+ * ⛔ WHY THIS EXISTS (Phase 164.8.2, B2). The IN-01 and F6 blocks below asserted
+ * on `"12 arms ran but EXPECTED_ARMS is 11"` and `"SELF-TEST FAIL: 10/11"` as
+ * literals, in three places, while the WR-03 leg in this same file already
+ * derived the constant. Adding one self-test arm therefore reddened three
+ * assertions that had no opinion about the count — the ratchet's own
+ * `EXPECTED_ARMS` line, moved in the same commit as the arm, is the only place
+ * that number is supposed to be maintained.
+ *
+ * ⚠️ `l.trim()`, NOT `^EXPECTED_ARMS=`. This phase already learned the anchored
+ * form: a `^EXPECTED_ARMS=` grep MISSES the INDENTED live occurrence, which is
+ * the only one there is. Do not re-anchor this.
+ *
+ * ⚠️ WR-03's own leg deliberately keeps its region-sliced copy of this read.
+ * That leg is what PROVES the line is single, live and inside `self_test()`, and
+ * it must not be able to inherit a laxer reader from the helper it is checking.
+ */
+function ledgerGateExpectedArms(src: string): number {
+  const lines = src.split("\n").filter((l) => /^EXPECTED_ARMS=\d+$/.test(l.trim()));
+  expect(
+    lines.length,
+    "EXPECTED_ARMS is not a single live line in the gate script — every count derived from it below would be a guess",
+  ).toBe(1);
+  const n = Number(lines[0].trim().split("=")[1]);
+  expect(n, "EXPECTED_ARMS did not read as a positive number").toBeGreaterThan(0);
+  return n;
+}
+
+/**
  * The VAC-04 gate wired exactly as migration-drift-check.yml wires it, over a
  * scratch PROD dump read by the REAL readers — with, optionally, injected
  * left-hand readers (the C2 / C4 gate-level arms) and a committed snapshot for
@@ -3652,6 +3682,13 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
   // strings would pass on a script where the `-lt` branch is unreachable.
   describe("IN-01 — the arms ratchet says which direction it measured", () => {
     const SRC = readFileSync(LEDGER_GATE, "utf8");
+    /**
+     * The ratchet, DERIVED. The two legs below duplicate and delete one arm, so
+     * the counts they expect are `ARMS + 1` and `ARMS - 1` BY CONSTRUCTION — a
+     * restated `11` here is a second place to maintain the same fact, and it
+     * would red on the next arm that lands without having an opinion about it.
+     */
+    const ARMS = ledgerGateExpectedArms(SRC);
     /** One whole `run_arm` invocation, unique in the file. */
     const ARM_LINE = '  run_arm "green path" 0 arm_env "$tmp/live" ""\n';
 
@@ -3679,7 +3716,7 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
 
       const { status, out } = selfTest(doubled);
       expect(status).toBe(1);
-      expect(out).toContain("12 arms ran but EXPECTED_ARMS is 11");
+      expect(out).toContain(`${ARMS + 1} arms ran but EXPECTED_ARMS is ${ARMS}`);
       expect(
         out,
         "an ADDED arm is still described as one that disappeared — the reader is sent looking for a deletion that never happened",
@@ -3694,7 +3731,7 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
 
       const { status, out } = selfTest(deleted);
       expect(status).toBe(1);
-      expect(out).toContain("10 arms ran but EXPECTED_ARMS is 11");
+      expect(out).toContain(`${ARMS - 1} arms ran but EXPECTED_ARMS is ${ARMS}`);
       expect(out).toContain("An arm DISAPPEARED");
       expect(out).toContain("Never lower EXPECTED_ARMS");
       expect(out).not.toContain("An arm was ADDED");
@@ -3716,6 +3753,9 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
   // `SELF-TEST FAIL: 10/11`, exit 1 both times; only the sentence differs.
   it("F6: a FAILING self-test arm re-emits its own MEASURE_FAIL sentence — the exit code was never the missing half", () => {
     const SRC = readFileSync(LEDGER_GATE, "utf8");
+    // Derived, not restated: the neuter below costs exactly one arm's worth of
+    // passing, so the tally it produces is `ARMS - 1` of `ARMS` by construction.
+    const ARMS = ledgerGateExpectedArms(SRC);
     // The ceiling arm's own naming `sed`. Deleting it leaves the gate exiting 1
     // for the right reason but no longer NAMING what was exempted, which is one
     // of the arm's four MEASURE_FAIL paths — the gate's own red mode, not an
@@ -3743,7 +3783,7 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
       // buy diagnosability by weakening it.
       expect(res.status, "the mutated gate must still FAIL the arm").toBe(1);
       expect(out).toContain("FAIL frontier-ceiling-exceeded RED");
-      expect(out).toContain("SELF-TEST FAIL: 10/11 arms behaved as declared.");
+      expect(out).toContain(`SELF-TEST FAIL: ${ARMS - 1}/${ARMS} arms behaved as declared.`);
 
       // The half this arm exists for.
       expect(
