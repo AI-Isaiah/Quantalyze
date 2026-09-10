@@ -1676,8 +1676,10 @@ export async function selfTest() {
         CRON_DRIFT_MOD.hygieneViolations(row.jobname, row.command).map((x) => x.slice(1, x.indexOf("]")));
       const silent = [];
       const unexpected = [];
+      const forbidden = [];
       const quoted = [];
       let judged = 0;
+      let asserted_not = 0;
       const byName = new Map();
       for (const row of bypass.data) {
         judged += 1;
@@ -1686,6 +1688,20 @@ export async function selfTest() {
         if (ids.length === 0) silent.push(row.shape);
         else if (!ids.some((id) => (row.expect_any_of || []).includes(id))) {
           unexpected.push(`${row.shape}->[${ids.join(",")}]`);
+        }
+        // ⭐ `expect_not` — THE Q2 SCOPING DECISION, MEASURED RATHER THAN
+        // ARGUED. `expect_any_of` alone cannot express "and NOT that other
+        // rule", so the `header_region_only` row would pass while BOTH rules
+        // fired — which is exactly the collision the decision to exclude header
+        // regions from `long-token-anywhere` exists to prevent, and exactly what
+        // would break the red rows' one-rule isolation.
+        //
+        // ⚠️ This row pins TODAY'S VALUES. The INVARIANT behind it —
+        // `TOKEN_MIN === HEADERS_LITERAL_MAX`, without which a token in the gap
+        // is caught by nobody — is pinned in prod-prober-wiring.test.ts.
+        for (const id of row.expect_not || []) {
+          asserted_not += 1;
+          if (ids.includes(id)) forbidden.push(`${row.jobname}->${id}`);
         }
         if (CRON_DRIFT_MOD.hygieneViolations(row.jobname, row.command).some((x) => x.includes(row.command))) {
           quoted.push(row.shape);
@@ -1707,6 +1723,14 @@ export async function selfTest() {
         expect(
           unexpected.length === 0,
           `and one of the rules it names (${unexpected.join(" ") || "every row matched its expect_any_of"})`,
+        ) &&
+        expect(
+          asserted_not > 0,
+          `at least one row carries an expect_not — without it the Q2 region-partition proof row is inert (${asserted_not} asserted)`,
+        ) &&
+        expect(
+          forbidden.length === 0,
+          `and no row fires a rule its expect_not forbids — the header-region token belongs to long-literal-in-headers ALONE (${forbidden.join(" ") || "none forbidden fired"})`,
         ) &&
         expect(quoted.length === 0, `and NO verdict quotes the offending command (${quoted.join(", ") || "none"})`) &&
         expect(pairs.length >= 2, `the apostrophe pair is present (${pairs.length} paired rows)`) &&
