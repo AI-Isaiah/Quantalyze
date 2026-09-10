@@ -3202,7 +3202,20 @@ FRESHSTUB
   # and EXPECTED_ARMS are all equal by construction, so the denominator is the
   # ratchet and says so.
   if [ "$total" -ne "$EXPECTED_ARMS" ]; then
-    echo "SELF-TEST FAIL: ${total} arms ran but EXPECTED_ARMS is ${EXPECTED_ARMS}. An arm that disappeared is a RED, not a smaller PASSED."
+    # ⛔ IN-01 (Phase 164.8.2) — THE MESSAGE NAMES THE DIRECTION IT MEASURED.
+    # One sentence covered both directions and named the WRONG one half the time:
+    # with a `run_arm` line DUPLICATED it printed "27 arms ran but EXPECTED_ARMS is
+    # 26. An arm that disappeared is a RED" — the count right, the reader sent
+    # hunting a deletion that never happened. The two directions have OPPOSITE
+    # remedies, which is why one sentence could not carry both: a vanished arm is
+    # RESTORED, an added arm is RATCHETED. The fix landed in
+    # `scripts/test-ledger-drift-check.sh` first; it belongs here more, because this
+    # is the script whose `--run` path is `DROP SCHEMA public CASCADE`.
+    if [ "$total" -lt "$EXPECTED_ARMS" ]; then
+      echo "SELF-TEST FAIL: ${total} arms ran but EXPECTED_ARMS is ${EXPECTED_ARMS}. An arm DISAPPEARED — that is a RED, not a smaller PASSED. RESTORE the arm. Never lower EXPECTED_ARMS to make a run green; that is deleting a proof of a guard on a destructive script."
+    else
+      echo "SELF-TEST FAIL: ${total} arms ran but EXPECTED_ARMS is ${EXPECTED_ARMS}. An arm was ADDED without raising the ratchet. RAISE EXPECTED_ARMS in the SAME commit as the arm, and move the dated MEASURED line and the \`prints N/N\` sentence beside it."
+    fi
     return 1
   fi
   if [ "$pass" -ne "$total" ]; then
