@@ -402,12 +402,23 @@ function softeningOffenders(text: string): string[] {
 }
 
 /**
- * Every `run: |` block in the scannable restore block, with the step it belongs to.
+ * Every `run:` BLOCK SCALAR in the scannable restore block, with the step it belongs to.
  *
  * Flow-scalar `run: <cmd>` steps are deliberately NOT collected: a one-command step
  * fails when its command fails, with or without `set -e`, so there is nothing there to
  * soften. Only a block scalar can quietly run five commands and report the last one's
  * status.
+ *
+ * ⛔ DEFAULT-IN: AN UNRECOGNISED `run:` SCALAR STYLE THROWS (review A4). This used to be
+ * `if (!/^\s*run: \|-?\s*$/.test(line)) continue;` — a DEFAULT-OUT collector. A step
+ * written `run: >`, `run: >-` or `run: |+` matched neither the block-scalar test nor
+ * anything else, so it was never checked for `-e` AND never reported: it simply left the
+ * corpus. `RUN_BLOCK_FLOOR` cannot see that, because a folded step ADDS a block the
+ * parser drops — the count does not fall below the floor, it just never rises. Measured
+ * 2026-09-10: 19 `run: |`, zero folded scalars, so nothing escapes TODAY; the point is
+ * that a NEW shape would escape silently. Now it throws, naming the line, the way
+ * `applyJobBlock` in `src/__tests__/critical-regressions.test.ts` throws on an
+ * unrecognised successor key. An unrecognised block is a finding, never a silent drop.
  */
 function runBlocks(text: string): { step: string; live: string[] }[] {
   const lines = scannableRestoreBlock(text).split("\n");
@@ -416,7 +427,23 @@ function runBlocks(text: string): { step: string; live: string[] }[] {
   for (let i = 0; i < lines.length; i += 1) {
     const m = lines[i].match(/^\s*- name: (.+)$/);
     if (m) step = m[1].trim();
-    if (!/^\s*run: \|-?\s*$/.test(lines[i])) continue;
+    const key = lines[i].match(/^\s*run:(?:\s+(\S.*?))?\s*$/);
+    if (key) {
+      const style = key[1] ?? "";
+      if (style !== "|" && style !== "|-") {
+        // A leading `|` or `>` means a block scalar this parser does not model; an
+        // EMPTY tail means `run:` with its value somewhere this parser is not looking.
+        // Anything else is a flow scalar and is skipped on the stated grounds above.
+        if (style === "" || style.startsWith("|") || style.startsWith(">")) {
+          throw new Error(
+            `${WF_PATH} line ${i + 1} of the scannable restore block uses an unrecognised \`run:\` scalar style in step "${step}": ${JSON.stringify(lines[i])}. This collector is DEFAULT-IN — a shape it cannot model is reported, never dropped, because a dropped block is one that is never checked for \`-e\` and never counted. Teach the parser the shape, or rewrite the step as \`run: |\`.`,
+          );
+        }
+        continue;
+      }
+    } else {
+      continue;
+    }
     const indent = lines[i].length - lines[i].trimStart().length;
     const body: string[] = [];
     for (let k = i + 1; k < lines.length; k += 1) {
@@ -482,10 +509,17 @@ const NO_ERREXIT_SITES: readonly string[] = [
 
 /**
  * MEASURED 2026-09-10, Phase 164.8.2: the scannable restore block holds 16 `run: |`
- * blocks, 13 of which set `-e`. A FLOOR, not an equality — a step added later must not
- * have to touch this number, but a parser that silently starts returning nothing must.
- * An empty list would make the rule below vacuously green, which is the failure shape
- * this whole file exists to refuse.
+ * blocks, 15 of which set `-e` (13 until review A1 revoked two NO_ERREXIT_SITES
+ * exemptions). A FLOOR, not an equality — a step added later must not have to touch this
+ * number, but a parser that silently starts returning nothing must. An empty list would
+ * make the rule below vacuously green, which is the failure shape this whole file exists
+ * to refuse.
+ *
+ * ⚠️ A FLOOR IS ONLY HALF THE GUARD, AND THE OTHER HALF IS IN `runBlocks` ITSELF. This
+ * number catches a parser returning too FEW of the shapes it KNOWS. It cannot catch a
+ * shape it does not know — a step added as `run: >-` would be dropped silently while the
+ * count stayed at 16. That direction is closed by making the collector throw (review A4),
+ * not by any number here.
  */
 const RUN_BLOCK_FLOOR = 16;
 
@@ -2206,6 +2240,158 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         errexitOffenders(renamed).join(" | "),
         "an exemption survived the step it exempts being renamed, and the renamed step was then unreported as well",
       ).toContain("DANGLING EXEMPTION");
+    });
+
+    /** The SUPERSEDED default-OUT collector, kept as a REFERENCE ORACLE and nothing else. */
+    function legacyRunBlockCount(text: string): number {
+      return scannableRestoreBlock(text)
+        .split("\n")
+        .filter((l) => /^\s*run: \|-?\s*$/.test(l)).length;
+    }
+
+    it("an unrecognised `run:` scalar style is REPORTED, not silently dropped", () => {
+      // ⛔ THE DEFAULT-OUT HOLE (review A4). `run: >`, `run: >-` and `run: |+` are all
+      // valid GitHub Actions steps that run several commands. The superseded collector
+      // matched only `run: |` / `run: |-`, so such a step was neither checked for `-e`
+      // nor reported — it left the corpus. And `RUN_BLOCK_FLOOR` is blind to it BY
+      // CONSTRUCTION: a folded step ADDS a block the parser drops, so the count never
+      // falls. The oracle below is what turns "the floor cannot see it" into a measurement.
+      const INSERT_AT = "      - name: Restore script self-test\n";
+      expect(
+        WF.split(INSERT_AT).length - 1,
+        "the insertion anchor is no longer unique in the workflow — re-anchor this arm rather than deleting it",
+      ).toBe(1);
+
+      for (const style of [">", ">-", "|+", "|2"]) {
+        const mutant = WF.replace(
+          INSERT_AT,
+          `      - name: A folded step (${style})\n        run: ${style}\n          echo one\n          echo two\n${INSERT_AT}`,
+        );
+        expect(mutant, `CALIBRATION (${style}): the mutation changed nothing`).not.toBe(WF);
+        expect(
+          legacyRunBlockCount(mutant),
+          `CALIBRATION (\`run: ${style}\`): the SUPERSEDED default-out collector already counted this step, so it was never dropped and A4 is not a finding`,
+        ).toBe(legacyRunBlockCount(WF));
+        expect(
+          () => runBlocks(mutant),
+          `a \`run: ${style}\` step was collected or skipped without a word. A block this parser cannot model is one that is never checked for \`-e\` and never counted — it must be a finding, not a drop.`,
+        ).toThrow(/unrecognised `run:` scalar style/);
+      }
+    });
+
+    /**
+     * A4, second half — the EXCLUDED mutex steps, measured rather than left invisible.
+     *
+     * `scannableRestoreBlock` slices BOTH ci.yml-copied mutex steps out, so
+     * `errexitOffenders` structurally cannot see them. `Release shared-test-db mutex
+     * (best effort)` therefore had no `set -e` and no exemption — it was outside the
+     * rule rather than excused by it, and "invisible" and "allowed" look identical from
+     * inside the rule. The exclusion is FORCED (the acquire suffix must stay byte-equal
+     * to ci.yml's and legitimately carries `exit 0`, `|| true` and `::warning`), so the
+     * answer is a second, narrower bijection over exactly the excluded region.
+     */
+    const MUTEX_NO_ERREXIT: readonly string[] = [
+      // The one step in this file allowed to end without a non-zero exit: killing the
+      // holder early is a courtesy to the next waiter, job teardown drops the session
+      // anyway, and reddening a job whose real work passed would be worse than the
+      // late release. Its body is BYTE-EQUAL to ci.yml's, so adding `-e` here would
+      // fork the copy the byte-identity pin exists to hold.
+      "Release shared-test-db mutex (best effort)",
+    ];
+
+    function mutexErrexitOffenders(text: string): string[] {
+      const offenders: string[] = [];
+      const seen: string[] = [];
+      for (const re of [ACQUIRE_RE, RELEASE_RE]) {
+        const region = text.match(re)?.[0] ?? "";
+        if (region === "") {
+          offenders.push(
+            "A MUTEX STEP DID NOT MATCH ITS SLICER — the excluded region is not what this rule thinks it is, so both the exclusion and this measurement are unanchored.",
+          );
+          continue;
+        }
+        const name = region.match(/^\s*- name: (.+)$/m)?.[1]?.trim() ?? "(unnamed)";
+        seen.push(name);
+        const live = liveLines(region);
+        const setsE = live.some((l) => ERREXIT_RE.test(l));
+        const exempt = MUTEX_NO_ERREXIT.includes(name);
+        if (!setsE && !exempt) {
+          offenders.push(
+            `NO ERREXIT in EXCLUDED mutex step "${name}" — it is sliced out of the scannable block, so the main rule cannot see it. Outside a rule is not the same as excused by one: give it \`-e\`, or list it in MUTEX_NO_ERREXIT with its reason.`,
+          );
+        }
+        if (setsE && exempt) {
+          offenders.push(
+            `STALE MUTEX EXEMPTION for "${name}" — it sets \`-e\` and is still listed. An exemption nobody needs is a standing permission to soften that step later.`,
+          );
+        }
+      }
+      for (const site of MUTEX_NO_ERREXIT) {
+        const n = seen.filter((x) => x === site).length;
+        if (n !== 1) {
+          offenders.push(
+            `DANGLING MUTEX EXEMPTION "${site}" — matched ${n} excluded mutex step(s), want exactly 1.`,
+          );
+        }
+      }
+      return offenders;
+    }
+
+    it("the EXCLUDED mutex steps are measured for `-e` too, and the one exemption is NAMED", () => {
+      // First: prove they really are invisible to the main rule, or this arm is
+      // duplicating a check that already exists rather than closing a hole.
+      const scannableSteps = runBlocks(WF).map((b) => b.step);
+      for (const name of ["Acquire shared-test-db mutex", ...MUTEX_NO_ERREXIT]) {
+        expect(
+          scannableSteps.includes(name),
+          `"${name}" is now INSIDE the scannable block, so \`errexitOffenders\` covers it and this narrower rule is redundant — delete it rather than keeping two opinions about one step.`,
+        ).toBe(false);
+        expect(
+          WF.includes(`- name: ${name}`),
+          `"${name}" is gone from the workflow — this rule is measuring a step that no longer exists`,
+        ).toBe(true);
+      }
+
+      expect(
+        mutexErrexitOffenders(WF),
+        "an excluded mutex step neither turns `-e` on nor carries a named exemption",
+      ).toEqual([]);
+
+      // ⭐ CALIBRATION 1 — the ACQUIRE step, which DOES set `-e`, loses it. Nothing in
+      // the main scan can see this: the step is sliced out before that rule runs.
+      const ACQUIRE_ANCHOR =
+        '          set -euo pipefail\n          if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then\n            echo "::error::TEST_SUPABASE_DB_URL is empty at the mutex acquire.';
+      expect(
+        WF.split(ACQUIRE_ANCHOR).length - 1,
+        "the acquire step's `set -euo pipefail` is no longer uniquely anchored here — re-anchor rather than deleting the twin",
+      ).toBe(1);
+      const softAcquire = WF.replace(ACQUIRE_ANCHOR, ACQUIRE_ANCHOR.replace("set -euo pipefail", "set -uo pipefail"));
+      expect(softAcquire, "CALIBRATION: the acquire-softening mutation changed nothing").not.toBe(WF);
+      expect(
+        errexitOffenders(softAcquire),
+        "CALIBRATION: the MAIN errexit rule reported the acquire step, so it is not excluded after all and this narrower rule buys nothing",
+      ).toEqual([]);
+      expect(
+        mutexErrexitOffenders(softAcquire).join(" | "),
+        "the acquire step — which holds advisory key 61616158 across marker, dry-run, push and post-verify — dropped `-e` and NOTHING reported it",
+      ).toContain('NO ERREXIT in EXCLUDED mutex step "Acquire shared-test-db mutex"');
+
+      // ⭐ CALIBRATION 2 — the other direction: the release step gains `-e` and its
+      // exemption must not outlive the need for it.
+      const RELEASE_ANCHOR = '        run: |\n          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"';
+      expect(
+        WF.split(RELEASE_ANCHOR).length - 1,
+        "the release step's `run: |` is no longer uniquely anchored here",
+      ).toBe(1);
+      const tightRelease = WF.replace(
+        RELEASE_ANCHOR,
+        '        run: |\n          set -euo pipefail\n          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"',
+      );
+      expect(tightRelease, "CALIBRATION: the release-tightening mutation changed nothing").not.toBe(WF);
+      expect(
+        mutexErrexitOffenders(tightRelease).join(" | "),
+        "the release step started setting `-e` and kept its exemption — a standing permission to soften it again, granted by nobody",
+      ).toContain('STALE MUTEX EXEMPTION for "Release shared-test-db mutex (best effort)"');
     });
 
     it("the token list is NINE, and its two hand-kept siblings must move with it", () => {
