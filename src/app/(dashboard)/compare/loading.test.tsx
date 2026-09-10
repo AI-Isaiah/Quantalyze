@@ -120,12 +120,33 @@ describe("[153 review] the skeleton's box matches the page's box", () => {
     expect(boxInsets("space-y-8 gap-4 flex w-full animate-pulse")).toEqual([]);
   });
 
+  /**
+   * The page's real render block — everything from its FINAL `return (`.
+   *
+   * 164.8.2 — this was an inline `pageSrc.slice(pageSrc.lastIndexOf("return ("))`.
+   * The docblock beside it worried about the slice going "silently empty", but
+   * `lastIndexOf` misses to -1 and `slice(-1)` is the LAST CHARACTER of the
+   * file, which is a different degeneracy than the one described. Today the
+   * `toContain("<CompareTable")` below catches it, so the site was LATENT rather
+   * than live — but it catches it while reporting "the page no longer renders
+   * CompareTable", which is a lie about what broke. Name the missing anchor at
+   * the point it goes missing instead; there is no default worth substituting.
+   */
+  function pageRenderBlock(pageSrc: string): string {
+    const at = pageSrc.lastIndexOf("return (");
+    if (at < 0) {
+      throw new Error(
+        `pageRenderBlock: ${PAGE} carries no "return (" anchor, so its render ` +
+          "block cannot be located — the comparison below would read a slice of " +
+          "the file rather than the page's content",
+      );
+    }
+    return pageSrc.slice(at);
+  }
+
   it("⭐ the skeleton's wrappers carry the SAME box inset as the page's", () => {
     const pageSrc = readFileSync(join(process.cwd(), PAGE), "utf8");
-    // The page's real render block. Anti-vacuity: if a refactor moves the
-    // content out of the final `return (`, this slice would silently go empty
-    // and the comparison would pass against nothing.
-    const pageRender = pageSrc.slice(pageSrc.lastIndexOf("return ("));
+    const pageRender = pageRenderBlock(pageSrc);
     expect(
       pageRender,
       "compare/page.tsx's final return no longer renders CompareTable — this " +
@@ -161,5 +182,27 @@ describe("[153 review] the skeleton's box matches the page's box", () => {
         "page and skeleton both rely on it and neither carries padding of " +
         "its own",
     ).toContain("px-4 py-6 md:px-8 md:py-8");
+  });
+
+  it("CALIBRATION (164.8.2) — pageRenderBlock BITES when the `return (` anchor is absent", () => {
+    const pageSrc = readFileSync(join(process.cwd(), PAGE), "utf8");
+
+    // The mutant: the same page source with every `return (` anchor removed.
+    const anchorless = pageSrc.replaceAll("return (", "return/*x*/(");
+    expect(anchorless, "the mutation did not apply").not.toBe(pageSrc);
+    expect(
+      anchorless.includes("return ("),
+      "the anchor is still present",
+    ).toBe(false);
+
+    // Run the REAL extractor over the mutant. Under the old inline form this
+    // returned the file's last character and the arm reported the wrong cause.
+    expect(() => pageRenderBlock(anchorless)).toThrow(/no "return \(" anchor/);
+
+    // CONTROL — over the real page it still yields the block that renders the
+    // table, i.e. it is reading content and not a one-character tail.
+    const real = pageRenderBlock(pageSrc);
+    expect(real).toContain("<CompareTable");
+    expect(real.length).toBeGreaterThan(1);
   });
 });

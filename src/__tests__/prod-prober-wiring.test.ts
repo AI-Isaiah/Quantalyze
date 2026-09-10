@@ -55,6 +55,47 @@ const SELF_TEST_RUN_LINE = "run: node scripts/prod-prober/run.mjs --self-test";
 const LIVE_COMMAND = 'node scripts/prod-prober/run.mjs > "$RUNNER_LOG" 2>&1';
 
 // ---------------------------------------------------------------------------
+// ⛔ ANCHOR DISCIPLINE (Phase 164.8.2 / WR-07). READ THIS BEFORE WRITING A SLICE.
+//
+// `String.indexOf` returns -1 on a miss, and JavaScript's `slice` reads a
+// negative index FROM THE END: `s.slice(-1)` is the LAST CHARACTER and
+// `s.slice(0, -1)` is nearly the WHOLE string. So a narrowing slice whose anchor
+// has been RENAMED does not fail — it degenerates into a subject that a
+// `toContain` / `not.toContain` / `toBe("")`-shaped assertion sails straight
+// over. MEASURED on this very branch: a byte-identity pin over an entire mutex
+// protocol was found comparing `"\n"` to `"\n"` and PASSING.
+//
+// ⛔ AN ABSENT ANCHOR IS A FINDING, NOT A VALUE. Never `?? ''`, never `|| 0`,
+// never `Math.max(0, i)`, and never the `start < 0 ? "" : …` shape these very
+// helpers used to carry — an empty subject is exactly what makes the assertion
+// vacuous. Throw, and NAME the anchor that went missing.
+//
+// ⚠️ These helpers are restated per-file rather than imported, for the same
+// self-containment reason `SOFTENING_TOKENS` is (CONTEXT Area 3, LOCKED for
+// Phase 164.8.2): no shared helper module that only wiring tests import.
+// ---------------------------------------------------------------------------
+
+/** `text.indexOf(anchor)`, but a miss THROWS by name instead of returning -1. */
+function anchorIndex(text: string, anchor: string, from = 0): number {
+  const at = text.indexOf(anchor, from);
+  if (at < 0) {
+    throw new Error(
+      `ANCHOR MISSING: ${JSON.stringify(anchor)} is not present in the subject text. ` +
+        `The narrowing slice that wanted it would have degenerated (slice(-1) is the LAST ` +
+        `CHARACTER, slice(0, -1) is nearly the WHOLE string) and every assertion over the ` +
+        `result would have passed vacuously. Fix the anchor or the subject — do not default it.`,
+    );
+  }
+  return at;
+}
+
+/** The region from `startAnchor` up to `endAnchor`; either miss throws by name. */
+function sliceBetweenAnchors(text: string, startAnchor: string, endAnchor: string): string {
+  const start = anchorIndex(text, startAnchor);
+  return text.slice(start, anchorIndex(text, endAnchor, start));
+}
+
+// ---------------------------------------------------------------------------
 // Predicates. Every one takes TEXT, so each can be run against a mutant.
 // ---------------------------------------------------------------------------
 
@@ -85,22 +126,62 @@ function liveCommandCapturesItsOwnStatus(text: string): boolean {
 
 /** The single `probe:` job block. */
 function probeJobText(text: string): string {
-  const start = text.indexOf("\n  probe:");
-  return start < 0 ? "" : text.slice(start);
+  return text.slice(anchorIndex(text, "\n  probe:"));
 }
 
-/** Every shape that could turn a failure into a pass, reported BY NAME. */
-const SOFTENING_TOKENS = ["continue-on-error", "|| true", "exit 0", "::warning", "set +e"];
+/**
+ * Every shape that could turn a failure into a pass, reported BY NAME.
+ *
+ * ⭐ THIS FILE IS THE ORIGIN OF THE IDIOM, and it was the LAST of the three to widen.
+ * The five-token list started here (Phase 164.1) and was copied out to
+ * `src/__tests__/supabase-migrate-test-first.test.ts` and to
+ * `src/__tests__/test-restore-workflow-wiring.test.ts`. Phase 164.8 widened the
+ * migrate copy to nine; Phase 164.8.2 widened the restore copy and, on measuring the
+ * class rather than the review's file list, found this third copy still on five.
+ * "One of three hardened" is the same defect as "one half of a twin pair hardened".
+ *
+ * ⚠️ THE LAST FOUR ARE HERE BECAUSE the first five were not a class, they were five
+ * spellings of a class:
+ *   - `|| :`            a drop-in for the banned `|| true`, and shorter to type.
+ *   - `2>/dev/null`     swallows the stderr that is the evidence a command failed.
+ *   - `set +o pipefail` re-enables the "a piped command's exit status is discarded"
+ *                       bug — the exact bug the comment above the self-test step in
+ *                       `prod-prober.yml` says the file-then-`cat` shape exists to
+ *                       avoid.
+ *   - `|| exit 0`       an explicit "and if that failed, succeed anyway".
+ *
+ * ⛔ Widening this list cost NOTHING to triage, and that was MEASURED, not assumed:
+ * `prod-prober.yml` carries 0 occurrences of all four (`grep -cF`, 2026-09-09), so
+ * unlike the restore workflow this file needs no exact-set allowlist. Regenerate that
+ * reading before trusting it.
+ *
+ * ⛔ THREE COPIES, KEPT LEVEL BY HAND, ON PURPOSE — restated rather than imported for
+ * the self-containment reason these wiring tests are built on (Phase 164.8 Plan 05
+ * Task 2; CONTEXT Area 3, LOCKED for Phase 164.8.2). No shared helper module that only
+ * wiring tests import. The length pin below is what makes the duplication survivable.
+ */
+const SOFTENING_TOKENS = [
+  "continue-on-error",
+  "|| true",
+  "exit 0",
+  "::warning",
+  "set +e",
+  "|| :",
+  "2>/dev/null",
+  "set +o pipefail",
+  "|| exit 0",
+];
 function softeningOffenders(text: string): string[] {
   return SOFTENING_TOKENS.filter((t) => text.includes(t));
 }
 
 /** The credential-assert step, from its `- name:` to its `run:`. */
 function credentialStepText(text: string): string {
-  const start = text.indexOf("- name: Assert credentials are configured");
-  if (start < 0) return "";
-  const end = text.indexOf("\n        run: |", start);
-  return end < 0 ? "" : text.slice(start, end);
+  return sliceBetweenAnchors(
+    text,
+    "- name: Assert credentials are configured",
+    "\n        run: |",
+  );
 }
 
 /** True when an `if:` key sits between the credential step's name and its run body. */
@@ -110,10 +191,16 @@ function credentialStepHasIf(text: string): boolean {
 
 /** The `if:` expression guarding the auto-issue step. */
 function issueStepIfExpression(text: string): string {
-  const start = text.indexOf("- name: Open or update the prod-prober issue");
-  if (start < 0) return "";
+  const start = anchorIndex(text, "- name: Open or update the prod-prober issue");
   const m = text.slice(start).match(/^\s*if:(.*)$/m);
-  return m ? m[1].trim() : "";
+  if (!m) {
+    throw new Error(
+      "ANCHOR MISSING: the auto-issue step carries no `if:` key at all. Returning \"\" here " +
+        "would make every `not.toContain` over the expression pass vacuously — an UNGATED " +
+        "auto-issue step is the very defect this predicate exists to report.",
+    );
+  }
+  return m[1].trim();
 }
 
 interface Policy {
@@ -128,8 +215,11 @@ interface Policy {
 }
 
 function policyOf(text: string): Policy {
-  const permissions = text.slice(text.indexOf("\npermissions:"), text.indexOf("\nconcurrency:"));
-  const concurrency = text.slice(text.indexOf("\nconcurrency:"), text.indexOf("\njobs:"));
+  // ⛔ WR-07, and this pair was the WORST case in the class: rename either key
+  // and `slice(-1, …)` / `slice(…, -1)` hands back a last character or nearly the
+  // whole file, and every regex below then reports a policy that was never read.
+  const permissions = sliceBetweenAnchors(text, "\npermissions:", "\nconcurrency:");
+  const concurrency = sliceBetweenAnchors(text, "\nconcurrency:", "\njobs:");
   const timeout = text.match(/^\s*timeout-minutes:\s*(\d+)\s*$/m);
   const maskAt = text.indexOf("::add-mask::");
   const exportAt = text.indexOf("PROBER_POOLER_URL=$pooler");
@@ -304,7 +394,7 @@ describe("[164.1-05] nothing softens a failure", () => {
     // The mutant is not invented here — it is the repo's OWN shape, the one
     // that printed a warning on an unset secret and then returned success.
     const phase19 = readFileSync(PHASE19_PATH, "utf8");
-    const rc2 = phase19.slice(phase19.indexOf("          set +e"), phase19.indexOf('          exit "$rc"'));
+    const rc2 = sliceBetweenAnchors(phase19, "          set +e", '          exit "$rc"');
     expect(rc2.length, "the phase-19 rc-2 block must be findable").toBeGreaterThan(100);
     const mutant = WORKFLOW_TEXT.replace(SELF_TEST_RUN_LINE, `${SELF_TEST_RUN_LINE}\n${rc2}`);
     expect(mutant, "the splice must actually change the text").not.toBe(WORKFLOW_TEXT);
@@ -318,6 +408,80 @@ describe("[164.1-05] nothing softens a failure", () => {
     const mutant = WORKFLOW_TEXT.replace(SELF_TEST_RUN_LINE, `${SELF_TEST_RUN_LINE} || true`);
     expect(mutant, "the softening must actually change the text").not.toBe(WORKFLOW_TEXT);
     expect(softeningOffenders(mutant)).toContain("|| true");
+  });
+
+  // ── The four tokens Phase 164.8.2 (WR-06) added, one calibration each. ──────
+  // A widened list that is never shown to bite is a list that reads harder and is
+  // not, which is the precise defect class this phase closes. Each mutant is
+  // inserted INSIDE the scanned `probe:` region and each asserts the mutation
+  // actually changed the text first — a replace whose anchor has moved leaves the
+  // string identical, and an unreported identical string reads as a passing arm.
+
+  it("CALIBRATION (164.8.2/WR-06): an `|| :` after the self-test is reported by name", () => {
+    const mutant = WORKFLOW_TEXT.replace(SELF_TEST_RUN_LINE, `${SELF_TEST_RUN_LINE} || :`);
+    expect(mutant, "the softening must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(softeningOffenders(probeJobText(mutant))).toContain("|| :");
+  });
+
+  it("CALIBRATION (164.8.2/WR-06): a `2>/dev/null` on the self-test is reported by name", () => {
+    // The self-test's whole job is to prove the detector can still fire. Swallow its
+    // stderr and a BROKEN prober reports nothing while the step still exits 0 on the
+    // happy path — the same shape that makes `2>/dev/null` the worst of the nine on
+    // the restore workflow's database-identity step.
+    const mutant = WORKFLOW_TEXT.replace(SELF_TEST_RUN_LINE, `${SELF_TEST_RUN_LINE} 2>/dev/null`);
+    expect(mutant, "the softening must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(softeningOffenders(probeJobText(mutant))).toContain("2>/dev/null");
+  });
+
+  it("CALIBRATION (164.8.2/WR-06): a `set +o pipefail` inside a probe step is reported by name", () => {
+    // Anchored on the Railway-CLI step's own `set -euo pipefail`, which is inside the
+    // `probe:` job and is the shape a real re-enabling edit would take.
+    const anchor = '          set -euo pipefail\n          asset="railway';
+    expect(
+      WORKFLOW_TEXT.split(anchor).length - 1,
+      "the Railway-CLI step's `set -euo pipefail` anchor moved; the mutation below would be a no-op",
+    ).toBe(1);
+    const mutant = WORKFLOW_TEXT.replace(
+      anchor,
+      '          set -euo pipefail\n          set +o pipefail\n          asset="railway',
+    );
+    expect(mutant, "the softening must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(softeningOffenders(probeJobText(mutant))).toContain("set +o pipefail");
+  });
+
+  it("CALIBRATION (164.8.2/WR-06): an `|| exit 0` after the self-test is reported by name", () => {
+    const mutant = WORKFLOW_TEXT.replace(SELF_TEST_RUN_LINE, `${SELF_TEST_RUN_LINE} || exit 0`);
+    expect(mutant, "the softening must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(softeningOffenders(probeJobText(mutant))).toContain("|| exit 0");
+    // ⚠️ And it is NOT absorbed by the measured schedule-path posture. That exemption
+    // is for the ONE guarded `exit 0` inside the schedule branch; an `|| exit 0` on
+    // the self-test line is a different site and must survive the same filter the
+    // posture arm above applies.
+    expect(
+      softeningOffenders(probeJobText(mutant)).filter((o) => o !== "exit 0" && o !== "::warning"),
+    ).toContain("|| exit 0");
+  });
+
+  it("the token list is NINE, and its two hand-kept siblings must move with it", () => {
+    expect(
+      SOFTENING_TOKENS,
+      "SOFTENING_TOKENS moved off nine. This list is one of THREE hand-kept copies — the others are in `src/__tests__/supabase-migrate-test-first.test.ts` and `src/__tests__/test-restore-workflow-wiring.test.ts`, and they are duplicated deliberately (CONTEXT Area 3, LOCKED: no shared helper module that only wiring tests import). Widen or narrow ALL THREE in the same commit, or the class Phase 164.8.2 closed re-opens as 'one of three hardened'.",
+    ).toHaveLength(9);
+    expect(new Set(SOFTENING_TOKENS).size, "a token is listed twice").toBe(SOFTENING_TOKENS.length);
+  });
+
+  it("the four tokens added in 164.8.2 are still ABSENT from prod-prober.yml, so no allowlist is owed", () => {
+    // The premise of the "widening this list is free" amendment (CONTEXT Area 3),
+    // made executable rather than left as a dated sentence. If a legitimate site ever
+    // appears here, this arm reds and the answer is an exact-set allowlist with a
+    // per-site justification — the `test-restore-workflow-wiring.test.ts` shape — not
+    // dropping the token from the list.
+    for (const token of ["|| :", "2>/dev/null", "set +o pipefail", "|| exit 0"]) {
+      expect(
+        WORKFLOW_TEXT.split(token).length - 1,
+        `prod-prober.yml gained a \`${token}\` site. This file has NO allowlist because the count was measured at 0 on 2026-09-09; a new site needs a justified exact-set count, not a narrower token list.`,
+      ).toBe(0);
+    }
   });
 
   it("the credential-assert step has NO `if:` and names all eight identifiers (D-06)", () => {
@@ -364,6 +528,41 @@ describe("[164.1-05] workflow policy", () => {
     expect(p.timeoutMinutes!).toBeLessThanOrEqual(30);
     expect(p.masksPoolerBeforeExport, "the pooler DSN must be masked BEFORE it is exported").toBe(true);
     expect(p.secretsOnlyViaEnv, "a secret is interpolated somewhere other than an env: value").toBe(true);
+  });
+
+  it("CALIBRATION (164.8.2/WR-07): renaming a slice anchor FAILS BY NAME instead of degenerating", () => {
+    // ⛔ The arm above reads `permissions:` and `concurrency:` out of a SLICE
+    // bounded by two `indexOf` results. Before WR-07 a rename of either key made
+    // `slice` take a negative index — `slice(-1, …)` is the LAST CHARACTER,
+    // `slice(…, -1)` is nearly the WHOLE file — and every regex over the result
+    // reported a policy nobody had read. This is the whole class in one arm.
+    const mutant = WORKFLOW_TEXT.replace("\npermissions:", "\nperms:");
+    expect(mutant, "the rename must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(
+      mutant.includes("\npermissions:"),
+      "the mutation must actually REMOVE the anchor — a mutant that still carries it proves nothing",
+    ).toBe(false);
+    expect(() => policyOf(mutant)).toThrow(/ANCHOR MISSING: "\\npermissions:"/);
+    // Control: the real subject still has the anchor, so the check is a check
+    // and not a blanket refusal.
+    expect(() => policyOf(WORKFLOW_TEXT)).not.toThrow();
+
+    // The same discipline on the single-anchor helpers this file's predicates use.
+    const noProbe = WORKFLOW_TEXT.replace("\n  probe:", "\n  prb:");
+    expect(noProbe.includes("\n  probe:"), "the probe-job mutation must remove the anchor").toBe(false);
+    expect(() => probeJobText(noProbe)).toThrow(/ANCHOR MISSING: "\\n {2}probe:"/);
+    expect(() => probeJobText(WORKFLOW_TEXT)).not.toThrow();
+
+    const noCredStep = WORKFLOW_TEXT.replace(
+      "- name: Assert credentials are configured",
+      "- name: Check credentials are configured",
+    );
+    expect(
+      noCredStep.includes("- name: Assert credentials are configured"),
+      "the credential-step mutation must remove the anchor",
+    ).toBe(false);
+    expect(() => credentialStepText(noCredStep)).toThrow(/ANCHOR MISSING/);
+    expect(() => credentialStepText(WORKFLOW_TEXT)).not.toThrow();
   });
 
   it("D-18: nothing in ci.yml references the prober — a red prober must never block a deploy", () => {
@@ -468,7 +667,7 @@ describe("[164.1-05] kinds and floors", () => {
     // exercised set is read out of selfTest()'s own SOURCE. The literal
     // `kind === "<k>"` comparisons are what this extractor can see, which is
     // why the runner spells them independently of its fixture table.
-    const selfTestBody = RUNNER_TEXT.slice(RUNNER_TEXT.indexOf("export async function selfTest()"));
+    const selfTestBody = RUNNER_TEXT.slice(anchorIndex(RUNNER_TEXT, "export async function selfTest()"));
     expect(selfTestBody.length, "selfTest() must be findable in the source").toBeGreaterThan(1000);
     const exercised = new Set([...selfTestBody.matchAll(/kind === "([a-z0-9-]+)"/g)].map((m) => m[1]));
     expect(exercised.size, "the self-test must assert on at least one kind").toBeGreaterThan(0);
@@ -479,7 +678,7 @@ describe("[164.1-05] kinds and floors", () => {
   });
 
   it("CALIBRATION: a kind with no by-name assertion is reported UNCOVERED", () => {
-    const selfTestBody = RUNNER_TEXT.slice(RUNNER_TEXT.indexOf("export async function selfTest()"));
+    const selfTestBody = RUNNER_TEXT.slice(anchorIndex(RUNNER_TEXT, "export async function selfTest()"));
     const mutant = selfTestBody.split('kind === "mt5-probe-timeout"').join('kind === "mt5-probe-elapsed"');
     expect(mutant, "the rename must actually change the text").not.toBe(selfTestBody);
     const exercised = new Set([...mutant.matchAll(/kind === "([a-z0-9-]+)"/g)].map((m) => m[1]));

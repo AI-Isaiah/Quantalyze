@@ -491,6 +491,17 @@ function codeArgumentOf(callee: string, args: string[]): string | null {
   const keywords = new Map<string, string>();
   for (const arg of args) {
     const kw = KEYWORD_ARG_RE.exec(arg);
+    // 164.8.2 — the `indexOf` here CANNOT return -1, and the reason is measured
+    // rather than assumed, so the next reader does not have to re-derive it:
+    // `KEYWORD_ARG_RE` is `^`-anchored and non-global, so `kw.index` is always
+    // 0; everything it matches before the `=` is `\s*`, `[A-Za-z_]\w*`, `\s*`,
+    // none of which can BE an `=`. So a successful `exec` proves an `=` exists
+    // and that the first one in `arg` is precisely the one matched. This site is
+    // therefore left un-narrowed on purpose — a throw here would be unreachable
+    // code, not a guard. The SELF-TEST "a matched kwarg always carries its `=`"
+    // below pins that implication, so a future relaxation of the regex (dropping
+    // the `^`, or admitting a prefix that can contain `=`) reds instead of
+    // silently reintroducing the class.
     if (kw) keywords.set(kw[1], arg.slice(arg.indexOf("=", kw.index) + 1));
     else positional.push(arg);
   }
@@ -1392,5 +1403,42 @@ describe("[140.5-02 / SEAMPROSE-03] every EMITTED Python error_code has a TypeSc
     expect(
       ASSIGNMENT_RE.exec('assert result["error_code"] == "MISSING_SCOPE"'),
     ).toBeNull();
+  });
+
+  it("SELF-TEST (164.8.2) — a matched kwarg ALWAYS carries its `=`, so codeArgumentOf's indexOf cannot miss", () => {
+    // WHY THIS ARM EXISTS. `codeArgumentOf` narrows a keyword argument with
+    // `arg.slice(arg.indexOf("=", kw.index) + 1)` and does NOT check the index,
+    // which everywhere else in this campaign is the vacuity shape. Here it is
+    // genuinely unreachable — but only because of a property of KEYWORD_ARG_RE,
+    // and a property nothing pinned is a property a future edit can delete. This
+    // is that pin.
+    const shapes = [
+      'error_code="A_CODE"',
+      "  error_code = 'B_CODE'",
+      "\terror_code\t=\tC",
+      "_x9 =D",
+      // The shape that pins the LOAD-BEARING half: the value itself contains an
+      // `=`. Under the real regex the match ends at the FIRST `=` (`kw[0]` is
+      // `"a="`), so `indexOf("=", kw.index)` lands on that one. A prefix pattern
+      // that could swallow an `=` (e.g. `([^\s]*)` instead of `([A-Za-z_]\w*)`)
+      // would end the match at the SECOND `=` while `indexOf` still found the
+      // first — a silently wrong slice, which the identity below reds on.
+      "a=b=c",
+    ];
+    for (const arg of shapes) {
+      const kw = KEYWORD_ARG_RE.exec(arg);
+      expect(kw, `unmatched: ${JSON.stringify(arg)}`).not.toBeNull();
+      // (a) the match is anchored at 0, and (b) the first `=` at or after it is
+      // real — the two facts the un-narrowed slice rests on.
+      expect(kw!.index).toBe(0);
+      const at = arg.indexOf("=", kw!.index);
+      expect(at, `no "=" in ${JSON.stringify(arg)}`).toBeGreaterThanOrEqual(0);
+      // …and it is the `=` the regex itself consumed, not a later one.
+      expect(at).toBe(kw![0].length - 1);
+    }
+    // NEGATIVE HALF: no match ⇒ the slice never runs, so an `=`-less argument
+    // never reaches the un-narrowed line at all.
+    expect(KEYWORD_ARG_RE.exec('"NOT_A_KWARG"')).toBeNull();
+    expect(KEYWORD_ARG_RE.exec("code == \"CMP\"")).toBeNull();
   });
 });

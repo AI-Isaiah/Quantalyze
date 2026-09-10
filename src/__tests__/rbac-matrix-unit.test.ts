@@ -217,6 +217,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
+// ⛔ THE DELIBERATE DEGENERACY DEMONSTRATION, ROUTED THROUGH ITS ONE NAMED HOME
+// (Phase 164.8.2 / W3). The calibration below must WRITE the unchecked narrow —
+// that expression IS its evidence — but the class rule in
+// `test-restore-workflow-wiring.test.ts` now scans every test file. A file:line
+// allowlist rots and fragment assembly ("sl" + "ice") would make the evidence
+// unreadable, so the trap lives in one announced function instead.
+import { degenerateNarrow } from "../test/helpers/degenerate-narrow";
+
 function makeRequest(
   body: unknown = {},
   url = "http://localhost:3000/api/admin/users/target-user-id/roles",
@@ -658,6 +666,26 @@ describe("H-0025: every admin route registers an RBAC guard", () => {
     "isAdminUser",
   ];
 
+  /**
+   * ⛔ ANCHOR DISCIPLINE (Phase 164.8.2 / WR-07). `String.indexOf` returns -1 on
+   * a miss and `s.slice(-1)` is the LAST CHARACTER, so an absolute path that did
+   * not contain `src/` used to collapse the repo-relative name below to a single
+   * character — which is the name this suite reports a missing admin guard UNDER.
+   * An unguarded admin route reported as `"s"` is a finding nobody can act on.
+   * An absent anchor is a FINDING, not a value: throw, and name it.
+   */
+  function anchorIndex(text: string, anchor: string): number {
+    const at = text.indexOf(anchor);
+    if (at < 0) {
+      throw new Error(
+        `ANCHOR MISSING: ${JSON.stringify(anchor)} is not present in ${JSON.stringify(text)}. ` +
+          `The repo-relative route name would have degenerated to a single character, and ` +
+          `this suite reports an unguarded admin route BY THAT NAME. Fix the walk, do not default it.`,
+      );
+    }
+    return at;
+  }
+
   /** Recursively collect every `route.ts` under the admin API tree. */
   function collectRouteFiles(dir: string): string[] {
     const out: string[] = [];
@@ -681,8 +709,28 @@ describe("H-0025: every admin route registers an RBAC guard", () => {
     expect(routeFiles.length).toBeGreaterThanOrEqual(15);
   });
 
+  it("CALIBRATION (164.8.2/WR-07): the repo-relative name throws BY NAME rather than degenerating", () => {
+    // A guard added and never shown to fire is the defect it was added to close.
+    // Control: a real discovered path resolves and yields a usable name.
+    const real = routeFiles[0];
+    expect(() => anchorIndex(real, "src/")).not.toThrow();
+    expect(real.slice(anchorIndex(real, "src/"))).toMatch(/^src\/app\/api\/admin\//);
+
+    // Mutant: the anchor is gone from the path. Assert the mutation APPLIED
+    // before asserting the flip — a mutant that still carries the anchor proves
+    // nothing, and two calibrations on this branch were found doing neither.
+    const mutant = real.split("src/").join("source/");
+    expect(mutant, "the mutation must actually change the path").not.toBe(real);
+    expect(mutant.includes("src/"), "the mutation must actually REMOVE the anchor").toBe(false);
+    expect(() => anchorIndex(mutant, "src/")).toThrow(/ANCHOR MISSING: "src\/"/);
+
+    // ⚠️ The trap it replaces: the unchecked form names the route "/" — one
+    // character — and that is the name an unguarded-admin-route failure carried.
+    expect(degenerateNarrow(mutant, { from: "src/" }).length).toBe(1);
+  });
+
   for (const file of routeFiles) {
-    const rel = file.slice(file.indexOf("src/"));
+    const rel = file.slice(anchorIndex(file, "src/"));
     it(`${rel} references an admin guard`, () => {
       const src = readFileSync(file, "utf8");
       const matched = GUARD_TOKENS.filter((t) => src.includes(t));

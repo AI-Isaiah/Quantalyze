@@ -679,9 +679,32 @@ function chokepointRetry(code: string): string {
  * to disagree with and would simply be a second place to forget.
  */
 function returnedKeyLiterals(code: string, declaration: string): string[] {
+  // 164.8.2 — BOTH lookups fail loud now, and the first is the interesting one.
+  // `if (start < 0) return []` was a SILENT EMPTY POPULATION: a renamed or moved
+  // `budgetKeyFor` made family (ii) discover nothing, and a guard that reports a
+  // smaller class than exists is exactly the failure the fence at
+  // "finds bindings at all" was built to catch — except this shape reaches that
+  // fence already emptied, with no name attached. The second lookup's -1 fed
+  // `slice(start, -1)`, which is the whole rest of the FILE minus one character,
+  // so a body that never closes at column 0 silently widened the scan. Neither
+  // is a value to substitute; an absent anchor is a finding about the source.
   const start = code.indexOf(declaration);
-  if (start < 0) return [];
-  const body = code.slice(start, code.indexOf("\n}", start));
+  if (start < 0) {
+    throw new Error(
+      `returnedKeyLiterals: declaration ${JSON.stringify(declaration)} is not ` +
+        "present in the scanned source — the selector was renamed or moved, and " +
+        "this discovery is blind, not empty",
+    );
+  }
+  const end = code.indexOf("\n}", start);
+  if (end < 0) {
+    throw new Error(
+      `returnedKeyLiterals: no "\\n}" body terminator after ${JSON.stringify(
+        declaration,
+      )} — the function body cannot be delimited`,
+    );
+  }
+  const body = code.slice(start, end);
   const withoutArmTests = body
     .replace(/===\s*"[^"]*"/g, "")
     .replace(/\bcase\s+"[^"]*"\s*:/g, "");
@@ -999,6 +1022,42 @@ describe("SC6 / SEAMCORE-08 — the budget-key binding class stays closed", () =
       "the binding discovery pass found nothing. The source moved or a pattern " +
         "stopped matching — this guard is now blind, not satisfied.",
     ).toBeGreaterThanOrEqual(15);
+  });
+
+  it("CALIBRATION (164.8.2) — returnedKeyLiterals BITES on a missing declaration and on a missing body terminator", () => {
+    const DECL = "function budgetKeyFor(";
+    const code = readCode(PROCESS_KEY_CLIENT);
+
+    // CONTROL first, so a mutant that throws for some unrelated reason cannot
+    // read as a passing calibration: the real source yields the real arms.
+    const real = returnedKeyLiterals(code, DECL);
+    expect(real).toContain("process-key-sync");
+    expect(real).toContain("process-key-enqueue");
+
+    // Mutant 1 — the declaration anchor is gone (the rename this guard must not
+    // survive silently). Before 164.8.2 this returned `[]` and family (ii)
+    // simply vanished from the census.
+    const renamed = code.replaceAll(DECL, "function budgetKeyForRenamed_(");
+    expect(renamed, "mutation 1 did not apply").not.toBe(code);
+    expect(renamed.includes(DECL), "mutation 1 left the anchor present").toBe(
+      false,
+    );
+    expect(() => returnedKeyLiterals(renamed, DECL)).toThrow(/is not present/);
+
+    // Mutant 2 — the body terminator anchor is gone. Before 164.8.2 the -1 made
+    // the body the rest of the file, so the arm roster silently widened.
+    const unterminated = code.replaceAll("\n}", "\n ");
+    expect(unterminated, "mutation 2 did not apply").not.toBe(code);
+    expect(
+      unterminated.includes("\n}"),
+      "mutation 2 left the anchor present",
+    ).toBe(false);
+    expect(unterminated.includes(DECL), "mutation 2 ate the declaration").toBe(
+      true,
+    );
+    expect(() => returnedKeyLiterals(unterminated, DECL)).toThrow(
+      /body terminator/,
+    );
   });
 
   it("every discovered binding is classified in the roster (a 15th binding FAILS)", () => {

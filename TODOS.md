@@ -1897,7 +1897,7 @@ true for 146 and half of 142–145, and **false for 141**.
       `set -euo pipefail` rather than at a hardcoded 45 — e.g. derive it, or move the
       disclaimer above the help range.
 
-- [ ] **`[WINDOWS-LEDGER-DRIFT]` `.planning/WINDOWS.md` refuses every append: its frontmatter counts and its entries disagree (logged 2026-09-02, Plan 164.4-00).**
+- [ ] **`[WINDOWS-LEDGER-DRIFT]` `.planning/WINDOWS.md` refuses every append: its frontmatter counts and its entries disagree (logged 2026-09-02, Plan 164.4-00; ⭐ ROUTED 2026-09-10 to Phase 164.8.4 — it had carried NO owner, date or gate for eight days, the exact condition the every-deferral-names-a-phase rule exists to end).**
       `gsd-tools windows append` exits with `Ledger counts disagree with entries: frontmatter
       open/waived/fixed/total=26/0/2/28 but entries yield 29/0/2/31`. Measured cause: the file carries
       TWO representations — a markdown table with ids 1-28 (26 open / 2 fixed, which is what the
@@ -2630,6 +2630,246 @@ Opened by Phase 164.8 plan 06 as it closed `CI-MIGRATE-01`, `[164.2-TEST-APPLY-P
 `[164.7-TEST-APPLY-APPSETTINGS]`, `[164.5-TEST-EXCEPT-DRIFT04]`, `[164.5-TEST-VAC08-DROP-UNAPPLIABLE]`
 and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a problem** (founder rule
 2026-09-08: a TODOS line alone has no owner, no date and no gate).
+
+- [ ] **`[164.8.4-SCOPE-DEPTH-AXIS]` the class-lint's scope sentence outruns its filter for the THIRD
+      time on one branch — now on the DEPTH axis (booked 2026-09-10, Phase 164.8.2 terminal review;
+      routed to Phase 164.8.4). LATENT — zero offenders in the unscanned files today.**
+      **MEASURED 2026-09-10:** `readdirSync` is NON-RECURSIVE. 144 test files live under
+      `src/__tests__`; **139 are scanned, 5 are not** — the `.test.ts` files in
+      `src/__tests__/contracts/` and `src/__tests__/helpers/`. Meanwhile the describe is titled
+      "…anywhere in `src/__tests__`" and its floor arm is titled "the scan covers the whole
+      directory". All 5 unscanned files were scanned by hand with the shipped scanner: **0
+      offenders**, so today's green is TRUE.
+      ⭐ **THE POINT IS THE RECURRENCE, NOT THE AXIS.** Round one: the rule covered 2 files while
+      its name claimed a class. Round five: 137 files, silently skipping 346 `.test.tsx`. Round six:
+      139 files, silently skipping 5 by directory depth. Each fix closed the axis it was SHOWN and
+      left the next one.
+      ⛔ **DO NOT close this with a third hand-widening.** The deliverable is a mechanism that makes
+      the scope CLAIM and the file SET agree by construction — derive one from the other — so a
+      fourth axis (depth, extension, location, symlink) cannot open quietly. A calibration must
+      prove it by OPENING a new axis on a scratch tree and observing RED, never by asserting
+      today's count.
+
+- [ ] **`[164.8.4-DEMOS-OFF-HELPER]` this branch planted two fresh copies of the offending
+      expression in exactly the files the docblock names as the next widening step (booked
+      2026-09-10; routed to Phase 164.8.4). LATENT.**
+      `src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx:7980` and
+      `src/lib/pdf-render-token.test.ts:163`. Both are legitimate calibration subjects demonstrating
+      the pre-fix form — but `src/test/helpers/degenerate-narrow.ts` exists PRECISELY so
+      demonstrations live outside the scanned surface, and neither routes through it. The rule's own
+      failure message instructs offenders to use it.
+      ⛔ **The hazard is the REFLEX, not the red.** When the promised widening lands and reds two
+      arms this branch wrote, the instinct will be to restore the file+function tolerance this
+      branch just DELETED as unworkable (its own calibration legs called the untolerated path and
+      could not fail). Route them through the helper instead, and add an arm asserting a NEW inline
+      demonstration outside the helper is reported.
+
+- [ ] **`[164.8.4-HELPER-UNPOLICED]` `degenerate-narrow.ts` left the scanned surface entirely, so
+      nothing polices the rest of that file (booked 2026-09-10; routed to Phase 164.8.4). LATENT.**
+      Deleting the file+function tolerance was correct — it could not fail, and the file is 79 lines
+      with ONE exported function, so the old tolerance policed an empty region. But the deletion
+      also removed the only thing watching that file outside `degenerateNarrow`. A second exported
+      helper added there that narrows on a raw lookup would be caught by nothing, and a gate calling
+      it would inherit the degradation.
+      Close it, or record a dated reason why one 79-line single-function file does not need it.
+      ⛔ Not silence.
+
+- [ ] **`[164.8.4-PROSE-OVERCLAIM]` four sentences that describe more than their code does (booked
+      2026-09-10; routed to Phase 164.8.4). COSMETIC — but this is the branch's own defect class, so
+      it is booked rather than shrugged off.**
+      1. `src/lib/seam-venue-vocabulary.invariant.test.ts` — the docblock says dropping the `^` from
+         `KEYWORD_ARG_RE` would red. MEASURED: it reds NOTHING and does not reintroduce the class
+         (the prefix from `kw.index` still cannot hold an `=`). The self-test DOES pin the genuinely
+         load-bearing property — relaxing the prefix to `([^\s]*)` on the `a=b=c` shape goes red,
+         verified — so the ARM is sound and only one clause of its prose is wrong.
+      2. `src/__tests__/restore-test-from-baseline.test.ts` — a sentence describing the sibling's
+         filter as `*.test.ts` went stale TWO COMMITS LATER on the same branch (`/\.test\.tsx?$/`).
+         Conclusion still holds, so it misleads without misdirecting.
+      3. `src/lib/pdf-render-token.test.ts` — one tautological illustration beside three
+         load-bearing legs.
+      4. `src/__tests__/test-restore-workflow-wiring.test.ts` — `SCAN_FILES.length > 130` over an
+         actual **139** lets nine test files be deleted silently. The in-code comment states the
+         limitation honestly; the floor still does not measure what a reader assumes.
+
+- [ ] **`[164.8.4-COMMENTISH-FALSE-RED]` the whole-directory floor's `commentish` test can false-RED
+      on a legitimate docblock continuation (booked 2026-09-10; routed to Phase 164.8.4). REACH.**
+      `/^\s*(\/\/|\/\*|\*)/` does not recognise a blanked continuation line that does not begin with
+      `*`. MEASURED: **0 occurrences across all 139 scanned files**, and it fails in the LOUD
+      direction, so it costs a false alarm rather than a false pass. Recorded so the next person to
+      see it red knows it is this, not a stripper regression.
+
+- [ ] **`[164.8.2-EVIDENCE-DOTENV-LEAK]` a local test wrapper injects repo credentials and turns 16
+      SKIPPED live-DB suites into real writes against SHARED TEST (booked 2026-09-10, Phase 164.8.2
+      gate run; routed to Phase 164.8.4).**
+      **MEASURED.** A recorded full-suite run reported `16 failed | 853 passed`, `39 failed`, with
+      skips collapsed from **19 files / 280 tests to 3 / 94**. A plain `npx vitest run` in the same
+      tree at the same commit is GREEN with skips intact, and none of the 16 failing files is in the
+      branch diff.
+      **CAUSE.** `gstack-evidence` carries `#!/usr/bin/env bun`, and bun AUTO-LOADS `.env.local` into
+      `process.env`; the child `vitest` inherits it, `HAS_LIVE_DB` flips true, and the gated suites
+      run for real. The wrapper HAS a scrubber for exactly this and it did not fire.
+      ⚠️ **The failures were the harmless half — the WRITES are the item.** Those suites INSERT
+      (`user_notes`, `match_decisions`); the observed `42501` / `22023` / rate-limit / NOT-NULL
+      errors are real answers from a real remote database. PROD was NOT touched
+      (`assertNotProductionSupabaseUrl` throws before any `getAdmin()` write, and these were ordinary
+      DB errors rather than that assertion), so it was SHARED TEST.
+      ⛔ **Do not close this by editing the skip gates.** `it.skipIf(!HAS_LIVE_DB)` is correct; the
+      defect is that `HAS_LIVE_DB` became true by accident.
+
+- [ ] **`[164.8.2-CHANNEL-ALLOWLIST-STALE]` the artifact's six-name diagnostic-channel allowlist has
+      no expiry, so a future channel is silently ABSENT (booked 2026-09-10; routed to Phase 164.8.4).**
+      164.8.2 replaced a glob (`"${outdir}"/*.err`) with an enumerated list because the glob
+      published a file nobody had named — the right direction, default-DENY. It bought a new failure
+      mode: a `.err` or `.log` added later does NOT publish until someone remembers this list, and
+      nothing reds. A diagnostic that is silently missing is the same class as one never scanned.
+      **FIX SHAPE:** derive it (channels the script can WRITE ⇔ channels the step stages), not a
+      second hand-maintained list.
+
+- [ ] **`[164.8.2-SENTINEL-GREP-NUL-BLIND]` the ancestry sentinel is read with a NUL-blind `grep -q`,
+      and the check is NEGATIVE, so it FAILS OPEN (booked 2026-09-10; routed to Phase 164.8.4).**
+      `.github/workflows/test-restore-from-baseline.yml:453` uses `grep -q` where the file's own
+      comment calls `-a` "mandatory repo-wide".
+      ⚠️ **Size is not severity.** The check reads *the sentinel is GONE, therefore git ran*. A
+      NUL-blind grep reporting NUL-bearing stderr as clean makes the guard conclude git ran when it
+      may not have — letting through the false `"<sha> is not an ancestor"` that THREE fixes now
+      exist to delete.
+      ✅ **Held as a CEILING, not an excuse:** the `-a` site-set rule was widened the same round to
+      cover the whole workflow; `:453` is its ONE dated exemption, required to match exactly one bare
+      grep. Add `-a` and the test goes RED telling you to delete the entry. The exemption cannot
+      outlive the defect. This entry exists so it is deleted deliberately rather than discovered.
+
+- [ ] **`[164.8.2-GATE-RESIDUE]` seven small gate-integrity leftovers from Phase 164.8.2's four
+      review rounds, each below the bar that blocked the ship, none with an owner (booked
+      2026-09-10; routed to Phase 164.8.4).**
+      ⭐ Booked as ONE entry deliberately: one sweep over one file family. Splitting it into seven
+      thin entries is how a class becomes seven half-classes — which this branch demonstrated three
+      times.
+      1. **`src/__tests__/test-restore-workflow-wiring.test.ts` (ancestry arm)** asserts on `git`'s
+         own stderr wording (`/not a valid/i`). Upstream reword = red for a non-defect.
+      2. **`src/__tests__/supabase-migrate-test-first.test.ts`** pins three literal needles inside a
+         prose comment. Defensible as a documentation gate; a maintenance liability as a guard test.
+      3. **`src/__tests__/restore-test-from-baseline.test.ts:720`** governs softening tokens with a
+         COUNT (`{"|| true": 4, "set +e": 7}`), in the family whose sibling rule was rewritten to a
+         SITE SET precisely because a count is blind to a one-for-one swap. Pre-existing; the batch's
+         own reasoning now applies verbatim.
+      4. **The database-marker regexes are HAND-COPIED** from `restore-test-from-baseline.sh`'s
+         `RESTORE_EXPECT_MARKER_RE` / `RESTORE_REFUSE_MARKER_RE` defaults into
+         `test-restore-from-baseline.yml`, with nothing pinning the copies to each other. Tighten the
+         script and the cheap early gate silently becomes the weaker of the two. The workflow comment
+         says this out loud and does not fix it; a two-line assertion would.
+      5. **`staged_n`** is computed and printed and never compared — it exists to be a floor and is
+         not one.
+      6. **The artifact README advertises six diagnostic channels unconditionally**, including on the
+         denial path that stages NONE of them, so a reader opening the zip finds a document
+         describing files it does not carry.
+      7. **A dead local** (`body3`, shellcheck SC2034) in `restore-test-from-baseline.sh`, and a
+         reused failure message naming the wrong subject in the self-test step.
+
+- [ ] **`[164.8.2-REFUSAL-STILL-PUBLISHES]` the published-`.sql` credential scan refuses without
+      withholding, so the flagged file is staged and published anyway (booked 2026-09-10, Phase
+      164.8.2 maintainability audit; routed to Phase 164.8.4 — founder decision, real cost both ways).**
+      **MECHANISM.** `refuse_credential_in_published_sql` aborts the restore BEFORE the transaction,
+      which protects the database and every future run. It does not `rm -f` the offending file, and
+      `Stage the public artifact` is `if: always()` — so the very `.sql` the gate named as carrying
+      a credential ships WORLD-READABLE for 90 days on a PUBLIC repo. The sibling backup-step scan
+      (`scan_for_secrets`) DOES `rm -f` on a hit.
+      ⚠️ **The comments no longer mislead** — script and artifact README both state what the
+      function does and does not protect. The gap is behavioural, not documentary.
+      ⛔ **RE-FRAMED 2026-09-10 by the phase's security audit — THIS IS NOT A BINARY, and it was
+      written as one.** The paragraph below framed the choice as *withhold the file* vs *lose the
+      reversal recipe*. A third option costs neither side, and presenting the founder with two when
+      three exist is itself the defect this repo names.
+      ⭐ **Option 3 — keep the file, make the ARTIFACT SELF-DECLARING.** The staging step already
+      reads a sibling step's verdict as a value (`REDACT_OUTCOME: ${{ steps.redact.outcome }}`), so
+      the identical wiring can read the restore step's outcome and write a top-level
+      `CREDENTIAL-DISCLOSED.txt` naming the file and the class. Today the ONLY disclosure signal is
+      a README paragraph plus a red step — and that README itself warns the artifact may be
+      re-shared. **A warning that travels only if someone reads prose is the weaker half of this
+      repo's own standard.** This is a conform-to-the-neighbour fix, the same shape
+      `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]` prescribes for itself.
+      **Audit's severity reading:** medium, not high. A hit requires a credential already sitting in
+      TEST's catalogue or in migration source; the four scanned files are generated from this
+      script's own heredocs, live TEST catalogue reads, and the allowlisted
+      `INSERT INTO public.<t> … VALUES (<literals>)` extractor. The workflow is dispatch-only and
+      the run is already red with a human reading it. Below the `block_on: high` threshold —
+      which is why it defers, not because the exposure is imaginary.
+
+      **Why option 1 is a founder call and not a patch:** withholding the file means deleting part
+      of the REVERSAL RECIPE (`T-164.8-21`) on exactly the run whose restore was refused — trading a
+      credential exposure for a lost undo on a database left mid-restore. ⭐ Option 3 above avoids
+      that trade entirely and should be costed FIRST.
+
+- [ ] **`[164.8.2-REDACT-HOSTNAME-01]` a routing WORD that was never a routing RECORD, over a gap
+      that is still open (booked 2026-09-10, same audit; routed to Phase 164.8.4).**
+      `[REDACT-HOSTNAME-01]` was cited in source comments and one CHANGELOG sentence as a booked
+      item. MEASURED 2026-09-10: `grep -rn` over `TODOS.md` and `.planning/ROADMAP.md` → **0 hits**.
+      It existed only as `T-164.8-22` in `164.8-05-PLAN.md`'s threat table: no owner, no date, no
+      gate. Same shape CLAUDE.md records for `FANOUT-GLOBAL-01`.
+      **THE UNDERLYING GAP IS REAL.** The psql redaction shared by `ci.yml` and
+      `test-restore-from-baseline.yml` masks THREE expressions; four other psql sites in that
+      workflow can still print a DNS-failure HOSTNAME into a public log.
+      ⭐ Plan as ONE sweep over every psql site together with
+      `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]` — site-by-site is how this became a half-class twice.
+
+- [ ] **`[164.6-SOURCE-ANCHOR-ROT]` `file:line` anchors in SOURCE comments are an unguarded class
+      (booked 2026-09-10, Phase 164.8.2 maintainability audit; routed to Phase 164.8.4).**
+      `plan-anchor-verify` re-resolves every anchor a pending PLAN.md asserts and fails loud.
+      NOTHING does that for a comment in a `.ts`/`.sh`/`.yml`/`.mjs` file — and those rot faster,
+      because every edit above an anchor moves it.
+      **MEASURED 2026-09-10** over the ten files 164.8.2 touched:
+      `grep -noE '[A-Za-z0-9_./-]+\.(ts|sh|yml|mjs|sql|md):[0-9]+'` finds ~30 anchors; spot-checks
+      found several that do not resolve (`test-restore-from-baseline.yml:412`/`:517`,
+      `test-ledger-drift-check.sh:281`/`:604`/`:667`/`:675`/`:140`, `ci.yml:2610`,
+      `restore-test-from-baseline.test.ts:217`). One was **already wrong on `main`** and pointed at
+      a bare `exit 1` in an unrelated step.
+      ⚠️ Only the TWO load-bearing anchors were pinned during 164.8.2 — converted to SYMBOLS with
+      an arm that reads the target file plus a calibration. Rewriting thirty by hand was refused
+      deliberately: it fixes today's instances and leaves the class open.
+      **DELIVERABLE: a repo-owned gate, `plan-anchor-verify`'s shape applied to source comments.**
+      ⭐ Prefer converting an anchor to a SYMBOL over re-pinning a number — a symbol survives the
+      edit that moves the line. Encode that preference in the gate's MESSAGE, not just its docs.
+
+- [ ] **`[164.8.2-LEDGER-STDERR-PUBLIC-LOG]` the `missing`-direction ledger read leaves psql
+      stderr UNREDIRECTED into a PUBLIC Actions log (booked 2026-09-10, Phase 164.8.2 round-three
+      review; routed to Phase 164.8.4).**
+      **MECHANISM.** In `scripts/test-ledger-drift-check.sh`, the `missing` read is
+      `run_ledger_query missing … || fail "…"` with no redirect at all. psql names the TEST pooler
+      HOST, its USER and sometimes the DSN on a connect or auth failure, and this repository is
+      PUBLIC — so that text is world-readable for the life of the run's logs. The same file's
+      NON-NEGOTIABLES forbid exactly this.
+      **THE CORRECT IDIOM ALREADY EXISTS THREE SCREENS BELOW.** The sibling `ledger_rows` read
+      captures its stderr to `${tmp}/ledger_rows.err` and reports only the LINE COUNT, with the
+      text WITHHELD. This is a conform-to-the-neighbour fix, not a new pattern.
+      ⚠️ **Pre-existing, and deliberately NOT bundled.** Found while closing the `ledger_rows`
+      half. SIX self-test arms depend on the `missing` path's current shape, so changing it is its
+      own unit of work with its own calibrations — not a rider on a fix already three rounds deep.
+      ⛔ **Do not "fix" it with a bare `2>/dev/null`.** That trades a credential leak for a blind
+      gate, which is the defect class this whole phase family exists to remove. Capture, count,
+      withhold.
+
+- [ ] **`[164.8.2-VAC08-FATAL-ON-TRANSIENT]` an unreadable ledger row count now reds the WHOLE
+      VAC-08 gate, where it used to cost only the absurdity floor (booked 2026-09-10, Phase
+      164.8.2; routed to Phase 164.9 — ⚠️ SAME ROOT as `[164.8-PUSH-RACE-VAC08]`, plan them
+      together).**
+      ⭐ **This is the CONSEQUENCE of a correct fix, recorded so the next person to see VAC-08
+      flake looks in the right place. It is NOT a request to revert.**
+      **BEFORE.** `ledger_rows="$(run_ledger_query ledger_rows … 2>/dev/null || echo "")"` followed
+      by `[ -n "$ledger_rows" ] && …`. An unreadable count collapsed to empty and SILENTLY
+      disabled the absurdity floor — the control that tells a wrong join key from real drift, and
+      whose absence sends a reader to hand-apply migrations to SHARED TEST. That is the 2026-08-29
+      defect shape: the gate reported "253 of 262 migrations are not present" against a database
+      that was passing.
+      **AFTER.** Three separated, named MEASURE_FAILs — query failed (with rc), exited 0 with NO
+      ROW, answer not a number — each exiting 1.
+      **THE EXPOSURE THIS CREATES.** A transient pooler blip on shared TEST that previously cost
+      one control now fails the entire gate, on a gate that ALREADY contends for advisory key
+      `61616158` with `apply-test` on every merge push.
+      ⛔ **THE REMEDY IS NEVER TO RESTORE THE `|| echo ""`.** That is the defect, not the
+      mitigation. If flakiness is MEASURED rather than feared, the answer is a bounded retry around
+      the read, or the per-run isolation Phase 164.9 exists to build — both keep an unreadable
+      input distinguishable from a clean one.
+      **Measured at booking:** the pre-fix gate already exited 1 on a failing query, so
+      `status === 1` is a vacuous assertion here; every arm binds to the SENTENCE instead.
 
 - [ ] **`[164.8-PUSH-RACE-VAC08]` `ci.yml`'s `sql-tests` and `supabase-migrate.yml`'s `apply-test`
       contend for ONE advisory lock on the same merge push, in an order nothing specifies — and
@@ -7464,6 +7704,7 @@ gitleaks auto-loads `.gitleaks.toml` from cwd, so omitting `-c` tests nothing.
   (b) **The exemption widens with the lag.** The exempt window is bounded by the frontier, so if TEST's ledger falls behind for an unrelated reason the window grows by exactly that much and real absences ride in on it. The ABSURDITY FLOOR (`ledger_rows >= 50` and under half the repo matched) catches the GROSS form and exits before the exemption runs; a narrow, quiet lag is caught by nothing. The gate prints `ledger frontier: tip=…; N above-tip migration(s) exempted.` on EVERY run precisely so that lag is readable in the log rather than only in its effect — but nothing yet ASSERTS on that tip.
   (c) **`apply-test` failing is not the same as VAC-08 failing.** If the apply errors, the merged migration stays above the frontier forever and VAC-08 keeps exempting it silently. The red board in that case is `apply-test`'s, and this gate will not add a second one.
   **Candidate fixes, none taken here:** give the two jobs distinct keys and make the ordering explicit (`needs:`/`workflow_run`) rather than emergent; or assert a MAXIMUM frontier lag (the tip must be within N repo migrations of the newest file) so (b) becomes measurable instead of merely printed; or have `apply-test` publish its applied-through version as an artifact VAC-08 reads, which would replace the derived frontier with a declared one and close (c) as well. ⚠️ Do not "fix" this by widening the exemption — the exemption is already the widest thing in this gate.
+  ⭐ **UPDATE 2026-09-09 (Phase 164.8.2, WR-02) — the exempt window now has a CEILING, and (b)/(c) are narrowed, not closed.** `scripts/test-ledger-drift-check.sh` carries a top-level `FRONTIER_EXEMPT_CEILING` (read it BY SYMBOL from the script — it is 3 at this writing, with its dated MEASURED justification beside it and an entry in `KNOWN_THRESHOLD_SITES`). More exempted migrations than the ceiling is an `::error::` that NAMES every exempted version and fails the gate, so "the apply stalled and VAC-08 kept printing `0 NEW drift` forever" is now bounded in WIDTH: at most the ceiling's worth of migrations can ride in silently. Proven by two arms in the script's own `--self-test` (`frontier-ceiling-exceeded RED`, `frontier-ceiling-boundary GREEN`), each observed RED on a scratch copy. **What this does NOT do:** it does not order the two jobs, so (a) is untouched; it bounds the window's width without bounding the LAG in time, so a narrow quiet lag under the ceiling is still caught by nothing; and it cannot be re-derived from the repo, because the exempt count is a property of a live shared ledger — lowering the ceiling stays a human act recorded by its dated line. **This entry stays OPEN and stays routed to Phase 164.9.**
   Owner: unassigned — see the report accompanying this entry for the routing recommendation.
 
 ## Phase 164.7 (APPSETTINGS) — SQL-fixer + three-reviewer residuals (logged 2026-09-07)

@@ -299,7 +299,15 @@ jobs:
           fi
           # The SAME provenance row scripts/check-baseline-staleness.mjs's
           # RECORDED_SHA_RE reads, spelled for sed. First match wins, as there.
-          sha="$(sed -nE 's/^\|[[:space:]]*sha256[[:space:]]*\|[[:space:]]*`([0-9a-f]{64})`[[:space:]]*\|.*$/\1/p' "${doc}" | head -1)"
+          # ⛔ UNANCHORED, and that is what makes the sentence above TRUE (IN-07, fixed
+          # 2026-09-09). This program carried a leading `^` until then, while
+          # RECORDED_SHA_RE (`/\|\s*sha256\s*\|\s*`([0-9a-f]{64})`\s*\|/`) and the
+          # script's own sed (restore-test-from-baseline.sh, `recorded=$(sed -nE …`)
+          # are both unanchored. On an INDENTED provenance row the anchored copy read
+          # nothing while the other two read the sha — three readers, two answers, and
+          # the divergence would surface as "carries no parseable sha256 provenance row"
+          # on a file the other two gates accept. Keep all three unanchored.
+          sha="$(sed -nE 's/.*\|[[:space:]]*sha256[[:space:]]*\|[[:space:]]*`([0-9a-f]{64})`[[:space:]]*\|.*$/\1/p' "${doc}" | head -1)"
           if [ "${#sha}" -ne 64 ]; then
             echo "::error::${doc} carries no parseable sha256 provenance row (matched ${#sha} chars, expected 64)."
             echo "::error::The confirm token is DERIVED from that row. An unparseable provenance row is"
@@ -402,7 +410,51 @@ jobs:
               failed="${failed} ancestor(headSha '${APPLY_HEAD_SHA:-}' is not a hex sha, so ancestry cannot be decided)"
               ;;
             *)
-              if ! git merge-base --is-ancestor "${APPLY_HEAD_SHA}" HEAD 2>/dev/null; then
+              # ⛔ THREE OUTCOMES, NOT TWO (Phase 164.8.2, silent-failure review F4).
+              # `--is-ancestor` exits 0 (ancestor), 1 (NOT an ancestor) and 128 (bad
+              # object / not a commit). The `case` above checks only that the sha is
+              # HEX-SHAPED — never that the object exists here — so a sha that was
+              # force-pushed away, or one `gh` read off a different ref, exits 128.
+              # Collapsing that into the `1` arm told the operator "<sha> is not an
+              # ancestor of this checkout's HEAD", which is a FALSE STATEMENT ABOUT
+              # PROD'S APPLY, and sent git's own "Not a valid commit name" to
+              # /dev/null. The run was red either way; what was wrong is what it said
+              # to go and fix. Same shape as IN-06 in the restore script: an unreadable
+              # answer is not a negative one.
+              ancestry_err="${RUNNER_TEMP}/ancestry.err"
+              # ⛔ ONE GUARD, AND IT DISCRIMINATES THE CASE IT NAMES (review F1). When a
+              # redirection cannot be opened, bash NEVER RUNS THE COMMAND and returns 1 —
+              # and 1 is exactly the code `--is-ancestor` uses for "not an ancestor". A
+              # `${RUNNER_TEMP}` that is empty, missing, or replaced under us therefore
+              # routes straight into the `elif` arm below and prints "<sha> is not an
+              # ancestor of this checkout's HEAD" about a sha git was never asked about:
+              # the precise FALSE STATEMENT F4 exists to delete, reintroduced through F4's
+              # own new file.
+              #
+              # ⛔ THE PREVIOUS SHAPE DID NOT DETECT THAT, AND WAS MEASURED UNREACHABLE
+              # (review F1). It was an `if ! : > "${ancestry_err}"` open-probe plus a
+              # post-probe `[ ! -r "${ancestry_err}" ]` re-check. A file that was just
+              # created successfully is readable, and `2>` truncates rather than removes
+              # it, so `-r` could not go false on any ordinary sequence; while the hole it
+              # was written for — a redirect that fails AT PROBE TIME (target replaced by
+              # a directory, ENOSPC) — leaves `[ -r <directory> ]` TRUE, so the guard
+              # waved the false verdict through the very case it named.
+              #
+              # A SENTINEL discriminates it, because it asks the question that decides the
+              # verdict: DID GIT RUN? Write a known line into the channel first. git's
+              # redirection TRUNCATES that file, so a surviving sentinel — or a channel
+              # that is no longer a readable regular file — means the redirection failed
+              # and git was never invoked. An unwritten channel is an unanswered question,
+              # never a negative answer.
+              sentinel_rc=0
+              printf 'ANCESTRY-PROBE-SENTINEL\n' > "${ancestry_err}" || sentinel_rc=$?
+              ancestry_rc=0
+              git merge-base --is-ancestor "${APPLY_HEAD_SHA}" HEAD 2>"${ancestry_err}" || ancestry_rc=$?
+              if [ ! -f "${ancestry_err}" ] || [ ! -r "${ancestry_err}" ] || grep -q 'ANCESTRY-PROBE-SENTINEL' "${ancestry_err}"; then
+                failed="${failed} ancestor(MEASURE_FAIL: the stderr channel ${ancestry_err} (RUNNER_TEMP='${RUNNER_TEMP}', pre-probe sentinel write exited ${sentinel_rc}) is missing, unreadable, or STILL HOLDS THE PRE-PROBE SENTINEL, so the redirection FAILED and git was NEVER INVOKED. rc=${ancestry_rc} is bash's, not --is-ancestor's — this is not a 'no'.)"
+              elif [ "${ancestry_rc}" -gt 1 ]; then
+                failed="${failed} ancestor(MEASURE_FAIL: git exited ${ancestry_rc}, so the ancestry question was NOT answered — this is not a 'no'. git said: $(tr '\n' ' ' < "${ancestry_err}"))"
+              elif [ "${ancestry_rc}" -eq 1 ]; then
                 failed="${failed} ancestor(${APPLY_HEAD_SHA} is not an ancestor of this checkout's HEAD)"
               else
                 # THE CONTENT CHECK. Ancestry alone says only WHERE PROD's apply ran; it
@@ -498,22 +550,56 @@ jobs:
       #
       # ⛔ NO `|| true` AND NO BARE ZERO-STATUS `exit` in this block — this job's
       # softening-token scan (src/__tests__/test-restore-workflow-wiring.test.ts)
-      # refuses both. `set -uo pipefail` WITHOUT `-e` is what makes that
-      # possible: a non-matching `grep` yields the empty string instead of
-      # aborting the step, so an absent line reaches its own MEASURE_FAIL.
+      # refuses both.
+      #
+      # ⛔ AND THE SHELL IS `bash -e {0}` (Phase 164.8.2, review A1). Until
+      # 2026-09-10 this paragraph claimed `set -uo pipefail` WITHOUT `-e` left
+      # errexit OFF, "so a non-matching `grep` yields the empty string instead of
+      # aborting the step". THAT IS FALSE ABOUT THE RUNNER. GitHub Actions invokes
+      # every `run:` as `bash -e {0}`, and neither this workflow nor ci.yml
+      # declares `shell:` or `defaults:`; `set -uo pipefail` turns `-u` and
+      # pipefail ON and does not turn `-e` OFF (measured: `bash -e` plus
+      # `set -uo pipefail` reports `shellopts=ehuB`). Errexit was on the whole
+      # time, so a non-matching `grep` in a command substitution ABORTED THE STEP
+      # and every MEASURE_FAIL branch below it was UNREACHABLE DEAD CODE — the
+      # operator got bash's silence where the author had written a named
+      # diagnosis. The direction was safe (red, never green); what was broken is
+      # what the step SAID, and a comment that teaches the next maintainer a false
+      # model of the runner is the defect this repo calls a control weaker than
+      # the sentence beside it.
+      #
+      # ci.yml already carries the correct model, at the `e2e` job's Playwright
+      # step: "Capture the test exit code WITHOUT aborting the script (default
+      # shell is `bash -e`)" (.github/workflows/ci.yml, `set +e` / `PW_EXIT=$?`).
+      # `set +e` is a banned token HERE, so the same intent is spelled with the
+      # BOUNDED `cmd || rc=$?` idiom: `-e` stays ON for the whole block and only
+      # the specific reads that are ALLOWED to fail — the two `node` invocations
+      # whose exit status is itself the measurement, and the `grep`s whose
+      # non-match is a finding rather than a fault — carry their own capture.
+      # Everything else in the block still dies on its first failure.
       - name: Assert the extractor self-test PRINTED its kind census and cleared the floor
         env:
           REFDATA_SELFTEST_LOG: ${{ runner.temp }}/extract-reference-inserts-selftest.log
         run: |
-          set -uo pipefail
-          node scripts/extract-reference-inserts.mjs --self-test > "$REFDATA_SELFTEST_LOG" 2>&1
-          status=$?
+          set -euo pipefail
+          # BOUNDED, so the named diagnosis below is REACHABLE under `bash -e`.
+          status=0
+          node scripts/extract-reference-inserts.mjs --self-test > "$REFDATA_SELFTEST_LOG" 2>&1 || status=$?
           cat "$REFDATA_SELFTEST_LOG"
           if [ "$status" -ne 0 ]; then
             echo "::error::the reference-data extractor self-test failed (exit $status)."
             exit "$status"
           fi
-          ok_line=$(grep -a -m1 -E '^extract-reference-inserts self-test OK: [0-9]+ kinds, red\+green each\.$' "$REFDATA_SELFTEST_LOG")
+          # `grep` exits 1 on NO MATCH and >1 on a real fault (unreadable file, bad
+          # pattern). Only the first is this step's own MEASURE_FAIL; the second is a
+          # question that was never asked, and IN-06's rule applies — an unreadable
+          # answer is not a negative one.
+          ok_rc=0
+          ok_line=$(grep -a -m1 -E '^extract-reference-inserts self-test OK: [0-9]+ kinds, red\+green each\.$' "$REFDATA_SELFTEST_LOG") || ok_rc=$?
+          if [ "$ok_rc" -gt 1 ]; then
+            echo "::error::MEASURE_FAIL: grep exited $ok_rc reading $REFDATA_SELFTEST_LOG, so the census line was NOT looked for. That is an unanswered question, not an absent line."
+            exit 1
+          fi
           if [ -z "$ok_line" ]; then
             echo "::error::MEASURE_FAIL: the self-test exited 0 but printed NO 'extract-reference-inserts self-test OK: N kinds, red+green each.' line. A zero status with no output is what a main guard that never fired looks like; it is not a passing self-test."
             exit 1
@@ -524,7 +610,12 @@ jobs:
           # The floor is READ FROM THE SCRIPT BY SYMBOL, never restated here.
           # `node -e` leaves `process.argv[1]` undefined, so importing the module
           # does not trip its CLI entry point.
-          floor=$(node -e 'import("./scripts/extract-reference-inserts.mjs").then(m => console.log(m.SELF_TEST_KINDS_FLOOR))')
+          floor_rc=0
+          floor=$(node -e 'import("./scripts/extract-reference-inserts.mjs").then(m => console.log(m.SELF_TEST_KINDS_FLOOR))') || floor_rc=$?
+          if [ "$floor_rc" -ne 0 ]; then
+            echo "::error::MEASURE_FAIL: reading SELF_TEST_KINDS_FLOOR out of scripts/extract-reference-inserts.mjs exited $floor_rc, so the floor is UNKNOWN. An unread floor is not a cleared one."
+            exit 1
+          fi
           case "$floor" in ''|*[!0-9]*)
             echo "::error::MEASURE_FAIL: could not read SELF_TEST_KINDS_FLOOR from scripts/extract-reference-inserts.mjs (got '$floor')."; exit 1;; esac
           if [ "$kinds" -lt "$floor" ]; then
@@ -546,20 +637,33 @@ jobs:
         env:
           REFDATA_AUDIT_LOG: ${{ runner.temp }}/extract-reference-inserts-audit.log
         run: |
-          set -uo pipefail
-          node scripts/extract-reference-inserts.mjs --audit > "$REFDATA_AUDIT_LOG" 2>&1
-          status=$?
+          set -euo pipefail
+          # Same bounding as the self-test assertion above, and for the same reason:
+          # under `bash -e` an unbounded capture aborts the step BEFORE its own
+          # MEASURE_FAIL can print. See that step's comment for the measurement.
+          status=0
+          node scripts/extract-reference-inserts.mjs --audit > "$REFDATA_AUDIT_LOG" 2>&1 || status=$?
           cat "$REFDATA_AUDIT_LOG"
           if [ "$status" -ne 0 ]; then
             echo "::error::the reference-data allowlist audit failed (exit $status)."
             exit "$status"
           fi
-          census=$(grep -a -m1 -E '^extract-reference-inserts audit OK: [0-9]+ entr\(ies\), [0-9]+ file\(s\), [0-9]+ table\(s\), [0-9]+ statement\(s\);' "$REFDATA_AUDIT_LOG")
+          census_rc=0
+          census=$(grep -a -m1 -E '^extract-reference-inserts audit OK: [0-9]+ entr\(ies\), [0-9]+ file\(s\), [0-9]+ table\(s\), [0-9]+ statement\(s\);' "$REFDATA_AUDIT_LOG") || census_rc=$?
+          if [ "$census_rc" -gt 1 ]; then
+            echo "::error::MEASURE_FAIL: grep exited $census_rc reading $REFDATA_AUDIT_LOG, so the census line was NOT looked for. That is an unanswered question, not an absent line."
+            exit 1
+          fi
           if [ -z "$census" ]; then
             echo "::error::MEASURE_FAIL: the audit exited 0 but printed NO 'extract-reference-inserts audit OK: …' census line. An audit that measured nothing is not an audit that found nothing."
             exit 1
           fi
-          scanned_line=$(grep -a -m1 -E '^ +migrations scanned: +[0-9]+$' "$REFDATA_AUDIT_LOG")
+          scanned_rc=0
+          scanned_line=$(grep -a -m1 -E '^ +migrations scanned: +[0-9]+$' "$REFDATA_AUDIT_LOG") || scanned_rc=$?
+          if [ "$scanned_rc" -gt 1 ]; then
+            echo "::error::MEASURE_FAIL: grep exited $scanned_rc looking for the 'migrations scanned: N' line, so it was NOT looked for. That is an unanswered question, not an absent line."
+            exit 1
+          fi
           if [ -z "$scanned_line" ]; then
             echo "::error::MEASURE_FAIL: the audit printed no 'migrations scanned: N' line, so how much of supabase/migrations it read is unknown."
             exit 1
@@ -590,6 +694,15 @@ jobs:
       # ⚠️ ci.yml's pg_cron provisioning step is deliberately NOT copied: Plan 01's
       # fixtures create no cron job, so this lane needs no pg_cron. A future fixture
       # that did need it would provision it the way `sql-mutation` does.
+      #
+      # ⚠️ THE ONE REMAINING `set -uo pipefail` IN THIS JOB, RE-DECIDED 2026-09-10
+      # against the CORRECT model of the runner (review A1; the shell is `bash -e
+      # {0}` and `-uo pipefail` never turned `-e` off). The exemption STANDS, and
+      # not for the reason the two steps above used to give: this body is a BYTE
+      # COPY of ci.yml's step, and every command in it is individually bounded by
+      # its own `|| echo`, so `-e` would change nothing here except to fork the
+      # copy. Nothing in it captures a status into a later branch, so there is no
+      # dead MEASURE_FAIL to reach.
       - name: Probe - the runner image's PostgreSQL server binaries resolve
         run: |
           set -uo pipefail
@@ -998,16 +1111,29 @@ jobs:
           busy="${probe%%|*}"
           breakdown="${probe#*|}"
           if [ "${rc}" -ne 0 ]; then
-            # Same three redactions as every other psql site here: a connect failure
-            # names the host, its IP and the DB user, and this log is public.
+            # A connect failure names the host, its IP and the DB user, and this log is
+            # public. ⚠️ THIS SITE IS NOT LIKE THE OTHERS — the sentence here read "same
+            # three redactions as every other psql site here" until 2026-09-10, directly
+            # above the paragraph saying there are four. It described the version before
+            # the fourth expression was added.
             # ⚠️ FOUR expressions here, not the three ci.yml uses. MEASURED 2026-09-08
             # against this step's real bytes: a DNS failure emits `could not translate
             # host name "<host>" to address`, which NONE of the three standard patterns
             # match, and the TEST pooler host survived into the output. The password is
             # stripped by the first expression (verified: 0 occurrences); the host was
             # not. The gap is not local to this step — it is in the shared ci.yml
-            # pattern — and is booked as [REDACT-HOSTNAME-01]; this fourth expression
-            # closes it HERE rather than shipping a known host leak on a public log.
+            # pattern — and this fourth expression closes it HERE rather than shipping a
+            # known host leak on a public log.
+            # ⛔ WHERE `[REDACT-HOSTNAME-01]` ACTUALLY LIVES, corrected 2026-09-10. This
+            # comment said it was "booked as [REDACT-HOSTNAME-01]", and in this repo's
+            # vocabulary "booked" means a `TODOS.md` entry naming a PHASE. MEASURED at
+            # HEAD: `grep -rn 'REDACT-HOSTNAME-01' TODOS.md .planning/ROADMAP.md` returns
+            # 0 hits. It exists as T-164.8-22 in the threat table of
+            # `.planning/phases/164.8-testpreprod-.../164.8-05-PLAN.md` and as a
+            # CHANGELOG sentence — neither of which has an owner, a date or a gate. Same
+            # shape CLAUDE.md records for `FANOUT-GLOBAL-01`: do not send a planner
+            # looking for an entry that was never written. Fixing the SHARED pattern
+            # (ci.yml and this file's other psql sites) still wants a real entry.
             sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
                    -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
                    -e 's#(could not translate host name )"[^"]*"#\1"***"#g' \
@@ -1041,9 +1167,16 @@ jobs:
       # step list cannot miss it.
       #
       # RESTORE_OUT_DIR is pointed at this same directory, so the script's pre-drop
-      # census (`pre-census.txt`, `survivors.keys`, `survivors.sql`) lands in the
-      # artifact as well — including when the transaction aborts, which is exactly the
-      # run where it is worth having.
+      # census lands here too — including when the transaction aborts, which is exactly
+      # the run where it is worth having in the JOB LOG.
+      # ⛔ SINCE PHASE 164.8.2 THIS DIRECTORY IS NOT THE ARTIFACT. Only the enumerated
+      # allowlist copied by `Stage the public artifact (enumerated allowlist;
+      # default-out)` is published; the rest stays in the job's temp dir and dies with
+      # the runner. `survivors.sql` — the DDL that re-creates the non-public objects
+      # depending on `public` — IS in the artifact, because without it an aborted restore
+      # is not reversible. `pre-census.txt`, `post-census.txt`, the two
+      # `*-rollback-view.txt` files and `survivors.keys` are NOT: they restate that same
+      # DDL with owner-named rows and have no reversal claim on it (T-164.8-21).
       - name: Back up TEST before any write (schema + ledger; NOT data)
         run: |
           set -euo pipefail
@@ -1080,9 +1213,19 @@ jobs:
           # modes, so a hit refuses BEFORE any write — the safe direction. It cannot live
           # in the redaction step: that one is `if: always()` and by then the drop has
           # happened.
-          # `supabase/schema/baseline.sql` is committed only after the five-class scan
-          # recorded in `scripts/local-stack/REPLAY-SPIKE.md` (DSN / supabase host /
-          # project ref / \connect / ALTER DATABASE / JWT). These two files are published
+          # `supabase/schema/baseline.sql` is committed only after the scan recorded in
+          # `scripts/local-stack/REPLAY-SPIKE.md`. ⚠️ CORRECTED 2026-09-10: this comment
+          # called it "the five-class scan" and then listed SIX names, which is the
+          # SP-M03 shape (a claim that does not match its own command) inside the fix for
+          # SP-M03. The COMMAND is six alternations — DSN / supabase host / project ref /
+          # \connect / ALTER DATABASE / JWT — and it is the authority; `BASELINE.md` says
+          # "five classes" because its prose folds the DSN scheme and the supabase host
+          # into one "DSN". Re-derive the class count rather than trusting either
+          # sentence — the enumerated, name-per-class copy of the same set is the
+          # `classes=(…)` array in `scripts/restore-test-from-baseline.sh`, and it prints
+          # its own length on every green run:
+          #   sed -n "/local -a classes=(/,/^  )$/p" scripts/restore-test-from-baseline.sh | grep -c "^    '"
+          # These two files are published
           # the same way and reviewed by nobody first — `schema-before.sql` is an
           # unreviewed `supabase db dump` of a live hosted database, and `ledger.csv`
           # carries the `statements` column, the verbatim SQL of every row applied to
@@ -1091,10 +1234,14 @@ jobs:
           #
           # ⚠️ ONE CLASS IS SCOPED OUT OF THE LEDGER SCAN, BY MEASUREMENT, NOT BY TASTE.
           # `ALTER DATABASE` belongs in the DUMP pattern because a schema dump has no
-          # legitimate reason to carry one. Migration SOURCE does. Measured 2026-09-08:
+          # legitimate reason to carry one. Migration SOURCE does. RE-DERIVE rather than
+          # trust the numbers below — these two commands print them:
           #   cat supabase/migrations/*.sql | grep -acE 'ALTER DATABASE'
-          # reports 6 lines across 4 files and every one is documentation — five `--`
-          # comments and one RAISE NOTICE string, all naming the GUC-setting recipe.
+          #   grep -clE 'ALTER DATABASE' supabase/migrations/*.sql | wc -l
+          # Measured 2026-09-10 at HEAD: 6 lines across THREE files (the count said FOUR
+          # files from 2026-09-08 until review F3 re-ran it), and every one is
+          # documentation — five `--` comments and one RAISE NOTICE string, all naming
+          # the GUC-setting recipe.
           # Applying that class to ledger.csv would be RED ON EVERY RUN, and a gate that
           # has to be waived to pass is not a gate. The residual risk is NAMED rather than
           # hidden: a hand-applied TEST row of the shape
@@ -1134,10 +1281,40 @@ jobs:
                               as it stood immediately BEFORE the restore.
             schema-before.sql `supabase db dump` of TEST's schema, same pinned CLI (2.98.2)
                               that produced supabase/schema/baseline.sql. NO data statements.
-            pre-census.txt    the restore script's pre-drop census, if it got that far.
-            survivors.keys    the non-public objects depending on `public` that the restore
-            survivors.sql     re-creates, and the DDL it re-creates them with.
-            transaction.out   psql's output for the transaction, redacted.
+            census.sql        the catalogue query the restore script ran to take its
+                              pre-drop census.
+            survivors.sql     the non-public objects depending on `public` that the
+                              restore re-creates, and the DDL it re-creates them with.
+                              The ONLY place that policy/trigger DDL appears here as a
+                              standalone file. Without it an aborted restore is not
+                              reversible, which is why it is in this artifact.
+            restore.sql       the full transaction as it was assembled and handed to
+                              psql. It EMBEDS survivors.sql and refdata.sql, so the
+                              survivor DDL appears twice across these files; this one is
+                              the record of what was actually attempted.
+            refdata.sql       the allowlisted migration-seeded reference data replayed
+                              after the schema is rebuilt.
+            census.err        stderr of the pre-drop catalogue census query.
+            ledger.err        stderr of the \copy that wrote ledger.csv.
+            marker.err        stderr of the database-identity marker read. It is
+                              REDACTED rather than echoed: it is psql's connect/auth
+                              channel for the step that decides TEST from PROD.
+            refdata.err       stderr of the reference-data extractor.
+            dump.log          stdout+stderr of `supabase db dump`.
+            transaction.out   stdout+stderr of the psql run of restore.sql.
+                              Those six diagnostic channels are the only files here
+                              that were redacted (see below), and since 2026-09-10
+                              they are named ONE BY ONE in the staging step rather
+                              than admitted as `*.err`/`*.log`/`*.out`. A channel this
+                              job gains tomorrow is NOT in this artifact until someone
+                              adds its name — the same default-out rule the files
+                              above have.
+
+            DELIBERATELY NOT HERE: pre-census.txt, post-census.txt and the two
+            *-rollback-view.txt files. They restate the same survivor DDL alongside
+            owner-named rows read off the live shared TEST database, with no claim on
+            being the reversal recipe, and this artifact is world-readable. They stay in
+            the job's temp directory and are visible in the run log only.
 
           REVERSING THE SCHEMA AND THE LEDGER (a founder act, deliberately manual)
             1. Take the shared-TEST advisory mutex (key 61616158) — see
@@ -1151,15 +1328,75 @@ jobs:
                \copy supabase_migrations.schema_migrations (version, name, statements)
                  FROM 'ledger.csv' CSV HEADER
 
-          ⚠️ WHAT WAS SCANNED, AND THE ONE CLASS THAT WAS NOT
-            This artifact is world-readable: the repository is public. Before this run
-            was allowed to proceed to any write, both files were scanned with the pattern
-            supabase/schema/baseline.sql is committed under (scripts/local-stack/
-            REPLAY-SPIKE.md): DSN, supabase host, project ref, \connect, ALTER DATABASE,
-            JWT. Any hit withholds the file and fails the run BEFORE any write.
-            ONE class is scoped out of the ledger scan and out of it only: ALTER DATABASE.
-            Migration SOURCE legitimately carries it in documentation (measured: 6 lines
-            across 4 files of supabase/migrations, all comments or a RAISE NOTICE), so
+          ⚠️ WHAT WAS SCANNED — SIX FILES OF THESE THIRTEEN, IN TWO PLACES, AND THAT IS ALL
+            This artifact is world-readable: the repository is public. Six of the files
+            here were scanned for the same six classes before this run was allowed to
+            proceed to any write — DSN, supabase host, project ref, \connect,
+            ALTER DATABASE, JWT, the pattern supabase/schema/baseline.sql is committed
+            under (scripts/local-stack/REPLAY-SPIKE.md) — but by TWO DIFFERENT CONTROLS
+            with two different consequences, and the difference matters to you:
+              ledger.csv and schema-before.sql, in this workflow's BACKUP step. A hit
+                WITHHOLDS the file (rm -f) and fails the run before any write, so the
+                offending file does not reach this artifact.
+              census.sql, survivors.sql, restore.sql and refdata.sql, in the restore
+                script's refuse_credential_in_published_sql. A hit REFUSES THE RUN before
+                the transaction — the database is untouched — but it does NOT withhold
+                the file. ⛔ CORRECTED 2026-09-10: this README used to say only "refusal
+                is not masking", which understated it. The staging step below is
+                `if: always()`, so on a hit the flagged file is STILL COPIED and STILL
+                PUBLISHED here. If you are reading a run whose restore step failed with
+                "a credential shape appears in …", treat that file as disclosed and read
+                it before quoting this artifact anywhere. Closing the gap means teaching
+                the scanner to rm -f the way the backup step's does, which costs the
+                reversal recipe on exactly the run that needs it — a decision, not an
+                oversight, and not one taken here.
+            Two paragraphs of this section said "TWO FILES OF THESE THIRTEEN, AND THAT IS
+            ALL" until 2026-09-10, which was true before the script gained its own scan
+            and false after it. Kept as the record of what changed.
+
+          ⛔ WHAT IS STILL SCANNED BY NOTHING
+            Corrected 2026-09-10, twice. This section said "both files were scanned" while
+            the list above advertised seven, which was true of a two-file artifact and
+            false of this one; it then said everything but those two was scanned by
+            nothing, which stopped being true when the script gained its own scan. The
+            workflow's scan runs inside the BACKUP step, which finishes before the
+            restore script exists to write anything — so it cannot have read a file the
+            script produced. Specifically:
+              survivors.sql, restore.sql, refdata.sql and census.sql are written by the
+                restore script, so THIS step's scan above cannot have read them — it
+                finishes before the script exists to write them. Corrected again
+                2026-09-10: they are no longer scanned by nothing. The script scans them
+                ITSELF, in refuse_credential_in_published_sql, over the SAME six classes
+                schema-before.sql gets, before the transaction runs; a hit REFUSES the run
+                and names the file and the class without printing the match, and a tally
+                short of `scanned 4 of 4` is its own MEASURE_FAIL rather than a clean
+                verdict over files it never opened. They are still redacted by NOTHING —
+                refusal is not masking, so a hit costs the run, it does not sanitise the
+                file. survivors.sql
+                and restore.sql deliberately carry pg_get_triggerdef(...) and
+                reconstructed CREATE POLICY ... USING (<qual>) for objects on live shared
+                TEST. That is the reversal recipe, and it is here on purpose (threat
+                T-164.8-21) — without it an aborted restore cannot be undone. Read them
+                before quoting this artifact anywhere it is not already public.
+              census.err, ledger.err, marker.err, refdata.err, dump.log and
+                transaction.out — the six diagnostic channels — are not secret-scanned
+                either. They went through the REDACTION step instead, which is a narrower
+                thing: its sed program masks a DSN's credentials, host=, user= and the
+                server/user names psql prints on a connect or auth failure. Owner names,
+                table names and anything else those channels happened to print pass
+                straight through.
+              README.txt is this file: a static heredoc in the workflow, carrying no
+                value read off any database, which is why nothing scans it.
+
+            ALTER DATABASE is scoped out of the ledger scan, and out of the script's scan
+            of refdata.sql — nowhere else. Migration SOURCE legitimately carries it in
+            documentation: measured 2026-09-10 at HEAD, 6 lines across THREE files of
+            supabase/migrations, all comments except one RAISE NOTICE string. ⚠️ This
+            sentence said FOUR files from 2026-09-08 until 2026-09-10; the maintainer-
+            facing comment above this heredoc was re-measured by review F3 and this copy
+            was not. Re-derive rather than trust either:
+              cat supabase/migrations/*.sql | grep -acE 'ALTER DATABASE'
+              grep -clE 'ALTER DATABASE' supabase/migrations/*.sql | wc -l
             scanning ledger.csv for it would be red on every run. CONSEQUENCE: a
             hand-applied TEST row of the shape
               ALTER DATABASE postgres SET app.<name> = '<real value>'
@@ -1299,11 +1536,11 @@ jobs:
             echo "::error::supabase db push --dry-run exited ${rc} against the restored TEST ledger. The CLI could not read the ledger it is supposed to push against; the redacted output is above."
             exit 1
           fi
-          if grep -q 'Would push these migrations:' "${out}"; then
+          if grep -aq 'Would push these migrations:' "${out}"; then
             echo "::error::the restored ledger leaves migrations PENDING — the seed did not write one row per repo migration file, or the CLI parses the versions differently than the seed spelled them."
             exit 1
           fi
-          if ! grep -q 'Remote database is up to date.' "${out}"; then
+          if ! grep -aq 'Remote database is up to date.' "${out}"; then
             echo "::error::the CLI did not print 'Remote database is up to date.'. Either the ledger is not CLI-consistent, or the pinned CLI's wording changed between 2.84.2 (where both strings were measured) and 2.98.2. Verify the wording before concluding anything about the ledger — this assertion is deliberately positive so a wording change reddens instead of passing vacuously."
             exit 1
           fi
@@ -1404,12 +1641,37 @@ jobs:
       # artifact.
       # The `trap ... ERR` is what makes that total: `set -e` alone would abort at the
       # failing command, BEFORE any cleanup, which is precisely the leak.
-      # ⚠️ SCOPE: only the .err/.log/.out channels are removed, not the whole directory.
-      # They are the only files that can carry connection metadata — ledger.csv and the
-      # two .sql files are left byte-exact by design, and are secret-SCANNED at the point
-      # they are written (see the backup step). So a failed redaction costs the run's
-      # diagnostics, never its reversal recipe.
+      # ⚠️ SCOPE — CORRECTED 2026-09-09 (Phase 164.8.2, WR-05). THIS STEP TOUCHES ONLY
+      # THE .err/.log/.out CHANNELS, and it is NOT what keeps the rest of the directory
+      # out of the public artifact. Read the previous version of this paragraph as a
+      # warning: it claimed the channels were "the only files that can carry connection
+      # metadata" and that "the two .sql files" were "secret-SCANNED at the point they
+      # are written". Both were false, and the false assurance is what let the census
+      # text files ship for a phase. What is TRUE:
+      #   - `ledger.csv` and `schema-before.sql` are left byte-exact here (a substitution
+      #     would corrupt the very bytes the reversal recipe replays) and they ARE
+      #     secret-scanned — in the BACKUP step, at the point they are written.
+      #   - The script-written files are scanned by NOTHING and redacted by NOTHING. The
+      #     backup step's scan runs BEFORE the script exists to write them. There are
+      #     FIVE `.sql` files in this directory, not two: `schema-before.sql` plus the
+      #     script's `census.sql`, `survivors.sql`, `restore.sql` and `refdata.sql`, and
+      #     only the first is scanned.
+      #   - What keeps the unscanned ones out of the world-readable artifact is the
+      #     `Stage the public artifact (enumerated allowlist; default-out)` step below,
+      #     which copies an enumerated list into a separate directory. It ADMITS the four
+      #     script `.sql` files above (`restore.sql` embeds `survivors.sql` by `cat`, so
+      #     that DDL is staged twice — stated, not glossed) and EXCLUDES the census text
+      #     files and `survivors.keys`.
+      # So a failed redaction costs the run's diagnostics, never its reversal recipe —
+      # and a failed STAGING costs the artifact entirely, which is the safe direction.
       - name: Redact connection metadata from the backup directory (public artifact)
+        # ⛔ THE `id:` IS LOAD-BEARING (Phase 164.8.2, review WR-06). The staging step
+        # below reads `steps.redact.outcome` and stages NO diagnostic channel unless
+        # this step succeeded. Remove the id and that expression becomes the empty
+        # string, which is not `success`, so every run would silently lose its
+        # diagnostics — a control that always fires tells the operator nothing.
+        # src/__tests__/test-restore-workflow-wiring.test.ts pins both halves.
+        id: redact
         if: always()
         run: |
           set -euo pipefail
@@ -1457,16 +1719,184 @@ jobs:
             echo "redacted ${redacted} .err/.log/.out channel(s) in the backup directory; .sql and .csv are left byte-exact so the reversal recipe replays."
           fi
 
+      # ── WHAT THE WORLD ACTUALLY GETS (Phase 164.8.2, WR-05). ────────────────
+      # ⛔ THE ALLOWLIST IS BY NAME, NEVER BY GLOB, AND THAT IS THE WHOLE POINT.
+      # ⚠️ THAT SENTENCE WAS FALSE FOR THREE DAYS — CORRECTED 2026-09-10, review WR-01.
+      # The by-name loop below was only ever half the step. Underneath it sat
+      # `for c in "${outdir}"/*.err "${outdir}"/*.log "${outdir}"/*.out`, which is
+      # default-IN for three whole extension classes, and the reviewer PROVED it by
+      # extracting this step and running it: a seeded `future-census.out` carrying
+      # `CREATE POLICY p ON t USING (owner=current_user)` — nobody's decision, a file
+      # this job does not write — was copied into the world-readable artifact. The
+      # channels are now enumerated by name too, so the sentence above is TRUE of the
+      # whole step rather than of one loop in it. The six names were regenerated from
+      # the writers, not carried from the finding:
+      #   grep -oE 'RESTORE_OUT_DIR}?/[A-Za-z0-9_.-]+\.(err|log|out)' scripts/restore-test-from-baseline.sh
+      #   grep -oE 'outdir}?/[A-Za-z0-9_.-]+\.(err|log|out)'          .github/workflows/test-restore-from-baseline.yml
+      # ⛔ Do not restore the glob to save six words. A whole-class admission is exactly
+      # the shape this step replaced, and it re-opened here one extension family at a
+      # time — which is what the `*.sql` sentence further down already warned about.
+      # Before this step the upload pointed at `${RUNNER_TEMP}/test-backup` whole, so
+      # every file the restore script happened to write was published on a PUBLIC repo
+      # for 90 days — in by default. Ten of the eighteen names that reach that
+      # directory passed through NEITHER the backup step's secret scan (which runs
+      # before the script writes anything) NOR the redaction above (`*.err/*.log/*.out`
+      # only). Copying an ENUMERATED list into a fresh directory inverts that: a file
+      # the script gains tomorrow is OUT until someone adds its name here and says why.
+      # `*.sql` would re-create the defect one extension at a time, which is precisely
+      # the shape the finding is about, so the four script-written `.sql` files are
+      # spelled out individually.
+      #
+      # WHAT STAYS, AND WHY (founder decision 2026-09-09, threat T-164.8-21):
+      #   `survivors.sql`  — the non-public objects depending on `public` and the DDL
+      #                      that re-creates them. It carries `pg_get_triggerdef(...)`
+      #                      and a reconstructed `CREATE POLICY … USING (<qual>)`, i.e.
+      #                      the very bytes the finding is about — and WITHOUT it an
+      #                      aborted restore is not reversible, a capability Phase 164.8
+      #                      built deliberately. The DDL lives in the file that needs it.
+      #   `restore.sql`    — the transaction as psql actually ran it. `build_transaction`
+      #                      `cat`s `survivors.sql` (and `refdata.sql`) into it, so the
+      #                      survivor DDL is present TWICE among the staged files. That
+      #                      is stated rather than glossed: the claim is NOT "the DDL
+      #                      appears exactly once", it is that each file carrying it has
+      #                      its own claim on being here — one is the recipe, the other
+      #                      is the record of what was attempted.
+      #   `census.sql`, `refdata.sql` — the queries the script ran, forward inputs a
+      #                      post-mortem needs to reproduce a reading.
+      #   the six CHANNELS — `census.err`, `ledger.err`, `marker.err`, `refdata.err`,
+      #                      `dump.log`, `transaction.out`. Named individually since
+      #                      2026-09-10 (WR-01). They are the only files here that
+      #                      pass through the redaction step above, and a run's
+      #                      diagnosis is usually the whole reason to open this
+      #                      artifact. ⚠️ `marker.err` is the one to think twice about
+      #                      before widening this list: it is psql's stderr from the
+      #                      step that decides TEST from PROD, which is why it is
+      #                      redacted rather than echoed.
+      # WHAT LEAVES: `pre-census.txt`, `post-census.txt`, `pre-census.rollback-view.txt`
+      # and `post-census.rollback-view.txt` — they restate that SAME DDL with
+      # owner-named rows read off live shared TEST and have no reversal claim on it —
+      # and `survivors.keys`, which is neither recipe nor channel and so is out under
+      # the default-out rule rather than by a judgement of its own.
+      #
+      # FAIL-CLOSED, the redaction step's discipline applied to this new boundary: any
+      # failure REMOVES the staging directory, so the `if: always()` upload below finds
+      # nothing and `if-no-files-found: error` reddens it. Nothing is ever uploaded from
+      # `${outdir}` directly any more.
+      - name: Stage the public artifact (enumerated allowlist; default-out)
+        if: always()
+        env:
+          # The redaction step's own verdict on whether its output is publishable.
+          # Read as a value rather than as an `if:` on this step, because the step
+          # must still run and still stage the REVERSAL RECIPE when the redaction
+          # failed — it is only the CHANNELS that a failed redaction disqualifies.
+          REDACT_OUTCOME: ${{ steps.redact.outcome }}
+        run: |
+          set -euo pipefail
+          outdir="${RUNNER_TEMP}/test-backup"
+          stage="${RUNNER_TEMP}/test-backup-artifact"
+          trap 'rc=$?; rm -rf "${stage}"; echo "::error::staging FAILED (exit ${rc}) — the staging directory was REMOVED so the upload finds nothing (if-no-files-found: error) rather than publishing an un-enumerated directory. Nothing is uploaded from ${outdir} directly."; exit 1' ERR
+          mkdir -p "${stage}"
+          # Set by the redaction-verdict guard below when the verdict could not be READ
+          # (as opposed to being a legitimate non-success). Consumed at the very end of
+          # the step so the staged manifest still prints first. See that guard's comment.
+          wiring_fault=0
+          # This branch exists so a run that died BEFORE the backup step reddens on its
+          # own cause rather than on `if-no-files-found: error`. The run is already red;
+          # a second red from the upload would point at the artifact plumbing and send
+          # the next reader to the wrong step. The note ships in place of the backup.
+          if [ ! -d "${outdir}" ]; then
+            printf '%s\n' "This run failed before the backup step ran, so there is no pre-restore backup to publish." > "${stage}/README.txt"
+            echo "staged 1 file(s) from a MISSING ${outdir} — the run failed before the backup step; the note above is the whole artifact."
+          else
+            # Guarded with `if [ -f ]` rather than `&&` chains: an ABORTED run legitimately
+            # has fewer files, and that must not be an error, while a `cp` that genuinely
+            # FAILS must still reach the trap. The softening idioms this job's wiring test
+            # scans for are banned here and would defeat exactly that — deliberately NOT
+            # spelled out, because a comment quoting a banned token is itself a hit (the
+            # class recorded in Phase 164.8: a widened matcher read its own example).
+            for f in ledger.csv schema-before.sql README.txt census.sql survivors.sql restore.sql refdata.sql; do
+              if [ -f "${outdir}/${f}" ]; then
+                cp -p "${outdir}/${f}" "${stage}/"
+              fi
+            done
+            # The diagnostic channels, BY NAME, under the same default-out rule as the
+            # content files above. This loop was `for c in "${outdir}"/*.err
+            # "${outdir}"/*.log "${outdir}"/*.out` until 2026-09-10; see the WR-01
+            # paragraph in the comment block above this step for what that cost.
+            #
+            # ⛔ AND ONLY IF THE REDACTION ACTUALLY SUCCEEDED (review WR-06). The step
+            # above prints, on a removal it could not perform, "Do NOT publish this
+            # run's artifact: treat the TEST pooler host, its IP and the DB user as
+            # disclosed" — and this step is `if: always()`, so until 2026-09-10 it
+            # copied the survivors anyway and the upload published exactly what that
+            # message forbids. Default-DENY: anything other than a green redaction
+            # stages NO channel.
+            #
+            # ⛔ THE FOUR REACHING VALUES ARE NOT ONE CASE, THEY ARE TWO (review A2).
+            # The single `else` that shipped printed `::error::` and fell through with
+            # status 0 — and an `::error::` annotation fails NEITHER a step NOR a job.
+            # For `failure` / `cancelled` / `skipped` that is correct and deliberate:
+            # each coincides with a job that is ALREADY red for its own reason, and a
+            # second red from the staging step would send the next reader to the wrong
+            # place. THE FOURTH DOES NOT COINCIDE WITH ANYTHING. Drop `id: redact`,
+            # reorder the steps, or edit this `env:` block and `steps.redact.outcome`
+            # evaluates to the EMPTY STRING: the redaction SUCCEEDED, the job is GREEN,
+            # and every run from then on publishes an artifact with zero diagnostic
+            # channels while this guard has silently become unconditional. A permanent
+            # deny nobody chose, on a green board, is the exact shape this file exists
+            # to refuse — so an empty (or unrecognised) outcome is a MEASURE_FAIL that
+            # EXITS 1, and its message says the WIRING is gone rather than that the
+            # redaction failed. The two are opposite diagnoses and must not share a
+            # sentence.
+            #
+            # ⚠️ THE FAULT IS FLAGGED HERE AND EXITS AT THE END OF THE STEP, ON PURPOSE.
+            # An immediate `exit 1` would skip the staged manifest — the one listing
+            # that tells the operator what the artifact does hold. And an explicit
+            # `exit` does NOT fire the `trap … ERR` above (measured), so the staging
+            # directory SURVIVES and the reversal recipe still uploads: an unreadable
+            # redaction verdict costs this run its diagnostics, never its undo. That is
+            # the same discipline as a failed redaction, applied to a worse case.
+            if [ "${REDACT_OUTCOME:-}" = "success" ]; then
+              for c in census.err ledger.err marker.err refdata.err dump.log transaction.out; do
+                if [ -f "${outdir}/${c}" ]; then
+                  cp -p "${outdir}/${c}" "${stage}/"
+                fi
+              done
+            elif [ -z "${REDACT_OUTCOME:-}" ]; then
+              echo "::error::MEASURE_FAIL: REDACT_OUTCOME is EMPTY, so the redaction step's verdict was NOT READ — this is a WIRING fault, not a failed redaction. \`steps.redact.outcome\` reads as the empty string when the redaction step has lost its \`id: redact\`, has been reordered after this one, or has been dropped from this step's \`env:\` block. NO diagnostic channel is staged (default-DENY), and this step EXITS 1: an unconditional deny on a GREEN board would silently strip every future run's diagnostics with nothing to say so. The reversal recipe IS staged."
+              wiring_fault=1
+            elif [ "${REDACT_OUTCOME}" = "failure" ] || [ "${REDACT_OUTCOME}" = "cancelled" ] || [ "${REDACT_OUTCOME}" = "skipped" ]; then
+              echo "::error::the redaction step did not succeed (outcome '${REDACT_OUTCOME}') — NO diagnostic channel is staged. psql and the CLI name the TEST pooler host, its IP and the DB user in a connect/auth failure, and this artifact is world-readable on a PUBLIC repo. The reversal recipe (ledger.csv, schema-before.sql and the four script .sql files) IS staged: a failed redaction costs this run its diagnostics, never its undo."
+            else
+              echo "::error::MEASURE_FAIL: REDACT_OUTCOME is '${REDACT_OUTCOME}', which is none of success/failure/cancelled/skipped — the value did not come from a step outcome this guard understands. NO diagnostic channel is staged (default-DENY), and this step EXITS 1 rather than denying quietly on a board that may be green. The reversal recipe IS staged."
+              wiring_fault=1
+            fi
+            echo "staged manifest:"
+            ls -1 "${stage}" | sed 's/^/  /'
+            staged_n="$(ls -1 "${stage}" | wc -l | tr -d ' ')"
+            echo "staged ${staged_n} file(s) from ${outdir}; everything else the script wrote stays in the job's temp dir and never enters the artifact."
+          fi
+          # ⛔ THE STEP'S EXIT STATUS, LAST. An `::error::` annotation reddens nothing by
+          # itself; this line is what turns an UNREADABLE redaction verdict into a failed
+          # step. A legitimate `failure`/`cancelled`/`skipped` never sets the flag and
+          # never reaches this exit, because that job is already red for its own reason.
+          if [ "${wiring_fault}" -ne 0 ]; then
+            exit 1
+          fi
+
       # `if: always()` so an ABORTED script still leaves the backup behind — that is
       # the run where the artifact matters most. Placed after the script rather than
       # immediately after the backup step so the script's pre-drop census is inside it
       # too; the backup FILES are written before the script either way, which is the
       # ordering the wiring test pins.
+      # ⛔ `path:` is the STAGED set, not the raw backup directory. Since Phase 164.8.2
+      # the pre-drop census text files are deliberately NOT in this artifact (they were,
+      # before) — see the staging step above for what is carried and why.
       - name: Upload the pre-restore backup (schema + ledger; NOT data)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: test-restore-backup-${{ github.run_id }}
-          path: ${{ runner.temp }}/test-backup
+          path: ${{ runner.temp }}/test-backup-artifact
           retention-days: 90
           if-no-files-found: error

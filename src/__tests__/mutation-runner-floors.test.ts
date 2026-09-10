@@ -44,6 +44,14 @@ import {
 } from "../../scripts/mutation-runner/run.mjs";
 import { parseFile, scanCorpus } from "../../scripts/mutation-runner/parse.mjs";
 
+// ⛔ THE DELIBERATE DEGENERACY DEMONSTRATION, ROUTED THROUGH ITS ONE NAMED HOME
+// (Phase 164.8.2 / W3). The calibration below must WRITE the unchecked narrow —
+// that expression IS its evidence — but the class rule in
+// `test-restore-workflow-wiring.test.ts` now scans every test file. A file:line
+// allowlist rots and fragment assembly ("sl" + "ice") would make the evidence
+// unreadable, so the trap lives in one announced function instead.
+import { degenerateNarrow } from "../test/helpers/degenerate-narrow";
+
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const GATE_DIR = join(REPO_ROOT, "supabase", "tests");
 const CI_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
@@ -61,6 +69,42 @@ const TWIN = /^[ \t]*--[ \t]*RED-UNDER-M:/;
 // A waiver is a twin declaring no executable mutation. Matched textually here,
 // deliberately, rather than by JSON.parse through the parser under test.
 const WAIVER = /^[ \t]*--[ \t]*RED-UNDER-M:.*"waiver"[ \t]*:/;
+
+// ---------------------------------------------------------------------------
+// ⛔ ANCHOR DISCIPLINE (Phase 164.8.2 / WR-07). READ THIS BEFORE WRITING A SLICE.
+//
+// `String.indexOf` returns -1 on a miss, and JavaScript's `slice` reads a
+// negative index FROM THE END: `s.slice(-1)` is the LAST CHARACTER and
+// `s.slice(0, -1)` is nearly the WHOLE string. A job-block slice whose `\n  job:`
+// anchor was renamed therefore does not fail — it degenerates into a subject
+// every `toContain` / `not.toContain` over it sails past. MEASURED on this
+// branch: a byte-identity pin over an entire mutex protocol comparing `"\n"` to
+// `"\n"` and PASSING.
+//
+// ⛔ AN ABSENT ANCHOR IS A FINDING, NOT A VALUE. No `?? ''`, no `|| 0`, no
+// `Math.max(0, i)`. Throw, and NAME the anchor. Restated per-file rather than
+// imported, matching the self-containment convention these pins are built on.
+// ---------------------------------------------------------------------------
+
+/** `text.indexOf(anchor)`, but a miss THROWS by name instead of returning -1. */
+function anchorIndex(text: string, anchor: string, from = 0): number {
+  const at = text.indexOf(anchor, from);
+  if (at < 0) {
+    throw new Error(
+      `ANCHOR MISSING: ${JSON.stringify(anchor)} is not present in the subject text. ` +
+        `The narrowing slice that wanted it would have degenerated (slice(-1) is the LAST ` +
+        `CHARACTER, slice(0, -1) is nearly the WHOLE string) and every assertion over the ` +
+        `result would have passed vacuously. Fix the anchor or the subject — do not default it.`,
+    );
+  }
+  return at;
+}
+
+/** The region from `startAnchor` up to `endAnchor`; either miss throws by name. */
+function sliceBetweenAnchors(text: string, startAnchor: string, endAnchor: string): string {
+  const start = anchorIndex(text, startAnchor);
+  return text.slice(start, anchorIndex(text, endAnchor, start));
+}
 
 function rederive(dir: string = GATE_DIR) {
   const files = readdirSync(dir)
@@ -701,10 +745,7 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
     expect(selfTestAt).toBeLessThan(corpusAt);
     // Both live in the SAME job. A self-test wired into some other job would
     // satisfy the ordering above while proving nothing about `sql-mutation`.
-    const job = CI_TEXT.slice(
-      CI_TEXT.indexOf("\n  sql-mutation:"),
-      CI_TEXT.indexOf("\n  plan-anchor-verify:"),
-    );
+    const job = sliceBetweenAnchors(CI_TEXT, "\n  sql-mutation:", "\n  plan-anchor-verify:");
     expect(job.length, "the sql-mutation job slice must be non-empty").toBeGreaterThan(1000);
     expect(job).toContain("run: node scripts/mutation-runner/run.mjs --self-test");
     expect(job).toContain('node scripts/mutation-runner/run.mjs > "$RUNNER_LOG" 2>&1');
@@ -718,7 +759,7 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
     // run.mjs, and the exercised set is read out of selfTest()'s source. A new
     // kind added without a scenario fails here BY NAME.
     const src = readFileSync(RUNNER_PATH, "utf8");
-    const selfTestBody = src.slice(src.indexOf("function selfTest()"));
+    const selfTestBody = src.slice(anchorIndex(src, "function selfTest()"));
     expect(selfTestBody.length, "selfTest() must be findable in the source").toBeGreaterThan(1000);
     const exercised = new Set(
       [...selfTestBody.matchAll(/kind === "([a-z-]+)"/g)].map((m) => m[1]),
@@ -1344,10 +1385,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
   const CI_TEXT = readFileSync(CI_PATH, "utf8");
 
   it("ci.yml parses the lane-invocations line with the missing-line MEASURE_FAIL discipline and asserts exact agreement", () => {
-    const job = CI_TEXT.slice(
-      CI_TEXT.indexOf("\n  sql-mutation:"),
-      CI_TEXT.indexOf("\n  plan-anchor-verify:"),
-    );
+    const job = sliceBetweenAnchors(CI_TEXT, "\n  sql-mutation:", "\n  plan-anchor-verify:");
     expect(job.length, "the sql-mutation job slice must be non-empty").toBeGreaterThan(1000);
     expect(job).toContain("^lane-invocations: [0-9]+ ");
     expect(job).toContain("NO 'lane-invocations: N' line");
@@ -1958,5 +1996,62 @@ describe("IN-03 — ONE spelling of the arm-identity grammar", () => {
     ).toBe(1);
     // Non-vacuity: the one spelling is the exported-by-name definition.
     expect(src).toContain(`const IDENTITY_RE = ${literal}g;`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⛔ WR-07 CALIBRATION — the anchor check must BITE.
+//
+// The `sql-mutation` job slice is the shape this closes: two `indexOf` results
+// handed straight to `slice`, feeding a block of `toContain` / `not.toContain`
+// assertions. Rename either job key and the old code narrowed to a single
+// character, at which point every `not.toContain` in that arm passed for the
+// wrong reason. Driven here with the anchor ABSENT — asserting the mutation
+// actually removed it first — and then with the real ci.yml as a control.
+// ---------------------------------------------------------------------------
+describe("[164.8.2-WR-07] slice anchors fail loud instead of degenerating", () => {
+  const CI_TEXT = readFileSync(CI_PATH, "utf8");
+
+  it("a renamed job key throws BY NAME instead of narrowing to one character", () => {
+    // Control first: the real workflow still carries both anchors.
+    expect(() =>
+      sliceBetweenAnchors(CI_TEXT, "\n  sql-mutation:", "\n  plan-anchor-verify:"),
+    ).not.toThrow();
+    expect(
+      sliceBetweenAnchors(CI_TEXT, "\n  sql-mutation:", "\n  plan-anchor-verify:").length,
+      "the control slice must be a real job block, not an accident",
+    ).toBeGreaterThan(1000);
+
+    const mutant = CI_TEXT.replace("\n  sql-mutation:", "\n  sql-mutant:");
+    expect(mutant, "the rename must actually change the text").not.toBe(CI_TEXT);
+    expect(
+      mutant.includes("\n  sql-mutation:"),
+      "the mutation must actually REMOVE the anchor — a no-op replace reads as a pass",
+    ).toBe(false);
+    expect(() =>
+      sliceBetweenAnchors(mutant, "\n  sql-mutation:", "\n  plan-anchor-verify:"),
+    ).toThrow(/ANCHOR MISSING: "\\n {2}sql-mutation:"/);
+
+    // ⚠️ The trap this replaces, spelled out so the next reader can see it: the
+    // unchecked form does not throw, it returns ONE CHARACTER, and a block of
+    // `not.toContain("continue-on-error")` assertions over one character all pass.
+    const degenerate = degenerateNarrow(mutant, {
+      from: "\n  sql-mutation:",
+      upTo: "\n  plan-anchor-verify:",
+    });
+    expect(degenerate.length, "the pre-WR-07 shape degenerated rather than failing").toBeLessThan(2);
+    expect(degenerate).not.toContain("continue-on-error");
+  });
+
+  it("the END anchor is checked too — a renamed successor job cannot silently widen the slice", () => {
+    const mutant = CI_TEXT.replace("\n  plan-anchor-verify:", "\n  plan-anchor-check:");
+    expect(mutant, "the rename must actually change the text").not.toBe(CI_TEXT);
+    expect(
+      mutant.includes("\n  plan-anchor-verify:"),
+      "the mutation must actually REMOVE the end anchor",
+    ).toBe(false);
+    expect(() =>
+      sliceBetweenAnchors(mutant, "\n  sql-mutation:", "\n  plan-anchor-verify:"),
+    ).toThrow(/ANCHOR MISSING: "\\n {2}plan-anchor-verify:"/);
   });
 });

@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.2.1
-current_phase_name: SESSIONID-FENCE
+current_phase: 164.8.2
+current_phase_name: GATEHARDENING
 status: verified
 stopped_at: "164.5-05 tasks 1-2 complete; STOPPED at task 3 blocking-human checkpoint:decision (ROADMAP criterion 5 wording)"
-last_updated: "2026-09-09T10:34:24.862Z"
-last_activity: 2026-09-06
-last_activity_desc: "164.2 shipped as PR #749. Version bumped 0.77.15.0 -> 0.77.16.0 with a CHANGELOG entry (nothing in GSD or CI enforces either). Ship review: security auditor + 10 diff-scoped specialists; 5 file-disjoint fixers. TWO VACUITIES: the roster-render poster census compared a hand-typed length to a hand-typed literal while claiming to scan src/ (it read no files) — and that was the pin the founder's criterion-3 override explicitly rested on; and the PGRST204 assertion passed on the format string's static tail. Three more found while fixing: C-10's 400-day fixture could not detect the arm-swap it guarded, the provenance census's Rule C ran only on stamped sites, and a fixer caught its own draft assertion passing for the wrong reason. FOUR user-facing/data-integrity: the two SUCCESS writers sat outside the PGRST204 degrade while the docstring claimed full coverage (a succeeded compute was recorded failed, cash series heal-deleted, retry burned); durable writer sentences had made an internal table name + raw uuid and a Python exception class name reach user copy; validate-and-encrypt showed OUR stale service key as 'Unauthorized' on a key-connect form; the post-23505 read discarded both failure channels. Fixing stale anchors introduced 3 bare file:line cites that [SEAMPROSE-01] bans for going stale — caught by the full suite. Gates re-run by the orchestrator: vitest 14180/0 (Node 22), pytest 5430, mypy --strict 79 files, tsc clean, corpus 369 arms no defects. SECURITY.md added: 21/21 closed, threats_open 0, HIGH proven non-vacuous by three lane mutants that each abort the apply."
-state_head: 27d519e2a54a6653a69e71e7211168bf33819501
+last_updated: "2026-09-10T14:12:59.000Z"
+last_activity: 2026-09-10
+last_activity_desc: "164.8.2 GATEHARDENING shipped as PR #772 (head 0c160c28, filtered branch phase-164.8.2-gatehardening-pr, 102 commits picked = 102 on-branch, CODE IDENTICAL 15965 lines, 0 forbidden paths, deletion-guard 0). ZERO migrations — supabase-migrate.yml's paths: filter means the merge applies nothing to any database. Closed the five code-review warnings Phase 164.8 shipped, then SIX review rounds: rounds 1-5 EACH found a control weaker than the sentence beside it, INCLUDING inside the previous round's fixes; round 6 was the first clean one and both reviewers reached it by rebuilding the shipped logic and re-deriving over all 874 test files rather than reading code. THE CLASS: String.indexOf returns -1, so s.slice(-1) is the LAST CHARACTER and s.slice(0,-1) is nearly the whole string — a byte-identity pin over an entire mutex protocol was comparing one newline literal to another; an arm asserting 'the credential gate carries no if:' passed BECAUSE THE STEP NO LONGER EXISTED; an adjacency check Math.abs(a.indexOf(x)-a.indexOf(y))===1 was true when one index was -1 and the other 0. Twelve sites across eleven files, each behind a helper that THROWS naming the missing anchor — no ?? '', no || 0, no Math.max(0,i). The standing gate was rebuilt three times then CUT BACK: its regex comment stripper deleted 858 lines (18%) of its own subject because these files quote shell globs verbatim and \"${outdir}\"/*.err opens a block comment; its scope claimed a class and delivered 2 files, then 137 while silently skipping 346 .test.tsx; its own anti-vacuity floor read the RAW source where both pinned files carry the offending expression in comments BY DESIGN. Then 96 lines of self-referential tolerance whose calibration legs could not fail were deleted, a duplicate rule copy deleted after proving coverage by five-depth injection, and a 4718-line strip subject replaced by a 201-line synthetic. Gates re-run by the orchestrator on the merged tree: vitest 853 files / 14644 tests / 0 failed, restore-test-from-baseline --self-test 27/27, test-ledger-drift-check --self-test 11/11, tsc clean, eslint clean. SECURITY.md: 24/24 closed, threats_open 0, ASVS 1, block_on high. Every assertion added or changed was neutered, observed RED and restored FROM A BYTE BACKUP. 14 residuals booked in TODOS.md, each naming exactly one destination phase (164.8.4 GATERESIDUE, 164.9 TESTISOLATION); none CARDINAL. The one with a CONFIRMED INCIDENT rather than a latent path: a local wrapper's bun shebang auto-loaded .env.local into a child vitest and produced REAL INSERTs against shared TEST — PROD provably untouched."
+state_head: d52d1e93ceb2966dffee1f50344092164b5e73d7
 
 # ⚠️ progress: HAND-SET 2026-09-06 against `origin/main`, NOT derived from this checkout.
 
@@ -225,12 +225,36 @@ state_head: 27d519e2a54a6653a69e71e7211168bf33819501
 
 # state-update step entirely, per this banner's own rule that it wins over that step.
 
+# ⚠️ HAND-SET AGAIN 2026-09-10 (Phase 164.8.2 ship). The block below was found CLOBBERED at
+# 28/8/116/108/29 — disk-derived numbers, the eighth reset this banner records. Restored and
+# re-censused, every integer with its source:
+#   total_phases     21 -> 29  — MEASURED, not assumed: `awk` over the v1.20 section of
+#                                ROADMAP.md counts 29 `### Phase` headers. The eight added
+#                                since 2026-09-07 are 164.5.1, 164.5.2, 164.8.1, 164.8.2,
+#                                164.8.3, 164.8.4, 164.9, 164.10.
+#   total_plans      126 -> 141 — 126 baseline + 164.8's 6 + 164.8.1's 4 + 164.8.2's 5.
+#                                The baseline reproduces EXACTLY from
+#                                `git ls-tree -r --name-only origin/main .planning/phases/`
+#                                (107 main-visible) + 164.2's 10 + 164.2.1's 2 + 164.7's 7,
+#                                which also CONFIRMS 164.5 and 164.6 have authored none.
+#   completed_plans  123 -> 137 — + 164.8's 6 SUMMARYs, + 164.8.1's 3 (the census reads S=3
+#                                against P=4; the ROADMAP calls it 4/4 and the disk does not
+#                                agree — counted CONSERVATIVELY at what is measurable),
+#                                + 164.8.2's 5.
+#   completed_phases 13 -> 15   — 164.8 (6/6) and 164.8.2 (5/5) satisfy plans>0 AND
+#                                summaries==plans. 164.8.1 does NOT under that rule (4 vs 3).
+#                                164.7 stays out: plans 06/07 are human gates and no new
+#                                evidence says they closed.
+#   percent          62 -> 52   — 15/29 phase-weighted, the convention fixed at 156-10.
+#                                It FELL because eight phases were inserted, not because work
+#                                was lost — a lower percent here is the roadmap growing.
+
 progress:
-  total_phases: 25
-  completed_phases: 7
-  total_plans: 107
-  completed_plans: 96
-  percent: 28
+  total_phases: 29
+  completed_phases: 15
+  total_plans: 141
+  completed_plans: 137
+  percent: 52
 ---
 
 # Project State — Quantalyze
@@ -1246,12 +1270,14 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.6 edited: carried in CI-DOCSPATH-01 (2026-09-06, at the PR #750 merge gate) — goal item (12), success criterion 9, requirements entry, and a TODOS entry. MEASURED on PR #750 itself, not estimated: a four-file `.planning/`-only diff ran 21 jobs / ~3,001 job-seconds (~50 min), excluding `e2e-seeded` and `sql-tests` which were still running at census time; `sql-mutation` 559s, `python` 494s, `e2e` 405s. The mutex cost is the real one — `e2e-seeded` and `sql-tests` each take the shared-TEST-DB advisory lock, so a roadmap edit delays real code PRs on a database shared with other people's CI. ⛔ Booked in 164.6 rather than left in TODOS because a job-skipping path filter has the shape of a gate silently not running, which is this milestone's defect class: criterion 9 requires proof on a CODE push that everything still executes, not merely proof that a docs push got fast. ⚠️ STATE entry written BY HAND: `state.add-roadmap-evolution` recomputes the `progress:` block from local disk as an undocumented side effect (observed earlier the same day on the 164.8 insertion), and this checkout cannot see the filtered 164.2 plans.
 - Phase 164.9 inserted after Phase 164: TESTISOLATION — per-run isolation replaces global truth against the shared TEST project, closing FANOUT-GLOBAL-01. Inserted because two hardening items were deferred to no phase during 164.8 discuss. (URGENT)
 - Phase 164.10 inserted after Phase 164: BODYDRIFT — PROD runs an EARLIER revision of three function bodies than the migration chain renders; DRIFT-06 repaired under the three-reviewer rule. (URGENT)
+- Phase 164.8.3 inserted after Phase 164.8: PROBERAUTH — prod-prober names MT5 -6 (no authorized account) instead of the catch-all mt5-terminal-error (URGENT)
 - Phase 164.9 moved after Phase 164.8: CORRECTION to the two entries above: phase.insert places a new decimal immediately after the named INTEGER phase, so 164.9 and 164.10 were written directly after Phase 164 — ahead of 164.7, 164.3, 164.5 and 164.8. Both sections were then RELOCATED BY HAND to the tail, after 164.8, because ROADMAP file order is the queue and 164.9 depends on the TEST restore that 164.8 delivers. Their 'inserted after Phase 164' wording above describes the tool call, NOT the final position.
 - Phase 164.8 moved after Phase 164.5: Section physically relocated to sit after 164.5 and before 164.5.1, so FILE ORDER matches the pull-forward decided earlier the same day. Until this move the phase was pulled forward in prose only, and roadmap.analyze walks file order — it would have returned 164.6 as next_phase. Prose is not the queue.
 - Phase 164.9 edited: edited fields: requirements — routed TODOS [164.8-DATA-DEPENDENT-MIGRATION-ESCAPE] here from Phase 164.8 plan-checker blocker B4 (restore is schema-only, so TEST mirrors PROD's catalogue not its data); 164.10 rejected as home, function-body scope only
 - Phase 164.8 edited: edited fields: plans — 5 to 6 after the plan-checker REVISE split plan 01's self-test harness into its own plan (W8, plan 01 was at 0.95 budget)
 - Phase 164.9 edited: routed [164.8.1-REPLAY-INSERT-ONLY-SCOPE] here from Phase 164.8.1 PR review: requirements line + ROUTED HERE block
 - Phase 164.9 edited: routed [164.8-PUSH-RACE-VAC08] here from Phase 164.8 plan 05: VAC-08 and apply-test share advisory key 61616158
+- Phase 164.5.1 edited: A1 measured on shared TEST (Vault read permitted) — gate lifted; migration-vs-runbook narrowed to the rebuild statement
 
 ### Decisions
 
@@ -2288,6 +2314,16 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - SC-1's ubuntu half and SC-3's ubuntu cleared half are UNMEASURED at 164.4.1-06: no SHA-bound workflow_dispatch of the finished 44-file/363-arm tree exists, so there is no ubuntu wall clock, no ubuntu per-arm lane time, and ci.yml's TIMEOUT DECISION block carries no number from this phase. Owed to the orchestrator after merge.
 - Plan 164.4.1-06 Task 2's CLEARED grep over 164.4.1-TRIPWIRE-FIRED.log ALREADY returns 1 at base ddfd55d3, satisfied by plan 01's own header sentence — a green there proves nothing. Booked as deferred-items D-164.4.1-06-1; repair belongs in the assertion (bind to run id + 40-hex sha), not the document.
 - Phase 164.5 plan 05 task 3 is a blocking-human checkpoint:decision, UNANSWERED: amend ROADMAP criterion 5 to the '0 NEW drift' reading, or hold it open pending the founder's decision on applying the 31 migrations to shared TEST. Tasks 1-2 are complete; ROADMAP.md and TODOS.md were deliberately NOT edited. Criterion 5 is recorded OPEN.
+
+- ✅ **164.8.2 GATEHARDENING SHIPPED 2026-09-10 as PR #772** (head `0c160c28` on the filtered branch `phase-164.8.2-gatehardening-pr`; filter reports picked=102, on-branch=102, skipped-planning-only=14, CODE IDENTICAL at 15965 lines, 0 forbidden paths, deletion-guard count 0, working 54 files -> pr 32). **ZERO migrations** — `supabase-migrate.yml`'s `paths:` filter means the merge applies nothing to any database, so neither the PROD auto-apply nor the TEST-first gate is in play.
+- ⭐ **THE RECURSION IS THE RESULT, not any single gate.** Six review rounds ran over this phase. **Rounds one through five EACH found a control weaker than the sentence beside it — including inside the previous round's fixes.** Round 2 found twelve findings against round 1; round 3 found five blockers against those; round 4 found a guard that was unreachable, blind and unfalsifiable at once; round 5 found that the CURE for it had blinded the scanner to 18% of its own file. Round 6 found none, and both reviewers reached that independently by REBUILDING the shipped logic and re-deriving its claims over all 874 test files rather than reading the code. ⚠️ Read that as a standing warning about review depth on gate code, not as a story about this phase.
+- ⛔ **THE CLASS THAT COST THE MOST WAS TRIVIAL: `String.indexOf`/`lastIndexOf`/`search` return `-1`.** `s.slice(-1)` is the LAST CHARACTER and `s.slice(0, -1)` is nearly the WHOLE string, so an assertion over either passes VACUOUSLY. Found live, not hypothetically: a byte-identity pin over an entire mutex protocol comparing one newline literal to another; an arm asserting *"the credential gate carries no `if:`"* that passed **because the step no longer existed**; and an adjacency check written `Math.abs(a.indexOf(x) - a.indexOf(y)) === 1`, true when one index is `-1` and the other `0` — it passed exactly when a leg it names was MISSING. Twelve sites closed across eleven files, each behind a helper that THROWS naming the missing anchor. ⛔ No `?? ''`, no `|| 0`, no `Math.max(0, i)`: an absent anchor means the subject is not the shape the code assumed, which is a FINDING, not a value to substitute. A standing gate now enforces the class across every test file in `src/__tests__`.
+- ⚠️ **THE GATE ITSELF WAS REBUILT THREE TIMES, THEN CUT BACK.** Its comment stripper was a REGEX, and these files pin SHELL workflows and quote their globs verbatim — `"${outdir}"/*.err` opens a block comment. **Measured: 858 lines, 18% of its own subject, deleted before the scan ever saw them.** Its scope claimed a class and delivered 2 files, then 137 while silently skipping 346 `.test.tsx`. Its own anti-vacuity floor read the RAW source, where both pinned files carry the offending expression in comments BY DESIGN — green forever regardless of the code. Then it lost its self-referential edge: 96 lines of tolerance machinery whose own calibration legs called the untolerated path and therefore COULD NOT FAIL, a duplicate copy that had been given the naive stripper *in the same branch that diagnosed it*, and a 4718-line strip subject replaced by a 201-line synthetic that cannot rot. Deleting the duplication was PROVEN, not assumed — an offender injected at five depths into the file whose local rule was removed is reported by the survivor, each at the correct line.
+- Gates re-run by the orchestrator on the merged tree, none delegated: vitest **853 files / 14,644 tests / 0 failed** (19 files / 280 tests skipped), `restore-test-from-baseline.sh --self-test` **27/27**, `test-ledger-drift-check.sh --self-test` **11/11**, `tsc --noEmit` clean, `eslint` clean. Every assertion added or changed was neutered, observed RED, and restored **from a byte backup** — never `git checkout --`.
+- `164.8.2-SECURITY.md` written from State B (no prior file, PLAN threat model on disk): **24/24 closed, `threats_open: 0`**, ASVS level 1, `block_on: high`, 3 accepted risks and 7 residuals each recorded with a severity and a destination phase. ⚠️ The auditor found TWO of the orchestrator's own errors: an item claimed by two phases at once, and a FALSE BINARY put to the founder — the refuse-vs-withhold question has a third option that costs neither side, now recorded before anyone is asked to choose.
+- 📋 **14 residuals booked in `TODOS.md`, each naming exactly ONE destination phase** (164.8.4 GATERESIDUE, 164.9 TESTISOLATION). **None is CARDINAL** — no control that cannot fail, no assertion vacuous today, no gate green over an empty corpus. The three worth knowing: the published-`.sql` scan **refuses without withholding** (the file it names still ships in a 90-day artifact); one psql read leaves stderr unredirected into a **public** Actions log against its own file's NON-NEGOTIABLES; and a local wrapper's `bun` shebang auto-loaded `.env.local` into a child `vitest`, producing **real INSERTs against shared TEST** — PROD provably untouched, and the ONE residual with a confirmed incident rather than a latent path.
+- ⚠️ **THE CLASS-LINT'S SCOPE CLAIM OUTRAN ITS FILTER THREE TIMES ON ONE BRANCH** (2 files -> 137 -> 139, the last still skipping 5 by directory depth). Phase 164.8.4's routed deliverable is explicitly **NOT a fourth widening** but a mechanism that makes claim and file set agree BY CONSTRUCTION. A fourth widening would be the same defect wearing the fix's clothes.
+- ⚖️ **ORCHESTRATOR CALL 2026-09-10 on phase creation:** the founder's stopping rule was *"wenn dann immer noch Kardinalsfehler, in eine neue Phase"* — CONDITIONAL on a cardinal error. Round six found none, so opening Phase 164.8.5 SCOPEAXIS was an over-application of the rule; it was FOLDED INTO 164.8.4 and removed, and its empty artifact directory deleted here. ⛔ Separately: the ROADMAP was hand-edited before that was caught. The CLAUDE.md "handlers clobber ROADMAP" warning covers the PROGRESS/STATE handlers ONLY — it does NOT license hand-editing a phase into the roadmap. Phase edits go through `/gsd-phase --edit`.
 
 ## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions
 

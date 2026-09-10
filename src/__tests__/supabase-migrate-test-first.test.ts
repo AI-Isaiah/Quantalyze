@@ -65,7 +65,8 @@ const APPLY_JOB = "apply";
  * `critical-regressions.test.ts` and `test-restore-workflow-wiring.test.ts` use, so
  * the three files cannot disagree about what "the step" is.
  */
-const ACQUIRE_RE = /^ {6}- name: Acquire shared-test-db mutex\n[\s\S]*?(?=\n {6}[-#])/m;
+const ACQUIRE_RE =
+  /^ {6}- name: Acquire shared-test-db mutex\n[\s\S]*?(?=\n {6}[-#])/m;
 const RELEASE_RE =
   /^ {6}- name: Release shared-test-db mutex \(best effort\)\n[\s\S]*?(?=\n {6}[-#]|\n {2}\S)/m;
 /** The line the byte-identical suffix begins at. Everything before it is ours. */
@@ -76,6 +77,33 @@ const SUFFIX_ANCHOR = "          if ! command -v psql";
 // ---------------------------------------------------------------------------
 
 /** A job's block, header line included, up to the next 2-space job key. */
+/**
+ * The stretch of a verdict's output that belongs to ONE numbered cause.
+ *
+ * ⛔ PHASE 164.8.2 CLASS SWEEP. Both call sites were written as a raw narrowing over
+ * `indexOf` results. A cause the verdict stopped printing yields -1, which does not
+ * throw — it counts from the END — so `"(3)" onwards` became the LAST CHARACTER of the
+ * output and `.toContain(...)` then failed for an unreadable reason, while the
+ * `(1)`→`(2)` form silently narrowed to an empty or reversed span. Naming the missing
+ * marker is the difference between a diagnosis and a puzzle.
+ */
+function causeSpan(out: string, from: string, to?: string): string {
+  const a = out.indexOf(from);
+  if (a < 0) {
+    throw new Error(
+      `the verdict output does not contain the marker ${from}:\n${out}`,
+    );
+  }
+  if (to === undefined) return out.slice(a);
+  const b = out.indexOf(to, a);
+  if (b < 0) {
+    throw new Error(
+      `the verdict output has ${from} but no ${to} after it:\n${out}`,
+    );
+  }
+  return out.slice(a, b);
+}
+
 function jobBlock(text: string, job: string): string {
   const head = `\n  ${job}:\n`;
   const start = text.indexOf(head);
@@ -129,9 +157,13 @@ const DRY_RUN_CMD =
 const PUSH_CMD =
   'supabase db push --include-all --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-push.txt"';
 
-/** The C-0331-twin reverted-grep condition and the echo that opens its branch. */
+/**
+ * The C-0331-twin reverted-grep condition and the echo that opens its branch.
+ * Moved 2026-09-09 for Phase 164.8.2 WR-04: `-Eiq` → `-aEiq` (`-a` is mandatory
+ * repo-wide on a NEGATIVE check; see the EXECUTED NUL-fixture arm below).
+ */
 const REVERTED_IF =
-  'if grep -Eiq \'(^|[[:space:]|])reverted([[:space:]|]|$)\' "${RUNNER_TEMP}/test-migration-list.txt"; then';
+  "if grep -aEiq '(^|[[:space:]|])reverted([[:space:]|]|$)' \"${RUNNER_TEMP}/test-migration-list.txt\"; then";
 const REVERTED_ECHO =
   '            echo "::error::Reverted migrations detected after db push to TEST — see list above (C-0331 twin)"';
 
@@ -158,7 +190,12 @@ function revertedBranchExits(block: string): boolean {
  * verdicts. A mutant that lands in the wrong job leaves the pinned job untouched, and
  * `calibrate()` then reports the predicate as unable to fail. Which it did, twice.
  */
-function mutateInJob(text: string, job: string, from: string, to: string): string {
+function mutateInJob(
+  text: string,
+  job: string,
+  from: string,
+  to: string,
+): string {
   const block = jobBlock(text, job);
   if (block === "" || !block.includes(from)) return text;
   const mutated = block.replace(from, to);
@@ -175,9 +212,22 @@ function stepHead(text: string, name: string): string {
 }
 
 /**
- * Every shape that could turn a failure into a pass, reported BY NAME. A superset of
- * the list `test-restore-workflow-wiring.test.ts` scans with, restated rather than
- * imported for the self-containment reason in this file's header.
+ * Every shape that could turn a failure into a pass, reported BY NAME.
+ *
+ * ⛔ IT IS NO LONGER A SUPERSET — corrected 2026-09-09, Phase 164.8.2 (WR-06). This
+ * comment used to read "A superset of the list `test-restore-workflow-wiring.test.ts`
+ * scans with", and that sentence was the record of a HALF-DONE widening: this copy
+ * went to nine in Phase 164.8 and the other copies stayed on five, so the destructive
+ * workflow — the one whose run cannot be undone — was scanned by the WEAKER list.
+ * As of Phase 164.8.2 there are THREE EQUAL COPIES:
+ *   - `src/__tests__/test-restore-workflow-wiring.test.ts` (which additionally carries
+ *     an exact-set `2>/dev/null` allowlist, because that workflow has five justified
+ *     sites and this one's all sit inside the sliced-out mutex copies),
+ *   - `src/__tests__/prod-prober-wiring.test.ts` (the ORIGIN of the idiom).
+ * ⭐ THE RULE: keep the three level BY HAND; no shared helper (Phase 164.8 Plan 05
+ * Task 2, re-affirmed as CONTEXT Area 3 LOCKED for Phase 164.8.2). Restated rather
+ * than imported for the self-containment reason in this file's header. The length pin
+ * in each of the three is what turns a one-sided widening into three red files.
  *
  * ⚠️ THE LAST FOUR WERE ADDED because the first five were not a class, they were five
  * spellings of a class, and the ones missing were the ones that fit this workflow:
@@ -214,7 +264,9 @@ const SOFTENING_TOKENS = [
  * exactly, and a separate assertion pins that OUR prefix carries no zero-status exit.
  */
 function scannableTestJob(text: string): string {
-  return jobBlock(text, TEST_JOB).replace(ACQUIRE_RE, "").replace(RELEASE_RE, "");
+  return jobBlock(text, TEST_JOB)
+    .replace(ACQUIRE_RE, "")
+    .replace(RELEASE_RE, "");
 }
 
 /**
@@ -229,7 +281,12 @@ function scannableTestJob(text: string): string {
  * job that carries the byte-identical ci.yml copies whose legitimate `exit 0` /
  * `|| true` / `::warning` the exclusion exists for.
  */
-const SCANNED_JOBS = [GUARD_JOB, TEST_JOB, VERDICT_JOB, DIVERGENCE_JOB] as const;
+const SCANNED_JOBS = [
+  GUARD_JOB,
+  TEST_JOB,
+  VERDICT_JOB,
+  DIVERGENCE_JOB,
+] as const;
 
 function scannableJob(text: string, job: string): string {
   return job === TEST_JOB ? scannableTestJob(text) : jobBlock(text, job);
@@ -241,7 +298,9 @@ function softeningOffenders(text: string): string[] {
     const block = scannableJob(text, job);
     if (block === "") {
       // An absent job scans clean, which is how a corpus quietly becomes empty.
-      offenders.push(`${job}: JOB IS MISSING (renamed or deleted — the scan over it proved nothing)`);
+      offenders.push(
+        `${job}: JOB IS MISSING (renamed or deleted — the scan over it proved nothing)`,
+      );
       continue;
     }
     const live = liveLines(block).join("\n");
@@ -266,7 +325,10 @@ function calibrate(
     mutant,
     `CALIBRATION ${label}: the mutation produced an identical string, so the twin proves nothing`,
   ).not.toBe(text);
-  expect(predicate(text), `${label}: the predicate is FALSE on the real file`).toBe(true);
+  expect(
+    predicate(text),
+    `${label}: the predicate is FALSE on the real file`,
+  ).toBe(true);
   expect(
     predicate(mutant),
     `CALIBRATION ${label}: the predicate did NOT flip on the mutant — it cannot fail, so it is not evidence`,
@@ -325,7 +387,10 @@ function runScript(
   opts: {
     stubs?: Record<string, string>;
     unset?: readonly string[];
-    files?: Record<string, string>;
+    // A `Uint8Array` value is written VERBATIM. The WR-04 arm needs a fixture whose
+    // NUL is a real 0x00 byte and not an escape the fixture merely spells, so it hands
+    // this a `Buffer` — the whole property under test is what a byte does to `grep`.
+    files?: Record<string, string | Uint8Array>;
   } = {},
 ): { status: number; out: string } {
   const dir = mkdtempSync(join(tmpdir(), "sm-test-first-"));
@@ -346,7 +411,10 @@ function runScript(
     // `...process.env` first, then the injection — the sibling wiring test's idiom.
     // The injected keys always win, and `GITHUB_REF` / `APPLY_TEST_RESULT` are not
     // set in a local vitest run, so the scenarios are decided by the injection alone.
-    const merged: Record<string, string | undefined> = { ...process.env, ...env };
+    const merged: Record<string, string | undefined> = {
+      ...process.env,
+      ...env,
+    };
     for (const key of opts.unset ?? []) delete merged[key];
     merged.PATH = `${binDir}:${process.env.PATH ?? ""}`;
     // The throwaway dir IS `RUNNER_TEMP` for these runs, so a relative `opts.files`
@@ -358,7 +426,10 @@ function runScript(
       encoding: "utf8",
       env: merged as NodeJS.ProcessEnv,
     });
-    return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+    return {
+      status: r.status ?? -1,
+      out: `${r.stdout ?? ""}${r.stderr ?? ""}`,
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -370,7 +441,8 @@ const TIMEOUT_STUB = '#!/usr/bin/env bash\nshift\nexec "$@"\n';
 const VERDICT_STEP = "Judge the TEST apply";
 const GUARD_STEP = "Explain why nothing ran, and fail";
 const CRED_STEP = "Assert TEST credential is configured";
-const DERIVE_STEP = "Derive the session-mode TEST DSN (once, for every step below)";
+const DERIVE_STEP =
+  "Derive the session-mode TEST DSN (once, for every step below)";
 const MARKER_STEP = "Which database am I on";
 const TEST_PUSH_STEP = "Push migrations to TEST";
 const PROD_PUSH_STEP = "Push migrations to production";
@@ -389,10 +461,13 @@ const EXEC_TEST_TIMEOUT_MS = 60_000;
 describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on it", () => {
   describe("apply-test: the job that puts a real Postgres in front of production", () => {
     it("declares environment: Test exactly once, as a LIVE line", () => {
-      expect(liveLineCount(jobBlock(WF, TEST_JOB), "environment: Test")).toBe(1);
+      expect(liveLineCount(jobBlock(WF, TEST_JOB), "environment: Test")).toBe(
+        1,
+      );
       calibrate(
         "apply-test declares environment: Test",
-        (s) => s.replace("    environment: Test\n", "    # environment: Test\n"),
+        (s) =>
+          s.replace("    environment: Test\n", "    # environment: Test\n"),
         (s) => liveLineCount(jobBlock(s, TEST_JOB), "environment: Test") === 1,
       );
     });
@@ -410,13 +485,21 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       ).toEqual([]);
       calibrate(
         "apply-test carries no needs:",
-        (s) => s.replace("  apply-test:\n    if:", "  apply-test:\n    needs: plan\n    if:"),
-        (s) => liveLines(jobBlock(s, TEST_JOB)).filter((l) => /^ {4}needs:/.test(l)).length === 0,
+        (s) =>
+          s.replace(
+            "  apply-test:\n    if:",
+            "  apply-test:\n    needs: plan\n    if:",
+          ),
+        (s) =>
+          liveLines(jobBlock(s, TEST_JOB)).filter((l) => /^ {4}needs:/.test(l))
+            .length === 0,
       );
     });
 
     it("declares timeout-minutes: 90 as a LIVE line (runbook section 2: sleep 6000s > TTL)", () => {
-      expect(liveLineCount(jobBlock(WF, TEST_JOB), "timeout-minutes: 90")).toBe(1);
+      expect(liveLineCount(jobBlock(WF, TEST_JOB), "timeout-minutes: 90")).toBe(
+        1,
+      );
       calibrate(
         "apply-test timeout-minutes: 90",
         (s) =>
@@ -424,20 +507,24 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
             "    environment: Test\n    timeout-minutes: 90\n",
             "    environment: Test\n    timeout-minutes: 120\n",
           ),
-        (s) => liveLineCount(jobBlock(s, TEST_JOB), "timeout-minutes: 90") === 1,
+        (s) =>
+          liveLineCount(jobBlock(s, TEST_JOB), "timeout-minutes: 90") === 1,
       );
     });
   });
 
   describe("B3 — no ref but main may reach shared TEST through this workflow", () => {
-    const TEST_IF = "if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'";
-    const GUARD_IF = "if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'";
+    const TEST_IF =
+      "if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'";
+    const GUARD_IF =
+      "if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'";
 
     it("apply-test carries the ref-guard if:, line-exact", () => {
       expect(liveLineCount(jobBlock(WF, TEST_JOB), TEST_IF)).toBe(1);
       calibrate(
         "apply-test if: keeps the || ref clause",
-        (s) => s.replace(TEST_IF, "if: github.event_name != 'workflow_dispatch'"),
+        (s) =>
+          s.replace(TEST_IF, "if: github.event_name != 'workflow_dispatch'"),
         (s) => liveLineCount(jobBlock(s, TEST_JOB), TEST_IF) === 1,
       );
       calibrate(
@@ -479,7 +566,9 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       // can run NEITHER", and that is a property of the workflow.
       const guardIf = jobIf(WF, GUARD_JOB);
       const testIf = jobIf(WF, TEST_JOB);
-      expect(guardIf, `${GUARD_JOB} has no if: line in ${WF_PATH}`).not.toBe("");
+      expect(guardIf, `${GUARD_JOB} has no if: line in ${WF_PATH}`).not.toBe(
+        "",
+      );
       expect(testIf, `${TEST_JOB} has no if: line in ${WF_PATH}`).not.toBe("");
 
       // The extracted text must still BE the pinned constants; otherwise the four
@@ -500,46 +589,70 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       // And it is now calibrated, which the constant-only version could not be.
       calibrate(
         "the inversion check reads apply-test's if: out of the file",
-        (s) => s.replace(`    ${TEST_IF}\n`, "    if: github.ref == 'refs/heads/main'\n"),
-        (s) => jobIf(s, TEST_JOB).includes("github.event_name != 'workflow_dispatch'"),
+        (s) =>
+          s.replace(
+            `    ${TEST_IF}\n`,
+            "    if: github.ref == 'refs/heads/main'\n",
+          ),
+        (s) =>
+          jobIf(s, TEST_JOB).includes(
+            "github.event_name != 'workflow_dispatch'",
+          ),
       );
       calibrate(
         "the inversion check reads dispatch-ref-guard's if: out of the file",
-        (s) => s.replace(`    ${GUARD_IF}\n`, "    if: github.event_name == 'workflow_dispatch'\n"),
+        (s) =>
+          s.replace(
+            `    ${GUARD_IF}\n`,
+            "    if: github.event_name == 'workflow_dispatch'\n",
+          ),
         (s) => jobIf(s, GUARD_JOB).includes("github.ref != 'refs/heads/main'"),
       );
     });
 
-    it("EXECUTED: the guard script exits 1 off main, naming the ref and the right dispatch", () => {
-      const script = extractRunScript(WF, GUARD_STEP);
-      const r = runScript(script, { GITHUB_REF: "refs/heads/feature-x" });
-      expect(
-        r.status,
-        `the ref guard exited ${r.status} on an off-main ref; it must exit 1. A green guard ` +
-          `teaches the operator that a dispatch which applied NOTHING to TEST worked.\n${r.out}`,
-      ).toBe(1);
-      expect(r.out, "the guard did not name the offending ref").toContain("refs/heads/feature-x");
-      expect(r.out, "the guard did not print the correct dispatch").toContain(
-        "gh workflow run supabase-migrate.yml --ref main",
-      );
-      expect(r.out, "the guard's refusal is not an ::error:: annotation").toContain("::error::");
-      // Calibration: the same script with its exit removed must stop failing, so the
-      // assertion above is measuring the exit status and not the mere presence of text.
-      const defanged = script.replace(/\nexit 1(?=\s*$)/, "\n:");
-      expect(defanged, "CALIBRATION: the trailing `exit 1` was not found to remove").not.toBe(
-        script,
-      );
-      expect(
-        runScript(defanged, { GITHUB_REF: "refs/heads/feature-x" }).status,
-        "CALIBRATION: the guard still exited non-zero without its `exit 1` — the pin is not " +
-          "measuring the exit status",
-      ).toBe(0);
-    }, EXEC_TEST_TIMEOUT_MS);
+    it(
+      "EXECUTED: the guard script exits 1 off main, naming the ref and the right dispatch",
+      () => {
+        const script = extractRunScript(WF, GUARD_STEP);
+        const r = runScript(script, { GITHUB_REF: "refs/heads/feature-x" });
+        expect(
+          r.status,
+          `the ref guard exited ${r.status} on an off-main ref; it must exit 1. A green guard ` +
+            `teaches the operator that a dispatch which applied NOTHING to TEST worked.\n${r.out}`,
+        ).toBe(1);
+        expect(r.out, "the guard did not name the offending ref").toContain(
+          "refs/heads/feature-x",
+        );
+        expect(r.out, "the guard did not print the correct dispatch").toContain(
+          "gh workflow run supabase-migrate.yml --ref main",
+        );
+        expect(
+          r.out,
+          "the guard's refusal is not an ::error:: annotation",
+        ).toContain("::error::");
+        // Calibration: the same script with its exit removed must stop failing, so the
+        // assertion above is measuring the exit status and not the mere presence of text.
+        const defanged = script.replace(/\nexit 1(?=\s*$)/, "\n:");
+        expect(
+          defanged,
+          "CALIBRATION: the trailing `exit 1` was not found to remove",
+        ).not.toBe(script);
+        expect(
+          runScript(defanged, { GITHUB_REF: "refs/heads/feature-x" }).status,
+          "CALIBRATION: the guard still exited non-zero without its `exit 1` — the pin is not " +
+            "measuring the exit status",
+        ).toBe(0);
+      },
+      EXEC_TEST_TIMEOUT_MS,
+    );
   });
 
   describe("apply-test: fail-loud credential, no softening, and the CLI commands in order", () => {
     it("the credential assert has NO if:, exits 1, and names TEST_SUPABASE_DB_URL", () => {
-      const head = stepHead(jobBlock(WF, TEST_JOB), "Assert TEST credential is configured");
+      const head = stepHead(
+        jobBlock(WF, TEST_JOB),
+        "Assert TEST credential is configured",
+      );
       expect(head, "the credential assert step is gone").not.toBe("");
       expect(
         /\n\s*if:/.test(head),
@@ -556,7 +669,10 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
           ),
         (s) =>
           !/\n\s*if:/.test(
-            stepHead(jobBlock(s, TEST_JOB), "Assert TEST credential is configured"),
+            stepHead(
+              jobBlock(s, TEST_JOB),
+              "Assert TEST credential is configured",
+            ),
           ),
       );
     });
@@ -570,55 +686,68 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
      * the logic"; the step has no external dependency at all, so grepping it was never
      * justified. It is EXECUTED here, once per state the secret can be in.
      */
-    it("EXECUTED: the credential assert exits 1 when TEST_SUPABASE_DB_URL is unset or empty", () => {
-      const script = extractRunScript(WF, CRED_STEP);
+    it(
+      "EXECUTED: the credential assert exits 1 when TEST_SUPABASE_DB_URL is unset or empty",
+      () => {
+        const script = extractRunScript(WF, CRED_STEP);
 
-      const unset = runScript(script, {}, { unset: [TEST_SECRET] });
-      expect(
-        unset.status,
-        `the credential assert exited ${unset.status} with ${TEST_SECRET} UNSET; it must ` +
-          `exit 1. The PROD apply is gated on this job's result, so a green TEST apply that ` +
-          `applied nothing because the credential was absent lets PROD proceed on the ` +
-          `strength of a stage nothing crossed.\n${unset.out}`,
-      ).toBe(1);
-      expect(unset.out, "the refusal is not an ::error:: annotation").toContain("::error::");
-      expect(unset.out, "the refusal does not name the missing secret").toContain(TEST_SECRET);
+        const unset = runScript(script, {}, { unset: [TEST_SECRET] });
+        expect(
+          unset.status,
+          `the credential assert exited ${unset.status} with ${TEST_SECRET} UNSET; it must ` +
+            `exit 1. The PROD apply is gated on this job's result, so a green TEST apply that ` +
+            `applied nothing because the credential was absent lets PROD proceed on the ` +
+            `strength of a stage nothing crossed.\n${unset.out}`,
+        ).toBe(1);
+        expect(
+          unset.out,
+          "the refusal is not an ::error:: annotation",
+        ).toContain("::error::");
+        expect(
+          unset.out,
+          "the refusal does not name the missing secret",
+        ).toContain(TEST_SECRET);
 
-      const empty = runScript(script, { [TEST_SECRET]: "" });
-      expect(
-        empty.status,
-        `the credential assert exited ${empty.status} with ${TEST_SECRET} set to the EMPTY ` +
-          `STRING; it must exit 1. GitHub hands an unconfigured secret to a step as "", not ` +
-          `as an absent variable, so this — not the unset case — is the shape CI produces.` +
-          `\n${empty.out}`,
-      ).toBe(1);
-      expect(empty.out).toContain("::error::");
+        const empty = runScript(script, { [TEST_SECRET]: "" });
+        expect(
+          empty.status,
+          `the credential assert exited ${empty.status} with ${TEST_SECRET} set to the EMPTY ` +
+            `STRING; it must exit 1. GitHub hands an unconfigured secret to a step as "", not ` +
+            `as an absent variable, so this — not the unset case — is the shape CI produces.` +
+            `\n${empty.out}`,
+        ).toBe(1);
+        expect(empty.out).toContain("::error::");
 
-      const secret = "postgres://user@db.example.invalid:5432/postgres";
-      const configured = runScript(script, { [TEST_SECRET]: secret });
-      expect(
-        configured.status,
-        `the credential assert exited ${configured.status} with the credential PRESENT; it ` +
-          `must exit 0, or the job can never run.\n${configured.out}`,
-      ).toBe(0);
-      expect(
-        configured.out,
-        "the credential assert PRINTED THE SECRET. This log is public.",
-      ).not.toContain(secret);
+        const secret = "postgres://user@db.example.invalid:5432/postgres";
+        const configured = runScript(script, { [TEST_SECRET]: secret });
+        expect(
+          configured.status,
+          `the credential assert exited ${configured.status} with the credential PRESENT; it ` +
+            `must exit 0, or the job can never run.\n${configured.out}`,
+        ).toBe(0);
+        expect(
+          configured.out,
+          "the credential assert PRINTED THE SECRET. This log is public.",
+        ).not.toContain(secret);
 
-      // Calibration: gut the condition, keep every string. The three `.toContain()`
-      // pins this test replaced all survived exactly this mutation.
-      const gutted = script.replace(`if [ -z "\${${TEST_SECRET}:-}" ]; then`, "if false; then");
-      expect(
-        gutted,
-        "CALIBRATION: the credential assert's `if [ -z ... ]` condition was not found to gut",
-      ).not.toBe(script);
-      expect(
-        runScript(gutted, {}, { unset: [TEST_SECRET] }).status,
-        "CALIBRATION: the assert still exited non-zero with its condition replaced by " +
-          "`if false` — the pin is not measuring the branch, only the strings inside it",
-      ).toBe(0);
-    }, EXEC_TEST_TIMEOUT_MS);
+        // Calibration: gut the condition, keep every string. The three `.toContain()`
+        // pins this test replaced all survived exactly this mutation.
+        const gutted = script.replace(
+          `if [ -z "\${${TEST_SECRET}:-}" ]; then`,
+          "if false; then",
+        );
+        expect(
+          gutted,
+          "CALIBRATION: the credential assert's `if [ -z ... ]` condition was not found to gut",
+        ).not.toBe(script);
+        expect(
+          runScript(gutted, {}, { unset: [TEST_SECRET] }).status,
+          "CALIBRATION: the assert still exited non-zero with its condition replaced by " +
+            "`if false` — the pin is not measuring the branch, only the strings inside it",
+        ).toBe(0);
+      },
+      EXEC_TEST_TIMEOUT_MS,
+    );
 
     /**
      * ⛔ THE CHECK THIS PINS REPLACED A DEAD ONE. The step used to end with
@@ -630,69 +759,105 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
      * passed straight through. Each scenario below reaches a branch that the old check
      * could not.
      */
-    it("EXECUTED: the DSN derivation rewrites to session mode and refuses a malformed secret", () => {
-      const script = extractRunScript(WF, DERIVE_STEP);
-      const derive = (
-        url: string,
-      ): { status: number; out: string; exported: string } => {
-        const envFile = join(mkdtempSync(join(tmpdir(), "sm-ghenv-")), "github_env");
-        writeFileSync(envFile, "");
-        const r = runScript(script, { [TEST_SECRET]: url, GITHUB_ENV: envFile });
-        const exported = readFileSync(envFile, "utf8");
-        rmSync(envFile, { force: true });
-        return { ...r, exported };
-      };
+    it(
+      "EXECUTED: the DSN derivation rewrites to session mode and refuses a malformed secret",
+      () => {
+        const script = extractRunScript(WF, DERIVE_STEP);
+        const derive = (
+          url: string,
+        ): { status: number; out: string; exported: string } => {
+          const envFile = join(
+            mkdtempSync(join(tmpdir(), "sm-ghenv-")),
+            "github_env",
+          );
+          writeFileSync(envFile, "");
+          const r = runScript(script, {
+            [TEST_SECRET]: url,
+            GITHUB_ENV: envFile,
+          });
+          const exported = readFileSync(envFile, "utf8");
+          rmSync(envFile, { force: true });
+          return { ...r, exported };
+        };
 
-      const pooler = derive("postgres://u@aws-0-eu.pooler.example.invalid:6543/postgres");
-      expect(
-        pooler.status,
-        `the derivation refused the documented secret shape (pooler DSN on :6543/): ` +
-          `exited ${pooler.status}.\n${pooler.out}`,
-      ).toBe(0);
-      expect(
-        pooler.exported,
-        "the derived DSN was not rewritten to the SESSION-mode port. A session advisory " +
-          "lock does not survive between statements on the 6543 transaction-mode pooler, so " +
-          "the whole job would run UNSERIALIZED against a shared database with a green mutex " +
-          "step.",
-      ).toContain(":5432/");
-      expect(pooler.exported).toContain("TEST_DB_SESSION_URL=");
-      expect(pooler.exported, "the transaction-mode port survived the rewrite").not.toContain(
-        ":6543",
-      );
-      // ⚠️ The ONLY line allowed to carry the DSN is `::add-mask::` — that command IS
-      // how the value gets registered for redaction, and Actions strips it from the
-      // log. Any OTHER line carrying it is a leak, and this repo is public.
-      const leaks = pooler.out
-        .split("\n")
-        .filter((l) => l.includes("pooler.example.invalid") && !l.startsWith("::add-mask::"));
-      expect(
-        leaks,
-        "the derivation printed the DSN on a line other than ::add-mask::, so it reaches the " +
-          "public Actions log unredacted",
-      ).toEqual([]);
-
-      // Already session-mode: unchanged, still accepted.
-      expect(derive("postgres://u@db.example.invalid:5432/postgres").status).toBe(0);
-      expect(derive("postgresql://u@db.example.invalid:5432/postgres").status).toBe(0);
-
-      for (const [label, url, needle] of [
-        ["not a postgres URL at all", "db.example.invalid:5432/postgres", "postgres://"],
-        ["a bare hostname", "not-a-dsn", "postgres://"],
-        ["still transaction-mode (no path to rewrite)", "postgres://u@h.invalid:6543", "6543"],
-        ["no explicit port, so session mode is unproven", "postgres://u@h.invalid/postgres", "5432"],
-      ] as const) {
-        const r = derive(url);
+        const pooler = derive(
+          "postgres://u@aws-0-eu.pooler.example.invalid:6543/postgres",
+        );
         expect(
-          r.status,
-          `the derivation ACCEPTED ${label}. Every psql and every CLI call downstream would ` +
-            `then connect to something other than the session-mode TEST endpoint, and the ` +
-            `mutex, the marker check and the apply would all report on it.\n${r.out}`,
-        ).toBe(1);
-        expect(r.out, `the refusal of ${label} does not name the cause`).toContain(needle);
-        expect(r.out).toContain("::error::");
-      }
-    }, EXEC_TEST_TIMEOUT_MS);
+          pooler.status,
+          `the derivation refused the documented secret shape (pooler DSN on :6543/): ` +
+            `exited ${pooler.status}.\n${pooler.out}`,
+        ).toBe(0);
+        expect(
+          pooler.exported,
+          "the derived DSN was not rewritten to the SESSION-mode port. A session advisory " +
+            "lock does not survive between statements on the 6543 transaction-mode pooler, so " +
+            "the whole job would run UNSERIALIZED against a shared database with a green mutex " +
+            "step.",
+        ).toContain(":5432/");
+        expect(pooler.exported).toContain("TEST_DB_SESSION_URL=");
+        expect(
+          pooler.exported,
+          "the transaction-mode port survived the rewrite",
+        ).not.toContain(":6543");
+        // ⚠️ The ONLY line allowed to carry the DSN is `::add-mask::` — that command IS
+        // how the value gets registered for redaction, and Actions strips it from the
+        // log. Any OTHER line carrying it is a leak, and this repo is public.
+        const leaks = pooler.out
+          .split("\n")
+          .filter(
+            (l) =>
+              l.includes("pooler.example.invalid") &&
+              !l.startsWith("::add-mask::"),
+          );
+        expect(
+          leaks,
+          "the derivation printed the DSN on a line other than ::add-mask::, so it reaches the " +
+            "public Actions log unredacted",
+        ).toEqual([]);
+
+        // Already session-mode: unchanged, still accepted.
+        expect(
+          derive("postgres://u@db.example.invalid:5432/postgres").status,
+        ).toBe(0);
+        expect(
+          derive("postgresql://u@db.example.invalid:5432/postgres").status,
+        ).toBe(0);
+
+        for (const [label, url, needle] of [
+          [
+            "not a postgres URL at all",
+            "db.example.invalid:5432/postgres",
+            "postgres://",
+          ],
+          ["a bare hostname", "not-a-dsn", "postgres://"],
+          [
+            "still transaction-mode (no path to rewrite)",
+            "postgres://u@h.invalid:6543",
+            "6543",
+          ],
+          [
+            "no explicit port, so session mode is unproven",
+            "postgres://u@h.invalid/postgres",
+            "5432",
+          ],
+        ] as const) {
+          const r = derive(url);
+          expect(
+            r.status,
+            `the derivation ACCEPTED ${label}. Every psql and every CLI call downstream would ` +
+              `then connect to something other than the session-mode TEST endpoint, and the ` +
+              `mutex, the marker check and the apply would all report on it.\n${r.out}`,
+          ).toBe(1);
+          expect(
+            r.out,
+            `the refusal of ${label} does not name the cause`,
+          ).toContain(needle);
+          expect(r.out).toContain("::error::");
+        }
+      },
+      EXEC_TEST_TIMEOUT_MS,
+    );
 
     it("carries none of the softening tokens, in ANY of the four jobs the phase added", () => {
       expect(
@@ -722,7 +887,11 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       for (const job of SCANNED_JOBS) {
         calibrate(
           `the softening scan actually covers the ${job} job`,
-          (s) => s.replace(`\n  ${job}:\n`, `\n  ${job}:\n    continue-on-error: true\n`),
+          (s) =>
+            s.replace(
+              `\n  ${job}:\n`,
+              `\n  ${job}:\n    continue-on-error: true\n`,
+            ),
           (t) => softeningOffenders(t).length === 0,
         );
         calibrate(
@@ -731,6 +900,16 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
           (t) => softeningOffenders(t).length === 0,
         );
       }
+    });
+
+    it("the token list is NINE, and its two hand-kept siblings must move with it", () => {
+      expect(
+        SOFTENING_TOKENS,
+        "SOFTENING_TOKENS moved off nine. This list is one of THREE hand-kept copies — the others are in `src/__tests__/test-restore-workflow-wiring.test.ts` and `src/__tests__/prod-prober-wiring.test.ts`, and they are duplicated deliberately (CONTEXT Area 3, LOCKED: no shared helper module that only wiring tests import). Widen or narrow ALL THREE in the same commit, or the class Phase 164.8.2 closed re-opens as 'one of three hardened' — which is exactly how this copy came to be a SUPERSET of the other two for a whole phase.",
+      ).toHaveLength(9);
+      expect(new Set(SOFTENING_TOKENS).size, "a token is listed twice").toBe(
+        SOFTENING_TOKENS.length,
+      );
     });
 
     it("the three CLI commands are LIVE run: lines, in order, after the marker and the mutex", () => {
@@ -751,12 +930,27 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
         ["the database identity marker query", marker],
         ["the mutex acquire step", acquire],
       ] as const) {
-        expect(idx, `${label} is not a LIVE line in apply-test`).toBeGreaterThanOrEqual(0);
+        expect(
+          idx,
+          `${label} is not a LIVE line in apply-test`,
+        ).toBeGreaterThanOrEqual(0);
       }
-      expect(acquire, "the mutex is acquired AFTER the marker check — the marker query would then run unserialized").toBeLessThan(marker);
-      expect(marker, "the dry-run runs BEFORE the database identity check — it would read a database this job has not identified").toBeLessThan(dry);
-      expect(dry, "the push runs BEFORE its own dry-run, so the logged plan is not what the apply ran").toBeLessThan(push);
-      expect(push, "the C-0331 migration list runs BEFORE the push it is supposed to verify").toBeLessThan(list);
+      expect(
+        acquire,
+        "the mutex is acquired AFTER the marker check — the marker query would then run unserialized",
+      ).toBeLessThan(marker);
+      expect(
+        marker,
+        "the dry-run runs BEFORE the database identity check — it would read a database this job has not identified",
+      ).toBeLessThan(dry);
+      expect(
+        dry,
+        "the push runs BEFORE its own dry-run, so the logged plan is not what the apply ran",
+      ).toBeLessThan(push);
+      expect(
+        push,
+        "the C-0331 migration list runs BEFORE the push it is supposed to verify",
+      ).toBeLessThan(list);
 
       calibrate(
         "the marker-before-dry-run ordering pin bites",
@@ -772,7 +966,10 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       // branch still carried its `exit 1`, so it could have been reduced to an `echo`.
       // Both holes are closed: LIVE-line exact match on the condition, and the branch
       // body must exit non-zero.
-      expect(liveLineCount(block, REVERTED_IF), "the C-0331-twin reverted-grep is gone or was commented out").toBe(1);
+      expect(
+        liveLineCount(block, REVERTED_IF),
+        "the C-0331-twin reverted-grep is gone or was commented out",
+      ).toBe(1);
       expect(
         revertedBranchExits(block),
         "the reverted branch no longer exits 1. `supabase db push` can return exit 0 while a " +
@@ -782,7 +979,11 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       ).toBe(true);
       calibrate(
         "the reverted-grep pin bites when the condition is commented out",
-        (s) => s.replace(`          ${REVERTED_IF}\n`, `          # ${REVERTED_IF}\n          if false; then\n`),
+        (s) =>
+          s.replace(
+            `          ${REVERTED_IF}\n`,
+            `          # ${REVERTED_IF}\n          if false; then\n`,
+          ),
         (t) => liveLineCount(jobBlock(t, TEST_JOB), REVERTED_IF) === 1,
       );
       calibrate(
@@ -801,7 +1002,10 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
     it("apply needs [plan, apply-test] and requires apply-test success", () => {
       const block = jobBlock(WF, APPLY_JOB);
       expect(liveLineCount(block, "needs: [plan, apply-test]")).toBe(1);
-      const ifLine = liveLines(block).find((l) => /^ {4}if:/.test(l))?.trim() ?? "";
+      const ifLine =
+        liveLines(block)
+          .find((l) => /^ {4}if:/.test(l))
+          ?.trim() ?? "";
       expect(
         ifLine,
         "apply's if: no longer requires apply-test to have SUCCEEDED. `needs:` alone blocks " +
@@ -815,8 +1019,16 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
 
       calibrate(
         "apply.needs includes apply-test",
-        (s) => mutateInJob(s, APPLY_JOB, "    needs: [plan, apply-test]\n", "    needs: plan\n"),
-        (t) => liveLineCount(jobBlock(t, APPLY_JOB), "needs: [plan, apply-test]") === 1,
+        (s) =>
+          mutateInJob(
+            s,
+            APPLY_JOB,
+            "    needs: [plan, apply-test]\n",
+            "    needs: plan\n",
+          ),
+        (t) =>
+          liveLineCount(jobBlock(t, APPLY_JOB), "needs: [plan, apply-test]") ===
+          1,
       );
       calibrate(
         "apply.if requires apply-test success",
@@ -826,10 +1038,9 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
             "    if: needs.plan.outputs.configured == 'true'\n",
           ),
         (t) =>
-          (liveLines(jobBlock(t, APPLY_JOB))
+          liveLines(jobBlock(t, APPLY_JOB))
             .find((l) => /^ {4}if:/.test(l))
-            ?.includes("needs.apply-test.result == 'success'") ??
-            false),
+            ?.includes("needs.apply-test.result == 'success'") ?? false,
       );
     });
 
@@ -876,7 +1087,12 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       calibrate(
         "the verdict's result wiring cannot be replaced by a literal",
         (s) =>
-          mutateInJob(s, VERDICT_JOB, `          ${wiring}\n`, "          APPLY_TEST_RESULT: success\n"),
+          mutateInJob(
+            s,
+            VERDICT_JOB,
+            `          ${wiring}\n`,
+            "          APPLY_TEST_RESULT: success\n",
+          ),
         (t) => liveLineCount(jobBlock(t, VERDICT_JOB), wiring) === 1,
       );
       calibrate(
@@ -903,73 +1119,186 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       );
     });
 
-    it("EXECUTED: the verdict script exits 0 / 1 / 1 on success / skipped / failure", () => {
-      const script = extractRunScript(WF, VERDICT_STEP);
+    it(
+      "EXECUTED: the verdict script exits 0 / 1 / 1 on success / skipped / failure",
+      () => {
+        const script = extractRunScript(WF, VERDICT_STEP);
 
-      const ok = runScript(script, { APPLY_TEST_RESULT: "success" });
-      expect(
-        ok.status,
-        `the verdict exited ${ok.status} on a SUCCEEDED apply-test; it must be 0.\n${ok.out}`,
-      ).toBe(0);
-      expect(ok.out).toContain("apply-test=success");
+        const ok = runScript(script, { APPLY_TEST_RESULT: "success" });
+        expect(
+          ok.status,
+          `the verdict exited ${ok.status} on a SUCCEEDED apply-test; it must be 0.\n${ok.out}`,
+        ).toBe(0);
+        expect(ok.out).toContain("apply-test=success");
 
-      const skipped = runScript(script, { APPLY_TEST_RESULT: "skipped" });
-      expect(
-        skipped.status,
-        `the verdict exited ${skipped.status} on a SKIPPED apply-test; it must be 1. A skip ` +
-          `means NOTHING crossed TEST, and the PROD apply is blocked — that must be a RED check ` +
-          `with a cause, not a grey job.\n${skipped.out}`,
-      ).toBe(1);
-      for (const n of ["(1)", "(2)", "(3)"]) {
-        expect(skipped.out, `the skipped verdict does not name cause ${n}`).toContain(n);
-      }
-      expect(
-        skipped.out.slice(skipped.out.indexOf("(1)"), skipped.out.indexOf("(2)")),
-        "cause (1) of a SKIP must name main — an off-main dispatch is the cheapest and " +
-          "likeliest cause, and the guard job has already printed the remedy",
-      ).toContain("main");
+        const skipped = runScript(script, { APPLY_TEST_RESULT: "skipped" });
+        expect(
+          skipped.status,
+          `the verdict exited ${skipped.status} on a SKIPPED apply-test; it must be 1. A skip ` +
+            `means NOTHING crossed TEST, and the PROD apply is blocked — that must be a RED check ` +
+            `with a cause, not a grey job.\n${skipped.out}`,
+        ).toBe(1);
+        for (const n of ["(1)", "(2)", "(3)"]) {
+          expect(
+            skipped.out,
+            `the skipped verdict does not name cause ${n}`,
+          ).toContain(n);
+        }
+        expect(
+          causeSpan(skipped.out, "(1)", "(2)"),
+          "cause (1) of a SKIP must name main — an off-main dispatch is the cheapest and " +
+            "likeliest cause, and the guard job has already printed the remedy",
+        ).toContain("main");
 
-      const failed = runScript(script, { APPLY_TEST_RESULT: "failure" });
-      expect(
-        failed.status,
-        `the verdict exited ${failed.status} on a FAILED apply-test; it must be 1.\n${failed.out}`,
-      ).toBe(1);
-      for (const n of ["(1)", "(2)", "(3)"]) {
-        expect(failed.out, `the failure verdict does not name cause ${n}`).toContain(n);
-      }
-      expect(
-        failed.out.slice(failed.out.indexOf("(3)")),
-        "cause (3) of a FAILURE must name [164.8-DATA-DEPENDENT-MIGRATION-ESCAPE] — the open " +
-          "case whose interim remedy is to revert the merge, NEVER to edit this workflow",
-      ).toContain("164.8-DATA-DEPENDENT-MIGRATION-ESCAPE");
+        const failed = runScript(script, { APPLY_TEST_RESULT: "failure" });
+        expect(
+          failed.status,
+          `the verdict exited ${failed.status} on a FAILED apply-test; it must be 1.\n${failed.out}`,
+        ).toBe(1);
+        for (const n of ["(1)", "(2)", "(3)"]) {
+          expect(
+            failed.out,
+            `the failure verdict does not name cause ${n}`,
+          ).toContain(n);
+        }
+        expect(
+          causeSpan(failed.out, "(3)"),
+          "cause (3) of a FAILURE must name [164.8-DATA-DEPENDENT-MIGRATION-ESCAPE] — the open " +
+            "case whose interim remedy is to revert the merge, NEVER to edit this workflow",
+        ).toContain("164.8-DATA-DEPENDENT-MIGRATION-ESCAPE");
 
-      // Calibration: a verdict whose skip branch exits zero-status must stop passing.
-      const defanged = script.replace(
-        /(\s+echo "::error:: {2}\(3\) the workflow run was cancelled[^\n]*\n)(\s+)exit 1\n/,
-        "$1$2:\n",
-      );
-      expect(
-        defanged,
-        "CALIBRATION: the skipped branch's `exit 1` was not found to neuter",
-      ).not.toBe(script);
-      expect(
-        runScript(defanged, { APPLY_TEST_RESULT: "skipped" }).status,
-        "CALIBRATION: the verdict still exited non-zero on a skip with its `exit 1` removed — " +
-          "the pin is not measuring the exit status",
-      ).toBe(0);
-    }, EXEC_TEST_TIMEOUT_MS);
+        // Calibration: a verdict whose skip branch exits zero-status must stop passing.
+        const defanged = script.replace(
+          /(\s+echo "::error:: {2}\(3\) the workflow run was cancelled[^\n]*\n)(\s+)exit 1\n/,
+          "$1$2:\n",
+        );
+        expect(
+          defanged,
+          "CALIBRATION: the skipped branch's `exit 1` was not found to neuter",
+        ).not.toBe(script);
+        expect(
+          runScript(defanged, { APPLY_TEST_RESULT: "skipped" }).status,
+          "CALIBRATION: the verdict still exited non-zero on a skip with its `exit 1` removed — " +
+            "the pin is not measuring the exit status",
+        ).toBe(0);
+      },
+      EXEC_TEST_TIMEOUT_MS,
+    );
   });
 
   describe("cross-file: the mutex protocol is ci.yml's, byte for byte, in all THREE workflows", () => {
-    const suffix = (s: string): string => s.slice(s.indexOf(SUFFIX_ANCHOR));
+    /**
+     * ⛔ IN-03 (164.8-REVIEW, closed 2026-09-09). This used to be
+     * `s.slice(s.indexOf(SUFFIX_ANCHOR))`, and `indexOf` returns -1 when the anchor is
+     * absent — so `slice(-1)` made a BYTE-IDENTITY pin over a whole mutex protocol
+     * degrade into comparing the last CHARACTER of two steps. Both end in a newline,
+     * so the pin would have gone on passing while measuring nothing. A silent
+     * degradation by construction: the failure mode is a PASS.
+     */
+    const suffix = (s: string): string => {
+      const i = s.indexOf(SUFFIX_ANCHOR);
+      if (i < 0) {
+        throw new Error(
+          "SUFFIX_ANCHOR not found — the byte-identity pin has no subject. The anchor " +
+            `(${JSON.stringify(SUFFIX_ANCHOR)}) is the line the copied mutex protocol begins ` +
+            "at; if the copy was re-indented or that line was reworded, re-derive the anchor " +
+            "rather than letting this comparison fall back to a suffix nobody chose.",
+        );
+      }
+      return s.slice(i);
+    };
+
+    /**
+     * ⛔ THE SYMMETRIC HALF IN-03 DID NOT ADDRESS (Phase 164.8.2). This was
+     * `s.slice(0, s.indexOf(SUFFIX_ANCHOR))`. On a missing anchor that is
+     * `slice(0, -1)` — not an error, but a SILENT WIDENING to nearly the whole
+     * step, so the `exit 0` assertion scoped to our own credential branch would
+     * start inspecting the copied protocol below it, where ci.yml's licensed
+     * `exit 0` lives. Same anchor, same -1, opposite direction, same failure
+     * mode: a pass.
+     */
+    const prefix = (s: string): string => {
+      const i = s.indexOf(SUFFIX_ANCHOR);
+      if (i < 0) {
+        throw new Error(
+          "SUFFIX_ANCHOR not found — the prefix pin has no subject. The anchor " +
+            `(${JSON.stringify(SUFFIX_ANCHOR)}) is the line the copied mutex protocol begins ` +
+            "at; if the copy was re-indented or that line was reworded, re-derive the anchor " +
+            "rather than letting this slice silently widen over bytes it does not own.",
+        );
+      }
+      return s.slice(0, i);
+    };
+
+    it("CALIBRATION (IN-03): BOTH anchored halves throw on a missing anchor", () => {
+      const ciStep = CI.match(ACQUIRE_RE)?.[0] ?? "";
+      expect(ciStep, "ci.yml's Acquire step could not be extracted").not.toBe(
+        "",
+      );
+
+      // The mutation is asserted APPLIED before the flip is asserted: a subject that
+      // still held the anchor would make the two `toThrow`s vacuous, which is the
+      // shape of the very defect being cured.
+      const anchorless = ciStep
+        .split(SUFFIX_ANCHOR)
+        .join("          if ! command -v RENAMED");
+      expect(
+        anchorless,
+        "CALIBRATION: the anchor-removal mutation changed nothing",
+      ).not.toBe(ciStep);
+      expect(
+        anchorless.includes(SUFFIX_ANCHOR),
+        "CALIBRATION: the anchor SURVIVED the mutation, so the arms below are not measuring an absent anchor",
+      ).toBe(false);
+      // ⭐ THE DEGRADATION, DEMONSTRATED. Two steps differing in the advisory key —
+      // the one token this pin exists to catch drifting — compared EQUAL under the
+      // old `-1` narrowing, which kept only the last character.
+      const drifted = anchorless.split("61616158").join("61616159");
+      expect(
+        drifted,
+        "CALIBRATION: the key-drift mutation changed nothing",
+      ).not.toBe(anchorless);
+      expect(
+        anchorless.slice(-1),
+        "CALIBRATION: the two subjects no longer share a last character, so this no longer reproduces the degradation it documents",
+      ).toBe(drifted.slice(-1));
+
+      expect(() => suffix(anchorless)).toThrow(/SUFFIX_ANCHOR not found/);
+      expect(() => prefix(anchorless)).toThrow(/SUFFIX_ANCHOR not found/);
+
+      // The control, on the real input the pins below use: neither half throws, and
+      // neither degenerates into a one-character tail or a step-wide prefix.
+      expect(suffix(ciStep).startsWith(SUFFIX_ANCHOR)).toBe(true);
+      expect(
+        suffix(ciStep).length,
+        "the suffix is a single character — this is the -1 degradation IN-03 names, and it " +
+          "is what a passing byte-identity pin looked like before the throw was added",
+      ).toBeGreaterThan(1);
+      expect(
+        prefix(ciStep).endsWith("\n"),
+        "the prefix does not end at a line boundary, so it is not the anchor-led split",
+      ).toBe(true);
+      expect(
+        prefix(ciStep).length + suffix(ciStep).length,
+        "the two halves do not reconstruct the step",
+      ).toBe(ciStep.length);
+    });
 
     it("the acquire suffix is identical across ci.yml, the restore workflow and this one", () => {
       const ciStep = CI.match(ACQUIRE_RE)?.[0] ?? "";
       const restoreStep = RESTORE.match(ACQUIRE_RE)?.[0] ?? "";
       const wfStep = WF.match(ACQUIRE_RE)?.[0] ?? "";
-      expect(ciStep, "ci.yml's Acquire step could not be extracted").not.toBe("");
-      expect(restoreStep, `${RESTORE_PATH}'s Acquire step could not be extracted`).not.toBe("");
-      expect(wfStep, `${WF_PATH}'s Acquire step could not be extracted`).not.toBe("");
+      expect(ciStep, "ci.yml's Acquire step could not be extracted").not.toBe(
+        "",
+      );
+      expect(
+        restoreStep,
+        `${RESTORE_PATH}'s Acquire step could not be extracted`,
+      ).not.toBe("");
+      expect(
+        wfStep,
+        `${WF_PATH}'s Acquire step could not be extracted`,
+      ).not.toBe("");
 
       const msg =
         "the copied mutex protocol has DRIFTED from ci.yml's. Every invariant in that step " +
@@ -981,23 +1310,26 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       expect(suffix(restoreStep), msg).toBe(suffix(ciStep));
       expect(suffix(wfStep), msg).toBe(suffix(ciStep));
 
-      const prefix = wfStep.slice(0, wfStep.indexOf(SUFFIX_ANCHOR));
+      const ourPrefix = prefix(wfStep);
       expect(
-        prefix.includes("exit 0"),
+        ourPrefix.includes("exit 0"),
         "the fork-PR early exit SURVIVED in the credential branch. ci.yml's copy may exit 0 " +
           "there because a fork PR legitimately has no secret; this workflow has no " +
           "pull_request trigger, so an absent credential is a FAULT — and exiting 0 would hand " +
           "the PROD gate a green from a job that locked nothing and applied nothing.",
       ).toBe(false);
       expect(
-        prefix.includes("exit 1"),
+        ourPrefix.includes("exit 1"),
         "the credential branch of the acquire step no longer exits 1",
       ).toBe(true);
 
       calibrate(
         "the acquire byte-identity pin bites on a one-token drift",
         (s) =>
-          s.replace("SELECT pg_advisory_lock(61616158);", "SELECT pg_advisory_lock(61616159);"),
+          s.replace(
+            "SELECT pg_advisory_lock(61616158);",
+            "SELECT pg_advisory_lock(61616159);",
+          ),
         (t) => {
           const w = t.match(ACQUIRE_RE)?.[0] ?? "";
           return w !== "" && suffix(w) === suffix(ciStep);
@@ -1015,9 +1347,10 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
           "end zero-status; that licence is ci.yml's reasoning, and it only transfers while " +
           "the copy is exact.",
       ).toBe(ciStep);
-      expect(RESTORE.match(RELEASE_RE)?.[0] ?? "", "the restore workflow's release drifted").toBe(
-        ciStep,
-      );
+      expect(
+        RESTORE.match(RELEASE_RE)?.[0] ?? "",
+        "the restore workflow's release drifted",
+      ).toBe(ciStep);
       calibrate(
         "the release byte-identity pin bites",
         (s) =>
@@ -1046,24 +1379,57 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
      * affirmative block is not pinned by bytes at all — it is EXECUTED below, which is
      * strictly stronger, and a byte pin over a block that is under active review would
      * only teach the next reader to re-paste it.
+     *
+     * ⭐ MOVED TWICE SINCE, BOTH TIMES DELIBERATELY:
+     *   1. 2026-09-09, Phase 164.8.2 WR-04 — `grep -Eiq` → `grep -aEiq`, and nothing else.
+     *   2. 2026-09-10, Phase 164.8.2 F1 — a POSITIVE FLOOR inserted between the
+     *      `migration list | tee` and the reverted-grep. The grep is NEGATIVE, so an empty
+     *      or header-only list made it return 1 and read as CLEAN having verified nothing,
+     *      on the ONE automatic applier of DDL to production. The floor is EXECUTED below
+     *      against empty / header-only / reshaped transcripts, so it is pinned by behaviour
+     *      and not only by bytes; what stays byte-pinned is that the grep, its `::error::`
+     *      wording, its `exit 1` and the `--linked` list command did not move.
+     * The reasons are in the `it` message below, where a reader who reds this pin meets them.
      */
     const PROD_C0331_TAIL = [
       '          echo "::group::Post-apply migration list verification (C-0331)"',
       "          supabase migration list --linked | tee /tmp/migration-list.txt",
-      "          if grep -Eiq '(^|[[:space:]|])reverted([[:space:]|]|$)' /tmp/migration-list.txt; then",
+    ].join("\n");
+    /** The reverted-grep branch itself: byte-identical to its pre-164.8-05 form but for `-a`. */
+    const PROD_C0331_BRANCH = [
+      "          if grep -aEiq '(^|[[:space:]|])reverted([[:space:]|]|$)' /tmp/migration-list.txt; then",
       '            echo "::error::Reverted migrations detected after db push — see list above (C-0331)"',
       "            exit 1",
       "          fi",
       '          echo "::endgroup::"',
     ].join("\n");
 
-    it("the C-0331 reverted-grep tail is byte-identical to its pre-164.8-05 form", () => {
-      expect(
-        WF.includes(PROD_C0331_TAIL),
+    it("the C-0331 tail is its pre-164.8-05 form EXCEPT the `-a` (WR-04) and the positive floor (F1)", () => {
+      const WHY =
         "the PROD `Push migrations to production` C-0331 tail CHANGED. The one automatic " +
-          "applier of DDL to production is not something to edit as a side effect of editing " +
-          "the job around it.",
-      ).toBe(true);
+        "applier of DDL to production is not something to edit as a side effect of editing " +
+        "the job around it.\n\n" +
+        "⭐ TWO edits have been made to it since this pin was written, and both are named " +
+        "here so the pin and the file agree about WHY.\n" +
+        "(1) Phase 164.8.2 WR-04 (2026-09-09) changed `grep -Eiq` to `grep -aEiq`. This is a " +
+        "NEGATIVE check, so a grep that declines to read a file it calls binary returns 1 and " +
+        "is indistinguishable from `no reverted row` — a PROD apply verified by a check that " +
+        "never read the list. `-a` is mandatory repo-wide.\n" +
+        "⚠️ MEASURED before that edit: on GNU grep 3.11 (what the runner has) and BSD grep " +
+        "2.6.0 the missing `-a` made NO difference to the verdict; on ugrep 7.8.4 it made " +
+        "the check read a NUL-bearing list as clean. It removes the flavour dependence; it " +
+        "is not a claim that the runner was blind.\n" +
+        "(2) Phase 164.8.2 F1 (2026-09-10) inserted a POSITIVE FLOOR between the " +
+        "`migration list | tee` and the grep. Same root cause, other half: a CLI that exits 0 " +
+        "and prints an EMPTY or HEADER-ONLY list also makes `grep -q` return 1, so the check " +
+        "read as clean having verified nothing, immediately after a PROD apply. The floor is " +
+        "EXECUTED against empty / header-only / reshaped transcripts elsewhere in this file.\n" +
+        "What is STILL byte-pinned, and must not move: `--linked`, `/tmp/migration-list.txt`, " +
+        "the reverted-grep line, its `::error::` wording and its `exit 1`.\n" +
+        "Any FURTHER change is what this pin exists to stop — move it deliberately, in its " +
+        "own commit, with its own reason, or do not move it.";
+      expect(WF.includes(PROD_C0331_TAIL), WHY).toBe(true);
+      expect(WF.includes(PROD_C0331_BRANCH), WHY).toBe(true);
       calibrate(
         "the PROD C-0331 tail pin bites",
         (s) =>
@@ -1073,29 +1439,58 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
           ),
         (t) => t.includes(PROD_C0331_TAIL),
       );
+      calibrate(
+        "the PROD C-0331 reverted-branch pin bites",
+        (s) =>
+          s.replace(
+            "          if grep -aEiq '(^|[[:space:]|])reverted([[:space:]|]|$)' /tmp/migration-list.txt; then\n",
+            "          if grep -Eiq '(^|[[:space:]|])reverted([[:space:]|]|$)' /tmp/migration-list.txt; then\n",
+          ),
+        (t) => t.includes(PROD_C0331_BRANCH),
+      );
     });
 
     it("the PROD apply still links, dry-runs and pushes with --include-all, in order", () => {
       const block = jobBlock(WF, APPLY_JOB);
-      const link = liveCommandIndex(block, 'supabase link --project-ref "$SUPABASE_PROJECT_REF"');
-      const dry = liveCommandIndex(block, "supabase db push --include-all --dry-run | tee /tmp/prod-dry-run.txt");
-      const push = liveCommandIndex(block, "supabase db push --include-all | tee /tmp/prod-push.txt");
-      const list = liveCommandIndex(block, "supabase migration list --linked | tee /tmp/migration-list.txt");
+      const link = liveCommandIndex(
+        block,
+        'supabase link --project-ref "$SUPABASE_PROJECT_REF"',
+      );
+      const dry = liveCommandIndex(
+        block,
+        "supabase db push --include-all --dry-run | tee /tmp/prod-dry-run.txt",
+      );
+      const push = liveCommandIndex(
+        block,
+        "supabase db push --include-all | tee /tmp/prod-push.txt",
+      );
+      const list = liveCommandIndex(
+        block,
+        "supabase migration list --linked | tee /tmp/migration-list.txt",
+      );
       for (const [label, idx] of [
         ["the supabase link", link],
         ["the PROD dry-run", dry],
         ["the PROD push", push],
         ["the C-0331 migration list", list],
       ] as const) {
-        expect(idx, `${label} is not a LIVE line in the apply job`).toBeGreaterThanOrEqual(0);
+        expect(
+          idx,
+          `${label} is not a LIVE line in the apply job`,
+        ).toBeGreaterThanOrEqual(0);
       }
-      expect(link, "the PROD dry-run runs BEFORE `supabase link`").toBeLessThan(dry);
+      expect(link, "the PROD dry-run runs BEFORE `supabase link`").toBeLessThan(
+        dry,
+      );
       expect(
         dry,
         "the PROD push runs BEFORE its own dry-run, so the set it is compared against was " +
           "captured after the fact and the comparison proves nothing",
       ).toBeLessThan(push);
-      expect(push, "the C-0331 migration list runs BEFORE the push it verifies").toBeLessThan(list);
+      expect(
+        push,
+        "the C-0331 migration list runs BEFORE the push it verifies",
+      ).toBeLessThan(list);
       calibrate(
         "the PROD dry-run-before-push pin bites",
         (s) =>
@@ -1138,9 +1533,12 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
      * down here. What is under test is the SHAPE the branches key on — a whole-word
      * `test`, a `prod` substring, NULL, unreadable — not any real marker's wording.
      */
-    const MARKER_OK = "fixture marker: a shared test database (invented, not a real marker)";
-    const MARKER_PROD = "fixture marker: test-shaped and production-shaped at once (invented)";
-    const MARKER_NOT_WHOLE_WORD = "fixture marker: latest database, no standalone word (invented)";
+    const MARKER_OK =
+      "fixture marker: a shared test database (invented, not a real marker)";
+    const MARKER_PROD =
+      "fixture marker: test-shaped and production-shaped at once (invented)";
+    const MARKER_NOT_WHOLE_WORD =
+      "fixture marker: latest database, no standalone word (invented)";
 
     const PSQL_STUB = [
       "#!/usr/bin/env bash",
@@ -1166,119 +1564,141 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       runScript(
         script,
         {
-          TEST_DB_SESSION_URL: "postgres://u@pooler.example.invalid:5432/postgres",
+          TEST_DB_SESSION_URL:
+            "postgres://u@pooler.example.invalid:5432/postgres",
           MARKER_STUB_MODE: mode,
           MARKER_STUB_TEXT: text,
         },
         { stubs: { psql: PSQL_STUB, timeout: TIMEOUT_STUB } },
       );
 
-    it("EXECUTED: it refuses an unreadable, NULL, non-TEST or PROD-named marker, and only then passes", () => {
-      const script = extractRunScript(WF, MARKER_STEP);
+    it(
+      "EXECUTED: it refuses an unreadable, NULL, non-TEST or PROD-named marker, and only then passes",
+      () => {
+        const script = extractRunScript(WF, MARKER_STEP);
 
-      const unreadable = runMarker(script, "unreadable");
-      expect(
-        unreadable.status,
-        `the marker step exited ${unreadable.status} when psql FAILED; it must exit 1 — it ` +
-          `cannot identify the database and everything after it writes to one.\n${unreadable.out}`,
-      ).toBe(1);
-      expect(unreadable.out).toContain("could not be read");
-      expect(
-        unreadable.out,
-        "psql's connect failure named the host and its IP verbatim. The three redactions in " +
-          "this branch (userinfo, the server-at clause, the for-user clause) exist because " +
-          "this log is public.",
-      ).not.toContain("pooler.example.invalid");
-
-      const nullMarker = runMarker(script, "null");
-      expect(
-        nullMarker.status,
-        `the marker step exited ${nullMarker.status} on a NULL marker; it must exit 1. A NULL ` +
-          `marker means the COMMENT ON DATABASE was LOST — it does NOT mean this is TEST.` +
-          `\n${nullMarker.out}`,
-      ).toBe(1);
-      expect(nullMarker.out).toContain("NULL");
-
-      const notWholeWord = runMarker(script, "text", MARKER_NOT_WHOLE_WORD);
-      expect(
-        notWholeWord.status,
-        `the marker step exited ${notWholeWord.status} on a marker that only CONTAINS the ` +
-          `letters "test" ("latest"); it must exit 1, or "production-latest" would pass as ` +
-          `TEST.\n${notWholeWord.out}`,
-      ).toBe(1);
-      expect(notWholeWord.out).toContain("whole word");
-
-      const prodMarker = runMarker(script, "text", MARKER_PROD);
-      expect(
-        prodMarker.status,
-        `the marker step exited ${prodMarker.status} on a marker naming PRODUCTION; it must ` +
-          `exit 1, loudly.\n${prodMarker.out}`,
-      ).toBe(1);
-      expect(prodMarker.out).toContain("PRODUCTION");
-
-      const ok = runMarker(script, "text", MARKER_OK);
-      expect(
-        ok.status,
-        `the marker step exited ${ok.status} on a marker naming TEST and not PROD; it must ` +
-          `exit 0, or the job can never run.\n${ok.out}`,
-      ).toBe(0);
-      expect(ok.out).toContain("which_database: OK");
-
-      // ⛔ The marker TEXT is never printed, not even when it is the reason to refuse.
-      for (const [label, r, text] of [
-        ["the non-TEST refusal", notWholeWord, MARKER_NOT_WHOLE_WORD],
-        ["the PRODUCTION refusal", prodMarker, MARKER_PROD],
-        ["the success path", ok, MARKER_OK],
-      ] as const) {
-        expect(r.out, `${label} PRINTED the marker text. This log is public.`).not.toContain(text);
-      }
-
-      // ⛔ CALIBRATION — THE REVIEWER'S EXACT MUTANT. Neuter all three refusal
-      // branches, leaving the SELECT plus an unconditional `echo which_database: OK`.
-      // Every assertion in both test files passed against that mutant before this
-      // block existed; here EVERY fixture must go green, which is what makes the
-      // assertions above evidence rather than decoration.
-      const NULL_IF = 'if [ -z "${marker}" ]; then';
-      const WHOLE_WORD_IF =
-        "if ! printf '%s' \"${marker}\" | grep -Eiq '(^|[^[:alnum:]_])test([^[:alnum:]_]|$)'; then";
-      const PROD_IF = "if printf '%s' \"${marker}\" | grep -Eiq 'prod'; then";
-      let gutted = script;
-      for (const branch of [NULL_IF, WHOLE_WORD_IF, PROD_IF]) {
+        const unreadable = runMarker(script, "unreadable");
         expect(
-          gutted,
-          `CALIBRATION: the branch \`${branch}\` was not found in the extracted script`,
-        ).toContain(branch);
-        gutted = gutted.replace(branch, "if false; then");
-      }
-      for (const [label, mode, text] of [
-        ["a NULL marker", "null", ""],
-        ["a marker that does not name TEST as a whole word", "text", MARKER_NOT_WHOLE_WORD],
-        ["a marker naming PRODUCTION", "text", MARKER_PROD],
-      ] as const) {
+          unreadable.status,
+          `the marker step exited ${unreadable.status} when psql FAILED; it must exit 1 — it ` +
+            `cannot identify the database and everything after it writes to one.\n${unreadable.out}`,
+        ).toBe(1);
+        expect(unreadable.out).toContain("could not be read");
         expect(
-          runMarker(gutted, mode, text).status,
-          `CALIBRATION: with all three refusal branches replaced by \`if false\`, the step STILL ` +
-            `refused ${label}. The assertions above are then measuring something other than ` +
-            `those branches.`,
+          unreadable.out,
+          "psql's connect failure named the host and its IP verbatim. The three redactions in " +
+            "this branch (userinfo, the server-at clause, the for-user clause) exist because " +
+            "this log is public.",
+        ).not.toContain("pooler.example.invalid");
+
+        const nullMarker = runMarker(script, "null");
+        expect(
+          nullMarker.status,
+          `the marker step exited ${nullMarker.status} on a NULL marker; it must exit 1. A NULL ` +
+            `marker means the COMMENT ON DATABASE was LOST — it does NOT mean this is TEST.` +
+            `\n${nullMarker.out}`,
+        ).toBe(1);
+        expect(nullMarker.out).toContain("NULL");
+
+        const notWholeWord = runMarker(script, "text", MARKER_NOT_WHOLE_WORD);
+        expect(
+          notWholeWord.status,
+          `the marker step exited ${notWholeWord.status} on a marker that only CONTAINS the ` +
+            `letters "test" ("latest"); it must exit 1, or "production-latest" would pass as ` +
+            `TEST.\n${notWholeWord.out}`,
+        ).toBe(1);
+        expect(notWholeWord.out).toContain("whole word");
+
+        const prodMarker = runMarker(script, "text", MARKER_PROD);
+        expect(
+          prodMarker.status,
+          `the marker step exited ${prodMarker.status} on a marker naming PRODUCTION; it must ` +
+            `exit 1, loudly.\n${prodMarker.out}`,
+        ).toBe(1);
+        expect(prodMarker.out).toContain("PRODUCTION");
+
+        const ok = runMarker(script, "text", MARKER_OK);
+        expect(
+          ok.status,
+          `the marker step exited ${ok.status} on a marker naming TEST and not PROD; it must ` +
+            `exit 0, or the job can never run.\n${ok.out}`,
         ).toBe(0);
-      }
-      // And each branch on its own, so a single deletion cannot hide behind a sibling.
-      expect(
-        runMarker(script.replace(PROD_IF, "if false; then"), "text", MARKER_PROD).status,
-        "CALIBRATION: the PRODUCTION-marker refusal is not produced by its own branch",
-      ).toBe(0);
-      expect(
-        runMarker(script.replace(WHOLE_WORD_IF, "if false; then"), "text", MARKER_NOT_WHOLE_WORD)
-          .status,
-        "CALIBRATION: the not-a-whole-word refusal is not produced by its own branch",
-      ).toBe(0);
-      const noNull = runMarker(script.replace(NULL_IF, "if false; then"), "null");
-      expect(
-        noNull.out,
-        "CALIBRATION: the NULL diagnosis survived the deletion of the NULL branch — the " +
-          "message is coming from somewhere else",
-      ).not.toContain("NULL");
-    }, EXEC_TEST_TIMEOUT_MS);
+        expect(ok.out).toContain("which_database: OK");
+
+        // ⛔ The marker TEXT is never printed, not even when it is the reason to refuse.
+        for (const [label, r, text] of [
+          ["the non-TEST refusal", notWholeWord, MARKER_NOT_WHOLE_WORD],
+          ["the PRODUCTION refusal", prodMarker, MARKER_PROD],
+          ["the success path", ok, MARKER_OK],
+        ] as const) {
+          expect(
+            r.out,
+            `${label} PRINTED the marker text. This log is public.`,
+          ).not.toContain(text);
+        }
+
+        // ⛔ CALIBRATION — THE REVIEWER'S EXACT MUTANT. Neuter all three refusal
+        // branches, leaving the SELECT plus an unconditional `echo which_database: OK`.
+        // Every assertion in both test files passed against that mutant before this
+        // block existed; here EVERY fixture must go green, which is what makes the
+        // assertions above evidence rather than decoration.
+        const NULL_IF = 'if [ -z "${marker}" ]; then';
+        const WHOLE_WORD_IF =
+          "if ! printf '%s' \"${marker}\" | grep -Eiq '(^|[^[:alnum:]_])test([^[:alnum:]_]|$)'; then";
+        const PROD_IF = "if printf '%s' \"${marker}\" | grep -Eiq 'prod'; then";
+        let gutted = script;
+        for (const branch of [NULL_IF, WHOLE_WORD_IF, PROD_IF]) {
+          expect(
+            gutted,
+            `CALIBRATION: the branch \`${branch}\` was not found in the extracted script`,
+          ).toContain(branch);
+          gutted = gutted.replace(branch, "if false; then");
+        }
+        for (const [label, mode, text] of [
+          ["a NULL marker", "null", ""],
+          [
+            "a marker that does not name TEST as a whole word",
+            "text",
+            MARKER_NOT_WHOLE_WORD,
+          ],
+          ["a marker naming PRODUCTION", "text", MARKER_PROD],
+        ] as const) {
+          expect(
+            runMarker(gutted, mode, text).status,
+            `CALIBRATION: with all three refusal branches replaced by \`if false\`, the step STILL ` +
+              `refused ${label}. The assertions above are then measuring something other than ` +
+              `those branches.`,
+          ).toBe(0);
+        }
+        // And each branch on its own, so a single deletion cannot hide behind a sibling.
+        expect(
+          runMarker(
+            script.replace(PROD_IF, "if false; then"),
+            "text",
+            MARKER_PROD,
+          ).status,
+          "CALIBRATION: the PRODUCTION-marker refusal is not produced by its own branch",
+        ).toBe(0);
+        expect(
+          runMarker(
+            script.replace(WHOLE_WORD_IF, "if false; then"),
+            "text",
+            MARKER_NOT_WHOLE_WORD,
+          ).status,
+          "CALIBRATION: the not-a-whole-word refusal is not produced by its own branch",
+        ).toBe(0);
+        const noNull = runMarker(
+          script.replace(NULL_IF, "if false; then"),
+          "null",
+        );
+        expect(
+          noNull.out,
+          "CALIBRATION: the NULL diagnosis survived the deletion of the NULL branch — the " +
+            "message is coming from somewhere else",
+        ).not.toContain("NULL");
+      },
+      EXEC_TEST_TIMEOUT_MS,
+    );
 
     it("the step is byte-identical to test-restore-from-baseline.yml's copy, as its comment claims", () => {
       const here = extractRunScript(WF, MARKER_STEP).trimEnd();
@@ -1341,8 +1761,19 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
     const SUPABASE_STUB = [
       "#!/usr/bin/env bash",
       'if [ "$1" = "link" ]; then echo "Finished supabase link."; exit 0; fi',
+      // ⛔ THE STUB'S `migration list` USED TO PRINT THE HEADER AND NOTHING ELSE, and that
+      // was itself the F1 shape: a transcript the C-0331 check "verified" while reading no
+      // migration version at all. It went unnoticed because the check was purely NEGATIVE
+      // — `grep -q` found no `reverted`, returned 1, and the group closed green. The moment
+      // the positive floor landed, every arm driving this stub reddened with MEASURE_FAIL,
+      // which is the finding reproducing itself against the repo's own model of the CLI.
+      // `${STUB_LIST_VERSIONS-…}` (no colon) so a test can set it EMPTY to get the
+      // header-only transcript back deliberately, rather than by omission.
       'if [ "$1" = "migration" ]; then',
       '  echo "        Local      | Remote     | Time (UTC)"',
+      "  for v in ${STUB_LIST_VERSIONS-20260101000000}; do",
+      '    echo "   ${v} | ${v} | 2026-01-01 00:00:00"',
+      "  done",
       "  exit 0",
       "fi",
       "dry=0",
@@ -1352,7 +1783,7 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       '  echo "Remote database is up to date."',
       "  exit 0",
       "fi",
-      "if [ \"${dry}\" = \"1\" ]; then",
+      'if [ "${dry}" = "1" ]; then',
       '  echo "Would push these migrations:"',
       '  for v in ${STUB_PLAN_VERSIONS:-}; do echo " • ${v}_stub.sql"; done',
       '  echo "Finished supabase db push."',
@@ -1370,151 +1801,641 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
     const V1 = "20260101000000";
     const V2 = "20260102000000";
 
-    it("EXECUTED (TEST): the push must apply exactly what its dry-run planned, and not nothing", () => {
-      const script = extractRunScript(WF, TEST_PUSH_STEP);
-      const run = (
-        plan: string[],
-        pushed: string[],
-        isPush: boolean,
-      ): { status: number; out: string } =>
-        runScript(
-          script,
+    it(
+      "EXECUTED (TEST): the push must apply exactly what its dry-run planned, and not nothing",
+      () => {
+        const script = extractRunScript(WF, TEST_PUSH_STEP);
+        const run = (
+          plan: string[],
+          pushed: string[],
+          isPush: boolean,
+        ): { status: number; out: string } =>
+          runScript(
+            script,
+            {
+              TEST_DB_SESSION_URL:
+                "postgres://u@pooler.example.invalid:5432/postgres",
+              IS_PUSH: isPush ? "true" : "false",
+              // The PLANNED set reaches the stub as well as the dry-run FILE: the push log
+              // the stub emits echoes the confirmation prompt, and that prompt lists the
+              // plan. Without this the echo would be empty and the partial-apply scenario
+              // would stop resembling the CLI it is modelling.
+              STUB_PLAN_VERSIONS: plan.join(" "),
+              STUB_PUSH_VERSIONS: pushed.join(" "),
+            },
+            {
+              stubs: { supabase: SUPABASE_STUB },
+              files: {
+                "test-dry-run.txt": plan
+                  .map((v) => ` • ${v}_stub.sql\n`)
+                  .join(""),
+              },
+            },
+          );
+
+        const applied = run([V1, V2], [V1, V2], true);
+        expect(
+          applied.status,
+          `the TEST push step exited ${applied.status} when the push applied exactly the two ` +
+            `versions the dry-run planned; it must exit 0.\n${applied.out}`,
+        ).toBe(0);
+
+        const short = run([V1, V2], [V1], true);
+        expect(
+          short.status,
+          `the TEST push step exited ${short.status} when the push applied ONE of the TWO ` +
+            `versions its own dry-run planned; it must exit 1.\n${short.out}`,
+        ).toBe(1);
+        expect(short.out).toContain(
+          "did NOT apply the set its own dry-run planned",
+        );
+        expect(
+          short.out,
+          "the mismatch does not name the version that went missing",
+        ).toContain(V2);
+
+        const nothingOnPush = run([], [], true);
+        expect(
+          nothingOnPush.status,
+          `⛔ THE CENTRAL DEFECT. The TEST push step exited ${nothingOnPush.status} when the ` +
+            `push applied ZERO migrations on a push-to-main run. This is exactly the ` +
+            `ledger-shadow state Phase 164.8-04's 266 seeded rows can produce, and it used to ` +
+            `pass — the reverted-grep matched nothing and read as clean, and the PROD apply was ` +
+            `green-lit by a stage nothing crossed.\n${nothingOnPush.out}`,
+        ).toBe(1);
+        expect(nothingOnPush.out).toContain("ZERO migrations");
+        expect(
+          nothingOnPush.out,
+          "the zero-applied refusal does not name the ledger cause an operator has to look at",
+        ).toContain("schema_migrations");
+
+        const nothingOnDispatch = run([], [], false);
+        expect(
+          nothingOnDispatch.status,
+          `the TEST push step exited ${nothingOnDispatch.status} when the push applied nothing ` +
+            `on a workflow_dispatch. That is the documented escape hatch for a genuinely ` +
+            `no-op change and must stay open, or the only remedy for a false red is to edit ` +
+            `this workflow.\n${nothingOnDispatch.out}`,
+        ).toBe(0);
+        expect(nothingOnDispatch.out).toContain("tolerated");
+
+        // Calibration: delete the zero-applied guard. The suite must then stop failing
+        // on the empty push — which is the state the whole check exists for.
+        const defanged = script.replace(
+          /if \[ "\$\{IS_PUSH\}" = "true" \] && \[ "\$\{applied_n\}" -eq 0 \]; then\n[\s\S]*?\nfi\n/,
+          "",
+        );
+        expect(
+          defanged,
+          "CALIBRATION: the zero-applied guard was not found to remove",
+        ).not.toBe(script);
+        const defangedRun = runScript(
+          defanged,
           {
-            TEST_DB_SESSION_URL: "postgres://u@pooler.example.invalid:5432/postgres",
-            IS_PUSH: isPush ? "true" : "false",
-            // The PLANNED set reaches the stub as well as the dry-run FILE: the push log
-            // the stub emits echoes the confirmation prompt, and that prompt lists the
-            // plan. Without this the echo would be empty and the partial-apply scenario
-            // would stop resembling the CLI it is modelling.
-            STUB_PLAN_VERSIONS: plan.join(" "),
-            STUB_PUSH_VERSIONS: pushed.join(" "),
+            TEST_DB_SESSION_URL:
+              "postgres://u@pooler.example.invalid:5432/postgres",
+            IS_PUSH: "true",
+            STUB_PUSH_VERSIONS: "",
           },
           {
             stubs: { supabase: SUPABASE_STUB },
-            files: {
-              "test-dry-run.txt": plan.map((v) => ` • ${v}_stub.sql\n`).join(""),
-            },
+            files: { "test-dry-run.txt": "" },
           },
         );
+        expect(
+          defangedRun.status,
+          "CALIBRATION: the step still exited non-zero on an empty push with its zero-applied " +
+            "guard deleted — this test is not measuring the guard",
+        ).toBe(0);
+      },
+      EXEC_TEST_TIMEOUT_MS,
+    );
 
-      const applied = run([V1, V2], [V1, V2], true);
-      expect(
-        applied.status,
-        `the TEST push step exited ${applied.status} when the push applied exactly the two ` +
-          `versions the dry-run planned; it must exit 0.\n${applied.out}`,
-      ).toBe(0);
+    /**
+     * ⛔ WR-03 (164.8.2-REVIEW, closed 2026-09-10). The `-a` comment in the workflow used
+     * to read "a tracked file carries a deliberate NUL byte and plain grep reports such
+     * input clean" — stated flatly, in a workflow that runs on `ubuntu-latest`, about the
+     * grep this very phase measured does NOT do that. Plan 02 measured GNU grep 3.11 (the
+     * runner's family) across 3 locales × 4 fixture shapes and `-a` changed the verdict in
+     * NONE of the twelve. ugrep 7.8.4 IS blind; GNU is not. The phase corrected the record
+     * in the PROD test pin's message (below, `PROD_C0331_TAIL`'s `it`) and re-asserted the
+     * falsified premise in the workflow, in the same commit range — and a maintainer
+     * editing this job reads the COMMENT, not the test file.
+     *
+     * ⭐ This arm is the falsifier for a PROSE fix, which is otherwise unfalsifiable: it
+     * reds if the retracted sentence comes back, and it reds if the measured record is
+     * removed. It reads the comment lines immediately ABOVE the reverted-grep and THROWS
+     * when there are none, because an empty string satisfies `not.toContain` vacuously.
+     */
+    it("the C-0331 twin's `-a` comment records the MEASUREMENT and does not re-assert the falsified premise (WR-03)", () => {
+      /** The contiguous comment lines immediately above the reverted-grep, in `apply-test`. */
+      const c0331Comment = (text: string): string => {
+        const lines = jobBlock(text, TEST_JOB).split("\n");
+        const anchor = lines.findIndex((l) => l.trim() === REVERTED_IF);
+        if (anchor < 0) {
+          throw new Error(
+            "the C-0331-twin reverted-grep line was not found in `apply-test`, so the " +
+              "comment this arm reads has no anchor. A rename must throw rather than let " +
+              "the arm scan an empty string and pass on `not.toContain`.",
+          );
+        }
+        const out: string[] = [];
+        for (let i = anchor - 1; i >= 0 && /^\s*#/.test(lines[i]); i--)
+          out.unshift(lines[i]);
+        if (out.length === 0) {
+          throw new Error(
+            "there are NO comment lines above the C-0331-twin reverted-grep. The `-a` " +
+              "rationale is gone; this arm would then assert nothing at all.",
+          );
+        }
+        // ⚠️ NORMALISED, and that is load-bearing. The retracted sentence is LINE-WRAPPED
+        // in the pre-fix file ("… and plain\n          # grep reports such input clean."),
+        // so a raw `not.toContain` over the joined comment did NOT bite when this arm was
+        // first run against the byte-identical pre-fix workflow — only the positive needle
+        // did. Strip the `#` markers and collapse whitespace so the pin binds to the CLAIM
+        // and not to where the author happened to wrap it.
+        return out
+          .join("\n")
+          .replace(/^\s*#\s?/gm, "")
+          .replace(/\s+/g, " ")
+          .trim();
+      };
 
-      const short = run([V1, V2], [V1], true);
+      const RETRACTED = "plain grep reports such input clean";
+      const comment = c0331Comment(WF);
       expect(
-        short.status,
-        `the TEST push step exited ${short.status} when the push applied ONE of the TWO ` +
-          `versions its own dry-run planned; it must exit 1.\n${short.out}`,
-      ).toBe(1);
-      expect(short.out).toContain("did NOT apply the set its own dry-run planned");
-      expect(short.out, "the mismatch does not name the version that went missing").toContain(V2);
+        comment,
+        "the C-0331 twin's `-a` comment re-asserts the premise Phase 164.8.2 measured FALSE: " +
+          "GNU grep 3.11 — the runner's — read the NUL-bearing fixture identically with and " +
+          "without `-a`, in 3 locales × 4 fixture shapes. `-a` is kept on the repo-wide rule " +
+          "and on the ugrep flavour dependence; it did NOT close a live CI exposure, and the " +
+          "comment must not say it did. ⛔ Do not fix this by deleting the sentence — state " +
+          "the measurement.\n\n" +
+          comment,
+      ).not.toContain(RETRACTED);
+      for (const needle of [
+        "GNU grep 3.11",
+        "ugrep 7.8.4",
+        "did not close a live CI exposure",
+      ]) {
+        expect(
+          comment,
+          `the C-0331 twin's \`-a\` comment lost the measured record (${needle}). Without it ` +
+            "the next reader has no way to know the flavour dependence is the whole reason " +
+            `\`-a\` is there.\n\n${comment}`,
+        ).toContain(needle);
+      }
 
-      const nothingOnPush = run([], [], true);
-      expect(
-        nothingOnPush.status,
-        `⛔ THE CENTRAL DEFECT. The TEST push step exited ${nothingOnPush.status} when the ` +
-          `push applied ZERO migrations on a push-to-main run. This is exactly the ` +
-          `ledger-shadow state Phase 164.8-04's 266 seeded rows can produce, and it used to ` +
-          `pass — the reverted-grep matched nothing and read as clean, and the PROD apply was ` +
-          `green-lit by a stage nothing crossed.\n${nothingOnPush.out}`,
-      ).toBe(1);
-      expect(nothingOnPush.out).toContain("ZERO migrations");
-      expect(
-        nothingOnPush.out,
-        "the zero-applied refusal does not name the ledger cause an operator has to look at",
-      ).toContain("schema_migrations");
-
-      const nothingOnDispatch = run([], [], false);
-      expect(
-        nothingOnDispatch.status,
-        `the TEST push step exited ${nothingOnDispatch.status} when the push applied nothing ` +
-          `on a workflow_dispatch. That is the documented escape hatch for a genuinely ` +
-          `no-op change and must stay open, or the only remedy for a false red is to edit ` +
-          `this workflow.\n${nothingOnDispatch.out}`,
-      ).toBe(0);
-      expect(nothingOnDispatch.out).toContain("tolerated");
-
-      // Calibration: delete the zero-applied guard. The suite must then stop failing
-      // on the empty push — which is the state the whole check exists for.
-      const defanged = script.replace(
-        /if \[ "\$\{IS_PUSH\}" = "true" \] && \[ "\$\{applied_n\}" -eq 0 \]; then\n[\s\S]*?\nfi\n/,
-        "",
+      calibrate(
+        "the WR-03 comment pin bites when the retracted sentence returns",
+        (s) =>
+          mutateInJob(
+            s,
+            TEST_JOB,
+            "          # MEASURED 2026-09-09, Phase 164.8.2: on GNU grep 3.11 (the runner's) and BSD grep 2.6.0\n",
+            `          # ${RETRACTED}.\n`,
+          ),
+        (t) => !c0331Comment(t).includes(RETRACTED),
       );
-      expect(defanged, "CALIBRATION: the zero-applied guard was not found to remove").not.toBe(
-        script,
+      calibrate(
+        "the WR-03 comment pin bites when the measured record is deleted",
+        (s) =>
+          mutateInJob(
+            s,
+            TEST_JOB,
+            "          # MEASURED 2026-09-09, Phase 164.8.2: on GNU grep 3.11 (the runner's) and BSD grep 2.6.0\n",
+            "          # MEASURED 2026-09-09, Phase 164.8.2: on a grep and another grep\n",
+          ),
+        (t) => c0331Comment(t).includes("GNU grep 3.11"),
       );
-      const defangedRun = runScript(
-        defanged,
-        {
-          TEST_DB_SESSION_URL: "postgres://u@pooler.example.invalid:5432/postgres",
-          IS_PUSH: "true",
-          STUB_PUSH_VERSIONS: "",
-        },
-        { stubs: { supabase: SUPABASE_STUB }, files: { "test-dry-run.txt": "" } },
-      );
-      expect(
-        defangedRun.status,
-        "CALIBRATION: the step still exited non-zero on an empty push with its zero-applied " +
-          "guard deleted — this test is not measuring the guard",
-      ).toBe(0);
-    }, EXEC_TEST_TIMEOUT_MS);
+    });
 
-    it("EXECUTED (PROD): the same affirmative check guards the production apply", () => {
-      const script = extractRunScript(WF, PROD_PUSH_STEP);
-      // ⚠️ The PROD step's paths are hard-coded `/tmp/...` (pre-existing, alongside the
-      // long-standing /tmp/migration-list.txt), so these runs write there rather than
-      // into the throwaway dir. Each scenario overwrites both files before it reads
-      // them, so ordering between scenarios cannot leak.
-      const run = (
-        plan: string[],
-        pushed: string[],
-        isPush: boolean,
-      ): { status: number; out: string } =>
-        runScript(
-          script,
+    /**
+     * ⛔ WR-04 (Phase 164.8.2). The C-0331 twin is a NEGATIVE check, and until
+     * 2026-09-09 it ran `grep -Eiq` with no `-a`. A grep that declines to read a file
+     * it calls binary returns 1, which this branch cannot tell from "no reverted row"
+     * — so ONE stray byte in `supabase migration list` output made the last check
+     * before the PROD apply pass without ever having read the list.
+     *
+     * This arm EXECUTES the group block over a fixture whose NUL is a real 0x00 byte.
+     * It asserts only the invariant that held on EVERY grep measured for this fix —
+     * WITH `-a`, a `| reverted |` row behind a NUL is found and the step exits 1 —
+     * because the WITHOUT-`-a` answer is grep-flavour dependent and a test that
+     * asserted it would be green on one machine and red on another for no code reason
+     * (RESEARCH Pitfall 4). The without-`-a` reading is OBSERVED and PRINTED below,
+     * and recorded per flavour in the plan SUMMARY, rather than asserted.
+     *
+     * MEASURED 2026-09-09 on the same block and pattern, `-Eiq` vs `-aEiq`:
+     *   ugrep 7.8.4 (this repo's local `grep`)  →  rc 1 vs 0  — the defect, reproduced
+     *   BSD grep 2.6.0-FreeBSD (/usr/bin/grep)  →  rc 0 vs 0  — no difference
+     *   GNU grep 3.11 (Debian; what CI runs)    →  rc 0 vs 0  — no difference, in
+     *     LC_ALL=C, C.UTF-8 and en_US.utf8, and for a NUL or a \xff before, on, or
+     *     after the matching line. So `-a` was NOT load-bearing on ubuntu-latest;
+     *     it is the repo-wide rule and it removes the flavour dependence entirely.
+     */
+    it(
+      "EXECUTED (TEST): the C-0331-twin reverted-grep READS a list carrying a NUL byte (WR-04)",
+      () => {
+        const script = extractRunScript(WF, TEST_PUSH_STEP);
+        const OPEN =
+          'echo "::group::Post-apply migration list verification (C-0331 twin)"';
+        const CLOSE = 'echo "::endgroup::"';
+        const lines = script.split("\n");
+        const openIdx = lines.findIndex((l) => l.trim() === OPEN);
+        if (openIdx < 0) {
+          throw new Error(
+            `the C-0331-twin group opener is gone from "${TEST_PUSH_STEP}". This arm EXECUTES ` +
+              `that block, so a rename must throw rather than let the arm scan nothing and pass.`,
+          );
+        }
+        const closeIdx = lines.findIndex(
+          (l, i) => i > openIdx && l.trim() === CLOSE,
+        );
+        if (closeIdx < 0) {
+          throw new Error(
+            "the C-0331-twin group has no closing `::endgroup::` — the slice would run to the " +
+              "end of the step and this arm would stop measuring the branch it names.",
+          );
+        }
+        const group = `${lines.slice(openIdx, closeIdx + 1).join("\n")}\n`;
+
+        // Hermetic: the CLI line becomes a `cat` of a fixture. No `supabase`, no database.
+        const LIST_CMD =
+          'supabase migration list --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-migration-list.txt"';
+        const FIXTURE_CMD =
+          'cat "${RUNNER_TEMP}/${FIXTURE}" | tee "${RUNNER_TEMP}/test-migration-list.txt"';
+        const hermetic = group.replace(LIST_CMD, FIXTURE_CMD);
+        expect(
+          hermetic,
+          "the `supabase migration list | tee` line was not found to substitute — the block " +
+            "below would shell out to the real CLI, which this checkout points at PRODUCTION",
+        ).not.toBe(group);
+        const body = `set -euo pipefail\n${hermetic}`;
+        expect(
+          body,
+          "the C-0331-twin block lost its `-a` between the pin and this arm",
+        ).toContain("grep -aEiq");
+
+        // A real 0x00 byte on a line BEFORE the `| reverted |` row — the review's shape.
+        // ⚠️ Spelled `\u0000` and NOT pasted as a raw byte: a literal NUL in this
+        // source would make THIS file the second one in the repo that plain grep silently
+        // skips (`src/lib/wizardErrors.test.ts` is the first), which is the very trap WR-04
+        // is about. Six source characters, one byte on disk — asserted immediately below.
+        const NUL_FIXTURE = Buffer.from(
+          "        Local      | Remote     | Time (UTC)\n" +
+            "        \u0000 stray\n" +
+            "   20260101000000 | reverted | 2026-01-01\n",
+          "utf8",
+        );
+        expect(
+          NUL_FIXTURE.includes(0),
+          "the fixture does not actually carry a 0x00 byte, so it is not the input this arm names",
+        ).toBe(true);
+        const CLEAN_FIXTURE =
+          "        Local      | Remote     | Time (UTC)\n" +
+          "   20260101000000 | 20260101000000 | 2026-01-01\n";
+
+        const FIXTURE_NAME = "wr04-list-fixture.txt";
+        const run = (fixture: string | Uint8Array, s: string = body) =>
+          runScript(
+            s,
+            { FIXTURE: FIXTURE_NAME },
+            { files: { [FIXTURE_NAME]: fixture } },
+          );
+
+        const dirty = run(NUL_FIXTURE);
+        expect(
+          dirty.status,
+          `⛔ THE WR-04 DEFECT. The C-0331 twin exited ${dirty.status} on a migration list that ` +
+            `CARRIES a reverted row — one stray byte earlier in the file was enough to make the ` +
+            `last check before the PROD apply read a list it never read. It must exit 1.\n` +
+            dirty.out,
+        ).toBe(1);
+        expect(
+          dirty.out,
+          "the step failed without naming the reverted rows — an operator cannot act on that",
+        ).toContain("Reverted migrations detected");
+
+        // CONTROL: the same block, a clean list. Proves the exit 1 above comes from the
+        // branch and not from the harness (a `set -euo pipefail` slip would red both).
+        const clean = run(CLEAN_FIXTURE);
+        expect(
+          clean.status,
+          `the C-0331 twin exited ${clean.status} on a CLEAN migration list. The arm above is ` +
+            `then not evidence: the harness reds whatever it is handed.\n${clean.out}`,
+        ).toBe(0);
+        expect(clean.out).not.toContain("Reverted migrations detected");
+
+        // CALIBRATION 1 (platform-safe): remove the branch's `exit 1`. The dirty fixture
+        // must then pass — i.e. this arm measures the BRANCH, not merely the grep.
+        const defanged = body.replace(
+          /(\n\s*echo "::error::Reverted migrations detected[^\n]*\n)\s*exit 1\n/,
+          "$1",
+        );
+        expect(
+          defanged,
+          "CALIBRATION: the reverted branch's `exit 1` was not found",
+        ).not.toBe(body);
+        expect(
+          run(NUL_FIXTURE, defanged).status,
+          "CALIBRATION: the block still exited non-zero on the NUL fixture with its `exit 1` " +
+            "deleted — this arm is not measuring the branch's exit status",
+        ).toBe(0);
+
+        // CALIBRATION 2 (RECORDED, NOT ASSERTED — RESEARCH Pitfall 4 / [ASSUMED A1]).
+        // Strip the `a` and run the same fixture. The exit code is a property of whichever
+        // grep this machine has, so it is PRINTED for the record — on CI that line is the
+        // GNU reading — and never turned into an assertion.
+        const preFix = body.replace("grep -aEiq", "grep -Eiq");
+        expect(preFix, "CALIBRATION: the `-a` was not found to strip").not.toBe(
+          body,
+        );
+        const preFixRun = run(NUL_FIXTURE, preFix);
+        const flavour =
+          spawnSync("bash", ["-c", "grep --version 2>&1 | head -1"], {
+            encoding: "utf8",
+          }).stdout?.trim() ?? "unknown grep";
+        // PRINTED, so the reading lands in the run's log rather than only in a message
+        // nobody sees on a green run. `--reporter=verbose` (and any failure) shows it.
+        console.log(
+          `[WR-04 A1 OBSERVATION] pre-fix (\`grep -Eiq\`, no -a) on the NUL fixture: ` +
+            `step-rc=${preFixRun.status}, branch-fired=${
+              preFixRun.out.includes("Reverted migrations detected")
+                ? "yes"
+                : "NO (read it CLEAN)"
+            } — grep here is: ${flavour}. Recorded, not asserted: this is grep-flavour ` +
+            `dependent and the fixed line's exit 1 above is the invariant.`,
+        );
+        expect(
+          typeof preFixRun.status,
+          "the pre-fix observation did not produce an exit status at all",
+        ).toBe("number");
+      },
+      EXEC_TEST_TIMEOUT_MS,
+    );
+
+    /**
+     * ⛔ F1 (164.8.2-SILENT-FAILURES, HIGH, closed 2026-09-10). The C-0331 check was purely
+     * NEGATIVE. WR-04 closed the ENCODING half of its vacuity (`-a`); this closes the
+     * EMPTINESS half. A CLI that exits 0 and prints an EMPTY list, a HEADER-ONLY list, or a
+     * table reshaped so it no longer prints migration versions makes `grep -q` return 1, the
+     * reverted branch is skipped, the group closes, `apply-test` goes green and
+     * `needs.apply-test.result == 'success'` green-lights the PROD apply. What the operator
+     * sees is a passing "Post-apply migration list verification" group; what is true is that
+     * nothing was verified. `set -euo pipefail` already covers the adjacent case (a CLI that
+     * exits non-zero aborts at the pipeline), so the LIVE path is exactly "exit 0, wrong text".
+     *
+     * ⭐ THE FIX CONFORMS TO THE SIBLING rather than inventing a second shape:
+     * `test-restore-from-baseline.yml` pairs its negative `grep -aq 'Would push these
+     * migrations:'` with a positive `! grep -aq 'Remote database is up to date.'`,
+     * "deliberately positive so a wording change reddens instead of passing vacuously".
+     *
+     * ⚠️ THE RESIDUAL, stated rather than papered over: this floor does NOT catch a CLI that
+     * keeps printing version rows but RENAMES the status word. Nothing can, without a
+     * measured replacement wording. Re-CASING is covered by the existing `-i`.
+     *
+     * ⭐ AND THE STUB WAS THE DEFECT. `SUPABASE_STUB`'s `migration list` printed the header
+     * and NOTHING ELSE until this arm landed — i.e. the repo's own hermetic model of the CLI
+     * was already the header-only shape, and every executed arm driving it green-lit a
+     * C-0331 check that read no version at all. Adding the floor reddened three arms at once.
+     */
+    it(
+      "EXECUTED (BOTH): the C-0331 floor REFUSES an empty, header-only or reshaped migration list (F1)",
+      () => {
+        /** Slice one site's `::group::` block out of its step and make it hermetic. */
+        const groupOf = (
+          stepName: string,
+          openEcho: string,
+          listCmd: string,
+          fixtureCmd: string,
+        ) => {
+          const script = extractRunScript(WF, stepName);
+          const lines = script.split("\n");
+          const openIdx = lines.findIndex((l) => l.trim() === openEcho);
+          if (openIdx < 0) {
+            throw new Error(
+              `the C-0331 group opener is gone from "${stepName}". This arm EXECUTES that ` +
+                "block, so a rename must throw rather than let the arm scan nothing and pass.",
+            );
+          }
+          const closeIdx = lines.findIndex(
+            (l, i) => i > openIdx && l.trim() === 'echo "::endgroup::"',
+          );
+          if (closeIdx < 0) {
+            throw new Error(
+              `the C-0331 group in "${stepName}" has no closing \`::endgroup::\` — the slice ` +
+                "would run to the end of the step and stop measuring the branch it names.",
+            );
+          }
+          const group = `${lines.slice(openIdx, closeIdx + 1).join("\n")}\n`;
+          const hermetic = group.replace(listCmd, fixtureCmd);
+          expect(
+            hermetic,
+            `the \`supabase migration list | tee\` line was not found to substitute in ` +
+              `"${stepName}" — the block below would shell out to the real CLI, which this ` +
+              "checkout points at PRODUCTION",
+          ).not.toBe(group);
+          return `set -euo pipefail\n${hermetic}`;
+        };
+
+        const FIXTURE_NAME = "f1-list-fixture.txt";
+        const SITES = [
           {
-            SUPABASE_PROJECT_REF: "stub-project-ref",
-            IS_PUSH: isPush ? "true" : "false",
-            STUB_PLAN_VERSIONS: plan.join(" "),
-            STUB_PUSH_VERSIONS: pushed.join(" "),
+            label: "TEST twin",
+            body: groupOf(
+              TEST_PUSH_STEP,
+              'echo "::group::Post-apply migration list verification (C-0331 twin)"',
+              'supabase migration list --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-migration-list.txt"',
+              'cat "${RUNNER_TEMP}/${FIXTURE}" | tee "${RUNNER_TEMP}/test-migration-list.txt"',
+            ),
           },
-          { stubs: { supabase: SUPABASE_STUB } },
+          {
+            label: "PROD",
+            // ⚠️ The PROD block's paths are hard-coded `/tmp/...`. They are redirected into the
+            // throwaway dir here so concurrent vitest workers cannot read each other's fixture;
+            // the floor's logic is path-independent, and the substitution is asserted to apply.
+            body: groupOf(
+              PROD_PUSH_STEP,
+              'echo "::group::Post-apply migration list verification (C-0331)"',
+              "supabase migration list --linked | tee /tmp/migration-list.txt",
+              'cat "${RUNNER_TEMP}/${FIXTURE}" | tee "${RUNNER_TEMP}/prod-migration-list.txt"',
+            ).replaceAll(
+              "/tmp/migration-list.txt",
+              '"${RUNNER_TEMP}/prod-migration-list.txt"',
+            ),
+          },
+        ] as const;
+
+        /**
+         * The three transcript shapes the PRE-FIX check missed. All three are `exit 0` from the
+         * CLI's point of view — the fixture is `cat`-ed — which is the live path F1 names.
+         */
+        const MISSED = [
+          { name: "EMPTY", text: "" },
+          {
+            name: "HEADER-ONLY",
+            text:
+              "        Local      | Remote     | Time (UTC)\n" +
+              "  ---------------|---------------|---------------------\n",
+          },
+          {
+            name: "RESHAPED/REWORDED (no version rows)",
+            text: "No migrations found.\n",
+          },
+        ] as const;
+        /** The control: a list that really does carry a version and no reverted row. */
+        const GOOD =
+          "        Local      | Remote     | Time (UTC)\n" +
+          "   20260101000000 | 20260101000000 | 2026-01-01 00:00:00\n";
+
+        const run = (s: string, fixture: string) =>
+          runScript(
+            s,
+            { FIXTURE: FIXTURE_NAME },
+            { files: { [FIXTURE_NAME]: fixture } },
+          );
+
+        for (const site of SITES) {
+          // The floor must be PRESENT before anything below is evidence about it.
+          expect(
+            site.body,
+            `the ${site.label} C-0331 block has no positive floor (\`grep -ac '[0-9]\\{14\\}'\`). ` +
+              "The negative grep is then the only check again, and an empty or header-only " +
+              "list passes it having read nothing (F1).",
+          ).toContain("grep -ac '[0-9]\\{14\\}'");
+
+          for (const { name, text } of MISSED) {
+            const r = run(site.body, text);
+            expect(
+              r.status,
+              `⛔ THE F1 DEFECT, ${site.label}. The C-0331 block exited ${r.status} on a ` +
+                `${name} migration list. The CLI exited 0 and printed nothing the check could ` +
+                `read, the negative grep matched nothing and read as CLEAN, and this block is ` +
+                `what green-lights the PROD apply. It must exit 1.\n${r.out}`,
+            ).toBe(1);
+            expect(
+              r.out,
+              `the ${site.label} block failed on a ${name} list without saying WHY — an ` +
+                "operator cannot act on that",
+            ).toContain("MEASURE_FAIL");
+            expect(r.out).toContain("printed no migration version at all");
+          }
+
+          // CONTROL: a real list must still pass. Without this the arm is a harness that reds
+          // whatever it is handed, and the three assertions above would prove nothing.
+          const good = run(site.body, GOOD);
+          expect(
+            good.status,
+            `the ${site.label} C-0331 block exited ${good.status} on a VALID migration list ` +
+              `carrying one version and no reverted row. The arms above are then not evidence.` +
+              `\n${good.out}`,
+          ).toBe(0);
+          expect(good.out).not.toContain("MEASURE_FAIL");
+
+          // CALIBRATION 1 — REPRODUCE THE PRE-FIX STATE. Strip the floor and re-run the same
+          // three fixtures: every one must go GREEN, which is the shipped vacuity itself. If
+          // they still red, this arm is measuring something other than the floor.
+          const preFix = site.body.replace(
+            /\nlist_rc=0\n[\s\S]*?\necho "the migration list carries[^\n]*\n/,
+            "\n",
+          );
+          expect(
+            preFix,
+            `CALIBRATION (${site.label}): the floor was not found to strip, so the pre-fix ` +
+              "state was never reproduced and the arms above are uncalibrated",
+          ).not.toBe(site.body);
+          expect(
+            preFix,
+            `CALIBRATION (${site.label}): the strip left the floor behind`,
+          ).not.toContain("MEASURE_FAIL");
+          for (const { name, text } of MISSED) {
+            const r = run(preFix, text);
+            expect(
+              r.status,
+              `CALIBRATION (${site.label}): with the floor removed, a ${name} list STILL ` +
+                `exited ${r.status}. The floor is then not what makes this block refuse, and ` +
+                `the F1 arms above are not evidence.\n${r.out}`,
+            ).toBe(0);
+          }
+
+          // CALIBRATION 2 — the MEASURE_FAIL rc branch. `grep` is replaced by a function that
+          // returns 2 ("could not read"), the case `|| true` collapses into "0 matches" and
+          // this repo's IN-06 fix exists to separate. Bounded at `-le 1`, so rc 2 is named.
+          const unreadable = `grep() { return 2; }\n${site.body}`;
+          const r2 = run(unreadable, GOOD);
+          expect(
+            r2.status,
+            `the ${site.label} block did not fail when grep could not READ the list (rc 2). ` +
+              `An unreadable list is not an empty one.\n${r2.out}`,
+          ).toBe(1);
+          expect(
+            r2.out,
+            `the ${site.label} block conflated "grep exited 2" with "0 matching lines" — the ` +
+              "shape IN-06 loudened elsewhere in this phase",
+          ).toContain("could not read the migration list");
+        }
+      },
+      EXEC_TEST_TIMEOUT_MS,
+    );
+
+    it(
+      "EXECUTED (PROD): the same affirmative check guards the production apply",
+      () => {
+        const script = extractRunScript(WF, PROD_PUSH_STEP);
+        // ⚠️ The PROD step's paths are hard-coded `/tmp/...` (pre-existing, alongside the
+        // long-standing /tmp/migration-list.txt), so these runs write there rather than
+        // into the throwaway dir. Each scenario overwrites both files before it reads
+        // them, so ordering between scenarios cannot leak.
+        const run = (
+          plan: string[],
+          pushed: string[],
+          isPush: boolean,
+        ): { status: number; out: string } =>
+          runScript(
+            script,
+            {
+              SUPABASE_PROJECT_REF: "stub-project-ref",
+              IS_PUSH: isPush ? "true" : "false",
+              STUB_PLAN_VERSIONS: plan.join(" "),
+              STUB_PUSH_VERSIONS: pushed.join(" "),
+            },
+            { stubs: { supabase: SUPABASE_STUB } },
+          );
+
+        const applied = run([V1], [V1], true);
+        expect(
+          applied.status,
+          `the PROD push step exited ${applied.status} on a push that applied what it planned; ` +
+            `it must exit 0.\n${applied.out}`,
+        ).toBe(0);
+
+        const short = run([V1, V2], [V1], true);
+        expect(
+          short.status,
+          `the PROD push step exited ${short.status} when the push applied ONE of the TWO ` +
+            `versions its own dry-run planned; it must exit 1.\n${short.out}`,
+        ).toBe(1);
+        expect(short.out).toContain(
+          "did NOT apply the set its own dry-run planned",
         );
 
-      const applied = run([V1], [V1], true);
-      expect(
-        applied.status,
-        `the PROD push step exited ${applied.status} on a push that applied what it planned; ` +
-          `it must exit 0.\n${applied.out}`,
-      ).toBe(0);
+        const nothingOnPush = run([], [], true);
+        expect(
+          nothingOnPush.status,
+          `the PROD push step exited ${nothingOnPush.status} when the push applied ZERO ` +
+            `migrations on a push-to-main run. A green PROD apply that applied nothing is the ` +
+            `PGRST204 schema/code divergence this workflow already fails loud on for absent ` +
+            `secrets, one step later in the chain.\n${nothingOnPush.out}`,
+        ).toBe(1);
+        expect(nothingOnPush.out).toContain("ZERO migrations");
 
-      const short = run([V1, V2], [V1], true);
-      expect(
-        short.status,
-        `the PROD push step exited ${short.status} when the push applied ONE of the TWO ` +
-          `versions its own dry-run planned; it must exit 1.\n${short.out}`,
-      ).toBe(1);
-      expect(short.out).toContain("did NOT apply the set its own dry-run planned");
-
-      const nothingOnPush = run([], [], true);
-      expect(
-        nothingOnPush.status,
-        `the PROD push step exited ${nothingOnPush.status} when the push applied ZERO ` +
-          `migrations on a push-to-main run. A green PROD apply that applied nothing is the ` +
-          `PGRST204 schema/code divergence this workflow already fails loud on for absent ` +
-          `secrets, one step later in the chain.\n${nothingOnPush.out}`,
-      ).toBe(1);
-      expect(nothingOnPush.out).toContain("ZERO migrations");
-
-      expect(
-        run([], [], false).status,
-        "the PROD push step refused a no-op workflow_dispatch; the escape hatch must stay open",
-      ).toBe(0);
-    }, EXEC_TEST_TIMEOUT_MS);
+        expect(
+          run([], [], false).status,
+          "the PROD push step refused a no-op workflow_dispatch; the escape hatch must stay open",
+        ).toBe(0);
+      },
+      EXEC_TEST_TIMEOUT_MS,
+    );
   });
 
   // ---------------------------------------------------------------------------
@@ -1552,7 +2473,8 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
         job: TEST_JOB,
         step: TEST_PUSH_STEP,
         planned: 'planned="$(versions_of "${RUNNER_TEMP}/test-dry-run.txt")"',
-        applied: 'applied="$(applied_versions_of "${RUNNER_TEMP}/test-push.txt")"',
+        applied:
+          'applied="$(applied_versions_of "${RUNNER_TEMP}/test-push.txt")"',
         dryFile: "test-dry-run.txt",
         pushFile: "test-push.txt",
       },
@@ -1578,7 +2500,10 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
 
       for (const site of SITES) {
         const block = jobBlock(WF, site.job);
-        expect(liveLineCount(block, APPLIED_FN), `${site.label} lost the apply-line scrape`).toBe(1);
+        expect(
+          liveLineCount(block, APPLIED_FN),
+          `${site.label} lost the apply-line scrape`,
+        ).toBe(1);
         expect(
           liveLineCount(block, APPLIED_AWK),
           `${site.label}'s apply-line scrape is no longer the measured awk one-liner. It must ` +
@@ -1597,7 +2522,11 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
 
         calibrate(
           `${site.label} binds \`applied\` to the apply-line scrape`,
-          (t) => t.replace(site.applied, site.applied.replace("applied_versions_of", "versions_of")),
+          (t) =>
+            t.replace(
+              site.applied,
+              site.applied.replace("applied_versions_of", "versions_of"),
+            ),
           (t) => liveLineCount(jobBlock(t, site.job), site.applied) === 1,
         );
       }
@@ -1622,7 +2551,9 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
     function extractScrapeFragment(stepName: string): string {
       const lines = extractRunScript(WF, stepName).split("\n");
       const start = lines.findIndex((l) => l.trim() === "versions_of() {");
-      const end = lines.findIndex((l) => l.trimStart().startsWith('applied="$('));
+      const end = lines.findIndex((l) =>
+        l.trimStart().startsWith('applied="$('),
+      );
       if (start < 0 || end < start) {
         throw new Error(
           `could not slice the planned/applied scrape out of "${stepName}". This test EXECUTES ` +
@@ -1654,12 +2585,15 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
      * same line shapes.
      */
     const FILE_OF: Record<string, string> = {
-      "20260908120000": "20260908120000_drop_create_allocator_connected_strategy.sql",
+      "20260908120000":
+        "20260908120000_drop_create_allocator_connected_strategy.sql",
     };
-    const fileOf = (v: string): string => FILE_OF[v] ?? `${v}_partial_apply_fixture.sql`;
+    const fileOf = (v: string): string =>
+      FILE_OF[v] ?? `${v}_partial_apply_fixture.sql`;
 
     /** A no-op run prints this and nothing else — run 34354619770, headSha 06db9958. */
-    const NOOP_LOG = "Connecting to remote database...\nRemote database is up to date.\n";
+    const NOOP_LOG =
+      "Connecting to remote database...\nRemote database is up to date.\n";
 
     const dryRunLog = (planned: readonly string[]): string =>
       planned.length === 0
@@ -1673,7 +2607,10 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
             "",
           ].join("\n");
 
-    const pushLog = (planned: readonly string[], applied: readonly string[]): string =>
+    const pushLog = (
+      planned: readonly string[],
+      applied: readonly string[],
+    ): string =>
       planned.length === 0
         ? NOOP_LOG
         : [
@@ -1694,116 +2631,129 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
     const W1 = "20260101000000";
     const W2 = "20260102000000";
 
-    it("EXECUTED: agrees on a real apply, DISAGREES on a partial one the OLD scrape called green", () => {
-      for (const site of SITES) {
-        const fragment = extractScrapeFragment(site.step);
-        const oldScrape = fragment.replace(
-          /applied="\$\(applied_versions_of/,
-          'applied="$(versions_of',
-        );
-        expect(
-          oldScrape,
-          `CALIBRATION (${site.label}): the pre-fix whole-stdout scrape could not be ` +
-            `reconstructed, so the "the old one called this GREEN" arm below proves nothing`,
-        ).not.toBe(fragment);
+    it(
+      "EXECUTED: agrees on a real apply, DISAGREES on a partial one the OLD scrape called green",
+      () => {
+        for (const site of SITES) {
+          const fragment = extractScrapeFragment(site.step);
+          const oldScrape = fragment.replace(
+            /applied="\$\(applied_versions_of/,
+            'applied="$(versions_of',
+          );
+          expect(
+            oldScrape,
+            `CALIBRATION (${site.label}): the pre-fix whole-stdout scrape could not be ` +
+              `reconstructed, so the "the old one called this GREEN" arm below proves nothing`,
+          ).not.toBe(fragment);
 
-        const files = (
-          planned: readonly string[],
-          applied: readonly string[],
-        ): Record<string, string> => ({
-          [site.dryFile]: dryRunLog(planned),
-          [site.pushFile]: pushLog(planned, applied),
-        });
+          const files = (
+            planned: readonly string[],
+            applied: readonly string[],
+          ): Record<string, string> => ({
+            [site.dryFile]: dryRunLog(planned),
+            [site.pushFile]: pushLog(planned, applied),
+          });
 
-        // (a) THE REAL NON-EMPTY PAIR — one planned, one applied, prompt echo present.
-        const real = runScrape(fragment, files([REAL], [REAL]));
-        expect(real.status, `${site.label}: the scrape exited ${real.status}\n${real.out}`).toBe(0);
-        expect(
-          real.out,
-          `${site.label}: the scrapes DISAGREED on the run that really did apply what it ` +
-            `planned (run 34200188676). A check that reddens a correct apply gets softened.` +
-            `\n${real.out}`,
-        ).toContain("VERDICT: AGREE");
-        expect(real.out).toContain(`applied=[${REAL}]`);
+          // (a) THE REAL NON-EMPTY PAIR — one planned, one applied, prompt echo present.
+          const real = runScrape(fragment, files([REAL], [REAL]));
+          expect(
+            real.status,
+            `${site.label}: the scrape exited ${real.status}\n${real.out}`,
+          ).toBe(0);
+          expect(
+            real.out,
+            `${site.label}: the scrapes DISAGREED on the run that really did apply what it ` +
+              `planned (run 34200188676). A check that reddens a correct apply gets softened.` +
+              `\n${real.out}`,
+          ).toContain("VERDICT: AGREE");
+          expect(real.out).toContain(`applied=[${REAL}]`);
 
-        // Calibration for (a): blind the apply-line pattern and the agreement must
-        // collapse — otherwise this arm is not reading the push log at all.
-        const blinded = runScrape(
-          fragment.replace("/Applying migration/", "/Applying migration NEVER-MATCHES/"),
-          files([REAL], [REAL]),
-        );
-        expect(
-          blinded.out,
-          `CALIBRATION (${site.label}): the scrapes still AGREED with the apply-line pattern ` +
-            `blinded, so arm (a) is not measuring the apply lines\n${blinded.out}`,
-        ).toContain("VERDICT: DISAGREE");
+          // Calibration for (a): blind the apply-line pattern and the agreement must
+          // collapse — otherwise this arm is not reading the push log at all.
+          const blinded = runScrape(
+            fragment.replace(
+              "/Applying migration/",
+              "/Applying migration NEVER-MATCHES/",
+            ),
+            files([REAL], [REAL]),
+          );
+          expect(
+            blinded.out,
+            `CALIBRATION (${site.label}): the scrapes still AGREED with the apply-line pattern ` +
+              `blinded, so arm (a) is not measuring the apply lines\n${blinded.out}`,
+          ).toContain("VERDICT: DISAGREE");
 
-        // (b) THE PARTIAL APPLY — the arm that proves this control can fail. TWO
-        // planned, BOTH echoed by the prompt, only ONE actually applied.
-        const partial = runScrape(fragment, files([W1, W2], [W1]));
-        expect(
-          partial.out,
-          `⛔ ${site.label}: the scrapes AGREED on a push that applied ONE of the TWO versions ` +
-            `its own dry-run planned. This is the exact state the comparison exists to catch, ` +
-            `and half a migration set on a database is worse than none.\n${partial.out}`,
-        ).toContain("VERDICT: DISAGREE");
-        expect(partial.out).toContain(`applied=[${W1}]`);
-        expect(partial.out, `${site.label}: the missing version is not named`).toContain(W2);
+          // (b) THE PARTIAL APPLY — the arm that proves this control can fail. TWO
+          // planned, BOTH echoed by the prompt, only ONE actually applied.
+          const partial = runScrape(fragment, files([W1, W2], [W1]));
+          expect(
+            partial.out,
+            `⛔ ${site.label}: the scrapes AGREED on a push that applied ONE of the TWO versions ` +
+              `its own dry-run planned. This is the exact state the comparison exists to catch, ` +
+              `and half a migration set on a database is worse than none.\n${partial.out}`,
+          ).toContain("VERDICT: DISAGREE");
+          expect(partial.out).toContain(`applied=[${W1}]`);
+          expect(
+            partial.out,
+            `${site.label}: the missing version is not named`,
+          ).toContain(W2);
 
-        // ⛔ AND THE RECORD OF WHAT WAS BROKEN: the SAME BYTES, through the pre-fix
-        // whole-stdout scrape, come back AGREE.
-        const partialOld = runScrape(oldScrape, files([W1, W2], [W1]));
-        expect(
-          partialOld.out,
-          `CALIBRATION (${site.label}): the pre-fix whole-stdout scrape did NOT call the ` +
-            `partial-apply fixture green. Either the fixture lost its confirmation-prompt echo ` +
-            `— the trap this test exists to avoid — or the reconstruction of the old scrape is ` +
-            `wrong. Either way this arm is not recording the defect.\n${partialOld.out}`,
-        ).toContain("VERDICT: AGREE");
-        expect(
-          partialOld.out,
-          "the pre-fix scrape read the MISSING version straight out of the prompt echo — that " +
-            "is the defect, stated as a value",
-        ).toContain(`applied=[${W1}\n${W2}]`);
+          // ⛔ AND THE RECORD OF WHAT WAS BROKEN: the SAME BYTES, through the pre-fix
+          // whole-stdout scrape, come back AGREE.
+          const partialOld = runScrape(oldScrape, files([W1, W2], [W1]));
+          expect(
+            partialOld.out,
+            `CALIBRATION (${site.label}): the pre-fix whole-stdout scrape did NOT call the ` +
+              `partial-apply fixture green. Either the fixture lost its confirmation-prompt echo ` +
+              `— the trap this test exists to avoid — or the reconstruction of the old scrape is ` +
+              `wrong. Either way this arm is not recording the defect.\n${partialOld.out}`,
+          ).toContain("VERDICT: AGREE");
+          expect(
+            partialOld.out,
+            "the pre-fix scrape read the MISSING version straight out of the prompt echo — that " +
+              "is the defect, stated as a value",
+          ).toContain(`applied=[${W1}\n${W2}]`);
 
-        // (c) THE NO-OP PAIR — the branch this fix must leave alone. Run 34354619770.
-        const noop = runScrape(fragment, files([], []));
-        expect(
-          noop.status,
-          `${site.label}: the scrape exited ${noop.status} on a no-op run. An awk pattern that ` +
-            `matches nothing must not abort the step under \`set -euo pipefail\`.\n${noop.out}`,
-        ).toBe(0);
-        expect(noop.out).toContain("VERDICT: AGREE");
-        expect(noop.out).toContain("planned=[]");
-        expect(noop.out).toContain("applied=[]");
+          // (c) THE NO-OP PAIR — the branch this fix must leave alone. Run 34354619770.
+          const noop = runScrape(fragment, files([], []));
+          expect(
+            noop.status,
+            `${site.label}: the scrape exited ${noop.status} on a no-op run. An awk pattern that ` +
+              `matches nothing must not abort the step under \`set -euo pipefail\`.\n${noop.out}`,
+          ).toBe(0);
+          expect(noop.out).toContain("VERDICT: AGREE");
+          expect(noop.out).toContain("planned=[]");
+          expect(noop.out).toContain("applied=[]");
 
-        // ⚠️ THE HONEST LIMIT OF ARM (c), stated rather than left implied. It is a
-        // NON-REGRESSION arm and it CANNOT be calibrated against the code: a no-op log
-        // carries no 14-digit version anywhere, so the old scrape and the new one both
-        // return the empty set and NO mutation of the scrape flips this verdict — which
-        // is asserted, not assumed, on the next line. What arm (c) does prove is that
-        // the new pattern does not abort the step on an empty match. The BEHAVIOURAL
-        // evidence for the empty branch — hard-fail on `push`, tolerated on
-        // `workflow_dispatch` — lives in the EXECUTED full-step tests above, which run
-        // the whole step and assert exit 1 and exit 0.
-        expect(
-          runScrape(oldScrape, files([], [])).out,
-          "the old scrape DISAGREED on a no-op pair, so the empty branch did change behaviour " +
-            "and the claim in the step comment is false",
-        ).toContain("VERDICT: AGREE");
-        // Calibration that this arm reads its fixtures at all: give the same no-op
-        // dry-run a push log with an apply line and the verdict must flip.
-        const noopProbe = runScrape(fragment, {
-          [site.dryFile]: dryRunLog([]),
-          [site.pushFile]: pushLog([W1], [W1]),
-        });
-        expect(
-          noopProbe.out,
-          `CALIBRATION (${site.label}): arm (c) did not flip when the push log gained an apply ` +
-            `line, so it is not reading its fixtures\n${noopProbe.out}`,
-        ).toContain("VERDICT: DISAGREE");
-      }
-    }, EXEC_TEST_TIMEOUT_MS);
+          // ⚠️ THE HONEST LIMIT OF ARM (c), stated rather than left implied. It is a
+          // NON-REGRESSION arm and it CANNOT be calibrated against the code: a no-op log
+          // carries no 14-digit version anywhere, so the old scrape and the new one both
+          // return the empty set and NO mutation of the scrape flips this verdict — which
+          // is asserted, not assumed, on the next line. What arm (c) does prove is that
+          // the new pattern does not abort the step on an empty match. The BEHAVIOURAL
+          // evidence for the empty branch — hard-fail on `push`, tolerated on
+          // `workflow_dispatch` — lives in the EXECUTED full-step tests above, which run
+          // the whole step and assert exit 1 and exit 0.
+          expect(
+            runScrape(oldScrape, files([], [])).out,
+            "the old scrape DISAGREED on a no-op pair, so the empty branch did change behaviour " +
+              "and the claim in the step comment is false",
+          ).toContain("VERDICT: AGREE");
+          // Calibration that this arm reads its fixtures at all: give the same no-op
+          // dry-run a push log with an apply line and the verdict must flip.
+          const noopProbe = runScrape(fragment, {
+            [site.dryFile]: dryRunLog([]),
+            [site.pushFile]: pushLog([W1], [W1]),
+          });
+          expect(
+            noopProbe.out,
+            `CALIBRATION (${site.label}): arm (c) did not flip when the push log gained an apply ` +
+              `line, so it is not reading its fixtures\n${noopProbe.out}`,
+          ).toContain("VERDICT: DISAGREE");
+        }
+      },
+      EXEC_TEST_TIMEOUT_MS,
+    );
   });
 
   // ---------------------------------------------------------------------------
@@ -1856,67 +2806,84 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       );
     });
 
-    it("EXECUTED: it reddens ONLY the TEST-applied / PROD-unconfigured combination", () => {
-      const script = extractRunScript(WF, DIVERGENCE_STEP);
-      const run = (
-        applyTest: string,
-        plan: string,
-        configured: string,
-      ): { status: number; out: string } =>
-        runScript(script, {
-          APPLY_TEST_RESULT: applyTest,
-          PLAN_RESULT: plan,
-          PLAN_CONFIGURED: configured,
-        });
+    it(
+      "EXECUTED: it reddens ONLY the TEST-applied / PROD-unconfigured combination",
+      () => {
+        const script = extractRunScript(WF, DIVERGENCE_STEP);
+        const run = (
+          applyTest: string,
+          plan: string,
+          configured: string,
+        ): { status: number; out: string } =>
+          runScript(script, {
+            APPLY_TEST_RESULT: applyTest,
+            PLAN_RESULT: plan,
+            PLAN_CONFIGURED: configured,
+          });
 
-      const diverged = run("success", "success", "false");
-      expect(
-        diverged.status,
-        `the divergence job exited ${diverged.status} on the exact all-green divergence: ` +
-          `apply-test SUCCEEDED (so TEST was written to) while the PROD apply was skipped for ` +
-          `want of credentials. It must exit 1 — that asymmetry is the one state in this ` +
-          `workflow with no other red anywhere.\n${diverged.out}`,
-      ).toBe(1);
-      expect(diverged.out).toContain("AHEAD OF PRODUCTION");
-      expect(
-        diverged.out,
-        "the refusal does not name the three values whose absence produced it",
-      ).toContain("SUPABASE_ACCESS_TOKEN");
-
-      for (const [label, applyTest, plan, configured] of [
-        ["PROD credentials present", "success", "success", "true"],
-        ["the TEST apply failed (the verdict job owns that)", "failure", "success", "false"],
-        ["the TEST apply was skipped (the verdict job owns that)", "skipped", "success", "false"],
-        ["the plan job itself is already red", "success", "failure", ""],
-      ] as const) {
-        const r = run(applyTest, plan, configured);
+        const diverged = run("success", "success", "false");
         expect(
-          r.status,
-          `the divergence job exited ${r.status} when ${label}. It must be SILENT there — a ` +
-            `second red on a state another job already names is noise, and noise is what gets ` +
-            `a fail-loud check softened.\n${r.out}`,
-        ).toBe(0);
-      }
+          diverged.status,
+          `the divergence job exited ${diverged.status} on the exact all-green divergence: ` +
+            `apply-test SUCCEEDED (so TEST was written to) while the PROD apply was skipped for ` +
+            `want of credentials. It must exit 1 — that asymmetry is the one state in this ` +
+            `workflow with no other red anywhere.\n${diverged.out}`,
+        ).toBe(1);
+        expect(diverged.out).toContain("AHEAD OF PRODUCTION");
+        expect(
+          diverged.out,
+          "the refusal does not name the three values whose absence produced it",
+        ).toContain("SUPABASE_ACCESS_TOKEN");
 
-      // Calibration: make the configured branch unconditional and the red disappears.
-      const defanged = script.replace(
-        'elif [ "${PLAN_CONFIGURED}" = "true" ]; then',
-        "elif true; then",
-      );
-      expect(defanged, "CALIBRATION: the configured branch was not found to gut").not.toBe(script);
-      expect(
-        run("success", "success", "false").status,
-        "sanity: the un-mutated script reddens the divergence",
-      ).toBe(1);
-      expect(
-        runScript(defanged, {
-          APPLY_TEST_RESULT: "success",
-          PLAN_RESULT: "success",
-          PLAN_CONFIGURED: "false",
-        }).status,
-        "CALIBRATION: the divergence still reddened with its condition replaced by `true` — " +
-          "this test is not measuring the branch",
-      ).toBe(0);
-    }, EXEC_TEST_TIMEOUT_MS);
+        for (const [label, applyTest, plan, configured] of [
+          ["PROD credentials present", "success", "success", "true"],
+          [
+            "the TEST apply failed (the verdict job owns that)",
+            "failure",
+            "success",
+            "false",
+          ],
+          [
+            "the TEST apply was skipped (the verdict job owns that)",
+            "skipped",
+            "success",
+            "false",
+          ],
+          ["the plan job itself is already red", "success", "failure", ""],
+        ] as const) {
+          const r = run(applyTest, plan, configured);
+          expect(
+            r.status,
+            `the divergence job exited ${r.status} when ${label}. It must be SILENT there — a ` +
+              `second red on a state another job already names is noise, and noise is what gets ` +
+              `a fail-loud check softened.\n${r.out}`,
+          ).toBe(0);
+        }
+
+        // Calibration: make the configured branch unconditional and the red disappears.
+        const defanged = script.replace(
+          'elif [ "${PLAN_CONFIGURED}" = "true" ]; then',
+          "elif true; then",
+        );
+        expect(
+          defanged,
+          "CALIBRATION: the configured branch was not found to gut",
+        ).not.toBe(script);
+        expect(
+          run("success", "success", "false").status,
+          "sanity: the un-mutated script reddens the divergence",
+        ).toBe(1);
+        expect(
+          runScript(defanged, {
+            APPLY_TEST_RESULT: "success",
+            PLAN_RESULT: "success",
+            PLAN_CONFIGURED: "false",
+          }).status,
+          "CALIBRATION: the divergence still reddened with its condition replaced by `true` — " +
+            "this test is not measuring the branch",
+        ).toBe(0);
+      },
+      EXEC_TEST_TIMEOUT_MS,
+    );
   });
 });

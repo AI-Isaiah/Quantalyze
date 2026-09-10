@@ -50,8 +50,15 @@
 #   BASELINE_DOC              default supabase/schema/BASELINE.md
 #   MIGRATIONS_DIR            default supabase/migrations
 #   NORMALIZER                default scripts/sql-body-normalize.mjs (the ONE shared
-#                             normalizer; test-ledger-drift-check.sh:123 spells the
-#                             same seam with the same default)
+#                             normalizer; test-ledger-drift-check.sh spells the same
+#                             seam with the same default — the anchor here read `:123`
+#                             from 2026-09-09 until 2026-09-10 and pointed at a
+#                             paragraph about the frontier ceiling, so it is now a
+#                             SYMBOL rather than a line: grep for
+#                             `NORMALIZER="${NORMALIZER:-` in that file. Both anchors in
+#                             this header are asserted by
+#                             `restore-test-from-baseline.test.ts`, so the next drift is
+#                             a red rather than a reader's dead end.)
 #   FRESHNESS_TS_CMD          default `git log -1 --format=%ct --`; invoked as
 #                             `$FRESHNESS_TS_CMD <path>` and must print an epoch
 #   RESTORE_EXPECT_MARKER_RE  default: `test` as a whole word, case-insensitive
@@ -61,13 +68,35 @@
 #                             points this at the workflow's backup artifact so the
 #                             pre-drop census survives an aborted transaction.
 #   RESTORE_REQUIRE_MUTEX     default 1
+#   REFDATA_ALLOWLIST         default scripts/restore-test-refdata-allowlist.txt —
+#                             the migration-seeded statements the restore replays
+#                             (Phase 164.8.1). An EMPTY allowlist is refused.
+#   REFDATA_EXTRACTOR         default scripts/extract-reference-inserts.mjs; run
+#                             TWICE — once to refuse before any write, once inside
+#                             `build_transaction` to emit refdata.sql
+#   REFDATA_KIND_REGISTRY     default public.compute_job_kinds
+#   REFDATA_KIND_REGISTRY_COL default name (measured; NOT `kind`)
+#   REFDATA_KIND_CHECK        default compute_jobs_kind_check
+#                             ⛔ THOSE LAST THREE REACH SQL TWICE EACH — as bare
+#                             identifiers AND inside string literals — in the
+#                             in-transaction partial-replay gate. That is why each
+#                             is CHARSET-REFUSED before any interpolation and
+#                             `sql_lit`-quoted at every literal site (W1, T-164.8-04),
+#                             and why they are seams at all: an invariant no arm
+#                             exercises is decorative, so the self-test points them
+#                             at `fx_keep_kind_check` over `public.fx_keep`.`label`.
 #   PGBIN                     (self-test only) server binaries for the throwaway lane
 #
 # ⚠️ psql's STDERR IS printed for the transaction — and it does NOT only name SQL
 # objects. A connect or auth failure names the HOST, its IP and the DB user; the
-# calling workflow says so in its own comment
-# (.github/workflows/test-restore-from-baseline.yml:659). What keeps that out of a
-# world-readable log is the workflow's REDACTION step, not any property of psql.
+# calling workflow's REDACTION step says so in its own comment — grep
+# `.github/workflows/test-restore-from-baseline.yml` for `name the TEST pooler host`.
+# ⚠️ That anchor read `:659` until 2026-09-10 and resolved to a bare `exit 1` inside
+# an unrelated step; it was already stale on `main`. A SYMBOL is used instead of a
+# line number for the same reason the seam above carries one, and
+# `restore-test-from-baseline.test.ts` asserts both resolve.
+# What keeps that stderr out of a world-readable log is that REDACTION step, not any
+# property of psql.
 # Two consequences, both deliberate: the DSN itself is never echoed by this script,
 # and the identity-marker read sends its stderr to a FILE rather than into the
 # value it judges or into the log (refusal 5).
@@ -156,6 +185,27 @@
 # print survivor KEYS here and leave the DDL in `survivors.sql` inside the
 # artifact. It is NOT closed by the workflow's redaction step, which covers the
 # artifact's channel files before upload and never touches this stdout.
+# ⭐ 2026-09-09 (Phase 164.8.2, WR-05): T-164.8-21 IS NOW HALF CLOSED, and only half.
+# The ARTIFACT half is done, by the workflow's `Stage the public artifact (enumerated
+# allowlist; default-out)` step: `pre-census.txt`, `post-census.txt` and both
+# `*-rollback-view.txt` files no longer ship, while `survivors.sql` does — the intent
+# quoted above, implemented. The STDOUT half is UNCHANGED and still booked: this script
+# still cats the WHOLE pre-census, DDL column included, to the public Actions log, and
+# no staging step can reach that.
+#
+# ⭐ 2026-09-10 (Phase 164.8.2 review-fix): AND THE FOUR STAGED `.sql` FILES ARE NOW
+# SCANNED — by `refuse_credential_in_published_sql`, between `build_transaction`
+# and `run_transaction`, so a hit refuses with the database untouched. The FILE SET
+# is unchanged and is not up for re-narrowing: admitting `census.sql`,
+# `survivors.sql`, `restore.sql` and `refdata.sql` is a founder decision and is
+# already narrower than what it replaced. What was missing was that NOTHING asserted
+# they were credential-free — the workflow's redaction step runs before this script
+# writes them, and `--self-test`'s redaction grep reads an arm's captured OUTPUT, not
+# these files. The scan covers the SAME SIX CLASSES the artifact's own README names
+# (DSN, supabase host, project ref, the `connect` meta-command, ALTER DATABASE, JWT),
+# so the code and that README's claim agree. Deliberate SQL BODIES in `survivors.sql`
+# remain in scope of T-164.8-21 above — the dollar-quote half of the ARM redaction
+# check is the one predicate not applied here, because these files are SQL.
 #
 # ── TWO THINGS THIS SCRIPT DELIBERATELY DOES NOT DO ─────────────────────────
 # 1. IT DOES NOT BACK ANYTHING UP. The WORKFLOW takes the backup, BEFORE calling
@@ -1151,7 +1201,16 @@ TXN_DROP
 
   # The dump, with exactly ONE line class removed. `grep -a` because a byte the
   # locale calls binary must not silently turn this filter into a no-op.
-  grep -av "$FILTER_PATTERN" "$BASELINE_FILE" >> "$out"
+  #
+  # ⛔ IN-06 — THE READ IS BOUNDED, NOT TRUSTED. Unwrapped, a grep that could not
+  # READ the dump (exit 2) died right here under `set -e` with no `::error::` at
+  # all: the operator saw a transaction that stopped mid-assembly and not one
+  # sentence saying why. `-le 1` and NOT `-eq 0` is the whole point of the bound —
+  # `grep -v` exits 1 when EVERY line matched the filter, i.e. an empty output,
+  # which is a legitimate reading; exit >= 2 is a broken instrument. This is the
+  # same shape as the `grep -ac` count above, and the two now fail the same way.
+  set +e; grep -av "$FILTER_PATTERN" "$BASELINE_FILE" >> "$out"; rc=$?; set -e
+  [ "$rc" -le 1 ] || fail "MEASURE_FAIL: could not read ${BASELINE_FILE} while filtering (grep exited ${rc}). An unreadable dump is not an empty one."
 
   # The dump ends with `set_config('search_path', '', false)` still in force. The
   # survivor DDL below is fully qualified and does not need a path — the ledger DDL
@@ -1456,6 +1515,196 @@ TXN_ASSERT
   note "transaction assembled at ${out} (filtered: ${FILTERED_N} line(s) matching ${FILTER_PATTERN})"
 }
 
+# ---------------------------------------------------------------------------
+# ⛔ THE FOUR SCRIPT-WRITTEN .sql FILES ARE PUBLISHED, AND UNTIL NOW NOTHING
+# ASSERTED THEY CARRY NO CREDENTIAL.
+#
+# `census.sql`, `survivors.sql`, `restore.sql` and `refdata.sql` are written by
+# THIS script into RESTORE_OUT_DIR, and the calling workflow's staging step admits
+# all four into the world-readable backup artifact. That set is a FOUNDER DECISION
+# and is deliberately not re-narrowed here: they are the reversal recipe
+# (T-164.8-21), and the artifact is where they belong.
+#
+# What was missing is a MEASUREMENT. The workflow's redaction step runs BEFORE
+# this script writes these files — its own comment says they are "scanned by
+# NOTHING and redacted by NOTHING" — and `--self-test`'s redaction grep reads an
+# arm's CAPTURED OUTPUT, never these files. So the one class that must never be
+# published anywhere was asserted about the LOG and about nothing else, and a DSN
+# reaching one of these files would have shipped for 90 days on a public repo with
+# every gate green.
+#
+# ⛔ IT SCANS THE SIX CLASSES THE ARTIFACT'S OWN README NAMES, and that agreement
+# is the point. `.github/workflows/test-restore-from-baseline.yml` defines the
+# redaction class as DSN, supabase host, project ref, the `connect` meta-command,
+# ALTER DATABASE and JWT — the pattern `supabase/schema/baseline.sql` is committed
+# under (scripts/local-stack/REPLAY-SPIKE.md), and the `schema_re` its backup step
+# runs over `schema-before.sql`. This scan used to be `postgres(ql)?://` ALONE while
+# the header above claimed the gap was closed for "the one class that must never be
+# published anywhere", and it dropped `supabase host`, `project ref`, `connect` and
+# `JWT` with NO STATED REASON. `survivors.sql` carries `pg_get_triggerdef(...)` and
+# reconstructed `CREATE POLICY ... USING (<qual>)` read off LIVE shared TEST, so a
+# host or a project ref reaching one of those bodies shipped with this check green.
+#
+# ⛔ MEASURED 2026-09-10, so the widening cannot make a legitimate run red: all six
+# classes are ZERO across every input these four files are assembled from —
+# `supabase/schema/baseline.sql` (0/0/0/0/0/0), the extractor's `refdata.sql` over
+# the real allowlist (0/0/0/0/0/0), and this script's own heredocs (0 for all but the
+# scan patterns below).
+#
+# ⛔ `ALTER DATABASE` IS SCOPED OUT FOR `refdata.sql`, AND ONLY FOR IT. This comment
+# said the opposite until 2026-09-10 — it claimed the class was safe to apply to all
+# four because "migration SOURCE carries it in comments, and migration source never
+# reaches these four files — only a migration's `version` and `name` do." That
+# sentence is FALSE, and it is false through the channel Phase 164.8.1 REFDATA built
+# on purpose: `refdata.sql` is `scripts/extract-reference-inserts.mjs`'s output, and
+# its own generated header says every statement in it is "the ORIGINAL bytes of an
+# allowlisted migration statement, sliced by offset". Migration source reaches ONE of
+# these four files BY DESIGN.
+#
+# MEASURED 2026-09-10, both halves:
+#   * The near-miss is already in the tree. `scripts/restore-test-refdata-allowlist.txt`
+#     allowlists `20260407164606_perfect_match.sql` :55-56, and that same file carries
+#     `--   ALTER DATABASE postgres SET app.admin_email = '<addr>'` at line 28 as a
+#     runbook recipe. Today's slice starts below it, so a regeneration measures 0 hits
+#     across all six classes and the CURRENT state is genuinely clean.
+#   * A slice CAN carry one. Probed against the real extractor with a scratch
+#     migration: a comment ABOVE the INSERT is dropped (the span starts at the first
+#     non-comment byte), but a comment INSIDE the statement — between `VALUES` and the
+#     `;` — is emitted VERBATIM, because the emitter slices original bytes.
+# The allowlist grows by founder decision, so the next allowlisted statement carrying
+# an interior recipe comment would make this scan REFUSE THE RESTORE over a piece of
+# documentation. That is the same shape `.github/workflows/test-restore-from-baseline.yml`
+# already scoped out of its LEDGER scan, for the same reason and in its own words:
+# "a gate that has to be waived to pass is not a gate."
+#
+# ⛔ AND THE CLASS HAS NO TRUE-POSITIVE POWER IN THAT FILE. Nothing an `ALTER DATABASE`
+# STATEMENT could be ever reaches `refdata.sql`: the extractor admits only top-level
+# `INSERT INTO public.<table> … VALUES (<literals>)` (criteria C1-C4 in the allowlist
+# header), so the class can match there only inside a comment or a seed string. A real
+# credential in either would still be caught — by the DSN, host, project-ref, connect
+# or JWT class, none of which is scoped out anywhere. The residual, named rather than
+# hidden: a bare `app.<x> = '<real value>'` recipe comment whose value is secret but
+# matches none of the other five shapes. `census.sql`, `survivors.sql` and
+# `restore.sql` are assembled from live-database reads and this script's own heredocs —
+# no migration source, so the class keeps its full meaning there and is KEPT.
+#
+# ⛔ THE ONE PREDICATE DELIBERATELY NOT APPLIED is the arm redaction check's SECOND
+# half — a dollar-quote, i.e. a SQL body. These files ARE SQL and are full of
+# dollar-quoted bodies by construction, so that half would refuse every legitimate
+# run.
+#
+# ⛔ THE MATCH IS NEVER PRINTED. A hit IS the credential; the refusal names the
+# FILE and stops. Same discipline as the identity marker, whose text is withheld
+# even when it is the reason for the refusal.
+#
+# ⛔ AND IT REFUSES THE RUN WITHOUT WITHHOLDING THE FILE — SAY SO, DO NOT IMPLY
+# OTHERWISE. Named 2026-09-10 by the comment audit. The workflow's sibling scan
+# over `ledger.csv` / `schema-before.sql` does `rm -f "${f}"` before it exits, and
+# its message says the file "has been WITHHELD from the artifact". This one does
+# not, and cannot be read as if it did: the calling workflow's `Stage the public
+# artifact` step is `if: always()` and copies all four of these files whenever they
+# exist, so on a hit the flagged file is still staged and still published to a
+# world-readable artifact for 90 days. What this function protects is the
+# DATABASE — it refuses before the transaction — plus every FUTURE run, because a
+# red board is what gets the shape removed. It does not protect THIS run's
+# artifact.
+# ⚠️ The asymmetry is a decision, not an oversight, and it is not taken here:
+# `rm -f`-ing these four would destroy the reversal recipe (T-164.8-21) on exactly
+# the run whose restore was refused. Whoever closes it has to choose which of the
+# two losses to take. The artifact's own README carries the same sentence, in the
+# artifact, where whoever downloads it will read it.
+#
+# ⭐ IT IS NOW NAMED `refuse_*`, AND THAT WAS EARNED RATHER THAN RENAMED INTO. It
+# shipped as `assert_public_sql_dsn_free` on 2026-09-10, and its own comment said
+# why: the `refuse_*() {` count is DERIVED — by `--self-test`'s closing line and by
+# `restore-test-from-baseline.test.ts` — into the claim that every refusal fires
+# before a write AND is armed by a named-message arm, and this check had NO cluster
+# arm, so joining the family would have made a true sentence false. Honest, and the
+# result was a new hard-fail path on the destructive script with zero lane coverage:
+# a name chosen to stay out of a count it would have falsified. The fix was to arm
+# it — arm 27, three legs on the throwaway lane — and only then to rename. The
+# sentence is true again, and now it covers this function too.
+#
+# Called AFTER `build_transaction` and BEFORE `run_transaction`, so a hit refuses
+# with the database still untouched.
+# ---------------------------------------------------------------------------
+refuse_credential_in_published_sql() {
+  local f c cname cre rc hits="" scanned=0 seen=""
+  local -a staged=(census.sql survivors.sql restore.sql refdata.sql)
+  # ⛔ `<name>|<ERE>`, one entry per class the artifact README names. The NAME is
+  # printed on a hit and the MATCH never is: a class name is not a credential, and a
+  # refusal that cannot say WHICH shape it found sends the operator through four
+  # files by hand.
+  local -a classes=(
+    'DSN|postgres(ql)?://'
+    'supabase host|@[a-z0-9.-]+\.supabase\.(co|com)'
+    'project ref|[a-z]{20}\.supabase'
+    'connect meta-command|\\connect'
+    'JWT|eyJ[A-Za-z0-9_-]{10,}'
+    'ALTER DATABASE|ALTER DATABASE'
+  )
+  # ⛔ `<file>|<class name>` — the pairs deliberately NOT applied, one line per
+  # exemption, each of which has to be argued in the block above this function. The
+  # ONE entry today is `refdata.sql` × `ALTER DATABASE`, for the reason the workflow's
+  # own ledger scan gives: migration SOURCE carries that string in runbook comments,
+  # `refdata.sql` is migration source by construction, and a class that can only ever
+  # match a comment there would abort a restore over documentation.
+  #
+  # ⛔ AN EXEMPTION THAT NAMES NOTHING IS A DEFECT, NOT A NO-OP. A typo fails CLOSED
+  # (the class simply still runs) and would therefore be invisible, so every entry is
+  # required to resolve against BOTH lists — a stale exemption left behind by a
+  # renamed file or class is a sentence claiming a decision that is no longer being
+  # taken, which is the failure mode this whole block exists to answer.
+  local -a scoped_out=(
+    'refdata.sql|ALTER DATABASE'
+  )
+  local e ef ec ok
+  for e in "${scoped_out[@]}"; do
+    ef="${e%%|*}"; ec="${e#*|}"
+    ok=0
+    # `if`, not `&&`: under `set -e` a final iteration whose test FAILS makes the
+    # loop exit non-zero and aborts the script at a line that is only counting.
+    for f in "${staged[@]}"; do if [ "$f" = "$ef" ]; then ok=1; fi; done
+    [ "$ok" -eq 1 ] || fail "MEASURE_FAIL: the class exemption '${e}' names '${ef}', which is not one of the ${#staged[@]} published files. A scoped-out pair that resolves against nothing is a recorded decision that is not being taken."
+    ok=0
+    for c in "${classes[@]}"; do if [ "${c%%|*}" = "$ec" ]; then ok=1; fi; done
+    [ "$ok" -eq 1 ] || fail "MEASURE_FAIL: the class exemption '${e}' names class '${ec}', which is not one of the ${#classes[@]} scanned classes. A scoped-out pair that resolves against nothing is a recorded decision that is not being taken."
+  done
+
+  for f in "${staged[@]}"; do
+    [ -f "$RESTORE_OUT_DIR/$f" ] || continue
+    scanned=$((scanned + 1))
+    seen="${seen}${seen:+, }${f}"
+    for c in "${classes[@]}"; do
+      cname="${c%%|*}"; cre="${c#*|}"
+      ok=0
+      for e in "${scoped_out[@]}"; do if [ "$e" = "${f}|${cname}" ]; then ok=1; fi; done
+      [ "$ok" -eq 0 ] || continue
+      rc=0
+      grep -acE "$cre" "$RESTORE_OUT_DIR/$f" >/dev/null || rc=$?
+      [ "$rc" -le 1 ] || fail "MEASURE_FAIL: could not scan ${f} for a ${cname} shape (grep exited ${rc}). An unreadable file is not a clean one, and this file is published."
+      if [ "$rc" -eq 0 ]; then hits="${hits}${hits:+, }${f} (${cname})"; fi
+    done
+  done
+  if [ -n "$hits" ]; then
+    fail "a credential shape appears in ${hits}, which the calling workflow stages into a WORLD-READABLE artifact for 90 days. The match is NOT printed — it would be the credential. Refusing before the transaction runs; the database is untouched."
+  fi
+  # ⛔ THE POSITIVE FLOOR. Everything above is a NEGATIVE check, and a negative
+  # check over an EMPTY list passes. `|| continue` is silent, so a run that found
+  # NONE of the four emitted the identical clean sentence as a run that read and
+  # cleared all four — the `-eq 0`-on-an-empty-count shape, in the one function whose
+  # whole purpose is to stand between a credential and a world-readable artifact.
+  # A relocated writer or a RESTORE_OUT_DIR that differs between `build_transaction`
+  # and this scan is enough. So the tally is MEASURED and compared with the list's
+  # own length, and a short count REFUSES rather than noting.
+  [ "$scanned" -eq "${#staged[@]}" ] || fail "MEASURE_FAIL: scanned ${scanned} of ${#staged[@]} published .sql file(s) under ${RESTORE_OUT_DIR} (found: ${seen:-none}). The workflow stages all ${#staged[@]} into a WORLD-READABLE artifact, so a file this scan could not find is a file that ships UNSCANNED. Refusing before the transaction runs; the database is untouched."
+  # ⛔ THE EXEMPTIONS ARE PRINTED ON A GREEN RUN. A scope-out that only ever appears
+  # in the source is a control weaker than the sentence beside it: the clean line has
+  # to say which pairs were NOT measured, or a reader of a green log is told six
+  # classes cleared four files when one of the twenty-four cells was never read.
+  note "public .sql files carry no credential shape in any of the ${#classes[@]} classes the artifact README names (scanned ${scanned} of ${#staged[@]}: ${seen}; scoped out by measurement: ${scoped_out[*]})"
+}
+
 run_transaction() {
   local rc=0
   psql "$RESTORE_DB_URL" -X -q -v ON_ERROR_STOP=1 -f "$RESTORE_OUT_DIR/restore.sql" \
@@ -1526,6 +1775,10 @@ run_restore() {
 
   derive_expected_shape
   build_transaction "$mode"
+  # Every file the workflow publishes now exists. Scan them BEFORE the psql
+  # session runs, so a credential in a to-be-published file stops the restore
+  # rather than being discovered in the artifact afterwards.
+  refuse_credential_in_published_sql
 
   note "── transaction (mode=${mode}) ──────────────────────────────────────"
   run_transaction
@@ -1644,6 +1897,8 @@ main() {
 #                                                23  RED  the refdata gate BITES
 #                                                24  RED  refdata allowlist refused
 #                                                25  GREEN rollback view normalises
+#                                                26  RED  backtick in a txn heredoc
+#                                                27  RED  credential in a published .sql
 #
 # Several arms carry more than one LEG, because one guard can be false in more than
 # one way and an arm that measures the easy way is not measuring the guard:
@@ -1711,8 +1966,16 @@ main() {
 # `git checkout --`, which restores to HEAD and silently destroys uncommitted work
 # (L-04) — and each observation, with its scratch path and verbatim output, is
 # recorded in 164.8.1-02-SUMMARY.md.
-# MEASURED 2026-09-09 — `--self-test` prints 26/26 and exits 0 on a throwaway cluster.
-EXPECTED_ARMS=26
+#
+# Arm 27 is THIS phase's (164.8.2, review C1-C4): the published-.sql credential scan.
+# Its four legs' falsifiers were observed RED on scratch copies under the harness's
+# mktemp dir, the same way arms 22-26 were, and are recorded in this phase's
+# review-fix report. ⚠️ This paragraph is here because the enumeration above stopped
+# at 26 while the sentence introducing it says EVERY arm has an observed-RED
+# falsifier — an unattributed arm makes that sentence unverifiable, which is the
+# same defect as a stale count.
+# MEASURED 2026-09-10 — `--self-test` prints 27/27 and exits 0 on a throwaway cluster.
+EXPECTED_ARMS=27
 
 SELFTEST_MUTEX_HOLDER_PID=""
 SELFTEST_TMPD=""
@@ -2969,6 +3232,171 @@ FRESHSTUB
   # supposed to restore and which is the failure this instrument exists to catch.
   # Both directions are driven here, on fixtures, with no lane: the function is
   # pure text and deserves a pure-text arm.
+  # ═══ ARM 27 — the published-.sql credential scan, ON THE LANE ═══════════════
+  # ⛔ WHY THIS ARM EXISTS. `refuse_credential_in_published_sql` shipped with its
+  # falsifiers in vitest only — a hard-fail path on the script whose `--run` is
+  # `DROP SCHEMA public CASCADE`, with ZERO cluster coverage, and a name chosen to
+  # keep it out of the derived `refuse_*` count it would otherwise have falsified.
+  # Four legs, each driving the real `--run` dispatch, so what is measured is the
+  # shipped call site and not a function called in isolation.
+  #
+  # ⛔ EVERY SEEDED CREDENTIAL IS ASSEMBLED AT RUNTIME FROM FRAGMENTS, never spelled
+  # as a literal — the same discipline the vitest fixture records. A literal here
+  # would carry a real credential SHAPE (that is the point of the fixture) and the
+  # pre-push guardrail would refuse the push, correctly. Do not inline them.
+  arm_published_sql_credential_scan() {
+    local out rc n copy
+    # ⛔ THE UNSET IS A RETURN TRAP, NOT A LAST LINE. It shipped as an `unset` on the
+    # SUCCESS path only, and this function has nine `return 1` paths — every one of
+    # them left a DSN-shaped and a JWT-shaped value EXPORTED into the environment of
+    # every arm that runs after it in the same self-test process, and self-test output
+    # is a public CI log. Latent, because no current arm dumps `env`; the fix is not
+    # to audit the arms for that, it is to make the failure paths carry the cleanup
+    # the success path already did.
+    trap 'unset ARM27_SEED_DSN ARM27_SEED_JWT' RETURN
+    local d1="postgre" d2="sql://u" d3=":p@db.example:5432/postgres"
+    local j1="eyJ" j2="armSeventeenSeed"
+    export ARM27_SEED_DSN="${d1}${d2}${d3}"
+    export ARM27_SEED_JWT="${j1}${j2}"
+
+    # (a) A DSN IN `restore.sql`. Seeded AFTER the transaction is assembled and
+    #     BEFORE the scan, which is exactly the window the scan owns.
+    copy="$SELFTEST_TMPD/pubscan-dsn.sh"
+    awk -v inj='  echo "-- ${ARM27_SEED_DSN}" >> "$RESTORE_OUT_DIR/restore.sql"  # arm 27(a): scratch copy only' \
+        '!d && $0 == "  refuse_credential_in_published_sql" { print inj; d = 1 }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
+      || { echo "MEASURE_FAIL (a): could not build the seeded-DSN scratch copy — the scan call site moved."; return 1; }
+    grep -aq 'arm 27(a): scratch copy only' "$copy" \
+      || { echo "MEASURE_FAIL (a): the scratch copy does not carry the injected seed, so this leg would test an unseeded run."; return 1; }
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a27a.out"; rc=0
+    run_leg "$copy" restore a27a > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (a): a restore whose restore.sql carries a DSN exited ${rc}, expected 1. That file is staged into a WORLD-READABLE artifact for 90 days."; return 1; }
+    grep -aq 'restore.sql (DSN)' "$out" \
+      || { echo "MEASURE_FAIL (a): the refusal does not name restore.sql and the DSN class — some other guard fired, so the scan is still unmeasured on the lane."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL (a): the stray table is gone (count=${n}) — the scan refused AFTER the transaction ran, so the credential was discovered with the database already written to."; return 1; }
+
+    # (b) A JWT IN `survivors.sql` — a class the scan did NOT cover until 2026-09-10,
+    #     in the file the artifact README singles out as carrying triggerdef and
+    #     policy-qual text read off LIVE shared TEST. `survivors.sql` is concatenated
+    #     into the transaction BEFORE this point, so the seed reaches the STAGED file
+    #     and not the transaction: the leg measures the staging risk, not a SQL error.
+    copy="$SELFTEST_TMPD/pubscan-jwt.sh"
+    awk -v inj='  echo "-- ${ARM27_SEED_JWT}" >> "$RESTORE_OUT_DIR/survivors.sql"  # arm 27(b): scratch copy only' \
+        '!d && $0 == "  refuse_credential_in_published_sql" { print inj; d = 1 }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
+      || { echo "MEASURE_FAIL (b): could not build the seeded-JWT scratch copy — the scan call site moved."; return 1; }
+    grep -aq 'arm 27(b): scratch copy only' "$copy" \
+      || { echo "MEASURE_FAIL (b): the scratch copy does not carry the injected seed."; return 1; }
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a27b.out"; rc=0
+    run_leg "$copy" restore a27b > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (b): a restore whose survivors.sql carries a JWT exited ${rc}, expected 1. Until 2026-09-10 the scan was the DSN class ALONE and this shipped green."; return 1; }
+    grep -aq 'survivors.sql (JWT)' "$out" \
+      || { echo "MEASURE_FAIL (b): the refusal does not name survivors.sql and the JWT class."; return 1; }
+    if grep -aq "$ARM27_SEED_JWT" "$out"; then
+      echo "MEASURE_FAIL (b): the refusal ECHOED the matched token — the refusal is itself the leak, and this log is public."
+      return 1
+    fi
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL (b): the stray table is gone (count=${n}) — the scan refused after the transaction ran."; return 1; }
+
+    # (c) A FILE THE SCAN CANNOT FIND. `census.sql` is removed just before the scan.
+    #     Until 2026-09-10 the loop skipped it with a silent `|| continue` and printed
+    #     the same clean four-name sentence, while the workflow staged the file
+    #     regardless — a positive floor is what makes "four clean" distinguishable
+    #     from "none found".
+    copy="$SELFTEST_TMPD/pubscan-missing.sh"
+    awk -v inj='  rm -f "$RESTORE_OUT_DIR/census.sql"  # arm 27(c): scratch copy only' \
+        '!d && $0 == "  refuse_credential_in_published_sql" { print inj; d = 1 }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
+      || { echo "MEASURE_FAIL (c): could not build the missing-file scratch copy — the scan call site moved."; return 1; }
+    grep -aq 'arm 27(c): scratch copy only' "$copy" \
+      || { echo "MEASURE_FAIL (c): the scratch copy does not carry the injected removal."; return 1; }
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a27c.out"; rc=0
+    run_leg "$copy" restore a27c > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (c): a run that could scan only 3 of the 4 staged files exited ${rc}, expected 1. The fourth ships UNSCANNED into a world-readable artifact."; return 1; }
+    # ⛔ THE NEEDLE CARRIES THE `MEASURE_FAIL:` PREFIX ON PURPOSE. The clean
+    #     `note` prints the SAME `scanned N of 4` tally, so a bare tally grep would
+    #     match a run that sailed past the floor and committed — MEASURED: with the
+    #     floor neutered this leg still saw `scanned 3 of 4`, and only the
+    #     stray-table check below caught it. The prefix is what makes the needle name
+    #     the REFUSAL rather than the tally.
+    grep -aq 'MEASURE_FAIL: scanned 3 of 4' "$out" \
+      || { echo "MEASURE_FAIL (c): the refusal does not report the measured tally, so a short scan is indistinguishable from a complete one."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL (c): the stray table is gone (count=${n}) — the floor refused after the transaction ran."; return 1; }
+
+    # (d) THE UNSEEDED CONTROL. The same lane, the same fixture, the SHIPPED script:
+    #     it must COMMIT. Without this the three legs above could be passing because
+    #     the widened scan refuses everything.
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a27d.out"; rc=0
+    arm_env restore a27d > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL (d): the UNSEEDED restore exited ${rc}, expected 0. The widened scan refuses a legitimate run, so legs (a)-(c) prove nothing."; return 1; }
+    grep -aq 'scanned 4 of 4' "$out" \
+      || { echo "MEASURE_FAIL (d): a clean run does not report scanning all four staged files."; return 1; }
+
+    # (e) THE `refdata.sql` × `ALTER DATABASE` EXEMPTION, BOTH HALVES, on the lane.
+    #     `refdata.sql` is `extract-reference-inserts.mjs` output — the ORIGINAL bytes
+    #     of an allowlisted migration statement — and a comment INTERIOR to such a
+    #     statement is emitted verbatim. The repo already carries the near-miss:
+    #     `20260407164606_perfect_match.sql` is allowlisted and carries an
+    #     `ALTER DATABASE postgres SET app.admin_email = …` runbook comment 27 lines
+    #     above the slice. So the class is scoped OUT for that one file, and both
+    #     directions are measured here: scoped out is not the same as deleted.
+    local ad="ALTER DATABASE postgres SET app.k = 'seed'"
+
+    #     (e1) the SAME text in `refdata.sql` must COMMIT.
+    copy="$SELFTEST_TMPD/pubscan-alterdb-refdata.sh"
+    awk -v inj="  printf '%s\\n' \"-- ${ad}\" >> \"\$RESTORE_OUT_DIR/refdata.sql\"  # arm 27(e1): scratch copy only" \
+        '!d && $0 == "  refuse_credential_in_published_sql" { print inj; d = 1 }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
+      || { echo "MEASURE_FAIL (e1): could not build the ALTER-DATABASE-in-refdata scratch copy — the scan call site moved."; return 1; }
+    grep -aq 'arm 27(e1): scratch copy only' "$copy" \
+      || { echo "MEASURE_FAIL (e1): the scratch copy does not carry the injected recipe comment, so this leg would test an unseeded run."; return 1; }
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a27e1.out"; rc=0
+    run_leg "$copy" restore a27e1 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL (e1): a restore whose refdata.sql carries an ALTER DATABASE recipe COMMENT exited ${rc}, expected 0. The allowlist grows by founder decision, and this aborts a restore over documentation — the exact shape the workflow scoped out of its own ledger scan."; return 1; }
+    grep -aq 'scoped out by measurement: refdata.sql|ALTER DATABASE' "$out" \
+      || { echo "MEASURE_FAIL (e1): the clean line does not NAME the scoped-out pair, so a green log claims six classes cleared four files while one cell was never read."; return 1; }
+
+    #     (e2) THE CALIBRATION, and it is the whole point of the pair: the class must
+    #          still BITE in a file that is NOT `refdata.sql`. Without this, (e1) would
+    #          pass just as well against a scan that dropped the class outright.
+    copy="$SELFTEST_TMPD/pubscan-alterdb-census.sh"
+    awk -v inj="  printf '%s\\n' \"${ad};\" >> \"\$RESTORE_OUT_DIR/census.sql\"  # arm 27(e2): scratch copy only" \
+        '!d && $0 == "  refuse_credential_in_published_sql" { print inj; d = 1 }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
+      || { echo "MEASURE_FAIL (e2): could not build the ALTER-DATABASE-in-census scratch copy — the scan call site moved."; return 1; }
+    grep -aq 'arm 27(e2): scratch copy only' "$copy" \
+      || { echo "MEASURE_FAIL (e2): the scratch copy does not carry the injected statement."; return 1; }
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a27e2.out"; rc=0
+    run_leg "$copy" restore a27e2 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (e2): an ALTER DATABASE in census.sql exited ${rc}, expected 1. The exemption is scoped to refdata.sql; if it bites nowhere, leg (e1) is passing because the class was DELETED."; return 1; }
+    grep -aq 'census.sql (ALTER DATABASE)' "$out" \
+      || { echo "MEASURE_FAIL (e2): the refusal does not name census.sql and the ALTER DATABASE class."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL (e2): the stray table is gone (count=${n}) — the scan refused AFTER the transaction ran."; return 1; }
+
+    return 0
+  }
+
   arm_census_rollback_view() {
     local d="$SELFTEST_TMPD/a25"; mkdir -p "$d"
 
@@ -3037,6 +3465,7 @@ FRESHSTUB
   run_arm "24 RED   reference-data allowlist: count drift, empty, silent extractor" 0 arm_bad_refdata_allowlist
   run_arm "25 GREEN the preflight rollback view normalises mutable reference counts and NOTHING else (CR-01)" 0 arm_census_rollback_view
   run_arm "26 RED   a backtick inside ANY unquoted heredoc is refused — SEVEN evasions closed — and THIS script is clean" 0 arm_backtick_in_txn_heredoc
+  run_arm "27 RED   a credential in a PUBLISHED .sql file, a file the scan could not find, and the refdata.sql ALTER DATABASE exemption in BOTH directions" 0 arm_published_sql_credential_scan
 
   release_mutex
 
@@ -3051,7 +3480,20 @@ FRESHSTUB
   # and EXPECTED_ARMS are all equal by construction, so the denominator is the
   # ratchet and says so.
   if [ "$total" -ne "$EXPECTED_ARMS" ]; then
-    echo "SELF-TEST FAIL: ${total} arms ran but EXPECTED_ARMS is ${EXPECTED_ARMS}. An arm that disappeared is a RED, not a smaller PASSED."
+    # ⛔ IN-01 (Phase 164.8.2) — THE MESSAGE NAMES THE DIRECTION IT MEASURED.
+    # One sentence covered both directions and named the WRONG one half the time:
+    # with a `run_arm` line DUPLICATED it printed "27 arms ran but EXPECTED_ARMS is
+    # 26. An arm that disappeared is a RED" — the count right, the reader sent
+    # hunting a deletion that never happened. The two directions have OPPOSITE
+    # remedies, which is why one sentence could not carry both: a vanished arm is
+    # RESTORED, an added arm is RATCHETED. The fix landed in
+    # `scripts/test-ledger-drift-check.sh` first; it belongs here more, because this
+    # is the script whose `--run` path is `DROP SCHEMA public CASCADE`.
+    if [ "$total" -lt "$EXPECTED_ARMS" ]; then
+      echo "SELF-TEST FAIL: ${total} arms ran but EXPECTED_ARMS is ${EXPECTED_ARMS}. An arm DISAPPEARED — that is a RED, not a smaller PASSED. RESTORE the arm. Never lower EXPECTED_ARMS to make a run green; that is deleting a proof of a guard on a destructive script."
+    else
+      echo "SELF-TEST FAIL: ${total} arms ran but EXPECTED_ARMS is ${EXPECTED_ARMS}. An arm was ADDED without raising the ratchet. RAISE EXPECTED_ARMS in the SAME commit as the arm, and move the dated MEASURED line and the \`prints N/N\` sentence beside it."
+    fi
     return 1
   fi
   if [ "$pass" -ne "$total" ]; then
@@ -3060,18 +3502,25 @@ FRESHSTUB
   fi
   # ⛔ W2 — THIS SENTENCE'S NUMBER IS MEASURED, AND SO IS ITS CLAIM. Regenerate the
   # count with `grep -c '^refuse_[a-z_]*() {' scripts/restore-test-from-baseline.sh`
-  # (2026-09-09: EIGHT, after `refuse_bad_refdata_allowlist` joined the block). It
-  # read "seven" until this phase.
+  # (2026-09-10: TEN, after `refuse_credential_in_published_sql` joined the block). It
+  # read "seven" until Phase 164.8, and was one short AGAIN until 164.8.2: the ninth
+  # refusal arrived with arm 26 in PR #767 (06db9958), the emitted line below moved
+  # with it and this comment did not. So the number is now DERIVED rather than
+  # remembered — `restore-test-from-baseline.test.ts` reads the live
+  # `^refuse_[a-z_]*() {` count, maps it to the same English word table, and asserts
+  # THIS line and the emitted one both carry it. A drift in either is red.
   #
   # ⚠️ AND IT USED TO OVERCLAIM. The words were "every BRANCH of every one of them
   # is armed", which is false and was false before this phase: `refuse_wrong_baseline_sha`
   # alone has four `fail` exits and only the sha-mismatch one has an arm; the
   # "baseline dump not found", "provenance doc not found" and "no parseable sha256
   # row" branches have none. What IS true, and what is claimed here, is that every
-  # refusal has at least one arm asserting its NAMED message — arms 1-7, 20, 21 and
-  # 24. A narrative that miscounts or overstates its own guards is the same defect
-  # class as a stale floor, so it is corrected rather than extended.
-  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — NINE refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back — EMPTY, SHORT and row-level partial each by name, a bad allowlist is refused before any write, the preflight's rollback view normalises mutable reference counts and nothing else, harness calibrated)"
+  # refusal has at least one arm asserting its NAMED message — arms 1-7, 20, 21, 24,
+  # 26 and 27. Arm 26 was MISSING from this list for the same reason the count was one
+  # short: `refuse_backticks_in_txn_heredocs` arrived with its arm and the sentence
+  # did not move. A narrative that miscounts or overstates its own guards is the same
+  # defect class as a stale floor, so it is corrected rather than extended.
+  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — TEN refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back — EMPTY, SHORT and row-level partial each by name, a bad allowlist is refused before any write, the preflight's rollback view normalises mutable reference counts and nothing else, a credential in any of the four PUBLISHED .sql files is refused BY CLASS before the transaction runs, a short scan refuses too, and the one scoped-out pair (refdata.sql x ALTER DATABASE) is proven to be an exemption rather than a deleted class, harness calibrated)"
   return 0
 }
 

@@ -2,6 +2,14 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 
+// ⛔ THE DELIBERATE DEGENERACY DEMONSTRATION, ROUTED THROUGH ITS ONE NAMED HOME
+// (Phase 164.8.2 / W3). The calibration below must WRITE the unchecked narrow —
+// that expression IS its evidence — but the class rule in
+// `test-restore-workflow-wiring.test.ts` now scans every test file. A file:line
+// allowlist rots and fragment assembly ("sl" + "ice") would make the evidence
+// unreadable, so the trap lives in one announced function instead.
+import { degenerateNarrow } from "../test/helpers/degenerate-narrow";
+
 // Regression guards for CRITICAL findings from the 2026-04-10 deep audit
 // and CSO security findings (SEC-001 through SEC-005).
 // Each test fails against the code state at commit 9930829 (baseline) and
@@ -875,7 +883,11 @@ describe("Critical regression guards", () => {
       it("ci.yml docs-link-check lychee step runs --offline (external URLs intentionally NOT checked)", () => {
         const src = readText(".github/workflows/ci.yml");
         // Scope to the docs-link-check job's run block, NOT a global grep —
-        // `npm ci --prefer-offline` appears 7x elsewhere and would vacuously pass.
+        // `npm ci --prefer-offline` appears elsewhere in the file and would vacuously
+        // pass. ⚠️ RE-MEASURED 2026-09-10: 13 occurrences, not the 7 this line said.
+        // The count is not load-bearing — "more than zero elsewhere" is what makes the
+        // scoping necessary — so it is stated as a regeneration rather than a constant:
+        //   grep -c 'npm ci --prefer-offline' .github/workflows/ci.yml
         const stepRe =
           /-\s*name:\s*Link-check docs[^\n]*\n\s*run:\s*\|\n([\s\S]*?)(?=\n\s{4,6}\S|\n\S|$)/;
         const m = src.match(stepRe);
@@ -1031,6 +1043,242 @@ describe("Critical regression guards", () => {
     // mirror apply; without a test the asymmetry can re-emerge in a
     // future rebase.
     describe("supabase-migrate plan/apply env-gate symmetry", () => {
+      /**
+       * ⛔ IN-04 (164.8-REVIEW, closed 2026-09-09). The two `apply:` pins below used to
+       * read `src.slice(applyIdx)` — everything from the job header to END OF FILE. That
+       * is correct ONLY while `apply` happens to be the last job in the workflow, which
+       * is a fact about today's file and not a property anyone maintains. The moment a
+       * job is appended after it, both pins start matching `environment: Production`,
+       * `needs: [plan, apply-test]` and the `if:` result clause ANYWHERE in that
+       * successor — so `apply` could lose its reviewer gate entirely and these pins would
+       * go on passing on a neighbour's text. A pin that reads past its subject is not
+       * pinning its subject.
+       *
+       * The bound is the `jobBlock` shape from `test-restore-workflow-wiring.test.ts:85`
+       * — the next 2-space job key — COPIED here rather than imported. The repo's wiring
+       * tests are deliberately self-contained files (see the header of
+       * `supabase-migrate-test-first.test.ts`): a shared helper module that only wiring
+       * tests import buys nothing and couples pins that must be able to fail
+       * independently. The calibration below appends a fake trailing job and proves the
+       * bound excludes it while the old unbounded slice swallowed it.
+       */
+      const APPLY_JOB_RE = /^ {2}apply:\s*\n/m;
+
+        // ⛔ ROUND FIVE: `String.search` returns -1 on a miss and `slice(-1)` yields the LAST
+      // CHARACTER, so every assertion below would answer about one byte instead of the apply
+      // block. `applyIdx` further down IS checked — but the SEEDED strings recompute the index
+      // and the check did not travel with it, which is how a checked value and an unchecked one
+      // end up living side by side. The store-then-use form at the first site is also the one
+      // shape the lexical class rule documents that it cannot reach, so it needs this by hand.
+      const applyIdxIn = (subject: string, label: string): number => {
+        const i = subject.search(APPLY_JOB_RE);
+        if (i < 0) {
+          throw new Error(
+            `APPLY_JOB_RE does not match ${label}, so this calibration has no subject. ` +
+              "A -1 here slices to the last character and every assertion over it answers " +
+              "about one byte rather than about the apply block.",
+          );
+        }
+        return i;
+      };
+      /**
+       * ⛔ WR-05 (164.8.2-REVIEW, closed 2026-09-10). This used to be
+       * `/\n {2}[A-Za-z_][\w-]*:\n/` — the trailing `:\n` required the successor job key
+       * to be a BARE line. MEASURED against three successors that are all valid YAML:
+       *
+       *   "  zz_after_apply:"                        -> bound excludes successor: true
+       *   "  zz_after_apply:  # a trailing comment"  -> bound excludes successor: FALSE
+       *   "  zz_after_apply: "                       -> bound excludes successor: FALSE
+       *
+       * In both failing cases `after.match(NEXT_JOB_RE)` returned `null`, `applyJobBlock`
+       * fell back to `after` (END OF FILE) and returned the exact unbounded slice IN-04
+       * was raised to remove — with no throw and no message. The calibration below used
+       * to seed a BARE key only, so it could not see it. `[^\S\n]*` admits trailing
+       * horizontal whitespace and `(#[^\n]*)?` a trailing comment.
+       */
+      const NEXT_JOB_RE = /\n {2}[A-Za-z_][\w-]*:[^\S\n]*(#[^\n]*)?\n/;
+      /**
+       * The PERMISSIVE detector: a 2-space key of ANY shape, value or no value. It is
+       * deliberately weaker than `NEXT_JOB_RE`, and the gap between the two is what
+       * `applyJobBlock` throws on — see below. Under `jobs:` nothing but a job key sits
+       * at exactly two spaces (verified 2026-09-10: `grep -c '^  [A-Za-z_][A-Za-z0-9_-]*:'`
+       * over supabase-migrate.yml returns 11 lines, all of them job keys or `concurrency`/
+       * `permissions`/`on` children ABOVE `apply`, which is the last job in the file).
+       */
+      const ANY_JOB_KEY_RE = /\n {2}[A-Za-z_][\w-]*:/;
+      const applyJobBlock = (src: string, applyIdx: number): string => {
+        const bodyStart = src.indexOf("\n", applyIdx) + 1;
+        const after = src.slice(bodyStart);
+        const next = after.match(NEXT_JOB_RE);
+        // ⭐ THE IN-03 DISCIPLINE, applied here for WR-05. An unrecognised successor is
+        // indistinguishable, in the return value, from `apply` genuinely being the last
+        // job: both give a slice that runs past a job boundary nobody chose. Fall back
+        // ONLY for the second, and THROW for the first, exactly as `suffix()` in
+        // `supabase-migrate-test-first.test.ts` throws rather than degrading to
+        // `slice(-1)`. The failure mode of the old code was a PASS.
+        //
+        // ⛔ WR-06 (164.8.2-REVIEW, closed 2026-09-10). This used to be guarded by
+        // `if (!next)`, so the permissive detector was consulted ONLY when NOTHING
+        // matched. An unrecognised key followed by a RECOGNISED one therefore left
+        // `next` non-null, skipped the throw, and let the slice extend straight across
+        // the first successor — the exact over-broad `applyJobBlock` IN-04 removed and
+        // WR-05 removed again. The question is not "is there a bound?" but "is the FIRST
+        // top-level key after `apply` the one we bounded on?", so compare POSITIONS.
+        //
+        // ⚠️ Be honest about the blast radius: this throw and its calibration guard a
+        // SLICE BOUND that lives in this test file. Nothing here protects
+        // `supabase-migrate.yml` itself — the workflow is unchanged either way. What they
+        // protect is the two `apply` pins BELOW from going green on a neighbour's text,
+        // i.e. they keep this file's own assertions honest rather than adding a
+        // production guard.
+        const loose = after.match(ANY_JOB_KEY_RE);
+        if (loose && (!next || (loose.index ?? 0) < (next.index ?? 0))) {
+          throw new Error(
+            "supabase-migrate.yml: a top-level job key FOLLOWS `apply:` " +
+              `(${JSON.stringify(after.slice(loose.index ?? 0, (loose.index ?? 0) + 60))}) ` +
+              "but NEXT_JOB_RE did not match it, so the apply-job slice would silently run " +
+              "past it — the unbounded shape IN-04 was raised to remove, and the " +
+              "`environment: Production` / `needs:` / `if:` pins below would then be " +
+              "satisfiable by that successor's text. Widen NEXT_JOB_RE to the key shape " +
+              "actually used rather than letting the bound fall back to a slice nobody chose.",
+          );
+        }
+        return (
+          src.slice(applyIdx, bodyStart) + (next ? after.slice(0, next.index) : after)
+        );
+      };
+
+      it("CALIBRATION (IN-04/WR-05): the apply-job slice stops at the next top-level job, in ALL THREE key shapes", () => {
+        const src = readText(".github/workflows/supabase-migrate.yml");
+        const applyIdx = src.search(APPLY_JOB_RE);
+        expect(applyIdx, "supabase-migrate.yml: apply job not found").toBeGreaterThanOrEqual(0);
+
+        // `apply` is the LAST job today, so on the real file bounded === unbounded and
+        // the bound cannot be shown to bite. Seed the condition it exists for.
+        //
+        // ⛔ WR-05: the seed used to be a BARE `  zz_after_apply:` and nothing else, which
+        // is precisely why the degradation shipped — a bare key is the ONE shape the old
+        // bound matched. All three shapes below are valid YAML and all three name the same
+        // job; a successor written in either of the last two made the old bound return
+        // slice-to-EOF, silently.
+        const BODY =
+          "    needs: [plan, apply-test]\n    if: needs.apply-test.result == 'success'\n";
+      const SHAPES = [
+          "  zz_after_apply:",
+          "  zz_after_apply:  # a trailing comment",
+          "  zz_after_apply: ",
+        ] as const;
+        for (const key of SHAPES) {
+          const seeded = `${src.trimEnd()}\n\n${key}\n${BODY}`;
+          expect(
+            seeded,
+            `CALIBRATION [${key}]: the fake trailing job was not appended`,
+          ).not.toBe(src);
+
+          const seededIdx = applyIdxIn(seeded, `the ${JSON.stringify(key)} seed`);
+          expect(
+            seeded.slice(seededIdx),
+            `CALIBRATION [${key}]: the UNBOUNDED slice does not contain the fake job — the ` +
+              "calibration is seeded on the wrong string and proves nothing about the bound",
+          ).toContain("zz_after_apply");
+          expect(
+            applyJobBlock(seeded, seededIdx),
+            `the bounded apply-job slice reaches into the job that FOLLOWS apply, when that ` +
+              `job's key is written ${JSON.stringify(key)}. Both pins below would then be ` +
+              "satisfiable by a successor's text — `apply` could lose its " +
+              "environment: Production reviewer gate and its needs/if wiring while they stay " +
+              "green (IN-04, re-opened as WR-05)",
+          ).not.toContain("zz_after_apply");
+        }
+
+        // …and the bound must not cut the subject short: the real block still carries the
+        // lines the two pins ask about.
+        const real = applyJobBlock(src, applyIdx);
+        expect(real, "the bounded slice lost the apply job's own body").toMatch(
+          /environment:\s*Production/,
+        );
+        expect(real).toMatch(/needs:\s*\[plan,\s*apply-test\]/);
+      });
+
+
+      it("CALIBRATION (round five): applyIdxIn THROWS rather than slicing to the last byte", () => {
+        const src = readText(".github/workflows/supabase-migrate.yml");
+        // The mutation: remove the apply job header the regex anchors on. Assert it APPLIED
+        // before asserting the flip — a neuter that does not apply reads as GREEN, and this
+        // repo has been bitten by exactly that twice.
+        const anchorless = src.split("\n  apply:\n").join("\n  zz_renamed_apply:\n");
+        expect(anchorless, "CALIBRATION: the apply-job header was not renamed").not.toBe(src);
+        expect(APPLY_JOB_RE.test(anchorless)).toBe(false);
+
+        expect(() => applyIdxIn(anchorless, "the anchorless subject")).toThrow(
+          /APPLY_JOB_RE does not match/,
+        );
+        // And the degradation it replaces: the old unchecked form answered about ONE BYTE.
+        expect(
+          degenerateNarrow(anchorless, { fromMatch: APPLY_JOB_RE }).length,
+        ).toBe(1);
+        // Control: the real workflow still resolves.
+        expect(applyIdxIn(src, "the real workflow")).toBeGreaterThanOrEqual(0);
+      });
+
+      it("CALIBRATION (WR-05): applyJobBlock THROWS on an unrecognised successor instead of slicing to EOF", () => {
+        const src = readText(".github/workflows/supabase-migrate.yml");
+        const applyIdx = src.search(APPLY_JOB_RE);
+        expect(applyIdx, "supabase-migrate.yml: apply job not found").toBeGreaterThanOrEqual(0);
+
+        // A successor key shape NEXT_JOB_RE deliberately does not match: a key carrying an
+        // inline scalar value. Whatever the reason it is unmatched, the answer must be a
+        // named throw and never a silent slice-to-EOF — that is the IN-03 discipline.
+        const seeded = `${src.trimEnd()}\n\n  zz_after_apply: something-unmatched\n    needs: [plan]\n`;
+        expect(seeded, "CALIBRATION: the unmatched successor was not appended").not.toBe(src);
+        const afterApply = seeded.slice(applyIdxIn(seeded, "the single-successor seed"));
+        expect(
+          NEXT_JOB_RE.test(afterApply),
+          "CALIBRATION: NEXT_JOB_RE MATCHED the seeded successor, so this arm is not " +
+            "exercising the unrecognised-shape path it names — pick a shape the bound " +
+            "genuinely does not match",
+        ).toBe(false);
+        expect(
+          ANY_JOB_KEY_RE.test(afterApply),
+          "CALIBRATION: the permissive detector does not see the seeded successor either, " +
+            "so the throw could not fire for the reason this arm claims",
+        ).toBe(true);
+        expect(() => applyJobBlock(seeded, applyIdxIn(seeded, "the single-successor seed"))).toThrow(
+          /a top-level job key FOLLOWS `apply:`/,
+        );
+
+        // ⛔ WR-06: the arrangement the `if (!next)` guard could not reach. An
+        // UNRECOGNISED successor followed by a RECOGNISED one leaves `next` non-null, so
+        // the old code skipped the permissive detector entirely and returned a slice that
+        // swallowed the first successor whole. Seeding the unrecognised key as the LAST
+        // thing in the file (above) is the single arrangement where `next` is null, which
+        // is why the calibration could not see the gap.
+        const seededPair =
+          `${src.trimEnd()}\n\n  zz_after_apply: something-unmatched\n    needs: [plan]\n` +
+          "\n  zz_recognised:\n    needs: [plan]\n";
+        const afterPair = seededPair.slice(applyIdxIn(seededPair, "the two-successor seed"));
+        const pairNext = afterPair.match(NEXT_JOB_RE);
+        expect(
+          pairNext,
+          "CALIBRATION: NEXT_JOB_RE matched NOTHING in the two-successor seed, so `next` " +
+            "is null and this arm degenerates into the single-successor arm above — it " +
+            "would not exercise the position comparison it names",
+        ).not.toBeNull();
+        expect(
+          afterPair.slice(0, pairNext?.index ?? 0),
+          "CALIBRATION: NEXT_JOB_RE bound on the FIRST seeded successor rather than the " +
+            "second, so the unrecognised key is not actually being skipped over and this " +
+            "arm proves nothing about the position comparison",
+        ).toContain("zz_after_apply");
+        expect(() => applyJobBlock(seededPair, seededPair.search(APPLY_JOB_RE))).toThrow(
+          /a top-level job key FOLLOWS `apply:`/,
+        );
+
+        // CONTROL: the real file, where `apply` genuinely IS the last job, must NOT throw —
+        // otherwise the throws above are the harness reddening whatever it is handed.
+        expect(() => applyJobBlock(src, applyIdx)).not.toThrow();
+      });
+
       it("supabase-migrate.yml plan job declares environment: Production", () => {
         const src = readText(".github/workflows/supabase-migrate.yml");
         // Anchor on the start-of-line `  plan:` job key followed by its
@@ -1051,12 +1299,13 @@ describe("Critical regression guards", () => {
         // Apply is the last top-level job; capture from `^  apply:` to EOF.
         // The `$` anchor in multiline mode only matches end-of-line, so use
         // a lookahead that matches either the next top-level job or EOL+EOF.
-        const applyIdx = src.search(/^ {2}apply:\s*\n/m);
+        const applyIdx = src.search(APPLY_JOB_RE);
         expect(
           applyIdx,
           "supabase-migrate.yml: apply job not found",
         ).toBeGreaterThanOrEqual(0);
-        const applyJob = src.slice(applyIdx);
+        // Bounded at the next top-level job (IN-04) — see the note above this describe.
+        const applyJob = applyJobBlock(src, applyIdx);
         expectMatch(
           applyJob,
           /environment:\s*Production/,
@@ -1091,12 +1340,13 @@ describe("Critical regression guards", () => {
 
       it("supabase-migrate.yml apply job waits for apply-test", () => {
         const src = readText(".github/workflows/supabase-migrate.yml");
-        const applyIdx = src.search(/^ {2}apply:\s*\n/m);
+        const applyIdx = src.search(APPLY_JOB_RE);
         expect(
           applyIdx,
           "supabase-migrate.yml: apply job not found",
         ).toBeGreaterThanOrEqual(0);
-        const applyJob = src.slice(applyIdx);
+        // Bounded at the next top-level job (IN-04) — see the note above this describe.
+        const applyJob = applyJobBlock(src, applyIdx);
         expectMatch(
           applyJob,
           /needs:\s*\[plan,\s*apply-test\]/,

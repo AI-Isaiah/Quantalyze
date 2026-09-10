@@ -118,6 +118,51 @@ set -euo pipefail
 
 GATE="VAC-08 repo-vs-TEST ledger and body drift gate"
 
+# ── ⛔ THE CEILING ON THE APPLY-ON-MERGE WINDOW (WR-02, Phase 164.8.2) ────────
+# WHAT IT BOUNDS. Migrations reach shared TEST only on the MERGE push
+# (supabase-migrate.yml, job `apply-test`), so a migration authored ABOVE the TEST
+# ledger's frontier tip cannot be present yet and is EXEMPTED from NEW drift below.
+# That exemption was UNBOUNDED: one failed `apply-test` exempts every later
+# migration forever while this gate keeps printing `0 NEW drift`. A tolerance with
+# no ceiling does not discriminate a timing artefact from a stalled pipeline — it
+# is a control that passes while measuring nothing.
+#
+# WHY 3. One migration above the tip is the ordinary artefact of a PR that adds a
+# migration (apply-on-merge, by construction). A handful is a stalled apply. Three
+# is "a handful has not happened yet"; the founder's own framing (CONTEXT Area 1)
+# was "N small, ~3".
+#
+# ⭐ IT IS A RATCHET. Lower it when reality allows. NEVER raise it to make a run
+# pass — that is deleting the measurement. Raising it is a reviewed edit to this
+# line, never a side effect of a green run. Conforms to `WAIVED_CEILING` in
+# scripts/mutation-runner/run.mjs (which sits at 0 and has survived two founder
+# decisions that each took the root-cause fix over an exception).
+#
+# HOW TO REGENERATE THE LIVE READING. Every `sql-tests` run prints
+# `  ledger frontier: tip=<ts>; N above-tip migration(s) exempted.` Read the newest:
+#   gh run list --workflow ci.yml --branch main --limit 3 --json databaseId
+#   gh run view <id> --job <sql-tests job id> --log | grep -a 'ledger frontier:'
+# (`gh run view --log` without `--job` truncates.)
+#
+# ⛔ WHAT THE SECOND LAYER CAN AND CANNOT DO, said plainly. CLAUDE.md's two-layer
+# rule is satisfied for a REPO corpus by re-deriving it from disk (see
+# src/__tests__/mutation-runner-floors.test.ts, `RATCHET STALE`). It CANNOT be
+# satisfied that way here: the exempt count is a property of a LIVE, shared ledger,
+# not of this repo, so a stale-HIGH ceiling is NOT re-derivable without a database.
+# The second layer here is therefore (a) SC-9 registration in
+# src/__tests__/gate-family-meta.test.ts's KNOWN_THRESHOLD_SITES, which makes any
+# change to this value a reviewed diff, and (b) the single-live-line and
+# positive-integer pins in src/__tests__/drift-check-scripts.test.ts. Lowering the
+# ceiling when reality allows remains a HUMAN act, recorded by the dated line below.
+#
+# MEASURED 2026-09-09 — the live above-tip exempt count on `main` is 0, well under
+# this ceiling: `ledger frontier: tip=20260908120000; 0 above-tip migration(s)
+# exempted.`, read from CI run 34390777698 (head 1ca4d4da, `sql-tests` job
+# 102600855496, success) at 19:01:34Z. The ceiling therefore reds nothing that is
+# green today; it is pinned at 3 rather than at 0 so an ordinary apply-on-merge
+# window does not red a PR that adds migrations.
+FRONTIER_EXEMPT_CEILING=3
+
 MIGRATIONS_DIR="${MIGRATIONS_DIR:-supabase/migrations}"
 SNAPSHOT_DIR="${SNAPSHOT_DIR:-supabase/schema/functions}"
 NORMALIZER="${NORMALIZER:-scripts/sql-body-normalize.mjs}"
@@ -174,7 +219,9 @@ default_ledger_query() {
       # DIAGNOSTIC ONLY — never decides pass/fail. A gate that fails must print
       # enough for the next reader to diagnose it without a database of their
       # own; otherwise the failure is a claim about the ledger that cannot be
-      # checked. Emits row counts and five sample (version, name) pairs.
+      # checked. Emits row counts, the FIVE newest (version, name) pairs and the
+      # THREE oldest — eight rows, not the "five sample pairs" this comment claimed
+      # until 2026-09-10. Read the `-c` queries below rather than this sentence.
       # Migration filenames are already public in this repo, so this discloses
       # nothing the tree does not.
       psql "$TEST_SUPABASE_DB_URL" -X -q -A -t -v ON_ERROR_STOP=1 \
@@ -332,11 +379,72 @@ check() {
   # normal and must not trip this. Separation is wide, not tuned: the real
   # defect scored matched=9 of 262 (fires); ordinary drift of 30 un-applied
   # migrations scores matched=232 of 262 (silent).
-  local ledger_rows matched
-  ledger_rows="$(run_ledger_query ledger_rows "$names_csv" 2>/dev/null || echo "")"
-  case "$ledger_rows" in (*[!0-9]*|"") ledger_rows="" ;; esac
+  #
+  # ⛔ F7 (Phase 164.8.2) — THE SIXTH `|| true`, AND THE ONLY ONE THAT FAILED
+  # TOWARD SILENCE. This read
+  #     ledger_rows="$(run_ledger_query ledger_rows … 2>/dev/null || echo "")"
+  #     case "$ledger_rows" in (*[!0-9]*|"") ledger_rows="" ;; esac
+  #     if [ -n "$ledger_rows" ] && [ "$ledger_rows" -ge 50 ] && …
+  # which is the SP-M01 shape the five bounded sites in this file already
+  # condemn — an unreadable measurement collapsing to a value the control can
+  # never fire on — except this one collapsed to EMPTY, and `[ -n … ]` then made
+  # the ENTIRE ABSURDITY FLOOR silently INERT. The `2>/dev/null` removed the only
+  # channel that would have said why. A pooler blip, a permission change or a
+  # `run_ledger_query` regression therefore did not merely lose the row count: it
+  # switched off the control that separates a WRONG JOIN KEY from real drift, and
+  # the gate went on to report drift-shaped nonsense with full confidence — on a
+  # SHARED database, in the words of the block above, "sending the reader to
+  # hand-apply migrations".
+  #
+  # The five sites F5 bounded fail toward RED. This one failed toward "the
+  # control did not act", which is strictly worse. An unreadable input is not a
+  # clean one — the same sentence the sibling bounds carry.
+  #
+  # ⚠️ THE STDERR IS CAPTURED AND DELIBERATELY NOT ECHOED, and the boundary is
+  # said out loud rather than implied: psql's connect/auth stderr names the host,
+  # the port and the DB user, and this job's log is PUBLIC (see NON-NEGOTIABLES
+  # at the top). So the diagnosis this failure hands the reader is the EXIT CODE
+  # and whether the query said anything at all — which already separates "psql
+  # spoke and refused" from "psql is not there" from "the query returned no row"
+  # — and not the text. What it must never do again is discard the channel and
+  # then decide.
+  local ledger_rows matched ledger_rows_rc=0 err_lines
+  local ledger_rows_err="${tmp}/ledger_rows.err"
+  set +e
+  ledger_rows="$(run_ledger_query ledger_rows "$names_csv" 2>"$ledger_rows_err")"
+  ledger_rows_rc=$?
+  set -e
+  # ⛔ G2 (Phase 164.8.2) — THE COUNT IS COMPUTED ONCE, AND IT IS TOTAL. Both
+  # MEASURE_FAILs below used to interpolate `$(wc -l < "$ledger_rows_err" | tr …)`
+  # INLINE, inside the very message that fires when the read went wrong. If the
+  # substitution failed BECAUSE the redirect target was gone (a removed `$tmp`),
+  # `wc` never ran, the substitution rendered EMPTY, and the diagnosis reached the
+  # operator as "…; line(s) of stderr captured and WITHHELD…" — a hole exactly
+  # where the one number they were handed belongs. It fails in the loud direction,
+  # but D-12/SC-7 (see src/__tests__/gate-family-meta.test.ts) is that every
+  # failure emission prints a runtime VALUE, and a blank is not one.
+  #
+  # ⚠️ THE `2>/dev/null` HERE IS CORRECT — DO NOT "FIX" IT BACK. This is one of
+  # the rare sites where suppressing a channel is right, because the alternative
+  # is a blank inside a diagnosis: `wc`'s own "No such file" would land in the log
+  # AND leave the count empty, whereas `|| echo '?'` makes the count total — it
+  # always says something, and `?` tells the reader the count itself could not be
+  # taken. The braces matter: `wc … || echo '?'` must be grouped BEFORE the pipe,
+  # or `tr` succeeds on nothing and the fallback never fires.
+  err_lines="$( { wc -l < "$ledger_rows_err" 2>/dev/null || echo '?'; } | tr -d '[:space:]' )"
+  if [ "$ledger_rows_rc" -ne 0 ]; then
+    fail "MEASURE_FAIL: could not read the TEST ledger row count (the ledger_rows query exited ${ledger_rows_rc}; ${err_lines} line(s) of stderr captured and WITHHELD — it can carry a DSN, host or username). The ABSURDITY FLOOR below is the control that tells a wrong join key from real drift, and it can only fire on a count that was READ; an unreadable one leaves it INERT while the gate reports drift with full confidence. An unreadable input is not a clean one."
+  fi
+  case "$ledger_rows" in
+    "")
+      fail "MEASURE_FAIL: the TEST ledger row-count query exited 0 and returned NO ROW (${err_lines} line(s) of stderr captured and WITHHELD — it can carry a DSN, host or username). A count query returns exactly one number, so an empty answer is a read that did not happen, not a ledger holding zero rows — and zero is one of the values the ABSURDITY FLOOR below can never fire on."
+      ;;
+    *[!0-9]*)
+      fail "MEASURE_FAIL: the TEST ledger row-count query exited 0 and returned something that is not a number (${#ledger_rows} character(s), value WITHHELD — a failed psql can print connection detail on stdout). A count that cannot be compared is not a count of zero; the ABSURDITY FLOOR below would have gone INERT on it."
+      ;;
+  esac
   matched=$(( ${#repo_names[@]} - missing_count ))
-  if [ -n "$ledger_rows" ] && [ "$ledger_rows" -ge 50 ] && [ $(( matched * 2 )) -lt "${#repo_names[@]}" ]; then
+  if [ "$ledger_rows" -ge 50 ] && [ $(( matched * 2 )) -lt "${#repo_names[@]}" ]; then
     echo "::error::${GATE}: MEASURE_FAIL — this is the GATE failing, not the database."
     echo "::error::The TEST ledger holds ${ledger_rows} rows, but only ${matched} of ${#repo_names[@]} repo"
     echo "::error::migrations matched it. A populated ledger that matches almost nothing means the"
@@ -359,10 +467,20 @@ check() {
     # Baselined names, comments and blank lines stripped.
     local base_names="${tmp}/baseline.names.txt"
     sed 's/#.*//' "$baseline" | sed 's/[[:space:]]*$//' | sed '/^$/d' > "$base_names"
+    # ⛔ F5 (Phase 164.8.2) — SP-M01's BOUND, ON THE FILTER SITES TOO. `|| true`
+    # cannot tell grep's rc 1 (every line filtered away — legitimate, and the
+    # ORDINARY clean case here) from rc >= 2 (could not read). An unreadable
+    # `$missing_file` wrote an EMPTY `$new_file`, and an empty `$new_file` is
+    # this gate's CLEAN verdict: `0 NEW drift`, exit 0, green board. `-le 1` and
+    # NOT `-eq 0` is the whole point of the bound. Same shape and same sentence
+    # as scripts/restore-test-from-baseline.sh's IN-06 wrap, so the twins fail
+    # the same way.
     # NEW drift = measured missing, not baselined.
-    grep -aFxv -f "$base_names" "$missing_file" > "$new_file" || true
+    set +e; grep -aFxv -f "$base_names" "$missing_file" > "$new_file"; grep_rc=$?; set -e
+    [ "$grep_rc" -le 1 ] || fail "MEASURE_FAIL: could not filter the measured-missing rows against ${baseline} (grep exited ${grep_rc}). An unreadable input is not a run with no new drift."
     # STALE baseline = baselined, but NOT measured missing any more.
-    grep -aFxv -f "$missing_file" "$base_names" > "$stale_file" || true
+    set +e; grep -aFxv -f "$missing_file" "$base_names" > "$stale_file"; grep_rc=$?; set -e
+    [ "$grep_rc" -le 1 ] || fail "MEASURE_FAIL: could not filter ${baseline} against the measured-missing rows (grep exited ${grep_rc}). An unreadable input is not a baseline with no stale entries."
   else
     cp "$missing_file" "$new_file"
     echo "::warning::${GATE}: no ledger baseline at ${baseline} — every measured absence is treated as new."
@@ -417,6 +535,14 @@ check() {
   # before this block runs). A narrow, quiet lag is NOT caught here. That cost
   # is the price of the exemption and is booked as [164.8-PUSH-RACE-VAC08].
   #
+  # ⭐ CURRENCY 2026-09-09 (Phase 164.8.2, WR-02): the window's WIDTH is now
+  # bounded — more than FRONTIER_EXEMPT_CEILING exempted migrations is an
+  # `::error::` naming every one of them and a failing gate (see the check beside
+  # `local bad=0` below). What stays open and booked at [164.8-PUSH-RACE-VAC08] is
+  # the ORDERING coupling (ci.yml's `sql-tests` and supabase-migrate.yml's
+  # `apply-test` contend for the same advisory key with nothing ordering them),
+  # routed to Phase 164.9. A bounded width is not an ordered pipeline.
+  #
   # ⚠️ PLACEMENT vs THE `sed 's/#.*//'` SEAM. That sed strips comments from the
   # BASELINE FILE only, a dozen lines up. This block adds no baseline syntax and
   # reads no baseline text, so nothing written here passes through it. Verified
@@ -461,8 +587,16 @@ check() {
   # The tip is printed on EVERY run — including runs that exempt nothing — so
   # the width of the window is readable without re-deriving it, and a tip that
   # has fallen behind is visible in the log rather than only in its effect.
+  #
+  # ⛔ F5 — AND THE COUNT IS BOUNDED. `|| true` here was worse than at the two
+  # sites above, because `exempt_count` feeds the FRONTIER_EXEMPT_CEILING check
+  # below: an uncountable exemption read as 0, which is simultaneously this
+  # gate's clean verdict AND a number no ceiling can ever exceed. The control
+  # would have reported nothing while measuring nothing.
   local exempt_count
-  exempt_count="$(grep -ac '[^[:space:]]' "$exempt_file" || true)"; exempt_count="${exempt_count:-0}"
+  set +e; exempt_count="$(grep -ac '[^[:space:]]' "$exempt_file")"; grep_rc=$?; set -e
+  [ "$grep_rc" -le 1 ] || fail "MEASURE_FAIL: could not count the frontier-exempted migrations (grep exited ${grep_rc} on ${exempt_file}). An uncountable exemption is not an exemption of zero, and zero is the one value FRONTIER_EXEMPT_CEILING can never fire on."
+  exempt_count="${exempt_count:-0}"
   echo "  ledger frontier: tip=${frontier_tip:-<none - no repo migration is present, exemption DISABLED>}; ${exempt_count} above-tip migration(s) exempted."
   if [ "$exempt_count" -gt 0 ]; then
     echo "::notice::${GATE}: ${exempt_count} repo migration(s) EXEMPTED from NEW drift — authored ABOVE the TEST ledger's frontier (tip ${frontier_tip})."
@@ -473,11 +607,29 @@ check() {
     sed 's/^/  exempt (above tip): /' "$exempt_file"
   fi
 
+  # ⛔ F5 — the two verdict counts, bounded on the same shape. `new_count` IS the
+  # verdict: 0 prints `0 NEW drift` and exits 0. A gate that cannot read its own
+  # result must not report the result it wanted.
   local new_count stale_count
-  new_count="$(grep -ac '[^[:space:]]' "$new_file" || true)"; new_count="${new_count:-0}"
-  stale_count="$(grep -ac '[^[:space:]]' "$stale_file" || true)"; stale_count="${stale_count:-0}"
+  set +e; new_count="$(grep -ac '[^[:space:]]' "$new_file")"; grep_rc=$?; set -e
+  [ "$grep_rc" -le 1 ] || fail "MEASURE_FAIL: could not count the NEW-drift rows (grep exited ${grep_rc} on ${new_file}). An uncountable result is not a count of zero, and zero here is this gate's clean verdict."
+  new_count="${new_count:-0}"
+  set +e; stale_count="$(grep -ac '[^[:space:]]' "$stale_file")"; grep_rc=$?; set -e
+  [ "$grep_rc" -le 1 ] || fail "MEASURE_FAIL: could not count the stale-baseline rows (grep exited ${grep_rc} on ${stale_file}). An uncountable result is not a baseline with nothing stale in it."
+  stale_count="${stale_count:-0}"
 
   local bad=0
+  # ⛔ WR-02 — THE EXEMPT WINDOW HAS A WIDTH, AND THE WIDTH IS BOUNDED. Sets
+  # `bad=1` rather than exiting, so the run still reports its other findings and
+  # the file's single verdict (`if [ "$bad" = 1 ]`) decides the exit code — the
+  # same shape as the `stale_count` and `new_count` blocks below it.
+  if [ "$exempt_count" -gt "$FRONTIER_EXEMPT_CEILING" ]; then
+    echo "::error::${GATE}: FRONTIER_EXEMPT_CEILING exceeded: ${exempt_count} migration(s) above the ledger frontier (tip ${frontier_tip}) > ceiling ${FRONTIER_EXEMPT_CEILING}. That is a stalled apply, not an apply-on-merge window — supabase-migrate.yml's apply-test has stopped applying to TEST. Fix the apply; do NOT raise the ceiling (a reviewed edit to FRONTIER_EXEMPT_CEILING in scripts/test-ledger-drift-check.sh, never a side effect of a green run)."
+    # NAMED, not counted. A ceiling that reports only a number tells a reader that
+    # something is wrong and nothing about what; the versions are the evidence.
+    sed 's/^/::error::  exempt (above tip): /' "$exempt_file"
+    bad=1
+  fi
   if [ "$stale_count" -gt 0 ]; then
     # A baseline that may hold stale entries is a control that quietly stops
     # controlling. Shrinking it is progress and MUST be recorded.
@@ -512,7 +664,25 @@ check() {
     # landed: an above-tip absence is not in the baseline file and never
     # appears there. A clean summary that misattributes WHY an absence was
     # tolerated is a gate reporting a control that did not act.
-    echo "  ledger presence: ${missing_count} absent — $(( missing_count - exempt_count )) baselined (see ${baseline}), ${exempt_count} exempt as above the ledger frontier; 0 NEW drift."
+    #
+    # ⛔ IN-02 (Phase 164.8.2) — THE VERDICT HALF IS CONDITIONED ON `bad`. The
+    # counts above are a MEASUREMENT and stay printed either way; the trailing
+    # `0 NEW drift.` is a VERDICT, and it used to print unconditionally. On a
+    # ceiling breach that put two contradictory sentences in one run, MEASURED
+    # 2026-09-10:
+    #   ::error::… FRONTIER_EXEMPT_CEILING exceeded: 4 … > ceiling 3.
+    #     ledger presence: 4 absent — 0 baselined (…), 4 exempt …; 0 NEW drift.
+    # The board was correctly red (the gate exits 1 and suppresses the
+    # `ledger and body checks clean` notice), but the line a reader scans for the
+    # verdict read clean beside the error that contradicts it. `new_count` is
+    # genuinely 0 here, so the fix is not to hide the number — it is to stop the
+    # summary claiming the run is clean when this run is not.
+    local presence="  ledger presence: ${missing_count} absent — $(( missing_count - exempt_count )) baselined (see ${baseline}), ${exempt_count} exempt as above the ledger frontier; 0 NEW drift"
+    if [ "$bad" = 0 ]; then
+      echo "${presence}."
+    else
+      echo "${presence} — but this run is NOT clean: see the ::error:: above (the frontier-exemption ceiling was BREACHED). 0 NEW drift is not a passing verdict here."
+    fi
   fi
 
   # Advisory only — squashes and CLI-era rows make this direction noisy.
@@ -693,10 +863,20 @@ self_test() {
   printf '%s\n' "$body" > "$tmp/snapshot/selftest_fn.sql"
 
   # Stub ledger: argv[1] is the direction; MISSING_NAMES seeds the red mode.
+  #
+  # ⛔ F7 (Phase 164.8.2) — `ledger_rows` ANSWERS, and answers with a SMALL
+  # number. It printed nothing until this fix, and "nothing" is now a
+  # MEASURE_FAIL in `check` by design: a count query that returns no row was
+  # never a ledger holding zero rows. 12 rather than 0 or 239 is deliberate —
+  # it is a READ count that sits UNDER the absurdity floor's `>= 50`
+  # precondition, so every arm below still fails or passes for exactly the
+  # reason its comment claims and the floor stays out of their way.
   cat > "$tmp/ledger.sh" <<'STUB'
 #!/usr/bin/env bash
 if [ "$1" = "missing" ]; then
   [ -n "${MISSING_NAMES:-}" ] && printf '%s\n' "$MISSING_NAMES"
+elif [ "$1" = "ledger_rows" ]; then
+  echo 12
 fi
 exit 0
 STUB
@@ -711,13 +891,61 @@ STUB
   local rc pass=0 total=0
   local -a results=()
 
+  # ⛔ THE ARMS RATCHET (WR-03, Phase 164.8.2). Without it the tally below read
+  # `self-test OK (${pass}/${total} arms …)` — a denominator that MOVES WITH THE
+  # CORPUS. Delete an arm and the run printed a smaller PASSED and exited 0, so a
+  # cleanup could remove the frontier arms and the gate would report success for
+  # having tested less. A vanished arm is a RED, not a smaller PASSED.
+  #
+  # ⭐ Raise it only TOGETHER with the arm that adds one; never lower it to make a
+  # run green — that is deleting a proof.
+  #
+  # ⚠️ THIS CONSTANT IS A DELIBERATE COPY of `EXPECTED_ARMS` in
+  # scripts/restore-test-from-baseline.sh (whose own `run_arm` comment records that
+  # it was copied FROM this file — the twins stay twins by copy). Separate constants
+  # per file is this repo's wiring convention, stated outright in Phase 164.8 Plan 05
+  # Task 2: the self-tests are self-contained. Do NOT "fix" this into a shared module.
+  #
+  # ⚠️ `EXPECTED_ARMS` is OUTSIDE gate-family-meta.test.ts's threshold name class
+  # (no FLOOR/MIN/CEILING/MAX/LIMIT), so SC-9 will never see it. The date below is
+  # kept honest ONLY by src/__tests__/drift-check-scripts.test.ts, which pins this
+  # line live-exactly-once and pins the `prints N/N` sentence against the value.
+  #
+  # Regenerate with `bash scripts/test-ledger-drift-check.sh --self-test`, and the
+  # live arm count with
+  # `grep -av '^\s*#' scripts/test-ledger-drift-check.sh | grep -ac '^  run_arm "'`.
+  # `--self-test --expect-inverted` exits 1. No database: the harness is stub-driven.
+  # MEASURED 2026-09-09 — `--self-test` prints 11/11 and exits 0.
+  EXPECTED_ARMS=11
+
   run_arm() {
     local label="$1" want="$2"
     shift 2
+    local arm_out=""
     total=$((total + 1))
     rc=0
-    ( "$@" ) >/dev/null 2>&1 || rc=$?
-    if [ "$inverted" = "--expect-inverted" ]; then
+    # ⛔ F6 (Phase 164.8.2) — CAPTURED, NOT DISCARDED, AND RE-EMITTED ON FAILURE
+    # ONLY. This read `( "$@" ) >/dev/null 2>&1`, and the EXIT-CODE contract was
+    # never the problem: `arm_frontier_ceiling_exceeded` is declared `want 1` and
+    # `return 0`s on every MEASURE_FAIL, so the arm genuinely FAILs. What was
+    # lost is the REASON. That arm has FOUR distinguishable causes — a wrong exit
+    # code, a missing `FRONTIER_EXEMPT_CEILING exceeded` string, and a missing
+    # `::error::  exempt (above tip): <name>` for any of four names — and the
+    # operator got `FAIL frontier-ceiling-exceeded RED (exit 0, expected 1)` and
+    # nothing else. The sentences were written to be read and could not be.
+    #
+    # ⛔ THE CONTRACT IS UNCHANGED, DELIBERATELY. `rc` still comes from the arm
+    # and is still compared against `want`; nothing here can turn a FAIL into an
+    # ok. Capturing is why `2>&1` replaces the discard — stderr carries the
+    # gate's own `::error::` lines and an arm that failed on one of them should
+    # say so. On the ok path the output is DROPPED, so a green run's log is
+    # byte-identical to what it was before this change.
+    arm_out="$( ( "$@" ) 2>&1 )" || rc=$?
+    # ⚠️ The `ARM_FORCE_INVERT` clause is the sibling's one extra `||`
+    # (scripts/restore-test-from-baseline.sh, `run_arm`). It exists for the
+    # harness-calibration arm below, which must be able to turn the flip on for
+    # ONE subshell without setting `--expect-inverted` for the whole run.
+    if [ "$inverted" = "--expect-inverted" ] || [ "${ARM_FORCE_INVERT:-0}" = "1" ]; then
       want=$(( want == 0 ? 1 : 0 ))
     fi
     if [ "$rc" -eq "$want" ]; then
@@ -725,6 +953,12 @@ STUB
       pass=$((pass + 1))
     else
       results+=("  FAIL ${label} (exit ${rc}, expected ${want})")
+      # The arm's own diagnosis, indented under its verdict and marked so a
+      # reader can tell the arm's output from the harness's. Withheld when the
+      # arm printed nothing, so a silent failure does not grow a blank block.
+      if [ -n "$arm_out" ]; then
+        results+=("$(printf '%s\n' "$arm_out" | sed 's/^/       | /')")
+      fi
     fi
   }
 
@@ -742,6 +976,32 @@ STUB
   : > "$tmp/mig_frontier/20260301000000_above.sql"
   : > "$tmp/mig_tipeq/20260201000000_applied.sql"
   : > "$tmp/mig_tipeq/20260201000000_twin.sql"
+
+  # ── FRONTIER-CEILING corpora (WR-02, Phase 164.8.2) ───────────────────────
+  #   mig_ceil_over  one applied + FOUR above the tip  => exempt_count 4 > 3, RED
+  #   mig_ceil_edge  one applied + THREE above the tip => exempt_count 3 == 3, GREEN
+  #
+  # ⚠️ TWO CORPORA ARE REQUIRED — ONE WOULD MEASURE THE WRONG THING. The tip is
+  # the GREATEST PRESENT timestamp. Deriving the boundary case from the over-the-
+  # ceiling corpus by making one of the four above-tip files "present" would MOVE
+  # THE TIP UP, and the remaining three would then sit BELOW it: still red, but as
+  # below-frontier drift, not as a boundary that stays green. An arm that reds for
+  # the wrong reason is indistinguishable from one that works.
+  mkdir -p "$tmp/mig_ceil_over" "$tmp/mig_ceil_edge"
+  : > "$tmp/mig_ceil_over/20260201000000_applied.sql"
+  : > "$tmp/mig_ceil_over/20260301000000_above1.sql"
+  : > "$tmp/mig_ceil_over/20260401000000_above2.sql"
+  : > "$tmp/mig_ceil_over/20260501000000_above3.sql"
+  : > "$tmp/mig_ceil_over/20260601000000_above4.sql"
+  : > "$tmp/mig_ceil_edge/20260201000000_applied.sql"
+  : > "$tmp/mig_ceil_edge/20260301000000_above1.sql"
+  : > "$tmp/mig_ceil_edge/20260401000000_above2.sql"
+  : > "$tmp/mig_ceil_edge/20260501000000_above3.sql"
+  # MISSING_NAMES is printed by the stub with `printf '%s\n'`, so REAL newlines
+  # seed several missing names from one value.
+  local ceil_over_names ceil_edge_names
+  ceil_over_names=$'20260301000000_above1\n20260401000000_above2\n20260501000000_above3\n20260601000000_above4'
+  ceil_edge_names=$'20260301000000_above1\n20260401000000_above2\n20260501000000_above3'
 
   # An EMPTY baseline for every arm. Without it the self-test inherits the
   # repo's real vac08-ledger-baseline.txt, whose 31 entries are all "stale"
@@ -811,12 +1071,124 @@ STUB
   # one did not, which is a defect rather than a timing artefact.
   run_arm "tip-equal-missing RED" 1 arm_env "$tmp/live" "20260201000000_twin" "selftest_fn" "$tmp/mig_tipeq"
 
+  # ── FRONTIER CEILING (WR-02, Phase 164.8.2) — over, and the boundary ───────
+  # RED 7 — four migrations above the tip is a stalled apply, not a window.
+  #
+  # ⛔ THIS ARM ASSERTS ON THE MESSAGE TEXT, NOT ON exit 1 ALONE. `run_arm`
+  # compares exit CODES, and this gate has several ways to exit 1 — the absurdity
+  # floor, below-frontier drift, a body mismatch. An `ok (exit 1)` earned by one of
+  # those would be a green arm proving nothing about the ceiling, which is the exact
+  # anti-vacuity trap this phase exists to close. It also requires EVERY exempted
+  # version to be named, because a ceiling that reports only a count tells a reader
+  # that something is wrong and nothing about what.
+  #
+  # (The absurdity floor cannot pre-empt it here: the stub answers `ledger_rows`
+  # with 12, so the floor's >= 50-rows precondition is never met. That is read from
+  # the stub rather than assumed — and the text assertion makes it moot anyway.)
+  arm_frontier_ceiling_exceeded() {
+    local out rc=0 nm
+    out="$(arm_env "$tmp/live" "$ceil_over_names" "selftest_fn" "$tmp/mig_ceil_over" 2>&1)" || rc=$?
+    if [ "$rc" -ne 1 ]; then
+      echo "MEASURE_FAIL: the gate exited ${rc}, not 1, on a corpus with four migrations above the tip."
+      return 0
+    fi
+    if ! printf '%s' "$out" | grep -aq 'FRONTIER_EXEMPT_CEILING exceeded'; then
+      echo "MEASURE_FAIL: the gate exited 1 but never said FRONTIER_EXEMPT_CEILING exceeded — this arm was about to pass for the wrong reason."
+      return 0
+    fi
+    # ⛔ THE NAMES ARE ASSERTED ON THE `::error::` LINES, not anywhere in the
+    # output. The pre-existing `::notice::` block a few lines up ALSO prints
+    # `  exempt (above tip): <name>` for every exempted migration, so a bare
+    # `grep -F <name>` over the whole output would be satisfied by code this arm
+    # is not testing — it would stay green with the ceiling's own `sed` deleted.
+    for nm in 20260301000000_above1 20260401000000_above2 20260501000000_above3 20260601000000_above4; do
+      if ! printf '%s' "$out" | grep -aqF -e "::error::  exempt (above tip): ${nm}"; then
+        echo "MEASURE_FAIL: the ceiling ERROR did not NAME the exempted migration ${nm}."
+        return 0
+      fi
+    done
+    return 1
+  }
+  run_arm "frontier-ceiling-exceeded RED" 1 arm_frontier_ceiling_exceeded
+
+  # GREEN 3 — THE BOUNDARY. Exactly the ceiling stays green, in the spirit of
+  # `tip-equal-missing RED`: an off-by-one hides at the boundary and nowhere else.
+  run_arm "frontier-ceiling-boundary GREEN" 0 arm_env "$tmp/live" "$ceil_edge_names" "selftest_fn" "$tmp/mig_ceil_edge"
+
+  # ── HARNESS CALIBRATION (WR-03, Phase 164.8.2) — the LAST arm ──────────────
+  # ⛔ WITHOUT THIS ARM every `ok` above is a claim about a harness nobody has
+  # seen say no. Both halves run `run_arm` in a SUBSHELL so their tallies cannot
+  # reach the real `total`/`pass`, against a leg KNOWN to exit 1, declared want 0.
+  # With the flip ON that must read `ok`; with it OFF it must read `FAIL`.
+  #
+  # ⚠️ BELT-AND-BRACES, NOT LOAD-BEARING for WR-03. `--expect-inverted` is already
+  # driven externally at the WHOLE-RUN level by
+  # src/__tests__/drift-check-scripts.test.ts ("--self-test FAILS when the gate is
+  # neutered"), which is what proves the arms are not decorative. This arm proves
+  # the narrower thing that check cannot isolate: `run_arm`'s FAIL branch is
+  # reachable. It is the shape CONTEXT Area 3 names, copied from
+  # scripts/restore-test-from-baseline.sh's `arm_harness_calibration`.
+  arm_calib_leg() {
+    # The `missing-ledger-row RED` invocation — the gate's own red mode, so this
+    # leg's exit 1 is a measured property of the gate and not an invented failure.
+    arm_env "$tmp/live" "20260829000000_selftest"
+  }
+  arm_harness_calibration() {
+    local flipped plain
+    flipped=$( total=0; pass=0; results=(); ARM_FORCE_INVERT=1
+               run_arm "calib" 0 arm_calib_leg; printf '%s\n' "${results[@]}" )
+    plain=$(   total=0; pass=0; results=(); ARM_FORCE_INVERT=0
+               run_arm "calib" 0 arm_calib_leg; printf '%s\n' "${results[@]}" )
+    echo "calibration, flip ON  -> ${flipped}"
+    echo "calibration, flip OFF -> $(printf '%s' "$plain" | head -1)"
+    case "$flipped" in
+      *"  ok   calib"*) ;;
+      *) echo "MEASURE_FAIL: with the flip the harness did not report ok for a command that exits 1 against want 0 — the inversion no longer inverts."; return 1 ;;
+    esac
+    case "$plain" in
+      *"  FAIL calib"*) ;;
+      *) echo "MEASURE_FAIL: WITHOUT the flip the harness did not report FAIL for a command that exits 1 against want 0. run_arm has stopped discriminating and every ok in this run is worthless."; return 1 ;;
+    esac
+    return 0
+  }
+  run_arm "harness calibration: run_arm can report FAIL, and the flip inverts" 0 arm_harness_calibration
+
   printf '%s\n' "${results[@]}"
+  # ⛔ THE COUNT CHECK COMES FIRST, and the success line comes LAST — the
+  # sibling's ordering (scripts/restore-test-from-baseline.sh). A run that lost an
+  # arm must not be able to print a success narrative at all, and a run that lost
+  # an arm AND passed the rest must not read as PASSED.
+  if [ "$total" -ne "$EXPECTED_ARMS" ]; then
+    # ⛔ IN-01 (Phase 164.8.2) — THE MESSAGE NAMES THE DIRECTION IT MEASURED.
+    # One sentence covered both, and it named the WRONG one half the time:
+    # MEASURED 2026-09-10 with a `run_arm` line DUPLICATED, the gate printed
+    # "12 arms ran but EXPECTED_ARMS is 11. An arm that disappeared is a RED" —
+    # the count right, the reader sent looking for a deletion that never
+    # happened. The two directions also have OPPOSITE remedies, which is why one
+    # sentence could not carry both: a vanished arm is restored, an added arm is
+    # ratcheted.
+    if [ "$total" -lt "$EXPECTED_ARMS" ]; then
+      echo "SELF-TEST FAIL: ${total} arms ran but EXPECTED_ARMS is ${EXPECTED_ARMS}. An arm DISAPPEARED — that is a RED, not a smaller PASSED. RESTORE the arm. Never lower EXPECTED_ARMS to make a run green; that is deleting a proof."
+    else
+      echo "SELF-TEST FAIL: ${total} arms ran but EXPECTED_ARMS is ${EXPECTED_ARMS}. An arm was ADDED without raising the ratchet. RAISE EXPECTED_ARMS in the SAME commit as the arm, and move the dated MEASURED line and the \`prints N/N\` sentence beside it."
+    fi
+    return 1
+  fi
   if [ "$pass" -ne "$total" ]; then
     echo "SELF-TEST FAIL: ${pass}/${total} arms behaved as declared."
     return 1
   fi
-  echo "${GATE}: self-test OK (${pass}/${total} arms — every red mode fires and both green paths pass)."
+  # ⛔ THE DENOMINATOR IS THE RATCHET, AND SAYS SO. Below both checks `pass`,
+  # `total` and `EXPECTED_ARMS` are all equal by construction, so printing
+  # `${total}` here would be indistinguishable from printing the constant — right
+  # up until an arm vanished, which is the one moment the difference matters.
+  # ⛔ THE SENTENCE'S COUNT IS MEASURED, NOT RESTATED. Regenerate the green arms
+  # with `grep -av '^\s*#' scripts/test-ledger-drift-check.sh | grep -ac '^  run_arm "[^"]*\(GREEN\|green\)'`
+  # (2026-09-09: THREE, after `frontier-ceiling-boundary GREEN` joined). It read
+  # "both green paths" until this phase, which was true of two and became false at
+  # three — a narrative that miscounts its own arms is the same defect class as a
+  # stale ratchet.
+  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — every red mode fires, all THREE green paths pass, and the harness is calibrated)."
   return 0
 }
 
