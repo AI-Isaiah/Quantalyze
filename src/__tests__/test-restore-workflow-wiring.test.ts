@@ -441,24 +441,42 @@ const ERREXIT_RE = /^\s*set\s+(-[a-zA-Z]*e[a-zA-Z]*(\s|$)|-o\s+errexit)/;
  * nine tokens, and was invisible. The scan's own stated purpose is that "the first five
  * were not a class, they were five spellings of a class"; this is a sixth spelling.
  *
- * ⚠️ ALL THREE OF TODAY'S SITES ARE DEFENSIBLE AND WERE RE-CHECKED, one at a time —
- * this closes a coverage gap, it does not report a live defect:
- *   1-2. the extractor self-test / allowlist audit assertions. Both capture `status=$?`
- *      explicitly on the very next line and route EVERY path to a named `::error::` and
- *      an `exit`. Their own comment says omitting `-e` is what lets them avoid `|| true`
- *      — a non-matching `grep` yields the empty string instead of aborting the step, so
- *      an absent line reaches its own MEASURE_FAIL instead of dying before it.
- *   3. the PostgreSQL server-binaries probe, a DIAGNOSTIC ECHO that is non-fatal by
- *      design (pg-lane's four-step resolution chain owns the judgement; a second
- *      divergent opinion would be worse than none).
+ * ⛔ THREE → ONE, 2026-09-10 (review A1). THE ORIGINAL JUSTIFICATION FOR TWO OF THE
+ * THREE WAS FACTUALLY WRONG ABOUT THE RUNNER, and it is kept here rather than deleted
+ * because the wrong sentence is the finding. It read:
+ *
+ *   "1-2. the extractor self-test / allowlist audit assertions. … Their own comment says
+ *    omitting `-e` is what lets them avoid `|| true` — a non-matching `grep` yields the
+ *    empty string instead of aborting the step, so an absent line reaches its own
+ *    MEASURE_FAIL instead of dying before it."
+ *
+ * MEASURED: GitHub Actions runs every `run:` as `bash -e {0}`, and neither this workflow
+ * nor ci.yml declares `shell:` or `defaults:` (0 hits in both). `set -uo pipefail` turns
+ * `-u` and pipefail ON; it does NOT turn `-e` off (`bash -e` + `set -uo pipefail` reports
+ * `shellopts=ehuB`). Errexit was on the whole time, so in both steps the unbounded
+ * `status=$?` capture and every `grep` substitution ABORTED the step on a non-zero
+ * status, and the named MEASURE_FAIL branches underneath them were UNREACHABLE DEAD
+ * CODE. The direction was safe — red, never green — but the operator got bash's silence
+ * where the author had written a diagnosis, and the exemption rested on a false model.
+ *
+ * THE RE-DECISION, one site at a time, against the correct model:
+ *   1-2. REVOKED. Both steps now `set -euo pipefail` and bound only the reads that are
+ *      allowed to fail with `cmd || rc=$?` (`set +e` being a banned token here), the way
+ *      ci.yml's `e2e` Playwright step already spells it — "Capture the test exit code
+ *      WITHOUT aborting the script (default shell is `bash -e`)". Their MEASURE_FAILs are
+ *      reachable now, and the arm below EXECUTES them to prove it.
+ *   3. STANDS, on a different reason than before. The PostgreSQL server-binaries probe is
+ *      a DIAGNOSTIC ECHO copied BYTE-FOR-BYTE from ci.yml's step of the same name;
+ *      pg-lane's four-step resolution chain owns the judgement and a second divergent
+ *      opinion would be worse than none. Every command in it is individually bounded by
+ *      its own `|| echo`, and nothing in it captures a status into a later branch, so
+ *      `-e` would reach no dead code — it would only fork the copy.
  *
  * ⛔ THE EXEMPTION IS A BIJECTION, like ALLOWED_SITES. An entry that matches no block, or
  * matches a block that DOES set `-e`, is reported: a stale exemption is a standing
  * permission for a future softening of that step, granted by nobody.
  */
 const NO_ERREXIT_SITES: readonly string[] = [
-  "Assert the extractor self-test PRINTED its kind census and cleared the floor",
-  "Assert the allowlist audit PRINTED its census over a non-empty corpus",
   "Probe - the runner image's PostgreSQL server binaries resolve",
 ];
 
@@ -2009,7 +2027,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       );
     });
 
-    it("every `run: |` in the restore job turns `-e` ON, except three named blocks", () => {
+    it("every `run: |` in the restore job turns `-e` ON, except one named block", () => {
       // ⛔ THE TENTH CHECK, AND IT IS STRUCTURAL RATHER THAN LEXICAL (silent-failure
       // review F3). The nine-token scan looks for spellings; this one asks the question
       // the spellings are proxies for — "can a failing command in this block go
@@ -2064,7 +2082,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
 
       // ⭐ AND A RENAMED EXEMPTION MUST NOT OUTLIVE ITS STEP.
       const renamed = WF.replace(
-        `- name: ${NO_ERREXIT_SITES[2]}`,
+        `- name: ${NO_ERREXIT_SITES[0]}`,
         "- name: Probe - the runner image's PostgreSQL server binaries resolve (renamed)",
       );
       expect(renamed, "the rename mutation changed nothing").not.toBe(WF);
@@ -2951,5 +2969,263 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
     // A non-numeric answer must not be coerced to zero.
     const garbage = runWithPsql("ERROR\n", 0);
     expect(garbage.code, "a non-numeric count was coerced rather than refused").toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A1 — the two reference-data assertions are EXECUTED under `bash -e`, and their
+// MEASURE_FAIL branches are proven REACHABLE.
+// ---------------------------------------------------------------------------
+/**
+ * ⛔ RUN WITH `bash -e`, NOT BARE `bash`, AND THAT IS THE WHOLE POINT.
+ *
+ * GitHub Actions invokes every `run:` as `bash -e {0}`; neither this workflow nor
+ * ci.yml declares `shell:` or `defaults:`. A harness that spawns bare `bash` models a
+ * shell the runner does not have, and under it the pre-fix scripts would look fine —
+ * which is exactly how the false claim in the workflow's own comment survived. The
+ * other executed arms in this file spawn bare `bash` and are unaffected because every
+ * script they run turns `-e` on itself in its first line; these two did not.
+ *
+ * Both steps read a `node` invocation's exit status INTO A LATER BRANCH. Until
+ * 2026-09-10 those captures were unbounded, so under `-e` a non-zero `node` or a
+ * non-matching `grep` killed the step BEFORE the named `::error::` it was written to
+ * print. Each scenario below therefore carries its twin: the same fixture against the
+ * same script with the `|| rc=$?` bounds removed, asserting the diagnosis DISAPPEARS.
+ */
+describe("164.8-03 A1 — the reference-data assertions' MEASURE_FAILs are reachable under `bash -e`", () => {
+  const SELFTEST_STEP =
+    "Assert the extractor self-test PRINTED its kind census and cleared the floor";
+  const AUDIT_STEP = "Assert the allowlist audit PRINTED its census over a non-empty corpus";
+
+  const workdir = mkdtempSync(join(tmpdir(), "a1-"));
+  const bindir = join(workdir, "bin");
+  mkdirSync(bindir);
+  writeFileSync(
+    join(bindir, "node"),
+    `#!/bin/bash
+if [ "$1" = "-e" ]; then
+  if [ "\${STUB_FLOOR_RC:-0}" != "0" ]; then exit "\${STUB_FLOOR_RC}"; fi
+  echo "\${STUB_FLOOR:-1}"
+  exit 0
+fi
+case "$*" in
+  *--self-test*) printf '%s' "\${STUB_SELFTEST_OUT:-}"; exit "\${STUB_SELFTEST_RC:-0}" ;;
+  *--audit*)     printf '%s' "\${STUB_AUDIT_OUT:-}";    exit "\${STUB_AUDIT_RC:-0}" ;;
+esac
+echo "stub node: unexpected invocation: $*" >&2
+exit 64
+`,
+  );
+  chmodSync(join(bindir, "node"), 0o755);
+
+  afterAll(() => rmSync(workdir, { recursive: true, force: true }));
+
+  let seq = 0;
+  function runStep(script: string, stub: Record<string, string>): { code: number | null; out: string } {
+    seq += 1;
+    const dir = mkdtempSync(join(workdir, `run-${seq}-`));
+    const scriptFile = join(dir, "step.sh");
+    writeFileSync(scriptFile, script);
+    const r = spawnSync("bash", ["-e", scriptFile], {
+      cwd: ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bindir}:${process.env.PATH ?? ""}`,
+        REFDATA_SELFTEST_LOG: join(dir, "selftest.log"),
+        REFDATA_AUDIT_LOG: join(dir, "audit.log"),
+        ...stub,
+      },
+    });
+    return { code: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  }
+
+  /** The pre-fix state: the same script with every `|| rc=$?` bound removed. */
+  function unbind(script: string, bounds: string[]): string {
+    let out = script;
+    for (const b of bounds) {
+      expect(
+        script.includes(b),
+        `the bounding token \`${b}\` is gone from the step — re-anchor this calibration rather than deleting it, or the arm below silently stops reproducing the pre-fix state`,
+      ).toBe(true);
+      out = out.split(b).join("");
+    }
+    expect(out, "CALIBRATION: removing the bounds changed nothing, so the twin proves nothing").not.toBe(
+      script,
+    );
+    return out;
+  }
+
+  it("the shell model this arm depends on is the one the workflow declares", () => {
+    // The claim under test is about the DEFAULT shell, so the absence of an override
+    // is load-bearing. If either file ever declares one, this arm's premise is gone.
+    // `shell:` is the only key that changes WHICH shell a `run:` gets, so it is the
+    // one measured in both files. ci.yml carries exactly one `defaults:` block and it
+    // sets `working-directory` — asserted here rather than waved past, because a
+    // `defaults.run.shell` added to it later would silently move this premise.
+    for (const [path, text] of [
+      [WF_PATH, WF],
+      [CI_PATH, CI],
+    ] as const) {
+      expect(
+        liveLines(text).filter((l) => /^\s*shell:/.test(l)).length,
+        `${path} now declares \`shell:\`. Every "the runner gives us \`bash -e\`" sentence in this phase rests on there being no override; re-measure before trusting any of them.`,
+      ).toBe(0);
+    }
+    expect(
+      liveLines(WF).filter((l) => /^\s*defaults:/.test(l)).length,
+      `${WF_PATH} now declares \`defaults:\` — check whether it sets \`run.shell\` before trusting any \`bash -e\` claim in this file.`,
+    ).toBe(0);
+    // And `set -uo pipefail` does NOT undo `-e` — the sentence the workflow used to
+    // assert. Measured here rather than asserted, because it is the load-bearing fact.
+    const probe = spawnSync("bash", ["-ec", 'set -uo pipefail; case "$-" in *e*) echo ON;; *) echo OFF;; esac'], {
+      encoding: "utf8",
+    });
+    expect(
+      (probe.stdout ?? "").trim(),
+      "`set -uo pipefail` under `bash -e` turned errexit OFF — the workflow's old comment would then have been right, and this whole fix is wrong",
+    ).toBe("ON");
+  });
+
+  describe(SELFTEST_STEP, () => {
+    const script = extractRunScript(WF, SELFTEST_STEP);
+    const BOUNDS = [" || status=$?", " || ok_rc=$?", " || floor_rc=$?"];
+    const OK_LINE = "extract-reference-inserts self-test OK: 9 kinds, red+green each.\n";
+
+    it("GREEN — a printed census at or above the floor exits 0", () => {
+      const r = runStep(script, { STUB_SELFTEST_OUT: OK_LINE, STUB_FLOOR: "2" });
+      expect(r.code, r.out).toBe(0);
+      expect(r.out).toContain("self-test census: 9 kind(s) against floor 2.");
+    });
+
+    it("a SILENT ZERO reaches its own MEASURE_FAIL (pre-fix: bash's silence)", () => {
+      const r = runStep(script, { STUB_SELFTEST_OUT: "", STUB_FLOOR: "2" });
+      expect(r.code, r.out).toBe(1);
+      expect(
+        r.out,
+        "the silent-no-op MEASURE_FAIL did not print — the branch the author wrote is still unreachable",
+      ).toContain("printed NO 'extract-reference-inserts self-test OK");
+
+      const pre = runStep(unbind(script, BOUNDS), { STUB_SELFTEST_OUT: "", STUB_FLOOR: "2" });
+      expect(
+        pre.out.includes("printed NO 'extract-reference-inserts self-test OK"),
+        "CALIBRATION: the UNBOUNDED script printed the MEASURE_FAIL too, so the bounding is not what makes it reachable and this arm is measuring nothing",
+      ).toBe(false);
+      expect(pre.code, "CALIBRATION: the unbounded script did not even go red").not.toBe(0);
+    });
+
+    it("a NON-ZERO self-test reaches its named error AND its log (pre-fix: neither)", () => {
+      const stub = { STUB_SELFTEST_OUT: "boom\n", STUB_SELFTEST_RC: "3" };
+      const r = runStep(script, stub);
+      expect(r.code, r.out).toBe(3);
+      expect(r.out).toContain("the reference-data extractor self-test failed (exit 3).");
+      expect(
+        r.out,
+        "the captured log was never `cat`ted, so the operator gets a status with no output — the whole reason the log is captured rather than streamed",
+      ).toContain("boom");
+
+      const pre = runStep(unbind(script, BOUNDS), stub);
+      expect(
+        pre.out.includes("the reference-data extractor self-test failed"),
+        "CALIBRATION: the unbounded script named the failure too",
+      ).toBe(false);
+      expect(
+        pre.out.includes("boom"),
+        "CALIBRATION: the unbounded script still printed the log, so `cat` was reached and the abort this arm is about did not happen",
+      ).toBe(false);
+    });
+
+    it("an UNREADABLE floor is a MEASURE_FAIL, not a cleared floor (pre-fix: silence)", () => {
+      const stub = { STUB_SELFTEST_OUT: OK_LINE, STUB_FLOOR_RC: "7" };
+      const r = runStep(script, stub);
+      expect(r.code, r.out).toBe(1);
+      expect(r.out).toContain("the floor is UNKNOWN");
+
+      const pre = runStep(unbind(script, BOUNDS), stub);
+      expect(
+        pre.out.includes("the floor is UNKNOWN"),
+        "CALIBRATION: the unbounded script reported the unread floor too",
+      ).toBe(false);
+      expect(pre.code, "CALIBRATION: the unbounded script did not go red").not.toBe(0);
+    });
+
+    it("a floor ABOVE the printed census is still a named regression", () => {
+      const r = runStep(script, { STUB_SELFTEST_OUT: OK_LINE, STUB_FLOOR: "12" });
+      expect(r.code, r.out).toBe(1);
+      expect(r.out).toContain("SELF_TEST_KINDS_FLOOR regression");
+    });
+  });
+
+  describe(AUDIT_STEP, () => {
+    const script = extractRunScript(WF, AUDIT_STEP);
+    const BOUNDS = [" || status=$?", " || census_rc=$?", " || scanned_rc=$?"];
+    const CENSUS =
+      "extract-reference-inserts audit OK: 3 entr(ies), 4 file(s), 2 table(s), 9 statement(s); all listed.\n";
+    const SCANNED = "  migrations scanned: 271\n";
+
+    it("GREEN — a census over a non-empty corpus exits 0", () => {
+      const r = runStep(script, { STUB_AUDIT_OUT: `${CENSUS}${SCANNED}` });
+      expect(r.code, r.out).toBe(0);
+      expect(r.out).toContain("migrations scanned: 271");
+    });
+
+    it("a SILENT ZERO reaches its own MEASURE_FAIL (pre-fix: bash's silence)", () => {
+      const r = runStep(script, { STUB_AUDIT_OUT: "" });
+      expect(r.code, r.out).toBe(1);
+      expect(r.out).toContain("census line. An audit that measured nothing");
+
+      const pre = runStep(unbind(script, BOUNDS), { STUB_AUDIT_OUT: "" });
+      expect(
+        pre.out.includes("An audit that measured nothing"),
+        "CALIBRATION: the unbounded script printed the MEASURE_FAIL too",
+      ).toBe(false);
+      expect(pre.code, "CALIBRATION: the unbounded script did not go red").not.toBe(0);
+    });
+
+    it("a NON-ZERO audit reaches its named error AND its log (pre-fix: neither)", () => {
+      const stub = { STUB_AUDIT_OUT: "kaboom\n", STUB_AUDIT_RC: "5" };
+      const r = runStep(script, stub);
+      expect(r.code, r.out).toBe(5);
+      expect(r.out).toContain("the reference-data allowlist audit failed (exit 5).");
+      expect(r.out).toContain("kaboom");
+
+      const pre = runStep(unbind(script, BOUNDS), stub);
+      expect(
+        pre.out.includes("the reference-data allowlist audit failed"),
+        "CALIBRATION: the unbounded script named the failure too",
+      ).toBe(false);
+      expect(
+        pre.out.includes("kaboom"),
+        "CALIBRATION: the unbounded script still printed the log",
+      ).toBe(false);
+    });
+
+    it("a census with NO 'migrations scanned' line is a MEASURE_FAIL (pre-fix: silence)", () => {
+      const stub = { STUB_AUDIT_OUT: CENSUS };
+      const r = runStep(script, stub);
+      expect(r.code, r.out).toBe(1);
+      expect(r.out).toContain("printed no 'migrations scanned: N' line");
+
+      const pre = runStep(unbind(script, BOUNDS), stub);
+      expect(
+        pre.out.includes("migrations scanned: N' line"),
+        "CALIBRATION: the unbounded script reported the missing coverage line too",
+      ).toBe(false);
+      expect(pre.code, "CALIBRATION: the unbounded script did not go red").not.toBe(0);
+    });
+
+    it("a zero SCANNED count and a zero ENTRY count are each refused by name", () => {
+      const zeroScan = runStep(script, {
+        STUB_AUDIT_OUT: `${CENSUS}  migrations scanned: 0\n`,
+      });
+      expect(zeroScan.code, zeroScan.out).toBe(1);
+      expect(zeroScan.out).toContain("An empty corpus audits clean BY CONSTRUCTION");
+
+      const zeroEntries = runStep(script, {
+        STUB_AUDIT_OUT: `extract-reference-inserts audit OK: 0 entr(ies), 4 file(s), 2 table(s), 9 statement(s); all listed.\n${SCANNED}`,
+      });
+      expect(zeroEntries.code, zeroEntries.out).toBe(1);
+      expect(zeroEntries.out).toContain("the restore would replay nothing");
+    });
   });
 });

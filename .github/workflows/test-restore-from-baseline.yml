@@ -522,22 +522,56 @@ jobs:
       #
       # ⛔ NO `|| true` AND NO BARE ZERO-STATUS `exit` in this block — this job's
       # softening-token scan (src/__tests__/test-restore-workflow-wiring.test.ts)
-      # refuses both. `set -uo pipefail` WITHOUT `-e` is what makes that
-      # possible: a non-matching `grep` yields the empty string instead of
-      # aborting the step, so an absent line reaches its own MEASURE_FAIL.
+      # refuses both.
+      #
+      # ⛔ AND THE SHELL IS `bash -e {0}` (Phase 164.8.2, review A1). Until
+      # 2026-09-10 this paragraph claimed `set -uo pipefail` WITHOUT `-e` left
+      # errexit OFF, "so a non-matching `grep` yields the empty string instead of
+      # aborting the step". THAT IS FALSE ABOUT THE RUNNER. GitHub Actions invokes
+      # every `run:` as `bash -e {0}`, and neither this workflow nor ci.yml
+      # declares `shell:` or `defaults:`; `set -uo pipefail` turns `-u` and
+      # pipefail ON and does not turn `-e` OFF (measured: `bash -e` plus
+      # `set -uo pipefail` reports `shellopts=ehuB`). Errexit was on the whole
+      # time, so a non-matching `grep` in a command substitution ABORTED THE STEP
+      # and every MEASURE_FAIL branch below it was UNREACHABLE DEAD CODE — the
+      # operator got bash's silence where the author had written a named
+      # diagnosis. The direction was safe (red, never green); what was broken is
+      # what the step SAID, and a comment that teaches the next maintainer a false
+      # model of the runner is the defect this repo calls a control weaker than
+      # the sentence beside it.
+      #
+      # ci.yml already carries the correct model, at the `e2e` job's Playwright
+      # step: "Capture the test exit code WITHOUT aborting the script (default
+      # shell is `bash -e`)" (.github/workflows/ci.yml, `set +e` / `PW_EXIT=$?`).
+      # `set +e` is a banned token HERE, so the same intent is spelled with the
+      # BOUNDED `cmd || rc=$?` idiom: `-e` stays ON for the whole block and only
+      # the specific reads that are ALLOWED to fail — the two `node` invocations
+      # whose exit status is itself the measurement, and the `grep`s whose
+      # non-match is a finding rather than a fault — carry their own capture.
+      # Everything else in the block still dies on its first failure.
       - name: Assert the extractor self-test PRINTED its kind census and cleared the floor
         env:
           REFDATA_SELFTEST_LOG: ${{ runner.temp }}/extract-reference-inserts-selftest.log
         run: |
-          set -uo pipefail
-          node scripts/extract-reference-inserts.mjs --self-test > "$REFDATA_SELFTEST_LOG" 2>&1
-          status=$?
+          set -euo pipefail
+          # BOUNDED, so the named diagnosis below is REACHABLE under `bash -e`.
+          status=0
+          node scripts/extract-reference-inserts.mjs --self-test > "$REFDATA_SELFTEST_LOG" 2>&1 || status=$?
           cat "$REFDATA_SELFTEST_LOG"
           if [ "$status" -ne 0 ]; then
             echo "::error::the reference-data extractor self-test failed (exit $status)."
             exit "$status"
           fi
-          ok_line=$(grep -a -m1 -E '^extract-reference-inserts self-test OK: [0-9]+ kinds, red\+green each\.$' "$REFDATA_SELFTEST_LOG")
+          # `grep` exits 1 on NO MATCH and >1 on a real fault (unreadable file, bad
+          # pattern). Only the first is this step's own MEASURE_FAIL; the second is a
+          # question that was never asked, and IN-06's rule applies — an unreadable
+          # answer is not a negative one.
+          ok_rc=0
+          ok_line=$(grep -a -m1 -E '^extract-reference-inserts self-test OK: [0-9]+ kinds, red\+green each\.$' "$REFDATA_SELFTEST_LOG") || ok_rc=$?
+          if [ "$ok_rc" -gt 1 ]; then
+            echo "::error::MEASURE_FAIL: grep exited $ok_rc reading $REFDATA_SELFTEST_LOG, so the census line was NOT looked for. That is an unanswered question, not an absent line."
+            exit 1
+          fi
           if [ -z "$ok_line" ]; then
             echo "::error::MEASURE_FAIL: the self-test exited 0 but printed NO 'extract-reference-inserts self-test OK: N kinds, red+green each.' line. A zero status with no output is what a main guard that never fired looks like; it is not a passing self-test."
             exit 1
@@ -548,7 +582,12 @@ jobs:
           # The floor is READ FROM THE SCRIPT BY SYMBOL, never restated here.
           # `node -e` leaves `process.argv[1]` undefined, so importing the module
           # does not trip its CLI entry point.
-          floor=$(node -e 'import("./scripts/extract-reference-inserts.mjs").then(m => console.log(m.SELF_TEST_KINDS_FLOOR))')
+          floor_rc=0
+          floor=$(node -e 'import("./scripts/extract-reference-inserts.mjs").then(m => console.log(m.SELF_TEST_KINDS_FLOOR))') || floor_rc=$?
+          if [ "$floor_rc" -ne 0 ]; then
+            echo "::error::MEASURE_FAIL: reading SELF_TEST_KINDS_FLOOR out of scripts/extract-reference-inserts.mjs exited $floor_rc, so the floor is UNKNOWN. An unread floor is not a cleared one."
+            exit 1
+          fi
           case "$floor" in ''|*[!0-9]*)
             echo "::error::MEASURE_FAIL: could not read SELF_TEST_KINDS_FLOOR from scripts/extract-reference-inserts.mjs (got '$floor')."; exit 1;; esac
           if [ "$kinds" -lt "$floor" ]; then
@@ -570,20 +609,33 @@ jobs:
         env:
           REFDATA_AUDIT_LOG: ${{ runner.temp }}/extract-reference-inserts-audit.log
         run: |
-          set -uo pipefail
-          node scripts/extract-reference-inserts.mjs --audit > "$REFDATA_AUDIT_LOG" 2>&1
-          status=$?
+          set -euo pipefail
+          # Same bounding as the self-test assertion above, and for the same reason:
+          # under `bash -e` an unbounded capture aborts the step BEFORE its own
+          # MEASURE_FAIL can print. See that step's comment for the measurement.
+          status=0
+          node scripts/extract-reference-inserts.mjs --audit > "$REFDATA_AUDIT_LOG" 2>&1 || status=$?
           cat "$REFDATA_AUDIT_LOG"
           if [ "$status" -ne 0 ]; then
             echo "::error::the reference-data allowlist audit failed (exit $status)."
             exit "$status"
           fi
-          census=$(grep -a -m1 -E '^extract-reference-inserts audit OK: [0-9]+ entr\(ies\), [0-9]+ file\(s\), [0-9]+ table\(s\), [0-9]+ statement\(s\);' "$REFDATA_AUDIT_LOG")
+          census_rc=0
+          census=$(grep -a -m1 -E '^extract-reference-inserts audit OK: [0-9]+ entr\(ies\), [0-9]+ file\(s\), [0-9]+ table\(s\), [0-9]+ statement\(s\);' "$REFDATA_AUDIT_LOG") || census_rc=$?
+          if [ "$census_rc" -gt 1 ]; then
+            echo "::error::MEASURE_FAIL: grep exited $census_rc reading $REFDATA_AUDIT_LOG, so the census line was NOT looked for. That is an unanswered question, not an absent line."
+            exit 1
+          fi
           if [ -z "$census" ]; then
             echo "::error::MEASURE_FAIL: the audit exited 0 but printed NO 'extract-reference-inserts audit OK: …' census line. An audit that measured nothing is not an audit that found nothing."
             exit 1
           fi
-          scanned_line=$(grep -a -m1 -E '^ +migrations scanned: +[0-9]+$' "$REFDATA_AUDIT_LOG")
+          scanned_rc=0
+          scanned_line=$(grep -a -m1 -E '^ +migrations scanned: +[0-9]+$' "$REFDATA_AUDIT_LOG") || scanned_rc=$?
+          if [ "$scanned_rc" -gt 1 ]; then
+            echo "::error::MEASURE_FAIL: grep exited $scanned_rc looking for the 'migrations scanned: N' line, so it was NOT looked for. That is an unanswered question, not an absent line."
+            exit 1
+          fi
           if [ -z "$scanned_line" ]; then
             echo "::error::MEASURE_FAIL: the audit printed no 'migrations scanned: N' line, so how much of supabase/migrations it read is unknown."
             exit 1
@@ -614,6 +666,15 @@ jobs:
       # ⚠️ ci.yml's pg_cron provisioning step is deliberately NOT copied: Plan 01's
       # fixtures create no cron job, so this lane needs no pg_cron. A future fixture
       # that did need it would provision it the way `sql-mutation` does.
+      #
+      # ⚠️ THE ONE REMAINING `set -uo pipefail` IN THIS JOB, RE-DECIDED 2026-09-10
+      # against the CORRECT model of the runner (review A1; the shell is `bash -e
+      # {0}` and `-uo pipefail` never turned `-e` off). The exemption STANDS, and
+      # not for the reason the two steps above used to give: this body is a BYTE
+      # COPY of ci.yml's step, and every command in it is individually bounded by
+      # its own `|| echo`, so `-e` would change nothing here except to fork the
+      # copy. Nothing in it captures a status into a later branch, so there is no
+      # dead MEASURE_FAIL to reach.
       - name: Probe - the runner image's PostgreSQL server binaries resolve
         run: |
           set -uo pipefail
