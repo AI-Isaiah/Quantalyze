@@ -1372,7 +1372,7 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 ### Phase 164.8.6: VAULTTICKFIX — the forward migration Phase 164.7 earned: the verification check that cannot fail is re-run correctly, the Vault read becomes single-row-safe, the whitespace-key guard learns btrim, and the SECURITY DEFINER grant set is asserted whole instead of two names deep (INSERTED)
 
 **Goal:** One forward migration repairs every SQL-side finding Phase 164.7's post-merge audit produced, including a verification check that CANNOT FAIL — shipped through this repo's full migration discipline, not around it.
-**Requirements**: [164.7-CR05-VACUOUS-MIGRATION-CHECK], [164.7-WR01-VAULT-NOT-STRICT], [164.7-WR02-SERVICE-ROLE-EXECUTE], [VAULTTICK-EMPTYKEY-01], [164.7-MIGRATION-COMMENT-DRIFT]
+**Requirements**: [164.7-CR05-VACUOUS-MIGRATION-CHECK], [164.7-WR01-VAULT-NOT-STRICT], [164.7-WR02-SERVICE-ROLE-EXECUTE], [VAULTTICK-EMPTYKEY-01], [164.7-MIGRATION-COMMENT-DRIFT], [APPGUC-WARNING-UNINSTRUMENTED-01] + [164.7-DORMANCY-UNINSTRUMENTED] (⛔ RE-ROUTED from 164.8.5 on 2026-09-10: ONE instrument closes both, and it is SQL in `20260907130000` — a phase whose fence forbids `supabase/**` cannot hold them. A prober-side `system_flags` read-back was considered and REJECTED by measurement: it cannot distinguish WR-10's third dormancy cause, so it would be a control that reports 'fine' for a case it cannot see)
 **Depends on:** Phase 164.8
 **Plans:** 0 plans
 
@@ -1393,7 +1393,7 @@ Plans:
 ### Phase 164.8.5: PROBERPARSE — the prod-prober hygiene rules stop being dodgeable and its parser stops dropping rows silently: the ||-split service key and the dollar-quoted literal both go RED, an unreadable oracle no longer disables the live credential scan, a malformed cron.job record becomes a measure-fail instead of a continue, and the app-GUC linter successor check stops accepting any readable file (INSERTED)
 
 **Goal:** Every control this phase touches is one a machine can DODGE today, and each fix ships with a red fixture proving the dodge now fails. The reviewer's verdict on Phase 164.7 is the brief: *"the SQL in this phase is careful and genuinely fail-closed; the verification code shipped alongside it is not."*
-**Requirements**: ⛔ [164.7-REPAIR-REVERTED] (FIRST WORK — the five prober repairs were written, measured as a net regression, and reverted on 2026-09-10; re-do them with a red control each, hoisting PROD hygiene above every early return BEFORE re-applying anything), [164.7-CR03-HYGIENE-BYPASS], [164.7-WR04-HYGIENE-BELOW-ORACLE], [164.7-WR05-PARSER-DROPS-ROWS], [164.7-APPGUC-SUCCESSOR-VACUOUS], [164.7-REVIEW-INFO-FOUR], [APPGUC-DETECT-DOUBLEQUOTE-01], [APPGUC-UTF16-01], [APPGUC-WARNING-UNINSTRUMENTED-01] + [164.7-DORMANCY-UNINSTRUMENTED] (ONE instrument closes both: a guard that fails CLOSED and RAISEs a WARNING nobody greps is indistinguishable in production from the work silently not happening — surface the decline as a COUNTED ROW, not a log line)
+**Requirements**: ⛔ [164.7-REPAIR-REVERTED] (FIRST WORK — the five prober repairs were written, measured as a net regression, and reverted on 2026-09-10; re-do them with a red control each, hoisting PROD hygiene above every early return BEFORE re-applying anything), [164.7-CR03-HYGIENE-BYPASS], [164.7-WR04-HYGIENE-BELOW-ORACLE], [164.7-WR05-PARSER-DROPS-ROWS], [164.7-APPGUC-SUCCESSOR-VACUOUS], [164.7-REVIEW-INFO-FOUR], [APPGUC-DETECT-DOUBLEQUOTE-01], [APPGUC-UTF16-01]
 **Depends on:** Phase 164.8
 **Plans:** 0 plans
 
