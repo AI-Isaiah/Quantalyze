@@ -1607,6 +1607,25 @@ true for 146 and half of 142–145, and **false for 141**.
       freshness gate; until one exists, a declaration for an RPC that has zero `.rpc()` call sites
       is dead weight, not a defect.
 
+- [ ] **`[164.7-MARKER-GREP-VACUOUS]` Plan 07's verify block greps for `which_database` OUTSIDE the
+      ACTIVATED/DEFERRED branch, so on the DEFER path the leg CANNOT FAIL (found by `gsd-verifier`,
+      2026-09-10).**
+      `164.7-07-PLAN.md:149` runs `grep -a -c 'which_database' "$R"` before the `if grep -a -q
+      '^## ACTIVATED'` split. On a DEFER path no PROD statement runs, so no marker OUTPUT can exist —
+      yet the leg still demands the STRING. It passes on the query text alone, and would pass
+      identically for a fabricated record that merely mentions the marker.
+      ⭐ `164.7-ACTIVATION-RECORD.md` discloses this honestly and in bold (*"Do not read this section
+      as evidence that the marker was checked"*), so the RECORD is not misleading. The DEFECT is the
+      CONTROL: a verify leg that cannot fail on the path actually taken is the anti-vacuity class
+      this project ranks above correctness, and disclosure in prose is not a substitute for a gate
+      that bites.
+      **Fix:** move the `which_database` assertion INSIDE the ACTIVATED branch (where a marker output
+      genuinely must exist and can be asserted non-empty), and give the DEFERRED branch its own
+      assertion that no PROD statement was run — e.g. the manifest is byte-identical to `origin/main`,
+      which the branch already checks, plus an explicit `grep -c '^## DEFERRED'` of exactly 1.
+      ⛔ Do NOT "fix" it by deleting the leg; the ACTIVATED path genuinely needs it.
+      Owner: **Phase 164.8.4 GATERESIDUE** (gate-integrity leftovers below the ship bar).
+
 - [ ] **`[164.7-ACTIVATION-DEFERRED]` Phase 164.7 plan 07's PROD activation of the 161.1
       ledger-refresh switch was DEFERRED 2026-09-10 at its founder gate, on a FAILED pre-flight —
       criteria 3 and 4 are BLOCKED by an operational fault outside this phase.**
