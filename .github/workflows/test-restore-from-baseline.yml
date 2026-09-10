@@ -1473,6 +1473,13 @@ jobs:
       # So a failed redaction costs the run's diagnostics, never its reversal recipe —
       # and a failed STAGING costs the artifact entirely, which is the safe direction.
       - name: Redact connection metadata from the backup directory (public artifact)
+        # ⛔ THE `id:` IS LOAD-BEARING (Phase 164.8.2, review WR-06). The staging step
+        # below reads `steps.redact.outcome` and stages NO diagnostic channel unless
+        # this step succeeded. Remove the id and that expression becomes the empty
+        # string, which is not `success`, so every run would silently lose its
+        # diagnostics — a control that always fires tells the operator nothing.
+        # src/__tests__/test-restore-workflow-wiring.test.ts pins both halves.
+        id: redact
         if: always()
         run: |
           set -euo pipefail
@@ -1585,6 +1592,12 @@ jobs:
       # `${outdir}` directly any more.
       - name: Stage the public artifact (enumerated allowlist; default-out)
         if: always()
+        env:
+          # The redaction step's own verdict on whether its output is publishable.
+          # Read as a value rather than as an `if:` on this step, because the step
+          # must still run and still stage the REVERSAL RECIPE when the redaction
+          # failed — it is only the CHANNELS that a failed redaction disqualifies.
+          REDACT_OUTCOME: ${{ steps.redact.outcome }}
         run: |
           set -euo pipefail
           outdir="${RUNNER_TEMP}/test-backup"
@@ -1610,16 +1623,28 @@ jobs:
                 cp -p "${outdir}/${f}" "${stage}/"
               fi
             done
-            # The diagnostic channels, AFTER the redaction step above has scrubbed
-            # them — BY NAME, under the same default-out rule as the content files
-            # above. This loop was `for c in "${outdir}"/*.err "${outdir}"/*.log
-            # "${outdir}"/*.out` until 2026-09-10; see the WR-01 paragraph in the
-            # comment block above this step for what that cost.
-            for c in census.err ledger.err marker.err refdata.err dump.log transaction.out; do
-              if [ -f "${outdir}/${c}" ]; then
-                cp -p "${outdir}/${c}" "${stage}/"
-              fi
-            done
+            # The diagnostic channels, BY NAME, under the same default-out rule as the
+            # content files above. This loop was `for c in "${outdir}"/*.err
+            # "${outdir}"/*.log "${outdir}"/*.out` until 2026-09-10; see the WR-01
+            # paragraph in the comment block above this step for what that cost.
+            #
+            # ⛔ AND ONLY IF THE REDACTION ACTUALLY SUCCEEDED (review WR-06). The step
+            # above prints, on a removal it could not perform, "Do NOT publish this
+            # run's artifact: treat the TEST pooler host, its IP and the DB user as
+            # disclosed" — and this step is `if: always()`, so until 2026-09-10 it
+            # copied the survivors anyway and the upload published exactly what that
+            # message forbids. Default-DENY: anything other than a green redaction
+            # (`failure`, `cancelled`, `skipped`, or an `env:` wiring that went
+            # missing, which reads as the empty string) stages NO channel.
+            if [ "${REDACT_OUTCOME:-}" = "success" ]; then
+              for c in census.err ledger.err marker.err refdata.err dump.log transaction.out; do
+                if [ -f "${outdir}/${c}" ]; then
+                  cp -p "${outdir}/${c}" "${stage}/"
+                fi
+              done
+            else
+              echo "::error::the redaction step did not succeed (outcome '${REDACT_OUTCOME:-}') — NO diagnostic channel is staged. psql and the CLI name the TEST pooler host, its IP and the DB user in a connect/auth failure, and this artifact is world-readable on a PUBLIC repo. The reversal recipe (ledger.csv, schema-before.sql and the four script .sql files) IS staged: a failed redaction costs this run its diagnostics, never its undo."
+            fi
             echo "staged manifest:"
             ls -1 "${stage}" | sed 's/^/  /'
             staged_n="$(ls -1 "${stage}" | wc -l | tr -d ' ')"
