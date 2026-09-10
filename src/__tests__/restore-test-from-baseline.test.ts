@@ -1487,8 +1487,106 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
   // `stub-never-used` and is never dialled.
   const DSN_HARNESS = ['source "$COPY"', "refuse_credential_in_published_sql", ""].join("\n");
 
-  /** The four names the workflow stages. */
-  const STAGED = ["census.sql", "survivors.sql", "restore.sql", "refdata.sql"];
+  // ⛔ E2 — DERIVED FROM THE SCRIPT, NEVER RE-TYPED. This was a hand-written literal
+  // until 2026-09-10, which meant the scan's file list, the workflow's publish loop
+  // and this test were THREE independent spellings of one fact. C1 closed "a file IN
+  // the list that the scan could not find" (the `scanned N of 4` floor). Nothing
+  // closed "a file the workflow PUBLISHES that is not in the list at all" — and that
+  // one ships GREEN: a later phase adds a fifth script-written artifact to the
+  // workflow's staging loop, the README rule reds until the name appears in the
+  // PROSE, the author adds it there, the board goes green, and the file is
+  // world-readable for 90 days having passed through nothing. Round two's defect one
+  // level up — code and README agreeing about CLASSES while disagreeing about FILES.
+  const STAGED = stagedFromScript(SRC);
+
+  /** The scan's own `staged=(…)` array, read out of the live script. */
+  function stagedFromScript(src: string): string[] {
+    const m = /\n  local -a staged=\(([^)]*)\)\n/.exec(src);
+    expect(
+      m,
+      "the scan no longer declares a `staged=(…)` array — the anchor every file-set assertion in this block is read through has moved",
+    ).not.toBeNull();
+    return (m?.[1] ?? "").trim().split(/\s+/).filter((x) => x.length > 0);
+  }
+
+  /**
+   * The `.sql` names the workflow's staging loop copies into the artifact.
+   * `schema-before.sql` is EXCLUDED, and the reason is encoded here rather than left
+   * as a bare filter: it is not written by this script at all — it is the backup
+   * step's own `supabase db dump`, and that step runs it through its own
+   * `scan_for_secrets` with `schema_re` before staging. Every OTHER `.sql` in the
+   * loop is written by this script after the workflow's redaction step has already
+   * run, so `refuse_credential_in_published_sql` is the only thing standing between
+   * it and the artifact.
+   */
+  const WORKFLOW_SELF_SCANNED = "schema-before.sql";
+
+  /**
+   * ⛔ THE ANCHOR IS THE CONTENT, NOT THE POSITION. The workflow carries several
+   * `for … in …; do` loops (the diagnostic-channel ones glob `"${outdir}"/*.err`),
+   * so the staging loop is identified as the one whose word list holds BARE
+   * `<name>.sql` tokens — and there must be exactly one, or the derivation below is
+   * reading a loop it was not aimed at and would report a clean agreement about the
+   * wrong list.
+   */
+  function stagedSqlLoop(wf: string): { whole: string; names: string[] } {
+    const loops = [...wf.matchAll(/\n[ \t]*for [a-z] in ([^;\n]*); do\n/g)].filter((m) =>
+      m[1].split(/\s+/).some((w) => /^[A-Za-z0-9._-]+\.sql$/.test(w)),
+    );
+    expect(
+      loops.length,
+      "the workflow does not carry EXACTLY ONE staging loop naming bare .sql files — the anchor this agreement is read through moved, and a derivation aimed at the wrong loop reports agreement about the wrong list",
+    ).toBe(1);
+    return {
+      whole: loops[0][0],
+      names: loops[0][1]
+        .trim()
+        .split(/\s+/)
+        .filter((n) => /^[A-Za-z0-9._-]+\.sql$/.test(n)),
+    };
+  }
+
+  function stagedSqlFromWorkflow(wf: string): string[] {
+    return stagedSqlLoop(wf).names.filter((n) => n !== WORKFLOW_SELF_SCANNED);
+  }
+
+  it("E2 — every .sql the workflow PUBLISHES is a file the scan actually reads", () => {
+    const wf = read(".github/workflows/test-restore-from-baseline.yml");
+    const published = stagedSqlFromWorkflow(wf);
+    expect(
+      published.length,
+      "the workflow's staging loop publishes no .sql files at all — the derivation found the wrong loop",
+    ).toBeGreaterThan(0);
+    expect(
+      new Set(published),
+      "the workflow stages a .sql file the credential scan does not know about, or the scan lists one the workflow does not publish. A published file that is not in `staged=(…)` ships into a WORLD-READABLE 90-day artifact having passed through NOTHING — and the `scanned N of N` floor cannot see it, because it only counts the files the list already names.",
+    ).toEqual(new Set(STAGED));
+    expect(
+      published,
+      "the workflow's staging loop no longer carries schema-before.sql — the exclusion above is describing a file that is not there, so its stated reason (the backup step scans it itself) is unverifiable",
+    ).not.toContain(WORKFLOW_SELF_SCANNED);
+    expect(
+      wf,
+      "the workflow no longer stages schema-before.sql at all, so this test excludes a name for a reason that has expired",
+    ).toContain(WORKFLOW_SELF_SCANNED);
+
+    // CALIBRATION — add a fifth published .sql on a SCRATCH STRING (the real
+    // workflow belongs to another owner and is never edited here) and the equality
+    // must break. The mutation is asserted to have APPLIED first: this file records
+    // a lesson where a `survivors.sql` mutation was a NO-OP because the name appears
+    // twice, and it read GREEN.
+    const loop = stagedSqlLoop(wf).whole;
+    const mutated = wf.replace(loop, loop.replace(" refdata.sql;", " refdata.sql acl.sql;"));
+    expect(mutated, "the E2 fifth-file calibration did not APPLY").not.toBe(wf);
+    expect(stagedSqlFromWorkflow(mutated)).toContain("acl.sql");
+    expect(new Set(stagedSqlFromWorkflow(mutated))).not.toEqual(new Set(STAGED));
+
+    // AND THE OTHER DIRECTION — a name dropped from the scan's own array must break
+    // it too, or the assertion only ever sees growth on one side.
+    const shrunk = SRC.replace(" refdata.sql)\n", ")\n");
+    expect(shrunk, "the E2 script-side calibration did not APPLY").not.toBe(SRC);
+    expect(new Set(stagedFromScript(shrunk))).not.toEqual(new Set(published));
+  });
 
   function runDsnAssert(
     files: Record<string, string>,
