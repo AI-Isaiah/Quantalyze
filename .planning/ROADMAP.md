@@ -1369,6 +1369,49 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 - [ ] 164.8-06-PLAN.md — WAVE 3 CLOSURE: record the verdicts and the SHA-bound readings, TODOS closures with run ids (incl. the `TEST-NOT-APPLICABLE` pragma verdict), first SHA-bound VAC-08 `0 absent` reading, CLAUDE.md + mutex runbook currency
   ⛔ **CORRECTED 2026-09-09.** This bullet read "the `TEST-NOT-APPLICABLE` pragma recorded as DEAD SCOPE by measurement" — the verdict the plan-checker's B4 finding REVERSED on 2026-09-08, before plan 06 ran. The shipped verdict is two-part: unnecessary for `20260908120000` (narrow, evidenced), general case OPEN and routed to Phase 164.9 as `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`. A ROADMAP bullet still carrying the superseded half would send the next reader to close a hole that is open.
 
+### Phase 164.8.4: GATERESIDUE — every deferral Phase 164.8.2's four review rounds produced: the shared-TEST credential channels that still reach a public log, the artifact that publishes the file it refuses over, and the gate-integrity leftovers each below the bar that blocked the ship (INSERTED)
+
+**Goal:** Discharge every deferral Phase 164.8.2 produced and nothing else. Four review rounds over that phase's own fixes found ten items that were each, individually, below the bar that would have blocked the ship — and the reason they are one phase rather than ten TODOS lines is that **eight of them are the same defect**: a control narrower than the sentence beside it. 164.8.2 proved three times over that fixing the instance a reviewer named, rather than the class, produces a half-class that the next round finds again.
+
+⛔ **The evidence, the measurements and the forbidden remedies live in each TODOS entry and are NOT restated here.** Every id below carries its own dated measurement, and several carry an explicit *do not close it this way* — read them before planning.
+
+**What this phase owns, grouped by the sweep that discharges it:**
+
+**(a) Credential channels that still reach a PUBLIC log** — plan as ONE sweep over every psql site, never site by site; that is how this became a half-class twice.
+- `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]` — the `missing`-direction ledger read has no redirect at all, so psql's connect and auth failures put the shared-TEST pooler host and user into a world-readable Actions log, against that file's own NON-NEGOTIABLES. The correct idiom (capture, count, WITHHOLD) already exists three screens below in its sibling read.
+- `[164.8.2-REDACT-HOSTNAME-01]` — a routing WORD that was never a routing RECORD: cited in comments and the changelog as booked, measured 2026-09-10 as **0 hits** in TODOS and the ROADMAP. The gap behind it is real — four psql sites can still print a DNS-failure hostname.
+- `[164.8.2-EVIDENCE-DOTENV-LEAK]` — a local wrapper's `bun` shebang auto-loads `.env.local` into the child `vitest`, flipping `HAS_LIVE_DB` true and turning 16 SKIPPED live-DB suites into real INSERTs against shared TEST. ⛔ Not closable by editing the skip gates; they are correct.
+
+**(b) The artifact publishes what it refuses over** — a founder decision with a real cost on both sides, not a patch.
+- `[164.8.2-REFUSAL-STILL-PUBLISHES]` — the published-`.sql` scan aborts the restore before the transaction but never `rm -f`s the offending file, and the staging step is `if: always()`. Its sibling scan DOES `rm -f`. Withholding it means deleting part of the reversal recipe (`T-164.8-21`) on exactly the run whose restore was refused.
+- `[164.8.2-CHANNEL-ALLOWLIST-STALE]` — replacing a glob with an enumerated list was the right direction and bought a new failure mode: a channel added later is silently ABSENT. Fix by DERIVATION (channels the script can write ⇔ channels the step stages), not a second hand-maintained list.
+
+**(c) Gate-integrity leftovers** — controls narrower than their own claims.
+- `[164.8.2-SENTINEL-GREP-NUL-BLIND]` — the ancestry sentinel is read with a NUL-blind `grep -q`, and the check is NEGATIVE, so it **fails OPEN**, letting through the false "is not an ancestor" that three fixes exist to delete. ✅ Already held as a CEILING: it is the `-a` rule's ONE dated exemption and the rule reds if the site is fixed without deleting the entry.
+- `[164.6-SOURCE-ANCHOR-ROT]` — `plan-anchor-verify` guards PLAN.md anchors; NOTHING guards `file:line` anchors in source comments, which rot faster. ~30 across the touched files, several dead, one already dead on `main`. ⭐ Deliverable is a GATE, and its message should say to prefer a SYMBOL over a re-pinned number.
+- `[164.8.2-GATE-RESIDUE]` — seven small items in one sweep over one file family: two assertions bound to text this repo does not control, a softening allowlist that is still a COUNT, hand-copied marker regexes pinned to nothing, a computed-but-never-compared floor, a README describing files the denial path does not stage, a dead local and a misdirected message.
+
+**(d) Carried in, because leaving it unowned a second time is the failure this phase exists to end.**
+- `[WINDOWS-LEDGER-DRIFT]` — NOT 164.8.2 residue. Logged 2026-09-02 in Plan 164.4-00 and carried with **no owner, no date and no gate for eight days**. `.planning/WINDOWS.md` refuses every append while its frontmatter counts and its entries disagree. It fits here because a ledger that rejects writes because its own header is stale is a control disagreeing with the thing it describes.
+
+**Success Criteria**:
+1. Every psql site in `test-ledger-drift-check.sh`, `test-restore-from-baseline.yml` and their shared redaction is swept in ONE pass, with a test that FAILS on a new unredirected site — not a fix to the three known ones.
+2. The `gstack-evidence` credential inheritance is closed at the wrapper, with the skip gates untouched, and proven by a run whose skip counts match a plain `npx vitest run` at the same commit.
+3. The refuse-vs-withhold tradeoff is DECIDED by the founder and the decision is recorded with its cost on both sides — not silently patched either way.
+4. The channel allowlist is DERIVED, and a calibration proves a newly written channel reaches the artifact without anyone editing a list.
+5. A source-comment anchor gate exists, fails loud on a dead anchor, and its message names the symbol-over-line-number preference.
+6. `[164.8.2-SENTINEL-GREP-NUL-BLIND]`'s exemption entry is DELETED, and the `-a` rule goes red if it is re-added.
+7. `.planning/WINDOWS.md` accepts an append, and the mechanism that made its counts drift is closed rather than the counts hand-corrected.
+8. Every one of the seven `[164.8.2-GATE-RESIDUE]` items is either fixed or has a recorded, dated reason for staying — ⛔ an unaddressed item silently dropped from the list is this phase's own defect class.
+
+**Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]`, `[164.8.2-REDACT-HOSTNAME-01]`, `[164.8.2-EVIDENCE-DOTENV-LEAK]`, `[164.8.2-REFUSAL-STILL-PUBLISHES]`, `[164.8.2-CHANNEL-ALLOWLIST-STALE]`, `[164.8.2-SENTINEL-GREP-NUL-BLIND]`, `[164.6-SOURCE-ANCHOR-ROT]`, `[164.8.2-GATE-RESIDUE]` and `[WINDOWS-LEDGER-DRIFT]` — read each before planning, do not re-derive.
+**Depends on:** Phase 164.8.2 (this is its residue). ⚠️ **Cross-phase coupling, deliberate:** `[164.8.2-VAC08-FATAL-ON-TRANSIENT]` is NOT owned here — it stays with Phase 164.9's `[164.8-PUSH-RACE-VAC08]` because they share one root (two jobs contending for advisory key `61616158` on shared TEST) and splitting them would produce exactly the sequential-ratchet-patched-in-one-place hazard this repo has already paid for once.
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.8.4 to break down)
+
 ### Phase 164.8.3: PROBERAUTH — the prod-prober names MT5 `-6` as what it is (the terminal has no authorized account) instead of collapsing it into the catch-all `mt5-terminal-error` whose remedy sends the operator to an error table (INSERTED)
 
 **Goal:** The prober's MT5 arm gives a dedicated defect kind to `-6`, so the five consecutive red `prod-prober` runs since 2026-09-07 say what is wrong and what to do. Today only `-10004` and `-10005` get their own kinds; everything else falls into `mt5-terminal-error`, whose remedy tells the operator to "read the reported code against the MT5 error table". `-6` has exactly one cause and exactly one remedy, so that instruction is the whole defect.
@@ -1376,10 +1419,12 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 ⛔ **This phase does NOT clear the live outage.** The terminal has no authorized account; restoring it needs a VNC session and broker credentials and is a founder action. This phase makes the NEXT occurrence self-explanatory. Do not treat a green prober as this phase's acceptance signal — it is not in this phase's gift.
 
 ⚠️ **MEASURED LIVE 2026-09-09 from this checkout, quoted so nobody re-derives it:**
+
 ```
 $ ./scripts/mt5-diag.sh
 PROBE {"initialize": false, "last_error": [-6, "Terminal: Authorization failed"], "terminal_info": null}
 ```
+
 `-6` is `RES_E_AUTH_FAILED`. The rpyc bridge answered (a dead bridge gives `-10004`), so the terminal is up and un-authorized — not a transport fault. The `mt5-gateway` deploy log at the minute of each failing prober run (`34387586781`, `34366806167`, `34340209991`, `34315451286`, `34296899495`) contains ONLY VNC session lines (`SLAVE/8001 accepted/welcome/goodbye`) and no MT5 login attempt at all — the absence is the evidence.
 
 **Success Criteria**:
@@ -1538,15 +1583,7 @@ Plans:
 ⚠️ **NOT hypothetical, and not a PR-only artifact.** `164.8-05-PLAN.md` claimed `supabase-migrate.yml:1-251` contains the `Push migrations to production` step — true on `main` (:211). Phase 164.8 plan 05 and its review added ~870 lines and moved it to :1038, so the claim went stale ON `main` the moment the PR landed. `plan-anchor-verify` would have been RED on `main`, not merely on the PR; it surfaced early only because the filtered branch happens to make more plans read as pending. The one-off remedy at #767 — correct that anchor and carry the corrected PLAN through the filter as a named exception — is a workaround that needs repeating every time. **The evidence and the candidate directions are in the TODOS entry; they are not restated here.**
 
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries OPS-08-F9, OPS-08-F8, OPS-08-TS, OPS-08-F2, PROC-02, PROC-03, H-0001, 161.1-D13, `[PLANANCHOR-SUMMARY-FILTER-01]` (routed here 2026-09-09 out of the PR #767 merge gate — see criterion 10 and its ROUTED HERE block), VAC08-COUNT-SPM01, MT5-VERDICT-SINK-01 (added 2026-09-05 — the MT5 CAPABILITY verdict reaches only `emit_mt5_stage_event` (`analytics-service/services/mt5_client.py:205`), a structured LOG EVENT, so an `undetermined` outcome is unverifiable once it rotates out; this is what has kept Phase 161's first human-verification item unclosable for over a week. ⛔ Routed HERE, not to 164.1, deliberately: 164.1's plans are authored, its criterion-5 ledger was verified to match the RE-PARTITION block EXACTLY, and its `ARMS_FLOOR` is pinned at 4 — adding a fifth target now would break both. ⚠️ ADJACENT to MT5-WEDGE-OBS-01, not the same: that arm probes LIVENESS (-10004/-10005), this is a CAPABILITY verdict (`tradeapi_disabled` → which remedy sentence a founder reads). Fits this phase because "an instrument whose reading cannot be checked afterwards" is the same class as the gate-integrity items it already owns) (added 2026-09-05 — VAC-08's ledger ratchet reads its TWO GATING counts, `new_count`/`stale_count` at `scripts/test-ledger-drift-check.sh:372-373`, with the `grep … || true` + `${:-0}` shape the SAME file documents as a false-clean at `:304-318`, where the fix idiom already exists; a grep error on either temp file reads as zero and the gate prints "clean" over unread NEW drift. ⭐ Ship the fix with a test that makes the grep actually fail and asserts MEASURE_FAIL — a fix with no failing test is the defect class 164.3 exists to remove), `MYPY-MAINPY-01` (added 2026-09-06 from Phase 164.1-02's `deferred-items.md` — the `ci.yml` B-mypy comment claims running-service coverage the invocation does not have; `analytics-service/tests/` stays OUT of scope and its policy question stays open), `PROBER-CALIBRATION-01` (added 2026-09-06 at the PR #748 merge gate — a calibration arm in `src/__tests__/prod-prober-wiring.test.ts:292` whose name promises a proof it does not perform; it passes with its own subject at `:279-281` deleted. Non-blocking by the stopping rule — neither user-facing nor data-integrity — so #748 landed at v0.77.15.0 with this booked rather than fixed. ⚠️ Read the arm and the two calibration arms beside it before planning: the file already contains the correct shape, so this is a conform-to-the-neighbour fix, not a new pattern), `CI-DOCSPATH-01` (added 2026-09-06 while merging PR #750, the Phase 164.8 insertion — measured there, not estimated: 21 jobs / ~50 job-minutes on a four-file `.planning/` diff, two of them holding the shared-TEST-DB mutex against other people's CI. ⚠️ Read criterion 9 before planning: the deliverable is NOT "make docs PRs fast", it is "make docs PRs fast WITHOUT making code PRs skip anything", and only the second half is hard) , `[164.5-STALE-GENERATED-TYPES]` (added 2026-09-08 while closing DRIFT-04 — `src/lib/database.types.ts` carries a generated declaration for `create_allocator_connected_strategy`, dropped from PROD by `20260908120000`. ⭐ The stale entry is NOT the item; the ABSENCE OF ANY MECHANISM is. Measured: `grep -rn 'database.types' .github/workflows/` returns NOTHING and `package.json` carries no `gen:types`-shaped script, so nothing regenerates that file and no gate would notice it drifting from the schema it claims to describe. ⛔ Do NOT resolve this by hand-editing the file to match — that fakes a currency no process maintains, which is this phase's own named defect class, the same shape as `MYPY-MAINPY-01`'s false coverage comment and `PROBER-CALIBRATION-01`'s arm that promises a proof it does not perform. DELIVERABLE: a regeneration step plus a freshness gate, so the file is either provably current or loudly stale) , `DRIFT-05B-FIRST-RUN` (added 2026-09-08 by founder instruction that a deferral must find a phase — gate (b), `bash scripts/prod-body-drift-check.sh --baseline-live`, SHIPPED in Phase 164.5 plan 04 and has **never run against the real credential**; its own entry records it as EXPECTED RED on that first run. ⭐ An unexercised control is not a control: until it has fired once against PROD nobody knows whether it measures what it claims. DELIVERABLE: run it on a credentialed migration PR, READ its output, and record the branch it took by line reference — a green job is NOT evidence, exactly as `VAC04-ARMS-UNRUN` taught), `WR-D-DUMP-SCOPE` (added 2026-09-08, same instruction — a stated scope limit on the repo-vs-PROD dump comparison that is documented in the gate header but pinned by nothing, so the limit can widen without anything noticing) — read each before planning, do not re-derive
-⛔ **ROUTED HERE 2026-09-10, out of Phase 164.8.2's maintainability audit — `[164.6-SOURCE-ANCHOR-ROT]`: `file:line` anchors in SOURCE comments are an entirely unguarded class.**
-
-`plan-anchor-verify` re-resolves every `file:line` anchor a pending PLAN.md asserts and fails loud on a miss. **Nothing does that for a comment in a `.ts`, `.sh`, `.yml` or `.mjs` file** — and those rot faster, because every edit above an anchor moves it.
-
-MEASURED 2026-09-10 over the ten files Phase 164.8.2 touched: `grep -noE '[A-Za-z0-9_./-]+\.(ts|sh|yml|mjs|sql|md):[0-9]+'` finds ~30 anchors, and spot-checking found SEVERAL that do not resolve — including `test-restore-from-baseline.yml:412` / `:517`, `test-ledger-drift-check.sh:281` / `:604` / `:667` / `:675` / `:140`, `ci.yml:2610` and `restore-test-from-baseline.test.ts:217`. At least one (`restore-test-from-baseline.sh:86` → the redaction comment) was **already wrong on `main`** and pointed at a bare `exit 1` in an unrelated step.
-
-⚠️ **Only the two load-bearing ones were pinned** during 164.8.2 — converted from line numbers to SYMBOLS with an arm that reads the target file and a calibration proving the predicate reads it. Rewriting thirty comments by hand was refused deliberately: that fixes today's instances and leaves the class open, which is the point of the fix-campaign rule.
-
-**DELIVERABLE: a repo-owned gate, the `plan-anchor-verify` shape applied to source comments.** ⭐ Prefer converting an anchor to a SYMBOL over re-pinning a number — a symbol survives the edit that moves the line, so the gate stops being something maintainers edit rather than read. That preference is the whole lesson of `IN-04` and it should be encoded in the gate's message, not just its docs.
+➡️ **MOVED 2026-09-10 to Phase 164.8.4 GATERESIDUE — `[164.6-SOURCE-ANCHOR-ROT]`.** Source-comment `file:line` anchors are unguarded where PLAN.md anchors are not. Still gate-hygiene in kind; owned there because 164.8.2 is what measured it.
 
 **Depends on:** Phase 164.5 (ordering — the substrate work lands first), Phase 164.4.1 (pg-lane with pg_cron)
 **Plans:** 0 plans
@@ -1635,13 +1672,7 @@ MEASURED 2026-09-09: advisory key `61616158` appears 7× in `supabase-migrate.ym
 
 ⛔ **Do not close this by widening the exemption.** It is already the widest thing in that gate.
 
-⛔ **ROUTED HERE 2026-09-10, out of Phase 164.8.2's round-three review — `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]`: the `missing`-direction ledger read leaves psql stderr unredirected into a PUBLIC Actions log.**
-
-`scripts/test-ledger-drift-check.sh` — the `missing` read is `run_ledger_query missing … || fail "…"`, with no redirect. psql's connect and auth failures name the TEST pooler HOST, its USER and sometimes the DSN, and this repository is PUBLIC, so that text is world-readable for the life of the run's logs. The file's own NON-NEGOTIABLES forbid exactly this, and the sibling `ledger_rows` read three screens below now captures its stderr to a temp file and reports only the LINE COUNT — the correct idiom already exists in the same function.
-
-⚠️ **Pre-existing, and deliberately NOT bundled.** Found while closing the `ledger_rows` half; six self-test arms depend on that path's current shape, so changing it is its own unit of work with its own calibrations, not a rider on a fix that was already three rounds deep.
-
-✅ **Why THIS phase.** A credential channel that is public because the database is SHARED is the `FANOUT-GLOBAL-01` family: the leak exists because the run is not isolated, and the same work that gives a run its own lane gives it its own diagnostics.
+➡️ **MOVED 2026-09-10 to Phase 164.8.4 GATERESIDUE — `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]`.** The `missing`-direction ledger read still puts the shared-TEST pooler host and user into a PUBLIC Actions log. It left this phase because it is one of THREE credential channels 164.8.2 produced and they must be swept together, not because it stopped being a shared-TEST problem.
 
 ⛔ **ROUTED HERE 2026-09-10, same review — `[164.8.2-VAC08-FATAL-ON-TRANSIENT]`: an unreadable ledger row count now reds the WHOLE VAC-08 gate, where it used to cost only the absurdity floor.**
 
@@ -1653,21 +1684,9 @@ This is a CONSEQUENCE of a fix that was correct and must NOT be reverted, record
 
 ✅ **Why THIS phase.** It is the same advisory-key contention on the same shared database as `[164.8-PUSH-RACE-VAC08]`, and the durable fix for both is isolation rather than tolerance.
 
-⛔ **ROUTED HERE 2026-09-10, out of Phase 164.8.2's maintainability audit — `[164.8.2-REFUSAL-STILL-PUBLISHES]`: the published-`.sql` credential scan REFUSES without WITHHOLDING, so the flagged file ships anyway.**
+➡️ **MOVED 2026-09-10 to Phase 164.8.4 GATERESIDUE — `[164.8.2-REFUSAL-STILL-PUBLISHES]`.** The published-`.sql` scan refuses without withholding, so the flagged file ships anyway. Founder decision, cost on both sides; it sits with the rest of 164.8.2's artifact residue.
 
-`refuse_credential_in_published_sql` in `scripts/restore-test-from-baseline.sh` aborts the restore before the transaction — which protects the DATABASE and every future run, and is genuinely worth having. It does NOT `rm -f` the offending file, and `Stage the public artifact` in `test-restore-from-baseline.yml` is `if: always()`. So on a hit, the very `.sql` the gate just named as carrying a credential is staged and published WORLD-READABLE for 90 days on a PUBLIC repo. The sibling backup-step scan (`scan_for_secrets`) does `rm -f` on a hit; this one does not, while its comments sat beside that scan's vocabulary.
-
-⚠️ **Deliberately NOT closed as a comment fix.** The comments now state plainly what the function does and does not protect, in the script AND in the artifact's own README — so nobody is misled today. But actually withholding the file means deleting part of the REVERSAL RECIPE (`T-164.8-21`) on exactly the run whose restore was refused, i.e. trading a credential exposure for a lost undo on a database that was just left mid-restore. That is a founder decision with a real cost on both sides, not a defect to patch.
-
-✅ **Why THIS phase.** It is the same artifact, the same 90-day window and the same `T-164.8-21` tradeoff this phase already owns.
-
-⛔ **ROUTED HERE 2026-09-10, same audit — `[164.8.2-REDACT-HOSTNAME-01]`: a routing WORD that was never a routing RECORD.**
-
-`[REDACT-HOSTNAME-01]` was cited in comments and one CHANGELOG sentence as though it were a booked item. MEASURED 2026-09-10: `grep -rn` over `TODOS.md` and `.planning/ROADMAP.md` returns **0 hits**. It existed only as `T-164.8-22` inside `164.8-05-PLAN.md`'s threat table — no owner, no date, no gate. Exactly the shape CLAUDE.md already records for `FANOUT-GLOBAL-01`, and the reason the founder's rule says every deferral names a PHASE.
-
-**The underlying gap is real and still open:** the psql redaction shared by `ci.yml` and this workflow masks three expressions, while four other psql sites in this workflow can still print a DNS-failure HOSTNAME into a public log.
-
-✅ **Why THIS phase.** Same shared-TEST credential-channel family as `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]` above; the two should be planned as one sweep over every psql site rather than site by site.
+➡️ **MOVED 2026-09-10 to Phase 164.8.4 GATERESIDUE — `[164.8.2-REDACT-HOSTNAME-01]`.** A routing word that was never a routing record, over a psql-redaction gap that is still open. Swept with the other two credential channels.
 
 **Depends on:** Phase 164.8 (its restore settles the schema and ledger this phase isolates against).
 **Plans:** 0 plans
