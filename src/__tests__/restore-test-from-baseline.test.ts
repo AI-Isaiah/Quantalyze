@@ -172,23 +172,23 @@ describe("restore-test-from-baseline.sh — the regions are real", () => {
 });
 
 describe("restore-test-from-baseline.sh — the arm ratchet", () => {
-  it("EXPECTED_ARMS=26 is a live line, exactly once, with its MEASURED date beside it", () => {
+  it("EXPECTED_ARMS=27 is a live line, exactly once, with its MEASURED date beside it", () => {
     const region = selfTestRegion(SRC);
     expect(
-      liveCount(region, "EXPECTED_ARMS=26"),
-      "the arm ratchet is no longer a single live `EXPECTED_ARMS=26` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
+      liveCount(region, "EXPECTED_ARMS=27"),
+      "the arm ratchet is no longer a single live `EXPECTED_ARMS=27` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
     ).toBe(1);
 
     // SC-9 (`gate-family-meta.test.ts:18-30`): a threshold constant needs a
     // measurement token AND a date beside it, or nobody can tell a measured floor
     // from a guessed one.
     const lines = region.split("\n");
-    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=26"));
+    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=27"));
     const beside = `${lines[at - 1] ?? ""}\n${lines[at]}`;
     expect(
       beside,
-      "EXPECTED_ARMS=26 carries no MEASURED date on its own or the preceding line — SC-9",
-    ).toContain("MEASURED 2026-09-09");
+      "EXPECTED_ARMS=27 carries no MEASURED date on its own or the preceding line — SC-9",
+    ).toContain("MEASURED 2026-09-10");
 
     // The harness must ASSERT the count, not merely print it.
     expect(liveCount(region, 'if [ "$total" -ne "$EXPECTED_ARMS" ]; then')).toBe(1);
@@ -218,9 +218,9 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION for the pair above — move the constant and the prose must
     // disagree, or this assertion is measuring nothing.
-    const moved = SRC.replace("\nEXPECTED_ARMS=26\n", "\nEXPECTED_ARMS=27\n");
+    const moved = SRC.replace("\nEXPECTED_ARMS=27\n", "\nEXPECTED_ARMS=28\n");
     expect(moved).not.toBe(SRC);
-    const movedArms = 27;
+    const movedArms = 28;
     expect(
       SRC.split("\n").filter((l) => /prints \d+\/\d+/.test(l)).every((l) => l.includes(`prints ${movedArms}/${movedArms}`)),
       "the `prints N/N` prose still agrees with a MOVED constant, so the agreement check is vacuous.",
@@ -228,15 +228,15 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — comment the constant out; a whole-file `toContain` would
     // still pass, this pin must not.
-    const commented = SRC.replace("\nEXPECTED_ARMS=26\n", "\n# EXPECTED_ARMS=26\n");
+    const commented = SRC.replace("\nEXPECTED_ARMS=27\n", "\n# EXPECTED_ARMS=27\n");
     expect(commented).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=26")).toBe(0);
+    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=27")).toBe(0);
 
     // CALIBRATION — a second copy of the constant is a disagreement waiting to
     // happen, and must fail the "exactly once" leg.
-    const doubled = SRC.replace("\nEXPECTED_ARMS=26\n", "\nEXPECTED_ARMS=26\nEXPECTED_ARMS=26\n");
+    const doubled = SRC.replace("\nEXPECTED_ARMS=27\n", "\nEXPECTED_ARMS=27\nEXPECTED_ARMS=27\n");
     expect(doubled).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=26")).toBe(2);
+    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=27")).toBe(2);
   });
 
   it("plan 01's interim closing line is GONE — the word it used appears nowhere", () => {
@@ -255,8 +255,8 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — re-insert the interim line; the pin must flip.
     const restored = SRC.replace(
-      "\nEXPECTED_ARMS=26\n",
-      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=26\n`,
+      "\nEXPECTED_ARMS=27\n",
+      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=27\n`,
     );
     expect(restored).not.toBe(SRC);
     expect(restored.includes(interimWord)).toBe(true);
@@ -952,7 +952,7 @@ describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is 
     expect(rClaims[0][1], "the reflowed block's dated claim lost its word").toBe(word);
   });
 
-  it("IN-02 — the arm list names every arm it claims, and it names arm 26", () => {
+  it("IN-02 — the arm list names every arm it claims, and it names arms 26 and 27", () => {
     // The sentence WRAPS across comment lines, so it is read as PROSE: each line's
     // leading `# ` stripped and the lines rejoined with a space. Matching the raw
     // block would bind to whatever happened not to wrap.
@@ -963,8 +963,10 @@ describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is 
     // the self-test's own bash, which is more machinery than the finding is worth
     // (the plan says so outright). What IS derived: every number the sentence names
     // must exist as a real `run_arm "<n> …` label, so a list naming a phantom arm is
-    // red; and 26 — the arm that shipped with the ninth refusal and never reached
-    // this sentence — must be among them.
+    // red; and 26 and 27 — the arms that shipped with the ninth and tenth refusals —
+    // must be among them. 26 reached this sentence only after it had already drifted
+    // once; 27 (`refuse_credential_in_published_sql`) is pinned here from the start
+    // so the same drift cannot repeat silently.
     const m = block.match(/arms 1-7((?:,\s*\d+)*)\s*and\s*(\d+)/);
     expect(
       m,
@@ -976,6 +978,7 @@ describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is 
       Number(m![2]),
     ];
     expect(listed).toContain(26);
+    expect(listed).toContain(27);
 
     const armNumbers = new Set(
       liveLines(SRC)
@@ -989,11 +992,11 @@ describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is 
       `the W2 sentence claims arm(s) ${phantom.join(", ")} assert a refusal's named message, and no \`run_arm\` label carries those numbers`,
     ).toEqual([]);
 
-    // CALIBRATION — drop 26 off the end of the list on a scratch string.
-    const shortened = SRC.replace("20, 21, 24\n  # and 26.", () => "20, 21\n  # and 24.");
+    // CALIBRATION — drop 27 off the end of the list on a scratch string.
+    const shortened = SRC.replace("20, 21, 24,\n  # 26 and 27.", () => "20, 21,\n  # 24 and 26.");
     expect(shortened, "the IN-02 calibration did not APPLY").not.toBe(SRC);
     const sm = prose(shortened).match(/arms 1-7((?:,\s*\d+)*)\s*and\s*(\d+)/);
-    expect([...(sm![1].match(/\d+/g) ?? []).map(Number), Number(sm![2])]).not.toContain(26);
+    expect([...(sm![1].match(/\d+/g) ?? []).map(Number), Number(sm![2])]).not.toContain(27);
   });
 
   /**
@@ -1482,7 +1485,7 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
   // does it (`main "$@"` stripped, definitions only) and the function is called
   // directly against a seeded RESTORE_OUT_DIR. `RESTORE_DB_URL` is the literal
   // `stub-never-used` and is never dialled.
-  const DSN_HARNESS = ['source "$COPY"', "assert_public_sql_dsn_free", ""].join("\n");
+  const DSN_HARNESS = ['source "$COPY"', "refuse_credential_in_published_sql", ""].join("\n");
 
   /** The four names the workflow stages. */
   const STAGED = ["census.sql", "survivors.sql", "restore.sql", "refdata.sql"];
@@ -1517,7 +1520,7 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
   it("is WIRED — called between build_transaction and run_transaction, so a hit refuses pre-write", () => {
     const body = functionBody(SRC, "run_restore");
     const buildAt = liveIndexOf(body, 'build_transaction "$mode"');
-    const scanAt = liveIndexOf(body, "assert_public_sql_dsn_free");
+    const scanAt = liveIndexOf(body, "refuse_credential_in_published_sql");
     const txnAt = liveIndexOf(body, "run_transaction");
     expect(scanAt, "run_restore no longer scans the published .sql files").toBeGreaterThanOrEqual(0);
     expect(
@@ -1530,13 +1533,13 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
     ).toBeLessThan(txnAt);
 
     // CALIBRATION — move the call after run_transaction on a scratch copy.
-    const moved = SRC.replace("  assert_public_sql_dsn_free\n", "").replace(
+    const moved = SRC.replace("  refuse_credential_in_published_sql\n", "").replace(
       "  run_transaction\n",
-      "  run_transaction\n  assert_public_sql_dsn_free\n",
+      "  run_transaction\n  refuse_credential_in_published_sql\n",
     );
     expect(moved, "the wiring calibration did not APPLY").not.toBe(SRC);
     const mBody = functionBody(moved, "run_restore");
-    expect(liveIndexOf(mBody, "assert_public_sql_dsn_free")).toBeGreaterThan(
+    expect(liveIndexOf(mBody, "refuse_credential_in_published_sql")).toBeGreaterThan(
       liveIndexOf(mBody, "run_transaction"),
     );
   });
@@ -1725,8 +1728,11 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
         red.status,
         `a run that could not find ${missing} exited 0 — that file reaches the artifact unscanned. Output:\n${red.out}`,
       ).toBe(1);
+      // ⛔ The `MEASURE_FAIL:` prefix is part of the needle: the CLEAN note prints
+      // the same `scanned N of 4` tally, so a bare tally grep would also match a run
+      // that sailed past the floor.
       expect(red.out, "the short-count refusal does not report the measured tally").toContain(
-        "scanned 3 of 4",
+        "MEASURE_FAIL: scanned 3 of 4",
       );
       expect(
         red.out,
@@ -1783,7 +1789,7 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
           "  done",
           '  command grep "$@"',
           "}",
-          "assert_public_sql_dsn_free",
+          "refuse_credential_in_published_sql",
           "",
         ].join("\n"),
       );

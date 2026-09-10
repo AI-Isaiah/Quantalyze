@@ -1799,6 +1799,8 @@ main() {
 #                                                23  RED  the refdata gate BITES
 #                                                24  RED  refdata allowlist refused
 #                                                25  GREEN rollback view normalises
+#                                                26  RED  backtick in a txn heredoc
+#                                                27  RED  credential in a published .sql
 #
 # Several arms carry more than one LEG, because one guard can be false in more than
 # one way and an arm that measures the easy way is not measuring the guard:
@@ -1866,8 +1868,8 @@ main() {
 # `git checkout --`, which restores to HEAD and silently destroys uncommitted work
 # (L-04) — and each observation, with its scratch path and verbatim output, is
 # recorded in 164.8.1-02-SUMMARY.md.
-# MEASURED 2026-09-09 — `--self-test` prints 26/26 and exits 0 on a throwaway cluster.
-EXPECTED_ARMS=26
+# MEASURED 2026-09-10 — `--self-test` prints 27/27 and exits 0 on a throwaway cluster.
+EXPECTED_ARMS=27
 
 SELFTEST_MUTEX_HOLDER_PID=""
 SELFTEST_TMPD=""
@@ -3124,6 +3126,116 @@ FRESHSTUB
   # supposed to restore and which is the failure this instrument exists to catch.
   # Both directions are driven here, on fixtures, with no lane: the function is
   # pure text and deserves a pure-text arm.
+  # ═══ ARM 27 — the published-.sql credential scan, ON THE LANE ═══════════════
+  # ⛔ WHY THIS ARM EXISTS. `refuse_credential_in_published_sql` shipped with its
+  # falsifiers in vitest only — a hard-fail path on the script whose `--run` is
+  # `DROP SCHEMA public CASCADE`, with ZERO cluster coverage, and a name chosen to
+  # keep it out of the derived `refuse_*` count it would otherwise have falsified.
+  # Four legs, each driving the real `--run` dispatch, so what is measured is the
+  # shipped call site and not a function called in isolation.
+  #
+  # ⛔ EVERY SEEDED CREDENTIAL IS ASSEMBLED AT RUNTIME FROM FRAGMENTS, never spelled
+  # as a literal — the same discipline the vitest fixture records. A literal here
+  # would carry a real credential SHAPE (that is the point of the fixture) and the
+  # pre-push guardrail would refuse the push, correctly. Do not inline them.
+  arm_published_sql_credential_scan() {
+    local out rc n copy
+    local d1="postgre" d2="sql://u" d3=":p@db.example:5432/postgres"
+    local j1="eyJ" j2="armSeventeenSeed"
+    export ARM27_SEED_DSN="${d1}${d2}${d3}"
+    export ARM27_SEED_JWT="${j1}${j2}"
+
+    # (a) A DSN IN `restore.sql`. Seeded AFTER the transaction is assembled and
+    #     BEFORE the scan, which is exactly the window the scan owns.
+    copy="$SELFTEST_TMPD/pubscan-dsn.sh"
+    awk -v inj='  echo "-- ${ARM27_SEED_DSN}" >> "$RESTORE_OUT_DIR/restore.sql"  # arm 27(a): scratch copy only' \
+        '!d && $0 == "  refuse_credential_in_published_sql" { print inj; d = 1 }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
+      || { echo "MEASURE_FAIL (a): could not build the seeded-DSN scratch copy — the scan call site moved."; return 1; }
+    grep -aq 'arm 27(a): scratch copy only' "$copy" \
+      || { echo "MEASURE_FAIL (a): the scratch copy does not carry the injected seed, so this leg would test an unseeded run."; return 1; }
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a27a.out"; rc=0
+    run_leg "$copy" restore a27a > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (a): a restore whose restore.sql carries a DSN exited ${rc}, expected 1. That file is staged into a WORLD-READABLE artifact for 90 days."; return 1; }
+    grep -aq 'restore.sql (DSN)' "$out" \
+      || { echo "MEASURE_FAIL (a): the refusal does not name restore.sql and the DSN class — some other guard fired, so the scan is still unmeasured on the lane."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL (a): the stray table is gone (count=${n}) — the scan refused AFTER the transaction ran, so the credential was discovered with the database already written to."; return 1; }
+
+    # (b) A JWT IN `survivors.sql` — a class the scan did NOT cover until 2026-09-10,
+    #     in the file the artifact README singles out as carrying triggerdef and
+    #     policy-qual text read off LIVE shared TEST. `survivors.sql` is concatenated
+    #     into the transaction BEFORE this point, so the seed reaches the STAGED file
+    #     and not the transaction: the leg measures the staging risk, not a SQL error.
+    copy="$SELFTEST_TMPD/pubscan-jwt.sh"
+    awk -v inj='  echo "-- ${ARM27_SEED_JWT}" >> "$RESTORE_OUT_DIR/survivors.sql"  # arm 27(b): scratch copy only' \
+        '!d && $0 == "  refuse_credential_in_published_sql" { print inj; d = 1 }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
+      || { echo "MEASURE_FAIL (b): could not build the seeded-JWT scratch copy — the scan call site moved."; return 1; }
+    grep -aq 'arm 27(b): scratch copy only' "$copy" \
+      || { echo "MEASURE_FAIL (b): the scratch copy does not carry the injected seed."; return 1; }
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a27b.out"; rc=0
+    run_leg "$copy" restore a27b > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (b): a restore whose survivors.sql carries a JWT exited ${rc}, expected 1. Until 2026-09-10 the scan was the DSN class ALONE and this shipped green."; return 1; }
+    grep -aq 'survivors.sql (JWT)' "$out" \
+      || { echo "MEASURE_FAIL (b): the refusal does not name survivors.sql and the JWT class."; return 1; }
+    if grep -aq "$ARM27_SEED_JWT" "$out"; then
+      echo "MEASURE_FAIL (b): the refusal ECHOED the matched token — the refusal is itself the leak, and this log is public."
+      return 1
+    fi
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL (b): the stray table is gone (count=${n}) — the scan refused after the transaction ran."; return 1; }
+
+    # (c) A FILE THE SCAN CANNOT FIND. `census.sql` is removed just before the scan.
+    #     Until 2026-09-10 the loop skipped it with a silent `|| continue` and printed
+    #     the same clean four-name sentence, while the workflow staged the file
+    #     regardless — a positive floor is what makes "four clean" distinguishable
+    #     from "none found".
+    copy="$SELFTEST_TMPD/pubscan-missing.sh"
+    awk -v inj='  rm -f "$RESTORE_OUT_DIR/census.sql"  # arm 27(c): scratch copy only' \
+        '!d && $0 == "  refuse_credential_in_published_sql" { print inj; d = 1 }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
+      || { echo "MEASURE_FAIL (c): could not build the missing-file scratch copy — the scan call site moved."; return 1; }
+    grep -aq 'arm 27(c): scratch copy only' "$copy" \
+      || { echo "MEASURE_FAIL (c): the scratch copy does not carry the injected removal."; return 1; }
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a27c.out"; rc=0
+    run_leg "$copy" restore a27c > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (c): a run that could scan only 3 of the 4 staged files exited ${rc}, expected 1. The fourth ships UNSCANNED into a world-readable artifact."; return 1; }
+    # ⛔ THE NEEDLE CARRIES THE `MEASURE_FAIL:` PREFIX ON PURPOSE. The clean
+    #     `note` prints the SAME `scanned N of 4` tally, so a bare tally grep would
+    #     match a run that sailed past the floor and committed — MEASURED: with the
+    #     floor neutered this leg still saw `scanned 3 of 4`, and only the
+    #     stray-table check below caught it. The prefix is what makes the needle name
+    #     the REFUSAL rather than the tally.
+    grep -aq 'MEASURE_FAIL: scanned 3 of 4' "$out" \
+      || { echo "MEASURE_FAIL (c): the refusal does not report the measured tally, so a short scan is indistinguishable from a complete one."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL (c): the stray table is gone (count=${n}) — the floor refused after the transaction ran."; return 1; }
+
+    # (d) THE UNSEEDED CONTROL. The same lane, the same fixture, the SHIPPED script:
+    #     it must COMMIT. Without this the three legs above could be passing because
+    #     the widened scan refuses everything.
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a27d.out"; rc=0
+    arm_env restore a27d > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL (d): the UNSEEDED restore exited ${rc}, expected 0. The widened scan refuses a legitimate run, so legs (a)-(c) prove nothing."; return 1; }
+    grep -aq 'scanned 4 of 4' "$out" \
+      || { echo "MEASURE_FAIL (d): a clean run does not report scanning all four staged files."; return 1; }
+
+    unset ARM27_SEED_DSN ARM27_SEED_JWT
+    return 0
+  }
+
   arm_census_rollback_view() {
     local d="$SELFTEST_TMPD/a25"; mkdir -p "$d"
 
@@ -3192,6 +3304,7 @@ FRESHSTUB
   run_arm "24 RED   reference-data allowlist: count drift, empty, silent extractor" 0 arm_bad_refdata_allowlist
   run_arm "25 GREEN the preflight rollback view normalises mutable reference counts and NOTHING else (CR-01)" 0 arm_census_rollback_view
   run_arm "26 RED   a backtick inside ANY unquoted heredoc is refused — SEVEN evasions closed — and THIS script is clean" 0 arm_backtick_in_txn_heredoc
+  run_arm "27 RED   a credential in a PUBLISHED .sql file, and a file the scan could not find" 0 arm_published_sql_credential_scan
 
   release_mutex
 
@@ -3228,7 +3341,7 @@ FRESHSTUB
   fi
   # ⛔ W2 — THIS SENTENCE'S NUMBER IS MEASURED, AND SO IS ITS CLAIM. Regenerate the
   # count with `grep -c '^refuse_[a-z_]*() {' scripts/restore-test-from-baseline.sh`
-  # (2026-09-09: NINE, after `refuse_backticks_in_txn_heredocs` joined the block). It
+  # (2026-09-10: TEN, after `refuse_credential_in_published_sql` joined the block). It
   # read "seven" until Phase 164.8, and was one short AGAIN until 164.8.2: the ninth
   # refusal arrived with arm 26 in PR #767 (06db9958), the emitted line below moved
   # with it and this comment did not. So the number is now DERIVED rather than
@@ -3241,12 +3354,12 @@ FRESHSTUB
   # alone has four `fail` exits and only the sha-mismatch one has an arm; the
   # "baseline dump not found", "provenance doc not found" and "no parseable sha256
   # row" branches have none. What IS true, and what is claimed here, is that every
-  # refusal has at least one arm asserting its NAMED message — arms 1-7, 20, 21, 24
-  # and 26. Arm 26 was MISSING from this list for the same reason the count was one
+  # refusal has at least one arm asserting its NAMED message — arms 1-7, 20, 21, 24,
+  # 26 and 27. Arm 26 was MISSING from this list for the same reason the count was one
   # short: `refuse_backticks_in_txn_heredocs` arrived with its arm and the sentence
   # did not move. A narrative that miscounts or overstates its own guards is the same
   # defect class as a stale floor, so it is corrected rather than extended.
-  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — NINE refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back — EMPTY, SHORT and row-level partial each by name, a bad allowlist is refused before any write, the preflight's rollback view normalises mutable reference counts and nothing else, harness calibrated)"
+  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — TEN refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back — EMPTY, SHORT and row-level partial each by name, a bad allowlist is refused before any write, the preflight's rollback view normalises mutable reference counts and nothing else, a credential in any of the four PUBLISHED .sql files is refused BY CLASS before the transaction runs and a short scan refuses too, harness calibrated)"
   return 0
 }
 
