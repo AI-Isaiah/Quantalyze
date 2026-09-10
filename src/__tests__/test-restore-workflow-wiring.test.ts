@@ -4653,10 +4653,69 @@ describe("WR-04 — the `-a` rule is workflow-wide, not post-verify-wide", () =>
 // narrow anything. A negative index does not throw — it counts from the END — so
 // every one of these is a pin that passes when its subject is gone.
 // ---------------------------------------------------------------------------
-describe("no lookup index reaches a narrowing call unchecked, in either mutex-pin file", () => {
-  const PIN_FILES = [
+describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__tests__", () => {
+  /**
+   * ⛔ TWO LISTS, TWO JOBS — DO NOT MERGE THEM.
+   *
+   * SCAN_FILES is the SURFACE the rule polices: every `src/__tests__/*.test.ts`,
+   * READ FROM THE DIRECTORY rather than hand-listed, because a hand list is a
+   * file that silently stops covering the next test somebody adds. Plus the one
+   * helper that writes the trap deliberately (see DEGENERATE_HELPER below).
+   * ⚠️ MEASURED 2026-09-10: this rule shipped scanning 2 of 137 test files, and
+   * that scope hid two REAL offenders — `phase-150-capital-ownership-invariant`
+   * line 1153 and `phase-84-asset-class-flow` line 27 (three unchecked lookups
+   * in one slice). Both are MULTI-LINE, so a line-scoped grep found neither
+   * across four review rounds. Cost of the widening, measured on this box: the
+   * scan is one strip plus one regex per file, 137 files in ~0.35 s.
+   *
+   * ⚠️ THE SURFACE STOPS AT THIS DIRECTORY, AND THAT IS A MEASURED CHOICE, NOT
+   * AN OVERSIGHT. Running the same scan over every OTHER `*.test.ts` in the repo
+   * (372 files: `src/**` outside this directory, `scripts/**`, `tests/**`) found
+   * FOUR more sites on 2026-09-10 — `src/app/api/strategies/[id]/share/route.test.ts`
+   * line 257, `src/lib/pdf-render-token.test.ts` line 74,
+   * `src/lib/resilient-fetch.wiring.test.ts` line 684 and
+   * `src/lib/seam-venue-vocabulary.invariant.test.ts` line 494. They are real and
+   * they are UNFIXED: colocated suites are a different blast radius than this
+   * structural-gate directory, and widening the surface and fixing four unrelated
+   * files in one change would make neither reviewable. Recorded here rather than
+   * left to be rediscovered — extending SCAN_FILES to them is the next step, not
+   * a decision to skip.
+   *
+   * CALIBRATION_FILES stays at the two comment-heavy mutex-pin files the
+   * EXPENSIVE arms were measured against — the eight-depth injection, the strip
+   * line-count/share floor, the naive-stripper subject. Those re-strip a whole
+   * file per injection point; running them over 137 files would buy nothing,
+   * because what they calibrate is the STRIPPER, and these two are its hardest
+   * subjects (quoted shell globs carrying `/*`, 35.5% and 32.8% comment by
+   * non-whitespace bytes). Widening the SCAN is free; widening the CALIBRATIONS
+   * is not, and would measure the same stripper 137 times.
+   */
+  const CALIBRATION_FILES = [
     "src/__tests__/test-restore-workflow-wiring.test.ts",
     "src/__tests__/supabase-migrate-test-first.test.ts",
+  ];
+
+  /**
+   * The ONE tolerated site (Phase 164.8.2 / W3). Several calibrations across
+   * these files INTENTIONALLY write the offending expression, to measure the
+   * trap they replace — that expression IS their evidence, so it may be neither
+   * exempted by `file:line` (an allowlist rots, and this branch carries a dated
+   * record of exactly that) nor obfuscated by fragment assembly (which would
+   * make the evidence unreadable). They call this helper instead.
+   *
+   * ⛔ THE TOLERANCE IS THE FILE **AND** THE FUNCTION, NOT A PATTERN. Offenders
+   * anywhere else in the helper file are still reported, and an arm below proves
+   * both halves bite.
+   */
+  const DEGENERATE_HELPER = "src/test/helpers/degenerate-narrow.ts";
+  const DEGENERATE_FN = "degenerateNarrow";
+
+  const SCAN_FILES = [
+    ...readdirSync(join(ROOT, "src", "__tests__"))
+      .filter((f) => f.endsWith(".test.ts"))
+      .sort()
+      .map((f) => `src/__tests__/${f}`),
+    DEGENERATE_HELPER,
   ];
 
   /**
@@ -4823,7 +4882,7 @@ describe("no lookup index reaches a narrowing call unchecked, in either mutex-pi
    * Line numbers survive the strip (comments are blanked, not deleted), so the
    * match offset still names the real line in the real file.
    */
-  const offenders = (src: string): string[] => {
+  const scanOffenders = (src: string): { line: number; text: string }[] => {
     const code = stripComments(src);
     const lines = code.split("\n");
     // A FRESH regex per scan. The `g` flag is safe here and ONLY here: `lastIndex`
@@ -4832,8 +4891,69 @@ describe("no lookup index reaches a narrowing call unchecked, in either mutex-pi
     const scan = new RegExp(UNCHECKED.source, "g");
     return [...code.matchAll(scan)].map((m) => {
       const line = code.slice(0, m.index).split("\n").length;
-      return `line ${line}: ${lines[line - 1].trim()}`;
+      return { line, text: lines[line - 1].trim() };
     });
+  };
+
+  const offenders = (src: string): string[] =>
+    scanOffenders(src).map((o) => `line ${o.line}: ${o.text}`);
+
+  /**
+   * First and last LINE of the named function's body, over the COMMENT-STRIPPED
+   * source. Brace-matched rather than regexed, and it FAILS LOUD on every way it
+   * can be wrong (name absent, no body, braces unbalanced) — a span helper that
+   * returned an empty range would silently tolerate the whole file.
+   *
+   * ⚠️ DOCUMENTED LIMIT: the stripper keeps string literals VERBATIM (deliberate
+   * — see its own docblock), so a `{` inside a string in the scanned function
+   * would skew the match. The helper file therefore carries no braces in its
+   * string literals, says so in its own header, and the arm below asserts the
+   * span it yields really is the function and not the file.
+   */
+  const functionBodyLines = (code: string, name: string): [number, number] => {
+    const at = code.indexOf(`function ${name}(`);
+    if (at < 0) {
+      throw new Error(
+        `TOLERANCE POINTS AT NOTHING: no \`function ${name}(\` in the subject. ` +
+          `The one tolerated site was renamed or removed — re-derive the ` +
+          `tolerance, do not widen it.`,
+      );
+    }
+    let i = code.indexOf("{", at);
+    if (i < 0) throw new Error(`no body brace after \`function ${name}\``);
+    let depth = 0;
+    for (; i < code.length; i += 1) {
+      if (code[i] === "{") depth += 1;
+      else if (code[i] === "}") {
+        depth -= 1;
+        if (depth === 0) break;
+      }
+    }
+    if (depth !== 0) throw new Error(`unbalanced braces in \`${name}\``);
+    return [
+      code.slice(0, at).split("\n").length,
+      code.slice(0, i).split("\n").length,
+    ];
+  };
+
+  /**
+   * The rule as it is ENFORCED: every offender in the file, minus the ones
+   * inside `degenerateNarrow` in the helper file — and NOTHING else is dropped.
+   */
+  const enforcedOffenders = (rel: string): string[] => {
+    const src = read(rel);
+    const found = scanOffenders(src);
+    const kept =
+      rel === DEGENERATE_HELPER
+        ? (() => {
+            const [from, to] = functionBodyLines(
+              stripComments(src),
+              DEGENERATE_FN,
+            );
+            return found.filter((o) => o.line < from || o.line > to);
+          })()
+        : found;
+    return kept.map((o) => `${rel} line ${o.line}: ${o.text}`);
   };
 
   it("CALIBRATION — the lexical rule fires on the exact expression IN-03 removed", () => {
@@ -4963,7 +5083,7 @@ describe("no lookup index reaches a narrowing call unchecked, in either mutex-pi
   });
 
   it("FLOOR — the comment strip preserves every line, and removes a bounded share", () => {
-    for (const rel of PIN_FILES) {
+    for (const rel of CALIBRATION_FILES) {
       const src = read(rel);
       const code = stripComments(src);
       expect(
@@ -4987,7 +5107,7 @@ describe("no lookup index reaches a narrowing call unchecked, in either mutex-pi
       src
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/(^|[^:])\/\/[^\n]*/gm, "$1");
-    const src = read(PIN_FILES[0]);
+    const src = read(CALIBRATION_FILES[0]);
     const lost = src.split("\n").length - naive(src).split("\n").length;
     expect(
       lost,
@@ -4997,7 +5117,7 @@ describe("no lookup index reaches a narrowing call unchecked, in either mutex-pi
 
   it("CALIBRATION — an injected offender is caught at every depth of both files", () => {
     const evil = `const evil = s.${NARROW}(s.${FIND}(A));`;
-    for (const rel of PIN_FILES) {
+    for (const rel of CALIBRATION_FILES) {
       const src = read(rel);
       const raw = src.split("\n");
       const code = stripComments(src).split("\n");
@@ -5034,8 +5154,70 @@ describe("no lookup index reaches a narrowing call unchecked, in either mutex-pi
     }
   });
 
-  it("neither file feeds a raw index into a narrowing call", () => {
-    for (const rel of PIN_FILES) {
+  it("FLOOR — the scan reads the whole directory, and reads CODE", () => {
+    // Anti-vacuity, both directions. A scan of a hand-list that stopped growing,
+    // or of a corpus with no lookups left in it, reports zero for the same
+    // reason a clean corpus does.
+    expect(
+      SCAN_FILES.length,
+      "the scan lost files — it is a directory read, so this means tests were DELETED, or the glob stopped matching",
+    ).toBeGreaterThan(130);
+    expect(SCAN_FILES).toContain(DEGENERATE_HELPER);
+    for (const rel of CALIBRATION_FILES) expect(SCAN_FILES).toContain(rel);
+    // MEASURED 2026-09-10: 29 of the 137 scanned test files perform one of these
+    // lookups IN CODE. A floor under that is what stands between "the rule found
+    // nothing" and "the rule looked at nothing".
+    const withLookups = SCAN_FILES.filter((rel) =>
+      new RegExp(`\\.(?:${FINDERS.join("|")})\\(`).test(
+        stripComments(read(rel)),
+      ),
+    );
+    expect(
+      withLookups.length,
+      `only ${withLookups.length} scanned files perform a lookup in code (29 when this floor was set) — the corpus this rule polices has evaporated, so its zero means nothing`,
+    ).toBeGreaterThanOrEqual(20);
+  });
+
+  it("CALIBRATION — the helper tolerance is the FILE and the FUNCTION, not a pattern", () => {
+    const src = read(DEGENERATE_HELPER);
+    const raw = scanOffenders(src);
+    // (a) The tolerance is not pinning nothing: the helper really does write the
+    //     trap, and every one of those writes is inside the tolerated function.
+    expect(
+      raw.length,
+      `${DEGENERATE_HELPER} no longer writes the unchecked narrow at all, so the tolerance below tolerates nothing — delete it rather than leaving a standing exemption`,
+    ).toBeGreaterThan(0);
+    expect(enforcedOffenders(DEGENERATE_HELPER)).toEqual([]);
+    // (b) The span really is the function, not the file.
+    const code = stripComments(src);
+    const [from, to] = functionBodyLines(code, DEGENERATE_FN);
+    expect(to).toBeGreaterThan(from);
+    expect(
+      (to - from) / code.split("\n").length,
+      "the tolerated span is most of the file — the brace match ran away and the tolerance is effectively file-wide",
+    ).toBeLessThan(0.5);
+    // (c) An offender elsewhere IN THE HELPER FILE is still reported.
+    const evil = `const evil = s.${NARROW}(s.${FIND}(A));`;
+    const helperLines = src.split("\n");
+    const outside = [evil, ...helperLines].join("\n");
+    expect(outside, "the injection changed nothing").not.toBe(src);
+    expect(
+      scanOffenders(outside).some((o) => o.line === 1),
+      "an offender injected ABOVE the tolerated function is invisible — the tolerance is file-wide",
+    ).toBe(true);
+    // (d) And the tolerance does not travel: the same expression in a NON-helper
+    //     file is reported by the enforced path, which is the abuse this guards.
+    const victim = CALIBRATION_FILES[0];
+    const mutated = [evil, ...read(victim).split("\n")].join("\n");
+    expect(mutated, "the injection changed nothing").not.toBe(read(victim));
+    expect(
+      scanOffenders(mutated).length,
+      `an offender written into ${victim} is not reported — the helper tolerance leaked into a file that has no business carrying one`,
+    ).toBeGreaterThan(0);
+  });
+
+  it("no scanned file feeds a raw index into a narrowing call", () => {
+    for (const rel of CALIBRATION_FILES) {
       const src = read(rel);
       // ⛔ THE FLOOR READS THE STRIPPED SOURCE, NOT THE RAW FILE, AND THAT IS THE
       // WHOLE POINT OF IT. This rule's own docblock says both files carry the
@@ -5051,10 +5233,13 @@ describe("no lookup index reaches a narrowing call unchecked, in either mutex-pi
         stripComments(src).includes(FIND),
         `${rel} no longer performs the lookup this rule is about IN CODE — if it was rewritten, re-derive the rule rather than letting it pass over an absent subject. (Comments mentioning it do NOT count: they are guaranteed present by this rule's own design.)`,
       ).toBe(true);
-      expect(
-        offenders(src).join("\n"),
-        `${rel} hands a raw lookup index to a narrowing call. -1 does not throw: it counts from the END, so the pin degrades into comparing a one-character tail (or silently widening a prefix) and its failure mode is a PASS. Check the index and throw, as the two anchored helpers do.`,
-      ).toBe("");
     }
+    // ⭐ WIDENED 2026-09-10 (W2): the assertion below used to run over the two
+    // pin files only. The two-file scope hid two real, multi-line offenders.
+    const found = SCAN_FILES.flatMap((rel) => enforcedOffenders(rel));
+    expect(
+      found.join("\n"),
+      `a scanned file hands a raw lookup index to a narrowing call. -1 does not throw: it counts from the END, so the pin degrades into comparing a one-character tail (or silently widening a prefix) and its failure mode is a PASS. Check the index and throw, as the per-file \`anchorIndex\` helpers do — and if the expression is a DELIBERATE degeneracy demonstration, route it through \`degenerateNarrow\` in ${DEGENERATE_HELPER}.`,
+    ).toBe("");
   });
 });
