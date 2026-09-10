@@ -1369,6 +1369,37 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 - [ ] 164.8-06-PLAN.md — WAVE 3 CLOSURE: record the verdicts and the SHA-bound readings, TODOS closures with run ids (incl. the `TEST-NOT-APPLICABLE` pragma verdict), first SHA-bound VAC-08 `0 absent` reading, CLAUDE.md + mutex runbook currency
   ⛔ **CORRECTED 2026-09-09.** This bullet read "the `TEST-NOT-APPLICABLE` pragma recorded as DEAD SCOPE by measurement" — the verdict the plan-checker's B4 finding REVERSED on 2026-09-08, before plan 06 ran. The shipped verdict is two-part: unnecessary for `20260908120000` (narrow, evidenced), general case OPEN and routed to Phase 164.9 as `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`. A ROADMAP bullet still carrying the superseded half would send the next reader to close a hole that is open.
 
+### Phase 164.8.5: SCOPEAXIS — the class-lint's scope claims outrun its filter on a THIRD axis, and the residue six review rounds left behind (INSERTED)
+
+**Goal:** Close the residue of Phase 164.8.2's SIX review rounds. ⛔ **Nothing here is CARDINAL** — the terminal round (2026-09-10, red team + silent-failure-hunter, both re-deriving the shipped logic independently rather than reading it) found no control that cannot fail, no assertion vacuous today, no gate green over an empty corpus. This phase exists because the founder's stopping rule sent the LATENT, COSMETIC and REACH findings here rather than into a seventh fixer round.
+
+⭐ **The one finding that is worth a phase on its own is `[164.8.5-SCOPE-DEPTH-AXIS]`, because it is the THIRD recurrence of one shape on one branch:** a scope sentence that outruns the filter beneath it. First the rule covered 2 files while its name claimed a class; then 137 while it skipped 346 `.test.tsx` files; now 139 while `readdirSync` — being non-recursive — skips the 5 test files in `src/__tests__/contracts/` and `src/__tests__/helpers/`. Each fix closed the axis it was shown and left the next one. **The deliverable is therefore NOT a third widening.** It is a mechanism that makes the scope claim and the file set agree by construction, so a fourth axis cannot open quietly.
+
+⛔ **The evidence and measurements live in each TODOS entry and are not restated here.**
+
+- `[164.8.5-SCOPE-DEPTH-AXIS]` — LATENT. 144 test files under `src/__tests__`, 139 scanned. Zero offenders in the 5 unscanned files TODAY, so today's green is true.
+- `[164.8.5-DEMOS-OFF-HELPER]` — LATENT. This branch planted two fresh copies of the offending expression, as deliberate calibration subjects, in exactly the two files the docblock names as the next widening step — and neither routes through `degenerateNarrow`, which exists precisely so demonstrations live outside the surface. ⛔ When the widening lands and reds them, the reflex will be to restore the tolerance this branch just deleted. Route them through the helper INSTEAD.
+- `[164.8.5-HELPER-UNPOLICED]` — LATENT. `src/test/helpers/degenerate-narrow.ts` left the scanned surface entirely; a second exported helper added there would be policed by nothing. 79 lines, one function, so the blast radius is small — but the deletion that removed the tolerance also removed the only thing watching the rest of that file.
+- `[164.8.5-PROSE-OVERCLAIM]` — COSMETIC, four sentences that describe more than the code does: a seam docblock naming a relaxation that would NOT red (its self-test pins a different, genuinely load-bearing property, verified); a sentence stale by one commit on the same branch; a tautological illustration beside three load-bearing legs; and a `SCAN_FILES.length > 130` floor over an actual 139 that would let nine files be deleted silently.
+- `[164.8.5-COMMENTISH-FALSE-RED]` — REACH. The whole-directory floor's `commentish` test would false-RED on a legitimately blanked docblock continuation line not starting with `*`. Measured 0 across all 139 files, and it fails in the LOUD direction.
+
+**Success Criteria**:
+1. The class-lint's file set is DERIVED from its own scope sentence, or the sentence is derived from the set — one of the two, so a fourth axis (depth, extension, location, symlink) cannot open without something going red. ⛔ A third hand-widening that closes only the depth axis does NOT satisfy this.
+2. A calibration proves the mechanism by opening a new axis on a scratch tree and observing RED — not by asserting today's count.
+3. The two inline degeneracy demonstrations are routed through `degenerateNarrow`, and an arm asserts no NEW inline demonstration can be added outside it without being reported.
+4. Either the helper file is policed again, or a stated, dated reason records why one 79-line single-function file does not need it — ⛔ not silence.
+5. Every one of the four `[164.8.5-PROSE-OVERCLAIM]` sentences is corrected to what its code actually does, with its regenerating command beside any number.
+6. Each correction is verified by MEASUREMENT at HEAD, not by reading — six rounds on this branch established that a restated claim is the defect class itself, and two of them were corrections that were themselves wrong.
+7. ⛔ Nothing in this phase widens `WAIVED_CEILING`, relaxes a floor, or adds an exemption to make a gate pass. Every item here is closed by making a claim true, never by narrowing what is claimed — except where narrowing IS the honest answer, in which case the narrowing is dated and reasoned in-code.
+
+**Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries `[164.8.5-SCOPE-DEPTH-AXIS]`, `[164.8.5-DEMOS-OFF-HELPER]`, `[164.8.5-HELPER-UNPOLICED]`, `[164.8.5-PROSE-OVERCLAIM]` and `[164.8.5-COMMENTISH-FALSE-RED]` — read each before planning, do not re-derive.
+**Depends on:** Phase 164.8.2 (this is its review residue). ⚠️ Related but SEPARATE from Phase 164.8.4 GATERESIDUE, which owns 164.8.2's *deferrals*; this phase owns what its six REVIEW ROUNDS left behind.
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.8.5 to break down)
+
 ### Phase 164.8.4: GATERESIDUE — every deferral Phase 164.8.2's four review rounds produced: the shared-TEST credential channels that still reach a public log, the artifact that publishes the file it refuses over, and the gate-integrity leftovers each below the bar that blocked the ship (INSERTED)
 
 **Goal:** Discharge every deferral Phase 164.8.2 produced and nothing else. Four review rounds over that phase's own fixes found ten items that were each, individually, below the bar that would have blocked the ship — and the reason they are one phase rather than ten TODOS lines is that **eight of them are the same defect**: a control narrower than the sentence beside it. 164.8.2 proved three times over that fixing the instance a reviewer named, rather than the class, produces a half-class that the next round finds again.
@@ -1378,23 +1409,28 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 **What this phase owns, grouped by the sweep that discharges it:**
 
 **(a) Credential channels that still reach a PUBLIC log** — plan as ONE sweep over every psql site, never site by site; that is how this became a half-class twice.
+
 - `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]` — the `missing`-direction ledger read has no redirect at all, so psql's connect and auth failures put the shared-TEST pooler host and user into a world-readable Actions log, against that file's own NON-NEGOTIABLES. The correct idiom (capture, count, WITHHOLD) already exists three screens below in its sibling read.
 - `[164.8.2-REDACT-HOSTNAME-01]` — a routing WORD that was never a routing RECORD: cited in comments and the changelog as booked, measured 2026-09-10 as **0 hits** in TODOS and the ROADMAP. The gap behind it is real — four psql sites can still print a DNS-failure hostname.
 - `[164.8.2-EVIDENCE-DOTENV-LEAK]` — a local wrapper's `bun` shebang auto-loads `.env.local` into the child `vitest`, flipping `HAS_LIVE_DB` true and turning 16 SKIPPED live-DB suites into real INSERTs against shared TEST. ⛔ Not closable by editing the skip gates; they are correct.
 
 **(b) The artifact publishes what it refuses over** — a founder decision with a real cost on both sides, not a patch.
+
 - `[164.8.2-REFUSAL-STILL-PUBLISHES]` — the published-`.sql` scan aborts the restore before the transaction but never `rm -f`s the offending file, and the staging step is `if: always()`. Its sibling scan DOES `rm -f`. Withholding it means deleting part of the reversal recipe (`T-164.8-21`) on exactly the run whose restore was refused.
 - `[164.8.2-CHANNEL-ALLOWLIST-STALE]` — replacing a glob with an enumerated list was the right direction and bought a new failure mode: a channel added later is silently ABSENT. Fix by DERIVATION (channels the script can write ⇔ channels the step stages), not a second hand-maintained list.
 
 **(c) Gate-integrity leftovers** — controls narrower than their own claims.
+
 - `[164.8.2-SENTINEL-GREP-NUL-BLIND]` — the ancestry sentinel is read with a NUL-blind `grep -q`, and the check is NEGATIVE, so it **fails OPEN**, letting through the false "is not an ancestor" that three fixes exist to delete. ✅ Already held as a CEILING: it is the `-a` rule's ONE dated exemption and the rule reds if the site is fixed without deleting the entry.
 - `[164.6-SOURCE-ANCHOR-ROT]` — `plan-anchor-verify` guards PLAN.md anchors; NOTHING guards `file:line` anchors in source comments, which rot faster. ~30 across the touched files, several dead, one already dead on `main`. ⭐ Deliverable is a GATE, and its message should say to prefer a SYMBOL over a re-pinned number.
 - `[164.8.2-GATE-RESIDUE]` — seven small items in one sweep over one file family: two assertions bound to text this repo does not control, a softening allowlist that is still a COUNT, hand-copied marker regexes pinned to nothing, a computed-but-never-compared floor, a README describing files the denial path does not stage, a dead local and a misdirected message.
 
 **(d) Carried in, because leaving it unowned a second time is the failure this phase exists to end.**
+
 - `[WINDOWS-LEDGER-DRIFT]` — NOT 164.8.2 residue. Logged 2026-09-02 in Plan 164.4-00 and carried with **no owner, no date and no gate for eight days**. `.planning/WINDOWS.md` refuses every append while its frontmatter counts and its entries disagree. It fits here because a ledger that rejects writes because its own header is stale is a control disagreeing with the thing it describes.
 
 **Success Criteria**:
+
 1. Every psql site in `test-ledger-drift-check.sh`, `test-restore-from-baseline.yml` and their shared redaction is swept in ONE pass, with a test that FAILS on a new unredirected site — not a fix to the three known ones.
 2. The `gstack-evidence` credential inheritance is closed at the wrapper, with the skip gates untouched, and proven by a run whose skip counts match a plain `npx vitest run` at the same commit.
 3. The refuse-vs-withhold tradeoff is DECIDED by the founder and the decision is recorded with its cost on both sides — not silently patched either way.

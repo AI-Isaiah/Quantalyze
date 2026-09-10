@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.77.32.0] - 2026-09-10 — controls that read stronger than they were, through three rounds of it
+## [0.77.32.0] - 2026-09-10 — controls that read stronger than they were, through SIX rounds of it
 
 Seven themes, over every commit on the branch. ⚠️ This line said "Eighty-two commits" and was
 already stale when the fourth review round landed — re-derive with
@@ -9,7 +9,8 @@ CHECKLIST for CLAUDE.md's cross-check step (every commit must map to a bullet), 
 the release, and a branch that keeps moving falsifies it on every push. Phase 164.8.2 GATEHARDENING
 closes the five Warnings the
 review raised against Phase 164.8's own gates, the twelve findings two reviewers raised against
-*those* fixes, and then five blockers a third round found against **those**. Every gate in this
+*those* fixes, then five blockers a third round found against **those** — and three further rounds after that,
+the last of which found nothing. Every gate in this
 entry was proven by executing the defect, not by reading the code.
 
 ⚠️ **The lesson of this entry is the recursion, not any one gate.** Each round of fixes was itself
@@ -278,7 +279,62 @@ correctly in two other workflows. A fix is not evidence. Running it is.
   nothing, a calibration whose mutation left `^.*` still matching, a deletion of a name that
   appears twice, and a vacuity guard that shadowed the finding it protected.
 
+- **Rounds five and six: one trivial defect, and what it cost to actually close.** `String.indexOf`
+  returns `-1` on a miss, so `s.slice(-1)` is the LAST CHARACTER and `s.slice(0, -1)` is nearly the
+  WHOLE string — and an assertion over either passes for a reason unrelated to its claim. Found
+  live, not hypothetically: a byte-identity pin over an entire mutex protocol comparing `"\n"` to
+  `"\n"`; an arm asserting *"the credential gate carries no `if:`"* that passed because the step no
+  longer existed; an adjacency check written `Math.abs(a.indexOf(x) - a.indexOf(y)) === 1`, which is
+  true when one index is `-1` and the other `0` — it passed exactly when a leg it names was missing.
+  - **Twelve sites closed across eleven files**, each behind a helper that THROWS naming the missing
+    anchor. ⛔ No `?? ''`, no `|| 0`, no `Math.max(0, i)`, and not the `start < 0 ? "" : …` shape:
+    an absent anchor means the subject is not the shape the code assumed, which is a finding, not a
+    value to substitute.
+  - **A standing gate now enforces the class** over every test file in `src/__tests__`, so it cannot
+    return one file at a time.
+- **The gate had to be rebuilt three times, and each rebuild is the entry's real content.**
+  - Its comment stripper was a regex, and these files pin SHELL workflows and quote their globs
+    verbatim. `"${outdir}"/*.err` opens a block comment. MEASURED: **858 lines — 18% of its own
+    subject — deleted before the scan ever saw them**, and an offender injected at three of four
+    depths was INVISIBLE. Replaced by a literal-aware scanner that BLANKS rather than deletes, so
+    line numbers survive; zero line-count desync across all 874 test files in the repo.
+  - Its scope claimed a class and delivered two files; then 137 while silently skipping 346
+    `.test.tsx`; the census built on it under-reported six sites as four. ⚠️ **A third axis is still
+    open and is routed, not fixed:** `readdirSync` is non-recursive, so 5 files under
+    `src/__tests__/contracts/` and `.../helpers/` are unscanned while the rule's own title says
+    "anywhere in `src/__tests__`". Zero offenders there today; booked as
+    `[164.8.5-SCOPE-DEPTH-AXIS]` because the RECURRENCE is the defect, not the axis.
+  - Its own anti-vacuity floor read the RAW source, and both pinned files carry the offending
+    expression verbatim in comments BY DESIGN — so the floor was green forever regardless of the
+    code. Now reads the stripped corpus.
+- **Then it was cut back, because it had outgrown the defect.** The self-referential edge is gone:
+  a tolerance that policed the demonstration helper, scoped by brace-matching, whose own calibration
+  legs called the untolerated path and therefore could not fail. A duplicate copy of the rule — which
+  had been given the NAIVE stripper, in the same branch that diagnosed it — was deleted after
+  measuring that the widened rule reports on that file. 96 lines of machinery, a 4718-line strip
+  subject replaced by a 201-line synthetic that cannot rot, eight injection depths down to three.
+  ⭐ **Deleting duplication was proven, not assumed:** an offender injected at five depths into the
+  file whose local rule was removed is reported by the survivor, each at the correct line.
+
 ### Notes
+- ⭐ **Six review rounds ran over this phase, and rounds one through five EACH found a control weaker
+  than the sentence beside it — including inside the fixes for the previous round.** Round two found
+  twelve findings against round one; round three found five blockers against those; round four found
+  a guard that was unreachable, blind and unfalsified at once; round five found that the cure for it
+  had blinded the scanner to 18% of its file. **Round six found none**, and both reviewers reached
+  that independently by rebuilding the shipped logic and re-deriving its claims over all 874 test
+  files rather than reading the code. That is why this entry is long: the recursion, not any one
+  gate, is what this phase learned.
+- ⚠️ **What the residue is, and where it went.** Round six's findings were LATENT, COSMETIC or REACH
+  — none live today — and by founder decision they were routed to a phase rather than into a seventh
+  fixer round: **Phase 164.8.5 SCOPEAXIS**, with `[164.8.5-SCOPE-DEPTH-AXIS]`,
+  `[164.8.5-DEMOS-OFF-HELPER]`, `[164.8.5-HELPER-UNPOLICED]`, `[164.8.5-PROSE-OVERCLAIM]` and
+  `[164.8.5-COMMENTISH-FALSE-RED]`. Phase 164.8.4 GATERESIDUE separately owns the phase's DEFERRALS.
+- ⚠️ **Six sites of the same class survive OUTSIDE `src/__tests__`** and were fixed here, but the
+  gate does not yet reach colocated suites. Two deliberate demonstrations this branch added sit in
+  exactly those files; when the surface widens they will red, and the fix is to route them through
+  the demonstration helper — ⛔ NOT to restore the tolerance that was just deleted for being unable
+  to fail.
 - **Parallel executor waves work again on this repo.** `gsd worktree base-check` had been
   degrading every phase to sequential on the grounds that the Claude Code harness forks worktrees
   from the default branch — true once, fixed upstream in 2.1.128, and never re-measured. Measured
