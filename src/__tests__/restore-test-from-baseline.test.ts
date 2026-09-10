@@ -171,6 +171,70 @@ describe("restore-test-from-baseline.sh — the regions are real", () => {
   });
 });
 
+/**
+ * ⛔ THE HEADER'S CROSS-FILE POINTERS RESOLVE — MECHANICALLY, NOT ON TRUST.
+ *
+ * MEASURED 2026-09-10 by the comment audit. The header carried two `file:line`
+ * anchors and BOTH were stale, one of them already stale on `main`:
+ *   `test-ledger-drift-check.sh:123`               -> a paragraph about the frontier
+ *                                                     ceiling; the NORMALIZER seam it
+ *                                                     names is at :168.
+ *   `test-restore-from-baseline.yml:659`           -> a bare `exit 1` in an unrelated
+ *                                                     step; the redaction comment it
+ *                                                     names is at :1578.
+ * A line number in prose has nothing holding it, and `plan-anchor-verify` only
+ * re-resolves anchors a pending PLAN.md asserts — never one in a source comment. So
+ * the header now points at SYMBOLS and this arm proves each symbol is really there.
+ * A pointer that resolves to nothing is a reader's dead end, and a reader who follows
+ * one twice stops following them.
+ *
+ * ⚠️ SCOPE, stated rather than implied: this arm covers the two pointers in THIS
+ * script's header. It is not a repo-wide anchor gate. `grep -noE
+ * '[A-Za-z0-9_./-]+\.(ts|sh|yml|mjs|sql|md):[0-9]+'` over the gate family finds ~30
+ * more, several of which do not resolve; closing that class is its own unit of work.
+ */
+describe("restore-test-from-baseline.sh — the header's cross-file pointers resolve", () => {
+  const POINTERS: readonly { readonly file: string; readonly symbol: string; readonly why: string }[] = [
+    {
+      file: "scripts/test-ledger-drift-check.sh",
+      symbol: 'NORMALIZER="${NORMALIZER:-',
+      why: "the ENV SEAMS block says this file spells the same NORMALIZER seam with the same default",
+    },
+    {
+      file: ".github/workflows/test-restore-from-baseline.yml",
+      symbol: "name the TEST pooler host",
+      why: "the psql-stderr paragraph says the calling workflow's redaction step says so in its own comment",
+    },
+  ];
+
+  it("every symbol the header sends a reader to exists in the file it names", () => {
+    for (const { file, symbol, why } of POINTERS) {
+      expect(
+        SRC.includes(file),
+        `the header no longer names ${file}, so this pointer pin is asserting about a sentence that is gone — delete the entry or restore the pointer`,
+      ).toBe(true);
+      expect(
+        SRC.includes(symbol),
+        `the header no longer quotes the symbol \`${symbol}\`, so a reader is back to hunting. ${why}`,
+      ).toBe(true);
+      const target = read(file);
+      expect(
+        target.includes(symbol),
+        `the header sends a reader to ${file} for \`${symbol}\` and it is NOT there. ${why}. Re-find it and update the header — do NOT delete the pointer to make this green.`,
+      ).toBe(true);
+    }
+  });
+
+  it("the pointer pin bites on a symbol that has moved", () => {
+    // CALIBRATION — without it, this arm could be satisfied by a predicate that
+    // never actually reads the target file.
+    const target = read(POINTERS[0].file);
+    const moved = target.split(POINTERS[0].symbol).join("NORMALISER=\"${NORMALISER:-");
+    expect(moved).not.toBe(target);
+    expect(moved.includes(POINTERS[0].symbol)).toBe(false);
+  });
+});
+
 describe("restore-test-from-baseline.sh — the arm ratchet", () => {
   it("EXPECTED_ARMS=27 is a live line, exactly once, with its MEASURED date beside it", () => {
     const region = selfTestRegion(SRC);
