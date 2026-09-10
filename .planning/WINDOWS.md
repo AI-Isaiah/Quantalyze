@@ -1,11 +1,10 @@
 ---
 schema_version: 1
-open_count: 37
+open_count: 36
 waived_count: 0
-fixed_count: 10
+fixed_count: 11
 total_count: 47
-last_updated: 2026-09-07T19:11:20.760Z
-last_updated: 2026-09-07T19:04:26.108Z
+last_updated: 2026-09-10T15:30:00.000Z
 ---
 
 # Broken Windows Ledger
@@ -40,7 +39,7 @@ last_updated: 2026-09-07T19:04:26.108Z
 | 22 | 164 | unrun-verify | src/instrumentation.ts |  | Sentry token scrub proven only at wiring+transform level; a REAL captured event on a deployed token URL is unread (164-CONTEXT.md Blocker 3 mandates it) — post-deploy UAT | open |  | 2026-08-27T22:54:22.410Z |  |
 | 23 | 164 | deviation | src/app/factsheet-share/gone/route.ts | 77 | 164-01 comment + test name repeat the FALSE claim that Referrer-Policy 'does not strip' the path; the header is correct, the stated reason is not. Needs a one-line correction pass. | open |  | 2026-08-27T22:54:30.377Z |  |
 | 24 | 164 | unrun-verify | src/app/PlausibleScript.tsx |  | Plausible withdrawal proven in jsdom markup only; the deployed check (network panel filtered to plausible.io shows ZERO requests on a token link) is post-deploy UAT | open |  | 2026-08-27T22:54:37.686Z |  |
-| 25 | 164.3 | unrun-verify | scripts/prod-body-drift-check.sh |  | VAC-04's first real-PROD execution pends the next migrations PR; the live supabase db dump path is stub-proven only | open |  | 2026-08-29T02:10:57.580Z |  |
+| 25 | 164.3 | unrun-verify | scripts/prod-body-drift-check.sh |  | VAC-04's first real-PROD execution pends the next migrations PR; the live supabase db dump path is stub-proven only — ✅ DISPOSITIONED 2026-09-10 FROM MEASUREMENT (164.7 plan 06): it executed on PR #756, run 34146946050, job 101820921298, head 7c9aea64, 2026-09-07T17:17Z. Log carries `Drift-check credentials present.`, `Functions indexed in the PROD source: 120 (union of two independent readings)` and `4 body comparison(s) — 2 match, 2 acknowledged drift, 1 measured-absent (new)`. The live dump path is no longer stub-proven. Evidence: 164.7-VAC04-OBSERVED.md | fixed |  | 2026-08-29T02:10:57.580Z | 2026-09-10T15:30:00.000Z |
 | 26 | 164.3 | unrun-verify | scripts/test-ledger-drift-check.sh |  | VAC-08's first real-TEST execution pends the next CI run of this branch; the name-joined schema_migrations query and pg_get_functiondef read are stub-proven only (this plan may not write to the shared TEST database) | open |  | 2026-08-29T02:11:06.140Z |  |
 | 27 | 164.3 | unmet-truth | scripts/mutation-runner/run.mjs | 123 | ARMS_FLOOR ships at 0 and therefore cannot fire; plan 164.3-08 must pin it from the first full-corpus measurement | fixed |  | 2026-08-29T02:54:49.352Z | 2026-08-29T08:58:19.520Z |
 | 28 | 164.3 | unrun-verify | .github/workflows/ci.yml |  | sql-mutation's first ubuntu execution pends the first CI run of this branch: RESEARCH assumption A1 (PostgreSQL 16 server binaries under /usr/lib/postgresql/<major>/bin) has never been measured — the lane, the runner and the job were all built on macOS, where the probe reports no such glob. A red first run names a real portability defect. | fixed |  | 2026-08-29T09:24:22.877Z | 2026-09-05T17:36:27.645Z |
