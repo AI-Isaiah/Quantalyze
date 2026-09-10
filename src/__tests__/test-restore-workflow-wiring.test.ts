@@ -2791,79 +2791,186 @@ exit 64
   });
 
   /**
-   * A3 — the false "not an ancestor" can come back through F4's OWN new file.
+   * F1/A3 — the false "not an ancestor" comes back through F4's OWN new file unless
+   * something asks WHETHER GIT RAN, and exactly ONE guard in the step does.
    *
-   * `git … 2>"${ancestry_err}"`: when bash cannot OPEN the redirection target it never
-   * runs the command and returns 1. `--is-ancestor` uses 1 for "not an ancestor". So an
-   * unwritable `${RUNNER_TEMP}` — set but empty, or pointing somewhere that does not
-   * exist — routed straight into the `elif` arm and printed "<sha> is not an ancestor of
-   * this checkout's HEAD" about a sha git was never asked about. That is precisely the
-   * false statement F4 deleted, restored via the file F4 introduced.
+   * `git … 2>"${ancestry_err}"`: when bash cannot open the redirection target it never
+   * runs the command and returns 1. `--is-ancestor` uses 1 for "not an ancestor". So a
+   * broken channel routes straight into the `elif` arm and prints "<sha> is not an
+   * ancestor of this checkout's HEAD" about a sha git was never asked about — precisely
+   * the false statement F4 deleted, restored through the file F4 introduced.
    *
-   * The fixture points `RUNNER_TEMP` at a path whose parent directory does not exist, so
-   * the redirection fails for every user including root — a fixture that leans on `/`
-   * being unwritable would quietly stop reproducing the class inside a root container.
+   * ⛔ THE ROUND-THREE SHAPE WAS TWO GUARDS, ONE OF WHICH COULD NOT FIRE (review F1). An
+   * `if ! : > "${ancestry_err}"` open-probe, then a post-probe `[ ! -r … ]` re-check. The
+   * re-check was unreachable on the path it was written for — a just-created file is
+   * readable, and `2>` truncates rather than removes it — AND blind to the case it
+   * claimed, because a redirect that fails AT PROBE TIME (target replaced by a directory,
+   * ENOSPC) leaves `[ -r <directory> ]` TRUE and falls through to the `elif`. Its
+   * calibration stripped BOTH guards at once and explained that away — "each defends
+   * independently, so removing one proves nothing" — which is a claim standing where a
+   * measurement belongs: with `RUNNER_TEMP` pointing at a missing parent the open-probe
+   * fires first, so stripping only the `-r` guard left the arm GREEN. Zero coverage.
+   *
+   * The step now carries ONE guard, built on a SENTINEL: a known line written into the
+   * channel BEFORE the probe, which git's redirection truncates away. A surviving
+   * sentinel — or a channel that is no longer a readable regular file — means the
+   * redirection failed and git was never invoked, so `ancestry_rc` is bash's and not
+   * `--is-ancestor`'s. Three fixtures below drive it, and each strips ONLY that guard and
+   * asserts the false verdict comes back.
+   *
+   * ⭐ NO FIXTURE LEANS ON `/` BEING UNWRITABLE — a root container would stop reproducing
+   * the class. The parent directory does not exist, or the channel is replaced under the
+   * probe.
    */
-  it("(an UNWRITABLE RUNNER_TEMP) → MEASURE_FAIL about the channel, never a false ancestry verdict", () => {
-    const asserterScript = readFileSync(asserterPath, "utf8");
-    const OPEN_GUARD = '    if ! : > "${ancestry_err}"; then\n';
-    const READ_GUARD = '    if [ ! -r "${ancestry_err}" ]; then\n';
-    for (const [label, g] of [["pre-probe open", OPEN_GUARD], ["post-probe readable", READ_GUARD]] as const) {
-      expect(
-        asserterScript.includes(g),
-        `the ${label} guard is no longer the form this arm strips — re-anchor the calibration rather than deleting it`,
-      ).toBe(true);
-    }
+  const PROBE_LINE =
+    '    git merge-base --is-ancestor "${APPLY_HEAD_SHA}" HEAD 2>"${ancestry_err}" || ancestry_rc=$?\n';
+  const SENTINEL_GUARD =
+    '    if [ ! -f "${ancestry_err}" ] || [ ! -r "${ancestry_err}" ] || grep -q \'ANCESTRY-PROBE-SENTINEL\' "${ancestry_err}"; then\n';
+  /** The same guard with ONLY its sentinel clause removed — the `-f`/`-r` clauses stay. */
+  const GUARD_WITHOUT_SENTINEL_CLAUSE =
+    '    if [ ! -f "${ancestry_err}" ] || [ ! -r "${ancestry_err}" ]; then\n';
+  const FALSE_VERDICT = "is not an ancestor of this checkout's HEAD";
+  /** `chmod 0444` is not a barrier to root, so that one fixture states its precondition. */
+  const NOT_ROOT = typeof process.getuid === "function" && process.getuid() !== 0;
 
+  /**
+   * Run an arbitrary variant of the asserter under `bash -e` — the runner spells every
+   * `run:` as `bash -e {0}`, and a bare `bash` would not reproduce it.
+   */
+  function runAsserterScript(
+    script: string,
+    env: Record<string, string>,
+  ): { code: number | null; out: string } {
+    const f = join(workdir, `asserter-f1-${(seq += 1)}.sh`);
+    writeFileSync(f, script);
+    const r = spawnSync("bash", ["-e", f], {
+      cwd: repo,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        APPLY_STATUS: "completed",
+        APPLY_CONCLUSION: "success",
+        APPLY_HEAD_SHA: ANCESTOR_SHA,
+        ...env,
+      },
+    });
+    return { code: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  }
+
+  /**
+   * A RUNNER_TEMP of this leg's OWN, because two of the fixtures below deliberately
+   * wreck `${RUNNER_TEMP}/ancestry.err` (replacing it with a directory, making it
+   * read-only) and a shared temp dir would carry that damage into the next arm.
+   */
+  const freshRunnerTemp = (): string => mkdtempSync(join(workdir, "rt-"));
+
+  /** The guard has to be where these arms think it is, or they are testing a ghost. */
+  function anchoredAsserter(): string {
+    const script = readFileSync(asserterPath, "utf8");
+    expect(
+      script.includes(SENTINEL_GUARD),
+      "the sentinel guard is no longer the form these arms strip — re-anchor the calibration rather than deleting it",
+    ).toBe(true);
+    expect(
+      script.includes(PROBE_LINE),
+      "the ancestry probe line is no longer the form these arms inject a fault before — re-anchor it",
+    ).toBe(true);
+    return script;
+  }
+
+  it("(a RUNNER_TEMP whose parent does not exist) → MEASURE_FAIL about the channel, never a false ancestry verdict", () => {
+    const script = anchoredAsserter();
     const deadEnd = join(workdir, "no-such-dir", "deeper");
-    const runAt = (script: string): { code: number | null; out: string } => {
-      const f = join(workdir, `asserter-a3-${(seq += 1)}.sh`);
-      writeFileSync(f, script);
-      const r = spawnSync("bash", [f], {
-        cwd: repo,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          RUNNER_TEMP: deadEnd,
-          APPLY_STATUS: "completed",
-          APPLY_CONCLUSION: "success",
-          APPLY_HEAD_SHA: ANCESTOR_SHA,
-        },
-      });
-      return { code: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
-    };
 
-    const fixed = runAt(asserterScript);
+    const fixed = runAsserterScript(script, { RUNNER_TEMP: deadEnd });
     expect(
       fixed.code,
       `an unopenable stderr channel was accepted (exit ${fixed.code}). A probe that could not run is not a probe that answered.\n${fixed.out}`,
     ).toBe(1);
     expect(
       fixed.out,
-      `the step told the operator that ${ANCESTOR_SHA} "is not an ancestor of this checkout's HEAD" — about a sha that IS one, on a run where git was never invoked. This is the exact false statement F4 deleted, reintroduced through F4's own file.`,
-    ).not.toContain("is not an ancestor of this checkout's HEAD");
+      `the step told the operator that ${ANCESTOR_SHA} "${FALSE_VERDICT}" — about a sha that IS one, on a run where git was never invoked.`,
+    ).not.toContain(FALSE_VERDICT);
     expect(
       fixed.out,
-      "the unopenable channel was not named, so the operator cannot tell a wiring fault from a real ancestry answer",
-    ).toContain("MEASURE_FAIL: could not create");
+      "the broken channel was not named, so the operator cannot tell a wiring fault from a real ancestry answer",
+    ).toContain("MEASURE_FAIL");
 
-    // ⭐ CALIBRATION — THE PRE-FIX STATE. Disable BOTH guards (each defends
-    // independently, so removing one proves nothing) and the same fixture prints the
-    // false verdict.
-    const unguarded = asserterScript
-      .replace(OPEN_GUARD, "    if false; then\n")
-      .replace(READ_GUARD, "    if false; then\n");
-    expect(unguarded, "CALIBRATION: the un-guarding mutation changed nothing").not.toBe(
-      asserterScript,
-    );
-    const pre = runAt(unguarded);
+    // ⭐ CALIBRATION — STRIP ONLY THE SENTINEL GUARD. Nothing else in the step defends
+    // this, and this is the measurement round three replaced with a sentence.
+    const unguarded = script.replace(SENTINEL_GUARD, "    if false; then\n");
+    expect(unguarded, "CALIBRATION: the un-guarding mutation changed nothing").not.toBe(script);
     expect(
-      pre.out,
-      "CALIBRATION: with both channel guards removed the step STILL did not print the false ancestry verdict, so this fixture does not reproduce the class and the assertion above proves nothing",
-    ).toContain("is not an ancestor of this checkout's HEAD");
+      runAsserterScript(unguarded, { RUNNER_TEMP: deadEnd }).out,
+      "CALIBRATION: with the sentinel guard removed the step STILL did not print the false ancestry verdict, so this fixture does not reproduce the class and the assertion above proves nothing",
+    ).toContain(FALSE_VERDICT);
   });
 
-  it("(a writable RUNNER_TEMP, an ancestor sha) → the channel guards do not fire on the happy path", () => {
+  it("(the channel replaced by a DIRECTORY between the sentinel write and the probe) → MEASURE_FAIL, not a false verdict", () => {
+    // The residual case the old `[ ! -r ]` guard NAMED and could not see: the open
+    // succeeds, and the redirection fails at PROBE time. Injected as an environment
+    // fault — the two lines below touch neither the guard nor the probe, so the guard
+    // stays independently strippable underneath the fault.
+    const script = anchoredAsserter();
+    const injected = script.replace(
+      PROBE_LINE,
+      '    rm -f "${ancestry_err}" && mkdir "${ancestry_err}"\n' + PROBE_LINE,
+    );
+    expect(injected, "CALIBRATION: the fault injection did not apply").not.toBe(script);
+
+    const rt = freshRunnerTemp();
+    const fixed = runAsserterScript(injected, { RUNNER_TEMP: rt });
+    expect(
+      fixed.code,
+      `a probe-time redirection failure was accepted (exit ${fixed.code}).\n${fixed.out}`,
+    ).toBe(1);
+    expect(
+      fixed.out,
+      `[ -r <directory> ] is TRUE, so the round-three guard passed this straight through and printed "${FALSE_VERDICT}" about a sha git was never asked about`,
+    ).not.toContain(FALSE_VERDICT);
+    expect(fixed.out, "the broken channel was not named").toContain("MEASURE_FAIL");
+
+    const unguarded = injected.replace(SENTINEL_GUARD, "    if false; then\n");
+    expect(unguarded, "CALIBRATION: the un-guarding mutation changed nothing").not.toBe(injected);
+    expect(
+      runAsserterScript(unguarded, { RUNNER_TEMP: freshRunnerTemp() }).out,
+      "CALIBRATION: with the sentinel guard removed this fixture did not print the false ancestry verdict, so it does not reproduce the class",
+    ).toContain(FALSE_VERDICT);
+  });
+
+  it.runIf(NOT_ROOT)(
+    "(the channel made UNWRITABLE-but-readable under the probe) → the SENTINEL CLAUSE is what fires",
+    () => {
+      // `-f` and `-r` are both TRUE here: the file is present and readable, and the only
+      // thing saying git never ran is its CONTENT. This is the clause the whole F1 fix
+      // rests on, so it gets a fixture that no other clause can answer.
+      const script = anchoredAsserter();
+      const injected = script.replace(
+        PROBE_LINE,
+        '    chmod 0444 "${ancestry_err}"\n' + PROBE_LINE,
+      );
+      expect(injected, "CALIBRATION: the fault injection did not apply").not.toBe(script);
+
+      const fixed = runAsserterScript(injected, { RUNNER_TEMP: freshRunnerTemp() });
+      expect(fixed.code, `a probe-time EACCES was accepted.\n${fixed.out}`).toBe(1);
+      expect(fixed.out).not.toContain(FALSE_VERDICT);
+      expect(
+        fixed.out,
+        "the step reported a broken channel without saying WHICH observation broke — the surviving sentinel is the evidence that git never ran",
+      ).toContain("STILL HOLDS THE PRE-PROBE SENTINEL");
+
+      // ⭐ CALIBRATION — drop ONLY the sentinel clause, keeping `-f` and `-r`. Both stay
+      // TRUE on this fixture, so a guard without the sentinel waves it through.
+      const clauseless = injected.replace(SENTINEL_GUARD, GUARD_WITHOUT_SENTINEL_CLAUSE);
+      expect(clauseless, "CALIBRATION: the clause removal did not apply").not.toBe(injected);
+      expect(
+        runAsserterScript(clauseless, { RUNNER_TEMP: freshRunnerTemp() }).out,
+        "CALIBRATION: with the sentinel clause gone the `-f`/`-r` clauses still caught this, so this fixture does not isolate the sentinel and the assertion above proves nothing",
+      ).toContain(FALSE_VERDICT);
+    },
+  );
+
+  it("(a writable RUNNER_TEMP, an ancestor sha) → the channel guard does not fire on the happy path", () => {
     // The other direction: a guard that fired on every run would be a control that
     // refuses everything, which is not a control.
     const asserted = runAsserter({
@@ -2874,7 +2981,7 @@ exit 64
     expect(asserted.code, asserted.out).toBe(0);
     expect(
       asserted.out.includes("MEASURE_FAIL"),
-      "the channel guards fired on a perfectly writable RUNNER_TEMP",
+      "the channel guard fired on a perfectly writable RUNNER_TEMP — a control that refuses everything is not a control",
     ).toBe(false);
   });
 

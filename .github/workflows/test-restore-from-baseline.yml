@@ -422,44 +422,54 @@ jobs:
               # to go and fix. Same shape as IN-06 in the restore script: an unreadable
               # answer is not a negative one.
               ancestry_err="${RUNNER_TEMP}/ancestry.err"
-              # ⛔ AND THE ERROR CHANNEL IS PROVEN OPEN BEFORE THE PROBE RUNS (review A3).
-              # `RUNNER_TEMP` unset is already fail-loud under `set -u`, but `RUNNER_TEMP`
-              # set to the EMPTY STRING resolves this path to `/ancestry.err`, which is not
-              # writable on the runner. When a redirection fails, bash NEVER RUNS THE
-              # COMMAND and returns 1 — and 1 is exactly the code `--is-ancestor` uses for
-              # "not an ancestor". The `|| ancestry_rc=$?` below would capture it, the
-              # `elif` arm would fire, and the step would print "<sha> is not an ancestor of
-              # this checkout's HEAD" having never invoked git at all. That is the precise
-              # FALSE STATEMENT F4 exists to delete, reintroduced through F4's own new file.
-              # So: open the channel first and fail loud on that, and re-check it is
-              # readable after the probe before any verdict reads from it. An unwritable
-              # channel is an unanswered question, never a negative answer.
-              if ! : > "${ancestry_err}"; then
-                failed="${failed} ancestor(MEASURE_FAIL: could not create ${ancestry_err} (RUNNER_TEMP='${RUNNER_TEMP}'), so git's stderr has nowhere to go. A failed redirection returns 1 WITHOUT RUNNING GIT, and 1 is --is-ancestor's code for 'not an ancestor' — the ancestry question was NOT answered and this is not a 'no'.)"
+              # ⛔ ONE GUARD, AND IT DISCRIMINATES THE CASE IT NAMES (review F1). When a
+              # redirection cannot be opened, bash NEVER RUNS THE COMMAND and returns 1 —
+              # and 1 is exactly the code `--is-ancestor` uses for "not an ancestor". A
+              # `${RUNNER_TEMP}` that is empty, missing, or replaced under us therefore
+              # routes straight into the `elif` arm below and prints "<sha> is not an
+              # ancestor of this checkout's HEAD" about a sha git was never asked about:
+              # the precise FALSE STATEMENT F4 exists to delete, reintroduced through F4's
+              # own new file.
+              #
+              # ⛔ THE PREVIOUS SHAPE DID NOT DETECT THAT, AND WAS MEASURED UNREACHABLE
+              # (review F1). It was an `if ! : > "${ancestry_err}"` open-probe plus a
+              # post-probe `[ ! -r "${ancestry_err}" ]` re-check. A file that was just
+              # created successfully is readable, and `2>` truncates rather than removes
+              # it, so `-r` could not go false on any ordinary sequence; while the hole it
+              # was written for — a redirect that fails AT PROBE TIME (target replaced by
+              # a directory, ENOSPC) — leaves `[ -r <directory> ]` TRUE, so the guard
+              # waved the false verdict through the very case it named.
+              #
+              # A SENTINEL discriminates it, because it asks the question that decides the
+              # verdict: DID GIT RUN? Write a known line into the channel first. git's
+              # redirection TRUNCATES that file, so a surviving sentinel — or a channel
+              # that is no longer a readable regular file — means the redirection failed
+              # and git was never invoked. An unwritten channel is an unanswered question,
+              # never a negative answer.
+              sentinel_rc=0
+              printf 'ANCESTRY-PROBE-SENTINEL\n' > "${ancestry_err}" || sentinel_rc=$?
+              ancestry_rc=0
+              git merge-base --is-ancestor "${APPLY_HEAD_SHA}" HEAD 2>"${ancestry_err}" || ancestry_rc=$?
+              if [ ! -f "${ancestry_err}" ] || [ ! -r "${ancestry_err}" ] || grep -q 'ANCESTRY-PROBE-SENTINEL' "${ancestry_err}"; then
+                failed="${failed} ancestor(MEASURE_FAIL: the stderr channel ${ancestry_err} (RUNNER_TEMP='${RUNNER_TEMP}', pre-probe sentinel write exited ${sentinel_rc}) is missing, unreadable, or STILL HOLDS THE PRE-PROBE SENTINEL, so the redirection FAILED and git was NEVER INVOKED. rc=${ancestry_rc} is bash's, not --is-ancestor's — this is not a 'no'.)"
+              elif [ "${ancestry_rc}" -gt 1 ]; then
+                failed="${failed} ancestor(MEASURE_FAIL: git exited ${ancestry_rc}, so the ancestry question was NOT answered — this is not a 'no'. git said: $(tr '\n' ' ' < "${ancestry_err}"))"
+              elif [ "${ancestry_rc}" -eq 1 ]; then
+                failed="${failed} ancestor(${APPLY_HEAD_SHA} is not an ancestor of this checkout's HEAD)"
               else
-                ancestry_rc=0
-                git merge-base --is-ancestor "${APPLY_HEAD_SHA}" HEAD 2>"${ancestry_err}" || ancestry_rc=$?
-                if [ ! -r "${ancestry_err}" ]; then
-                  failed="${failed} ancestor(MEASURE_FAIL: ${ancestry_err} was opened before the probe and is NOT readable after it, so git's stderr is gone. No arm may read a verdict out of a channel that is not there — an unreadable answer is not a negative one.)"
-                elif [ "${ancestry_rc}" -gt 1 ]; then
-                  failed="${failed} ancestor(MEASURE_FAIL: git exited ${ancestry_rc}, so the ancestry question was NOT answered — this is not a 'no'. git said: $(tr '\n' ' ' < "${ancestry_err}"))"
-                elif [ "${ancestry_rc}" -eq 1 ]; then
-                  failed="${failed} ancestor(${APPLY_HEAD_SHA} is not an ancestor of this checkout's HEAD)"
-                else
-                  # THE CONTENT CHECK. Ancestry alone says only WHERE PROD's apply ran; it
-                  # says nothing about what this tree has GAINED since. A file added in
-                  # that window is in the repo file set, is absent from PROD's ledger, and
-                  # would be seeded into TEST's ledger as applied — after which `supabase
-                  # db push` compares `version` only and never applies it. `--diff-filter=A`
-                  # with no rename detection reports a renamed migration as an addition
-                  # too, which is the direction we want.
-                  rc=0
-                  added="$(git diff --name-only --diff-filter=A "${APPLY_HEAD_SHA}" HEAD -- supabase/migrations)" || rc=$?
-                  if [ "${rc}" -ne 0 ]; then
-                    failed="${failed} content(git diff exited ${rc}, so the added-migration check could not be decided — an undecided check is not a passed one)"
-                  elif [ -n "${added}" ]; then
-                    failed="${failed} content($(printf '%s\n' "${added}" | wc -l | tr -d ' ') migration file(s) added after ${APPLY_HEAD_SHA} and therefore NOT in PROD's ledger)"
-                  fi
+                # THE CONTENT CHECK. Ancestry alone says only WHERE PROD's apply ran; it
+                # says nothing about what this tree has GAINED since. A file added in
+                # that window is in the repo file set, is absent from PROD's ledger, and
+                # would be seeded into TEST's ledger as applied — after which `supabase
+                # db push` compares `version` only and never applies it. `--diff-filter=A`
+                # with no rename detection reports a renamed migration as an addition
+                # too, which is the direction we want.
+                rc=0
+                added="$(git diff --name-only --diff-filter=A "${APPLY_HEAD_SHA}" HEAD -- supabase/migrations)" || rc=$?
+                if [ "${rc}" -ne 0 ]; then
+                  failed="${failed} content(git diff exited ${rc}, so the added-migration check could not be decided — an undecided check is not a passed one)"
+                elif [ -n "${added}" ]; then
+                  failed="${failed} content($(printf '%s\n' "${added}" | wc -l | tr -d ' ') migration file(s) added after ${APPLY_HEAD_SHA} and therefore NOT in PROD's ledger)"
                 fi
               fi
               ;;
