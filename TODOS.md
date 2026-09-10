@@ -2631,6 +2631,50 @@ Opened by Phase 164.8 plan 06 as it closed `CI-MIGRATE-01`, `[164.2-TEST-APPLY-P
 and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a problem** (founder rule
 2026-09-08: a TODOS line alone has no owner, no date and no gate).
 
+- [ ] **`[164.8.2-REFUSAL-STILL-PUBLISHES]` the published-`.sql` credential scan refuses without
+      withholding, so the flagged file is staged and published anyway (booked 2026-09-10, Phase
+      164.8.2 maintainability audit; routed to Phase 164.9 — founder decision, real cost both ways).**
+      **MECHANISM.** `refuse_credential_in_published_sql` aborts the restore BEFORE the transaction,
+      which protects the database and every future run. It does not `rm -f` the offending file, and
+      `Stage the public artifact` is `if: always()` — so the very `.sql` the gate named as carrying
+      a credential ships WORLD-READABLE for 90 days on a PUBLIC repo. The sibling backup-step scan
+      (`scan_for_secrets`) DOES `rm -f` on a hit.
+      ⚠️ **The comments no longer mislead** — script and artifact README both state what the
+      function does and does not protect. The gap is behavioural, not documentary.
+      ⛔ **Why this is a founder call, not a patch:** withholding the file means deleting part of
+      the REVERSAL RECIPE (`T-164.8-21`) on exactly the run whose restore was refused — trading a
+      credential exposure for a lost undo on a database left mid-restore.
+
+- [ ] **`[164.8.2-REDACT-HOSTNAME-01]` a routing WORD that was never a routing RECORD, over a gap
+      that is still open (booked 2026-09-10, same audit; routed to Phase 164.9).**
+      `[REDACT-HOSTNAME-01]` was cited in source comments and one CHANGELOG sentence as a booked
+      item. MEASURED 2026-09-10: `grep -rn` over `TODOS.md` and `.planning/ROADMAP.md` → **0 hits**.
+      It existed only as `T-164.8-22` in `164.8-05-PLAN.md`'s threat table: no owner, no date, no
+      gate. Same shape CLAUDE.md records for `FANOUT-GLOBAL-01`.
+      **THE UNDERLYING GAP IS REAL.** The psql redaction shared by `ci.yml` and
+      `test-restore-from-baseline.yml` masks THREE expressions; four other psql sites in that
+      workflow can still print a DNS-failure HOSTNAME into a public log.
+      ⭐ Plan as ONE sweep over every psql site together with
+      `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]` — site-by-site is how this became a half-class twice.
+
+- [ ] **`[164.6-SOURCE-ANCHOR-ROT]` `file:line` anchors in SOURCE comments are an unguarded class
+      (booked 2026-09-10, Phase 164.8.2 maintainability audit; routed to Phase 164.6 GATE-HYGIENE).**
+      `plan-anchor-verify` re-resolves every anchor a pending PLAN.md asserts and fails loud.
+      NOTHING does that for a comment in a `.ts`/`.sh`/`.yml`/`.mjs` file — and those rot faster,
+      because every edit above an anchor moves it.
+      **MEASURED 2026-09-10** over the ten files 164.8.2 touched:
+      `grep -noE '[A-Za-z0-9_./-]+\.(ts|sh|yml|mjs|sql|md):[0-9]+'` finds ~30 anchors; spot-checks
+      found several that do not resolve (`test-restore-from-baseline.yml:412`/`:517`,
+      `test-ledger-drift-check.sh:281`/`:604`/`:667`/`:675`/`:140`, `ci.yml:2610`,
+      `restore-test-from-baseline.test.ts:217`). One was **already wrong on `main`** and pointed at
+      a bare `exit 1` in an unrelated step.
+      ⚠️ Only the TWO load-bearing anchors were pinned during 164.8.2 — converted to SYMBOLS with
+      an arm that reads the target file plus a calibration. Rewriting thirty by hand was refused
+      deliberately: it fixes today's instances and leaves the class open.
+      **DELIVERABLE: a repo-owned gate, `plan-anchor-verify`'s shape applied to source comments.**
+      ⭐ Prefer converting an anchor to a SYMBOL over re-pinning a number — a symbol survives the
+      edit that moves the line. Encode that preference in the gate's MESSAGE, not just its docs.
+
 - [ ] **`[164.8.2-LEDGER-STDERR-PUBLIC-LOG]` the `missing`-direction ledger read leaves psql
       stderr UNREDIRECTED into a PUBLIC Actions log (booked 2026-09-10, Phase 164.8.2 round-three
       review; routed to Phase 164.9).**
