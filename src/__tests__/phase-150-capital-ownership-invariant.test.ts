@@ -14,6 +14,36 @@ import {
   STRATEGY_PROFILES,
 } from "../../scripts/seed-demo-profiles";
 
+// The trap this file's P10 arm used to walk into, kept importable in exactly one
+// place so the calibration below can MEASURE it. Nothing that asserts may use it.
+import { degenerateNarrow } from "../test/helpers/degenerate-narrow";
+
+// ---------------------------------------------------------------------------
+// Phase 164.8.2 / W1 — an anchor a slice depends on must FAIL LOUD when absent.
+// MEASURED 2026-09-10 on P10's prose pin: with `<OwnershipTag` gone from
+// StrategyTable, `indexOf` returned -1 and `slice(0, -1)` was the WHOLE FILE
+// bar its last byte — so `toContain("UI-SPEC invariant")` passed on the very
+// prose the pin was supposed to prove sits BEFORE the mount. The arm's failure
+// mode was a PASS. ⛔ NO DEFAULT: no `?? 0`, no `Math.max(0, i)`. Restated
+// per-file rather than imported, matching the self-containment convention these
+// structural gate files are built on.
+// ---------------------------------------------------------------------------
+
+/** `text.indexOf(anchor)`, but a miss THROWS by name instead of returning -1. */
+function anchorIndex(text: string, anchor: string, from = 0): number {
+  const at = text.indexOf(anchor, from);
+  if (at < 0) {
+    throw new Error(
+      `ANCHOR MISSING: ${JSON.stringify(anchor)} is not present in the subject ` +
+        `text. The narrowing slice that wanted it would have degenerated ` +
+        `(slice(-1) is the LAST CHARACTER, slice(0, -1) is nearly the WHOLE ` +
+        `string) and every assertion over the result would have passed ` +
+        `vacuously. Fix the anchor or the subject — do not default it.`,
+    );
+  }
+  return at;
+}
+
 /**
  * Phase 150 (OWN-03 / OWN-05) — the capital-ownership hard-invariant structural
  * gate.
@@ -1150,10 +1180,7 @@ describe("OWN-03 — the gate cannot pass vacuously", () => {
     //    out in prose, so an unstripped P8 could pass on documentation alone.
     const strategyTableRaw = readSource(STRATEGY_TABLE);
     expect(
-      strategyTableRaw.slice(
-        0,
-        strategyTableRaw.indexOf("<OwnershipTag"),
-      ),
+      strategyTableRaw.slice(0, anchorIndex(strategyTableRaw, "<OwnershipTag")),
     ).toContain("UI-SPEC invariant");
     expect(strategyTableSrc).not.toContain("UI-SPEC invariant");
 
@@ -1213,5 +1240,43 @@ describe("OWN-03 — the gate cannot pass vacuously", () => {
     const callback = firstArgument(callArgs(factsheetPageSrc, "unstable_cache"));
     expect(callback.length).toBeGreaterThan(10);
     expect(callback.length).toBeLessThan(400);
+  });
+
+  it("CALIBRATION (164.8.2/W1) — P10's prose pin THROWS on a missing mount anchor instead of reading the whole file", () => {
+    const ANCHOR = "<OwnershipTag";
+    const src = readSource(STRATEGY_TABLE);
+
+    // Control: the real component resolves, and the prefix is a PREFIX — a
+    // check that refuses the healthy subject too is a refusal, not a check.
+    expect(() => anchorIndex(src, ANCHOR)).not.toThrow();
+    const real = src.slice(0, anchorIndex(src, ANCHOR));
+    expect(real).toContain("UI-SPEC invariant");
+    expect(real.length).toBeLessThan(src.length);
+
+    // Mutant: the mount is gone. Assert the mutation APPLIED before asserting
+    // the flip — a neuter that does not apply reads as GREEN, and two
+    // calibrations on this branch were caught proving exactly nothing.
+    const mutant = src.split(ANCHOR).join("<RenamedOwnershipTag");
+    expect(mutant, "the mutation must actually change the source").not.toBe(src);
+    expect(
+      mutant.includes(ANCHOR),
+      "the mutation must actually REMOVE the anchor — a no-op replace reads as a pass",
+    ).toBe(false);
+    expect(() => anchorIndex(mutant, ANCHOR)).toThrow(
+      /ANCHOR MISSING: "<OwnershipTag"/,
+    );
+
+    // ⚠️ The trap it replaces, MEASURED rather than asserted: `slice(0, -1)` is
+    // the whole file bar its last byte, so the pin's `toContain` went green on
+    // the very prose it claims sits BEFORE the mount. Its failure mode was a PASS.
+    const degenerate = degenerateNarrow(mutant, { upTo: ANCHOR });
+    expect(
+      degenerate.length,
+      "the pre-W1 shape no longer widens to (nearly) the whole file — re-derive this arm rather than assuming it still bites",
+    ).toBe(mutant.length - 1);
+    expect(
+      degenerate,
+      "the widened prefix no longer carries the needle, so the vacuity this arm measures is not reproduced",
+    ).toContain("UI-SPEC invariant");
   });
 });
