@@ -4832,6 +4832,26 @@ describe("no `indexOf` result reaches a slice unchecked, in either mutex-pin fil
     throw new Error("no code line found — the stripper blanked the entire file");
   };
 
+  it("CALIBRATION — the anti-vacuity floor is NOT satisfiable by comments alone", () => {
+    // A corpus whose only lookup lives in a comment: the scan has nothing to look
+    // at, so it reports clean. The floor must be the thing that notices.
+    const commentsOnly = `// s.${NARROW}(s.${FIND}(A)) — removed by IN-03\nconst x = 1;\n`;
+    expect(
+      commentsOnly.includes(FIND),
+      "CALIBRATION: the subject does not carry the needle in a comment, so it does not reproduce the vacuity",
+    ).toBe(true);
+    expect(
+      offenders(commentsOnly),
+      "CALIBRATION: the scan found something, so this subject is not the EMPTY corpus the floor has to catch",
+    ).toEqual([]);
+    // The old floor read the RAW text and would have passed here — green over an
+    // empty corpus. The floor as it now stands reads code, and fails.
+    expect(
+      stripComments(commentsOnly).includes(FIND),
+      "the floor still passes on a corpus whose only lookup is a comment — it is measuring the historical note, not live code",
+    ).toBe(false);
+  });
+
   it("FLOOR — the comment strip preserves every line, and removes a bounded share", () => {
     for (const rel of PIN_FILES) {
       const src = read(rel);
@@ -4903,9 +4923,19 @@ describe("no `indexOf` result reaches a slice unchecked, in either mutex-pin fil
   it("neither file feeds a raw index into a narrowing call", () => {
     for (const rel of PIN_FILES) {
       const src = read(rel);
+      // ⛔ THE FLOOR READS THE STRIPPED SOURCE, NOT THE RAW FILE, AND THAT IS THE
+      // WHOLE POINT OF IT. This rule's own docblock says both files carry the
+      // offending expression VERBATIM inside the comment recording why it was
+      // removed — so on the RAW text the needle is present BY DESIGN and the floor
+      // is green forever. Measured 2026-09-10: the lookup appears 24× raw / 18×
+      // in code here, and 11× raw / 7× in code in the sibling. A future rewrite off
+      // `String.indexOf` would leave the historical comments standing, the floor
+      // green, and `offenders()` scanning a corpus with nothing in it to find — the
+      // "no offender found means nothing was looked at" shape this rule exists to
+      // kill.
       expect(
-        src.includes(FIND),
-        `${rel} no longer performs the lookup this rule is about — if it was rewritten, re-derive the rule rather than letting it pass over an absent subject`,
+        stripComments(src).includes(FIND),
+        `${rel} no longer performs the lookup this rule is about IN CODE — if it was rewritten, re-derive the rule rather than letting it pass over an absent subject. (Comments mentioning it do NOT count: they are guaranteed present by this rule's own design.)`,
       ).toBe(true);
       expect(
         offenders(src).join("\n"),
