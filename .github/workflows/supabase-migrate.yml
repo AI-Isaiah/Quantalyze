@@ -855,6 +855,34 @@ jobs:
           echo "::endgroup::"
           echo "::group::Post-apply migration list verification (C-0331 twin)"
           supabase migration list --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-migration-list.txt"
+          # F1 (164.8.2-SILENT-FAILURES, closed 2026-09-10): a POSITIVE FLOOR, and it runs
+          # BEFORE the negative grep below. That grep cannot tell "no reverted row" from
+          # "nothing was read": a CLI that exits 0 and prints an EMPTY or HEADER-ONLY list
+          # makes `grep -q` return 1, the branch is skipped, this group closes, `apply-test`
+          # goes green, and `needs.apply-test.result == 'success'` green-lights the PROD
+          # apply. What the operator sees is a passing group; what is true is that nothing
+          # was verified. `set -euo pipefail` already covers the adjacent case (a CLI that
+          # exits NON-ZERO aborts at the pipeline), so the live path is "exit 0, wrong text".
+          # ⭐ CONFORMING TO THE SIBLING, not inventing a second shape: this repo's
+          # test-restore-from-baseline.yml pairs its negative `grep -aq 'Would push these
+          # migrations:'` with a positive `! grep -aq 'Remote database is up to date.'`,
+          # "deliberately positive so a wording change reddens instead of passing vacuously".
+          # ⚠️ WHAT THIS FLOOR DOES NOT CATCH, said out loud rather than left implied: a CLI
+          # that still prints version rows but RENAMES the status word. Nothing can catch
+          # that without a measured replacement wording. Re-CASING is already covered by the
+          # `-i` below. What it does catch: empty, header-only, and any reshape that stops
+          # printing migration versions at all.
+          list_rc=0
+          list_rows="$(grep -ac '[0-9]\{14\}' "${RUNNER_TEMP}/test-migration-list.txt")" || list_rc=$?
+          if [ "${list_rc}" -gt 1 ]; then
+            echo "::error::MEASURE_FAIL: could not read the migration list (grep exited ${list_rc}). The C-0331 twin's verdict is UNKNOWN, not clean, and it is the last check before the PROD apply."
+            exit 1
+          fi
+          if [ "${list_rows}" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: 'supabase migration list' printed no migration version at all. An empty or header-only list is not a list with no reverted rows — the C-0331 check below would find nothing, read as CLEAN and verify NOTHING, and this check is what green-lights the PROD apply. Read the list echoed above before concluding anything about TEST."
+            exit 1
+          fi
+          echo "the migration list carries ${list_rows} version-bearing line(s) — the C-0331 check below has something to read."
           # `-a` is mandatory repo-wide (this repo tracks a file carrying a deliberate NUL byte).
           # MEASURED 2026-09-09, Phase 164.8.2: on GNU grep 3.11 (the runner's) and BSD grep 2.6.0
           # the missing `-a` changed NOTHING; on ugrep 7.8.4 the check read a NUL-bearing list as
@@ -1157,6 +1185,21 @@ jobs:
           echo "::endgroup::"
           echo "::group::Post-apply migration list verification (C-0331)"
           supabase migration list --linked | tee /tmp/migration-list.txt
+          # F1 (164.8.2-SILENT-FAILURES): the POSITIVE FLOOR, identical in shape to the TEST
+          # twin's — see the long rationale there. Short version: the grep below is NEGATIVE,
+          # so an empty or header-only list makes it return 1 and read as CLEAN having
+          # verified nothing, on the ONE automatic applier of DDL to production.
+          list_rc=0
+          list_rows="$(grep -ac '[0-9]\{14\}' /tmp/migration-list.txt)" || list_rc=$?
+          if [ "${list_rc}" -gt 1 ]; then
+            echo "::error::MEASURE_FAIL: could not read the migration list (grep exited ${list_rc}). The C-0331 verdict is UNKNOWN, not clean, and PROD has just been applied to."
+            exit 1
+          fi
+          if [ "${list_rows}" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: 'supabase migration list' printed no migration version at all. An empty or header-only list is not a list with no reverted rows — the C-0331 check below would find nothing, read as CLEAN and verify NOTHING, immediately after a PROD apply. Read the list echoed above before concluding anything about production."
+            exit 1
+          fi
+          echo "the migration list carries ${list_rows} version-bearing line(s) — the C-0331 check below has something to read."
           if grep -aEiq '(^|[[:space:]|])reverted([[:space:]|]|$)' /tmp/migration-list.txt; then
             echo "::error::Reverted migrations detected after db push — see list above (C-0331)"
             exit 1
