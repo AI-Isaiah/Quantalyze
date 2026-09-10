@@ -38,7 +38,10 @@
  * commands. That is why there are TEN hygiene rules rather than the three
  * RESEARCH proposed, why they run on BOTH sides of the comparison, and why a
  * PROD command failing them is `cron-secret-in-command` EVEN WHEN ITS SHA
- * MATCHES THE MANIFEST.
+ * MATCHES THE MANIFEST — and even when there is no readable manifest at all,
+ * because the PROD-side scan is section (0) of `compareManifest`, above every
+ * `return` in it, and `run()` reads the oracle LAST precisely so that section
+ * can never be starved of rows.
  *
  * Every rule ships with a RED fixture row in `fixtures/cron-drift/hygiene-red.json`
  * proving it fires and a GREEN control in `hygiene-green.json` proving the
@@ -428,15 +431,66 @@ const withReadings = (headline) => `${headline}\n      ${READING_1}\n      ${REA
 /**
  * @param {object|null} manifest   parsed `cron-manifest.json` (null when absent/unparsable)
  * @param {Array<object>} prodRows from `parseCronJobRows`
+ * @param {object} opts
+ * @param {string} opts.liveMarker  ⛔ MANDATORY. The `COMMENT ON DATABASE` marker read from the
+ *        database this reading came from. Absent or empty is a `measure-fail`, never a pass.
+ * @param {string|null} [opts.manifestReadError]  the reason the oracle could not be read, if any
+ * @param {string} [opts.manifestPath]            the path it was looked for at, named in that defect
  * @returns {{defects: Array<{kind:string, subject:string|null, detail:string}>, lines: string[]}}
  */
-export function compareManifest(manifest, prodRows) {
+export function compareManifest(manifest, prodRows, opts = {}) {
   const defects = [];
   const lines = [];
   const drift = (subject, headline) => defects.push({ kind: "cron-drift", subject, detail: withReadings(headline) });
 
   // -------------------------------------------------------------------------
-  // (1) Validate the ORACLE first. Comparing against an invalid oracle would
+  // (0) PROD-SIDE HYGIENE, ABOVE EVERY `return` IN THIS FUNCTION.
+  //
+  // ⛔ DO NOT MOVE THIS BELOW ANY RETURN. MEASURED on the reverted repair
+  // `84b21cb5`: with a PROD command carrying an inline JWT, appending a tidy
+  // ` -- comment` to the MANIFEST's copy of that command collapsed the whole
+  // result to `manifest-invalid` and the `cron-secret-in-command` finding
+  // VANISHED for all fourteen jobs. This arm's own adversary is someone
+  // hand-cleaning the committed text, and an oracle-validity check placed above
+  // the live credential scan hands them an off switch.
+  //
+  // This loop reads `prodRows` ONLY. It needs nothing from the oracle, so no
+  // oracle state — absent, unparsable, schema-bumped, hand-edited, or captured
+  // from a different database — can silence it.
+  // -------------------------------------------------------------------------
+  const rows = Array.isArray(prodRows) ? prodRows : [];
+  const prodHygiene = new Map();
+  for (const row of rows) {
+    const v = hygieneViolations(row.jobname, row.command);
+    prodHygiene.set(row.jobname, v);
+    if (v.length > 0) {
+      defects.push({
+        kind: "cron-secret-in-command",
+        subject: `prod:${row.jobname}`,
+        detail: `the PROD cron.job row for ${row.jobname} fails ${v.length} hygiene rule(s): ${v.join(" ")}`,
+      });
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // (0b) WHICH DATABASE WAS THIS READ FROM? MANDATORY, and checked here rather
+  //      than only at the call site so that a future second caller cannot omit
+  //      it. Note the `return` carries section (0)'s findings with it: a
+  //      reading whose provenance failed still reports the credentials it saw.
+  // -------------------------------------------------------------------------
+  const liveMarker = typeof opts.liveMarker === "string" ? opts.liveMarker.trim() : "";
+  if (liveMarker.length === 0) {
+    defects.push({
+      kind: "measure-fail",
+      subject: "database marker",
+      detail:
+        "the live database marker was never established, so no statement about drift can be made. current_database() is `postgres` on every Supabase project and proves nothing; the hand-set COMMENT ON DATABASE marker is the only identification that exists.",
+    });
+    return { defects, lines };
+  }
+
+  // -------------------------------------------------------------------------
+  // (1) Validate the ORACLE. Comparing against an invalid oracle would
   //     produce confident nonsense — and "no manifest" must never read as "no
   //     drift", which is the whole SKIP-01 shape this phase exists to remove.
   // -------------------------------------------------------------------------
@@ -445,7 +499,14 @@ export function compareManifest(manifest, prodRows) {
     return { defects, lines };
   };
 
+  const readError = typeof opts.manifestReadError === "string" ? opts.manifestReadError.trim() : "";
+
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+    if (readError.length > 0) {
+      return invalid(
+        `the cron manifest at ${opts.manifestPath || "<unknown path>"} could not be read or parsed: ${readError}. No comparison happened; that is not the absence of drift.`,
+      );
+    }
     return invalid(
       "the cron manifest is missing or is not a JSON object, so NO comparison happened. An absent oracle is not the absence of drift.",
     );
@@ -490,9 +551,31 @@ export function compareManifest(manifest, prodRows) {
   const marker = manifest.database_marker || "<unset>";
 
   // -------------------------------------------------------------------------
-  // (2) Hygiene on BOTH sides, INDEPENDENTLY of equality. A PROD command that
-  //     matches the manifest byte for byte and still carries an inline key is
-  //     STILL a defect — that is what makes the oracle "achievable" rather than
+  // (1b) The oracle is well-formed — so it can now be asked WHICH DATABASE it
+  //      describes, and that answer compared to the one in hand. Two different
+  //      databases produce a full-page diff that means nothing: it is not drift,
+  //      it is a comparison that was never valid. Both markers are names a human
+  //      chose, so both are safe to print — and printing both is the only way
+  //      the reader can tell which side is the surprise.
+  //
+  //      Placed AFTER section (1) on purpose: a null or schema-bumped oracle
+  //      must report `manifest-invalid`, not a marker mismatch against
+  //      `undefined`. Section (0)'s findings ride along on this return too.
+  // -------------------------------------------------------------------------
+  if (String(manifest.database_marker ?? "").trim() !== liveMarker) {
+    defects.push({
+      kind: "measure-fail",
+      subject: "database marker",
+      detail: `the manifest was captured from a database marked ${JSON.stringify(String(manifest.database_marker ?? ""))} but this reading came from one marked ${JSON.stringify(liveMarker)}. These are two different databases, so NO comparison happened — a diff between two databases is not drift.`,
+    });
+    return { defects, lines };
+  }
+
+  // -------------------------------------------------------------------------
+  // (2) MANIFEST-side hygiene, INDEPENDENTLY of equality. (The PROD side ran in
+  //     section (0), above every return.) A PROD command that matches the
+  //     manifest byte for byte and still carries an inline key is STILL a
+  //     defect — that is what makes the oracle "achievable" rather than
   //     "whatever PROD has".
   // -------------------------------------------------------------------------
   const manifestHygiene = new Map();
@@ -508,23 +591,11 @@ export function compareManifest(manifest, prodRows) {
       });
     }
   }
-  const prodHygiene = new Map();
-  for (const row of prodRows) {
-    const v = hygieneViolations(row.jobname, row.command);
-    prodHygiene.set(row.jobname, v);
-    if (v.length > 0) {
-      defects.push({
-        kind: "cron-secret-in-command",
-        subject: `prod:${row.jobname}`,
-        detail: `the PROD cron.job row for ${row.jobname} fails ${v.length} hygiene rule(s): ${v.join(" ")}`,
-      });
-    }
-  }
 
   // -------------------------------------------------------------------------
   // (3) Adjacency: zero rows and duplicates, before any set arithmetic.
   // -------------------------------------------------------------------------
-  if (prodRows.length === 0) {
+  if (rows.length === 0) {
     drift(
       "cron.job",
       `cron-drift: PROD cron.job returned zero rows; the manifest has ${manifest.jobs.length} job(s). Every scheduled job has vanished — this is the loudest possible drift, not "no drift".`,
@@ -534,7 +605,7 @@ export function compareManifest(manifest, prodRows) {
 
   const seen = new Set();
   const duplicates = new Set();
-  for (const row of prodRows) {
+  for (const row of rows) {
     if (seen.has(row.jobname)) duplicates.add(row.jobname);
     seen.add(row.jobname);
   }
@@ -550,7 +621,7 @@ export function compareManifest(manifest, prodRows) {
   //     construction — the comparison is a map lookup, never a positional one.
   // -------------------------------------------------------------------------
   const manifestByName = new Map(manifest.jobs.map((j) => [j.jobname, j]));
-  const prodByName = new Map(prodRows.map((r) => [r.jobname, r]));
+  const prodByName = new Map(rows.map((r) => [r.jobname, r]));
 
   for (const name of prodByName.keys()) {
     if (!manifestByName.has(name)) {
@@ -616,7 +687,7 @@ export function compareManifest(manifest, prodRows) {
   }
 
   lines.push(
-    `cron-drift: ${prodRows.length} PROD job(s) vs ${manifest.jobs.length} manifest job(s), ${differing} differing`,
+    `cron-drift: ${rows.length} PROD job(s) vs ${manifest.jobs.length} manifest job(s), ${differing} differing`,
   );
 
   return { defects, lines };
@@ -640,27 +711,22 @@ function readManifestFile(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
+/**
+ * ⛔ THE ORDER OF THIS FUNCTION IS LOAD-BEARING, AND IT IS NOT THE ORDER IT WAS
+ * WRITTEN IN. `run()` used to read the ORACLE first and `return` on a read
+ * error BEFORE `CRON_JOB_SQL` was ever issued — so hoisting the hygiene scan
+ * inside `compareManifest` alone would still have left the "no oracle at all"
+ * case silent, because there were no PROD rows to scan. The oracle read is
+ * therefore LAST, and it never returns: whatever it produces is handed to
+ * `compareManifest`, which reports the credentials it can see before it judges
+ * the oracle it was given.
+ *
+ * The two EARLY returns that remain are both "nothing has been read yet":
+ * a marker read that failed and a `cron.job` read that failed. There is no row
+ * to scan in either case, so returning hides nothing.
+ */
 async function run({ seams, log, addDefect, manifestPath }) {
-  // (1) The oracle. An ABSENT file is `manifest-invalid`, never a skip.
-  let manifest = null;
-  let readError = null;
-  try {
-    manifest = readManifestFile(manifestPath);
-  } catch (err) {
-    readError = err && err.message ? err.message : String(err);
-  }
-  if (readError) {
-    addDefect(
-      "manifest-invalid",
-      "cron-drift",
-      "cron-manifest.json",
-      `the cron manifest at ${manifestPath} could not be read or parsed: ${readError}. No comparison happened; that is not the absence of drift.`,
-      REMEDIES["manifest-invalid"],
-    );
-    return;
-  }
-
-  // (2) WHICH DATABASE AM I ON? `current_database()` is `postgres` on every
+  // (1) WHICH DATABASE AM I ON? `current_database()` is `postgres` on every
   //     Supabase project and proves nothing; the hand-set COMMENT ON DATABASE
   //     marker is the only identification that exists. The marker is a name a
   //     human chose, so it is safe to print.
@@ -670,7 +736,7 @@ async function run({ seams, log, addDefect, manifestPath }) {
       "measure-fail",
       "cron-drift",
       "database marker",
-      `the database marker could not be read: ${markerRes.measureFail}.`,
+      `the database marker could not be read: ${markerRes.measureFail}. No cron.job row has been read at this point, so there is nothing this return can hide.`,
     );
     return;
   }
@@ -687,7 +753,7 @@ async function run({ seams, log, addDefect, manifestPath }) {
   }
   log(`cron-drift: database marker = ${marker}`);
 
-  // (3) All rows of cron.job, with separators a multi-line command survives.
+  // (2) All rows of cron.job, with separators a multi-line command survives.
   const res = await seams.sql("cron-drift", CRON_JOB_SQL, CRON_JOB_SEPARATORS);
   if (res.measureFail) {
     addDefect(
@@ -699,8 +765,27 @@ async function run({ seams, log, addDefect, manifestPath }) {
     return;
   }
 
+  // (3) Parse the rows.
   const prodRows = parseCronJobRows(res.stdout);
-  const { defects, lines } = compareManifest(manifest, prodRows);
+
+  // (4) The oracle, LAST and WITHOUT A RETURN. An ABSENT or unparsable file is
+  //     `manifest-invalid` — raised by `compareManifest` from
+  //     `manifestReadError`, BELOW its section (0), so the credential scan on
+  //     the rows already in hand happens either way.
+  let manifest = null;
+  let readError = null;
+  try {
+    manifest = readManifestFile(manifestPath);
+  } catch (err) {
+    readError = err && err.message ? err.message : String(err);
+  }
+
+  // (5) Compare.
+  const { defects, lines } = compareManifest(manifest, prodRows, {
+    liveMarker: marker,
+    manifestReadError: readError,
+    manifestPath,
+  });
   for (const line of lines) log(line);
   for (const d of defects) addDefect(d.kind, "cron-drift", d.subject, d.detail, REMEDIES[d.kind]);
 }

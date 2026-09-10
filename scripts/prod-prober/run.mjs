@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 52;
+export const SELF_TEST_SCENARIOS = 56;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -1508,8 +1508,14 @@ export async function selfTest() {
   // The cron-drift scenarios the ARM_FIXTURE_TABLE cannot express: they need a
   // DIFFERENT manifest, an absent manifest, or no verdict loop at all.
   // -------------------------------------------------------------------------
-  const driftRun = async (prodRows, manifestPath, log) => {
-    const seams = createSeams({ sqlRunner: fixtureSql({ cronJobRows: prodRows }) });
+  //
+  // ⚠️ `marker` is the FOURTH argument and defaults to `undefined`, which
+  // `fixtureSql` answers with `FIXTURE_DB_MARKER` — the same marker every
+  // committed cron-drift manifest fixture records. Passing a DIFFERENT string
+  // is how the "this reading came from another database" state is driven, with
+  // no new seam and no production-code hook that exists only for the test.
+  const driftRun = async (prodRows, manifestPath, log, marker) => {
+    const seams = createSeams({ sqlRunner: fixtureSql({ cronJobRows: prodRows, marker }) });
     return runProber({
       arms: [CRON_DRIFT_MOD.ARM],
       env: { ...SELFTEST_ENV },
@@ -1619,7 +1625,137 @@ export async function selfTest() {
         ) &&
         expect(
           noDefectOfKind(r.defects, ["cron-drift", "cron-secret-in-command"]),
-          "and NO drift or hygiene verdict — with no oracle nothing was compared, and a comparison that did not happen is not a comparison that passed",
+          "and NO drift or hygiene verdict — with no oracle nothing was COMPARED, and a comparison that did not happen is not a comparison that passed. The PROD hygiene scan still ran (section 0, above every return); THESE rows are simply clean, which the three HOIST scenarios below prove by running the same path with DIRTY ones",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("HOIST: the PROD credential scan fires with the oracle ABSENT");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE DEFECT THAT REVERTED A WHOLE REPAIR. `84b21cb5` put oracle
+    // validation ABOVE the PROD-side hygiene loop, so hand-editing the
+    // committed manifest — the one thing this arm's own adversary can do —
+    // turned the live credential scan OFF for all fourteen jobs. These three
+    // scenarios drive the SAME dirty PROD rows through three different broken
+    // oracle states and require the credential finding in every one.
+    const prod = loadFixture("cron-drift", "prod-inline-key.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const missing = driftFixturePath("manifest-HOIST-NO-SUCH-FILE.json");
+      const r = await driftRun(prod.data, missing, quiet);
+      const invalid = r.defects.filter((x) => x.kind === "manifest-invalid");
+      pass =
+        expect(r.exitCode === 1, `an absent oracle over dirty rows exits 1 (got ${r.exitCode})`) &&
+        expect(invalid.length === 1, `exactly one manifest-invalid (got ${invalid.length})`) &&
+        expect(
+          String((invalid[0] || {}).detail).includes("manifest-HOIST-NO-SUCH-FILE.json"),
+          "naming the path it looked for",
+        ) &&
+        expect(
+          r.defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:match_engine_cron"),
+          "AND the PROD credential is STILL reported — an unreadable oracle is not an off switch for the live scan",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("HOIST: the PROD credential scan fires with the oracle STALE (schema_version bumped)");
+  // -------------------------------------------------------------------------
+  {
+    const prod = loadFixture("cron-drift", "prod-inline-key.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const r = await driftRun(prod.data, driftFixturePath("manifest-schema-bumped.json"), quiet);
+      const invalid = r.defects.filter((x) => x.kind === "manifest-invalid");
+      pass =
+        expect(r.exitCode === 1, `a schema-bumped oracle over dirty rows exits 1 (got ${r.exitCode})`) &&
+        expect(invalid.length === 1, `exactly one manifest-invalid (got ${invalid.length})`) &&
+        expect(
+          String((invalid[0] || {}).detail).includes("schema_version"),
+          "saying the schema is the reason no comparison happened",
+        ) &&
+        expect(
+          r.defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:match_engine_cron"),
+          "AND the PROD credential is STILL reported — a stale oracle is not an off switch either",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("HOIST: the PROD credential scan fires with the live marker MISMATCHED");
+  // -------------------------------------------------------------------------
+  {
+    // Three things at once, and the third is the point: (a) a manifest captured
+    // from one database compared against a reading from another is a
+    // measure-fail, (b) it produces NO drift verdict, because a diff between two
+    // databases is not drift, and (c) the credential in the rows actually read
+    // is reported anyway.
+    const prod = loadFixture("cron-drift", "prod-inline-key.json");
+    const man = loadFixture("cron-drift", "manifest-inline-key.json");
+    if (!prod.ok || !man.ok) {
+      pass = expect(false, prod.ok ? man.reason : prod.reason) && pass;
+    } else {
+      const otherMarker = "quantalyze-fixture-OTHER";
+      const r = await driftRun(prod.data, driftFixturePath("manifest-inline-key.json"), quiet, otherMarker);
+      const mf = r.defects.filter((x) => x.kind === "measure-fail" && x.subject === "database marker");
+      pass =
+        expect(
+          man.data.database_marker !== otherMarker,
+          `PRECONDITION: the two markers genuinely differ (${man.data.database_marker} vs ${otherMarker})`,
+        ) &&
+        expect(r.exitCode === 1, `a marker mismatch exits 1, never 0 (got ${r.exitCode})`) &&
+        expect(mf.length === 1, `exactly one measure-fail on the database marker (got ${mf.length})`) &&
+        expect(
+          String((mf[0] || {}).detail).includes(man.data.database_marker) &&
+            String((mf[0] || {}).detail).includes(otherMarker),
+          "naming BOTH markers — they are names a human chose, and the reader cannot tell which side is the surprise without both",
+        ) &&
+        expect(
+          noDefectOfKind(r.defects, ["cron-drift"]),
+          "and NO drift verdict at all — a diff between two DIFFERENT databases is not drift, it is a comparison that was never valid",
+        ) &&
+        expect(
+          r.defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:match_engine_cron"),
+          "AND the PROD credential is STILL reported — the rows were really read, whatever database they came from",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("MARKER MANDATORY: compareManifest called without a liveMarker is a measure-fail, never a pass");
+  // -------------------------------------------------------------------------
+  {
+    // A DIRECT call, deliberately: `run()` guards the marker itself, so this is
+    // the only way to prove the FUNCTION refuses rather than the caller. Both
+    // inputs are the CLEAN ones — the pair that produces zero defects with a
+    // marker — so the single defect below can only come from the missing marker.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    const man = loadFixture("cron-drift", "manifest.json");
+    if (!prod.ok || !man.ok) {
+      pass = expect(false, prod.ok ? man.reason : prod.reason) && pass;
+    } else {
+      const r = CRON_DRIFT_MOD.compareManifest(man.data, prod.data, {});
+      const control = CRON_DRIFT_MOD.compareManifest(man.data, prod.data, { liveMarker: man.data.database_marker });
+      pass =
+        expect(
+          r.defects.length === 1,
+          `exactly one defect with no marker in hand (got ${r.defects.map((x) => x.kind).join(", ") || "none"})`,
+        ) &&
+        expect(
+          (r.defects[0] || {}).kind === "measure-fail" && (r.defects[0] || {}).subject === "database marker",
+          `and it is a measure-fail on the database marker (got ${(r.defects[0] || {}).kind} / ${(r.defects[0] || {}).subject})`,
+        ) &&
+        expect(
+          control.defects.length === 0,
+          `CONTROL: the SAME two inputs WITH the marker produce zero defects (got ${control.defects.map((x) => x.kind).join(", ") || "none"}) — so the defect above is the missing marker and nothing else`,
         ) &&
         pass;
     }
