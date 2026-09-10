@@ -12,8 +12,8 @@
  *
  * ⭐ WHY A HELPER AND NOT AN EXEMPTION LIST. The lint rule in
  * `src/__tests__/test-restore-workflow-wiring.test.ts` scans every
- * `src/__tests__/*.test.ts`, and the calibrations that measure this trap write
- * the offending expression DELIBERATELY. A `file:line`
+ * `src/__tests__/*.test.ts` and `*.test.tsx`, and the calibrations that measure
+ * this trap write the offending expression DELIBERATELY. A `file:line`
  * allowlist rots on the next reformat (this branch carries a dated record of
  * exactly that), and fragment assembly — `"sl" + "ice"` — would make the
  * demonstrations unreadable, and the demonstrations ARE the evidence. Routing
