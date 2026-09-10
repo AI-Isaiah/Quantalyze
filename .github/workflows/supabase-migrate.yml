@@ -855,9 +855,11 @@ jobs:
           echo "::endgroup::"
           echo "::group::Post-apply migration list verification (C-0331 twin)"
           supabase migration list --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-migration-list.txt"
-          # `-a` is mandatory repo-wide: a tracked file carries a deliberate NUL byte and plain
-          # grep reports such input clean. This is a NEGATIVE check, so reading clean is
-          # indistinguishable from finding nothing — and this one green-lights the PROD apply.
+          # `-a` is mandatory repo-wide (this repo tracks a file carrying a deliberate NUL byte).
+          # MEASURED 2026-09-09, Phase 164.8.2: on GNU grep 3.11 (the runner's) and BSD grep 2.6.0
+          # the missing `-a` changed NOTHING; on ugrep 7.8.4 the check read a NUL-bearing list as
+          # CLEAN. `-a` removes the flavour dependence — it did not close a live CI exposure. The
+          # reason it still matters: this is a NEGATIVE check that green-lights the PROD apply.
           if grep -aEiq '(^|[[:space:]|])reverted([[:space:]|]|$)' "${RUNNER_TEMP}/test-migration-list.txt"; then
             echo "::error::Reverted migrations detected after db push to TEST — see list above (C-0331 twin)"
             exit 1
