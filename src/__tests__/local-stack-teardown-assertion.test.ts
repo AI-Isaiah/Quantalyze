@@ -32,6 +32,14 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// ⛔ THE DELIBERATE DEGENERACY DEMONSTRATION, ROUTED THROUGH ITS ONE NAMED HOME
+// (Phase 164.8.2 / W3). The calibration below must WRITE the unchecked narrow —
+// that expression IS its evidence — but the class rule in
+// `test-restore-workflow-wiring.test.ts` now scans every test file. A file:line
+// allowlist rots and fragment assembly ("sl" + "ice") would make the evidence
+// unreadable, so the trap lives in one announced function instead.
+import { degenerateNarrow } from "../test/helpers/degenerate-narrow";
+
 const LANE = "scripts/local-stack/run.sh";
 
 // ---------------------------------------------------------------------------
@@ -272,7 +280,9 @@ describe("[164.8.2-WR-07] the case-dispatch slice anchor fails loud instead of d
     // ⚠️ The trap this replaces: the unchecked form returns the LAST CHARACTER
     // of the script, from which the mode regex extracts NOTHING — and an empty
     // mode list makes the usage-coverage loop below assert nothing at all.
-    const degenerate = mutant.slice(mutant.indexOf('case "${1:-}" in'));
+    const degenerate = degenerateNarrow(mutant, {
+      from: 'case "${1:-}" in',
+    });
     expect(degenerate.length, "the pre-WR-07 shape degenerated rather than failing").toBe(1);
     expect([...degenerate.matchAll(/^ {2}(--?[a-z-]+|up|down)\)/gm)]).toEqual([]);
   });

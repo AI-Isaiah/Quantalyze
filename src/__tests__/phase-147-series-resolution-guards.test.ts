@@ -3,6 +3,14 @@ import { join, relative } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+// ⛔ THE DELIBERATE DEGENERACY DEMONSTRATION, ROUTED THROUGH ITS ONE NAMED HOME
+// (Phase 164.8.2 / W3). The calibration below must WRITE the unchecked narrow —
+// that expression IS its evidence — but the class rule in
+// `test-restore-workflow-wiring.test.ts` now scans every test file. A file:line
+// allowlist rots and fragment assembly ("sl" + "ice") would make the evidence
+// unreadable, so the trap lives in one announced function instead.
+import { degenerateNarrow } from "../test/helpers/degenerate-narrow";
+
 /**
  * Phase 147 (SCEN-01) — series-resolution durability guard.
  *
@@ -469,7 +477,11 @@ describe("[164.8.2-WR-07] the embed block-slice anchors fail loud instead of deg
     // ⚠️ And the trap it replaces, measured rather than asserted: the unchecked
     // form returns the rest of the file, in which BOTH pinned column names
     // appear — so the arm would have gone green while reading nothing.
-    const degenerate = mutant.slice(embedStart, mutant.indexOf(")", embedStart));
+    const degenerate = degenerateNarrow(mutant, {
+      at: embedStart,
+      upTo: ")",
+      upToFrom: embedStart,
+    });
     expect(degenerate.length, "the pre-WR-07 shape widened instead of failing").toBeGreaterThan(
       real.length,
     );

@@ -36,6 +36,14 @@ import { basename, dirname, join, resolve } from "node:path";
 import { normalizeSql } from "../../scripts/sql-body-normalize.mjs";
 import { createHash } from "node:crypto";
 
+// ⛔ THE DELIBERATE DEGENERACY DEMONSTRATION, ROUTED THROUGH ITS ONE NAMED HOME
+// (Phase 164.8.2 / W3). The calibration below must WRITE the unchecked narrow —
+// that expression IS its evidence — but the class rule in
+// `test-restore-workflow-wiring.test.ts` now scans every test file. A file:line
+// allowlist rots and fragment assembly ("sl" + "ice") would make the evidence
+// unreadable, so the trap lives in one announced function instead.
+import { degenerateNarrow } from "../test/helpers/degenerate-narrow";
+
 const PROD_GATE = "scripts/prod-body-drift-check.sh";
 const LEDGER_GATE = "scripts/test-ledger-drift-check.sh";
 
@@ -5052,7 +5060,9 @@ describe("[164.8.2-WR-07] slice anchors fail loud instead of degenerating", () =
     // ⚠️ And the degenerate value the old code returned is exactly the trap: an
     // unchecked `slice(0, -1)` here is nearly the WHOLE basename, which still
     // looks like a plausible timestamp to every assertion downstream.
-    expect(mutant.slice(0, mutant.indexOf("_"))).toBe("20260828061901-add-thing.sq");
+    expect(degenerateNarrow(mutant, { upTo: "_" })).toBe(
+      "20260828061901-add-thing.sq",
+    );
   });
 
   it("lastAnchorIndex throws BY NAME when the command has no argument separator", () => {
@@ -5066,6 +5076,6 @@ describe("[164.8.2-WR-07] slice anchors fail loud instead of degenerating", () =
     expect(() => lastAnchorIndex(mutant, " ")).toThrow(/ANCHOR MISSING \(last\): " "/);
     // The trap it replaces: `slice(-1 + 1)` is `slice(0)` — the WHOLE command,
     // so two argument-less commands would "agree about their dump" naming none.
-    expect(mutant.slice(mutant.lastIndexOf(" ") + 1)).toBe(mutant);
+    expect(degenerateNarrow(mutant, { fromLast: " ", plus: 1 })).toBe(mutant);
   });
 });
