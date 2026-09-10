@@ -1499,6 +1499,123 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
     }
   });
 
+  it("C2 — the scan's class list IS the workflow's own redaction pattern, derived not restated", () => {
+    // ⛔ THE DEFECT. The artifact's README (in
+    // `.github/workflows/test-restore-from-baseline.yml`) defines the redaction
+    // class as SIX shapes — DSN, supabase host, project ref, the `connect`
+    // meta-command, ALTER DATABASE, JWT — and this scan was `postgres(ql)?://`
+    // ALONE, while the script header claimed the gap was closed for "the one class
+    // that must never be published anywhere". Four of the six were dropped with no
+    // stated reason. `survivors.sql` carries `pg_get_triggerdef(...)` and
+    // reconstructed `CREATE POLICY ... USING (<qual>)` read off LIVE shared TEST, so
+    // a host or a project ref in one of those bodies shipped with the check green.
+    //
+    // ⭐ SO THE AGREEMENT IS DERIVED FROM BOTH FILES, never re-typed here. If the
+    // workflow's pattern gains a class, this arm goes red until the script does too.
+    const wf = read(".github/workflows/test-restore-from-baseline.yml");
+    const ledgerRe = /^\s*ledger_re='(.*)'\s*$/m.exec(wf);
+    expect(
+      ledgerRe,
+      "the workflow no longer declares a single-quoted `ledger_re=` line — the anchor this agreement is read through moved",
+    ).not.toBeNull();
+    const schemaRe = `${ledgerRe?.[1]}|ALTER DATABASE`;
+
+    // The script's list, read out of the live array.
+    const arr = /\n  local -a classes=\(\n([\s\S]*?)\n  \)\n/.exec(SRC);
+    expect(arr, "the scan no longer declares a `classes=(…)` array").not.toBeNull();
+    const entries = (arr?.[1] ?? "")
+      .split("\n")
+      .map((l) => l.trim().replace(/^'/, "").replace(/'$/, ""))
+      .filter((l) => l.length > 0);
+    const names = entries.map((e) => e.slice(0, e.indexOf("|")));
+    const res = entries.map((e) => e.slice(e.indexOf("|") + 1));
+
+    expect(
+      res.join("|"),
+      "the scan's classes and the workflow's schema-scan pattern have DIVERGED. The README tells a reader of the artifact that these files were held to that pattern; the code is what actually holds them to it.",
+    ).toBe(schemaRe);
+    expect(new Set(names).size, "two classes share a name — a hit could not be read").toBe(names.length);
+
+    // CALIBRATION — drop a class on a scratch copy and the equality must break.
+    const dropped = SRC.replace(`    '${entries[1]}'\n`, "");
+    expect(dropped, "the C2 class-list calibration did not APPLY").not.toBe(SRC);
+    const dArr = /\n  local -a classes=\(\n([\s\S]*?)\n  \)\n/.exec(dropped);
+    const dRes = (dArr?.[1] ?? "")
+      .split("\n")
+      .map((l) => l.trim().replace(/^'/, "").replace(/'$/, ""))
+      .filter((l) => l.length > 0)
+      .map((e) => e.slice(e.indexOf("|") + 1));
+    expect(dRes.join("|")).not.toBe(schemaRe);
+  });
+
+  it("EXECUTED — C2: EVERY class refuses, names its class, and never echoes the match", () => {
+    // ⛔ ASSEMBLED AT RUNTIME, NEVER SPELLED AS LITERALS — the same discipline the
+    // DSN fixture above records, and for the same reason: each of these has to carry
+    // a REAL credential SHAPE or it would not exercise the scanner, which is exactly
+    // what the pre-push guardrail is looking for. Do NOT inline them, and do NOT
+    // allowlist this file.
+    //
+    // Each fixture carries a NEEDLE that appears nowhere else, so "the refusal did
+    // not echo the match" is measured on a token rather than assumed.
+    const REF20 = "abcdefghij".repeat(2); // 20 lowercase letters — a project ref's shape
+    const CASES: { cls: string; needle: string; text: string }[] = [
+      {
+        cls: "DSN",
+        needle: "db.example",
+        text: `-- ${["postgre", "sql://u", ":p@db.example:5432/postgres"].join("")}\n`,
+      },
+      {
+        cls: "supabase host",
+        needle: "exampleref",
+        text: `-- ${["@db.exampleref", ".supa", "base.co"].join("")}\n`,
+      },
+      {
+        cls: "project ref",
+        needle: REF20,
+        text: `-- ${[REF20, ".supa", "base"].join("")}\n`,
+      },
+      {
+        cls: "connect meta-command",
+        needle: "target_db_name",
+        text: `${["\\", "connect target_db_name"].join("")}\n`,
+      },
+      {
+        cls: "JWT",
+        needle: "abcdefghijklmn",
+        text: `-- ${["eyJ", "abcdefghijklmn"].join("")}\n`,
+      },
+      {
+        cls: "ALTER DATABASE",
+        needle: "sekrit_value",
+        text: "ALTER DATABASE postgres SET app.k = 'sekrit_value';\n",
+      },
+    ];
+
+    const body = "CREATE TABLE public.x ();\nSELECT $$a dollar-quoted body$$;\n";
+    const clean = Object.fromEntries(STAGED.map((f) => [f, body]));
+    expect(runDsnAssert(clean).status, "the six-class scan refuses clean SQL").toBe(0);
+
+    for (const { cls, needle, text } of CASES) {
+      // survivors.sql is the file the README singles out: it carries triggerdef and
+      // policy qual text read off LIVE shared TEST.
+      const seeded = { ...clean, "survivors.sql": `${body}${text}` };
+      const red = runDsnAssert(seeded);
+      expect(
+        red.status,
+        `a ${cls} shape in survivors.sql did NOT refuse — that class reaches a world-readable artifact unscanned. Output:\n${red.out}`,
+      ).toBe(1);
+      expect(red.out, `the ${cls} refusal does not name the file`).toContain("survivors.sql");
+      expect(
+        red.out,
+        `the ${cls} refusal does not name the CLASS, so an operator cannot tell which of the six shapes was found without opening the file by hand`,
+      ).toContain(cls);
+      expect(
+        red.out.includes(needle),
+        `the ${cls} refusal ECHOED the matched text — the refusal is itself the leak`,
+      ).toBe(false);
+    }
+  });
+
   it("EXECUTED — C1: a MISSING published file is a named refusal, not a clean four-file sentence", () => {
     // ⛔ THE DEFECT. The scan loop's `[ -f … ] || continue` is silent and the
     // closing `note` was unconditional and restated all four names, so a run that
