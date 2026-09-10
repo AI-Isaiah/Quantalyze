@@ -829,6 +829,55 @@ describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is 
     return b < 0 ? "" : lines.slice(a, b + 1).join("\n");
   }
 
+  /**
+   * The W2 block as PROSE: each line's leading `# ` stripped and the lines rejoined
+   * with a space.
+   *
+   * ⭐ THIS IS WHY IT IS REFLOW-INVARIANT, and it is IN-02's idiom hoisted rather
+   * than a new one. A comment sentence WRAPS; where it wraps is a function of how
+   * long the words are, so a predicate read over RAW LINES binds to whatever
+   * happened not to wrap. Read over prose, the same sentence is the same string
+   * whether it occupies one line or four.
+   */
+  function w2Prose(text: string): string {
+    return w2Block(text)
+      .split("\n")
+      .map((l) => l.replace(/^\s*#\s?/, ""))
+      .join(" ");
+  }
+
+  /**
+   * ⛔ A DATED CLAIM — a date, and in the SAME SENTENCE one of the count WORDS.
+   *
+   * ⭐ REWRITTEN 2026-09-10 (code review IN-04). The predicate used to require a
+   * line matching `^\s*# \(YYYY-MM-DD: WORD, after …\)` — exactly one of them,
+   * inside the sliced block. The word derivation underneath it was real and could
+   * fail (the review verified that), but the LINE SHAPE it bound to was a
+   * convention this pin itself introduced: nothing in the script requires the
+   * parenthesis, the colon, the comma, or the claim starting a line. An innocent
+   * reflow of that comment reddened a gate for a non-defect, and a gate that reds
+   * for a non-defect is one a maintainer learns to edit rather than to read.
+   *
+   * So the binding moved onto the FACT: somewhere in the W2 block there is exactly
+   * one dated sentence that names a refusal count, and the count it names is the
+   * live one. `[^.]*?` keeps the match inside a single sentence, so a date in one
+   * sentence cannot reach a word in the next.
+   *
+   * ⛔ THIS IS NOT A RETREAT TO THE TAUTOLOGY IT REPLACED. The check this whole
+   * arm replaced compared a `grep -c` against a byte-identical copy of itself and
+   * could never fail. Both halves here are still DERIVED from the script: `n` is
+   * counted off the live `^refuse_*() {` declarations, and the word is looked up
+   * in the table — nothing is re-typed, and the calibrations below observe the
+   * predicate flip on a drifted word and on a deleted claim.
+   */
+  function datedClaims(text: string): RegExpExecArray[] {
+    return [
+      ...w2Prose(text).matchAll(
+        new RegExp(`\\d{4}-\\d{2}-\\d{2}[^.]*?\\b(${WORDS.join("|")})\\b`, "g"),
+      ),
+    ] as RegExpExecArray[];
+  }
+
   it("IN-01 — the W2 comment's refusal WORD is the live `refuse_*() {` count, and so is the emitted line", () => {
     const n = liveLines(SRC).filter(({ line }) => /^refuse_[a-z_]*\(\) \{/.test(line)).length;
     const word = WORDS[n];
@@ -840,17 +889,15 @@ describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is 
     const block = w2Block(SRC);
     expect(block, "the W2 block slicer found no anchor — every pin below it would be vacuous").not.toBe("");
 
-    const dated = block
-      .split("\n")
-      .filter((l) => /^\s*# \(\d{4}-\d{2}-\d{2}: /.test(l));
+    const claims = datedClaims(SRC);
     expect(
-      dated.length,
-      "the W2 block no longer carries exactly one dated `# (YYYY-MM-DD: WORD, after …)` line — the shape this pin and the plan's shell verify both read",
+      claims.length,
+      "the W2 block no longer carries exactly one DATED SENTENCE naming a refusal count. One is the contract: zero means the regeneration claim was dropped, two means a reader cannot tell which one is current.",
     ).toBe(1);
     expect(
-      dated[0],
-      `the W2 comment's refusal word disagrees with the live count of ${n}. Regenerate with \`grep -c '^refuse_[a-z_]*() {' ${SCRIPT}\` and write ${word} into the dated line.`,
-    ).toContain(`${word},`);
+      claims[0][1],
+      `the W2 comment's dated refusal count disagrees with the live count of ${n}. Regenerate with \`grep -c '^refuse_[a-z_]*() {' ${SCRIPT}\` and write ${word} into the dated sentence. (Its LAYOUT is free — wrap it however you like.)`,
+    ).toBe(word);
 
     const emitted = block.split("\n").filter((l) => l.includes("self-test OK"));
     expect(emitted.length).toBe(1);
@@ -859,25 +906,57 @@ describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is 
       `the EMITTED closing line disagrees with the live count of ${n}. The comment and the sentence the operator actually reads must carry the same word — they did not, and that is IN-01.`,
     ).toContain(`${word} refusals`);
 
-    // CALIBRATION — put the stale word back on a scratch string; both halves flip.
+    // CALIBRATION 1 — DRIFT. Put the stale word back on a scratch copy, editing the
+    // block's FIRST occurrence rather than a punctuation-bearing literal, and watch
+    // the predicate flip.
     const stale = WORDS[n - 1];
-    const drifted = SRC.replace(`: ${word}, after`, () => `: ${stale}, after`);
-    expect(drifted, "the IN-01 calibration did not APPLY").not.toBe(SRC);
-    const dBlock = w2Block(drifted);
-    expect(dBlock.split("\n").filter((l) => /^\s*# \(\d{4}-\d{2}-\d{2}: /.test(l))[0]).not.toContain(
-      `${word},`,
-    );
+    const driftedBlock = block.replace(new RegExp(`\\b${word}\\b`), stale);
+    expect(driftedBlock, "the IN-01 drift calibration did not APPLY to the block").not.toBe(block);
+    const drifted = SRC.replace(block, driftedBlock);
+    expect(drifted, "the IN-01 drift calibration did not APPLY").not.toBe(SRC);
+    expect(datedClaims(drifted)[0][1]).toBe(stale);
+
+    // CALIBRATION 2 — DELETION. Strip the date out of the claim; the pin must lose
+    // it entirely rather than pass on a countless sentence.
+    const undatedBlock = block.replace(/\d{4}-\d{2}-\d{2}/, "recently");
+    expect(undatedBlock, "the IN-01 deletion calibration did not APPLY to the block").not.toBe(block);
+    const undated = SRC.replace(block, undatedBlock);
+    expect(undated, "the IN-01 deletion calibration did not APPLY").not.toBe(SRC);
+    expect(datedClaims(undated).length).toBe(0);
+
+    // CALIBRATION 3 — REFLOW-INVARIANCE, the property IN-04 asked for, and the one
+    // calibration here that must come out GREEN. Break the claim across two comment
+    // lines immediately before the count word and re-read it.
+    //
+    // ⛔ THE BREAK POINT IS DERIVED FROM THE WORD, NOT FROM THE CURRENT LAYOUT, and
+    // that is not a detail. The first cut of this calibration located the line with
+    // the pre-IN-04 `# (YYYY-MM-DD: ` pattern and asserted the file carried exactly
+    // one — which put the very layout requirement IN-04 named back into the arm
+    // through the calibration. MEASURED: reflowing the real script's claim then
+    // failed with "the reflow calibration has nothing to reflow", a non-defect
+    // reddening the gate, which is the finding reproduced. Anchoring on the word
+    // works whatever shape the comment is in.
+    //
+    // The historical half — that the pre-IN-04 predicate went red on exactly this
+    // reflow — was observed against the real script and recorded in the fix report.
+    // It is NOT asserted here: pinning the old shape is how the coupling returns.
+    const reflowedBlock = block.replace(new RegExp(`\\b${word}\\b`), `\n  # ${word}`);
+    expect(reflowedBlock, "the IN-04 reflow calibration did not APPLY to the block").not.toBe(block);
+    const reflowed = SRC.replace(block, reflowedBlock);
+    expect(reflowed, "the IN-04 reflow calibration did not APPLY").not.toBe(SRC);
+    const rClaims = datedClaims(reflowed);
+    expect(
+      rClaims.length,
+      "the reflowed block lost its dated claim — the predicate is layout-bound after all, which is IN-04 un-fixed",
+    ).toBe(1);
+    expect(rClaims[0][1], "the reflowed block's dated claim lost its word").toBe(word);
   });
 
   it("IN-02 — the arm list names every arm it claims, and it names arm 26", () => {
     // The sentence WRAPS across comment lines, so it is read as PROSE: each line's
     // leading `# ` stripped and the lines rejoined with a space. Matching the raw
     // block would bind to whatever happened not to wrap.
-    const prose = (text: string) =>
-      w2Block(text)
-        .split("\n")
-        .map((l) => l.replace(/^\s*#\s?/, ""))
-        .join(" ");
+    const prose = w2Prose;
     const block = prose(SRC);
     // ⚠️ THE DERIVATION IS DELIBERATELY PARTIAL, AND SAYING SO IS THE POINT. Walking
     // `run_arm` labels back to the refusal each leg greps for would be a parser of
@@ -917,50 +996,187 @@ describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is 
     expect([...(sm![1].match(/\d+/g) ?? []).map(Number), Number(sm![2])]).not.toContain(26);
   });
 
-  it("IN-05 — every env seam the script DECLARES is named in the `--help` ENV SEAMS block", () => {
-    // ⛔ THE ONLY SANCTIONED EXCEPTION CHANNEL. A seam left out of the operator's
-    // contract has to be listed HERE, with a reason, so the omission is a reviewed
-    // line in a diff rather than an absence nobody can see. It is empty, and it
-    // should stay empty: `--help` is what an operator reads before running a
-    // destructive tool.
+  /**
+   * Names the SHELL provides. They are not seams of THIS script's contract, and
+   * `--help` documenting `BASH_SOURCE` would be noise, not a contract.
+   */
+  const SHELL_SPECIALS = new Set([
+    "BASH_SOURCE", "BASH_VERSION", "FUNCNAME", "HOME", "IFS", "LINENO",
+    "OLDPWD", "PATH", "PGPASSWORD", "PWD", "RANDOM", "SHLVL", "TMPDIR",
+  ]);
+
+  /**
+   * ⛔ THE SECOND SANCTIONED EXCEPTION CHANNEL, and it is narrow ON PURPOSE.
+   * Channel A below also catches a variable the SCRIPT ITSELF computes and then
+   * defaults defensively (`X=${X:-0}`). Each of these four is assigned `=0` at
+   * TOP LEVEL before any read, so whatever the environment supplied is destroyed
+   * before it can be used — they are readings, not seams. The list is asserted
+   * EXACT below (an entry that is no longer a candidate is RED), so it cannot
+   * quietly become a place to park a real seam.
+   */
+  const INTERNAL_NOT_SEAMS = [
+    { name: "EXP_TABLES", why: "`EXP_TABLES=0` at top level; derived from the dump TEXT in derive_expected_shape" },
+    { name: "EXP_POLICIES", why: "`EXP_POLICIES=0` at top level; same derivation" },
+    { name: "EXP_FUNCTIONS", why: "`EXP_FUNCTIONS=0` at top level; same derivation" },
+    { name: "FILTERED_N", why: "`FILTERED_N=0` at top level; counted by build_transaction's own filter grep" },
+  ];
+
+  /**
+   * ⛔ EVERY UPPERCASE NAME THE SCRIPT CAN TAKE FROM THE ENVIRONMENT, DERIVED FROM
+   * THE SCRIPT TEXT rather than typed.
+   *
+   * ⭐ WIDENED 2026-09-10 (code review WR-04), and the old derivation was PROVEN
+   * blind rather than argued so. It read ONE spelling — `NAME="${NAME:-default}"`
+   * — which covers 13 of this script's 16 environment seams. The three it could
+   * not see are `RESTORE_DB_URL`, `RESTORE_OUT_DIR` and `PGBIN`: none of them has
+   * a literal default, so all three are read with the OPTIONAL spelling instead
+   * (`[ -z "${RESTORE_DB_URL:-}" ]`, `if [ -z "${RESTORE_OUT_DIR:-}" ]`,
+   * `[ -n "${PGBIN:-}" ]`). The reviewer deleted the `RESTORE_DB_URL` entry from
+   * the operator contract and this arm stayed GREEN — the DSN of the database the
+   * script runs `DROP SCHEMA public CASCADE` against, and the one line an operator
+   * most needs to read before running it.
+   *
+   * TWO CHANNELS, because under `set -u` a seam can only reach the script two ways:
+   *   A. a DEFAULTING expansion, `${NAME:-…}` or `${NAME:?…}`. BOTH the declaration
+   *      form and the optional-read form are this shape, which is why one regex
+   *      over it now catches all sixteen.
+   *   B. a reference the script NEVER assigns anywhere. Under `set -u` a bare
+   *      `"$NAME"` the script never sets can only come from the environment (or
+   *      abort). Today this channel yields `BASH_SOURCE` alone, which
+   *      `SHELL_SPECIALS` drops; it is here so a future MANDATORY seam read bare
+   *      is not invisible the way these three were.
+   *
+   * ⚠️ WHAT IT STILL CANNOT SEE, stated rather than implied: a seam read ONLY as a
+   * bare `"$NAME"` that the script ALSO assigns somewhere (channel B excludes it,
+   * channel A never saw it). No such seam exists today — every one of the sixteen
+   * has a `${NAME:-}` read — and `set -u` makes that shape a crash waiting to
+   * happen, so it is a narrow gap and not a silent one.
+   *
+   * Comment lines are dropped first (this file's own `isLive` rule), so PROSE
+   * naming a variable is never mistaken for a read.
+   */
+  function envSeams(text: string): string[] {
+    const live = liveLines(text)
+      .map(({ line }) => line)
+      .join("\n");
+    const locals = new Set(
+      [...live.matchAll(/\blocal\s+([A-Z][A-Z0-9_]*)=/g)].map((m) => m[1]),
+    );
+    const defaulted = [...live.matchAll(/\$\{([A-Z][A-Z0-9_]*)(?::-|:\?)/g)].map((m) => m[1]);
+    const referenced = [...new Set([...live.matchAll(/\$\{?([A-Z][A-Z0-9_]*)/g)].map((m) => m[1]))];
+    const neverAssigned = referenced.filter(
+      (n) => !new RegExp(`(^|[\\s;&|(])${n}\\+?=`, "m").test(live),
+    );
+    return [...new Set([...defaulted, ...neverAssigned])]
+      .filter(
+        (n) =>
+          !locals.has(n) &&
+          !SHELL_SPECIALS.has(n) &&
+          !INTERNAL_NOT_SEAMS.some((i) => i.name === n),
+      )
+      .sort();
+  }
+
+  /** The `--help` header's ENV SEAMS block — the operator's contract, verbatim. */
+  function seamsBlock(text: string): string {
+    const lines = text.split("\n");
+    const a = lines.findIndex((l) => l.includes("── ENV SEAMS"));
+    if (a < 0) return "";
+    const b = lines.findIndex((l, i) => i > a && l.startsWith("# ──"));
+    return b < 0 ? "" : lines.slice(a, b).join("\n");
+  }
+
+  /** Seams the block does not name — the arm's whole predicate, reusable. */
+  function undocumented(text: string): string[] {
+    const block = seamsBlock(text);
+    return envSeams(text).filter((name) => !new RegExp(`\\b${name}\\b`).test(block));
+  }
+
+  it("IN-05/WR-04 — every env seam the script READS is named in the `--help` ENV SEAMS block", () => {
+    // ⛔ THE ONLY SANCTIONED EXCEPTION CHANNEL for a seam that is REAL and
+    // undocumented. It has to be listed HERE, with a reason, so the omission is a
+    // reviewed line in a diff rather than an absence nobody can see. It is empty,
+    // and it should stay empty: `--help` is what an operator reads before running
+    // a destructive tool.
     const UNDOCUMENTED_SEAMS: { name: string; why: string }[] = [];
 
-    const declared = [...SRC.matchAll(/^([A-Z_]+)="\$\{[A-Z_]+:-/gm)].map((x) => x[1]);
+    // ⛔ A RATCHET, in the direction that matters. The defect WR-04 named was a
+    // derivation that silently covered LESS of the contract than its title claimed,
+    // and a narrowing regex would shrink this number rather than turn anything red.
+    // Raise it when the seam count climbs; never lower it to make a run pass.
+    const SEAM_FLOOR = 16;
+
+    const seams = envSeams(SRC);
     expect(
-      declared.length,
-      "no `NAME=\"${NAME:-…}\"` seam declarations were found — the derivation would pass vacuously",
-    ).toBeGreaterThan(5);
+      seams.length,
+      `the seam derivation found ${seams.length} seams (${seams.join(", ")}) but the floor is ${SEAM_FLOOR}. A derivation that covers LESS of the operator contract than it used to is the WR-04 defect itself — do not lower the floor.`,
+    ).toBeGreaterThanOrEqual(SEAM_FLOOR);
 
-    const lines = SRC.split("\n");
-    const a = lines.findIndex((l) => l.includes("── ENV SEAMS"));
-    expect(a, "the ENV SEAMS header rule is gone").toBeGreaterThan(-1);
-    const b = lines.findIndex((l, i) => i > a && l.startsWith("# ──"));
-    expect(b, "the ENV SEAMS block has no closing `# ──` rule").toBeGreaterThan(a);
-    const seams = lines.slice(a, b).join("\n");
+    // The three WR-04 named, pinned BY NAME. A revert of the widening above is red
+    // here even if the floor were edited in the same commit.
+    for (const blind of ["RESTORE_DB_URL", "RESTORE_OUT_DIR", "PGBIN"]) {
+      expect(
+        seams,
+        `${blind} is not in the derived seam set. It was invisible to the pre-WR-04 derivation, and RESTORE_DB_URL is the DSN of the database this script runs DROP SCHEMA public CASCADE against.`,
+      ).toContain(blind);
+    }
 
-    const missing = declared.filter(
-      (name) =>
-        !UNDOCUMENTED_SEAMS.some((u) => u.name === name) &&
-        !new RegExp(`\\b${name}\\b`).test(seams),
+    // ⛔ THE INTERNAL-EXCLUSION LIST IS CHECKED, not trusted. Each entry must still
+    // be BOTH halves of the reason it was written with — a defaulting read (which
+    // is why the derivation catches it at all) AND a TOP-LEVEL unconditional
+    // assignment that destroys whatever the environment supplied (which is why it
+    // is not a seam). Park a real env seam here and the second half is red, because
+    // a real seam has no unconditional clobber.
+    const liveSrc = liveLines(SRC)
+      .map(({ line }) => line)
+      .join("\n");
+    for (const i of INTERNAL_NOT_SEAMS) {
+      expect(
+        new RegExp(`\\$\\{${i.name}(?::-|:\\?)`).test(liveSrc),
+        `INTERNAL_NOT_SEAMS names ${i.name} (${i.why}) but the script no longer reads it with a defaulting expansion — the entry is stale and must be deleted, not kept "just in case".`,
+      ).toBe(true);
+      expect(
+        // `^NAME=` OR `; NAME=` — the script clobbers all three EXP_* on ONE
+        // top-level line, so an anchor-only match would see the first and miss the
+        // other two. The lookahead rejects the DEFAULTING form `NAME=${NAME:-0}`,
+        // which is a read and not a clobber.
+        new RegExp(`(^|;[ \\t]*)${i.name}=(?![^\\n;]*\\$\\{${i.name})`, "m").test(liveSrc),
+        `INTERNAL_NOT_SEAMS excludes ${i.name} on the grounds that the script clobbers it at top level (${i.why}), and no unconditional top-level \`${i.name}=…\` assignment exists any more. Either it became a REAL environment seam — document it in ENV SEAMS — or the reason is stale.`,
+      ).toBe(true);
+    }
+
+    expect(
+      seamsBlock(SRC),
+      "the ENV SEAMS block slicer found no anchor — the pin below would be vacuous",
+    ).not.toBe("");
+
+    const missing = undocumented(SRC).filter(
+      (name) => !UNDOCUMENTED_SEAMS.some((u) => u.name === name),
     );
     expect(
       missing,
       `\`--help\`'s ENV SEAMS block does not name ${missing.join(", ")}, and the script reads ${missing.length === 1 ? "it" : "them"} from the environment. Either document ${missing.length === 1 ? "it" : "them"} or put ${missing.length === 1 ? "it" : "them"} in UNDOCUMENTED_SEAMS with a reason.`,
     ).toEqual([]);
 
-    // CALIBRATION — remove one documented seam line from a scratch string.
-    const stripped = SRC.replace(
-      /^#   REFDATA_KIND_CHECK .*\n/m,
-      () => "",
-    );
-    expect(stripped, "the IN-05 calibration did not APPLY").not.toBe(SRC);
-    const sLines = stripped.split("\n");
-    const sa = sLines.findIndex((l) => l.includes("── ENV SEAMS"));
-    const sb = sLines.findIndex((l, i) => i > sa && l.startsWith("# ──"));
-    const sSeams = sLines.slice(sa, sb).join("\n");
-    expect(
-      declared.filter((name) => !new RegExp(`\\b${name}\\b`).test(sSeams)),
-    ).toEqual(["REFDATA_KIND_CHECK"]);
+    // ⛔ CALIBRATION — EVERY SEAM, NOT A SAMPLE. The old calibration deleted ONE
+    // documented line (`REFDATA_KIND_CHECK`) and proved the pin bit for that one
+    // name; WR-04 was precisely a pin that bit for the seams it happened to see.
+    // So each of the sixteen entries is deleted in turn — its header line AND the
+    // indented continuation lines that belong to it, because a name left standing
+    // in its own continuation is not a documented entry — and the arm must report
+    // exactly that seam and no other.
+    for (const name of seams) {
+      const entry = new RegExp(`^#   ${name}\\b.*\\n(?:#[ ]{20,}.*\\n)*`, "m");
+      const stripped = SRC.replace(entry, "");
+      expect(
+        stripped,
+        `the WR-04 calibration did not APPLY for ${name} — no \`#   ${name} …\` entry line was found, so the assertion below would be vacuous`,
+      ).not.toBe(SRC);
+      expect(
+        undocumented(stripped),
+        `deleting the ${name} entry from the ENV SEAMS block did NOT turn this pin red. That is the WR-04 defect for ${name}.`,
+      ).toEqual([name]);
+    }
   });
 });
 
@@ -1155,5 +1371,150 @@ describe("restore-test-from-baseline-fixtures — the arm corpus is a DIRECTORY 
     const dump = read(`${FIXTURES}/baseline-fixture.sql`);
     expect(dump).toContain('ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public"');
     expect(read("supabase/schema/baseline.sql").split("\nALTER DEFAULT PRIVILEGES").length - 1).toBe(12);
+  });
+});
+
+describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are scanned for a DSN", () => {
+  // ⛔ WHAT THIS ARM IS ABOUT, AND WHAT IT IS DELIBERATELY NOT ABOUT. The calling
+  // workflow stages `census.sql`, `survivors.sql`, `restore.sql` and `refdata.sql`
+  // into a world-readable artifact that lives for 90 days on a PUBLIC repo. That
+  // FILE SET is a founder decision and is not in scope here — it is already
+  // narrower than what it replaced, and re-narrowing it is explicitly out of
+  // bounds. The gap this arm closes is that NOTHING asserted the four were
+  // credential-free: the workflow's redaction step runs BEFORE the script writes
+  // them, and `--self-test`'s redaction grep reads an arm's captured OUTPUT rather
+  // than these files.
+  //
+  // ⛔ SO THE PREDICATE IS ABOUT DSN SHAPES, NOT ABOUT WHICH FILES EXIST. A pin
+  // over the file list would go red the next time the set legitimately changes and
+  // would say nothing about credentials either way.
+  //
+  // ⚠️ EXECUTED, not grepped, and with NO CLUSTER AND NO DATABASE. A static pin on
+  // the guard's TEXT would stay green against a guard that scans the wrong
+  // directory or swallows grep's rc. The script is SOURCED the way the IN-06 arm
+  // does it (`main "$@"` stripped, definitions only) and the function is called
+  // directly against a seeded RESTORE_OUT_DIR. `RESTORE_DB_URL` is the literal
+  // `stub-never-used` and is never dialled.
+  const DSN_HARNESS = ['source "$COPY"', "assert_public_sql_dsn_free", ""].join("\n");
+
+  /** The four names the workflow stages. */
+  const STAGED = ["census.sql", "survivors.sql", "restore.sql", "refdata.sql"];
+
+  function runDsnAssert(files: Record<string, string>): { status: number; out: string } {
+    const dir = mkdtempSync(join(tmpdir(), "restore-dsnscan-"));
+    try {
+      const stripped = SRC.replace(/\nmain "\$@"\n?$/, "\n");
+      expect(
+        stripped,
+        'the script no longer ends with its `main "$@"` dispatch — sourcing the copy would RUN the real thing',
+      ).not.toBe(SRC);
+      const copy = join(dir, "copy.sh");
+      writeFileSync(copy, stripped);
+      writeFileSync(join(dir, "harness.sh"), DSN_HARNESS);
+      const out = join(dir, "out");
+      mkdirSync(out);
+      for (const [name, body] of Object.entries(files)) writeFileSync(join(out, name), body);
+      const r = spawnSync("bash", [join(dir, "harness.sh")], {
+        encoding: "utf8",
+        env: { ...process.env, COPY: copy, RESTORE_OUT_DIR: out, RESTORE_DB_URL: "stub-never-used" },
+      });
+      return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("is WIRED — called between build_transaction and run_transaction, so a hit refuses pre-write", () => {
+    const body = functionBody(SRC, "run_restore");
+    const buildAt = liveIndexOf(body, 'build_transaction "$mode"');
+    const scanAt = liveIndexOf(body, "assert_public_sql_dsn_free");
+    const txnAt = liveIndexOf(body, "run_transaction");
+    expect(scanAt, "run_restore no longer scans the published .sql files").toBeGreaterThanOrEqual(0);
+    expect(
+      scanAt,
+      "the DSN scan runs BEFORE the transaction is assembled, so restore.sql and refdata.sql do not exist yet and it would scan two files instead of four",
+    ).toBeGreaterThan(buildAt);
+    expect(
+      scanAt,
+      "the DSN scan runs AFTER the transaction, so a credential in a published file is discovered only once the database has already been written to",
+    ).toBeLessThan(txnAt);
+
+    // CALIBRATION — move the call after run_transaction on a scratch copy.
+    const moved = SRC.replace("  assert_public_sql_dsn_free\n", "").replace(
+      "  run_transaction\n",
+      "  run_transaction\n  assert_public_sql_dsn_free\n",
+    );
+    expect(moved, "the wiring calibration did not APPLY").not.toBe(SRC);
+    const mBody = functionBody(moved, "run_restore");
+    expect(liveIndexOf(mBody, "assert_public_sql_dsn_free")).toBeGreaterThan(
+      liveIndexOf(mBody, "run_transaction"),
+    );
+  });
+
+  it("EXECUTED — clean files pass, and a DSN in ANY ONE of the four is a named refusal", () => {
+    const clean: Record<string, string> = Object.fromEntries(
+      STAGED.map((f) => [f, "CREATE TABLE public.x ();\nSELECT $$a dollar-quoted body$$;\n"]),
+    );
+    const green = runDsnAssert(clean);
+    expect(green.status, `the guard refused four DSN-free files. Output:\n${green.out}`).toBe(0);
+    expect(green.out).toContain("carry no DSN shape");
+
+    // ⛔ THE FALSIFIER, ONE FILE AT A TIME. A guard that scans `restore.sql` and
+    // nothing else would pass three of these four.
+    for (const target of STAGED) {
+      const seeded = {
+        ...clean,
+        [target]: `${clean[target]}-- postgresql://u:p@db.example:5432/postgres\n`,
+      };
+      const red = runDsnAssert(seeded);
+      expect(
+        red.status,
+        `a DSN in ${target} did NOT refuse — that file reaches a world-readable artifact unscanned. Output:\n${red.out}`,
+      ).toBe(1);
+      expect(red.out, `the refusal for ${target} does not name the file`).toContain(target);
+      // The match itself is the credential and must never be printed.
+      expect(
+        red.out.includes("db.example"),
+        `the refusal for ${target} ECHOED the matched DSN — the refusal is itself the leak`,
+      ).toBe(false);
+    }
+  });
+
+  it("EXECUTED — an UNREADABLE published file is a named MEASURE_FAIL, never a clean read", () => {
+    // grep's rc>=2 must not collapse to "no match". The harness replaces grep with
+    // one that returns 2 for the scan and delegates everything else.
+    const dir = mkdtempSync(join(tmpdir(), "restore-dsnscan-rc-"));
+    try {
+      const copy = join(dir, "copy.sh");
+      writeFileSync(copy, SRC.replace(/\nmain "\$@"\n?$/, "\n"));
+      writeFileSync(
+        join(dir, "harness.sh"),
+        [
+          'source "$COPY"',
+          "grep() {",
+          '  for a in "$@"; do',
+          '    case "$a" in -*c*) return 2 ;; esac',
+          "  done",
+          '  command grep "$@"',
+          "}",
+          "assert_public_sql_dsn_free",
+          "",
+        ].join("\n"),
+      );
+      const out = join(dir, "out");
+      mkdirSync(out);
+      for (const f of STAGED) writeFileSync(join(out, f), "SELECT 1;\n");
+      const r = spawnSync("bash", [join(dir, "harness.sh")], {
+        encoding: "utf8",
+        env: { ...process.env, COPY: copy, RESTORE_OUT_DIR: out, RESTORE_DB_URL: "stub-never-used" },
+      });
+      const combined = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+      expect(combined, `an unreadable file read as clean. Output:\n${combined}`).toContain(
+        "MEASURE_FAIL: could not scan",
+      );
+      expect(r.status, `the guard did not exit 1 on an unreadable file. Output:\n${combined}`).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
