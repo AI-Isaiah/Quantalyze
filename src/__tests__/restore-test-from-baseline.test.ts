@@ -1374,6 +1374,93 @@ describe("restore-test-from-baseline-fixtures — the arm corpus is a DIRECTORY 
   });
 });
 
+describe("restore-test-from-baseline.sh — C3: the arm ratchet names the DIRECTION it measured", () => {
+  // ⛔ THE DEFECT, AND WHY IT LANDED IN THE WRONG FILE FIRST. A sibling review
+  // (IN-01) found that ONE sentence covering both directions of an arm-count
+  // mismatch names the WRONG one half the time: add an arm and the gate says an arm
+  // "disappeared", sending the reader hunting a deletion that never happened. The
+  // two directions have OPPOSITE remedies — a vanished arm is RESTORED, an added arm
+  // is RATCHETED — so one sentence cannot carry both. The fix was applied to
+  // `scripts/test-ledger-drift-check.sh`, the file the finding happened to name, and
+  // NOT to this one, whose `--run` path is `DROP SCHEMA public CASCADE`. The more
+  // destructive of the two was the one left with the direction-blind message.
+  //
+  // ⚠️ WHY THIS ARM EXTRACTS AND EXECUTES rather than sourcing and calling. The
+  // ratchet lives inside the self-test driver, and calling that function `initdb`s a
+  // throwaway PostgreSQL cluster — not something a vitest arm may do. So the arm
+  // takes the REAL BYTES off disk (never a fixture written here), asserts the slice
+  // is present and unique, and RUNS them under both directions. It is still the
+  // shipped code that decides each verdict.
+
+  /** The ratchet block, sliced out of the live script. */
+  function ratchetBlock(text: string): string {
+    const lines = text.split("\n");
+    const a = lines.findIndex((l) => l === '  if [ "$total" -ne "$EXPECTED_ARMS" ]; then');
+    if (a < 0) return "";
+    const b = lines.findIndex((l, i) => i > a && l === "  fi");
+    return b < 0 ? "" : lines.slice(a, b + 1).join("\n");
+  }
+
+  /** Run the sliced block with a given tally, and return everything it printed. */
+  function runRatchet(block: string, total: number, expected: number): string {
+    const dir = mkdtempSync(join(tmpdir(), "restore-ratchet-"));
+    try {
+      const h = join(dir, "h.sh");
+      writeFileSync(
+        h,
+        ["ratchet() {", block, '  echo "RATCHET-SILENT"', "}", `total=${total}`, `EXPECTED_ARMS=${expected}`, "ratchet", ""].join("\n"),
+      );
+      const r = spawnSync("bash", [h], { encoding: "utf8" });
+      return `${r.stdout ?? ""}${r.stderr ?? ""}`;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("EXECUTED — an ADDED arm says ADDED, a VANISHED arm says DISAPPEARED, and equality is silent", () => {
+    const block = ratchetBlock(SRC);
+    expect(block, "the arm-ratchet block slicer found no anchor — everything below would be vacuous").not.toBe("");
+    expect(
+      SRC.split('  if [ "$total" -ne "$EXPECTED_ARMS" ]; then').length - 1,
+      "the ratchet anchor is not unique, so the slice above may not be the shipped one",
+    ).toBe(1);
+
+    const added = runRatchet(block, 27, 26);
+    expect(added, "an ADDED arm is not reported as added").toContain("An arm was ADDED");
+    expect(
+      added,
+      "the added-arm message does not carry the RATCHET remedy, so the reader is told what happened but not what to do",
+    ).toContain("RAISE EXPECTED_ARMS");
+    expect(
+      added.includes("DISAPPEARED"),
+      "an ADDED arm is STILL described as a disappearance — the direction-blind sentence, exactly as found",
+    ).toBe(false);
+
+    const vanished = runRatchet(block, 25, 26);
+    expect(vanished, "a VANISHED arm is not reported as a disappearance").toContain("An arm DISAPPEARED");
+    expect(
+      vanished,
+      "the vanished-arm message does not carry the RESTORE remedy, and the wrong remedy here is lowering the ratchet",
+    ).toContain("RESTORE the arm");
+    expect(vanished.includes("was ADDED")).toBe(false);
+
+    // The equality path must fall through both branches without printing a verdict.
+    expect(runRatchet(block, 26, 26)).toContain("RATCHET-SILENT");
+    expect(runRatchet(block, 26, 26).includes("SELF-TEST FAIL")).toBe(false);
+
+    // CALIBRATION — collapse the branch back to ONE sentence and watch an ADDED arm
+    // be reported as a disappearance again.
+    const collapsed = block.replace(
+      /\n    if \[ "\$total" -lt "\$EXPECTED_ARMS" \]; then[\s\S]*?\n    fi\n/,
+      '\n    echo "SELF-TEST FAIL: ${total} arms ran but EXPECTED_ARMS is ${EXPECTED_ARMS}. An arm that disappeared is a RED, not a smaller PASSED."\n',
+    );
+    expect(collapsed, "the C3 direction calibration did not APPLY").not.toBe(block);
+    const blind = runRatchet(collapsed, 27, 26);
+    expect(blind).toContain("An arm that disappeared");
+    expect(blind.includes("An arm was ADDED")).toBe(false);
+  });
+});
+
 describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are scanned for a DSN", () => {
   // ⛔ WHAT THIS ARM IS ABOUT, AND WHAT IT IS DELIBERATELY NOT ABOUT. The calling
   // workflow stages `census.sql`, `survivors.sql`, `restore.sql` and `refdata.sql`
