@@ -37,6 +37,10 @@ import {
   SELF_TEST_SCENARIOS,
   selfTest,
 } from "../../scripts/prod-prober/run.mjs";
+import {
+  CRON_JOB_SEPARATORS,
+  parseCronJobRows,
+} from "../../scripts/prod-prober/arms/cron-drift.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "prod-prober.yml");
@@ -685,6 +689,52 @@ describe("[164.1-05] kinds and floors", () => {
     expect(DEFECT_KINDS.filter((k: string) => !exercised.has(k))).toEqual(["mt5-probe-timeout"]);
   });
 
+  // -------------------------------------------------------------------------
+  // parseCronJobRows — the WR-05 defect, asserted directly on the function.
+  //
+  // ⛔ A ROW THE PARSER COULD NOT READ IS NOT A ROW THAT IS NOT THERE. A record
+  // with fewer than seven fields used to be `continue`d away, so a cron.job
+  // command carrying the arm's own record separator removed itself from every
+  // judgement — the credential scan included — while the run still read green.
+  // Both callers (the arm's run() and captureManifest) now refuse on the count.
+  // -------------------------------------------------------------------------
+  const cronRecord = (fields: string[]) => fields.join(CRON_JOB_SEPARATORS.fieldSep);
+  const GOOD_RECORD = cronRecord(["1", "a_job", "* * * * *", "t", "postgres", "postgres", "SELECT 1"]);
+  const SHORT_RECORD = cronRecord(["2", "b_job", "*/5 * * * *", "t", "postgres"]);
+  const renderRecords = (records: string[]) =>
+    // psql prints the record separator AFTER every record, last one included —
+    // which is why the parser's EMPTY-record skip is correct and must stay.
+    records.map((r) => `${r}${CRON_JOB_SEPARATORS.recordSep}`).join("");
+
+  it("a record with fewer than seven fields is COUNTED, never dropped (WR-05)", () => {
+    const stdout = renderRecords([GOOD_RECORD, SHORT_RECORD]);
+    const { rows, malformed } = parseCronJobRows(stdout);
+    expect(rows.length, "the readable record still parses — one bad record does not blind the arm to the others").toBe(1);
+    expect(rows[0].jobname).toBe("a_job");
+    expect(malformed.length, "and the unreadable one is REPORTED rather than skipped").toBe(1);
+    expect(malformed[0].fields, "by its field count, so the reader can tell where the record split").toBe(5);
+    expect(
+      JSON.stringify(malformed),
+      "and NEVER by its text — an unreadable record is exactly where a credential could be hiding",
+    ).not.toContain("b_job");
+  });
+
+  it("CALIBRATION: padding that same record to seven fields makes it a ROW and empties the malformed list", () => {
+    const original = renderRecords([GOOD_RECORD, SHORT_RECORD]);
+    const padded = renderRecords([
+      GOOD_RECORD,
+      cronRecord(["2", "b_job", "*/5 * * * *", "t", "postgres", "postgres", "SELECT 2"]),
+    ]);
+    expect(padded, "the mutated stdout must actually differ, or this calibration is vacuous").not.toBe(original);
+    const { rows, malformed } = parseCronJobRows(padded);
+    expect(rows.length).toBe(2);
+    expect(malformed).toEqual([]);
+    // The predicate FLIPS on the mutated copy: the same function reports one
+    // malformed record on the original and none here, so "malformed is empty"
+    // is a real reading rather than something the parser always says.
+    expect(parseCronJobRows(original).malformed.length).toBe(1);
+  });
+
   it("the arm floor is FOUR and the registry meets it", () => {
     // Pinned at 4 while only one arm existed, on purpose: an incomplete prober
     // must be LOUD. From here a `floor` defect means an arm was REMOVED.
@@ -698,13 +748,13 @@ describe("[164.1-05] kinds and floors", () => {
     ]);
   });
 
-  it("SELF_TEST_SCENARIOS is 56, and the runner PRINTS exactly 56 headers numbered 1..56", async () => {
+  it("SELF_TEST_SCENARIOS is 58, and the runner PRINTS exactly 58 headers numbered 1..58", async () => {
     // ⭐ SOURCE-DERIVED, not scraped. The headers are auto-numbered at RUNTIME
     // off the same counter the runner's completeness assertion reads, so there
     // is no literal `k/50` in the source to count. Executing the self-test is
     // the only honest way to derive the number — and it is fixtures-only, no
     // network, under a tenth of a second.
-    expect(SELF_TEST_SCENARIOS).toBe(56);
+    expect(SELF_TEST_SCENARIOS).toBe(58);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);
