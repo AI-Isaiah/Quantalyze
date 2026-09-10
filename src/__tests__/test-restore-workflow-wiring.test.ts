@@ -283,20 +283,26 @@ function scannableRestoreBlock(text: string): string {
  * reaches its `trap … ERR`. Had it contributed, the staging step would have been the
  * defect and this allowlist would not have been the place to absorb it.
  *
- * `2>/dev/null` x5 — every one a PROBE whose exit status is consumed by the line it
+ * ⭐ RE-MEASURED AGAIN 2026-09-10 — 5 → 4. Silent-failure review F4 removed what was
+ * site 1, and the justification below is what it removed: the ancestry probe's
+ * `2>/dev/null` was written up here as "git's stderr would only restate 'not a valid
+ * object' for a sha the `case` above has already accepted as hex", which conceded the
+ * defect while calling it a reason. `--is-ancestor` exits 0, 1 AND 128; the `case`
+ * checks hex SHAPE, never existence; and that discarded stderr was the only channel
+ * separating "not an ancestor" from "there is no such commit". It now redirects to
+ * `${RUNNER_TEMP}/ancestry.err` and the 128 is reported as a MEASURE_FAIL. ⛔ THE
+ * ALLOWLIST WENT DOWN, WHICH IS THE GOOD DIRECTION — a justification that reads as an
+ * argument for suppressing evidence is a finding, not an entry.
+ *
+ * `2>/dev/null` x4 — every one a PROBE whose exit status is consumed by the line it
  *                    sits on, so the suppressed channel is noise and never evidence:
- *   1. `Assert PROD's apply ran on an ancestor of this checkout` —
- *      `if ! git merge-base --is-ancestor "${APPLY_HEAD_SHA}" HEAD 2>/dev/null; then`.
- *      The exit code IS the answer and it is branched on; git's stderr here would only
- *      restate "not a valid object" for a sha the `case` above has already accepted as
- *      hex. A non-ancestor appends to `failed` and the step exits 1.
- *   2-4. `Probe - the runner image's PostgreSQL server binaries resolve` — the
+ *   1-3. `Probe - the runner image's PostgreSQL server binaries resolve` — the
  *      `pg_config --bindir`, `ls -d …/bin` and `ls -l …/initdb …/pg_ctl` lines. This
  *      whole step is a DIAGNOSTIC ECHO, non-fatal by design (see its own comment: the
  *      pg-lane resolution chain owns the judgement, a second divergent opinion would be
  *      worse than none). Each swallowed stderr is paired with an `|| echo '(absent)'`
  *      that prints the absence, so the log says what was not found either way.
- *   5. `Back up TEST's schema and ledger …` — the `SELECT count(*) FROM
+ *   4. `Back up TEST's schema and ledger …` — the `SELECT count(*) FROM
  *      supabase_migrations.schema_migrations;` row count. Its rc IS captured
  *      (`… 2>/dev/null | tr -d '\r' | tail -1)" || rc=$?`) and the very next branch
  *      turns a non-zero into `::error::` + `exit 1`. psql's connect/auth stderr names
@@ -306,7 +312,7 @@ function scannableRestoreBlock(text: string): string {
  * ⛔ A count that moves in EITHER direction is red. Do not edit the number to make a
  * run pass: a new one has to earn its place in this allowlist with a justification.
  */
-const ALLOWED: Record<string, number> = { "2>/dev/null": 5 };
+const ALLOWED: Record<string, number> = { "2>/dev/null": 4 };
 
 function softeningOffenders(text: string): string[] {
   const live = liveLines(scannableRestoreBlock(text)).join("\n");
@@ -1838,10 +1844,12 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       const live = liveLines(scannableRestoreBlock(WF)).join("\n");
       expect(
         live.split("2>/dev/null").length - 1,
-        "the live `2>/dev/null` count in the scannable restore block moved off its re-measured 5",
+        "the live `2>/dev/null` count in the scannable restore block moved off its re-measured 4 (it was 5 until 2026-09-10; silent-failure review F4 removed the ancestry probe's suppression)",
       ).toBe(ALLOWED["2>/dev/null"]);
 
-      // DOWN: delete one of the five justified sites.
+      // DOWN: delete one of the justified sites. The expected count is DERIVED from
+      // the allowlist, not typed — a literal here goes stale the moment a site is
+      // added or (as in F4) removed, and a stale twin reads exactly like a passing one.
       const narrowed = WF.replace(
         ' 2>/dev/null || echo "(no /usr/lib/postgresql/*/bin)"',
         ' || echo "(no /usr/lib/postgresql/*/bin)"',
@@ -1850,7 +1858,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       expect(
         softeningOffenders(narrowed).join(" | "),
         "a VANISHED allowlisted site went unreported — the count is not an exact set, it is a ceiling",
-      ).toContain("2>/dev/null (4,");
+      ).toContain(`2>/dev/null (${(ALLOWED["2>/dev/null"] as number) - 1},`);
     });
   });
 
@@ -2035,6 +2043,10 @@ exit 64
       encoding: "utf8",
       env: {
         ...process.env,
+        // The runner always sets this; the step writes git's stderr into it rather
+        // than into /dev/null so an UNANSWERED ancestry question can be told apart
+        // from a NEGATIVE answer (silent-failure review F4).
+        RUNNER_TEMP: workdir,
         APPLY_STATUS: outputs.status ?? "",
         APPLY_CONCLUSION: outputs.conclusion ?? "",
         APPLY_HEAD_SHA: outputs.head_sha ?? "",
@@ -2089,6 +2101,52 @@ exit 64
       "a green PROD apply at a sha this checkout does NOT descend from was accepted — the premise is about THIS tree, not about any green run",
     ).toBe(1);
     expect(asserted.out).toContain("ancestor");
+  });
+
+  // -------------------------------------------------------------------------
+  // F4 (Phase 164.8.2 silent-failure review) — rc 1 and rc >= 2 are DIFFERENT
+  // answers, and one of them is not an answer at all.
+  //
+  // ⛔ `git merge-base --is-ancestor` exits 0 (ancestor), 1 (not an ancestor) and
+  // 128 (bad object / not a commit). The `case` above this line checks only that
+  // APPLY_HEAD_SHA is HEX-SHAPED, never that the object exists — so a sha that was
+  // force-pushed away, or one `gh` returned from a different ref, used to produce
+  // "X is not an ancestor of this checkout's HEAD": a FALSE STATEMENT ABOUT PROD'S
+  // APPLY, with git's own "Not a valid commit name" thrown into /dev/null.
+  //
+  // Same shape as IN-06 in the restore script (`-le 1`, not `-eq 0`, because "an
+  // unreadable dump is not an empty one"). The run was always going to be red;
+  // what was wrong is what it told the operator to go and fix.
+  // -------------------------------------------------------------------------
+  it("(success, completed, a hex sha that is NOT A COMMIT) → MEASURE_FAIL, not a false ancestry verdict", () => {
+    // Hex-shaped and 40 long, so the shape `case` admits it; no such object exists
+    // in the throwaway repo, so git exits 128.
+    const GHOST = `${"0".repeat(39)}1`;
+    const asserted = runAsserter({
+      status: "completed",
+      conclusion: "success",
+      head_sha: GHOST,
+    });
+    expect(
+      asserted.code,
+      `an unanswerable ancestry question was accepted (exit ${asserted.code}).\n${asserted.out}`,
+    ).toBe(1);
+    expect(
+      asserted.out,
+      "the step did not report that the ancestry question went UNANSWERED — it is reporting a verdict it never obtained",
+    ).toContain("MEASURE_FAIL");
+    expect(
+      asserted.out,
+      `the step told the operator that ${GHOST} "is not an ancestor of this checkout's HEAD". git never said that: it exited 128 because the object does not exist. A false statement about PROD's apply sends the reader to land migrations that are already landed.`,
+    ).not.toContain("is not an ancestor of this checkout's HEAD");
+    expect(
+      asserted.out,
+      "git exited non-zero-non-one and the step did not name the exit code, so the next reader cannot tell a bad object from a broken checkout",
+    ).toContain("128");
+    expect(
+      asserted.out,
+      "git's stderr was discarded — that channel is the ONLY thing that distinguishes 'no such object' from every other 128, and the previous version sent it to /dev/null",
+    ).toMatch(/not a valid/i);
   });
 
   it("(status still in progress) → exit 1 naming `status`", () => {
