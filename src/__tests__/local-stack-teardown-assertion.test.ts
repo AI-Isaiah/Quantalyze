@@ -34,6 +34,30 @@ import { join } from "node:path";
 
 const LANE = "scripts/local-stack/run.sh";
 
+// ---------------------------------------------------------------------------
+// ⛔ ANCHOR DISCIPLINE (Phase 164.8.2 / WR-07).
+//
+// `String.indexOf` returns -1 on a miss and `s.slice(-1)` is the LAST CHARACTER,
+// so a narrowing slice whose anchor was renamed degenerates into a subject that
+// yields an EMPTY match list — and an empty list satisfies every `for (… of …)`
+// assertion in this file without executing one. An absent anchor is a FINDING
+// about the script's shape, never a value to default away.
+// ---------------------------------------------------------------------------
+
+/** `text.indexOf(anchor)`, but a miss THROWS by name instead of returning -1. */
+function anchorIndex(text: string, anchor: string, from = 0): number {
+  const at = text.indexOf(anchor, from);
+  if (at < 0) {
+    throw new Error(
+      `ANCHOR MISSING: ${JSON.stringify(anchor)} is not present in the subject text. ` +
+        `The narrowing slice that wanted it would have degenerated (slice(-1) is the LAST ` +
+        `CHARACTER) and every assertion over the result would have passed vacuously. ` +
+        `Fix the anchor or the subject — do not default it.`,
+    );
+  }
+  return at;
+}
+
 /** Write a fake `docker` and return its path. */
 function fakeDocker(dir: string, body: string): string {
   const p = join(dir, "fake-docker.sh");
@@ -143,7 +167,7 @@ describe("R2-I03 — every dispatched mode is documented, and usage() prints onl
 
   it("the help text names every mode the case statement dispatches", () => {
     const src = readFileSync(LANE, "utf8");
-    const block = src.slice(src.indexOf('case "${1:-}" in'));
+    const block = src.slice(anchorIndex(src, 'case "${1:-}" in'));
     const modes = [...block.matchAll(/^ {2}(--?[a-z-]+|up|down)\)/gm)].map((m) => m[1]);
 
     // Non-vacuity: an empty mode list would satisfy every assertion below.
@@ -218,5 +242,38 @@ describe("R2-I03 — every dispatched mode is documented, and usage() prints onl
       if (line.trim().length === 0) continue;
       expect(line, `usage() printed a non-comment line: ${JSON.stringify(line)}`).toMatch(/^\s*#/);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⛔ WR-07 CALIBRATION — the anchor check must BITE.
+// ---------------------------------------------------------------------------
+describe("[164.8.2-WR-07] the case-dispatch slice anchor fails loud instead of degenerating", () => {
+  it("a renamed `case` header throws BY NAME; the real script does not", () => {
+    const src = readFileSync(LANE, "utf8");
+    // Control: the real lane still carries the anchor, so this is a check and
+    // not a blanket refusal.
+    expect(() => anchorIndex(src, 'case "${1:-}" in')).not.toThrow();
+
+    // ⚠️ split/join, not `replace`: the lane carries the header MORE THAN ONCE
+    // (measured 2026-09-10), and a single-shot `replace` leaves a copy behind —
+    // the mutant would then still resolve and this arm would read as a pass for
+    // the wrong reason. The assertions below are what caught exactly that.
+    const mutant = src.split('case "${1:-}" in').join('case "${1:-none}" in');
+    expect(mutant, "the rename must actually change the text").not.toBe(src);
+    expect(
+      mutant.includes('case "${1:-}" in'),
+      "the mutation must actually REMOVE the anchor — a no-op replace reads as a pass",
+    ).toBe(false);
+    expect(() => anchorIndex(mutant, 'case "${1:-}" in')).toThrow(
+      /ANCHOR MISSING: "case \\"\$\{1:-\}\\" in"/,
+    );
+
+    // ⚠️ The trap this replaces: the unchecked form returns the LAST CHARACTER
+    // of the script, from which the mode regex extracts NOTHING — and an empty
+    // mode list makes the usage-coverage loop below assert nothing at all.
+    const degenerate = mutant.slice(mutant.indexOf('case "${1:-}" in'));
+    expect(degenerate.length, "the pre-WR-07 shape degenerated rather than failing").toBe(1);
+    expect([...degenerate.matchAll(/^ {2}(--?[a-z-]+|up|down)\)/gm)]).toEqual([]);
   });
 });
