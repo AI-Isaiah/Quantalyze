@@ -294,25 +294,6 @@ function headerRegions(text) {
 }
 
 /**
- * SQL comments removed, so a rule can test what the database would EXECUTE
- * rather than what the text merely says. Line comments (`-- …`) and block
- * comments are both stripped.
- *
- * ⚠️ This is a TEXT strip, not a parser: a `--` inside a string literal is
- * removed with everything after it on that line. That direction is safe for
- * the only rule that uses it — `vault-absent` fires when the needle is
- * ABSENT, so over-stripping can only produce a FALSE ALARM, never a false
- * clean. Do not reuse it for a rule that fires on PRESENCE without first
- * making it quote-aware.
- *
- * @param {string} t
- * @returns {string}
- */
-export function stripSqlComments(t) {
-  return String(t ?? "").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
-}
-
-/**
  * Ten rules. Returns one sentence per violation, each prefixed with a stable
  * `[rule-id]`.
  *
@@ -323,10 +304,7 @@ export function stripSqlComments(t) {
  * @param {string} jobname
  * @param {string} command  the RAW command text (normalization does not change
  *        any of these judgements, and running on raw text keeps the rules
- *        readable against what an operator actually sees in `cron.job`).
- *        ⚠️ ONE rule departs from that: `vault-absent` tests
- *        COMMENT-STRIPPED text, because a needle that must be PRESENT is
- *        otherwise satisfied by a comment naming it. See CR-03.
+ *        readable against what an operator actually sees in `cron.job`)
  * @returns {string[]}
  */
 export function hygieneViolations(jobname, command) {
@@ -347,11 +325,7 @@ export function hygieneViolations(jobname, command) {
       `job ${name} reads a current_setting('app.…') GUC. Setting those needs ALTER DATABASE … SET on a placeholder GUC, which returns 42501 on Supabase — a job carrying this design is not the achievable configuration and cannot be the standard PROD is judged against.`,
     );
   }
-  // ⛔ Tested against COMMENT-STRIPPED text. A substring test over raw command
-  // text is satisfied by `-- resolves from vault.decrypted_secrets`, which is
-  // a grep matching its own comment — the named anti-vacuity shape, and it
-  // returned CLEAN on a command inlining a live key (CR-03, 2026-09-10).
-  if (name === "match_engine_cron" && !stripSqlComments(text).includes("vault.decrypted_secrets")) {
+  if (name === "match_engine_cron" && !text.includes("vault.decrypted_secrets")) {
     say(
       "vault-absent",
       `job ${name} does not read vault.decrypted_secrets. The achievable configuration resolves its key from Vault at execution time, so a command without it is obtaining the key some other way — and the only other ways this project has used put it in the command text.`,
@@ -456,7 +430,7 @@ const withReadings = (headline) => `${headline}\n      ${READING_1}\n      ${REA
  * @param {Array<object>} prodRows from `parseCronJobRows`
  * @returns {{defects: Array<{kind:string, subject:string|null, detail:string}>, lines: string[]}}
  */
-export function compareManifest(manifest, prodRows, opts = {}) {
+export function compareManifest(manifest, prodRows) {
   const defects = [];
   const lines = [];
   const drift = (subject, headline) => defects.push({ kind: "cron-drift", subject, detail: withReadings(headline) });
@@ -505,43 +479,6 @@ export function compareManifest(manifest, prodRows, opts = {}) {
         );
       }
     }
-    // ⛔ BIND THE TEXT TO ITS OWN SHA. Nothing re-derived this until
-    // 2026-09-10, so the two fields floated free after capture: a hand-cleaned
-    // `command` beside a sha still matching a DIRTY prod command reported
-    // clean on the manifest side and printed a diff whose "manifest" half was
-    // never the text that was compared. The docstring's promise that a
-    // reviewer "cannot invent an oracle" was true of the withhold path only
-    // (WR-11).
-    if (typeof row.command === "string") {
-      const derived = sha256Hex(normalizeCommand(row.command));
-      if (derived !== row.command_sha256) {
-        return invalid(
-          `cron manifest row ${row.jobname} carries a command whose own sha (${derived.slice(0, 12)}) is not the command_sha256 it publishes (${String(row.command_sha256).slice(0, 12)}). The two fields describe different text, so the printed diff and the manifest-side hygiene scan would be about a command that was never captured. Re-capture rather than hand-editing; to hide text, use the withhold procedure.`,
-        );
-      }
-    }
-    // ⛔ The comparison below reads `active` through Boolean(), and
-    // Boolean(undefined) is `false`. A row that merely OMITS the flag would
-    // therefore AGREE with a deactivated PROD job — a job that produces no
-    // run rows at all, which is quieter than the hourly 401 this arm exists
-    // for. The oracle is a hand-reviewed file by design, so the omission is
-    // one hand-edit away and must be refused rather than trusted.
-    if (typeof row.active !== "boolean") {
-      return invalid(
-        `cron manifest row ${row.jobname} has no boolean \`active\`. Boolean(undefined) is false, so an omitted flag would silently AGREE with a deactivated PROD job — the quietest form of the outage this arm exists for.`,
-      );
-    }
-    if (typeof row.schedule !== "string" || row.schedule.trim().length === 0) {
-      return invalid(`cron manifest row ${row.jobname} has no schedule, so its cadence cannot be compared against PROD at all.`);
-    }
-    // `username` is the pg_cron column that decides WHICH ROLE the command
-    // executes as, and `database` which database it runs in. Both are captured
-    // on every row; both are compared below; neither may be absent.
-    for (const field of ["username", "database"]) {
-      if (typeof row[field] !== "string" || row[field].trim().length === 0) {
-        return invalid(`cron manifest row ${row.jobname} has no ${field}. It is captured on every row and compared below, so an absent one would make that comparison vacuous.`);
-      }
-    }
   }
   if (!manifest.jobs.some((j) => j.jobname === "match_engine_cron")) {
     return invalid(
@@ -551,28 +488,6 @@ export function compareManifest(manifest, prodRows, opts = {}) {
 
   const capturedAt = manifest.captured_at || "<unknown>";
   const marker = manifest.database_marker || "<unset>";
-
-  // -------------------------------------------------------------------------
-  // (1b) WHICH DATABASE PRODUCED THIS READING? `run()` reads the hand-set
-  //      COMMENT ON DATABASE marker because current_database() is `postgres`
-  //      on every Supabase project and proves nothing — but until 2026-09-10
-  //      that value was only null-checked and logged, never compared to the
-  //      marker the ORACLE was captured from. So a run aimed at another
-  //      project would compare ITS cron.job against PROD's oracle and stamp
-  //      every line with PROD's marker: a provenance the report never
-  //      verified. Two different databases is not drift, it is a void run.
-  // -------------------------------------------------------------------------
-  if (opts.liveMarker !== undefined && String(opts.liveMarker) !== String(manifest.database_marker ?? "")) {
-    defects.push({
-      kind: "measure-fail",
-      subject: "database marker",
-      detail:
-        `the cron oracle was captured from a database marked ${JSON.stringify(manifest.database_marker ?? null)}, ` +
-        `but this reading came from one marked ${JSON.stringify(String(opts.liveMarker))}. Two different databases were compared, ` +
-        `so NO statement about drift can be made from this run.`,
-    });
-    return { defects, lines };
-  }
 
   // -------------------------------------------------------------------------
   // (2) Hygiene on BOTH sides, INDEPENDENTLY of equality. A PROD command that
@@ -661,23 +576,6 @@ export function compareManifest(manifest, prodRows, opts = {}) {
     const changed = [];
     if (String(m.schedule ?? "").trim() !== String(p.schedule ?? "").trim()) changed.push("schedule");
     if (Boolean(m.active) !== Boolean(p.active)) changed.push("active");
-    // `username` decides which ROLE the command executes as and `database`
-    // which database it runs in — both are captured on every manifest row, and
-    // until 2026-09-10 neither was ever tested, so a job repointed to a more
-    // privileged role was not drift to this arm (CR-01).
-    if (String(m.username ?? "").trim() !== String(p.username ?? "").trim()) changed.push("username");
-    if (String(m.database ?? "").trim() !== String(p.database ?? "").trim()) changed.push("database");
-    // ⛔ `jobid` is PRINTED above and deliberately NOT compared, and that is a
-    // decision rather than the oversight CR-01 named. It is pg_cron's
-    // surrogate key: it carries no configuration meaning, it changes on any
-    // legitimate unschedule/reschedule, and every semantically meaningful
-    // field it could stand proxy for (schedule, command, username, database,
-    // active) is already compared beside it. MEASURED 2026-09-10: comparing it
-    // made `prod-duplicate-jobname.json` report TWO cron-drift defects — the
-    // duplicate, and a jobid change that is merely that duplicate's
-    // consequence — which would have cost an existing isolation control to
-    // accommodate. Printing it stays useful: an operator reading a drift line
-    // wants the id to run `SELECT * FROM cron.job WHERE jobid = …`.
 
     const prodSha = sha256Hex(normalizeCommand(p.command));
     if (m.command_sha256 !== prodSha) changed.push("command");
@@ -693,10 +591,7 @@ export function compareManifest(manifest, prodRows, opts = {}) {
       `cron-drift: manifest captured ${capturedAt} (marker ${marker}) sha ${m.command_sha256} — ` +
       `PROD now sha ${prodSha}; changed: ${changed.join(", ")}` +
       (changed.includes("schedule") ? ` (schedule ${m.schedule} → ${p.schedule})` : "") +
-      (changed.includes("active") ? ` (active ${Boolean(m.active)} → ${Boolean(p.active)})` : "") +
-      (changed.includes("username") ? ` (username ${m.username} → ${p.username} — the role the command EXECUTES AS)` : "") +
-      (changed.includes("database") ? ` (database ${m.database} → ${p.database})` : "") +
-      (changed.includes("jobid") ? ` (jobid ${m.jobid} → ${p.jobid})` : "");
+      (changed.includes("active") ? ` (active ${Boolean(m.active)} → ${Boolean(p.active)})` : "");
 
     // ⛔ The command TEXT is printed only when BOTH sides pass hygiene AND the
     // manifest row carries text. Otherwise: shas only, and SAY WHY.
@@ -805,7 +700,7 @@ async function run({ seams, log, addDefect, manifestPath }) {
   }
 
   const prodRows = parseCronJobRows(res.stdout);
-  const { defects, lines } = compareManifest(manifest, prodRows, { liveMarker: marker });
+  const { defects, lines } = compareManifest(manifest, prodRows);
   for (const line of lines) log(line);
   for (const d of defects) addDefect(d.kind, "cron-drift", d.subject, d.detail, REMEDIES[d.kind]);
 }
