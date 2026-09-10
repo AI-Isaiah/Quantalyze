@@ -4757,19 +4757,38 @@ describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()
   }
 
   /**
-   * Every `set +e` must be BOUNDED — an rc capture and a `set -e` within its own
-   * four live lines. The site list says each one is a bound; this measures it, so
-   * the control is not weaker than the sentence beside it.
+   * Every `set +e` must be BOUNDED — an rc capture, a `set -e` within its own
+   * four live lines, AND a READ of the captured status somewhere in `check()`.
+   * The site list says each one is a bound; this measures it, so the control is
+   * not weaker than the sentence beside it.
+   *
+   * ⛔ G1 (Phase 164.8.2) — THE THIRD LEG IS WHY THIS IS A BOUND AND NOT A
+   * RITUAL. Capture and restoration were the whole rule, and neither proves the
+   * status is ever CONSUMED: a `set +e` that writes `foo_rc=$?`, restores `-e`
+   * and then never branches on `foo_rc` is the discarded-exit-code shape this
+   * phase exists to eliminate, and it passed both legs AND the site allowlist,
+   * because a site entry's prose reason is never checked against behaviour. The
+   * read is counted as `$foo_rc` / `${foo_rc}` USES across the region — the
+   * assignment itself carries no `$`, so it can never satisfy its own leg.
    */
   function unboundedSetE(text: string): string[] {
     const lines = liveLines(checkRegion(text));
+    const region = lines.join("\n");
     const out: string[] = [];
     lines.forEach((l, i) => {
       if (!l.includes("set +e")) return;
       const win = lines.slice(i, i + 4).join("\n");
       const missing: string[] = [];
-      if (!/=\$\?/.test(win)) missing.push("no `rc=$?` capture");
+      const captured = /(\w+)=\$\?/.exec(win);
+      if (!captured) missing.push("no `rc=$?` capture");
       if (!/set -e\b/.test(win)) missing.push("never turns `-e` back on");
+      if (captured) {
+        const name = captured[1];
+        const reads = region.split(new RegExp(`\\$\\{?${name}(?![A-Za-z0-9_])`)).length - 1;
+        if (reads === 0) {
+          missing.push(`captures \`${name}\` and then never reads it — a DISCARDED exit code`);
+        }
+      }
       if (missing.length > 0) {
         out.push(`UNBOUNDED \`set +e\` (${missing.join(", ")}): ${l.trim()}`);
       }
@@ -4909,5 +4928,50 @@ describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()
       unboundedSetE(uncaptured).join(" | "),
       "a `set +e` whose status is never captured went unreported — that is the discarded exit code the bound exists to keep",
     ).toContain("no `rc=$?` capture");
+  });
+
+  it("⭐ G1: a status CAPTURED and then never READ is reported — capture is not consumption", () => {
+    // The gap the first two legs cannot see. This mutation keeps the SITE
+    // byte-identical (same `set +e`, same allowlisted bounded read), keeps the
+    // capture and keeps the `set -e` — it only renames the variable the status
+    // lands in, so nothing ever branches on it. That is the ninth-`set +e`
+    // shape stated in prose beside the list, made real on an existing site.
+    const orphaned = SRC.replace("  ledger_rows_rc=$?\n", "  ledger_rows_discarded_rc=$?\n");
+    expect(orphaned, "the capture-rename mutation changed nothing").not.toBe(SRC);
+    // CALIBRATION: the mutation APPLIED, and applied where it was aimed.
+    expect(orphaned, "the mutant does not carry the orphaned capture").toContain(
+      "ledger_rows_discarded_rc=$?",
+    );
+    expect(
+      liveLines(checkRegion(orphaned))
+        .join("\n")
+        .split(/\$\{?ledger_rows_discarded_rc(?![A-Za-z0-9_])/).length - 1,
+      "CALIBRATION: the renamed status is read somewhere after all, so this is not the discarded-capture shape",
+    ).toBe(0);
+
+    // GREEN CONTROL, on the real script: all eight sites capture AND consume.
+    expect(
+      unboundedSetE(SRC),
+      "the REAL script trips the new leg — one of its `set +e` bounds captures a status nobody reads",
+    ).toEqual([]);
+
+    // The two older legs stay silent on this mutant, and so does the site rule —
+    // which is the whole point: without the third leg this passes everything.
+    const report = unboundedSetE(orphaned).join(" | ");
+    expect(report, "the capture leg fired, so the mutant is not exercising the READ leg").not.toContain(
+      "no `rc=$?` capture",
+    );
+    expect(report, "the restore leg fired, so the mutant is not exercising the READ leg").not.toContain(
+      "never turns `-e` back on",
+    );
+    expect(
+      softeningOffenders(orphaned),
+      "the SITE rule alone should not see this — the site is unchanged, only the consumption is gone",
+    ).toEqual([]);
+
+    expect(
+      report,
+      "a `set +e` whose captured status is never read went unreported — the bound proves capture and restoration and calls that consumption",
+    ).toContain("captures `ledger_rows_discarded_rc` and then never reads it");
   });
 });
