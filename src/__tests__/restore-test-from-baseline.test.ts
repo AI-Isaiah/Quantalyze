@@ -1638,6 +1638,117 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
     expect(dRes.join("|")).not.toBe(schemaRe);
   });
 
+  it("E1 — the ONE class exemption is refdata.sql x ALTER DATABASE, and widening it is a RED", () => {
+    // ⛔ WHY A PIN AND NOT A DERIVATION. `scoped_out` is the one list in this
+    // function that makes a cell go UNREAD, and every other agreement here is
+    // derived precisely because a restated constant drifts. This one cannot be
+    // derived from anything — there is no second copy of the decision to check
+    // against — so the control has to be that the list is SHORT and NAMED. The
+    // script already refuses an entry that resolves against neither list, which
+    // fails closed; the direction it cannot see is a NEW, well-formed exemption
+    // silently switching a class off for another file.
+    //
+    // The reason for the one entry is measured, not asserted: `refdata.sql` is
+    // `scripts/extract-reference-inserts.mjs` output — "the ORIGINAL bytes of an
+    // allowlisted migration statement, sliced by offset" — and migration source
+    // carries `ALTER DATABASE` in runbook comments (`20260407164606_perfect_match.sql`
+    // is allowlisted AND carries one). The same class in the other three files has no
+    // such channel and is KEPT.
+    const arr = /\n  local -a scoped_out=\(\n([\s\S]*?)\n  \)\n/.exec(SRC);
+    expect(
+      arr,
+      "the scan no longer declares a `scoped_out=(…)` array — either the exemption became unconditional or the anchor moved",
+    ).not.toBeNull();
+    const pairs = (arr?.[1] ?? "")
+      .split("\n")
+      .map((l) => l.trim().replace(/^'/, "").replace(/'$/, ""))
+      .filter((l) => l.length > 0);
+    expect(
+      pairs,
+      "the class-exemption list is no longer the single argued pair. Every entry here switches a credential class OFF for a file the workflow publishes to a world-readable artifact for 90 days, so a new one is a founder decision with its own measurement, not an edit.",
+    ).toEqual(["refdata.sql|ALTER DATABASE"]);
+  });
+
+  it("EXECUTED — E1: the exemption is scoped, not a deletion, and the green log SAYS so", () => {
+    const body = "CREATE TABLE public.x ();\n";
+    // The realistic shape: a recipe comment INTERIOR to an allowlisted INSERT, which
+    // the extractor emits verbatim because it slices original bytes.
+    const RECIPE = "INSERT INTO public.t VALUES\n  -- ALTER DATABASE postgres SET app.k = 'v'\n  (1);\n";
+
+    // (a) In `refdata.sql` it must PASS — and the clean line must name the pair, or a
+    //     green log claims a cell was read that never was.
+    const green = runDsnAssert({
+      ...Object.fromEntries(STAGED.map((f) => [f, body])),
+      "refdata.sql": `${body}${RECIPE}`,
+    });
+    expect(
+      green.status,
+      `an ALTER DATABASE recipe COMMENT in refdata.sql refused the restore. The allowlist grows by founder decision, so this aborts a restore over documentation. Output:\n${green.out}`,
+    ).toBe(0);
+    expect(
+      green.out,
+      "the clean sentence does not name the scoped-out pair, so a reader of a green log is told six classes cleared four files while one of the twenty-four cells was never read",
+    ).toContain("scoped out by measurement: refdata.sql|ALTER DATABASE");
+
+    // (b) THE CALIBRATION. The same text in each of the other three must still
+    //     REFUSE, or (a) is passing because the class was dropped outright.
+    for (const target of STAGED.filter((f) => f !== "refdata.sql")) {
+      const red = runDsnAssert({
+        ...Object.fromEntries(STAGED.map((f) => [f, body])),
+        [target]: `${body}ALTER DATABASE postgres SET app.k = 'v';\n`,
+      });
+      expect(
+        red.status,
+        `an ALTER DATABASE in ${target} did NOT refuse — the exemption is scoped to refdata.sql, so if the class bites nowhere it has been deleted. Output:\n${red.out}`,
+      ).toBe(1);
+      expect(red.out, `the refusal does not name ${target} and the ALTER DATABASE class`).toContain(
+        `${target} (ALTER DATABASE)`,
+      );
+    }
+
+    // (c) THE EXEMPTION IS PER-CLASS, NOT PER-FILE. `refdata.sql` must still be
+    //     scanned for the other five, or the entry above quietly excused the file.
+    const dsn = ["postgre", "sql://u", ":p@db.example:5432/postgres"].join("");
+    const stillScanned = runDsnAssert({
+      ...Object.fromEntries(STAGED.map((f) => [f, body])),
+      "refdata.sql": `${body}-- ${dsn}\n`,
+    });
+    expect(
+      stillScanned.status,
+      `a DSN in refdata.sql passed — the ALTER DATABASE exemption has excused the whole FILE. Output:\n${stillScanned.out}`,
+    ).toBe(1);
+    expect(stillScanned.out).toContain("refdata.sql (DSN)");
+  });
+
+  it("EXECUTED — E1: an exemption that resolves against NOTHING is a MEASURE_FAIL", () => {
+    // A typo fails CLOSED (the class simply still runs) and would therefore be
+    // invisible — a line in the source claiming a decision that is no longer being
+    // taken, beside a control that no longer implements it. That is the defect class
+    // this whole block exists to answer, so it is refused rather than ignored.
+    const body = "CREATE TABLE public.x ();\n";
+    const clean = Object.fromEntries(STAGED.map((f) => [f, body]));
+
+    for (const [bad, why] of [
+      ["refdata.sqll|ALTER DATABASE", "file"],
+      ["refdata.sql|ALTER DATABASE ", "class"],
+    ] as const) {
+      const mutated = SRC.replace("    'refdata.sql|ALTER DATABASE'\n", `    '${bad}'\n`);
+      expect(mutated, `the stale-exemption (${why}) mutation did not APPLY`).not.toBe(SRC);
+      const red = runDsnAssert(clean, mutated);
+      expect(
+        red.status,
+        `a stale exemption naming a ${why} that does not exist passed silently. Output:\n${red.out}`,
+      ).toBe(1);
+      expect(red.out, `the stale-exemption refusal does not report the unresolved ${why}`).toContain(
+        "MEASURE_FAIL: the class exemption",
+      );
+    }
+
+    // And the INTACT list on the same clean input is green, so the two legs above
+    // are not passing because the guard refuses everything.
+    expect(runDsnAssert(clean).status).toBe(0);
+  });
+
   it("EXECUTED — C2: EVERY class refuses, names its class, and never echoes the match", () => {
     // ⛔ ASSEMBLED AT RUNTIME, NEVER SPELLED AS LITERALS — the same discipline the
     // DSN fixture above records, and for the same reason: each of these has to carry

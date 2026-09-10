@@ -1537,10 +1537,44 @@ TXN_ASSERT
 # classes are ZERO across every input these four files are assembled from —
 # `supabase/schema/baseline.sql` (0/0/0/0/0/0), the extractor's `refdata.sql` over
 # the real allowlist (0/0/0/0/0/0), and this script's own heredocs (0 for all but the
-# scan patterns below). `ALTER DATABASE` IS included here although the workflow scopes
-# it out of the LEDGER scan: that exemption exists because migration SOURCE carries it
-# in comments, and migration source never reaches these four files — only a
-# migration's `version` and `name` do.
+# scan patterns below).
+#
+# ⛔ `ALTER DATABASE` IS SCOPED OUT FOR `refdata.sql`, AND ONLY FOR IT. This comment
+# said the opposite until 2026-09-10 — it claimed the class was safe to apply to all
+# four because "migration SOURCE carries it in comments, and migration source never
+# reaches these four files — only a migration's `version` and `name` do." That
+# sentence is FALSE, and it is false through the channel Phase 164.8.1 REFDATA built
+# on purpose: `refdata.sql` is `scripts/extract-reference-inserts.mjs`'s output, and
+# its own generated header says every statement in it is "the ORIGINAL bytes of an
+# allowlisted migration statement, sliced by offset". Migration source reaches ONE of
+# these four files BY DESIGN.
+#
+# MEASURED 2026-09-10, both halves:
+#   * The near-miss is already in the tree. `scripts/restore-test-refdata-allowlist.txt`
+#     allowlists `20260407164606_perfect_match.sql` :55-56, and that same file carries
+#     `--   ALTER DATABASE postgres SET app.admin_email = '<addr>'` at line 28 as a
+#     runbook recipe. Today's slice starts below it, so a regeneration measures 0 hits
+#     across all six classes and the CURRENT state is genuinely clean.
+#   * A slice CAN carry one. Probed against the real extractor with a scratch
+#     migration: a comment ABOVE the INSERT is dropped (the span starts at the first
+#     non-comment byte), but a comment INSIDE the statement — between `VALUES` and the
+#     `;` — is emitted VERBATIM, because the emitter slices original bytes.
+# The allowlist grows by founder decision, so the next allowlisted statement carrying
+# an interior recipe comment would make this scan REFUSE THE RESTORE over a piece of
+# documentation. That is the same shape `.github/workflows/test-restore-from-baseline.yml`
+# already scoped out of its LEDGER scan, for the same reason and in its own words:
+# "a gate that has to be waived to pass is not a gate."
+#
+# ⛔ AND THE CLASS HAS NO TRUE-POSITIVE POWER IN THAT FILE. Nothing an `ALTER DATABASE`
+# STATEMENT could be ever reaches `refdata.sql`: the extractor admits only top-level
+# `INSERT INTO public.<table> … VALUES (<literals>)` (criteria C1-C4 in the allowlist
+# header), so the class can match there only inside a comment or a seed string. A real
+# credential in either would still be caught — by the DSN, host, project-ref, connect
+# or JWT class, none of which is scoped out anywhere. The residual, named rather than
+# hidden: a bare `app.<x> = '<real value>'` recipe comment whose value is secret but
+# matches none of the other five shapes. `census.sql`, `survivors.sql` and
+# `restore.sql` are assembled from live-database reads and this script's own heredocs —
+# no migration source, so the class keeps its full meaning there and is KEPT.
 #
 # ⛔ THE ONE PREDICATE DELIBERATELY NOT APPLIED is the arm redaction check's SECOND
 # half — a dollar-quote, i.e. a SQL body. These files ARE SQL and are full of
@@ -1580,12 +1614,43 @@ refuse_credential_in_published_sql() {
     'JWT|eyJ[A-Za-z0-9_-]{10,}'
     'ALTER DATABASE|ALTER DATABASE'
   )
+  # ⛔ `<file>|<class name>` — the pairs deliberately NOT applied, one line per
+  # exemption, each of which has to be argued in the block above this function. The
+  # ONE entry today is `refdata.sql` × `ALTER DATABASE`, for the reason the workflow's
+  # own ledger scan gives: migration SOURCE carries that string in runbook comments,
+  # `refdata.sql` is migration source by construction, and a class that can only ever
+  # match a comment there would abort a restore over documentation.
+  #
+  # ⛔ AN EXEMPTION THAT NAMES NOTHING IS A DEFECT, NOT A NO-OP. A typo fails CLOSED
+  # (the class simply still runs) and would therefore be invisible, so every entry is
+  # required to resolve against BOTH lists — a stale exemption left behind by a
+  # renamed file or class is a sentence claiming a decision that is no longer being
+  # taken, which is the failure mode this whole block exists to answer.
+  local -a scoped_out=(
+    'refdata.sql|ALTER DATABASE'
+  )
+  local e ef ec ok
+  for e in "${scoped_out[@]}"; do
+    ef="${e%%|*}"; ec="${e#*|}"
+    ok=0
+    # `if`, not `&&`: under `set -e` a final iteration whose test FAILS makes the
+    # loop exit non-zero and aborts the script at a line that is only counting.
+    for f in "${staged[@]}"; do if [ "$f" = "$ef" ]; then ok=1; fi; done
+    [ "$ok" -eq 1 ] || fail "MEASURE_FAIL: the class exemption '${e}' names '${ef}', which is not one of the ${#staged[@]} published files. A scoped-out pair that resolves against nothing is a recorded decision that is not being taken."
+    ok=0
+    for c in "${classes[@]}"; do if [ "${c%%|*}" = "$ec" ]; then ok=1; fi; done
+    [ "$ok" -eq 1 ] || fail "MEASURE_FAIL: the class exemption '${e}' names class '${ec}', which is not one of the ${#classes[@]} scanned classes. A scoped-out pair that resolves against nothing is a recorded decision that is not being taken."
+  done
+
   for f in "${staged[@]}"; do
     [ -f "$RESTORE_OUT_DIR/$f" ] || continue
     scanned=$((scanned + 1))
     seen="${seen}${seen:+, }${f}"
     for c in "${classes[@]}"; do
       cname="${c%%|*}"; cre="${c#*|}"
+      ok=0
+      for e in "${scoped_out[@]}"; do if [ "$e" = "${f}|${cname}" ]; then ok=1; fi; done
+      [ "$ok" -eq 0 ] || continue
       rc=0
       grep -acE "$cre" "$RESTORE_OUT_DIR/$f" >/dev/null || rc=$?
       [ "$rc" -le 1 ] || fail "MEASURE_FAIL: could not scan ${f} for a ${cname} shape (grep exited ${rc}). An unreadable file is not a clean one, and this file is published."
@@ -1604,7 +1669,11 @@ refuse_credential_in_published_sql() {
   # and this scan is enough. So the tally is MEASURED and compared with the list's
   # own length, and a short count REFUSES rather than noting.
   [ "$scanned" -eq "${#staged[@]}" ] || fail "MEASURE_FAIL: scanned ${scanned} of ${#staged[@]} published .sql file(s) under ${RESTORE_OUT_DIR} (found: ${seen:-none}). The workflow stages all ${#staged[@]} into a WORLD-READABLE artifact, so a file this scan could not find is a file that ships UNSCANNED. Refusing before the transaction runs; the database is untouched."
-  note "public .sql files carry no credential shape in any of the ${#classes[@]} classes the artifact README names (scanned ${scanned} of ${#staged[@]}: ${seen})"
+  # ⛔ THE EXEMPTIONS ARE PRINTED ON A GREEN RUN. A scope-out that only ever appears
+  # in the source is a control weaker than the sentence beside it: the clean line has
+  # to say which pairs were NOT measured, or a reader of a green log is told six
+  # classes cleared four files when one of the twenty-four cells was never read.
+  note "public .sql files carry no credential shape in any of the ${#classes[@]} classes the artifact README names (scanned ${scanned} of ${#staged[@]}: ${seen}; scoped out by measurement: ${scoped_out[*]})"
 }
 
 run_transaction() {
@@ -3232,6 +3301,54 @@ FRESHSTUB
     grep -aq 'scanned 4 of 4' "$out" \
       || { echo "MEASURE_FAIL (d): a clean run does not report scanning all four staged files."; return 1; }
 
+    # (e) THE `refdata.sql` × `ALTER DATABASE` EXEMPTION, BOTH HALVES, on the lane.
+    #     `refdata.sql` is `extract-reference-inserts.mjs` output — the ORIGINAL bytes
+    #     of an allowlisted migration statement — and a comment INTERIOR to such a
+    #     statement is emitted verbatim. The repo already carries the near-miss:
+    #     `20260407164606_perfect_match.sql` is allowlisted and carries an
+    #     `ALTER DATABASE postgres SET app.admin_email = …` runbook comment 27 lines
+    #     above the slice. So the class is scoped OUT for that one file, and both
+    #     directions are measured here: scoped out is not the same as deleted.
+    local ad="ALTER DATABASE postgres SET app.k = 'seed'"
+
+    #     (e1) the SAME text in `refdata.sql` must COMMIT.
+    copy="$SELFTEST_TMPD/pubscan-alterdb-refdata.sh"
+    awk -v inj="  printf '%s\\n' \"-- ${ad}\" >> \"\$RESTORE_OUT_DIR/refdata.sql\"  # arm 27(e1): scratch copy only" \
+        '!d && $0 == "  refuse_credential_in_published_sql" { print inj; d = 1 }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
+      || { echo "MEASURE_FAIL (e1): could not build the ALTER-DATABASE-in-refdata scratch copy — the scan call site moved."; return 1; }
+    grep -aq 'arm 27(e1): scratch copy only' "$copy" \
+      || { echo "MEASURE_FAIL (e1): the scratch copy does not carry the injected recipe comment, so this leg would test an unseeded run."; return 1; }
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a27e1.out"; rc=0
+    run_leg "$copy" restore a27e1 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL (e1): a restore whose refdata.sql carries an ALTER DATABASE recipe COMMENT exited ${rc}, expected 0. The allowlist grows by founder decision, and this aborts a restore over documentation — the exact shape the workflow scoped out of its own ledger scan."; return 1; }
+    grep -aq 'scoped out by measurement: refdata.sql|ALTER DATABASE' "$out" \
+      || { echo "MEASURE_FAIL (e1): the clean line does not NAME the scoped-out pair, so a green log claims six classes cleared four files while one cell was never read."; return 1; }
+
+    #     (e2) THE CALIBRATION, and it is the whole point of the pair: the class must
+    #          still BITE in a file that is NOT `refdata.sql`. Without this, (e1) would
+    #          pass just as well against a scan that dropped the class outright.
+    copy="$SELFTEST_TMPD/pubscan-alterdb-census.sh"
+    awk -v inj="  printf '%s\\n' \"${ad};\" >> \"\$RESTORE_OUT_DIR/census.sql\"  # arm 27(e2): scratch copy only" \
+        '!d && $0 == "  refuse_credential_in_published_sql" { print inj; d = 1 }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
+      || { echo "MEASURE_FAIL (e2): could not build the ALTER-DATABASE-in-census scratch copy — the scan call site moved."; return 1; }
+    grep -aq 'arm 27(e2): scratch copy only' "$copy" \
+      || { echo "MEASURE_FAIL (e2): the scratch copy does not carry the injected statement."; return 1; }
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a27e2.out"; rc=0
+    run_leg "$copy" restore a27e2 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (e2): an ALTER DATABASE in census.sql exited ${rc}, expected 1. The exemption is scoped to refdata.sql; if it bites nowhere, leg (e1) is passing because the class was DELETED."; return 1; }
+    grep -aq 'census.sql (ALTER DATABASE)' "$out" \
+      || { echo "MEASURE_FAIL (e2): the refusal does not name census.sql and the ALTER DATABASE class."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL (e2): the stray table is gone (count=${n}) — the scan refused AFTER the transaction ran."; return 1; }
+
     unset ARM27_SEED_DSN ARM27_SEED_JWT
     return 0
   }
@@ -3304,7 +3421,7 @@ FRESHSTUB
   run_arm "24 RED   reference-data allowlist: count drift, empty, silent extractor" 0 arm_bad_refdata_allowlist
   run_arm "25 GREEN the preflight rollback view normalises mutable reference counts and NOTHING else (CR-01)" 0 arm_census_rollback_view
   run_arm "26 RED   a backtick inside ANY unquoted heredoc is refused — SEVEN evasions closed — and THIS script is clean" 0 arm_backtick_in_txn_heredoc
-  run_arm "27 RED   a credential in a PUBLISHED .sql file, and a file the scan could not find" 0 arm_published_sql_credential_scan
+  run_arm "27 RED   a credential in a PUBLISHED .sql file, a file the scan could not find, and the refdata.sql ALTER DATABASE exemption in BOTH directions" 0 arm_published_sql_credential_scan
 
   release_mutex
 
@@ -3359,7 +3476,7 @@ FRESHSTUB
   # short: `refuse_backticks_in_txn_heredocs` arrived with its arm and the sentence
   # did not move. A narrative that miscounts or overstates its own guards is the same
   # defect class as a stale floor, so it is corrected rather than extended.
-  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — TEN refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back — EMPTY, SHORT and row-level partial each by name, a bad allowlist is refused before any write, the preflight's rollback view normalises mutable reference counts and nothing else, a credential in any of the four PUBLISHED .sql files is refused BY CLASS before the transaction runs and a short scan refuses too, harness calibrated)"
+  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — TEN refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back — EMPTY, SHORT and row-level partial each by name, a bad allowlist is refused before any write, the preflight's rollback view normalises mutable reference counts and nothing else, a credential in any of the four PUBLISHED .sql files is refused BY CLASS before the transaction runs, a short scan refuses too, and the one scoped-out pair (refdata.sql x ALTER DATABASE) is proven to be an exemption rather than a deleted class, harness calibrated)"
   return 0
 }
 
