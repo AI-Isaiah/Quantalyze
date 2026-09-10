@@ -1545,6 +1545,104 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
     }, EXEC_TEST_TIMEOUT_MS);
 
     /**
+     * ⛔ WR-03 (164.8.2-REVIEW, closed 2026-09-10). The `-a` comment in the workflow used
+     * to read "a tracked file carries a deliberate NUL byte and plain grep reports such
+     * input clean" — stated flatly, in a workflow that runs on `ubuntu-latest`, about the
+     * grep this very phase measured does NOT do that. Plan 02 measured GNU grep 3.11 (the
+     * runner's family) across 3 locales × 4 fixture shapes and `-a` changed the verdict in
+     * NONE of the twelve. ugrep 7.8.4 IS blind; GNU is not. The phase corrected the record
+     * in the PROD test pin's message (below, `PROD_C0331_TAIL`'s `it`) and re-asserted the
+     * falsified premise in the workflow, in the same commit range — and a maintainer
+     * editing this job reads the COMMENT, not the test file.
+     *
+     * ⭐ This arm is the falsifier for a PROSE fix, which is otherwise unfalsifiable: it
+     * reds if the retracted sentence comes back, and it reds if the measured record is
+     * removed. It reads the comment lines immediately ABOVE the reverted-grep and THROWS
+     * when there are none, because an empty string satisfies `not.toContain` vacuously.
+     */
+    it("the C-0331 twin's `-a` comment records the MEASUREMENT and does not re-assert the falsified premise (WR-03)", () => {
+      /** The contiguous comment lines immediately above the reverted-grep, in `apply-test`. */
+      const c0331Comment = (text: string): string => {
+        const lines = jobBlock(text, TEST_JOB).split("\n");
+        const anchor = lines.findIndex((l) => l.trim() === REVERTED_IF);
+        if (anchor < 0) {
+          throw new Error(
+            "the C-0331-twin reverted-grep line was not found in `apply-test`, so the " +
+              "comment this arm reads has no anchor. A rename must throw rather than let " +
+              "the arm scan an empty string and pass on `not.toContain`.",
+          );
+        }
+        const out: string[] = [];
+        for (let i = anchor - 1; i >= 0 && /^\s*#/.test(lines[i]); i--) out.unshift(lines[i]);
+        if (out.length === 0) {
+          throw new Error(
+            "there are NO comment lines above the C-0331-twin reverted-grep. The `-a` " +
+              "rationale is gone; this arm would then assert nothing at all.",
+          );
+        }
+        // ⚠️ NORMALISED, and that is load-bearing. The retracted sentence is LINE-WRAPPED
+        // in the pre-fix file ("… and plain\n          # grep reports such input clean."),
+        // so a raw `not.toContain` over the joined comment did NOT bite when this arm was
+        // first run against the byte-identical pre-fix workflow — only the positive needle
+        // did. Strip the `#` markers and collapse whitespace so the pin binds to the CLAIM
+        // and not to where the author happened to wrap it.
+        return out
+          .join("\n")
+          .replace(/^\s*#\s?/gm, "")
+          .replace(/\s+/g, " ")
+          .trim();
+      };
+
+      const RETRACTED = "plain grep reports such input clean";
+      const comment = c0331Comment(WF);
+      expect(
+        comment,
+        "the C-0331 twin's `-a` comment re-asserts the premise Phase 164.8.2 measured FALSE: " +
+          "GNU grep 3.11 — the runner's — read the NUL-bearing fixture identically with and " +
+          "without `-a`, in 3 locales × 4 fixture shapes. `-a` is kept on the repo-wide rule " +
+          "and on the ugrep flavour dependence; it did NOT close a live CI exposure, and the " +
+          "comment must not say it did. ⛔ Do not fix this by deleting the sentence — state " +
+          "the measurement.\n\n" +
+          comment,
+      ).not.toContain(RETRACTED);
+      for (const needle of [
+        "GNU grep 3.11",
+        "ugrep 7.8.4",
+        "did not close a live CI exposure",
+      ]) {
+        expect(
+          comment,
+          `the C-0331 twin's \`-a\` comment lost the measured record (${needle}). Without it ` +
+            "the next reader has no way to know the flavour dependence is the whole reason " +
+            `\`-a\` is there.\n\n${comment}`,
+        ).toContain(needle);
+      }
+
+      calibrate(
+        "the WR-03 comment pin bites when the retracted sentence returns",
+        (s) =>
+          mutateInJob(
+            s,
+            TEST_JOB,
+            "          # MEASURED 2026-09-09, Phase 164.8.2: on GNU grep 3.11 (the runner's) and BSD grep 2.6.0\n",
+            `          # ${RETRACTED}.\n`,
+          ),
+        (t) => !c0331Comment(t).includes(RETRACTED),
+      );
+      calibrate(
+        "the WR-03 comment pin bites when the measured record is deleted",
+        (s) =>
+          mutateInJob(
+            s,
+            TEST_JOB,
+            "          # MEASURED 2026-09-09, Phase 164.8.2: on GNU grep 3.11 (the runner's) and BSD grep 2.6.0\n",
+            "          # MEASURED 2026-09-09, Phase 164.8.2: on a grep and another grep\n",
+          ),
+        (t) => c0331Comment(t).includes("GNU grep 3.11"),
+      );
+    });
+
+    /**
      * ⛔ WR-04 (Phase 164.8.2). The C-0331 twin is a NEGATIVE check, and until
      * 2026-09-09 it ran `grep -Eiq` with no `-a`. A grep that declines to read a file
      * it calls binary returns 1, which this branch cannot tell from "no reverted row"
