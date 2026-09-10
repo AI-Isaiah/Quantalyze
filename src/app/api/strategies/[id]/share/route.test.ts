@@ -252,9 +252,25 @@ function seedMint(): void {
   });
 }
 
-/** Pull the 43-char token back out of a minted url. */
+/**
+ * Pull the 43-char token back out of a minted url.
+ *
+ * 164.8.2 — `lastIndexOf` returns -1 on a url carrying no "/", and the old
+ * `slice(-1 + 1)` handed back the WHOLE url. Today every caller compares the
+ * result against `/^[A-Za-z0-9_-]{43}$/` or feeds it to `verifyShareToken`, so
+ * that degeneracy reds — but it reds with "the token is malformed", which is a
+ * lie about which side broke, and one caller edit away from being silent. An
+ * absent separator means the route stopped minting a URL-shaped value; name it.
+ */
 function tokenFrom(url: string): string {
-  return url.slice(url.lastIndexOf("/") + 1);
+  const cut = url.lastIndexOf("/");
+  if (cut < 0) {
+    throw new Error(
+      `tokenFrom: minted url carries no "/" separator (length ${url.length}), ` +
+        "so the share token cannot be split off",
+    );
+  }
+  return url.slice(cut + 1);
 }
 
 let originalAppUrl: string | undefined;
@@ -417,6 +433,25 @@ describe("POST /api/strategies/[id]/share — the mint (SHARE-01)", () => {
     expect(url.startsWith(`${APP_URL}/factsheet-share/`)).toBe(true);
     expect(tokenFrom(url)).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(res.headers.get("Cache-Control")).toContain("no-store");
+  });
+
+  it("CALIBRATION (164.8.2) — tokenFrom BITES on a url carrying no '/' separator", async () => {
+    const res = await POST(makeReq(), makeCtx());
+    const { url } = (await res.json()) as { url: string };
+
+    // The mutant: the same minted url with every "/" anchor removed.
+    const separatorless = url.replaceAll("/", "");
+    expect(separatorless, "the mutation did not apply").not.toBe(url);
+    expect(separatorless.includes("/"), "the anchor is still present").toBe(
+      false,
+    );
+
+    // Run the REAL extractor over the mutant. Before 164.8.2 this returned the
+    // whole mutated url; now it names the missing anchor.
+    expect(() => tokenFrom(separatorless)).toThrow(/no "\/" separator/);
+
+    // CONTROL — over the real minted url it still yields the real token.
+    expect(tokenFrom(url)).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 
   it("⭐ ROUND-TRIPS: the minted token VERIFIES against (id, nonce, generation)", async () => {
