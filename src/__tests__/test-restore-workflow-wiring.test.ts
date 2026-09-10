@@ -4864,14 +4864,20 @@ describe("no lookup index reaches a narrowing call unchecked, in either mutex-pi
    * blanked and so differs). Used to place injected offenders where a real one
    * could live. Fails loud rather than silently picking nothing.
    */
-  const nearestCodeLine = (raw: string[], code: string[], at: number): number => {
+  const nearestCodeLine = (
+    raw: string[],
+    code: string[],
+    at: number,
+  ): number => {
     for (let d = 0; d < raw.length; d += 1) {
       for (const j of [at + d, at - d]) {
         if (j < 0 || j >= raw.length) continue;
         if (raw[j].trim() !== "" && raw[j] === code[j]) return j;
       }
     }
-    throw new Error("no code line found — the stripper blanked the entire file");
+    throw new Error(
+      "no code line found — the stripper blanked the entire file",
+    );
   };
 
   it("CALIBRATION — every narrow/lookup pair with -1 semantics fires; the two out-of-reach forms are pinned as MISSED", () => {
@@ -4978,7 +4984,9 @@ describe("no lookup index reaches a narrowing call unchecked, in either mutex-pi
     // here as a SUBJECT, not as a fallback: if it stopped losing lines on this file
     // the floor above would be pinning nothing, and this arm says so out loud.
     const naive = (src: string): string =>
-      src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/gm, "$1");
+      src
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/(^|[^:])\/\/[^\n]*/gm, "$1");
     const src = read(PIN_FILES[0]);
     const lost = src.split("\n").length - naive(src).split("\n").length;
     expect(
@@ -5005,9 +5013,11 @@ describe("no lookup index reaches a narrowing call unchecked, in either mutex-pi
         `${rel}: no injection point landed in the last tenth — the calibration is not spanning the file`,
       ).toBeGreaterThan(0.9);
       for (const at of depths) {
-        const mutated = [...raw.slice(0, at + 1), evil, ...raw.slice(at + 1)].join(
-          "\n",
-        );
+        const mutated = [
+          ...raw.slice(0, at + 1),
+          evil,
+          ...raw.slice(at + 1),
+        ].join("\n");
         expect(
           mutated,
           `CALIBRATION: the injection at line ${at + 1} of ${rel} changed nothing`,
