@@ -3454,6 +3454,77 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
     });
   });
 
+  // ── F6 (Phase 164.8.2) — A FAILING ARM MUST SAY WHY ───────────────────────
+  // `run_arm` ran every arm as `( "$@" ) >/dev/null 2>&1`. The exit-code
+  // contract was correct — `arm_frontier_ceiling_exceeded` is `want 1` and
+  // `return 0`s on each of its FOUR MEASURE_FAIL paths, so the arm genuinely
+  // FAILs — but all four causes printed to a discarded channel and the operator
+  // saw one undifferentiated `FAIL frontier-ceiling-exceeded RED`.
+  //
+  // ⛔ THIS ARM BINDS TO THE DIAGNOSIS, NOT TO THE EXIT CODE, and it has to:
+  // the exit code was ALREADY right, so an arm asserting `status === 1` would
+  // have passed against the pre-fix script and proved nothing. MEASURED
+  // 2026-09-10 on the same mutated copy, pre-fix vs post-fix — byte-identical
+  // `FAIL frontier-ceiling-exceeded RED (exit 0, expected 1)` and
+  // `SELF-TEST FAIL: 10/11`, exit 1 both times; only the sentence differs.
+  it("F6: a FAILING self-test arm re-emits its own MEASURE_FAIL sentence — the exit code was never the missing half", () => {
+    const SRC = readFileSync(LEDGER_GATE, "utf8");
+    // The ceiling arm's own naming `sed`. Deleting it leaves the gate exiting 1
+    // for the right reason but no longer NAMING what was exempted, which is one
+    // of the arm's four MEASURE_FAIL paths — the gate's own red mode, not an
+    // invented failure.
+    const NAMING_SED = `    sed 's/^/::error::  exempt (above tip): /' "$exempt_file"\n`;
+    expect(
+      occurrences(SRC, NAMING_SED),
+      "the ceiling's naming `sed` is not where this mutation expects it — the neuter below would not apply, and a neuter that does not apply reads as GREEN",
+    ).toBe(1);
+    const mutated = SRC.replace(NAMING_SED, "");
+    expect(mutated, "the neuter did not change the script").not.toBe(SRC);
+    expect(mutated.split("\n").length).toBe(SRC.split("\n").length - 1);
+
+    withTempDir((dir) => {
+      const copy = join(dir, "gate-no-naming.sh");
+      writeFileSync(copy, mutated);
+      chmodSync(copy, 0o755);
+      const res = spawnSync("bash", [copy, "--self-test"], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      });
+      const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+
+      // The contract half, unchanged and re-asserted so a future edit cannot
+      // buy diagnosability by weakening it.
+      expect(res.status, "the mutated gate must still FAIL the arm").toBe(1);
+      expect(out).toContain("FAIL frontier-ceiling-exceeded RED");
+      expect(out).toContain("SELF-TEST FAIL: 10/11 arms behaved as declared.");
+
+      // The half this arm exists for.
+      expect(
+        out,
+        "the arm failed mutely — its MEASURE_FAIL sentence went to the discarded channel, which is the whole of F6",
+      ).toContain("MEASURE_FAIL: the ceiling ERROR did not NAME the exempted migration 20260301000000_above1.");
+      expect(out, "the arm's output is not indented under its own verdict").toContain(
+        "       | MEASURE_FAIL: the ceiling ERROR did not NAME",
+      );
+    });
+  });
+
+  it("F6: a PASSING arm stays silent — capturing must not turn a green run into a wall of text", () => {
+    // The other direction, and the reason the capture is re-emitted on the FAIL
+    // branch only: `arm_calib_leg` alone prints ~20 lines of the gate's own
+    // output on a run that is entirely green.
+    const res = spawnSync("bash", [LEDGER_GATE, "--self-test"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+    expect(res.status).toBe(0);
+    expect(out, "a green run grew an arm-output block").not.toContain("       | ");
+    // And no arm's captured text leaked into the green narrative.
+    expect(out).not.toContain("calibration, flip ON");
+    expect(out).not.toContain("Repo migrations:");
+  });
+
   it("--self-test FAILS when the gate is neutered (the self-test itself can fail)", () => {
     // Drives the gate through its own stub seam with a condition present but
     // the assertion inverted, proving the self-test's arms are not decorative.

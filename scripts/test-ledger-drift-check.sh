@@ -830,9 +830,26 @@ STUB
   run_arm() {
     local label="$1" want="$2"
     shift 2
+    local arm_out=""
     total=$((total + 1))
     rc=0
-    ( "$@" ) >/dev/null 2>&1 || rc=$?
+    # ⛔ F6 (Phase 164.8.2) — CAPTURED, NOT DISCARDED, AND RE-EMITTED ON FAILURE
+    # ONLY. This read `( "$@" ) >/dev/null 2>&1`, and the EXIT-CODE contract was
+    # never the problem: `arm_frontier_ceiling_exceeded` is declared `want 1` and
+    # `return 0`s on every MEASURE_FAIL, so the arm genuinely FAILs. What was
+    # lost is the REASON. That arm has FOUR distinguishable causes — a wrong exit
+    # code, a missing `FRONTIER_EXEMPT_CEILING exceeded` string, and a missing
+    # `::error::  exempt (above tip): <name>` for any of four names — and the
+    # operator got `FAIL frontier-ceiling-exceeded RED (exit 0, expected 1)` and
+    # nothing else. The sentences were written to be read and could not be.
+    #
+    # ⛔ THE CONTRACT IS UNCHANGED, DELIBERATELY. `rc` still comes from the arm
+    # and is still compared against `want`; nothing here can turn a FAIL into an
+    # ok. Capturing is why `2>&1` replaces the discard — stderr carries the
+    # gate's own `::error::` lines and an arm that failed on one of them should
+    # say so. On the ok path the output is DROPPED, so a green run's log is
+    # byte-identical to what it was before this change.
+    arm_out="$( ( "$@" ) 2>&1 )" || rc=$?
     # ⚠️ The `ARM_FORCE_INVERT` clause is the sibling's one extra `||`
     # (scripts/restore-test-from-baseline.sh, `run_arm`). It exists for the
     # harness-calibration arm below, which must be able to turn the flip on for
@@ -845,6 +862,12 @@ STUB
       pass=$((pass + 1))
     else
       results+=("  FAIL ${label} (exit ${rc}, expected ${want})")
+      # The arm's own diagnosis, indented under its verdict and marked so a
+      # reader can tell the arm's output from the harness's. Withheld when the
+      # arm printed nothing, so a silent failure does not grow a blank block.
+      if [ -n "$arm_out" ]; then
+        results+=("$(printf '%s\n' "$arm_out" | sed 's/^/       | /')")
+      fi
     fi
   }
 
