@@ -4799,17 +4799,44 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
         continue;
       }
       if (c === '"' || c === "'" || c === "`") {
+        // ⛔ A BACKTICK IS NOT A PLAIN QUOTE, AND TREATING IT AS ONE WAS A LIVE
+        // BLIND SPOT (fixed 2026-09-10). `${ … }` holds CODE, and that code may
+        // open another template. Scanned with a single closing-quote search, the
+        // INNER backtick terminated the OUTER literal, and everything after it —
+        // still string text — was read as code. If that text held `/*`, the
+        // block-comment branch below swallowed to the next `*/` and took real
+        // offenders with it:
+        //     const t = `outer ${ `inner /*` } end`;
+        //     const evil = s.slice(s.indexOf(A));   → 0 offenders reported
+        // So: a STACK. "`" = template text, "\"" / "'" = a plain string, "{" = a
+        // `${ … }` substitution, which is code and may nest further.
         const start = i;
+        const stack: string[] = [c];
         i += 1;
-        while (i < n) {
-          if (src[i] === "\\") {
+        while (i < n && stack.length > 0) {
+          const ch = src[i];
+          const top = stack[stack.length - 1];
+          if (top === "{") {
+            // Inside `${ … }`: real code. Literal openers and brace depth are
+            // the only things that can change where the template ends.
+            if (ch === "`" || ch === '"' || ch === "'" || ch === "{") {
+              stack.push(ch);
+            } else if (ch === "}") {
+              stack.pop();
+            }
+            i += 1;
+            continue;
+          }
+          if (ch === "\\") {
             i += 2;
             continue;
           }
-          if (src[i] === c) {
-            i += 1;
-            break;
+          if (top === "`" && ch === "$" && src[i + 1] === "{") {
+            stack.push("{");
+            i += 2;
+            continue;
           }
+          if (ch === top) stack.pop();
           i += 1;
         }
         out += src.slice(start, i);
@@ -4976,6 +5003,75 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
         `the rule now reaches \`${subject}\` — good, but the docblock above still calls it out of reach. Update the stated limit.`,
       ).toEqual([]);
     }
+  });
+
+  it("CALIBRATION — a nested template literal carrying `/*` no longer blinds the strip", () => {
+    // ⚠️ LATENT, NOT LIVE, WHEN FOUND (2026-09-10): a sweep of all scanned files
+    // found zero non-comment lines being blanked. It is pinned anyway, because
+    // the failure mode is the one this whole rule exists to kill — the scan
+    // reports clean over a region it never read.
+    const subject = [
+      "const t = `outer ${ `inner /" + "*` } end`;",
+      `const evil = s.${NARROW}(s.${FIND}(A));`,
+    ].join("\n");
+    // CALIBRATION: the subject really is the hazard — an inner template inside a
+    // `${ … }` substitution, and a block-comment opener inside THAT.
+    expect(
+      /`[^`]*\$\{[^`]*`[^`]*\/\*/.test(subject),
+      "CALIBRATION: the subject is not a nested template carrying a comment opener, so it does not reproduce the blind spot",
+    ).toBe(true);
+    // The pre-fix quote branch, kept as a live SUBJECT: byte-identical to the
+    // shipped walker except that a backtick is a plain quote. The inner backtick
+    // ends the outer literal, the `/*` that follows opens a block comment with no
+    // terminator, and the rest of the file is blanked before the scan sees it.
+    const backtickAsQuote = (src: string): string => {
+      let out = "";
+      let i = 0;
+      while (i < src.length) {
+        const c = src[i];
+        const d = src[i + 1];
+        if (c === "/" && d === "*") {
+          const end = src.indexOf("*/", i + 2);
+          const stop = end === -1 ? src.length : end + 2;
+          out += src.slice(i, stop).replace(/[^\n]/g, " ");
+          i = stop;
+          continue;
+        }
+        if (c === '"' || c === "'" || c === "`") {
+          const start = i;
+          i += 1;
+          while (i < src.length) {
+            if (src[i] === "\\") {
+              i += 2;
+              continue;
+            }
+            if (src[i] === c) {
+              i += 1;
+              break;
+            }
+            i += 1;
+          }
+          out += src.slice(start, i);
+          continue;
+        }
+        out += c;
+        i += 1;
+      }
+      return out;
+    };
+    expect(
+      new RegExp(UNCHECKED.source, "g").test(backtickAsQuote(subject)),
+      "the pre-fix walker no longer misses this subject, so this arm has no live subject — re-derive it rather than assuming the fix still matters",
+    ).toBe(false);
+    // And the shipped walker sees it, on the right line.
+    expect(
+      offenders(subject),
+      "a nested template literal containing a comment opener still blinds the strip — the offender after it is invisible",
+    ).toEqual([`line 2: const evil = s.${NARROW}(s.${FIND}(A));`]);
+    expect(
+      stripComments(subject).split("\n").length,
+      "the strip lost a line on the nested-template subject",
+    ).toBe(2);
   });
 
   it("CALIBRATION — a formatter-wrapped offender is caught, and located", () => {
