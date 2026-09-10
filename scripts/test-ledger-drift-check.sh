@@ -377,11 +377,54 @@ check() {
   # normal and must not trip this. Separation is wide, not tuned: the real
   # defect scored matched=9 of 262 (fires); ordinary drift of 30 un-applied
   # migrations scores matched=232 of 262 (silent).
-  local ledger_rows matched
-  ledger_rows="$(run_ledger_query ledger_rows "$names_csv" 2>/dev/null || echo "")"
-  case "$ledger_rows" in (*[!0-9]*|"") ledger_rows="" ;; esac
+  #
+  # ⛔ F7 (Phase 164.8.2) — THE SIXTH `|| true`, AND THE ONLY ONE THAT FAILED
+  # TOWARD SILENCE. This read
+  #     ledger_rows="$(run_ledger_query ledger_rows … 2>/dev/null || echo "")"
+  #     case "$ledger_rows" in (*[!0-9]*|"") ledger_rows="" ;; esac
+  #     if [ -n "$ledger_rows" ] && [ "$ledger_rows" -ge 50 ] && …
+  # which is the SP-M01 shape the five bounded sites in this file already
+  # condemn — an unreadable measurement collapsing to a value the control can
+  # never fire on — except this one collapsed to EMPTY, and `[ -n … ]` then made
+  # the ENTIRE ABSURDITY FLOOR silently INERT. The `2>/dev/null` removed the only
+  # channel that would have said why. A pooler blip, a permission change or a
+  # `run_ledger_query` regression therefore did not merely lose the row count: it
+  # switched off the control that separates a WRONG JOIN KEY from real drift, and
+  # the gate went on to report drift-shaped nonsense with full confidence — on a
+  # SHARED database, in the words of the block above, "sending the reader to
+  # hand-apply migrations".
+  #
+  # The five sites F5 bounded fail toward RED. This one failed toward "the
+  # control did not act", which is strictly worse. An unreadable input is not a
+  # clean one — the same sentence the sibling bounds carry.
+  #
+  # ⚠️ THE STDERR IS CAPTURED AND DELIBERATELY NOT ECHOED, and the boundary is
+  # said out loud rather than implied: psql's connect/auth stderr names the host,
+  # the port and the DB user, and this job's log is PUBLIC (see NON-NEGOTIABLES
+  # at the top). So the diagnosis this failure hands the reader is the EXIT CODE
+  # and whether the query said anything at all — which already separates "psql
+  # spoke and refused" from "psql is not there" from "the query returned no row"
+  # — and not the text. What it must never do again is discard the channel and
+  # then decide.
+  local ledger_rows matched ledger_rows_rc=0
+  local ledger_rows_err="${tmp}/ledger_rows.err"
+  set +e
+  ledger_rows="$(run_ledger_query ledger_rows "$names_csv" 2>"$ledger_rows_err")"
+  ledger_rows_rc=$?
+  set -e
+  if [ "$ledger_rows_rc" -ne 0 ]; then
+    fail "MEASURE_FAIL: could not read the TEST ledger row count (the ledger_rows query exited ${ledger_rows_rc}; $(wc -l < "$ledger_rows_err" | tr -d '[:space:]') line(s) of stderr captured and WITHHELD — it can carry a DSN, host or username). The ABSURDITY FLOOR below is the control that tells a wrong join key from real drift, and it can only fire on a count that was READ; an unreadable one leaves it INERT while the gate reports drift with full confidence. An unreadable input is not a clean one."
+  fi
+  case "$ledger_rows" in
+    "")
+      fail "MEASURE_FAIL: the TEST ledger row-count query exited 0 and returned NO ROW. A count query returns exactly one number, so an empty answer is a read that did not happen, not a ledger holding zero rows — and zero is one of the values the ABSURDITY FLOOR below can never fire on."
+      ;;
+    *[!0-9]*)
+      fail "MEASURE_FAIL: the TEST ledger row-count query exited 0 and returned something that is not a number (${#ledger_rows} character(s), value WITHHELD — a failed psql can print connection detail on stdout). A count that cannot be compared is not a count of zero; the ABSURDITY FLOOR below would have gone INERT on it."
+      ;;
+  esac
   matched=$(( ${#repo_names[@]} - missing_count ))
-  if [ -n "$ledger_rows" ] && [ "$ledger_rows" -ge 50 ] && [ $(( matched * 2 )) -lt "${#repo_names[@]}" ]; then
+  if [ "$ledger_rows" -ge 50 ] && [ $(( matched * 2 )) -lt "${#repo_names[@]}" ]; then
     echo "::error::${GATE}: MEASURE_FAIL — this is the GATE failing, not the database."
     echo "::error::The TEST ledger holds ${ledger_rows} rows, but only ${matched} of ${#repo_names[@]} repo"
     echo "::error::migrations matched it. A populated ledger that matches almost nothing means the"
@@ -800,10 +843,20 @@ self_test() {
   printf '%s\n' "$body" > "$tmp/snapshot/selftest_fn.sql"
 
   # Stub ledger: argv[1] is the direction; MISSING_NAMES seeds the red mode.
+  #
+  # ⛔ F7 (Phase 164.8.2) — `ledger_rows` ANSWERS, and answers with a SMALL
+  # number. It printed nothing until this fix, and "nothing" is now a
+  # MEASURE_FAIL in `check` by design: a count query that returns no row was
+  # never a ledger holding zero rows. 12 rather than 0 or 239 is deliberate —
+  # it is a READ count that sits UNDER the absurdity floor's `>= 50`
+  # precondition, so every arm below still fails or passes for exactly the
+  # reason its comment claims and the floor stays out of their way.
   cat > "$tmp/ledger.sh" <<'STUB'
 #!/usr/bin/env bash
 if [ "$1" = "missing" ]; then
   [ -n "${MISSING_NAMES:-}" ] && printf '%s\n' "$MISSING_NAMES"
+elif [ "$1" = "ledger_rows" ]; then
+  echo 12
 fi
 exit 0
 STUB
@@ -1009,9 +1062,9 @@ STUB
   # version to be named, because a ceiling that reports only a count tells a reader
   # that something is wrong and nothing about what.
   #
-  # (The absurdity floor cannot pre-empt it here: the stub prints nothing for
-  # `ledger_rows`, so the floor's >= 50-rows precondition is never met. That is read
-  # from the stub rather than assumed — and the text assertion makes it moot anyway.)
+  # (The absurdity floor cannot pre-empt it here: the stub answers `ledger_rows`
+  # with 12, so the floor's >= 50-rows precondition is never met. That is read from
+  # the stub rather than assumed — and the text assertion makes it moot anyway.)
   arm_frontier_ceiling_exceeded() {
     local out rc=0 nm
     out="$(arm_env "$tmp/live" "$ceil_over_names" "selftest_fn" "$tmp/mig_ceil_over" 2>&1)" || rc=$?
