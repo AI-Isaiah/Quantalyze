@@ -917,50 +917,187 @@ describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is 
     expect([...(sm![1].match(/\d+/g) ?? []).map(Number), Number(sm![2])]).not.toContain(26);
   });
 
-  it("IN-05 — every env seam the script DECLARES is named in the `--help` ENV SEAMS block", () => {
-    // ⛔ THE ONLY SANCTIONED EXCEPTION CHANNEL. A seam left out of the operator's
-    // contract has to be listed HERE, with a reason, so the omission is a reviewed
-    // line in a diff rather than an absence nobody can see. It is empty, and it
-    // should stay empty: `--help` is what an operator reads before running a
-    // destructive tool.
+  /**
+   * Names the SHELL provides. They are not seams of THIS script's contract, and
+   * `--help` documenting `BASH_SOURCE` would be noise, not a contract.
+   */
+  const SHELL_SPECIALS = new Set([
+    "BASH_SOURCE", "BASH_VERSION", "FUNCNAME", "HOME", "IFS", "LINENO",
+    "OLDPWD", "PATH", "PGPASSWORD", "PWD", "RANDOM", "SHLVL", "TMPDIR",
+  ]);
+
+  /**
+   * ⛔ THE SECOND SANCTIONED EXCEPTION CHANNEL, and it is narrow ON PURPOSE.
+   * Channel A below also catches a variable the SCRIPT ITSELF computes and then
+   * defaults defensively (`X=${X:-0}`). Each of these four is assigned `=0` at
+   * TOP LEVEL before any read, so whatever the environment supplied is destroyed
+   * before it can be used — they are readings, not seams. The list is asserted
+   * EXACT below (an entry that is no longer a candidate is RED), so it cannot
+   * quietly become a place to park a real seam.
+   */
+  const INTERNAL_NOT_SEAMS = [
+    { name: "EXP_TABLES", why: "`EXP_TABLES=0` at top level; derived from the dump TEXT in derive_expected_shape" },
+    { name: "EXP_POLICIES", why: "`EXP_POLICIES=0` at top level; same derivation" },
+    { name: "EXP_FUNCTIONS", why: "`EXP_FUNCTIONS=0` at top level; same derivation" },
+    { name: "FILTERED_N", why: "`FILTERED_N=0` at top level; counted by build_transaction's own filter grep" },
+  ];
+
+  /**
+   * ⛔ EVERY UPPERCASE NAME THE SCRIPT CAN TAKE FROM THE ENVIRONMENT, DERIVED FROM
+   * THE SCRIPT TEXT rather than typed.
+   *
+   * ⭐ WIDENED 2026-09-10 (code review WR-04), and the old derivation was PROVEN
+   * blind rather than argued so. It read ONE spelling — `NAME="${NAME:-default}"`
+   * — which covers 13 of this script's 16 environment seams. The three it could
+   * not see are `RESTORE_DB_URL`, `RESTORE_OUT_DIR` and `PGBIN`: none of them has
+   * a literal default, so all three are read with the OPTIONAL spelling instead
+   * (`[ -z "${RESTORE_DB_URL:-}" ]`, `if [ -z "${RESTORE_OUT_DIR:-}" ]`,
+   * `[ -n "${PGBIN:-}" ]`). The reviewer deleted the `RESTORE_DB_URL` entry from
+   * the operator contract and this arm stayed GREEN — the DSN of the database the
+   * script runs `DROP SCHEMA public CASCADE` against, and the one line an operator
+   * most needs to read before running it.
+   *
+   * TWO CHANNELS, because under `set -u` a seam can only reach the script two ways:
+   *   A. a DEFAULTING expansion, `${NAME:-…}` or `${NAME:?…}`. BOTH the declaration
+   *      form and the optional-read form are this shape, which is why one regex
+   *      over it now catches all sixteen.
+   *   B. a reference the script NEVER assigns anywhere. Under `set -u` a bare
+   *      `"$NAME"` the script never sets can only come from the environment (or
+   *      abort). Today this channel yields `BASH_SOURCE` alone, which
+   *      `SHELL_SPECIALS` drops; it is here so a future MANDATORY seam read bare
+   *      is not invisible the way these three were.
+   *
+   * ⚠️ WHAT IT STILL CANNOT SEE, stated rather than implied: a seam read ONLY as a
+   * bare `"$NAME"` that the script ALSO assigns somewhere (channel B excludes it,
+   * channel A never saw it). No such seam exists today — every one of the sixteen
+   * has a `${NAME:-}` read — and `set -u` makes that shape a crash waiting to
+   * happen, so it is a narrow gap and not a silent one.
+   *
+   * Comment lines are dropped first (this file's own `isLive` rule), so PROSE
+   * naming a variable is never mistaken for a read.
+   */
+  function envSeams(text: string): string[] {
+    const live = liveLines(text)
+      .map(({ line }) => line)
+      .join("\n");
+    const locals = new Set(
+      [...live.matchAll(/\blocal\s+([A-Z][A-Z0-9_]*)=/g)].map((m) => m[1]),
+    );
+    const defaulted = [...live.matchAll(/\$\{([A-Z][A-Z0-9_]*)(?::-|:\?)/g)].map((m) => m[1]);
+    const referenced = [...new Set([...live.matchAll(/\$\{?([A-Z][A-Z0-9_]*)/g)].map((m) => m[1]))];
+    const neverAssigned = referenced.filter(
+      (n) => !new RegExp(`(^|[\\s;&|(])${n}\\+?=`, "m").test(live),
+    );
+    return [...new Set([...defaulted, ...neverAssigned])]
+      .filter(
+        (n) =>
+          !locals.has(n) &&
+          !SHELL_SPECIALS.has(n) &&
+          !INTERNAL_NOT_SEAMS.some((i) => i.name === n),
+      )
+      .sort();
+  }
+
+  /** The `--help` header's ENV SEAMS block — the operator's contract, verbatim. */
+  function seamsBlock(text: string): string {
+    const lines = text.split("\n");
+    const a = lines.findIndex((l) => l.includes("── ENV SEAMS"));
+    if (a < 0) return "";
+    const b = lines.findIndex((l, i) => i > a && l.startsWith("# ──"));
+    return b < 0 ? "" : lines.slice(a, b).join("\n");
+  }
+
+  /** Seams the block does not name — the arm's whole predicate, reusable. */
+  function undocumented(text: string): string[] {
+    const block = seamsBlock(text);
+    return envSeams(text).filter((name) => !new RegExp(`\\b${name}\\b`).test(block));
+  }
+
+  it("IN-05/WR-04 — every env seam the script READS is named in the `--help` ENV SEAMS block", () => {
+    // ⛔ THE ONLY SANCTIONED EXCEPTION CHANNEL for a seam that is REAL and
+    // undocumented. It has to be listed HERE, with a reason, so the omission is a
+    // reviewed line in a diff rather than an absence nobody can see. It is empty,
+    // and it should stay empty: `--help` is what an operator reads before running
+    // a destructive tool.
     const UNDOCUMENTED_SEAMS: { name: string; why: string }[] = [];
 
-    const declared = [...SRC.matchAll(/^([A-Z_]+)="\$\{[A-Z_]+:-/gm)].map((x) => x[1]);
+    // ⛔ A RATCHET, in the direction that matters. The defect WR-04 named was a
+    // derivation that silently covered LESS of the contract than its title claimed,
+    // and a narrowing regex would shrink this number rather than turn anything red.
+    // Raise it when the seam count climbs; never lower it to make a run pass.
+    const SEAM_FLOOR = 16;
+
+    const seams = envSeams(SRC);
     expect(
-      declared.length,
-      "no `NAME=\"${NAME:-…}\"` seam declarations were found — the derivation would pass vacuously",
-    ).toBeGreaterThan(5);
+      seams.length,
+      `the seam derivation found ${seams.length} seams (${seams.join(", ")}) but the floor is ${SEAM_FLOOR}. A derivation that covers LESS of the operator contract than it used to is the WR-04 defect itself — do not lower the floor.`,
+    ).toBeGreaterThanOrEqual(SEAM_FLOOR);
 
-    const lines = SRC.split("\n");
-    const a = lines.findIndex((l) => l.includes("── ENV SEAMS"));
-    expect(a, "the ENV SEAMS header rule is gone").toBeGreaterThan(-1);
-    const b = lines.findIndex((l, i) => i > a && l.startsWith("# ──"));
-    expect(b, "the ENV SEAMS block has no closing `# ──` rule").toBeGreaterThan(a);
-    const seams = lines.slice(a, b).join("\n");
+    // The three WR-04 named, pinned BY NAME. A revert of the widening above is red
+    // here even if the floor were edited in the same commit.
+    for (const blind of ["RESTORE_DB_URL", "RESTORE_OUT_DIR", "PGBIN"]) {
+      expect(
+        seams,
+        `${blind} is not in the derived seam set. It was invisible to the pre-WR-04 derivation, and RESTORE_DB_URL is the DSN of the database this script runs DROP SCHEMA public CASCADE against.`,
+      ).toContain(blind);
+    }
 
-    const missing = declared.filter(
-      (name) =>
-        !UNDOCUMENTED_SEAMS.some((u) => u.name === name) &&
-        !new RegExp(`\\b${name}\\b`).test(seams),
+    // ⛔ THE INTERNAL-EXCLUSION LIST IS CHECKED, not trusted. Each entry must still
+    // be BOTH halves of the reason it was written with — a defaulting read (which
+    // is why the derivation catches it at all) AND a TOP-LEVEL unconditional
+    // assignment that destroys whatever the environment supplied (which is why it
+    // is not a seam). Park a real env seam here and the second half is red, because
+    // a real seam has no unconditional clobber.
+    const liveSrc = liveLines(SRC)
+      .map(({ line }) => line)
+      .join("\n");
+    for (const i of INTERNAL_NOT_SEAMS) {
+      expect(
+        new RegExp(`\\$\\{${i.name}(?::-|:\\?)`).test(liveSrc),
+        `INTERNAL_NOT_SEAMS names ${i.name} (${i.why}) but the script no longer reads it with a defaulting expansion — the entry is stale and must be deleted, not kept "just in case".`,
+      ).toBe(true);
+      expect(
+        // `^NAME=` OR `; NAME=` — the script clobbers all three EXP_* on ONE
+        // top-level line, so an anchor-only match would see the first and miss the
+        // other two. The lookahead rejects the DEFAULTING form `NAME=${NAME:-0}`,
+        // which is a read and not a clobber.
+        new RegExp(`(^|;[ \\t]*)${i.name}=(?![^\\n;]*\\$\\{${i.name})`, "m").test(liveSrc),
+        `INTERNAL_NOT_SEAMS excludes ${i.name} on the grounds that the script clobbers it at top level (${i.why}), and no unconditional top-level \`${i.name}=…\` assignment exists any more. Either it became a REAL environment seam — document it in ENV SEAMS — or the reason is stale.`,
+      ).toBe(true);
+    }
+
+    expect(
+      seamsBlock(SRC),
+      "the ENV SEAMS block slicer found no anchor — the pin below would be vacuous",
+    ).not.toBe("");
+
+    const missing = undocumented(SRC).filter(
+      (name) => !UNDOCUMENTED_SEAMS.some((u) => u.name === name),
     );
     expect(
       missing,
       `\`--help\`'s ENV SEAMS block does not name ${missing.join(", ")}, and the script reads ${missing.length === 1 ? "it" : "them"} from the environment. Either document ${missing.length === 1 ? "it" : "them"} or put ${missing.length === 1 ? "it" : "them"} in UNDOCUMENTED_SEAMS with a reason.`,
     ).toEqual([]);
 
-    // CALIBRATION — remove one documented seam line from a scratch string.
-    const stripped = SRC.replace(
-      /^#   REFDATA_KIND_CHECK .*\n/m,
-      () => "",
-    );
-    expect(stripped, "the IN-05 calibration did not APPLY").not.toBe(SRC);
-    const sLines = stripped.split("\n");
-    const sa = sLines.findIndex((l) => l.includes("── ENV SEAMS"));
-    const sb = sLines.findIndex((l, i) => i > sa && l.startsWith("# ──"));
-    const sSeams = sLines.slice(sa, sb).join("\n");
-    expect(
-      declared.filter((name) => !new RegExp(`\\b${name}\\b`).test(sSeams)),
-    ).toEqual(["REFDATA_KIND_CHECK"]);
+    // ⛔ CALIBRATION — EVERY SEAM, NOT A SAMPLE. The old calibration deleted ONE
+    // documented line (`REFDATA_KIND_CHECK`) and proved the pin bit for that one
+    // name; WR-04 was precisely a pin that bit for the seams it happened to see.
+    // So each of the sixteen entries is deleted in turn — its header line AND the
+    // indented continuation lines that belong to it, because a name left standing
+    // in its own continuation is not a documented entry — and the arm must report
+    // exactly that seam and no other.
+    for (const name of seams) {
+      const entry = new RegExp(`^#   ${name}\\b.*\\n(?:#[ ]{20,}.*\\n)*`, "m");
+      const stripped = SRC.replace(entry, "");
+      expect(
+        stripped,
+        `the WR-04 calibration did not APPLY for ${name} — no \`#   ${name} …\` entry line was found, so the assertion below would be vacuous`,
+      ).not.toBe(SRC);
+      expect(
+        undocumented(stripped),
+        `deleting the ${name} entry from the ENV SEAMS block did NOT turn this pin red. That is the WR-04 defect for ${name}.`,
+      ).toEqual([name]);
+    }
   });
 });
 
