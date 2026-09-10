@@ -2631,6 +2631,73 @@ Opened by Phase 164.8 plan 06 as it closed `CI-MIGRATE-01`, `[164.2-TEST-APPLY-P
 and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a problem** (founder rule
 2026-09-08: a TODOS line alone has no owner, no date and no gate).
 
+- [ ] **`[164.8.5-SCOPE-DEPTH-AXIS]` the class-lint's scope sentence outruns its filter for the THIRD
+      time on one branch — now on the DEPTH axis (booked 2026-09-10, Phase 164.8.2 terminal review;
+      routed to Phase 164.8.5). LATENT — zero offenders in the unscanned files today.**
+      **MEASURED 2026-09-10:** `readdirSync` is NON-RECURSIVE. 144 test files live under
+      `src/__tests__`; **139 are scanned, 5 are not** — the `.test.ts` files in
+      `src/__tests__/contracts/` and `src/__tests__/helpers/`. Meanwhile the describe is titled
+      "…anywhere in `src/__tests__`" and its floor arm is titled "the scan covers the whole
+      directory". All 5 unscanned files were scanned by hand with the shipped scanner: **0
+      offenders**, so today's green is TRUE.
+      ⭐ **THE POINT IS THE RECURRENCE, NOT THE AXIS.** Round one: the rule covered 2 files while
+      its name claimed a class. Round five: 137 files, silently skipping 346 `.test.tsx`. Round six:
+      139 files, silently skipping 5 by directory depth. Each fix closed the axis it was SHOWN and
+      left the next one.
+      ⛔ **DO NOT close this with a third hand-widening.** The deliverable is a mechanism that makes
+      the scope CLAIM and the file SET agree by construction — derive one from the other — so a
+      fourth axis (depth, extension, location, symlink) cannot open quietly. A calibration must
+      prove it by OPENING a new axis on a scratch tree and observing RED, never by asserting
+      today's count.
+
+- [ ] **`[164.8.5-DEMOS-OFF-HELPER]` this branch planted two fresh copies of the offending
+      expression in exactly the files the docblock names as the next widening step (booked
+      2026-09-10; routed to Phase 164.8.5). LATENT.**
+      `src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx:7980` and
+      `src/lib/pdf-render-token.test.ts:163`. Both are legitimate calibration subjects demonstrating
+      the pre-fix form — but `src/test/helpers/degenerate-narrow.ts` exists PRECISELY so
+      demonstrations live outside the scanned surface, and neither routes through it. The rule's own
+      failure message instructs offenders to use it.
+      ⛔ **The hazard is the REFLEX, not the red.** When the promised widening lands and reds two
+      arms this branch wrote, the instinct will be to restore the file+function tolerance this
+      branch just DELETED as unworkable (its own calibration legs called the untolerated path and
+      could not fail). Route them through the helper instead, and add an arm asserting a NEW inline
+      demonstration outside the helper is reported.
+
+- [ ] **`[164.8.5-HELPER-UNPOLICED]` `degenerate-narrow.ts` left the scanned surface entirely, so
+      nothing polices the rest of that file (booked 2026-09-10; routed to Phase 164.8.5). LATENT.**
+      Deleting the file+function tolerance was correct — it could not fail, and the file is 79 lines
+      with ONE exported function, so the old tolerance policed an empty region. But the deletion
+      also removed the only thing watching that file outside `degenerateNarrow`. A second exported
+      helper added there that narrows on a raw lookup would be caught by nothing, and a gate calling
+      it would inherit the degradation.
+      Close it, or record a dated reason why one 79-line single-function file does not need it.
+      ⛔ Not silence.
+
+- [ ] **`[164.8.5-PROSE-OVERCLAIM]` four sentences that describe more than their code does (booked
+      2026-09-10; routed to Phase 164.8.5). COSMETIC — but this is the branch's own defect class, so
+      it is booked rather than shrugged off.**
+      1. `src/lib/seam-venue-vocabulary.invariant.test.ts` — the docblock says dropping the `^` from
+         `KEYWORD_ARG_RE` would red. MEASURED: it reds NOTHING and does not reintroduce the class
+         (the prefix from `kw.index` still cannot hold an `=`). The self-test DOES pin the genuinely
+         load-bearing property — relaxing the prefix to `([^\s]*)` on the `a=b=c` shape goes red,
+         verified — so the ARM is sound and only one clause of its prose is wrong.
+      2. `src/__tests__/restore-test-from-baseline.test.ts` — a sentence describing the sibling's
+         filter as `*.test.ts` went stale TWO COMMITS LATER on the same branch (`/\.test\.tsx?$/`).
+         Conclusion still holds, so it misleads without misdirecting.
+      3. `src/lib/pdf-render-token.test.ts` — one tautological illustration beside three
+         load-bearing legs.
+      4. `src/__tests__/test-restore-workflow-wiring.test.ts` — `SCAN_FILES.length > 130` over an
+         actual **139** lets nine test files be deleted silently. The in-code comment states the
+         limitation honestly; the floor still does not measure what a reader assumes.
+
+- [ ] **`[164.8.5-COMMENTISH-FALSE-RED]` the whole-directory floor's `commentish` test can false-RED
+      on a legitimate docblock continuation (booked 2026-09-10; routed to Phase 164.8.5). REACH.**
+      `/^\s*(\/\/|\/\*|\*)/` does not recognise a blanked continuation line that does not begin with
+      `*`. MEASURED: **0 occurrences across all 139 scanned files**, and it fails in the LOUD
+      direction, so it costs a false alarm rather than a false pass. Recorded so the next person to
+      see it red knows it is this, not a stripper regression.
+
 - [ ] **`[164.8.2-EVIDENCE-DOTENV-LEAK]` a local test wrapper injects repo credentials and turns 16
       SKIPPED live-DB suites into real writes against SHARED TEST (booked 2026-09-10, Phase 164.8.2
       gate run; routed to Phase 164.8.4).**
