@@ -4699,7 +4699,7 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
    * a decision to skip.
    *
    * CALIBRATION_FILES stays at the two comment-heavy mutex-pin files the
-   * EXPENSIVE arms were measured against — the eight-depth injection, the strip
+   * EXPENSIVE arms were measured against — the three-depth injection, the strip
    * line-count/share floor, the naive-stripper subject. Those re-strip a whole
    * file per injection point; running them over 137 files would buy nothing,
    * because what they calibrate is the STRIPPER, and these two are its hardest
@@ -5132,6 +5132,17 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
     for (const rel of CALIBRATION_FILES) {
       const src = read(rel);
       const code = stripComments(src);
+      // ⚠️ THIS ASSERTION CANNOT FAIL AGAINST THE SHIPPED STRIPPER, AND SAYING SO
+      // IS THE POINT. The walker replaces comments with spaces character-for-
+      // character, so it is length-preserving BY CONSTRUCTION and this equality
+      // holds for any input. It is a REVERT TRIPWIRE — it goes red the moment
+      // somebody swaps in a deleting strip, which is the 2026-09-09 defect
+      // verbatim (a `/*` inside a quoted glob opened a block comment and 858
+      // lines of real code vanished before the scan saw them). That is a
+      // legitimate job, but this file's own standard is that a line which READS
+      // as proof and is not one is worse than no line. The assertion that
+      // measures the shipped stripper is the blanked-line check in the
+      // whole-directory floor below.
       expect(
         code.split("\n").length,
         `${rel}: the strip changed the LINE COUNT. That is the 2026-09-09 defect verbatim: a \`/*\` inside a quoted glob opened a block comment and 858 lines of real code were deleted before the scan saw them. Reported locations are also meaningless once lines shift.`,
@@ -5147,27 +5158,49 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
 
   it("CALIBRATION — the floor bites: the naive strip this replaced fails it", () => {
     // The stripper that shipped in the first version of this rule, verbatim. It is
-    // here as a SUBJECT, not as a fallback: if it stopped losing lines on this file
-    // the floor above would be pinning nothing, and this arm says so out loud.
+    // here as a SUBJECT, not as a fallback: if it stopped losing lines the floor
+    // above would be pinning nothing, and this arm says so out loud.
     const naive = (src: string): string =>
       src
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/(^|[^:])\/\/[^\n]*/gm, "$1");
-    const src = read(CALIBRATION_FILES[0]);
+    // ⭐ A THREE-LINE SYNTHETIC, NOT A REAL FILE (2026-09-10). This arm used to
+    // run the naive strip over a 4718-line pin file, which made BOTH the
+    // superseded stripper and that file's exact comment layout load-bearing
+    // forever: a reformat there could quietly retire the subject. The defect is
+    // a `/*` inside a STRING opening a block comment that runs to the next
+    // terminator, and that needs three lines to state. It cannot rot.
+    const src = `'"/` + `*"'` + "\n".repeat(200) + "*" + "/";
+    expect(
+      src.split("\n").length,
+      "CALIBRATION: the subject is not 201 lines, so the threshold below is not measuring what it says",
+    ).toBe(201);
     const lost = src.split("\n").length - naive(src).split("\n").length;
     expect(
       lost,
       "the naive strip no longer swallows lines here, so the floor above has no live subject — re-derive it rather than assuming it still bites",
     ).toBeGreaterThan(100);
+    // And the shipped stripper leaves every one of them standing — the two
+    // halves of the same measurement, on the same subject.
+    expect(
+      stripComments(src).split("\n").length,
+      "the shipped stripper lost lines on the synthetic subject",
+    ).toBe(201);
   });
 
   it("CALIBRATION — an injected offender is caught at every depth of both files", () => {
     const evil = `const evil = s.${NARROW}(s.${FIND}(A));`;
+    // ⭐ THREE DEPTHS, NOT EIGHT (2026-09-10). Eight was empirical evidence for a
+    // LINE-SCOPED scanner, where each position could genuinely behave differently.
+    // `scanOffenders` is offset-based over the JOINED text, so position-independence
+    // is structural: what the depths still buy is a head/middle/tail sweep proving
+    // the strip did not eat a whole region before the scan. Three carry that; the
+    // other five re-measured the same property at 2× the cost of the arm.
     for (const rel of CALIBRATION_FILES) {
       const src = read(rel);
       const raw = src.split("\n");
       const code = stripComments(src).split("\n");
-      const depths = [0.05, 0.1, 0.25, 0.35, 0.5, 0.65, 0.8, 0.95].map((f) =>
+      const depths = [0.05, 0.5, 0.95].map((f) =>
         nearestCodeLine(raw, code, Math.floor(raw.length * f)),
       );
       expect(
@@ -5234,6 +5267,9 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
     for (const rel of SCAN_FILES) {
       const src = read(rel);
       const code = stripComments(src);
+      // ⚠️ Length-preserving BY CONSTRUCTION, so this one is a revert tripwire
+      // and not a measurement — see the note in the CALIBRATION_FILES floor
+      // above. The blanked-line check below is the one that measures the strip.
       expect(
         code.split("\n").length,
         `${rel}: the strip changed the LINE COUNT, so every reported location in this file is wrong`,
