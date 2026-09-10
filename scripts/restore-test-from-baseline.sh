@@ -3209,6 +3209,14 @@ FRESHSTUB
   # pre-push guardrail would refuse the push, correctly. Do not inline them.
   arm_published_sql_credential_scan() {
     local out rc n copy
+    # ⛔ THE UNSET IS A RETURN TRAP, NOT A LAST LINE. It shipped as an `unset` on the
+    # SUCCESS path only, and this function has nine `return 1` paths — every one of
+    # them left a DSN-shaped and a JWT-shaped value EXPORTED into the environment of
+    # every arm that runs after it in the same self-test process, and self-test output
+    # is a public CI log. Latent, because no current arm dumps `env`; the fix is not
+    # to audit the arms for that, it is to make the failure paths carry the cleanup
+    # the success path already did.
+    trap 'unset ARM27_SEED_DSN ARM27_SEED_JWT' RETURN
     local d1="postgre" d2="sql://u" d3=":p@db.example:5432/postgres"
     local j1="eyJ" j2="armSeventeenSeed"
     export ARM27_SEED_DSN="${d1}${d2}${d3}"
@@ -3349,7 +3357,6 @@ FRESHSTUB
     n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
     [ "$n" = "1" ] || { echo "MEASURE_FAIL (e2): the stray table is gone (count=${n}) — the scan refused AFTER the transaction ran."; return 1; }
 
-    unset ARM27_SEED_DSN ARM27_SEED_JWT
     return 0
   }
 
