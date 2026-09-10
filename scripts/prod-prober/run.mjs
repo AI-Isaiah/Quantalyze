@@ -1753,6 +1753,17 @@ export async function selfTest() {
           (r.defects[0] || {}).kind === "measure-fail" && (r.defects[0] || {}).subject === "database marker",
           `and it is a measure-fail on the database marker (got ${(r.defects[0] || {}).kind} / ${(r.defects[0] || {}).subject})`,
         ) &&
+        // ⛔ THE LEG THAT MAKES THIS CONTROL SEPARABLE. Without it, deleting the
+        // mandatory-marker guard leaves this scenario GREEN: an empty marker
+        // would fall through to the marker COMPARISON and be reported as a
+        // mismatch — same kind, same subject, same count, and a sentence that
+        // is not true. "Provenance was never established" and "these are two
+        // different databases" are different findings, and the neuter matrix
+        // can only attribute a RED to one control if they read differently.
+        expect(
+          String((r.defects[0] || {}).detail).includes("never established"),
+          `and it says the marker was never ESTABLISHED, not that two databases disagree (got: ${String((r.defects[0] || {}).detail).slice(0, 70)}…)`,
+        ) &&
         expect(
           control.defects.length === 0,
           `CONTROL: the SAME two inputs WITH the marker produce zero defects (got ${control.defects.map((x) => x.kind).join(", ") || "none"}) — so the defect above is the missing marker and nothing else`,
