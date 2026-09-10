@@ -1110,13 +1110,23 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
      * strictly stronger, and a byte pin over a block that is under active review would
      * only teach the next reader to re-paste it.
      *
-     * ⭐ MOVED ONCE SINCE, DELIBERATELY: 2026-09-09, Phase 164.8.2 WR-04, `grep -Eiq` →
-     * `grep -aEiq` on line 3 and nothing else. The reason is in the `it` message below,
-     * where a reader who reds this pin will actually meet it.
+     * ⭐ MOVED TWICE SINCE, BOTH TIMES DELIBERATELY:
+     *   1. 2026-09-09, Phase 164.8.2 WR-04 — `grep -Eiq` → `grep -aEiq`, and nothing else.
+     *   2. 2026-09-10, Phase 164.8.2 F1 — a POSITIVE FLOOR inserted between the
+     *      `migration list | tee` and the reverted-grep. The grep is NEGATIVE, so an empty
+     *      or header-only list made it return 1 and read as CLEAN having verified nothing,
+     *      on the ONE automatic applier of DDL to production. The floor is EXECUTED below
+     *      against empty / header-only / reshaped transcripts, so it is pinned by behaviour
+     *      and not only by bytes; what stays byte-pinned is that the grep, its `::error::`
+     *      wording, its `exit 1` and the `--linked` list command did not move.
+     * The reasons are in the `it` message below, where a reader who reds this pin meets them.
      */
     const PROD_C0331_TAIL = [
       '          echo "::group::Post-apply migration list verification (C-0331)"',
       "          supabase migration list --linked | tee /tmp/migration-list.txt",
+    ].join("\n");
+    /** The reverted-grep branch itself: byte-identical to its pre-164.8-05 form but for `-a`. */
+    const PROD_C0331_BRANCH = [
       "          if grep -aEiq '(^|[[:space:]|])reverted([[:space:]|]|$)' /tmp/migration-list.txt; then",
       '            echo "::error::Reverted migrations detected after db push — see list above (C-0331)"',
       "            exit 1",
@@ -1124,27 +1134,32 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       '          echo "::endgroup::"',
     ].join("\n");
 
-    it("the C-0331 tail is its pre-164.8-05 form EXCEPT the `-a` added deliberately by 164.8.2", () => {
-      expect(
-        WF.includes(PROD_C0331_TAIL),
+    it("the C-0331 tail is its pre-164.8-05 form EXCEPT the `-a` (WR-04) and the positive floor (F1)", () => {
+      const WHY =
         "the PROD `Push migrations to production` C-0331 tail CHANGED. The one automatic " +
-          "applier of DDL to production is not something to edit as a side effect of editing " +
-          "the job around it.\n\n" +
-          "⭐ ONE edit has been made to it since that pin was written, and it is named here so " +
-          "the pin and the file agree about WHY. Phase 164.8.2 (WR-04, 2026-09-09) changed " +
-          "`grep -Eiq` to `grep -aEiq` on the third line, and nothing else in the tail moved: " +
-          "`--linked`, `/tmp/migration-list.txt`, the `::error::` wording and the `exit 1` are " +
-          "byte-identical to their pre-164.8-05 form. The reason is the SAME one that closed " +
-          "the TEST twin: this is a NEGATIVE check, so a grep that declines to read a file it " +
-          "calls binary returns 1 and is indistinguishable from `no reverted row` — a PROD " +
-          "apply verified by a check that never read the list. `-a` is mandatory repo-wide.\n" +
-          "⚠️ MEASURED before the edit: on GNU grep 3.11 (what the runner has) and BSD grep " +
-          "2.6.0 the missing `-a` made NO difference to the verdict; on ugrep 7.8.4 it made " +
-          "the check read a NUL-bearing list as clean. The edit removes the flavour " +
-          "dependence; it is not a claim that the runner was blind.\n" +
-          "Any FURTHER change is what this pin exists to stop — move it deliberately, in its " +
-          "own commit, with its own reason, or do not move it.",
-      ).toBe(true);
+        "applier of DDL to production is not something to edit as a side effect of editing " +
+        "the job around it.\n\n" +
+        "⭐ TWO edits have been made to it since this pin was written, and both are named " +
+        "here so the pin and the file agree about WHY.\n" +
+        "(1) Phase 164.8.2 WR-04 (2026-09-09) changed `grep -Eiq` to `grep -aEiq`. This is a " +
+        "NEGATIVE check, so a grep that declines to read a file it calls binary returns 1 and " +
+        "is indistinguishable from `no reverted row` — a PROD apply verified by a check that " +
+        "never read the list. `-a` is mandatory repo-wide.\n" +
+        "⚠️ MEASURED before that edit: on GNU grep 3.11 (what the runner has) and BSD grep " +
+        "2.6.0 the missing `-a` made NO difference to the verdict; on ugrep 7.8.4 it made " +
+        "the check read a NUL-bearing list as clean. It removes the flavour dependence; it " +
+        "is not a claim that the runner was blind.\n" +
+        "(2) Phase 164.8.2 F1 (2026-09-10) inserted a POSITIVE FLOOR between the " +
+        "`migration list | tee` and the grep. Same root cause, other half: a CLI that exits 0 " +
+        "and prints an EMPTY or HEADER-ONLY list also makes `grep -q` return 1, so the check " +
+        "read as clean having verified nothing, immediately after a PROD apply. The floor is " +
+        "EXECUTED against empty / header-only / reshaped transcripts elsewhere in this file.\n" +
+        "What is STILL byte-pinned, and must not move: `--linked`, `/tmp/migration-list.txt`, " +
+        "the reverted-grep line, its `::error::` wording and its `exit 1`.\n" +
+        "Any FURTHER change is what this pin exists to stop — move it deliberately, in its " +
+        "own commit, with its own reason, or do not move it.";
+      expect(WF.includes(PROD_C0331_TAIL), WHY).toBe(true);
+      expect(WF.includes(PROD_C0331_BRANCH), WHY).toBe(true);
       calibrate(
         "the PROD C-0331 tail pin bites",
         (s) =>
@@ -1153,6 +1168,15 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
             "          supabase migration list --linked\n",
           ),
         (t) => t.includes(PROD_C0331_TAIL),
+      );
+      calibrate(
+        "the PROD C-0331 reverted-branch pin bites",
+        (s) =>
+          s.replace(
+            "          if grep -aEiq '(^|[[:space:]|])reverted([[:space:]|]|$)' /tmp/migration-list.txt; then\n",
+            "          if grep -Eiq '(^|[[:space:]|])reverted([[:space:]|]|$)' /tmp/migration-list.txt; then\n",
+          ),
+        (t) => t.includes(PROD_C0331_BRANCH),
       );
     });
 
@@ -1422,8 +1446,19 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
     const SUPABASE_STUB = [
       "#!/usr/bin/env bash",
       'if [ "$1" = "link" ]; then echo "Finished supabase link."; exit 0; fi',
+      // ⛔ THE STUB'S `migration list` USED TO PRINT THE HEADER AND NOTHING ELSE, and that
+      // was itself the F1 shape: a transcript the C-0331 check "verified" while reading no
+      // migration version at all. It went unnoticed because the check was purely NEGATIVE
+      // — `grep -q` found no `reverted`, returned 1, and the group closed green. The moment
+      // the positive floor landed, every arm driving this stub reddened with MEASURE_FAIL,
+      // which is the finding reproducing itself against the repo's own model of the CLI.
+      // `${STUB_LIST_VERSIONS-…}` (no colon) so a test can set it EMPTY to get the
+      // header-only transcript back deliberately, rather than by omission.
       'if [ "$1" = "migration" ]; then',
       '  echo "        Local      | Remote     | Time (UTC)"',
+      "  for v in ${STUB_LIST_VERSIONS-20260101000000}; do",
+      '    echo "   ${v} | ${v} | 2026-01-01 00:00:00"',
+      "  done",
       "  exit 0",
       "fi",
       "dry=0",
@@ -1543,6 +1578,104 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
           "guard deleted — this test is not measuring the guard",
       ).toBe(0);
     }, EXEC_TEST_TIMEOUT_MS);
+
+    /**
+     * ⛔ WR-03 (164.8.2-REVIEW, closed 2026-09-10). The `-a` comment in the workflow used
+     * to read "a tracked file carries a deliberate NUL byte and plain grep reports such
+     * input clean" — stated flatly, in a workflow that runs on `ubuntu-latest`, about the
+     * grep this very phase measured does NOT do that. Plan 02 measured GNU grep 3.11 (the
+     * runner's family) across 3 locales × 4 fixture shapes and `-a` changed the verdict in
+     * NONE of the twelve. ugrep 7.8.4 IS blind; GNU is not. The phase corrected the record
+     * in the PROD test pin's message (below, `PROD_C0331_TAIL`'s `it`) and re-asserted the
+     * falsified premise in the workflow, in the same commit range — and a maintainer
+     * editing this job reads the COMMENT, not the test file.
+     *
+     * ⭐ This arm is the falsifier for a PROSE fix, which is otherwise unfalsifiable: it
+     * reds if the retracted sentence comes back, and it reds if the measured record is
+     * removed. It reads the comment lines immediately ABOVE the reverted-grep and THROWS
+     * when there are none, because an empty string satisfies `not.toContain` vacuously.
+     */
+    it("the C-0331 twin's `-a` comment records the MEASUREMENT and does not re-assert the falsified premise (WR-03)", () => {
+      /** The contiguous comment lines immediately above the reverted-grep, in `apply-test`. */
+      const c0331Comment = (text: string): string => {
+        const lines = jobBlock(text, TEST_JOB).split("\n");
+        const anchor = lines.findIndex((l) => l.trim() === REVERTED_IF);
+        if (anchor < 0) {
+          throw new Error(
+            "the C-0331-twin reverted-grep line was not found in `apply-test`, so the " +
+              "comment this arm reads has no anchor. A rename must throw rather than let " +
+              "the arm scan an empty string and pass on `not.toContain`.",
+          );
+        }
+        const out: string[] = [];
+        for (let i = anchor - 1; i >= 0 && /^\s*#/.test(lines[i]); i--) out.unshift(lines[i]);
+        if (out.length === 0) {
+          throw new Error(
+            "there are NO comment lines above the C-0331-twin reverted-grep. The `-a` " +
+              "rationale is gone; this arm would then assert nothing at all.",
+          );
+        }
+        // ⚠️ NORMALISED, and that is load-bearing. The retracted sentence is LINE-WRAPPED
+        // in the pre-fix file ("… and plain\n          # grep reports such input clean."),
+        // so a raw `not.toContain` over the joined comment did NOT bite when this arm was
+        // first run against the byte-identical pre-fix workflow — only the positive needle
+        // did. Strip the `#` markers and collapse whitespace so the pin binds to the CLAIM
+        // and not to where the author happened to wrap it.
+        return out
+          .join("\n")
+          .replace(/^\s*#\s?/gm, "")
+          .replace(/\s+/g, " ")
+          .trim();
+      };
+
+      const RETRACTED = "plain grep reports such input clean";
+      const comment = c0331Comment(WF);
+      expect(
+        comment,
+        "the C-0331 twin's `-a` comment re-asserts the premise Phase 164.8.2 measured FALSE: " +
+          "GNU grep 3.11 — the runner's — read the NUL-bearing fixture identically with and " +
+          "without `-a`, in 3 locales × 4 fixture shapes. `-a` is kept on the repo-wide rule " +
+          "and on the ugrep flavour dependence; it did NOT close a live CI exposure, and the " +
+          "comment must not say it did. ⛔ Do not fix this by deleting the sentence — state " +
+          "the measurement.\n\n" +
+          comment,
+      ).not.toContain(RETRACTED);
+      for (const needle of [
+        "GNU grep 3.11",
+        "ugrep 7.8.4",
+        "did not close a live CI exposure",
+      ]) {
+        expect(
+          comment,
+          `the C-0331 twin's \`-a\` comment lost the measured record (${needle}). Without it ` +
+            "the next reader has no way to know the flavour dependence is the whole reason " +
+            `\`-a\` is there.\n\n${comment}`,
+        ).toContain(needle);
+      }
+
+      calibrate(
+        "the WR-03 comment pin bites when the retracted sentence returns",
+        (s) =>
+          mutateInJob(
+            s,
+            TEST_JOB,
+            "          # MEASURED 2026-09-09, Phase 164.8.2: on GNU grep 3.11 (the runner's) and BSD grep 2.6.0\n",
+            `          # ${RETRACTED}.\n`,
+          ),
+        (t) => !c0331Comment(t).includes(RETRACTED),
+      );
+      calibrate(
+        "the WR-03 comment pin bites when the measured record is deleted",
+        (s) =>
+          mutateInJob(
+            s,
+            TEST_JOB,
+            "          # MEASURED 2026-09-09, Phase 164.8.2: on GNU grep 3.11 (the runner's) and BSD grep 2.6.0\n",
+            "          # MEASURED 2026-09-09, Phase 164.8.2: on a grep and another grep\n",
+          ),
+        (t) => c0331Comment(t).includes("GNU grep 3.11"),
+      );
+    });
 
     /**
      * ⛔ WR-04 (Phase 164.8.2). The C-0331 twin is a NEGATIVE check, and until
@@ -1686,6 +1819,190 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
         typeof preFixRun.status,
         "the pre-fix observation did not produce an exit status at all",
       ).toBe("number");
+    }, EXEC_TEST_TIMEOUT_MS);
+
+    /**
+     * ⛔ F1 (164.8.2-SILENT-FAILURES, HIGH, closed 2026-09-10). The C-0331 check was purely
+     * NEGATIVE. WR-04 closed the ENCODING half of its vacuity (`-a`); this closes the
+     * EMPTINESS half. A CLI that exits 0 and prints an EMPTY list, a HEADER-ONLY list, or a
+     * table reshaped so it no longer prints migration versions makes `grep -q` return 1, the
+     * reverted branch is skipped, the group closes, `apply-test` goes green and
+     * `needs.apply-test.result == 'success'` green-lights the PROD apply. What the operator
+     * sees is a passing "Post-apply migration list verification" group; what is true is that
+     * nothing was verified. `set -euo pipefail` already covers the adjacent case (a CLI that
+     * exits non-zero aborts at the pipeline), so the LIVE path is exactly "exit 0, wrong text".
+     *
+     * ⭐ THE FIX CONFORMS TO THE SIBLING rather than inventing a second shape:
+     * `test-restore-from-baseline.yml` pairs its negative `grep -aq 'Would push these
+     * migrations:'` with a positive `! grep -aq 'Remote database is up to date.'`,
+     * "deliberately positive so a wording change reddens instead of passing vacuously".
+     *
+     * ⚠️ THE RESIDUAL, stated rather than papered over: this floor does NOT catch a CLI that
+     * keeps printing version rows but RENAMES the status word. Nothing can, without a
+     * measured replacement wording. Re-CASING is covered by the existing `-i`.
+     *
+     * ⭐ AND THE STUB WAS THE DEFECT. `SUPABASE_STUB`'s `migration list` printed the header
+     * and NOTHING ELSE until this arm landed — i.e. the repo's own hermetic model of the CLI
+     * was already the header-only shape, and every executed arm driving it green-lit a
+     * C-0331 check that read no version at all. Adding the floor reddened three arms at once.
+     */
+    it("EXECUTED (BOTH): the C-0331 floor REFUSES an empty, header-only or reshaped migration list (F1)", () => {
+      /** Slice one site's `::group::` block out of its step and make it hermetic. */
+      const groupOf = (stepName: string, openEcho: string, listCmd: string, fixtureCmd: string) => {
+        const script = extractRunScript(WF, stepName);
+        const lines = script.split("\n");
+        const openIdx = lines.findIndex((l) => l.trim() === openEcho);
+        if (openIdx < 0) {
+          throw new Error(
+            `the C-0331 group opener is gone from "${stepName}". This arm EXECUTES that ` +
+              "block, so a rename must throw rather than let the arm scan nothing and pass.",
+          );
+        }
+        const closeIdx = lines.findIndex(
+          (l, i) => i > openIdx && l.trim() === 'echo "::endgroup::"',
+        );
+        if (closeIdx < 0) {
+          throw new Error(
+            `the C-0331 group in "${stepName}" has no closing \`::endgroup::\` — the slice ` +
+              "would run to the end of the step and stop measuring the branch it names.",
+          );
+        }
+        const group = `${lines.slice(openIdx, closeIdx + 1).join("\n")}\n`;
+        const hermetic = group.replace(listCmd, fixtureCmd);
+        expect(
+          hermetic,
+          `the \`supabase migration list | tee\` line was not found to substitute in ` +
+            `"${stepName}" — the block below would shell out to the real CLI, which this ` +
+            "checkout points at PRODUCTION",
+        ).not.toBe(group);
+        return `set -euo pipefail\n${hermetic}`;
+      };
+
+      const FIXTURE_NAME = "f1-list-fixture.txt";
+      const SITES = [
+        {
+          label: "TEST twin",
+          body: groupOf(
+            TEST_PUSH_STEP,
+            'echo "::group::Post-apply migration list verification (C-0331 twin)"',
+            'supabase migration list --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-migration-list.txt"',
+            'cat "${RUNNER_TEMP}/${FIXTURE}" | tee "${RUNNER_TEMP}/test-migration-list.txt"',
+          ),
+        },
+        {
+          label: "PROD",
+          // ⚠️ The PROD block's paths are hard-coded `/tmp/...`. They are redirected into the
+          // throwaway dir here so concurrent vitest workers cannot read each other's fixture;
+          // the floor's logic is path-independent, and the substitution is asserted to apply.
+          body: groupOf(
+            PROD_PUSH_STEP,
+            'echo "::group::Post-apply migration list verification (C-0331)"',
+            "supabase migration list --linked | tee /tmp/migration-list.txt",
+            'cat "${RUNNER_TEMP}/${FIXTURE}" | tee "${RUNNER_TEMP}/prod-migration-list.txt"',
+          ).replaceAll("/tmp/migration-list.txt", '"${RUNNER_TEMP}/prod-migration-list.txt"'),
+        },
+      ] as const;
+
+      /**
+       * The three transcript shapes the PRE-FIX check missed. All three are `exit 0` from the
+       * CLI's point of view — the fixture is `cat`-ed — which is the live path F1 names.
+       */
+      const MISSED = [
+        { name: "EMPTY", text: "" },
+        {
+          name: "HEADER-ONLY",
+          text:
+            "        Local      | Remote     | Time (UTC)\n" +
+            "  ---------------|---------------|---------------------\n",
+        },
+        { name: "RESHAPED/REWORDED (no version rows)", text: "No migrations found.\n" },
+      ] as const;
+      /** The control: a list that really does carry a version and no reverted row. */
+      const GOOD =
+        "        Local      | Remote     | Time (UTC)\n" +
+        "   20260101000000 | 20260101000000 | 2026-01-01 00:00:00\n";
+
+      const run = (s: string, fixture: string) =>
+        runScript(s, { FIXTURE: FIXTURE_NAME }, { files: { [FIXTURE_NAME]: fixture } });
+
+      for (const site of SITES) {
+        // The floor must be PRESENT before anything below is evidence about it.
+        expect(
+          site.body,
+          `the ${site.label} C-0331 block has no positive floor (\`grep -ac '[0-9]\\{14\\}'\`). ` +
+            "The negative grep is then the only check again, and an empty or header-only " +
+            "list passes it having read nothing (F1).",
+        ).toContain("grep -ac '[0-9]\\{14\\}'");
+
+        for (const { name, text } of MISSED) {
+          const r = run(site.body, text);
+          expect(
+            r.status,
+            `⛔ THE F1 DEFECT, ${site.label}. The C-0331 block exited ${r.status} on a ` +
+              `${name} migration list. The CLI exited 0 and printed nothing the check could ` +
+              `read, the negative grep matched nothing and read as CLEAN, and this block is ` +
+              `what green-lights the PROD apply. It must exit 1.\n${r.out}`,
+          ).toBe(1);
+          expect(
+            r.out,
+            `the ${site.label} block failed on a ${name} list without saying WHY — an ` +
+              "operator cannot act on that",
+          ).toContain("MEASURE_FAIL");
+          expect(r.out).toContain("printed no migration version at all");
+        }
+
+        // CONTROL: a real list must still pass. Without this the arm is a harness that reds
+        // whatever it is handed, and the three assertions above would prove nothing.
+        const good = run(site.body, GOOD);
+        expect(
+          good.status,
+          `the ${site.label} C-0331 block exited ${good.status} on a VALID migration list ` +
+            `carrying one version and no reverted row. The arms above are then not evidence.` +
+            `\n${good.out}`,
+        ).toBe(0);
+        expect(good.out).not.toContain("MEASURE_FAIL");
+
+        // CALIBRATION 1 — REPRODUCE THE PRE-FIX STATE. Strip the floor and re-run the same
+        // three fixtures: every one must go GREEN, which is the shipped vacuity itself. If
+        // they still red, this arm is measuring something other than the floor.
+        const preFix = site.body.replace(
+          /\nlist_rc=0\n[\s\S]*?\necho "the migration list carries[^\n]*\n/,
+          "\n",
+        );
+        expect(
+          preFix,
+          `CALIBRATION (${site.label}): the floor was not found to strip, so the pre-fix ` +
+            "state was never reproduced and the arms above are uncalibrated",
+        ).not.toBe(site.body);
+        expect(preFix, `CALIBRATION (${site.label}): the strip left the floor behind`).not.toContain(
+          "MEASURE_FAIL",
+        );
+        for (const { name, text } of MISSED) {
+          const r = run(preFix, text);
+          expect(
+            r.status,
+            `CALIBRATION (${site.label}): with the floor removed, a ${name} list STILL ` +
+              `exited ${r.status}. The floor is then not what makes this block refuse, and ` +
+              `the F1 arms above are not evidence.\n${r.out}`,
+          ).toBe(0);
+        }
+
+        // CALIBRATION 2 — the MEASURE_FAIL rc branch. `grep` is replaced by a function that
+        // returns 2 ("could not read"), the case `|| true` collapses into "0 matches" and
+        // this repo's IN-06 fix exists to separate. Bounded at `-le 1`, so rc 2 is named.
+        const unreadable = `grep() { return 2; }\n${site.body}`;
+        const r2 = run(unreadable, GOOD);
+        expect(
+          r2.status,
+          `the ${site.label} block did not fail when grep could not READ the list (rc 2). ` +
+            `An unreadable list is not an empty one.\n${r2.out}`,
+        ).toBe(1);
+        expect(
+          r2.out,
+          `the ${site.label} block conflated "grep exited 2" with "0 matching lines" — the ` +
+            "shape IN-06 loudened elsewhere in this phase",
+        ).toContain("could not read the migration list");
+      }
     }, EXEC_TEST_TIMEOUT_MS);
 
     it("EXECUTED (PROD): the same affirmative check guards the production apply", () => {
