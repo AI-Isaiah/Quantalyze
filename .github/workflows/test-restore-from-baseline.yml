@@ -410,7 +410,23 @@ jobs:
               failed="${failed} ancestor(headSha '${APPLY_HEAD_SHA:-}' is not a hex sha, so ancestry cannot be decided)"
               ;;
             *)
-              if ! git merge-base --is-ancestor "${APPLY_HEAD_SHA}" HEAD 2>/dev/null; then
+              # ⛔ THREE OUTCOMES, NOT TWO (Phase 164.8.2, silent-failure review F4).
+              # `--is-ancestor` exits 0 (ancestor), 1 (NOT an ancestor) and 128 (bad
+              # object / not a commit). The `case` above checks only that the sha is
+              # HEX-SHAPED — never that the object exists here — so a sha that was
+              # force-pushed away, or one `gh` read off a different ref, exits 128.
+              # Collapsing that into the `1` arm told the operator "<sha> is not an
+              # ancestor of this checkout's HEAD", which is a FALSE STATEMENT ABOUT
+              # PROD'S APPLY, and sent git's own "Not a valid commit name" to
+              # /dev/null. The run was red either way; what was wrong is what it said
+              # to go and fix. Same shape as IN-06 in the restore script: an unreadable
+              # answer is not a negative one.
+              ancestry_err="${RUNNER_TEMP}/ancestry.err"
+              ancestry_rc=0
+              git merge-base --is-ancestor "${APPLY_HEAD_SHA}" HEAD 2>"${ancestry_err}" || ancestry_rc=$?
+              if [ "${ancestry_rc}" -gt 1 ]; then
+                failed="${failed} ancestor(MEASURE_FAIL: git exited ${ancestry_rc}, so the ancestry question was NOT answered — this is not a 'no'. git said: $(tr '\n' ' ' < "${ancestry_err}"))"
+              elif [ "${ancestry_rc}" -eq 1 ]; then
                 failed="${failed} ancestor(${APPLY_HEAD_SHA} is not an ancestor of this checkout's HEAD)"
               else
                 # THE CONTENT CHECK. Ancestry alone says only WHERE PROD's apply ran; it
