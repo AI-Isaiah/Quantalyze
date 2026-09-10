@@ -3397,6 +3397,55 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
       });
     });
 
+    // ⛔ IN-02 (Phase 164.8.2) — THE SUMMARY MUST NOT READ CLEAN BESIDE ITS OWN
+    // ERROR. `new_count` really is 0 on a ceiling breach, so the trailing
+    // `0 NEW drift.` was not WRONG — it was a VERDICT printed unconditionally
+    // next to an `::error::` that contradicts it. MEASURED 2026-09-10 pre-fix,
+    // one run:
+    //   ::error::… FRONTIER_EXEMPT_CEILING exceeded: 4 … > ceiling 3.
+    //     ledger presence: 4 absent — 0 baselined (…), 4 exempt …; 0 NEW drift.
+    // The board was red and the line a reader scans for the verdict was not.
+    //
+    // ⛔ THE NEEDLE IS `0 NEW drift.` WITH ITS TERMINATING PERIOD. `0 NEW drift`
+    // without one still appears post-fix, inside the caveat — binding to the
+    // bare phrase would make this arm unable to fail.
+    it("IN-02 RED: a ceiling breach's summary does not claim a clean verdict beside its own ::error::", () => {
+      expect(CEILING).toBeGreaterThan(0);
+      withTempDir((dir) => {
+        const corpus = ceilingCorpus(dir, "mig_ceil_over", CEILING + 1);
+        const env = scaffoldLedgerCase(dir, { missing: corpus.names });
+        const { status, out } = run(LEDGER_GATE, { ...env, MIGRATIONS_DIR: corpus.dir });
+
+        expect(status).toBe(1);
+        expect(out).toContain("FRONTIER_EXEMPT_CEILING exceeded");
+        // The MEASUREMENT half stays — hiding the counts is not the fix.
+        expect(out).toContain(`${CEILING + 1} exempt as above the ledger frontier`);
+        // The VERDICT half must not read clean.
+        expect(
+          out,
+          "the presence summary still ends `0 NEW drift.` while an ::error:: is being raised — two contradictory sentences in one run",
+        ).not.toContain("0 NEW drift.");
+        expect(out).toContain("but this run is NOT clean");
+      });
+    });
+
+    it("IN-02 CONTROL: a genuinely clean run still ends `0 NEW drift.` with no caveat", () => {
+      // The other direction. Without this leg the fix could be "always print the
+      // caveat", which would make the RED arm above pass while telling every
+      // green run it is not clean.
+      expect(CEILING).toBeGreaterThan(0);
+      withTempDir((dir) => {
+        const corpus = ceilingCorpus(dir, "mig_ceil_edge", CEILING);
+        const env = scaffoldLedgerCase(dir, { missing: corpus.names });
+        const { status, out } = run(LEDGER_GATE, { ...env, MIGRATIONS_DIR: corpus.dir });
+
+        expect(status).toBe(0);
+        expect(out).toContain("0 NEW drift.");
+        expect(out).not.toContain("but this run is NOT clean");
+        expect(out).toContain("ledger and body checks clean");
+      });
+    });
+
     // ⛔ F5 (Phase 164.8.2) — THE CEILING SAT ON A READ THAT COULD RETURN 0
     // WITHOUT MEASURING. `exempt_count` was `grep -ac … || true`, and 0 is the
     // ONE value `-gt FRONTIER_EXEMPT_CEILING` can never fire on. So a run whose
