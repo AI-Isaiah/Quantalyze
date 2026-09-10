@@ -103,6 +103,10 @@ it was written to close.
 ### Tests
 - 14,561 passing across 872 files at the merge, with `tsc`, `eslint`, both gate linters
   (`lint-sql-gates` 7 rules, `lint-app-guc` 0 findings) and `verify-plan-anchors` green.
+- The new DSN-scan fixture is **assembled at runtime, never spelled as a literal**. It has to
+  carry a real DSN shape to exercise the scanner, which is exactly what trips the pre-push
+  credential guardrail — so the fixture yields rather than asking for an exemption. A guard that
+  had to tell a synthetic credential from a real one would be no guard.
 - Every fix carries a falsifier that was observed RED and restored from pristine bytes. Four
   neuters were caught *not applying* before their RED was believed — a `perl -0pi` that matched
   nothing, a calibration whose mutation left `^.*` still matching, a deletion of a name that
