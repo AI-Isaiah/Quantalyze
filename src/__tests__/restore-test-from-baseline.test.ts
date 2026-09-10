@@ -1981,6 +1981,89 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
     expect(runDsnAssert(all).status).toBe(0);
   });
 
+  it("EXECUTED — E3: arm 27's seeded credentials are unset on a FAILURE path, not only on success", () => {
+    // ⛔ THE DEFECT. `arm_published_sql_credential_scan` seeds a DSN-shaped and a
+    // JWT-shaped value with `export` — deliberately, because the scan has to see a
+    // real credential SHAPE — and cleared them with an `unset` on the SUCCESS path
+    // only. The function has nine `return 1` paths, and each of them left both
+    // values exported into the environment of every arm that runs after it in the
+    // same self-test process. Self-test output is a public CI log. Latent, because
+    // no current arm dumps `env` — which is a property of the OTHER arms, not of
+    // this one, and is exactly the kind of guarantee that expires without warning.
+    //
+    // ⚠️ EXECUTED, and on the REAL function taking a REAL early return. The arm
+    // functions are nested inside the self-test's own scope and cannot be reached by
+    // sourcing the script, so the definition is sliced verbatim out of SRC and run
+    // as-is. Nothing is stubbed: with `SELFTEST_TMPD` pointing at a scratch dir, leg
+    // (a)'s `awk` cannot find its anchor in the harness it is handed as `$0`, so the
+    // function returns 1 through its own first failure path before any lane, any
+    // database or any `run_leg` is reached.
+    const FN = /\n  arm_published_sql_credential_scan\(\) \{\n[\s\S]*?\n  \}\n/.exec(SRC);
+    expect(
+      FN,
+      "the arm-27 function definition could not be sliced out of the script — the anchor moved and everything below would be vacuous",
+    ).not.toBeNull();
+
+    function runArmEarlyReturn(fn: string): { out: string; leaked: string } {
+      const dir = mkdtempSync(join(tmpdir(), "restore-arm27env-"));
+      try {
+        const harness = join(dir, "harness.sh");
+        writeFileSync(
+          harness,
+          [
+            "set -uo pipefail",
+            `SELFTEST_TMPD=${JSON.stringify(dir)}`,
+            fn.replace(/^\n/, "").replace(/^ {2}/gm, ""),
+            "arm_published_sql_credential_scan || echo ARM-RETURNED-NONZERO",
+            'echo "LEAK_DSN=[${ARM27_SEED_DSN:-<unset>}] LEAK_JWT=[${ARM27_SEED_JWT:-<unset>}]"',
+            "",
+          ].join("\n"),
+        );
+        const r = spawnSync("bash", [harness], { encoding: "utf8" });
+        const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+        return { out, leaked: /LEAK_DSN=\[(.*?)\] LEAK_JWT=\[(.*?)\]/.exec(out)?.[0] ?? "" };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    const real = runArmEarlyReturn(FN?.[0] ?? "");
+    expect(
+      real.out,
+      `the arm did not take an early failure return, so this test measured nothing. Output:\n${real.out}`,
+    ).toContain("ARM-RETURNED-NONZERO");
+    expect(
+      real.out,
+      "the arm did not fail through leg (a)'s own MEASURE_FAIL path — it failed somewhere unexpected and the leak window measured here may not be the shipped one",
+    ).toContain("MEASURE_FAIL (a)");
+    expect(
+      real.leaked,
+      `arm 27 left its seeded credential shapes EXPORTED after a failure return. Every arm that runs afterwards in the same self-test process inherits them, and that process writes a public CI log. Output:\n${real.out}`,
+    ).toBe("LEAK_DSN=[<unset>] LEAK_JWT=[<unset>]");
+
+    // CALIBRATION — drop the RETURN trap on a scratch copy and the SAME early return
+    // must leak both values, or the assertion above is passing for some other reason
+    // (an arm that never exported, a harness that never ran the function).
+    const TRAP = "    trap 'unset ARM27_SEED_DSN ARM27_SEED_JWT' RETURN\n";
+    expect(
+      (FN?.[0] ?? "").split(TRAP).length - 1,
+      "the RETURN-trap anchor is not unique inside the arm, so this mutation could be a NO-OP that reads green — the lesson this file records for the survivors.sql mutation",
+    ).toBe(1);
+    const untrapped = (FN?.[0] ?? "").replace(TRAP, "");
+    expect(untrapped, "the E3 trap calibration did not APPLY").not.toBe(FN?.[0] ?? "");
+    const leaky = runArmEarlyReturn(untrapped);
+    expect(leaky.out, "the calibration run did not take the same early return").toContain(
+      "ARM-RETURNED-NONZERO",
+    );
+    expect(
+      leaky.leaked,
+      "with the RETURN trap removed the same failure path did NOT leak, so the trap is not what is doing the work and the assertion above proves nothing",
+    ).not.toBe("LEAK_DSN=[<unset>] LEAK_JWT=[<unset>]");
+    // And the leak is the credential SHAPE, not an empty string — the thing that
+    // would reach a public log.
+    expect(leaky.leaked).toContain("eyJ");
+  });
+
   it("EXECUTED — an UNREADABLE published file is a named MEASURE_FAIL, never a clean read", () => {
     // grep's rc>=2 must not collapse to "no match". The harness replaces grep with
     // one that returns 2 for the scan and delegates everything else.
