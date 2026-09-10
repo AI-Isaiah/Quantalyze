@@ -2085,6 +2085,36 @@ export async function selfTest() {
       }
       const fixtureIds = [...new Set(red.data.map((x) => x.rule))].sort();
       const armIds = [...CRON_DRIFT_MOD.HYGIENE_RULE_IDS].sort();
+
+      // ⛔ THE UNBALANCED ROW'S VALUE LENGTH IS LOAD-BEARING, AND UNTIL NOW IT
+      // WAS ONLY DOCUMENTED. Wave 4 measured that with a SHORT value both
+      // spellings of `fixture_unbalanced_headers_job` return just
+      // `["header-unparseable"]`, so the `continue` that stops the header-value
+      // walks descending into an unparseable region becomes a control that
+      // CANNOT FAIL — neutering it changes nothing and the self-test stays
+      // green. That wave shipped a 37-character value and a `note` saying why,
+      // but a `note` cannot fail: MEASURED 2026-09-11, shortening the value
+      // back to 10 characters passed 69/69 at exit 0. This assertion is that
+      // note made falsifiable, and it is the accepted residual wave 4 routed
+      // here because `run.mjs` was frozen for its own wave.
+      //
+      // The length is DERIVED, never hand-typed: the header value is a `||`
+      // chain of short operands (split so no credential-shaped token is typed
+      // whole into a public repo), so the guard sums the literal contents that
+      // follow the header NAME rather than reading any single one.
+      const UNBALANCED_JOB = "fixture_unbalanced_headers_job";
+      const unbalancedRow = red.data.find((x) => x.jobname === UNBALANCED_JOB);
+      const unbalancedTail = unbalancedRow ? unbalancedRow.command.split("'X-Trace',")[1] : undefined;
+      const unbalancedDerived =
+        unbalancedTail === undefined
+          ? -1
+          : (unbalancedTail.match(/'[^']*'/g) || []).reduce((n, lit) => n + lit.length - 2, 0);
+      const unbalancedMessage =
+        unbalancedRow === undefined
+          ? `the red fixture still carries ${UNBALANCED_JOB} — the row whose value length keeps the unparseable-region skip falsifiable`
+          : unbalancedTail === undefined
+            ? `${UNBALANCED_JOB}'s command still anchors its header value on 'X-Trace' — the guard below cannot measure a value it cannot find`
+            : `and ${UNBALANCED_JOB}'s header value still DERIVES at least HEADERS_LITERAL_MAX characters (${unbalancedDerived} vs ${CRON_DRIFT_MOD.HEADERS_LITERAL_MAX}) — shorten it and neutering the unparseable-region skip stops reddening anything, which is how that control silently became unfalsifiable once already`;
       pass =
         expect(
           missed.length === 0,
@@ -2103,6 +2133,7 @@ export async function selfTest() {
           JSON.stringify(fixtureIds) === JSON.stringify(armIds),
           `the fixture's rule ids are EXACTLY the arm's HYGIENE_RULE_IDS — a rule added without a red row, or a red row whose rule was deleted, fails here (fixture [${fixtureIds.join(", ")}] vs arm [${armIds.join(", ")}])`,
         ) &&
+        expect(unbalancedDerived >= CRON_DRIFT_MOD.HEADERS_LITERAL_MAX, unbalancedMessage) &&
         pass;
     }
   }
