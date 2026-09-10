@@ -1432,7 +1432,7 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 
 ⭐ **`[164.8.4-SCOPE-DEPTH-AXIS]` is the one worth planning first, because it is the THIRD recurrence of one shape on one branch:** a scope sentence outrunning the filter beneath it. 2 files while claiming a class; then 137 while skipping 346 `.test.tsx`; now 139 while `readdirSync` — non-recursive — skips 5 by directory depth. Each fix closed the axis it was SHOWN and left the next. ⛔ **The deliverable is NOT a third widening** but a mechanism making the scope claim and the file set agree by construction, proved by opening a new axis on a scratch tree and observing RED.
 
-**Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]`, `[164.8.2-REDACT-HOSTNAME-01]`, `[164.8.2-EVIDENCE-DOTENV-LEAK]`, `[164.8.2-REFUSAL-STILL-PUBLISHES]`, `[164.8.2-CHANNEL-ALLOWLIST-STALE]`, `[164.8.2-SENTINEL-GREP-NUL-BLIND]`, `[164.6-SOURCE-ANCHOR-ROT]`, `[164.8.2-GATE-RESIDUE]` and `[WINDOWS-LEDGER-DRIFT]` — read each before planning, do not re-derive.
+**Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries `[164.7-MARKER-GREP-VACUOUS]`, `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]`, `[164.8.2-REDACT-HOSTNAME-01]`, `[164.8.2-EVIDENCE-DOTENV-LEAK]`, `[164.8.2-REFUSAL-STILL-PUBLISHES]`, `[164.8.2-CHANNEL-ALLOWLIST-STALE]`, `[164.8.2-SENTINEL-GREP-NUL-BLIND]`, `[164.6-SOURCE-ANCHOR-ROT]`, `[164.8.2-GATE-RESIDUE]` and `[WINDOWS-LEDGER-DRIFT]` — read each before planning, do not re-derive.
 **Depends on:** Phase 164.8.2 (this is its residue). ⚠️ **Cross-phase coupling, deliberate:** `[164.8.2-VAC08-FATAL-ON-TRANSIENT]` is NOT owned here — it stays with Phase 164.9's `[164.8-PUSH-RACE-VAC08]` because they share one root (two jobs contending for advisory key `61616158` on shared TEST) and splitting them would produce exactly the sequential-ratchet-patched-in-one-place hazard this repo has already paid for once.
 **Plans:** 0 plans
 
@@ -1566,7 +1566,7 @@ The 164.7 rule is the more recent, shipped and tested convention, and `docs/runb
 
 ⚠️ PROD is currently CORRECT (verified 2026-09-01, `net._http_response` id 3485 returned 200). **This closes a REPRODUCIBILITY gap, not an outage** — there is no time pressure, which is exactly why settling the convention first is affordable.
 
-**Requirements**: TODOS entries CRON-DRIFT-01 (the REPAIR/LIVE-ROW half only — the DETECT half is Phase 164.1's), `[164.7-VAULT-ABSENT-RULE]`
+**Requirements**: TODOS entries CRON-DRIFT-01 (the REPAIR/LIVE-ROW half only — the DETECT half is Phase 164.1's), `[164.7-VAULT-ABSENT-RULE]`, `[VAULTTICK-EMPTYKEY-01]` (⚠️ added 2026-09-10: the whitespace-key hole is IN the callable this phase repoints jobid 1 at — `match_engine_cron_tick()` tests `v_key = ''` not `btrim(v_key) = ''`, and a whitespace secret is sent as the `X-Service-Key` header, producing the 401 that `CRON-DRIFT-01` exists because of)
 **Depends on:** Phase 164.1 (its committed cron manifest is this phase's oracle), Phase 164.7 (the settled `app.*` replacement mechanism — `system_settings` + Vault — which this MUST consume rather than invent a second answer), Phase 164.4.1 (pg-lane with pg_cron)
 **Plans:** 0 plans
 
