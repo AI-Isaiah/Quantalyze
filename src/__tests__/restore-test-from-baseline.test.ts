@@ -829,6 +829,55 @@ describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is 
     return b < 0 ? "" : lines.slice(a, b + 1).join("\n");
   }
 
+  /**
+   * The W2 block as PROSE: each line's leading `# ` stripped and the lines rejoined
+   * with a space.
+   *
+   * ⭐ THIS IS WHY IT IS REFLOW-INVARIANT, and it is IN-02's idiom hoisted rather
+   * than a new one. A comment sentence WRAPS; where it wraps is a function of how
+   * long the words are, so a predicate read over RAW LINES binds to whatever
+   * happened not to wrap. Read over prose, the same sentence is the same string
+   * whether it occupies one line or four.
+   */
+  function w2Prose(text: string): string {
+    return w2Block(text)
+      .split("\n")
+      .map((l) => l.replace(/^\s*#\s?/, ""))
+      .join(" ");
+  }
+
+  /**
+   * ⛔ A DATED CLAIM — a date, and in the SAME SENTENCE one of the count WORDS.
+   *
+   * ⭐ REWRITTEN 2026-09-10 (code review IN-04). The predicate used to require a
+   * line matching `^\s*# \(YYYY-MM-DD: WORD, after …\)` — exactly one of them,
+   * inside the sliced block. The word derivation underneath it was real and could
+   * fail (the review verified that), but the LINE SHAPE it bound to was a
+   * convention this pin itself introduced: nothing in the script requires the
+   * parenthesis, the colon, the comma, or the claim starting a line. An innocent
+   * reflow of that comment reddened a gate for a non-defect, and a gate that reds
+   * for a non-defect is one a maintainer learns to edit rather than to read.
+   *
+   * So the binding moved onto the FACT: somewhere in the W2 block there is exactly
+   * one dated sentence that names a refusal count, and the count it names is the
+   * live one. `[^.]*?` keeps the match inside a single sentence, so a date in one
+   * sentence cannot reach a word in the next.
+   *
+   * ⛔ THIS IS NOT A RETREAT TO THE TAUTOLOGY IT REPLACED. The check this whole
+   * arm replaced compared a `grep -c` against a byte-identical copy of itself and
+   * could never fail. Both halves here are still DERIVED from the script: `n` is
+   * counted off the live `^refuse_*() {` declarations, and the word is looked up
+   * in the table — nothing is re-typed, and the calibrations below observe the
+   * predicate flip on a drifted word and on a deleted claim.
+   */
+  function datedClaims(text: string): RegExpExecArray[] {
+    return [
+      ...w2Prose(text).matchAll(
+        new RegExp(`\\d{4}-\\d{2}-\\d{2}[^.]*?\\b(${WORDS.join("|")})\\b`, "g"),
+      ),
+    ] as RegExpExecArray[];
+  }
+
   it("IN-01 — the W2 comment's refusal WORD is the live `refuse_*() {` count, and so is the emitted line", () => {
     const n = liveLines(SRC).filter(({ line }) => /^refuse_[a-z_]*\(\) \{/.test(line)).length;
     const word = WORDS[n];
@@ -840,17 +889,15 @@ describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is 
     const block = w2Block(SRC);
     expect(block, "the W2 block slicer found no anchor — every pin below it would be vacuous").not.toBe("");
 
-    const dated = block
-      .split("\n")
-      .filter((l) => /^\s*# \(\d{4}-\d{2}-\d{2}: /.test(l));
+    const claims = datedClaims(SRC);
     expect(
-      dated.length,
-      "the W2 block no longer carries exactly one dated `# (YYYY-MM-DD: WORD, after …)` line — the shape this pin and the plan's shell verify both read",
+      claims.length,
+      "the W2 block no longer carries exactly one DATED SENTENCE naming a refusal count. One is the contract: zero means the regeneration claim was dropped, two means a reader cannot tell which one is current.",
     ).toBe(1);
     expect(
-      dated[0],
-      `the W2 comment's refusal word disagrees with the live count of ${n}. Regenerate with \`grep -c '^refuse_[a-z_]*() {' ${SCRIPT}\` and write ${word} into the dated line.`,
-    ).toContain(`${word},`);
+      claims[0][1],
+      `the W2 comment's dated refusal count disagrees with the live count of ${n}. Regenerate with \`grep -c '^refuse_[a-z_]*() {' ${SCRIPT}\` and write ${word} into the dated sentence. (Its LAYOUT is free — wrap it however you like.)`,
+    ).toBe(word);
 
     const emitted = block.split("\n").filter((l) => l.includes("self-test OK"));
     expect(emitted.length).toBe(1);
@@ -859,25 +906,57 @@ describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is 
       `the EMITTED closing line disagrees with the live count of ${n}. The comment and the sentence the operator actually reads must carry the same word — they did not, and that is IN-01.`,
     ).toContain(`${word} refusals`);
 
-    // CALIBRATION — put the stale word back on a scratch string; both halves flip.
+    // CALIBRATION 1 — DRIFT. Put the stale word back on a scratch copy, editing the
+    // block's FIRST occurrence rather than a punctuation-bearing literal, and watch
+    // the predicate flip.
     const stale = WORDS[n - 1];
-    const drifted = SRC.replace(`: ${word}, after`, () => `: ${stale}, after`);
-    expect(drifted, "the IN-01 calibration did not APPLY").not.toBe(SRC);
-    const dBlock = w2Block(drifted);
-    expect(dBlock.split("\n").filter((l) => /^\s*# \(\d{4}-\d{2}-\d{2}: /.test(l))[0]).not.toContain(
-      `${word},`,
-    );
+    const driftedBlock = block.replace(new RegExp(`\\b${word}\\b`), stale);
+    expect(driftedBlock, "the IN-01 drift calibration did not APPLY to the block").not.toBe(block);
+    const drifted = SRC.replace(block, driftedBlock);
+    expect(drifted, "the IN-01 drift calibration did not APPLY").not.toBe(SRC);
+    expect(datedClaims(drifted)[0][1]).toBe(stale);
+
+    // CALIBRATION 2 — DELETION. Strip the date out of the claim; the pin must lose
+    // it entirely rather than pass on a countless sentence.
+    const undatedBlock = block.replace(/\d{4}-\d{2}-\d{2}/, "recently");
+    expect(undatedBlock, "the IN-01 deletion calibration did not APPLY to the block").not.toBe(block);
+    const undated = SRC.replace(block, undatedBlock);
+    expect(undated, "the IN-01 deletion calibration did not APPLY").not.toBe(SRC);
+    expect(datedClaims(undated).length).toBe(0);
+
+    // CALIBRATION 3 — REFLOW-INVARIANCE, the property IN-04 asked for, and the one
+    // calibration here that must come out GREEN. Break the claim across two comment
+    // lines immediately before the count word and re-read it.
+    //
+    // ⛔ THE BREAK POINT IS DERIVED FROM THE WORD, NOT FROM THE CURRENT LAYOUT, and
+    // that is not a detail. The first cut of this calibration located the line with
+    // the pre-IN-04 `# (YYYY-MM-DD: ` pattern and asserted the file carried exactly
+    // one — which put the very layout requirement IN-04 named back into the arm
+    // through the calibration. MEASURED: reflowing the real script's claim then
+    // failed with "the reflow calibration has nothing to reflow", a non-defect
+    // reddening the gate, which is the finding reproduced. Anchoring on the word
+    // works whatever shape the comment is in.
+    //
+    // The historical half — that the pre-IN-04 predicate went red on exactly this
+    // reflow — was observed against the real script and recorded in the fix report.
+    // It is NOT asserted here: pinning the old shape is how the coupling returns.
+    const reflowedBlock = block.replace(new RegExp(`\\b${word}\\b`), `\n  # ${word}`);
+    expect(reflowedBlock, "the IN-04 reflow calibration did not APPLY to the block").not.toBe(block);
+    const reflowed = SRC.replace(block, reflowedBlock);
+    expect(reflowed, "the IN-04 reflow calibration did not APPLY").not.toBe(SRC);
+    const rClaims = datedClaims(reflowed);
+    expect(
+      rClaims.length,
+      "the reflowed block lost its dated claim — the predicate is layout-bound after all, which is IN-04 un-fixed",
+    ).toBe(1);
+    expect(rClaims[0][1], "the reflowed block's dated claim lost its word").toBe(word);
   });
 
   it("IN-02 — the arm list names every arm it claims, and it names arm 26", () => {
     // The sentence WRAPS across comment lines, so it is read as PROSE: each line's
     // leading `# ` stripped and the lines rejoined with a space. Matching the raw
     // block would bind to whatever happened not to wrap.
-    const prose = (text: string) =>
-      w2Block(text)
-        .split("\n")
-        .map((l) => l.replace(/^\s*#\s?/, ""))
-        .join(" ");
+    const prose = w2Prose;
     const block = prose(SRC);
     // ⚠️ THE DERIVATION IS DELIBERATELY PARTIAL, AND SAYING SO IS THE POINT. Walking
     // `run_arm` labels back to the refusal each leg greps for would be a parser of
