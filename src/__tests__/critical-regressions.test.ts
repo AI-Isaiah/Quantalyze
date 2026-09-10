@@ -2,6 +2,14 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 
+// ⛔ THE DELIBERATE DEGENERACY DEMONSTRATION, ROUTED THROUGH ITS ONE NAMED HOME
+// (Phase 164.8.2 / W3). The calibration below must WRITE the unchecked narrow —
+// that expression IS its evidence — but the class rule in
+// `test-restore-workflow-wiring.test.ts` now scans every test file. A file:line
+// allowlist rots and fragment assembly ("sl" + "ice") would make the evidence
+// unreadable, so the trap lives in one announced function instead.
+import { degenerateNarrow } from "../test/helpers/degenerate-narrow";
+
 // Regression guards for CRITICAL findings from the 2026-04-10 deep audit
 // and CSO security findings (SEC-001 through SEC-005).
 // Each test fails against the code state at commit 9930829 (baseline) and
@@ -1206,7 +1214,9 @@ describe("Critical regression guards", () => {
           /APPLY_JOB_RE does not match/,
         );
         // And the degradation it replaces: the old unchecked form answered about ONE BYTE.
-        expect(anchorless.slice(anchorless.search(APPLY_JOB_RE)).length).toBe(1);
+        expect(
+          degenerateNarrow(anchorless, { fromMatch: APPLY_JOB_RE }).length,
+        ).toBe(1);
         // Control: the real workflow still resolves.
         expect(applyIdxIn(src, "the real workflow")).toBeGreaterThanOrEqual(0);
       });

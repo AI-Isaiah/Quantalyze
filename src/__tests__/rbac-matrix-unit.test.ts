@@ -217,6 +217,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
+// ⛔ THE DELIBERATE DEGENERACY DEMONSTRATION, ROUTED THROUGH ITS ONE NAMED HOME
+// (Phase 164.8.2 / W3). The calibration below must WRITE the unchecked narrow —
+// that expression IS its evidence — but the class rule in
+// `test-restore-workflow-wiring.test.ts` now scans every test file. A file:line
+// allowlist rots and fragment assembly ("sl" + "ice") would make the evidence
+// unreadable, so the trap lives in one announced function instead.
+import { degenerateNarrow } from "../test/helpers/degenerate-narrow";
+
 function makeRequest(
   body: unknown = {},
   url = "http://localhost:3000/api/admin/users/target-user-id/roles",
@@ -718,7 +726,7 @@ describe("H-0025: every admin route registers an RBAC guard", () => {
 
     // ⚠️ The trap it replaces: the unchecked form names the route "/" — one
     // character — and that is the name an unguarded-admin-route failure carried.
-    expect(mutant.slice(mutant.indexOf("src/")).length).toBe(1);
+    expect(degenerateNarrow(mutant, { from: "src/" }).length).toBe(1);
   });
 
   for (const file of routeFiles) {

@@ -44,6 +44,14 @@ import {
 } from "../../scripts/mutation-runner/run.mjs";
 import { parseFile, scanCorpus } from "../../scripts/mutation-runner/parse.mjs";
 
+// ⛔ THE DELIBERATE DEGENERACY DEMONSTRATION, ROUTED THROUGH ITS ONE NAMED HOME
+// (Phase 164.8.2 / W3). The calibration below must WRITE the unchecked narrow —
+// that expression IS its evidence — but the class rule in
+// `test-restore-workflow-wiring.test.ts` now scans every test file. A file:line
+// allowlist rots and fragment assembly ("sl" + "ice") would make the evidence
+// unreadable, so the trap lives in one announced function instead.
+import { degenerateNarrow } from "../test/helpers/degenerate-narrow";
+
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const GATE_DIR = join(REPO_ROOT, "supabase", "tests");
 const CI_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
@@ -2027,10 +2035,10 @@ describe("[164.8.2-WR-07] slice anchors fail loud instead of degenerating", () =
     // ⚠️ The trap this replaces, spelled out so the next reader can see it: the
     // unchecked form does not throw, it returns ONE CHARACTER, and a block of
     // `not.toContain("continue-on-error")` assertions over one character all pass.
-    const degenerate = mutant.slice(
-      mutant.indexOf("\n  sql-mutation:"),
-      mutant.indexOf("\n  plan-anchor-verify:"),
-    );
+    const degenerate = degenerateNarrow(mutant, {
+      from: "\n  sql-mutation:",
+      upTo: "\n  plan-anchor-verify:",
+    });
     expect(degenerate.length, "the pre-WR-07 shape degenerated rather than failing").toBeLessThan(2);
     expect(degenerate).not.toContain("continue-on-error");
   });
