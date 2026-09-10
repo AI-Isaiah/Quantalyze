@@ -4674,7 +4674,7 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
    * line 1153 and `phase-84-asset-class-flow` line 27 (three unchecked lookups
    * in one slice). Both are MULTI-LINE, so a line-scoped grep found neither
    * across four review rounds. Cost of the widening, measured on this box: the
-   * scan is one strip plus one regex per file, 137 files in ~0.35 s.
+   * scan is one strip plus one regex per file, 139 files in ~0.35 s.
    *
    * ⚠️ THE SURFACE STOPS AT THIS DIRECTORY, AND THAT IS A MEASURED CHOICE, NOT
    * AN OVERSIGHT. Running the same scan over every OTHER test file in the repo
@@ -4692,20 +4692,23 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
    * filter that this rule's own SCAN_FILES carried, so the record reproduced the
    * defect it was recording. That is this branch's thesis one level up: a scope
    * that looks complete and is not. Re-derive over BOTH extensions or not at all.
-   * They are real and they are UNFIXED: colocated suites are a different blast radius than this
-   * structural-gate directory, and widening the surface and fixing four unrelated
-   * files in one change would make neither reviewable. Recorded here rather than
-   * left to be rediscovered — extending SCAN_FILES to them is the next step, not
+   * ⛔ THAT LIST IS DATED LINEAGE, NOT A LIVE COUNT — REGENERATE IT, never quote
+   * it. Phase 164.8.2 fixed those sites in parallel with this change, so the
+   * scan over the same corpus returns a DIFFERENT and shrinking number, and a
+   * fix that reformats a file moves every line number below it. Colocated suites
+   * stay outside the surface for a reason that has not changed: they are a
+   * different blast radius than this structural-gate directory, and nothing
+   * enforces the class there. Extending SCAN_FILES to them is the next step, not
    * a decision to skip.
    *
    * CALIBRATION_FILES stays at the two comment-heavy mutex-pin files the
    * EXPENSIVE arms were measured against — the three-depth injection, the strip
-   * line-count/share floor, the naive-stripper subject. Those re-strip a whole
-   * file per injection point; running them over 137 files would buy nothing,
+   * line-count/share floor. Those re-strip a whole
+   * file per injection point; running them over 139 files would buy nothing,
    * because what they calibrate is the STRIPPER, and these two are its hardest
    * subjects (quoted shell globs carrying `/*`, 35.5% and 32.8% comment by
    * non-whitespace bytes). Widening the SCAN is free; widening the CALIBRATIONS
-   * is not, and would measure the same stripper 137 times.
+   * is not, and would measure the same stripper 139 times.
    */
   const CALIBRATION_FILES = [
     "src/__tests__/test-restore-workflow-wiring.test.ts",
