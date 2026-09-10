@@ -1211,10 +1211,14 @@ jobs:
           #
           # ⚠️ ONE CLASS IS SCOPED OUT OF THE LEDGER SCAN, BY MEASUREMENT, NOT BY TASTE.
           # `ALTER DATABASE` belongs in the DUMP pattern because a schema dump has no
-          # legitimate reason to carry one. Migration SOURCE does. Measured 2026-09-08:
+          # legitimate reason to carry one. Migration SOURCE does. RE-DERIVE rather than
+          # trust the numbers below — these two commands print them:
           #   cat supabase/migrations/*.sql | grep -acE 'ALTER DATABASE'
-          # reports 6 lines across 4 files and every one is documentation — five `--`
-          # comments and one RAISE NOTICE string, all naming the GUC-setting recipe.
+          #   grep -clE 'ALTER DATABASE' supabase/migrations/*.sql | wc -l
+          # Measured 2026-09-10 at HEAD: 6 lines across THREE files (the count said FOUR
+          # files from 2026-09-08 until review F3 re-ran it), and every one is
+          # documentation — five `--` comments and one RAISE NOTICE string, all naming
+          # the GUC-setting recipe.
           # Applying that class to ledger.csv would be RED ON EVERY RUN, and a gate that
           # has to be waived to pass is not a gate. The residual risk is NAMED rather than
           # hidden: a hand-applied TEST row of the shape
