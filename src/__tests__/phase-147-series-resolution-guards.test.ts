@@ -249,12 +249,45 @@ describe("SCEN-01 LAYER A — repo-wide bare daily_returns select ban", () => {
  *  the `allocator-portfolio-payload` re-export. */
 const RESOLVER_CALL = "resolveDailyReturnSeries(";
 
+// ---------------------------------------------------------------------------
+// ⛔ ANCHOR DISCIPLINE (Phase 164.8.2 / WR-07).
+//
+// `String.indexOf` returns -1 on a miss, and `slice` reads a negative index FROM
+// THE END: `s.slice(-1)` is the LAST CHARACTER, `s.slice(0, -1)` is nearly the
+// WHOLE string. The `queries.ts` embed pin below is the live case — that file is
+// ~3.5k lines, so an unchecked `src.indexOf(")", embedStart)` returning -1 would
+// have handed the block-slice almost the ENTIRE file, and `daily_returns` /
+// `returns_series` both appear elsewhere in it. The arm would have gone green on
+// a projection it never read, which is exactly the false-green the block-slice
+// technique exists to prevent.
+//
+// ⛔ An absent anchor is a FINDING, not a value: no `?? ''`, no `|| 0`, no
+// `Math.max(0, i)`. Throw, and NAME the anchor.
+// ---------------------------------------------------------------------------
+
+/** `text.indexOf(anchor)`, but a miss THROWS by name instead of returning -1. */
+function anchorIndex(text: string, anchor: string, from = 0): number {
+  const at = text.indexOf(anchor, from);
+  if (at < 0) {
+    throw new Error(
+      `ANCHOR MISSING: ${JSON.stringify(anchor)} is not present in the subject source. ` +
+        `The narrowing slice that wanted it would have degenerated (slice(-1) is the LAST ` +
+        `CHARACTER, slice(0, -1) is nearly the WHOLE string) and every assertion over the ` +
+        `result would have passed vacuously. Fix the anchor or the subject — do not default it.`,
+    );
+  }
+  return at;
+}
+
 /** The argument list of the FIRST `resolveDailyReturnSeries(...)` call in a
  *  source (paren-balanced). Used to pin what is threaded INTO the resolver,
  *  which a mere "the file mentions the identifier" assertion cannot see. */
 function resolverCallArgs(src: string): string {
-  const start = src.indexOf(RESOLVER_CALL);
-  if (start === -1) return "";
+  // ⛔ WR-07: `if (start === -1) return ""` was a silent default. A source that
+  // stopped calling the resolver would have handed back an empty argument list,
+  // and "the args do not mention returnsSeriesById" is precisely the defect this
+  // predicate reports — reported as an empty string, it reads as a shape.
+  const start = anchorIndex(src, RESOLVER_CALL);
   let i = start + RESOLVER_CALL.length;
   let depth = 1;
   while (i < src.length && depth > 0) {
@@ -317,11 +350,14 @@ describe("SCEN-01 LAYER B — every series reader resolves through the ONE resol
     // Block-slice to the dashboard's own strategy_analytics embed (phase-84's
     // marker-literal technique) so an unrelated two-column select elsewhere in
     // this 3.5k-line file cannot false-green this surface.
-    const joinStart = src.indexOf("strategy:strategies!inner (");
+    const joinStart = anchorIndex(src, "strategy:strategies!inner (");
     expect(joinStart).toBeGreaterThan(-1);
-    const embedStart = src.indexOf("strategy_analytics (", joinStart);
+    const embedStart = anchorIndex(src, "strategy_analytics (", joinStart);
     expect(embedStart).toBeGreaterThan(-1);
-    const embed = src.slice(embedStart, src.indexOf(")", embedStart));
+    // ⛔ WR-07: the CLOSING paren was the unchecked one. Absent, `indexOf`
+    // returns -1, `slice(embedStart, -1)` is the rest of a 3.5k-line file, and
+    // both `toContain`s below pass on some OTHER select entirely.
+    const embed = src.slice(embedStart, anchorIndex(src, ")", embedStart));
     expect(embed).toContain("daily_returns");
     expect(embed).toContain("returns_series");
   });
@@ -396,5 +432,64 @@ describe("SCEN-01 LAYER B — every series reader resolves through the ONE resol
     // The differencing step is what makes returns_series usable as RETURNS.
     // Its absence would mean the wealth index is forwarded raw (+100% day one).
     expect(src).toContain("equityCurveToDailyReturns");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⛔ WR-07 CALIBRATION — the anchor check must BITE.
+//
+// The `queries.ts` embed pin is a block-slice bounded by an unchecked closing
+// paren. That paren going missing is not hypothetical noise: it is precisely the
+// case where the arm's whole reason for existing — "an unrelated two-column
+// select elsewhere in this 3.5k-line file must not false-green this surface" —
+// silently inverts. Driven with the anchor absent, mutation asserted first.
+// ---------------------------------------------------------------------------
+describe("[164.8.2-WR-07] the embed block-slice anchors fail loud instead of degenerating", () => {
+  it("a missing closing paren throws BY NAME instead of widening the slice to the whole file", () => {
+    const src = stripComments(readSource("src/lib/queries.ts"));
+    const embedStart = anchorIndex(src, "strategy_analytics (");
+
+    // Control: the real source closes its embed, and the slice is a SMALL
+    // projection — not the file.
+    expect(() => anchorIndex(src, ")", embedStart)).not.toThrow();
+    const real = src.slice(embedStart, anchorIndex(src, ")", embedStart));
+    expect(real.length, "the control slice must be a projection, not the file").toBeLessThan(500);
+
+    // Mutant: every `)` from the embed onward is gone. Assert that APPLIED
+    // before asserting the flip — a mutant that still carries the anchor proves
+    // nothing, and two calibrations on this branch were found doing exactly that.
+    const mutant = src.slice(0, embedStart) + src.slice(embedStart).split(")").join("");
+    expect(mutant, "the mutation must actually change the source").not.toBe(src);
+    expect(
+      mutant.slice(embedStart).includes(")"),
+      "the mutation must actually REMOVE the closing-paren anchor",
+    ).toBe(false);
+    expect(() => anchorIndex(mutant, ")", embedStart)).toThrow(/ANCHOR MISSING: "\)"/);
+
+    // ⚠️ And the trap it replaces, measured rather than asserted: the unchecked
+    // form returns the rest of the file, in which BOTH pinned column names
+    // appear — so the arm would have gone green while reading nothing.
+    const degenerate = mutant.slice(embedStart, mutant.indexOf(")", embedStart));
+    expect(degenerate.length, "the pre-WR-07 shape widened instead of failing").toBeGreaterThan(
+      real.length,
+    );
+    expect(degenerate).toContain("daily_returns");
+    expect(degenerate).toContain("returns_series");
+  });
+
+  it("resolverCallArgs reports an ABSENT resolver call rather than returning an empty argument list", () => {
+    const src = stripComments(readSource("src/lib/queries.ts"));
+    // Control: the real source calls the resolver.
+    expect(() => resolverCallArgs(src)).not.toThrow();
+
+    const mutant = src.split(RESOLVER_CALL).join("resolveNothingAtAll(");
+    expect(mutant, "the rename must actually change the source").not.toBe(src);
+    expect(
+      mutant.includes(RESOLVER_CALL),
+      "the mutation must actually REMOVE the resolver call",
+    ).toBe(false);
+    expect(() => resolverCallArgs(mutant)).toThrow(
+      /ANCHOR MISSING: "resolveDailyReturnSeries\("/,
+    );
   });
 });
