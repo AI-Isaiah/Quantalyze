@@ -1520,12 +1520,17 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         script.includes(GUARD_ANCHOR),
         "the staging step's redaction-outcome guard is no longer the form this calibration strips — re-anchor the mutation rather than deleting the twin",
       ).toBe(true);
-      const ungated = script
-        .replace(GUARD_ANCHOR, "")
-        .replace(
-          /^ {2}else\n {4}echo "::error::the redaction step did not succeed[\s\S]*?\n {2}fi\n/m,
-          "",
-        );
+      // ⛔ RE-ANCHORED 2026-09-10 (review A2): the single `else` this used to strip is
+      // now a THREE-ARM chain (empty / recognised-non-success / unrecognised), so the
+      // mutation removes the whole chain. A regex that silently matched nothing would
+      // leave a dangling `elif`, and the twin would fail as "broke the shell" instead
+      // of as evidence — which is how this re-anchor was found.
+      const ELIF_ANCHOR = /^ {2}elif \[ -z "\$\{REDACT_OUTCOME:-\}" \]; then\n[\s\S]*?\n {2}fi\n/m;
+      expect(
+        ELIF_ANCHOR.test(script),
+        "the staging step's redaction-verdict chain is no longer the form this calibration strips — re-anchor the mutation rather than deleting the twin",
+      ).toBe(true);
+      const ungated = script.replace(GUARD_ANCHOR, "").replace(ELIF_ANCHOR, "");
       expect(
         ungated,
         "CALIBRATION: the un-gating mutation changed nothing, so it proves nothing",
@@ -1540,6 +1545,117 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         leakedChannels,
         "CALIBRATION: removing the guard did NOT republish the channels on a failed redaction, so this arm cannot see the shape review WR-06 is about",
       ).toEqual(channels);
+    });
+
+    /**
+     * A2 — the fourth reaching value is not the other three.
+     *
+     * `failure` / `cancelled` / `skipped` each coincide with a job that is already red,
+     * so denying the channels and exiting 0 is right there. An EMPTY `REDACT_OUTCOME`
+     * coincides with NOTHING: the redaction succeeded, the board is green, and the guard
+     * has quietly become unconditional — every later run publishes an artifact with zero
+     * diagnostic channels and nothing anywhere says so. `::error::` reddens neither a
+     * step nor a job, so the shipped `else` was a permanent silent deny.
+     */
+    const RECIPE = [
+      "ledger.csv",
+      "schema-before.sql",
+      "README.txt",
+      "census.sql",
+      "survivors.sql",
+      "restore.sql",
+      "refdata.sql",
+    ].sort();
+
+    /** The pre-fix state: the verdict guard denies, but never fails the step. */
+    function withoutTheExit(script: string): string {
+      const out = script.split("\n").filter((l) => l.trim() !== "wiring_fault=1").join("\n");
+      expect(
+        out,
+        "CALIBRATION: no `wiring_fault=1` line was removed, so the twin does not reproduce the pre-fix silent deny",
+      ).not.toBe(script);
+      return out;
+    }
+
+    it("EXECUTED — an EMPTY REDACT_OUTCOME FAILS the step, and says the WIRING is gone", () => {
+      const script = extractRunScript(WF, STAGE);
+      const seed = [...REAL_NAMES, UNEXPECTED, UNEXPECTED_CHANNEL];
+
+      const r = runStage(script, seed, "");
+      expect(
+        r.status,
+        `an empty REDACT_OUTCOME left the step GREEN (exit ${r.status}). Drop \`id: redact\`, reorder the steps or edit the \`env:\` block and this is what happens on a run whose redaction SUCCEEDED: a permanent, unconditional, silent deny of every diagnostic channel on a green board.\n${r.output}`,
+      ).toBe(1);
+      expect(
+        r.output,
+        "the empty case reported the redaction as having failed. It did not — it was never READ. Those are opposite diagnoses and must not share a sentence.",
+      ).toContain("REDACT_OUTCOME is EMPTY");
+      expect(r.output).toContain("WIRING fault");
+      expect(
+        r.output.includes("the redaction step did not succeed"),
+        "the wiring fault printed the FAILED-REDACTION message too, so the operator still cannot tell the two apart",
+      ).toBe(false);
+
+      const channels = stagedChannelNames(WF);
+      expect(channels.length, "no channel names parsed — the assertion below would be vacuous").toBe(6);
+      for (const c of channels) {
+        expect(r.staged.includes(c), `\`${c}\` was published on an UNREAD redaction verdict`).toBe(false);
+      }
+      expect(
+        r.staged,
+        "the reversal recipe did not survive a wiring fault. An explicit `exit` does not fire the `trap … ERR`, precisely so the undo outlives an unreadable verdict.",
+      ).toEqual(RECIPE);
+
+      // ⭐ CALIBRATION — THE SHIPPED STATE. Strip the `wiring_fault=1` flags and the
+      // very same fixture goes GREEN while denying every channel: the annotation is
+      // there, the deny is there, and nothing fails.
+      const silent = runStage(withoutTheExit(script), seed, "");
+      expect(
+        silent.status,
+        "CALIBRATION: the pre-fix script failed the step anyway, so the `exit 1` is not what this arm is measuring",
+      ).toBe(0);
+      expect(
+        silent.output,
+        "CALIBRATION: the pre-fix script did not even annotate, so the fixture is not exercising the guard",
+      ).toContain("::error::");
+      for (const c of channels) {
+        expect(
+          silent.staged.includes(c),
+          "CALIBRATION: the pre-fix script staged a channel, so the defect was never a SILENT deny",
+        ).toBe(false);
+      }
+    });
+
+    it("EXECUTED — an UNRECOGNISED outcome is denied AND fails, by its own name", () => {
+      const script = extractRunScript(WF, STAGE);
+      const seed = [...REAL_NAMES];
+      const r = runStage(script, seed, "neutral");
+      expect(
+        r.status,
+        `an unrecognised outcome left the step green (exit ${r.status}) — default-DENY without a red is the same permanent silent deny the empty case is about.\n${r.output}`,
+      ).toBe(1);
+      expect(r.output).toContain("none of success/failure/cancelled/skipped");
+      for (const c of stagedChannelNames(WF)) {
+        expect(r.staged.includes(c), `\`${c}\` was published on an unrecognised verdict`).toBe(false);
+      }
+    });
+
+    it("EXECUTED — `cancelled` and `skipped` still deny WITHOUT reddening a job that is already red", () => {
+      const script = extractRunScript(WF, STAGE);
+      const seed = [...REAL_NAMES];
+      for (const outcome of ["failure", "cancelled", "skipped"]) {
+        const r = runStage(script, seed, outcome);
+        expect(
+          r.status,
+          `outcome '${outcome}' failed the staging step. All three coincide with a job that is ALREADY red for its own reason; a second red here sends the next reader to the artifact plumbing instead of the actual failure.\n${r.output}`,
+        ).toBe(0);
+        expect(r.output).toContain(`outcome '${outcome}'`);
+        expect(
+          r.output.includes("MEASURE_FAIL"),
+          `outcome '${outcome}' was reported as a MEASURE_FAIL — it is a legitimate non-success, not an unread verdict`,
+        ).toBe(false);
+        expect(r.staged, `the reversal recipe did not survive outcome '${outcome}'`).toEqual(RECIPE);
+      }
     });
 
     it("EXECUTED — a run that died before the backup step still stages a self-explaining note", () => {
