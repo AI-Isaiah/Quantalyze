@@ -2394,10 +2394,28 @@ describe("restore-test-from-baseline.test.ts — no lookup index reaches a narro
   // idiom (and the same reason) as the `SKELETON` and whole-file-flag needles above.
   const NARROW = "sl" + "ice";
   const FIND = "index" + "Of";
+  // ⭐ THE RULE MATCHES ITS OWN SENTENCE. This describe's name says a LOOKUP INDEX
+  // must be checked before it can narrow anything; pinning exactly one narrowing
+  // call and exactly one lookup would deliver less than the title claims, and the
+  // gap between a gate's sentence and its regex is this repo's worst defect class.
+  // Every form below has IDENTICAL -1 semantics — `search` and `lastIndexOf` miss
+  // with -1 exactly as `indexOf` does, `substring`/`substr` narrow exactly as
+  // `slice` does — so a rewrite into any of them degrades the same silent way.
+  // (Adopted from the sibling rule, `test-restore-workflow-wiring.test.ts`.)
+  const NARROWERS = [NARROW, "sub" + "string", "sub" + "str"];
+  const FINDERS = [FIND, "last" + "Index" + "Of", "sea" + "rch"];
   // ⛔ NO `g` FLAG: a global regex carries `lastIndex` across `.test()` calls and
   // would skip every second match — a rule that reads half of what it looks at is
   // the same "passes when it should not" shape as the defect it pins.
-  const UNCHECKED = new RegExp(`\\.${NARROW}\\(\\s*[^()]*?\\.${FIND}\\(`);
+  // ⚠️ DOCUMENTED LIMIT, stated rather than implied: `[^()]` forbids parentheses
+  // between the two calls, so `s.slice(f(s.indexOf(A)))` — a lookup passed through
+  // ANY intervening call — is out of reach of a lexical rule, as is the
+  // store-then-narrow form where the index is bound to a variable first. Reaching
+  // those needs dataflow, not a regex. The arm below pins both misses, so the limit
+  // is a measured fact rather than a hope.
+  const UNCHECKED = new RegExp(
+    `\\.(?:${NARROWERS.join("|")})\\(\\s*[^()]*?\\.(?:${FINDERS.join("|")})\\(`,
+  );
 
   /**
    * ⛔ SCANS THE JOINED TEXT, NOT LINE BY LINE. A line-scoped filter is blind to
@@ -2439,6 +2457,32 @@ describe("restore-test-from-baseline.test.ts — no lookup index reaches a narro
     // And the comment strip is proven, not assumed.
     expect(offenders(`// const r = e.${NARROW}(e.${FIND}("|") + 1);`)).toEqual([]);
     expect(offenders(`/** e.${NARROW}(e.${FIND}("|") + 1) */`)).toEqual([]);
+  });
+
+  it("CALIBRATION — every narrow/lookup pair fires, and the two out-of-reach forms are pinned as MISSED", () => {
+    expect(
+      NARROWERS.length * FINDERS.length,
+      "the cross product changed — re-derive the pairs below rather than trusting the count",
+    ).toBe(9);
+    for (const narrow of NARROWERS) {
+      for (const find of FINDERS) {
+        const subject = `const r = e.${narrow}(e.${find}("|") + 1);`;
+        expect(
+          offenders(subject),
+          `CALIBRATION: the rule did not fire on ${narrow}/${find} — the describe's own sentence covers it, so a rewrite into that pair would degrade unseen`,
+        ).toEqual([`line 1: ${subject}`]);
+      }
+    }
+    // THE DOCUMENTED LIMIT, measured. If either of these ever fires, the docblock
+    // above is wrong and this red arm is what says so.
+    expect(
+      offenders(`const r = e.${NARROW}(f(e.${FIND}("|")));`),
+      "a lookup through an intervening call is now caught — update the documented limit",
+    ).toEqual([]);
+    expect(
+      offenders(`const at = e.${FIND}("|");\nconst r = e.${NARROW}(at + 1);`),
+      "the store-then-narrow form is now caught — update the documented limit",
+    ).toEqual([]);
   });
 
   it("CALIBRATION — a formatter-wrapped offender is caught, and located", () => {
