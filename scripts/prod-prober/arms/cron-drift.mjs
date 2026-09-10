@@ -606,7 +606,36 @@ export function compareManifest(manifest, prodRows, opts = {}) {
       }
     }
     // -----------------------------------------------------------------------
-    // (1a) TOTALITY (CR-04). Every field the per-job comparison later reads
+    // (1a) THE COMMAND IS BOUND TO ITS OWN SHA (WR-11).
+    //
+    // ⛔ MEASURED on the reverted repair: hand-cleaning a manifest row's
+    // `command` text while leaving its machine-produced `command_sha256` alone
+    // reported CLEAN on the manifest side — the hygiene scan judged text that
+    // was never captured — and then printed a DIFF between that fabricated
+    // text and PROD, which is a fictional diff about a fictional oracle. The
+    // sha is what the comparison uses; the text is what a human reads and what
+    // section (2) scans. Nothing made them describe the same command.
+    //
+    // Only the first twelve hex of each digest is printed: they are truncated
+    // digests of command TEXT that is already published in this same file, so
+    // there is no new leak surface, and twelve is enough to point a reviewer at
+    // the right row without inviting a byte-comparison by eye.
+    //
+    // ⚠️ This sits BELOW section (0) on purpose. Above it, this very return
+    // would hand the arm's own adversary the off switch that reverted the first
+    // repair — see the `HAND-EDITED` self-test scenario, which drives dirty
+    // PROD rows through exactly this defect and requires the credential anyway.
+    // -----------------------------------------------------------------------
+    if (typeof row.command === "string") {
+      const derived = sha256Hex(normalizeCommand(row.command));
+      if (derived !== row.command_sha256) {
+        return invalid(
+          `cron manifest row ${row.jobname}: its command text hashes to ${derived.slice(0, 12)} but the command_sha256 it publishes is ${String(row.command_sha256).slice(0, 12)}. The two fields describe different text, so the printed diff and the manifest-side hygiene scan are about a command that was never captured. Re-capture rather than hand-editing; to hide text, use the withhold procedure.`,
+        );
+      }
+    }
+    // -----------------------------------------------------------------------
+    // (1b) TOTALITY (CR-04). Every field the per-job comparison later reads
     //      must be PRESENT and of the right type, because JavaScript's
     //      coercions turn every absence into AGREEMENT rather than into a
     //      question.
