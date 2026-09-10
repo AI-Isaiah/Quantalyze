@@ -7771,3 +7771,52 @@ read the result.
 - [ ] **[164.7-PLAN03-EVIDENCE-01] Plan 03's lane evidence is not re-derivable from the artifacts it left.** The SUMMARY cites a lane result without the workdir, the apply list, or the exit code that would let a later reader reproduce it. Nothing is known to be WRONG — this is a provenance gap, not a contradicted claim. Recorded because "measured" with no re-derivable trace is exactly the shape that let a false stated-reason survive review twice in this milestone (see `[GATE-COMMENT-D2-FALSE]`). **Fix:** when re-touching plan 03's area, re-run the lane and record the invocation verbatim beside the number.
 
 - [ ] **[164.7-CITATION-DRIFT-01] Line-number citations in the 164.7 artifacts drifted by ~4 lines** when the fixer's four new arms landed in `test_analytics_service_settings_and_vault_tick.sql`, and again when the loopback comment was corrected in `20260907120000_...sql`. Prose that cites `file:line` in `.planning/phases/164.7-*` and in this file's neighbours should be read as approximate. ⭐ The durable lesson is the one already recorded for the project CLAUDE.md: **cite by SYMBOL, not by line** — a line cite in a file that is still growing is wrong by the next commit.
+
+## Phase 164.7 (APPSETTINGS) — post-merge `gsd-code-reviewer` deep audit (logged 2026-09-10)
+
+⭐ **The audit's verdict, quoted, because it names the shape rather than the items:** *"the SQL in
+this phase is careful and genuinely fail-closed; the verification code shipped alongside it is not,
+and that inversion is the phase's real defect."* Five Criticals, eleven Warnings, four Info over the
+five files PR #756 shipped. **Six of them were proven by EXECUTION, not argued** — each is
+reproducible from the command quoted in `.planning/phases/164.7-*/164.7-REVIEW.md`.
+
+**CLOSED IN-PHASE on 2026-09-10** (branch `phase-164.7-finalize`, all in
+`scripts/prod-prober/arms/cron-drift.mjs`, no production write): CR-01 (username/database now
+compared, with `prod-username-changed.json` as its red control), CR-02 (the live database marker is
+compared to the oracle's, disagreement is a `measure-fail`), CR-03 part (a) (`vault-absent` reads
+comment-STRIPPED text), CR-04 (the oracle validation is total over every field the comparison
+consumes) and WR-11 (a row's `command` is bound to its own `command_sha256`). The entries below are
+what was NOT closed.
+
+- [ ] **[164.7-CR03-HYGIENE-BYPASS] The ten hygiene rules still return ZERO violations on a command that inlines a live service key, if the key is split.** Parts (b) and (c) of CR-03 are open; only the comment-strip half landed. (b) `headerCarriesLiteral` inspects only the FIRST quoted literal after the header name and fires at `content.length >= 16`, so `'sk_live_' || 'AAAABBBBCCCCDDDDEEEE'` presents an 8-character first literal, and both fragments sit under `HEADERS_LITERAL_MAX = 32` so `long-literal-in-headers` misses them too. (c) the literal scanner has **no dollar-quote awareness** although this file's own comment says `cron.job.command` is *"frequently a multi-line `DO $$ … $$` block"* — a lone apostrophe inside `$q$don't$q$` desyncs `singleQuotedLiterals` and flips `long-literal-in-headers` from RED to CLEAN. ⛔ This is the arm's reason for existing: PROD jobid 1 carried an inline service key for MONTHS. **Fix:** sum every literal in the `||` chain up to the next depth-0 comma and compare the SUM to `HEADER_LITERAL_MIN`; teach the scanner to skip `$tag$ … $tag$` regions wholesale; ship a red fixture for each of the three shapes. ⛔ Do NOT lower `HEADER_LITERAL_MIN` — the docstring correctly explains why the threshold exists, and lowering it fires on the green Vault-backed shape. **Owner: Phase 164.8.5 PROBERPARSE.**
+
+- [ ] **[164.7-WR04-HYGIENE-BELOW-ORACLE] An unreadable or invalid oracle disables the live credential scan entirely.** `run()` returns as soon as the manifest cannot be read — before the `cron.job` query is issued — and `compareManifest`'s `invalid()` returns above the `prodHygiene` loop. So a bumped `schema_version` or one malformed row means the arm never asks whether a live cron command carries a credential. The file header claims the opposite as a design property: hygiene runs *"on BOTH sides of the comparison … EVEN WHEN ITS SHA MATCHES THE MANIFEST."* It is presented as independent of the comparison and implemented as downstream of it. Not silent (`manifest-invalid` is loud) but it MASKS a higher-severity finding behind a lower-severity one. **Fix:** read `cron.job` and scan it for credentials FIRST, then validate the oracle. **Owner: Phase 164.8.5 PROBERPARSE.**
+
+- [ ] **[164.7-WR05-PARSER-DROPS-ROWS] `parseCronJobRows` silently drops any record with fewer than seven fields** (`if (f.length < 7) continue;`). This is the one path in the arm where a PROD cron row disappears with **no** `measure-fail`, in a file whose whole discipline is that "could not measure" must never share a code path with "measured zero". A dropped row surfaces indirectly as "job missing from PROD" *if* it is in the manifest — but an EXTRA, unreviewed PROD job that the parser drops vanishes with no trace, which is exactly the case the extra-job arm exists to catch. **Fix:** collect malformed records and raise a `measure-fail` naming the count. A row the parser could not read is NOT a row that is not there. **Owner: Phase 164.8.5 PROBERPARSE.**
+
+- [ ] **[164.7-CR05-VACUOUS-MIGRATION-CHECK] Migration `20260907120000`'s check 6 CANNOT FAIL.** It asserts `v_fn !~ 'analytics_service_url'`, but that string occurs three times in the comment-stripped function body, two of them inside `RAISE EXCEPTION` message text. Delete the settings read entirely, keep the error messages, and the check still passes. ⭐ The sibling migration `20260907130000:766` gets this right, so the correct idiom is already in the repo one file away. **Fix:** a forward migration re-running a corrected verification block that excludes `RAISE` text before matching. **Owner: Phase 164.8.6 VAULTTICKFIX.**
+
+- [ ] **[164.7-WR01-VAULT-NOT-STRICT] The Vault read in `match_engine_cron_tick()` is not single-row-safe.** `SELECT decrypted_secret INTO v_key FROM vault.decrypted_secrets WHERE name = …` carries no `STRICT` and no cardinality check, so a duplicate secret name silently selects an arbitrary row and posts whichever key it got. Sits on the SAME lines as `[VAULTTICK-EMPTYKEY-01]` and must be repaired in the same forward migration. **Owner: Phase 164.8.6 VAULTTICKFIX.**
+
+- [ ] **[164.7-WR02-SERVICE-ROLE-EXECUTE] `service_role` keeps EXECUTE on all three SECURITY DEFINER functions,** and both migrations' verification blocks stop at `anon`/`authenticated` — so the grant they do not check is the one that remains. **Fix:** REVOKE where not needed and extend both verification blocks to assert the full grantee set, not a two-name subset. **Owner: Phase 164.8.6 VAULTTICKFIX.**
+
+- [ ] **[164.7-MIGRATION-COMMENT-DRIFT] `20260907130000` carries two contradictory VAC-04 acknowledgement blocks** — the second says the pragma is absent while the first *is* the pragma — and `20260907130000`'s comment-strip false-pass analysis is inverted for its own check 6 (WR-03 + WR-08). Comment-only, on APPLIED migrations. ⚠️ Blocked on the same open question as 164.5.1's criterion 6: *does a comment-only edit to an applied migration change what the CLI plans?* No such reading has ever been taken (recorded as PATTERNS TRAP A in `164.7-06-SUMMARY.md`). **Take that reading before editing either file.** **Owner: Phase 164.8.6 VAULTTICKFIX.**
+
+- [ ] **[164.7-APPGUC-SUCCESSOR-VACUOUS] `lint-app-guc`'s successor check is satisfied by any readable file, of any type, anywhere reachable by relative traversal** (WR-06), and `DETECT_RE` misses FOUR spellings rather than the one already booked as `[APPGUC-DETECT-DOUBLEQUOTE-01]` (WR-07 — three of them unbooked). Both are latent: the corpus is at 0 findings and 5 annotated files today. **Owner: Phase 164.8.5 PROBERPARSE.**
+
+- [ ] **[164.7-DORMANCY-UNINSTRUMENTED] Two of the three dormancy causes never reach even a WARNING** — the fan-outs cannot tell "closed by design" from "invisible to the definer" (WR-10). Same shape as the already-booked `[APPGUC-WARNING-UNINSTRUMENTED-01]` and should be closed with it, by the same instrument. **Owner: whoever takes `[APPGUC-WARNING-UNINSTRUMENTED-01]`.**
+
+- [ ] **[164.7-REVIEW-INFO-FOUR] The four Info findings, kept together because none is worth a phase alone.** IN-01 `--files` mode disables allowlist enforcement, leaving the self-exemption threat open in that mode; IN-02 `sqlFilesUnder` silently skips symlinked directories and is case-sensitive on `.sql`; IN-03 `parseLineageHeader` accepts the first marker and ignores any later one; IN-04 the `pg-password` rule misses the assignment forms that actually appear in plpgsql. **Owner: Phase 164.8.5 PROBERPARSE**, as a single sweep.
+
+⚠️ **WR-09 is NOT booked here.** Both of this phase's migrations are unbooked instances of
+`[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`, which already exists and is already routed to **Phase
+164.9 TESTISOLATION**. A second id for the same defect would split its evidence.
+
+⭐ **One reviewer recommendation was DECLINED, and it is recorded rather than quietly skipped.**
+CR-01 also asked for `jobid` to be compared. It is not, and the code says why at the comparison:
+`jobid` is pg_cron's surrogate key, it carries no configuration meaning, it changes on any
+legitimate unschedule/reschedule, and every field it could stand proxy for is already compared
+beside it. MEASURED 2026-09-10: comparing it made `prod-duplicate-jobname.json` report TWO
+cron-drift defects — the duplicate, and a jobid change that is merely that duplicate's consequence
+— which would have cost an existing isolation control to accommodate. Weakening a control to admit
+a redundant one is the wrong trade.
