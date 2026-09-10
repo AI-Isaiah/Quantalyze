@@ -1055,6 +1055,24 @@ describe("Critical regression guards", () => {
        * bound excludes it while the old unbounded slice swallowed it.
        */
       const APPLY_JOB_RE = /^ {2}apply:\s*\n/m;
+
+        // ⛔ ROUND FIVE: `String.search` returns -1 on a miss and `slice(-1)` yields the LAST
+      // CHARACTER, so every assertion below would answer about one byte instead of the apply
+      // block. `applyIdx` further down IS checked — but the SEEDED strings recompute the index
+      // and the check did not travel with it, which is how a checked value and an unchecked one
+      // end up living side by side. The store-then-use form at the first site is also the one
+      // shape the lexical class rule documents that it cannot reach, so it needs this by hand.
+      const applyIdxIn = (subject: string, label: string): number => {
+        const i = subject.search(APPLY_JOB_RE);
+        if (i < 0) {
+          throw new Error(
+            `APPLY_JOB_RE does not match ${label}, so this calibration has no subject. ` +
+              "A -1 here slices to the last character and every assertion over it answers " +
+              "about one byte rather than about the apply block.",
+          );
+        }
+        return i;
+      };
       /**
        * ⛔ WR-05 (164.8.2-REVIEW, closed 2026-09-10). This used to be
        * `/\n {2}[A-Za-z_][\w-]*:\n/` — the trailing `:\n` required the successor job key
@@ -1137,7 +1155,7 @@ describe("Critical regression guards", () => {
         // slice-to-EOF, silently.
         const BODY =
           "    needs: [plan, apply-test]\n    if: needs.apply-test.result == 'success'\n";
-        const SHAPES = [
+      const SHAPES = [
           "  zz_after_apply:",
           "  zz_after_apply:  # a trailing comment",
           "  zz_after_apply: ",
@@ -1149,7 +1167,7 @@ describe("Critical regression guards", () => {
             `CALIBRATION [${key}]: the fake trailing job was not appended`,
           ).not.toBe(src);
 
-          const seededIdx = seeded.search(APPLY_JOB_RE);
+          const seededIdx = applyIdxIn(seeded, `the ${JSON.stringify(key)} seed`);
           expect(
             seeded.slice(seededIdx),
             `CALIBRATION [${key}]: the UNBOUNDED slice does not contain the fake job — the ` +
@@ -1174,6 +1192,25 @@ describe("Critical regression guards", () => {
         expect(real).toMatch(/needs:\s*\[plan,\s*apply-test\]/);
       });
 
+
+      it("CALIBRATION (round five): applyIdxIn THROWS rather than slicing to the last byte", () => {
+        const src = readText(".github/workflows/supabase-migrate.yml");
+        // The mutation: remove the apply job header the regex anchors on. Assert it APPLIED
+        // before asserting the flip — a neuter that does not apply reads as GREEN, and this
+        // repo has been bitten by exactly that twice.
+        const anchorless = src.split("\n  apply:\n").join("\n  zz_renamed_apply:\n");
+        expect(anchorless, "CALIBRATION: the apply-job header was not renamed").not.toBe(src);
+        expect(APPLY_JOB_RE.test(anchorless)).toBe(false);
+
+        expect(() => applyIdxIn(anchorless, "the anchorless subject")).toThrow(
+          /APPLY_JOB_RE does not match/,
+        );
+        // And the degradation it replaces: the old unchecked form answered about ONE BYTE.
+        expect(anchorless.slice(anchorless.search(APPLY_JOB_RE)).length).toBe(1);
+        // Control: the real workflow still resolves.
+        expect(applyIdxIn(src, "the real workflow")).toBeGreaterThanOrEqual(0);
+      });
+
       it("CALIBRATION (WR-05): applyJobBlock THROWS on an unrecognised successor instead of slicing to EOF", () => {
         const src = readText(".github/workflows/supabase-migrate.yml");
         const applyIdx = src.search(APPLY_JOB_RE);
@@ -1184,7 +1221,7 @@ describe("Critical regression guards", () => {
         // named throw and never a silent slice-to-EOF — that is the IN-03 discipline.
         const seeded = `${src.trimEnd()}\n\n  zz_after_apply: something-unmatched\n    needs: [plan]\n`;
         expect(seeded, "CALIBRATION: the unmatched successor was not appended").not.toBe(src);
-        const afterApply = seeded.slice(seeded.search(APPLY_JOB_RE));
+        const afterApply = seeded.slice(applyIdxIn(seeded, "the single-successor seed"));
         expect(
           NEXT_JOB_RE.test(afterApply),
           "CALIBRATION: NEXT_JOB_RE MATCHED the seeded successor, so this arm is not " +
@@ -1196,7 +1233,7 @@ describe("Critical regression guards", () => {
           "CALIBRATION: the permissive detector does not see the seeded successor either, " +
             "so the throw could not fire for the reason this arm claims",
         ).toBe(true);
-        expect(() => applyJobBlock(seeded, seeded.search(APPLY_JOB_RE))).toThrow(
+        expect(() => applyJobBlock(seeded, applyIdxIn(seeded, "the single-successor seed"))).toThrow(
           /a top-level job key FOLLOWS `apply:`/,
         );
 
@@ -1209,7 +1246,7 @@ describe("Critical regression guards", () => {
         const seededPair =
           `${src.trimEnd()}\n\n  zz_after_apply: something-unmatched\n    needs: [plan]\n` +
           "\n  zz_recognised:\n    needs: [plan]\n";
-        const afterPair = seededPair.slice(seededPair.search(APPLY_JOB_RE));
+        const afterPair = seededPair.slice(applyIdxIn(seededPair, "the two-successor seed"));
         const pairNext = afterPair.match(NEXT_JOB_RE);
         expect(
           pairNext,
