@@ -2604,6 +2604,94 @@ exit 64
     ).toMatch(/not a valid/i);
   });
 
+  /**
+   * A3 — the false "not an ancestor" can come back through F4's OWN new file.
+   *
+   * `git … 2>"${ancestry_err}"`: when bash cannot OPEN the redirection target it never
+   * runs the command and returns 1. `--is-ancestor` uses 1 for "not an ancestor". So an
+   * unwritable `${RUNNER_TEMP}` — set but empty, or pointing somewhere that does not
+   * exist — routed straight into the `elif` arm and printed "<sha> is not an ancestor of
+   * this checkout's HEAD" about a sha git was never asked about. That is precisely the
+   * false statement F4 deleted, restored via the file F4 introduced.
+   *
+   * The fixture points `RUNNER_TEMP` at a path whose parent directory does not exist, so
+   * the redirection fails for every user including root — a fixture that leans on `/`
+   * being unwritable would quietly stop reproducing the class inside a root container.
+   */
+  it("(an UNWRITABLE RUNNER_TEMP) → MEASURE_FAIL about the channel, never a false ancestry verdict", () => {
+    const asserterScript = readFileSync(asserterPath, "utf8");
+    const OPEN_GUARD = '    if ! : > "${ancestry_err}"; then\n';
+    const READ_GUARD = '    if [ ! -r "${ancestry_err}" ]; then\n';
+    for (const [label, g] of [["pre-probe open", OPEN_GUARD], ["post-probe readable", READ_GUARD]] as const) {
+      expect(
+        asserterScript.includes(g),
+        `the ${label} guard is no longer the form this arm strips — re-anchor the calibration rather than deleting it`,
+      ).toBe(true);
+    }
+
+    const deadEnd = join(workdir, "no-such-dir", "deeper");
+    const runAt = (script: string): { code: number | null; out: string } => {
+      const f = join(workdir, `asserter-a3-${(seq += 1)}.sh`);
+      writeFileSync(f, script);
+      const r = spawnSync("bash", [f], {
+        cwd: repo,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          RUNNER_TEMP: deadEnd,
+          APPLY_STATUS: "completed",
+          APPLY_CONCLUSION: "success",
+          APPLY_HEAD_SHA: ANCESTOR_SHA,
+        },
+      });
+      return { code: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+    };
+
+    const fixed = runAt(asserterScript);
+    expect(
+      fixed.code,
+      `an unopenable stderr channel was accepted (exit ${fixed.code}). A probe that could not run is not a probe that answered.\n${fixed.out}`,
+    ).toBe(1);
+    expect(
+      fixed.out,
+      `the step told the operator that ${ANCESTOR_SHA} "is not an ancestor of this checkout's HEAD" — about a sha that IS one, on a run where git was never invoked. This is the exact false statement F4 deleted, reintroduced through F4's own file.`,
+    ).not.toContain("is not an ancestor of this checkout's HEAD");
+    expect(
+      fixed.out,
+      "the unopenable channel was not named, so the operator cannot tell a wiring fault from a real ancestry answer",
+    ).toContain("MEASURE_FAIL: could not create");
+
+    // ⭐ CALIBRATION — THE PRE-FIX STATE. Disable BOTH guards (each defends
+    // independently, so removing one proves nothing) and the same fixture prints the
+    // false verdict.
+    const unguarded = asserterScript
+      .replace(OPEN_GUARD, "    if false; then\n")
+      .replace(READ_GUARD, "    if false; then\n");
+    expect(unguarded, "CALIBRATION: the un-guarding mutation changed nothing").not.toBe(
+      asserterScript,
+    );
+    const pre = runAt(unguarded);
+    expect(
+      pre.out,
+      "CALIBRATION: with both channel guards removed the step STILL did not print the false ancestry verdict, so this fixture does not reproduce the class and the assertion above proves nothing",
+    ).toContain("is not an ancestor of this checkout's HEAD");
+  });
+
+  it("(a writable RUNNER_TEMP, an ancestor sha) → the channel guards do not fire on the happy path", () => {
+    // The other direction: a guard that fired on every run would be a control that
+    // refuses everything, which is not a control.
+    const asserted = runAsserter({
+      status: "completed",
+      conclusion: "success",
+      head_sha: ANCESTOR_SHA,
+    });
+    expect(asserted.code, asserted.out).toBe(0);
+    expect(
+      asserted.out.includes("MEASURE_FAIL"),
+      "the channel guards fired on a perfectly writable RUNNER_TEMP",
+    ).toBe(false);
+  });
+
   it("(status still in progress) → exit 1 naming `status`", () => {
     const asserted = runAsserter({
       status: "in_progress",

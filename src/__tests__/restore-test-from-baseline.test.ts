@@ -1460,7 +1460,7 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
     );
     const green = runDsnAssert(clean);
     expect(green.status, `the guard refused four DSN-free files. Output:\n${green.out}`).toBe(0);
-    expect(green.out).toContain("carry no DSN shape");
+    expect(green.out).toContain("carry no credential shape");
     // ⛔ C1 — THE CLEAN SENTENCE REPORTS THE MEASURED TALLY, not the four names it
     // was going to print either way. A reader of a green log must be able to tell
     // "four files were read and cleared" from "the loop matched nothing".
@@ -1535,7 +1535,7 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
     expect(none.status, `an EMPTY out dir passed the scan. Output:\n${none.out}`).toBe(1);
     expect(none.out).toContain("scanned 0 of 4");
     expect(none.out, "an empty scan still claims the files are clean").not.toContain(
-      "carry no DSN shape",
+      "carry no credential shape",
     );
 
     // CALIBRATION — neuter the floor on a scratch copy and watch the same short

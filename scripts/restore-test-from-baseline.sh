@@ -182,16 +182,18 @@
 # no staging step can reach that.
 #
 # ⭐ 2026-09-10 (Phase 164.8.2 review-fix): AND THE FOUR STAGED `.sql` FILES ARE NOW
-# SCANNED FOR A DSN — by `assert_public_sql_dsn_free`, between `build_transaction`
+# SCANNED — by `assert_public_sql_dsn_free`, between `build_transaction`
 # and `run_transaction`, so a hit refuses with the database untouched. The FILE SET
 # is unchanged and is not up for re-narrowing: admitting `census.sql`,
 # `survivors.sql`, `restore.sql` and `refdata.sql` is a founder decision and is
 # already narrower than what it replaced. What was missing was that NOTHING asserted
 # they were credential-free — the workflow's redaction step runs before this script
 # writes them, and `--self-test`'s redaction grep reads an arm's captured OUTPUT, not
-# these files. That gap is closed for DSN shapes and for nothing else: the
-# dollar-quote half of the arm check would refuse every run, because these files are
-# SQL. Deliberate SQL BODIES in `survivors.sql` remain in scope of T-164.8-21 above.
+# these files. The scan covers the SAME SIX CLASSES the artifact's own README names
+# (DSN, supabase host, project ref, the `connect` meta-command, ALTER DATABASE, JWT),
+# so the code and that README's claim agree. Deliberate SQL BODIES in `survivors.sql`
+# remain in scope of T-164.8-21 above — the dollar-quote half of the ARM redaction
+# check is the one predicate not applied here, because these files are SQL.
 #
 # ── TWO THINGS THIS SCRIPT DELIBERATELY DOES NOT DO ─────────────────────────
 # 1. IT DOES NOT BACK ANYTHING UP. The WORKFLOW takes the backup, BEFORE calling
@@ -1519,12 +1521,31 @@ TXN_ASSERT
 # reaching one of these files would have shipped for 90 days on a public repo with
 # every gate green.
 #
-# ⛔ IT IS ABOUT DSN SHAPES AND NOTHING ELSE, and the narrowness is the point. The
-# arm redaction check has a SECOND half — a dollar-quote, i.e. a SQL body — that is
-# deliberately NOT applied here: these files ARE SQL and are full of dollar-quoted
-# bodies by construction, so that half would refuse every legitimate run. The
-# pattern is the same `postgres(ql)?://` the arm check uses, so both readings of
-# "a DSN" in this script are one string.
+# ⛔ IT SCANS THE SIX CLASSES THE ARTIFACT'S OWN README NAMES, and that agreement
+# is the point. `.github/workflows/test-restore-from-baseline.yml` defines the
+# redaction class as DSN, supabase host, project ref, the `connect` meta-command,
+# ALTER DATABASE and JWT — the pattern `supabase/schema/baseline.sql` is committed
+# under (scripts/local-stack/REPLAY-SPIKE.md), and the `schema_re` its backup step
+# runs over `schema-before.sql`. This scan used to be `postgres(ql)?://` ALONE while
+# the header above claimed the gap was closed for "the one class that must never be
+# published anywhere", and it dropped `supabase host`, `project ref`, `connect` and
+# `JWT` with NO STATED REASON. `survivors.sql` carries `pg_get_triggerdef(...)` and
+# reconstructed `CREATE POLICY ... USING (<qual>)` read off LIVE shared TEST, so a
+# host or a project ref reaching one of those bodies shipped with this check green.
+#
+# ⛔ MEASURED 2026-09-10, so the widening cannot make a legitimate run red: all six
+# classes are ZERO across every input these four files are assembled from —
+# `supabase/schema/baseline.sql` (0/0/0/0/0/0), the extractor's `refdata.sql` over
+# the real allowlist (0/0/0/0/0/0), and this script's own heredocs (0 for all but the
+# scan patterns below). `ALTER DATABASE` IS included here although the workflow scopes
+# it out of the LEDGER scan: that exemption exists because migration SOURCE carries it
+# in comments, and migration source never reaches these four files — only a
+# migration's `version` and `name` do.
+#
+# ⛔ THE ONE PREDICATE DELIBERATELY NOT APPLIED is the arm redaction check's SECOND
+# half — a dollar-quote, i.e. a SQL body. These files ARE SQL and are full of
+# dollar-quoted bodies by construction, so that half would refuse every legitimate
+# run.
 #
 # ⛔ THE MATCH IS NEVER PRINTED. A hit IS the credential; the refusal names the
 # FILE and stops. Same discipline as the identity marker, whose text is withheld
@@ -1541,19 +1562,34 @@ TXN_ASSERT
 # with the database still untouched.
 # ---------------------------------------------------------------------------
 assert_public_sql_dsn_free() {
-  local f rc hits="" scanned=0 seen=""
+  local f c cname cre rc hits="" scanned=0 seen=""
   local -a staged=(census.sql survivors.sql restore.sql refdata.sql)
+  # ⛔ `<name>|<ERE>`, one entry per class the artifact README names. The NAME is
+  # printed on a hit and the MATCH never is: a class name is not a credential, and a
+  # refusal that cannot say WHICH shape it found sends the operator through four
+  # files by hand.
+  local -a classes=(
+    'DSN|postgres(ql)?://'
+    'supabase host|@[a-z0-9.-]+\.supabase\.(co|com)'
+    'project ref|[a-z]{20}\.supabase'
+    'connect meta-command|\\connect'
+    'JWT|eyJ[A-Za-z0-9_-]{10,}'
+    'ALTER DATABASE|ALTER DATABASE'
+  )
   for f in "${staged[@]}"; do
     [ -f "$RESTORE_OUT_DIR/$f" ] || continue
     scanned=$((scanned + 1))
     seen="${seen}${seen:+, }${f}"
-    rc=0
-    grep -acE 'postgres(ql)?://' "$RESTORE_OUT_DIR/$f" >/dev/null || rc=$?
-    [ "$rc" -le 1 ] || fail "MEASURE_FAIL: could not scan ${f} for a DSN shape (grep exited ${rc}). An unreadable file is not a clean one, and this file is published."
-    if [ "$rc" -eq 0 ]; then hits="${hits}${hits:+, }${f}"; fi
+    for c in "${classes[@]}"; do
+      cname="${c%%|*}"; cre="${c#*|}"
+      rc=0
+      grep -acE "$cre" "$RESTORE_OUT_DIR/$f" >/dev/null || rc=$?
+      [ "$rc" -le 1 ] || fail "MEASURE_FAIL: could not scan ${f} for a ${cname} shape (grep exited ${rc}). An unreadable file is not a clean one, and this file is published."
+      if [ "$rc" -eq 0 ]; then hits="${hits}${hits:+, }${f} (${cname})"; fi
+    done
   done
   if [ -n "$hits" ]; then
-    fail "a DSN shape appears in ${hits}, which the calling workflow stages into a WORLD-READABLE artifact for 90 days. The match is NOT printed — it would be the credential. Refusing before the transaction runs; the database is untouched."
+    fail "a credential shape appears in ${hits}, which the calling workflow stages into a WORLD-READABLE artifact for 90 days. The match is NOT printed — it would be the credential. Refusing before the transaction runs; the database is untouched."
   fi
   # ⛔ THE POSITIVE FLOOR. Everything above is a NEGATIVE check, and a negative
   # check over an EMPTY list passes. `|| continue` is silent, so a run that found
@@ -1564,7 +1600,7 @@ assert_public_sql_dsn_free() {
   # and this scan is enough. So the tally is MEASURED and compared with the list's
   # own length, and a short count REFUSES rather than noting.
   [ "$scanned" -eq "${#staged[@]}" ] || fail "MEASURE_FAIL: scanned ${scanned} of ${#staged[@]} published .sql file(s) under ${RESTORE_OUT_DIR} (found: ${seen:-none}). The workflow stages all ${#staged[@]} into a WORLD-READABLE artifact, so a file this scan could not find is a file that ships UNSCANNED. Refusing before the transaction runs; the database is untouched."
-  note "public .sql files carry no DSN shape (scanned ${scanned} of ${#staged[@]}: ${seen})"
+  note "public .sql files carry no credential shape in any of the ${#classes[@]} classes the artifact README names (scanned ${scanned} of ${#staged[@]}: ${seen})"
 }
 
 run_transaction() {
