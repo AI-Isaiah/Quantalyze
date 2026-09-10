@@ -417,7 +417,7 @@ check() {
   fi
   case "$ledger_rows" in
     "")
-      fail "MEASURE_FAIL: the TEST ledger row-count query exited 0 and returned NO ROW. A count query returns exactly one number, so an empty answer is a read that did not happen, not a ledger holding zero rows — and zero is one of the values the ABSURDITY FLOOR below can never fire on."
+      fail "MEASURE_FAIL: the TEST ledger row-count query exited 0 and returned NO ROW ($(wc -l < "$ledger_rows_err" | tr -d '[:space:]') line(s) of stderr captured and WITHHELD — it can carry a DSN, host or username). A count query returns exactly one number, so an empty answer is a read that did not happen, not a ledger holding zero rows — and zero is one of the values the ABSURDITY FLOOR below can never fire on."
       ;;
     *[!0-9]*)
       fail "MEASURE_FAIL: the TEST ledger row-count query exited 0 and returned something that is not a number (${#ledger_rows} character(s), value WITHHELD — a failed psql can print connection detail on stdout). A count that cannot be compared is not a count of zero; the ABSURDITY FLOOR below would have gone INERT on it."
