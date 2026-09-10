@@ -4657,11 +4657,126 @@ describe("no `indexOf` result reaches a slice unchecked, in either mutex-pin fil
    * Comments are stripped first, and that is load-bearing, not tidiness: BOTH files
    * carry the offending expression VERBATIM inside the comment that records why it
    * was removed. That note is the thing a future reader most needs, so the scanner
-   * must read code only. `[^:]` keeps a `://` inside a string from being read as a
-   * line comment.
+   * must read code only.
+   *
+   * ⛔ THE STRIPPER IS A SCANNER, NOT A REGEX, AND THAT IS THE WHOLE POINT. The first
+   * version of this rule stripped with `/\/\*[\s\S]*?\*\//g`. These files pin SHELL
+   * workflows and quote their glob strings verbatim — `"${outdir}"/*.err`,
+   * and a `postgresql` path with a version wildcard mid-path — and every one of
+   * those `/*` opened a block comment that ran to the next comment terminator.
+   * (Those two examples cannot be quoted in full HERE for the same reason: the
+   * second one closes this very docblock. That is the defect, demonstrated.) MEASURED at the time: 4718 raw lines became
+   * 3860, so 858 lines — 18% of the file, and precisely the string-heavy region where
+   * this defect class actually lives — were deleted before the scan ever saw them.
+   * A textbook offender injected at lines 421, 1201 and 1701 was INVISIBLE.
+   *
+   * So: walk the source once, and recognise string literals, template literals and
+   * regex literals as opaque spans that a `/*` inside cannot escape. Literals are
+   * KEPT VERBATIM rather than blanked — an offender inside a template's `${...}` is
+   * real code, and a false positive from a quoted workflow line is loud, not silent.
+   * Comments are replaced by spaces, NOT removed, so line numbers survive the strip
+   * and the reported location means something. That preservation is itself asserted
+   * by the floor arm below.
    */
-  const stripComments = (src: string): string =>
-    src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/gm, "$1");
+  const REGEX_MAY_FOLLOW = new Set([
+    "",
+    "(",
+    ",",
+    "=",
+    ":",
+    "[",
+    "!",
+    "&",
+    "|",
+    "?",
+    "{",
+    "}",
+    ";",
+    "+",
+    "-",
+    "*",
+    "%",
+    "~",
+    "^",
+    "<",
+    ">",
+  ]);
+
+  const stripComments = (src: string): string => {
+    const blank = (s: string): string => s.replace(/[^\n]/g, " ");
+    let out = "";
+    let prev = "";
+    let i = 0;
+    const n = src.length;
+    while (i < n) {
+      const c = src[i];
+      const d = src[i + 1];
+      if (c === "/" && d === "*") {
+        const end = src.indexOf("*/", i + 2);
+        const stop = end === -1 ? n : end + 2;
+        out += blank(src.slice(i, stop));
+        i = stop;
+        continue;
+      }
+      if (c === "/" && d === "/") {
+        const nl = src.indexOf("\n", i);
+        const stop = nl === -1 ? n : nl;
+        out += blank(src.slice(i, stop));
+        i = stop;
+        continue;
+      }
+      if (c === '"' || c === "'" || c === "`") {
+        const start = i;
+        i += 1;
+        while (i < n) {
+          if (src[i] === "\\") {
+            i += 2;
+            continue;
+          }
+          if (src[i] === c) {
+            i += 1;
+            break;
+          }
+          i += 1;
+        }
+        out += src.slice(start, i);
+        prev = c;
+        continue;
+      }
+      if (c === "/" && REGEX_MAY_FOLLOW.has(prev)) {
+        const start = i;
+        i += 1;
+        let inClass = false;
+        let closed = false;
+        while (i < n) {
+          const r = src[i];
+          if (r === "\\") {
+            i += 2;
+            continue;
+          }
+          if (r === "\n") break;
+          if (r === "[") inClass = true;
+          else if (r === "]") inClass = false;
+          else if (r === "/" && !inClass) {
+            i += 1;
+            closed = true;
+            break;
+          }
+          i += 1;
+        }
+        if (closed) {
+          out += src.slice(start, i);
+          prev = "/";
+          continue;
+        }
+        i = start;
+      }
+      out += c;
+      if (!/\s/.test(c)) prev = c;
+      i += 1;
+    }
+    return out;
+  };
 
   // Assembled from fragments so this file does not match its own rule. Same idiom,
   // and same reason, as the `SCHEME` needle at the top of the file.
@@ -4699,6 +4814,90 @@ describe("no `indexOf` result reaches a slice unchecked, in either mutex-pin fil
     // offending expression when it appears inside a comment, not by inspection.
     expect(offenders(`// const s2 = s.${NARROW}(s.${FIND}(A));`)).toEqual([]);
     expect(offenders(`/** x: s.${NARROW}(s.${FIND}(A)) */`)).toEqual([]);
+  });
+
+  /**
+   * A line the STRIPPER considers code: non-blank, and byte-identical to its raw
+   * self after the strip (a comment line, or a line with a trailing comment, is
+   * blanked and so differs). Used to place injected offenders where a real one
+   * could live. Fails loud rather than silently picking nothing.
+   */
+  const nearestCodeLine = (raw: string[], code: string[], at: number): number => {
+    for (let d = 0; d < raw.length; d += 1) {
+      for (const j of [at + d, at - d]) {
+        if (j < 0 || j >= raw.length) continue;
+        if (raw[j].trim() !== "" && raw[j] === code[j]) return j;
+      }
+    }
+    throw new Error("no code line found — the stripper blanked the entire file");
+  };
+
+  it("FLOOR — the comment strip preserves every line, and removes a bounded share", () => {
+    for (const rel of PIN_FILES) {
+      const src = read(rel);
+      const code = stripComments(src);
+      expect(
+        code.split("\n").length,
+        `${rel}: the strip changed the LINE COUNT. That is the 2026-09-09 defect verbatim: a \`/*\` inside a quoted glob opened a block comment and 858 lines of real code were deleted before the scan saw them. Reported locations are also meaningless once lines shift.`,
+      ).toBe(src.split("\n").length);
+      const nonWs = (t: string): number => t.replace(/\s/g, "").length;
+      const removed = 1 - nonWs(code) / nonWs(src);
+      expect(
+        removed,
+        `${rel}: the strip removed ${(removed * 100).toFixed(1)}% of the non-whitespace bytes. These files are comment-heavy by design (measured 2026-09-10: 35.5% and 32.8%), but a stripper that eats HALF of them is swallowing code, and a scan over a hollowed-out corpus reports clean because it looked at nothing.`,
+      ).toBeLessThan(0.5);
+    }
+  });
+
+  it("CALIBRATION — the floor bites: the naive strip this replaced fails it", () => {
+    // The stripper that shipped in the first version of this rule, verbatim. It is
+    // here as a SUBJECT, not as a fallback: if it stopped losing lines on this file
+    // the floor above would be pinning nothing, and this arm says so out loud.
+    const naive = (src: string): string =>
+      src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/gm, "$1");
+    const src = read(PIN_FILES[0]);
+    const lost = src.split("\n").length - naive(src).split("\n").length;
+    expect(
+      lost,
+      "the naive strip no longer swallows lines here, so the floor above has no live subject — re-derive it rather than assuming it still bites",
+    ).toBeGreaterThan(100);
+  });
+
+  it("CALIBRATION — an injected offender is caught at every depth of both files", () => {
+    const evil = `const evil = s.${NARROW}(s.${FIND}(A));`;
+    for (const rel of PIN_FILES) {
+      const src = read(rel);
+      const raw = src.split("\n");
+      const code = stripComments(src).split("\n");
+      const depths = [0.05, 0.1, 0.25, 0.35, 0.5, 0.65, 0.8, 0.95].map((f) =>
+        nearestCodeLine(raw, code, Math.floor(raw.length * f)),
+      );
+      expect(
+        Math.min(...depths) / raw.length,
+        `${rel}: every injection point landed past the first tenth — the calibration is not spanning the file`,
+      ).toBeLessThan(0.1);
+      expect(
+        Math.max(...depths) / raw.length,
+        `${rel}: no injection point landed in the last tenth — the calibration is not spanning the file`,
+      ).toBeGreaterThan(0.9);
+      for (const at of depths) {
+        const mutated = [...raw.slice(0, at + 1), evil, ...raw.slice(at + 1)].join(
+          "\n",
+        );
+        expect(
+          mutated,
+          `CALIBRATION: the injection at line ${at + 1} of ${rel} changed nothing`,
+        ).not.toBe(src);
+        expect(
+          mutated.includes(evil),
+          `CALIBRATION: the offender did not survive injection at line ${at + 1} of ${rel}`,
+        ).toBe(true);
+        expect(
+          offenders(mutated).length,
+          `${rel}: a textbook offender injected at line ${at + 1} is INVISIBLE to the scanner. That is exactly how the first version of this rule failed — it read 82% of the file and reported clean over the other 18%.`,
+        ).toBeGreaterThan(0);
+      }
+    }
   });
 
   it("neither file feeds a raw index into a narrowing call", () => {
