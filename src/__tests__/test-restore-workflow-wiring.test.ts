@@ -446,12 +446,23 @@ function runBlocks(text: string): { step: string; live: string[] }[] {
     }
     const indent = lines[i].length - lines[i].trimStart().length;
     const body: string[] = [];
-    for (let k = i + 1; k < lines.length; k += 1) {
+    let k = i + 1;
+    for (; k < lines.length; k += 1) {
       if (lines[k].trim() === "") continue;
       if (lines[k].length - lines[k].trimStart().length <= indent) break;
       body.push(lines[k]);
     }
     out.push({ step, live: body.filter((l) => !/^\s*#/.test(l)) });
+    // ⛔ AND THE OUTER LOOP SKIPS THE BODY IT JUST COLLECTED (review F4). Without this
+    // the scan re-entered every line INSIDE a `run: |` body and tested it against the
+    // bare-`run:` pattern again. Before the DEFAULT-IN throw that was silent DOUBLE
+    // COLLECTION; with the throw it is worse — a body line that happens to read as a
+    // `run:` key (a heredoc writing YAML, a quoted example) would ABORT an unrelated
+    // edit with a message naming a step the line does not belong to. Zero such lines
+    // today; the point is that the next one must not red the wrong thing. `k` is the
+    // line that ENDED the body, and the loop's own `i += 1` lands on it, so a step
+    // header terminating a body is still seen.
+    i = k - 1;
   }
   return out;
 }
@@ -2320,6 +2331,89 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           `a \`run: ${style}\` step was collected or skipped without a word. A block this parser cannot model is one that is never checked for \`-e\` and never counted — it must be a finding, not a drop.`,
         ).toThrow(/unrecognised `run:` scalar style/);
       }
+    });
+
+    /**
+     * The SUPERSEDED collector, kept as a REFERENCE ORACLE and nothing else: byte-for-byte
+     * `runBlocks` except that it never advances the outer index past a collected body.
+     * Its only caller is the arm below, which is what turns "the loop re-entered the body"
+     * from a claim into a measurement.
+     */
+    function legacyRunBlocksNoAdvance(text: string): { step: string; live: string[] }[] {
+      const lines = scannableRestoreBlock(text).split("\n");
+      const out: { step: string; live: string[] }[] = [];
+      let step = "(unnamed)";
+      for (let i = 0; i < lines.length; i += 1) {
+        const m = lines[i].match(/^\s*- name: (.+)$/);
+        if (m) step = m[1].trim();
+        const key = lines[i].match(/^\s*run:(?:\s+(\S.*?))?\s*$/);
+        if (!key) continue;
+        const style = key[1] ?? "";
+        if (style !== "|" && style !== "|-") {
+          if (style === "" || style.startsWith("|") || style.startsWith(">")) {
+            throw new Error(
+              `legacy collector: unrecognised \`run:\` scalar style in step "${step}": ${JSON.stringify(lines[i])}`,
+            );
+          }
+          continue;
+        }
+        const indent = lines[i].length - lines[i].trimStart().length;
+        const body: string[] = [];
+        for (let k = i + 1; k < lines.length; k += 1) {
+          if (lines[k].trim() === "") continue;
+          if (lines[k].length - lines[k].trimStart().length <= indent) break;
+          body.push(lines[k]);
+        }
+        out.push({ step, live: body.filter((l) => !/^\s*#/.test(l)) });
+      }
+      return out;
+    }
+
+    it("a `run:`-shaped line INSIDE a collected body is skipped, not re-collected", () => {
+      // ⛔ REVIEW F4. The outer loop used to walk straight back into the body it had just
+      // collected and test every line in it against the bare-`run:` pattern again. Before
+      // the DEFAULT-IN throw that was silent double collection — a phantom block, with an
+      // empty body, attributed to the step above it. AFTER the throw it is worse: a body
+      // line that reads as a `run:` key would ABORT, naming a step the line is not in, and
+      // red an edit that has nothing to do with it. There are zero such lines today, which
+      // is exactly why the fixture is synthetic.
+      const ANCHOR = '          set -euo pipefail\n          failed=""\n';
+      expect(
+        WF.split(ANCHOR).length - 1,
+        "the injection anchor is no longer unique in the workflow — re-anchor this arm rather than deleting it",
+      ).toBe(1);
+      const baseline = runBlocks(WF).length;
+
+      // 1. A body line that reads as a BARE `run:` key — the post-throw failure mode.
+      const bare = WF.replace(ANCHOR, `${ANCHOR}          run:\n`);
+      expect(bare, "CALIBRATION: the bare-`run:` injection changed nothing").not.toBe(WF);
+      expect(
+        () => legacyRunBlocksNoAdvance(bare),
+        "CALIBRATION: the SUPERSEDED collector did NOT abort on a `run:`-shaped body line, so re-entering the body was never a defect and this arm proves nothing",
+      ).toThrow(/unrecognised `run:` scalar style/);
+      expect(
+        () => runBlocks(bare),
+        "a line INSIDE a `run: |` body aborted the whole scan, naming a step it does not belong to — the collector is reading step bodies as step keys again",
+      ).not.toThrow();
+      expect(runBlocks(bare).length, "the injected body line changed the block count").toBe(
+        baseline,
+      );
+
+      // 2. A body line that reads as a BLOCK-SCALAR key — the pre-throw failure mode.
+      const nested = WF.replace(ANCHOR, `${ANCHOR}          run: |\n`);
+      expect(nested, "CALIBRATION: the nested-`run: |` injection changed nothing").not.toBe(WF);
+      expect(
+        legacyRunBlocksNoAdvance(nested).length,
+        "CALIBRATION: the SUPERSEDED collector did not double-collect the nested key, so this fixture does not reproduce the class",
+      ).toBeGreaterThan(legacyRunBlocksNoAdvance(WF).length);
+      expect(
+        runBlocks(nested).length,
+        "a `run: |`-shaped line inside a body was collected as a SECOND block — an empty phantom attributed to the step above it, which `errexitOffenders` then reports as that step never setting `-e`",
+      ).toBe(baseline);
+      expect(
+        errexitOffenders(nested),
+        "the phantom block reached the errexit rule and accused a real step of a softening that is not in it",
+      ).toEqual([]);
     });
 
     /**
