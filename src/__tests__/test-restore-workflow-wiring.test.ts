@@ -706,9 +706,14 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           return r > -1 && u > -1 && r < u;
         },
       );
+      // ⚠️ RE-ANCHORED 2026-09-10 (Phase 164.8.2, review WR-06). This mutation used to
+      // splice on `- name: <REDACT>\n        if: always()\n`; the WR-06 fix put an
+      // `id: redact` (and its reasoning) between those two lines, so the replace
+      // silently became a no-op — caught by `calibrate()`'s own "the mutation produced
+      // an identical string" assertion, which is what that assertion is for.
       calibrate(
         "the redaction runs on an aborted run too",
-        (s) => s.replace(`      - name: ${REDACT}\n        if: always()\n`, `      - name: ${REDACT}\n`),
+        (s) => s.replace("        id: redact\n        if: always()\n", "        id: redact\n"),
         (t) => liveLines(stepBody(t, REDACT)).some((l) => l.trim() === "if: always()"),
       );
     });
@@ -976,10 +981,18 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       return seeded.filter((f) => carriedBy.includes(f)).sort();
     }
 
-    /** Seed a fixture RUNNER_TEMP and run a (possibly mutated) copy of the step. */
+    /**
+     * Seed a fixture RUNNER_TEMP and run a (possibly mutated) copy of the step.
+     *
+     * `redactOutcome` is the value CI passes in through `env: REDACT_OUTCOME:
+     * ${{ steps.redact.outcome }}`. It defaults to `"success"` because that is the
+     * only outcome under which the artifact is publishable at all; the arms that care
+     * about the other direction pass it explicitly (Phase 164.8.2, review WR-06).
+     */
     function runStage(
       script: string,
       seed: string[],
+      redactOutcome = "success",
     ): {
       status: number | null;
       output: string;
@@ -999,7 +1012,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       writeFileSync(scriptFile, script);
       const r = spawnSync("bash", [scriptFile], {
         encoding: "utf8",
-        env: { ...process.env, RUNNER_TEMP: runnerTemp },
+        env: { ...process.env, RUNNER_TEMP: runnerTemp, REDACT_OUTCOME: redactOutcome },
       });
       const stageDir = join(runnerTemp, "test-backup-artifact");
       let staged: string[] = [];
@@ -1165,22 +1178,22 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // That is the reviewer's measurement, kept as a standing twin so the glob cannot
       // come back quietly.
       const CHANNEL_LOOP_ANCHOR =
-        "  for c in census.err ledger.err marker.err refdata.err dump.log transaction.out; do\n" +
-        '    if [ -f "${outdir}/${c}" ]; then\n' +
-        '      cp -p "${outdir}/${c}" "${stage}/"\n' +
-        "    fi\n" +
-        "  done\n";
+        "    for c in census.err ledger.err marker.err refdata.err dump.log transaction.out; do\n" +
+        '      if [ -f "${outdir}/${c}" ]; then\n' +
+        '        cp -p "${outdir}/${c}" "${stage}/"\n' +
+        "      fi\n" +
+        "    done\n";
       expect(
         script.includes(CHANNEL_LOOP_ANCHOR),
         "the staging step's enumerated CHANNEL loop is no longer the form this calibration mutates — re-anchor the mutation rather than deleting the twin, or the arm silently stops being evidence",
       ).toBe(true);
       const globbed = script.replace(
         CHANNEL_LOOP_ANCHOR,
-        '  for c in "${outdir}"/*.err "${outdir}"/*.log "${outdir}"/*.out; do\n' +
-          '    if [ -f "${c}" ]; then\n' +
-          '      cp -p "${c}" "${stage}/"\n' +
-          "    fi\n" +
-          "  done\n",
+        '    for c in "${outdir}"/*.err "${outdir}"/*.log "${outdir}"/*.out; do\n' +
+          '      if [ -f "${c}" ]; then\n' +
+          '        cp -p "${c}" "${stage}/"\n' +
+          "      fi\n" +
+          "    done\n",
       );
       expect(
         globbed,
@@ -1222,6 +1235,103 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       ).toBe(false);
       expect(r.output).toContain("::error::");
       expect(r.output).toContain("staging FAILED");
+    });
+
+    // -----------------------------------------------------------------------
+    // WR-06 (Phase 164.8.2) — a FAILED redaction must not be followed by the
+    // publication of the very channels its own error message says not to publish.
+    //
+    // ⛔ THE DEFECT. `withhold_channels()` prints, verbatim, "Do NOT publish this
+    // run's artifact: treat the TEST pooler host, its IP and the DB user as
+    // disclosed." The staging step runs `if: always()`, consulted nothing, and
+    // copied whatever `*.err/*.log/*.out` survived — after which the `if: always()`
+    // upload published them. The workflow shipped exactly what it told the operator
+    // not to ship. The trigger (an `rm -f` that fails) is low-realism, but it is
+    // explicitly coded for, and the whole point of the fail-closed trap next door is
+    // that the unlikely path is the one worth wiring.
+    // -----------------------------------------------------------------------
+    it("the staging step is WIRED to the redaction step's outcome, by id", () => {
+      expect(
+        stepHead(WF, REDACT).includes("\n        id: redact\n"),
+        "the redaction step lost its `id: redact`, so `steps.redact.outcome` evaluates to the empty string and the staging step's guard would silently withhold every channel on EVERY run — a control that always fires is as uninformative as one that never does",
+      ).toBe(true);
+      expect(
+        stepHead(WF, STAGE).includes("REDACT_OUTCOME: ${{ steps.redact.outcome }}"),
+        "the staging step no longer receives the redaction step's outcome. Without it the channel loop is back to copying whatever survived a FAILED redaction into a world-readable artifact (review WR-06).",
+      ).toBe(true);
+      calibrate(
+        "the staging step reads the redaction step's outcome",
+        (s) => s.replace("REDACT_OUTCOME: ${{ steps.redact.outcome }}", "REDACT_OUTCOME: success"),
+        (t) => stepHead(t, STAGE).includes("REDACT_OUTCOME: ${{ steps.redact.outcome }}"),
+      );
+      calibrate(
+        "the redaction step carries the id the staging step names",
+        (s) => s.replace("\n        id: redact\n", "\n"),
+        (t) => stepHead(t, REDACT).includes("\n        id: redact\n"),
+      );
+    });
+
+    it("EXECUTED — a FAILED redaction stages NO channel, and still stages the reversal recipe", () => {
+      const script = extractRunScript(WF, STAGE);
+      const seed = [...REAL_NAMES, UNEXPECTED, UNEXPECTED_CHANNEL];
+
+      const r = runStage(script, seed, "failure");
+      expect(
+        r.status,
+        `the staging step failed outright on a failed redaction (exit ${r.status}). A failed redaction costs the run's DIAGNOSTICS, never its reversal recipe — that is the discipline the redaction step's own comment states.\n${r.output}`,
+      ).toBe(0);
+
+      const channels = stagedChannelNames(WF);
+      expect(channels.length, "no channel names parsed — the assertion below would be vacuous").toBe(
+        6,
+      );
+      for (const c of channels) {
+        expect(
+          r.staged.includes(c),
+          `\`${c}\` was published after a FAILED redaction. \`withhold_channels()\` prints "Do NOT publish this run's artifact: treat the TEST pooler host, its IP and the DB user as disclosed" — and this step then published it anyway (review WR-06).`,
+        ).toBe(false);
+      }
+      expect(
+        r.staged,
+        "the reversal recipe did not survive a failed redaction. ledger.csv, schema-before.sql and the four script `.sql` files carry no connection metadata; withholding them would turn a lost diagnostic into a lost undo.",
+      ).toEqual(
+        ["ledger.csv", "schema-before.sql", "README.txt", "census.sql", "survivors.sql", "restore.sql", "refdata.sql"].sort(),
+      );
+      expect(
+        r.output,
+        "the withheld channels were withheld SILENTLY — an operator reading the artifact would not know the diagnostics are missing rather than absent",
+      ).toContain("::error::");
+      expect(r.output).toContain("did not succeed");
+
+      // ⭐ CALIBRATION — THE OBSERVED RED. Strip the guard, leaving the unconditional
+      // loop that shipped, and the channels come straight back on the same failed
+      // redaction. Without this twin, "no channel is staged" could be reported by a
+      // fixture that staged nothing for an unrelated reason.
+      const GUARD_ANCHOR = '  if [ "${REDACT_OUTCOME:-}" = "success" ]; then\n';
+      expect(
+        script.includes(GUARD_ANCHOR),
+        "the staging step's redaction-outcome guard is no longer the form this calibration strips — re-anchor the mutation rather than deleting the twin",
+      ).toBe(true);
+      const ungated = script
+        .replace(GUARD_ANCHOR, "")
+        .replace(
+          /^ {2}else\n {4}echo "::error::the redaction step did not succeed[\s\S]*?\n {2}fi\n/m,
+          "",
+        );
+      expect(
+        ungated,
+        "CALIBRATION: the un-gating mutation changed nothing, so it proves nothing",
+      ).not.toBe(script);
+      const leaked = runStage(ungated, seed, "failure");
+      expect(
+        leaked.status,
+        `CALIBRATION: the un-gated script did not even run (exit ${leaked.status}) — the mutation broke the shell rather than removing the control, so the arm is not evidence.\n${leaked.output}`,
+      ).toBe(0);
+      const leakedChannels = channels.filter((c) => leaked.staged.includes(c));
+      expect(
+        leakedChannels,
+        "CALIBRATION: removing the guard did NOT republish the channels on a failed redaction, so this arm cannot see the shape review WR-06 is about",
+      ).toEqual(channels);
     });
 
     it("EXECUTED — a run that died before the backup step still stages a self-explaining note", () => {
