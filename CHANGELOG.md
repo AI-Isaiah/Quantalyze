@@ -1,5 +1,129 @@
 # Changelog
 
+## [0.77.33.0] - 2026-09-10 — Phase 164.7 finalized, and the verification code that could not fail
+
+Ten commits, six themes. The phase's own migrations shipped on 2026-09-07 (PR #756); what landed
+here is everything that was supposed to happen *around* them — the reviewer pass, the activation
+gate, and the record — plus the repairs that pass produced.
+
+⭐ **The post-merge `gsd-code-reviewer` audit is the headline, and its verdict names the shape
+better than a summary can:** *"the SQL in this phase is careful and genuinely fail-closed; the
+verification code shipped alongside it is not, and that inversion is the phase's real defect."*
+Five Critical, eleven Warning, four Info over five files. **Six were proven by EXECUTION, not
+argued.**
+
+### Fixed
+
+- **`cron-drift` compared three fields it had been collecting all along and testing none of.**
+  `username` — the pg_cron column deciding which ROLE a command executes as — plus `database` and
+  `jobid` were parsed, stored on all 14 manifest rows, and printed. A job repointed from `postgres`
+  to `supabase_admin`, moved to another database and given a new jobid returned `defects: []`.
+  `username` and `database` are now compared and the drift headline names the old and new role.
+- **The live database marker is now compared to the oracle's.** It was read, null-checked, logged —
+  and discarded, while `manifest.database_marker` went on being interpolated into every drift
+  headline. A run aimed at another project would have compared ITS `cron.job` against PROD's oracle
+  and stamped the output with PROD's marker: a provenance the report never verified. Disagreement
+  is now a `measure-fail` that refuses to state anything about drift.
+- **`vault-absent` stopped being a grep that matched its own comment.** It was a substring test over
+  RAW command text, so `-- resolves from vault.decrypted_secrets` satisfied it. Now tested against
+  comment-STRIPPED text. ⚠️ Only part (a) of that finding: the `||`-split service key and the
+  dollar-quote desync are NOT fixed and are booked.
+- **A manifest row omitting `active` no longer agrees with a DEACTIVATED production cron job.**
+  `Boolean(undefined)` is `false` and the oracle validation said nothing about the flag — so the
+  quietest possible outage (a job that produces no run rows at all) read as clean. The validation is
+  now total over every field the comparison consumes.
+- **A manifest row's `command` is bound to its own `command_sha256`.** Nothing re-derived the sha
+  after capture, so the two fields floated free: a hand-cleaned `command` beside a sha still matching
+  a DIRTY prod command reported clean on the manifest side and printed a diff whose "manifest" half
+  was never the text compared. The docstring's promise that a reviewer "cannot invent an oracle" was
+  true of the withhold path only.
+
+### Root cause
+
+- **Two corrections to this phase's own record, both found by `gsd-verifier`, both kept visible
+  rather than quietly rewritten.** The reviewer-findings file first claimed a sixth finding "is not
+  identifiable" while `TODOS.md` carried a heading reading literally *three-reviewer residuals* with
+  exactly six entries — cited from a line INSIDE that section, eight lines below the heading that
+  answered it. It also listed the wrong set: two non-reviewer items in, four real findings out. The
+  second round then introduced two NEW defects in the fix: the wrong header name (`Authorization`,
+  copied unread from TODOS; the callable builds `X-Service-Key`) and a routing claim that `grep`
+  returned zero hits for. Both corrected at source, including in `TODOS.md` itself.
+  ⭐ The pattern worth keeping: a reconstruction rounds a record off to the shape you already
+  believe, and the fix for a bad record can carry its own new errors.
+
+### Added
+
+- **Phase 164.8.5 PROBERPARSE** and **Phase 164.8.6 VAULTTICKFIX**, created through the insert-phase
+  workflow, each with seven success criteria naming the FORBIDDEN remedies — several of these
+  findings have an obvious wrong fix (do not lower `HEADER_LITERAL_MIN`, do not widen the app-GUC
+  corpus count, do not edit `supabase-migrate.yml` to get a deploy out). They own the 15 findings
+  not closed here. ⛔ A named owner that is not a phase is a blank destination; TODOS booked against
+  both names before either existed.
+- **`prod-username-changed.json`** — the red control for the role-repoint arm. Neutering the
+  comparison turns the self-test RED naming that fixture (measured, then restored).
+- **Phase 164.8.3 PROBERAUTH gained criteria 7 and 8**, from the live MT5 outage: the probe records
+  `terminal_info()` as present/absent rather than as `connected` and `trade_allowed` — the two
+  fields the go-live runbook names as THE verification — and the narrowed `--arm` diagnostic
+  publishes nothing at all.
+- **Phase 164.8.4 GATERESIDUE** gained the `.planning/WINDOWS.md` hand-off note and
+  `[164.7-MARKER-GREP-VACUOUS]` in its Requirements, so nobody hunts a defect that was already
+  removed.
+
+### Changed
+
+- `SELF_TEST_SCENARIOS` 52 → 53. ⭐ The completeness guard caught the stale counter itself: the new
+  fixture added a scenario and the run went red naming the mismatch, exactly as designed.
+- `**Success criteria:**` → `**Success Criteria**:` on the two new phases — the roadmap parser reads
+  only the latter, and the first spelling parsed as ZERO criteria on both.
+
+### Notes
+
+- ⛔ **The Phase 164.7 activation was DEFERRED at the founder gate, and NOTHING was written to
+  production.** Its hard pre-flight P3-C could not pass by arithmetic: both enqueue crons are
+  daily, MT5 broke five minutes after the 2026-09-07 04:00Z tick, leaving a ~3.5-day gap against a
+  3-day window. Forcing was considered and declined on blast radius — the two enqueue functions
+  fan out to every key at every venue, so manufacturing one mt5 row for a pre-flight would have
+  triggered a full cross-venue day-run. The activation closes a reproducibility gap, not an outage.
+- **The MT5 outage that caused it, diagnosed from the terminal's own Journal rather than the
+  prober** — whose remedy text actively misdirects, sending the operator to an error table when the
+  real cause is a terminal with no authorized account. The terminal dropped a working session on
+  2026-09-07 04:05:03 and re-attached to an account it could not authorize, failing identically for
+  three days. Resolved ~16:10Z; issue #753 closed. ⚠️ Verified by the *step* conclusion, not the run
+  conclusion — `prod-prober.yml` deliberately exits 0 even on a real production defect so Railway's
+  wait-for-CI is not blocked.
+- **One reviewer recommendation was DECLINED and the reason lives in the code.** CR-01 also asked
+  for `jobid` to be compared. It is pg_cron's surrogate key, carries no configuration meaning, and
+  changes on any legitimate reschedule. Comparing it made `prod-duplicate-jobname.json` report TWO
+  cron-drift defects — the duplicate, and a jobid change that is merely its consequence — which
+  would have cost an existing isolation control. Weakening a control to admit a redundant one is
+  the wrong trade.
+- ⚠️ **`state.add-roadmap-evolution` clobbered STATE.md exactly as CLAUDE.md warns**, rewriting the
+  hand-verified census (29/15/141/137/52) to a disk-derived 31/8/118/112/26, moving `current_phase`
+  out of the frontmatter and injecting 22 blank lines. Restored from a pre-call copy; only the two
+  evolution bullets and an honest `total_phases: 29 → 31` / `percent: 48` were kept. Also measured:
+  `phase.insert 164.8.4` allocates **164.8.4.1**, not 164.8.5 — insert against the parent to get the
+  next free decimal.
+- **Phase 164.7's artifacts had to be restored onto current `main` before plans 06-07 could run at
+  all.** ⚠️ The `-pr` branch filter strips `.planning/phases/**` while KEEPING `ROADMAP.md`,
+  `STATE.md` and `state.json` — so a shipped `-pr` branch is a snapshot that can carry ledger files
+  describing phase artifacts that are no longer on `main`.
+- **`.planning/WINDOWS.md`'s frontmatter carried two `last_updated` keys.** A YAML parser takes the
+  last, which was the OLDER timestamp, so the ledger reported a stale value. Collapsed to one.
+- ⛔ **New trap, measured:** `gh api …/actions/jobs/<id>/logs` REFUSES a log containing terminal
+  escape sequences, exiting **1 with EMPTY stdout**. Without the flag `rc=1, bytes=0`; with
+  `--allow-escape-sequences`, `rc=0, 681 lines`. An empty log read as "no drift" is a false green of
+  the exact shape this project books. Always assert a non-zero line count before concluding
+  anything.
+- **WR-09 is deliberately not re-booked.** Both of this phase's migrations are instances of
+  `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`, already routed to Phase 164.9 — a second id would
+  split its evidence.
+
+### Tests
+
+- prod-prober self-test **53/53**, 424 assertions, exit 0. The LIVE committed manifest re-validates
+  to **0 defects** against every new guard, so the hourly prober does not start reporting drift
+  against itself. `prod-prober-wiring` 31/31. lint 0 errors, tsc clean.
+
 ## [0.77.32.0] - 2026-09-10 — controls that read stronger than they were, through SIX rounds of it
 
 Seven themes, over every commit on the branch. ⚠️ This line said "Eighty-two commits" and was
