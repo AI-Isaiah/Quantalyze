@@ -402,6 +402,104 @@ function softeningOffenders(text: string): string[] {
 }
 
 /**
+ * Every `run: |` block in the scannable restore block, with the step it belongs to.
+ *
+ * Flow-scalar `run: <cmd>` steps are deliberately NOT collected: a one-command step
+ * fails when its command fails, with or without `set -e`, so there is nothing there to
+ * soften. Only a block scalar can quietly run five commands and report the last one's
+ * status.
+ */
+function runBlocks(text: string): { step: string; live: string[] }[] {
+  const lines = scannableRestoreBlock(text).split("\n");
+  const out: { step: string; live: string[] }[] = [];
+  let step = "(unnamed)";
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = lines[i].match(/^\s*- name: (.+)$/);
+    if (m) step = m[1].trim();
+    if (!/^\s*run: \|-?\s*$/.test(lines[i])) continue;
+    const indent = lines[i].length - lines[i].trimStart().length;
+    const body: string[] = [];
+    for (let k = i + 1; k < lines.length; k += 1) {
+      if (lines[k].trim() === "") continue;
+      if (lines[k].length - lines[k].trimStart().length <= indent) break;
+      body.push(lines[k]);
+    }
+    out.push({ step, live: body.filter((l) => !/^\s*#/.test(l)) });
+  }
+  return out;
+}
+
+/** A live line that turns `-e` ON. `set -uo pipefail` does not match; that is the point. */
+const ERREXIT_RE = /^\s*set\s+(-[a-zA-Z]*e[a-zA-Z]*(\s|$)|-o\s+errexit)/;
+
+/**
+ * The `run: |` blocks that deliberately never turn `-e` on, BY STEP NAME.
+ *
+ * ⛔ WHY THIS EXISTS (Phase 164.8.2, silent-failure review F3). `set +e` is banned
+ * outright by the nine-token scan. `set -uo pipefail` — a block that simply never turns
+ * `-e` ON — is functionally the SAME softening over the whole step, contains none of the
+ * nine tokens, and was invisible. The scan's own stated purpose is that "the first five
+ * were not a class, they were five spellings of a class"; this is a sixth spelling.
+ *
+ * ⚠️ ALL THREE OF TODAY'S SITES ARE DEFENSIBLE AND WERE RE-CHECKED, one at a time —
+ * this closes a coverage gap, it does not report a live defect:
+ *   1-2. the extractor self-test / allowlist audit assertions. Both capture `status=$?`
+ *      explicitly on the very next line and route EVERY path to a named `::error::` and
+ *      an `exit`. Their own comment says omitting `-e` is what lets them avoid `|| true`
+ *      — a non-matching `grep` yields the empty string instead of aborting the step, so
+ *      an absent line reaches its own MEASURE_FAIL instead of dying before it.
+ *   3. the PostgreSQL server-binaries probe, a DIAGNOSTIC ECHO that is non-fatal by
+ *      design (pg-lane's four-step resolution chain owns the judgement; a second
+ *      divergent opinion would be worse than none).
+ *
+ * ⛔ THE EXEMPTION IS A BIJECTION, like ALLOWED_SITES. An entry that matches no block, or
+ * matches a block that DOES set `-e`, is reported: a stale exemption is a standing
+ * permission for a future softening of that step, granted by nobody.
+ */
+const NO_ERREXIT_SITES: readonly string[] = [
+  "Assert the extractor self-test PRINTED its kind census and cleared the floor",
+  "Assert the allowlist audit PRINTED its census over a non-empty corpus",
+  "Probe - the runner image's PostgreSQL server binaries resolve",
+];
+
+/**
+ * MEASURED 2026-09-10, Phase 164.8.2: the scannable restore block holds 16 `run: |`
+ * blocks, 13 of which set `-e`. A FLOOR, not an equality — a step added later must not
+ * have to touch this number, but a parser that silently starts returning nothing must.
+ * An empty list would make the rule below vacuously green, which is the failure shape
+ * this whole file exists to refuse.
+ */
+const RUN_BLOCK_FLOOR = 16;
+
+function errexitOffenders(text: string): string[] {
+  const blocks = runBlocks(text);
+  const offenders: string[] = [];
+  for (const { step, live } of blocks) {
+    const setsE = live.some((l) => ERREXIT_RE.test(l));
+    const exempt = NO_ERREXIT_SITES.includes(step);
+    if (!setsE && !exempt) {
+      offenders.push(
+        `NO ERREXIT in step "${step}" — its \`run: |\` block never turns \`-e\` on, which softens every command in it exactly as \`set +e\` would while carrying none of the nine banned tokens. Fix the step, or add it to NO_ERREXIT_SITES with the per-site justification the others carry.`,
+      );
+    }
+    if (setsE && exempt) {
+      offenders.push(
+        `STALE EXEMPTION for step "${step}" — it sets \`-e\` and is still listed in NO_ERREXIT_SITES. An exemption nobody needs is a standing permission to soften that step later, granted by nobody. Remove the entry.`,
+      );
+    }
+  }
+  for (const site of NO_ERREXIT_SITES) {
+    const n = blocks.filter((b) => b.step === site).length;
+    if (n !== 1) {
+      offenders.push(
+        `DANGLING EXEMPTION "${site}" — matched ${n} \`run: |\` block(s), want exactly 1. The step was renamed or removed and the exemption outlived it.`,
+      );
+    }
+  }
+  return offenders;
+}
+
+/**
  * The SUPERSEDED count rule, kept as a REFERENCE ORACLE and nothing else.
  *
  * Its only caller is the swap calibration below, which asserts that this reports
@@ -1909,6 +2007,71 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           ),
         (t) => softeningOffenders(t).length === 0,
       );
+    });
+
+    it("every `run: |` in the restore job turns `-e` ON, except three named blocks", () => {
+      // ⛔ THE TENTH CHECK, AND IT IS STRUCTURAL RATHER THAN LEXICAL (silent-failure
+      // review F3). The nine-token scan looks for spellings; this one asks the question
+      // the spellings are proxies for — "can a failing command in this block go
+      // unnoticed?" A step written `set -uo pipefail` answers yes while matching none
+      // of the nine.
+      const blocks = runBlocks(WF);
+      expect(
+        blocks.length,
+        `only ${blocks.length} \`run: |\` block(s) were parsed out of the scannable restore block (floor ${RUN_BLOCK_FLOOR}, measured 2026-09-10). A parser returning too few makes the rule below vacuously green — the exact failure this file exists to refuse.`,
+      ).toBeGreaterThanOrEqual(RUN_BLOCK_FLOOR);
+      // ⚠️ `> 0`, DELIBERATELY, AND NOT A SECOND FLOOR. This guard exists only to catch
+      // an ERREXIT_RE that matches nothing (which would make every block an offender or
+      // none). A tighter bound here — e.g. `>= RUN_BLOCK_FLOOR - NO_ERREXIT_SITES.length`
+      // — was written first and SHADOWED the finding: neutering the marker step failed
+      // on "expected 12 to be >= 13" instead of on the offender that names the step.
+      // A guard that fires before the rule it guards is a worse message, not a stronger
+      // check.
+      expect(
+        blocks.filter((b) => b.live.some((l) => ERREXIT_RE.test(l))).length,
+        "no `run: |` block sets `-e` at all — ERREXIT_RE is not matching what it thinks it is, so this rule is measuring nothing",
+      ).toBeGreaterThan(0);
+      expect(
+        errexitOffenders(WF),
+        "a `run: |` block in the restore job never turns `-e` on and is not a named exception",
+      ).toEqual([]);
+
+      // ⭐ THE FALSIFIER, AND THE PROOF THAT THE NINE-TOKEN SCAN CANNOT SEE IT.
+      // Soften the WHOLE of `Which database am I on` — the gate standing between a
+      // dashboard-shaped mistake and a DROP SCHEMA on the wrong database — by dropping
+      // one letter. No banned token appears anywhere in the mutant.
+      const softened = WF.replace(
+        "          set -euo pipefail\n          # The session-mode DSN derived ONCE",
+        "          set -uo pipefail\n          # The session-mode DSN derived ONCE",
+      );
+      expect(softened, "the `-e`-dropping mutation changed nothing").not.toBe(WF);
+      expect(
+        softeningOffenders(softened),
+        "CALIBRATION: the NINE-TOKEN scan already caught a step that simply never sets `-e`, so F3 was not a gap and this whole check is buying nothing",
+      ).toEqual([]);
+      expect(
+        errexitOffenders(softened).join(" | "),
+        "dropping `-e` from the marker step's `run: |` went unreported — that is `set +e` by another spelling, over the step that decides TEST from PROD",
+      ).toContain('NO ERREXIT in step "Which database am I on"');
+
+      // ⭐ AND THE OTHER DIRECTION: an exemption that stopped being needed.
+      const tightened = WF.replace("          set -uo pipefail\n", "          set -euo pipefail\n");
+      expect(tightened, "the exemption-staling mutation changed nothing").not.toBe(WF);
+      expect(
+        errexitOffenders(tightened).join(" | "),
+        "a step that now sets `-e` kept its exemption and nothing said so — a standing permission to soften it again later, granted by nobody",
+      ).toContain("STALE EXEMPTION");
+
+      // ⭐ AND A RENAMED EXEMPTION MUST NOT OUTLIVE ITS STEP.
+      const renamed = WF.replace(
+        `- name: ${NO_ERREXIT_SITES[2]}`,
+        "- name: Probe - the runner image's PostgreSQL server binaries resolve (renamed)",
+      );
+      expect(renamed, "the rename mutation changed nothing").not.toBe(WF);
+      expect(
+        errexitOffenders(renamed).join(" | "),
+        "an exemption survived the step it exempts being renamed, and the renamed step was then unreported as well",
+      ).toContain("DANGLING EXEMPTION");
     });
 
     it("the token list is NINE, and its two hand-kept siblings must move with it", () => {
