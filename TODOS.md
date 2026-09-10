@@ -2631,9 +2631,9 @@ Opened by Phase 164.8 plan 06 as it closed `CI-MIGRATE-01`, `[164.2-TEST-APPLY-P
 and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a problem** (founder rule
 2026-09-08: a TODOS line alone has no owner, no date and no gate).
 
-- [ ] **`[164.8.5-SCOPE-DEPTH-AXIS]` the class-lint's scope sentence outruns its filter for the THIRD
+- [ ] **`[164.8.4-SCOPE-DEPTH-AXIS]` the class-lint's scope sentence outruns its filter for the THIRD
       time on one branch — now on the DEPTH axis (booked 2026-09-10, Phase 164.8.2 terminal review;
-      routed to Phase 164.8.5). LATENT — zero offenders in the unscanned files today.**
+      routed to Phase 164.8.4). LATENT — zero offenders in the unscanned files today.**
       **MEASURED 2026-09-10:** `readdirSync` is NON-RECURSIVE. 144 test files live under
       `src/__tests__`; **139 are scanned, 5 are not** — the `.test.ts` files in
       `src/__tests__/contracts/` and `src/__tests__/helpers/`. Meanwhile the describe is titled
@@ -2650,9 +2650,9 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       prove it by OPENING a new axis on a scratch tree and observing RED, never by asserting
       today's count.
 
-- [ ] **`[164.8.5-DEMOS-OFF-HELPER]` this branch planted two fresh copies of the offending
+- [ ] **`[164.8.4-DEMOS-OFF-HELPER]` this branch planted two fresh copies of the offending
       expression in exactly the files the docblock names as the next widening step (booked
-      2026-09-10; routed to Phase 164.8.5). LATENT.**
+      2026-09-10; routed to Phase 164.8.4). LATENT.**
       `src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx:7980` and
       `src/lib/pdf-render-token.test.ts:163`. Both are legitimate calibration subjects demonstrating
       the pre-fix form — but `src/test/helpers/degenerate-narrow.ts` exists PRECISELY so
@@ -2664,8 +2664,8 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       could not fail). Route them through the helper instead, and add an arm asserting a NEW inline
       demonstration outside the helper is reported.
 
-- [ ] **`[164.8.5-HELPER-UNPOLICED]` `degenerate-narrow.ts` left the scanned surface entirely, so
-      nothing polices the rest of that file (booked 2026-09-10; routed to Phase 164.8.5). LATENT.**
+- [ ] **`[164.8.4-HELPER-UNPOLICED]` `degenerate-narrow.ts` left the scanned surface entirely, so
+      nothing polices the rest of that file (booked 2026-09-10; routed to Phase 164.8.4). LATENT.**
       Deleting the file+function tolerance was correct — it could not fail, and the file is 79 lines
       with ONE exported function, so the old tolerance policed an empty region. But the deletion
       also removed the only thing watching that file outside `degenerateNarrow`. A second exported
@@ -2674,8 +2674,8 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       Close it, or record a dated reason why one 79-line single-function file does not need it.
       ⛔ Not silence.
 
-- [ ] **`[164.8.5-PROSE-OVERCLAIM]` four sentences that describe more than their code does (booked
-      2026-09-10; routed to Phase 164.8.5). COSMETIC — but this is the branch's own defect class, so
+- [ ] **`[164.8.4-PROSE-OVERCLAIM]` four sentences that describe more than their code does (booked
+      2026-09-10; routed to Phase 164.8.4). COSMETIC — but this is the branch's own defect class, so
       it is booked rather than shrugged off.**
       1. `src/lib/seam-venue-vocabulary.invariant.test.ts` — the docblock says dropping the `^` from
          `KEYWORD_ARG_RE` would red. MEASURED: it reds NOTHING and does not reintroduce the class
@@ -2691,8 +2691,8 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
          actual **139** lets nine test files be deleted silently. The in-code comment states the
          limitation honestly; the floor still does not measure what a reader assumes.
 
-- [ ] **`[164.8.5-COMMENTISH-FALSE-RED]` the whole-directory floor's `commentish` test can false-RED
-      on a legitimate docblock continuation (booked 2026-09-10; routed to Phase 164.8.5). REACH.**
+- [ ] **`[164.8.4-COMMENTISH-FALSE-RED]` the whole-directory floor's `commentish` test can false-RED
+      on a legitimate docblock continuation (booked 2026-09-10; routed to Phase 164.8.4). REACH.**
       `/^\s*(\/\/|\/\*|\*)/` does not recognise a blanked continuation line that does not begin with
       `*`. MEASURED: **0 occurrences across all 139 scanned files**, and it fails in the LOUD
       direction, so it costs a false alarm rather than a false pass. Recorded so the next person to
@@ -2775,9 +2775,29 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       (`scan_for_secrets`) DOES `rm -f` on a hit.
       ⚠️ **The comments no longer mislead** — script and artifact README both state what the
       function does and does not protect. The gap is behavioural, not documentary.
-      ⛔ **Why this is a founder call, not a patch:** withholding the file means deleting part of
-      the REVERSAL RECIPE (`T-164.8-21`) on exactly the run whose restore was refused — trading a
-      credential exposure for a lost undo on a database left mid-restore.
+      ⛔ **RE-FRAMED 2026-09-10 by the phase's security audit — THIS IS NOT A BINARY, and it was
+      written as one.** The paragraph below framed the choice as *withhold the file* vs *lose the
+      reversal recipe*. A third option costs neither side, and presenting the founder with two when
+      three exist is itself the defect this repo names.
+      ⭐ **Option 3 — keep the file, make the ARTIFACT SELF-DECLARING.** The staging step already
+      reads a sibling step's verdict as a value (`REDACT_OUTCOME: ${{ steps.redact.outcome }}`), so
+      the identical wiring can read the restore step's outcome and write a top-level
+      `CREDENTIAL-DISCLOSED.txt` naming the file and the class. Today the ONLY disclosure signal is
+      a README paragraph plus a red step — and that README itself warns the artifact may be
+      re-shared. **A warning that travels only if someone reads prose is the weaker half of this
+      repo's own standard.** This is a conform-to-the-neighbour fix, the same shape
+      `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]` prescribes for itself.
+      **Audit's severity reading:** medium, not high. A hit requires a credential already sitting in
+      TEST's catalogue or in migration source; the four scanned files are generated from this
+      script's own heredocs, live TEST catalogue reads, and the allowlisted
+      `INSERT INTO public.<t> … VALUES (<literals>)` extractor. The workflow is dispatch-only and
+      the run is already red with a human reading it. Below the `block_on: high` threshold —
+      which is why it defers, not because the exposure is imaginary.
+
+      **Why option 1 is a founder call and not a patch:** withholding the file means deleting part
+      of the REVERSAL RECIPE (`T-164.8-21`) on exactly the run whose restore was refused — trading a
+      credential exposure for a lost undo on a database left mid-restore. ⭐ Option 3 above avoids
+      that trade entirely and should be costed FIRST.
 
 - [ ] **`[164.8.2-REDACT-HOSTNAME-01]` a routing WORD that was never a routing RECORD, over a gap
       that is still open (booked 2026-09-10, same audit; routed to Phase 164.8.4).**
