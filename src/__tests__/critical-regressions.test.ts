@@ -1080,26 +1080,38 @@ describe("Critical regression guards", () => {
         const bodyStart = src.indexOf("\n", applyIdx) + 1;
         const after = src.slice(bodyStart);
         const next = after.match(NEXT_JOB_RE);
-        if (!next) {
-          // ⭐ THE IN-03 DISCIPLINE, applied here for WR-05. A missing bound has two
-          // causes that are indistinguishable in the return value: `apply` is genuinely
-          // the last job (correct — slice to EOF), or a successor exists whose key shape
-          // `NEXT_JOB_RE` does not recognise (the silent slice-to-EOF this bound exists to
-          // remove). Fall back ONLY for the first, and THROW for the second, exactly as
-          // `suffix()` in `supabase-migrate-test-first.test.ts` throws rather than
-          // degrading to `slice(-1)`. The failure mode of the old code was a PASS.
-          const loose = after.match(ANY_JOB_KEY_RE);
-          if (loose) {
-            throw new Error(
-              "supabase-migrate.yml: a top-level job key FOLLOWS `apply:` " +
-                `(${JSON.stringify(after.slice(loose.index ?? 0, (loose.index ?? 0) + 60))}) ` +
-                "but NEXT_JOB_RE did not match it, so the apply-job slice would silently run " +
-                "to END OF FILE — the unbounded shape IN-04 was raised to remove, and the " +
-                "`environment: Production` / `needs:` / `if:` pins below would then be " +
-                "satisfiable by that successor's text. Widen NEXT_JOB_RE to the key shape " +
-                "actually used rather than letting the bound fall back to a slice nobody chose.",
-            );
-          }
+        // ⭐ THE IN-03 DISCIPLINE, applied here for WR-05. An unrecognised successor is
+        // indistinguishable, in the return value, from `apply` genuinely being the last
+        // job: both give a slice that runs past a job boundary nobody chose. Fall back
+        // ONLY for the second, and THROW for the first, exactly as `suffix()` in
+        // `supabase-migrate-test-first.test.ts` throws rather than degrading to
+        // `slice(-1)`. The failure mode of the old code was a PASS.
+        //
+        // ⛔ WR-06 (164.8.2-REVIEW, closed 2026-09-10). This used to be guarded by
+        // `if (!next)`, so the permissive detector was consulted ONLY when NOTHING
+        // matched. An unrecognised key followed by a RECOGNISED one therefore left
+        // `next` non-null, skipped the throw, and let the slice extend straight across
+        // the first successor — the exact over-broad `applyJobBlock` IN-04 removed and
+        // WR-05 removed again. The question is not "is there a bound?" but "is the FIRST
+        // top-level key after `apply` the one we bounded on?", so compare POSITIONS.
+        //
+        // ⚠️ Be honest about the blast radius: this throw and its calibration guard a
+        // SLICE BOUND that lives in this test file. Nothing here protects
+        // `supabase-migrate.yml` itself — the workflow is unchanged either way. What they
+        // protect is the two `apply` pins BELOW from going green on a neighbour's text,
+        // i.e. they keep this file's own assertions honest rather than adding a
+        // production guard.
+        const loose = after.match(ANY_JOB_KEY_RE);
+        if (loose && (!next || (loose.index ?? 0) < (next.index ?? 0))) {
+          throw new Error(
+            "supabase-migrate.yml: a top-level job key FOLLOWS `apply:` " +
+              `(${JSON.stringify(after.slice(loose.index ?? 0, (loose.index ?? 0) + 60))}) ` +
+              "but NEXT_JOB_RE did not match it, so the apply-job slice would silently run " +
+              "past it — the unbounded shape IN-04 was raised to remove, and the " +
+              "`environment: Production` / `needs:` / `if:` pins below would then be " +
+              "satisfiable by that successor's text. Widen NEXT_JOB_RE to the key shape " +
+              "actually used rather than letting the bound fall back to a slice nobody chose.",
+          );
         }
         return (
           src.slice(applyIdx, bodyStart) + (next ? after.slice(0, next.index) : after)
@@ -1184,8 +1196,35 @@ describe("Critical regression guards", () => {
           /a top-level job key FOLLOWS `apply:`/,
         );
 
+        // ⛔ WR-06: the arrangement the `if (!next)` guard could not reach. An
+        // UNRECOGNISED successor followed by a RECOGNISED one leaves `next` non-null, so
+        // the old code skipped the permissive detector entirely and returned a slice that
+        // swallowed the first successor whole. Seeding the unrecognised key as the LAST
+        // thing in the file (above) is the single arrangement where `next` is null, which
+        // is why the calibration could not see the gap.
+        const seededPair =
+          `${src.trimEnd()}\n\n  zz_after_apply: something-unmatched\n    needs: [plan]\n` +
+          "\n  zz_recognised:\n    needs: [plan]\n";
+        const afterPair = seededPair.slice(seededPair.search(APPLY_JOB_RE));
+        const pairNext = afterPair.match(NEXT_JOB_RE);
+        expect(
+          pairNext,
+          "CALIBRATION: NEXT_JOB_RE matched NOTHING in the two-successor seed, so `next` " +
+            "is null and this arm degenerates into the single-successor arm above — it " +
+            "would not exercise the position comparison it names",
+        ).not.toBeNull();
+        expect(
+          afterPair.slice(0, pairNext?.index ?? 0),
+          "CALIBRATION: NEXT_JOB_RE bound on the FIRST seeded successor rather than the " +
+            "second, so the unrecognised key is not actually being skipped over and this " +
+            "arm proves nothing about the position comparison",
+        ).toContain("zz_after_apply");
+        expect(() => applyJobBlock(seededPair, seededPair.search(APPLY_JOB_RE))).toThrow(
+          /a top-level job key FOLLOWS `apply:`/,
+        );
+
         // CONTROL: the real file, where `apply` genuinely IS the last job, must NOT throw —
-        // otherwise the throw above is the harness reddening whatever it is handed.
+        // otherwise the throws above are the harness reddening whatever it is handed.
         expect(() => applyJobBlock(src, applyIdx)).not.toThrow();
       });
 
