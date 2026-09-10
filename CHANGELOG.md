@@ -2,7 +2,7 @@
 
 ## [0.77.32.0] - 2026-09-10 — controls that read stronger than they were, through three rounds of it
 
-Seventy-two commits over seven themes. Phase 164.8.2 GATEHARDENING closes the five Warnings the
+Eighty-two commits over seven themes. Phase 164.8.2 GATEHARDENING closes the five Warnings the
 review raised against Phase 164.8's own gates, the twelve findings two reviewers raised against
 *those* fixes, and then five blockers a third round found against **those**. Every gate in this
 entry was proven by executing the defect, not by reading the code.
@@ -83,6 +83,51 @@ correctly in two other workflows. A fix is not evidence. Running it is.
     `DROP SCHEMA public CASCADE` script too, where telling an operator an arm DISAPPEARED when one
     was ADDED costs the most. And three restated arm-count literals now read the constant by
     symbol.
+- **Round four: the reasons were wrong where the code was right.** A read-only re-review of round
+  three found three defects in which the CODE behaved correctly and the SENTENCE recorded beside it
+  did not — which is the same disease, because the sentence is what the next maintainer acts on.
+  - **`ALTER DATABASE` was admitted to the published-`.sql` scan on a false premise.** The recorded
+    reason was that migration source never reaches those four files. It does:
+    `refdata.sql` is assembled from the ORIGINAL BYTES of allowlisted migration statements, by the
+    channel Phase 164.8.1 REFDATA built. The near-miss was already in the tree — an allowlisted
+    slice sits in a file carrying `ALTER DATABASE` seventeen lines above it. MEASURED against the
+    real extractor: a comment ABOVE a statement is dropped, a comment INTERIOR to it is emitted
+    verbatim, so the false positive needs only the allowlist to grow, and it would abort a restore
+    over a documentation comment. Scoped out for `refdata.sql` alone, in the workflow's own words —
+    *a gate that has to be waived to pass is not a gate*. The other three keep the class. Two
+    hardenings beyond the finding: a scoped-out entry must resolve against BOTH the file list and
+    the class list, so a typo fails closed rather than standing as an invisible stale sentence;
+    and the clean verdict now PRINTS the exemption, because an exemption visible only in source is
+    a control weaker than the log beside it.
+  - **The scan's file list and the workflow's publish list were independent literals.** The tally
+    closed "a file in the list the scan could not find" and nothing closed "a file the workflow
+    publishes that is not in the list at all" — a fifth artifact added later would have satisfied
+    the README rule by being NAMED, gone green, and shipped through nothing for 90 days. The set is
+    derived from the workflow now, with `schema-before.sql`'s exclusion carrying its reason and its
+    own expiry check.
+  - **A guard that was unreachable, blind, and unfalsified — all three at once.** The ancestry
+    channel's `[ ! -r ]` check could not fire on the path it was written for, and MEASURABLY missed
+    the one it claimed: `[ -r ]` on a DIRECTORY is true, and a redirect to a directory returns 1
+    without ever invoking git — so the step printed "is not an ancestor", the exact false statement
+    two prior fixes existed to delete. Its calibration stripped it together with its neighbour
+    under the words *"each defends independently, so removing one proves nothing"* — a
+    rationalisation standing where a measurement belongs, and the reason the guard had zero
+    coverage. Replaced by a pre-probe SENTINEL, which git's own redirect truncates: the sentinel
+    surviving proves the redirect failed and `rc` is bash's, not `--is-ancestor`'s. Three arms, each
+    stripping ONLY the new guard.
+- **Two measurements that were restated rather than taken.** A comment pinned as the CORRECTIVE
+  measurement for the shell-model defect claimed "0 hits in both" for `shell:`/`defaults:` — but
+  `ci.yml` does declare `defaults:`. The conclusion survives (there is no `shell:` anywhere under
+  `.github/workflows/`, and a `working-directory` does not change the shell) and is now MECHANICAL:
+  an arm scans the whole workflow directory instead of restating a count. Separately, an
+  `ALTER DATABASE` census said "6 lines across 4 files"; re-measured, it is 3, and the regenerating
+  commands now sit beside the number.
+- **Two gaps in the gates that guard the gates.** The softening site-set proved a status was
+  CAPTURED and never that it was READ, so a ninth site could have earned an allowlist entry and
+  still discarded its exit code; a third leg now requires the identifier to be used. And a
+  `MEASURE_FAIL` read its own quantity from the channel whose loss it was reporting, rendering as a
+  blank where the operator's only number belonged — it says `?` now, and the comment states that
+  this suppression is the correct one and must not be "fixed" back.
 - **A bare conclusion caught across file boundaries.** The new NO-ROW `MEASURE_FAIL` printed a
   verdict with no runtime value. `gate-family-meta.test.ts` (D-12/SC-7) named the site and refused
   the allowlist escape. It now reports the captured stderr line count — the quantity its own block
