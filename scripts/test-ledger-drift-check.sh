@@ -601,7 +601,25 @@ check() {
     # landed: an above-tip absence is not in the baseline file and never
     # appears there. A clean summary that misattributes WHY an absence was
     # tolerated is a gate reporting a control that did not act.
-    echo "  ledger presence: ${missing_count} absent — $(( missing_count - exempt_count )) baselined (see ${baseline}), ${exempt_count} exempt as above the ledger frontier; 0 NEW drift."
+    #
+    # ⛔ IN-02 (Phase 164.8.2) — THE VERDICT HALF IS CONDITIONED ON `bad`. The
+    # counts above are a MEASUREMENT and stay printed either way; the trailing
+    # `0 NEW drift.` is a VERDICT, and it used to print unconditionally. On a
+    # ceiling breach that put two contradictory sentences in one run, MEASURED
+    # 2026-09-10:
+    #   ::error::… FRONTIER_EXEMPT_CEILING exceeded: 4 … > ceiling 3.
+    #     ledger presence: 4 absent — 0 baselined (…), 4 exempt …; 0 NEW drift.
+    # The board was correctly red (the gate exits 1 and suppresses the
+    # `ledger and body checks clean` notice), but the line a reader scans for the
+    # verdict read clean beside the error that contradicts it. `new_count` is
+    # genuinely 0 here, so the fix is not to hide the number — it is to stop the
+    # summary claiming the run is clean when this run is not.
+    local presence="  ledger presence: ${missing_count} absent — $(( missing_count - exempt_count )) baselined (see ${baseline}), ${exempt_count} exempt as above the ledger frontier; 0 NEW drift"
+    if [ "$bad" = 0 ]; then
+      echo "${presence}."
+    else
+      echo "${presence} — but this run is NOT clean: see the ::error:: above (the frontier-exemption ceiling was BREACHED). 0 NEW drift is not a passing verdict here."
+    fi
   fi
 
   # Advisory only — squashes and CLI-era rows make this direction noisy.
