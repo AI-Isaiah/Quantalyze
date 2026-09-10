@@ -50,8 +50,15 @@
 #   BASELINE_DOC              default supabase/schema/BASELINE.md
 #   MIGRATIONS_DIR            default supabase/migrations
 #   NORMALIZER                default scripts/sql-body-normalize.mjs (the ONE shared
-#                             normalizer; test-ledger-drift-check.sh:123 spells the
-#                             same seam with the same default)
+#                             normalizer; test-ledger-drift-check.sh spells the same
+#                             seam with the same default — the anchor here read `:123`
+#                             from 2026-09-09 until 2026-09-10 and pointed at a
+#                             paragraph about the frontier ceiling, so it is now a
+#                             SYMBOL rather than a line: grep for
+#                             `NORMALIZER="${NORMALIZER:-` in that file. Both anchors in
+#                             this header are asserted by
+#                             `restore-test-from-baseline.test.ts`, so the next drift is
+#                             a red rather than a reader's dead end.)
 #   FRESHNESS_TS_CMD          default `git log -1 --format=%ct --`; invoked as
 #                             `$FRESHNESS_TS_CMD <path>` and must print an epoch
 #   RESTORE_EXPECT_MARKER_RE  default: `test` as a whole word, case-insensitive
@@ -82,9 +89,14 @@
 #
 # ⚠️ psql's STDERR IS printed for the transaction — and it does NOT only name SQL
 # objects. A connect or auth failure names the HOST, its IP and the DB user; the
-# calling workflow says so in its own comment
-# (.github/workflows/test-restore-from-baseline.yml:659). What keeps that out of a
-# world-readable log is the workflow's REDACTION step, not any property of psql.
+# calling workflow's REDACTION step says so in its own comment — grep
+# `.github/workflows/test-restore-from-baseline.yml` for `name the TEST pooler host`.
+# ⚠️ That anchor read `:659` until 2026-09-10 and resolved to a bare `exit 1` inside
+# an unrelated step; it was already stale on `main`. A SYMBOL is used instead of a
+# line number for the same reason the seam above carries one, and
+# `restore-test-from-baseline.test.ts` asserts both resolve.
+# What keeps that stderr out of a world-readable log is that REDACTION step, not any
+# property of psql.
 # Two consequences, both deliberate: the DSN itself is never echoed by this script,
 # and the identity-marker read sends its stderr to a FILE rather than into the
 # value it judges or into the log (refusal 5).
@@ -1585,6 +1597,23 @@ TXN_ASSERT
 # FILE and stops. Same discipline as the identity marker, whose text is withheld
 # even when it is the reason for the refusal.
 #
+# ⛔ AND IT REFUSES THE RUN WITHOUT WITHHOLDING THE FILE — SAY SO, DO NOT IMPLY
+# OTHERWISE. Named 2026-09-10 by the comment audit. The workflow's sibling scan
+# over `ledger.csv` / `schema-before.sql` does `rm -f "${f}"` before it exits, and
+# its message says the file "has been WITHHELD from the artifact". This one does
+# not, and cannot be read as if it did: the calling workflow's `Stage the public
+# artifact` step is `if: always()` and copies all four of these files whenever they
+# exist, so on a hit the flagged file is still staged and still published to a
+# world-readable artifact for 90 days. What this function protects is the
+# DATABASE — it refuses before the transaction — plus every FUTURE run, because a
+# red board is what gets the shape removed. It does not protect THIS run's
+# artifact.
+# ⚠️ The asymmetry is a decision, not an oversight, and it is not taken here:
+# `rm -f`-ing these four would destroy the reversal recipe (T-164.8-21) on exactly
+# the run whose restore was refused. Whoever closes it has to choose which of the
+# two losses to take. The artifact's own README carries the same sentence, in the
+# artifact, where whoever downloads it will read it.
+#
 # ⭐ IT IS NOW NAMED `refuse_*`, AND THAT WAS EARNED RATHER THAN RENAMED INTO. It
 # shipped as `assert_public_sql_dsn_free` on 2026-09-10, and its own comment said
 # why: the `refuse_*() {` count is DERIVED — by `--self-test`'s closing line and by
@@ -1937,6 +1966,14 @@ main() {
 # `git checkout --`, which restores to HEAD and silently destroys uncommitted work
 # (L-04) — and each observation, with its scratch path and verbatim output, is
 # recorded in 164.8.1-02-SUMMARY.md.
+#
+# Arm 27 is THIS phase's (164.8.2, review C1-C4): the published-.sql credential scan.
+# Its four legs' falsifiers were observed RED on scratch copies under the harness's
+# mktemp dir, the same way arms 22-26 were, and are recorded in this phase's
+# review-fix report. ⚠️ This paragraph is here because the enumeration above stopped
+# at 26 while the sentence introducing it says EVERY arm has an observed-RED
+# falsifier — an unattributed arm makes that sentence unverifiable, which is the
+# same defect as a stale count.
 # MEASURED 2026-09-10 — `--self-test` prints 27/27 and exits 0 on a throwaway cluster.
 EXPECTED_ARMS=27
 

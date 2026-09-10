@@ -1111,16 +1111,29 @@ jobs:
           busy="${probe%%|*}"
           breakdown="${probe#*|}"
           if [ "${rc}" -ne 0 ]; then
-            # Same three redactions as every other psql site here: a connect failure
-            # names the host, its IP and the DB user, and this log is public.
+            # A connect failure names the host, its IP and the DB user, and this log is
+            # public. ⚠️ THIS SITE IS NOT LIKE THE OTHERS — the sentence here read "same
+            # three redactions as every other psql site here" until 2026-09-10, directly
+            # above the paragraph saying there are four. It described the version before
+            # the fourth expression was added.
             # ⚠️ FOUR expressions here, not the three ci.yml uses. MEASURED 2026-09-08
             # against this step's real bytes: a DNS failure emits `could not translate
             # host name "<host>" to address`, which NONE of the three standard patterns
             # match, and the TEST pooler host survived into the output. The password is
             # stripped by the first expression (verified: 0 occurrences); the host was
             # not. The gap is not local to this step — it is in the shared ci.yml
-            # pattern — and is booked as [REDACT-HOSTNAME-01]; this fourth expression
-            # closes it HERE rather than shipping a known host leak on a public log.
+            # pattern — and this fourth expression closes it HERE rather than shipping a
+            # known host leak on a public log.
+            # ⛔ WHERE `[REDACT-HOSTNAME-01]` ACTUALLY LIVES, corrected 2026-09-10. This
+            # comment said it was "booked as [REDACT-HOSTNAME-01]", and in this repo's
+            # vocabulary "booked" means a `TODOS.md` entry naming a PHASE. MEASURED at
+            # HEAD: `grep -rn 'REDACT-HOSTNAME-01' TODOS.md .planning/ROADMAP.md` returns
+            # 0 hits. It exists as T-164.8-22 in the threat table of
+            # `.planning/phases/164.8-testpreprod-.../164.8-05-PLAN.md` and as a
+            # CHANGELOG sentence — neither of which has an owner, a date or a gate. Same
+            # shape CLAUDE.md records for `FANOUT-GLOBAL-01`: do not send a planner
+            # looking for an entry that was never written. Fixing the SHARED pattern
+            # (ci.yml and this file's other psql sites) still wants a real entry.
             sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
                    -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
                    -e 's#(could not translate host name )"[^"]*"#\1"***"#g' \
@@ -1200,9 +1213,19 @@ jobs:
           # modes, so a hit refuses BEFORE any write — the safe direction. It cannot live
           # in the redaction step: that one is `if: always()` and by then the drop has
           # happened.
-          # `supabase/schema/baseline.sql` is committed only after the five-class scan
-          # recorded in `scripts/local-stack/REPLAY-SPIKE.md` (DSN / supabase host /
-          # project ref / \connect / ALTER DATABASE / JWT). These two files are published
+          # `supabase/schema/baseline.sql` is committed only after the scan recorded in
+          # `scripts/local-stack/REPLAY-SPIKE.md`. ⚠️ CORRECTED 2026-09-10: this comment
+          # called it "the five-class scan" and then listed SIX names, which is the
+          # SP-M03 shape (a claim that does not match its own command) inside the fix for
+          # SP-M03. The COMMAND is six alternations — DSN / supabase host / project ref /
+          # \connect / ALTER DATABASE / JWT — and it is the authority; `BASELINE.md` says
+          # "five classes" because its prose folds the DSN scheme and the supabase host
+          # into one "DSN". Re-derive the class count rather than trusting either
+          # sentence — the enumerated, name-per-class copy of the same set is the
+          # `classes=(…)` array in `scripts/restore-test-from-baseline.sh`, and it prints
+          # its own length on every green run:
+          #   sed -n "/local -a classes=(/,/^  )$/p" scripts/restore-test-from-baseline.sh | grep -c "^    '"
+          # These two files are published
           # the same way and reviewed by nobody first — `schema-before.sql` is an
           # unreviewed `supabase db dump` of a live hosted database, and `ledger.csv`
           # carries the `statements` column, the verbatim SQL of every row applied to
@@ -1305,19 +1328,38 @@ jobs:
                \copy supabase_migrations.schema_migrations (version, name, statements)
                  FROM 'ledger.csv' CSV HEADER
 
-          ⚠️ WHAT WAS SCANNED — TWO FILES OF THESE THIRTEEN, AND THAT IS ALL
-            This artifact is world-readable: the repository is public. Before this run
-            was allowed to proceed to any write, EXACTLY TWO of the files here were
-            scanned with the pattern supabase/schema/baseline.sql is committed under
-            (scripts/local-stack/REPLAY-SPIKE.md): DSN, supabase host, project ref,
-            \connect, ALTER DATABASE, JWT. Those two are ledger.csv and
-            schema-before.sql. Any hit withholds the file and fails the run BEFORE any
-            write.
+          ⚠️ WHAT WAS SCANNED — SIX FILES OF THESE THIRTEEN, IN TWO PLACES, AND THAT IS ALL
+            This artifact is world-readable: the repository is public. Six of the files
+            here were scanned for the same six classes before this run was allowed to
+            proceed to any write — DSN, supabase host, project ref, \connect,
+            ALTER DATABASE, JWT, the pattern supabase/schema/baseline.sql is committed
+            under (scripts/local-stack/REPLAY-SPIKE.md) — but by TWO DIFFERENT CONTROLS
+            with two different consequences, and the difference matters to you:
+              ledger.csv and schema-before.sql, in this workflow's BACKUP step. A hit
+                WITHHOLDS the file (rm -f) and fails the run before any write, so the
+                offending file does not reach this artifact.
+              census.sql, survivors.sql, restore.sql and refdata.sql, in the restore
+                script's refuse_credential_in_published_sql. A hit REFUSES THE RUN before
+                the transaction — the database is untouched — but it does NOT withhold
+                the file. ⛔ CORRECTED 2026-09-10: this README used to say only "refusal
+                is not masking", which understated it. The staging step below is
+                `if: always()`, so on a hit the flagged file is STILL COPIED and STILL
+                PUBLISHED here. If you are reading a run whose restore step failed with
+                "a credential shape appears in …", treat that file as disclosed and read
+                it before quoting this artifact anywhere. Closing the gap means teaching
+                the scanner to rm -f the way the backup step's does, which costs the
+                reversal recipe on exactly the run that needs it — a decision, not an
+                oversight, and not one taken here.
+            Two paragraphs of this section said "TWO FILES OF THESE THIRTEEN, AND THAT IS
+            ALL" until 2026-09-10, which was true before the script gained its own scan
+            and false after it. Kept as the record of what changed.
 
-          ⛔ EVERYTHING ELSE HERE WAS SCANNED BY NOTHING
-            Corrected 2026-09-10. This section said "both files were scanned" while the
-            list above advertised seven, which was true of a two-file artifact and false
-            of this one. The scan runs inside the BACKUP step, which finishes before the
+          ⛔ WHAT IS STILL SCANNED BY NOTHING
+            Corrected 2026-09-10, twice. This section said "both files were scanned" while
+            the list above advertised seven, which was true of a two-file artifact and
+            false of this one; it then said everything but those two was scanned by
+            nothing, which stopped being true when the script gained its own scan. The
+            workflow's scan runs inside the BACKUP step, which finishes before the
             restore script exists to write anything — so it cannot have read a file the
             script produced. Specifically:
               survivors.sql, restore.sql, refdata.sql and census.sql are written by the
@@ -1346,9 +1388,15 @@ jobs:
               README.txt is this file: a static heredoc in the workflow, carrying no
                 value read off any database, which is why nothing scans it.
 
-            ONE class is scoped out of the ledger scan and out of it only: ALTER DATABASE.
-            Migration SOURCE legitimately carries it in documentation (measured: 6 lines
-            across 4 files of supabase/migrations, all comments or a RAISE NOTICE), so
+            ALTER DATABASE is scoped out of the ledger scan, and out of the script's scan
+            of refdata.sql — nowhere else. Migration SOURCE legitimately carries it in
+            documentation: measured 2026-09-10 at HEAD, 6 lines across THREE files of
+            supabase/migrations, all comments except one RAISE NOTICE string. ⚠️ This
+            sentence said FOUR files from 2026-09-08 until 2026-09-10; the maintainer-
+            facing comment above this heredoc was re-measured by review F3 and this copy
+            was not. Re-derive rather than trust either:
+              cat supabase/migrations/*.sql | grep -acE 'ALTER DATABASE'
+              grep -clE 'ALTER DATABASE' supabase/migrations/*.sql | wc -l
             scanning ledger.csv for it would be red on every run. CONSEQUENCE: a
             hand-applied TEST row of the shape
               ALTER DATABASE postgres SET app.<name> = '<real value>'
