@@ -4647,7 +4647,7 @@ describe("WR-04 — the `-a` rule is workflow-wide, not post-verify-wide", () =>
 // narrow anything. A negative index does not throw — it counts from the END — so
 // every one of these is a pin that passes when its subject is gone.
 // ---------------------------------------------------------------------------
-describe("no `indexOf` result reaches a slice unchecked, in either mutex-pin file", () => {
+describe("no lookup index reaches a narrowing call unchecked, in either mutex-pin file", () => {
   const PIN_FILES = [
     "src/__tests__/test-restore-workflow-wiring.test.ts",
     "src/__tests__/supabase-migrate-test-first.test.ts",
@@ -4782,11 +4782,29 @@ describe("no `indexOf` result reaches a slice unchecked, in either mutex-pin fil
   // and same reason, as the `SCHEME` needle at the top of the file.
   const NARROW = "sl" + "ice";
   const FIND = "index" + "Of";
+  // ⭐ THE RULE MATCHES ITS OWN SENTENCE. The heading says an index derived from a
+  // lookup must be checked before it can narrow anything; the first version then
+  // pinned exactly one narrowing call and exactly one lookup. Every form below has
+  // IDENTICAL -1 semantics — `search` and `lastIndexOf` return -1 on a miss just as
+  // `indexOf` does, and `substring`/`substr` narrow just as `slice` does — so a
+  // rewrite into any of them degrades in exactly the same silent way. Widened
+  // rather than the sentence narrowed: this repo's worst defect class is the gap
+  // between what a gate's title claims and what its regex delivers.
+  const NARROWERS = [NARROW, "sub" + "string", "sub" + "str"];
+  const FINDERS = [FIND, "last" + "Index" + "Of", "sea" + "rch"];
   // ⛔ NO `g` FLAG. A global regex carries `lastIndex` across `.test()` calls, so the
   // scanner would skip every second match — a rule that misses half of what it looks
   // at, which is the same "passes when it should not" shape as the defect it pins.
   // Measured: with `g`, the calibration's second subject came back clean.
-  const UNCHECKED = new RegExp(`\\.${NARROW}\\(\\s*[^()]*?\\.${FIND}\\(`);
+  // ⚠️ DOCUMENTED LIMIT, stated rather than implied: `[^()]` forbids parentheses
+  // between the two calls, so `s.slice(f(s.indexOf(A)))` — a lookup passed through
+  // ANY intervening call — is OUT OF REACH of a lexical rule, as is the
+  // store-then-narrow form where the index is bound to a variable first. Reaching
+  // those needs dataflow, not a regex. The arm below pins the miss so the limit is
+  // a measured fact and not a hope.
+  const UNCHECKED = new RegExp(
+    `\\.(?:${NARROWERS.join("|")})\\(\\s*[^()]*?\\.(?:${FINDERS.join("|")})\\(`,
+  );
 
   /**
    * ⛔ SCANS THE JOINED TEXT, NOT LINE BY LINE. The first version filtered
@@ -4849,6 +4867,34 @@ describe("no `indexOf` result reaches a slice unchecked, in either mutex-pin fil
     }
     throw new Error("no code line found — the stripper blanked the entire file");
   };
+
+  it("CALIBRATION — every narrow/lookup pair with -1 semantics fires; the two out-of-reach forms are pinned as MISSED", () => {
+    expect(
+      NARROWERS.length * FINDERS.length,
+      "the cross product changed — re-derive the pairs below rather than trusting the count",
+    ).toBe(9);
+    for (const narrow of NARROWERS) {
+      for (const find of FINDERS) {
+        const subject = `const s2 = s.${narrow}(s.${find}(A));`;
+        expect(
+          offenders(subject),
+          `the rule misses \`.${narrow}(… .${find}(…))\`. Its -1 semantics are identical to the pinned form: a miss returns -1, -1 does not throw, and the narrowing silently counts from the END. A rule whose TITLE claims the class must cover the class.`,
+        ).toEqual([`line 1: ${subject}`]);
+      }
+    }
+    // ⚠️ THE LIMIT, MEASURED. Both of these are real offenders that this lexical
+    // rule CANNOT see. They are asserted as misses so the limit is a fact in the
+    // suite rather than a sentence in a comment — and so that anyone who widens the
+    // rule to reach them is told here, by a red arm, to update the docblock too.
+    const throughCall = `const s2 = s.${NARROW}(f(s.${FIND}(A)));`;
+    const storeThenNarrow = `const i = s.${FIND}(A);\nconst s2 = s.${NARROW}(i);`;
+    for (const subject of [throughCall, storeThenNarrow]) {
+      expect(
+        offenders(subject),
+        `the rule now reaches \`${subject}\` — good, but the docblock above still calls it out of reach. Update the stated limit.`,
+      ).toEqual([]);
+    }
+  });
 
   it("CALIBRATION — a formatter-wrapped offender is caught, and located", () => {
     // What prettier does to a long call with a long anchor name, which is the
