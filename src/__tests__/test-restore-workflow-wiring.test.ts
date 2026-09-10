@@ -888,6 +888,8 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     const STAGE = "Stage the public artifact (enumerated allowlist; default-out)";
     const REDACT = "Redact connection metadata from the backup directory (public artifact)";
     const UPLOAD = "Upload the pre-restore backup (schema + ledger; NOT data)";
+    /** The step that takes the backup, writes the README and runs the secret scan. */
+    const BACKUP = "Back up TEST before any write (schema + ledger; NOT data)";
 
     // ⛔ REGENERATED 2026-09-09, NOT restated from the review (which said "seven
     // unscanned" and was wrong) — from the WRITERS:
@@ -1417,7 +1419,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
      * filename field extractable without guessing which dotted token is a filename.
      */
     function readmeEntries(text: string): string[] {
-      const body = stepBody(text, "Back up TEST before any write (schema + ledger; NOT data)");
+      const body = stepBody(text, BACKUP);
       const from = body.indexOf("WHAT IS HERE");
       if (from < 0) return [];
       const rest = body.slice(from);
@@ -1463,6 +1465,148 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           const c = [...stagedNameList(t), ...stagedChannelNames(t)];
           return readmeEntries(t).every((x) => c.includes(x));
         },
+      );
+    });
+
+    /**
+     * The files the backup step actually SECRET-SCANS, read off its own calls.
+     *
+     * ⛔ PARSED, NEVER RESTATED — the whole finding (WR-02) is that a restated scan
+     * scope drifted away from the code. A literal `["ledger.csv", "schema-before.sql"]`
+     * here would be the same defect one layer up: the test would agree with itself
+     * while the workflow scanned something else.
+     */
+    function scannedFiles(text: string): string[] {
+      const body = stepBody(text, BACKUP);
+      return [
+        ...body.matchAll(/^\s*scan_for_secrets "\$\{outdir\}\/([A-Za-z0-9_.-]+)"/gm),
+      ].map((m) => m[1]);
+    }
+
+    /** The README's `⚠️ WHAT WAS SCANNED` section, verbatim. */
+    function readmeScanSection(text: string): string {
+      const body = stepBody(text, BACKUP);
+      const from = body.indexOf("⚠️ WHAT WAS SCANNED");
+      if (from < 0) return "";
+      const rest = body.slice(from);
+      const to = rest.indexOf("⛔ WHAT CANNOT BE REVERSED");
+      return to < 0 ? rest : rest.slice(0, to);
+    }
+
+    it("the README's scan-scope section NAMES every staged file that nothing scanned", () => {
+      // ⛔ THE FINDING (Phase 164.8.2, review WR-02). Plan 03 rewrote `WHAT IS HERE` to
+      // advertise seven files and left the section immediately below saying "both files
+      // were scanned" — "both" being ledger.csv and schema-before.sql. The four
+      // script-written `.sql` files pass through NO secret scan and NO redaction; the
+      // phase established that itself and wrote it into the maintainer-facing SCOPE
+      // comment, and the correction never reached the document that ships INSIDE the
+      // world-readable artifact. That is the same false-assurance shape WR-05 was
+      // raised about, relocated from a maintainer-facing comment to a world-facing one.
+      //
+      // The rule below is DERIVED, so it cannot drift again: whatever the staging step
+      // carries, minus whatever `scan_for_secrets` is actually called on, must be named
+      // in the section. Add a file to the artifact without saying it is unscanned and
+      // this reds.
+      const scanned = scannedFiles(WF);
+      expect(
+        scanned,
+        "the backup step's `scan_for_secrets` calls could not be parsed, or it stopped scanning the two files the README's guarantee is about — an empty list would make the rule below vacuously satisfiable by a README that says nothing",
+      ).toEqual(["ledger.csv", "schema-before.sql"]);
+
+      const section = readmeScanSection(WF);
+      expect(
+        section,
+        "the README's `⚠️ WHAT WAS SCANNED` section could not be sliced — the assertion below would be vacuous",
+      ).not.toBe("");
+
+      const staged = [...stagedNameList(WF), ...stagedChannelNames(WF)];
+      const unscanned = staged.filter((f) => !scanned.includes(f));
+      expect(
+        unscanned.length,
+        "every staged file is scanned, which cannot be true — the derivation is broken, not the workflow",
+      ).toBeGreaterThan(0);
+      const unnamed = unscanned.filter((f) => !section.includes(f));
+      expect(
+        unnamed,
+        `the README that ships INSIDE the world-readable artifact does not tell its reader that ${unnamed.length} of the file(s) it carries went through NO secret scan: ${unnamed.join(", ")}. The scan runs in the backup step, before the restore script exists to write them. survivors.sql and restore.sql carry pg_get_triggerdef(...) and a reconstructed CREATE POLICY … USING (<qual>) read off live shared TEST, and this artifact is public for 90 days.`,
+      ).toEqual([]);
+
+      // ⛔ AND THE SECTION'S OWN NUMERAL IS DERIVED FROM THE ALLOWLIST, not restated.
+      // The heading says how many files this artifact carries; a hand-typed word there
+      // is stale the first time a name is added, and a stale numeral beside a corrected
+      // paragraph is how WR-02 happened in the first place.
+      const WORDS = [
+        "ZERO", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE",
+        "TEN", "ELEVEN", "TWELVE", "THIRTEEN", "FOURTEEN", "FIFTEEN", "SIXTEEN",
+        "SEVENTEEN", "EIGHTEEN", "NINETEEN", "TWENTY",
+      ];
+      const word = WORDS[staged.length];
+      expect(word, `no numeral word for a ${staged.length}-file artifact — extend WORDS`).toBeTruthy();
+      expect(
+        section,
+        `the README's scan-scope heading no longer says how many files this artifact carries, or says the wrong number. The staging step's two lists now carry ${staged.length}, so the heading must read "THESE ${word}".`,
+      ).toContain(`THESE ${word}`);
+      calibrate(
+        "the scan-scope heading's file count is derived from the allowlist, not typed",
+        (s) =>
+          s.replace(
+            "for f in ledger.csv schema-before.sql README.txt census.sql",
+            "for f in ledger.csv schema-before.sql README.txt survivors.keys census.sql",
+          ),
+        (t) => {
+          const n = [...stagedNameList(t), ...stagedChannelNames(t)].length;
+          return readmeScanSection(t).includes(`THESE ${WORDS[n]}`);
+        },
+      );
+
+      // CALIBRATION 1 — delete one name from the section and the rule must flip.
+      // Without this, "nothing is unnamed" could be reported by a section that
+      // happens to contain every word.
+      // ⚠️ `census.err` and NOT `survivors.sql`, deliberately: survivors.sql is named
+      // TWICE in this section (once in the enumeration, once in the sentence about the
+      // DDL it carries), so deleting one mention leaves the other and the mutation is
+      // a no-op the predicate cannot see. Measured while writing this arm — the first
+      // version of it did exactly that and reported a twin that does not bite.
+      calibrate(
+        "the scan-scope rule bites when a staged file stops being named as unscanned",
+        (s) => s.replace("census.err, ledger.err, marker.err", "ledger.err, marker.err"),
+        (t) => {
+          const sec = readmeScanSection(t);
+          const sc = scannedFiles(t);
+          return [...stagedNameList(t), ...stagedChannelNames(t)]
+            .filter((f) => !sc.includes(f))
+            .every((f) => sec.includes(f));
+        },
+      );
+      // CALIBRATION 2 — the direction that actually caused WR-02: a file is ADDED to
+      // the artifact and the scan-scope paragraph is left alone.
+      calibrate(
+        "the scan-scope rule bites on a file added to the artifact but not to the section",
+        (s) =>
+          s.replace(
+            "for f in ledger.csv schema-before.sql README.txt census.sql survivors.sql restore.sql refdata.sql; do",
+            "for f in ledger.csv schema-before.sql README.txt census.sql survivors.sql restore.sql refdata.sql pre-census.txt; do",
+          ),
+        (t) => {
+          const sec = readmeScanSection(t);
+          const sc = scannedFiles(t);
+          return [...stagedNameList(t), ...stagedChannelNames(t)]
+            .filter((f) => !sc.includes(f))
+            .every((f) => sec.includes(f));
+        },
+      );
+      // ⛔ AND THE SUPERSEDED SENTENCE MUST NOT COME BACK. "both files were scanned"
+      // was true of a two-file artifact and false of this one; an absence assertion is
+      // only evidence if the presence of the thing can be detected, hence the twin.
+      const DEAD = "was allowed to proceed to any write, both files were scanned";
+      expect(
+        WF.includes(DEAD),
+        `the superseded README sentence ${JSON.stringify(DEAD)} is back. It describes a two-file artifact; this one carries ${staged.length} files, ${unscanned.length} of them scanned by nothing.`,
+      ).toBe(false);
+      calibrate(
+        "the dead 'both files were scanned' sentence would be caught if it came back",
+        (s) => s.replace("⚠️ WHAT WAS SCANNED", `${DEAD}\n          ⚠️ WHAT WAS SCANNED`),
+        (t) => !t.includes(DEAD),
       );
     });
 

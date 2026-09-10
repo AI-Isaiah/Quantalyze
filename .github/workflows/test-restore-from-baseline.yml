@@ -1196,12 +1196,38 @@ jobs:
                \copy supabase_migrations.schema_migrations (version, name, statements)
                  FROM 'ledger.csv' CSV HEADER
 
-          ⚠️ WHAT WAS SCANNED, AND THE ONE CLASS THAT WAS NOT
+          ⚠️ WHAT WAS SCANNED — TWO FILES OF THESE THIRTEEN, AND THAT IS ALL
             This artifact is world-readable: the repository is public. Before this run
-            was allowed to proceed to any write, both files were scanned with the pattern
-            supabase/schema/baseline.sql is committed under (scripts/local-stack/
-            REPLAY-SPIKE.md): DSN, supabase host, project ref, \connect, ALTER DATABASE,
-            JWT. Any hit withholds the file and fails the run BEFORE any write.
+            was allowed to proceed to any write, EXACTLY TWO of the files here were
+            scanned with the pattern supabase/schema/baseline.sql is committed under
+            (scripts/local-stack/REPLAY-SPIKE.md): DSN, supabase host, project ref,
+            \connect, ALTER DATABASE, JWT. Those two are ledger.csv and
+            schema-before.sql. Any hit withholds the file and fails the run BEFORE any
+            write.
+
+          ⛔ EVERYTHING ELSE HERE WAS SCANNED BY NOTHING
+            Corrected 2026-09-10. This section said "both files were scanned" while the
+            list above advertised seven, which was true of a two-file artifact and false
+            of this one. The scan runs inside the BACKUP step, which finishes before the
+            restore script exists to write anything — so it cannot have read a file the
+            script produced. Specifically:
+              survivors.sql, restore.sql, refdata.sql and census.sql are written by the
+                restore script: scanned by nothing and redacted by nothing. survivors.sql
+                and restore.sql deliberately carry pg_get_triggerdef(...) and
+                reconstructed CREATE POLICY ... USING (<qual>) for objects on live shared
+                TEST. That is the reversal recipe, and it is here on purpose (threat
+                T-164.8-21) — without it an aborted restore cannot be undone. Read them
+                before quoting this artifact anywhere it is not already public.
+              census.err, ledger.err, marker.err, refdata.err, dump.log and
+                transaction.out — the six diagnostic channels — are not secret-scanned
+                either. They went through the REDACTION step instead, which is a narrower
+                thing: its sed program masks a DSN's credentials, host=, user= and the
+                server/user names psql prints on a connect or auth failure. Owner names,
+                table names and anything else those channels happened to print pass
+                straight through.
+              README.txt is this file: a static heredoc in the workflow, carrying no
+                value read off any database, which is why nothing scans it.
+
             ONE class is scoped out of the ledger scan and out of it only: ALTER DATABASE.
             Migration SOURCE legitimately carries it in documentation (measured: 6 lines
             across 4 files of supabase/migrations, all comments or a RAISE NOTICE), so
