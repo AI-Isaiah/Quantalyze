@@ -912,6 +912,19 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     ];
     /** A name the script does not write today — the "future file" the rule is for. */
     const UNEXPECTED = "future-thing.txt";
+    /**
+     * The SAME rule, in the three extension classes the step used to admit by GLOB.
+     *
+     * ⛔ WHY A SECOND FUTURE FILE (Phase 164.8.2, review WR-01). `UNEXPECTED` above is a
+     * `.txt`, so until 2026-09-10 the default-out rule was PROVEN for one extension and
+     * merely ASSERTED for the rest — while the step's channel loop was
+     * `for c in "${outdir}"/*.err "${outdir}"/*.log "${outdir}"/*.out`, i.e. in-by-default
+     * for three whole classes. The reviewer executed the shipped step with a seeded
+     * `future-census.out` carrying `CREATE POLICY … USING (<qual>)` and watched it reach
+     * the world-readable artifact. This fixture is that file, and it is seeded with the
+     * same DDL marker so its presence is measurable and not merely a name in a list.
+     */
+    const UNEXPECTED_CHANNEL = "future-census.out";
     /** The DDL shape the finding is actually about, seeded so its absence is measurable. */
     const POLICY_MARKER = "CREATE POLICY p ON t USING (owner = current_user)";
     const DDL_BEARING = [
@@ -921,6 +934,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       "post-census.rollback-view.txt",
       "survivors.sql",
       "restore.sql",
+      UNEXPECTED_CHANNEL,
     ];
 
     /**
@@ -938,28 +952,42 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       return m ? m[1].trim().split(/\s+/) : [];
     }
 
-    /** The channel globs the step copies, as bare extensions (`err`/`log`/`out`). */
-    function stagedChannelExts(text: string): string[] {
+    /**
+     * The diagnostic-channel allowlist, parsed OUT of the step's own `for c in …; do`
+     * line — the same discipline, and the same parse, as `stagedNameList` above.
+     *
+     * ⛔ IT RETURNS THE RAW TOKENS, GLOBS INCLUDED, ON PURPOSE (Phase 164.8.2, WR-01).
+     * The predecessor of this function returned bare EXTENSIONS (`err`/`log`/`out`)
+     * scraped out of `"${outdir}"/*.err`, which meant every predicate built on it
+     * asked "does this file's extension match?" — and a predicate that can only ask
+     * that cannot report the defect that a whole extension class is admitted. Reading
+     * the tokens verbatim lets the arm below assert that none of them contains `*`,
+     * which is the actual rule.
+     */
+    function stagedChannelNames(text: string): string[] {
       const body = stepBody(text, STAGE);
       const m = body.match(/^\s*for c in ([^;\n]+); do$/m);
-      if (!m) return [];
-      return [...m[1].matchAll(/\/\*\.([a-z]+)/g)].map((x) => x[1]);
+      return m ? m[1].trim().split(/\s+/) : [];
     }
 
     /** What the workflow's OWN two lists say should be staged, given a seeded set. */
     function expectedStaged(text: string, seeded: string[]): string[] {
-      const names = stagedNameList(text);
-      const exts = stagedChannelExts(text);
-      return seeded
-        .filter((f) => names.includes(f) || exts.some((e) => f.endsWith(`.${e}`)))
-        .sort();
+      const carriedBy = [...stagedNameList(text), ...stagedChannelNames(text)];
+      return seeded.filter((f) => carriedBy.includes(f)).sort();
     }
 
     /** Seed a fixture RUNNER_TEMP and run a (possibly mutated) copy of the step. */
     function runStage(
       script: string,
       seed: string[],
-    ): { status: number | null; output: string; staged: string[]; stageExists: boolean } {
+    ): {
+      status: number | null;
+      output: string;
+      staged: string[];
+      stageExists: boolean;
+      /** The staged files' BYTES, read before the fixture is torn down. */
+      contents: Record<string, string>;
+    } {
       const runnerTemp = mkdtempSync(join(tmpdir(), "stage-run-"));
       const outdir = join(runnerTemp, "test-backup");
       mkdirSync(outdir, { recursive: true });
@@ -981,12 +1009,19 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       } catch {
         stageExists = false;
       }
+      // Read the BYTES before the teardown: an arm that asks "did the leaked file
+      // actually carry the DDL" cannot ask it of a directory that no longer exists,
+      // and "the file is named in the manifest" is a weaker claim than "the file is
+      // in the artifact and here is the policy line inside it".
+      const contents: Record<string, string> = {};
+      for (const f of staged) contents[f] = readFileSync(join(stageDir, f), "utf8");
       rmSync(runnerTemp, { recursive: true, force: true });
       return {
         status: r.status,
         output: `${r.stdout ?? ""}${r.stderr ?? ""}`,
         staged,
         stageExists,
+        contents,
       };
     }
 
@@ -1008,10 +1043,38 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         stagedNameList(WF),
         "the staging step's `for f in …; do` line no longer copies exactly the decided allowlist. If a name was ADDED, the founder's default-out rule says say why in the step comment and update this list in the same edit; if `survivors.sql` was REMOVED, an aborted restore stops being reversible — that was rejected explicitly (CONTEXT Area 2, AMENDED 2026-09-09).",
       ).toEqual(DECIDED);
+      // ⛔ THE CHANNELS ARE A LIST OF NAMES, NOT A LIST OF CLASSES (Phase 164.8.2,
+      // WR-01). These six are the complete set of `.err`/`.log`/`.out` files written
+      // into `${RUNNER_TEMP}/test-backup`, REGENERATED from the two writers rather
+      // than carried from the review:
+      //   grep -oE 'RESTORE_OUT_DIR}?/[A-Za-z0-9_.-]+\.(err|log|out)' scripts/restore-test-from-baseline.sh
+      //   grep -oE 'outdir}?/[A-Za-z0-9_.-]+\.(err|log|out)'          .github/workflows/test-restore-from-baseline.yml
+      // A channel this job gains tomorrow is OUT until it is named here and in the
+      // step, which is the same default-out rule the content files have always had —
+      // and, until this phase, the one thing the channels did not.
+      const DECIDED_CHANNELS = [
+        "census.err",
+        "ledger.err",
+        "marker.err",
+        "refdata.err",
+        "dump.log",
+        "transaction.out",
+      ];
       expect(
-        stagedChannelExts(WF),
-        "the staging step no longer copies exactly the three redacted channel classes",
-      ).toEqual(["err", "log", "out"]);
+        stagedChannelNames(WF),
+        "the staging step's `for c in …; do` line no longer copies exactly the decided channel allowlist. It was a GLOB over three whole extension classes until 2026-09-10 (review WR-01, proven by executing the step against a seeded `future-census.out` carrying reconstructed CREATE POLICY DDL, which reached the artifact). Do not restore the glob: name the channel and say why.",
+      ).toEqual(DECIDED_CHANNELS);
+      expect(
+        stagedChannelNames(WF).some((n) => n.includes("*")),
+        "the channel allowlist has been widened back to a glob — every future `.err`/`.log`/`.out` file is then IN by default, which is the defect review WR-01 measured by execution",
+      ).toBe(false);
+      // CALIBRATION — the channel PARSE must break when a channel name changes, or
+      // the agreement above is between two constants.
+      calibrate(
+        "the channel allowlist is parsed out of the step, not restated",
+        (s) => s.replace("for c in census.err ledger.err", "for c in census.ERR ledger.err"),
+        (t) => stagedChannelNames(t).includes("census.err"),
+      );
 
       // CALIBRATION — the PARSE must break when a name changes, or the agreement
       // above is between two constants and measures nothing.
@@ -1030,7 +1093,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
 
     it("EXECUTED — the staged set is exactly the allowlist over all 18 REAL names", () => {
       const script = extractRunScript(WF, STAGE);
-      const seed = [...REAL_NAMES, UNEXPECTED];
+      const seed = [...REAL_NAMES, UNEXPECTED, UNEXPECTED_CHANNEL];
       const r = runStage(script, seed);
 
       expect(
@@ -1050,10 +1113,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         "post-census.rollback-view.txt",
         "survivors.keys",
         UNEXPECTED,
+        UNEXPECTED_CHANNEL,
       ]) {
         expect(
           r.staged.includes(withheld),
-          `\`${withheld}\` reached the world-readable artifact. The census text files restate the survivor DDL with owner-named rows read off live shared TEST and have no reversal claim on it (T-164.8-21); \`survivors.keys\` is neither recipe nor channel; \`${UNEXPECTED}\` stands for every file the script gains tomorrow and must be OUT until someone names it.`,
+          `\`${withheld}\` reached the world-readable artifact. The census text files restate the survivor DDL with owner-named rows read off live shared TEST and have no reversal claim on it (T-164.8-21); \`survivors.keys\` is neither recipe nor channel; \`${UNEXPECTED}\` and \`${UNEXPECTED_CHANNEL}\` stand for every file the job gains tomorrow — a content file and a DIAGNOSTIC CHANNEL — and both must be OUT until someone names them. \`${UNEXPECTED_CHANNEL}\` is seeded with ${JSON.stringify(POLICY_MARKER)}: review WR-01 proved by execution that the channel loop's glob published exactly this.`,
         ).toBe(false);
       }
       expect(
@@ -1092,6 +1156,45 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         old.staged.includes(UNEXPECTED),
         "CALIBRATION: the whole-directory neuter did not stage the unexpected file either — the fixture is not exercising the default-out rule",
       ).toBe(true);
+
+      // ⭐ CALIBRATION 3 — THE SHIPPED DEFECT, RE-RUN (Phase 164.8.2, review WR-01).
+      // Calibration 2 above mutates the CONTENT loop, so it could only ever prove the
+      // default-out rule for the by-name half. Put the channel loop's GLOB back — the
+      // exact three-class form that shipped — and the seeded `future-census.out`
+      // returns to the world-readable artifact with its CREATE POLICY line intact.
+      // That is the reviewer's measurement, kept as a standing twin so the glob cannot
+      // come back quietly.
+      const CHANNEL_LOOP_ANCHOR =
+        "  for c in census.err ledger.err marker.err refdata.err dump.log transaction.out; do\n" +
+        '    if [ -f "${outdir}/${c}" ]; then\n' +
+        '      cp -p "${outdir}/${c}" "${stage}/"\n' +
+        "    fi\n" +
+        "  done\n";
+      expect(
+        script.includes(CHANNEL_LOOP_ANCHOR),
+        "the staging step's enumerated CHANNEL loop is no longer the form this calibration mutates — re-anchor the mutation rather than deleting the twin, or the arm silently stops being evidence",
+      ).toBe(true);
+      const globbed = script.replace(
+        CHANNEL_LOOP_ANCHOR,
+        '  for c in "${outdir}"/*.err "${outdir}"/*.log "${outdir}"/*.out; do\n' +
+          '    if [ -f "${c}" ]; then\n' +
+          '      cp -p "${c}" "${stage}/"\n' +
+          "    fi\n" +
+          "  done\n",
+      );
+      expect(
+        globbed,
+        "CALIBRATION: the channel-glob neuter produced an identical script, so it proves nothing",
+      ).not.toBe(script);
+      const leaked = runStage(globbed, seed);
+      expect(
+        leaked.staged.includes(UNEXPECTED_CHANNEL),
+        `CALIBRATION: restoring the channel GLOB did not put \`${UNEXPECTED_CHANNEL}\` in the artifact, so this arm cannot see the shape review WR-01 measured. Without this twin, "the future channel is absent" could be reported by a fixture that never contained it.`,
+      ).toBe(true);
+      expect(
+        leaked.contents[UNEXPECTED_CHANNEL] ?? "",
+        "CALIBRATION: the leaked future channel did not carry the policy marker, so the fixture is not exercising the byte class the finding is about",
+      ).toContain(POLICY_MARKER);
     });
 
     it("EXECUTED — a forced failure inside the step FAILS CLOSED: exit 1, nothing staged", () => {
@@ -1217,11 +1320,12 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     }
 
     it("the README inside the artifact describes only files the artifact carries", () => {
-      const names = stagedNameList(WF);
-      const exts = stagedChannelExts(WF);
-      const carried = (entry: string): boolean =>
-        names.includes(entry) ||
-        (/^\*\.[a-z]+$/.test(entry) && exts.includes(entry.slice(2)));
+      // ⛔ NO `*.<ext>` ESCAPE HATCH ANY MORE (Phase 164.8.2, WR-01). This predicate
+      // used to admit a `*.err`-shaped entry whenever the step globbed that extension,
+      // which is how the README came to describe three whole classes as "here". Both
+      // lists are now sets of NAMES, so the agreement is name-for-name.
+      const carriedBy = [...stagedNameList(WF), ...stagedChannelNames(WF)];
+      const carried = (entry: string): boolean => carriedBy.includes(entry);
 
       const entries = readmeEntries(WF);
       expect(
@@ -1246,11 +1350,8 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
               "            census.sql        the catalogue query the restore script ran to take its\n",
           ),
         (t) => {
-          const n = stagedNameList(t);
-          const e = stagedChannelExts(t);
-          return readmeEntries(t).every(
-            (x) => n.includes(x) || (/^\*\.[a-z]+$/.test(x) && e.includes(x.slice(2))),
-          );
+          const c = [...stagedNameList(t), ...stagedChannelNames(t)];
+          return readmeEntries(t).every((x) => c.includes(x));
         },
       );
     });
