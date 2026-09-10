@@ -2,7 +2,7 @@
 
 ## [0.77.32.0] - 2026-09-10 — five controls that read stronger than they were, and the two the fixes re-opened
 
-Fifty-six commits over seven themes. Phase 164.8.2 GATEHARDENING closes the five Warnings the
+Fifty-nine commits over seven themes. Phase 164.8.2 GATEHARDENING closes the five Warnings the
 review raised against Phase 164.8's own gates, plus the twelve findings two reviewers raised
 against *those* fixes. Every gate in this entry was proven by executing the defect, not by
 reading the code — including three cases where a fix shipped by this phase re-opened the class
@@ -49,6 +49,17 @@ it was written to close.
   trailing comment or a trailing space was not matched and the slice ran to end-of-file — the
   unbounded shape the bound was added to close. It now throws, the discipline its sibling nine
   lines away already used. The review undercounted the sites: there are two, not one.
+  **That throw then shipped with the same class inside it** and is fixed here too: it consulted
+  its permissive detector only when NOTHING matched, so an unrecognised successor followed by a
+  RECOGNISED one left the bound non-null, skipped the throw, and swallowed the first successor
+  whole — the over-broad slice, back for a third time. It now compares POSITIONS: the throw fires
+  whenever the first top-level key after `apply:` is not the one the bound landed on. The
+  calibration could not have seen it, because it seeded the unrecognised key as the last thing in
+  the file — the single arrangement where the old guard happened to be right — so it gains the
+  two-successor arrangement, with guards proving the seed exercises that path and the control that
+  the real file does not throw. ⚠️ Scope, stated plainly: this and its calibration bound a slice
+  that lives inside `critical-regressions.test.ts`. They add no guard to `supabase-migrate.yml`;
+  what they protect is that file's own `apply` pins from going green on a neighbour's text.
 - **The `--help` seam pin was blind to 3 of 16 seams, `RESTORE_DB_URL` among them** — the DSN of a
   script that assembles `DROP SCHEMA public CASCADE`. All three share one mechanism: no literal
   default, so each is read as `${NAME:-}`, which a declaration-anchored regex cannot see. The arm
@@ -74,8 +85,9 @@ it was written to close.
   suppression and adding one on the database-identity step left the total unchanged and reported
   zero offenders. The superseded count rule is kept as a reference oracle so the arm *measures*
   that the new control is stronger rather than claiming it.
-- **A tenth, structural check: every `run:` block must turn `-e` on.** `set -uo pipefail` is the
-  same softening over a whole step and contains none of the nine tokens.
+- **A tenth, structural check: every `run:` block must turn `-e` on.** It is worth having because
+  it makes the intent explicit in the file and survives a future `shell:` or `defaults:` override —
+  but it is REDUNDANT with the runner default, not a new safety net. See Root cause.
 - **A `MEASURE_FAIL` wrap** on the dump filter's read, so an unreadable baseline is loud rather
   than indistinguishable from an empty one, and a failing self-test arm re-emits its own
   `MEASURE_FAIL` sentence instead of discarding it to `/dev/null`.
@@ -94,6 +106,20 @@ it was written to close.
   printed the header and nothing else, i.e. the hermetic double already *was* the header-only shape
   that C-0331 could not distinguish from clean. Adding the positive floor reddened three existing
   arms at once.
+- **CORRECTION — the `-e` half of the tenth check was published on a false model of the runner,
+  and the correction is the finding.** The entry as first written (commit `cd5befc6`) said
+  `set -uo pipefail` "is the same softening over a whole step". It is not. GitHub Actions invokes
+  every `run:` block as `bash -e {0}`, and neither `test-restore-from-baseline.yml` nor
+  `supabase-migrate.yml` declares a `shell:` or `defaults:` (0 hits in either), so errexit arrives
+  from the INVOCATION FLAG. `set -uo pipefail` turns `-u` and `pipefail` on and leaves `-e`
+  untouched — measured, a probe of `bash -e` plus `set -uo pipefail` reports `shellopts=ehuB`, and
+  a non-matching `grep` inside a command substitution aborts the step. The repo already carried the
+  correct model in two places (`ci.yml`, `cassette-refresh.yml`) while this entry contradicted it.
+  **The real defect the check exposed is the opposite one:** three steps in
+  `test-restore-from-baseline.yml` were WRITTEN believing `-e` was off, so their `MEASURE_FAIL`
+  diagnostics sat after a command that aborts the step first and could never be reached. Those
+  steps are being corrected on this branch in the same review batch; the structural rule stays
+  as intent-documentation.
 - **WR-04's premise did not reproduce on the runner.** GNU grep 3.11 — the CI runner's own family —
   was measured across three locales × four fixture shapes, and `-a` changed the verdict in none of
   the twelve. ugrep 7.8.4 *is* blind, so the fix stands as a repo-wide rule and for the flavour
