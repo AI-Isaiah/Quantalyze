@@ -182,7 +182,7 @@
 # no staging step can reach that.
 #
 # ⭐ 2026-09-10 (Phase 164.8.2 review-fix): AND THE FOUR STAGED `.sql` FILES ARE NOW
-# SCANNED — by `assert_public_sql_dsn_free`, between `build_transaction`
+# SCANNED — by `refuse_credential_in_published_sql`, between `build_transaction`
 # and `run_transaction`, so a hit refuses with the database untouched. The FILE SET
 # is unchanged and is not up for re-narrowing: admitting `census.sql`,
 # `survivors.sql`, `restore.sql` and `refdata.sql` is a founder decision and is
@@ -1551,17 +1551,21 @@ TXN_ASSERT
 # FILE and stops. Same discipline as the identity marker, whose text is withheld
 # even when it is the reason for the refusal.
 #
-# ⚠️ IT IS NOT NAMED `refuse_*`, and that is a measured choice rather than a
-# style one. The `refuse_*() {` count is DERIVED — by `--self-test`'s closing line
-# and by `restore-test-from-baseline.test.ts` — into the claim that every refusal
-# fires before a write AND is armed by a named-message arm. This check runs after
-# the census has already connected, and it has no cluster arm (arming it needs the
-# throwaway lane). Joining that family would have made a true sentence false.
+# ⭐ IT IS NOW NAMED `refuse_*`, AND THAT WAS EARNED RATHER THAN RENAMED INTO. It
+# shipped as `assert_public_sql_dsn_free` on 2026-09-10, and its own comment said
+# why: the `refuse_*() {` count is DERIVED — by `--self-test`'s closing line and by
+# `restore-test-from-baseline.test.ts` — into the claim that every refusal fires
+# before a write AND is armed by a named-message arm, and this check had NO cluster
+# arm, so joining the family would have made a true sentence false. Honest, and the
+# result was a new hard-fail path on the destructive script with zero lane coverage:
+# a name chosen to stay out of a count it would have falsified. The fix was to arm
+# it — arm 27, three legs on the throwaway lane — and only then to rename. The
+# sentence is true again, and now it covers this function too.
 #
 # Called AFTER `build_transaction` and BEFORE `run_transaction`, so a hit refuses
 # with the database still untouched.
 # ---------------------------------------------------------------------------
-assert_public_sql_dsn_free() {
+refuse_credential_in_published_sql() {
   local f c cname cre rc hits="" scanned=0 seen=""
   local -a staged=(census.sql survivors.sql restore.sql refdata.sql)
   # ⛔ `<name>|<ERE>`, one entry per class the artifact README names. The NAME is
@@ -1676,7 +1680,7 @@ run_restore() {
   # Every file the workflow publishes now exists. Scan them BEFORE the psql
   # session runs, so a credential in a to-be-published file stops the restore
   # rather than being discovered in the artifact afterwards.
-  assert_public_sql_dsn_free
+  refuse_credential_in_published_sql
 
   note "── transaction (mode=${mode}) ──────────────────────────────────────"
   run_transaction
