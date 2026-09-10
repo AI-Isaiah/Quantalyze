@@ -459,6 +459,41 @@ const READING_2 =
 const withReadings = (headline) => `${headline}\n      ${READING_1}\n      ${READING_2}`;
 
 /**
+ * CR-04 — the manifest fields whose ABSENCE would make the comparison agree
+ * with PROD by accident, checked for presence in section (1)'s row loop.
+ *
+ * ⛔ ONE LOOP, THREE CONTROLS. The predicate is identical for all three, so
+ * spelling it out three times would be three chances to typo it (SR-09) — but
+ * the loop is the IMPLEMENTATION, not the control. `schedule` is WHEN a job
+ * runs, `username` is the ROLE it executes as, `database` is WHERE it runs;
+ * each is independently load-bearing, and each is neuter-proved ALONE with the
+ * other two left live (D3). Removing a name from this list must redden exactly
+ * one test.
+ *
+ * `active` is NOT here because its collapse is a different one — see the
+ * boolean guard beside the loop.
+ */
+const REQUIRED_ROW_STRINGS = ["schedule", "username", "database"];
+
+/**
+ * CR-01 — the manifest fields compared per job that are neither `schedule`,
+ * `active` nor the command sha.
+ *
+ * MEASURED 2026-09-10 on the reverted repair: `compareManifest` COLLECTED
+ * `username` and `database` on all fourteen manifest rows and compared
+ * NEITHER, so a cron job repointed from `postgres` to a more privileged role
+ * and moved to another database produced `defects: []`. `username` is the
+ * pg_cron column that decides which role the command executes as, which makes
+ * an unnoticed change to it a privilege escalation this arm was blind to.
+ *
+ * ⛔ Each name here is its own control with its own red fixture
+ * (`prod-username-changed.json`, `prod-database-changed.json`) and is neutered
+ * alone. `schedule` is deliberately NOT in this list: it keeps its own line so
+ * that restricting this list cannot darken it too.
+ */
+const COMPARED_ROW_STRINGS = ["username", "database"];
+
+/**
  * @param {object|null} manifest   parsed `cron-manifest.json` (null when absent/unparsable)
  * @param {Array<object>} prodRows from `parseCronJobRows`
  * @param {object} opts
@@ -570,6 +605,24 @@ export function compareManifest(manifest, prodRows, opts = {}) {
         );
       }
     }
+    // -----------------------------------------------------------------------
+    // (1a) TOTALITY (CR-04). Every field the per-job comparison later reads
+    //      must be PRESENT and of the right type, because JavaScript's
+    //      coercions turn every absence into AGREEMENT rather than into a
+    //      question.
+    // -----------------------------------------------------------------------
+    if (typeof row.active !== "boolean") {
+      return invalid(
+        `cron manifest row ${row.jobname} has no boolean active flag. Boolean(undefined) is false, so an omitted flag silently AGREES with a deactivated PROD job — the quietest form of the outage this arm exists for.`,
+      );
+    }
+    for (const field of REQUIRED_ROW_STRINGS) {
+      if (typeof row[field] !== "string" || row[field].trim().length === 0) {
+        return invalid(
+          `cron manifest row ${row.jobname} has no usable ${field}. String(undefined ?? "").trim() is "", which compares EQUAL to an absent or empty PROD value, so a row missing its ${field} is not a comparison — it is an agreement by accident.`,
+        );
+      }
+    }
   }
   if (!manifest.jobs.some((j) => j.jobname === "match_engine_cron")) {
     return invalid(
@@ -677,6 +730,31 @@ export function compareManifest(manifest, prodRows, opts = {}) {
     const changed = [];
     if (String(m.schedule ?? "").trim() !== String(p.schedule ?? "").trim()) changed.push("schedule");
     if (Boolean(m.active) !== Boolean(p.active)) changed.push("active");
+    // CR-01: the ROLE and the DATABASE, which were captured on every row and
+    // compared on none. See COMPARED_ROW_STRINGS for the measurement.
+    for (const field of COMPARED_ROW_STRINGS) {
+      if (String(m[field] ?? "").trim() !== String(p[field] ?? "").trim()) changed.push(field);
+    }
+
+    // ⛔ `jobid` is PRINTED on the line above and deliberately NOT compared,
+    // and that is a decision rather than the oversight CR-01 named.
+    //
+    // It is pg_cron's surrogate key and carries no configuration meaning.
+    // ⚠️ It is ALSO not the change-detector it looks like: `cron.schedule` on
+    // an existing jobname is an UPSERT and PRESERVES the id, so an ordinary
+    // re-schedule moves the schedule or the command while the id sits still —
+    // both of which are compared beside it. Only an unschedule / re-schedule
+    // CYCLE allocates a new one, and such a cycle necessarily changes nothing
+    // else this arm can see. THE LOAD-BEARING REASON is therefore field
+    // coverage, not churn: every semantically meaningful field a jobid could
+    // stand proxy for — schedule, command, username, database, active — is
+    // already compared, so comparing the id adds no detection and costs
+    // isolation. MEASURED 2026-09-10: adding "jobid" to COMPARED_ROW_STRINGS
+    // made `prod-duplicate-jobname.json` report TWO cron-drift defects (the
+    // duplicate, plus a jobid change that is only that duplicate's
+    // consequence) and broke that fixture's one-defect isolation control.
+    // Printing it stays useful: an operator reading a drift line wants the id
+    // to run `SELECT * FROM cron.job WHERE jobid = …`.
 
     const prodSha = sha256Hex(normalizeCommand(p.command));
     if (m.command_sha256 !== prodSha) changed.push("command");
@@ -692,7 +770,9 @@ export function compareManifest(manifest, prodRows, opts = {}) {
       `cron-drift: manifest captured ${capturedAt} (marker ${marker}) sha ${m.command_sha256} — ` +
       `PROD now sha ${prodSha}; changed: ${changed.join(", ")}` +
       (changed.includes("schedule") ? ` (schedule ${m.schedule} → ${p.schedule})` : "") +
-      (changed.includes("active") ? ` (active ${Boolean(m.active)} → ${Boolean(p.active)})` : "");
+      (changed.includes("active") ? ` (active ${Boolean(m.active)} → ${Boolean(p.active)})` : "") +
+      (changed.includes("username") ? ` (username ${m.username} → ${p.username} — the role the command EXECUTES AS)` : "") +
+      (changed.includes("database") ? ` (database ${m.database} → ${p.database})` : "");
 
     // ⛔ The command TEXT is printed only when BOTH sides pass hygiene AND the
     // manifest row carries text. Otherwise: shas only, and SAY WHY.

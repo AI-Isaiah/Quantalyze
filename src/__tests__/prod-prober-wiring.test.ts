@@ -39,6 +39,7 @@ import {
 } from "../../scripts/prod-prober/run.mjs";
 import {
   CRON_JOB_SEPARATORS,
+  compareManifest,
   parseCronJobRows,
 } from "../../scripts/prod-prober/arms/cron-drift.mjs";
 
@@ -748,17 +749,95 @@ describe("[164.1-05] kinds and floors", () => {
     ]);
   });
 
-  it("SELF_TEST_SCENARIOS is 58, and the runner PRINTS exactly 58 headers numbered 1..58", async () => {
+  it("SELF_TEST_SCENARIOS is 60, and the runner PRINTS exactly 60 headers numbered 1..60", async () => {
     // ⭐ SOURCE-DERIVED, not scraped. The headers are auto-numbered at RUNTIME
     // off the same counter the runner's completeness assertion reads, so there
     // is no literal `k/50` in the source to count. Executing the self-test is
     // the only honest way to derive the number — and it is fixtures-only, no
     // network, under a tenth of a second.
-    expect(SELF_TEST_SCENARIOS).toBe(58);
+    expect(SELF_TEST_SCENARIOS).toBe(60);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);
     expect(numbers).toEqual(Array.from({ length: SELF_TEST_SCENARIOS }, (_, i) => i + 1));
     expect(new Set(denominators)).toEqual(new Set([SELF_TEST_SCENARIOS]));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// compareManifest TOTALITY — the CR-04 defect, asserted directly on the
+// function rather than through a fixture run.
+//
+// ⛔ AN ABSENT MANIFEST FIELD IS AN AGREEMENT, NOT A QUESTION. `Boolean(undefined)`
+// is `false`, so a manifest row that merely LOST its `active` key agreed with a
+// DEACTIVATED production job and reported no drift; `String(undefined ?? "").trim()`
+// is `""`, which compares equal to an absent PROD value the same way.
+//
+// ⭐ FOUR SEPARATE `it()`s ON PURPOSE. `schedule`, `username` and `database`
+// share ONE loop in the implementation (SR-09) but they are THREE controls, and
+// the neuter matrix darkens each alone with the other two left live. A single
+// test covering all three would credit one RED to three controls — the exact
+// shape that let the reverted repair report five vacuous controls as proved.
+// ---------------------------------------------------------------------------
+describe("[164.8.5-02] compareManifest totality (CR-04)", () => {
+  const DRIFT_FIXTURES = join(PROBER_DIR, "fixtures", "cron-drift");
+  const MANIFEST = JSON.parse(readFileSync(join(DRIFT_FIXTURES, "manifest.json"), "utf8"));
+  const PROD_OK = JSON.parse(readFileSync(join(DRIFT_FIXTURES, "prod-ok.json"), "utf8"));
+  const SUBJECT_JOB = "match_engine_cron";
+
+  /**
+   * Deep-copy the oracle and delete ONE key from the subject row.
+   *
+   * ⛔ THROWS when the key was not there to begin with. A `delete` of a missing
+   * key is a silent no-op, and a mutant identical to its original makes every
+   * assertion below vacuous.
+   */
+  const withoutField = (field: string) => {
+    const copy = JSON.parse(JSON.stringify(MANIFEST));
+    const row = copy.jobs.find((j: { jobname: string }) => j.jobname === SUBJECT_JOB);
+    if (!row || !(field in row)) throw new Error(`fixture drift: ${SUBJECT_JOB} has no ${field} to delete`);
+    delete row[field];
+    if (JSON.stringify(copy) === JSON.stringify(MANIFEST)) throw new Error(`the ${field} mutant is identical to the original`);
+    return copy;
+  };
+
+  const invalidsFor = (manifest: unknown) =>
+    compareManifest(manifest, PROD_OK, { liveMarker: MANIFEST.database_marker }).defects.filter(
+      (d: { kind: string }) => d.kind === "manifest-invalid",
+    );
+
+  const assertNamesJobAndField = (field: string) => {
+    const invalids = invalidsFor(withoutField(field));
+    expect(invalids.length, `a row missing ${field} must be manifest-invalid, not a silent agreement`).toBe(1);
+    expect(invalids[0].detail, "naming the job, so a reviewer knows which row to re-capture").toContain(SUBJECT_JOB);
+    expect(invalids[0].detail, "and naming the FIELD, so the sentence is actionable").toContain(field);
+  };
+
+  it("CR-04 totality: a manifest row missing `active` is manifest-invalid", () => {
+    assertNamesJobAndField("active");
+  });
+
+  it("CR-04 totality: a manifest row missing `schedule` is manifest-invalid", () => {
+    assertNamesJobAndField("schedule");
+  });
+
+  it("CR-04 totality: a manifest row missing `username` is manifest-invalid", () => {
+    assertNamesJobAndField("username");
+  });
+
+  it("CR-04 totality: a manifest row missing `database` is manifest-invalid", () => {
+    assertNamesJobAndField("database");
+  });
+
+  it("CALIBRATION: the UNTOUCHED oracle over the same rows yields ZERO manifest-invalid, and every mutant really differs", () => {
+    // The predicate FLIPS: the same function reports one manifest-invalid on
+    // each mutated copy above and none here, so "manifest-invalid fired" is a
+    // real reading rather than something this pair of inputs always produces.
+    expect(invalidsFor(MANIFEST), "the committed fixture pair must be CLEAN or the four tests above prove nothing").toEqual([]);
+    for (const field of ["active", "schedule", "username", "database"]) {
+      expect(JSON.stringify(withoutField(field)), `the ${field} mutant must differ from the original`).not.toBe(
+        JSON.stringify(MANIFEST),
+      );
+    }
   });
 });
