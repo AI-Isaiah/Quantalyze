@@ -3040,10 +3040,16 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           anchoredPrefix(step).endsWith("\n"),
           `${label}: the prefix does not end at a line boundary, so it is not the anchor-led split`,
         ).toBe(true);
+        // ⛔ NOT `prefix.length + suffix.length === step.length`. That is what stood
+        // here, and it CANNOT FAIL: both helpers split the same string at the same
+        // deterministic `anchorIndex`, and `slice(0, i).length + slice(i).length`
+        // equals the length for ANY `i`. A line that reads as proof and is not is
+        // worse than no line. Compare the BYTES: this fails the moment either half
+        // drops, duplicates or reorders content.
         expect(
-          anchoredPrefix(step).length + anchoredSuffix(step).length,
-          `${label}: the two halves do not reconstruct the step`,
-        ).toBe(step.length);
+          anchoredPrefix(step) + anchoredSuffix(step),
+          `${label}: the two halves do not reconstruct the step BYTE FOR BYTE — the split is losing or duplicating content, and every byte-identity pin built on it is comparing something other than the step`,
+        ).toBe(step);
       }
     });
 
