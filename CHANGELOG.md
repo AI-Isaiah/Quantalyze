@@ -266,7 +266,8 @@ correctly in two other workflows. A fix is not evidence. Running it is.
   claiming a closed production exposure.
 
 ### Tests
-- 14,561 passing across 872 files at the merge, with `tsc`, `eslint`, both gate linters
+- **RE-MEASURED 2026-09-10 at HEAD, not restated from the merge:** 14,607 passing across 853
+  files (872 total, 19 skipped; 280 tests skipped), with `tsc`, `eslint`, both gate linters
   (`lint-sql-gates` 7 rules, `lint-app-guc` 0 findings) and `verify-plan-anchors` green.
 - The new DSN-scan fixture is **assembled at runtime, never spelled as a literal**. It has to
   carry a real DSN shape to exercise the scanner, which is exactly what trips the pre-push
