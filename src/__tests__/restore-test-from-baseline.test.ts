@@ -74,6 +74,35 @@ function liveCount(text: string, needle: string): number {
 }
 
 /**
+ * Split a `name|regex` class entry, FAILING LOUD when the separator is absent.
+ *
+ * ⛔ WHY THIS IS A FUNCTION AND NOT TWO SLICES. `String.indexOf` returns -1 on a
+ * miss and a negative index does not throw — it counts from the END. So
+ * `e.slice(0, e.indexOf("|"))` silently widens to all-but-the-last-character and
+ * `e.slice(e.indexOf("|") + 1)` becomes `slice(0)`, the whole string. Every
+ * assertion downstream — a `.not.toContain`, a joined-pattern equality — then
+ * compares text nobody chose, and its failure mode is a PASS. Phase 164.8.2 closed
+ * this class in the two mutex-pin files; these three sites are the same defect in
+ * the file that shipped the rule's sibling.
+ *
+ * ⛔ NOT `?? ""` AND NOT A DEFAULT. An entry with no `|` is not a class with an
+ * empty name — it is the script's `classes=(…)` array no longer holding what this
+ * arm parses, which is a finding. Substituting a value would hide it.
+ */
+function splitClassEntry(entry: string): { name: string; re: string } {
+  const at = entry.indexOf("|");
+  if (at < 0) {
+    throw new Error(
+      `the class entry ${JSON.stringify(entry)} carries no \`|\` separator. Every entry in ` +
+        "the script's `classes=(…)` array is `name|regex`; an entry without one means the array " +
+        "no longer holds what this arm parses, and a raw lookup index handed to a slice would " +
+        "have widened silently instead of saying so.",
+    );
+  }
+  return { name: entry.slice(0, at), re: entry.slice(at + 1) };
+}
+
+/**
  * The destructive statement every ordering pin below is measured against.
  *
  * ⛔ THE TRAILING SEMICOLON IS LOAD-BEARING — do not "simplify" it away. The phrase
@@ -1923,8 +1952,9 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
       .split("\n")
       .map((l) => l.trim().replace(/^'/, "").replace(/'$/, ""))
       .filter((l) => l.length > 0);
-    const names = entries.map((e) => e.slice(0, e.indexOf("|")));
-    const res = entries.map((e) => e.slice(e.indexOf("|") + 1));
+    const parsed = entries.map(splitClassEntry);
+    const names = parsed.map((c) => c.name);
+    const res = parsed.map((c) => c.re);
 
     expect(
       res.join("|"),
@@ -1940,7 +1970,7 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
       .split("\n")
       .map((l) => l.trim().replace(/^'/, "").replace(/'$/, ""))
       .filter((l) => l.length > 0)
-      .map((e) => e.slice(e.indexOf("|") + 1));
+      .map((e) => splitClassEntry(e).re);
     expect(dRes.join("|")).not.toBe(schemaRe);
   });
 
@@ -2308,5 +2338,104 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE `-1` CLASS, IN THIS FILE (Phase 164.8.2). The class rule shipped with the
+// two mutex-pin files scans only those two. THIS file — the one that phase also
+// edited — carried three sites of the very defect the rule was written to catch:
+// two halves of a `name|regex` split and its calibration's copy. A lookup index is
+// -1 on a miss, a negative index does not throw, and both narrowings then produce
+// text nobody chose: `slice(0, -1)` is nearly the whole string and `slice(-1 + 1)`
+// is all of it. Any `.not.toContain` or joined-equality over that passes vacuously.
+// ---------------------------------------------------------------------------
+describe("restore-test-from-baseline.test.ts — no lookup index reaches a narrowing call unchecked", () => {
+  const SELF = "src/__tests__/restore-test-from-baseline.test.ts";
+
+  it("CALIBRATION — splitClassEntry THROWS on a missing separator, and splits a real one", () => {
+    // The predicate the three fixed sites now run, exercised on both subjects. The
+    // shape it replaced could not fail here: it would have returned a name of
+    // "dsn|postgres(ql)://" minus its last character and a regex of the whole entry.
+    expect(splitClassEntry("dsn|postgres(ql)?://")).toEqual({
+      name: "dsn",
+      re: "postgres(ql)?://",
+    });
+    expect(() => splitClassEntry("dsn"), "a separator-less entry did NOT throw").toThrow(
+      /carries no `\|` separator/,
+    );
+    expect(() => splitClassEntry(""), "an empty entry did NOT throw").toThrow(
+      /carries no `\|` separator/,
+    );
+    // The half that made the old form dangerous rather than merely wrong: on a miss
+    // the raw index does not throw, it narrows from the END. Measured, not asserted
+    // from memory, so this comment cannot drift away from the language.
+    expect("dsn".slice(0, -1)).toBe("ds");
+    expect("dsn".slice(-1 + 1)).toBe("dsn");
+  });
+
+  /**
+   * Comments are stripped first, and that is load-bearing rather than tidy: the
+   * comment above `splitClassEntry` records the offending expression VERBATIM,
+   * because that note is what a future reader most needs. `[^:]` keeps a `://`
+   * inside a string literal from being read as a line comment.
+   */
+  const stripComments = (src: string): string =>
+    src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/gm, "$1");
+
+  // Assembled from fragments so this rule does not match its own source, the same
+  // idiom (and the same reason) as the `SKELETON` and whole-file-flag needles above.
+  const NARROW = "sl" + "ice";
+  const FIND = "index" + "Of";
+  // ⛔ NO `g` FLAG: a global regex carries `lastIndex` across `.test()` calls and
+  // would skip every second match — a rule that reads half of what it looks at is
+  // the same "passes when it should not" shape as the defect it pins.
+  const UNCHECKED = new RegExp(`\\.${NARROW}\\(\\s*[^()]*?\\.${FIND}\\(`);
+
+  const offenders = (src: string): string[] =>
+    stripComments(src)
+      .split("\n")
+      .filter((l) => UNCHECKED.test(`${l}\n`))
+      .map((l) => l.trim());
+
+  it("CALIBRATION — the lexical rule fires on both removed expressions and not on the fix", () => {
+    const bad = [`const r = e.${NARROW}(e.${FIND}("|") + 1);`, `const n = e.${NARROW}(0, e.${FIND}("|"));`];
+    for (const subject of bad) {
+      expect(
+        offenders(subject),
+        `CALIBRATION: the rule did not fire on ${subject} — it cannot fail, so it is not evidence`,
+      ).toEqual([subject]);
+    }
+    // It must NOT fire on the checked form, or it is a ban rather than a rule.
+    const good = `const at = e.${FIND}("|");\nif (at < 0) throw new Error("x");\nreturn e.${NARROW}(at + 1);`;
+    expect(offenders(good), "the rule fires on the CHECKED form — that is a ban, not a rule").toEqual(
+      [],
+    );
+    // And the comment strip is proven, not assumed.
+    expect(offenders(`// const r = e.${NARROW}(e.${FIND}("|") + 1);`)).toEqual([]);
+    expect(offenders(`/** e.${NARROW}(e.${FIND}("|") + 1) */`)).toEqual([]);
+  });
+
+  it("this file feeds no raw lookup index into a narrowing call", () => {
+    const src = read(SELF);
+    expect(
+      src.includes(FIND),
+      `${SELF} no longer performs the lookup this rule is about — if it was rewritten, re-derive the rule rather than letting it pass over an absent subject`,
+    ).toBe(true);
+    expect(
+      offenders(src).join("\n"),
+      `${SELF} hands a raw lookup index to a narrowing call. -1 does not throw: it counts from the END, so the pin degrades into a silently widened slice and its failure mode is a PASS. Check the index and throw, as splitClassEntry does.`,
+    ).toBe("");
+
+    // CALIBRATION — re-introduce one of the removed sites on a scratch copy and the
+    // scan must name it. Without this, a rule that matched nothing would read the
+    // same as a file that is clean.
+    const site = `    const res = entries.map((e) => e.${NARROW}(e.${FIND}("|") + 1));`;
+    const regressed = `${src}\n${site}\n`;
+    expect(regressed, "the class-scan calibration did not APPLY").not.toBe(src);
+    expect(
+      offenders(regressed),
+      "the scan did NOT name a re-introduced site — it is measuring nothing",
+    ).toEqual([site.trim()]);
   });
 });
