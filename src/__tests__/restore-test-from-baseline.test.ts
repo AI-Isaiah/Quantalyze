@@ -1400,14 +1400,17 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
   /** The four names the workflow stages. */
   const STAGED = ["census.sql", "survivors.sql", "restore.sql", "refdata.sql"];
 
-  function runDsnAssert(files: Record<string, string>): { status: number; out: string } {
+  function runDsnAssert(
+    files: Record<string, string>,
+    src: string = SRC,
+  ): { status: number; out: string } {
     const dir = mkdtempSync(join(tmpdir(), "restore-dsnscan-"));
     try {
-      const stripped = SRC.replace(/\nmain "\$@"\n?$/, "\n");
+      const stripped = src.replace(/\nmain "\$@"\n?$/, "\n");
       expect(
         stripped,
         'the script no longer ends with its `main "$@"` dispatch — sourcing the copy would RUN the real thing',
-      ).not.toBe(SRC);
+      ).not.toBe(src);
       const copy = join(dir, "copy.sh");
       writeFileSync(copy, stripped);
       writeFileSync(join(dir, "harness.sh"), DSN_HARNESS);
@@ -1458,6 +1461,13 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
     const green = runDsnAssert(clean);
     expect(green.status, `the guard refused four DSN-free files. Output:\n${green.out}`).toBe(0);
     expect(green.out).toContain("carry no DSN shape");
+    // ⛔ C1 — THE CLEAN SENTENCE REPORTS THE MEASURED TALLY, not the four names it
+    // was going to print either way. A reader of a green log must be able to tell
+    // "four files were read and cleared" from "the loop matched nothing".
+    expect(
+      green.out,
+      "the clean sentence does not report how many files were actually scanned, so it reads identically on a run that scanned none",
+    ).toContain("scanned 4 of 4");
 
     // ⛔ ASSEMBLED AT RUNTIME, NEVER SPELLED AS A LITERAL. The string below has to
     // carry a real DSN SHAPE or it would not exercise the scanner at all — which is
@@ -1487,6 +1497,69 @@ describe("restore-test-from-baseline.sh — the four PUBLISHED .sql files are sc
         `the refusal for ${target} ECHOED the matched DSN — the refusal is itself the leak`,
       ).toBe(false);
     }
+  });
+
+  it("EXECUTED — C1: a MISSING published file is a named refusal, not a clean four-file sentence", () => {
+    // ⛔ THE DEFECT. The scan loop's `[ -f … ] || continue` is silent and the
+    // closing `note` was unconditional and restated all four names, so a run that
+    // found ZERO of the four emitted the SAME sentence as a run that read and
+    // cleared four. That is the `-eq 0`-on-an-empty-count shape, sitting in the one
+    // function whose whole job is to stand between a credential and a
+    // world-readable 90-day artifact: the calling workflow stages the file whether
+    // or not this scan could find it, so an unfound file ships UNSCANNED.
+    const body = "CREATE TABLE public.x ();\n";
+    const all = Object.fromEntries(STAGED.map((f) => [f, body]));
+
+    // ONE AT A TIME — a floor that only notices the all-four-gone case would still
+    // let three of four ship unscanned.
+    for (const missing of STAGED) {
+      const short = Object.fromEntries(
+        STAGED.filter((f) => f !== missing).map((f) => [f, body]),
+      );
+      const red = runDsnAssert(short);
+      expect(
+        red.status,
+        `a run that could not find ${missing} exited 0 — that file reaches the artifact unscanned. Output:\n${red.out}`,
+      ).toBe(1);
+      expect(red.out, "the short-count refusal does not report the measured tally").toContain(
+        "scanned 3 of 4",
+      );
+      expect(
+        red.out,
+        "the short-count refusal does not name the files it DID find, so the operator cannot tell which one moved",
+      ).toContain(STAGED.filter((f) => f !== missing)[0]);
+    }
+
+    // ZERO FILES — the exact case that used to print the clean four-name sentence.
+    const none = runDsnAssert({});
+    expect(none.status, `an EMPTY out dir passed the scan. Output:\n${none.out}`).toBe(1);
+    expect(none.out).toContain("scanned 0 of 4");
+    expect(none.out, "an empty scan still claims the files are clean").not.toContain(
+      "carry no DSN shape",
+    );
+
+    // CALIBRATION — neuter the floor on a scratch copy and watch the same short
+    // input read GREEN. Without this, the three legs above could be passing on some
+    // other refusal and the floor itself would be unmeasured.
+    const FLOOR = '  [ "$scanned" -eq "${#staged[@]}" ] || fail "MEASURE_FAIL: scanned ';
+    expect(
+      SRC.split(FLOOR).length - 1,
+      "the floor anchor is not unique — a mutation on a duplicated needle can be a NO-OP that reads green (the lesson recorded for the survivors.sql mutation in this very file)",
+    ).toBe(1);
+    const neutered = SRC.replace(FLOOR, '  [ "$scanned" -ge 0 ] || fail "MEASURE_FAIL: scanned ');
+    expect(neutered, "the C1 floor calibration did not APPLY").not.toBe(SRC);
+    const relaxed = runDsnAssert(
+      Object.fromEntries(STAGED.slice(1).map((f) => [f, body])),
+      neutered,
+    );
+    expect(
+      relaxed.status,
+      `the short input still refused with the floor neutered — the three legs above are measuring some OTHER guard. Output:\n${relaxed.out}`,
+    ).toBe(0);
+
+    // And the intact script on the intact input is still green, so the legs above
+    // are not passing because the guard refuses everything.
+    expect(runDsnAssert(all).status).toBe(0);
   });
 
   it("EXECUTED — an UNREADABLE published file is a named MEASURE_FAIL, never a clean read", () => {

@@ -1541,9 +1541,12 @@ TXN_ASSERT
 # with the database still untouched.
 # ---------------------------------------------------------------------------
 assert_public_sql_dsn_free() {
-  local f rc hits=""
-  for f in census.sql survivors.sql restore.sql refdata.sql; do
+  local f rc hits="" scanned=0 seen=""
+  local -a staged=(census.sql survivors.sql restore.sql refdata.sql)
+  for f in "${staged[@]}"; do
     [ -f "$RESTORE_OUT_DIR/$f" ] || continue
+    scanned=$((scanned + 1))
+    seen="${seen}${seen:+, }${f}"
     rc=0
     grep -acE 'postgres(ql)?://' "$RESTORE_OUT_DIR/$f" >/dev/null || rc=$?
     [ "$rc" -le 1 ] || fail "MEASURE_FAIL: could not scan ${f} for a DSN shape (grep exited ${rc}). An unreadable file is not a clean one, and this file is published."
@@ -1552,7 +1555,16 @@ assert_public_sql_dsn_free() {
   if [ -n "$hits" ]; then
     fail "a DSN shape appears in ${hits}, which the calling workflow stages into a WORLD-READABLE artifact for 90 days. The match is NOT printed — it would be the credential. Refusing before the transaction runs; the database is untouched."
   fi
-  note "public .sql files carry no DSN shape (census.sql, survivors.sql, restore.sql, refdata.sql)"
+  # ⛔ THE POSITIVE FLOOR. Everything above is a NEGATIVE check, and a negative
+  # check over an EMPTY list passes. `|| continue` is silent, so a run that found
+  # NONE of the four emitted the identical clean sentence as a run that read and
+  # cleared all four — the `-eq 0`-on-an-empty-count shape, in the one function whose
+  # whole purpose is to stand between a credential and a world-readable artifact.
+  # A relocated writer or a RESTORE_OUT_DIR that differs between `build_transaction`
+  # and this scan is enough. So the tally is MEASURED and compared with the list's
+  # own length, and a short count REFUSES rather than noting.
+  [ "$scanned" -eq "${#staged[@]}" ] || fail "MEASURE_FAIL: scanned ${scanned} of ${#staged[@]} published .sql file(s) under ${RESTORE_OUT_DIR} (found: ${seen:-none}). The workflow stages all ${#staged[@]} into a WORLD-READABLE artifact, so a file this scan could not find is a file that ships UNSCANNED. Refusing before the transaction runs; the database is untouched."
+  note "public .sql files carry no DSN shape (scanned ${scanned} of ${#staged[@]}: ${seen})"
 }
 
 run_transaction() {
