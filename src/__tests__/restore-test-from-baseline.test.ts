@@ -142,7 +142,32 @@ function functionBody(text: string, name: string): string {
   return b < 0 ? "" : lines.slice(a, b + 1).join("\n");
 }
 
+/**
+ * The script's LEADING COMMENT BLOCK: the shebang plus every line above the first
+ * LIVE statement.
+ *
+ * ⛔ WHY A REGION AND NOT THE WHOLE FILE, and why this is the difference between a
+ * pin and a decoration. The pointer arm below asserts that the HEADER quotes a
+ * symbol. Asserted over `SRC` it could not fail for the pointer that matters:
+ * MEASURED 2026-09-10, `NORMALIZER="${NORMALIZER:-` occurs TWICE in this script —
+ * once at :58 as the ENV-SEAMS pointer the arm means to pin, and once at :280 as
+ * the script's OWN live assignment. Delete the entire ENV-SEAMS block this
+ * `describe` exists to protect and the live assignment still satisfies
+ * `SRC.includes(symbol)`, so the arm stays green over the exact edit it guards
+ * against. The second pointer ("name the TEST pooler host", header-only) does not
+ * have that property, which is precisely why the defect was invisible when the two
+ * were read as a pair. A pin on PROSE has to be scoped to the prose.
+ */
+function headerRegion(text: string): string {
+  const lines = text.split("\n");
+  const end = lines.findIndex(
+    (l, i) => i > 0 && l.trim() !== "" && !l.trimStart().startsWith("#"),
+  );
+  return end < 0 ? "" : lines.slice(0, end).join("\n");
+}
+
 const SRC = read(SCRIPT);
+const HEADER = headerRegion(SRC);
 
 describe("restore-test-from-baseline.sh — the regions are real", () => {
   it("every region slicer finds its anchor and returns a non-empty slice", () => {
@@ -194,44 +219,160 @@ describe("restore-test-from-baseline.sh — the regions are real", () => {
  * more, several of which do not resolve; closing that class is its own unit of work.
  */
 describe("restore-test-from-baseline.sh — the header's cross-file pointers resolve", () => {
-  const POINTERS: readonly { readonly file: string; readonly symbol: string; readonly why: string }[] = [
+  const POINTERS: readonly {
+    readonly file: string;
+    readonly mention: string;
+    readonly symbol: string;
+    readonly why: string;
+  }[] = [
     {
       file: "scripts/test-ledger-drift-check.sh",
+      // ⛔ `mention` is what the HEADER spells, `file` is what a reader opens, and the
+      // arm asserts `file.endsWith(mention)` so the two cannot drift apart into
+      // naming different files. The header writes the basename here; the full path
+      // appears elsewhere in the script, which is exactly the kind of accident a
+      // whole-file `includes` mistakes for a pointer.
+      mention: "test-ledger-drift-check.sh",
       symbol: 'NORMALIZER="${NORMALIZER:-',
       why: "the ENV SEAMS block says this file spells the same NORMALIZER seam with the same default",
     },
     {
       file: ".github/workflows/test-restore-from-baseline.yml",
+      mention: ".github/workflows/test-restore-from-baseline.yml",
       symbol: "name the TEST pooler host",
       why: "the psql-stderr paragraph says the calling workflow's redaction step says so in its own comment",
     },
   ];
 
+  /**
+   * THE PIN ITSELF, hoisted into a named predicate so the arm and every calibration
+   * below run the SAME code over different subjects.
+   *
+   * ⛔ WHY IT IS A FUNCTION AND NOT AN INLINE `includes`. The calibration this
+   * replaces mutated a copy of the target, asserted that `String.split`/`join` had
+   * replaced a substring — and then DISCARDED the copy without ever running the pin
+   * over it. Two assertions, both true of any subject whatsoever, neither able to
+   * fail for a reason connected to the pointer rule. A calibration has to invoke the
+   * predicate it calibrates or it is a green arm standing in for evidence.
+   */
+  function resolves(target: string, symbol: string): boolean {
+    return target.includes(symbol);
+  }
+
+  /**
+   * A symbol that has MOVED: the same text with one byte wedged in after the first.
+   * Derived from the symbol rather than re-typed, so adding a pointer needs no
+   * hand-written mutant (and a hand-written one cannot silently stop matching).
+   */
+  function movedSymbol(symbol: string): string {
+    return `${symbol.slice(0, 1)}~${symbol.slice(1)}`;
+  }
+
+  it("the header region is non-empty and is genuinely a comment block", () => {
+    // ⛔ THE PRECONDITION FOR EVERY POINTER PIN BELOW. Scoping the pin to a region
+    // trades one vacuity for another unless the region itself is measured: an empty
+    // or mis-sliced header would make `resolves(HEADER, …)` fail loudly rather than
+    // pass, but a header that had silently grown to swallow the script's code would
+    // put the defect right back. So: non-empty, starts at the shebang, contains NO
+    // live statement, and is a strict SLICE of the file.
+    const lines = HEADER.split("\n");
+    expect(
+      lines.length,
+      "the header region is empty or a stub — its slicer no longer finds the leading comment block, and a pin over it would assert about nothing",
+    ).toBeGreaterThan(20);
+    expect(lines[0].startsWith("#!"), "the header region does not start at the shebang").toBe(true);
+    expect(
+      lines.slice(1).filter((l) => l.trim() !== "" && !l.trimStart().startsWith("#")),
+      "the header region contains a LIVE line — it is no longer a comment block, so a pin on the header's PROSE could be satisfied by the script's CODE",
+    ).toEqual([]);
+    expect(
+      HEADER.length,
+      "the header region is the whole file — the slicer found no live statement at all",
+    ).toBeLessThan(SRC.length);
+
+    // CALIBRATION — put a live statement immediately below the shebang. The region
+    // must collapse to the shebang alone, and the emptiness leg above must be what
+    // catches it.
+    const early = SRC.replace("#!/usr/bin/env bash\n", "#!/usr/bin/env bash\nset -e\n");
+    expect(early, "the header-region calibration did not APPLY").not.toBe(SRC);
+    expect(headerRegion(early)).toBe("#!/usr/bin/env bash");
+    expect(headerRegion(early).split("\n").length).toBe(1);
+  });
+
   it("every symbol the header sends a reader to exists in the file it names", () => {
-    for (const { file, symbol, why } of POINTERS) {
+    for (const { file, mention, symbol, why } of POINTERS) {
       expect(
-        SRC.includes(file),
-        `the header no longer names ${file}, so this pointer pin is asserting about a sentence that is gone — delete the entry or restore the pointer`,
+        file.endsWith(mention),
+        `the pointer's \`mention\` (${mention}) does not name \`${file}\` — the header could be quoting one file while this arm reads another`,
+      ).toBe(true);
+      expect(symbol.length, "an empty symbol resolves against anything").toBeGreaterThan(0);
+      expect(
+        resolves(HEADER, mention),
+        `the header no longer names ${mention}, so this pointer pin is asserting about a sentence that is gone — delete the entry or restore the pointer`,
       ).toBe(true);
       expect(
-        SRC.includes(symbol),
+        resolves(HEADER, symbol),
         `the header no longer quotes the symbol \`${symbol}\`, so a reader is back to hunting. ${why}`,
       ).toBe(true);
-      const target = read(file);
       expect(
-        target.includes(symbol),
+        resolves(read(file), symbol),
         `the header sends a reader to ${file} for \`${symbol}\` and it is NOT there. ${why}. Re-find it and update the header — do NOT delete the pointer to make this green.`,
       ).toBe(true);
     }
   });
 
-  it("the pointer pin bites on a symbol that has moved", () => {
-    // CALIBRATION — without it, this arm could be satisfied by a predicate that
-    // never actually reads the target file.
-    const target = read(POINTERS[0].file);
-    const moved = target.split(POINTERS[0].symbol).join("NORMALISER=\"${NORMALISER:-");
-    expect(moved).not.toBe(target);
-    expect(moved.includes(POINTERS[0].symbol)).toBe(false);
+  it("the pointer pin bites — for BOTH pointers, in the target file AND in the header", () => {
+    // The calibration `POINTERS[1]` never had. Each half MUTATES, asserts the
+    // mutation APPLIED, then runs the real predicate over the mutant and asserts it
+    // FLIPS — with the control on the unmutated subject beside it.
+    for (const { file, symbol } of POINTERS) {
+      const mutant = movedSymbol(symbol);
+      expect(mutant, `the mutant for \`${symbol}\` is not a mutation`).not.toBe(symbol);
+      expect(
+        mutant.includes(symbol),
+        `the mutant for \`${symbol}\` still contains it — the flip below would be unreachable`,
+      ).toBe(false);
+
+      const target = read(file);
+      const movedTarget = target.split(symbol).join(mutant);
+      expect(movedTarget, `CALIBRATION (${file}): the symbol move did not APPLY`).not.toBe(target);
+      expect(resolves(target, symbol), `control: \`${symbol}\` is not in ${file}`).toBe(true);
+      expect(
+        resolves(movedTarget, symbol),
+        `CALIBRATION (${file}): the pin did NOT flip on a moved symbol — it cannot fail, so it is not evidence`,
+      ).toBe(false);
+
+      const movedHeader = HEADER.split(symbol).join(mutant);
+      expect(movedHeader, `CALIBRATION (header/${symbol}): the quote edit did not APPLY`).not.toBe(HEADER);
+      expect(resolves(HEADER, symbol)).toBe(true);
+      expect(
+        resolves(movedHeader, symbol),
+        `CALIBRATION (header/${symbol}): the header half of the pin did NOT flip`,
+      ).toBe(false);
+    }
+  });
+
+  it("a symbol surviving only in CODE does not satisfy the header pin", () => {
+    // ⛔ THIS ARM IS THE DEFECT ITSELF, RUN AS AN EXPERIMENT. Gut the pointer out of
+    // the header, leave a live line spelling the same symbol, and measure both
+    // predicates: the whole-file one — the shape this file shipped one commit ago —
+    // is still GREEN, and the header-scoped one is RED. That difference is the fix.
+    const { symbol } = POINTERS[0];
+    const gutted = `${HEADER.split(symbol).join("<the pointer was deleted>")}\n${SRC.slice(
+      HEADER.length + 1,
+    )}\n${symbol}scripts/sql-body-normalize.mjs}"\n`;
+    expect(gutted, "the header-gutting calibration did not APPLY").not.toBe(SRC);
+    expect(
+      resolves(gutted, symbol),
+      "the whole-file predicate did not stay green on a gutted header — the experiment does not demonstrate what it claims",
+    ).toBe(true);
+    expect(
+      resolves(headerRegion(gutted), symbol),
+      "the header-scoped predicate ALSO passed on a header with the pointer deleted — the scoping bought nothing",
+    ).toBe(false);
+    // …and the region is still a real comment block after the gutting, so the RED
+    // above is the pointer's absence and not a collapsed slice.
+    expect(headerRegion(gutted).split("\n").length).toBe(HEADER.split("\n").length);
   });
 });
 
