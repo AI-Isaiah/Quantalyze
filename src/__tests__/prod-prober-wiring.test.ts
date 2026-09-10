@@ -39,6 +39,7 @@ import {
 } from "../../scripts/prod-prober/run.mjs";
 import {
   CRON_JOB_SEPARATORS,
+  FUNCTIONS_DIR,
   HYGIENE_RULE_IDS,
   compareManifest,
   hygieneViolations,
@@ -800,13 +801,35 @@ describe("[164.1-05] kinds and floors", () => {
     expect(ids(uncommented)).toContain("x-service-key-literal");
   });
 
-  it("SELF_TEST_SCENARIOS is 66, and the runner PRINTS exactly 66 headers numbered 1..66", async () => {
+  it("FUNCTIONS_DIR resolves to a real directory that carries match_engine_cron_tick.sql", () => {
+    // ⛔ THE RENAME TRAP. `vault-absent` fails CLOSED: a callable it cannot
+    // resolve is not a Vault reader. That is right for an unknown FUNCTION and
+    // catastrophic for a moved DIRECTORY — rename `supabase/schema/functions/`
+    // and the flagship job starts firing `cron-secret-in-command` on correct
+    // production configuration every hour. The arm throws on an absent
+    // directory (self-test scenario "a MISSING functions snapshot is a
+    // measure-fail"), and this pin is the other half: it names the exact file
+    // the 164.5.1 collision scenario depends on, so a rename reds HERE, in a
+    // test whose message says what moved.
+    expect(statSync(FUNCTIONS_DIR).isDirectory()).toBe(true);
+    const tick = join(FUNCTIONS_DIR, "match_engine_cron_tick.sql");
+    expect(statSync(tick).isFile()).toBe(true);
+    // And it is the snapshot's OWN text, not something that merely exists: the
+    // executing Vault read is the fact the collision scenario turns on.
+    expect(readFileSync(tick, "utf8")).toMatch(/FROM\s+vault\.decrypted_secrets/i);
+
+    // CALIBRATION: the same predicate reports a MISSING sibling, so "the file is
+    // there" is a reading rather than something this assertion always says.
+    expect(() => statSync(join(FUNCTIONS_DIR, "match_engine_cron_tick_MOVED.sql"))).toThrow();
+  });
+
+  it("SELF_TEST_SCENARIOS is 69, and the runner PRINTS exactly 69 headers numbered 1..69", async () => {
     // ⭐ SOURCE-DERIVED, not scraped. The headers are auto-numbered at RUNTIME
     // off the same counter the runner's completeness assertion reads, so there
     // is no literal `k/50` in the source to count. Executing the self-test is
     // the only honest way to derive the number — and it is fixtures-only, no
     // network, under a tenth of a second.
-    expect(SELF_TEST_SCENARIOS).toBe(66);
+    expect(SELF_TEST_SCENARIOS).toBe(69);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);

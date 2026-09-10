@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 66;
+export const SELF_TEST_SCENARIOS = 69;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -354,6 +354,11 @@ export function absurdityViolations({ armsExecuted, seamInvocations, armsWithSea
  *                                          MECHANISM is measured rather than today's constant
  * @param {string|null} [opts.onlyArm]      narrowed diagnostic; floors are NOT enforced
  * @param {string} [opts.manifestPath]      passed through to arms (plan 03's cron-drift oracle)
+ * @param {string} [opts.functionsDir]      passed through to arms; the committed function snapshot
+ *                                          `vault-absent` resolves callables against. UNDEFINED by
+ *                                          default on purpose — the arm's own `FUNCTIONS_DIR`
+ *                                          default then applies, so the live run can never be
+ *                                          pointed somewhere else by omission here.
  * @param {(s:string)=>void} [opts.log]     the ONLY output channel; the self-test captures it
  */
 export async function runProber({
@@ -363,6 +368,7 @@ export async function runProber({
   armsFloor = ARMS_FLOOR,
   onlyArm = null,
   manifestPath = MANIFEST_PATH,
+  functionsDir = undefined,
   log = (s) => console.log(s),
 } = {}) {
   const narrowed = Boolean(onlyArm);
@@ -434,7 +440,7 @@ export async function runProber({
     if (blocked.has(arm.name)) continue;
     armsExecuted += 1;
     try {
-      await arm.run({ env, seams, log: out, addDefect, manifestPath });
+      await arm.run({ env, seams, log: out, addDefect, manifestPath, functionsDir });
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
       addDefect(
@@ -1524,7 +1530,7 @@ export async function selfTest() {
   // committed cron-drift manifest fixture records. Passing a DIFFERENT string
   // is how the "this reading came from another database" state is driven, with
   // no new seam and no production-code hook that exists only for the test.
-  const driftRun = async (prodRows, manifestPath, log, marker) => {
+  const driftRun = async (prodRows, manifestPath, log, marker, functionsDir) => {
     const seams = createSeams({ sqlRunner: fixtureSql({ cronJobRows: prodRows, marker }) });
     return runProber({
       arms: [CRON_DRIFT_MOD.ARM],
@@ -1532,6 +1538,7 @@ export async function selfTest() {
       seams,
       armsFloor: 1,
       manifestPath,
+      functionsDir,
       log,
     });
   };
@@ -2159,6 +2166,176 @@ export async function selfTest() {
         expect(
           spans.length === 2 && spans[1].masked.includes("vault.decrypted_secrets"),
           "and the body's Vault read is visible on the SECOND span's MASKED text — a rule reading only scanSql(cmd).masked would see an empty command here",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("vault-absent TRI-STATE on the fixture snapshot: reaching an EXECUTING Vault read is ACCEPTED, mentioning one is REJECTED");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE RULE THAT SERVES TWO PHASES PULLING OPPOSITE WAYS (D2). 164.5.1
+    // needs `SELECT public.match_engine_cron_tick();` ACCEPTED — a command with
+    // no Vault reference in it at all. This phase needs a command that names the
+    // table only in a comment or a literal REJECTED. `text.includes(...)` got
+    // BOTH wrong in the same direction, and it is the shape the rule had until
+    // this plan.
+    //
+    // ⚠️ RESOLVED AGAINST A FIXTURE SNAPSHOT, NOT THE REAL ONE. Phase 164.8.6
+    // edits `match_engine_cron_tick`; a scenario asserting "a comment-only
+    // mention is rejected" must not be able to go red because a different phase
+    // changed a different function. The REAL snapshot has its own scenario
+    // directly below, and that coupling is deliberate.
+    const fnDir = join(FIXTURE_ROOT, "cron-drift", "functions");
+    const REQUIRED_FIXTURE_FILES = [
+      "fixture_vault_reader.sql",
+      "fixture_wrapper.sql",
+      "fixture_comment_only.sql",
+      "fixture_literal_only.sql",
+    ];
+    // ⛔ A MISSING FIXTURE IS A FAIL, NEVER A SKIP (S2). Without this, deleting
+    // `fixture_vault_reader.sql` would turn the ACCEPT rows below into
+    // "unknown callable → REJECT" and the scenario would pass for exactly the
+    // wrong reason.
+    const missingFiles = REQUIRED_FIXTURE_FILES.filter((f) => !existsSync(join(fnDir, f)));
+
+    const idsOf = (cmd) =>
+      CRON_DRIFT_MOD.hygieneViolations("match_engine_cron", cmd, { functionsDir: fnDir }).map((x) =>
+        x.slice(1, x.indexOf("]")),
+      );
+    const sentencesOf = (cmd) =>
+      CRON_DRIFT_MOD.hygieneViolations("match_engine_cron", cmd, { functionsDir: fnDir });
+
+    const ACCEPT = [
+      ["a public-qualified call to a committed Vault reader", "SELECT public.fixture_vault_reader();"],
+      ["an UNQUALIFIED call, resolved TRANSITIVELY through a wrapper", "SELECT fixture_wrapper();"],
+      ["the read spelled inline inside a DO body (span recursion)", "DO $$ BEGIN PERFORM 1 FROM vault.decrypted_secrets; END $$"],
+    ];
+    const REJECT = [
+      ["a callable whose body mentions the table only in a comment", "SELECT public.fixture_comment_only();"],
+      ["a callable whose body mentions it only inside a literal", "SELECT public.fixture_literal_only();"],
+      ["a callable with no file in the snapshot at all", "SELECT public.fixture_unknown();"],
+      ["the table named in a `--` comment on the command itself", "SELECT 1 -- vault.decrypted_secrets"],
+      ["the table named inside a single-quoted literal", "SELECT 'FROM vault.decrypted_secrets'"],
+      ["the table named inside a DOLLAR-quoted literal", "SELECT $q$FROM vault.decrypted_secrets$q$"],
+    ];
+    const wronglyRejected = ACCEPT.filter(([, cmd]) => idsOf(cmd).includes("vault-absent")).map(([why]) => why);
+    const wronglyAccepted = REJECT.filter(([, cmd]) => !idsOf(cmd).includes("vault-absent")).map(([why]) => why);
+    const quoted = [...ACCEPT, ...REJECT]
+      .filter(([, cmd]) => sentencesOf(cmd).some((v) => v.includes(cmd)))
+      .map(([why]) => why);
+    const unknownSentence = sentencesOf("SELECT public.fixture_unknown();").join(" ");
+
+    pass =
+      expect(
+        missingFiles.length === 0,
+        `PRECONDITION: the fixture snapshot is complete (${missingFiles.join(", ") || `all ${REQUIRED_FIXTURE_FILES.length} present`}) — a missing file would make the ACCEPT rows pass as REJECTs`,
+      ) &&
+      expect(
+        wronglyRejected.length === 0,
+        `every command that REACHES an executing Vault read is accepted (${wronglyRejected.join(" | ") || `all ${ACCEPT.length} accepted`})`,
+      ) &&
+      expect(
+        wronglyAccepted.length === 0,
+        `and every command that merely MENTIONS one is rejected — this is what \`text.includes()\` could not do (${wronglyAccepted.join(" | ") || `all ${REJECT.length} rejected`})`,
+      ) &&
+      expect(
+        unknownSentence.includes("fixture_unknown"),
+        `an unresolvable callable is NAMED in the sentence, so the reader knows what could not be judged (${unknownSentence.slice(0, 0) || "named"})`,
+      ) &&
+      expect(
+        quoted.length === 0,
+        `and NO sentence quotes the command it judged (${quoted.join(" | ") || "none"})`,
+      ) &&
+      pass;
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("vault-absent against the REAL snapshot: the 164.5.1 command SELECT public.match_engine_cron_tick(); is ACCEPTED");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THIS IS THE `[164.7-VAULT-ABSENT-RULE]` COLLISION, MEASURED EVERY RUN
+    // RATHER THAN ARGUED IN A PLAN. Phase 164.5.1 will re-point PROD's cron.job
+    // jobid 1 onto exactly this command. If this rule rejected it, the hourly
+    // prober would fire `cron-secret-in-command` on correct production
+    // configuration from the moment that repoint lands — and 164.5.1 would have
+    // no way to know until it did.
+    //
+    // ⚠️ NO `functionsDir` OVERRIDE HERE, ON PURPOSE. This is the ONE scenario
+    // that resolves against `supabase/schema/functions/` — the real, committed,
+    // `@generated` snapshot.
+    //
+    // ⛔ IF THIS GOES RED, THE CAUSE IS ONE OF TWO THINGS AND NEITHER IS "the
+    // scenario is flaky": either Phase 164.8.6 removed the Vault read from
+    // `match_engine_cron_tick`'s body, or somebody changed that function without
+    // running `npm run schema:functions`. Fix the cause; do not point this
+    // scenario at a fixture.
+    const TICK_COMMAND = "SELECT public.match_engine_cron_tick();";
+    const TICK_FILE = join(CRON_DRIFT_MOD.FUNCTIONS_DIR, "match_engine_cron_tick.sql");
+    const v = CRON_DRIFT_MOD.hygieneViolations("match_engine_cron", TICK_COMMAND);
+    // CONTROL: the same command judged against a snapshot that does NOT contain
+    // the tick IS rejected — so the green above is a real resolution, not a rule
+    // that accepts everything.
+    const control = CRON_DRIFT_MOD.hygieneViolations("match_engine_cron", TICK_COMMAND, {
+      functionsDir: join(FIXTURE_ROOT, "cron-drift", "functions"),
+    });
+    pass =
+      expect(
+        existsSync(TICK_FILE),
+        `PRECONDITION: the real snapshot carries match_engine_cron_tick.sql at ${TICK_FILE} — its absence is a FAIL, not a skip`,
+      ) &&
+      expect(
+        v.length === 0,
+        `the 164.5.1 command trips NO hygiene rule against the real snapshot (${v.join(" ") || "clean"})`,
+      ) &&
+      expect(
+        control.some((x) => x.startsWith("[vault-absent]")),
+        `CONTROL: the SAME command against a snapshot without that function IS rejected (${control.map((x) => x.slice(1, x.indexOf("]"))).join(", ") || "NOTHING FIRED — the rule accepts everything"})`,
+      ) &&
+      pass;
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("a MISSING functions snapshot is a measure-fail, never a clean vault-absent");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ ABSENCE OF THE INSTRUMENT IS NOT ABSENCE OF THE FINDING. If the
+    // resolver answered "no Vault read" when its snapshot directory is gone, a
+    // deleted or renamed `supabase/schema/functions/` would make the flagship
+    // job fire `cron-secret-in-command` hourly on correct configuration; if it
+    // answered "reads Vault", a deleted snapshot would silently switch the rule
+    // off. It throws instead, and `runProber` maps an arm throw to
+    // `measure-fail` — the verdict that says a measurement did not happen.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const absent = join(FIXTURE_ROOT, "cron-drift", "functions-this-directory-does-not-exist");
+      const r = await driftRun(prod.data, driftFixturePath("manifest.json"), quiet, undefined, absent);
+      // CONTROL: the SAME rows and the SAME manifest with the snapshot present
+      // are clean — so the measure-fail above is attributable to the missing
+      // directory and to nothing else in the fixture.
+      const rControl = await driftRun(prod.data, driftFixturePath("manifest.json"), quiet);
+      const mf = r.defects.filter((x) => x.kind === "measure-fail");
+      pass =
+        expect(!existsSync(absent), `PRECONDITION: ${absent} really is absent`) &&
+        expect(
+          mf.length === 1,
+          `exactly one measure-fail (got ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ") || "no defects at all"})`,
+        ) &&
+        expect(
+          mf.length === 1 && String(mf[0].detail).includes("functions snapshot directory"),
+          "naming the snapshot directory as the thing that could not be measured",
+        ) &&
+        expect(
+          noDefectOfKind(r.defects, ["cron-secret-in-command"]),
+          "and ZERO cron-secret-in-command — a missing resolver never becomes a credential finding",
+        ) &&
+        expect(r.exitCode === 1, `the run exits 1 — refusing to measure is not passing (got ${r.exitCode})`) &&
+        expect(
+          rControl.exitCode === 0 && rControl.defects.length === 0,
+          `CONTROL: the same run WITH the snapshot present is clean (got ${rControl.exitCode}, ${JSON.stringify(rControl.defects.map((x) => x.kind))})`,
         ) &&
         pass;
     }
@@ -3029,7 +3206,7 @@ export async function selfTest() {
  *       the missing row would then be judged against nothing forever. This is
  *       a 3 rather than a 1 on purpose: hygiene never ran, so the two refusals
  *       must stay distinguishable by exit code alone.
- *   1 — ANY row fails ANY of the ten hygiene rules. This is what makes the
+ *   1 — ANY row fails ANY rule in `HYGIENE_RULE_IDS`. This is what makes the
  *       manifest an oracle of the ACHIEVABLE configuration rather than a
  *       photograph of whatever PROD has: it CANNOT be captured into a state
  *       that carries a credential. The refusal prints the jobname and the rule
@@ -3041,7 +3218,7 @@ export async function selfTest() {
  *
  * @returns {Promise<number>} the CLI exit code (0 captured / 1 refused on hygiene / 3 refused on usage, an unidentified database, or an unreadable cron.job record)
  */
-export async function captureManifest({ seams, outPath, log = (s) => console.log(s) }) {
+export async function captureManifest({ seams, outPath, log = (s) => console.log(s), functionsDir }) {
   if (!outPath) {
     log("ERROR: --capture-manifest requires --out <path>. The destination is never defaulted to the committed oracle — a capture is a reviewed file move.");
     return 3;
@@ -3078,7 +3255,7 @@ export async function captureManifest({ seams, outPath, log = (s) => console.log
 
   const dirty = [];
   for (const r of rows) {
-    const v = CRON_DRIFT_MOD.hygieneViolations(r.jobname, r.command);
+    const v = CRON_DRIFT_MOD.hygieneViolations(r.jobname, r.command, { functionsDir });
     if (v.length > 0) dirty.push({ jobname: r.jobname, rules: v.map((x) => x.slice(0, x.indexOf("]") + 1)) });
   }
   if (dirty.length > 0) {
