@@ -1,0 +1,27 @@
+The successor `successor-not-sql.red.sql` points at — and why it is a .txt
+===========================================================================
+
+This file is the TARGET of that fixture's `successor:` field. It is plain text,
+it is readable, and it is emphatically not a migration.
+
+It exists to make ONE arm of the successor check falsifiable on its own: the
+TYPE arm, which refuses a successor whose name does not end in `.sql` before
+anything is resolved or read.
+
+The line below is the load-bearing part. It is SQL-shaped, so under the OLD
+one-arm check — "the successor must exist and must contain zero app-GUC reads" —
+this file's content was the reason the check had to be tightened rather than the
+reason it passed:
+
+  v_url := current_setting('app.analytics_service_url', TRUE);
+
+Read that line the way the gate does and it is a site. But nothing reads this
+file at all any more: the TYPE arm short-circuits, so the refusal cannot be
+confused with a refusal about content. Deleting the line above would make the
+fixture pass for the wrong reason, and the fixture would stop proving that a
+non-SQL successor is rejected BY TYPE.
+
+⚠️ This is a `.txt` and therefore outside `sqlFilesUnder`'s corpus and outside
+the self-test's `*.red.sql` / `*.green.sql` sweeps. It is never scanned. Its
+sibling `unreadable-marker.txt` documents the other conditions that cannot be a
+committed `.sql` file.
