@@ -688,6 +688,35 @@ export function hygieneViolations(jobname, command) {
   return out;
 }
 
+/** Rule ids whose finding is "I could not judge this", not "this carries a secret". */
+const UNJUDGEABLE_RULE_IDS = ["header-unparseable"];
+
+/**
+ * Split a violation list into the two things a caller must report DIFFERENTLY.
+ *
+ * ⛔ THE REMEDY IS WHY THIS EXISTS. `cron-secret-in-command`'s remedy says
+ * "treat the named secret as EXPOSED — rotate it". That sentence is FALSE for a
+ * command whose parentheses do not balance: nothing was found, something could
+ * not be read. Reporting a parse failure under a rotation remedy would send an
+ * operator to rotate a key on no evidence, and — worse — would teach them that
+ * the arm's rotation calls are sometimes noise.
+ *
+ * It stays a VIOLATION, so `captureManifest` still refuses to write an oracle
+ * containing it. It is merely CLASSIFIED as `measure-fail`, a kind that already
+ * exists: adding a new `DEFECT_KIND` would need four other pins edited in step
+ * (`DEFECT_KINDS`, `EXPECTED_DEFECT_KINDS`, `KIND_ASSERTIONS`, the coverage
+ * extractor) for no gain in meaning.
+ */
+function splitHygiene(violations) {
+  const credential = [];
+  const unjudgeable = [];
+  for (const v of violations) {
+    const id = v.slice(1, v.indexOf("]"));
+    (UNJUDGEABLE_RULE_IDS.includes(id) ? unjudgeable : credential).push(v);
+  }
+  return { credential, unjudgeable };
+}
+
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
@@ -826,11 +855,19 @@ export function compareManifest(manifest, prodRows, opts = {}) {
   for (const row of rows) {
     const v = hygieneViolations(row.jobname, row.command);
     prodHygiene.set(row.jobname, v);
-    if (v.length > 0) {
+    const { credential, unjudgeable } = splitHygiene(v);
+    if (credential.length > 0) {
       defects.push({
         kind: "cron-secret-in-command",
         subject: `prod:${row.jobname}`,
-        detail: `the PROD cron.job row for ${row.jobname} fails ${v.length} hygiene rule(s): ${v.join(" ")}`,
+        detail: `the PROD cron.job row for ${row.jobname} fails ${credential.length} hygiene rule(s): ${credential.join(" ")}`,
+      });
+    }
+    if (unjudgeable.length > 0) {
+      defects.push({
+        kind: "measure-fail",
+        subject: `prod:${row.jobname}`,
+        detail: `${unjudgeable.join(" ")} The command could not be judged, and an unjudged command is not a clean one.`,
       });
     }
   }
@@ -993,11 +1030,19 @@ export function compareManifest(manifest, prodRows, opts = {}) {
     if (typeof row.command !== "string") continue; // a withheld row was read by a human at capture time
     const v = hygieneViolations(row.jobname, row.command);
     manifestHygiene.set(row.jobname, v);
-    if (v.length > 0) {
+    const { credential, unjudgeable } = splitHygiene(v);
+    if (credential.length > 0) {
       defects.push({
         kind: "cron-secret-in-command",
         subject: `manifest:${row.jobname}`,
-        detail: `the COMMITTED manifest row for ${row.jobname} fails ${v.length} hygiene rule(s): ${v.join(" ")}`,
+        detail: `the COMMITTED manifest row for ${row.jobname} fails ${credential.length} hygiene rule(s): ${credential.join(" ")}`,
+      });
+    }
+    if (unjudgeable.length > 0) {
+      defects.push({
+        kind: "measure-fail",
+        subject: `manifest:${row.jobname}`,
+        detail: `${unjudgeable.join(" ")} The command could not be judged, and an unjudged command is not a clean one.`,
       });
     }
   }

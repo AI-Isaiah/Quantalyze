@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 64;
+export const SELF_TEST_SCENARIOS = 66;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -1586,6 +1586,130 @@ export async function selfTest() {
         expect(
           noDefectOfKind(r.defects, ["cron-drift"]),
           "and NO cron-drift is reported, because the two sides genuinely agree",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("an UNPARSEABLE header region is a measure-fail on the PROD row, never a credential verdict");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ WHY THIS IS NOT `cron-secret-in-command`. That kind's remedy tells an
+    // operator to treat the named secret as EXPOSED and rotate it. For a
+    // command whose header argument list does not close, NOTHING WAS FOUND —
+    // something could not be READ. Filing a parse failure under a rotation
+    // remedy sends someone to rotate a key on no evidence, and teaches them the
+    // arm's rotation calls are sometimes noise. It is still a violation (a
+    // capture of this row is still refused); it is reported as what it is.
+    //
+    // ⚠️ THE SUBSTITUTION TARGET IS `audit_log_cold_purge`, NOT
+    // `match_engine_cron`, and that is deliberate. `vault-absent` is scoped BY
+    // JOBNAME to `match_engine_cron`, so replacing THAT row's command with an
+    // unbalanced one fires two rules at once and the scenario could no longer
+    // attribute the classification to anything. Picking a job with no
+    // jobname-specific rule also keeps this scenario standing when the
+    // `vault-absent` redesign lands.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    const red = loadFixture("cron-drift", "hygiene-red.json");
+    if (!prod.ok || !red.ok) {
+      pass = expect(false, prod.ok ? red.reason : prod.reason) && pass;
+    } else {
+      const unbalanced = red.data.find((r) => r.rule === "header-unparseable");
+      const rows = clone(prod.data);
+      const target = rows.find((r) => r.jobname === "audit_log_cold_purge");
+      if (target && unbalanced) target.command = unbalanced.command;
+      const r = await driftRun(rows, driftFixturePath("manifest.json"), quiet);
+      const mf = r.defects.filter((x) => x.kind === "measure-fail" && x.subject === "prod:audit_log_cold_purge");
+      pass =
+        expect(
+          unbalanced !== undefined && target !== undefined,
+          "PRECONDITION: hygiene-red.json carries a header-unparseable row and prod-ok.json carries audit_log_cold_purge",
+        ) &&
+        expect(
+          unbalanced !== undefined &&
+            CRON_DRIFT_MOD.hygieneViolations("audit_log_cold_purge", unbalanced.command).length === 1,
+          "PRECONDITION: that command trips exactly ONE rule under this jobname, so the classification below is attributable",
+        ) &&
+        expect(
+          mf.length === 1,
+          `exactly one measure-fail on the PROD row (got ${mf.length}: ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ")})`,
+        ) &&
+        expect(
+          mf.length === 1 && String(mf[0].detail).includes("[header-unparseable]"),
+          "naming the rule that refused, and saying the command could not be judged",
+        ) &&
+        expect(
+          noDefectOfKind(r.defects, ["cron-secret-in-command"]),
+          "and ZERO cron-secret-in-command — an unjudgeable command is never reported as a found credential",
+        ) &&
+        expect(r.exitCode === 1, `the run still exits 1 — refusing to judge is not passing (got ${r.exitCode})`) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("hygiene BYPASS: every enumerated shape fires at least one NAMED rule, and the apostrophe pair agrees");
+  // -------------------------------------------------------------------------
+  {
+    // ⚠️ A SEPARATE FILE FROM `hygiene-red.json` ON PURPOSE. These rows are
+    // MEASURED bypass shapes — spellings that returned zero violations from
+    // every rule before this phase — and several legitimately trip more than
+    // one rule now. `hygiene-red.json` asserts one-rule ISOLATION, so mixing
+    // them would force either a weaker isolation assertion there or a payload
+    // trimmed to fit here. Neither is worth it; the two files ask different
+    // questions.
+    //
+    // ⛔ The assertion is "a NAMED rule fired", never "the command was quoted".
+    const bypass = loadFixture("cron-drift", "hygiene-bypass.json");
+    if (!bypass.ok) {
+      pass = expect(false, bypass.reason) && pass;
+    } else {
+      const idsOf = (row) =>
+        CRON_DRIFT_MOD.hygieneViolations(row.jobname, row.command).map((x) => x.slice(1, x.indexOf("]")));
+      const silent = [];
+      const unexpected = [];
+      const quoted = [];
+      let judged = 0;
+      const byName = new Map();
+      for (const row of bypass.data) {
+        judged += 1;
+        const ids = idsOf(row);
+        byName.set(row.jobname, ids);
+        if (ids.length === 0) silent.push(row.shape);
+        else if (!ids.some((id) => (row.expect_any_of || []).includes(id))) {
+          unexpected.push(`${row.shape}->[${ids.join(",")}]`);
+        }
+        if (CRON_DRIFT_MOD.hygieneViolations(row.jobname, row.command).some((x) => x.includes(row.command))) {
+          quoted.push(row.shape);
+        }
+      }
+      const pairs = bypass.data.filter((r) => typeof r.expect_same_verdict_as === "string");
+      const disagreeing = pairs
+        .filter((r) => JSON.stringify(byName.get(r.jobname)) !== JSON.stringify(byName.get(r.expect_same_verdict_as)))
+        .map((r) => `${r.jobname} vs ${r.expect_same_verdict_as}`);
+      // ⛔ A pair that agrees on EMPTY proves nothing — it is the state before
+      // this phase. The agreement must be on a NON-EMPTY verdict.
+      const emptyPairs = pairs.filter((r) => (byName.get(r.jobname) || []).length === 0).map((r) => r.jobname);
+      pass =
+        expect(judged === bypass.data.length, `every bypass row was judged (${judged} of ${bypass.data.length})`) &&
+        expect(
+          silent.length === 0,
+          `every MEASURED bypass shape now fires at least one rule (${silent.join(", ") || `all ${judged} fire`})`,
+        ) &&
+        expect(
+          unexpected.length === 0,
+          `and one of the rules it names (${unexpected.join(" ") || "every row matched its expect_any_of"})`,
+        ) &&
+        expect(quoted.length === 0, `and NO verdict quotes the offending command (${quoted.join(", ") || "none"})`) &&
+        expect(pairs.length >= 2, `the apostrophe pair is present (${pairs.length} paired rows)`) &&
+        expect(
+          emptyPairs.length === 0,
+          `and it agrees on a NON-EMPTY verdict — two clean readings would be the pre-phase state, not a proof (${emptyPairs.join(", ") || "non-empty"})`,
+        ) &&
+        expect(
+          disagreeing.length === 0,
+          `$q$don't$q$ and $q$dont$q$ produce the SAME verdict set — the apostrophe is inside a dollar-quoted literal and is not a delimiter (${disagreeing.join(" ") || "identical"})`,
         ) &&
         pass;
     }

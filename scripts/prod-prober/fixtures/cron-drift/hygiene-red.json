@@ -57,17 +57,17 @@
   {
     "rule": "x-service-key-literal",
     "jobname": "fixture_split_key_job",
-    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', 'FAKE-key-' || '0123456789ab'), body := '{}'::jsonb)"
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', 'FAKE-key-' || '012345' || '6789ab'), body := '{}'::jsonb)"
   },
   {
     "rule": "x-service-key-literal",
     "jobname": "fixture_concat_key_job",
-    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', concat('FAKE-key-','0123456789ab')), body := '{}'::jsonb)"
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', concat('FAKE-key-','012345','6789ab')), body := '{}'::jsonb)"
   },
   {
     "rule": "x-service-key-literal",
     "jobname": "fixture_format_key_job",
-    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', format('%s%s','FAKE-key-','0123456789ab')), body := '{}'::jsonb)"
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', format('%s%s%s','FAKE-key-','012345','6789ab')), body := '{}'::jsonb)"
   },
   {
     "rule": "x-service-key-literal",

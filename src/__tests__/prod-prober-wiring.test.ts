@@ -39,7 +39,9 @@ import {
 } from "../../scripts/prod-prober/run.mjs";
 import {
   CRON_JOB_SEPARATORS,
+  HYGIENE_RULE_IDS,
   compareManifest,
+  hygieneViolations,
   parseCronJobRows,
 } from "../../scripts/prod-prober/arms/cron-drift.mjs";
 
@@ -749,13 +751,62 @@ describe("[164.1-05] kinds and floors", () => {
     ]);
   });
 
-  it("SELF_TEST_SCENARIOS is 64, and the runner PRINTS exactly 64 headers numbered 1..64", async () => {
+  it("every hygiene-bypass row names rule ids that EXIST, and a misspelled id is caught", () => {
+    // The bypass fixture's `expect_any_of` is what the self-test scenario
+    // measures each row against. An id that no longer exists — renamed rule,
+    // typo — would make that assertion unsatisfiable in the silent direction,
+    // so the id set is checked against the arm's own list here.
+    const rows: Array<{ jobname: string; expect_any_of: string[] }> = JSON.parse(
+      readFileSync(join(PROBER_DIR, "fixtures", "cron-drift", "hygiene-bypass.json"), "utf8"),
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    const unknown = (rs: Array<{ expect_any_of: string[] }>) =>
+      rs.flatMap((r) => (r.expect_any_of || []).filter((id) => !HYGIENE_RULE_IDS.includes(id)));
+    for (const r of rows) expect(r.expect_any_of?.length, r.jobname).toBeGreaterThan(0);
+    expect(unknown(rows)).toEqual([]);
+
+    // CALIBRATION: the check above must be able to fail. Misspell one id on a
+    // COPY and assert the same predicate reports it.
+    const mutated = JSON.parse(JSON.stringify(rows));
+    mutated[0].expect_any_of[0] = `${mutated[0].expect_any_of[0]}-typo`;
+    expect(JSON.stringify(mutated)).not.toBe(JSON.stringify(rows));
+    expect(unknown(mutated).length).toBeGreaterThan(0);
+  });
+
+  it("a header NAME inside a comment is not an anchor, and removing the comment marker makes it one", () => {
+    // ⛔ D7's trap, calibrated in both directions. The header name is itself a
+    // string literal, so it is BLANK in `scanSql`'s mask and cannot be matched
+    // there; it is matched on the raw text and then CONFIRMED at the same index
+    // on the mask. Without that confirmation, a name sitting in a `--` comment
+    // — or inside a bigger literal — would anchor the rule and a long literal
+    // somewhere else entirely would be reported as a header credential.
+    //
+    // ⚠️ THE FIXTURE SHAPE IS LOAD-BEARING AND WAS CHOSEN BY MEASUREMENT. An
+    // anchor sitting in a comment with NO real code after it is already clean
+    // for a second reason — the value walk runs on the mask, where the comment
+    // is blank — so such a fixture passes even with this control removed and
+    // proves nothing. Here the comment ENDS at the newline and real code with a
+    // long literal follows, which is the case only the mask CONFIRMATION
+    // catches. PROBED: with `masked[m.index] !== "'"` neutered, the first
+    // command below fires `x-service-key-literal`.
+    const commented = "SELECT id FROM t -- 'X-Service-Key',\n WHERE k = 'FAKE-key-0123456789ab'";
+    // The SAME text with only the comment marker removed, so the anchor is code.
+    const uncommented = commented.replace(" -- ", "    ");
+    expect(uncommented).not.toBe(commented);
+
+    const ids = (cmd: string) =>
+      hygieneViolations("fixture_anchor_job", cmd).map((v: string) => v.slice(1, v.indexOf("]")));
+    expect(ids(commented)).not.toContain("x-service-key-literal");
+    expect(ids(uncommented)).toContain("x-service-key-literal");
+  });
+
+  it("SELF_TEST_SCENARIOS is 66, and the runner PRINTS exactly 66 headers numbered 1..66", async () => {
     // ⭐ SOURCE-DERIVED, not scraped. The headers are auto-numbered at RUNTIME
     // off the same counter the runner's completeness assertion reads, so there
     // is no literal `k/50` in the source to count. Executing the self-test is
     // the only honest way to derive the number — and it is fixtures-only, no
     // network, under a tenth of a second.
-    expect(SELF_TEST_SCENARIOS).toBe(64);
+    expect(SELF_TEST_SCENARIOS).toBe(66);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);
