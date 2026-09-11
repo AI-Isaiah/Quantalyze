@@ -945,8 +945,34 @@ function reachesVaultRead(spans, functionsDir) {
  * @returns {string[]}
  */
 export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_DIR } = {}) {
-  const text = String(command ?? "");
-  const name = String(jobname ?? "");
+  // ⛔ A COMMAND THAT IS NOT A STRING IS ONE NOBODY MEASURED — IT IS NOT A CLEAN
+  // ONE. Found by the CR-R1-02 audit of "absence coerced to a pass" (the
+  // invariant is recorded beside `recordVerdict`): `String(command ?? "")`
+  // turned `undefined`, `null` and a number into the empty command, and the
+  // empty command trips no rule, so `hygieneViolations(name, undefined)`
+  // returned `[]` — the same sentence this function uses for "judged and
+  // clean". MEASURED 2026-09-11, all four returned `[]`.
+  //
+  // ⭐ IT THROWS RATHER THAN RETURNING A VIOLATION, because "no measurement
+  // happened" is the verdict every OTHER refusal in this function already
+  // spells that way (`codeSpans`' depth cap, `reachesVaultRead`'s absent
+  // snapshot). Both callers already route the throw to a per-row
+  // `measure-fail`: `compareManifest`'s `judgeRow` and `captureManifest`'s
+  // guard. The manifest side had its own totality check (a row whose `command`
+  // is not a string is a WITHHELD row and is skipped); the PROD side had
+  // nothing, and the PROD side is the one read live from a database.
+  if (typeof command !== "string") {
+    throw new Error(
+      `the cron.job command for ${typeof jobname === "string" && jobname.length > 0 ? jobname : "an unnamed job"} is ${command === null ? "null" : typeof command}, not a string — refusing to judge it. An unread command is not a clean one, and String(undefined ?? "") is the empty command, which trips no rule.`,
+    );
+  }
+  if (typeof jobname !== "string" || jobname.trim().length === 0) {
+    throw new Error(
+      "a cron.job row reached the hygiene rules with no usable jobname — refusing to judge it. The jobname SCOPES the vault-absent rule, so an unnamed row silently opts out of it.",
+    );
+  }
+  const text = command;
+  const name = jobname;
   const out = [];
   const said = new Set();
   // A rule says its piece AT MOST ONCE per command. Every rule below runs over
