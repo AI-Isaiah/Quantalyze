@@ -165,5 +165,23 @@
       "header-unparseable",
       "long-token-anywhere"
     ]
+  },
+  {
+    "shape": "(n) CR-R1-01: the credential sits DIRECTLY under an anchored header name, one call-level deep behind coalesce(nullif(v,''), '<key>') — the ordinary “read the config, else the hardcoded fallback” idiom, not obfuscation. derivedLiteralLength refuses to enter a non-BUILDERS callee, so the header rules never counted the value and the token rule had been switched off for the whole region.",
+    "jobname": "bypass_header_wrapped_literal_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('Content-Type', 'application/json', 'X-Service-Key', coalesce(nullif(v_key, ''), 'FAKE-0123456789-0123456789-0123456789ab')), body := '{}'::jsonb)",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ],
+    "expect_same_verdict_as": "bypass_var_key_job"
+  },
+  {
+    "shape": "(n-control) the SAME wrapper around the SAME key OUTSIDE any header argument list — the spelling that always fired. It is what makes the row above a reading about the header REGION rather than about coalesce().",
+    "jobname": "bypass_wrapped_literal_outside_header_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', body := coalesce(nullif(v_key, ''), 'FAKE-0123456789-0123456789-0123456789ab')::jsonb)",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ],
+    "expect_same_verdict_as": "bypass_header_wrapped_literal_job"
   }
 ]

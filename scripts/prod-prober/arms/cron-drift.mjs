@@ -29,6 +29,17 @@
  * rules below: the manifest records the ACHIEVABLE configuration, never
  * "whatever PROD happens to have".
  *
+ * ⚠️ AND THAT SENTENCE IS ONLY EVER AS STRONG AS THE RULES IT POINTS AT — it
+ * says every row PASSES them, which is not the same as every credential being
+ * caught. It has been falsified by measurement twice already: 164.8.5-REVIEW
+ * CR-02 (a record separator inside a command truncated the text the rules were
+ * handed) and 164.8.5-REVIEW-R1 CR-R1-01 (a 37-character key directly under
+ * 'X-Service-Key', one ordinary `coalesce(…)` deep, tripped NO rule and was
+ * WRITTEN INTO the committed oracle). Both are closed and each carries its own
+ * red row. ⛔ The next reader should treat this paragraph as a DESIGN INTENT to
+ * re-measure against — `hygiene-bypass.json` is where a falsification is
+ * recorded — and never as a property already proven.
+ *
  * ============================================================================
  * ⛔ THE REPOSITORY IS PUBLIC AND `.planning/` IS TRACKED (T-164.1-10)
  * ============================================================================
@@ -288,13 +299,27 @@ export const HEADERS_LITERAL_MAX = 32;
  * (1) THE Q2 REGION PARTITION. `long-token-anywhere` deliberately EXCLUDES
  *     header regions, because `long-literal-in-headers` already owns them and
  *     two rules firing on one red row would break the one-rule-isolation
- *     assertion. That exclusion loses nothing ONLY while
- *     `TOKEN_MIN >= HEADERS_LITERAL_MAX`: a whitespace-delimited token of
- *     `TOKEN_MIN` characters lives inside a literal of at least `TOKEN_MIN`
- *     characters, which is an argument of at least `HEADERS_LITERAL_MAX`
- *     DERIVED length, which is exactly what `long-literal-in-headers` fires on.
- *     Let the two constants drift apart and a token in the gap is caught by
- *     NOBODY, silently — the whole point of writing one in terms of the other.
+ *     assertion. That exclusion needs `TOKEN_MIN >= HEADERS_LITERAL_MAX`: a
+ *     whitespace-delimited token of `TOKEN_MIN` characters lives inside a
+ *     literal of at least `TOKEN_MIN` characters, which is an argument of at
+ *     least `HEADERS_LITERAL_MAX` DERIVED length, which is exactly what
+ *     `long-literal-in-headers` fires on. Let the two constants drift apart and
+ *     a token in the gap is caught by NOBODY, silently — the whole point of
+ *     writing one in terms of the other.
+ *
+ *     ⛔ CORRECTED 2026-09-11 (164.8.5-REVIEW-R1 CR-R1-01): this paragraph used
+ *     to claim the exclusion "loses nothing ONLY while
+ *     `TOKEN_MIN >= HEADERS_LITERAL_MAX`". THAT CONDITION IS NECESSARY AND NOT
+ *     SUFFICIENT, and the claim was false as written. The partition ALSO needs
+ *     the header measurement to be TOTAL over the region — and it is not:
+ *     `derivedLiteralLength` deliberately refuses to enter `(SELECT …)` and any
+ *     `(` whose callee is not in `BUILDERS`, so a literal behind either derives
+ *     0 and the header rules never see it. MEASURED: a 37-character key under
+ *     `'X-Service-Key'` behind `coalesce(nullif(v,''), '<key>')` reported ZERO
+ *     violations from every rule. The exclusion at the token rule is now
+ *     conditional on the literal having been COUNTED rather than merely
+ *     LOCATED; both halves of the condition are live, and neither constant
+ *     moved.
  *
  * (2) THE PIN. `src/__tests__/prod-prober-wiring.test.ts` asserts
  *     `TOKEN_MIN === HEADERS_LITERAL_MAX` under a title that states this
@@ -1104,7 +1129,50 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
       // trade: one-rule isolation is a property of the RED fixture file, and
       // preserving it at the cost of never naming the credential is the
       // measurement serving the harness.
-      if (regions.some((r) => !r.unparseable && lit.start < r.to && lit.end > r.from)) continue;
+      //
+      // ⛔ EXCLUDE ONLY WHAT `long-literal-in-headers` COULD ACTUALLY SEE
+      // (164.8.5-REVIEW-R1 CR-R1-01). THE INVARIANT: a literal may be handed to
+      // the header rules ONLY if the header measurement really EXAMINED it —
+      // being LOCATED inside a header region is not the same thing as having
+      // been COUNTED by one.
+      //
+      // The old test was pure location. The Q2 partition argued that a literal
+      // inside a header region is an argument of at least its own derived
+      // length, so `long-literal-in-headers` owns it — but that is false
+      // wherever `derivedLiteralLength` deliberately refuses to descend: it
+      // never enters `(SELECT …)` and skips whole any `(` whose callee is not
+      // in `BUILDERS`. Such an argument derives 0, the three anchored header
+      // rules measure 0 < `HEADER_LITERAL_MIN`, and the only rule left had been
+      // switched off for that region.
+      //
+      // ⛔ AND THE SHAPE THAT DOES IT IS ORDINARY CODE, NOT OBFUSCATION.
+      // MEASURED 2026-09-11, a 37-character digit-bearing key directly under
+      // 'X-Service-Key' behind `coalesce(nullif(v_key,''), '<key>')` — "read the
+      // config, else the hardcoded fallback" — reported ZERO violations from
+      // EVERY rule in `HYGIENE_RULE_IDS`, and `captureManifest` returned 0 and WROTE THAT KEY
+      // into the oracle committed to a PUBLIC repository. `nullif`,
+      // `(SELECT …)` and any non-BUILDERS wrapper behaved identically. The
+      // identical key written PLAINLY, and the identical `coalesce` OUTSIDE a
+      // header region, were both caught — moving the credential INTO the header
+      // expression is what made it invisible, which is the precise inversion of
+      // what this rule set is for.
+      //
+      // ⛔ NO THRESHOLD MOVES. D4's `HEADER_LITERAL_MIN` / `HEADERS_LITERAL_MAX`
+      // are untouched and `TOKEN_MIN` stays derived; what changed is the
+      // PREDICATE, from "is located in" to "was counted by".
+      if (
+        regions.some(
+          (r) =>
+            !r.unparseable &&
+            lit.start < r.to &&
+            lit.end > r.from &&
+            depth0Args(span, r.from, r.to).some(
+              ([a, b]) =>
+                lit.start >= a && lit.end <= b && derivedLiteralLength(span, a, b) >= lit.content.length,
+            ),
+        )
+      )
+        continue;
       // ⛔ THE `vaultSpan` EXEMPTION WAS DELETED IN 164.8.5-REVIEW F5, AND ITS
       // ABSENCE IS THE SAFEGUARD. It read
       //
