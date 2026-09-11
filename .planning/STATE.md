@@ -1280,8 +1280,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.9 edited: routed [164.8.1-REPLAY-INSERT-ONLY-SCOPE] here from Phase 164.8.1 PR review: requirements line + ROUTED HERE block
 - Phase 164.9 edited: routed [164.8-PUSH-RACE-VAC08] here from Phase 164.8 plan 05: VAC-08 and apply-test share advisory key 61616158
 - Phase 164.5.1 edited: A1 measured on shared TEST (Vault read permitted) — gate lifted; migration-vs-runbook narrowed to the rebuild statement
-- Phase 164.8.5 inserted after Phase 164.8: PROBERPARSE — the prober's dodgeable hygiene rules and silently-dropping parser, from Phase 164.7's post-merge code review (URGENT)
-- Phase 164.8.6 inserted after Phase 164.8: VAULTTICKFIX — the forward migration for Phase 164.7's SQL-side findings, including a verification check that cannot fail (URGENT)
+- Phase 164.8.5 inserted after Phase 164.8: PROBERPARSE — the prober's dodgeable hygiene rules and silently-dropping parser, from Phase 164.7's post-merge code review (URGENT) Current Phase pointer deliberately NOT moved — these are DEFERRAL DESTINATIONS for Phase 164.7's post-merge review findings, scheduled rather than urgent-next (same precedent as the 164.1, 164.8 and 164.4.1 insertions). ⛔ `state.patch` cannot write `Current Phase` / `Next recommended run` in any case.
+- Phase 164.8.6 inserted after Phase 164.8: VAULTTICKFIX — the forward migration for Phase 164.7's SQL-side findings, including a verification check that cannot fail (URGENT) Current Phase pointer deliberately NOT moved — these are DEFERRAL DESTINATIONS for Phase 164.7's post-merge review findings, scheduled rather than urgent-next (same precedent as the 164.1, 164.8 and 164.4.1 insertions). ⛔ `state.patch` cannot write `Current Phase` / `Next recommended run` in any case.
 
 ### Decisions
 
