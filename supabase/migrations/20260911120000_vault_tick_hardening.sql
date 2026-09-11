@@ -17,6 +17,30 @@
 -- a falsifiable form, never by rewriting a file the ledger has already recorded.
 --
 -- ══════════════════════════════════════════════════════════════════════════
+-- ⛔ CRITERIA 2 AND 3 ARE DELIVERED HERE AND ARE **NOT LIVE ON THE HOURLY TICK**
+-- ══════════════════════════════════════════════════════════════════════════
+-- ⛔ NOTHING IN THIS FILE MAY BE READ AS CLOSING CRITERIA 2 OR 3 IN PRODUCTION.
+-- The single-row-safe Vault read (criterion 2) and the whitespace-aware empty-key
+-- guard (criterion 3) land in public.match_engine_cron_tick() — a function that
+-- THE SCHEDULER DOES NOT CALL.
+--
+-- MEASURED from scripts/prod-prober/cron-manifest.json, captured
+-- 2026-09-11T14:41:44Z: the manifest holds 14 jobs, every one of them
+-- `username: postgres`, and NOT ONE of them calls match_engine_cron_tick().
+-- Cron job 1 `match_engine_cron` (schedule `0 * * * *`, active) still carries its
+-- OWN inline DO block, with the UNGUARDED single-row secret read and the
+-- pre-164.8.6 empty-string key guard — MEASURED: that command text contains no
+-- btrim at all. So on the hourly tick today a duplicate secret name still picks
+-- an arbitrary row, and a key of pure whitespace still ships in a header.
+--
+-- ⭐ WHAT THIS FILE ACTUALLY DELIVERS is the CALLABLE with both defects fixed,
+-- plus the falsifiable checks and the gate arms that keep it fixed. What it does
+-- NOT deliver is the re-point. Re-pointing the live job row at this function is
+-- owned by **Phase 164.5.1 CRONREPOINT** (carried forward from Phase 164.5 item
+-- (7)); until that phase merges, the two criteria are closed IN THE REPO and
+-- OPEN IN PRODUCTION, and that gap is recorded here rather than rounded off.
+--
+-- ══════════════════════════════════════════════════════════════════════════
 -- TWO FILES, ONE REPAIR — recorded rather than silently satisfied
 -- ══════════════════════════════════════════════════════════════════════════
 -- The ROADMAP goal sentence says "One forward migration". The "one FILE"
@@ -131,9 +155,9 @@
 -- is fixed at the source. The two sets, enumerated:
 --
 --   MIGRATION NEEDLES (asserted present by position(needle IN v_def) below)
---     FROM vault.decrypted_secrets          — the Vault read's own statement shape
---     FROM public.system_settings           — the settings read's own statement shape
---     IF v_cnt > 1 THEN                     — the cardinality guard (shape-only; no arm)
+--     FROM vault.⟦…⟧                        — the Vault read's own statement shape
+--     FROM public.⟦…⟧                       — the settings read's own statement shape
+--     IF v_cnt ⟦…⟧                          — the cardinality guard (shape-only; no arm)
 --
 --   GATE `find` STRINGS (mutated by the twins in
 --   supabase/tests/test_analytics_service_settings_and_vault_tick.sql)
@@ -143,17 +167,27 @@
 --     C2       IF v_url !~ c_url_allowed ⟦…⟧
 --     C3       … read it with an admin session. Allowed: an https host under .up.railway.app⟦…⟧
 --
--- ⛔ EVERY GATE `find` ABOVE IS PRINTED WITH ITS TAIL ELIDED AS ⟦…⟧ AND IS
---    THEREFORE NOT A BYTE-IDENTICAL COPY, DELIBERATELY. The mutation runner
---    measures `occurrences` over the RAW FILE TEXT, comments included
+-- ⛔ EVERY STRING IN BOTH TABLES ABOVE IS PRINTED WITH ITS TAIL ELIDED AS ⟦…⟧
+--    AND IS THEREFORE NOT A BYTE-IDENTICAL COPY, DELIBERATELY. The mutation
+--    runner measures `occurrences` over the RAW FILE TEXT, comments included
 --    (countOccurrences / applyFileStep in scripts/mutation-runner/run.mjs): a
 --    verbatim paste of a find string in this header would be a SECOND
 --    occurrence, every one of those arms claims 1, and the run would report
 --    MEASURE_FAIL / occurrence-mismatch — the mutation not applied, so the arm
---    not tested. The elided tails are, in order: THEN, THEN, ' , THEN, and ';
---    This is the same class of trap 20260907130000:776-783 records for its own
---    concatenated needle, and the reason the three needles above are ASSEMBLED
---    BY CONCATENATION in the DECLARE below rather than written whole.
+--    not tested. The elided gate tails are, in order: THEN, THEN, ' , THEN, and
+--    '; and the elided needle tails are decrypted_secrets, system_settings and
+--    > 1 THEN. This is the same class of trap 20260907130000:776-783 records for
+--    its own concatenated needle, and the reason the three needles above are
+--    ASSEMBLED BY CONCATENATION in the DECLARE below rather than written whole.
+--
+-- ⭐ THE NEEDLE ROWS WERE WRITTEN WHOLE UNTIL 2026-09-11, and this file then
+--    CONTRADICTED ITSELF: the DECLARE below says the needles are concatenated
+--    "precisely so each occurs once", while the header's own verbatim copies
+--    made each occur TWICE. MEASURED before the elision — 2, 2 and 2 raw
+--    occurrences of the three needles; after it, 1 each, the body's own. No arm
+--    keys on any of the three, so nothing was RED either way; the defect was
+--    that the rationale was false, not that a gate broke. Elision is the repair
+--    because the rationale is the part worth keeping.
 --
 -- ⛔ NEITHER V1's NOR V2's find is a needle, and no arm mutates the cardinality
 --    guard. The two sets are disjoint by construction and stay that way: adding
@@ -295,7 +329,16 @@ COMMENT ON FUNCTION public.match_engine_cron_tick() IS
   're-test is what survives the CHECK constraint being dropped, and it never '
   'echoes the offending value), and fires one ASYNC net.http_post whose '
   'returned BIGINT is a request id and NOT an HTTP success. EXECUTE is held by '
-  'the owner alone; the scheduler runs as that owner.';
+  'the owner alone; the scheduler WOULD run as that owner once the job row is '
+  're-pointed. ⛔ AND IT IS NOT RE-POINTED YET: this function registers nothing '
+  'and is invoked by nothing in this repository — MEASURED 2026-09-11 against '
+  'the prober cron manifest, no scheduled job calls it, and cron job 1 '
+  'match_engine_cron still runs its own inline body. The cardinality guard and '
+  'the whitespace-aware key guard above are therefore NOT live on the hourly '
+  'tick. Repointing the live job row at it is Phase 164.5.1 CRONREPOINT '
+  '(carried forward from Phase 164.5 item (7)), which must also settle the '
+  'manifest hygiene rule requiring the literal vault.decrypted_secrets to '
+  'appear in that row''s own command text (164.7-RESEARCH Open Question 2).';
 
 -- --------------------------------------------------------------------------
 -- STEP 2: the EXECUTE grantee set (criterion 4 / 164.7-WR02)
@@ -306,9 +349,15 @@ COMMENT ON FUNCTION public.match_engine_cron_tick() IS
 -- revoked three of the four, and service_role's EXECUTE survived Phase 164.7
 -- precisely because the check beside it probed only anon and authenticated.
 --
--- NO GRANT follows. The scheduler runs as `postgres`, which is the function's
--- OWNER (scripts/prod-prober/cron-manifest.json jobid 1), and an owner needs no
--- grant — the same statement 20260907120000:386 makes.
+-- NO GRANT follows. The scheduler runs as `postgres` — MEASURED, all 14 rows of
+-- scripts/prod-prober/cron-manifest.json carry `username: postgres` — and
+-- `postgres` is this function's OWNER, so an owner needs no grant; the same
+-- statement 20260907120000:386 makes.
+--
+-- ⚠️ THAT IS A STATEMENT ABOUT THE ROLE, NOT ABOUT WIRING. No job in that
+-- manifest calls this function yet (see the criteria-2-and-3 block in the
+-- header); the grantee set below is what the scheduler WILL need once Phase
+-- 164.5.1 CRONREPOINT re-points jobid 1 at it, and is correct in the meantime.
 --
 -- ⚠️ ASSUMPTION A3, stated rather than assumed away: no out-of-repo caller
 -- invokes this function as service_role. MEASURED at HEAD — a repo-wide grep
@@ -347,9 +396,11 @@ DO $verify$
 DECLARE
   -- ⛔ Every variable is DECLAREd up front: plpgsql compiles a DO block WHOLE,
   --    so a missing DECLARE raises 42601 and NONE of the checks below run.
+  v_overloads INTEGER;
   v_nargs     SMALLINT;
   v_secdef    BOOLEAN;
   v_config    TEXT[];
+  v_srchpath  TEXT;
   v_owner     TEXT;
   v_bypass    BOOLEAN;
   v_super     BOOLEAN;
@@ -389,6 +440,33 @@ DECLARE
   --     it, because neither environment can hold two secrets of one name.
   v_cardinality_needle TEXT := 'IF v_cnt ' || '> 1 THEN';
 BEGIN
+  -- 0. THE NAME MUST RESOLVE TO EXACTLY ONE FUNCTION, asserted rather than
+  --    assumed, and asserted FIRST because every check after it depends on it.
+  --
+  -- ⛔ CHECKS 1, 2 AND 2b READ (nspname, proname) WITH NO SIGNATURE, while check
+  --    6 narrows its own read to `pronargs = 0` — the file was internally
+  --    inconsistent about this until 2026-09-11 and this check is what makes the
+  --    two agree. `SELECT … INTO` WITHOUT STRICT takes the first of several rows
+  --    IN SILENCE: no error, no notice, nothing in the apply log. Create a
+  --    one-argument overload of this name and checks 1/2/2b may measure
+  --    whichever row the planner hands back — the overload's pronargs, the
+  --    overload's prosecdef, the overload's proconfig, and (through check 3-5's
+  --    regprocedure literal, which resolves to the zero-argument row) a body
+  --    that belongs to a different function than the flags beside it. Check 6
+  --    cannot see the overload AT ALL. A SECURITY DEFINER overload created
+  --    without an explicit REVOKE carries the DEFAULT ACL, which grants EXECUTE
+  --    TO PUBLIC — so a callable that posts the analytics service key would sit
+  --    in the catalogue, world-executable, with every check below green. One
+  --    extra catalogue count buys the difference between "the checks passed" and
+  --    "the checks measured the function they name".
+  SELECT count(*) INTO v_overloads
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'match_engine_cron_tick';
+  IF v_overloads > 1 THEN
+    RAISE EXCEPTION 'Migration 20260911120000: public.match_engine_cron_tick resolves to % functions in schema public, expected exactly 1. Checks 1, 2 and 2b read (schema, name) with no signature and SELECT INTO without STRICT silently takes the first of several, while check 6 is narrowed to the zero-argument row and cannot see an overload at all — so an overload carrying the default ACL (EXECUTE TO PUBLIC on a SECURITY DEFINER body that posts the analytics service key) would sit in the catalogue with every check below reporting green', v_overloads;
+  END IF;
+
   -- 1. The function exists and takes NO arguments. A caller-supplied url or key
   --    on a SECURITY DEFINER function IS the attack surface (T-161.1-10).
   SELECT p.pronargs, p.prosecdef, p.proconfig
@@ -409,10 +487,27 @@ BEGIN
   IF NOT v_secdef THEN
     RAISE EXCEPTION 'Migration 20260911120000: match_engine_cron_tick is not SECURITY DEFINER, so it reads the secret store as the CALLER and the Vault read fails for every role that is not the owner';
   END IF;
-  IF v_config IS NULL OR NOT EXISTS (
-       SELECT 1 FROM unnest(v_config) c WHERE c LIKE 'search_path=%'
-     ) THEN
-    RAISE EXCEPTION 'Migration 20260911120000: match_engine_cron_tick has no pinned search_path. On a SECURITY DEFINER function that is a privilege-escalation route — a caller-created settings table earlier in the path would supply the url the service key is posted to';
+  --
+  -- ⛔ THE VALUE, NOT THE PREFIX. The form this replaces asked only whether SOME
+  --    proconfig element BEGAN `search_path=`, and that prefix test is satisfied
+  --    by the EMPTY path (`search_path=`) and by a path whose FIRST element is a
+  --    schema the caller can create objects in (`search_path=tenant_scratch,
+  --    public`) — while the message beside it claimed the strictly stronger
+  --    property, that no caller-created settings table can be interposed ahead
+  --    of the one this definer reads. A prefix test cannot claim that, and the
+  --    two disagreeing is the whole defect. The comparison below is against the
+  --    value THIS FILE SETS in the CREATE FUNCTION declaration in STEP 1, with
+  --    whitespace removed so it survives the server's own rendering of the SET
+  --    clause instead of pinning a spacing convention. Check and message now
+  --    claim the same thing.
+  SELECT c INTO v_srchpath
+    FROM unnest(COALESCE(v_config, ARRAY[]::TEXT[])) AS c
+   WHERE c LIKE 'search_path=%';
+  IF v_srchpath IS NULL THEN
+    RAISE EXCEPTION 'Migration 20260911120000: match_engine_cron_tick does not pin search_path at all (proconfig=%). On a SECURITY DEFINER function that is a privilege-escalation route — the CALLER then decides which schema every unqualified name in the body resolves to, and a caller-created settings table earlier in the path would supply the url the service key is posted to', v_config;
+  END IF;
+  IF regexp_replace(v_srchpath, '\s', '', 'g') <> 'search_path=public,pg_catalog' THEN
+    RAISE EXCEPTION 'Migration 20260911120000: match_engine_cron_tick pins search_path to "%", not to the "public, pg_catalog" its own CREATE FUNCTION sets. A pin that merely EXISTS proves nothing: an empty path, or one led by a schema the caller can create objects in, satisfies a prefix test while still letting a caller-created settings table earlier in the path supply the url the service key is posted to — and this body runs as a role that is exempt from row security', v_srchpath;
   END IF;
 
   -- 2b. …and the DEFINER role can actually SEE the row it reads (161.1-AUDIT
