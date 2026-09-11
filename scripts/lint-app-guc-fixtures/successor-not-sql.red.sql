@@ -14,11 +14,13 @@
 -- contains zero app-GUC reads, so the second half of the check was free —
 -- an exemption satisfied by any readable file of any type.
 --
--- WHY `notes.txt` BESIDE THIS FILE CARRIES A READ-SHAPED LINE. It does, on
--- purpose. If the target were an empty or irrelevant text file, this fixture
--- would not distinguish "rejected because it is not SQL" from "rejected
--- because of what is in it". The target's content would satisfy the old arm;
--- it is refused on TYPE, before its content is ever looked at.
+-- ⛔ WHY `notes.txt` BESIDE THIS FILE HOLDS ZERO APP-GUC READS. Because the
+-- defect is that a content-CLEAN non-SQL file passed. A target carrying a
+-- read-shaped line would be caught by the CONTENT arm instead, and the red
+-- could not be attributed to the TYPE arm — MEASURED 2026-09-11 with exactly
+-- such a draft: deleting the type arm left the self-test at exit 0, GREEN.
+-- With a clean target, deleting the type arm makes THIS fixture fire nothing
+-- and the self-test names it. See `notes.txt` itself for the full record.
 --
 -- MUST fire exactly one finding kind: successor-invalid.
 

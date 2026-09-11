@@ -4,24 +4,31 @@ The successor `successor-not-sql.red.sql` points at — and why it is a .txt
 This file is the TARGET of that fixture's `successor:` field. It is plain text,
 it is readable, and it is emphatically not a migration.
 
-It exists to make ONE arm of the successor check falsifiable on its own: the
-TYPE arm, which refuses a successor whose name does not end in `.sql` before
-anything is resolved or read.
+⛔ IT CONTAINS ZERO APP-GUC READS, AND THAT IS LOAD-BEARING — MEASURED
+------------------------------------------------------------------------
+The defect this fixture closes (164.7-REVIEW WR-06, threat T-164.7-02) is that
+a successor merely had to EXIST and to hold zero app-GUC reads. Any file that
+is not SQL trivially holds zero, so the second half of the old check was free
+and `successor: notes.txt` PASSED.
 
-The line below is the load-bearing part. It is SQL-shaped, so under the OLD
-one-arm check — "the successor must exist and must contain zero app-GUC reads" —
-this file's content was the reason the check had to be tightened rather than the
-reason it passed:
+So the fixture only demonstrates that closure if this file would have passed
+the OLD check. If it carried a read-shaped line, the fixture would go red on
+the CONTENT arm instead, and the red could not be attributed to the TYPE arm
+at all.
 
-  v_url := current_setting('app.analytics_service_url', TRUE);
+MEASURED 2026-09-11, with an earlier draft of this file that did carry one:
+disabling the type arm left `lint-app-guc.mjs --self-test` at `exit 0`, fully
+GREEN — the fixture kept firing through the content arm and proved nothing
+about the arm that had just been deleted. That is a control that cannot fail,
+which is the exact defect class this phase exists to remove.
 
-Read that line the way the gate does and it is a site. But nothing reads this
-file at all any more: the TYPE arm short-circuits, so the refusal cannot be
-confused with a refusal about content. Deleting the line above would make the
-fixture pass for the wrong reason, and the fixture would stop proving that a
-non-SQL successor is rejected BY TYPE.
+⛔ Do NOT add an app-GUC read to this file to make it "look like SQL". Doing so
+re-creates that vacuity. The refusal must happen on the NAME, before this
+file's bytes are ever read — which is also why the type arm short-circuits.
 
 ⚠️ This is a `.txt` and therefore outside `sqlFilesUnder`'s corpus and outside
-the self-test's `*.red.sql` / `*.green.sql` sweeps. It is never scanned. Its
-sibling `unreadable-marker.txt` documents the other conditions that cannot be a
-committed `.sql` file.
+the self-test's `*.red.sql` / `*.green.sql` sweeps. It is never scanned on its
+own; it is read only as the successor of the fixture that names it, and under
+the shipped check it is not even read that far. Its sibling
+`unreadable-marker.txt` documents the conditions that cannot be a committed
+`.sql` file at all.
