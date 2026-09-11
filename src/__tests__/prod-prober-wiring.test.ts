@@ -839,6 +839,34 @@ describe("[164.1-05] kinds and floors", () => {
     expect(ids(uncommented)).toContain("x-service-key-literal");
   });
 
+  it("a command that is NOT A STRING is REFUSED, never judged clean — the second spelling of CR-R1-02's class", () => {
+    // ⛔ THE SAME INVARIANT AS CR-R1-02, ONE LAYER DOWN. `hygieneViolations`
+    // opened with `String(command ?? "")`, so `undefined`, `null` and a number
+    // all became the EMPTY command — which trips no rule and therefore returned
+    // `[]`, byte-identical to the answer for "judged, and clean". MEASURED
+    // 2026-09-11 before the fix: all four of the calls below returned `[]`.
+    //
+    // The manifest side had its own totality check (a row whose `command` is
+    // not a string is a WITHHELD row and is skipped deliberately). The PROD
+    // side — the one read live out of a database — had nothing.
+    //
+    // ⭐ IT MUST THROW rather than return a violation id: that is how every
+    // other refusal in this function is spelled, and both callers already route
+    // a throw to a per-row `measure-fail` rather than to a credential finding.
+    for (const bad of [undefined, null, 12345, { toString: () => "SELECT 1" }] as unknown[]) {
+      expect(() => hygieneViolations("a_job", bad as string), `command ${String(bad)} must be refused`).toThrow(
+        /not a string/,
+      );
+    }
+    expect(() => hygieneViolations(undefined as unknown as string, "SELECT 1"), "an unnamed row scopes vault-absent out of existence").toThrow(
+      /no usable jobname/,
+    );
+    // CALIBRATION: a real string on the same call path is judged rather than
+    // refused, so "it throws" is a reading about the TYPE and not something
+    // this function now always does.
+    expect(hygieneViolations("a_job", "SELECT 1")).toEqual([]);
+  });
+
   it("TOKEN_MIN equals HEADERS_LITERAL_MAX — the Q2 region partition has no gap only while a TOKEN_MIN-length token inside a header literal is a HEADERS_LITERAL_MAX-length argument", () => {
     // ⛔ THE INVARIANT, NOT THE VALUE. `long-token-anywhere` deliberately
     // EXCLUDES header regions so it cannot collide with
