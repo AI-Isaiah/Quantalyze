@@ -910,7 +910,17 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
   // nothing today (the outer raw text already contains each body) — they are
   // written this way so both families read the same input list.
   for (const span of spans) {
-    if (/current_setting\s*\(\s*'app\./i.test(span.sql)) {
+    // ⛔ BYTE-IDENTICAL to `DETECT_RE` in `scripts/lint-app-guc.mjs` — this repo
+    // has ONE definition of what an app-GUC read looks like, and
+    // `src/__tests__/lint-app-guc.test.ts` pins that identity by SUBSTRING, so
+    // drifting either copy reds the suite. Widened 2026-09-11 (plan 164.8.5-07,
+    // 164.7-REVIEW WR-07) to the five spellings the single-quote form missed;
+    // the six detected forms are tabulated in `lint-app-guc.mjs`'s docstring.
+    if (
+      /current_setting\s*(?:\/\*[\s\S]*?\*\/\s*)?\(\s*(?:[EU]&?)?'{1,2}app\.|current_setting\s*\(\s*\$[A-Za-z_]*\$app\./i.test(
+        span.sql,
+      )
+    ) {
       say(
         "app-guc",
         `job ${name} reads a current_setting('app.…') GUC. Setting those needs ALTER DATABASE … SET on a placeholder GUC, which returns 42501 on Supabase — a job carrying this design is not the achievable configuration and cannot be the standard PROD is judged against.`,

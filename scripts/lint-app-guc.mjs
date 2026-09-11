@@ -86,15 +86,40 @@ export const HEADER_SCAN_LINES = 40;
  * has ONE definition of what an app-GUC read looks like. `src/__tests__` pins
  * that identity by substring, so drifting either copy reds the suite.
  *
+ * ── THE SIX SPELLINGS IT DETECTS (WIDENED 2026-09-11, plan 164.8.5-07) ──────
+ * Postgres accepts the same call written six ways, and the pre-widening regex
+ * saw exactly ONE of them — so the other five were a documented way to write a
+ * new app-GUC reader that the gate waves through (164.7-REVIEW WR-07, and
+ * `[APPGUC-DETECT-DOUBLEQUOTE-01]` for the second row, which was booked).
+ *
+ *   plain            current_setting('app.x')
+ *   doubled quote    current_setting(''app.x'')     inside an outer literal
+ *   E-string         current_setting(E'app.x')
+ *   unicode string   current_setting(U&'app.x')
+ *   dollar-quoted    current_setting($q$app.x$q$)   any tag, including $$
+ *   block comment    current_setting/*c*\/('app.x') between name and paren
+ *
+ * Each of the five widened spellings carries its OWN red fixture under
+ * `FINDING_KINDS[unannotated-reader].redFixtures`, so `--self-test` can prove
+ * each alternation individually rather than as a bundle.
+ *
+ * ⛔ MEASURED BEFORE AND AFTER (RESEARCH Q6, reproduced 2026-09-11 at this
+ * commit): 292 migration files, 12 matches under the old source and 12 under
+ * this one, ZERO per-file diffs. The widening therefore moves no allowlist
+ * count. If a future widening DOES move one, the finding is real — fix the
+ * regex or the prose it matched, never the count (decision D4).
+ *
  * ⚠️ KNOWN BLIND SPOT, booked as a criterion-1 limit and NOT fixed in this
  * phase: a read assembled by SQL string concatenation — e.g.
  * `'current_' || 'setting(''app.' || …` — is invisible to this regex. Phase
  * 164.7 plan 03's `v_guc_needle` inside its `DO $verify$` block relies on that
  * DELIBERATELY, because a verification block that spelled the call out would
  * make its own migration self-matching under this very lint. A future reader
- * must NOT "fix" that by inlining the literal.
+ * must NOT "fix" that by inlining the literal. Concatenation is the one
+ * spelling that remains.
  */
-export const DETECT_RE = /current_setting\s*\(\s*'app\./i;
+export const DETECT_RE =
+  /current_setting\s*(?:\/\*[\s\S]*?\*\/\s*)?\(\s*(?:[EU]&?)?'{1,2}app\.|current_setting\s*\(\s*\$[A-Za-z_]*\$app\./i;
 
 /** `-- APP-GUC-LINEAGE: …`, line-start anchored after optional indentation. */
 export const LINEAGE_MARKER_RE = /^\s*--\s*APP-GUC-LINEAGE:\s*(.*)$/;
@@ -114,7 +139,23 @@ export const FINDING_KINDS = [
     title: "app-GUC read with no lineage annotation",
     // TWO red fixtures, because D-05's whole claim is that an executable read
     // and a commented read are the same finding to this gate.
-    redFixtures: ["unannotated-reader.red.sql", "unannotated-comment.red.sql"],
+    //
+    // ⭐ PLUS ONE FIXTURE PER WIDENED SPELLING (2026-09-11, plan 164.8.5-07).
+    // Each of the five files below carries exactly ONE of the spellings
+    // `DETECT_RE` was widened to see, and nothing else. That is what lets the
+    // neuter matrix disable ONE alternation of the detector and watch ONE
+    // fixture stop firing: a single combined fixture would still match on the
+    // other four spellings and would prove nothing about the alternation that
+    // was removed — a batch control wearing one fixture's clothing (D3).
+    redFixtures: [
+      "unannotated-reader.red.sql",
+      "unannotated-comment.red.sql",
+      "spelling-doubled-quote.red.sql",
+      "spelling-e-string.red.sql",
+      "spelling-dollar-tag.red.sql",
+      "spelling-unicode.red.sql",
+      "spelling-block-comment.red.sql",
+    ],
     scope:
       "One finding per DETECT_RE match, in RAW text, in a file that carries no lineage " +
       "header or whose header will not parse. This is the finding the phase exists to " +
