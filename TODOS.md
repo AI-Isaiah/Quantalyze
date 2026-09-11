@@ -1607,6 +1607,32 @@ true for 146 and half of 142–145, and **false for 141**.
       freshness gate; until one exists, a declaration for an RPC that has zero `.rpc()` call sites
       is dead weight, not a defect.
 
+- [ ] **`[164.7-ACTIVATION-DEFERRED]` Phase 164.7 plan 07's PROD activation of the 161.1
+      ledger-refresh switch was DEFERRED 2026-09-10 at its founder gate, on a FAILED pre-flight —
+      criteria 3 and 4 are BLOCKED by an operational fault outside this phase.**
+      **Failed pre-flight:** P3-C (mt5 `compute_jobs` `done` within 3 days).
+      **Measured value:** the newest usable mt5 job is ~2026-09-07 04:0xZ. The MT5 terminal broke at
+      **04:05:08** that day — five minutes AFTER the 04:00Z `poll-allocator-positions` tick and
+      before the 05:00Z `refresh-allocator-equity` tick — and failed identically for three days
+      (`'34043761': authorization on VantageMarkets-Live 14 failed (Invalid account)`). At the
+      decision point the gap was ~3.5 days against a 3-day window.
+      ⚠️ **Both enqueue jobs are DAILY, not hourly** (`0 4 * * *` jobid 15, `0 5 * * *` jobid 17), so
+      no wait inside 2026-09-10 could have closed the gap.
+      ⛔ **Forcing was considered and declined on blast radius:**
+      `enqueue_refresh_allocator_equity_for_all()` / `enqueue_poll_allocator_positions_for_all_keys()`
+      enqueue for EVERY key at EVERY venue — a full cross-venue day-run to produce one mt5 row for a
+      pre-flight. The activation closes a reproducibility gap, not an outage; there is no time
+      pressure that justifies it.
+      **Re-entry condition:** after the 04:00Z and 05:00Z ticks on **2026-09-11**, re-run P3-C from
+      `164.7-ACTIVATION-PREFLIGHT.md` (P0 marker first). MT5 has been authorized again since
+      2026-09-10 ~16:10Z — issue #753 closed, prober run **34500455961** clean (its
+      `Open or update the prod-prober issue` step was SKIPPED, and that step is gated on a `^❌`
+      line, so skipped means zero defects).
+      **Nothing was written to PROD.** `scripts/prod-prober/cron-manifest.json` is untouched at 14
+      jobs; `ledger_refresh_fanout` is still absent from it and from PROD.
+      Owner: Phase 164.7 plan 07, re-entered at the same gate. Record:
+      `164.7-ACTIVATION-RECORD.md`.
+
 - [x] **`[164.7-TEST-APPLY-APPSETTINGS]` Two migrations from Phase 164.7 are RED on shared TEST
       from this PR's first CI run onward, BY DESIGN, and must be hand-applied (booked 2026-09-07,
       Phase 164.7 plan 05; the reds are named in `164.7-02-SUMMARY.md` → "Expected reds, named
