@@ -580,7 +580,7 @@ export function scanFile(absPath, opts = {}) {
   }
 
   if (header.successor !== "none") {
-    // ⭐ FOUR ARMS, IN ORDER, EACH ITS OWN PREDICATE (WR-06 / threat
+    // ⭐ SEVEN PREDICATES, IN ORDER, EACH ITS OWN ARM (WR-06 / threat
     // T-164.7-02, closed 2026-09-11). Before this the check had ONE arm that a
     // reader could satisfy: the successor merely had to EXIST and contain zero
     // app-GUC reads. MEASURED in 164.7-REVIEW: `successor: notes.txt` and
@@ -588,11 +588,35 @@ export function scanFile(absPath, opts = {}) {
     // trivially contains zero app-GUC reads, so pointing at one satisfied the
     // check while proving nothing whatever about where the mechanism went.
     //
-    // Arms (1a) and (1b) are two SEPARATE predicates on two lines rather than
-    // one combined test, so each can be disabled alone and exactly one red
-    // surface goes clean (D3 — a batch neuter proves nothing about the
-    // individual arms). (1a) and (1b) short-circuit (2)-(4): once the name is
-    // not a sibling `.sql`, resolving it is the wrong question.
+    // They are SEPARATE predicates on separate lines rather than one combined
+    // test, so each can be disabled alone and exactly one red surface goes
+    // clean (D3 — a batch neuter proves nothing about the individual arms).
+    // (1a) and (1b) short-circuit the rest: once the name is not a sibling
+    // `.sql`, resolving it is the wrong question.
+    //
+    // ⛔ WHERE EACH ARM'S RED SURFACE LIVES. The claim "each can be disabled
+    // alone and exactly one red surface goes clean" is only worth what the
+    // surfaces are worth, so they are enumerated rather than asserted in
+    // general. Two of the seven were RE-MEASURED on 2026-09-11 and the CONTENT
+    // arm had NO surface at all — neutering it to `if (false)` left the
+    // self-test, the corpus and the vitest suite all green, which is why this
+    // table now exists and why the two missing surfaces were built.
+    //
+    //   1a  TYPE          `successor-not-sql.red.sql` + vitest "arm 1a TYPE"
+    //   1b  SEPARATOR     vitest "arm 1b SEPARATOR"
+    //   2a  ABSENT        `successor-invalid.red.sql`
+    //   2b  NOT-A-FILE    vitest "arm 2 isFile"
+    //   3   TIMESTAMP     vitest "arm 3 TIMESTAMP"
+    //   4   UNREADABLE    vitest "arm 4 UNREADABLE" (chmod 000, PROBED — it
+    //                     names its own skip under root rather than passing)
+    //   5   CONTENT       vitest "arm 5 CONTENT"   ⭐ ADDED 2026-09-11
+    //
+    // ⚠️ Arms 1b, 2b, 3, 4 and 5 need a corpus BUILT AT RUNTIME and cannot be
+    // committed `.sql` fixtures: 1b and 3 need sibling names the fixture
+    // directory must not really carry, 2b needs a directory git cannot commit,
+    // 4 needs a mode git does not preserve, and 5 needs a successor holding an
+    // app-GUC read — which, committed, would itself be scanned by the corpus
+    // sweep and fire `unannotated-reader`.
     const successor = header.successor;
     if (!/\.sql$/i.test(successor)) {
       push(
