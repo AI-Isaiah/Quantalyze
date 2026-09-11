@@ -1395,7 +1395,7 @@ Plans:
 **Goal:** Every control this phase touches is one a machine can DODGE today, and each fix ships with a red fixture proving the dodge now fails. The reviewer's verdict on Phase 164.7 is the brief: *"the SQL in this phase is careful and genuinely fail-closed; the verification code shipped alongside it is not."*
 **Requirements**: ⛔ [164.7-REPAIR-REVERTED] (FIRST WORK — the five prober repairs were written, measured as a net regression, and reverted on 2026-09-10; re-do them with a red control each, hoisting PROD hygiene above every early return BEFORE re-applying anything), [164.7-CR03-HYGIENE-BYPASS], [164.7-WR04-HYGIENE-BELOW-ORACLE], [164.7-WR05-PARSER-DROPS-ROWS], [164.7-APPGUC-SUCCESSOR-VACUOUS], [164.7-REVIEW-INFO-FOUR], [APPGUC-DETECT-DOUBLEQUOTE-01], [APPGUC-UTF16-01]
 **Depends on:** Phase 164.8
-**Plans:** 5 plans
+**Plans:** 7 plans
 
 **Success Criteria**:
 
@@ -1411,11 +1411,13 @@ Plans:
 
 Plans:
 
-- [ ] 164.8.5-01-PLAN.md — Prober structure: section (0) PROD hygiene above every return in `compareManifest`, `run()` never returns before it, mandatory + compared live marker, `{ rows, malformed }` parser with a measure-fail naming the count; HOIST scenarios (absent / stale / marker-mismatched); individual neuter matrix
-- [ ] 164.8.5-02-PLAN.md — The four reverted repairs re-applied with a red control each: CR-01 username/database, CR-04 totality loop, WR-11 sha binding + the HAND-EDITED hoist state, SR-05/07/08/09 comment fixes; individual neuter matrix
-- [ ] 164.8.5-03-PLAN.md — Hygiene lexer: import `scanSql`, `codeSpans()` DO-body recursion, header rules on masked text with derived-length sum (bypasses a–g, `||` split, `$q$don't$q$` pair), `header-unparseable` → measure-fail, IN-04 pg-password forms, `hygiene-bypass.json`; individual neuter matrix
-- [ ] 164.8.5-04-PLAN.md — `vault-absent` = "reaches an executing Vault read" (executable shape on spans OR resolvable committed callable, injectable snapshot dir, fixture snapshot, real-snapshot 164.5.1 collision scenario) + `long-token-anywhere` with a measured zero-FP budget (bypasses h, i); individual neuter matrix
-- [ ] 164.8.5-05-PLAN.md — `lint-app-guc`: `DETECT_RE` five spellings in BOTH files, four-arm successor check (T-164.7-02), IN-01 banner, IN-02 symlink/case, IN-03 multi-marker, UTF-16 BOM/NUL measureFail; corpus stays 0 / 12; individual neuter matrix + the nine-criteria proof table
+- [ ] 164.8.5-01-PLAN.md — Prober structure: section (0) PROD hygiene above every return in `compareManifest` (positional gate), `run()` never returns before it, mandatory + compared live marker, `{ rows, malformed }` parser with a measure-fail naming the count, `captureManifest` fourth refusal + its scenario; HOIST scenarios (absent / stale / marker-mismatched); individual neuter matrix
+- [ ] 164.8.5-02-PLAN.md — The four reverted repairs re-applied with a red control each: CR-01 username/database, CR-04 totality loop (three fields neutered ALONE), WR-11 sha binding + the HAND-EDITED hoist state, SR-05/07/08/09 comment fixes; eight-row individual neuter matrix
+- [ ] 164.8.5-03-PLAN.md — Hygiene lexer: import `scanSql`, `codeSpans()` DO-body recursion, header rules on masked text with derived-length sum (anchored ids at `HEADER_LITERAL_MIN`, every header argument at `HEADERS_LITERAL_MAX` — bypasses a–g, the non-anchored split, `$q$don't$q$` pair), `headerRegions` as a list with an unparseable state → `header-unparseable` measure-fail, IN-04 pg-password forms, `hygiene-bypass.json`, the committed-manifest zero-FP scenario
+- [ ] 164.8.5-04-PLAN.md — Individual neuter matrix for Plan 03's lexer-era controls (eleven rows) + the CR-03 reproduction
+- [ ] 164.8.5-05-PLAN.md — `vault-absent` = "reaches an executing Vault read" (executable shape on spans OR resolvable committed callable, injectable snapshot dir, fixture snapshot, real-snapshot 164.5.1 collision scenario) + `long-token-anywhere` with `TOKEN_MIN` DERIVED from `HEADERS_LITERAL_MAX` and pinned (bypasses h, i; zero-FP budget inherited from Plan 03)
+- [ ] 164.8.5-06-PLAN.md — Individual neuter matrix for Plan 05's controls incl. the `TOKEN_MIN` pin (twelve rows) + the CR-03/SR-02 reproductions and phase-level prober checks
+- [ ] 164.8.5-07-PLAN.md — `lint-app-guc`: `DETECT_RE` widened in BOTH files with FIVE single-spelling `--self-test` red fixtures, four-arm successor check (T-164.7-02; type and separator as separate predicates), IN-01 banner, IN-02 symlink/case, IN-03 multi-marker, UTF-16 BOM and NUL measureFail (separate tests); corpus stays 0 / 12; sixteen-row individual neuter matrix + the nine-criteria proof table
 
 ### Phase 164.8.4: GATERESIDUE — every deferral Phase 164.8.2's four review rounds produced: the shared-TEST credential channels that still reach a public log, the artifact that publishes the file it refuses over, and the gate-integrity leftovers each below the bar that blocked the ship (INSERTED)
 
