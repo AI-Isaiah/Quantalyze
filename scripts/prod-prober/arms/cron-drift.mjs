@@ -1363,10 +1363,40 @@ export function compareManifest(manifest, prodRows, opts = {}) {
   // oracle state — absent, unparsable, schema-bumped, hand-edited, or captured
   // from a different database — can silence it.
   // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // F3 (164.8.5-REVIEW) — A ROW THAT CANNOT BE JUDGED IS ONE ROW, NOT THE RUN.
+  //
+  // ⛔ `hygieneViolations` THROWS, and this function collects into a LOCAL array
+  // returned only at the end. `reachesVaultRead` refusing on an absent snapshot
+  // directory is RIGHT — absence of the instrument is not absence of the finding
+  // — but it happens inside a PER-ROW loop, so the throw took every defect
+  // already collected with it. MEASURED with two rows, one leaking: an absent
+  // `functionsDir` turned `["cron-secret-in-command:prod:leaky_job",
+  // "manifest-invalid:…"]` into a THROW, i.e. into ONE generic arm-level
+  // measure-fail. Delete or fail to regenerate `supabase/schema/functions/` and
+  // the `cron-secret-in-command` line — the signal, in a workflow that exits 0
+  // on everything else — was simply gone.
+  //
+  // So the refusal is SCOPED to the row it belongs to: that row becomes a
+  // `measure-fail` naming itself, and every other row is still judged.
+  // ---------------------------------------------------------------------------
+  const judgeRow = (jobname, command) => {
+    try {
+      return { violations: hygieneViolations(jobname, command, { functionsDir: opts.functionsDir }), error: null };
+    } catch (err) {
+      return { violations: null, error: err && err.message ? err.message : String(err) };
+    }
+  };
+
   const rows = Array.isArray(prodRows) ? prodRows : [];
   const prodHygiene = new Map();
   for (const row of rows) {
-    const v = hygieneViolations(row.jobname, row.command, { functionsDir: opts.functionsDir });
+    const judged = judgeRow(row.jobname, row.command);
+    if (judged.error !== null) {
+      defects.push({ kind: "measure-fail", subject: `prod:${row.jobname}`, detail: judged.error });
+      continue;
+    }
+    const v = judged.violations;
     prodHygiene.set(row.jobname, v);
     const { credential, unjudgeable } = splitHygiene(v);
     if (credential.length > 0) {
@@ -1541,7 +1571,13 @@ export function compareManifest(manifest, prodRows, opts = {}) {
   const manifestHygiene = new Map();
   for (const row of manifest.jobs) {
     if (typeof row.command !== "string") continue; // a withheld row was read by a human at capture time
-    const v = hygieneViolations(row.jobname, row.command, { functionsDir: opts.functionsDir });
+    // Same F3 scoping as section (0): one unjudgeable row is one row.
+    const judged = judgeRow(row.jobname, row.command);
+    if (judged.error !== null) {
+      defects.push({ kind: "measure-fail", subject: `manifest:${row.jobname}`, detail: judged.error });
+      continue;
+    }
+    const v = judged.violations;
     manifestHygiene.set(row.jobname, v);
     const { credential, unjudgeable } = splitHygiene(v);
     if (credential.length > 0) {

@@ -2406,7 +2406,7 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
-  scenario("a MISSING functions snapshot is a measure-fail, never a clean vault-absent");
+  scenario("F3: a MISSING functions snapshot refuses ONE ROW, and every other row's credential finding SURVIVES");
   // -------------------------------------------------------------------------
   {
     // ⛔ ABSENCE OF THE INSTRUMENT IS NOT ABSENCE OF THE FINDING. If the
@@ -2414,37 +2414,86 @@ export async function selfTest() {
     // deleted or renamed `supabase/schema/functions/` would make the flagship
     // job fire `cron-secret-in-command` hourly on correct configuration; if it
     // answered "reads Vault", a deleted snapshot would silently switch the rule
-    // off. It throws instead, and `runProber` maps an arm throw to
-    // `measure-fail` — the verdict that says a measurement did not happen.
-    const prod = loadFixture("cron-drift", "prod-ok.json");
+    // off. It throws instead — the verdict that says a measurement did not
+    // happen.
+    //
+    // ⛔ BUT THE THROW USED TO TAKE THE WHOLE RUN WITH IT (164.8.5-REVIEW F3),
+    // AND THIS SCENARIO USED TO BE UNABLE TO SEE THAT. It ran on `prod-ok.json`
+    // — three CLEAN rows — and asserted the ABSENCE of `cron-secret-in-command`.
+    // That is unfalsifiable and points the wrong way: clean rows produce no
+    // credential finding whether or not the throw discards one. The fixture is
+    // now a LEAKING row beside the flagship, and the assertion is that the
+    // credential line is STILL THERE.
+    //
+    // MEASURED before the fix: `["cron-secret-in-command:prod:…",
+    // "manifest-invalid:…"]` became a THROW, i.e. one generic arm-level
+    // measure-fail, and the credential line — the signal, in a workflow that
+    // exits 0 on everything else — was gone.
+    const prod = loadFixture("cron-drift", "prod-leaky-plus-match.json");
     if (!prod.ok) {
       pass = expect(false, prod.reason) && pass;
     } else {
+      const LEAKY = "retention_compute_jobs_done";
       const absent = join(FIXTURE_ROOT, "cron-drift", "functions-this-directory-does-not-exist");
-      const r = await driftRun(prod.data, driftFixturePath("manifest.json"), quiet, undefined, absent);
-      // CONTROL: the SAME rows and the SAME manifest with the snapshot present
-      // are clean — so the measure-fail above is attributable to the missing
-      // directory and to nothing else in the fixture.
-      const rControl = await driftRun(prod.data, driftFixturePath("manifest.json"), quiet);
+      // ⛔ AN ABSENT MANIFEST PATH ON PURPOSE, so the expected defect set is
+      // exactly the review's measured one: the credential, the refusal, and
+      // `manifest-invalid`. A matching oracle would add drift noise that could
+      // mask a regression here.
+      const missingManifest = driftFixturePath("manifest-THIS-FILE-DOES-NOT-EXIST.json");
+      const r = await driftRun(prod.data, missingManifest, quiet, undefined, absent);
+      // CONTROL: the SAME rows and the SAME manifest path WITH the snapshot
+      // present — so the measure-fail is attributable to the missing directory
+      // and to nothing else, and the credential finding is not an artefact of it.
+      const rControl = await driftRun(prod.data, missingManifest, quiet);
       const mf = r.defects.filter((x) => x.kind === "measure-fail");
+      const secrets = r.defects.filter((x) => x.kind === "cron-secret-in-command");
+      const controlSecrets = rControl.defects.filter((x) => x.kind === "cron-secret-in-command");
       pass =
         expect(!existsSync(absent), `PRECONDITION: ${absent} really is absent`) &&
         expect(
-          mf.length === 1,
-          `exactly one measure-fail (got ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ") || "no defects at all"})`,
+          controlSecrets.length === 1 && String(controlSecrets[0].subject) === `prod:${LEAKY}`,
+          `PRECONDITION: with the snapshot present the fixture reports exactly one credential, on ${LEAKY} (got ${rControl.defects.map((x) => `${x.kind}:${x.subject}`).join(", ") || "nothing"}) — a fixture that leaks nothing would make the assertion below unfalsifiable, which is what this scenario used to be`,
+        ) &&
+        expect(
+          mf.length === 1 && String(mf[0].subject) === "prod:match_engine_cron",
+          `exactly one measure-fail, SCOPED TO THE ROW that could not be judged (got ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ") || "no defects at all"})`,
         ) &&
         expect(
           mf.length === 1 && String(mf[0].detail).includes("functions snapshot directory"),
           "naming the snapshot directory as the thing that could not be measured",
         ) &&
         expect(
-          noDefectOfKind(r.defects, ["cron-secret-in-command"]),
-          "and ZERO cron-secret-in-command — a missing resolver never becomes a credential finding",
+          secrets.length === 1 && String(secrets[0].subject) === `prod:${LEAKY}`,
+          `and the OTHER row's credential finding SURVIVES the refusal (got ${secrets.map((x) => x.subject).join(", ") || "NOTHING — the throw discarded it, which is F3"})`,
+        ) &&
+        expect(
+          r.defects.some((x) => x.kind === "manifest-invalid"),
+          "and the defects collected AFTER the refused row survive too — the loop continued rather than unwinding",
         ) &&
         expect(r.exitCode === 1, `the run exits 1 — refusing to measure is not passing (got ${r.exitCode})`) &&
         expect(
-          rControl.exitCode === 0 && rControl.defects.length === 0,
-          `CONTROL: the same run WITH the snapshot present is clean (got ${rControl.exitCode}, ${JSON.stringify(rControl.defects.map((x) => x.kind))})`,
+          rControl.defects.every((x) => x.kind !== "measure-fail"),
+          `CONTROL: the same run WITH the snapshot present has NO measure-fail (got ${rControl.defects.map((x) => x.kind).join(", ")})`,
+        ) &&
+        expect(
+          // ⛔ BOTH HYGIENE LOOPS, SEPARATELY. Section (0) reads `prodRows` and
+          // section (2) reads the oracle, and each has its own `judgeRow` call
+          // site. With the manifest ABSENT above, section (2) never runs — so
+          // this second reading, with a VALID oracle, is what keeps the
+          // manifest-side wrap from being an uncontrolled edit. Two refusals,
+          // one per side, each naming its own row.
+          JSON.stringify(
+            (await driftRun(prod.data, driftFixturePath("manifest.json"), quiet, undefined, absent)).defects
+              .filter((x) => x.kind === "measure-fail")
+              .map((x) => String(x.subject))
+              .sort(),
+          ) === JSON.stringify(["manifest:match_engine_cron", "prod:match_engine_cron"]),
+          `and with a VALID oracle BOTH hygiene loops refuse their own row and nothing else (got ${JSON.stringify(
+            (await driftRun(prod.data, driftFixturePath("manifest.json"), quiet, undefined, absent)).defects
+              .filter((x) => x.kind === "measure-fail")
+              .map((x) => String(x.subject))
+              .sort(),
+          )})`,
         ) &&
         pass;
     }
