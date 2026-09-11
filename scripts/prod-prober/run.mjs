@@ -2302,6 +2302,15 @@ export async function selfTest() {
       "fixture_wrapper.sql",
       "fixture_comment_only.sql",
       "fixture_literal_only.sql",
+      "fixture_nondollar_body.sql",
+      // The F6 depth-memoisation chain. Deleting any link shortens it below
+      // `CALLABLE_DEPTH_MAX` and the ACCEPT row below stops measuring anything.
+      "fixture_chain_1.sql",
+      "fixture_chain_2.sql",
+      "fixture_chain_3.sql",
+      "fixture_chain_4.sql",
+      "fixture_chain_5.sql",
+      "fixture_shared.sql",
     ];
     // ⛔ A MISSING FIXTURE IS A FAIL, NEVER A SKIP (S2). Without this, deleting
     // `fixture_vault_reader.sql` would turn the ACCEPT rows below into
@@ -2320,6 +2329,22 @@ export async function selfTest() {
       ["a public-qualified call to a committed Vault reader", "SELECT public.fixture_vault_reader();"],
       ["an UNQUALIFIED call, resolved TRANSITIVELY through a wrapper", "SELECT fixture_wrapper();"],
       ["the read spelled inline inside a DO body (span recursion)", "DO $$ BEGIN PERFORM 1 FROM vault.decrypted_secrets; END $$"],
+      // ⛔ F6 (2). `fixture_chain_1` walks five links to `fixture_shared`, which
+      // lands AT `CALLABLE_DEPTH_MAX` with its own callee truncated. The SECOND
+      // call resolves `fixture_shared` at depth 0, where its Vault-reading
+      // callee is one edge away. `visited` used to be a Set, so the truncated
+      // depth-5 answer memoised `false` and the depth-0 approach returned the
+      // memo WITHOUT exploring — `vault-absent` firing on a command that does
+      // reach Vault. It is now a Map of name -> shallowest depth explored.
+      //
+      // ⚠️ ORDER IS LOAD-BEARING: the deep path must run FIRST, which is why
+      // `fixture_chain_1` is named before `fixture_shared` in the command text
+      // (`calleesOn` returns names in source order). Reversing them would make
+      // the row pass under the Set too.
+      [
+        "a node reached at the DEPTH CAP and then again with budget to spare — the memo must not survive the shallower approach",
+        "SELECT public.fixture_chain_1(); SELECT public.fixture_shared();",
+      ],
     ];
     const REJECT = [
       ["a callable whose body mentions the table only in a comment", "SELECT public.fixture_comment_only();"],
@@ -2328,6 +2353,12 @@ export async function selfTest() {
       ["the table named in a `--` comment on the command itself", "SELECT 1 -- vault.decrypted_secrets"],
       ["the table named inside a single-quoted literal", "SELECT 'FROM vault.decrypted_secrets'"],
       ["the table named inside a DOLLAR-quoted literal", "SELECT $q$FROM vault.decrypted_secrets$q$"],
+      // ⛔ F6. `fixture_nondollar_body.sql` DOES read Vault, in a single-quoted
+      // `AS '…'` body the snapshot reader does not expose. REJECT is the right
+      // answer — loud, and in the safe direction — but before F6 the verdict
+      // carried NO mention of the skip, so the operator read "reaches no Vault
+      // read" when the truth was "this arm did not read one definition".
+      ["a callable whose body is not dollar-quoted, so the resolver never saw it", "SELECT public.fixture_nondollar_body();"],
     ];
     const wronglyRejected = ACCEPT.filter(([, cmd]) => idsOf(cmd).includes("vault-absent")).map(([why]) => why);
     const wronglyAccepted = REJECT.filter(([, cmd]) => !idsOf(cmd).includes("vault-absent")).map(([why]) => why);
@@ -2335,6 +2366,7 @@ export async function selfTest() {
       .filter(([, cmd]) => sentencesOf(cmd).some((v) => v.includes(cmd)))
       .map(([why]) => why);
     const unknownSentence = sentencesOf("SELECT public.fixture_unknown();").join(" ");
+    const nonDollarSentence = sentencesOf("SELECT public.fixture_nondollar_body();").join(" ");
 
     pass =
       expect(
@@ -2352,6 +2384,14 @@ export async function selfTest() {
       expect(
         unknownSentence.includes("fixture_unknown"),
         `an unresolvable callable is NAMED in the sentence, so the reader knows what could not be judged (${unknownSentence.slice(0, 0) || "named"})`,
+      ) &&
+      expect(
+        // ⛔ F6. A definition the snapshot reader does not expose was dropped
+        // SILENTLY: no body contributed, and no `unresolved` entry either, so
+        // the sentence could not say it had skipped anything. A skip nobody is
+        // told about is the same shape as a rule that cannot fire.
+        nonDollarSentence.includes("fixture_nondollar_body") && nonDollarSentence.includes("not dollar-quoted"),
+        `and so is a callable whose body the snapshot reader does not expose, WITH the reason — "could not be shown to read Vault" is a different claim from "has no file" (${nonDollarSentence.slice(0, 220) || "NO SENTENCE AT ALL"})`,
       ) &&
       expect(
         quoted.length === 0,
