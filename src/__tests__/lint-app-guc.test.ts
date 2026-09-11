@@ -27,7 +27,7 @@
  * goal, and the two anti-vacuity arms below are what keep the exemption honest.
  */
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -38,9 +38,11 @@ import {
   FIXTURE_DIR,
   LINEAGE_ALLOWLIST,
   countReads,
+  main,
   parseLineageHeader,
   relPath,
   scanCorpus,
+  scanPaths,
   selfTest,
 } from "../../scripts/lint-app-guc.mjs";
 
@@ -553,5 +555,271 @@ describe("lint-app-guc: the MEASURED ANNOTATED census on the real tree", () => {
     const commented = reads.filter((r) => lines[r.line - 1].trimStart().startsWith("--"));
     expect(commented.length, "exactly one of the five is inside a `--` comment").toBe(1);
     expect(lines[commented[0].line - 1]).toContain("current_setting");
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Plan 164.8.5-07 — the arms no single committed fixture can isolate.
+//
+// Each block below ships a CALIBRATION: the same corpus without the defect must
+// be clean. Without it, "a finding fired" is satisfied by a scanner that finds
+// something wrong with every temp corpus it is handed, and the arm would be
+// asserting the harness rather than the rule.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** A minimal annotated migration: header + exactly one app-GUC read. */
+function annotated(successor: string, occurrences = 1): string {
+  return (
+    `-- APP-GUC-LINEAGE: retired 2026-09-10; occurrences: ${occurrences}; successor: ${successor}; ` +
+    "reason: temp-corpus arm for the successor check\n" +
+    "DO $$ BEGIN PERFORM current_setting('app.ledger_refresh_enabled', TRUE); END $$;\n"
+  );
+}
+
+/** Scans ONE file with an allowlist entry that AGREES with its header, so the
+ *  only thing that can fire is the successor arm under test. */
+function scanOne(abs: string, successor: string, occurrences = 1) {
+  return scanPaths([abs], {
+    allowlist: [{ file: relPath(abs), occurrences, successor, reason: "temp-corpus arm" }],
+  }) as { findings: Finding[]; measureFails: { file: string; reason: string }[] };
+}
+
+describe("lint-app-guc: successor-invalid — the four arms (WR-06 / threat T-164.7-02)", () => {
+  it("CALIBRATION: a sibling .sql successor that exists and reads nothing is clean", () => {
+    const dir = tempDir("succ-ok");
+    writeFileSync(join(dir, "later.sql"), "SELECT 1;\n");
+    const target = join(dir, "a.sql");
+    writeFileSync(target, annotated("later.sql"));
+    const r = scanOne(target, "later.sql");
+    expect(r.measureFails).toEqual([]);
+    expect(kindsOf(r.findings), "the control must be clean or no arm below is attributable").toEqual([]);
+  });
+
+  it("arm 1a TYPE: a successor that is not a .sql file is refused — T-164.7-02 closure evidence", () => {
+    // ⭐ BOTH strings 164.7-REVIEW WR-06 MEASURED PASSING are asserted here.
+    // `notes.txt` is additionally a committed self-test fixture; the traversal
+    // `.md` string is the second half of the closure evidence and fails on TYPE
+    // before the separator is ever considered.
+    const dir = tempDir("succ-type");
+    writeFileSync(join(dir, "notes.txt"), "v_url := current_setting('app.x', TRUE);\n");
+    for (const bad of ["notes.txt", "../out/escaped.md"]) {
+      const target = join(dir, "a.sql");
+      writeFileSync(target, annotated(bad));
+      const r = scanOne(target, bad);
+      expect(kindsOf(r.findings), bad).toEqual(["successor-invalid"]);
+      expect(r.findings[0].message, bad).toContain("not a .sql file");
+    }
+  });
+
+  it("arm 1b SEPARATOR: a `.sql` successor carrying a path separator is refused as not a SIBLING", () => {
+    // ⛔ The name MUST end in `.sql`. `../out/escaped.md` also fails arm 1a on
+    // type, so a red on THAT string could not be attributed to the separator
+    // arm — and an unattributable red is the defect this phase exists to
+    // remove. `../out/escaped.sql` can only be refused by 1b.
+    const dir = tempDir("succ-sep");
+    const target = join(dir, "a.sql");
+    writeFileSync(target, annotated("../out/escaped.sql"));
+    const r = scanOne(target, "../out/escaped.sql");
+    expect(kindsOf(r.findings)).toEqual(["successor-invalid"]);
+    expect(r.findings[0].message).toContain("not a SIBLING");
+    expect(r.findings[0].message, "it must NOT be refused on type").not.toContain("not a .sql file");
+  });
+
+  it("arm 2 isFile: a DIRECTORY wearing the successor's name is refused", () => {
+    const dir = tempDir("succ-dir");
+    mkdirSync(join(dir, "later.sql"));
+    const target = join(dir, "a.sql");
+    writeFileSync(target, annotated("later.sql"));
+    const r = scanOne(target, "later.sql");
+    expect(kindsOf(r.findings)).toEqual(["successor-invalid"]);
+    expect(r.findings[0].message).toContain("not a regular file");
+  });
+
+  it("arm 3 TIMESTAMP: a lineage cannot point backwards, and the right way round is clean", () => {
+    const dir = tempDir("succ-time");
+    const LATER = "20260907130000_x.sql";
+    const EARLIER = "20260907120000_y.sql";
+
+    // Backwards: the later migration claims the earlier one as its successor.
+    writeFileSync(join(dir, EARLIER), "SELECT 1;\n");
+    const back = join(dir, LATER);
+    writeFileSync(back, annotated(EARLIER));
+    const r = scanOne(back, EARLIER);
+    expect(kindsOf(r.findings)).toEqual(["successor-invalid"]);
+    expect(r.findings[0].message).toContain("cannot point backwards");
+
+    // CALIBRATION, the same two names the other way round: clean.
+    const dir2 = tempDir("succ-time-ok");
+    writeFileSync(join(dir2, LATER), "SELECT 1;\n");
+    const fwd = join(dir2, EARLIER);
+    writeFileSync(fwd, annotated(LATER));
+    expect(kindsOf(scanOne(fwd, LATER).findings)).toEqual([]);
+  });
+
+  it("arm 3 does NOT judge fixture names — it is conditional on BOTH names being migrations", () => {
+    // `lineage.green.sql -> successor-target.green.sql` carries no timestamp
+    // prefix and must not be compared as if it did; that is why this arm is
+    // conditional rather than universal.
+    const dir = tempDir("succ-nots");
+    writeFileSync(join(dir, "aaa.sql"), "SELECT 1;\n");
+    const target = join(dir, "zzz.sql");
+    writeFileSync(target, annotated("aaa.sql"));
+    expect(kindsOf(scanOne(target, "aaa.sql").findings)).toEqual([]);
+  });
+});
+
+describe("lint-app-guc: IN-01 — `--files` mode says its allowlist enforcement is OFF", () => {
+  function captureLog(fn: () => void): string[] {
+    const lines: string[] = [];
+    const real = console.log;
+    console.log = (...args: unknown[]) => void lines.push(args.map(String).join(" "));
+    try {
+      fn();
+    } finally {
+      console.log = real;
+    }
+    return lines;
+  }
+
+  const BANNER = "allowlist enforcement OFF";
+
+  it("prints the banner in --files mode", () => {
+    const lines = captureLog(() => main(["--files", join(FIX_DIR, "lineage.green.sql")]));
+    expect(lines.some((l) => l.includes(BANNER)), lines.join("\n")).toBe(true);
+  });
+
+  it("CALIBRATION: corpus mode does NOT print it — the gate's own invocation is unaffected", () => {
+    const lines = captureLog(() => main([]));
+    expect(lines.some((l) => l.includes(BANNER)), lines.join("\n")).toBe(false);
+    // And the corpus mode still reports, so the calibration is not just a
+    // silent run: a mode that printed nothing would also pass the line above.
+    expect(lines.some((l) => l.includes("app-guc: findings"))).toBe(true);
+  });
+});
+
+describe("lint-app-guc: IN-02 — the corpus walk follows case and symlinked directories", () => {
+  it("scans a `.SQL` file — the extension test is case-insensitive", () => {
+    const dir = tempDir("case");
+    writeFileSync(
+      join(dir, "A.SQL"),
+      "DO $$ BEGIN PERFORM current_setting('app.x', TRUE); END $$;\n",
+    );
+    const r = scanCorpus({ migrationsDir: dir, allowlist: [] });
+    expect(r.measureFails, "a case-sensitive walk would find zero files and MEASURE_FAIL").toEqual([]);
+    expect(r.filesScanned).toBe(1);
+    expect(kindsOf(r.findings as Finding[])).toEqual(["unannotated-reader"]);
+  });
+
+  it("descends into a SYMLINKED directory — readdir's isDirectory() is false for a link", () => {
+    const dir = tempDir("symlink");
+    const real = join(dir, "real");
+    mkdirSync(real);
+    writeFileSync(
+      join(real, "b.sql"),
+      "DO $$ BEGIN PERFORM current_setting('app.x', TRUE); END $$;\n",
+    );
+    const hidden = join(dir, "hidden");
+    mkdirSync(hidden);
+    writeFileSync(
+      join(hidden, "c.sql"),
+      "DO $$ BEGIN PERFORM current_setting('app.x', TRUE); END $$;\n",
+    );
+    // The link is created OUTSIDE the try below on purpose: a platform that
+    // cannot make one must SKIP with a named reason, never silently pass.
+    let linked = true;
+    try {
+      symlinkSync(hidden, join(dir, "linked"), "dir");
+    } catch {
+      linked = false;
+    }
+    if (!linked) {
+      console.warn("SKIPPED (named): this platform refused symlinkSync — the symlink arm was not measured here.");
+      expect(linked, "symlink arm unmeasured on this platform").toBe(false);
+      return;
+    }
+    const r = scanCorpus({ migrationsDir: dir, allowlist: [] });
+    expect(r.measureFails).toEqual([]);
+    // real/b.sql + hidden/c.sql + linked/c.sql (the same file, reached twice).
+    expect(r.filesScanned, "the symlinked subtree must be walked, not skipped").toBe(3);
+    expect((r.findings as Finding[]).some((f) => f.file.includes("linked/c.sql"))).toBe(true);
+  });
+});
+
+describe("lint-app-guc: IN-03 — two lineage markers is header-malformed, not 'first one wins'", () => {
+  it("reports the COUNT and both line numbers when a file carries two markers", () => {
+    const h = parseLineageHeader(
+      "-- APP-GUC-LINEAGE: retired 2026-09-07; occurrences: 1; successor: none; reason: the reviewed one\n" +
+        "SELECT 1;\n" +
+        "-- APP-GUC-LINEAGE: retired 2026-09-07; occurrences: 9; successor: none; reason: the contradicting one\n",
+    ) as { line: number; malformed: string };
+    expect(h.malformed).toContain("2 lineage markers");
+    expect(h.malformed).toContain("lines 1, 3");
+    expect(h.line, "the finding is reported at the FIRST marker").toBe(1);
+  });
+
+  it("CALIBRATION: ONE marker parses exactly as before", () => {
+    const h = parseLineageHeader(
+      "-- APP-GUC-LINEAGE: retired 2026-09-07; occurrences: 1; successor: none; reason: the only one\n",
+    ) as { occurrences: number; malformed?: string };
+    expect(h.malformed).toBeUndefined();
+    expect(h.occurrences).toBe(1);
+  });
+
+  it("a second marker BEYOND the masthead window does not count — the window is the rule", () => {
+    const h = parseLineageHeader(
+      "-- APP-GUC-LINEAGE: retired 2026-09-07; occurrences: 1; successor: none; reason: the only one\n" +
+        "-- filler\n".repeat(60) +
+        "-- APP-GUC-LINEAGE: retired 2026-09-07; occurrences: 9; successor: none; reason: too late\n",
+    ) as { occurrences: number; malformed?: string };
+    expect(h.malformed).toBeUndefined();
+    expect(h.occurrences).toBe(1);
+  });
+});
+
+describe("lint-app-guc: [APPGUC-UTF16-01] — an undecodable migration MEASURE_FAILs by name", () => {
+  const READER = "DO $$ BEGIN PERFORM current_setting('app.x', TRUE); END $$;\n";
+
+  it("a UTF-16LE file (BOM FF FE) is a MEASURE_FAIL naming BOM, and never a clean count", () => {
+    const dir = tempDir("utf16");
+    const target = join(dir, "a.sql");
+    // The BOM is written as EXPLICIT BYTES rather than as a U+FEFF character in
+    // this source: an invisible character in a test file is a fact nobody can
+    // review, and `readFileSync(…, "utf8")` would have decoded this whole file
+    // into mojibake and reported it clean — which is the defect under test.
+    writeFileSync(target, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(READER, "utf16le")]));
+    const r = scanCorpus({ migrationsDir: dir, allowlist: [] });
+    expect(r.ok).toBe(false);
+    expect(r.findings, "an undecodable file must produce NO findings, not zero-that-looks-clean").toEqual([]);
+    expect(r.measureFails.length).toBe(1);
+    expect(r.measureFails[0].file).toContain("a.sql");
+    expect(r.measureFails[0].reason).toContain("BOM");
+  });
+
+  it("a UTF-8 file with a NUL byte and NO BOM is a MEASURE_FAIL naming NUL", () => {
+    // ⛔ A SEPARATE test from the BOM one on purpose: the two predicates are
+    // two controls, and one test covering both could be satisfied by either.
+    const dir = tempDir("nul");
+    const target = join(dir, "a.sql");
+    writeFileSync(target, Buffer.concat([Buffer.from("-- note\0hidden\n"), Buffer.from(READER)]));
+    const r = scanCorpus({ migrationsDir: dir, allowlist: [] });
+    expect(r.ok).toBe(false);
+    expect(r.findings).toEqual([]);
+    expect(r.measureFails.length).toBe(1);
+    expect(r.measureFails[0].reason).toContain("NUL");
+    expect(r.measureFails[0].reason, "the BOM predicate must not claim this one").not.toContain("BOM");
+  });
+
+  it("CALIBRATION: the same content as clean UTF-8 is measured, and fires one unannotated-reader", () => {
+    const dir = tempDir("clean");
+    writeFileSync(join(dir, "a.sql"), READER);
+    const r = scanCorpus({ migrationsDir: dir, allowlist: [] });
+    expect(r.measureFails).toEqual([]);
+    expect(kindsOf(r.findings as Finding[])).toEqual(["unannotated-reader"]);
+  });
+
+  it("the REAL corpus carries no BOM and no NUL — this tightening flags nothing that exists", () => {
+    const r = scanCorpus({});
+    expect(r.measureFails).toEqual([]);
+    expect(r.filesScanned).toBeGreaterThan(200);
   });
 });

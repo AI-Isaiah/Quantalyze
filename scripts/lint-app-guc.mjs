@@ -67,7 +67,7 @@
  *   node scripts/lint-app-guc.mjs --files a.sql b.sql   # ad-hoc, no allowlist
  *   node scripts/lint-app-guc.mjs --self-test      # the engine's own fixtures
  */
-import { readFileSync, readdirSync, existsSync, realpathSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative, resolve, basename } from "node:path";
 
@@ -192,6 +192,11 @@ export const FINDING_KINDS = [
   {
     id: "successor-invalid",
     title: "named successor is absent or still reads an app GUC",
+    // TWO red fixtures, one per arm that a single file CAN exhibit alone: the
+    // absent successor, and the successor that is not a `.sql` file at all
+    // (WR-06 / T-164.7-02). The separator, directory and backwards-timestamp
+    // arms need a corpus built at runtime and are vitest-covered.
+    redFixtures: ["successor-invalid.red.sql", "successor-not-sql.red.sql"],
     scope:
       "`successor: <file>` claims the mechanism moved somewhere. The successor must exist " +
       "beside the annotated file and must itself contain ZERO app-GUC reads, else the " +
@@ -313,6 +318,15 @@ export const FIXTURE_ALLOWLIST = [
       "Agrees with that fixture's header on both fields, so the paperwork is complete and the " +
       "only defect left is the successor that is not there.",
   },
+  {
+    file: `${FIXTURE_DIR}/successor-not-sql.red.sql`,
+    occurrences: 1,
+    successor: "notes.txt",
+    reason:
+      "Agrees with that fixture's header on both fields, so the paperwork is complete and the " +
+      "only defect left is the TYPE of the successor: `notes.txt` exists, is readable and holds " +
+      "zero app-GUC reads, which is exactly why the old one-arm check passed it (WR-06).",
+  },
 ];
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -368,13 +382,37 @@ function isRealDate(iso) {
  * marker is there but the payload will not parse, and the parsed fields
  * otherwise. The header line is prose about an "app-GUC read" and must never
  * spell the call out, or it would match DETECT_RE and count as a site itself.
+ *
+ * ⚠️ IN-03 (164.7-REVIEW, closed 2026-09-11). TWO markers in the scan window is
+ * header-malformed, not "the first one wins". Before this, a file could carry a
+ * reviewed header AND a second one contradicting it — a different count, a
+ * different successor — and the gate would read whichever came first while a
+ * reviewer read whichever caught their eye. An exemption with two answers is
+ * not an exemption. Measured on this tree the same day: ZERO of the 292
+ * migrations carries more than one marker, so this tightening flags nothing
+ * that exists and everything that would be added.
  */
 export function parseLineageHeader(text) {
   const lines = String(text ?? "").split("\n");
   const limit = Math.min(lines.length, HEADER_SCAN_LINES);
-  for (let i = 0; i < limit; i++) {
+
+  // Collected FIRST, over the whole window, rather than returning on the first
+  // hit — a scan that stops at the first marker cannot count them.
+  const markerLines = [];
+  for (let i = 0; i < limit; i++) if (LINEAGE_MARKER_RE.test(lines[i])) markerLines.push(i);
+  if (markerLines.length > 1) {
+    return {
+      line: markerLines[0] + 1,
+      raw: lines[markerLines[0]].trim(),
+      malformed:
+        `${markerLines.length} lineage markers in the scan window (lines ` +
+        `${markerLines.map((i) => i + 1).join(", ")}); a file may carry exactly one. Two headers ` +
+        "are two answers, and the gate must not pick one for the reviewer.",
+    };
+  }
+
+  for (const i of markerLines) {
     const m = LINEAGE_MARKER_RE.exec(lines[i]);
-    if (!m) continue;
     const line = i + 1;
     const payload = m[1].trim();
     const bad = (why) => ({ line, raw: payload, malformed: why });
@@ -431,24 +469,56 @@ export function scanFile(absPath, opts = {}) {
   const findings = [];
   const push = (kind, line, message) => findings.push({ kind, file, line, message });
 
-  let text;
+  const fail = (reason) => ({ file, header: null, reads: 0, findings: [], measureFail: { file, reason } });
+
+  let buf;
   try {
-    text = readFileSync(absPath, "utf8");
+    // Read as BYTES first. `readFileSync(path, "utf8")` is the step that hides
+    // the encoding problem below: it decodes anything, silently, and hands back
+    // a string in which a UTF-16 migration's every second byte has become a
+    // replacement character — so the scan finds nothing and reports a clean file.
+    buf = readFileSync(absPath);
   } catch (err) {
     // ⛔ "could not measure" must never share a code path with "measured zero".
-    return {
-      file,
-      header: null,
-      reads: 0,
-      findings: [],
-      measureFail: {
-        file,
-        reason:
-          `cannot read ${file} (${err.code ?? err.message}). An unreadable migration is not ` +
-          "a clean one — this is a MEASURE_FAIL, not zero findings.",
-      },
-    };
+    return fail(
+      `cannot read ${file} (${err.code ?? err.message}). An unreadable migration is not ` +
+        "a clean one — this is a MEASURE_FAIL, not zero findings.",
+    );
   }
+
+  // ⚠️ `[APPGUC-UTF16-01]`, closed 2026-09-11. TWO INDEPENDENT PREDICATES over
+  // the first KiB, each nameable on its own so each can be neutered alone:
+  //
+  //   BOM — a UTF-16BE / UTF-16LE / UTF-8 byte-order mark. This gate's whole
+  //         subject is text shape, and a file whose text is not the text we
+  //         decoded is not a file we measured.
+  //   NUL — any zero byte. Catches every UTF-16 file whose BOM was stripped,
+  //         and every binary that wandered in wearing a `.sql` name.
+  //
+  // The BOM test runs FIRST so a UTF-16LE file is named by its BOM rather than
+  // by the NUL bytes that necessarily follow. Either way it is a MEASURE_FAIL,
+  // never a finding and never a clean count.
+  //
+  // ⛔ MEASURED on this tree the same day: 0 of 292 migrations carries a BOM or
+  // a NUL in its first KiB, so this bites nothing that exists today.
+  const head = buf.subarray(0, 1024);
+  const hasBom =
+    (head[0] === 0xfe && head[1] === 0xff) ||
+    (head[0] === 0xff && head[1] === 0xfe) ||
+    (head[0] === 0xef && head[1] === 0xbb && head[2] === 0xbf);
+  const hasNul = head.includes(0x00);
+  if (hasBom) {
+    return fail(
+      `cannot measure ${file}: BOM in the first KiB — an undecodable migration is not a clean one.`,
+    );
+  }
+  if (hasNul) {
+    return fail(
+      `cannot measure ${file}: NUL in the first KiB — an undecodable migration is not a clean one.`,
+    );
+  }
+
+  const text = buf.toString("utf8");
 
   const reads = countReads(text);
   const header = parseLineageHeader(text);
@@ -510,36 +580,96 @@ export function scanFile(absPath, opts = {}) {
   }
 
   if (header.successor !== "none") {
-    // The successor is resolved as a SIBLING of the annotated file. For every
-    // real migration that directory IS `supabase/migrations`, which is what the
-    // plan specifies; resolving relative to the file is also what lets the
-    // fixture pair be self-contained inside FIXTURE_DIR.
-    const successorAbs = join(dirname(absPath), header.successor);
-    if (!existsSync(successorAbs)) {
+    // ⭐ FOUR ARMS, IN ORDER, EACH ITS OWN PREDICATE (WR-06 / threat
+    // T-164.7-02, closed 2026-09-11). Before this the check had ONE arm that a
+    // reader could satisfy: the successor merely had to EXIST and contain zero
+    // app-GUC reads. MEASURED in 164.7-REVIEW: `successor: notes.txt` and
+    // `successor: ../out/escaped.md` both PASSED. Any file that is not SQL
+    // trivially contains zero app-GUC reads, so pointing at one satisfied the
+    // check while proving nothing whatever about where the mechanism went.
+    //
+    // Arms (1a) and (1b) are two SEPARATE predicates on two lines rather than
+    // one combined test, so each can be disabled alone and exactly one red
+    // surface goes clean (D3 — a batch neuter proves nothing about the
+    // individual arms). (1a) and (1b) short-circuit (2)-(4): once the name is
+    // not a sibling `.sql`, resolving it is the wrong question.
+    const successor = header.successor;
+    if (!/\.sql$/i.test(successor)) {
       push(
         "successor-invalid",
         header.line,
-        `names successor "${header.successor}", which does not exist beside this file. A lineage ` +
-          "header that points nowhere is an exemption with no forwarding address.",
+        `names successor "${successor}", which is not a .sql file — a successor is a MIGRATION; ` +
+          "any other file type trivially contains zero app-GUC reads and would satisfy this " +
+          "check while proving nothing about where the mechanism went.",
+      );
+    } else if (/[\\/]/.test(successor)) {
+      push(
+        "successor-invalid",
+        header.line,
+        `names successor "${successor}", which is not a SIBLING — a successor sits beside this ` +
+          "migration. A name carrying a path separator (traversal, or an absolute path) is " +
+          "refused outright rather than resolved and then argued about.",
       );
     } else {
-      let successorReads = null;
-      try {
-        successorReads = countReads(readFileSync(successorAbs, "utf8")).length;
-      } catch (err) {
+      // The successor is resolved as a SIBLING of the annotated file. For every
+      // real migration that directory IS `supabase/migrations`, which is what the
+      // plan specifies; resolving relative to the file is also what lets the
+      // fixture pair be self-contained inside FIXTURE_DIR.
+      const successorAbs = resolve(dirname(absPath), successor);
+      if (!existsSync(successorAbs)) {
         push(
           "successor-invalid",
           header.line,
-          `names successor "${header.successor}", which cannot be read (${err.code ?? err.message}).`,
+          `names successor "${successor}", which does not exist beside this file. A lineage ` +
+            "header that points nowhere is an exemption with no forwarding address.",
         );
-      }
-      if (successorReads !== null && successorReads !== 0) {
+      } else if (!statSync(successorAbs).isFile()) {
+        // A DIRECTORY named `later.sql` exists, and `existsSync` says so. It is
+        // still not a migration — same shape as threat T-164.7-04, where a
+        // directory wearing a `.sql` name must MEASURE_FAIL rather than pass.
         push(
           "successor-invalid",
           header.line,
-          `names successor "${header.successor}", but that file still contains ${successorReads} ` +
-            "app-GUC read(s) — the lineage points at another copy of the same defect.",
+          `names successor "${successor}", which exists but is not a regular file. A directory ` +
+            "wearing a migration's name is not the place the mechanism moved to.",
         );
+      } else {
+        const selfBase = basename(absPath);
+        const succBase = basename(successorAbs);
+        // Arm (3) is CONDITIONAL on both names being real migration names, so
+        // the fixture pair (`lineage.green.sql` -> `successor-target.green.sql`)
+        // keeps working: fixtures carry no timestamp prefix and are not judged
+        // on one.
+        if (/^\d{14}_/.test(selfBase) && /^\d{14}_/.test(succBase)) {
+          if (succBase.slice(0, 14) <= selfBase.slice(0, 14)) {
+            push(
+              "successor-invalid",
+              header.line,
+              `names successor "${successor}", whose migration timestamp ${succBase.slice(0, 14)} ` +
+                `is not strictly later than this file's ${selfBase.slice(0, 14)}. A lineage cannot ` +
+                "point backwards — the successor applies AFTER the file it supersedes.",
+            );
+          }
+        }
+
+        let successorReads = null;
+        try {
+          successorReads = countReads(readFileSync(successorAbs, "utf8")).length;
+        } catch (err) {
+          push(
+            "successor-invalid",
+            header.line,
+            `names successor "${successor}", which cannot be read (${err.code ?? err.message}).`,
+          );
+        }
+        if (successorReads !== null && successorReads !== 0) {
+          push(
+            "successor-invalid",
+            header.line,
+            `names successor "${successor}", but that file still contains ${successorReads} ` +
+              "app-GUC read(s) — the lineage points at another copy of the same defect.",
+          );
+        }
       }
     }
   }
@@ -603,7 +733,25 @@ export function scanPaths(paths, opts = {}) {
   };
 }
 
-/** Every `*.sql` under a directory, recursively, sorted. */
+/**
+ * Every `*.sql` under a directory, recursively, sorted.
+ *
+ * ⚠️ IN-02 (164.7-REVIEW, closed 2026-09-11), TWO independent widenings:
+ *
+ *   CASE — the extension test is case-INSENSITIVE. `Foo.SQL` is a migration on
+ *          every filesystem Postgres tooling runs on, and on the macOS
+ *          case-insensitive volume this repo is developed on it is the SAME
+ *          FILE as `foo.sql`. A case-sensitive test meant renaming the
+ *          extension was a way out of the corpus.
+ *   SYMLINK — a symlinked DIRECTORY is descended into. `readdirSync`'s
+ *          `isDirectory()` is FALSE for a symlink (it does not follow), so a
+ *          symlinked subtree of migrations was silently skipped, and a skipped
+ *          subtree reads exactly like an empty one.
+ *
+ * ⛔ MEASURED on this tree the same day: 292 files, 0 symlinks, 0 non-lowercase
+ * `.sql` names — so neither widening changes today's corpus, and both close a
+ * way of leaving it.
+ */
 function sqlFilesUnder(absDir) {
   if (!existsSync(absDir)) return [];
   const out = [];
@@ -616,8 +764,19 @@ function sqlFilesUnder(absDir) {
       // a corpus entry that cannot be read, and it is collected so scanFile
       // MEASURE_FAILs on it. Skipping it silently would let an unreadable
       // corpus entry read as a clean one (threat T-164.7-04).
-      if (ent.name.endsWith(".sql")) out.push(p);
+      if (ent.name.toLowerCase().endsWith(".sql")) out.push(p);
       else if (ent.isDirectory()) walk(p);
+      else if (ent.isSymbolicLink()) {
+        // `statSync` FOLLOWS the link, which is the whole point; a dangling
+        // link throws, and a dangling link is not a directory to descend.
+        let linkedDir = false;
+        try {
+          linkedDir = statSync(p).isDirectory();
+        } catch {
+          linkedDir = false;
+        }
+        if (linkedDir) walk(p);
+      }
     }
   };
   walk(absDir);
@@ -764,6 +923,17 @@ export function main(argv) {
       console.error("lint-app-guc: --files needs at least one path.");
       return 1;
     }
+    // ⚠️ IN-01 (164.7-REVIEW, closed 2026-09-11). `--files` passes
+    // `allowlist: null`, which turns OFF the second half of the exemption: in
+    // this mode a lineage header ALONE exempts a file, with no
+    // LINEAGE_ALLOWLIST entry required and no `header-not-allowlisted` and no
+    // `allowlist-stale` possible. That is correct for ad-hoc use and would be
+    // a disaster as a gate, so the mode says so out loud rather than leaving a
+    // green line that looks exactly like the corpus mode's green line. CI
+    // never uses `--files`; the corpus invocation is the gate.
+    console.log(
+      "app-guc: --files mode — allowlist enforcement OFF; a lineage header alone exempts a file here.",
+    );
     return report(scanPaths(paths, { allowlist: null }));
   }
   if (argv.length > 0) {
