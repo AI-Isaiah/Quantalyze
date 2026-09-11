@@ -69,7 +69,7 @@
  */
 import { readFileSync, readdirSync, existsSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, relative, resolve, basename } from "node:path";
+import { dirname, join, relative, resolve, basename, sep } from "node:path";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -704,11 +704,18 @@ export function scanFile(absPath, opts = {}) {
 /**
  * Scans a list of paths. `requireNonEmpty` turns an empty list into a
  * MEASURE_FAIL rather than a clean pass — an empty corpus proves nothing.
+ *
+ * `opts.measureFails` SEEDS the list with failures that happened while the
+ * corpus was being ENUMERATED, before any file was opened — a subtree the walk
+ * could not enter is exactly as unmeasured as a file it could not read, and it
+ * must not be able to reach the summary as silence. Seeded entries survive the
+ * `requireNonEmpty` early return on purpose: a walk that failed AND found
+ * nothing must report both reasons, not just the emptier one.
  */
 export function scanPaths(paths, opts = {}) {
-  const { allowlist = null, requireNonEmpty = false } = opts;
+  const { allowlist = null, requireNonEmpty = false, measureFails: seeded = [] } = opts;
   const findings = [];
-  const measureFails = [];
+  const measureFails = [...seeded];
   const annotated = [];
 
   if (requireNonEmpty && paths.length === 0) {
@@ -758,7 +765,26 @@ export function scanPaths(paths, opts = {}) {
 }
 
 /**
- * Every `*.sql` under a directory, recursively, sorted.
+ * Every `*.sql` under a directory, recursively, sorted — returned as
+ * `{ files, measureFails }` rather than a bare array, because the WALK can fail
+ * as well as the READ, and a subtree it could not enter must reach the summary
+ * as a named MEASURE_FAIL rather than as silence.
+ *
+ * ⛔ WHAT THE WALK REFUSES, AND WHY (closed 2026-09-11). Both conditions were
+ * MEASURED on this tree before the fix:
+ *
+ *   DANGLING / UNREADABLE LINK — the old `catch { linkedDir = false; }`
+ *        contributed zero entries and zero errors, which is what an EMPTY
+ *        directory contributes. It is now a MEASURE_FAIL naming the link. See
+ *        the comment at the catch for the CI scenario it must catch.
+ *   ESCAPE AND CYCLE — `ln -s .. migrations/loop` pulled 66,034 files into the
+ *        corpus and walked out of the repo entirely, terminating only when
+ *        ENAMETOOLONG hit that same swallowing catch. Unbounded work AND an
+ *        escape from the corpus root. Every descent is now realpath'd and
+ *        refused if it resolves outside the root or onto a directory already on
+ *        the descent path — the same reason `successor-invalid`'s arm 1b
+ *        refuses a name carrying a path separator instead of resolving it and
+ *        then arguing about it.
  *
  * ⚠️ IN-02 (164.7-REVIEW, closed 2026-09-11), TWO independent widenings:
  *
@@ -777,8 +803,73 @@ export function scanPaths(paths, opts = {}) {
  * way of leaving it.
  */
 function sqlFilesUnder(absDir) {
-  if (!existsSync(absDir)) return [];
+  if (!existsSync(absDir)) return { files: [], measureFails: [] };
   const out = [];
+  const measureFails = [];
+
+  let root;
+  try {
+    root = realpathSync(absDir);
+  } catch (err) {
+    return {
+      files: [],
+      measureFails: [
+        {
+          file: relPath(absDir),
+          reason:
+            `cannot resolve the corpus root (${err.code ?? err.message}). A root that will not ` +
+            "resolve cannot be walked, and an unwalked corpus is never a clean one.",
+        },
+      ],
+    };
+  }
+
+  // The realpaths of the directories currently ON the descent path, innermost
+  // last. A STACK, not a visited-set: two DIFFERENT links to the same sibling
+  // subtree are both legitimate corpus entries and both get walked (the vitest
+  // symlink arm measures exactly that, at 3 files for 2 real ones), while a
+  // link that resolves to a directory we are already inside is a cycle and is
+  // refused.
+  const stack = [root];
+
+  const descend = (p) => {
+    let real;
+    try {
+      real = realpathSync(p);
+    } catch (err) {
+      measureFails.push({
+        file: relPath(p),
+        reason:
+          `cannot resolve ${relPath(p)} to a real path (${err.code ?? err.message}) — the subtree ` +
+          "below it was NOT walked, and an unwalked subtree is not an empty one.",
+      });
+      return;
+    }
+    if (real !== root && !real.startsWith(root + sep)) {
+      measureFails.push({
+        file: relPath(p),
+        reason:
+          `${relPath(p)} resolves to ${real}, which is OUTSIDE the corpus root ${relPath(root)}. ` +
+          "The walk refuses to leave the corpus rather than dragging an unbounded amount of the " +
+          "filesystem into it — the same reason the successor check refuses a name carrying a " +
+          "path separator.",
+      });
+      return;
+    }
+    if (stack.includes(real)) {
+      measureFails.push({
+        file: relPath(p),
+        reason:
+          `${relPath(p)} resolves to ${real}, a directory already on the descent path — a symlink ` +
+          "cycle. It is refused rather than followed until the filesystem runs out of path.",
+      });
+      return;
+    }
+    stack.push(real);
+    walk(p);
+    stack.pop();
+  };
+
   const walk = (dir) => {
     for (const ent of readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
       a.name.localeCompare(b.name),
@@ -789,22 +880,44 @@ function sqlFilesUnder(absDir) {
       // MEASURE_FAILs on it. Skipping it silently would let an unreadable
       // corpus entry read as a clean one (threat T-164.7-04).
       if (ent.name.toLowerCase().endsWith(".sql")) out.push(p);
-      else if (ent.isDirectory()) walk(p);
+      else if (ent.isDirectory()) descend(p);
       else if (ent.isSymbolicLink()) {
-        // `statSync` FOLLOWS the link, which is the whole point; a dangling
-        // link throws, and a dangling link is not a directory to descend.
-        let linkedDir = false;
+        // `statSync` FOLLOWS the link, which is the whole point.
+        //
+        // ⛔ THE THROW IS A MEASURE_FAIL, NOT A `false` (closed 2026-09-11).
+        // The old empty `catch { linkedDir = false; }` justified itself for a
+        // DANGLING link, and it also swallowed EACCES, ELOOP, ENAMETOOLONG and
+        // a target on an unmounted volume. MEASURED on this tree the same day:
+        // a dangling link contributed zero entries and zero errors —
+        // indistinguishable from an empty directory, which is the exact defect
+        // the docstring above claims to be FIXING.
+        //
+        // THE FAILURE IT MUST CATCH: `supabase/migrations/vendor ->
+        // /mnt/shared/migrations` on a runner without that mount. statSync
+        // throws ENOENT, the subtree is skipped, `requireNonEmpty` is satisfied
+        // by the other 292 files, and the gate reports `findings 0, exit 0` for
+        // a corpus it never read.
+        let linked;
         try {
-          linkedDir = statSync(p).isDirectory();
-        } catch {
-          linkedDir = false;
+          linked = statSync(p);
+        } catch (err) {
+          measureFails.push({
+            file: relPath(p),
+            reason:
+              `cannot stat the symlink ${relPath(p)} (${err.code ?? err.message}). A link the walk ` +
+              "cannot follow is NOT an empty directory: it may be a dangling link, an unmounted " +
+              "volume, EACCES or ELOOP, and every one of those leaves a subtree unmeasured. " +
+              "Repoint or remove the link — do not let it read as zero findings.",
+          });
+          continue;
         }
-        if (linkedDir) walk(p);
+        if (linked.isDirectory()) descend(p);
       }
     }
   };
+
   walk(absDir);
-  return out.sort();
+  return { files: out.sort(), measureFails };
 }
 
 /**
@@ -814,7 +927,8 @@ function sqlFilesUnder(absDir) {
 export function scanCorpus(opts = {}) {
   const { allowlist = LINEAGE_ALLOWLIST, migrationsDir = null } = opts;
   const dir = migrationsDir ? resolve(migrationsDir) : join(REPO_ROOT, MIGRATIONS_DIR);
-  return scanPaths(sqlFilesUnder(dir), { allowlist, requireNonEmpty: true });
+  const { files, measureFails } = sqlFilesUnder(dir);
+  return scanPaths(files, { allowlist, requireNonEmpty: true, measureFails });
 }
 
 // ───────────────────────────────────────────────────────────────────────────
