@@ -132,7 +132,7 @@
 --      presence, its check 6 is absence — so the flat claim is wrong for exactly
 --      one of its three, and wrong in the quiet direction. ⭐ THE CORRECTED FORM
 --      IS ALREADY IN THIS FILE, stated per direction beside the strip itself in
---      STEP 3 (checks 5-7 presence, check 8 absence). This entry is what says
+--      STEP 3 (checks 5, 6, 7 and 7b presence, check 8 absence). This entry is what says
 --      whose sentence it supersedes; without it the two files read as two
 --      independent opinions rather than a correction.
 --
@@ -199,6 +199,16 @@
 --                                       concatenation (see the DECLARE). Named
 --                                       in prose and never written, which is the
 --                                       treatment the other two now get.
+--     GET ⟦…⟧ DIAGNOSTICS v_found     — the row-count read the two INVISIBLE
+--                                       causes are told apart by. ⛔ ELIDED and
+--                                       assembled by concatenation for the
+--                                       PRE-EMPTIVE reason stated at needle (5):
+--                                       no arm mutates it TODAY (MEASURED at
+--                                       HEAD across all 43 RED-UNDER-M edit
+--                                       steps of the three ledger/tick gates),
+--                                       and splitting it now is what keeps a
+--                                       FUTURE arm on that line reddening its
+--                                       own gate instead of aborting this apply.
 --
 --   GATE `find` STRINGS (mutated by the twins in
 --   supabase/tests/test_ledger_refresh_fanout.sql and
@@ -442,12 +452,20 @@ BEGIN
     -- the ELSE, the cause is nulled and NO ROW IS WRITTEN: an UNMEASURED read
     -- would be filed as the healthy row-present-and-FALSE case, silently. That
     -- is the named failure mode of the invariant this whole phase is restoring,
-    -- and the apply-time block CANNOT catch it — check 7 below asserts only that
-    -- the instrument INSERT is PRESENT, so deleting the row-count read above
-    -- yields a migration that verifies itself green on the auto-apply-to-PROD
-    -- route. The NULL-safe form files an unmeasured read with the other
-    -- INVISIBLE cause, where it is counted and loud, instead of with the silent
-    -- one.
+    -- and until check 7b was added the apply-time block COULD NOT catch it:
+    -- check 7 asserts only that the instrument INSERT is PRESENT, so deleting
+    -- the row-count read above yielded a migration that verified itself green on
+    -- the auto-apply-to-PROD route. The NULL-safe form files an unmeasured read
+    -- with the other INVISIBLE cause, where it is counted and loud, instead of
+    -- with the silent one.
+    --
+    -- ⭐ AND THE DETECTOR IS BACK, at the apply rather than in the gate. The
+    -- NULL-safe form is what made the deletion invisible to the GATES too — the
+    -- row now writes under it, so arm M1 no longer reddens (see the A/B below,
+    -- which measures exactly that). Check 7b holds needle (5) over the
+    -- row-count read itself and REFUSES THE APPLY when the line is gone, which
+    -- is the one layer the deletion cannot route around. The trade the M-3 fix
+    -- made is therefore paid back rather than merely recorded.
     --
     -- ⭐ A/B MEASURED 2026-09-11 on real pg-lanes, because "it would be silent"
     -- is the kind of claim this repo does not take on argument. Delete the
@@ -475,15 +493,73 @@ BEGIN
       -- ⛔ THE SQLSTATE GOES IN `metadata`, NEVER IN `error`. Both ledger gates'
       -- M2 arms count rows whose `error` is EXACTLY the cause string; appending a
       -- diagnostic there breaks that equality and the arm reddens for a reason
-      -- unrelated to what it tests. `metadata` carries no equality assertion,
+      -- unrelated to what it tests. `metadata` carries NO EQUALITY assertion,
       -- which is what makes it the column a new diagnostic can join without
       -- renegotiating a gate. It is NULL on the invisible-or-absent path, by
       -- construction: there was no exception, so there was no SQLSTATE to read.
-      INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
-      VALUES ('ledger_refresh_fanout', 'error', now(), v_cause,
-              jsonb_build_object('function', 'enqueue_ledger_refresh_for_strategies',
-                                 'cause', v_cause,
-                                 'sqlstate', v_sqlstate));
+      --
+      -- ⚠️ AMENDED 2026-09-12 — `metadata` now carries a PRESENCE assertion, and
+      -- the distinction from an EQUALITY one is the whole reason it could be
+      -- added without renegotiating anything. Both gates' M2 arms narrow their
+      -- count to rows whose `metadata->>'sqlstate'` IS NOT NULL. Deleting the
+      -- key pair below therefore makes M2 count 0 and redden by name, where
+      -- before it was read by nothing: check 7's needle is the INSERT's own
+      -- statement shape and SURVIVES the deletion intact, so a tidy-up of this
+      -- jsonb_build_object call silently collapsed 42P01, 42501 and a planner
+      -- fault back into one undifferentiated cause with every gate green. No
+      -- VALUE is pinned — an equality on a SQLSTATE would make the arm depend on
+      -- which failure the gate happens to provoke, which is the mistake the
+      -- paragraph above refuses for `error`.
+      --
+      -- ⛔ THE WRITE IS BEST-EFFORT; THE DORMANT RETURN IS THE CONTRACT — a
+      -- DECISION, recorded here because the file argues the handler's shape at
+      -- length above and was silent at the one place the argument also applies.
+      -- Control reaches the flag_read_failed branch BECAUSE a read raised
+      -- (42P01, 42501 or a planner fault), and two of those three plausibly
+      -- reach this INSERT as well. Unwrapped, the tick on which the instrument
+      -- matters MOST is the tick on which this function RAISES: the row rolls
+      -- back, the diagnostic is lost anyway, and a fail-closed dormant no-op on
+      -- a function slated for a schedule becomes a hard error — an hourly cron
+      -- that starts erroring is an incident, which is the exact thing arm L of
+      -- both gates exists to refuse one layer up. So the write is wrapped and
+      -- the dormancy survives it.
+      --
+      -- ⭐ A/B MEASURED 2026-09-12 on real pg-lanes, in the one state this whole
+      -- decision is about: the activation read raising 42P01 (system_flags
+      -- renamed away) AND the instrument's own table gone (cron_runs dropped).
+      -- WITH the wrap the function emitted the WARNING below and RETURNED 0.
+      -- With the wrap removed and nothing else changed, the SAME probe reported
+      -- `the fan-out RAISED (SQLSTATE 42P01)`. The decision is therefore a
+      -- measured difference in behaviour, not a preference.
+      --
+      -- ⚠️ THE WARNING IS NOT THE DETECTOR AND IS NOT CLAIMED AS ONE — this
+      -- file's header MEASURES a WARNING as having no consumer. What detects a
+      -- silently-failing instrument is both gates' M1/M2 arms, which count the
+      -- row inside their own transaction and redden at 0.
+      --
+      -- ⚠️ R1-exception-handler-probe is not imported by this shape: that rule
+      -- governs the GATE corpus (scripts/lint-sql-gates.mjs, CORPUS_DIR =
+      -- supabase/tests) and not migration bodies, and this handler holds neither
+      -- a probe nor a SELECT INTO — only the RAISE the rule exists to preserve.
+      --
+      -- ⛔ FORCE ROW LEVEL SECURITY on public.cron_runs IS THE CLAUSE THAT
+      -- BREAKS THIS WRITE. The definer is exempt from row security on this table
+      -- by OWNERSHIP ALONE (see check 3's derivation: the table carries no FORCE
+      -- clause at baseline.sql:9864, and neither policy admits this role), and
+      -- FORCE is the one clause under which owning a table stops being an
+      -- exemption. Add it at STEP 2b — which is where a future hardener will be
+      -- standing — and every dormant-with-cause tick loses its row. Before the
+      -- wrap below that was a RAISE; with it, it is a WARNING and a missing row,
+      -- which both gates' M1/M2 arms report by name.
+      BEGIN
+        INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+        VALUES ('ledger_refresh_fanout', 'error', now(), v_cause,
+                jsonb_build_object('function', 'enqueue_ledger_refresh_for_strategies',
+                                   'cause', v_cause,
+                                   'sqlstate', v_sqlstate));
+      EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'enqueue_ledger_refresh_for_strategies: dormancy instrument write failed (SQLSTATE %); the dormant cause was %', SQLSTATE, v_cause;
+      END;
     END IF;
     RETURN 0;
   END IF;
@@ -831,12 +907,20 @@ BEGIN
     -- the ELSE, the cause is nulled and NO ROW IS WRITTEN: an UNMEASURED read
     -- would be filed as the healthy row-present-and-FALSE case, silently. That
     -- is the named failure mode of the invariant this whole phase is restoring,
-    -- and the apply-time block CANNOT catch it — check 7 below asserts only that
-    -- the instrument INSERT is PRESENT, so deleting the row-count read above
-    -- yields a migration that verifies itself green on the auto-apply-to-PROD
-    -- route. The NULL-safe form files an unmeasured read with the other
-    -- INVISIBLE cause, where it is counted and loud, instead of with the silent
-    -- one.
+    -- and until check 7b was added the apply-time block COULD NOT catch it:
+    -- check 7 asserts only that the instrument INSERT is PRESENT, so deleting
+    -- the row-count read above yielded a migration that verified itself green on
+    -- the auto-apply-to-PROD route. The NULL-safe form files an unmeasured read
+    -- with the other INVISIBLE cause, where it is counted and loud, instead of
+    -- with the silent one.
+    --
+    -- ⭐ AND THE DETECTOR IS BACK, at the apply rather than in the gate. The
+    -- NULL-safe form is what made the deletion invisible to the GATES too — the
+    -- row now writes under it, so arm M1 no longer reddens (see the A/B below,
+    -- which measures exactly that). Check 7b holds needle (5) over the
+    -- row-count read itself and REFUSES THE APPLY when the line is gone, which
+    -- is the one layer the deletion cannot route around. The trade the M-3 fix
+    -- made is therefore paid back rather than merely recorded.
     --
     -- ⭐ A/B MEASURED 2026-09-11 on real pg-lanes, because "it would be silent"
     -- is the kind of claim this repo does not take on argument. Delete the
@@ -864,15 +948,73 @@ BEGIN
       -- ⛔ THE SQLSTATE GOES IN `metadata`, NEVER IN `error`. Both ledger gates'
       -- M2 arms count rows whose `error` is EXACTLY the cause string; appending a
       -- diagnostic there breaks that equality and the arm reddens for a reason
-      -- unrelated to what it tests. `metadata` carries no equality assertion,
+      -- unrelated to what it tests. `metadata` carries NO EQUALITY assertion,
       -- which is what makes it the column a new diagnostic can join without
       -- renegotiating a gate. It is NULL on the invisible-or-absent path, by
       -- construction: there was no exception, so there was no SQLSTATE to read.
-      INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
-      VALUES ('ledger_refresh_fanout', 'error', now(), v_cause,
-              jsonb_build_object('function', 'enqueue_ledger_composite_refresh',
-                                 'cause', v_cause,
-                                 'sqlstate', v_sqlstate));
+      --
+      -- ⚠️ AMENDED 2026-09-12 — `metadata` now carries a PRESENCE assertion, and
+      -- the distinction from an EQUALITY one is the whole reason it could be
+      -- added without renegotiating anything. Both gates' M2 arms narrow their
+      -- count to rows whose `metadata->>'sqlstate'` IS NOT NULL. Deleting the
+      -- key pair below therefore makes M2 count 0 and redden by name, where
+      -- before it was read by nothing: check 7's needle is the INSERT's own
+      -- statement shape and SURVIVES the deletion intact, so a tidy-up of this
+      -- jsonb_build_object call silently collapsed 42P01, 42501 and a planner
+      -- fault back into one undifferentiated cause with every gate green. No
+      -- VALUE is pinned — an equality on a SQLSTATE would make the arm depend on
+      -- which failure the gate happens to provoke, which is the mistake the
+      -- paragraph above refuses for `error`.
+      --
+      -- ⛔ THE WRITE IS BEST-EFFORT; THE DORMANT RETURN IS THE CONTRACT — a
+      -- DECISION, recorded here because the file argues the handler's shape at
+      -- length above and was silent at the one place the argument also applies.
+      -- Control reaches the flag_read_failed branch BECAUSE a read raised
+      -- (42P01, 42501 or a planner fault), and two of those three plausibly
+      -- reach this INSERT as well. Unwrapped, the tick on which the instrument
+      -- matters MOST is the tick on which this function RAISES: the row rolls
+      -- back, the diagnostic is lost anyway, and a fail-closed dormant no-op on
+      -- a function slated for a schedule becomes a hard error — an hourly cron
+      -- that starts erroring is an incident, which is the exact thing arm L of
+      -- both gates exists to refuse one layer up. So the write is wrapped and
+      -- the dormancy survives it.
+      --
+      -- ⭐ A/B MEASURED 2026-09-12 on real pg-lanes, in the one state this whole
+      -- decision is about: the activation read raising 42P01 (system_flags
+      -- renamed away) AND the instrument's own table gone (cron_runs dropped).
+      -- WITH the wrap the function emitted the WARNING below and RETURNED 0.
+      -- With the wrap removed and nothing else changed, the SAME probe reported
+      -- `the fan-out RAISED (SQLSTATE 42P01)`. The decision is therefore a
+      -- measured difference in behaviour, not a preference.
+      --
+      -- ⚠️ THE WARNING IS NOT THE DETECTOR AND IS NOT CLAIMED AS ONE — this
+      -- file's header MEASURES a WARNING as having no consumer. What detects a
+      -- silently-failing instrument is both gates' M1/M2 arms, which count the
+      -- row inside their own transaction and redden at 0.
+      --
+      -- ⚠️ R1-exception-handler-probe is not imported by this shape: that rule
+      -- governs the GATE corpus (scripts/lint-sql-gates.mjs, CORPUS_DIR =
+      -- supabase/tests) and not migration bodies, and this handler holds neither
+      -- a probe nor a SELECT INTO — only the RAISE the rule exists to preserve.
+      --
+      -- ⛔ FORCE ROW LEVEL SECURITY on public.cron_runs IS THE CLAUSE THAT
+      -- BREAKS THIS WRITE. The definer is exempt from row security on this table
+      -- by OWNERSHIP ALONE (see check 3's derivation: the table carries no FORCE
+      -- clause at baseline.sql:9864, and neither policy admits this role), and
+      -- FORCE is the one clause under which owning a table stops being an
+      -- exemption. Add it at STEP 2b — which is where a future hardener will be
+      -- standing — and every dormant-with-cause tick loses its row. Before the
+      -- wrap below that was a RAISE; with it, it is a WARNING and a missing row,
+      -- which both gates' M1/M2 arms report by name.
+      BEGIN
+        INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+        VALUES ('ledger_refresh_fanout', 'error', now(), v_cause,
+                jsonb_build_object('function', 'enqueue_ledger_composite_refresh',
+                                   'cause', v_cause,
+                                   'sqlstate', v_sqlstate));
+      EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'enqueue_ledger_composite_refresh: dormancy instrument write failed (SQLSTATE %); the dormant cause was %', SQLSTATE, v_cause;
+      END;
     END IF;
     RETURN 0;
   END IF;
@@ -1142,6 +1284,32 @@ REVOKE ALL ON FUNCTION public.enqueue_ledger_composite_refresh()
 -- immediately before this file. A `to_regclass` guard would buy back the
 -- apply-anywhere property by SKIPPING the hardening in silence on any cluster
 -- that lacked the table, which is the trade this phase exists to refuse.
+--
+-- ⛔ DO NOT ADD `FORCE ROW LEVEL SECURITY` TO public.cron_runs HERE. This step is
+-- exactly where the next person hardening this table will be standing, and that
+-- clause is the one under which OWNING a table stops being an RLS exemption —
+-- it would silence the dormancy instrument in both fan-out bodies, whose INSERT
+-- depends on the definer's ownership and on nothing else. The full derivation
+-- and the failure shape are stated beside each INSERT and in check 3.
+--
+-- ⛔ AND THE REVOKE BELOW IS VERIFIED, by check 10 of STEP 3 — do not read the
+-- statement as its own proof. REVOKE removes only grants made by the CURRENT
+-- USER or by a role it is a member of; on a grantor mismatch the grant SURVIVES
+-- and the migration COMMITS AT EXIT 0 with the privilege intact.
+--
+-- ⛔ AND IT IS SILENT — MEASURED, because the weaker guess was wrong in the
+-- direction that flatters the statement. On PostgreSQL 16.13, 2026-09-12, on a
+-- throwaway pg-lane: with a second role holding the grant option and having made
+-- the grant, `REVOKE TRUNCATE, REFERENCES, TRIGGER … FROM anon, authenticated`
+-- printed `REVOKE` and NOTHING ELSE — no warning, no notice — while
+-- has_table_privilege('authenticated', …, 'TRUNCATE') stayed TRUE. The review
+-- that found this gap expected at least a `no privileges could be revoked`
+-- WARNING; there is not even that, so the "a WARNING has no consumer" argument
+-- this file makes elsewhere does not apply here. There is no output to consume.
+--
+-- ⛔ AND A SUPERUSER CANNOT FIX IT BY BEING ONE. Same lane, same run: the
+-- bootstrap superuser's own REVOKE left the privilege held (t). Only
+-- `SET ROLE <grantor>` followed by the REVOKE cleared it (f).
 REVOKE TRUNCATE, REFERENCES, TRIGGER ON TABLE public.cron_runs FROM anon, authenticated;
 
 -- --------------------------------------------------------------------------
@@ -1172,22 +1340,35 @@ REVOKE TRUNCATE, REFERENCES, TRIGGER ON TABLE public.cron_runs FROM anon, authen
 -- The interim remedy for such a refusal is to REVERT THE MERGE; ⛔ never to edit
 -- supabase-migrate.yml.
 --
--- ⛔ AND THIS BLOCK MUST NEVER NAME public.cron_runs OR public.system_flags AS
--- OBJECTS. The ONLY relations it reads are pg_proc, pg_namespace and pg_roles,
--- plus the functions pg_get_functiondef, aclexplode, acldefault and
--- pg_get_userbyid — it asserts the SHAPE of two function bodies, and a body
--- resolves its own table references at CALL time, so this block stays correct on
--- a cluster where neither table exists.
+-- ⛔ AND THIS BLOCK MUST NEVER NAME public.system_flags AS AN OBJECT, NOR READ A
+-- ROW FROM EITHER TABLE. The relations it reads are pg_proc, pg_namespace,
+-- pg_roles and — in check 10 — pg_class via has_table_privilege, plus the
+-- functions pg_get_functiondef, aclexplode, acldefault and pg_get_userbyid. All
+-- of those are CATALOGUE. It asserts the SHAPE of two function bodies and the
+-- OUTCOME of one REVOKE; a body resolves its own table references at CALL time,
+-- so the body checks stay correct on a cluster where neither table exists.
 --
--- ⚠️ THE FILE AS A WHOLE NO LONGER HAS THAT PROPERTY, and the sentence that used
--- to claim it here ("every reference lives inside the plpgsql bodies above") is
--- what STEP 2b falsified. That step REVOKEs three privileges on the heartbeat
--- table at statement level, so the file now requires it to exist where it
--- applies — which it does, in all three places this file applies, for the
--- reasons STEP 2b records. The narrow claim is the one that was load-bearing:
--- what must not read those tables is THIS BLOCK, because an apply-time read of
--- committed DATA is the escape class criterion 7 forbids. A REVOKE reads no
--- rows.
+-- ⚠️ THE BAN ON NAMING public.cron_runs WAS LIFTED 2026-09-12, and the sentence
+-- it replaces was already obsolete when it was written — the paragraph below has
+-- said so since STEP 2b landed. Kept as a ban, it had one measurable effect: it
+-- forbade the ONLY layer that could verify STEP 2b's REVOKE, so that REVOKE was
+-- asserted by nothing at all while the file explained at length why the
+-- privilege it removes is the residual row security never evaluates. Check 10
+-- names the table.
+--
+-- ⚠️ AND IT ADDS NO NEW REQUIREMENT. Check 10 resolves 'public.cron_runs' from a
+-- TEXT literal at run time, so it does not need the table at parse time — but it
+-- does raise 42P01 if the table is absent at execute time, which is the SAME
+-- requirement STEP 2b's REVOKE imposes twenty lines earlier and which cannot be
+-- reached without it. The apply-anywhere property was spent by the REVOKE, for
+-- the reasons STEP 2b records; check 10 spends nothing further.
+--
+-- ⚠️ WHAT IS STILL FORBIDDEN, and this is the part that was load-bearing all
+-- along: THIS BLOCK MAY NOT READ COMMITTED DATA. A row count over
+-- public.cron_runs is the escape class criterion 7 names — shared TEST carries
+-- PROD's catalogue and EMPTY tables, so a count that holds on PROD refuses on
+-- TEST and blocks the deploy. A REVOKE reads no rows, and neither does
+-- has_table_privilege: it reads pg_class.relacl.
 DO $verify$
 DECLARE
   -- ⛔ Every variable is DECLAREd up front: plpgsql compiles a DO block WHOLE,
@@ -1239,6 +1420,36 @@ DECLARE
   --     the very hit it exists to forbid, and a NEW file cannot be allowlisted.
   --     Copied verbatim from 20260907130000:783.
   v_guc_needle        TEXT := 'current_' || 'setting(''app.' || 'ledger_refresh_enabled''';
+  -- (5) THE ROW-COUNT READ ITSELF, and it is here because the M-3 fix traded a
+  --     detector away. Under the earlier `v_found = 0` cause branch, deleting
+  --     the row-count read made v_found NULL, the branch was not taken, no row
+  --     was written, and gate arm M1 reddened — the DELETION had a detector,
+  --     even though it lived in the gate rather than here. The NULL-safe
+  --     `IS DISTINCT FROM 1` that replaced it is CORRECT and stays: it files an
+  --     unmeasured read with the INVISIBLE causes, where it is counted and loud,
+  --     instead of with the silent healthy one. But the row now WRITES under the
+  --     deletion, so the gate stays GREEN and nothing anywhere noticed that the
+  --     count had stopped being taken. This needle is that detector, moved to
+  --     the layer the deletion actually reaches: the apply.
+  --
+  -- ⛔ ASSEMBLED BY CONCATENATION, for a reason that is NOT the occurrence
+  --     counter's. No gate arm's find string contains this token (MEASURED at
+  --     HEAD over all 43 RED-UNDER-M edit steps of the three ledger/tick gates),
+  --     so a raw spelling would break nothing today. It is split anyway so that
+  --     a FUTURE arm which mutates the row-count read reddens its own gate
+  --     instead of aborting this apply — the same trade the other concatenated
+  --     needles make, taken before it costs anything rather than after.
+  --
+  -- ⚠️ BOUND TO THE TARGET VARIABLE, not to the bare statement keyword: the
+  --     floating form would be satisfied by a row-count read into ANY other
+  --     variable, which is precisely the rewrite that leaves v_found unset.
+  --
+  -- ⚠️ STATED FIFTH AND CHECKED AS "7b", deliberately out of step. Checks 8 and
+  --     9 are cited BY NUMBER in this file's header, in their own RAISE messages
+  --     and in 20260907130000's cross-references; renumbering them to make room
+  --     would make every one of those citations wrong, which is a worse defect
+  --     than an out-of-order label.
+  v_diag_needle       TEXT := 'GET ' || 'DIAGNOSTICS v_found';
 BEGIN
   FOREACH v_fn IN ARRAY ARRAY[
     'enqueue_ledger_refresh_for_strategies',
@@ -1358,11 +1569,11 @@ BEGIN
     --
     -- ⚠️ RESIDUAL, RECORDED not closed, carried over from 20260907130000:880-886:
     -- this idiom does not strip `/* … */`. A block comment quoting a needle would
-    -- satisfy checks 5-7 with the code gone. MEASURED on both bodies in this
-    -- file: 0 occurrences of a block-comment opener.
+    -- satisfy checks 5, 6, 7 and 7b with the code gone. MEASURED on both bodies
+    -- in this file: 0 occurrences of a block-comment opener.
     --
     -- ⚠️ AND THE TWO DIRECTIONS ARE NOT THE SAME, which is why they are stated
-    -- separately. For the PRESENCE checks 5, 6 and 7 a `--` inside a string
+    -- separately. For the PRESENCE checks 5, 6, 7 and 7b a `--` inside a string
     -- literal makes the strip eat real code, which can only cause a FALSE
     -- FAILURE — loud, and safe. For the ABSENCE check 8 the same accident is a
     -- FALSE PASS: the strip could swallow the very call the check forbids.
@@ -1370,7 +1581,7 @@ BEGIN
     v_def := regexp_replace(v_def_raw, '--[^\n]*', '', 'g');
 
     IF v_def IS NULL OR length(v_def) < 500 THEN
-      RAISE EXCEPTION 'Migration 20260911130000: the comment-stripped definition of public.% is % character(s) — the strip is broken, so checks 5-8 below would pass over nothing', v_fn, COALESCE(length(v_def), 0);
+      RAISE EXCEPTION 'Migration 20260911130000: the comment-stripped definition of public.% is % character(s) — the strip is broken, so checks 5, 6, 7, 7b and 8 below would pass over nothing', v_fn, COALESCE(length(v_def), 0);
     END IF;
 
     -- 5. the guard READS THE ACTIVATION TABLE.
@@ -1391,6 +1602,20 @@ BEGIN
     --    removes this needle's only occurrence in the body.
     IF position(v_instrument_needle IN v_def) = 0 THEN
       RAISE EXCEPTION 'Migration 20260911130000: public.% no longer writes the dormancy instrument row (looked for "%"). Two of the three dormant causes — a read that RAISED and a flag row that is absent or invisible to the definer — would again reach no counted row, and the second of those is a live platform reporting itself dormant with nothing to read', v_fn, v_instrument_needle;
+    END IF;
+
+    -- 7b. and the count that DECIDES between the two invisible causes is still
+    --    TAKEN. See needle (5) in the DECLARE for the full derivation; the short
+    --    form is that the M-3 fix moved the row-count read's only detector out of
+    --    the gate, so this is where it comes back.
+    --
+    -- ⚠️ THIS IS THE CHECK THAT MAKES THE PARAGRAPH BESIDE THE CAUSE BRANCH TRUE.
+    --    That paragraph used to say the apply-time block CANNOT catch the
+    --    deletion because check 7 asserts only the INSERT's presence. That was
+    --    accurate and is now superseded: check 7 still asserts only the write,
+    --    and this check asserts the measurement the write's cause depends on.
+    IF position(v_diag_needle IN v_def) = 0 THEN
+      RAISE EXCEPTION 'Migration 20260911130000: public.% no longer takes the row count of the activation read (looked for "%"). v_found then stays NULL on a read that did NOT raise, the NULL-safe cause branch files an UNMEASURED read as flag_row_invisible_or_absent, and the two invisible causes stop being distinguishable — the instrument still writes its row, so every gate stays GREEN and nothing below this line notices', v_fn, v_diag_needle;
     END IF;
 
     -- 8. and the retired app-namespace database-setting call is GONE from the
@@ -1468,6 +1693,60 @@ BEGIN
       RAISE EXCEPTION 'Migration 20260911130000: EXECUTE on public.% is held by [%], expected exactly the owner [%]. service_role''s grant survived Phase 164.7 precisely because only anon and authenticated were probed; a cross-tenant SECURITY DEFINER function that enqueues work for every tenant must be callable by the scheduler alone, and the scheduler IS the owner', v_fn, v_grantees, v_acl_owner;
     END IF;
   END LOOP;
+
+  -- 10. STEP 2b's REVOKE ACTUALLY BIT — the post-condition, OUTSIDE the loop
+  --     because it is a property of one table and not of either function.
+  --
+  -- ⛔ A REVOKE IS NOT ITS OWN PROOF, and this is the specific reason. Postgres
+  --    removes only the grants made by the CURRENT USER or by a role it is a
+  --    member of. On a grantor mismatch — the normal shape on a Supabase-hosted
+  --    project, where the bootstrap `GRANT ALL` was made by one role and
+  --    migrations apply as another — the foreign grant SURVIVES and the
+  --    transaction COMMITS AT EXIT 0. The migration then reports success with the
+  --    role still holding TRUNCATE on the one table this file makes load-bearing,
+  --    and TRUNCATE is the statement row security never evaluates, so no policy
+  --    is standing behind it.
+  --
+  -- ⛔ AND THE FAILURE IS SILENT, not merely unheard — MEASURED on PostgreSQL
+  --    16.13 on a throwaway pg-lane, 2026-09-12, because the guess that it WARNs
+  --    would have made this check optional. With `grantor_r1` holding the grant
+  --    option and having made the grant, the REVOKE printed `REVOKE` and nothing
+  --    else: no WARNING, no NOTICE, exit 0, and
+  --    has_table_privilege('authenticated', …, 'TRUNCATE') still TRUE. There is
+  --    no server output to route to a consumer. This check IS the output.
+  --
+  -- ⛔ BEING A SUPERUSER IS NOT THE ESCAPE. Same run: the bootstrap superuser's
+  --    own REVOKE against the foreign grantor left the privilege held (t), and
+  --    only `SET ROLE grantor_r1` followed by the REVOKE cleared it (f). The
+  --    remedy in the message below states the measured one and not the intuitive
+  --    one.
+  --
+  -- ⭐ BITE-PROVEN on a real pg-lane 2026-09-12, not argued: with that grantor
+  --    mismatch planted before the apply, this check RAISED by name with
+  --    `(anon=f, authenticated=t)` and the lane exited 3; with the mismatch
+  --    absent it stays silent and the fan-out gate passes 15/15 at exit 0.
+  --
+  -- ⭐ IT LIVES HERE AND NOT IN A GATE ARM, deliberately. A grantor mismatch is a
+  --    property of the cluster the statement runs on. The pg-lane creates anon
+  --    and authenticated itself and grants them nothing on this table, so a lane
+  --    cannot reproduce a grantor it never had — a lane arm would be green for a
+  --    reason unrelated to the risk. This check runs on the TEST apply and then
+  --    on the PROD apply, which is exactly where the mismatch lives.
+  --
+  -- ⚠️ CATALOGUE ONLY (criterion 7). has_table_privilege reads pg_class.relacl;
+  --    it counts no rows, so it cannot refuse on TEST for the empty-table reason
+  --    that would block a deploy.
+  --
+  -- ⚠️ IT CANNOT BE THE FIRST FAILURE FOR A MISSING ROLE. has_table_privilege
+  --    raises on an unknown role name — but STEP 2b's REVOKE names both roles at
+  --    statement level and raises first if either is absent, so a missing role is
+  --    already diagnosed twenty lines earlier and never arrives here mislabelled.
+  IF has_table_privilege('anon', 'public.cron_runs', 'TRUNCATE')
+     OR has_table_privilege('authenticated', 'public.cron_runs', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'Migration 20260911130000: STEP 2b''s REVOKE did not bite — TRUNCATE on public.cron_runs is still held (anon=%, authenticated=%). REVOKE removes only grants made by the current user or by a role it is a member of, and on a grantor mismatch it COMMITS AT EXIT 0 having printed `REVOKE` and NOTHING ELSE — no warning, no notice (MEASURED, PostgreSQL 16.13, 2026-09-12) — so the statement above cannot be read as its own proof. TRUNCATE is the one statement row security never evaluates: the table''s two policies are consulted for SELECT/INSERT/UPDATE/DELETE and not for this, so an ordinary session can erase exactly the dormancy evidence this migration exists to create. REMEDY: find the grantor with `SELECT DISTINCT a.grantor::regrole FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a WHERE c.oid = ''public.cron_runs''::regclass;`, then re-run the REVOKE under `SET ROLE <that grantor>`. ⛔ Being a superuser is NOT the escape and do not reach for it: MEASURED on the same lane, the bootstrap superuser''s own REVOKE left the privilege held, and only SET ROLE to the grantor cleared it. Do NOT relax this check',
+      has_table_privilege('anon', 'public.cron_runs', 'TRUNCATE'),
+      has_table_privilege('authenticated', 'public.cron_runs', 'TRUNCATE');
+  END IF;
 
   RAISE NOTICE 'Migration 20260911130000: both ledger fan-outs re-based — EXECUTE held by the owner alone, and a dormant tick with an invisible cause now writes one counted row naming it. NOTHING scheduled, NOTHING activated';
 END $verify$;
