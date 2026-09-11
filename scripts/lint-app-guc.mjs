@@ -871,9 +871,35 @@ function sqlFilesUnder(absDir) {
   };
 
   const walk = (dir) => {
-    for (const ent of readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
-      a.name.localeCompare(b.name),
-    )) {
+    // ⛔ THE READ IS WRAPPED, FOR THE SAME REASON `descend`'s `realpathSync` AND
+    // the symlink arm's `statSync` ARE (164.8.5-REVIEW-R1 WR). `readdirSync`
+    // was the one bare call in this block, so a directory that RESOLVES but
+    // cannot be READ — mode 0111, EACCES, EIO on a network mount, EMFILE —
+    // threw straight out of `sqlFilesUnder` → `scanCorpus` → `main`. MEASURED
+    // 2026-09-11 with `chmod 111` on a subdirectory: `THREW: EACCES`, and with
+    // it no MEASURE_FAIL, no `app-guc:` summary and no `report()` at all.
+    //
+    // The DIRECTION was already loud (uncaught → exit 1 → red CI), so this was
+    // never a false green — but it defeated this block's own design and handed
+    // the operator a stack trace instead of the sentence that says what was not
+    // measured. An unwalked subtree is not an empty one, and the walk continues
+    // over the siblings it CAN read rather than losing the whole corpus to one
+    // unreadable directory.
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      measureFails.push({
+        file: relPath(dir),
+        reason:
+          `cannot READ the directory ${relPath(dir)} (${err.code ?? err.message}) — it resolves, but its ` +
+          "entries could not be listed, so the subtree below it was NOT walked. An unwalked subtree is not " +
+          "an empty one: EACCES, EIO on an unmounted network path and EMFILE all leave migrations unmeasured. " +
+          "Fix the permission or the mount — do not let it read as zero findings.",
+      });
+      return;
+    }
+    for (const ent of entries.sort((a, b) => a.name.localeCompare(b.name))) {
       const p = join(dir, ent.name);
       // The `.sql` test comes FIRST, deliberately. A DIRECTORY named `x.sql` is
       // a corpus entry that cannot be read, and it is collected so scanFile

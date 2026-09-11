@@ -967,6 +967,58 @@ describe("lint-app-guc: a walk that could not enter a subtree MEASURE_FAILs by n
     }
   });
 
+  it("a directory that RESOLVES but cannot be READ is a MEASURE_FAIL, not an uncaught throw that loses the whole corpus", () => {
+    // ⛔ THE ONE BARE CALL IN A BLOCK BUILT OUT OF WRAPPED ONES. `descend`
+    // wraps `realpathSync` and the symlink arm wraps `statSync`; `readdirSync`
+    // was not wrapped, so a directory that resolves fine and merely cannot be
+    // LISTED — mode 0111, EACCES, EIO on a network mount, EMFILE — threw
+    // straight out of `sqlFilesUnder` → `scanCorpus` → `main`. MEASURED
+    // 2026-09-11 with `chmod 111` on a subdirectory: `THREW: EACCES`, and with
+    // it no MEASURE_FAIL, no `app-guc:` summary and no `report()` at all.
+    //
+    // ⚠️ NOT A FALSE GREEN — uncaught means exit 1 means red CI. What it cost
+    // was the block's own design: the operator got a stack trace instead of the
+    // sentence naming what was not measured, and ONE unreadable directory lost
+    // every sibling the walk could have read.
+    const dir = tempDir("walk-unreadable");
+    writeFileSync(join(dir, "ok.sql"), "SELECT 1;\n");
+    const locked = join(dir, "locked");
+    mkdirSync(locked);
+    writeFileSync(join(locked, "hidden.sql"), "SELECT 2;\n");
+
+    // CALIBRATION FIRST, while the directory is still readable: two files, no
+    // failures. The red below is caused by the mode change and by nothing else.
+    const control = scanCorpus({ migrationsDir: dir, allowlist: [] });
+    expect(control.measureFails).toEqual([]);
+    expect(control.ok, "the control corpus must be clean").toBe(true);
+    expect(control.filesScanned).toBe(2);
+
+    chmodSync(locked, 0o111); // resolves and can be entered, but NOT listed
+    try {
+      if (scanCorpus({ migrationsDir: dir, allowlist: [] }).measureFails.length === 0) {
+        // Running as root (some CI images) defeats the permission bit outright.
+        console.warn("SKIPPED (named): this environment can read a 0111 directory — this arm was NOT measured here.");
+        return;
+      }
+      const r = scanCorpus({ migrationsDir: dir, allowlist: [] });
+      expect(r.ok, "a corpus with an unreadable subtree is NOT a clean one").toBe(false);
+      expect(r.findings, "a walk failure is a MEASURE_FAIL, never a finding").toEqual([]);
+      expect(r.measureFails.length).toBe(1);
+      expect(r.measureFails[0].file).toContain("locked");
+      expect(r.measureFails[0].reason).toContain("cannot READ the directory");
+      // ⭐ AND THE WALK CONTINUES. The sibling the walk CAN read is still
+      // scanned — one unreadable directory must not cost the corpus.
+      expect(r.filesScanned, "the readable sibling survives the refusal").toBe(1);
+      // Pairwise-distinct fingerprints: this refusal is attributable to THIS
+      // arm and to none of the three symlink arms beside it.
+      for (const otherArm of ["cannot stat the symlink", "OUTSIDE the corpus root", "already on the descent path", "cannot resolve the corpus root"]) {
+        expect(r.measureFails[0].reason, `must not be refused on: ${otherArm}`).not.toContain(otherArm);
+      }
+    } finally {
+      chmodSync(locked, 0o755);
+    }
+  });
+
   it("a walk failure SURVIVES the empty-corpus early return — both reasons are reported", () => {
     // A directory whose ONLY entry is an unwalkable link yields zero files AND
     // one walk failure. `requireNonEmpty` returns early; the seeded failure
