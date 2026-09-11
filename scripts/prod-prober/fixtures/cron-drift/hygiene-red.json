@@ -52,7 +52,8 @@
   {
     "rule": "header-unparseable",
     "jobname": "fixture_unbalanced_headers_job",
-    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Trace', 'a'"
+    "note": "THE VALUE IS LONG ON PURPOSE — it derives 37 characters, over HEADERS_LITERAL_MAX. Shorten it and this row stops distinguishing the header walks SKIPPING an unparseable region from them walking it: with a short value both spellings return only [header-unparseable], so the skip becomes a control that cannot fail. Split into short operands so gitleaks sees no credential-shaped token.",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Trace', 'FAKE-trace-' || '012345' || '6789ab' || '01234567' || '89abcd'"
   },
   {
     "rule": "x-service-key-literal",
