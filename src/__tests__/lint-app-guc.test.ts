@@ -101,7 +101,27 @@ describe("lint-app-guc: the shipped finding kinds", () => {
     // Not a copy of the regex typed here — the identity is asserted against the
     // OTHER file's source text, so drifting either copy reds this test.
     const cronDrift = readFileSync(join(ROOT, "scripts/prod-prober/arms/cron-drift.mjs"), "utf8");
-    expect(cronDrift).toContain(DETECT_RE.source);
+    expect(cronDrift, "the prober must carry this exact source somewhere").toContain(DETECT_RE.source);
+
+    // ⛔ CONTAINMENT IS NOT IDENTITY, MEASURED 2026-09-11 (plan 164.8.5-07,
+    // Task 3 row 4). `toContain` alone catches a copy that DIVERGES and is
+    // BLIND to one that SHRINKS TO A PREFIX: deleting the trailing
+    // dollar-quoted alternation from `DETECT_RE` left the remaining source a
+    // perfectly good substring of the prober's untouched regex, and this test
+    // stayed GREEN while the two files had genuinely stopped agreeing. The
+    // comment above claimed "drifting either copy reds this test" and, in that
+    // direction, it did not.
+    //
+    // So the source is EXTRACTED from the prober and compared for EQUALITY.
+    // Now a narrowing on either side reds, which is what the claim says.
+    const literal = /^\s*\/(current_setting[^\n]*?)\/i\.test\($/m.exec(cronDrift);
+    expect(
+      literal,
+      "cron-drift must carry the app-guc regex as ONE single-line literal this test can extract",
+    ).toBeTruthy();
+    expect(literal![1], "the two copies must be BYTE-IDENTICAL, not merely overlapping").toBe(
+      DETECT_RE.source,
+    );
   });
 
   it("LINEAGE_ALLOWLIST holds exactly the five annotated files, and every entry is complete", () => {
