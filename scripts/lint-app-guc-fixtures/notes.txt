@@ -26,9 +26,25 @@ which is the exact defect class this phase exists to remove.
 re-creates that vacuity. The refusal must happen on the NAME, before this
 file's bytes are ever read — which is also why the type arm short-circuits.
 
-⚠️ This is a `.txt` and therefore outside `sqlFilesUnder`'s corpus and outside
-the self-test's `*.red.sql` / `*.green.sql` sweeps. It is never scanned on its
-own; it is read only as the successor of the fixture that names it, and under
-the shipped check it is not even read that far. Its sibling
-`unreadable-marker.txt` documents the conditions that cannot be a committed
-`.sql` file at all.
+⛔ AND THE ZERO IS NOW ASSERTED, NOT MERELY WRITTEN DOWN HERE
+------------------------------------------------------------------------
+Everything above this line shipped in 7021f661 as PROSE, in this file and in
+one comment block inside the fixture — and a note cannot fail. MEASURED
+2026-09-11, in two steps: appending one app-GUC read to this file left both
+`lint-app-guc.mjs --self-test` and the corpus scan at `exit 0`, noticing
+nothing; THEN also neutering the type arm left the self-test fully GREEN. The
+exact vacuity 7021f661's message says it measured and removed was re-openable
+by a one-line edit to a file no test read.
+
+`selfTest()` now re-measures this property for EVERY red fixture's named
+successor, not just for this filename, and fails with
+`SELF-TEST FAIL: … names successor "notes.txt", and that target … holds N
+app-GUC read(s)`. So the paragraph above is now a description of a checked
+fact rather than a request to the next author.
+
+⚠️ This is still a `.txt`, and therefore still outside `sqlFilesUnder`'s
+corpus and outside the self-test's `*.red.sql` / `*.green.sql` sweeps — it is
+never scanned as a corpus entry, and under the shipped check the gate itself
+does not read it at all, because the type arm short-circuits first. The
+assertion above is what reaches it. Its sibling `unreadable-marker.txt`
+documents the conditions that cannot be a committed `.sql` file at all.

@@ -893,6 +893,50 @@ export function selfTest() {
         );
         bad = 1;
       }
+
+      // ⛔ A RED FIXTURE'S SUCCESSOR TARGET MUST ITSELF HOLD ZERO APP-GUC
+      // READS ([APPGUC-SUCCESSOR-TARGET-UNASSERTED-01], closed 2026-09-11).
+      //
+      // WHY. `successor-invalid` has several arms, and the early ones
+      // SHORT-CIRCUIT: once the name is refused on type or on sibling-ness,
+      // the target's bytes are never read. So a red fixture for an early arm
+      // is only attributable to that arm if its target would have SURVIVED
+      // the CONTENT arm — a target carrying a read fires the fixture either
+      // way, and deleting the arm under test changes nothing.
+      //
+      // MEASURED 2026-09-11, in two steps, on the committed tree:
+      //   (1) appending one app-GUC read to `notes.txt` — the target of
+      //       `successor-not-sql.red.sql` — left BOTH `--self-test` and the
+      //       corpus at exit 0. Nothing scans a `.txt`: it is outside
+      //       `sqlFilesUnder`'s corpus AND outside the `*.red.sql` /
+      //       `*.green.sql` sweeps below.
+      //   (2) THEN also neutering the type arm left the self-test FULLY
+      //       GREEN — exactly the vacuous state commit 7021f661 says it
+      //       measured and removed, re-opened by a one-line edit to a file
+      //       no test reads.
+      //
+      // 7021f661 fixed the vacuity but shipped the REASON as prose in two
+      // comment blocks, and a note cannot fail. This asserts it, and asserts
+      // it for EVERY red fixture's successor rather than pinning one
+      // filename — so the next fixture inherits the guarantee instead of the
+      // next author having to remember the lesson.
+      const hdr = parseLineageHeader(readFileSync(p, "utf8"));
+      if (hdr && !hdr.malformed && hdr.successor !== "none") {
+        const succAbs = resolve(dirname(p), hdr.successor);
+        if (existsSync(succAbs) && statSync(succAbs).isFile()) {
+          const succReads = countReads(readFileSync(succAbs, "utf8")).length;
+          if (succReads !== 0) {
+            console.error(
+              `SELF-TEST FAIL: red fixture ${name} names successor "${hdr.successor}", and that ` +
+                `target (${relPath(succAbs)}) holds ${succReads} app-GUC read(s). A red fixture's ` +
+                "successor target must hold ZERO: otherwise the CONTENT arm fires the fixture on " +
+                "its own and the red is no longer attributable to the arm the fixture exists for. " +
+                "Do NOT 'fix' this by deleting the fixture — remove the read from the target.",
+            );
+            bad = 1;
+          }
+        }
+      }
     }
   }
 
