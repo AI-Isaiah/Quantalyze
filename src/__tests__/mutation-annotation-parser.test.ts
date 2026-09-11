@@ -839,7 +839,24 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // exit 0. RECORD: 164.8.6-05-SUMMARY.md beside 164.8.6-05-FLOORS.log.
     expect(armsSeen).toBe(392);
     expect(stepsSeen).toBe(411);
-  });
+    // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
+    // the FIRST per-test timeout in this suite, so it is a deliberate new shape
+    // rather than a local convention being followed. MEASURED, not guessed:
+    //   unloaded, file-scoped   — the whole FILE runs in 2.19 s of test time
+    //   inside `npm run test:coverage` — THIS test alone took 6330 ms and FAILED
+    //     with `Test timed out in 5000ms`, vitest's default budget
+    // The assertion did not change and nothing is being relaxed: this walk does
+    // real work proportional to the corpus (392 arms x 411 file steps, each
+    // read, applied and identity-compared), so its cost grows with every arm
+    // this repo adds while the default budget stays 5 s. A green file-scoped run
+    // beside a red full-suite run is the exact shape VALIDATION.md warns about
+    // ("a file-scoped vitest run cannot clear a directory-scanning contract
+    // test" / "full vitest must not share the box").
+    // ⛔ 30 s is a HARNESS budget, not a gate threshold — it bounds how long the
+    // walk may take, never what it accepts. Every violation check still runs in
+    // full, and `violations` must still be empty. If this ever times out AGAIN,
+    // the answer is to make the walk cheaper, not to raise this number.
+  }, 30_000);
 
   // ══════════════════════════════════════════════════════════════════════════
   // R3-W01 + R3-C02 (secondary) — the two blind spots of the multiset compare

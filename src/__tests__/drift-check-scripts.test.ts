@@ -4525,7 +4525,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=10 and ARMS_FLOOR=195 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=10 and ARMS_FLOOR=203 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -4553,6 +4553,23 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     //     7 -> 11 and the total follows.
     // The pin went red across both because it is an exact-literal mirror, which
     // is the design. Moving it here is mirroring a raise, never authorising one.
+    //
+    // MOVED 2026-09-11 (Phase 164.8.6 VAULTTICKFIX, plan 05), 10/195 -> 10/203.
+    // SENTINEL_FLOOR does NOT move: no file joined or left the sentinel-bearing
+    // set. ARMS_FLOOR 195 -> 203 is EIGHT arms across THREE existing rows of
+    // ci.yml's derivation table — test_analytics_service_settings_and_vault_tick
+    // .sql 11 -> 13 (arms V2, G1) and the ledger PAIR 12 -> 15 each (S1, M1, M2)
+    // — which is the shape the two floors are meant to distinguish: arms grew,
+    // the file set did not.
+    // ⭐ Worth recording: scripts/mutation-runner/run.mjs's OWN ARMS_FLOOR moved
+    // 384 -> 392 in the same commit, also +8, and the two count DIFFERENT things
+    // (sentinel arms here, RED-UNDER-M twins there). Agreement is evidence each
+    // new arm got both a sentinel and a biting twin — not evidence one number
+    // was copied from the other.
+    // ⚠️ This pin went red only in the FULL suite, after ci.yml was edited — a
+    // file-scoped run of the contract test that prompted the ci.yml edit passed
+    // while this one still said 195. Two separate mirrors of the same two
+    // integers, and only running everything shows both.
     const res = spawnSync(
       "grep",
       ["-ac", "SENTINEL_FLOOR=10", ".github/workflows/ci.yml"],
@@ -4566,7 +4583,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=195", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=203", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
