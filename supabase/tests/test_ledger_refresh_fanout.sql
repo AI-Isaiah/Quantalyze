@@ -739,11 +739,32 @@ BEGIN
     --    survives the rollback exactly as v_ret_l does, so splitting the read
     --    from the assertion costs nothing and keeps both identities correct.
     -- ================================================================
+    -- ⭐ THE `sqlstate` KEY IS PART OF THIS ARM'S PREDICATE, and it is the key's
+    --    ONLY reader anywhere. The migration writes the failing read's SQLSTATE
+    --    into `metadata` so that 42P01 (the table was dropped), 42501 (the
+    --    privilege was revoked) and a planner fault stop reporting as one
+    --    undifferentiated cause — and check 7 of that migration asserts the
+    --    INSERT's own STATEMENT SHAPE, which survives deleting the key pair
+    --    intact. Without this conjunct a tidy-up of the jsonb_build_object call
+    --    silently collapses the three causes back into one with every gate
+    --    green. With it, the deletion makes this count 0 and THIS arm reddens by
+    --    name.
+    --
+    -- ⛔ PRESENCE, NEVER A VALUE. An equality on a SQLSTATE would bind the arm to
+    --    whichever failure the RENAME above happens to provoke, which is the
+    --    mistake the migration refuses for `error`. IS NOT NULL is falsifiable by
+    --    the deletion and by nothing else.
+    --
+    -- ⚠️ ARM M1's TWIN PREDICATE IS DELIBERATELY NOT NARROWED THE SAME WAY: on
+    --    the invisible-or-absent path there was no exception, so there was no
+    --    SQLSTATE to read and the key is NULL BY CONSTRUCTION. Asserting it there
+    --    would be an assertion that cannot hold.
     SELECT count(*) INTO v_cnt_m2
       FROM public.cron_runs
      WHERE cron_name = 'ledger_refresh_fanout'
        AND error = 'flag_read_failed'
-       AND metadata->>'function' = 'enqueue_ledger_refresh_for_strategies';
+       AND metadata->>'function' = 'enqueue_ledger_refresh_for_strategies'
+       AND metadata->>'sqlstate' IS NOT NULL;
     RAISE EXCEPTION USING ERRCODE = 'P0164', MESSAGE = 'arm L: unwinding the RENAME (not a failure)';
   EXCEPTION WHEN SQLSTATE 'P0164' THEN
     NULL;
@@ -765,9 +786,27 @@ BEGIN
   --    `INSERT INTO public.` || `cron_runs`), so the apply survives and the arm
   --    is the first failure. `nth: 1` is the single-key body, MEASURED: the
   --    literal is assigned once per body and the file holds both.
+  --
+  -- ⭐ THIS ARM NOW HAS A SECOND FALSIFIER, AND IT IS DELIBERATELY NOT A SECOND
+  --    ARM. Deleting the `sqlstate` key pair from the migration's
+  --    jsonb_build_object call also makes this count 0 and reddens this arm by
+  --    name — that is the whole reason the conjunct was added, since nothing
+  --    else anywhere reads the key. It is recorded in prose rather than
+  --    annotated because a second RED-UNDER-M step is a second ARM, and the
+  --    corpus arm count is ratcheted in both directions
+  --    (scripts/mutation-runner/run.mjs ARMS_FLOOR, read by symbol, plus the
+  --    stale-low detector in src/__tests__/mutation-runner-floors.test.ts).
+  --    Moving that count is a separate, deliberate change and not a side effect
+  --    of adding a conjunct. ⭐ PROVEN BY HAND on a real pg-lane 2026-09-12,
+  --    against a scratch COPY of the migration so no tracked file was mutated:
+  --    drop the sqlstate key pair from this body's jsonb_build_object call,
+  --    leaving every other line of it intact, and the APPLY SURVIVES (the
+  --    deletion is not a migration needle) while this arm is the FIRST failure —
+  --    `TEST FAILED (M2): … wrote 0 instrument row(s) …`, lane exit 3. Unmutated,
+  --    the same lane prints ALL 15 ARMS EXECUTED and exits 0.
   -- RED-UNDER-M: {"arm":"M2","apply":[{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"v_cause := 'flag_read_failed';","replace":"v_cause := NULL;","occurrences":2,"nth":1}]}
   IF v_cnt_m2 <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (M2): the flag read RAISED and the fan-out wrote % instrument row(s) naming flag_read_failed, expected exactly 1. The guard swallows the error and WARNs, which is correct and is exactly what arm L proves — but a WARNING is not a trace pg_cron keeps, so without this row a fan-out that has been failing its activation read on every tick for weeks is indistinguishable from one that is dormant by design. This is the APPGUC-WARNING-UNINSTRUMENTED-01 half of WR-10', v_cnt_m2;
+    RAISE EXCEPTION 'TEST FAILED (M2): the flag read RAISED and the fan-out wrote % instrument row(s) naming flag_read_failed AND carrying a non-NULL metadata->>''sqlstate'', expected exactly 1. The guard swallows the error and WARNs, which is correct and is exactly what arm L proves — but a WARNING is not a trace pg_cron keeps, so without this row a fan-out that has been failing its activation read on every tick for weeks is indistinguishable from one that is dormant by design. This is the APPGUC-WARNING-UNINSTRUMENTED-01 half of WR-10. A count of 0 here is EITHER no row at all OR a row whose `sqlstate` key has gone: the key is what separates 42P01 from 42501 from a planner fault, check 7 of the migration cannot see its deletion (that check asserts the statement shape of the INSERT, which survives), and this arm is the only reader of the key.', v_cnt_m2;
   END IF;
 
   -- Everything below runs with the switch ON. The row is written inside this
