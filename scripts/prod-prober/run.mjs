@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 76;
+export const SELF_TEST_SCENARIOS = 78;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -3440,6 +3440,140 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
+  scenario("GUARD AUDIT: an ABSENT functions snapshot refuses the row WITHOUT discarding the credential it already found");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE FOURTH SUBSTITUTIVE GUARD, found by sweeping EVERY guard this phase
+    // added rather than by a reported finding. `reachesVaultRead` throws when
+    // `supabase/schema/functions/` is absent — which is RIGHT, a missing
+    // snapshot is not the absence of a Vault read — but it threw from the LAST
+    // statement before `return out`, so the throw DISCARDED every credential
+    // already collected and both callers recorded a generic `measure-fail` in
+    // its place.
+    //
+    // MEASURED 2026-09-11 with an inline 39-character X-Service-Key:
+    //   REAL snapshot   -> ["x-service-key-literal","long-literal-in-headers","vault-absent"]
+    //   ABSENT snapshot -> THROW (all three lost)
+    //   CONTROL, same command under a NON-scoped jobname, absent snapshot
+    //                   -> ["x-service-key-literal","long-literal-in-headers"]
+    //
+    // ⛔ AND THE VICTIM IS THE FLAGSHIP JOB — `vault-absent` is scoped to
+    // `match_engine_cron`, jobid 1, the row whose inline service key IS the
+    // measured outage this module exists for. A stale checkout was enough.
+    //
+    // ⭐ The row stays `judged: false`, which is the truth — one rule really
+    // could not be applied, and it must withhold its text like any unjudged
+    // row. What changed is that the throw CARRIES `out`.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    const red = loadFixture("cron-drift", "hygiene-red.json");
+    if (!prod.ok || !red.ok) {
+      pass = expect(false, prod.ok ? red.reason : prod.reason) && pass;
+    } else {
+      const SUBJECT = "match_engine_cron";
+      const leak = red.data.find((r) => r.rule === "x-service-key-literal");
+      const rows = clone(prod.data);
+      const target = rows.find((r) => r.jobname === SUBJECT);
+      if (target && leak) target.command = leak.command;
+      const absent = join(FIXTURE_ROOT, "cron-drift", "functions-this-directory-does-not-exist");
+      const r = await driftRun(rows, driftFixturePath("manifest.json"), quiet, undefined, absent);
+      const on = (kind) => r.defects.filter((x) => x.kind === kind && x.subject === `prod:${SUBJECT}`);
+      pass =
+        expect(!existsSync(absent), `PRECONDITION: ${absent} really is absent`) &&
+        expect(
+          leak !== undefined && target !== undefined,
+          "PRECONDITION: the fixtures carry an x-service-key-literal row and match_engine_cron",
+        ) &&
+        expect(
+          (() => {
+            try {
+              CRON_DRIFT_MOD.hygieneViolations(SUBJECT, target.command, { functionsDir: absent });
+              return false;
+            } catch {
+              return true;
+            }
+          })(),
+          "PRECONDITION: the row really IS refused against that snapshot — the judgement still throws, so the verdict stays judged:false",
+        ) &&
+        expect(
+          on("measure-fail").length === 1 && String(on("measure-fail")[0].detail).includes("functions snapshot directory"),
+          `the refusal is reported and names what could not be measured (got ${on("measure-fail").map((x) => String(x.detail).slice(0, 40)).join(" | ") || "NOTHING"})`,
+        ) &&
+        expect(
+          on("cron-secret-in-command").length === 1,
+          `and the CREDENTIAL is reported BESIDE it rather than instead of it (got ${on("cron-secret-in-command").length}: ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ")})`,
+        ) &&
+        expect(
+          on("cron-secret-in-command").length === 1 &&
+            String(on("cron-secret-in-command")[0].detail).includes("[x-service-key-literal]") &&
+            String(on("cron-secret-in-command")[0].detail).includes("DID run before the judgement was refused"),
+          "naming the rule AND saying the finding survived a refusal, so nobody reads it as a full judgement",
+        ) &&
+        expect(
+          on("cron-secret-in-command").length === 1 &&
+            !String(on("cron-secret-in-command")[0].detail).includes("[vault-absent]"),
+          "…and NOT claiming vault-absent, which is precisely the rule that could not be applied",
+        ) &&
+        expect(r.exitCode === 1, `the run exits 1 (got ${r.exitCode})`) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("GUARD AUDIT: captureManifest prints the DIRTY rows even when another row is UNJUDGED");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE SAME CLASS AT THE REPORT LEVEL. The `unjudged` branch `return 3`-ed
+    // BEFORE the `dirty` block ran, so ONE row nobody could judge hid EVERY
+    // credential found on every OTHER row. The exit code still partitions (3
+    // beats 1 — "nothing was measured" is the stronger statement about this
+    // reading) but no finding is withheld to make that partition.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    const red = loadFixture("cron-drift", "hygiene-red.json");
+    if (!prod.ok || !red.ok) {
+      pass = expect(false, prod.ok ? red.reason : prod.reason) && pass;
+    } else {
+      const DIRTY_JOB = "audit_log_cold_purge";
+      const UNJUDGED_JOB = "match_engine_cron";
+      const leak = red.data.find((r) => r.rule === "x-service-key-literal");
+      const rows = clone(prod.data);
+      const dirtyRow = rows.find((r) => r.jobname === DIRTY_JOB);
+      if (dirtyRow && leak) dirtyRow.command = leak.command;
+      const absent = join(FIXTURE_ROOT, "cron-drift", "functions-this-directory-does-not-exist");
+      const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
+      const outPath = join(dir, "both.json");
+      const lines = [];
+      try {
+        const code = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: rows }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath,
+          log: (x) => lines.push(String(x)),
+          functionsDir: absent,
+        });
+        const text = lines.join("\n");
+        pass =
+          expect(dirtyRow !== undefined && leak !== undefined, `PRECONDITION: the fixtures carry ${DIRTY_JOB} and a leaky row`) &&
+          expect(code === 3, `the stronger refusal still owns the exit code (got ${code})`) &&
+          expect(
+            text.includes("fail secret hygiene") && text.includes(DIRTY_JOB),
+            `the DIRTY row is named anyway (${text.replace(/\n/g, " | ")})`,
+          ) &&
+          expect(
+            text.includes("Rotate the exposed secret"),
+            "…under its own rotation remedy, which for a genuinely dirty row is the right sentence",
+          ) &&
+          expect(
+            text.includes("could not be JUDGED at all") && text.includes(UNJUDGED_JOB),
+            `and the UNJUDGED row is named too (${text.replace(/\n/g, " | ")})`,
+          ) &&
+          expect(existsSync(outPath) === false, "and nothing was written") &&
+          pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   scenario("captureManifest REFUSES when the database has no COMMENT ON DATABASE marker");
   // -------------------------------------------------------------------------
   {
@@ -4170,7 +4304,20 @@ export async function captureManifest({ seams, outPath, log = (s) => console.log
     try {
       v = CRON_DRIFT_MOD.hygieneViolations(r.jobname, r.command, { functionsDir });
     } catch (err) {
-      unjudged.push({ jobname: r.jobname, reason: err && err.message ? err.message : String(err) });
+      // ⛔ THE THROW CARRIES WHAT IT DID MEASURE. `hygieneViolations` attaches
+      // `partialViolations` when the snapshot refusal fires AFTER other rules
+      // have already found something (see its derivation in the arm). Without
+      // this the credential on the refused row is simply gone from the
+      // operator's screen, which is the substitutive shape this phase keeps
+      // finding.
+      const partial = CRON_DRIFT_MOD.splitHygiene(
+        Array.isArray(err && err.partialViolations) ? err.partialViolations : [],
+      ).credential.map((x) => x.slice(0, x.indexOf("]") + 1));
+      const why = err && err.message ? err.message : String(err);
+      unjudged.push({
+        jobname: r.jobname,
+        reason: partial.length > 0 ? `${why} ⚠️ ${partial.join(" ")} fired BEFORE the refusal, and those findings are REAL.` : why,
+      });
       continue;
     }
     const { credential, unjudgeable } = CRON_DRIFT_MOD.splitHygiene(v);
@@ -4184,6 +4331,18 @@ export async function captureManifest({ seams, outPath, log = (s) => console.log
       dirty.push({ jobname: r.jobname, rules: ids(credential) });
     }
   }
+  // ⛔ BOTH LISTS ARE PRINTED, ALWAYS, AND ONLY THE EXIT CODE IS EXCLUSIVE. The
+  // `unjudged` branch used to `return 3` before the `dirty` block ran, so ONE
+  // row nobody could judge hid EVERY credential found on every OTHER row —
+  // a substitutive refusal at the report level, and the same class as CR-R2-01.
+  // The exit code still partitions (3 beats 1: "nothing was measured" is the
+  // stronger statement about this reading), but no finding is withheld to make
+  // that partition.
+  if (dirty.length > 0) {
+    log(`REFUSED: ${dirty.length} cron.job row(s) fail secret hygiene, so this configuration cannot become the oracle. Nothing was written.`);
+    for (const d of dirty) log(`  ${d.jobname}: ${d.rules.join(" ")}`);
+    log("Rotate the exposed secret, re-schedule that job onto a vault.decrypted_secrets body, then capture again.");
+  }
   if (unjudged.length > 0) {
     log(
       `REFUSED: ${unjudged.length} cron.job row(s) could not be JUDGED at all, so this configuration cannot become the oracle. An unjudged row is not a clean one. Nothing was written.`,
@@ -4191,14 +4350,11 @@ export async function captureManifest({ seams, outPath, log = (s) => console.log
     for (const u of unjudged) log(`  ${u.jobname}: ${u.reason}`);
     // 3, not 1: hygiene did not RUN on these rows, so this refusal must stay
     // distinguishable by exit code from "hygiene ran and found a credential".
+    // ⚠️ When BOTH are non-empty the 3 wins and the rotation remedy above has
+    // ALREADY been printed, so the operator loses nothing by the ordering.
     return 3;
   }
-  if (dirty.length > 0) {
-    log(`REFUSED: ${dirty.length} cron.job row(s) fail secret hygiene, so this configuration cannot become the oracle. Nothing was written.`);
-    for (const d of dirty) log(`  ${d.jobname}: ${d.rules.join(" ")}`);
-    log("Rotate the exposed secret, re-schedule that job onto a vault.decrypted_secrets body, then capture again.");
-    return 1;
-  }
+  if (dirty.length > 0) return 1;
 
   // ⛔ AN UNPARSABLE `jobid` IS REFUSED, NEVER SERIALISED AS `null`
   // (164.8.5-REVIEW-R1). `Number.parseInt("", 10)` and `parseInt("x", 10)` are

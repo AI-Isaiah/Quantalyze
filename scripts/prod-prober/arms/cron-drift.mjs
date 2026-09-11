@@ -1686,7 +1686,43 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
   // sentence below says so out loud so nobody reads a green here as proof about
   // production.
   if (name === "match_engine_cron") {
-    const { reads, unresolved } = reachesVaultRead(spans, functionsDir);
+    // ⛔ THE SNAPSHOT REFUSAL CARRIES THE FINDINGS IT ALREADY HAS (the round-2
+    // guard audit; same class as CR-R2-01 and WR-R2-05, found by sweeping every
+    // guard this phase added rather than by a reported finding).
+    //
+    // `reachesVaultRead` throws when `supabase/schema/functions/` is absent, and
+    // that refusal is RIGHT — a missing snapshot is not the absence of a Vault
+    // read. But it threw from HERE, the last statement before `return out`, so
+    // the throw DISCARDED every credential already in `out` and both callers
+    // recorded a generic `measure-fail` in its place.
+    //
+    // MEASURED 2026-09-11 with an inline 39-character X-Service-Key:
+    //   REAL snapshot   -> ["x-service-key-literal","long-literal-in-headers","vault-absent"]
+    //   ABSENT snapshot -> THROW (all three findings lost)
+    //   CONTROL, the same command under a NON-scoped jobname, absent snapshot
+    //                   -> ["x-service-key-literal","long-literal-in-headers"]
+    //
+    // ⛔ AND THE VICTIM IS THE FLAGSHIP JOB. `vault-absent` is scoped to
+    // `match_engine_cron` — jobid 1, the job whose inline service key is the
+    // measured outage this whole module exists for — so deleting or failing to
+    // regenerate the snapshot silenced the credential scan on exactly that row.
+    // It is also a one-step off-switch, and it needs no adversary: a stale
+    // checkout is enough.
+    //
+    // ⭐ THE ROW STAYS `judged: false`, WHICH IS THE TRUTH. One rule really
+    // could not be applied. What changes is that the throw now CARRIES `out`,
+    // so the callers can report the credentials beside the refusal instead of
+    // instead of them. Keeping the throw also keeps every existing control
+    // intact — the withholding predicate, scenario 54 and the F3 scoping all
+    // still see an unjudged row.
+    let reads;
+    let unresolved;
+    try {
+      ({ reads, unresolved } = reachesVaultRead(spans, functionsDir));
+    } catch (err) {
+      err.partialViolations = out;
+      throw err;
+    }
     if (!reads) {
       // ⛔ NAMES ONLY, NEVER VALUES. `unresolved` holds FUNCTION NAMES the
       // resolver could not find a snapshot file for — safe to print into a
@@ -2065,12 +2101,38 @@ export function compareManifest(manifest, prodRows, opts = {}) {
   // So the refusal is SCOPED to the row it belongs to: that row becomes a
   // `measure-fail` naming itself, and every other row is still judged.
   // ---------------------------------------------------------------------------
+  //
+  // ⛔ AND THE REFUSAL CARRIES WHAT IT DID MEASURE. `hygieneViolations` attaches
+  // `partialViolations` to the error it rethrows from the snapshot refusal (see
+  // the derivation there), so a row that could not be fully judged still NAMES
+  // any credential the rules that DID run found. `violations` stays `null` —
+  // the row is genuinely unjudged and must withhold like one — and `partial` is
+  // reported as its own defect beside the `measure-fail`.
   const judgeRow = (jobname, command) => {
     try {
-      return { violations: hygieneViolations(jobname, command, { functionsDir: opts.functionsDir }), error: null };
+      return { violations: hygieneViolations(jobname, command, { functionsDir: opts.functionsDir }), error: null, partial: [] };
     } catch (err) {
-      return { violations: null, error: err && err.message ? err.message : String(err) };
+      return {
+        violations: null,
+        error: err && err.message ? err.message : String(err),
+        partial: Array.isArray(err && err.partialViolations) ? err.partialViolations : [],
+      };
     }
+  };
+
+  /**
+   * The `cron-secret-in-command` defect for a row whose judgement was REFUSED
+   * but which had already tripped credential rules. Returns null when there is
+   * nothing to say, so a caller can `push` it unconditionally.
+   */
+  const partialCredentialDefect = (side, jobname, judged) => {
+    const { credential } = splitHygiene(judged.partial || []);
+    if (credential.length === 0) return null;
+    return {
+      kind: "cron-secret-in-command",
+      subject: `${side}:${jobname}`,
+      detail: `${side === "prod" ? "the PROD cron.job row" : "the COMMITTED manifest row"} for ${shownName(jobname)} fails ${credential.length} hygiene rule(s) that DID run before the judgement was refused: ${credential.join(" ")} The refusal is reported separately; it does not make these findings less real.`,
+    };
   };
 
   // ---------------------------------------------------------------------------
@@ -2118,6 +2180,8 @@ export function compareManifest(manifest, prodRows, opts = {}) {
     recordVerdict(prodHygiene, row.jobname, judged);
     if (judged.error !== null) {
       defects.push({ kind: "measure-fail", subject: `prod:${row.jobname}`, detail: judged.error });
+      const partial = partialCredentialDefect("prod", row.jobname, judged);
+      if (partial !== null) defects.push(partial);
       continue;
     }
     const v = judged.violations;
@@ -2302,6 +2366,8 @@ export function compareManifest(manifest, prodRows, opts = {}) {
     recordVerdict(manifestHygiene, row.jobname, judged);
     if (judged.error !== null) {
       defects.push({ kind: "measure-fail", subject: `manifest:${row.jobname}`, detail: judged.error });
+      const partial = partialCredentialDefect("manifest", row.jobname, judged);
+      if (partial !== null) defects.push(partial);
       continue;
     }
     const v = judged.violations;
