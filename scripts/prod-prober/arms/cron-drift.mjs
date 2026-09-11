@@ -1677,6 +1677,38 @@ export const UNRECORDED_VERDICT = Object.freeze({
 export const hygieneVerdict = (map, jobname) => map.get(jobname) ?? UNRECORDED_VERDICT;
 
 /**
+ * Does this verdict mean the command TEXT must be withheld from the log?
+ *
+ * ⛔ ONE PREDICATE, NOT TWO COPIES (164.8.5-REVIEW-R2 WR-R2-03). It used to be
+ * spelled out at BOTH call sites — `manifestDirty` and `prodDirty` — and
+ * `164.8.5-FIX-R1-SUMMARY.md` recorded the pair as ONE neuter-proved control.
+ * It could only ever have proven one. MEASURED 2026-09-11, each `!…judged ||`
+ * arm dropped ALONE:
+ *
+ *   (B) prod side only     -> === SELF-TEST PASSED: 73/73 ===   (GREEN)
+ *   (C) manifest side only -> === SELF-TEST PASSED: 73/73 ===   (GREEN) + vitest GREEN
+ *   (B+C) both             -> === SELF-TEST FAILED ===
+ *
+ * because the only scenario exercising them drove an absent `functionsDir`,
+ * which is SHARED by both sides, so both verdicts were `judged: false` and the
+ * two terms were redundant. A future editor "simplifying" either line shipped
+ * the CR-R1-02 regression with a fully green suite.
+ *
+ * ⭐ THE ROOT-CAUSE ANSWER IS ONE CONTROL, NOT TWO RED FIXTURES FOR A DUPLICATE.
+ * Two spellings of one predicate ARE one control; D3 asks that each CONTROL be
+ * neuter-proved alone, and this one's two ARMS now are:
+ *   · `!judged`               — proven by a scenario where exactly the PROD side
+ *                               is unjudgeable (its command is not a string) and
+ *                               the manifest side is judged and clean;
+ *   · `violations.length > 0` — proven by a scenario where the PROD side is
+ *                               JUDGED and dirty and the manifest side is clean.
+ * Neither can mask the other, because neither exists twice.
+ *
+ * @param {{judged: boolean, violations: string[]}} verdict
+ */
+export const hygieneWithholds = (verdict) => !verdict.judged || verdict.violations.length > 0;
+
+/**
  * How a jobname is PRINTED. Identical to `hygieneViolations`' own derivation so
  * a defect detail and the rule sentence inside it name the row the same way.
  * ⛔ It is for TEXT only — `subject` stays the raw jobname, because that is the
@@ -2290,10 +2322,17 @@ export function compareManifest(manifest, prodRows, opts = {}) {
     // ⛔ UNJUDGED WITHHOLDS EXACTLY AS DIRTY DOES — see the invariant recorded
     // beside `recordVerdict`. `!v.judged` is the whole of CR-R1-02's fix; the
     // `.violations.length > 0` half is the pre-existing reading.
+    //
+    // ⛔ AND IT IS ONE PREDICATE, CALLED TWICE — never two spellings
+    // (164.8.5-REVIEW-R2 WR-R2-03). Spelled out, each side's `!judged` arm
+    // stayed GREEN when dropped ALONE, because the only scenario reaching them
+    // drove an absent `functionsDir` that made BOTH sides unjudged. See
+    // `hygieneWithholds` for the measurement and for the two scenarios that now
+    // give its two ARMS separate red surfaces.
     const manifestVerdict = hygieneVerdict(manifestHygiene, name);
     const prodVerdict = hygieneVerdict(prodHygiene, name);
-    const manifestDirty = !manifestVerdict.judged || manifestVerdict.violations.length > 0;
-    const prodDirty = !prodVerdict.judged || prodVerdict.violations.length > 0;
+    const manifestDirty = hygieneWithholds(manifestVerdict);
+    const prodDirty = hygieneWithholds(prodVerdict);
 
     let headline =
       `cron-drift: manifest captured ${capturedAt} (marker ${marker}) sha ${m.command_sha256} — ` +
