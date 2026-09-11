@@ -867,11 +867,11 @@ describe("[164.1-05] kinds and floors", () => {
     expect(hygieneViolations("a_job", "SELECT 1")).toEqual([]);
   });
 
-  it("TOKEN_MIN equals HEADERS_LITERAL_MAX — the Q2 region partition has no gap only while a TOKEN_MIN-length token inside a header literal is a HEADERS_LITERAL_MAX-length argument", () => {
+  it("TOKEN_MIN equals HEADERS_LITERAL_MAX — ONE of the two conditions the Q2 region partition needs; the other is that the header measurement actually COUNTED the literal, asserted separately below", () => {
     // ⛔ THE INVARIANT, NOT THE VALUE. `long-token-anywhere` deliberately
     // EXCLUDES header regions so it cannot collide with
-    // `long-literal-in-headers` on a red row. That exclusion loses nothing ONLY
-    // while `TOKEN_MIN >= HEADERS_LITERAL_MAX`: a whitespace-delimited token of
+    // `long-literal-in-headers` on a red row. That exclusion needs
+    // `TOKEN_MIN >= HEADERS_LITERAL_MAX`: a whitespace-delimited token of
     // `TOKEN_MIN` characters lives inside a literal of at least that length,
     // which is an argument of at least `HEADERS_LITERAL_MAX` DERIVED length,
     // which is precisely what `long-literal-in-headers` fires on. Raise
@@ -900,6 +900,46 @@ describe("[164.1-05] kinds and floors", () => {
     );
     expect(mutated).not.toBe(armText);
     expect(mutated).not.toContain("export const TOKEN_MIN = HEADERS_LITERAL_MAX;");
+  });
+
+  it("CR-R1-01: the header-region exclusion is conditional on the literal having been COUNTED, not on it merely being LOCATED in a region", () => {
+    // ⛔ THE SECOND CONDITION THE PARTITION NEEDS, AND THE ONE THE TITLE ABOVE
+    // USED TO OVERSTATE AWAY. `TOKEN_MIN >= HEADERS_LITERAL_MAX` is necessary
+    // and NOT sufficient: `derivedLiteralLength` deliberately refuses to enter
+    // `(SELECT …)` and skips whole any `(` whose callee is not in `BUILDERS`,
+    // so a literal behind either derives 0 — the three anchored header rules
+    // measure 0 < HEADER_LITERAL_MIN, `long-literal-in-headers` does not fire,
+    // and `long-token-anywhere` had been switched off for that whole region.
+    //
+    // ⛔ AND THE SHAPE IS ORDINARY CODE. MEASURED 2026-09-11 before the fix,
+    // every row below except the two CONTROLs returned `[]` from every rule in
+    // `HYGIENE_RULE_IDS`, and captureManifest then WROTE the key into the
+    // oracle committed to a public repository.
+    const KEY = `FAKE-${"abcdef0123"}${"456789abcd"}${"ef0123456789"}`;
+    expect(KEY.length, "the fixture key must be over TOKEN_MIN or this test proves nothing").toBeGreaterThan(TOKEN_MIN);
+    const ids = (cmd: string) => hygieneViolations("a_job", cmd).map((x) => x.slice(1, anchorIndex(x, "]")));
+    const header = (value: string) =>
+      `SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('Content-Type','application/json','X-Service-Key', ${value}));`;
+
+    // Every wrapper `derivedLiteralLength` refuses to descend into.
+    for (const wrapped of [`coalesce(nullif(v_key,''), '${KEY}')`, `nullif('${KEY}', '')`, `(SELECT '${KEY}')`, `util_wrap('${KEY}')`]) {
+      expect(ids(header(wrapped)), `an uncounted literal under an anchored header name must be NAMED by a rule: ${wrapped}`).toContain(
+        "long-token-anywhere",
+      );
+    }
+
+    // CONTROL 1 — a literal the header walk DID count keeps belonging to
+    // `long-literal-in-headers` ALONE. Without this the "fix" would be a
+    // collision that breaks every red row's one-rule isolation.
+    expect(ids(header(`'${KEY}'`))).toContain("long-literal-in-headers");
+    expect(ids(header(`'${KEY}'`)), "a COUNTED header literal must NOT also fire the token rule — that is the Q2 partition").not.toContain(
+      "long-token-anywhere",
+    );
+    // CONTROL 2 — the same wrapper outside any header region always fired, so
+    // the rows above are a reading about the REGION and not about coalesce().
+    expect(ids(`SELECT net.http_post(url := 'https://x.invalid/a', body := coalesce(nullif(v_key,''), '${KEY}')::jsonb);`)).toContain(
+      "long-token-anywhere",
+    );
   });
 
   it("BARE_URL_RE exempts a bare URL and NOTHING that carries a token or credentials", () => {
