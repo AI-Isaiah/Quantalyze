@@ -183,5 +183,23 @@
       "long-token-anywhere"
     ],
     "expect_same_verdict_as": "bypass_header_wrapped_literal_job"
+  },
+  {
+    "shape": "(o) WR-R1-01: the credential in a `--` COMMENT. literalsIn walks `masked`, in which scanSql has blanked comment bodies AND their delimiters, so a comment was never a literal and never reached the token rule. The realistic path is an operator “removing” an inline key by commenting it out; the next capture then writes that comment byte for byte into a manifest committed to a PUBLIC repository while the arm reports the row clean.",
+    "jobname": "bypass_comment_borne_key_job",
+    "command": "SELECT retention_sweep('compute_jobs_done', interval '30 days'); -- was: X-Service-Key 'FAKE-0123456789-0123456789-0123456789ab'",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ],
+    "expect_same_verdict_as": "bypass_block_comment_key_job"
+  },
+  {
+    "shape": "(o-2) the same key in a BLOCK comment, and inside a DO body — the same class, two more spellings. scanSql masks a nested block comment as one comment, and codeSpans re-enters the DO body so its comments are found on the child span.",
+    "jobname": "bypass_block_comment_key_job",
+    "command": "DO $$ BEGIN /* was: X-Service-Key 'FAKE-0123456789-0123456789-0123456789ab' */ PERFORM retention_sweep('compute_jobs_done', interval '30 days'); END $$",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ],
+    "expect_same_verdict_as": "bypass_comment_borne_key_job"
   }
 ]
