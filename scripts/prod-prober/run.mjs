@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 74;
+export const SELF_TEST_SCENARIOS = 75;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -3275,6 +3275,117 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
+  scenario("WR-R2-04: an UNJUDGEABLE row refuses the capture with 3 and NO rotation remedy — the 1-vs-3 partition holds on BOTH sides");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ `captureManifest` NEVER CALLED `splitHygiene` (164.8.5-REVIEW-R2
+    // WR-R2-04). `compareManifest` has used it since it was written, precisely
+    // because "reporting a parse failure under a rotation remedy would send an
+    // operator to rotate a key on no evidence". The capture side tested
+    // `v.length > 0` and put EVERYTHING in `dirty`. MEASURED 2026-09-11 on the
+    // parent commit, a row whose `DO` nesting exceeds `MAX_DOLLAR_DEPTH`:
+    //
+    //   captureManifest exit code: 1
+    //     REFUSED: 1 cron.job row(s) fail secret hygiene …
+    //       match_engine_cron: [command-unjudgeable] [vault-absent]
+    //     Rotate the exposed secret, re-schedule that job onto a
+    //     vault.decrypted_secrets body, then capture again.
+    //
+    // Nothing was found. The lexer gave up. `run.mjs`'s own docstring above
+    // says "⛔ 1 IS 'HYGIENE RAN AND FOUND SOMETHING'; 3 IS 'NOTHING WAS
+    // MEASURED'. That partition is the whole information content of the exit
+    // code" — and the code beneath it broke the partition for every
+    // `UNJUDGEABLE_RULE_IDS` member.
+    //
+    // ⚠️ THE ROW ALSO TRIPS `vault-absent`, which IS a credential rule, and that
+    // is the harder half: a row carrying BOTH must refuse as 3 (nothing was
+    // measured about the unread spans) while still NAMING the credential rule
+    // in its sentence. Asserted below in both directions.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    const red = loadFixture("cron-drift", "hygiene-red.json");
+    if (!prod.ok || !red.ok) {
+      pass = expect(false, prod.ok ? red.reason : prod.reason) && pass;
+    } else {
+      const SUBJECT = "match_engine_cron";
+      const unjudgeable = red.data.find((r) => r.rule === "command-unjudgeable");
+      const leak = red.data.find((r) => r.rule === "x-service-key-literal");
+      const rows = clone(prod.data);
+      const target = rows.find((r) => r.jobname === SUBJECT);
+      if (target && unjudgeable) target.command = unjudgeable.command;
+      // The CONTROL rows: a genuine credential, which must still be a 1.
+      const dirtyRows = clone(prod.data);
+      const dirtyTarget = dirtyRows.find((r) => r.jobname === "audit_log_cold_purge");
+      if (dirtyTarget && leak) dirtyTarget.command = leak.command;
+
+      const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
+      const outPath = join(dir, "unjudgeable.json");
+      const dirtyPath = join(dir, "dirty.json");
+      const lines = [];
+      const dirtyLines = [];
+      try {
+        const code = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: rows }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath,
+          log: (x) => lines.push(String(x)),
+        });
+        const dirtyCode = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: dirtyRows }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath: dirtyPath,
+          log: (x) => dirtyLines.push(String(x)),
+        });
+        const ids = unjudgeable
+          ? CRON_DRIFT_MOD.hygieneViolations(SUBJECT, unjudgeable.command).map((x) => x.slice(1, x.indexOf("]")))
+          : [];
+        pass =
+          expect(
+            unjudgeable !== undefined && leak !== undefined && target !== undefined && dirtyTarget !== undefined,
+            "PRECONDITION: hygiene-red.json carries a command-unjudgeable row and an x-service-key-literal row",
+          ) &&
+          expect(
+            ids.includes("command-unjudgeable"),
+            `PRECONDITION: that command really is unjudgeable under ${SUBJECT} (got [${ids.join(", ")}])`,
+          ) &&
+          expect(
+            code === 3,
+            `an UNJUDGEABLE row returns 3 — nothing was MEASURED, so it is not the hygiene refusal's 1 (got ${code}; ${lines.join(" | ")})`,
+          ) &&
+          expect(
+            lines.some((l) => l.startsWith("REFUSED:") && l.includes("could not be JUDGED")),
+            `under the refusal sentence, not the rotation one (${lines.join(" | ") || "nothing"})`,
+          ) &&
+          expect(
+            lines.every((l) => !l.includes("Rotate")),
+            `and the word "Rotate" appears NOWHERE — an operator is never sent to rotate a key on no evidence (${lines.filter((l) => l.includes("Rotate")).join(" | ") || "absent"})`,
+          ) &&
+          expect(
+            lines.some((l) => l.includes("[command-unjudgeable]")),
+            `naming the refusal id (${lines.join(" | ")})`,
+          ) &&
+          expect(
+            ids.includes("vault-absent") === false || lines.some((l) => l.includes("[vault-absent]")),
+            `and STILL naming any credential rule that fired beside it — the refusal is additive here too (${lines.join(" | ")})`,
+          ) &&
+          expect(existsSync(outPath) === false, "and nothing was written") &&
+          // ⛔ THE CALIBRATION IS THE OTHER HALF OF THE PARTITION. Without it,
+          // "returns 3" could be satisfied by a function that returns 3 for
+          // everything, which is the shape the round-1 uncaught throw had.
+          expect(
+            dirtyCode === 1,
+            `CALIBRATION: a row with a REAL credential and nothing unjudgeable still returns 1 (got ${dirtyCode}; ${dirtyLines.join(" | ")})`,
+          ) &&
+          expect(
+            dirtyLines.some((l) => l.includes("Rotate the exposed secret")),
+            "…under the rotation remedy, which is where that sentence belongs",
+          ) &&
+          expect(existsSync(dirtyPath) === false, "and nothing was written there either") &&
+          pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   scenario("captureManifest REFUSES when the database has no COMMENT ON DATABASE marker");
   // -------------------------------------------------------------------------
   {
@@ -3974,6 +4085,30 @@ export async function captureManifest({ seams, outPath, log = (s) => console.log
   // invariant as CR-R1-02 on the comparison side: an unjudged row is not a
   // clean one, and an oracle is exactly the artefact that must not record one
   // as if it were.
+  //
+  // ⛔ AND IT ROUTES THROUGH `splitHygiene`, THE WAY `compareManifest` ALWAYS
+  // HAS (164.8.5-REVIEW-R2 WR-R2-04). This loop used to test `v.length > 0` and
+  // put EVERYTHING in `dirty`. MEASURED 2026-09-11 on a row whose `DO` nesting
+  // exceeds `MAX_DOLLAR_DEPTH`:
+  //
+  //   captureManifest exit code: 1
+  //     REFUSED: 1 cron.job row(s) fail secret hygiene …
+  //       match_engine_cron: [command-unjudgeable] [vault-absent]
+  //     Rotate the exposed secret, re-schedule that job onto a
+  //     vault.decrypted_secrets body, then capture again.
+  //
+  // Nothing was found; the lexer gave up. The operator was told to rotate a key
+  // and the caller read `1` — breaking the partition this function's own
+  // docstring calls "the whole information content of the exit code", for every
+  // `UNJUDGEABLE_RULE_IDS` member. `splitHygiene` exists precisely because
+  // "reporting a parse failure under a rotation remedy would send an operator
+  // to rotate a key on no evidence".
+  //
+  // ⚠️ A ROW CARRYING BOTH goes to `unjudged` — an unread span is the stronger
+  // statement, and 3 is the honest code — but its sentence still NAMES every
+  // credential rule that fired beside the refusal, so nothing is lost. That is
+  // the same additive rule the arm applies to `jobname-absent` and
+  // `command-unjudgeable`.
   const dirty = [];
   const unjudged = [];
   for (const r of rows) {
@@ -3984,7 +4119,16 @@ export async function captureManifest({ seams, outPath, log = (s) => console.log
       unjudged.push({ jobname: r.jobname, reason: err && err.message ? err.message : String(err) });
       continue;
     }
-    if (v.length > 0) dirty.push({ jobname: r.jobname, rules: v.map((x) => x.slice(0, x.indexOf("]") + 1)) });
+    const { credential, unjudgeable } = CRON_DRIFT_MOD.splitHygiene(v);
+    const ids = (list) => list.map((x) => x.slice(0, x.indexOf("]") + 1));
+    if (unjudgeable.length > 0) {
+      unjudged.push({
+        jobname: r.jobname,
+        reason: `${ids(unjudgeable).join(" ")}${credential.length > 0 ? ` — and ${ids(credential).join(" ")} fired BESIDE the refusal on the spans that WERE read` : ""}`,
+      });
+    } else if (credential.length > 0) {
+      dirty.push({ jobname: r.jobname, rules: ids(credential) });
+    }
   }
   if (unjudged.length > 0) {
     log(
