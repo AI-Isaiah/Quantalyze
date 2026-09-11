@@ -1733,14 +1733,20 @@ export async function selfTest() {
           `and no row fires a rule its expect_not forbids — the header-region token belongs to long-literal-in-headers ALONE (${forbidden.join(" ") || "none forbidden fired"})`,
         ) &&
         expect(quoted.length === 0, `and NO verdict quotes the offending command (${quoted.join(", ") || "none"})`) &&
-        expect(pairs.length >= 2, `the apostrophe pair is present (${pairs.length} paired rows)`) &&
+        expect(pairs.length >= 2, `the SPELLING pairs are present (${pairs.length} paired rows)`) &&
         expect(
           emptyPairs.length === 0,
           `and it agrees on a NON-EMPTY verdict — two clean readings would be the pre-phase state, not a proof (${emptyPairs.join(", ") || "non-empty"})`,
         ) &&
         expect(
           disagreeing.length === 0,
-          `$q$don't$q$ and $q$dont$q$ produce the SAME verdict set — the apostrophe is inside a dollar-quoted literal and is not a delimiter (${disagreeing.join(" ") || "identical"})`,
+          // TWO pairs now, and each asks "does RESPELLING the same value change
+          // the verdict?" — `$q$don't$q$` vs `$q$dont$q$` (criterion 4: an
+          // apostrophe inside a dollar-quoted literal is not a delimiter), and
+          // `DO '…'` vs `DO $$…$$` (CR-03: a single-quoted procedural body was
+          // skipped as data by `literalsIn` AND never re-entered as code by
+          // `codeSpans`, so it was a TOTAL blind spot).
+          `every paired row produces the SAME verdict set as the row it names — respelling a value must not change what fires (${disagreeing.join(" ") || `all ${pairs.length} pairs identical`})`,
         ) &&
         pass;
     }
