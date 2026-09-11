@@ -1131,7 +1131,29 @@ export function selfTest() {
     }
   }
 
-  const reds = readdirSync(dir).filter((f) => f.endsWith(".red.sql")).sort();
+  // ⛔ THE FIXTURE-DIRECTORY READS ARE WRAPPED TOO (164.8.5-REVIEW-R2 IN-R2-05).
+  // `1c81df48` wrapped `walk`'s `readdirSync` so an unreadable directory becomes
+  // a named MEASURE_FAIL; these two stayed bare, so an unreadable
+  // `scripts/lint-app-guc-fixtures` threw a stack trace out of `--self-test`
+  // instead of printing `SELF-TEST FAIL`. The DIRECTION was already loud (exit
+  // non-zero), so this is consistency rather than a hole — but "the self-test
+  // could not run" and "the self-test failed" are two different sentences, and
+  // only one of them tells an operator to go look at a permission.
+  const fixtureNames = (suffix) => {
+    try {
+      return readdirSync(dir).filter((f) => f.endsWith(suffix)).sort();
+    } catch (err) {
+      console.error(
+        `SELF-TEST FAIL: cannot READ the fixture directory ${FIXTURE_DIR} (${err.code ?? err.message}) — ` +
+          `so no ${suffix} fixture could be enumerated. An unreadable fixture directory is not an empty one: ` +
+          "every arm below would report zero fixtures and this self-test would have nothing to prove.",
+      );
+      bad = 1;
+      return [];
+    }
+  };
+
+  const reds = fixtureNames(".red.sql");
   for (const name of reds) {
     if (!declared.has(name)) {
       console.error(
@@ -1142,7 +1164,7 @@ export function selfTest() {
     }
   }
 
-  const greens = readdirSync(dir).filter((f) => f.endsWith(".green.sql")).sort();
+  const greens = fixtureNames(".green.sql");
   if (greens.length === 0) {
     console.error("SELF-TEST FAIL: no *.green.sql fixture — red arms alone cannot show a clean pass.");
     bad = 1;
