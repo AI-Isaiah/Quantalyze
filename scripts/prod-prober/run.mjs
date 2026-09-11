@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 69;
+export const SELF_TEST_SCENARIOS = 70;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -1747,17 +1747,39 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
-  scenario("row ORDER, CRLF line endings and re-indentation are NOT drift (ws-collapse-v1)");
+  scenario("row ORDER, CRLF line endings and re-indentation are NOT drift (ws-collapse-v2)");
   // -------------------------------------------------------------------------
   {
+    // ⛔ THE FIXTURE LOST ITS LITERAL CRLF BYTES IN 164.8.5-REVIEW CR-01, AND
+    // THAT IS THE FINDING RATHER THAN A CONCESSION. `ws-collapse-v1` folded
+    // NEWLINES into spaces, so this fixture could prove "not drift" by
+    // RE-WRAPPING a single-line command onto several lines. Re-wrapping is
+    // exactly the operation that lets a leading `--` swallow a body, so `v2`
+    // treats a line break as the semantic byte it is and a re-wrap IS drift.
+    //
+    // What survives here is the invariant `v2` really holds: row ORDER,
+    // RE-INDENTATION (tabs vs spaces), doubled intra-line spaces, and
+    // leading/trailing padding. The CRLF half — `\r\n` and a lone `\r` both
+    // normalising to `\n` — is asserted DIRECTLY on `normalizeCommand` below,
+    // which is stronger than asserting it through a fixture: it names the
+    // function under test.
     const prod = loadFixture("cron-drift", "prod-ok-shuffled-crlf.json");
+    const n = CRON_DRIFT_MOD.normalizeCommand;
     if (!prod.ok) {
       pass = expect(false, prod.reason) && pass;
     } else {
       const lines = [];
       const r = await driftRun(prod.data, driftFixturePath("manifest.json"), (x) => lines.push(x));
       pass =
-        expect(r.exitCode === 0, `reversed rows with CRLF and doubled spaces exit 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
+        expect(
+          n("SELECT 1\r\nSELECT 2") === n("SELECT 1\nSELECT 2") && n("SELECT 1\rSELECT 2") === n("SELECT 1\nSELECT 2"),
+          `CRLF and a lone CR both normalise to LF — a client that round-trips a command through DOS line endings has changed nothing that runs (${JSON.stringify(n("SELECT 1\r\nSELECT 2"))})`,
+        ) &&
+        expect(
+          n("-- c\nDO $$ BEGIN PERFORM 1; END $$") !== n("-- c DO $$ BEGIN PERFORM 1; END $$"),
+          "and RE-WRAPPING is drift: the same bytes with and without one line break normalise DIFFERENTLY, which is the whole of CR-01 — under v1 they were byte-equal and therefore hashed the same, so a working reaper and its all-comment no-op twin reported `0 differing`",
+        ) &&
+        expect(r.exitCode === 0, `reversed rows with tabs and doubled spaces exit 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
         expect(
           noDefectOfKind(r.defects, ["cron-drift", "cron-secret-in-command", "manifest-invalid"]),
           "nothing at all is reported — the comparison is a jobname MAP lookup, so PROD row order is irrelevant by construction",
@@ -2631,7 +2653,16 @@ export async function selfTest() {
         pass =
           expect(code === 0, `a clean configuration captures with 0 (got ${code}; log ${lines.join(" | ")})`) &&
           expect(written !== null, "the file was written") &&
-          expect((written || {}).schema_version === 1 && (written || {}).normalization === "ws-collapse-v1", `schema 1 / ws-collapse-v1 (got ${(written || {}).schema_version} / ${(written || {}).normalization})`) &&
+          // ⛔ DERIVED FROM THE ARM'S OWN CONSTANTS, NEVER RE-TYPED. Both
+          // values were hand-typed literals until 164.8.5-REVIEW CR-01 bumped
+          // `NORMALIZATION` to `ws-collapse-v2`: the assertion then failed for
+          // being STALE rather than for anything the capture path did, which is
+          // a control that measures its own transcription.
+          expect(
+            (written || {}).schema_version === CRON_DRIFT_MOD.MANIFEST_SCHEMA_VERSION &&
+              (written || {}).normalization === CRON_DRIFT_MOD.NORMALIZATION,
+            `schema ${CRON_DRIFT_MOD.MANIFEST_SCHEMA_VERSION} / ${CRON_DRIFT_MOD.NORMALIZATION} (got ${(written || {}).schema_version} / ${(written || {}).normalization})`,
+          ) &&
           expect((written || {}).database_marker === FIXTURE_DB_MARKER, `the database marker is recorded (got ${(written || {}).database_marker})`) &&
           expect((written || {}).captured_at === "2026-09-05T12:00:00.000Z", `captured_at comes from the INJECTED clock (got ${(written || {}).captured_at})`) &&
           expect(((written || {}).jobs || []).length === 3, `three jobs (got ${((written || {}).jobs || []).length})`) &&
@@ -2642,6 +2673,87 @@ export async function selfTest() {
           expect(
             ((written || {}).jobs || []).map((j) => j.jobname).join(",") === "audit_log_cold_purge,match_engine_cron,retention_compute_jobs_done",
             "sorted by jobname, so two captures of the same state are byte-identical",
+          ) &&
+          pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("CR-01: capture STORES the line breaks, so a `--`-commented multi-line command stays JUDGEABLE and hashes apart from its folded no-op twin");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE DEFECT SITE IS THE CAPTURE, NOT THE SCAN. `hygieneViolations` is
+    // handed PROD's RAW `cron.job.command`, which still has its newlines — so
+    // section (0) was never blind. What was blind is the MANIFEST side:
+    // `captureManifest` STORES `normalizeCommand(command)`, and under
+    // `ws-collapse-v1` that folded a multi-line command onto ONE line, where a
+    // leading `--` swallows the body. MEASURED on the real committed oracle:
+    // `retention_compute_jobs_orphaned_running` is 1791 characters with ZERO
+    // newlines, opens with `--`, and `scanSql` masks 100% of it to spaces.
+    //
+    // ⛔ AND THE SHA HALF, WHICH IS WORSE THAN A BLIND ROW. Under `v1` the
+    // working program and its folded all-comment twin hashed IDENTICALLY, so
+    // `compareManifest` said `0 differing` between a live reaper and a no-op —
+    // and `REMEDIES["cron-drift"]`'s "re-schedule PROD from the manifest" would
+    // have disabled the orphaned-`compute_jobs` reaper in production.
+    //
+    // The `folded` string below is the v1 OUTPUT, spelled out, so the control
+    // is a measurement of the old behaviour rather than a re-run of it.
+    const prod = loadFixture("cron-drift", "prod-multiline-comment.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const JOB = "retention_compute_jobs_orphaned_running";
+      const source = (prod.data.find((r) => r.jobname === JOB) || {}).command || "";
+      const folded = source.replace(/\s+/g, " ").trim(); // exactly what ws-collapse-v1 produced
+      // A low-entropy fake, assembled from short operands so nothing
+      // credential-shaped is ever typed whole into a public repository.
+      const TOKEN = `FAKE${"-0123456789"}${"-0123456789"}${"-0123456789ab"}`;
+      const probe = (cmd) =>
+        CRON_DRIFT_MOD.hygieneViolations("probe_job", `${cmd} SELECT set_config('p', '${TOKEN}', false);`).map((x) =>
+          x.slice(1, x.indexOf("]")),
+        );
+      const executable = (cmd) => CRON_DRIFT_MOD.codeSpans(cmd)[0].masked.trim().length;
+      const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
+      const outPath = join(dir, "cron-manifest.json");
+      const lines = [];
+      try {
+        const code = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: prod.data }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath,
+          log: (x) => lines.push(x),
+        });
+        const written = existsSync(outPath) ? JSON.parse(readFileSync(outPath, "utf8")) : null;
+        const stored = ((written || { jobs: [] }).jobs.find((j) => j.jobname === JOB) || {}).command;
+        pass =
+          expect(
+            source.includes("\n") && source.startsWith("--"),
+            `PRECONDITION: the fixture row really is multi-line and really opens with a \`--\` comment (${source.split("\n").length} line(s))`,
+          ) &&
+          expect(code === 0, `the capture succeeds (got ${code}; log ${lines.join(" | ")})`) &&
+          expect(
+            typeof stored === "string" && stored.includes("\n"),
+            `the STORED command still carries its line break — under v1 it did not, and that single fold is the whole defect (stored ${typeof stored === "string" ? `${stored.split("\n").length} line(s)` : "NOTHING"})`,
+          ) &&
+          expect(
+            executable(String(stored)) > 0,
+            `and the stored text still lexes to EXECUTABLE code rather than to an empty command (${executable(String(stored))} non-space masked character(s))`,
+          ) &&
+          expect(
+            probe(String(stored)).includes("long-token-anywhere"),
+            `so a credential spliced into the STORED text is still CAUGHT (${probe(String(stored)).join(", ") || "NOTHING FIRED"})`,
+          ) &&
+          expect(
+            executable(folded) === 0 && probe(folded).length === 0,
+            `CONTROL, MEASURED NOT ARGUED: the v1-folded twin masks to ZERO executable characters (${executable(folded)}) and catches NOTHING (${probe(folded).join(", ") || "no rule fired"}) — that is the 1-of-14 blind row the review found`,
+          ) &&
+          expect(
+            CRON_DRIFT_MOD.sha256Hex(CRON_DRIFT_MOD.normalizeCommand(source)) !==
+              CRON_DRIFT_MOD.sha256Hex(CRON_DRIFT_MOD.normalizeCommand(folded)),
+            "and the working command no longer HASHES THE SAME as its folded no-op twin — under v1 it did, so `compareManifest` reported `0 differing` between a live reaper and a command that does nothing",
           ) &&
           pass;
       } finally {

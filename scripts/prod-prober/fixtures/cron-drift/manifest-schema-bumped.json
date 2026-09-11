@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "normalization": "ws-collapse-v1",
+  "normalization": "ws-collapse-v2",
   "captured_at": "2026-09-05T00:00:00Z",
   "database_marker": "quantalyze-fixture-db",
   "jobs": [
