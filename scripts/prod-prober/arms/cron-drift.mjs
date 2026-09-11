@@ -822,18 +822,51 @@ function calleesOn(maskedText) {
  *
  * Overloads share one file; EVERY definition in it is tested and ANY reader
  * counts, because the command does not say which overload it calls.
+ *
+ * ⛔ TWO F3-ADJACENT DEFECTS CLOSED HERE (164.8.5-REVIEW F6). Both resolved to
+ * `vault-absent` FIRING — a LOUD false positive on correct configuration, never
+ * a silent pass — which is why they are low severity and not why they are
+ * acceptable.
+ *
+ * (1) A NON-DOLLAR BODY WAS DROPPED SILENTLY. A function defined
+ *     `AS 'SELECT … FROM vault.decrypted_secrets'` — the single-quoted body form,
+ *     the same spelling CR-03 found a `DO` block can take — is filtered out by
+ *     `bodyKind === "dollar"`, contributed NO body, and was NOT recorded in
+ *     `unresolved`. So the violation sentence could not say it had skipped
+ *     anything: the operator read "this command reaches no Vault read" when the
+ *     truth was "this arm did not read one definition". A skip nobody is told
+ *     about is the same shape as a rule that cannot fire.
+ *
+ * (2) `visited` MEMOISED `false` ACROSS DEPTHS. It was a Set shared for the
+ *     whole call, so a name first reached at depth `CALLABLE_DEPTH_MAX` was
+ *     marked visited with its own callees TRUNCATED by the depth cap — and if
+ *     the same name was later reachable at depth 1, with budget to spare, the
+ *     memoised `false` was returned without exploring it. It is now a Map of
+ *     name -> the SHALLOWEST depth already explored, so a name reached shallower
+ *     than before is re-explored and a name reached at the same depth or deeper
+ *     is not. Cycles still terminate: `a -> b -> a` re-enters `a` at depth 2
+ *     against a recorded 0, which is not shallower.
  */
 function resolveCallable(name, functionsDir, visited, depth, unresolved) {
   if (depth > CALLABLE_DEPTH_MAX) return false;
-  if (visited.has(name)) return false;
-  visited.add(name);
+  // `>=`, not `has`: a name already explored with LESS depth budget than we
+  // have now was explored with a truncated subtree, and must be re-explored.
+  if (visited.has(name) && visited.get(name) <= depth) return false;
+  visited.set(name, depth);
   const file = resolve(functionsDir, `${name}.sql`);
   if (!existsSync(file)) {
     unresolved.add(name);
     return false;
   }
   const defs = extractFunctionDefs(readFileSync(file, "utf8"));
-  const bodies = defs.filter((d) => d.bodyKind === "dollar").map((d) => scanSql(d.body).masked);
+  const bodies = [];
+  for (const d of defs) {
+    if (d.bodyKind === "dollar") bodies.push(scanSql(d.body).masked);
+    // ⛔ NAMES ONLY, NEVER BODY TEXT — this string reaches a world-readable
+    // Actions log. The PARENTHETICAL is what makes the sentence honest: "could
+    // not be shown to read Vault" is a different claim from "has no file".
+    else unresolved.add(`${name} (a definition whose body is not dollar-quoted)`);
+  }
   if (bodies.some((masked) => VAULT_READ_RE.test(masked))) return true;
   for (const masked of bodies) {
     for (const callee of calleesOn(masked)) {
@@ -861,7 +894,10 @@ function reachesVaultRead(spans, functionsDir) {
     );
   }
   if (spans.some((span) => VAULT_READ_RE.test(span.masked))) return { reads: true, unresolved: [] };
-  const visited = new Set();
+  // name -> the SHALLOWEST depth it has already been explored at. See F6 (2)
+  // beside `resolveCallable`: a Set memoised `false` for a name whose subtree
+  // the depth cap had truncated.
+  const visited = new Map();
   const unresolved = new Set();
   for (const span of spans) {
     for (const callee of calleesOn(span.masked)) {
@@ -1174,7 +1210,14 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
       // world-readable Actions log, unlike any part of the command text.
       const named =
         unresolved.length > 0
-          ? ` The command calls ${unresolved.join(", ")}, which has no file in the committed function snapshot, so it could not be shown to read Vault either — an unknown callable is never assumed to be a reader.`
+          ? // ⛔ THE SENTENCE NAMES EVERY CALLABLE THE RESOLVER COULD NOT READ, AND
+            // SAYS WHY (164.8.5-REVIEW F6). It used to claim the named callables
+            // "have no file in the committed function snapshot" — true of one of
+            // the two skip reasons. A definition whose body is not dollar-quoted
+            // (`AS 'SELECT …'`) HAS a file and was dropped ANYWAY, contributing no
+            // body and no entry, so the sentence could not say it had skipped
+            // anything. Each entry now carries its own reason.
+            ` The command calls ${unresolved.join(", ")}, which this arm could not read a body for — either no file in the committed function snapshot, or a definition the snapshot reader does not expose — so it could not be shown to read Vault either. An unjudged callable is never assumed to be a reader.`
           : "";
       say(
         "vault-absent",
