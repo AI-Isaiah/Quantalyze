@@ -167,19 +167,53 @@ describe("lint-app-guc: the shipped finding kinds", () => {
  * phase exists to eliminate.
  */
 describe("lint-app-guc: DETECT_RE spelling calibration", () => {
-  const SPELLINGS: Record<string, string> = {
-    plain: "current_setting('app.x')",
-    "doubled quote": "current_setting(''app.x'')",
-    "E-string": "current_setting(E'app.x')",
-    "dollar-quoted": "current_setting($q$app.x$q$)",
-    "unicode string": "current_setting(U&'app.x')",
-    "block comment": "current_setting/*c*/('app.x')",
+  // ⛔ A CROSS-PRODUCT, NOT A LIST, AND THE TITLE NO LONGER NAMES A COUNT
+  // (164.8.5-REVIEW WR-05, closed 2026-09-11). The old table enumerated the
+  // QUOTING spellings and folded exactly one COMMENT position into it, under a
+  // title promising "all SIX spellings Postgres accepts". MEASURED at that
+  // commit, three real spellings were misses: `current_setting(/*c*/'app.x')`,
+  // `current_setting(--c\n'app.x')` and `current_setting/*c*/($q$app.x$q$)` —
+  // the last because the comment group was absent from the second alternation
+  // entirely. A title that names a number is a claim the body must earn; this
+  // one earns it by construction instead.
+  const QUOTINGS: Record<string, string> = {
+    plain: "'app.x'",
+    "doubled quote": "''app.x''",
+    "E-string": "E'app.x'",
+    "dollar-quoted": "$q$app.x$q$",
+    "unicode string": "U&'app.x'",
+  };
+  // Postgres allows a comment wherever whitespace is allowed, and D-05 requires
+  // this gate to COUNT comments rather than strip them.
+  const COMMENT_POSITIONS: Record<string, (q: string) => string> = {
+    none: (q) => `current_setting(${q})`,
+    "block, before the paren": (q) => `current_setting/*c*/(${q})`,
+    "block, after the paren": (q) => `current_setting(/*c*/${q})`,
+    "line, after the paren": (q) => `current_setting(--c\n${q})`,
   };
 
-  it("matches all SIX spellings Postgres accepts for the same call", () => {
-    for (const [name, sql] of Object.entries(SPELLINGS)) {
-      expect(new RegExp(DETECT_RE.source, "i").test(sql), `${name}: ${sql}`).toBe(true);
+  // DERIVED from the two dimensions above, so the mutant tests below and the
+  // matrix cannot drift apart: one place spells each shape, both read it.
+  const SPELLINGS: Record<string, string> = {
+    ...Object.fromEntries(Object.entries(QUOTINGS).map(([k, q]) => [k, COMMENT_POSITIONS.none(q)])),
+    "block comment": COMMENT_POSITIONS["block, before the paren"](QUOTINGS.plain),
+    "block comment after paren": COMMENT_POSITIONS["block, after the paren"](QUOTINGS.plain),
+    "line comment after paren": COMMENT_POSITIONS["line, after the paren"](QUOTINGS.plain),
+  };
+
+  it("matches every QUOTING spelling in every COMMENT position — the full cross-product, derived rather than listed", () => {
+    const misses: string[] = [];
+    let checked = 0;
+    for (const [qName, q] of Object.entries(QUOTINGS)) {
+      for (const [pName, build] of Object.entries(COMMENT_POSITIONS)) {
+        checked += 1;
+        if (!new RegExp(DETECT_RE.source, "i").test(build(q))) misses.push(`${qName} + ${pName}: ${JSON.stringify(build(q))}`);
+      }
     }
+    expect(checked, "the matrix must be the product of both dimensions, or one of them is not being varied").toBe(
+      Object.keys(QUOTINGS).length * Object.keys(COMMENT_POSITIONS).length,
+    );
+    expect(misses, `every cell of the matrix must match (${misses.length} miss(es))`).toEqual([]);
   });
 
   it("does NOT match a non-app GUC, nor an indirected read — the gate is not a `current_setting` grep", () => {
@@ -233,6 +267,45 @@ describe("lint-app-guc: DETECT_RE spelling calibration", () => {
     const mutant = new RegExp(mutated, "i");
     expect(mutant.test(SPELLINGS["block comment"])).toBe(false);
     expect(mutant.test(SPELLINGS.plain)).toBe(true);
+  });
+
+  // ⛔ THE TWO MUTANTS WR-05 NEEDED, ONE PER NEW GROUP. Both groups appear
+  // TWICE in the source (once per alternation), and the asymmetry between them
+  // was the defect: the comment group existed only in the first alternation, so
+  // a dollar-quoted read with a comment anywhere near it was a documented miss.
+  const AFTER_PAREN_GROUP = "(?:(?:\\/\\*[\\s\\S]*?\\*\\/|--[^\\n]*\\n)\\s*)?";
+  const BEFORE_PAREN_GROUP = "(?:\\/\\*[\\s\\S]*?\\*\\/\\s*)?";
+
+  it("MUTANT: dropping the AFTER-paren comment group blinds it to a comment inside the parentheses", () => {
+    expect(
+      DETECT_RE.source.split(AFTER_PAREN_GROUP).length - 1,
+      "the group must appear in BOTH alternations — its absence from the second WAS the WR-05 defect",
+    ).toBe(2);
+    const mutated = DETECT_RE.source.split(AFTER_PAREN_GROUP).join("");
+    expect(mutated).not.toBe(DETECT_RE.source);
+    const mutant = new RegExp(mutated, "i");
+    expect(mutant.test(SPELLINGS["block comment after paren"]), "the mutant must MISS a block comment after the paren").toBe(
+      false,
+    );
+    expect(mutant.test(SPELLINGS["line comment after paren"]), "and MISS a `--` comment after the paren").toBe(false);
+    expect(mutant.test(SPELLINGS.plain), "while still seeing the plain spelling — the mutant is narrow").toBe(true);
+  });
+
+  it("MUTANT: dropping the BEFORE-paren comment group from the SECOND alternation blinds it to a commented dollar-quoted read", () => {
+    // ⛔ SURGERY ON THE SECOND ALTERNATION ALONE. Removing both copies would
+    // also blind the first, so the failure could not be attributed — the same
+    // batch-neuter objection D3 records.
+    const [first, second] = DETECT_RE.source.split("|current_setting");
+    expect(second, "the source must really have two alternations").toBeTruthy();
+    const mutated = `${first}|current_setting${second.replace(BEFORE_PAREN_GROUP, "")}`;
+    expect(mutated).not.toBe(DETECT_RE.source);
+    const mutant = new RegExp(mutated, "i");
+    expect(
+      mutant.test(COMMENT_POSITIONS["block, before the paren"](QUOTINGS["dollar-quoted"])),
+      "the mutant must MISS a comment before the paren of a dollar-quoted read — the exact spelling that was a miss before WR-05",
+    ).toBe(false);
+    expect(mutant.test(SPELLINGS["dollar-quoted"]), "while still seeing the uncommented dollar-quoted spelling").toBe(true);
+    expect(mutant.test(SPELLINGS["block comment"]), "and the FIRST alternation is untouched").toBe(true);
   });
 
   it("MUTANT: `'{1,2}`→`'` blinds it to the doubled-quote spelling ([APPGUC-DETECT-DOUBLEQUOTE-01])", () => {
