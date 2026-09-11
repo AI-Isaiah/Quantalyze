@@ -718,7 +718,7 @@ describe("[164.1-05] kinds and floors", () => {
   // LAST on purpose (CR-R1-03) so the head fragment of a payload-0x1E split
   // loses it and is therefore SHORT, rather than a full-width record carrying a
   // silently truncated command.
-  const cronRecord = (fields: string[], total = 2) =>
+  const cronRecord = (fields: string[], total: string | number = 2) =>
     [...fields, String(total)].join(CRON_JOB_SEPARATORS.fieldSep);
   const GOOD_RECORD = cronRecord(["1", "a_job", "* * * * *", "t", "postgres", "postgres", "SELECT 1"]);
   const SHORT_RECORD = cronRecord(["2", "b_job", "*/5 * * * *", "t", "postgres"]);
@@ -1549,6 +1549,67 @@ describe("[164.1-05] kinds and floors", () => {
       username: "v_username",
       command: "v_command",
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // THE TWO `countMismatch` ARMS ROUND 2 FOUND UNPROVEN. CR-R1-03 shipped three
+  // arms and exercised ONE — the `rows + malformed !== total` disagreement.
+  // `totals.size > 1` and `total === null` were REACHABLE and measured by
+  // nothing, so either could have been deleted with a fully green suite. One
+  // `it()` per arm: they are two branches, and a single test covering both
+  // would credit one RED to two controls.
+  //
+  // ⚠️ Driven through `parseCronJobRows` directly rather than through the
+  // runner, because the runner's fixture path always emits a well-formed,
+  // agreeing `total` by construction — there is no record it can produce that
+  // reaches either branch.
+  // -------------------------------------------------------------------------
+  // ⚠️ Built on the `cronRecord` / `renderRecords` helpers already in this
+  // block, so a change to the record shape reaches these two tests too.
+  const countRecord = (jobid: string, total: string) =>
+    cronRecord([jobid, `j${jobid}`, "0 * * * *", "t", "postgres", "postgres", "SELECT 1;"], total);
+
+  it("countMismatch arm: records that DISAGREE about `count(*) OVER ()` are a hole, not a reading", () => {
+    // ⛔ `count(*) OVER ()` IS ONE NUMBER PER READING. Two answers means the
+    // records were assembled from fragments of DIFFERENT records — the shape a
+    // payload `0x1E` produces when the split happens to leave both halves
+    // full-width. `total` collapses to `null` in that case, so without this arm
+    // the reading would fall through to the `total === null` sentence and
+    // describe the wrong defect.
+    const r = parseCronJobRows(renderRecords([countRecord("1", "2"), countRecord("2", "3")]));
+    expect(r.rows).toHaveLength(2);
+    expect(r.malformed).toEqual([]);
+    expect(r.total, "two answers collapse to no answer").toBeNull();
+    expect(r.countMismatch).toContain("disagree about how many rows the database returned");
+    expect(r.countMismatch, "naming BOTH readings, sorted, so an operator can see the split").toContain("(2, 3)");
+    // CONTROL — the same two records AGREEING are clean, so this is a reading
+    // about the disagreement and not about having two records.
+    const ok = parseCronJobRows(renderRecords([countRecord("1", "2"), countRecord("2", "2")]));
+    expect(ok.total).toBe(2);
+    expect(ok.countMismatch).toBeNull();
+  });
+
+  it("countMismatch arm: records in hand and NO out-of-band count is a hole, not an empty cron.job", () => {
+    // ⛔ `total === null` IS ONLY BENIGN WITH NOTHING TO COUNT. `count(*) OVER ()`
+    // returns no rows for an empty `cron.job`, a state the arm already answers
+    // loudly ("every scheduled job has vanished"). With records in hand and no
+    // total, something between the query and this parser dropped the column —
+    // and the CR-R1-03 completeness guard is then measuring nothing at all.
+    for (const spelling of ["", "   ", "x", "-1", "2.0"]) {
+      const r = parseCronJobRows(renderRecords([countRecord("1", spelling)]));
+      expect(r.rows, `total=${JSON.stringify(spelling)}`).toHaveLength(1);
+      expect(r.total, `total=${JSON.stringify(spelling)}`).toBeNull();
+      expect(r.countMismatch, `total=${JSON.stringify(spelling)}`).toContain("NOT ONE carried the out-of-band row count");
+    }
+    // CONTROL 1 — a real count on the same record is clean.
+    expect(parseCronJobRows(renderRecords([countRecord("1", "1")])).countMismatch).toBeNull();
+    // CONTROL 2 — and EMPTY stdout stays clean, because there is genuinely
+    // nothing to count. Without this the arm would fire on every empty read and
+    // mask the "every scheduled job has vanished" drift that belongs there.
+    const empty = parseCronJobRows("");
+    expect(empty.rows).toEqual([]);
+    expect(empty.total).toBeNull();
+    expect(empty.countMismatch).toBeNull();
   });
 
   it("F5: the UNREACHABLE `vaultSpan` exemption is gone and cannot come back", () => {
