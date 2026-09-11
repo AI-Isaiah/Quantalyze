@@ -11,9 +11,8 @@
       "active": true,
       "database": "postgres",
       "username": "postgres",
-      "command_sha256": "dadebb9293f39d43d3eb3f7ab86c728a3c6180176f0b922918d818fe61a28fb3",
-      "command_withheld": true,
-      "withheld_reason": "fixture: reviewer withheld the jobid-1 body"
+      "command_sha256": "fb354345ea8cb9d808e2f75e80d668da74742ec672c07e790d37a1db2bd5dfde",
+      "command": "DO $$ DECLARE k text; u text; BEGIN SELECT decrypted_secret INTO k FROM vault.decrypted_secrets WHERE name = 'analytics_service_key'; SELECT decrypted_secret INTO u FROM vault.decrypted_secrets WHERE name = 'analytics_base_url'; PERFORM net.http_post(url := u || '/api/match/cron-recompute', headers := jsonb_build_object('Content-Type', 'application/json', 'X-Service-Key', k), body := '{}'::jsonb, timeout_milliseconds := 60000); END $$"
     },
     {
       "jobid": 2,

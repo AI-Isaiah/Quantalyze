@@ -1,0 +1,233 @@
+[
+  {
+    "shape": "(a) dollar-quoted value — one token, nothing to split",
+    "jobname": "bypass_dollar_quoted_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', $q$FAKE-key-0123456789ab$q$), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "(b) chr() chain — zero literals at all",
+    "jobname": "bypass_chr_chain_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', chr(65)||chr(66)||chr(67)||chr(68)||chr(69)||chr(70)||chr(71)||chr(72)||chr(73)||chr(74)||chr(75)||chr(76)||chr(77)||chr(78)||chr(79)||chr(80)), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "(c) concat()",
+    "jobname": "bypass_concat_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', concat('FAKE-key-','012345','6789ab')), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "(d) format()",
+    "jobname": "bypass_format_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', format('%s%s%s','FAKE-key-','012345','6789ab')), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "(e) convert_from(decode(…,'base64'),'utf8')",
+    "jobname": "bypass_base64_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', convert_from(decode('RkFLRS1rZXktMDEyMzQ1Njc4OWFi','base64'),'utf8')), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "(f) U&'…' unicode escapes",
+    "jobname": "bypass_unicode_escape_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', U&'\\0046\\0041\\004B\\0045\\002D\\006B\\0065\\0079\\002D\\0030\\0031\\0032'), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "(g) quote_literal(…) || …",
+    "jobname": "bypass_quote_literal_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', quote_literal('FAKE-key-0123456789') || '0123'), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "(j) ||-split value under a header name outside the three anchored ones",
+    "jobname": "bypass_nonanchored_split_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Auth', 'FAKE-key-0123456789' || 'abcdef0123456789'), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "long-literal-in-headers"
+    ]
+  },
+  {
+    "shape": "criterion 4: an apostrophe INSIDE a dollar-quoted literal is not a delimiter",
+    "jobname": "pair_apostrophe",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Trace', $q$FAKE-don't-0123456789-0123456789-0123$q$), body := '{}'::jsonb)",
+    "expect_any_of": [
+      "long-literal-in-headers"
+    ],
+    "expect_same_verdict_as": "pair_no_apostrophe"
+  },
+  {
+    "shape": "criterion 4: the same value spelled without the apostrophe",
+    "jobname": "pair_no_apostrophe",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Trace', $q$FAKE-dont-0123456789-0123456789-0123$q$), body := '{}'::jsonb)",
+    "expect_any_of": [
+      "long-literal-in-headers"
+    ],
+    "expect_same_verdict_as": "pair_apostrophe"
+  },
+  {
+    "shape": "(h) variable indirection — k := '<key>' then jsonb_build_object(name, k)",
+    "jobname": "bypass_var_key_job",
+    "command": "DO $$ DECLARE k text; BEGIN -- resolves from vault.decrypted_secrets\n  k := 'FAKE-0123456789-0123456789-0123456789ab';\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', k), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ]
+  },
+  {
+    "shape": "(i) whole-header JSON — the header NAME is inside a bigger literal, so no anchor ever matches",
+    "jobname": "bypass_header_json_job",
+    "command": "DO $$ DECLARE h jsonb; BEGIN -- resolves from vault.decrypted_secrets\n  h := '{\"X-Service-Key\":\"FAKE-0123456789-0123456789-01\"}'::jsonb;\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := h, body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ]
+  },
+  {
+    "shape": "Q2 SCOPING PROOF: a TOKEN_MIN+ digit-bearing token landing ONLY inside a header region is caught by long-literal-in-headers and NOT by the token rule",
+    "jobname": "header_region_only",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Trace', 'FAKE-0123456789-0123456789-0123456789'), body := '{}'::jsonb)",
+    "expect_any_of": [
+      "long-literal-in-headers"
+    ],
+    "expect_not": [
+      "long-token-anywhere"
+    ]
+  },
+  {
+    "shape": "Q2 SCOPING PROOF, INSIDE A DO BLOCK — the same header-region token wrapped in the shape 4 of the 14 committed PROD commands actually use",
+    "jobname": "header_region_only_in_do",
+    "note": "⭐ THIS ROW IS WHAT MAKES THE `DO`-BODY SKIP IN `literalsIn` A CONTROL THAT CAN FAIL. At the OUTER span a top-level `DO $$ … $$` is one dollar-quoted literal, and `headerRegions` finds NOTHING there because the whole body is blank in the outer mask. So without the skip, the body's every token is judged with NO region exclusion at all and this row fires long-token-anywhere ALONGSIDE long-literal-in-headers — the Q2 partition silently holds only for non-DO commands, which is the minority shape. MEASURED 2026-09-11: deleting the skip reds this row and the long-literal-in-headers red row's isolation, and nothing else.",
+    "command": "DO $$ BEGIN PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Trace', 'FAKE-0123456789-0123456789-0123456789'), body := '{}'::jsonb); END $$",
+    "expect_any_of": [
+      "long-literal-in-headers"
+    ],
+    "expect_not": [
+      "long-token-anywhere"
+    ]
+  },
+  {
+    "shape": "(k) DO '…' — the SINGLE-QUOTED procedural body, valid PostgreSQL and re-entered by NOBODY before CR-03",
+    "jobname": "bypass_do_single_quoted_job",
+    "command": "DO ' DECLARE k text; BEGIN -- resolves from vault.decrypted_secrets\n  k := ''FAKE-0123456789-0123456789-0123456789ab'';\n  PERFORM net.http_post(url := ''https://x.invalid/a'', headers := jsonb_build_object(''X-Service-Key'', k), body := ''{}''::jsonb);\nEND '",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ],
+    "expect_same_verdict_as": "bypass_var_key_job"
+  },
+  {
+    "shape": "(l) the credential in a URL PATH SEGMENT — BARE_URL_RE's own path charset swallowed it whole",
+    "jobname": "bypass_url_path_token_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://hook.invalid/t/FAKE-0123456789-0123456789-0123456789ab', body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ],
+    "expect_same_verdict_as": "bypass_url_query_token_job"
+  },
+  {
+    "shape": "(l-control) the SAME credential in the query string — the spelling that always fired",
+    "jobname": "bypass_url_query_token_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://hook.invalid/t?k=FAKE-0123456789-0123456789-0123456789ab', body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ]
+  },
+  {
+    "shape": "(m) ONE stray `(` — an unparseable header region runs to the end of the span, and used to exclude every literal after it from the token rule",
+    "jobname": "bypass_unparseable_then_token_job",
+    "command": "DO $$ DECLARE k text; BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('Content-Type', 'application/json';\n  k := 'FAKE-0123456789-0123456789-0123456789ab';\nEND $$",
+    "expect_any_of": [
+      "long-token-anywhere",
+      "header-unparseable"
+    ],
+    "expect_all_of": [
+      "header-unparseable",
+      "long-token-anywhere"
+    ]
+  },
+  {
+    "shape": "(n) CR-R1-01: the credential sits DIRECTLY under an anchored header name, one call-level deep behind coalesce(nullif(v,''), '<key>') — the ordinary “read the config, else the hardcoded fallback” idiom, not obfuscation. derivedLiteralLength refuses to enter a non-BUILDERS callee, so the header rules never counted the value and the token rule had been switched off for the whole region.",
+    "jobname": "bypass_header_wrapped_literal_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('Content-Type', 'application/json', 'X-Service-Key', coalesce(nullif(v_key, ''), 'FAKE-0123456789-0123456789-0123456789ab')), body := '{}'::jsonb)",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ],
+    "expect_same_verdict_as": "bypass_var_key_job"
+  },
+  {
+    "shape": "(n-control) the SAME wrapper around the SAME key OUTSIDE any header argument list — the spelling that always fired. It is what makes the row above a reading about the header REGION rather than about coalesce().",
+    "jobname": "bypass_wrapped_literal_outside_header_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', body := coalesce(nullif(v_key, ''), 'FAKE-0123456789-0123456789-0123456789ab')::jsonb)",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ],
+    "expect_same_verdict_as": "bypass_header_wrapped_literal_job"
+  },
+  {
+    "shape": "(o) WR-R1-01: the credential in a `--` COMMENT. literalsIn walks `masked`, in which scanSql has blanked comment bodies AND their delimiters, so a comment was never a literal and never reached the token rule. The realistic path is an operator “removing” an inline key by commenting it out; the next capture then writes that comment byte for byte into a manifest committed to a PUBLIC repository while the arm reports the row clean.",
+    "jobname": "bypass_comment_borne_key_job",
+    "command": "SELECT retention_sweep('compute_jobs_done', interval '30 days'); -- was: X-Service-Key 'FAKE-0123456789-0123456789-0123456789ab'",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ],
+    "expect_same_verdict_as": "bypass_block_comment_key_job"
+  },
+  {
+    "shape": "(o-2) the same key in a BLOCK comment, and inside a DO body — the same class, two more spellings. scanSql masks a nested block comment as one comment, and codeSpans re-enters the DO body so its comments are found on the child span.",
+    "jobname": "bypass_block_comment_key_job",
+    "command": "DO $$ BEGIN /* was: X-Service-Key 'FAKE-0123456789-0123456789-0123456789ab' */ PERFORM retention_sweep('compute_jobs_done', interval '30 days'); END $$",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ],
+    "expect_same_verdict_as": "bypass_comment_borne_key_job"
+  },
+  {
+    "shape": "(p) WR-R1-03: an inline X-Service-Key in the OUTER command, beside SIX nested DO bodies that push codeSpans past MAX_DOLLAR_DEPTH. The throw used to leave hygieneViolations BEFORE ANY RULE RAN, so every finding on the row was LOST and it became a generic measure-fail — for ANY jobname, not only match_engine_cron as the residual first claimed. The refusal is now ADDITIVE: the row reports the credential AND the refusal. ⚠️ THE KEY IS IN THE OUTER COMMAND HERE — i.e. spans[0], pushed before any recursion — so this row could NEVER have shown the round-1 residual at its real width. Row (p-2) beside it is the ORDER-SWAPPED spelling that could, and the throw this row tolerated is exactly what (p-2) reddened (164.8.5-REVIEW-R2 WR-R2-05). ⚠️ RESIDUAL, measured and recorded rather than closed: a credential INSIDE the too-deep body is still unreported — those spans were never read, and command-unjudgeable is the honest verdict about them.",
+    "jobname": "bypass_deep_nesting_hides_key_job",
+    "command": "PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', 'FAKE-0123456789-0123456789-0123456789ab')); DO $t5$ DO $t4$ DO $t3$ DO $t2$ DO $t1$ DO $t0$ PERFORM 1; $t0$ $t1$ $t2$ $t3$ $t4$ $t5$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers",
+      "command-unjudgeable"
+    ],
+    "expect_all_of": [
+      "x-service-key-literal",
+      "command-unjudgeable"
+    ]
+  },
+  {
+    "shape": "(p-2) 164.8.5-REVIEW-R2 WR-R2-05: the SAME two statements as (p), REORDERED — the too-deeply-nested DO block FIRST, the ordinary depth-1 DO body carrying the inline X-Service-Key SECOND. codeSpans threw from INSIDE its recursion, so the parent's remaining dollarRegions loop and its whole single-quoted-body walk were abandoned and everything not yet pushed was lost. MEASURED before the fix: (p) reported [command-unjudgeable, x-service-key-literal, long-literal-in-headers] and this row reported [command-unjudgeable] ALONE — a credential silenced by statement ORDER. The depth cap now records a refusal and returns, so the traversal completes.",
+    "jobname": "bypass_deep_nesting_before_key_job",
+    "command": "DO $t5$ DO $t4$ DO $t3$ DO $t2$ DO $t1$ DO $t0$ PERFORM 1; $t0$ $t1$ $t2$ $t3$ $t4$ $t5$; DO $y$ BEGIN PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', 'FAKE-' || '0123456789-0123456789' || '-0123456789ab')); END $y$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers",
+      "command-unjudgeable"
+    ],
+    "expect_all_of": [
+      "x-service-key-literal",
+      "command-unjudgeable"
+    ]
+  }
+]

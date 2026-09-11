@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "normalization": "ws-collapse-v2",
   "captured_at": "2026-09-05T00:00:00Z",
   "database_marker": "quantalyze-fixture-db",
@@ -12,8 +12,7 @@
       "database": "postgres",
       "username": "postgres",
       "command_sha256": "dadebb9293f39d43d3eb3f7ab86c728a3c6180176f0b922918d818fe61a28fb3",
-      "command_withheld": true,
-      "withheld_reason": "fixture: reviewer withheld the jobid-1 body"
+      "command": "DO $$ DECLARE k text; u text; BEGIN SELECT decrypted_secret INTO k FROM vault.decrypted_secrets WHERE name = 'analytics_service_key'; SELECT decrypted_secret INTO u FROM vault.decrypted_secrets WHERE name = 'analytics_base_url'; PERFORM net.http_post(url := u || '/api/match/cron-recompute', headers := jsonb_build_object('Content-Type', 'application/json', 'X-Service-Key', k), body := '{}'::jsonb, timeout_milliseconds := 60000); END $$"
     },
     {
       "jobid": 2,

@@ -48,5 +48,84 @@
     "rule": "long-literal-in-headers",
     "jobname": "fixture_longlit_job",
     "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Trace', 'FAKE-0123456789-0123456789-0123456789'), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "header-unparseable",
+    "jobname": "fixture_unbalanced_headers_job",
+    "note": "THE VALUE IS LONG ON PURPOSE — it derives 37 characters, over HEADERS_LITERAL_MAX. Shorten it and this row stops distinguishing the header walks SKIPPING an unparseable region from them walking it: with a short value both spellings return only [header-unparseable], so the skip becomes a control that cannot fail. Split into short operands so gitleaks sees no credential-shaped token.",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Trace', 'FAKE-trace-' || '012345' || '6789ab' || '01234567' || '89abcd'"
+  },
+  {
+    "rule": "x-service-key-literal",
+    "jobname": "fixture_split_key_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', 'FAKE-key-' || '012345' || '6789ab'), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "x-service-key-literal",
+    "jobname": "fixture_concat_key_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', concat('FAKE-key-','012345','6789ab')), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "x-service-key-literal",
+    "jobname": "fixture_format_key_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', format('%s%s%s','FAKE-key-','012345','6789ab')), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "x-service-key-literal",
+    "jobname": "fixture_chr_key_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', chr(65)||chr(66)||chr(67)||chr(68)||chr(69)||chr(70)||chr(71)||chr(72)||chr(73)||chr(74)||chr(75)||chr(76)||chr(77)||chr(78)||chr(79)||chr(80)), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "x-service-key-literal",
+    "jobname": "fixture_decode_key_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', convert_from(decode('RkFLRS1rZXktMDE=','base64'),'utf8')), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "x-service-key-literal",
+    "jobname": "fixture_quote_literal_key_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', quote_literal('FAKE-key-0123456789ab')), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "x-service-key-literal",
+    "jobname": "fixture_dollar_quoted_key_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', $q$FAKE-key-0123456789ab$q$), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "long-literal-in-headers",
+    "jobname": "fixture_nonanchored_split_job",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Auth', 'FAKE-key-0123456789' || 'abcdef0123456789'), body := '{}'::jsonb)"
+  },
+  {
+    "rule": "pg-password",
+    "jobname": "fixture_plpgsql_pw_job",
+    "command": "DO $$ DECLARE v_password text; BEGIN v_password := 'FAKEpw'; END $$"
+  },
+  {
+    "rule": "pg-password",
+    "jobname": "fixture_libpq_uri_job",
+    "command": "SELECT dblink_connect('postgres://u:FAKEpw@db.invalid/db')"
+  },
+  {
+    "rule": "pg-password",
+    "jobname": "fixture_pgpassword_colon_job",
+    "command": "SELECT set_config('x', 'PGPASSWORD: FAKEpw', false)"
+  },
+  {
+    "rule": "long-token-anywhere",
+    "jobname": "fixture_var_key_job",
+    "note": "BYPASS (h) AS A RED ROW. The header VALUE is a plpgsql VARIABLE, so every header-anchored rule has nothing to measure and this row fires long-token-anywhere ALONE — which is what makes it attributable. The literal sits OUTSIDE any header region: that is the Q2 partition working, not luck. Assembled from short operands so no credential-shaped token is typed whole into a public repo.",
+    "command": "DO $$ DECLARE k text; BEGIN k := 'FAKE-0123456789-0123456789-0123456789ab'; PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', k), body := '{}'::jsonb); END $$"
+  },
+  {
+    "rule": "command-unjudgeable",
+    "jobname": "fixture_deep_dollar_nesting_job",
+    "note": "WR-R1-03. codeSpans gives up past MAX_DOLLAR_DEPTH and used to throw straight out of hygieneViolations — BEFORE ANY RULE RAN — so every finding on such a row was LOST and the row became a generic measure-fail, for ANY jobname (the residual as first recorded wrongly bounded this to match_engine_cron). The refusal is now ADDITIVE: the rules run over the spans that WERE read and this id is reported beside them. It carries NO credential on purpose, because this file asserts one-rule isolation.",
+    "command": "DO $t5$ DO $t4$ DO $t3$ DO $t2$ DO $t1$ DO $t0$ PERFORM retention_sweep('compute_jobs_done', interval '30 days'); $t0$ $t1$ $t2$ $t3$ $t4$ $t5$"
+  },
+  {
+    "rule": "jobname-absent",
+    "jobname": "",
+    "note": "164.8.5-REVIEW-R2 CR-R2-01. cron.job.jobname is NULLable and pg_cron two-arg cron.schedule(schedule, command) leaves it NULL; psql -At renders NULL as the empty string. The guard shipped in round 1 THREW here, and a throw is SUBSTITUTIVE — compareManifest turned it into a per-row measure-fail and continued, so all thirteen other rules were silenced for the row. The refusal is now its own id and is ADDITIVE. The command is deliberately CLEAN so this row isolates one rule; the scenario that proves the additivity splices a credential into an unnamed row and requires BOTH findings.",
+    "command": "SELECT public.retention_sweep($q$compute_jobs_done$q$, interval $q$30 days$q$);"
   }
 ]

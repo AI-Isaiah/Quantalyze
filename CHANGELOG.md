@@ -1,5 +1,296 @@
 # Changelog
 
+## [0.77.33.1] - 2026-09-11 — two red gates nobody had run locally, and what each one was really saying
+
+Ship-time repair of PR #774. Both gates were red on CI at head `e7c57d7c` while every local
+reading reported green, for the same underlying reason in two different disguises: **the gate that
+was red was never the gate that was run.** `npm run lint` is eslint plus three manifest checks;
+`tsc --noEmit` is a SEPARATE script (`npm run typecheck`) and was not executed once during the
+phase. `gitleaks` was run as `detect --no-git` over the working tree, while CI scans PRs with
+`fetch-depth: 0` over the full commit history.
+
+### Fixed
+
+- **`npm run typecheck`: 7 errors → 0**, and the root cause was one class, not seven bugs.
+  `scripts/prod-prober/arms/cron-drift.mjs` is JSDoc-typed, and `parseCronJobRows` declared
+  `@returns {{rows: Array<object>, …}}` — so every assertion 164.8.5 added that reads a field off a
+  parsed row (`rows[0].jobname`, four sites) was TS2339 against a shape the parser knows exactly.
+  Replaced `Array<object>` with a named `CronJobRow` typedef naming all seven fields, `active` as
+  the one field narrowed on the way in, and `total` as DELIBERATELY absent (it is a `count(*) OVER ()`
+  reading about the query, not job state).
+- **`hygieneVerdict`'s JSDoc was attached to the wrong symbol** — the `@param` block documenting its
+  Map sat above `UNRECORDED_VERDICT`, leaving the function's own parameters untyped. Moved, and
+  given a `@returns`.
+- Three test-side annotations that narrowed *wronger than the source*: a `new Map<string, typeof clean>`
+  inferring `violations: never[]`, `compareManifest`'s first parameter typed `unknown` where the
+  contract says `object | null`, and a defect's `subject` cast to `string` where the source promises
+  `string | null`.
+- ⭐ **Removing that last cast surfaced a real latent defect the cast had been hiding.**
+  `d.subject.endsWith(SUBJECT_JOB)` would have thrown a TypeError rather than reported, because a
+  `measure-fail` defect may legitimately carry `subject: null`. Now `d.subject?.endsWith(…) === true`
+  — a null subject names no job.
+
+- **A THIRD red gate, `frontend-test (2)`, was pre-existing and had been hidden behind the first
+  two.** `test-restore-workflow-wiring.test.ts` scans every file in `src/__tests__` for a raw
+  lookup index fed into a narrowing call, and `prod-prober-wiring.test.ts:1579` had
+  `fn.indexOf("\n}\n") + 2` — on a miss that is `-1 + 2 = 1`, so `slice(0, 1)` silently narrows the
+  parser body to ONE CHARACTER and every assertion over it passes vacuously. Routed through the
+  file's own `anchorIndex`, which throws by name. Introduced by `ed21b6b8`, confirmed failing on
+  the previous head `e7c57d7c` with the identical assertion.
+- ⚠️ **A file-scoped vitest run can never clear that guard**, because it scans the whole directory
+  rather than the file under test — which is exactly why the targeted runs reported green.
+
+### Security
+
+- **`gitleaks` (8.30.1): 5 findings → 0, without weakening the gate.** `generic-api-key` fires on
+  164.8.5's SPLIT-literal fixtures — `'FAKE-key-' || '0123456789ab'`, `concat(…)`, `format(…)` —
+  extracting the bare tail as the secret at entropy 3.585. Measured 2026-09-11: the split form is
+  reported while the same key written whole is not. A fixture proving the arm catches a split
+  credential cannot avoid looking like one.
+- ⛔ **Lowering fixture entropy was tried first (RESEARCH Q4's preference) and does not close it.**
+  Three of the five reported sites exist only in ALREADY-COMMITTED history, and PRs are scanned at
+  `fetch-depth: 0`, so no working-tree edit can clear them. Suppression had to be stated.
+- Added a rule-scoped `[[allowlists]]` block — `targetRules = ["generic-api-key"]`,
+  `paths = scripts/prod-prober/`, `regexTarget = "match"`, `regexes = ['FAKE-key-']`. `regexTarget`
+  is load-bearing HERE and nowhere else in the file: the finding's SECRET is the bare hex tail and
+  carries no marker, so keying on it would suppress any 12-hex token in that directory; the MATCH
+  carries `FAKE-key-`, the same way `SENTINEL-KEY-` and `pyapi06-` key the 164.1 block. Kept as a
+  SEPARATE block so the 164.1 block's guard arm keeps measuring what it measures.
+
+### Tests
+
+- New guard arm in `src/__tests__/gitleaks-allowlist.test.ts` pinning that the new suppression is
+  keyed on the MARKER, not the directory: an UNMARKED split credential (`'live-key-' || '8f3a1c7e9b24'`)
+  planted in the same directory must still be reported.
+- **Both directions measured, and the arm was proven able to fail.** Neutering the block to `paths`
+  alone (the exemption its own comment forbids) turns BOTH scanner-behaviour arms RED — the new one
+  by its named message — and the restore is byte-identical. A planted real credential
+  (`xQ7vR2mN8pL4wZ6tY1cB9jH3kF5sD0gA`) under `scripts/prod-prober/` is still caught.
+
+### Notes
+
+- `scripts/prod-prober/arms/cron-drift.mjs` changed in COMMENTS ONLY. No runtime behaviour moved:
+  self-test holds at 78/78 scenarios, `lint-app-guc` at 0 findings, `lint-sql-gates` at 7 rules.
+- ⚠️ **The process defect worth carrying forward:** every "gates green" report in this phase covered
+  `lint`, the self-tests and vitest, and silently excluded `typecheck`. A gate that is never run
+  cannot go red, which is the same anti-vacuity failure this phase spent three review rounds on —
+  here applied to the gate set itself rather than to a control inside it.
+
+## [0.77.33.0] - 2026-09-11 — the hygiene rules stop being dodgeable, and three fixes proved the class they were written against
+
+Phase 164.8.5 PROBERPARSE. Seven plans, then three initial reviews and **three bounded
+re-review rounds**, stopping on the founder's rule: keep iterating until a round yields zero
+Critical findings. Round 3 yielded zero, earned by driving every reproduction rather than
+reading the reports.
+
+⭐ **The finding that outranks every individual fix: three separate repairs introduced the very
+defect class they were briefed against.** `compareManifest`'s per-row catch made "unjudged" read
+as "clean"; `String(command ?? "")` made a malformed command byte-identical to a clean one; the
+`jobname` totality guard disabled thirteen rules to protect one. Each was written by an agent
+holding an explicit warning about that class. The generalisation now governs the file: **a guard
+that refuses must be ADDITIVE, never SUBSTITUTIVE** — it may ADD a `measure-fail`, never REMOVE a
+finding already derivable from the same input. Auditing every guard against that invariant found
+two more instances that no reviewer had reported, including the worst one in the phase.
+
+### Security
+
+- **`DO '…'` was a total blind spot.** `codeSpans` re-entered `DO $$…$$` but never the
+  single-quoted form, while `literalsIn` skipped EVERY `DO`-prefixed literal on the premise that
+  `codeSpans` would re-enter it. The two predicates were byte-identical, as documented — and
+  ranged over different sets. A 37-character key in a `DO '…'` body reported zero violations from
+  all twelve rules. Dollar-quoting is a PostgreSQL recommendation, not a requirement, and 5 of the
+  14 committed commands are `DO` blocks.
+- **A credential one call-level deep under `'X-Service-Key'` was invisible.**
+  `coalesce(current_setting('app.k',true), '<key>')`, `nullif('<key>','')` and `(SELECT '<key>')`
+  all reported nothing: `long-token-anywhere` excluded every literal in a parseable header region
+  on the ground that `TOKEN_MIN >= HEADERS_LITERAL_MAX` made the exclusion lossless — necessary
+  but NOT sufficient, because `derivedLiteralLength` deliberately refuses to enter `(SELECT …)`
+  and non-builder calls. The exclusion is now conditional on the value having been EXAMINED, not
+  on it merely being LOCATED in a header region. `captureManifest` had published such a key with
+  exit 0, falsifying the module's own headline claim.
+- **A refused row's command TEXT reached a world-readable Actions log.** With the functions
+  snapshot absent, the refusal was not recorded, `(map.get(name) || []).length > 0` read false,
+  and the withholding gate fell through to the branch that prints both command texts verbatim —
+  on a PUBLIC repo, for `match_engine_cron`, the row whose inline service key is this module's
+  founding incident. Found independently by two reviewers.
+- **`reachesVaultRead`'s absent-snapshot throw discarded every credential already found.** It
+  fired from the last statement before `return out`, so a stale checkout was enough to lose all
+  three findings on jobid 1. Found by the invariant audit, not by any review. The throw now
+  carries `partialViolations` and both callers report them beside the refusal.
+- **A NULL `jobname` silenced thirteen rules.** `cron.job.jobname` is NULLable and pg_cron's
+  two-arg `cron.schedule(schedule, command)` leaves it NULL, so this needed no attacker — and it
+  was a one-step off-switch (`unschedule` + two-arg `schedule`). The guard existed for
+  `vault-absent`, which is jobname-scoped; it now refuses that ONE rule and the other twelve still
+  report.
+- **Two record-shape dodges.** A `>7`-field `cron.job` record truncated `command` to `f[6]` with
+  `malformed: []`; a `0x1E` inside a command split the record into a 7-field head that no
+  field-count guard can catch. A delimiter parser cannot self-validate a delimiter in its payload,
+  so the read now carries an out-of-band `count(*) OVER () AS total` — placed LAST, which is
+  load-bearing: the head fragment of a payload split then loses it and the width guard bites too.
+- **`isBareUrl` never inspected the URL authority**, so a key in a host label reported nothing —
+  the URL-path exemption moved left of the first `/`. Two docstrings claimed the opposite, one
+  asserting "the exemption can never be the reason a credential goes unreported."
+
+### Fixed
+
+- **`prod-prober.yml`'s step died at the `node` call and had been doing so for weeks.** The block
+  sets `set -uo pipefail`, deliberately omitting `-e` — but GitHub's default shell is
+  `/usr/bin/bash -e {0}`, so `-e` was on regardless, and an untested non-zero exit terminated the
+  step. `status=$?`, the `cat`, the `^❌` step-summary block and the ENTIRE 25-line POSTURE LINE
+  never executed. **10 of the last 12 scheduled runs were `failure`** — an hourly red check on
+  `main`'s HEAD, which is precisely the Railway `wait-for-CI` deadlock the POSTURE LINE comment
+  was written to prevent (incident 2026-06-21). A careful, correct, well-argued safeguard that had
+  never once been reached. ⚠️ The wiring test PINNED the bug: it asserted `status=$?` on the next
+  line, which is right about pipes and blind to `-e`.
+- **Normalization folded newlines into `--` comments.** `\s+ → " "` turned a multi-line command
+  into one line, so a leading comment swallowed the body — and the working text then hashed
+  IDENTICALLY to its no-op twin, so `compareManifest` reported `0 differing` while the manifest's
+  published text was semantically a no-op. `NORMALIZATION` is now `ws-collapse-v2`.
+- **The `DETECT_RE` identity pin was half-blind, and had been since Phase 164.7.** `toContain`
+  catches a copy that DIVERGES and is blind to one that SHRINKS TO A PREFIX; the shortened source
+  stayed a valid substring and the test stayed green while the two files genuinely disagreed. Now
+  an equality pin. Its own comment had claimed "drifting either copy reds this test".
+- The app-GUC walk's empty `catch` made an unenterable subtree read as an empty one — the exact
+  defect its docstring named as fixed. Unreadable directories now MEASURE_FAIL, and a descent
+  stack refuses a cycle or an escape from the corpus root.
+- `check-planning-hygiene` went red on an absolute home path and the local username in a tracked
+  planning artifact, on a public repo.
+
+### Added
+
+- A real lexer for the hygiene rules: `codeSpans` recursion into `DO` bodies (both quotings),
+  derived literal length across `||` chains, and a masked/raw split so a header name inside a
+  comment is not an anchor.
+- `long-token-anywhere` and `jobname-absent`; `TOKEN_MIN` DERIVED from `HEADERS_LITERAL_MAX` as
+  one symbol, pinned by source line rather than runtime value.
+- `vault-absent` redesigned to ask *"does this command REACH a Vault read that EXECUTES"* —
+  transitively through committed function bodies, with a visited set and a depth cap. Phase
+  164.5.1 consumes this: `SELECT public.match_engine_cron_tick();` is ACCEPTED while a
+  comment-only or literal-only mention is REJECTED.
+- `lint-app-guc`: `DETECT_RE` widened to all six app-GUC spellings (doubled quote, `E''`, `$tag$`,
+  `U&''`, block comment), each with its own single-spelling red fixture; a four-arm successor
+  check; a `--files` banner; case-insensitive and symlink-aware walking; BOM/NUL MEASURE_FAIL.
+
+### Tests
+
+- Prober self-test **52 → 78** scenarios; the phase's two vitest suites **40 → 136**.
+- Permanent neuter matrices: one control per EDIT, a DECLARED expected-failing set matched exactly
+  (`others=[] missing=[]`), and pairwise-distinct message-granularity fingerprints. Wave 4
+  measured that neither output criterion subsumes the other and that the load-bearing rule is the
+  harness invariant, not either check.
+- Controls that could not fail, found and given red surfaces: an unparseable-region skip whose
+  fixture was too short to distinguish it; a successor CONTENT arm with no red surface at all; a
+  fixture note asserting a load-bearing property that nothing tested; the `?? UNRECORDED` half of
+  the withholding sentinel; two `countMismatch` arms.
+
+### Notes
+
+- ⛔ **Known open, founder's decision pending:** `retention_compute_jobs_orphaned_running` is
+  committed with 0 newlines and lexes to a pure comment, so one of 14 rows is invisible to every
+  lexer-based rule. The fold happened at CAPTURE time; no code change restores it. The class is
+  closed at the mechanism; the ARTIFACT needs a PROD re-capture.
+- ⚠️ The committed manifest now reports `manifest-invalid` (declares `ws-collapse-v1`, arm
+  computes `v2`) — a version refusal, not a hash break; all 14 shas still bind.
+- Routed: `[164.8.5-HYGIENE-RESIDUALS]` (five credential shapes still unreported; the honest
+  remedy is a whole-token measure, which is a DECISION — each further exemption risks the
+  zero-false-positive budget the arm depends on) and `[164.8.5-MANIFEST-SIDE-LOOP-DEAD]` (the
+  manifest-side loop sits below `compareManifest`'s early returns and is dead on every production
+  run today; ⭐ the pending re-capture will SILENTLY RE-ANIMATE it).
+- ⚠️ A login shell on the development machine resolves node **v19.2.0**, below this repo's
+  `engines: ">=22"`, and the self-tests do not crash on it — they print plausible output. One full
+  neuter matrix was measured under it and discarded. Harnesses must print `node -v` and assert.
+- The 14 committed manifest commands stayed at **ZERO violations** through every narrowing and
+  every widening. An arm that cries wolf gets switched off, and that budget is why the one true
+  positive is still readable.
+
+## [0.77.32.1] - 2026-09-10 — Phase 164.7 finalized; a repair written, measured, and reverted
+
+Twelve commits, and **zero net change to `scripts/` or `src/`** — both are byte-identical to the
+previous release. That is the point of this entry, not a footnote to it.
+
+⭐ **What happened.** A post-merge deep code review of Phase 164.7 found 5 Critical / 11 Warning / 4
+Info across its five shipped files, its verdict being: *"the SQL in this phase is careful and
+genuinely fail-closed; the verification code shipped alongside it is not."* Five of those findings
+were repaired in `scripts/prod-prober/arms/cron-drift.mjs`. Five specialists then reviewed **the
+repair**, and it was reverted.
+
+### Root cause
+
+- ⛔ **The repair SUPPRESSED credential detection — measured, not argued.** `compareManifest`'s
+  PROD-side hygiene loop sits below every oracle-validation `return`, and the repair added four new
+  early returns above it. With a PROD `cron.job` command carrying an inline JWT, appending
+  ` -- tidy` to the manifest's copy of that command collapsed the whole result to
+  `manifest-invalid` and the `cron-secret-in-command` defect **vanished for all 14 jobs**. That is
+  this arm's own adversary — someone hand-cleaning the committed text so a dirty command looks tidy
+  — being handed an off switch. Before the repair the key was caught; after it, it was not.
+- ⛔ **Five of the repair's six new controls could not fail.** Neuter-proved individually: only the
+  `username` comparison turned the self-test red. The `database` comparison, the marker check, the
+  sha binding, the `active` validator and the comment-strip were each individually removable at
+  exit 0 — and three of them disabled *simultaneously* still printed `53/53 PASSED`. The repair
+  committed the exact defect class it was repairing, in the commit that claimed to fix it.
+- ⛔ **The comment-strip was vacuous AND harmful.** It removed comments but not string literals, so
+  `RAISE NOTICE 'reads vault.decrypted_secrets'` satisfied the rule — all ten rules returned clean
+  on a command inlining a live key. And because a PROD `cron.job.command` is one physical line, a
+  `--` inside a literal deleted the remainder, raising a false `vault-absent` that then withheld the
+  drift diff for the flagship job.
+- ⭐ **The evidence error worth keeping:** the repair's own neuter test disabled the `username` and
+  `database` comparisons *together* and reported the resulting RED as proof of both. It could not
+  distinguish them. **A batch neuter proves nothing about the individual arms.**
+
+### Added
+
+- **Phase 164.8.5 PROBERPARSE** and **Phase 164.8.6 VAULTTICKFIX**, created through the insert-phase
+  workflow with seven success criteria each, naming the FORBIDDEN remedies as well as the required
+  ones. 164.8.5 now opens with `[164.7-REPAIR-REVERTED]` and a criterion 0: hoist PROD hygiene above
+  every early return, and prove a PROD-side credential finding still fires with the oracle absent,
+  stale, hand-edited and marker-mismatched — **before** re-applying any repair.
+- **`164.7-SECURITY.md`** — the phase's first security audit, verifying a 31-threat plan-time STRIDE
+  register. Verdict **OPEN_THREATS**: 28 closed, 3 open, 2 at or above the `high` block threshold.
+  T-164.7-07's mitigation claimed "cron-drift hygiene rules stay in force" and is falsified by
+  execution; T-164.7-08's "explicit RAISE on NULL/empty" is defeated by a whitespace secret and by a
+  non-STRICT Vault read, both producing a silent 401 behind an async `net.http_post` — bit-for-bit
+  the `CRON-DRIFT-01` outage this phase exists because of. ⚠️ It also found summaries 02, 06 and 07
+  carry no `## Threat Flags` at all, 02 being the one that added a table, a SECURITY DEFINER
+  function and a Vault read. Its standing rule: *routing is a plan, not a mitigation, and does not
+  close a threat.*
+- **The nine-member credential bypass family, measured and written down** so the owning phase
+  inherits it rather than re-deriving it: dollar-quoted header value (needs no splitting at all),
+  `chr()`, `concat()`, `format()`, base64 `decode()`, `U&''` unicode escapes, `quote_literal()`, and
+  — needing no obfuscation whatsoever — variable indirection and whole-header JSON indirection.
+
+### Notes
+
+- ⛔ **Phase 164.7's activation was DEFERRED at the founder gate; nothing was written to
+  production.** P3-C could not pass by arithmetic: both enqueue crons are daily, MT5 broke five
+  minutes after the 2026-09-07 04:00Z tick, leaving a ~3.5-day gap against a 3-day window. Forcing
+  was declined on blast radius — the enqueue functions fan out to every key at every venue.
+- **The MT5 outage was diagnosed from the terminal's own Journal**, not from the prober, whose
+  remedy text actively misdirects. The terminal dropped a working session and re-attached to an
+  account it could not authorize, failing identically for three days. Resolved ~16:10Z, issue #753
+  closed. ⚠️ Verified by the *step* conclusion, not the run conclusion — `prod-prober.yml`
+  deliberately exits 0 even on a real defect so Railway's wait-for-CI is not blocked.
+- **Two corrections to the phase's own record**, both found by `gsd-verifier` and kept visible: a
+  claim that a sixth reviewer finding "is not identifiable" when `TODOS.md` carried a heading with
+  exactly six under it, and then two NEW defects introduced by that correction (the wrong header
+  name, copied unread; and a routing claim `grep` returned zero hits for).
+- ⚠️ **`state.add-roadmap-evolution` clobbered STATE.md** exactly as CLAUDE.md warns — rewriting the
+  hand-verified census to a disk-derived one, moving `current_phase` and injecting 22 blank lines.
+  Restored from a pre-call copy. Also measured: `phase.insert 164.8.4` allocates **164.8.4.1**, not
+  164.8.5 — insert against the parent. And the roadmap parser reads only `**Success Criteria**:`;
+  the other spelling parses as ZERO criteria.
+- ⛔ **`gh api …/actions/jobs/<id>/logs` refuses a log containing terminal escape sequences**,
+  exiting 1 with EMPTY stdout. An empty log read as "no drift" is a false green. Always pass
+  `--allow-escape-sequences` and assert a non-zero line count.
+- **`.planning/WINDOWS.md` carried two `last_updated` keys** — a YAML parser takes the last, which
+  was the older timestamp, so the ledger reported a stale value. Collapsed to one.
+
+### Removed
+
+- Commit `84b21cb5`'s changes to `cron-drift.mjs`, `run.mjs`, `prod-prober-wiring.test.ts` and the
+  `prod-username-changed.json` fixture. `SELF_TEST_SCENARIOS` returns to **52** and the self-test to
+  `52/52`. CR-01 through CR-05, WR-01/02/11 and the nine ship-time findings are **all open**, with
+  measured evidence and a prescribed fix each in `164.7-REVIEW.md`.
+
 ## [0.77.32.0] - 2026-09-10 — controls that read stronger than they were, through SIX rounds of it
 
 Seven themes, over every commit on the branch. ⚠️ This line said "Eighty-two commits" and was

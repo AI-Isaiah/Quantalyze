@@ -93,9 +93,9 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createSeams, realFetch, realSqlRunner, realSshRunner } from "./seams.mjs";
@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 52;
+export const SELF_TEST_SCENARIOS = 78;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -354,6 +354,11 @@ export function absurdityViolations({ armsExecuted, seamInvocations, armsWithSea
  *                                          MECHANISM is measured rather than today's constant
  * @param {string|null} [opts.onlyArm]      narrowed diagnostic; floors are NOT enforced
  * @param {string} [opts.manifestPath]      passed through to arms (plan 03's cron-drift oracle)
+ * @param {string} [opts.functionsDir]      passed through to arms; the committed function snapshot
+ *                                          `vault-absent` resolves callables against. UNDEFINED by
+ *                                          default on purpose — the arm's own `FUNCTIONS_DIR`
+ *                                          default then applies, so the live run can never be
+ *                                          pointed somewhere else by omission here.
  * @param {(s:string)=>void} [opts.log]     the ONLY output channel; the self-test captures it
  */
 export async function runProber({
@@ -363,6 +368,7 @@ export async function runProber({
   armsFloor = ARMS_FLOOR,
   onlyArm = null,
   manifestPath = MANIFEST_PATH,
+  functionsDir = undefined,
   log = (s) => console.log(s),
 } = {}) {
   const narrowed = Boolean(onlyArm);
@@ -434,7 +440,7 @@ export async function runProber({
     if (blocked.has(arm.name)) continue;
     armsExecuted += 1;
     try {
-      await arm.run({ env, seams, log: out, addDefect, manifestPath });
+      await arm.run({ env, seams, log: out, addDefect, manifestPath, functionsDir });
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
       addDefect(
@@ -756,6 +762,12 @@ function fixtureSql(data) {
 
     if (q.includes("cron.job")) {
       const rows = data.cronJobRows || [];
+      // ⚠️ THE TRAILING `total` COLUMN IS PART OF THE ANSWER psql WOULD GIVE —
+      // `CRON_JOB_SQL` carries `count(*) OVER () AS total`, so every record
+      // renders it, LAST. `cronJobTotal` lets a scenario render a count that
+      // DISAGREES with the rows (the truncated-read case), which is the only
+      // way to drive the completeness guard without a fragment.
+      const total = typeof data.cronJobTotal === "number" ? data.cronJobTotal : rows.length;
       const rendered = rows.map((r) =>
         [
           String(r.jobid),
@@ -765,6 +777,7 @@ function fixtureSql(data) {
           r.database,
           r.username,
           r.command,
+          String(total),
         ].join(fieldSep),
       );
       // psql prints the record separator AFTER every record, last one included.
@@ -864,18 +877,28 @@ const ARM_FIXTURE_TABLE = [
     manifestPath: SELFTEST_MANIFEST_PATH,
     makeSeams: (data) => createSeams({ sqlRunner: fixtureSql({ cronJobRows: data }) }),
     red: {
-      // SIX fixtures, ONE kind, six DIFFERENT causes. `cron-drift` is not six
-      // kinds pretending to be one: every one of them has the same two
-      // readings and the same remedy pair, and splitting them would multiply
-      // the defect vocabulary without changing what an operator does. What
-      // must NOT collapse is the DETAIL, so the extra/missing pair is asserted
-      // to name its job below.
+      // MANY fixtures, ONE kind, each with a DIFFERENT cause. `cron-drift` is
+      // not one kind per fixture: every one of them has the same two readings
+      // and the same remedy pair, and splitting them would multiply the defect
+      // vocabulary without changing what an operator does. What must NOT
+      // collapse is the DETAIL, so the extra/missing pair is asserted to name
+      // its job below.
+      //
+      // ⛔ No count is written here on purpose (SR-07). This map is appended to
+      // by design — the `-changed` rows below arrived a phase after the rest —
+      // and a hand-typed numeral in a comment beside a growing literal is a
+      // fact that rots on the very next line added.
       "prod-extra-job.json": "cron-drift",
       "prod-missing-job.json": "cron-drift",
       "prod-schedule-moved.json": "cron-drift",
       "prod-active-flipped.json": "cron-drift",
       "prod-zero-rows.json": "cron-drift",
       "prod-duplicate-jobname.json": "cron-drift",
+      // CR-01: the ROLE a job executes as and the DATABASE it runs in. One
+      // fixture each, so the neuter that darkens one comparison reddens
+      // exactly one scenario.
+      "prod-username-changed.json": "cron-drift",
+      "prod-database-changed.json": "cron-drift",
     },
   },
   {
@@ -1508,14 +1531,21 @@ export async function selfTest() {
   // The cron-drift scenarios the ARM_FIXTURE_TABLE cannot express: they need a
   // DIFFERENT manifest, an absent manifest, or no verdict loop at all.
   // -------------------------------------------------------------------------
-  const driftRun = async (prodRows, manifestPath, log) => {
-    const seams = createSeams({ sqlRunner: fixtureSql({ cronJobRows: prodRows }) });
+  //
+  // ⚠️ `marker` is the FOURTH argument and defaults to `undefined`, which
+  // `fixtureSql` answers with `FIXTURE_DB_MARKER` — the same marker every
+  // committed cron-drift manifest fixture records. Passing a DIFFERENT string
+  // is how the "this reading came from another database" state is driven, with
+  // no new seam and no production-code hook that exists only for the test.
+  const driftRun = async (prodRows, manifestPath, log, marker, functionsDir) => {
+    const seams = createSeams({ sqlRunner: fixtureSql({ cronJobRows: prodRows, marker }) });
     return runProber({
       arms: [CRON_DRIFT_MOD.ARM],
       env: { ...SELFTEST_ENV },
       seams,
       armsFloor: 1,
       manifestPath,
+      functionsDir,
       log,
     });
   };
@@ -1576,17 +1606,281 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
-  scenario("row ORDER, CRLF line endings and re-indentation are NOT drift (ws-collapse-v1)");
+  scenario("an UNPARSEABLE header region is a measure-fail on the PROD row, never a credential verdict");
   // -------------------------------------------------------------------------
   {
+    // ⛔ WHY THIS IS NOT `cron-secret-in-command`. That kind's remedy tells an
+    // operator to treat the named secret as EXPOSED and rotate it. For a
+    // command whose header argument list does not close, NOTHING WAS FOUND —
+    // something could not be READ. Filing a parse failure under a rotation
+    // remedy sends someone to rotate a key on no evidence, and teaches them the
+    // arm's rotation calls are sometimes noise. It is still a violation (a
+    // capture of this row is still refused); it is reported as what it is.
+    //
+    // ⚠️ THE SUBSTITUTION TARGET IS `audit_log_cold_purge`, NOT
+    // `match_engine_cron`, and that is deliberate. `vault-absent` is scoped BY
+    // JOBNAME to `match_engine_cron`, so replacing THAT row's command with an
+    // unbalanced one fires two rules at once and the scenario could no longer
+    // attribute the classification to anything. Picking a job with no
+    // jobname-specific rule also keeps this scenario standing when the
+    // `vault-absent` redesign lands.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    const red = loadFixture("cron-drift", "hygiene-red.json");
+    if (!prod.ok || !red.ok) {
+      pass = expect(false, prod.ok ? red.reason : prod.reason) && pass;
+    } else {
+      const unbalanced = red.data.find((r) => r.rule === "header-unparseable");
+      const rows = clone(prod.data);
+      const target = rows.find((r) => r.jobname === "audit_log_cold_purge");
+      if (target && unbalanced) target.command = unbalanced.command;
+      const r = await driftRun(rows, driftFixturePath("manifest.json"), quiet);
+      const mf = r.defects.filter((x) => x.kind === "measure-fail" && x.subject === "prod:audit_log_cold_purge");
+      pass =
+        expect(
+          unbalanced !== undefined && target !== undefined,
+          "PRECONDITION: hygiene-red.json carries a header-unparseable row and prod-ok.json carries audit_log_cold_purge",
+        ) &&
+        expect(
+          unbalanced !== undefined &&
+            CRON_DRIFT_MOD.hygieneViolations("audit_log_cold_purge", unbalanced.command).length === 1,
+          "PRECONDITION: that command trips exactly ONE rule under this jobname, so the classification below is attributable",
+        ) &&
+        expect(
+          mf.length === 1,
+          `exactly one measure-fail on the PROD row (got ${mf.length}: ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ")})`,
+        ) &&
+        expect(
+          mf.length === 1 && String(mf[0].detail).includes("[header-unparseable]"),
+          "naming the rule that refused, and saying the command could not be judged",
+        ) &&
+        expect(
+          noDefectOfKind(r.defects, ["cron-secret-in-command"]),
+          "and ZERO cron-secret-in-command — an unjudgeable command is never reported as a found credential",
+        ) &&
+        expect(r.exitCode === 1, `the run still exits 1 — refusing to judge is not passing (got ${r.exitCode})`) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("an UNNAMED PROD row carrying an inline key is STILL named as a credential — the jobname refusal is ADDITIVE");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ 164.8.5-REVIEW-R2 CR-R2-01, AND IT IS THE WHOLE POINT OF THE FIXTURE
+    // ROW BESIDE IT. `hygiene-red.json`'s `jobname-absent` row proves the
+    // refusal can FIRE; nothing there could prove it does not REPLACE anything,
+    // because that row carries no credential on purpose (one-rule isolation).
+    // This scenario is the other half: a row with BOTH, requiring BOTH.
+    //
+    // Round 1 shipped a THROW here. `cron.job.jobname` is NULLable and
+    // pg_cron's TWO-ARGUMENT `cron.schedule(schedule, command)` leaves it NULL,
+    // `psql -At` renders NULL as the empty string, and `compareManifest` routed
+    // the throw to a per-row `measure-fail` + `continue` — so an ordinary
+    // pg_cron API call silently switched off EVERY credential rule for its row.
+    // MEASURED before the fix: `measure-fail | prod: | …no usable jobname…` and
+    // nothing else; the identical command under a jobname reported
+    // `["x-service-key-literal","long-literal-in-headers"]`.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    const red = loadFixture("cron-drift", "hygiene-red.json");
+    if (!prod.ok || !red.ok) {
+      pass = expect(false, prod.ok ? red.reason : prod.reason) && pass;
+    } else {
+      const leak = red.data.find((r) => r.rule === "x-service-key-literal");
+      const rows = clone(prod.data);
+      const target = rows.find((r) => r.jobname === "audit_log_cold_purge");
+      if (target && leak) {
+        target.command = leak.command;
+        target.jobname = ""; // exactly what psql -At prints for a NULL jobname
+      }
+      const r = await driftRun(rows, driftFixturePath("manifest.json"), quiet);
+      const onUnnamed = r.defects.filter((x) => x.subject === "prod:");
+      const credential = onUnnamed.filter((x) => x.kind === "cron-secret-in-command");
+      const refusal = onUnnamed.filter(
+        (x) => x.kind === "measure-fail" && String(x.detail).includes("[jobname-absent]"),
+      );
+      pass =
+        expect(
+          leak !== undefined && target !== undefined,
+          "PRECONDITION: hygiene-red.json carries an x-service-key-literal row and prod-ok.json carries audit_log_cold_purge",
+        ) &&
+        expect(
+          credential.length === 1,
+          `the credential is NAMED on the unnamed row — cron-secret-in-command:prod: (got ${credential.length}: ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ")})`,
+        ) &&
+        expect(
+          credential.length === 1 && String(credential[0].detail).includes("[x-service-key-literal]"),
+          "naming the rule that found it, so the rotation remedy has evidence behind it",
+        ) &&
+        expect(
+          refusal.length === 1,
+          `and the scoping loss is reported BESIDE it as its own measure-fail (got ${refusal.length})`,
+        ) &&
+        expect(
+          refusal.length === 1 && !String(refusal[0].detail).includes("[x-service-key-literal]"),
+          "the two are SEPARATE defects — a refusal never carries a rotation remedy and a credential never hides inside one",
+        ) &&
+        expect(r.exitCode === 1, `the run exits 1 (got ${r.exitCode})`) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("hygiene BYPASS: every enumerated shape fires at least one NAMED rule, and the apostrophe pair agrees");
+  // -------------------------------------------------------------------------
+  {
+    // ⚠️ A SEPARATE FILE FROM `hygiene-red.json` ON PURPOSE. These rows are
+    // MEASURED bypass shapes — spellings that returned zero violations from
+    // every rule before this phase — and several legitimately trip more than
+    // one rule now. `hygiene-red.json` asserts one-rule ISOLATION, so mixing
+    // them would force either a weaker isolation assertion there or a payload
+    // trimmed to fit here. Neither is worth it; the two files ask different
+    // questions.
+    //
+    // ⛔ The assertion is "a NAMED rule fired", never "the command was quoted".
+    const bypass = loadFixture("cron-drift", "hygiene-bypass.json");
+    if (!bypass.ok) {
+      pass = expect(false, bypass.reason) && pass;
+    } else {
+      const idsOf = (row) =>
+        CRON_DRIFT_MOD.hygieneViolations(row.jobname, row.command).map((x) => x.slice(1, x.indexOf("]")));
+      const silent = [];
+      const unexpected = [];
+      const forbidden = [];
+      const incomplete = [];
+      const quoted = [];
+      let judged = 0;
+      let asserted_not = 0;
+      let asserted_all = 0;
+      const byName = new Map();
+      for (const row of bypass.data) {
+        judged += 1;
+        const ids = idsOf(row);
+        byName.set(row.jobname, ids);
+        if (ids.length === 0) silent.push(row.shape);
+        else if (!ids.some((id) => (row.expect_any_of || []).includes(id))) {
+          unexpected.push(`${row.shape}->[${ids.join(",")}]`);
+        }
+        // ⭐ `expect_not` — THE Q2 SCOPING DECISION, MEASURED RATHER THAN
+        // ARGUED. `expect_any_of` alone cannot express "and NOT that other
+        // rule", so the `header_region_only` row would pass while BOTH rules
+        // fired — which is exactly the collision the decision to exclude header
+        // regions from `long-token-anywhere` exists to prevent, and exactly what
+        // would break the red rows' one-rule isolation.
+        //
+        // ⚠️ This row pins TODAY'S VALUES. The INVARIANT behind it —
+        // `TOKEN_MIN === HEADERS_LITERAL_MAX`, without which a token in the gap
+        // is caught by nobody — is pinned in prod-prober-wiring.test.ts.
+        for (const id of row.expect_not || []) {
+          asserted_not += 1;
+          if (ids.includes(id)) forbidden.push(`${row.jobname}->${id}`);
+        }
+        // ⭐ `expect_all_of` — THE F2 DECISION, and the third thing a row can
+        // say. `expect_any_of` is satisfied by ONE id, which is exactly the
+        // reading that hid F2: a command with an unbalanced header region
+        // reported `header-unparseable` ALONE, `header-unparseable` is the sole
+        // `UNJUDGEABLE_RULE_IDS` member, so the run routed to `measure-fail` and
+        // NO RULE NAMED THE TOKEN. "At least one rule fired" is true of that
+        // state and says nothing about it.
+        //
+        // ⛔ THIS IS WHY THE ROW LIVES HERE AND NOT IN `hygiene-red.json`. That
+        // file asserts one-rule ISOLATION so a red row is attributable; this one
+        // must trip TWO. Isolation is a property of the RED file, not a thing
+        // worth keeping at the cost of never naming the credential.
+        for (const id of row.expect_all_of || []) {
+          asserted_all += 1;
+          if (!ids.includes(id)) incomplete.push(`${row.jobname}-> missing ${id} (got [${ids.join(",")}])`);
+        }
+        if (CRON_DRIFT_MOD.hygieneViolations(row.jobname, row.command).some((x) => x.includes(row.command))) {
+          quoted.push(row.shape);
+        }
+      }
+      const pairs = bypass.data.filter((r) => typeof r.expect_same_verdict_as === "string");
+      const disagreeing = pairs
+        .filter((r) => JSON.stringify(byName.get(r.jobname)) !== JSON.stringify(byName.get(r.expect_same_verdict_as)))
+        .map((r) => `${r.jobname} vs ${r.expect_same_verdict_as}`);
+      // ⛔ A pair that agrees on EMPTY proves nothing — it is the state before
+      // this phase. The agreement must be on a NON-EMPTY verdict.
+      const emptyPairs = pairs.filter((r) => (byName.get(r.jobname) || []).length === 0).map((r) => r.jobname);
+      pass =
+        expect(judged === bypass.data.length, `every bypass row was judged (${judged} of ${bypass.data.length})`) &&
+        expect(
+          silent.length === 0,
+          `every MEASURED bypass shape now fires at least one rule (${silent.join(", ") || `all ${judged} fire`})`,
+        ) &&
+        expect(
+          unexpected.length === 0,
+          `and one of the rules it names (${unexpected.join(" ") || "every row matched its expect_any_of"})`,
+        ) &&
+        expect(
+          asserted_not > 0,
+          `at least one row carries an expect_not — without it the Q2 region-partition proof row is inert (${asserted_not} asserted)`,
+        ) &&
+        expect(
+          forbidden.length === 0,
+          `and no row fires a rule its expect_not forbids — the header-region token belongs to long-literal-in-headers ALONE (${forbidden.join(" ") || "none forbidden fired"})`,
+        ) &&
+        expect(
+          asserted_all > 0,
+          `at least one row carries an expect_all_of — without it the F2 unparseable-region row would pass on "header-unparseable" alone, which IS the defect (${asserted_all} asserted)`,
+        ) &&
+        expect(
+          incomplete.length === 0,
+          `and every expect_all_of id really fired — a credential sitting after a stray \`(\` must be NAMED by a rule, not merely routed to measure-fail (${incomplete.join(" ") || "every declared id fired"})`,
+        ) &&
+        expect(quoted.length === 0, `and NO verdict quotes the offending command (${quoted.join(", ") || "none"})`) &&
+        expect(pairs.length >= 2, `the SPELLING pairs are present (${pairs.length} paired rows)`) &&
+        expect(
+          emptyPairs.length === 0,
+          `and it agrees on a NON-EMPTY verdict — two clean readings would be the pre-phase state, not a proof (${emptyPairs.join(", ") || "non-empty"})`,
+        ) &&
+        expect(
+          disagreeing.length === 0,
+          // TWO pairs now, and each asks "does RESPELLING the same value change
+          // the verdict?" — `$q$don't$q$` vs `$q$dont$q$` (criterion 4: an
+          // apostrophe inside a dollar-quoted literal is not a delimiter), and
+          // `DO '…'` vs `DO $$…$$` (CR-03: a single-quoted procedural body was
+          // skipped as data by `literalsIn` AND never re-entered as code by
+          // `codeSpans`, so it was a TOTAL blind spot).
+          `every paired row produces the SAME verdict set as the row it names — respelling a value must not change what fires (${disagreeing.join(" ") || `all ${pairs.length} pairs identical`})`,
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("row ORDER, CRLF line endings and re-indentation are NOT drift (ws-collapse-v2)");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE FIXTURE LOST ITS LITERAL CRLF BYTES IN 164.8.5-REVIEW CR-01, AND
+    // THAT IS THE FINDING RATHER THAN A CONCESSION. `ws-collapse-v1` folded
+    // NEWLINES into spaces, so this fixture could prove "not drift" by
+    // RE-WRAPPING a single-line command onto several lines. Re-wrapping is
+    // exactly the operation that lets a leading `--` swallow a body, so `v2`
+    // treats a line break as the semantic byte it is and a re-wrap IS drift.
+    //
+    // What survives here is the invariant `v2` really holds: row ORDER,
+    // RE-INDENTATION (tabs vs spaces), doubled intra-line spaces, and
+    // leading/trailing padding. The CRLF half — `\r\n` and a lone `\r` both
+    // normalising to `\n` — is asserted DIRECTLY on `normalizeCommand` below,
+    // which is stronger than asserting it through a fixture: it names the
+    // function under test.
     const prod = loadFixture("cron-drift", "prod-ok-shuffled-crlf.json");
+    const n = CRON_DRIFT_MOD.normalizeCommand;
     if (!prod.ok) {
       pass = expect(false, prod.reason) && pass;
     } else {
       const lines = [];
       const r = await driftRun(prod.data, driftFixturePath("manifest.json"), (x) => lines.push(x));
       pass =
-        expect(r.exitCode === 0, `reversed rows with CRLF and doubled spaces exit 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
+        expect(
+          n("SELECT 1\r\nSELECT 2") === n("SELECT 1\nSELECT 2") && n("SELECT 1\rSELECT 2") === n("SELECT 1\nSELECT 2"),
+          `CRLF and a lone CR both normalise to LF — a client that round-trips a command through DOS line endings has changed nothing that runs (${JSON.stringify(n("SELECT 1\r\nSELECT 2"))})`,
+        ) &&
+        expect(
+          n("-- c\nDO $$ BEGIN PERFORM 1; END $$") !== n("-- c DO $$ BEGIN PERFORM 1; END $$"),
+          "and RE-WRAPPING is drift: the same bytes with and without one line break normalise DIFFERENTLY, which is the whole of CR-01 — under v1 they were byte-equal and therefore hashed the same, so a working reaper and its all-comment no-op twin reported `0 differing`",
+        ) &&
+        expect(r.exitCode === 0, `reversed rows with tabs and doubled spaces exit 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
         expect(
           noDefectOfKind(r.defects, ["cron-drift", "cron-secret-in-command", "manifest-invalid"]),
           "nothing at all is reported — the comparison is a jobname MAP lookup, so PROD row order is irrelevant by construction",
@@ -1619,7 +1913,233 @@ export async function selfTest() {
         ) &&
         expect(
           noDefectOfKind(r.defects, ["cron-drift", "cron-secret-in-command"]),
-          "and NO drift or hygiene verdict — with no oracle nothing was compared, and a comparison that did not happen is not a comparison that passed",
+          "and NO drift or hygiene verdict — with no oracle nothing was COMPARED, and a comparison that did not happen is not a comparison that passed. The PROD hygiene scan still ran (section 0, above every return); THESE rows are simply clean, which the three HOIST scenarios below prove by running the same path with DIRTY ones",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("HOIST: the PROD credential scan fires with the oracle ABSENT");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE DEFECT THAT REVERTED A WHOLE REPAIR. `84b21cb5` put oracle
+    // validation ABOVE the PROD-side hygiene loop, so hand-editing the
+    // committed manifest — the one thing this arm's own adversary can do —
+    // turned the live credential scan OFF for all fourteen jobs. These three
+    // scenarios drive the SAME dirty PROD rows through three different broken
+    // oracle states and require the credential finding in every one.
+    const prod = loadFixture("cron-drift", "prod-inline-key.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const missing = driftFixturePath("manifest-HOIST-NO-SUCH-FILE.json");
+      const r = await driftRun(prod.data, missing, quiet);
+      const invalid = r.defects.filter((x) => x.kind === "manifest-invalid");
+      pass =
+        expect(r.exitCode === 1, `an absent oracle over dirty rows exits 1 (got ${r.exitCode})`) &&
+        expect(invalid.length === 1, `exactly one manifest-invalid (got ${invalid.length})`) &&
+        expect(
+          String((invalid[0] || {}).detail).includes("manifest-HOIST-NO-SUCH-FILE.json"),
+          "naming the path it looked for",
+        ) &&
+        expect(
+          r.defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:match_engine_cron"),
+          "AND the PROD credential is STILL reported — an unreadable oracle is not an off switch for the live scan",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("HOIST: the PROD credential scan fires with the oracle STALE (schema_version bumped)");
+  // -------------------------------------------------------------------------
+  {
+    const prod = loadFixture("cron-drift", "prod-inline-key.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const r = await driftRun(prod.data, driftFixturePath("manifest-schema-bumped.json"), quiet);
+      const invalid = r.defects.filter((x) => x.kind === "manifest-invalid");
+      pass =
+        expect(r.exitCode === 1, `a schema-bumped oracle over dirty rows exits 1 (got ${r.exitCode})`) &&
+        expect(invalid.length === 1, `exactly one manifest-invalid (got ${invalid.length})`) &&
+        expect(
+          String((invalid[0] || {}).detail).includes("schema_version"),
+          "saying the schema is the reason no comparison happened",
+        ) &&
+        expect(
+          r.defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:match_engine_cron"),
+          "AND the PROD credential is STILL reported — a stale oracle is not an off switch either",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("HOIST: the PROD credential scan fires with the live marker MISMATCHED");
+  // -------------------------------------------------------------------------
+  {
+    // Three things at once, and the third is the point: (a) a manifest captured
+    // from one database compared against a reading from another is a
+    // measure-fail, (b) it produces NO drift verdict, because a diff between two
+    // databases is not drift, and (c) the credential in the rows actually read
+    // is reported anyway.
+    const prod = loadFixture("cron-drift", "prod-inline-key.json");
+    const man = loadFixture("cron-drift", "manifest-inline-key.json");
+    if (!prod.ok || !man.ok) {
+      pass = expect(false, prod.ok ? man.reason : prod.reason) && pass;
+    } else {
+      const otherMarker = "quantalyze-fixture-OTHER";
+      const r = await driftRun(prod.data, driftFixturePath("manifest-inline-key.json"), quiet, otherMarker);
+      const mf = r.defects.filter((x) => x.kind === "measure-fail" && x.subject === "database marker");
+      pass =
+        expect(
+          man.data.database_marker !== otherMarker,
+          `PRECONDITION: the two markers genuinely differ (${man.data.database_marker} vs ${otherMarker})`,
+        ) &&
+        expect(r.exitCode === 1, `a marker mismatch exits 1, never 0 (got ${r.exitCode})`) &&
+        expect(mf.length === 1, `exactly one measure-fail on the database marker (got ${mf.length})`) &&
+        expect(
+          String((mf[0] || {}).detail).includes(man.data.database_marker) &&
+            String((mf[0] || {}).detail).includes(otherMarker),
+          "naming BOTH markers — they are names a human chose, and the reader cannot tell which side is the surprise without both",
+        ) &&
+        expect(
+          noDefectOfKind(r.defects, ["cron-drift"]),
+          "and NO drift verdict at all — a diff between two DIFFERENT databases is not drift, it is a comparison that was never valid",
+        ) &&
+        expect(
+          r.defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:match_engine_cron"),
+          "AND the PROD credential is STILL reported — the rows were really read, whatever database they came from",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("WR-11: a manifest row whose command does not hash to its own sha is manifest-invalid naming the jobname");
+  // -------------------------------------------------------------------------
+  {
+    // `manifest-sha-mismatch.json` is WR-11's exact adversary: a byte copy of
+    // `manifest-inline-key.json` whose match_engine_cron `command` was
+    // hand-edited to the CLEAN Vault-backed body while its `command_sha256`
+    // was left describing the DIRTY one. The committed text looks tidy; the
+    // sha still names the inline key. Without the binding this reports clean
+    // on the manifest side and prints a diff about text nobody ever captured.
+    const prod = loadFixture("cron-drift", "prod-inline-key.json");
+    const man = loadFixture("cron-drift", "manifest-sha-mismatch.json");
+    if (!prod.ok || !man.ok) {
+      pass = expect(false, prod.ok ? man.reason : prod.reason) && pass;
+    } else {
+      const manRow = man.data.jobs.find((j) => j.jobname === "match_engine_cron");
+      const derived = CRON_DRIFT_MOD.sha256Hex(CRON_DRIFT_MOD.normalizeCommand(manRow.command));
+      const r = await driftRun(prod.data, driftFixturePath("manifest-sha-mismatch.json"), quiet);
+      const invalid = r.defects.filter((x) => x.kind === "manifest-invalid");
+      pass =
+        expect(
+          derived !== manRow.command_sha256,
+          `PRECONDITION: the fixture really IS unbound (${derived.slice(0, 12)} vs ${String(manRow.command_sha256).slice(0, 12)}) — a bound fixture would make every assertion below vacuous`,
+        ) &&
+        expect(r.exitCode === 1, `an unbound manifest row exits 1 (got ${r.exitCode})`) &&
+        expect(invalid.length === 1, `exactly one manifest-invalid (got ${invalid.length})`) &&
+        expect(
+          String((invalid[0] || {}).detail).includes("match_engine_cron"),
+          "naming the row a reviewer has to re-capture",
+        ) &&
+        expect(
+          String((invalid[0] || {}).detail).includes("command_sha256 it publishes") &&
+            String((invalid[0] || {}).detail).includes(derived.slice(0, 12)) &&
+            String((invalid[0] || {}).detail).includes(String(manRow.command_sha256).slice(0, 12)),
+          "and naming BOTH 12-hex prefixes — the derived one and the published one",
+        ) &&
+        expect(
+          r.defects.filter((d) => d.subject === "manifest:match_engine_cron").length === 0,
+          "and NO manifest-side hygiene verdict about that row — the text it would have scanned was never captured, and a clean reading of fabricated text is worse than no reading",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("HOIST: the PROD credential scan fires with the oracle HAND-EDITED (sha mismatch)");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE FOURTH BROKEN-ORACLE STATE, and the one the reverted repair
+    // actually created. WR-11's return is a NEW way to collapse the whole
+    // result to `manifest-invalid`, so it is a new candidate off switch for
+    // the live credential scan — and hand-editing the committed text is
+    // precisely what this arm's adversary does. Same run as the scenario
+    // above, asserted for the opposite thing, so that one neuter reddens one
+    // of them and never both.
+    const prod = loadFixture("cron-drift", "prod-inline-key.json");
+    const man = loadFixture("cron-drift", "manifest-sha-mismatch.json");
+    if (!prod.ok || !man.ok) {
+      pass = expect(false, prod.ok ? man.reason : prod.reason) && pass;
+    } else {
+      // ⛔ ONE ASSERTION, ON PURPOSE (D3). Asserting the `manifest-invalid`
+      // HERE as well would make this scenario a SECOND observer of the WR-11
+      // binding, so neutering that binding would redden two scenarios and one
+      // RED would be credited to two controls. MEASURED while building this
+      // plan's matrix: with that extra assertion present, row 7 reddened this
+      // scenario too. The precondition below keeps the scenario honest about
+      // WHICH state it is driving without reading the control's verdict — it
+      // hashes the fixture itself, so it survives any neuter of the binding
+      // and fails only if the fixture stops being hand-edited.
+      const manRow = man.data.jobs.find((j) => j.jobname === "match_engine_cron");
+      const derived = CRON_DRIFT_MOD.sha256Hex(CRON_DRIFT_MOD.normalizeCommand(manRow.command));
+      const r = await driftRun(prod.data, driftFixturePath("manifest-sha-mismatch.json"), quiet);
+      pass =
+        expect(
+          derived !== manRow.command_sha256,
+          `PRECONDITION: the oracle really is HAND-EDITED (${derived.slice(0, 12)} vs ${String(manRow.command_sha256).slice(0, 12)}) — against a bound oracle this would be the ordinary path, not the fourth broken state`,
+        ) &&
+        expect(
+          r.defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:match_engine_cron"),
+          "AND the PROD credential is STILL reported — a HAND-EDITED oracle is not an off switch either, which is the exact regression that reverted the first repair",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("MARKER MANDATORY: compareManifest called without a liveMarker is a measure-fail, never a pass");
+  // -------------------------------------------------------------------------
+  {
+    // A DIRECT call, deliberately: `run()` guards the marker itself, so this is
+    // the only way to prove the FUNCTION refuses rather than the caller. Both
+    // inputs are the CLEAN ones — the pair that produces zero defects with a
+    // marker — so the single defect below can only come from the missing marker.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    const man = loadFixture("cron-drift", "manifest.json");
+    if (!prod.ok || !man.ok) {
+      pass = expect(false, prod.ok ? man.reason : prod.reason) && pass;
+    } else {
+      const r = CRON_DRIFT_MOD.compareManifest(man.data, prod.data, {});
+      const control = CRON_DRIFT_MOD.compareManifest(man.data, prod.data, { liveMarker: man.data.database_marker });
+      pass =
+        expect(
+          r.defects.length === 1,
+          `exactly one defect with no marker in hand (got ${r.defects.map((x) => x.kind).join(", ") || "none"})`,
+        ) &&
+        expect(
+          (r.defects[0] || {}).kind === "measure-fail" && (r.defects[0] || {}).subject === "database marker",
+          `and it is a measure-fail on the database marker (got ${(r.defects[0] || {}).kind} / ${(r.defects[0] || {}).subject})`,
+        ) &&
+        // ⛔ THE LEG THAT MAKES THIS CONTROL SEPARABLE. Without it, deleting the
+        // mandatory-marker guard leaves this scenario GREEN: an empty marker
+        // would fall through to the marker COMPARISON and be reported as a
+        // mismatch — same kind, same subject, same count, and a sentence that
+        // is not true. "Provenance was never established" and "these are two
+        // different databases" are different findings, and the neuter matrix
+        // can only attribute a RED to one control if they read differently.
+        expect(
+          String((r.defects[0] || {}).detail).includes("never established"),
+          `and it says the marker was never ESTABLISHED, not that two databases disagree (got: ${String((r.defects[0] || {}).detail).slice(0, 70)}…)`,
+        ) &&
+        expect(
+          control.defects.length === 0,
+          `CONTROL: the SAME two inputs WITH the marker produce zero defects (got ${control.defects.map((x) => x.kind).join(", ") || "none"}) — so the defect above is the missing marker and nothing else`,
         ) &&
         pass;
     }
@@ -1657,7 +2177,7 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
-  scenario("hygiene RED: all ten rules fire on their own fixture row, and the id sets match exactly");
+  scenario("hygiene RED: every rule fires on its own fixture row, and the id sets match exactly");
   // -------------------------------------------------------------------------
   {
     const red = loadFixture("cron-drift", "hygiene-red.json");
@@ -1666,26 +2186,77 @@ export async function selfTest() {
     } else {
       const missed = [];
       const overlapping = [];
+      // ⛔ A COUNTED ROW AXIS, NOT A HAND-TYPED TOTAL. The old assertion was
+      // `red.data.length === 10`, a literal that equalled the rule count only
+      // by a one-row-per-rule coincidence — a rule needing two red rows broke
+      // it, and bumping the literal to match would have been the fix that
+      // measures nothing. `judged` counts the rows this loop actually reached,
+      // so a row skipped for any reason fails here rather than passing quietly.
+      let judged = 0;
       for (const row of red.data) {
+        judged += 1;
         const v = CRON_DRIFT_MOD.hygieneViolations(row.jobname, row.command);
         const ids = v.map((x) => x.slice(1, x.indexOf("]")));
-        if (!ids.includes(row.rule)) missed.push(row.rule);
+        // ⚠️ THE JOBNAME, NOT JUST THE RULE ID. A rule with several red rows —
+        // `pg-password` has one per detection ARM — reports the same sentence
+        // whichever row went silent, so the failure could not be attributed to
+        // the arm that broke. MEASURED: neutering the masked `:=` arm and
+        // neutering the libpq-URI arm produced BYTE-IDENTICAL output.
+        if (!ids.includes(row.rule)) missed.push(`${row.rule} (${row.jobname})`);
         if (ids.length !== 1) overlapping.push(`${row.rule}->[${ids.join(",")}]`);
         if (v.some((x) => x.includes(row.command))) missed.push(`${row.rule} (QUOTED THE COMMAND)`);
       }
       const fixtureIds = [...new Set(red.data.map((x) => x.rule))].sort();
       const armIds = [...CRON_DRIFT_MOD.HYGIENE_RULE_IDS].sort();
+
+      // ⛔ THE UNBALANCED ROW'S VALUE LENGTH IS LOAD-BEARING, AND UNTIL NOW IT
+      // WAS ONLY DOCUMENTED. Wave 4 measured that with a SHORT value both
+      // spellings of `fixture_unbalanced_headers_job` return just
+      // `["header-unparseable"]`, so the `continue` that stops the header-value
+      // walks descending into an unparseable region becomes a control that
+      // CANNOT FAIL — neutering it changes nothing and the self-test stays
+      // green. That wave shipped a 37-character value and a `note` saying why,
+      // but a `note` cannot fail: MEASURED 2026-09-11, shortening the value
+      // back to 10 characters passed 69/69 at exit 0. This assertion is that
+      // note made falsifiable, and it is the accepted residual wave 4 routed
+      // here because `run.mjs` was frozen for its own wave.
+      //
+      // The length is DERIVED, never hand-typed: the header value is a `||`
+      // chain of short operands (split so no credential-shaped token is typed
+      // whole into a public repo), so the guard sums the literal contents that
+      // follow the header NAME rather than reading any single one.
+      const UNBALANCED_JOB = "fixture_unbalanced_headers_job";
+      const unbalancedRow = red.data.find((x) => x.jobname === UNBALANCED_JOB);
+      const unbalancedTail = unbalancedRow ? unbalancedRow.command.split("'X-Trace',")[1] : undefined;
+      const unbalancedDerived =
+        unbalancedTail === undefined
+          ? -1
+          : (unbalancedTail.match(/'[^']*'/g) || []).reduce((n, lit) => n + lit.length - 2, 0);
+      const unbalancedMessage =
+        unbalancedRow === undefined
+          ? `the red fixture still carries ${UNBALANCED_JOB} — the row whose value length keeps the unparseable-region skip falsifiable`
+          : unbalancedTail === undefined
+            ? `${UNBALANCED_JOB}'s command still anchors its header value on 'X-Trace' — the guard below cannot measure a value it cannot find`
+            : `and ${UNBALANCED_JOB}'s header value still DERIVES at least HEADERS_LITERAL_MAX characters (${unbalancedDerived} vs ${CRON_DRIFT_MOD.HEADERS_LITERAL_MAX}) — shorten it and neutering the unparseable-region skip stops reddening anything, which is how that control silently became unfalsifiable once already`;
       pass =
-        expect(missed.length === 0, `every red row fires the rule it names (${missed.join(", ") || "all ten fired"})`) &&
+        expect(
+          missed.length === 0,
+          `every red row fires the rule it names (${missed.join(", ") || `all ${judged} rows fired`})`,
+        ) &&
         expect(
           overlapping.length === 0,
           `and fires ONLY that rule — red-fixture ISOLATION, the lint-sql-gates idiom (${overlapping.join(" ") || "each row isolates one rule"})`,
         ) &&
-        expect(red.data.length === 10, `the fixture has exactly ten rows (got ${red.data.length})`) &&
+        expect(judged === red.data.length, `every row in the fixture was judged (${judged} of ${red.data.length})`) &&
+        expect(
+          red.data.length >= CRON_DRIFT_MOD.HYGIENE_RULE_IDS.length,
+          `the fixture carries at least one row per rule (${red.data.length} rows vs ${CRON_DRIFT_MOD.HYGIENE_RULE_IDS.length} rules)`,
+        ) &&
         expect(
           JSON.stringify(fixtureIds) === JSON.stringify(armIds),
           `the fixture's rule ids are EXACTLY the arm's HYGIENE_RULE_IDS — a rule added without a red row, or a red row whose rule was deleted, fails here (fixture [${fixtureIds.join(", ")}] vs arm [${armIds.join(", ")}])`,
         ) &&
+        expect(unbalancedDerived >= CRON_DRIFT_MOD.HEADERS_LITERAL_MAX, unbalancedMessage) &&
         pass;
     }
   }
@@ -1719,6 +2290,522 @@ export async function selfTest() {
         expect(
           flagged.length === 0,
           `no achievable shape is flagged (${flagged.map((x) => `${x.jobname}: ${x.v.join(" ")}`).join(" | ") || "all clean"})`,
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario(
+    "DERIVED LENGTH is calibrated: 'Bearer ' || (SELECT …) sums below HEADER_LITERAL_MIN while a split key sums above it",
+  );
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE FALSE-POSITIVE DIRECTION IS THE ONE THAT MATTERS HERE. The naive
+    // derived sum — every literal up to the next depth-0 comma, which is what
+    // the review finding literally asked for — MEASURES 28 on the achievable
+    // Vault-backed `'Bearer ' || (SELECT decrypted_secret FROM
+    // vault.decrypted_secrets WHERE name = 'analytics_service_key')` shape:
+    // `'Bearer '` (7) plus the secret's NAME (21). That fires on committed,
+    // correct configuration. Refusing to descend into `(SELECT …)` is what
+    // makes it 7, and this scenario is the control for that refusal.
+    const green = loadFixture("cron-drift", "hygiene-green.json");
+    if (!green.ok) {
+      pass = expect(false, green.reason) && pass;
+    } else {
+      const idsOf = (job, cmd) => CRON_DRIFT_MOD.hygieneViolations(job, cmd).map((x) => x.slice(1, x.indexOf("]")));
+      const HEADER_IDS = ["x-service-key-literal", "authorization-literal", "apikey-literal", "long-literal-in-headers"];
+      const bearer = green.data.find((g) => g.command.includes("'Bearer ' ||"));
+      const split =
+        "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', 'FAKE-key-' || '0123456789ab'), body := '{}'::jsonb)";
+      const bearerIds = bearer ? idsOf(bearer.jobname, bearer.command) : ["<no Bearer control in hygiene-green.json>"];
+      const splitIds = idsOf("fixture_split_key_job", split);
+
+      // The CORRECTION's measurement, kept as a permanent control rather than a
+      // note in a plan: `scanSql` alone masks a top-level `DO $body$ … $body$`
+      // as ONE string, so a masked-only rule reads the flagship job — and four
+      // of the fourteen committed commands — as having no body at all.
+      const mec = green.data.find((g) => g.jobname === "match_engine_cron");
+      const spans = mec ? CRON_DRIFT_MOD.codeSpans(mec.command) : [];
+
+      pass =
+        expect(
+          bearer !== undefined && bearerIds.every((id) => !HEADER_IDS.includes(id)),
+          `the 'Bearer ' || (SELECT …) shape derives BELOW the threshold and fires no header rule (${JSON.stringify(bearerIds)})`,
+        ) &&
+        expect(
+          splitIds.includes("x-service-key-literal"),
+          `while '<prefix>' || '<suffix>' under the SAME threshold DOES fire — the sum is over operands, not over the first literal (${JSON.stringify(splitIds)})`,
+        ) &&
+        expect(
+          spans.length === 2,
+          `codeSpans re-enters the DO body of the Vault-backed match_engine_cron command: 2 spans (got ${spans.length})`,
+        ) &&
+        expect(
+          spans.length === 2 && spans[1].masked.includes("vault.decrypted_secrets"),
+          "and the body's Vault read is visible on the SECOND span's MASKED text — a rule reading only scanSql(cmd).masked would see an empty command here",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("vault-absent TRI-STATE on the fixture snapshot: reaching an EXECUTING Vault read is ACCEPTED, mentioning one is REJECTED");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE RULE THAT SERVES TWO PHASES PULLING OPPOSITE WAYS (D2). 164.5.1
+    // needs `SELECT public.match_engine_cron_tick();` ACCEPTED — a command with
+    // no Vault reference in it at all. This phase needs a command that names the
+    // table only in a comment or a literal REJECTED. `text.includes(...)` got
+    // BOTH wrong in the same direction, and it is the shape the rule had until
+    // this plan.
+    //
+    // ⚠️ RESOLVED AGAINST A FIXTURE SNAPSHOT, NOT THE REAL ONE. Phase 164.8.6
+    // edits `match_engine_cron_tick`; a scenario asserting "a comment-only
+    // mention is rejected" must not be able to go red because a different phase
+    // changed a different function. The REAL snapshot has its own scenario
+    // directly below, and that coupling is deliberate.
+    const fnDir = join(FIXTURE_ROOT, "cron-drift", "functions");
+    const REQUIRED_FIXTURE_FILES = [
+      "fixture_vault_reader.sql",
+      "fixture_wrapper.sql",
+      "fixture_comment_only.sql",
+      "fixture_literal_only.sql",
+      "fixture_nondollar_body.sql",
+      // The F6 depth-memoisation chain. Deleting any link shortens it below
+      // `CALLABLE_DEPTH_MAX` and the ACCEPT row below stops measuring anything.
+      "fixture_chain_1.sql",
+      "fixture_chain_2.sql",
+      "fixture_chain_3.sql",
+      "fixture_chain_4.sql",
+      "fixture_chain_5.sql",
+      "fixture_shared.sql",
+    ];
+    // ⛔ A MISSING FIXTURE IS A FAIL, NEVER A SKIP (S2). Without this, deleting
+    // `fixture_vault_reader.sql` would turn the ACCEPT rows below into
+    // "unknown callable → REJECT" and the scenario would pass for exactly the
+    // wrong reason.
+    const missingFiles = REQUIRED_FIXTURE_FILES.filter((f) => !existsSync(join(fnDir, f)));
+
+    const idsOf = (cmd) =>
+      CRON_DRIFT_MOD.hygieneViolations("match_engine_cron", cmd, { functionsDir: fnDir }).map((x) =>
+        x.slice(1, x.indexOf("]")),
+      );
+    const sentencesOf = (cmd) =>
+      CRON_DRIFT_MOD.hygieneViolations("match_engine_cron", cmd, { functionsDir: fnDir });
+
+    const ACCEPT = [
+      ["a public-qualified call to a committed Vault reader", "SELECT public.fixture_vault_reader();"],
+      ["an UNQUALIFIED call, resolved TRANSITIVELY through a wrapper", "SELECT fixture_wrapper();"],
+      ["the read spelled inline inside a DO body (span recursion)", "DO $$ BEGIN PERFORM 1 FROM vault.decrypted_secrets; END $$"],
+      // ⛔ F6 (2). `fixture_chain_1` walks five links to `fixture_shared`, which
+      // lands AT `CALLABLE_DEPTH_MAX` with its own callee truncated. The SECOND
+      // call resolves `fixture_shared` at depth 0, where its Vault-reading
+      // callee is one edge away. `visited` used to be a Set, so the truncated
+      // depth-5 answer memoised `false` and the depth-0 approach returned the
+      // memo WITHOUT exploring — `vault-absent` firing on a command that does
+      // reach Vault. It is now a Map of name -> shallowest depth explored.
+      //
+      // ⚠️ ORDER IS LOAD-BEARING: the deep path must run FIRST, which is why
+      // `fixture_chain_1` is named before `fixture_shared` in the command text
+      // (`calleesOn` returns names in source order). Reversing them would make
+      // the row pass under the Set too.
+      [
+        "a node reached at the DEPTH CAP and then again with budget to spare — the memo must not survive the shallower approach",
+        "SELECT public.fixture_chain_1(); SELECT public.fixture_shared();",
+      ],
+    ];
+    const REJECT = [
+      ["a callable whose body mentions the table only in a comment", "SELECT public.fixture_comment_only();"],
+      ["a callable whose body mentions it only inside a literal", "SELECT public.fixture_literal_only();"],
+      ["a callable with no file in the snapshot at all", "SELECT public.fixture_unknown();"],
+      ["the table named in a `--` comment on the command itself", "SELECT 1 -- vault.decrypted_secrets"],
+      ["the table named inside a single-quoted literal", "SELECT 'FROM vault.decrypted_secrets'"],
+      ["the table named inside a DOLLAR-quoted literal", "SELECT $q$FROM vault.decrypted_secrets$q$"],
+      // ⛔ F6. `fixture_nondollar_body.sql` DOES read Vault, in a single-quoted
+      // `AS '…'` body the snapshot reader does not expose. REJECT is the right
+      // answer — loud, and in the safe direction — but before F6 the verdict
+      // carried NO mention of the skip, so the operator read "reaches no Vault
+      // read" when the truth was "this arm did not read one definition".
+      ["a callable whose body is not dollar-quoted, so the resolver never saw it", "SELECT public.fixture_nondollar_body();"],
+    ];
+    const wronglyRejected = ACCEPT.filter(([, cmd]) => idsOf(cmd).includes("vault-absent")).map(([why]) => why);
+    const wronglyAccepted = REJECT.filter(([, cmd]) => !idsOf(cmd).includes("vault-absent")).map(([why]) => why);
+    const quoted = [...ACCEPT, ...REJECT]
+      .filter(([, cmd]) => sentencesOf(cmd).some((v) => v.includes(cmd)))
+      .map(([why]) => why);
+    const unknownSentence = sentencesOf("SELECT public.fixture_unknown();").join(" ");
+    const nonDollarSentence = sentencesOf("SELECT public.fixture_nondollar_body();").join(" ");
+
+    pass =
+      expect(
+        missingFiles.length === 0,
+        `PRECONDITION: the fixture snapshot is complete (${missingFiles.join(", ") || `all ${REQUIRED_FIXTURE_FILES.length} present`}) — a missing file would make the ACCEPT rows pass as REJECTs`,
+      ) &&
+      expect(
+        wronglyRejected.length === 0,
+        `every command that REACHES an executing Vault read is accepted (${wronglyRejected.join(" | ") || `all ${ACCEPT.length} accepted`})`,
+      ) &&
+      expect(
+        wronglyAccepted.length === 0,
+        `and every command that merely MENTIONS one is rejected — this is what \`text.includes()\` could not do (${wronglyAccepted.join(" | ") || `all ${REJECT.length} rejected`})`,
+      ) &&
+      expect(
+        unknownSentence.includes("fixture_unknown"),
+        // ⛔ F7. This read `${unknownSentence.slice(0, 0) || "named"}`, which is
+        // `"" || "named"` — ALWAYS the literal `"named"`. The assertion was
+        // sound; its failure message could not report what it actually saw, so
+        // a red here told the reader nothing. `slice(0, 0)` is almost certainly
+        // a `slice(0, N)` whose N was lost in an edit.
+        `an unresolvable callable is NAMED in the sentence, so the reader knows what could not be judged (${unknownSentence.slice(0, 220) || "NO SENTENCE AT ALL"})`,
+      ) &&
+      expect(
+        // ⛔ F6. A definition the snapshot reader does not expose was dropped
+        // SILENTLY: no body contributed, and no `unresolved` entry either, so
+        // the sentence could not say it had skipped anything. A skip nobody is
+        // told about is the same shape as a rule that cannot fire.
+        nonDollarSentence.includes("fixture_nondollar_body") && nonDollarSentence.includes("not dollar-quoted"),
+        `and so is a callable whose body the snapshot reader does not expose, WITH the reason — "could not be shown to read Vault" is a different claim from "has no file" (${nonDollarSentence.slice(0, 220) || "NO SENTENCE AT ALL"})`,
+      ) &&
+      expect(
+        quoted.length === 0,
+        `and NO sentence quotes the command it judged (${quoted.join(" | ") || "none"})`,
+      ) &&
+      pass;
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("vault-absent against the REAL snapshot: the 164.5.1 command SELECT public.match_engine_cron_tick(); is ACCEPTED");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THIS IS THE `[164.7-VAULT-ABSENT-RULE]` COLLISION, MEASURED EVERY RUN
+    // RATHER THAN ARGUED IN A PLAN. Phase 164.5.1 will re-point PROD's cron.job
+    // jobid 1 onto exactly this command. If this rule rejected it, the hourly
+    // prober would fire `cron-secret-in-command` on correct production
+    // configuration from the moment that repoint lands — and 164.5.1 would have
+    // no way to know until it did.
+    //
+    // ⚠️ NO `functionsDir` OVERRIDE HERE, ON PURPOSE. This is the ONE scenario
+    // that resolves against `supabase/schema/functions/` — the real, committed,
+    // `@generated` snapshot.
+    //
+    // ⛔ IF THIS GOES RED, THE CAUSE IS ONE OF TWO THINGS AND NEITHER IS "the
+    // scenario is flaky": either Phase 164.8.6 removed the Vault read from
+    // `match_engine_cron_tick`'s body, or somebody changed that function without
+    // running `npm run schema:functions`. Fix the cause; do not point this
+    // scenario at a fixture.
+    const TICK_COMMAND = "SELECT public.match_engine_cron_tick();";
+    const TICK_FILE = join(CRON_DRIFT_MOD.FUNCTIONS_DIR, "match_engine_cron_tick.sql");
+    const v = CRON_DRIFT_MOD.hygieneViolations("match_engine_cron", TICK_COMMAND);
+    // CONTROL: the same command judged against a snapshot that does NOT contain
+    // the tick IS rejected — so the green above is a real resolution, not a rule
+    // that accepts everything.
+    const control = CRON_DRIFT_MOD.hygieneViolations("match_engine_cron", TICK_COMMAND, {
+      functionsDir: join(FIXTURE_ROOT, "cron-drift", "functions"),
+    });
+    pass =
+      expect(
+        existsSync(TICK_FILE),
+        `PRECONDITION: the real snapshot carries match_engine_cron_tick.sql at ${TICK_FILE} — its absence is a FAIL, not a skip`,
+      ) &&
+      expect(
+        v.length === 0,
+        `the 164.5.1 command trips NO hygiene rule against the real snapshot (${v.join(" ") || "clean"})`,
+      ) &&
+      expect(
+        control.some((x) => x.startsWith("[vault-absent]")),
+        `CONTROL: the SAME command against a snapshot without that function IS rejected (${control.map((x) => x.slice(1, x.indexOf("]"))).join(", ") || "NOTHING FIRED — the rule accepts everything"})`,
+      ) &&
+      pass;
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("F3: a MISSING functions snapshot refuses ONE ROW, and every other row's credential finding SURVIVES");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ ABSENCE OF THE INSTRUMENT IS NOT ABSENCE OF THE FINDING. If the
+    // resolver answered "no Vault read" when its snapshot directory is gone, a
+    // deleted or renamed `supabase/schema/functions/` would make the flagship
+    // job fire `cron-secret-in-command` hourly on correct configuration; if it
+    // answered "reads Vault", a deleted snapshot would silently switch the rule
+    // off. It throws instead — the verdict that says a measurement did not
+    // happen.
+    //
+    // ⛔ BUT THE THROW USED TO TAKE THE WHOLE RUN WITH IT (164.8.5-REVIEW F3),
+    // AND THIS SCENARIO USED TO BE UNABLE TO SEE THAT. It ran on `prod-ok.json`
+    // — three CLEAN rows — and asserted the ABSENCE of `cron-secret-in-command`.
+    // That is unfalsifiable and points the wrong way: clean rows produce no
+    // credential finding whether or not the throw discards one. The fixture is
+    // now a LEAKING row beside the flagship, and the assertion is that the
+    // credential line is STILL THERE.
+    //
+    // MEASURED before the fix: `["cron-secret-in-command:prod:…",
+    // "manifest-invalid:…"]` became a THROW, i.e. one generic arm-level
+    // measure-fail, and the credential line — the signal, in a workflow that
+    // exits 0 on everything else — was gone.
+    const prod = loadFixture("cron-drift", "prod-leaky-plus-match.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const LEAKY = "retention_compute_jobs_done";
+      const absent = join(FIXTURE_ROOT, "cron-drift", "functions-this-directory-does-not-exist");
+      // ⛔ AN ABSENT MANIFEST PATH ON PURPOSE, so the expected defect set is
+      // exactly the review's measured one: the credential, the refusal, and
+      // `manifest-invalid`. A matching oracle would add drift noise that could
+      // mask a regression here.
+      const missingManifest = driftFixturePath("manifest-THIS-FILE-DOES-NOT-EXIST.json");
+      const r = await driftRun(prod.data, missingManifest, quiet, undefined, absent);
+      // CONTROL: the SAME rows and the SAME manifest path WITH the snapshot
+      // present — so the measure-fail is attributable to the missing directory
+      // and to nothing else, and the credential finding is not an artefact of it.
+      const rControl = await driftRun(prod.data, missingManifest, quiet);
+      const mf = r.defects.filter((x) => x.kind === "measure-fail");
+      const secrets = r.defects.filter((x) => x.kind === "cron-secret-in-command");
+      const controlSecrets = rControl.defects.filter((x) => x.kind === "cron-secret-in-command");
+      pass =
+        expect(!existsSync(absent), `PRECONDITION: ${absent} really is absent`) &&
+        expect(
+          controlSecrets.length === 1 && String(controlSecrets[0].subject) === `prod:${LEAKY}`,
+          `PRECONDITION: with the snapshot present the fixture reports exactly one credential, on ${LEAKY} (got ${rControl.defects.map((x) => `${x.kind}:${x.subject}`).join(", ") || "nothing"}) — a fixture that leaks nothing would make the assertion below unfalsifiable, which is what this scenario used to be`,
+        ) &&
+        expect(
+          mf.length === 1 && String(mf[0].subject) === "prod:match_engine_cron",
+          `exactly one measure-fail, SCOPED TO THE ROW that could not be judged (got ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ") || "no defects at all"})`,
+        ) &&
+        expect(
+          mf.length === 1 && String(mf[0].detail).includes("functions snapshot directory"),
+          "naming the snapshot directory as the thing that could not be measured",
+        ) &&
+        expect(
+          secrets.length === 1 && String(secrets[0].subject) === `prod:${LEAKY}`,
+          `and the OTHER row's credential finding SURVIVES the refusal (got ${secrets.map((x) => x.subject).join(", ") || "NOTHING — the throw discarded it, which is F3"})`,
+        ) &&
+        expect(
+          r.defects.some((x) => x.kind === "manifest-invalid"),
+          "and the defects collected AFTER the refused row survive too — the loop continued rather than unwinding",
+        ) &&
+        expect(r.exitCode === 1, `the run exits 1 — refusing to measure is not passing (got ${r.exitCode})`) &&
+        expect(
+          rControl.defects.every((x) => x.kind !== "measure-fail"),
+          `CONTROL: the same run WITH the snapshot present has NO measure-fail (got ${rControl.defects.map((x) => x.kind).join(", ")})`,
+        ) &&
+        expect(
+          // ⛔ BOTH HYGIENE LOOPS, SEPARATELY. Section (0) reads `prodRows` and
+          // section (2) reads the oracle, and each has its own `judgeRow` call
+          // site. With the manifest ABSENT above, section (2) never runs — so
+          // this second reading, with a VALID oracle, is what keeps the
+          // manifest-side wrap from being an uncontrolled edit. Two refusals,
+          // one per side, each naming its own row.
+          JSON.stringify(
+            (await driftRun(prod.data, driftFixturePath("manifest.json"), quiet, undefined, absent)).defects
+              .filter((x) => x.kind === "measure-fail")
+              .map((x) => String(x.subject))
+              .sort(),
+          ) === JSON.stringify(["manifest:match_engine_cron", "prod:match_engine_cron"]),
+          `and with a VALID oracle BOTH hygiene loops refuse their own row and nothing else (got ${JSON.stringify(
+            (await driftRun(prod.data, driftFixturePath("manifest.json"), quiet, undefined, absent)).defects
+              .filter((x) => x.kind === "measure-fail")
+              .map((x) => String(x.subject))
+              .sort(),
+          )})`,
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("CR-R1-02: a row nobody could JUDGE withholds its command text, exactly as a DIRTY row does");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ "COULD NOT BE JUDGED" IS NOT "PASSED HYGIENE", AND THE DIFFERENCE IS
+    // PUBLISHED. `compareManifest` used to read `(map.get(name) || []).length >
+    // 0`; a row the F3 wrapper refused is ABSENT from the map, so `|| []` made
+    // that `false` and the text-withholding branch printed a unified diff of
+    // BOTH sides' command text — into the runner log `prod-prober.yml` `cat`s
+    // into a PUBLIC Actions log, which the step summary and the auto-filed
+    // issue copy verbatim (D-03). `makeScrubber` redacts each arm's
+    // `requiredEnv` VALUES and knows nothing about an inline key.
+    //
+    // ⛔ THE FIXTURE NEEDS NO OPERATOR MISTAKE. Its unjudgeable row is
+    // unjudgeable because of its OWN TEXT: `codeSpans` refuses dollar nesting
+    // deeper than `MAX_DOLLAR_DEPTH`, for ANY jobname. The F3 scenario above
+    // cannot see any of this — it passes `quiet` as the log sink and never
+    // inspects `lines`.
+    const prod = loadFixture("cron-drift", "prod-unjudgeable-drift.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const UNJUDGED = "match_engine_cron";
+      const CLEAN_BUT_DIFFERING = "audit_log_cold_purge";
+      // The key as the fixture spells it — two short `||` operands, never one
+      // credential-shaped string in a public repo (Q3).
+      const KEY_PARTS = ["FAKE-abcdef0123", "456789abcdef0123456789"];
+      // ⛔ AN ABSENT FUNCTIONS SNAPSHOT IS WHAT MAKES A ROW UNJUDGED HERE, and
+      // `vault-absent` is scoped to `match_engine_cron` alone, so exactly ONE
+      // row is refused while the others are judged normally. (The dollar-depth
+      // refusal no longer produces this state: WR-R1-03 made it ADDITIVE, so
+      // such a row is now JUDGED and merely dirty — which withholds through the
+      // other half of the predicate and would not exercise this one.)
+      const absent = join(FIXTURE_ROOT, "cron-drift", "functions-this-directory-does-not-exist");
+      const lines = [];
+      const r = await driftRun(prod.data, driftFixturePath("manifest.json"), (s) => lines.push(String(s)), undefined, absent);
+      const log = lines.join("\n");
+      pass =
+        expect(!existsSync(absent), `PRECONDITION: ${absent} really is absent`) &&
+        expect(
+          (() => {
+            try {
+              CRON_DRIFT_MOD.hygieneViolations(UNJUDGED, prod.data.find((x) => x.jobname === UNJUDGED).command, {
+                functionsDir: absent,
+              });
+              return false;
+            } catch {
+              return true;
+            }
+          })(),
+          `PRECONDITION: the ${UNJUDGED} row really is UNJUDGEABLE against that snapshot — hygieneViolations throws, so the row carries a judged:false verdict`,
+        ) &&
+        expect(
+          CRON_DRIFT_MOD.hygieneViolations(UNJUDGED, prod.data.find((x) => x.jobname === UNJUDGED).command).length === 0,
+          `PRECONDITION: and it trips NO rule against the REAL snapshot — so the withholding below is driven by "nobody judged it", never by "it is dirty" (got ${CRON_DRIFT_MOD.hygieneViolations(UNJUDGED, prod.data.find((x) => x.jobname === UNJUDGED).command).join(" ") || "clean"})`,
+        ) &&
+        expect(
+          r.defects.some((x) => x.kind === "cron-drift" && String(x.subject) === UNJUDGED),
+          `PRECONDITION: that same row really DRIFTS, so the withholding branch is reached at all (got ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ") || "no defects"})`,
+        ) &&
+        expect(
+          KEY_PARTS.every((p) => log.includes(p) === false),
+          `the credential is NOWHERE in the log — neither operand of the fixture's split key (${KEY_PARTS.filter((p) => log.includes(p)).join(", ") || "neither present"})`,
+        ) &&
+        expect(
+          log.includes(`command text withheld:`) && log.includes("could not be judged"),
+          `and the withholding SAYS WHY, in the words that send an operator to the right place (withheld line: ${log.includes("command text withheld:")}, reason given: ${log.includes("could not be judged")})`,
+        ) &&
+        expect(
+          // ⭐ THE CALIBRATION IS IN THE SAME RUN, which is stronger than a
+          // second run: the OTHER differing row WAS judged and IS clean, so its
+          // two-sided diff IS printed. "No diff line" would be a constant; "no
+          // diff line for THIS row while the other row has one" is a reading.
+          lines.some((l) => l.startsWith("- ")) && lines.some((l) => l.startsWith("+ ")),
+          `CALIBRATION: the SAME run prints the two-sided diff for ${CLEAN_BUT_DIFFERING}, which WAS judged and is clean (${lines.filter((l) => /^[+-] /.test(l)).length} diff line(s))`,
+        ) &&
+        expect(
+          // ⛔ IN-R1-01, AND IT IS ASSERTED ON PHYSICAL LINES BECAUSE THAT IS
+          // WHAT A READER SEES. `ws-collapse-v2` PRESERVES line breaks, so a
+          // multi-line command reaches the log as ONE array entry carrying
+          // embedded newlines — and the `-`/`+` used to mark only its FIRST
+          // physical line, leaving a reader unable to tell where the manifest
+          // text ended and PROD's began. Counting ARRAY ENTRIES cannot see
+          // that, which is exactly why nothing did. The fixture's clean-but-
+          // differing row is multi-line ON PURPOSE; the precondition below
+          // makes that a measurement rather than a hope.
+          (() => {
+            const diff = lines.filter((l) => /^[+-] /.test(l));
+            const physical = diff.flatMap((l) => l.split("\n"));
+            return physical.length > diff.length && physical.every((l) => /^[+-] /.test(l));
+          })(),
+          `and EVERY PHYSICAL LINE of that diff carries its marker — ${lines
+            .filter((l) => /^[+-] /.test(l))
+            .flatMap((l) => l.split("\n"))
+            .filter((l) => !/^[+-] /.test(l))
+            .map((l) => JSON.stringify(l))
+            .join(" ") || "none unmarked"} (physical ${lines
+            .filter((l) => /^[+-] /.test(l))
+            .flatMap((l) => l.split("\n")).length} vs ${lines.filter((l) => /^[+-] /.test(l)).length} entries — equal would mean the fixture is single-line and this assertion is inert)`,
+        ) &&
+        expect(
+          lines.every((l) => !/^[+-] /.test(l) || !l.includes("match_engine_cron_tick")),
+          `and NO diff line carries the UNJUDGED row's text (${lines.filter((l) => /^[+-] /.test(l) && l.includes("match_engine_cron_tick")).length} leaked)`,
+        ) &&
+        expect(r.exitCode === 1, `the run still exits 1 — withholding is not passing (got ${r.exitCode})`) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("the COMMITTED cron manifest passes every hygiene rule — zero violations on all rows (the false-positive budget)");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THIS IS THE ORACLE'S OWN TEXT, NOT A FIXTURE. It is asserted in the
+    // same wave the derived-length rules land, because a rule that fires on
+    // real committed configuration turns the hourly prober into noise, and
+    // alert fatigue is how a true positive gets ignored.
+    //
+    // ⚠️ THE MARGIN HERE IS ONE CHARACTER WIDE. Measured token census of the
+    // committed commands: `retention_notification_dispatches:` is 34 characters
+    // and `reconcile_dropped_enqueue_sweep:` is exactly 32 — both at or over
+    // `HEADERS_LITERAL_MAX`, and clean only because they sit outside a header
+    // region. Whoever renames a cron job, or moves one of those strings into a
+    // header, is touching this scenario.
+    //
+    // ⛔ IF THIS GOES RED, NARROW THE RULE. Never edit the manifest to fit.
+    if (!existsSync(CRON_DRIFT_MOD.MANIFEST_PATH)) {
+      pass =
+        expect(
+          false,
+          `the committed cron manifest is MISSING at ${CRON_DRIFT_MOD.MANIFEST_PATH} — a missing oracle is a FAIL, never a skip`,
+        ) && pass;
+    } else {
+      let manifest = null;
+      let readError = null;
+      try {
+        manifest = JSON.parse(readFileSync(CRON_DRIFT_MOD.MANIFEST_PATH, "utf8"));
+      } catch (err) {
+        readError = err.message;
+      }
+      const jobs = manifest && Array.isArray(manifest.jobs) ? manifest.jobs : [];
+      let judged = 0;
+      const flagged = [];
+      for (const row of jobs) {
+        if (typeof row.command !== "string") continue; // a withheld row has no text to judge
+        judged += 1;
+        const v = CRON_DRIFT_MOD.hygieneViolations(row.jobname, row.command);
+        if (v.length > 0) flagged.push(`${row.jobname}: ${v.map((x) => x.slice(0, x.indexOf("]") + 1)).join(" ")}`);
+      }
+
+      // ⛔ THE ANTI-VACUITY ARM (164.8.5-REVIEW WR-04, closed 2026-09-11).
+      // `judged >= 10` and `flagged.length === 0` are BOTH satisfied by a
+      // `hygieneViolations` that returns `[]` for everything — which is the one
+      // way this scenario could be catastrophically wrong while reading green,
+      // and it is the shape of the very defect the rules exist to prevent. The
+      // previous pass ran a 13-of-14 probe BY HAND and never committed it as a
+      // control; a measurement nobody committed is a measurement that will not
+      // be taken again.
+      //
+      // ⭐ THE INJECTION IS THE SAME FUNCTION ON THE SAME CORPUS, so it proves
+      // the RULES are live on THESE ROWS rather than that some rule fires
+      // somewhere. Each committed command is re-judged with a credential
+      // appended; every one of them must flip. Row-by-row and not "at least
+      // one": a rule set that woke up for a single row would otherwise pass.
+      const INJECT_KEY = `FAKE-${"0123456789"}-${"0123456789"}-${"0123456789ab"}`;
+      const inertRows = [];
+      for (const row of jobs) {
+        if (typeof row.command !== "string") continue;
+        const spiked = `${row.command}\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', '${INJECT_KEY}'));`;
+        let v = [];
+        try {
+          v = CRON_DRIFT_MOD.hygieneViolations(row.jobname, spiked);
+        } catch {
+          // A row this module refuses to lex is not an inert one — the refusal
+          // is itself a verdict, and `command-unjudgeable` reports it.
+          continue;
+        }
+        if (v.length === 0) inertRows.push(row.jobname);
+      }
+
+      pass =
+        expect(readError === null, `the committed manifest parses (${readError || "ok"})`) &&
+        expect(
+          judged >= 10,
+          `at least ten committed commands were judged — a manifest with fewer rows than that is not the oracle this scenario means (got ${judged})`,
+        ) &&
+        expect(
+          flagged.length === 0,
+          `and NONE of them trips a hygiene rule (${flagged.join(" | ") || `all ${judged} clean`})`,
+        ) &&
+        expect(
+          inertRows.length === 0,
+          `ANTI-VACUITY: and the rules are LIVE on every one of those same rows — splicing a credential into each committed command makes each of them fire (${inertRows.join(", ") || `all ${judged} flipped`}). Without this, "zero violations" is equally the reading of a rule set that judges nothing at all.`,
         ) &&
         pass;
     }
@@ -1807,6 +2894,159 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
+  scenario("a MALFORMED cron.job record is a measure-fail naming the count, never a continue (WR-05)");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ The fixture carries ONE literal 0x1E — the arm's own record separator —
+    // inside jobid 1's body literal, so psql's answer splits that row in two.
+    // The parser used to `continue` past the short tail, which removed a PROD
+    // row from every judgement this arm makes while the run still read green.
+    //
+    // ⚠️ THE READING MOVED WHEN `total` BECAME THE LAST COLUMN (CR-R1-03), and
+    // it moved in the direction of catching MORE. The head fragment now loses
+    // the trailing count field, so BOTH halves of the split are unreadable
+    // (widths 7 and 2, where 8 are required) instead of the head passing as a
+    // full-width row with a silently truncated command — and the out-of-band
+    // count then disagrees as well. Two independent measure-fails, and the
+    // counts below are asserted rather than restated.
+    const prod = loadFixture("cron-drift", "prod-malformed-record.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const r = await driftRun(prod.data, driftFixturePath("manifest.json"), quiet);
+      const mf = r.defects.filter((x) => x.kind === "measure-fail");
+      const widthMf = mf.filter((x) => String(x.detail).includes("could not be parsed"));
+      const countMf = mf.filter((x) => String(x.detail).includes("but this reading yielded"));
+      const details = mf.map((x) => String(x.detail)).join(" ");
+      pass =
+        expect(r.exitCode === 1, `an unreadable record exits 1, never 0 (got ${r.exitCode})`) &&
+        expect(
+          mf.length === 2,
+          `TWO measure-fails, one per independent guard — the width of the fragments and the out-of-band row count (got ${mf.length}: ${mf.map((x) => String(x.detail).slice(0, 40)).join(" | ")})`,
+        ) &&
+        expect(mf.every((x) => String(x.subject) === "cron.job"), `both on subject cron.job (got ${mf.map((x) => x.subject).join(", ")})`) &&
+        expect(
+          widthMf.length === 1 && String(widthMf[0].detail).includes("2 of 4 record(s)"),
+          `NAMING THE COUNT — two records were read and two were not (detail: ${String((widthMf[0] || {}).detail || "none").slice(0, 90)}…)`,
+        ) &&
+        expect(
+          widthMf.length === 1 && String(widthMf[0].detail).includes("field counts: 7, 2"),
+          `and NAMING BOTH FRAGMENT WIDTHS — 7 for the head that lost its count column, 2 for the tail (detail: ${String((widthMf[0] || {}).detail || "none").slice(0, 90)}…)`,
+        ) &&
+        expect(
+          countMf.length === 1 && String(countMf[0].detail).includes("reported 3 cron.job row(s)"),
+          `and the DATABASE's own count is reported against the reading — 3 rows, 4 records (detail: ${String((countMf[0] || {}).detail || "none").slice(0, 90)}…)`,
+        ) &&
+        expect(
+          details.includes("{}") === false,
+          "and the record TEXT is never quoted — an unreadable record is exactly the place a credential could be hiding",
+        ) &&
+        pass;
+      // ⚠️ The drift side is deliberately NOT asserted: the truncated head
+      // legitimately no longer matches its sha, and that IS drift by every
+      // definition this arm has.
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("CR-02: a record with MORE than seven fields is a measure-fail too, never a SILENTLY TRUNCATED command");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE EXACT MIRROR OF WR-05, AND STRICTLY WORSE. The guard was
+    // `f.length < 7`, so a record with EIGHT fields sailed through: `command`
+    // was taken as `f[6]` — the text up to the stray separator — and everything
+    // after it was DISCARDED with `malformed: []`, i.e. with the parser
+    // claiming it read the row.
+    //
+    // ⛔ THE FIXTURE PUTS THE CREDENTIAL AFTER THE SEPARATOR ON PURPOSE.
+    // MEASURED on this fixture's row: the FULL command reports
+    // `[x-service-key-literal, long-literal-in-headers]`; the TRUNCATED head
+    // reports `[]`. Under `< 7` the arm therefore read GREEN on a row carrying
+    // an inline service key — a silent pass, not a downgrade.
+    //
+    // Seven is the column count of `CRON_JOB_SQL`. Anything else is a record
+    // this parser did not read, in EITHER direction.
+    const prod = loadFixture("cron-drift", "prod-wide-record.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const WIDE = "retention_compute_jobs_done";
+      const wideRow = prod.data.find((r) => r.jobname === WIDE) || {};
+      const halves = String(wideRow.command || "").split(CRON_DRIFT_MOD.CRON_JOB_SEPARATORS.fieldSep);
+      const headIds = CRON_DRIFT_MOD.hygieneViolations(WIDE, halves[0] || "").map((x) => x.slice(1, x.indexOf("]")));
+      const wholeIds = CRON_DRIFT_MOD.hygieneViolations(WIDE, halves.join("")).map((x) => x.slice(1, x.indexOf("]")));
+      const r = await driftRun(prod.data, driftFixturePath("manifest.json"), quiet);
+      const mf = r.defects.filter((x) => x.kind === "measure-fail");
+      const detail = String((mf[0] || {}).detail || "");
+      pass =
+        expect(
+          halves.length === 2,
+          `PRECONDITION: the fixture row really carries ONE literal field separator, so psql renders it as eight fields (${halves.length - 1} found)`,
+        ) &&
+        expect(
+          headIds.length === 0 && wholeIds.length > 0,
+          `PRECONDITION: the credential is hidden AFTER the separator — the truncated head is CLEAN (${headIds.join(", ") || "no rule"}) while the whole command is not (${wholeIds.join(", ") || "NO RULE — the fixture proves nothing"})`,
+        ) &&
+        expect(r.exitCode === 1, `an over-wide record exits 1, never 0 (got ${r.exitCode})`) &&
+        expect(mf.length === 1, `exactly one measure-fail (got ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ") || "no defects at all"})`) &&
+        expect(String((mf[0] || {}).subject) === "cron.job", `on subject cron.job (got ${(mf[0] || {}).subject})`) &&
+        expect(
+          detail.includes("1 of 3 record(s)") &&
+            detail.includes(`field counts: ${CRON_DRIFT_MOD.CRON_JOB_COLUMNS.length + 1}`),
+          `NAMING THE COUNT AND THE WIDTH — two rows were read and a third record was ONE FIELD TOO WIDE (detail: ${detail.slice(0, 120)}…)`,
+        ) &&
+        expect(
+          detail.includes("X-Service-Key") === false && detail.includes("FAKE") === false,
+          "and the record TEXT is never quoted — an unreadable record is exactly the place a credential could be hiding, and this one is",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("captureManifest REFUSES a MALFORMED cron.job record (exit 3), and writes nothing");
+  // -------------------------------------------------------------------------
+  {
+    // The capture path is the SECOND caller of the parser, and it needs its own
+    // refusal: an oracle captured from a reading with a hole in it records the
+    // hole as the standard. Exit 3, not 1 — hygiene never ran, so this refusal
+    // must stay distinguishable from a hygiene refusal by exit code alone.
+    const prod = loadFixture("cron-drift", "prod-malformed-record.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
+      const outPath = join(dir, "cron-manifest.json");
+      const lines = [];
+      try {
+        const code = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: prod.data }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath,
+          log: (x) => lines.push(x),
+        });
+        pass =
+          expect(code === 3, `an unreadable record returns 3, not the hygiene refusal's 1 (got ${code})`) &&
+          expect(existsSync(outPath) === false, "and the out path DOES NOT EXIST afterwards — a reading with a hole in it can never become the oracle") &&
+          expect(
+            // The count is DERIVED from the same parser the capture path calls,
+            // so this assertion cannot drift out of step with the fixture the
+            // way a hand-typed `1 ` did when `total` became the last column.
+            lines.some(
+              (l) =>
+                l.startsWith("REFUSED:") &&
+                l.includes(`${CRON_DRIFT_MOD.parseCronJobRows(fixtureSql({ cronJobRows: prod.data })(CRON_DRIFT_MOD.CRON_JOB_SQL, CRON_DRIFT_MOD.CRON_JOB_SEPARATORS).stdout).malformed.length} cron.job record(s) could not be parsed`),
+            ),
+            `the refusal is explicit and names how many records it could not read (${lines.join(" | ") || "no lines"})`,
+          ) &&
+          expect(lines.every((l) => l.includes("{}") === false), "and never echoes the record text") &&
+          pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   scenario("captureManifest writes a schema-1 manifest whose shas match the committed fixture");
   // -------------------------------------------------------------------------
   {
@@ -1834,7 +3074,16 @@ export async function selfTest() {
         pass =
           expect(code === 0, `a clean configuration captures with 0 (got ${code}; log ${lines.join(" | ")})`) &&
           expect(written !== null, "the file was written") &&
-          expect((written || {}).schema_version === 1 && (written || {}).normalization === "ws-collapse-v1", `schema 1 / ws-collapse-v1 (got ${(written || {}).schema_version} / ${(written || {}).normalization})`) &&
+          // ⛔ DERIVED FROM THE ARM'S OWN CONSTANTS, NEVER RE-TYPED. Both
+          // values were hand-typed literals until 164.8.5-REVIEW CR-01 bumped
+          // `NORMALIZATION` to `ws-collapse-v2`: the assertion then failed for
+          // being STALE rather than for anything the capture path did, which is
+          // a control that measures its own transcription.
+          expect(
+            (written || {}).schema_version === CRON_DRIFT_MOD.MANIFEST_SCHEMA_VERSION &&
+              (written || {}).normalization === CRON_DRIFT_MOD.NORMALIZATION,
+            `schema ${CRON_DRIFT_MOD.MANIFEST_SCHEMA_VERSION} / ${CRON_DRIFT_MOD.NORMALIZATION} (got ${(written || {}).schema_version} / ${(written || {}).normalization})`,
+          ) &&
           expect((written || {}).database_marker === FIXTURE_DB_MARKER, `the database marker is recorded (got ${(written || {}).database_marker})`) &&
           expect((written || {}).captured_at === "2026-09-05T12:00:00.000Z", `captured_at comes from the INJECTED clock (got ${(written || {}).captured_at})`) &&
           expect(((written || {}).jobs || []).length === 3, `three jobs (got ${((written || {}).jobs || []).length})`) &&
@@ -1846,6 +3095,477 @@ export async function selfTest() {
             ((written || {}).jobs || []).map((j) => j.jobname).join(",") === "audit_log_cold_purge,match_engine_cron,retention_compute_jobs_done",
             "sorted by jobname, so two captures of the same state are byte-identical",
           ) &&
+          pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("CR-01: capture STORES the line breaks, so a `--`-commented multi-line command stays JUDGEABLE and hashes apart from its folded no-op twin");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE DEFECT SITE IS THE CAPTURE, NOT THE SCAN. `hygieneViolations` is
+    // handed PROD's RAW `cron.job.command`, which still has its newlines — so
+    // section (0) was never blind. What was blind is the MANIFEST side:
+    // `captureManifest` STORES `normalizeCommand(command)`, and under
+    // `ws-collapse-v1` that folded a multi-line command onto ONE line, where a
+    // leading `--` swallows the body. MEASURED on the real committed oracle:
+    // `retention_compute_jobs_orphaned_running` is 1791 characters with ZERO
+    // newlines, opens with `--`, and `scanSql` masks 100% of it to spaces.
+    //
+    // ⛔ AND THE SHA HALF, WHICH IS WORSE THAN A BLIND ROW. Under `v1` the
+    // working program and its folded all-comment twin hashed IDENTICALLY, so
+    // `compareManifest` said `0 differing` between a live reaper and a no-op —
+    // and `REMEDIES["cron-drift"]`'s "re-schedule PROD from the manifest" would
+    // have disabled the orphaned-`compute_jobs` reaper in production.
+    //
+    // The `folded` string below is the v1 OUTPUT, spelled out, so the control
+    // is a measurement of the old behaviour rather than a re-run of it.
+    const prod = loadFixture("cron-drift", "prod-multiline-comment.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const JOB = "retention_compute_jobs_orphaned_running";
+      const source = (prod.data.find((r) => r.jobname === JOB) || {}).command || "";
+      const folded = source.replace(/\s+/g, " ").trim(); // exactly what ws-collapse-v1 produced
+      // A low-entropy fake, assembled from short operands so nothing
+      // credential-shaped is ever typed whole into a public repository.
+      const TOKEN = `FAKE${"-0123456789"}${"-0123456789"}${"-0123456789ab"}`;
+      const probe = (cmd) =>
+        CRON_DRIFT_MOD.hygieneViolations("probe_job", `${cmd} SELECT set_config('p', '${TOKEN}', false);`).map((x) =>
+          x.slice(1, x.indexOf("]")),
+        );
+      // The MASK-READING probe. `long-token-anywhere` reads literals and
+      // comment bodies and so survives the fold; the header rules anchor on
+      // STRUCTURE and cannot survive a command masked entirely to spaces. That
+      // asymmetry is what the control below measures.
+      const headerProbe = (cmd) =>
+        CRON_DRIFT_MOD.hygieneViolations(
+          "probe_job",
+          `${cmd} PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', '${TOKEN}'));`,
+        ).map((x) => x.slice(1, x.indexOf("]")));
+      const executable = (cmd) => CRON_DRIFT_MOD.codeSpans(cmd)[0].masked.trim().length;
+      const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
+      const outPath = join(dir, "cron-manifest.json");
+      const lines = [];
+      try {
+        const code = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: prod.data }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath,
+          log: (x) => lines.push(x),
+        });
+        const written = existsSync(outPath) ? JSON.parse(readFileSync(outPath, "utf8")) : null;
+        const stored = ((written || { jobs: [] }).jobs.find((j) => j.jobname === JOB) || {}).command;
+        pass =
+          expect(
+            source.includes("\n") && source.startsWith("--"),
+            `PRECONDITION: the fixture row really is multi-line and really opens with a \`--\` comment (${source.split("\n").length} line(s))`,
+          ) &&
+          expect(code === 0, `the capture succeeds (got ${code}; log ${lines.join(" | ")})`) &&
+          expect(
+            typeof stored === "string" && stored.includes("\n"),
+            `the STORED command still carries its line break — under v1 it did not, and that single fold is the whole defect (stored ${typeof stored === "string" ? `${stored.split("\n").length} line(s)` : "NOTHING"})`,
+          ) &&
+          expect(
+            executable(String(stored)) > 0,
+            `and the stored text still lexes to EXECUTABLE code rather than to an empty command (${executable(String(stored))} non-space masked character(s))`,
+          ) &&
+          expect(
+            probe(String(stored)).includes("long-token-anywhere"),
+            `so a credential spliced into the STORED text is still CAUGHT (${probe(String(stored)).join(", ") || "NOTHING FIRED"})`,
+          ) &&
+          expect(
+            executable(folded) === 0,
+            `CONTROL, MEASURED NOT ARGUED: the v1-folded twin masks to ZERO executable characters (${executable(folded)}) — that is the 1-of-14 blind row the review found`,
+          ) &&
+          expect(
+            // ⛔ NARROWED 2026-09-11, AND THE NARROWING IS THE POINT
+            // (164.8.5-REVIEW-R1 WR-R1-01). This used to assert
+            // `probe(folded).length === 0` — "the folded twin catches NOTHING".
+            // That is no longer true and the change is an IMPROVEMENT:
+            // `long-token-anywhere` now reads COMMENT BODIES as well as
+            // literals, so a key folded into a comment IS named. Asserting the
+            // old blindness would have pinned a defect in place.
+            //
+            // What the fold still destroys is every MASK-READING rule, and that
+            // is what this control now measures by NAME. The header rules
+            // anchor on structure, and structure is exactly what a command
+            // masked 100% to spaces no longer has. Same splice, both sides.
+            headerProbe(String(stored)).includes("x-service-key-literal") &&
+              headerProbe(folded).includes("x-service-key-literal") === false,
+            `CONTROL: the same header splice fires the MASK-READING rules on the stored text (${headerProbe(String(stored)).join(", ") || "NOTHING"}) and NOT on the v1-folded twin (${headerProbe(folded).join(", ") || "nothing"}) — the fold costs every rule that needs executable structure, which is most of them`,
+          ) &&
+          expect(
+            CRON_DRIFT_MOD.sha256Hex(CRON_DRIFT_MOD.normalizeCommand(source)) !==
+              CRON_DRIFT_MOD.sha256Hex(CRON_DRIFT_MOD.normalizeCommand(folded)),
+            "and the working command no longer HASHES THE SAME as its folded no-op twin — under v1 it did, so `compareManifest` reported `0 differing` between a live reaper and a command that does nothing",
+          ) &&
+          pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("IN-R1-02: captureManifest REFUSES a row it could not JUDGE, and by DECISION rather than by an uncaught throw");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE EXIT CODE USED TO BE RIGHT BY ACCIDENT. `hygieneViolations` throws
+    // on an absent functions snapshot, the loop was UNGUARDED, and the throw
+    // unwound to `main`'s catch — which leaves `code` at its initialiser 3, the
+    // value the docstring assigns to three OTHER refusals. Nothing was written
+    // either way, so it was fail-safe; what it cost was the exit code's
+    // meaning, and the exit code is the only thing a caller can read.
+    //
+    // ⭐ AND THE INVARIANT IS CR-R1-02's, ONE ARTEFACT OVER: an unjudged row is
+    // not a clean one, and an ORACLE is exactly the thing that must not record
+    // one as if it were.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const absent = join(FIXTURE_ROOT, "cron-drift", "functions-this-directory-does-not-exist");
+      const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
+      const outPath = join(dir, "cron-manifest.json");
+      const lines = [];
+      const controlLines = [];
+      try {
+        const code = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: prod.data }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath,
+          log: (x) => lines.push(x),
+          functionsDir: absent,
+        });
+        // CALIBRATION: the SAME rows with the REAL snapshot capture cleanly, so
+        // the refusal is attributable to the missing directory and to nothing
+        // else — and "exit 3" is a reading rather than this fixture's constant.
+        const controlPath = join(dir, "control.json");
+        const controlCode = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: prod.data }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath: controlPath,
+          log: (x) => controlLines.push(x),
+        });
+        pass =
+          expect(!existsSync(absent), `PRECONDITION: ${absent} really is absent`) &&
+          expect(code === 3, `an unjudgeable row returns 3 — hygiene never RAN, so it is not the hygiene refusal's 1 (got ${code})`) &&
+          expect(
+            existsSync(outPath) === false,
+            "and the out path DOES NOT EXIST — an oracle cannot record a row nobody judged as if it were clean",
+          ) &&
+          expect(
+            lines.some((l) => l.startsWith("REFUSED:") && l.includes("could not be JUDGED")),
+            `the refusal is a DECISION with its own sentence, not an unwound throw (${lines.join(" | ") || "NO LINES AT ALL — which is exactly what the uncaught throw produced"})`,
+          ) &&
+          expect(
+            lines.some((l) => l.includes("functions snapshot directory")),
+            `naming what could not be measured (${lines.join(" | ") || "nothing"})`,
+          ) &&
+          expect(
+            controlCode === 0 && existsSync(controlPath),
+            `CALIBRATION: the SAME rows against the REAL snapshot capture cleanly (got ${controlCode}; ${controlLines.join(" | ")})`,
+          ) &&
+          pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("WR-R2-04: an UNJUDGEABLE row refuses the capture with 3 and NO rotation remedy — the 1-vs-3 partition holds on BOTH sides");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ `captureManifest` NEVER CALLED `splitHygiene` (164.8.5-REVIEW-R2
+    // WR-R2-04). `compareManifest` has used it since it was written, precisely
+    // because "reporting a parse failure under a rotation remedy would send an
+    // operator to rotate a key on no evidence". The capture side tested
+    // `v.length > 0` and put EVERYTHING in `dirty`. MEASURED 2026-09-11 on the
+    // parent commit, a row whose `DO` nesting exceeds `MAX_DOLLAR_DEPTH`:
+    //
+    //   captureManifest exit code: 1
+    //     REFUSED: 1 cron.job row(s) fail secret hygiene …
+    //       match_engine_cron: [command-unjudgeable] [vault-absent]
+    //     Rotate the exposed secret, re-schedule that job onto a
+    //     vault.decrypted_secrets body, then capture again.
+    //
+    // Nothing was found. The lexer gave up. `run.mjs`'s own docstring above
+    // says "⛔ 1 IS 'HYGIENE RAN AND FOUND SOMETHING'; 3 IS 'NOTHING WAS
+    // MEASURED'. That partition is the whole information content of the exit
+    // code" — and the code beneath it broke the partition for every
+    // `UNJUDGEABLE_RULE_IDS` member.
+    //
+    // ⚠️ THE ROW ALSO TRIPS `vault-absent`, which IS a credential rule, and that
+    // is the harder half: a row carrying BOTH must refuse as 3 (nothing was
+    // measured about the unread spans) while still NAMING the credential rule
+    // in its sentence. Asserted below in both directions.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    const red = loadFixture("cron-drift", "hygiene-red.json");
+    if (!prod.ok || !red.ok) {
+      pass = expect(false, prod.ok ? red.reason : prod.reason) && pass;
+    } else {
+      const SUBJECT = "match_engine_cron";
+      const unjudgeable = red.data.find((r) => r.rule === "command-unjudgeable");
+      const leak = red.data.find((r) => r.rule === "x-service-key-literal");
+      const rows = clone(prod.data);
+      const target = rows.find((r) => r.jobname === SUBJECT);
+      if (target && unjudgeable) target.command = unjudgeable.command;
+      // The CONTROL rows: a genuine credential, which must still be a 1.
+      const dirtyRows = clone(prod.data);
+      const dirtyTarget = dirtyRows.find((r) => r.jobname === "audit_log_cold_purge");
+      if (dirtyTarget && leak) dirtyTarget.command = leak.command;
+
+      const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
+      const outPath = join(dir, "unjudgeable.json");
+      const dirtyPath = join(dir, "dirty.json");
+      const lines = [];
+      const dirtyLines = [];
+      try {
+        const code = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: rows }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath,
+          log: (x) => lines.push(String(x)),
+        });
+        const dirtyCode = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: dirtyRows }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath: dirtyPath,
+          log: (x) => dirtyLines.push(String(x)),
+        });
+        const ids = unjudgeable
+          ? CRON_DRIFT_MOD.hygieneViolations(SUBJECT, unjudgeable.command).map((x) => x.slice(1, x.indexOf("]")))
+          : [];
+        pass =
+          expect(
+            unjudgeable !== undefined && leak !== undefined && target !== undefined && dirtyTarget !== undefined,
+            "PRECONDITION: hygiene-red.json carries a command-unjudgeable row and an x-service-key-literal row",
+          ) &&
+          expect(
+            ids.includes("command-unjudgeable"),
+            `PRECONDITION: that command really is unjudgeable under ${SUBJECT} (got [${ids.join(", ")}])`,
+          ) &&
+          expect(
+            code === 3,
+            `an UNJUDGEABLE row returns 3 — nothing was MEASURED, so it is not the hygiene refusal's 1 (got ${code}; ${lines.join(" | ")})`,
+          ) &&
+          expect(
+            lines.some((l) => l.startsWith("REFUSED:") && l.includes("could not be JUDGED")),
+            `under the refusal sentence, not the rotation one (${lines.join(" | ") || "nothing"})`,
+          ) &&
+          expect(
+            lines.every((l) => !l.includes("Rotate")),
+            `and the word "Rotate" appears NOWHERE — an operator is never sent to rotate a key on no evidence (${lines.filter((l) => l.includes("Rotate")).join(" | ") || "absent"})`,
+          ) &&
+          expect(
+            lines.some((l) => l.includes("[command-unjudgeable]")),
+            `naming the refusal id (${lines.join(" | ")})`,
+          ) &&
+          expect(
+            ids.includes("vault-absent") === false || lines.some((l) => l.includes("[vault-absent]")),
+            `and STILL naming any credential rule that fired beside it — the refusal is additive here too (${lines.join(" | ")})`,
+          ) &&
+          expect(existsSync(outPath) === false, "and nothing was written") &&
+          // ⛔ THE CALIBRATION IS THE OTHER HALF OF THE PARTITION. Without it,
+          // "returns 3" could be satisfied by a function that returns 3 for
+          // everything, which is the shape the round-1 uncaught throw had.
+          expect(
+            dirtyCode === 1,
+            `CALIBRATION: a row with a REAL credential and nothing unjudgeable still returns 1 (got ${dirtyCode}; ${dirtyLines.join(" | ")})`,
+          ) &&
+          expect(
+            dirtyLines.some((l) => l.includes("Rotate the exposed secret")),
+            "…under the rotation remedy, which is where that sentence belongs",
+          ) &&
+          expect(existsSync(dirtyPath) === false, "and nothing was written there either") &&
+          pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("IN-R2-02: a jobid of `12abc` is REFUSED, not silently captured as 12");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ `Number.parseInt("12abc", 10)` IS `12`. parseInt stops at the first
+    // non-digit and `Number.isInteger(12)` is `true`, so the guard that says "a
+    // jobid that is not an integer" let `12abc` through and the oracle recorded
+    // `"jobid": 12` — a value nobody read, written as if it were the captured
+    // truth. That is the same class as the NaN→null defect the guard was added
+    // for (IN-R1-03), one spelling over. `/^\d+$/` closes it.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const rows = clone(prod.data);
+      rows[0].jobid = "12abc";
+      const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
+      const outPath = join(dir, "bad-jobid.json");
+      const controlPath = join(dir, "control.json");
+      const lines = [];
+      const controlLines = [];
+      try {
+        const code = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: rows }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath,
+          log: (x) => lines.push(String(x)),
+        });
+        const controlCode = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: prod.data }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath: controlPath,
+          log: (x) => controlLines.push(String(x)),
+        });
+        pass =
+          expect(
+            Number.isInteger(Number.parseInt("12abc", 10)),
+            "PRECONDITION: the OLD guard really did accept it — parseInt('12abc') is 12 and Number.isInteger(12) is true",
+          ) &&
+          expect(code === 3, `the capture is REFUSED (got ${code}; ${lines.join(" | ")})`) &&
+          expect(
+            lines.some((l) => l.includes("jobid that is not an integer") && l.includes(rows[0].jobname)),
+            `naming the row (${lines.join(" | ")})`,
+          ) &&
+          expect(existsSync(outPath) === false, "and nothing was written — an unread jobid is never serialised") &&
+          expect(
+            controlCode === 0 && existsSync(controlPath),
+            `CALIBRATION: the SAME rows with their real integer jobids capture cleanly (got ${controlCode}; ${controlLines.join(" | ")})`,
+          ) &&
+          pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("GUARD AUDIT: an ABSENT functions snapshot refuses the row WITHOUT discarding the credential it already found");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE FOURTH SUBSTITUTIVE GUARD, found by sweeping EVERY guard this phase
+    // added rather than by a reported finding. `reachesVaultRead` throws when
+    // `supabase/schema/functions/` is absent — which is RIGHT, a missing
+    // snapshot is not the absence of a Vault read — but it threw from the LAST
+    // statement before `return out`, so the throw DISCARDED every credential
+    // already collected and both callers recorded a generic `measure-fail` in
+    // its place.
+    //
+    // MEASURED 2026-09-11 with an inline 39-character X-Service-Key:
+    //   REAL snapshot   -> ["x-service-key-literal","long-literal-in-headers","vault-absent"]
+    //   ABSENT snapshot -> THROW (all three lost)
+    //   CONTROL, same command under a NON-scoped jobname, absent snapshot
+    //                   -> ["x-service-key-literal","long-literal-in-headers"]
+    //
+    // ⛔ AND THE VICTIM IS THE FLAGSHIP JOB — `vault-absent` is scoped to
+    // `match_engine_cron`, jobid 1, the row whose inline service key IS the
+    // measured outage this module exists for. A stale checkout was enough.
+    //
+    // ⭐ The row stays `judged: false`, which is the truth — one rule really
+    // could not be applied, and it must withhold its text like any unjudged
+    // row. What changed is that the throw CARRIES `out`.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    const red = loadFixture("cron-drift", "hygiene-red.json");
+    if (!prod.ok || !red.ok) {
+      pass = expect(false, prod.ok ? red.reason : prod.reason) && pass;
+    } else {
+      const SUBJECT = "match_engine_cron";
+      const leak = red.data.find((r) => r.rule === "x-service-key-literal");
+      const rows = clone(prod.data);
+      const target = rows.find((r) => r.jobname === SUBJECT);
+      if (target && leak) target.command = leak.command;
+      const absent = join(FIXTURE_ROOT, "cron-drift", "functions-this-directory-does-not-exist");
+      const r = await driftRun(rows, driftFixturePath("manifest.json"), quiet, undefined, absent);
+      const on = (kind) => r.defects.filter((x) => x.kind === kind && x.subject === `prod:${SUBJECT}`);
+      pass =
+        expect(!existsSync(absent), `PRECONDITION: ${absent} really is absent`) &&
+        expect(
+          leak !== undefined && target !== undefined,
+          "PRECONDITION: the fixtures carry an x-service-key-literal row and match_engine_cron",
+        ) &&
+        expect(
+          (() => {
+            try {
+              CRON_DRIFT_MOD.hygieneViolations(SUBJECT, target.command, { functionsDir: absent });
+              return false;
+            } catch {
+              return true;
+            }
+          })(),
+          "PRECONDITION: the row really IS refused against that snapshot — the judgement still throws, so the verdict stays judged:false",
+        ) &&
+        expect(
+          on("measure-fail").length === 1 && String(on("measure-fail")[0].detail).includes("functions snapshot directory"),
+          `the refusal is reported and names what could not be measured (got ${on("measure-fail").map((x) => String(x.detail).slice(0, 40)).join(" | ") || "NOTHING"})`,
+        ) &&
+        expect(
+          on("cron-secret-in-command").length === 1,
+          `and the CREDENTIAL is reported BESIDE it rather than instead of it (got ${on("cron-secret-in-command").length}: ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ")})`,
+        ) &&
+        expect(
+          on("cron-secret-in-command").length === 1 &&
+            String(on("cron-secret-in-command")[0].detail).includes("[x-service-key-literal]") &&
+            String(on("cron-secret-in-command")[0].detail).includes("DID run before the judgement was refused"),
+          "naming the rule AND saying the finding survived a refusal, so nobody reads it as a full judgement",
+        ) &&
+        expect(
+          on("cron-secret-in-command").length === 1 &&
+            !String(on("cron-secret-in-command")[0].detail).includes("[vault-absent]"),
+          "…and NOT claiming vault-absent, which is precisely the rule that could not be applied",
+        ) &&
+        expect(r.exitCode === 1, `the run exits 1 (got ${r.exitCode})`) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("GUARD AUDIT: captureManifest prints the DIRTY rows even when another row is UNJUDGED");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE SAME CLASS AT THE REPORT LEVEL. The `unjudged` branch `return 3`-ed
+    // BEFORE the `dirty` block ran, so ONE row nobody could judge hid EVERY
+    // credential found on every OTHER row. The exit code still partitions (3
+    // beats 1 — "nothing was measured" is the stronger statement about this
+    // reading) but no finding is withheld to make that partition.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    const red = loadFixture("cron-drift", "hygiene-red.json");
+    if (!prod.ok || !red.ok) {
+      pass = expect(false, prod.ok ? red.reason : prod.reason) && pass;
+    } else {
+      const DIRTY_JOB = "audit_log_cold_purge";
+      const UNJUDGED_JOB = "match_engine_cron";
+      const leak = red.data.find((r) => r.rule === "x-service-key-literal");
+      const rows = clone(prod.data);
+      const dirtyRow = rows.find((r) => r.jobname === DIRTY_JOB);
+      if (dirtyRow && leak) dirtyRow.command = leak.command;
+      const absent = join(FIXTURE_ROOT, "cron-drift", "functions-this-directory-does-not-exist");
+      const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
+      const outPath = join(dir, "both.json");
+      const lines = [];
+      try {
+        const code = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: rows }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath,
+          log: (x) => lines.push(String(x)),
+          functionsDir: absent,
+        });
+        const text = lines.join("\n");
+        pass =
+          expect(dirtyRow !== undefined && leak !== undefined, `PRECONDITION: the fixtures carry ${DIRTY_JOB} and a leaky row`) &&
+          expect(code === 3, `the stronger refusal still owns the exit code (got ${code})`) &&
+          expect(
+            text.includes("fail secret hygiene") && text.includes(DIRTY_JOB),
+            `the DIRTY row is named anyway (${text.replace(/\n/g, " | ")})`,
+          ) &&
+          expect(
+            text.includes("Rotate the exposed secret"),
+            "…under its own rotation remedy, which for a genuinely dirty row is the right sentence",
+          ) &&
+          expect(
+            text.includes("could not be JUDGED at all") && text.includes(UNJUDGED_JOB),
+            `and the UNJUDGED row is named too (${text.replace(/\n/g, " | ")})`,
+          ) &&
+          expect(existsSync(outPath) === false, "and nothing was written") &&
           pass;
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -2451,7 +4171,8 @@ export async function selfTest() {
 /**
  * Capture `cron.job` into a manifest file.
  *
- * ⛔ THREE REFUSALS, and each of them writes NOTHING:
+ * ⛔ EVERY REFUSAL BELOW WRITES NOTHING, and the count is deliberately not
+ * restated in prose — it has moved twice:
  *
  *   3 — no `--out` path. The destination is REQUIRED and is never defaulted to
  *       `MANIFEST_PATH`, so a capture is always a reviewed file MOVE rather
@@ -2459,19 +4180,41 @@ export async function selfTest() {
  *   3 — the database has no `COMMENT ON DATABASE` marker, or the read failed.
  *       An unlabelled database is one whose identity was never established;
  *       `current_database()` is `postgres` on every Supabase project.
- *   1 — ANY row fails ANY of the ten hygiene rules. This is what makes the
+ *   3 — a `cron.job` record the parser could not read. An oracle captured from
+ *       a reading with a hole in it would record the hole as the standard, and
+ *       the missing row would then be judged against nothing forever. This is
+ *       a 3 rather than a 1 on purpose: hygiene never ran, so the two refusals
+ *       must stay distinguishable by exit code alone.
+ *   3 — the reading's record count disagrees with `count(*) OVER ()`. A record
+ *       separator inside a command splits one row into two, and a truncated
+ *       read loses whole rows; either way the oracle would record a phantom
+ *       job, or the absence of a real one, as the standard forever (CR-R1-03).
+ *   3 — a row that could not be JUDGED AT ALL: `hygieneViolations` throws on an
+ *       absent functions snapshot and on a command that is not a string. This
+ *       used to be UNGUARDED, so the throw unwound to `main`'s catch and left
+ *       `code` at its initialiser 3 by accident rather than by decision
+ *       (IN-R1-02). A 3 rather than a 1 for the same reason as the row above:
+ *       hygiene did not run, so the two must stay distinguishable.
+ *   3 — a `jobid` that is not an integer. `JSON.stringify(NaN)` is `null`, and
+ *       an oracle recording `"jobid": null` hands the next reader a null as if
+ *       it were the captured truth.
+ *   1 — ANY row fails ANY rule in `HYGIENE_RULE_IDS`. This is what makes the
  *       manifest an oracle of the ACHIEVABLE configuration rather than a
  *       photograph of whatever PROD has: it CANNOT be captured into a state
  *       that carries a credential. The refusal prints the jobname and the rule
  *       ids, never the offending text.
  *
+ * ⛔ 1 IS "HYGIENE RAN AND FOUND SOMETHING"; 3 IS "NOTHING WAS MEASURED". That
+ * partition is the whole information content of the exit code, and it is why
+ * every refusal above is a 3 rather than a convenient 1.
+ *
  * The command TEXT is written on success precisely because every row passed
- * those ten rules. A reviewer may still withhold any row to sha-only afterwards
+ * those rules. A reviewer may still withhold any row to sha-only afterwards
  * — see the withhold procedure at the top of `arms/cron-drift.mjs`.
  *
- * @returns {Promise<number>} the CLI exit code (0 captured / 1 refused on hygiene / 3 refused on usage or an unidentified database)
+ * @returns {Promise<number>} the CLI exit code (0 captured / 1 refused on hygiene / 3 refused on usage, an unidentified database, or an unreadable cron.job record)
  */
-export async function captureManifest({ seams, outPath, log = (s) => console.log(s) }) {
+export async function captureManifest({ seams, outPath, log = (s) => console.log(s), functionsDir }) {
   if (!outPath) {
     log("ERROR: --capture-manifest requires --out <path>. The destination is never defaulted to the committed oracle — a capture is a reviewed file move.");
     return 3;
@@ -2493,24 +4236,154 @@ export async function captureManifest({ seams, outPath, log = (s) => console.log
     log(`ERROR: cron.job could not be read: ${res.measureFail}. Nothing was written.`);
     return 3;
   }
-  const rows = CRON_DRIFT_MOD.parseCronJobRows(res.stdout);
-
-  const dirty = [];
-  for (const r of rows) {
-    const v = CRON_DRIFT_MOD.hygieneViolations(r.jobname, r.command);
-    if (v.length > 0) dirty.push({ jobname: r.jobname, rules: v.map((x) => x.slice(0, x.indexOf("]") + 1)) });
+  const { rows, malformed, countMismatch } = CRON_DRIFT_MOD.parseCronJobRows(res.stdout);
+  if (malformed.length > 0) {
+    // ⛔ BEFORE the hygiene loop, and deliberately: a record that could not be
+    // parsed was never handed to the hygiene rules, so a capture that proceeded
+    // would be certifying text nobody read. The counts are printed; the record
+    // text never is.
+    log(
+      `REFUSED: ${malformed.length} cron.job record(s) could not be parsed (field counts: ${malformed.map((m) => m.fields).join(", ")}; ${CRON_DRIFT_MOD.CRON_JOB_COLUMNS.length} are required), so this reading has a hole in it and cannot become the oracle. Nothing was written.`,
+    );
+    log("Read the affected command by hand — a record separator (0x1E) inside a cron.job command splits it in two — then capture again.");
+    return 3;
   }
+  if (countMismatch !== null) {
+    // ⛔ THE SECOND, INDEPENDENT REFUSAL (164.8.5-REVIEW-R1 CR-R1-03). The width
+    // guard above reads FRAGMENTS and cannot tell a fabricated row from a real
+    // one; `count(*) OVER ()` is the database's own answer, computed before any
+    // separator was chosen. An oracle captured from a reading whose row count
+    // cannot be confirmed would record a phantom job — or the absence of a real
+    // one — as the standard, forever.
+    log(`REFUSED: ${countMismatch} Nothing was written.`);
+    log("Read cron.job by hand (SELECT jobid, jobname FROM cron.job ORDER BY jobid), fix the command carrying the separator, then capture again.");
+    return 3;
+  }
+
+  // ⛔ THE HYGIENE LOOP IS WRAPPED, THE WAY `compareManifest`'s `judgeRow`
+  // ALREADY IS (164.8.5-REVIEW-R1 IN-R1-02). `hygieneViolations` throws on an
+  // absent `functionsDir` and on a command that is not a string. Neither was
+  // caught here, so the throw unwound to `main`'s catch, which leaves `code` at
+  // its initialiser 3 — the value this function's own docstring assigns to
+  // three DIFFERENT refusals. Nothing is written either way, so it was
+  // fail-safe; what it cost was the exit code's meaning, which is the only
+  // thing a caller reading it can use.
+  //
+  // ⭐ AND A ROW NOBODY COULD JUDGE REFUSES THE CAPTURE. That is the same
+  // invariant as CR-R1-02 on the comparison side: an unjudged row is not a
+  // clean one, and an oracle is exactly the artefact that must not record one
+  // as if it were.
+  //
+  // ⛔ AND IT ROUTES THROUGH `splitHygiene`, THE WAY `compareManifest` ALWAYS
+  // HAS (164.8.5-REVIEW-R2 WR-R2-04). This loop used to test `v.length > 0` and
+  // put EVERYTHING in `dirty`. MEASURED 2026-09-11 on a row whose `DO` nesting
+  // exceeds `MAX_DOLLAR_DEPTH`:
+  //
+  //   captureManifest exit code: 1
+  //     REFUSED: 1 cron.job row(s) fail secret hygiene …
+  //       match_engine_cron: [command-unjudgeable] [vault-absent]
+  //     Rotate the exposed secret, re-schedule that job onto a
+  //     vault.decrypted_secrets body, then capture again.
+  //
+  // Nothing was found; the lexer gave up. The operator was told to rotate a key
+  // and the caller read `1` — breaking the partition this function's own
+  // docstring calls "the whole information content of the exit code", for every
+  // `UNJUDGEABLE_RULE_IDS` member. `splitHygiene` exists precisely because
+  // "reporting a parse failure under a rotation remedy would send an operator
+  // to rotate a key on no evidence".
+  //
+  // ⚠️ A ROW CARRYING BOTH goes to `unjudged` — an unread span is the stronger
+  // statement, and 3 is the honest code — but its sentence still NAMES every
+  // credential rule that fired beside the refusal, so nothing is lost. That is
+  // the same additive rule the arm applies to `jobname-absent` and
+  // `command-unjudgeable`.
+  const dirty = [];
+  const unjudged = [];
+  for (const r of rows) {
+    let v;
+    try {
+      v = CRON_DRIFT_MOD.hygieneViolations(r.jobname, r.command, { functionsDir });
+    } catch (err) {
+      // ⛔ THE THROW CARRIES WHAT IT DID MEASURE. `hygieneViolations` attaches
+      // `partialViolations` when the snapshot refusal fires AFTER other rules
+      // have already found something (see its derivation in the arm). Without
+      // this the credential on the refused row is simply gone from the
+      // operator's screen, which is the substitutive shape this phase keeps
+      // finding.
+      const partial = CRON_DRIFT_MOD.splitHygiene(
+        Array.isArray(err && err.partialViolations) ? err.partialViolations : [],
+      ).credential.map((x) => x.slice(0, x.indexOf("]") + 1));
+      const why = err && err.message ? err.message : String(err);
+      unjudged.push({
+        jobname: r.jobname,
+        reason: partial.length > 0 ? `${why} ⚠️ ${partial.join(" ")} fired BEFORE the refusal, and those findings are REAL.` : why,
+      });
+      continue;
+    }
+    const { credential, unjudgeable } = CRON_DRIFT_MOD.splitHygiene(v);
+    const ids = (list) => list.map((x) => x.slice(0, x.indexOf("]") + 1));
+    if (unjudgeable.length > 0) {
+      unjudged.push({
+        jobname: r.jobname,
+        reason: `${ids(unjudgeable).join(" ")}${credential.length > 0 ? ` — and ${ids(credential).join(" ")} fired BESIDE the refusal on the spans that WERE read` : ""}`,
+      });
+    } else if (credential.length > 0) {
+      dirty.push({ jobname: r.jobname, rules: ids(credential) });
+    }
+  }
+  // ⛔ BOTH LISTS ARE PRINTED, ALWAYS, AND ONLY THE EXIT CODE IS EXCLUSIVE. The
+  // `unjudged` branch used to `return 3` before the `dirty` block ran, so ONE
+  // row nobody could judge hid EVERY credential found on every OTHER row —
+  // a substitutive refusal at the report level, and the same class as CR-R2-01.
+  // The exit code still partitions (3 beats 1: "nothing was measured" is the
+  // stronger statement about this reading), but no finding is withheld to make
+  // that partition.
   if (dirty.length > 0) {
     log(`REFUSED: ${dirty.length} cron.job row(s) fail secret hygiene, so this configuration cannot become the oracle. Nothing was written.`);
     for (const d of dirty) log(`  ${d.jobname}: ${d.rules.join(" ")}`);
     log("Rotate the exposed secret, re-schedule that job onto a vault.decrypted_secrets body, then capture again.");
-    return 1;
+  }
+  if (unjudged.length > 0) {
+    log(
+      `REFUSED: ${unjudged.length} cron.job row(s) could not be JUDGED at all, so this configuration cannot become the oracle. An unjudged row is not a clean one. Nothing was written.`,
+    );
+    for (const u of unjudged) log(`  ${u.jobname}: ${u.reason}`);
+    // 3, not 1: hygiene did not RUN on these rows, so this refusal must stay
+    // distinguishable by exit code from "hygiene ran and found a credential".
+    // ⚠️ When BOTH are non-empty the 3 wins and the rotation remedy above has
+    // ALREADY been printed, so the operator loses nothing by the ordering.
+    return 3;
+  }
+  if (dirty.length > 0) return 1;
+
+  // ⛔ AN UNPARSABLE `jobid` IS REFUSED, NEVER SERIALISED AS `null`
+  // (164.8.5-REVIEW-R1). `Number.parseInt("", 10)` and `parseInt("x", 10)` are
+  // `NaN`, and `JSON.stringify` writes `NaN` as `null` — so an oracle would
+  // have recorded `"jobid": null` for a row whose id could not be read, and the
+  // NEXT reader of that manifest would take the null as the captured truth.
+  // `jobid` is not compared by `compareManifest` (its absence from
+  // COMPARED_ROW_STRINGS is a recorded decision), but it IS printed beside
+  // every drift line so an operator can run `WHERE jobid = …`, which is exactly
+  // the use a null defeats.
+  // ⛔ `/^\d+$/`, NOT `Number.isInteger(parseInt(...))` (164.8.5-REVIEW-R2
+  // IN-R2-02). `Number.parseInt("12abc", 10)` is `12` — parseInt STOPS at the
+  // first non-digit — and `Number.isInteger(12)` is `true`, so a jobid of
+  // `12abc` passed this guard and was captured as `12`. The guard's own
+  // sentence says "a jobid that is not an integer"; it was weaker than it read.
+  // Harmless against a real `int` column, and the point of a totality guard is
+  // that it does not depend on that.
+  const badJobids = rows.filter((r) => !/^\d+$/.test(String(r.jobid).trim()));
+  if (badJobids.length > 0) {
+    log(
+      `REFUSED: ${badJobids.length} cron.job row(s) carry a jobid that is not an integer (${badJobids.map((r) => r.jobname).join(", ")}), which JSON.stringify would have written into the oracle as null. Nothing was written.`,
+    );
+    return 3;
   }
 
   const capturedAt = seams.now().toISOString();
   const jobs = rows
     .map((r) => ({
-      jobid: Number.parseInt(r.jobid, 10),
+      jobid: Number.parseInt(String(r.jobid).trim(), 10),
       jobname: r.jobname,
       schedule: r.schedule,
       active: r.active,
@@ -2615,7 +4488,33 @@ export async function main(argv) {
   return result.exitCode;
 }
 
-if (process.argv[1] && process.argv[1].endsWith("run.mjs")) {
+/**
+ * ⛔ THE REALPATH-SAFE MAIN-MODULE GUARD, ADOPTED FROM `scripts/lint-app-guc.mjs`
+ * (164.8.5-REVIEW-R1 IN-R1-03; pre-existing, introduced in `42868a9b`).
+ *
+ * The guard used to be a FILENAME-SUFFIX test on `process.argv[1]`, whose
+ * failure is the MIRROR of the `[VAC04-C2]` lesson its sibling documents. That
+ * one no-ops on a symlinked or space-bearing path and silently turns the CLI
+ * into a library; this one over-fired — ANY process whose `argv[1]` merely
+ * ended with this file's basename, including a future `scripts/<other>/run.mjs`
+ * that imports this module, would execute this CLI and call `process.exit`.
+ * ⛔ The old form is deliberately NOT quoted here: the wiring test asserts its
+ * ABSENCE from this file, so writing it in prose would red the suite.
+ *
+ * Comparing REAL PATHS answers both: the resolved entry point either is this
+ * file or it is not, however it was spelled. The `catch` keeps a
+ * non-existent-but-resolvable `argv[1]` from throwing at module load.
+ */
+function invokedDirectly() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  }
+}
+
+if (invokedDirectly()) {
   let code = 3;
   try {
     code = await main(process.argv.slice(2));

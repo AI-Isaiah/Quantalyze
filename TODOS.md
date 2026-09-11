@@ -1568,6 +1568,98 @@ true for 146 and half of 142–145, and **false for 141**.
       marker check confirms which DATABASE you are connected to; it says nothing about which
       SERVICE the tick calls. They are different questions and only the first has a guard.
 
+- [ ] **`[164.8.5-MANIFEST-SIDE-LOOP-DEAD]` `compareManifest`'s MANIFEST-side hygiene loop sits
+      BELOW all three early returns, so it is dead on every production run today (booked
+      2026-09-11, found by the round-3 silent-failure hunt).**
+      ⛔ **MEASURED, and the deadness is not hypothetical:** `scripts/prod-prober/cron-manifest.json`
+      declares `normalization: ws-collapse-v1` while the arm computes `ws-collapse-v2`, so the
+      `manifest-invalid` early return fires on every real run and the manifest-side loop is never
+      reached.
+      ```
+      CONTROL: valid manifest      -> manifest-side credential defects: 1
+      normalization ws-collapse-v1 -> 0        schema_version wrong -> 0        marker mismatch -> 0
+      ```
+      ⚠️ **Deliberately NOT graded Critical**, and the reasoning is worth keeping: a credential
+      LIVE IN PROD is still reported on every one of those paths, because decision D1 hoisted the
+      PROD-side loop above every `return`. What this loop uniquely catches is a credential in
+      COMMITTED REPO TEXT that is no longer in PROD — a real class, but repo text, which gitleaks
+      also scans.
+      ⭐ **The coupling is the point, and it is a trap for whoever does the re-capture:** the
+      pending PROD re-capture clears `manifest-invalid`, which SILENTLY RE-ANIMATES this loop.
+      A check that has not run for weeks starts running again as a side effect of an unrelated
+      action. Whoever re-captures should know that before, not after.
+      ⛔ The fix pass's own audit table justified these early returns as "ADDITIVE by construction
+      — D1 hoisted the PROD hygiene loop above every `return`". That is only half true: D1 hoisted
+      the PROD loop; the manifest loop was never hoisted. A recorded justification that is
+      narrower than it reads is exactly the class this phase exists to eliminate.
+      <deferred>Phase 164.5.1 CRONREPOINT (the re-capture) AND Phase 164.8.6 VAULTTICKFIX (the
+      ordering fix)</deferred> — routed 2026-09-11. TWO destinations DELIBERATELY, not a
+      duplicate: 164.5.1 owns the re-capture that silently RE-ANIMATES the loop; 164.8.6 would
+      own moving the loop above `compareManifest`'s early returns so it stops being skippable
+      at all. Whichever lands first must say so in its SUMMARY.
+      **Evidence:** `.planning/phases/164.8.5-proberparse-*/164.8.5-REVIEW-R3.md`.
+
+- [ ] **`[164.8.5-HYGIENE-RESIDUALS]` Five credential shapes the prod-prober's hygiene rules still
+      do not report, each measured and each individually below the bar that blocked the ship
+      (booked 2026-09-11, from three initial reviews + three bounded re-review rounds over
+      Phase 164.8.5).**
+      ⛔ **All five are MEASURED, not hypothetical, and none is a false green on a shape the arm
+      claims to cover** — they are gaps the arm's own docstrings now name honestly, which is the
+      change this phase made. Grouped as ONE entry on purpose: they share a cause (a rule that
+      reads a token must decide what a token IS) and no existing phase thematically owns them.
+      ⚠️ Phase 164.8.4 GATERESIDUE is NOT their home — its goal is scoped to Phase 164.8.2's
+      deferrals "and nothing else".
+      1. **A credential inside a too-deeply-nested `DO` body** reports `["command-unjudgeable"]`
+         alone. Honest — those spans were genuinely never read — but the key is not named.
+      2. **`DETECT_RE`'s concatenation blind spot** and the **`||`-split value OUTSIDE a header
+         region**: a value assembled from short operands is under every length threshold by
+         construction.
+      3. **The A2 alphabetic-token residual** — a long token carrying no digit is exempt, because
+         the digit test is what keeps `'application/json'`-class constants from firing.
+      4. **`MIGRATION_FILENAME_RE`'s body charset is `[a-z0-9_]`**, which is the charset of an
+         `sk_live_`-style key: `-- 20260907130000_<32 hex>.sql` is exempt while the bare token is
+         not. Needs deliberate construction and is comment-only, but the docstring's "the prefix
+         and suffix stop this being a one-step off-switch" reads stronger than it is.
+      5. **`captureManifest`'s malformed / `countMismatch` refusals return 3 before the hygiene
+         loop**, so findings on readable rows go unprinted. Documented as deliberate; recorded
+         because "deliberate" and "known to the next reader" are different things.
+      ⭐ **The honest remedy for 2-4 is a whole-token measure rather than five more exemptions —
+      which is a DECISION about what the arm is for, not a fix.** That is why this is booked
+      rather than patched: each individual narrowing risks the zero-false-positive budget the
+      whole arm depends on (an arm that cries wolf gets switched off), and the budget is the
+      reason the one true positive is still readable.
+      <deferred>Phase 164.8.6 VAULTTICKFIX</deferred> — routed 2026-09-11 by founder decision.
+      ⚠️ THEMATIC MISMATCH, recorded in that phase's Requirements: 164.8.6 is the SQL-migration
+      phase and these are pure JavaScript. Plan them as a separate wave, and do not read the
+      migration's discipline (3 reviewers, TEST before PROD) as applying to them.
+      **Evidence:** `.planning/phases/164.8.5-proberparse-*/164.8.5-REVIEW-R2.md`,
+      `164.8.5-REVIEW-R3.md`, `164.8.5-FIX-R2-SUMMARY.md`.
+
+- [ ] **`[164.8.1-DISPATCH-RECORD-GAP]` A founder-dispatched `workflow_dispatch` leaves its
+      evidence in GitHub Actions and NOTHING in `.planning/`, so a phase's record depends on
+      someone remembering to write it afterwards (booked 2026-09-11, found while closing
+      Phase 164.8.1 plan 04).**
+      ⛔ **MEASURED, not hypothetical.** Plan 04's preflight (run `34329459044`) and restore
+      (run `34330741339`) both completed on `main` at 2026-09-09 08:47:39Z, green, under the
+      held mutex, with the which-database marker printed. No `SUMMARY.md` and no `RESTORE.log`
+      were written. For two days the phase therefore carried three executed plans and a fourth
+      that read as a pending `checkpoint:decision` — and a founder-checkpoint inventory on
+      2026-09-11 duly reported it as awaiting a founder dispatch that had already been made.
+      ⭐ **The defect is the INFERENCE the missing artifact invites:** absence of the artifact
+      read as absence of the action. Same shape as the reconstruction defect
+      `164.7-REVIEWS.md` records. Only reading the two runs' own job logs corrected it.
+      ⚠️ Compounding trap, measured the same session: the Actions runner ECHOES each script
+      line with an ANSI colour prefix, so a naive grep over a job log matches the SOURCE of an
+      `echo` rather than its OUTPUT — the first read mistook the echoed string
+      `mode=restore requires -f confirm=…` for evidence of a run's mode. Filter `\[36;1m`
+      lines out before concluding what a run printed. (`--allow-escape-sequences` is still
+      required at all, per `164.7-06-SUMMARY.md`.)
+      **Remedy shape (not yet decided):** either the workflow itself commits a machine-written
+      run record, or the phase gate refuses to close a plan whose must-haves name a run id
+      that no artifact cites. <deferred>Phase 164.9 TESTISOLATION</deferred>
+      **Evidence:** `.planning/phases/164.8.1-refdata-.../164.8.1-04-RESTORE.log`,
+      `164.8.1-04-SUMMARY.md`.
+
 - [ ] **`[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` The TEST restore's reference-data replay reproduces
       INSERT effects only, so post-seed UPDATEs from LATER migrations are never re-applied while
       the ledger swears they ran (booked 2026-09-09, found by review of Phase 164.8.1's PR).**
@@ -1606,6 +1698,65 @@ true for 146 and half of 142–145, and **false for 141**.
       illusion that something keeps it current. The right fix is a types-regeneration step with a
       freshness gate; until one exists, a declaration for an RPC that has zero `.rpc()` call sites
       is dead weight, not a defect.
+
+- [ ] **`[164.7-MARKER-GREP-VACUOUS]` Plan 07's verify block greps for `which_database` OUTSIDE the
+      ACTIVATED/DEFERRED branch, so on the DEFER path the leg CANNOT FAIL (found by `gsd-verifier`,
+      2026-09-10).**
+      `164.7-07-PLAN.md:149` runs `grep -a -c 'which_database' "$R"` before the `if grep -a -q
+      '^## ACTIVATED'` split. On a DEFER path no PROD statement runs, so no marker OUTPUT can exist —
+      yet the leg still demands the STRING. It passes on the query text alone, and would pass
+      identically for a fabricated record that merely mentions the marker.
+      ⭐ `164.7-ACTIVATION-RECORD.md` discloses this honestly and in bold (*"Do not read this section
+      as evidence that the marker was checked"*), so the RECORD is not misleading. The DEFECT is the
+      CONTROL: a verify leg that cannot fail on the path actually taken is the anti-vacuity class
+      this project ranks above correctness, and disclosure in prose is not a substitute for a gate
+      that bites.
+      **Fix:** move the `which_database` assertion INSIDE the ACTIVATED branch (where a marker output
+      genuinely must exist and can be asserted non-empty), and give the DEFERRED branch its own
+      assertion that no PROD statement was run — e.g. the manifest is byte-identical to `origin/main`,
+      which the branch already checks, plus an explicit `grep -c '^## DEFERRED'` of exactly 1.
+      ⛔ Do NOT "fix" it by deleting the leg; the ACTIVATED path genuinely needs it.
+      Owner: **Phase 164.8.4 GATERESIDUE** (gate-integrity leftovers below the ship bar).
+
+- [ ] **`[164.7-ACTIVATION-DEFERRED]` Phase 164.7 plan 07's PROD activation of the 161.1
+      ledger-refresh switch was DEFERRED 2026-09-10 at its founder gate, on a FAILED pre-flight —
+      criteria 3 and 4 are BLOCKED by an operational fault outside this phase.**
+      **Failed pre-flight:** P3-C (mt5 `compute_jobs` `done` within 3 days).
+      **Measured value:** the newest usable mt5 job is ~2026-09-07 04:0xZ. The MT5 terminal broke at
+      **04:05:08** that day — five minutes AFTER the 04:00Z `poll-allocator-positions` tick and
+      before the 05:00Z `refresh-allocator-equity` tick — and failed identically for three days
+      (`'34043761': authorization on VantageMarkets-Live 14 failed (Invalid account)`). At the
+      decision point the gap was ~3.5 days against a 3-day window.
+      ⚠️ **Both enqueue jobs are DAILY, not hourly** (`0 4 * * *` jobid 15, `0 5 * * *` jobid 17), so
+      no wait inside 2026-09-10 could have closed the gap.
+      ⛔ **Forcing was considered and declined on blast radius:**
+      `enqueue_refresh_allocator_equity_for_all()` / `enqueue_poll_allocator_positions_for_all_keys()`
+      enqueue for EVERY key at EVERY venue — a full cross-venue day-run to produce one mt5 row for a
+      pre-flight. The activation closes a reproducibility gap, not an outage; there is no time
+      pressure that justifies it.
+      **Re-entry condition:** after the 04:00Z and 05:00Z ticks on **2026-09-11**, re-run P3-C from
+      `164.7-ACTIVATION-PREFLIGHT.md` (P0 marker first). MT5 has been authorized again since
+      2026-09-10 ~16:10Z — issue #753 closed, prober run **34500455961** reported `conclusion:
+      success` (its `Open or update the prod-prober issue` step was SKIPPED).
+      ⛔ **CORRECTED 2026-09-11 — the REASON recorded here was wrong, and it has been cited as
+      evidence in a later session.** That step is NOT gated on a `^❌` line. Its `if:` is
+      `failure() && steps.probe.outcome == 'failure' && inputs.arm == ''`
+      (`.github/workflows/prod-prober.yml:353`, measured at this commit), so a SKIP means the probe step did not end in
+      `failure` — which is not the same statement, and on a SCHEDULED run it is a much weaker one,
+      because the POSTURE LINE makes a scheduled probe exit 0 on purpose. Read `conclusion:` on the
+      run, or the runner log's own `❌ N defect(s)` line; never infer "zero defects" from a skipped
+      issue step.
+      ⚠️ **AND UNTIL 2026-09-11 THE PROBE STEP COULD NOT REACH ITS OWN POSTURE LINE.** GitHub runs
+      a `run:` block under `/usr/bin/bash -e {0}`, so the bare `node scripts/prod-prober/run.mjs >
+      "$RUNNER_LOG" 2>&1` terminated the step on any non-zero exit — before the `cat`, before the
+      `^❌` step-summary block and before the `exit 0`. Measured that day: 10 of the last 12
+      SCHEDULED runs `conclusion: failure`, i.e. an hourly red check on main's HEAD. Fixed with
+      `|| status=$?` in both branches. Any earlier reading of this workflow's conclusions predates
+      that fix and should be re-measured rather than trusted.
+      **Nothing was written to PROD.** `scripts/prod-prober/cron-manifest.json` is untouched at 14
+      jobs; `ledger_refresh_fanout` is still absent from it and from PROD.
+      Owner: Phase 164.7 plan 07, re-entered at the same gate. Record:
+      `164.7-ACTIVATION-RECORD.md`.
 
 - [x] **`[164.7-TEST-APPLY-APPSETTINGS]` Two migrations from Phase 164.7 are RED on shared TEST
       from this PR's first CI run onward, BY DESIGN, and must be hand-applied (booked 2026-09-07,
@@ -7721,8 +7872,94 @@ read the result.
 
 - [ ] **[APPGUC-WARNING-UNINSTRUMENTED-01] The ledger fan-out guard's `WARNING` reaches no instrument.** `20260907130000_ledger_refresh_switch_to_system_flags.sql` fails CLOSED and RAISEs a `WARNING` naming why it declined to fan out, which is the right behaviour — but nothing reads PostgreSQL's log for that string. In production the observable difference between "the flag is off, deliberately" and "the flag row is missing / mistyped and we are silently not refreshing" is zero. ⚠️ This is the `pg_net` lesson in a different costume: a green cron history is not evidence the work happened. **Fix:** surface the decline as a counted row (a `system_flags` read-back in the cron manifest capture, or a row the fan-out writes when it declines), not as a log line nobody greps. Owner: whoever takes the next OPS/observability phase.
 
-- [ ] **[VAULTTICK-EMPTYKEY-01] `match_engine_cron_tick()` tests `v_key = ''`, not `btrim(v_key) = ''`.** A vault secret that is pure whitespace passes the guard and is sent as the `Authorization` header, producing a 401 from the analytics service rather than the named `RAISE` the guard exists to give. Narrow blast radius (an operator would have to store whitespace), and the failure is loud downstream, which is why it is booked rather than fixed mid-phase. **Fix:** `btrim(v_key) = ''`, plus an arm in the gate that stores a single space and asserts the function RAISEs by name. ⚠️ Adding that arm moves `ARMS_FLOOR` — separate it in both directions on a real full-corpus lane run before pinning, per the runner's own derivation block.
+- [ ] **[VAULTTICK-EMPTYKEY-01] `match_engine_cron_tick()` tests `v_key = ''`, not `btrim(v_key) = ''`.** A vault secret that is pure whitespace passes the guard and is sent as the `X-Service-Key` header ⛔ (CORRECTED 2026-09-10: this entry said `Authorization`; the callable builds `X-Service-Key` at `match_engine_cron_tick.sql:69`, and the wrong name was copied onward into two Phase 164.7 artifacts before anyone re-read the function), producing a 401 from the analytics service rather than the named `RAISE` the guard exists to give. Narrow blast radius (an operator would have to store whitespace), and the failure is loud downstream, which is why it is booked rather than fixed mid-phase. **Fix:** `btrim(v_key) = ''`, plus an arm in the gate that stores a single space and asserts the function RAISEs by name. ⚠️ Adding that arm moves `ARMS_FLOOR` — separate it in both directions on a real full-corpus lane run before pinning, per the runner's own derivation block.
 
 - [ ] **[164.7-PLAN03-EVIDENCE-01] Plan 03's lane evidence is not re-derivable from the artifacts it left.** The SUMMARY cites a lane result without the workdir, the apply list, or the exit code that would let a later reader reproduce it. Nothing is known to be WRONG — this is a provenance gap, not a contradicted claim. Recorded because "measured" with no re-derivable trace is exactly the shape that let a false stated-reason survive review twice in this milestone (see `[GATE-COMMENT-D2-FALSE]`). **Fix:** when re-touching plan 03's area, re-run the lane and record the invocation verbatim beside the number.
 
 - [ ] **[164.7-CITATION-DRIFT-01] Line-number citations in the 164.7 artifacts drifted by ~4 lines** when the fixer's four new arms landed in `test_analytics_service_settings_and_vault_tick.sql`, and again when the loopback comment was corrected in `20260907120000_...sql`. Prose that cites `file:line` in `.planning/phases/164.7-*` and in this file's neighbours should be read as approximate. ⭐ The durable lesson is the one already recorded for the project CLAUDE.md: **cite by SYMBOL, not by line** — a line cite in a file that is still growing is wrong by the next commit.
+
+## Phase 164.7 (APPSETTINGS) — post-merge `gsd-code-reviewer` deep audit (logged 2026-09-10)
+
+⭐ **The audit's verdict, quoted, because it names the shape rather than the items:** *"the SQL in
+this phase is careful and genuinely fail-closed; the verification code shipped alongside it is not,
+and that inversion is the phase's real defect."* Five Criticals, eleven Warnings, four Info over the
+five files PR #756 shipped. **Six of them were proven by EXECUTION, not argued** — each is
+reproducible from the command quoted in `.planning/phases/164.7-*/164.7-REVIEW.md`.
+
+⛔ **NOTHING WAS CLOSED IN-PHASE. A repair was written on 2026-09-10 and REVERTED THE SAME DAY.**
+This paragraph previously read "CLOSED IN-PHASE … CR-01, CR-02, CR-03(a), CR-04 and WR-11". That
+claim is false and is kept visible rather than deleted, because the reason it was false is the
+lesson.
+
+Commit `84b21cb5` repaired CR-01/02/03a/04 and WR-11 in
+`scripts/prod-prober/arms/cron-drift.mjs`. Five specialists then reviewed **the repair** and it was
+**a measured net regression**:
+
+- **It SUPPRESSED credential detection.** The PROD-side hygiene loop sat below every
+  oracle-validation `return`, and the repair added four new early returns above it. MEASURED: with a
+  PROD command carrying an inline JWT, appending ` -- tidy` to the manifest's copy of that command
+  collapsed the result to `manifest-invalid` and the `cron-secret-in-command` defect VANISHED for
+  all 14 jobs. That is the arm's own adversary — someone hand-cleaning the committed text — being
+  handed an off switch. Before the repair the key was caught; after it, it was not.
+- **Five of its six new controls COULD NOT FAIL.** Neuter-proved individually: only the `username`
+  comparison turned the self-test red. `database`, the marker check, the sha binding, the `active`
+  validator and the comment-strip were each individually removable at exit 0 — and all three of the
+  sha binding, marker check and comment-strip disabled SIMULTANEOUSLY still printed `53/53 PASSED`.
+- **CR-03's fix was vacuous AND harmful.** `stripSqlComments` removed comments but not STRING
+  LITERALS, so `RAISE NOTICE 'reads vault.decrypted_secrets'` satisfied it (measured: all ten rules
+  clean on a command inlining a live key); and because a PROD command is ONE PHYSICAL LINE, a `--`
+  inside a literal deleted the remainder and raised a FALSE `vault-absent` that then withheld the
+  drift diff.
+
+⭐ **The lesson, and the reason this is recorded rather than quietly re-done:** the repair committed
+the exact defect class it was repairing, in the commit that claimed to fix it — and the batch
+neuter used to "prove" it (both `username` and `database` disabled together) could not distinguish
+which arm produced the RED. **A batch neuter proves nothing about the individual arms.**
+
+`scripts/` and `src/` on this branch are now byte-identical to `origin/main`. **CR-01 through CR-05,
+WR-01/02/11 and SR-01..SR-09 are ALL OPEN**, with the full measured evidence and a prescribed fix
+per finding in `.planning/phases/164.7-*/164.7-REVIEW.md`. Owner: **Phase 164.8.5 PROBERPARSE**
+(prober/parser) and **Phase 164.8.6 VAULTTICKFIX** (the forward migration).
+
+- [ ] **[164.7-REPAIR-REVERTED] The five prober repairs must be re-done WITH A RED CONTROL EACH.** CR-01 (`username`/`database` uncompared), CR-02 (live marker read then discarded), CR-04 (`Boolean(undefined)` agrees with a deactivated PROD job) and WR-11 (`command` unbound from its `command_sha256`) are all still live defects — the repair was correct in substance and wrong in structure and in evidence. **Fix, in this order:** (1) hoist the PROD-side hygiene loop to the TOP of `compareManifest`, above every `return`, so no oracle state can silence credential detection — this also closes `[164.7-WR04-HYGIENE-BELOW-ORACLE]`; (2) re-apply the four repairs; (3) ship a red fixture for EACH, neuter-proved INDIVIDUALLY (`prod-database-changed.json`, `manifest-sha-mismatch.json`, a marker-mismatch scenario asserting the PROD credential scan STILL fires, and direct `compareManifest` unit tests for the four row validators); (4) make `opts.liveMarker` MANDATORY — an absent marker must be a `measure-fail`, not a silent pass. ⛔ Do NOT re-apply CR-03's comment-strip; it is in `[164.7-CR03-HYGIENE-BYPASS]` and needs a quote-aware masker, not a strip. Also fix: the dead `changed.includes("jobid")` headline branch, `run.mjs`'s half-updated "SEVEN … is not six" comment, and the overstated claim that jobid changes on any reschedule (`cron.schedule` UPSERTS on `(jobname, username)` and PRESERVES the jobid). **Owner: Phase 164.8.5 PROBERPARSE.**
+
+The entries below are the findings that were never attempted.
+
+- [ ] **[164.7-CR03-HYGIENE-BYPASS] The ten hygiene rules still return ZERO violations on a command that inlines a live service key, if the key is split.** Parts (b) and (c) of CR-03 are open; only the comment-strip half landed. (b) `headerCarriesLiteral` inspects only the FIRST quoted literal after the header name and fires at `content.length >= 16`, so `'sk_live_' || 'AAAABBBBCCCCDDDDEEEE'` presents an 8-character first literal, and both fragments sit under `HEADERS_LITERAL_MAX = 32` so `long-literal-in-headers` misses them too. (c) the literal scanner has **no dollar-quote awareness** although this file's own comment says `cron.job.command` is *"frequently a multi-line `DO $$ … $$` block"* — a lone apostrophe inside `$q$don't$q$` desyncs `singleQuotedLiterals` and flips `long-literal-in-headers` from RED to CLEAN. ⛔ This is the arm's reason for existing: PROD jobid 1 carried an inline service key for MONTHS. **Fix:** sum every literal in the `||` chain up to the next depth-0 comma and compare the SUM to `HEADER_LITERAL_MIN`; teach the scanner to skip `$tag$ … $tag$` regions wholesale; ship a red fixture for each of the three shapes. ⛔ Do NOT lower `HEADER_LITERAL_MIN` — the docstring correctly explains why the threshold exists, and lowering it fires on the green Vault-backed shape. ⭐ **THE BYPASS FAMILY IS NINE MEMBERS, ALL MEASURED 2026-09-10 — inherit this, do not re-derive it.** Each returns ZERO violations from all ten rules: (a) **dollar-quoted header value** — `jsonb_build_object('X-Service-Key',$q$sk_live_…$q$)`, a one-token bypass needing no splitting at all; (b) `chr(115)||chr(107)||…` — zero literals; (c) `concat('sk_live_','AAAABBBB','CCCCDDDD')`; (d) `format('%s%s',…)`; (e) `convert_from(decode('…','base64'),'utf8')||…`; (f) `U&'\0073\006b'||…` unicode escapes; (g) `quote_literal('sk_live_…')||'…'`; (h) ⚠️ **variable indirection** — `k := '<key>'` then `jsonb_build_object('X-Service-Key', k)`; (i) ⚠️ **whole-header indirection** — `h := '{"X-Service-Key":"<key>"}'::jsonb; … headers := h`, where the key is DOUBLE-quoted JSON so the `'X-Service-Key'\s*,\s*'` anchor never matches. ⛔ **(h) and (i) need no obfuscation — they are what a normal developer writes**, and outside `match_engine_cron` nothing looks for a long literal at all, because `long-literal-in-headers` is scoped to header regions only. Header-name CASING is not a bypass (the regex carries `gi`) and splitting the NAME is not one either. **Fix the families, not the cases:** teach the literal scanner about `$tag$…$tag$` (nested tags included), `E''` and `U&''`; length-test the DERIVED value by summing operands joined by `||` or passed to `concat`/`format`/`chr`/`decode`; and add a rule that fires on a long literal ANYWHERE in the command with the vault-read shape as its only exemption — that last one is the only thing that catches (h). **Owner: Phase 164.8.5 PROBERPARSE.**
+
+⛔ **RULE COLLISION — 164.8.5 and 164.5.1 both rewrite `vault-absent`, in OPPOSITE directions. Whoever plans either one must read this first.**
+- **164.5.1 needs it to ACCEPT more.** It repoints PROD's jobid 1 at `SELECT public.match_engine_cron_tick();`. That command contains NO reference to `vault.decrypted_secrets` at all — the callable reads Vault *inside its own body* — so today's rule fires `vault-absent`, `captureManifest` REFUSES and 164.5.1's criterion 2 cannot be met (`[164.7-VAULT-ABSENT-RULE]`).
+- **164.8.5 needs it to REJECT more.** A command naming the table only in a `--` comment or a string literal must stop satisfying it (`[164.7-CR03-HYGIENE-BYPASS]`).
+⭐ **ONE rule satisfies both, and neither phase can reach it alone:** the test is not "does the text contain the string" but **"does this command reach a Vault read that actually executes"** — an executable read shape (`FROM`/`JOIN vault.decrypted_secrets` on quote- and dollar-quote-MASKED text), **OR** a call to a function whose committed body contains one. The second arm is what admits `match_engine_cron_tick()`, and it needs a resolvable set of Vault-reading callables (`supabase/schema/functions/` is the source).
+⚠️ **Ordering:** 164.8.5 owns the rule REDESIGN and must land first; 164.5.1 then consumes it and repoints. Widening the rule first leaves no broken window — repointing first does. ⛔ Do NOT let 164.5.1 hand-widen the rule to unblock itself; that reopens the bypass 164.8.5 exists to close.
+
+- [ ] **[164.7-WR04-HYGIENE-BELOW-ORACLE] An unreadable or invalid oracle disables the live credential scan entirely.** `run()` returns as soon as the manifest cannot be read — before the `cron.job` query is issued — and `compareManifest`'s `invalid()` returns above the `prodHygiene` loop. So a bumped `schema_version` or one malformed row means the arm never asks whether a live cron command carries a credential. The file header claims the opposite as a design property: hygiene runs *"on BOTH sides of the comparison … EVEN WHEN ITS SHA MATCHES THE MANIFEST."* It is presented as independent of the comparison and implemented as downstream of it. Not silent (`manifest-invalid` is loud) but it MASKS a higher-severity finding behind a lower-severity one. **Fix:** read `cron.job` and scan it for credentials FIRST, then validate the oracle. **Owner: Phase 164.8.5 PROBERPARSE.**
+
+- [ ] **[164.7-WR05-PARSER-DROPS-ROWS] `parseCronJobRows` silently drops any record with fewer than seven fields** (`if (f.length < 7) continue;`). This is the one path in the arm where a PROD cron row disappears with **no** `measure-fail`, in a file whose whole discipline is that "could not measure" must never share a code path with "measured zero". A dropped row surfaces indirectly as "job missing from PROD" *if* it is in the manifest — but an EXTRA, unreviewed PROD job that the parser drops vanishes with no trace, which is exactly the case the extra-job arm exists to catch. **Fix:** collect malformed records and raise a `measure-fail` naming the count. A row the parser could not read is NOT a row that is not there. **Owner: Phase 164.8.5 PROBERPARSE.**
+
+- [ ] **[164.7-CR05-VACUOUS-MIGRATION-CHECK] Migration `20260907120000`'s check 6 CANNOT FAIL.** It asserts `v_fn !~ 'analytics_service_url'`, but that string occurs three times in the comment-stripped function body, two of them inside `RAISE EXCEPTION` message text. Delete the settings read entirely, keep the error messages, and the check still passes. ⭐ The sibling migration `20260907130000:766` gets this right, so the correct idiom is already in the repo one file away. **Fix:** a forward migration re-running a corrected verification block that excludes `RAISE` text before matching. **Owner: Phase 164.8.6 VAULTTICKFIX.**
+
+- [ ] **[164.7-WR01-VAULT-NOT-STRICT] The Vault read in `match_engine_cron_tick()` is not single-row-safe.** `SELECT decrypted_secret INTO v_key FROM vault.decrypted_secrets WHERE name = …` carries no `STRICT` and no cardinality check, so a duplicate secret name silently selects an arbitrary row and posts whichever key it got. Sits on the SAME lines as `[VAULTTICK-EMPTYKEY-01]` and must be repaired in the same forward migration. **Owner: Phase 164.8.6 VAULTTICKFIX.**
+
+- [ ] **[164.7-WR02-SERVICE-ROLE-EXECUTE] `service_role` keeps EXECUTE on all three SECURITY DEFINER functions,** and both migrations' verification blocks stop at `anon`/`authenticated` — so the grant they do not check is the one that remains. **Fix:** REVOKE where not needed and extend both verification blocks to assert the full grantee set, not a two-name subset. **Owner: Phase 164.8.6 VAULTTICKFIX.**
+
+- [ ] **[164.7-MIGRATION-COMMENT-DRIFT] `20260907130000` carries two contradictory VAC-04 acknowledgement blocks** — the second says the pragma is absent while the first *is* the pragma — and `20260907130000`'s comment-strip false-pass analysis is inverted for its own check 6 (WR-03 + WR-08). Comment-only, on APPLIED migrations. ⚠️ Blocked on the same open question as 164.5.1's criterion 6: *does a comment-only edit to an applied migration change what the CLI plans?* No such reading has ever been taken (recorded as PATTERNS TRAP A in `164.7-06-SUMMARY.md`). **Take that reading before editing either file.** **Owner: Phase 164.8.6 VAULTTICKFIX.**
+
+- [ ] **[164.7-APPGUC-SUCCESSOR-VACUOUS] `lint-app-guc`'s successor check is satisfied by any readable file, of any type, anywhere reachable by relative traversal** (WR-06), and `DETECT_RE` misses FOUR spellings rather than the one already booked as `[APPGUC-DETECT-DOUBLEQUOTE-01]` (WR-07 — three of them unbooked). Both are latent: the corpus is at 0 findings and 5 annotated files today. **Owner: Phase 164.8.5 PROBERPARSE.**
+
+- [ ] **[164.7-DORMANCY-UNINSTRUMENTED] Two of the three dormancy causes never reach even a WARNING** — the fan-outs cannot tell "closed by design" from "invisible to the definer" (WR-10). Same shape as the already-booked `[APPGUC-WARNING-UNINSTRUMENTED-01]` and should be closed with it, by the same instrument. **Owner: whoever takes `[APPGUC-WARNING-UNINSTRUMENTED-01]`.**
+
+- [ ] **[164.7-REVIEW-INFO-FOUR] The four Info findings, kept together because none is worth a phase alone.** IN-01 `--files` mode disables allowlist enforcement, leaving the self-exemption threat open in that mode; IN-02 `sqlFilesUnder` silently skips symlinked directories and is case-sensitive on `.sql`; IN-03 `parseLineageHeader` accepts the first marker and ignores any later one; IN-04 the `pg-password` rule misses the assignment forms that actually appear in plpgsql. **Owner: Phase 164.8.5 PROBERPARSE**, as a single sweep.
+
+⚠️ **WR-09 is NOT booked here.** Both of this phase's migrations are unbooked instances of
+`[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`, which already exists and is already routed to **Phase
+164.9 TESTISOLATION**. A second id for the same defect would split its evidence.
+
+⭐ **One reviewer recommendation was DECLINED, and it is recorded rather than quietly skipped.**
+CR-01 also asked for `jobid` to be compared. It is not, and the code says why at the comparison:
+`jobid` is pg_cron's surrogate key, it carries no configuration meaning, it changes on any
+legitimate unschedule/reschedule, and every field it could stand proxy for is already compared
+beside it. MEASURED 2026-09-10: comparing it made `prod-duplicate-jobname.json` report TWO
+cron-drift defects — the duplicate, and a jobid change that is merely that duplicate's consequence
+— which would have cost an existing isolation control to accommodate. Weakening a control to admit
+a redundant one is the wrong trade.
