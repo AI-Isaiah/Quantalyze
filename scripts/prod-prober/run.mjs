@@ -1795,18 +1795,30 @@ export async function selfTest() {
     // above, asserted for the opposite thing, so that one neuter reddens one
     // of them and never both.
     const prod = loadFixture("cron-drift", "prod-inline-key.json");
-    if (!prod.ok) {
-      pass = expect(false, prod.reason) && pass;
+    const man = loadFixture("cron-drift", "manifest-sha-mismatch.json");
+    if (!prod.ok || !man.ok) {
+      pass = expect(false, prod.ok ? man.reason : prod.reason) && pass;
     } else {
+      // ⛔ ONE ASSERTION, ON PURPOSE (D3). Asserting the `manifest-invalid`
+      // HERE as well would make this scenario a SECOND observer of the WR-11
+      // binding, so neutering that binding would redden two scenarios and one
+      // RED would be credited to two controls. MEASURED while building this
+      // plan's matrix: with that extra assertion present, row 7 reddened this
+      // scenario too. The precondition below keeps the scenario honest about
+      // WHICH state it is driving without reading the control's verdict — it
+      // hashes the fixture itself, so it survives any neuter of the binding
+      // and fails only if the fixture stops being hand-edited.
+      const manRow = man.data.jobs.find((j) => j.jobname === "match_engine_cron");
+      const derived = CRON_DRIFT_MOD.sha256Hex(CRON_DRIFT_MOD.normalizeCommand(manRow.command));
       const r = await driftRun(prod.data, driftFixturePath("manifest-sha-mismatch.json"), quiet);
       pass =
         expect(
-          r.defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:match_engine_cron"),
-          "AND the PROD credential is STILL reported — a HAND-EDITED oracle is not an off switch either, which is the exact regression that reverted the first repair",
+          derived !== manRow.command_sha256,
+          `PRECONDITION: the oracle really is HAND-EDITED (${derived.slice(0, 12)} vs ${String(manRow.command_sha256).slice(0, 12)}) — against a bound oracle this would be the ordinary path, not the fourth broken state`,
         ) &&
         expect(
-          r.defects.some((d) => d.kind === "manifest-invalid"),
-          "in the same run that refuses the oracle — both findings ride out together, they are not alternatives",
+          r.defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:match_engine_cron"),
+          "AND the PROD credential is STILL reported — a HAND-EDITED oracle is not an off switch either, which is the exact regression that reverted the first repair",
         ) &&
         pass;
     }
