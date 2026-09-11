@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.77.33.1] - 2026-09-11 — two red gates nobody had run locally, and what each one was really saying
+
+Ship-time repair of PR #774. Both gates were red on CI at head `e7c57d7c` while every local
+reading reported green, for the same underlying reason in two different disguises: **the gate that
+was red was never the gate that was run.** `npm run lint` is eslint plus three manifest checks;
+`tsc --noEmit` is a SEPARATE script (`npm run typecheck`) and was not executed once during the
+phase. `gitleaks` was run as `detect --no-git` over the working tree, while CI scans PRs with
+`fetch-depth: 0` over the full commit history.
+
+### Fixed
+
+- **`npm run typecheck`: 7 errors → 0**, and the root cause was one class, not seven bugs.
+  `scripts/prod-prober/arms/cron-drift.mjs` is JSDoc-typed, and `parseCronJobRows` declared
+  `@returns {{rows: Array<object>, …}}` — so every assertion 164.8.5 added that reads a field off a
+  parsed row (`rows[0].jobname`, four sites) was TS2339 against a shape the parser knows exactly.
+  Replaced `Array<object>` with a named `CronJobRow` typedef naming all seven fields, `active` as
+  the one field narrowed on the way in, and `total` as DELIBERATELY absent (it is a `count(*) OVER ()`
+  reading about the query, not job state).
+- **`hygieneVerdict`'s JSDoc was attached to the wrong symbol** — the `@param` block documenting its
+  Map sat above `UNRECORDED_VERDICT`, leaving the function's own parameters untyped. Moved, and
+  given a `@returns`.
+- Three test-side annotations that narrowed *wronger than the source*: a `new Map<string, typeof clean>`
+  inferring `violations: never[]`, `compareManifest`'s first parameter typed `unknown` where the
+  contract says `object | null`, and a defect's `subject` cast to `string` where the source promises
+  `string | null`.
+- ⭐ **Removing that last cast surfaced a real latent defect the cast had been hiding.**
+  `d.subject.endsWith(SUBJECT_JOB)` would have thrown a TypeError rather than reported, because a
+  `measure-fail` defect may legitimately carry `subject: null`. Now `d.subject?.endsWith(…) === true`
+  — a null subject names no job.
+
+### Security
+
+- **`gitleaks` (8.30.1): 5 findings → 0, without weakening the gate.** `generic-api-key` fires on
+  164.8.5's SPLIT-literal fixtures — `'FAKE-key-' || '0123456789ab'`, `concat(…)`, `format(…)` —
+  extracting the bare tail as the secret at entropy 3.585. Measured 2026-09-11: the split form is
+  reported while the same key written whole is not. A fixture proving the arm catches a split
+  credential cannot avoid looking like one.
+- ⛔ **Lowering fixture entropy was tried first (RESEARCH Q4's preference) and does not close it.**
+  Three of the five reported sites exist only in ALREADY-COMMITTED history, and PRs are scanned at
+  `fetch-depth: 0`, so no working-tree edit can clear them. Suppression had to be stated.
+- Added a rule-scoped `[[allowlists]]` block — `targetRules = ["generic-api-key"]`,
+  `paths = scripts/prod-prober/`, `regexTarget = "match"`, `regexes = ['FAKE-key-']`. `regexTarget`
+  is load-bearing HERE and nowhere else in the file: the finding's SECRET is the bare hex tail and
+  carries no marker, so keying on it would suppress any 12-hex token in that directory; the MATCH
+  carries `FAKE-key-`, the same way `SENTINEL-KEY-` and `pyapi06-` key the 164.1 block. Kept as a
+  SEPARATE block so the 164.1 block's guard arm keeps measuring what it measures.
+
+### Tests
+
+- New guard arm in `src/__tests__/gitleaks-allowlist.test.ts` pinning that the new suppression is
+  keyed on the MARKER, not the directory: an UNMARKED split credential (`'live-key-' || '8f3a1c7e9b24'`)
+  planted in the same directory must still be reported.
+- **Both directions measured, and the arm was proven able to fail.** Neutering the block to `paths`
+  alone (the exemption its own comment forbids) turns BOTH scanner-behaviour arms RED — the new one
+  by its named message — and the restore is byte-identical. A planted real credential
+  (`xQ7vR2mN8pL4wZ6tY1cB9jH3kF5sD0gA`) under `scripts/prod-prober/` is still caught.
+
+### Notes
+
+- `scripts/prod-prober/arms/cron-drift.mjs` changed in COMMENTS ONLY. No runtime behaviour moved:
+  self-test holds at 78/78 scenarios, `lint-app-guc` at 0 findings, `lint-sql-gates` at 7 rules.
+- ⚠️ **The process defect worth carrying forward:** every "gates green" report in this phase covered
+  `lint`, the self-tests and vitest, and silently excluded `typecheck`. A gate that is never run
+  cannot go red, which is the same anti-vacuity failure this phase spent three review rounds on —
+  here applied to the gate set itself rather than to a control inside it.
+
 ## [0.77.33.0] - 2026-09-11 — the hygiene rules stop being dodgeable, and three fixes proved the class they were written against
 
 Phase 164.8.5 PROBERPARSE. Seven plans, then three initial reviews and **three bounded

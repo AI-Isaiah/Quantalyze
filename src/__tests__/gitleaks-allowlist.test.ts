@@ -399,6 +399,56 @@ describe(".gitleaks.toml — real scanner behavior (H-0017)", () => {
     60_000,
   );
 
+  it.skipIf(!HAS_GITLEAKS)(
+    "Phase 164.8.5: the SPLIT-literal fixture shape is suppressed, and its suppression is keyed on the MARKER, not the directory",
+    () => {
+      // 164.8.5 made the hygiene rules length-test the DERIVED value, so its
+      // red fixtures spell a key out in pieces. That shape IS the
+      // `<keyword><delimiter><secret>` form generic-api-key looks for —
+      // MEASURED 2026-09-11: the split form is reported (secret
+      // `0123456789ab`, entropy 3.585) while the same key written whole is
+      // not. The 164.8.5 allowlist block suppresses it via
+      // `regexTarget = "match"` on `FAKE-key-`, because the finding's SECRET
+      // is the bare tail and carries no marker of its own.
+      //
+      // ⛔ THIS ARM EXISTS TO PROVE THE SUPPRESSION IS NARROW. Widening the
+      // block to `paths` alone, or keying it on the bare tail, makes the
+      // `leaky.json` assertion below RED — which is the whole point: a
+      // suppression nobody can prove is scoped is the defect, not the fix.
+      const scratch = mkdtempSync(join(tmpdir(), "gitleaks-prober-split-"));
+      const proberDir = join(scratch, "scripts", "prod-prober");
+      mkdirSync(join(proberDir, "fixtures", "cron-drift"), { recursive: true });
+
+      // Allowlisted BY MARKER: the three split spellings 164.8.5 ships.
+      writeFileSync(
+        join(proberDir, "fixtures", "cron-drift", "hygiene-red.json"),
+        '{ "a": "jsonb_build_object(\'X-Service-Key\', \'FAKE-key-\' || \'0123456789ab\')",\n' +
+          '  "b": "jsonb_build_object(\'X-Service-Key\', concat(\'FAKE-key-\',\'0123456789ab\'))",\n' +
+          '  "c": "jsonb_build_object(\'X-Service-Key\', format(\'%s%s\',\'FAKE-key-\',\'0123456789ab\'))" }\n',
+      );
+      // NOT allowlisted: the SAME split shape in the SAME directory, without
+      // the `FAKE-key-` marker. If this were suppressed, the block would be
+      // keying on the directory or on the tail rather than on the marker.
+      writeFileSync(
+        join(proberDir, "leaky.json"),
+        '{ "a": "jsonb_build_object(\'X-Service-Key\', \'live-key-\' || \'8f3a1c7e9b24\')" }\n',
+      );
+
+      const findings = runGitleaks(scratch);
+
+      // THE LOAD-BEARING ASSERTION.
+      expect(
+        findings.filter((f) => f.File.endsWith("leaky.json")).length,
+        "an UNMARKED split credential in the same directory must still be reported",
+      ).toBeGreaterThan(0);
+      expect(
+        findings.filter((f) => f.File.endsWith("hygiene-red.json")),
+        "the marked 164.8.5 fixture spellings are quiet",
+      ).toEqual([]);
+    },
+    60_000,
+  );
+
   it.skipIf(HAS_GITLEAKS)(
     "advertises skip reason when the gitleaks binary is unavailable",
     () => {

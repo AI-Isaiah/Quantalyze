@@ -1449,10 +1449,11 @@ describe("[164.1-05] kinds and floors", () => {
 
     // CALIBRATION: a RECORDED verdict is returned unchanged, so "unjudged" is a
     // reading about absence rather than something this helper always says.
-    const clean = { judged: true, violations: [], reason: null };
-    const dirty = { judged: true, violations: ["[x-service-key-literal] …"], reason: null };
-    const refused = { judged: false, violations: [], reason: "the functions snapshot is absent" };
-    const map = new Map<string, typeof clean>([
+    type Verdict = { judged: boolean; violations: string[]; reason: string | null };
+    const clean: Verdict = { judged: true, violations: [], reason: null };
+    const dirty: Verdict = { judged: true, violations: ["[x-service-key-literal] …"], reason: null };
+    const refused: Verdict = { judged: false, violations: [], reason: "the functions snapshot is absent" };
+    const map = new Map<string, Verdict>([
       ["clean_job", clean],
       ["dirty_job", dirty],
       ["refused_job", refused],
@@ -1816,7 +1817,7 @@ describe("[164.8.5-02] compareManifest totality (CR-04)", () => {
     return copy;
   };
 
-  const invalidsFor = (manifest: unknown) =>
+  const invalidsFor = (manifest: object | null) =>
     compareManifest(manifest, PROD_OK, { liveMarker: MANIFEST.database_marker }).defects.filter(
       (d: { kind: string }) => d.kind === "manifest-invalid",
     );
@@ -1876,9 +1877,9 @@ describe("[164.8.5-02] compareManifest totality (CR-04)", () => {
     if (!row) throw new Error(`fixture drift: prod-ok.json has no ${SUBJECT_JOB}`);
     row.command = command;
     const r = compareManifest(MANIFEST, rows, { liveMarker: MANIFEST.database_marker });
-    const drifts = r.defects.filter((d: { kind: string; subject: string }) => d.kind === "cron-drift" && d.subject === SUBJECT_JOB);
+    const drifts = r.defects.filter((d) => d.kind === "cron-drift" && d.subject === SUBJECT_JOB);
     expect(drifts.length, "PRECONDITION: the row must DRIFT or the withholding branch is never reached").toBe(1);
-    return { detail: String(drifts[0].detail), all: r.defects as { kind: string; subject: string }[], lines: r.lines as string[] };
+    return { detail: String(drifts[0].detail), all: r.defects, lines: r.lines };
   };
 
   it("WR-R2-03 arm 1 — ONE side UNJUDGED withholds the text (`!judged`, with the other side judged and clean)", () => {
@@ -1912,7 +1913,7 @@ describe("[164.8.5-02] compareManifest totality (CR-04)", () => {
     expect(hygieneViolations(SUBJECT_JOB, LEAKY).length, "PRECONDITION: the replacement command is judged AND dirty").toBeGreaterThan(0);
     const { detail, all, lines } = driftDetailWithProdCommand(LEAKY);
     expect(
-      all.some((d) => d.kind === "measure-fail" && d.subject.endsWith(SUBJECT_JOB)),
+      all.some((d) => d.kind === "measure-fail" && d.subject?.endsWith(SUBJECT_JOB) === true),
       "PRECONDITION: NEITHER side is unjudged, so the `!judged` arm cannot be the reason below",
     ).toBe(false);
     expect(detail).toContain("command text withheld");

@@ -261,3 +261,38 @@ regexes = [
   '''SENTINEL-KEY-[0-9a-f]{4,}''',
   '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkZBS0UifQ''',
 ]
+
+[[allowlists]]
+description = """
+Phase 164.8.5 prod-prober: the SPLIT-literal hygiene fixtures. 164.8.5 made the
+cron-drift rules length-test the DERIVED value, so its red fixtures spell a key
+out in pieces — `'FAKE-key-' || '0123456789ab'`, `concat('FAKE-key-','…')`,
+`format('%s%s','FAKE-key-','…')`. That shape is, by construction, the exact
+`<keyword><delimiter><secret>` form `generic-api-key` looks for: MEASURED
+2026-09-11 with gitleaks 8.30.1, the split form is reported (secret
+`0123456789ab`, entropy 3.585) while the SAME key written whole
+(`'FAKE-key-0123456789ab'`) is not. A fixture proving the arm catches a split
+credential cannot avoid looking like a split credential.
+
+⛔ THIS IS WHY LOWERING FIXTURE ENTROPY DOES NOT CLOSE IT, though it was tried
+first per RESEARCH Q4. Three of the five reported sites
+(`fixtures/cron-drift/hygiene-red.json:60,65,70`) exist only in ALREADY-COMMITTED
+history; PRs are scanned with `fetch-depth: 0`, so no edit to the working tree
+can clear them. Suppression has to be stated, not rewritten.
+
+⭐ `regexTarget = "match"` is load-bearing HERE and nowhere else in this file.
+The finding's SECRET is the bare tail `0123456789ab`, which carries no marker of
+its own — keying on it would suppress any 12-hex token in this directory. The
+MATCH carries the `FAKE-key-` marker, so that is what this keys on, the same way
+`SENTINEL-KEY-` and `pyapi06-` key the block above.
+
+NOT a path exemption, and separate from that block so its guard arm keeps
+measuring what it measures: a real credential under `scripts/prod-prober/` does
+not contain `FAKE-key-` and is still reported. MEASURED both directions
+2026-09-11.
+"""
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''(^|/)scripts/prod-prober/''']
+regexes = ['''FAKE-key-''']

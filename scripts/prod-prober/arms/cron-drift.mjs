@@ -1779,8 +1779,6 @@ const UNJUDGEABLE_RULE_IDS = ["header-unparseable", "command-unjudgeable", "jobn
  * `src/__tests__/prod-prober-wiring.test.ts` calls it with an EMPTY map, so the
  * contract a future third producer inherits has a red surface of its own.
  *
- * @param {Map<string, {judged: boolean, violations: string[], reason: string|null}>} map
- * @param {string} jobname
  */
 export const UNRECORDED_VERDICT = Object.freeze({
   judged: false,
@@ -1788,6 +1786,11 @@ export const UNRECORDED_VERDICT = Object.freeze({
   reason: "no hygiene verdict was recorded for this row at all",
 });
 
+/**
+ * @param {Map<string, {judged: boolean, violations: string[], reason: string|null}>} map
+ * @param {string} jobname
+ * @returns {{judged: boolean, violations: string[], reason: string|null}}
+ */
 export const hygieneVerdict = (map, jobname) => map.get(jobname) ?? UNRECORDED_VERDICT;
 
 /**
@@ -1923,7 +1926,22 @@ export function splitHygiene(violations) {
  * one. A guard that cannot fail is worse than no guard, because it reads as
  * coverage.
  *
- * @returns {{rows: Array<object>, malformed: Array<{index:number, fields:number}>, total: number|null, countMismatch: string|null}}
+ * @typedef {object} CronJobRow
+ * @property {string} jobid
+ * @property {string} jobname
+ * @property {string} schedule
+ * @property {boolean} active   `active` is the only field narrowed on the way in (`=== "t"`).
+ * @property {string} database
+ * @property {string} username
+ * @property {string} command   ⚠️ NOT trimmed — see the note at the push site.
+ *
+ * ⛔ `total` is DELIBERATELY ABSENT from the row. It is a `count(*) OVER ()`
+ * column about the READING, not a property of any one job, and it is returned
+ * out-of-band as `total` so no consumer can mistake it for job state.
+ */
+
+/**
+ * @returns {{rows: CronJobRow[], malformed: Array<{index:number, fields:number}>, total: number|null, countMismatch: string|null}}
  *          `malformed` carries the record INDEX and its FIELD COUNT and never
  *          the record TEXT — that text is exactly what may hold the credential
  *          this arm exists to find, and every detail it produces is world-readable.
