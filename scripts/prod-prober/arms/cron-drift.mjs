@@ -122,7 +122,13 @@ export const CRON_JOB_SQL = `SELECT jobid, jobname, schedule, active, database, 
  * arm that mis-parses PROD is worse than one that does not run.
  *
  * ASCII 0x1F (unit separator) and 0x1E (record separator) exist for exactly
- * this and cannot occur in SQL source text.
+ * this and are vanishingly rare in SQL source text.
+ *
+ * ⛔ CORRECTED: this docstring used to claim they "cannot occur in SQL source
+ * text". They can. `E'\x1e'` is a legal literal, and a control byte can be
+ * pasted into a command directly; either produces a record this parser splits
+ * in two. That is precisely why `parseCronJobRows` COUNTS a short record and
+ * both callers refuse on it, rather than trusting the separator to be unique.
  */
 export const CRON_JOB_SEPARATORS = { fieldSep: "\u001f", recordSep: "\u001e" };
 
@@ -388,14 +394,38 @@ export function hygieneViolations(jobname, command) {
 // Parsing
 // ---------------------------------------------------------------------------
 
-/** Parse psql `-At -F <US> -R <RS>` output into `cron.job` row objects. */
+/**
+ * Parse psql `-At -F <US> -R <RS>` output into `cron.job` row objects.
+ *
+ * ⛔ A ROW THE PARSER COULD NOT READ IS NOT A ROW THAT IS NOT THERE. A record
+ * with fewer than seven fields used to be `continue`d away, so a `cron.job`
+ * command containing a record separator (see `CRON_JOB_SEPARATORS`) removed
+ * itself from every judgement this arm makes — including the credential scan —
+ * and the run still read green. Such a record is COUNTED here and answered with
+ * a `measure-fail` by both callers.
+ *
+ * The EMPTY-record skip is different and is CORRECT: psql prints the record
+ * separator AFTER every record, last one included, so the trailing empty string
+ * is an artefact of the format rather than a row.
+ *
+ * @returns {{rows: Array<object>, malformed: Array<{index:number, fields:number}>}}
+ *          `malformed` carries the record INDEX and its FIELD COUNT and never
+ *          the record TEXT — that text is exactly what may hold the credential
+ *          this arm exists to find, and every detail it produces is world-readable.
+ */
 export function parseCronJobRows(stdout) {
   const out = [];
+  const malformed = [];
+  let index = -1;
   for (const record of String(stdout || "").split(CRON_JOB_SEPARATORS.recordSep)) {
+    index += 1;
     const rec = record.replace(/^[\r\n]+/, "");
     if (rec.trim().length === 0) continue;
     const f = rec.split(CRON_JOB_SEPARATORS.fieldSep);
-    if (f.length < 7) continue;
+    if (f.length < 7) {
+      malformed.push({ index, fields: f.length });
+      continue;
+    }
     out.push({
       jobid: f[0].trim(),
       jobname: f[1].trim(),
@@ -406,7 +436,7 @@ export function parseCronJobRows(stdout) {
       command: f[6],
     });
   }
-  return out;
+  return { rows: out, malformed };
 }
 
 // ---------------------------------------------------------------------------
@@ -766,7 +796,24 @@ async function run({ seams, log, addDefect, manifestPath }) {
   }
 
   // (3) Parse the rows.
-  const prodRows = parseCronJobRows(res.stdout);
+  //
+  // ⛔ ATTRIBUTION FENCE. A record this parser could not read is a row whose
+  //    contents were never judged — not a row that is absent, and not a row
+  //    that passed. It is reported by COUNT and FIELD COUNT only, because the
+  //    text is what may carry the credential. The readable rows continue
+  //    through section (0) and the comparison: a parse failure on ONE record
+  //    must not silence the credential scan on the others, which is the same
+  //    "one bad input disables the instrument" shape the hoist exists to remove.
+  const { rows: prodRows, malformed } = parseCronJobRows(res.stdout);
+  if (malformed.length > 0) {
+    addDefect(
+      "measure-fail",
+      "cron-drift",
+      "cron.job",
+      `${malformed.length} of ${malformed.length + prodRows.length} record(s) returned by the cron.job read could not be parsed (field counts: ${malformed.map((m) => m.fields).join(", ")}; seven are required). Those rows were NOT judged by any check in this arm. An unreadable row is not an absent row and is not a clean one.`,
+      "Read the affected cron.job command by hand: a record separator (0x1E) inside a command splits it, and the likeliest sources are a pasted control byte or an E'\\x1e' literal. Re-schedule that job onto a body without it, then re-capture the manifest.",
+    );
+  }
 
   // (4) The oracle, LAST and WITHOUT A RETURN. An ABSENT or unparsable file is
   //     `manifest-invalid` — raised by `compareManifest` from

@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 56;
+export const SELF_TEST_SCENARIOS = 58;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -1943,6 +1943,77 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
+  scenario("a MALFORMED cron.job record is a measure-fail naming the count, never a continue (WR-05)");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ The fixture carries ONE literal 0x1E — the arm's own record separator —
+    // inside jobid 1's body literal, so psql's answer splits into a 7-field head
+    // and a 1-field tail: three readable rows and one unreadable record. The
+    // parser used to `continue` past the tail, which removed a PROD row from
+    // every judgement this arm makes while the run still read green.
+    const prod = loadFixture("cron-drift", "prod-malformed-record.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const r = await driftRun(prod.data, driftFixturePath("manifest.json"), quiet);
+      const mf = r.defects.filter((x) => x.kind === "measure-fail");
+      const detail = String((mf[0] || {}).detail || "");
+      pass =
+        expect(r.exitCode === 1, `an unreadable record exits 1, never 0 (got ${r.exitCode})`) &&
+        expect(mf.length === 1, `exactly one measure-fail (got ${mf.length})`) &&
+        expect(String((mf[0] || {}).subject) === "cron.job", `on subject cron.job (got ${(mf[0] || {}).subject})`) &&
+        expect(
+          detail.includes("1 of 4 record(s)"),
+          `NAMING THE COUNT — three rows were read and a fourth record was not (detail: ${detail.slice(0, 80)}…)`,
+        ) &&
+        expect(
+          detail.includes("{}") === false,
+          "and the record TEXT is never quoted — an unreadable record is exactly the place a credential could be hiding",
+        ) &&
+        pass;
+      // ⚠️ The drift side is deliberately NOT asserted: the truncated head
+      // legitimately no longer matches its sha, and that IS drift by every
+      // definition this arm has.
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("captureManifest REFUSES a MALFORMED cron.job record (exit 3), and writes nothing");
+  // -------------------------------------------------------------------------
+  {
+    // The capture path is the SECOND caller of the parser, and it needs its own
+    // refusal: an oracle captured from a reading with a hole in it records the
+    // hole as the standard. Exit 3, not 1 — hygiene never ran, so this refusal
+    // must stay distinguishable from a hygiene refusal by exit code alone.
+    const prod = loadFixture("cron-drift", "prod-malformed-record.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
+      const outPath = join(dir, "cron-manifest.json");
+      const lines = [];
+      try {
+        const code = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: prod.data }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath,
+          log: (x) => lines.push(x),
+        });
+        pass =
+          expect(code === 3, `an unreadable record returns 3, not the hygiene refusal's 1 (got ${code})`) &&
+          expect(existsSync(outPath) === false, "and the out path DOES NOT EXIST afterwards — a reading with a hole in it can never become the oracle") &&
+          expect(
+            lines.some((l) => l.startsWith("REFUSED:") && l.includes("1 ") && l.includes("record")),
+            `the refusal is explicit and names how many records it could not read (${lines.join(" | ") || "no lines"})`,
+          ) &&
+          expect(lines.every((l) => l.includes("{}") === false), "and never echoes the record text") &&
+          pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   scenario("captureManifest writes a schema-1 manifest whose shas match the committed fixture");
   // -------------------------------------------------------------------------
   {
@@ -2587,7 +2658,7 @@ export async function selfTest() {
 /**
  * Capture `cron.job` into a manifest file.
  *
- * ⛔ THREE REFUSALS, and each of them writes NOTHING:
+ * ⛔ FOUR REFUSALS, and each of them writes NOTHING:
  *
  *   3 — no `--out` path. The destination is REQUIRED and is never defaulted to
  *       `MANIFEST_PATH`, so a capture is always a reviewed file MOVE rather
@@ -2595,6 +2666,11 @@ export async function selfTest() {
  *   3 — the database has no `COMMENT ON DATABASE` marker, or the read failed.
  *       An unlabelled database is one whose identity was never established;
  *       `current_database()` is `postgres` on every Supabase project.
+ *   3 — a `cron.job` record the parser could not read. An oracle captured from
+ *       a reading with a hole in it would record the hole as the standard, and
+ *       the missing row would then be judged against nothing forever. This is
+ *       a 3 rather than a 1 on purpose: hygiene never ran, so the two refusals
+ *       must stay distinguishable by exit code alone.
  *   1 — ANY row fails ANY of the ten hygiene rules. This is what makes the
  *       manifest an oracle of the ACHIEVABLE configuration rather than a
  *       photograph of whatever PROD has: it CANNOT be captured into a state
@@ -2605,7 +2681,7 @@ export async function selfTest() {
  * those ten rules. A reviewer may still withhold any row to sha-only afterwards
  * — see the withhold procedure at the top of `arms/cron-drift.mjs`.
  *
- * @returns {Promise<number>} the CLI exit code (0 captured / 1 refused on hygiene / 3 refused on usage or an unidentified database)
+ * @returns {Promise<number>} the CLI exit code (0 captured / 1 refused on hygiene / 3 refused on usage, an unidentified database, or an unreadable cron.job record)
  */
 export async function captureManifest({ seams, outPath, log = (s) => console.log(s) }) {
   if (!outPath) {
@@ -2629,7 +2705,18 @@ export async function captureManifest({ seams, outPath, log = (s) => console.log
     log(`ERROR: cron.job could not be read: ${res.measureFail}. Nothing was written.`);
     return 3;
   }
-  const rows = CRON_DRIFT_MOD.parseCronJobRows(res.stdout);
+  const { rows, malformed } = CRON_DRIFT_MOD.parseCronJobRows(res.stdout);
+  if (malformed.length > 0) {
+    // ⛔ BEFORE the hygiene loop, and deliberately: a record that could not be
+    // parsed was never handed to the ten rules, so a capture that proceeded
+    // would be certifying text nobody read. The counts are printed; the record
+    // text never is.
+    log(
+      `REFUSED: ${malformed.length} cron.job record(s) could not be parsed (field counts: ${malformed.map((m) => m.fields).join(", ")}; seven are required), so this reading has a hole in it and cannot become the oracle. Nothing was written.`,
+    );
+    log("Read the affected command by hand — a record separator (0x1E) inside a cron.job command splits it in two — then capture again.");
+    return 3;
+  }
 
   const dirty = [];
   for (const r of rows) {
