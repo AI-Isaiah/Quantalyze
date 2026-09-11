@@ -1638,6 +1638,45 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
 const UNJUDGEABLE_RULE_IDS = ["header-unparseable", "command-unjudgeable", "jobname-absent"];
 
 /**
+ * The verdict a hygiene map returns for a jobname NOBODY RECORDED ONE FOR.
+ *
+ * ⛔ THE INVARIANT (164.8.5-REVIEW-R1 CR-R1-02): every consumer of a hygiene map
+ * must distinguish NO ENTRY (the row was never judged) from an EMPTY entry (the
+ * row was judged and is clean). The consumer used to read
+ * `(map.get(name) || []).length > 0`, which coerces absence to `false` —
+ * "could not be judged" became "passed hygiene", and the withholding rule then
+ * printed the full command text of the ONE row nobody could clear into a PUBLIC
+ * Actions log.
+ *
+ * ⛔ AND THIS DEFAULT WAS A CONTROL THAT COULD NOT FAIL (164.8.5-REVIEW-R2
+ * WR-R2-02). MEASURED 2026-09-11: neutering `?? UNRECORDED` back to
+ * `?? { judged: true, violations: [], reason: null }` — the exact pre-fix
+ * coercion — left the self-test at 73/73 and vitest at 118/118. It is
+ * unreachable from TODAY'S two producers by construction: `compareManifest`'s
+ * PROD loop calls `recordVerdict` for EVERY row before any `continue`, and the
+ * only manifest rows it skips are `typeof row.command !== "string"`, which is
+ * byte-for-byte the `withheld` predicate whose branch is taken first.
+ *
+ * ⭐ SO IT IS EXPORTED AND PINNED RATHER THAN DELETED, AND THE DIFFERENCE
+ * MATTERS. Deleting it would make `map.get(...)` return `undefined` and the
+ * consumer crash on `.judged` — trading a defence for a latent TypeError. What
+ * was wrong was not the default; it was PRESENTING an unfalsifiable line as
+ * coverage. `hygieneVerdict` is now a named, exported total function and
+ * `src/__tests__/prod-prober-wiring.test.ts` calls it with an EMPTY map, so the
+ * contract a future third producer inherits has a red surface of its own.
+ *
+ * @param {Map<string, {judged: boolean, violations: string[], reason: string|null}>} map
+ * @param {string} jobname
+ */
+export const UNRECORDED_VERDICT = Object.freeze({
+  judged: false,
+  violations: [],
+  reason: "no hygiene verdict was recorded for this row at all",
+});
+
+export const hygieneVerdict = (map, jobname) => map.get(jobname) ?? UNRECORDED_VERDICT;
+
+/**
  * How a jobname is PRINTED. Identical to `hygieneViolations`' own derivation so
  * a defect detail and the rule sentence inside it name the row the same way.
  * ⛔ It is for TEXT only — `subject` stays the raw jobname, because that is the
@@ -1948,13 +1987,6 @@ export function compareManifest(manifest, prodRows, opts = {}) {
         ? { judged: false, violations: [], reason: judged.error }
         : { judged: true, violations: judged.violations, reason: null },
     );
-
-  const UNRECORDED = Object.freeze({
-    judged: false,
-    violations: [],
-    reason: "no hygiene verdict was recorded for this row at all",
-  });
-  const hygieneVerdict = (map, jobname) => map.get(jobname) ?? UNRECORDED;
 
   const rows = Array.isArray(prodRows) ? prodRows : [];
   const prodHygiene = new Map();

@@ -48,10 +48,12 @@ import {
   HYGIENE_RULE_IDS,
   TOKEN_MIN,
   compareManifest,
+  hygieneVerdict,
   hygieneViolations,
   isBareUrl,
   parseCronJobRows,
   splitHygiene,
+  UNRECORDED_VERDICT,
 } from "../../scripts/prod-prober/arms/cron-drift.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -1357,6 +1359,55 @@ describe("[164.1-05] kinds and floors", () => {
     // future narrowing of MAX_DOLLAR_DEPTH's blast radius has a red surface.
     const DEEPKEY = `DO $t5$ DO $t4$ DO $t3$ DO $t2$ DO $t1$ DO $t0$ PERFORM foo('${KEY}'); $t0$ $t1$ $t2$ $t3$ $t4$ $t5$`;
     expect(ids(`${DEEPKEY};`)).toEqual(["command-unjudgeable"]);
+  });
+
+  it("WR-R2-02: a jobname NOBODY recorded a verdict for is UNJUDGED, never judged-and-clean", () => {
+    // ⛔ THE CONTROL THAT COULD NOT FAIL. `164.8.5-FIX-R1-SUMMARY.md` presented
+    // `?? UNRECORDED` as the durable half of CR-R1-02's closure — "a future
+    // third producer that forgets to record cannot re-open this hole". Nothing
+    // could observe it: MEASURED 2026-09-11, neutering it back to
+    // `?? { judged: true, violations: [], reason: null }` (the exact pre-fix
+    // coercion) left the self-test at 73/73 and vitest at 118/118.
+    //
+    // It is unreachable from TODAY'S two producers by construction — the PROD
+    // loop records for every row before any `continue`, and the only manifest
+    // rows skipped are `typeof row.command !== "string"`, which is byte-for-byte
+    // the `withheld` predicate whose branch is taken first.
+    //
+    // ⭐ THE FIX IS A SURFACE, NOT A DELETION. Deleting the default would make
+    // the consumer crash on `undefined.judged` — a defence traded for a latent
+    // TypeError. What was wrong was presenting an unfalsifiable line as
+    // coverage, so the helper is exported and its CONTRACT is pinned here.
+    expect(hygieneVerdict(new Map(), "a_job")).toEqual({
+      judged: false,
+      violations: [],
+      reason: "no hygiene verdict was recorded for this row at all",
+    });
+    expect(hygieneVerdict(new Map(), "a_job").judged, "absence is NOT a pass").toBe(false);
+    // …and it is the shared frozen sentinel, so a consumer cannot mutate the
+    // default into a pass for every later reader.
+    expect(hygieneVerdict(new Map(), "a_job")).toBe(UNRECORDED_VERDICT);
+    expect(Object.isFrozen(UNRECORDED_VERDICT)).toBe(true);
+
+    // CALIBRATION: a RECORDED verdict is returned unchanged, so "unjudged" is a
+    // reading about absence rather than something this helper always says.
+    const clean = { judged: true, violations: [], reason: null };
+    const dirty = { judged: true, violations: ["[x-service-key-literal] …"], reason: null };
+    const refused = { judged: false, violations: [], reason: "the functions snapshot is absent" };
+    const map = new Map<string, typeof clean>([
+      ["clean_job", clean],
+      ["dirty_job", dirty],
+      ["refused_job", refused],
+    ]);
+    expect(hygieneVerdict(map, "clean_job")).toBe(clean);
+    expect(hygieneVerdict(map, "dirty_job")).toBe(dirty);
+    expect(hygieneVerdict(map, "refused_job")).toBe(refused);
+    // The three are pairwise distinguishable, which is the whole point of
+    // recording a VERDICT rather than a bare array.
+    expect(hygieneVerdict(map, "clean_job").judged).toBe(true);
+    expect(hygieneVerdict(map, "refused_job").judged).toBe(false);
+    expect(hygieneVerdict(map, "clean_job").violations).toHaveLength(0);
+    expect(hygieneVerdict(map, "dirty_job").violations).toHaveLength(1);
   });
 
   it("F5: the UNREACHABLE `vaultSpan` exemption is gone and cannot come back", () => {
