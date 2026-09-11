@@ -2,13 +2,14 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260907130000_ledger_refresh_switch_to_system_flags.sql
+-- source migration: 20260911130000_ledger_fanout_grantees_and_dormancy.sql
 -- --------------------------------------------------------------------------
--- STEP 2: the single-key fan-out
+-- STEP 1: the single-key fan-out
 -- --------------------------------------------------------------------------
 -- Re-based on supabase/schema/functions/enqueue_ledger_refresh_for_strategies.sql
--- (source migration 20260825130000), Lock B replaced. Every other line of the
--- body is that snapshot's, byte for byte.
+-- (source migration 20260907130000). The four edits enumerated in the RE-BASE
+-- DISCIPLINE section above and nothing else; every other line of the body is
+-- that snapshot's, byte for byte.
 CREATE OR REPLACE FUNCTION public.enqueue_ledger_refresh_for_strategies()
 RETURNS INTEGER
 LANGUAGE plpgsql
@@ -21,6 +22,16 @@ DECLARE
   v_job_id   UUID;
   v_existing INTEGER;
   v_enqueued INTEGER := 0;
+  -- ---- the dormancy instrument's locals (164.7 WR-10) --------------------
+  -- Three, because the dormant branch below has THREE causes and the single
+  -- NOTICE it raises cannot tell two of them apart. v_found is the row count of
+  -- the activation read and stays NULL until that read has actually completed;
+  -- v_read_failed is set by the handler after it has nulled the flag; v_cause is
+  -- the string the instrument row carries. The cause table is in this file's
+  -- header, under WR-10.
+  v_found       INTEGER := NULL;
+  v_read_failed BOOLEAN := FALSE;
+  v_cause       TEXT;
 BEGIN
   -- ---- Lock B (D-08, 164.7 D-01): the fail-closed activation switch ------
   -- FIRST statement in the body, deliberately — unchanged from the form this
@@ -65,12 +76,51 @@ BEGIN
     SELECT sf.enabled INTO v_enabled
       FROM public.system_flags sf
      WHERE sf.key = 'ledger_refresh_enabled';
+    -- The row count of the read that just ran. It is the ONLY thing separating
+    -- "there is no such row" from "the row is there and says FALSE" — both leave
+    -- the flag with a value that is not TRUE, and both raise the same NOTICE
+    -- below. Unreachable when the read RAISED, which is why the handler records
+    -- its own cause instead of relying on this.
+    GET DIAGNOSTICS v_found = ROW_COUNT;
   EXCEPTION WHEN OTHERS THEN
     RAISE WARNING 'enqueue_ledger_refresh_for_strategies: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;
     v_enabled := NULL;
+    -- ⚠️ The note above says NOTHING BUT THE ASSIGNMENT goes in this handler.
+    -- This IS an assignment — the second of them — and it is deliberately not a
+    -- probe, a read or a write: lint rule R1-exception-handler-probe forbids DML
+    -- and SELECT INTO here, and an INSERT in a handler is exactly the shape that
+    -- rule exists to keep out of the gate corpus. The cause is RECORDED here and
+    -- WRITTEN below, on the dormant path, where a write is legal.
+    v_read_failed := TRUE;
   END;
   IF v_enabled IS DISTINCT FROM TRUE THEN
     RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant (system_flags.ledger_refresh_enabled is not TRUE); enqueued 0';
+    -- ---- the dormancy instrument (WR-10, APPGUC-WARNING-UNINSTRUMENTED-01) --
+    -- ⛔ IT GOES AFTER THE NOTICE AND NEVER BETWEEN THE GUARD AND IT. Those two
+    -- lines are ADJACENT inside one gate-arm `find` string in both ledger gates;
+    -- a statement inserted between them makes that find match ZERO times, and
+    -- the mutation runner reports occurrence-mismatch — the mutation not
+    -- applied, so the arm not tested.
+    --
+    -- The healthy dormant cause — the row is present and says FALSE — writes
+    -- NOTHING, deliberately. It is already legible from the flag row itself, and
+    -- no purge of the heartbeat table exists (MEASURED at HEAD), so a row per
+    -- function per tick would accrue for the whole pre-activation period to
+    -- restate a fact one SELECT already gives. The two causes below are the ones
+    -- that are INVISIBLE today: a read that RAISED, and a row that is absent or
+    -- unreadable by this definer while the platform believes itself live.
+    IF v_read_failed THEN
+      v_cause := 'flag_read_failed';
+    ELSIF v_found = 0 THEN
+      v_cause := 'flag_row_invisible_or_absent';
+    ELSE
+      v_cause := NULL;
+    END IF;
+    IF v_cause IS NOT NULL THEN
+      INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+      VALUES ('ledger_refresh_fanout', 'error', now(), v_cause,
+              jsonb_build_object('function', 'enqueue_ledger_refresh_for_strategies', 'cause', v_cause));
+    END IF;
     RETURN 0;
   END IF;
 
