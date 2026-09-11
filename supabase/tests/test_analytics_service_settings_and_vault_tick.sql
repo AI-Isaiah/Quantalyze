@@ -136,6 +136,12 @@
 --                                reaches the job-run row and the Postgres log,
 --                                and writing a collector's hostname there hands
 --                                it to every downstream reader of these logs.
+--   V2  whitespace key ⇒ RAISE — a secret of a single SPACE is neither absent
+--                                nor the empty string, so the pre-164.8.6 guard
+--                                (`v_key = ''`) passed it through and the header
+--                                went out useless. 20260911120000's btrim guard
+--                                refuses it by the SAME name V1 asserts
+--                                (VAULTTICK-EMPTYKEY-01).
 --   R1  anon reads nothing     — two layers: `REVOKE ALL … FROM anon` and the
 --                                absence of any anon-visible policy. system_flags
 --                                carries a scoped anon-readable policy for its
@@ -152,12 +158,17 @@
 --                                Supabase's bootstrap GRANT ALL includes
 --                                TRUNCATE; R1/R2/R3 are blind to it because no
 --                                policy is consulted for it.
+--   G1  EXECUTE set == owner   — the WHOLE grantee set of the callable, not the
+--                                anon/authenticated SUBSET 20260907120000
+--                                probed. service_role's EXECUTE survived Phase
+--                                164.7 precisely because nothing asked about it
+--                                (164.7-WR02).
 --
 -- pgTAP is NOT installed (CLAUDE.md). Plain PL/pgSQL DO block, RAISE EXCEPTION
 -- on failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed
 -- assertion exits non-zero. The whole test rolls back.
 --
--- The final `ALL 11 ARMS EXECUTED (…)` notice at the foot of this file is the
+-- The final `ALL 13 ARMS EXECUTED (…)` notice at the foot of this file is the
 -- sentinel CI's loop reads the arm count off. If you add or remove an arm,
 -- update BOTH the integer and the roster on that line: `sql-tests` counts the
 -- roster's entries and fails when they disagree with N, which is what makes
@@ -177,7 +188,7 @@
 -- mutates COPIES on a throwaway pg-lane cluster, requires the FIRST
 -- `TEST FAILED (…)` to name that arm, and restores GREEN. Schema:
 -- scripts/mutation-runner/GRAMMAR.md.
--- ⚠️ The apply list ends at fixture 32 and then the migration. 32 is the vault
+-- ⚠️ The apply list ends at fixture 32 and then the TWO migrations. 32 is the vault
 -- stand-in without which NO arm of this file can run on the lane: plpgsql
 -- resolves `vault.decrypted_secrets` at CALL time, so the migration applies
 -- happily on a vault-less cluster and then every call dies on a raw 42P01
@@ -187,7 +198,14 @@
 -- fail. 12 supplies `profiles.is_admin` (default FALSE) for arm R2's
 -- non-admin, and 15 supplies `auth.role()` without which
 -- system_settings_service_all does not parse.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/12-fixture-profiles-is-admin.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/32-fixture-vault-stand-in.sql","supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql"]}
+-- ⚠️ `20260911120000_vault_tick_hardening.sql` is applied LAST, because its
+-- `CREATE OR REPLACE` must be the definition the arms run against. That is
+-- precisely why every edit-kind twin below now names IT and not 20260907120000:
+-- the 20260907 body is overwritten before arm 0 executes, so mutating it would
+-- be mutating dead text (TRAP E / C-02). The ONE exception is arm R3, whose
+-- edit targets a table-level REVOKE that 20260911120000 does not restate — it
+-- correctly still names 20260907120000.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/12-fixture-profiles-is-admin.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/32-fixture-vault-stand-in.sql","supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql","supabase/migrations/20260911120000_vault_tick_hardening.sql"]}
 
 BEGIN;
 
@@ -201,6 +219,11 @@ DECLARE
   v_val     TEXT;
   v_uid     UUID;
   v_admin   BOOLEAN;
+  -- Arm G1's whole-grantee-set read (164.7-WR02). Declared here with everything
+  -- else: plpgsql compiles a DO block WHOLE, so a missing DECLARE raises 42601
+  -- and NO arm in this file runs.
+  v_owner   TEXT;
+  v_grantees TEXT;
   v_seedurl TEXT := 'https://quantalyze-analytics-production.up.railway.app';
 BEGIN
   -- ===== ARM 0 — applied-ness. ABSENCE IS A FAILURE, NOT A SKIP ===========
@@ -245,14 +268,19 @@ BEGIN
     GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT;
   END;
 
-  -- RED-UNDER: stand the key guard down — `IF v_key IS NULL OR v_key = '' THEN`
-  --            becomes `IF FALSE THEN`, which is EXACTLY the pre-CRON-DRIFT-01
-  --            shape: the read still happens, v_key is still NULL, and the
-  --            function sails on into net.http_post with a null X-Service-Key
-  --            header. No layering is needed — the migration's STEP 3 verify
-  --            asserts the BODY still names vault.decrypted_secrets and
-  --            analytics_service_url, and this edit changes neither.
-  -- RED-UNDER-M: {"arm":"V1","apply":[{"kind":"edit","file":"supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql","find":"IF v_key IS NULL OR v_key = '' THEN","replace":"IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER: stand the key guard down — the `btrim(v_key)` guard line becomes
+  --            `IF FALSE THEN`, which is EXACTLY the pre-CRON-DRIFT-01 shape:
+  --            the read still happens, v_key is still NULL, and the function
+  --            sails on into net.http_post with a null X-Service-Key header. No
+  --            layering is needed — 20260911120000's verify block asserts the
+  --            BODY still carries the vault read, the settings read and the
+  --            cardinality guard, and this edit changes none of the three.
+  -- ⚠️ Re-pointed at 20260911120000 (phase 164.8.6): that file's CREATE OR
+  --    REPLACE is applied LAST, so an edit to the 20260907 body would be an edit
+  --    to dead text and this arm could not redden. The `find` moved with it —
+  --    the guard is now spelled with btrim — and `occurrences` was re-MEASURED
+  --    against the new file, not assumed.
+  -- RED-UNDER-M: {"arm":"V1","apply":[{"kind":"edit","file":"supabase/migrations/20260911120000_vault_tick_hardening.sql","find":"IF v_key IS NULL OR btrim(v_key) = '' THEN","replace":"IF FALSE THEN","occurrences":1}]}
   IF NOT v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (V1): match_engine_cron_tick() RETURNED with no analytics_service_key in the vault. That is the CRON-DRIFT-01 outage exactly: jsonb_build_object(''X-Service-Key'', NULL) builds a header with a null value, the analytics service answers 401, and because net.http_post is ASYNC the scheduler records the run as succeeded. Seven days of silent 401s behind a green job history is what this RAISE exists to convert into one failed run row.';
   END IF;
@@ -280,7 +308,7 @@ BEGIN
   --            becomes `IF FALSE THEN`. v_url is then NULL, `v_url || '/api/…'`
   --            is NULL, and the function posts to a null url instead of saying
   --            which setting is missing.
-  -- RED-UNDER-M: {"arm":"U1","apply":[{"kind":"edit","file":"supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql","find":"IF v_url IS NULL OR v_url = '' THEN","replace":"IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"U1","apply":[{"kind":"edit","file":"supabase/migrations/20260911120000_vault_tick_hardening.sql","find":"IF v_url IS NULL OR v_url = '' THEN","replace":"IF FALSE THEN","occurrences":1}]}
   IF NOT v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (U1): match_engine_cron_tick() RETURNED with no analytics_service_url row in system_settings. `NULL || ''/api/match/cron-recompute''` is NULL, so this posts the live service key to a null url — the same async, silently-successful shape as V1, with the secret now going somewhere nobody chose.';
   END IF;
@@ -381,10 +409,14 @@ BEGIN
   --            which runs first — would be the FIRST failure. MEASURED, see
   --            .planning/phases/164.7-…/164.7-02-NEUTER.log. This needle leaves
   --            V1 and U1 green (both are ASKING for a raise) and reddens C1
-  --            alone. It also survives the migration's own STEP 3 body check,
-  --            because `analytics_service_url_never` still contains
-  --            `analytics_service_url`.
-  -- RED-UNDER-M: {"arm":"C1","apply":[{"kind":"edit","file":"supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql","find":"WHERE s.key = 'analytics_service_url'","replace":"WHERE s.key = 'analytics_service_url_never'","occurrences":1}]}
+  --            alone. It also survives 20260911120000's own body check, and for
+  --            a stronger reason than it survived 20260907120000's: that file's
+  --            settings needle is the STATEMENT SHAPE `FROM public.system_settings`,
+  --            which this mutation does not touch at all, so the apply succeeds
+  --            by construction rather than by the accident that
+  --            `analytics_service_url_never` still contains the setting key —
+  --            the vacuity Phase 164.8.6 exists to replace.
+  -- RED-UNDER-M: {"arm":"C1","apply":[{"kind":"edit","file":"supabase/migrations/20260911120000_vault_tick_hardening.sql","find":"WHERE s.key = 'analytics_service_url'","replace":"WHERE s.key = 'analytics_service_url_never'","occurrences":1}]}
   IF v_raised AND v_msg ~ 'missing from' THEN
     RAISE EXCEPTION 'TEST FAILED (C1): with BOTH the vault secret and the analytics_service_url row present, match_engine_cron_tick() still refused with: %. One of the two lookups is not finding a value that is demonstrably there — a renamed key, a mis-scoped WHERE, a search_path that resolves system_settings somewhere else — and the effect is a match engine that never runs while both guards report themselves as working. V1 and U1 cannot see this: they are both ASKING for a refusal.', v_msg;
   END IF;
@@ -422,13 +454,14 @@ BEGIN
   --            in before the constraint existed: the read still happens, the
   --            value is still the attacker's host, and the function sails into
   --            net.http_post carrying the live X-Service-Key to it. No layering
-  --            needed — the migration's STEP 3 check 7 asserts the allow-list
-  --            LITERAL is still in the body, and that literal is the DECLARE
-  --            line, which this edit does not touch, so the apply still
-  --            succeeds. ⚠️ Deliberately NOT a `sql` step dropping the
+  --            needed — none of 20260911120000's three needles is this line
+  --            (its verify asserts the two read shapes and the cardinality
+  --            guard), and 20260907120000's STEP 3 check 7 asserts the
+  --            allow-list LITERAL, which lives on the DECLARE line this edit
+  --            does not touch, so the apply still succeeds. ⚠️ Deliberately NOT a `sql` step dropping the
   --            constraint: this file has already dropped it, so such a step
   --            would mutate nothing and the arm could not redden.
-  -- RED-UNDER-M: {"arm":"C2","apply":[{"kind":"edit","file":"supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql","find":"IF v_url !~ c_url_allowed THEN","replace":"IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"C2","apply":[{"kind":"edit","file":"supabase/migrations/20260911120000_vault_tick_hardening.sql","find":"IF v_url !~ c_url_allowed THEN","replace":"IF FALSE THEN","occurrences":1}]}
   IF NOT v_raised OR v_msg !~ 'not an allowed destination' THEN
     RAISE EXCEPTION 'TEST FAILED (C2): with analytics_service_url set to a host outside the allow-list and the CHECK constraint dropped, match_engine_cron_tick() did not refuse by name — raised=%, message: %. The constraint is one ALTER TABLE from gone and this re-test is what is supposed to be left, so a green U2 beside a red C2 means the destination control has exactly one layer and it is the removable one. What follows is not a configuration nuisance: net.http_post is fire-and-forget, so the Vault-held service key leaves in an X-Service-Key header and NOTHING downstream ever reports where it went.', v_raised, COALESCE(v_msg, 'NULL');
   END IF;
@@ -441,9 +474,77 @@ BEGIN
   --            reader of this project's logs by the guard that refused it.
   --            ⚠️ It leaves `not an allowed destination` in place, so C2 above
   --            stays GREEN and this arm is the first failure.
-  -- RED-UNDER-M: {"arm":"C3","apply":[{"kind":"edit","file":"supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql","find":"read it with an admin session. Allowed: an https host under .up.railway.app';","replace":"read it with an admin session. Allowed: an https host under .up.railway.app (%)', v_url;","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"C3","apply":[{"kind":"edit","file":"supabase/migrations/20260911120000_vault_tick_hardening.sql","find":"read it with an admin session. Allowed: an https host under .up.railway.app';","replace":"read it with an admin session. Allowed: an https host under .up.railway.app (%)', v_url;","occurrences":1}]}
   IF v_msg ~ 'collector\.attacker\.example' THEN
     RAISE EXCEPTION 'TEST FAILED (C3): the destination refusal ECHOED the url it refused — it reads: %. The value in that row is attacker-controlled by construction (that is the whole premise of U2/C2), and RAISE text is not a private channel: it becomes the cron job-run row''s error and a Postgres log line, so the guard that refused the destination is the thing that publishes it to every reader of these logs. Name the SETTING, never its value — the same rule the two absence raises above follow (T-161.1-10). An operator who needs the value can SELECT it.', v_msg;
+  END IF;
+
+  -- ===== ARM V2 — a WHITESPACE secret ⇒ the callable RAISES, by the SAME ==
+  -- =====          name V1 asserts (VAULTTICK-EMPTYKEY-01) =================
+  -- A secret of a single SPACE is neither absent nor the empty string, so the
+  -- pre-164.8.6 guard (`v_key = ''`) let it through and jsonb_build_object built
+  -- an X-Service-Key header out of it. That is CRON-DRIFT-01 with ONE CHARACTER
+  -- in the secret store instead of none: the analytics service answers 401,
+  -- net.http_post is ASYNC, and the scheduler records the run as succeeded.
+  -- 20260911120000's `btrim(v_key) = ''` is what converts it into one failed run
+  -- row, and it re-uses V1's RAISE text verbatim so an operator and the cron-obs
+  -- prober arm meet ONE message for "the key is not usable", not two.
+  --
+  -- ⚠️ PLACEMENT IS DELIBERATE AND IT IS AN EGRESS ARGUMENT. C2-SETUP left
+  -- analytics_service_url at `https://collector.attacker.example`. On shared
+  -- TEST BEFORE this phase merges, the OLD body is live and a whitespace key
+  -- sails past its `v_key = ''` guard — and the callable STILL refuses, on the
+  -- destination allow-list re-test, before it builds any request. Nothing
+  -- leaves the host either way. After the merge the btrim guard fires first and
+  -- this arm passes for the reason it names. No later arm calls the function,
+  -- so the blank secret stored here is never read again; the closing ROLLBACK
+  -- restores TEST's real row.
+  --
+  -- ⚠️ PRE-MERGE ON SHARED TEST THIS ARM IS RED BY CONSTRUCTION and that is the
+  -- known coupling (b) recorded in CLAUDE.md, not a defect: a gate carrying an
+  -- applied-ness probe is red on the PR that ADDS its migration, because this
+  -- repo applies on MERGE and not on PR. It goes green on the first `apply-test`
+  -- run after the merge. Do NOT weaken the arm to make a PR board green.
+  v_setup := NULL;
+  BEGIN
+    DELETE FROM vault.decrypted_secrets WHERE name = 'analytics_service_key';
+    PERFORM vault.create_secret(' ', 'analytics_service_key', 'phase 164.8.6 gate fixture');
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT, v_state = RETURNED_SQLSTATE;
+    v_setup := v_state || ' ' || v_msg;
+  END;
+  IF v_setup IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (V2-SETUP): could not store a single-space analytics_service_key for the duration of this transaction (%), so V2 below would be asking its question of a database holding either no secret at all or the real one — and in both cases any raise it saw would be about something else. On the pg-lane vault.decrypted_secrets is a stand-in TABLE and create_secret a stand-in function; on shared TEST both are the real supabase_vault objects, and this is the first arm that writes one. Record what it says — do NOT weaken V2 to accommodate it.', v_setup;
+  END IF;
+
+  v_raised := false;
+  v_msg    := NULL;
+  BEGIN
+    PERFORM public.match_engine_cron_tick();
+  EXCEPTION WHEN OTHERS THEN
+    v_raised := true;
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT;
+  END;
+
+  -- RED-UNDER: revert the key guard to its pre-164.8.6 spelling — the btrim
+  --            comparison becomes the bare `v_key = ''` one. A single space is
+  --            then neither NULL nor equal to the empty string, the guard is not
+  --            taken, and the callable carries a useless header onward.
+  -- ⚠️ DELIBERATELY THE MIRROR OF ARM V1's TWIN, and that is the proof the two
+  --    arms are not redundant: under THIS mutation V1 stays GREEN (a wholly
+  --    absent secret is still NULL and still caught) and only V2 reddens, while
+  --    under V1's twin (`IF FALSE THEN`) BOTH redden and V1 — which runs first —
+  --    is the FIRST failure, so V1's twin could never be V2's. Neither mutation
+  --    can redden both. Same argument as arms A/K in
+  --    supabase/tests/test_ledger_refresh_fanout.sql:520-525.
+  -- ⚠️ Neither spelling is one of 20260911120000's three needles (the two read
+  --    shapes and the cardinality guard), so this edit cannot abort the apply.
+  -- RED-UNDER-M: {"arm":"V2","apply":[{"kind":"edit","file":"supabase/migrations/20260911120000_vault_tick_hardening.sql","find":"IF v_key IS NULL OR btrim(v_key) = '' THEN","replace":"IF v_key IS NULL OR v_key = '' THEN","occurrences":1}]}
+  IF NOT v_raised THEN
+    RAISE EXCEPTION 'TEST FAILED (V2): match_engine_cron_tick() RETURNED with a single-space analytics_service_key in the vault. A space is not absence and it is not the empty string, so a guard written `v_key = ''''` lets it through — and what leaves is an X-Service-Key header the analytics service answers 401 to, asynchronously, behind a scheduler that records the run as succeeded. That is the CRON-DRIFT-01 outage with one character in the secret store instead of none, and V1 cannot see it: V1 removes the row entirely, which the NULL half of the same guard catches.';
+  END IF;
+  IF v_msg !~ 'analytics_service_key missing from vault' THEN
+    RAISE EXCEPTION 'TEST FAILED (V2): the callable did raise with a single-space secret present, but its message does not name analytics_service_key — it reads: %. This arm shares V1''s RAISE text ON PURPOSE, so that "the key is not usable" is ONE message an operator and the cron-obs prober arm both key on. If this reads like the destination refusal, the whitespace guard is absent and the callable got as far as the url; if it reads like a raw 42P01/42883, the vault stand-in or the function itself is missing rather than the guard working.', COALESCE(v_msg, 'NULL');
   END IF;
 
   -- ===== ARM R1 — anon reads NOTHING out of system_settings ==============
@@ -598,12 +699,70 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (T1): an authenticated NON-ADMIN TRUNCATEd public.system_settings — the statement was % and the table now holds % row(s). RLS did not fail here and could not have: TRUNCATE is not subject to row security, so system_settings_admin_all was never consulted and R1, R2 and R3 all stay green through this. The consequence is not a lost configuration row: match_engine_cron_tick() then RAISES the MISSING-ROW message on every tick, which sends an operator to re-seed a setting while the actual cause was a privilege no policy governs. ⛔ Fix it at the grant layer — `REVOKE TRUNCATE, REFERENCES, TRIGGER … FROM authenticated` — never by adding a policy, which would change nothing.', COALESCE(v_state, 'permitted'), v_cnt;
   END IF;
 
+  -- ===== ARM G1 — EXECUTE on the callable is held by the OWNER ALONE =====
+  -- ⭐ THE WHOLE GRANTEE SET, NOT A SUBSET. 20260907120000's check 3 asked
+  -- has_function_privilege about anon and authenticated, passed, and
+  -- service_role kept its EXECUTE the entire time — a subset probe is satisfied
+  -- by every role it does not name (164.7-WR02). aclexplode over proacl
+  -- ENUMERATES the grantees instead of interrogating a guessed list, so a
+  -- grantee nobody thought of is a FAILURE here rather than a silence.
+  -- ⚠️ Compared to the OWNER'S NAME and never to the literal `postgres`: the
+  -- pg-lane boots as whatever role scripts/pg-lane/run.sh created, and a literal
+  -- would make this arm pass or fail for a reason unrelated to the migration.
+  -- ⚠️ COALESCE(proacl, acldefault(…)) is what makes a NULL acl explicit — a
+  -- function whose privileges were never touched carries NULL proacl, whose
+  -- MEANING is the default ACL, and the default ACL for a function grants
+  -- EXECUTE to PUBLIC. Reading NULL as "no grantees" would report the widest
+  -- possible state as the tightest.
+  -- ⚠️ Falsifiable on the pg-lane only because fixture 07 grants the
+  -- project-bootstrap `GRANT ALL ON FUNCTIONS TO anon, authenticated,
+  -- service_role` first; on a vanilla cluster the REVOKE is a no-op and this arm
+  -- would pass for a reason unrelated to the file.
+  -- ⚠️ PRE-MERGE ON SHARED TEST THIS ARM IS RED BY CONSTRUCTION — the OLD REVOKE
+  -- (20260907120000:385) named three roles and left service_role its EXECUTE.
+  -- CLAUDE.md coupling (b), same as V2; green on the first `apply-test` after
+  -- the merge.
+  -- ⚠️ Runs LAST, after T1: T1's twin TRUNCATEs the settings table, and a
+  -- catalogue arm is the one kind of arm that is unaffected by it.
+  v_owner    := NULL;
+  v_grantees := NULL;
+  SELECT g.owner_name, string_agg(g.grantee_name, ',' ORDER BY g.grantee_name)
+    INTO v_owner, v_grantees
+    FROM (
+      SELECT pg_get_userbyid(p.proowner) AS owner_name,
+             CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee_name
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+       WHERE n.nspname = 'public'
+         AND p.proname = 'match_engine_cron_tick'
+         AND p.pronargs = 0
+         AND a.privilege_type = 'EXECUTE'
+    ) g
+   GROUP BY g.owner_name;
+
+  -- RED-UNDER: hand the privilege back on the live lane. A `sql` step and NOT an
+  --            edit of 20260911120000's REVOKE line, because THAT FILE'S OWN
+  --            VERIFY BLOCK ASSERTS THIS VERY SET: an edit weakening the REVOKE
+  --            would ABORT the apply, the gate would never run, and no arm could
+  --            be the FIRST failure — the runner would score a defect rather
+  --            than a bite. Exactly the reason arm 0 and arm T1 use `sql` steps.
+  --            ⚠️ And deliberately service_role rather than anon or
+  --            authenticated: those two were already probed in 164.7 and would
+  --            redden a check that a subset probe also catches. service_role is
+  --            the grantee the subset probe MISSED, so this is the mutation that
+  --            distinguishes a whole-set assertion from the old one.
+  -- RED-UNDER-M: {"arm":"G1","apply":[{"kind":"sql","stmt":"GRANT EXECUTE ON FUNCTION public.match_engine_cron_tick() TO service_role"}]}
+  IF v_grantees IS NULL OR v_grantees IS DISTINCT FROM v_owner THEN
+    RAISE EXCEPTION 'TEST FAILED (G1): EXECUTE on match_engine_cron_tick is held by [%], expected exactly the owner [%]. That function reads a live service key out of the vault as its DEFINER and POSTs it in an outbound header, so every extra grantee is a principal who can fire the whole match engine and spend the key''s privileges — and service_role in particular is the one a leaked project key becomes. Its grant survived Phase 164.7 precisely because only anon and authenticated were probed, which is why this arm asserts the SET rather than a list of roles someone thought to name. ⛔ Do NOT "fix" a red here with a GRANT: the scheduler runs as the OWNER and needs none.', COALESCE(v_grantees, 'nothing at all — the function is missing or carries no EXECUTE aclitem, and an empty answer is indistinguishable from a locked-down one unless it is refused'), COALESCE(v_owner, 'unresolved');
+  END IF;
+
   -- Leave the row as the migration seeded it. Cosmetic — the ROLLBACK below is
   -- what actually protects shared TEST — but it keeps a psql session that is
   -- read mid-transaction from showing a value no migration ever wrote.
   UPDATE public.system_settings SET value = v_seedurl WHERE key = 'analytics_service_url';
 
-  RAISE NOTICE 'ALL 11 ARMS EXECUTED (0,V1,U1,U2,C1,C2,C3,R1,R2,R3,T1): public.match_engine_cron_tick() RAISES by name when the analytics_service_key secret is absent from the vault (V1) and when the analytics_service_url row is absent from system_settings (U1) — each measured by removing that value inside this transaction and calling the real function, never by inspecting its body — and gets PAST both guards when both are present (C1), which is what stops a callable that refuses unconditionally from passing V1 and U1 while posting nothing forever. The DESTINATION is bounded in two independent layers: public.system_settings will not STORE a url outside the allow-list (U2), and with that CHECK constraint dropped — one ALTER TABLE, which this file performs on itself — the callable still REFUSES to post to one (C2) without naming the value it refused (C3). public.system_settings is unreadable by anon at both the grant layer and the policy layer (R1), unwritable by an authenticated non-admin (R2), writable by the service role (R3), and not TRUNCATABLE by an authenticated user (T1) — the one statement row security never sees. So the host a live service key is POSTed to cannot be read, redirected or erased by anyone a browser can be. Phase 164.7 / criterion 2 / SC-2, mig 20260907120000.';
+  RAISE NOTICE 'ALL 13 ARMS EXECUTED (0,V1,U1,U2,C1,C2,C3,V2,R1,R2,R3,T1,G1): public.match_engine_cron_tick() RAISES by name when the analytics_service_key secret is absent from the vault (V1) and when the analytics_service_url row is absent from system_settings (U1) — each measured by removing that value inside this transaction and calling the real function, never by inspecting its body — and gets PAST both guards when both are present (C1), which is what stops a callable that refuses unconditionally from passing V1 and U1 while posting nothing forever. The DESTINATION is bounded in two independent layers: public.system_settings will not STORE a url outside the allow-list (U2), and with that CHECK constraint dropped — one ALTER TABLE, which this file performs on itself — the callable still REFUSES to post to one (C2) without naming the value it refused (C3). public.system_settings is unreadable by anon at both the grant layer and the policy layer (R1), unwritable by an authenticated non-admin (R2), writable by the service role (R3), and not TRUNCATABLE by an authenticated user (T1) — the one statement row security never sees. A secret that is present but BLANK — a single space, which is neither absence nor the empty string — is refused by the same name (V2), so the pre-164.8.6 guard cannot let a useless key out behind a green job history. And EXECUTE on the callable is held by exactly the owner and nobody else (G1) — the WHOLE grantee set, not the anon/authenticated subset, which is how service_role kept its grant through Phase 164.7. So the host a live service key is POSTed to cannot be read, redirected or erased by anyone a browser can be, and the callable itself cannot be invoked by anyone but the scheduler. Phase 164.7 / criterion 2 / SC-2, mig 20260907120000; Phase 164.8.6 criteria 2-4, mig 20260911120000.';
 END $$;
 
 ROLLBACK;
