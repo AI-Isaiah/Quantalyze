@@ -233,6 +233,45 @@ describe("lint-app-guc: DETECT_RE spelling calibration", () => {
     }
   });
 
+  it("WR-R2-06: the comment groups cannot BACKTRACK across statements — no phantom app-GUC read", () => {
+    // ⛔ `\/\*[\s\S]*?\*\/` IS LAZY BUT STILL BACKTRACKS. When the shortest
+    // `*/` leads to a non-`app.` literal the engine extends the "comment" to a
+    // LATER `*/` in the file and tries again. MEASURED on the parent commit:
+    //
+    //   input : current_setting(/*a*/ 'other.x'); SELECT /*b*/ 'app.z';
+    //   DETECT_RE.test(...) -> true
+    //   match               -> "current_setting(/*a*/ 'other.x'); SELECT /*b*/ 'app." (52 chars)
+    //
+    // There is no app-GUC read in that text. The multi-statement span is the
+    // tell. Consequences: an unannotated file got a phantom `unannotated-reader`
+    // whose only D4-permitted remedies are "annotate" or "remove the reader";
+    // an ANNOTATED file got `header-count-mismatch`, whose message sends a
+    // maintainer to hunt a reader that does not exist. The prober's
+    // byte-identical copy fired `app-guc` -> `cron-secret-in-command` -> a
+    // rotation remedy. The corpus is at 0 today, so this was latent cry-wolf.
+    const re = () => new RegExp(DETECT_RE.source, "i");
+    const BACKTRACK_BEFORE_PAREN = "current_setting /*a*/ ('other.x'); SELECT /*b*/ 'app.z';";
+    const BACKTRACK_AFTER_PAREN = "current_setting(/*a*/ 'other.x'); SELECT /*b*/ 'app.z';";
+    expect(re().test(BACKTRACK_AFTER_PAREN), BACKTRACK_AFTER_PAREN).toBe(false);
+    expect(re().test(BACKTRACK_BEFORE_PAREN), BACKTRACK_BEFORE_PAREN).toBe(false);
+    // CONTROL — the same two statements with the comments REMOVED were already
+    // a miss, so the two readings above measure the BACKTRACKING and not the
+    // text.
+    expect(re().test("current_setting('other.x'); SELECT 'app.z';")).toBe(false);
+    // ⛔ AND THE OTHER DIRECTION: a real commented read at either position still
+    // matches, so the non-crossing form narrowed nothing the gate needs.
+    expect(re().test("current_setting(/*a*/ 'app.x')")).toBe(true);
+    expect(re().test("current_setting /*a*/ ('app.x')")).toBe(true);
+    expect(re().test("current_setting(/*a*/ $q$app.x$q$)")).toBe(true);
+    // A comment containing a `*` that is not a terminator is still one comment.
+    expect(re().test("current_setting(/* a * b */ 'app.x')")).toBe(true);
+    // MUTANT: put the backtracking body back and the phantom returns — so "no
+    // phantom" is a reading about THIS spelling, not about the input.
+    const backtracking = DETECT_RE.source.split(COMMENT_BODY).join("\\/\\*[\\s\\S]*?\\*\\/");
+    expect(backtracking, "the mutant must actually differ").not.toBe(DETECT_RE.source);
+    expect(new RegExp(backtracking, "i").test(BACKTRACK_AFTER_PAREN)).toBe(true);
+  });
+
   it("MUTANT [EU]→[E]: narrowing the class blinds it to the unicode spelling and nothing else", () => {
     const mutated = DETECT_RE.source.replace("[EU]", "[E]");
     expect(mutated, "the mutant must actually differ, or this arm tests nothing").not.toBe(
@@ -262,7 +301,7 @@ describe("lint-app-guc: DETECT_RE spelling calibration", () => {
   });
 
   it("MUTANT: dropping the block-comment group blinds it to a comment between name and paren", () => {
-    const mutated = DETECT_RE.source.replace("(?:\\/\\*[\\s\\S]*?\\*\\/\\s*)?", "");
+    const mutated = DETECT_RE.source.replace(BEFORE_PAREN_GROUP, "");
     expect(mutated).not.toBe(DETECT_RE.source);
     const mutant = new RegExp(mutated, "i");
     expect(mutant.test(SPELLINGS["block comment"])).toBe(false);
@@ -273,8 +312,17 @@ describe("lint-app-guc: DETECT_RE spelling calibration", () => {
   // TWICE in the source (once per alternation), and the asymmetry between them
   // was the defect: the comment group existed only in the first alternation, so
   // a dollar-quoted read with a comment anywhere near it was a documented miss.
-  const AFTER_PAREN_GROUP = "(?:(?:\\/\\*[\\s\\S]*?\\*\\/|--[^\\n]*\\n)\\s*)?";
-  const BEFORE_PAREN_GROUP = "(?:\\/\\*[\\s\\S]*?\\*\\/\\s*)?";
+  // ⛔ ONE SOURCE FOR THE COMMENT BODY (164.8.5-REVIEW-R2 WR-R2-06). It used to
+  // be `\/\*[\s\S]*?\*\/` — lazy, but still BACKTRACKING: when the
+  // shortest `*/` led to a non-`app.` literal the engine extended the "comment"
+  // to a LATER `*/` in the file and tried again, matching across statements.
+  // The classic non-crossing form cannot leave its own terminator, which
+  // removes the backtracking as well. Spelled ONCE here and asserted to be
+  // present, so a future edit to the regex reds this file rather than silently
+  // turning three `.replace()` mutants into no-ops.
+  const COMMENT_BODY = "\\/\\*[^*]*\\*+(?:[^/*][^*]*\\*+)*\\/";
+  const AFTER_PAREN_GROUP = `(?:(?:${COMMENT_BODY}|--[^\\n]*\\n)\\s*)?`;
+  const BEFORE_PAREN_GROUP = `(?:${COMMENT_BODY}\\s*)?`;
 
   it("MUTANT: dropping the AFTER-paren comment group blinds it to a comment inside the parentheses", () => {
     expect(

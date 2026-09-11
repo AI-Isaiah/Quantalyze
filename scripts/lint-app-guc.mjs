@@ -130,6 +130,26 @@ export const HEADER_SCAN_LINES = 40;
  * one, the finding is real — fix the regex or the prose it matched, never the
  * count (decision D4).
  *
+ * ⛔ THE COMMENT BODY IS THE CLASSIC NON-CROSSING FORM, NEVER `[\s\S]*?`
+ * (164.8.5-REVIEW-R2 WR-R2-06). Lazy is not the same as non-crossing: when the
+ * shortest `*\/` led to a non-`app.` literal the engine EXTENDED the "comment"
+ * to a LATER `*\/` in the file and tried again, so the pattern matched ACROSS
+ * STATEMENTS. MEASURED 2026-09-11:
+ *
+ *   input : current_setting(\/*a*\/ 'other.x'); SELECT \/*b*\/ 'app.z';
+ *   DETECT_RE.test(...) -> true   (a 52-character match spanning TWO statements)
+ *   control, the same text with the comments removed -> false
+ *
+ * There is no app-GUC read in that text. An unannotated file got a phantom
+ * `unannotated-reader` whose only D4-permitted remedies are "annotate" or
+ * "remove the reader"; an ANNOTATED file got `header-count-mismatch`, whose
+ * message sends a maintainer to hunt a reader that does not exist. The prober's
+ * byte-identical copy turned the same phantom into a ROTATION remedy. The
+ * non-crossing body cannot leave its own terminator, which removes the
+ * backtracking as well. The corpus stayed at 292 files / 0 findings across the
+ * change, and `src/__tests__/lint-app-guc.test.ts` carries both texts as
+ * NEGATIVE cells beside a mutant that puts the phantom back.
+ *
  * ⚠️ KNOWN BLIND SPOT, booked as a criterion-1 limit and NOT fixed in this
  * phase: a read assembled by SQL string concatenation — e.g.
  * `'current_' || 'setting(''app.' || …` — is invisible to this regex. Phase
@@ -140,7 +160,7 @@ export const HEADER_SCAN_LINES = 40;
  * spelling that remains.
  */
 export const DETECT_RE =
-  /current_setting\s*(?:\/\*[\s\S]*?\*\/\s*)?\(\s*(?:(?:\/\*[\s\S]*?\*\/|--[^\n]*\n)\s*)?(?:[EU]&?)?'{1,2}app\.|current_setting\s*(?:\/\*[\s\S]*?\*\/\s*)?\(\s*(?:(?:\/\*[\s\S]*?\*\/|--[^\n]*\n)\s*)?\$[A-Za-z_]*\$app\./i;
+  /current_setting\s*(?:\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\/\s*)?\(\s*(?:(?:\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\/|--[^\n]*\n)\s*)?(?:[EU]&?)?'{1,2}app\.|current_setting\s*(?:\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\/\s*)?\(\s*(?:(?:\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\/|--[^\n]*\n)\s*)?\$[A-Za-z_]*\$app\./i;
 
 /** `-- APP-GUC-LINEAGE: …`, line-start anchored after optional indentation. */
 export const LINEAGE_MARKER_RE = /^\s*--\s*APP-GUC-LINEAGE:\s*(.*)$/;
