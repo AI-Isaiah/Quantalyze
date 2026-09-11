@@ -1393,12 +1393,13 @@ Plans:
 ### Phase 164.8.5: PROBERPARSE — the prod-prober hygiene rules stop being dodgeable and its parser stops dropping rows silently: the ||-split service key and the dollar-quoted literal both go RED, an unreadable oracle no longer disables the live credential scan, a malformed cron.job record becomes a measure-fail instead of a continue, and the app-GUC linter successor check stops accepting any readable file (INSERTED)
 
 **Goal:** Every control this phase touches is one a machine can DODGE today, and each fix ships with a red fixture proving the dodge now fails. The reviewer's verdict on Phase 164.7 is the brief: *"the SQL in this phase is careful and genuinely fail-closed; the verification code shipped alongside it is not."*
-**Requirements**: [164.7-CR03-HYGIENE-BYPASS], [164.7-WR04-HYGIENE-BELOW-ORACLE], [164.7-WR05-PARSER-DROPS-ROWS], [164.7-APPGUC-SUCCESSOR-VACUOUS], [164.7-REVIEW-INFO-FOUR], [APPGUC-DETECT-DOUBLEQUOTE-01], [APPGUC-UTF16-01]
+**Requirements**: ⛔ [164.7-REPAIR-REVERTED] (FIRST WORK — the five prober repairs were written, measured as a net regression, and reverted on 2026-09-10; re-do them with a red control each, hoisting PROD hygiene above every early return BEFORE re-applying anything), [164.7-CR03-HYGIENE-BYPASS], [164.7-WR04-HYGIENE-BELOW-ORACLE], [164.7-WR05-PARSER-DROPS-ROWS], [164.7-APPGUC-SUCCESSOR-VACUOUS], [164.7-REVIEW-INFO-FOUR], [APPGUC-DETECT-DOUBLEQUOTE-01], [APPGUC-UTF16-01]
 **Depends on:** Phase 164.8
 **Plans:** 0 plans
 
 **Success Criteria**:
 
+0. ⛔ **Before ANY of the below:** the PROD-side hygiene loop runs at the TOP of `compareManifest`, above every `return`, and a test proves a `cron-secret-in-command` on the PROD side STILL fires when the oracle is absent, stale, hand-edited and marker-mismatched. This is the precondition the 2026-09-10 revert exists to enforce — re-applying the repairs without it re-introduces a measured suppression of credential detection.
 1. `hygieneViolations` returns a NON-EMPTY list for a command whose service key is split across a `||` concatenation, and a red fixture in `fixtures/cron-drift/` proves it — neutering the fix must turn the self-test RED naming that fixture. ⛔ NOT by lowering `HEADER_LITERAL_MIN`: the docstring explains why the threshold exists and lowering it fires on the green Vault-backed shape.
 2. The literal scanner skips `$tag$ … $tag$` regions wholesale, so `$q$don't$q$` and `$q$dont$q$` in the headers list produce the SAME verdict. Both spellings ship as fixtures.
 3. A live `cron.job` command carrying a credential is reported as `cron-secret-in-command` EVEN WHEN the oracle is missing, unparseable, or has a bumped `schema_version` — the property the file header already claims and does not have.

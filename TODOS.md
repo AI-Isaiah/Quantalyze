@@ -7780,15 +7780,46 @@ and that inversion is the phase's real defect."* Five Criticals, eleven Warnings
 five files PR #756 shipped. **Six of them were proven by EXECUTION, not argued** — each is
 reproducible from the command quoted in `.planning/phases/164.7-*/164.7-REVIEW.md`.
 
-**CLOSED IN-PHASE on 2026-09-10** (branch `phase-164.7-finalize`, all in
-`scripts/prod-prober/arms/cron-drift.mjs`, no production write): CR-01 (username/database now
-compared, with `prod-username-changed.json` as its red control), CR-02 (the live database marker is
-compared to the oracle's, disagreement is a `measure-fail`), CR-03 part (a) (`vault-absent` reads
-comment-STRIPPED text), CR-04 (the oracle validation is total over every field the comparison
-consumes) and WR-11 (a row's `command` is bound to its own `command_sha256`). The entries below are
-what was NOT closed.
+⛔ **NOTHING WAS CLOSED IN-PHASE. A repair was written on 2026-09-10 and REVERTED THE SAME DAY.**
+This paragraph previously read "CLOSED IN-PHASE … CR-01, CR-02, CR-03(a), CR-04 and WR-11". That
+claim is false and is kept visible rather than deleted, because the reason it was false is the
+lesson.
 
-- [ ] **[164.7-CR03-HYGIENE-BYPASS] The ten hygiene rules still return ZERO violations on a command that inlines a live service key, if the key is split.** Parts (b) and (c) of CR-03 are open; only the comment-strip half landed. (b) `headerCarriesLiteral` inspects only the FIRST quoted literal after the header name and fires at `content.length >= 16`, so `'sk_live_' || 'AAAABBBBCCCCDDDDEEEE'` presents an 8-character first literal, and both fragments sit under `HEADERS_LITERAL_MAX = 32` so `long-literal-in-headers` misses them too. (c) the literal scanner has **no dollar-quote awareness** although this file's own comment says `cron.job.command` is *"frequently a multi-line `DO $$ … $$` block"* — a lone apostrophe inside `$q$don't$q$` desyncs `singleQuotedLiterals` and flips `long-literal-in-headers` from RED to CLEAN. ⛔ This is the arm's reason for existing: PROD jobid 1 carried an inline service key for MONTHS. **Fix:** sum every literal in the `||` chain up to the next depth-0 comma and compare the SUM to `HEADER_LITERAL_MIN`; teach the scanner to skip `$tag$ … $tag$` regions wholesale; ship a red fixture for each of the three shapes. ⛔ Do NOT lower `HEADER_LITERAL_MIN` — the docstring correctly explains why the threshold exists, and lowering it fires on the green Vault-backed shape. **Owner: Phase 164.8.5 PROBERPARSE.**
+Commit `84b21cb5` repaired CR-01/02/03a/04 and WR-11 in
+`scripts/prod-prober/arms/cron-drift.mjs`. Five specialists then reviewed **the repair** and it was
+**a measured net regression**:
+
+- **It SUPPRESSED credential detection.** The PROD-side hygiene loop sat below every
+  oracle-validation `return`, and the repair added four new early returns above it. MEASURED: with a
+  PROD command carrying an inline JWT, appending ` -- tidy` to the manifest's copy of that command
+  collapsed the result to `manifest-invalid` and the `cron-secret-in-command` defect VANISHED for
+  all 14 jobs. That is the arm's own adversary — someone hand-cleaning the committed text — being
+  handed an off switch. Before the repair the key was caught; after it, it was not.
+- **Five of its six new controls COULD NOT FAIL.** Neuter-proved individually: only the `username`
+  comparison turned the self-test red. `database`, the marker check, the sha binding, the `active`
+  validator and the comment-strip were each individually removable at exit 0 — and all three of the
+  sha binding, marker check and comment-strip disabled SIMULTANEOUSLY still printed `53/53 PASSED`.
+- **CR-03's fix was vacuous AND harmful.** `stripSqlComments` removed comments but not STRING
+  LITERALS, so `RAISE NOTICE 'reads vault.decrypted_secrets'` satisfied it (measured: all ten rules
+  clean on a command inlining a live key); and because a PROD command is ONE PHYSICAL LINE, a `--`
+  inside a literal deleted the remainder and raised a FALSE `vault-absent` that then withheld the
+  drift diff.
+
+⭐ **The lesson, and the reason this is recorded rather than quietly re-done:** the repair committed
+the exact defect class it was repairing, in the commit that claimed to fix it — and the batch
+neuter used to "prove" it (both `username` and `database` disabled together) could not distinguish
+which arm produced the RED. **A batch neuter proves nothing about the individual arms.**
+
+`scripts/` and `src/` on this branch are now byte-identical to `origin/main`. **CR-01 through CR-05,
+WR-01/02/11 and SR-01..SR-09 are ALL OPEN**, with the full measured evidence and a prescribed fix
+per finding in `.planning/phases/164.7-*/164.7-REVIEW.md`. Owner: **Phase 164.8.5 PROBERPARSE**
+(prober/parser) and **Phase 164.8.6 VAULTTICKFIX** (the forward migration).
+
+- [ ] **[164.7-REPAIR-REVERTED] The five prober repairs must be re-done WITH A RED CONTROL EACH.** CR-01 (`username`/`database` uncompared), CR-02 (live marker read then discarded), CR-04 (`Boolean(undefined)` agrees with a deactivated PROD job) and WR-11 (`command` unbound from its `command_sha256`) are all still live defects — the repair was correct in substance and wrong in structure and in evidence. **Fix, in this order:** (1) hoist the PROD-side hygiene loop to the TOP of `compareManifest`, above every `return`, so no oracle state can silence credential detection — this also closes `[164.7-WR04-HYGIENE-BELOW-ORACLE]`; (2) re-apply the four repairs; (3) ship a red fixture for EACH, neuter-proved INDIVIDUALLY (`prod-database-changed.json`, `manifest-sha-mismatch.json`, a marker-mismatch scenario asserting the PROD credential scan STILL fires, and direct `compareManifest` unit tests for the four row validators); (4) make `opts.liveMarker` MANDATORY — an absent marker must be a `measure-fail`, not a silent pass. ⛔ Do NOT re-apply CR-03's comment-strip; it is in `[164.7-CR03-HYGIENE-BYPASS]` and needs a quote-aware masker, not a strip. Also fix: the dead `changed.includes("jobid")` headline branch, `run.mjs`'s half-updated "SEVEN … is not six" comment, and the overstated claim that jobid changes on any reschedule (`cron.schedule` UPSERTS on `(jobname, username)` and PRESERVES the jobid). **Owner: Phase 164.8.5 PROBERPARSE.**
+
+The entries below are the findings that were never attempted.
+
+- [ ] **[164.7-CR03-HYGIENE-BYPASS] The ten hygiene rules still return ZERO violations on a command that inlines a live service key, if the key is split.** Parts (b) and (c) of CR-03 are open; only the comment-strip half landed. (b) `headerCarriesLiteral` inspects only the FIRST quoted literal after the header name and fires at `content.length >= 16`, so `'sk_live_' || 'AAAABBBBCCCCDDDDEEEE'` presents an 8-character first literal, and both fragments sit under `HEADERS_LITERAL_MAX = 32` so `long-literal-in-headers` misses them too. (c) the literal scanner has **no dollar-quote awareness** although this file's own comment says `cron.job.command` is *"frequently a multi-line `DO $$ … $$` block"* — a lone apostrophe inside `$q$don't$q$` desyncs `singleQuotedLiterals` and flips `long-literal-in-headers` from RED to CLEAN. ⛔ This is the arm's reason for existing: PROD jobid 1 carried an inline service key for MONTHS. **Fix:** sum every literal in the `||` chain up to the next depth-0 comma and compare the SUM to `HEADER_LITERAL_MIN`; teach the scanner to skip `$tag$ … $tag$` regions wholesale; ship a red fixture for each of the three shapes. ⛔ Do NOT lower `HEADER_LITERAL_MIN` — the docstring correctly explains why the threshold exists, and lowering it fires on the green Vault-backed shape. ⭐ **THE BYPASS FAMILY IS NINE MEMBERS, ALL MEASURED 2026-09-10 — inherit this, do not re-derive it.** Each returns ZERO violations from all ten rules: (a) **dollar-quoted header value** — `jsonb_build_object('X-Service-Key',$q$sk_live_…$q$)`, a one-token bypass needing no splitting at all; (b) `chr(115)||chr(107)||…` — zero literals; (c) `concat('sk_live_','AAAABBBB','CCCCDDDD')`; (d) `format('%s%s',…)`; (e) `convert_from(decode('…','base64'),'utf8')||…`; (f) `U&'\0073\006b'||…` unicode escapes; (g) `quote_literal('sk_live_…')||'…'`; (h) ⚠️ **variable indirection** — `k := '<key>'` then `jsonb_build_object('X-Service-Key', k)`; (i) ⚠️ **whole-header indirection** — `h := '{"X-Service-Key":"<key>"}'::jsonb; … headers := h`, where the key is DOUBLE-quoted JSON so the `'X-Service-Key'\s*,\s*'` anchor never matches. ⛔ **(h) and (i) need no obfuscation — they are what a normal developer writes**, and outside `match_engine_cron` nothing looks for a long literal at all, because `long-literal-in-headers` is scoped to header regions only. Header-name CASING is not a bypass (the regex carries `gi`) and splitting the NAME is not one either. **Fix the families, not the cases:** teach the literal scanner about `$tag$…$tag$` (nested tags included), `E''` and `U&''`; length-test the DERIVED value by summing operands joined by `||` or passed to `concat`/`format`/`chr`/`decode`; and add a rule that fires on a long literal ANYWHERE in the command with the vault-read shape as its only exemption — that last one is the only thing that catches (h). **Owner: Phase 164.8.5 PROBERPARSE.**
 
 - [ ] **[164.7-WR04-HYGIENE-BELOW-ORACLE] An unreadable or invalid oracle disables the live credential scan entirely.** `run()` returns as soon as the manifest cannot be read — before the `cron.job` query is issued — and `compareManifest`'s `invalid()` returns above the `prodHygiene` loop. So a bumped `schema_version` or one malformed row means the arm never asks whether a live cron command carries a credential. The file header claims the opposite as a design property: hygiene runs *"on BOTH sides of the comparison … EVEN WHEN ITS SHA MATCHES THE MANIFEST."* It is presented as independent of the comparison and implemented as downstream of it. Not silent (`manifest-invalid` is loud) but it MASKS a higher-severity finding behind a lower-severity one. **Fix:** read `cron.job` and scan it for credentials FIRST, then validate the oracle. **Owner: Phase 164.8.5 PROBERPARSE.**
 

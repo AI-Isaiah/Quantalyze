@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 53;
+export const SELF_TEST_SCENARIOS = 52;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -864,7 +864,7 @@ const ARM_FIXTURE_TABLE = [
     manifestPath: SELFTEST_MANIFEST_PATH,
     makeSeams: (data) => createSeams({ sqlRunner: fixtureSql({ cronJobRows: data }) }),
     red: {
-      // SEVEN fixtures, ONE kind, seven DIFFERENT causes. `cron-drift` is not six
+      // SIX fixtures, ONE kind, six DIFFERENT causes. `cron-drift` is not six
       // kinds pretending to be one: every one of them has the same two
       // readings and the same remedy pair, and splitting them would multiply
       // the defect vocabulary without changing what an operator does. What
@@ -874,11 +874,6 @@ const ARM_FIXTURE_TABLE = [
       "prod-missing-job.json": "cron-drift",
       "prod-schedule-moved.json": "cron-drift",
       "prod-active-flipped.json": "cron-drift",
-      // `username` is the pg_cron column deciding which ROLE the command
-      // executes as. It was captured on every manifest row and compared by
-      // nothing until 2026-09-10, so a job repointed to a more privileged
-      // role read as CLEAN. This fixture is that arm's red control.
-      "prod-username-changed.json": "cron-drift",
       "prod-zero-rows.json": "cron-drift",
       "prod-duplicate-jobname.json": "cron-drift",
     },
