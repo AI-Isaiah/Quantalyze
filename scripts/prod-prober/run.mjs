@@ -2383,7 +2383,12 @@ export async function selfTest() {
       ) &&
       expect(
         unknownSentence.includes("fixture_unknown"),
-        `an unresolvable callable is NAMED in the sentence, so the reader knows what could not be judged (${unknownSentence.slice(0, 0) || "named"})`,
+        // ⛔ F7. This read `${unknownSentence.slice(0, 0) || "named"}`, which is
+        // `"" || "named"` — ALWAYS the literal `"named"`. The assertion was
+        // sound; its failure message could not report what it actually saw, so
+        // a red here told the reader nothing. `slice(0, 0)` is almost certainly
+        // a `slice(0, N)` whose N was lost in an edit.
+        `an unresolvable callable is NAMED in the sentence, so the reader knows what could not be judged (${unknownSentence.slice(0, 220) || "NO SENTENCE AT ALL"})`,
       ) &&
       expect(
         // ⛔ F6. A definition the snapshot reader does not expose was dropped
