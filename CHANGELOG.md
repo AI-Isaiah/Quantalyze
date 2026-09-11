@@ -30,6 +30,16 @@ phase. `gitleaks` was run as `detect --no-git` over the working tree, while CI s
   `measure-fail` defect may legitimately carry `subject: null`. Now `d.subject?.endsWith(…) === true`
   — a null subject names no job.
 
+- **A THIRD red gate, `frontend-test (2)`, was pre-existing and had been hidden behind the first
+  two.** `test-restore-workflow-wiring.test.ts` scans every file in `src/__tests__` for a raw
+  lookup index fed into a narrowing call, and `prod-prober-wiring.test.ts:1579` had
+  `fn.indexOf("\n}\n") + 2` — on a miss that is `-1 + 2 = 1`, so `slice(0, 1)` silently narrows the
+  parser body to ONE CHARACTER and every assertion over it passes vacuously. Routed through the
+  file's own `anchorIndex`, which throws by name. Introduced by `ed21b6b8`, confirmed failing on
+  the previous head `e7c57d7c` with the identical assertion.
+- ⚠️ **A file-scoped vitest run can never clear that guard**, because it scans the whole directory
+  rather than the file under test — which is exactly why the targeted runs reported green.
+
 ### Security
 
 - **`gitleaks` (8.30.1): 5 findings → 0, without weakening the gate.** `generic-api-key` fires on
