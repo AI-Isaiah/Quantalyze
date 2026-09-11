@@ -573,22 +573,46 @@ const MAX_DOLLAR_DEPTH = 4;
  * map its offsets or stop at the child's `base`.
  *
  * @param {string} sql
+ * ⛔ THE DEPTH CAP RETURNS, IT DOES NOT THROW (164.8.5-REVIEW-R2 WR-R2-05). It
+ * used to `throw` from INSIDE the recursion, which abandoned the PARENT's
+ * remaining `dollarRegions` loop AND its entire single-quoted-body walk —
+ * everything not yet pushed into `spans` was lost, not merely the too-deeply
+ * nested body. `hygieneViolations` caught the throw and reported
+ * `command-unjudgeable` beside whatever HAD been collected, so the refusal was
+ * additive in NAME while being substitutive for every span the unwind skipped.
+ *
+ * MEASURED 2026-09-11 on the parent commit, with `deep` = six nested `DO`
+ * bodies carrying no credential and `sibling` = an ordinary depth-1 `DO $y$ … $y$`
+ * carrying an inline `X-Service-Key`:
+ *
+ *   SIBLING ALONE (control) -> ["x-service-key-literal","long-literal-in-headers"]
+ *   SIBLING then DEEP       -> ["command-unjudgeable","x-service-key-literal","long-literal-in-headers"]
+ *   DEEP then SIBLING       -> ["command-unjudgeable"]          <-- credential NOT named
+ *
+ * The only thing that changed was the ORDER of two independent statements in
+ * one command, and `command-unjudgeable` is in `UNJUDGEABLE_RULE_IDS`, so the
+ * row routed to `measure-fail` with no rotation remedy. Order-dependence in a
+ * refusal is the substitutive bug wearing a different hat.
+ *
+ * @param {string[]} [refusals] every span this walk GAVE UP on, as sentences.
+ *   Non-empty means the reading is incomplete; the caller reports that BESIDE
+ *   its findings rather than instead of them. It is an out-parameter for the
+ *   same reason `out` is: the traversal must keep going after a refusal.
  * @returns {{base:number, sql:string, masked:string, dollarRegions:object[]}[]}
  *   `base` is the offset of this span inside the ORIGINAL command, so a future
  *   caller can report a position; `masked` is index-aligned with `sql`.
  */
-export function codeSpans(sql, base = 0, depth = 0, out = []) {
+export function codeSpans(sql, base = 0, depth = 0, out = [], refusals = []) {
   if (depth > MAX_DOLLAR_DEPTH) {
-    // Thrown, not swallowed: `run()` maps an arm throw to `measure-fail`, which
-    // is the honest verdict for text this module gave up on.
-    throw new Error(`cron command has dollar-quote nesting deeper than ${MAX_DOLLAR_DEPTH} — refusing to judge it`);
+    refusals.push(`dollar-quote nesting deeper than ${MAX_DOLLAR_DEPTH} at offset ${base}`);
+    return out;
   }
   const { masked, dollarRegions } = scanSql(sql);
   const span = { base, sql, masked, dollarRegions };
   out.push(span);
   for (const r of dollarRegions) {
     if (DO_PREFIX.test(masked.slice(0, r.start))) {
-      codeSpans(sql.slice(r.contentStart, r.contentEnd), base + r.contentStart, depth + 1, out);
+      codeSpans(sql.slice(r.contentStart, r.contentEnd), base + r.contentStart, depth + 1, out, refusals);
     }
   }
   // The single-quoted body. Walked with the same primitives every other walk in
@@ -611,7 +635,7 @@ export function codeSpans(sql, base = 0, depth = 0, out = []) {
       continue;
     }
     if (DO_PREFIX.test(masked.slice(0, lit.start))) {
-      codeSpans(lit.content, base + lit.start + 1, depth + 1, out);
+      codeSpans(lit.content, base + lit.start + 1, depth + 1, out, refusals);
     }
     i = lit.end;
   }
@@ -1244,7 +1268,7 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
   // which the string lexer correctly masks away in its entirety.
   //
   // ⛔ THE REFUSAL IS ADDITIVE, NOT SUBSTITUTIVE (164.8.5-REVIEW-R1 WR-R1-03).
-  // `codeSpans` throws when dollar nesting exceeds `MAX_DOLLAR_DEPTH`, and it
+  // `codeSpans` gives up when dollar nesting exceeds `MAX_DOLLAR_DEPTH`, and it
   // used to throw straight out of this function — BEFORE ANY RULE RAN. Every
   // rule that would have fired on that command was lost, and the row became a
   // generic `measure-fail`. MEASURED 2026-09-11: an `audit_log_hot_to_cold` row
@@ -1259,17 +1283,23 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
   // the answer is the same: collect what CAN be measured, and report the
   // refusal BESIDE it rather than instead of it.
   //
-  // `codeSpans` appends into `out` as it recurses, so passing our own array
-  // keeps every span it reached before giving up. The outer span is pushed
-  // first, so the rules still see the whole command text; what is lost is only
-  // the too-deeply-nested bodies, and `command-unjudgeable` says so.
+  // ⛔ AND "ADDITIVE" HAD TO MEAN IT AT EVERY OFFSET (164.8.5-REVIEW-R2
+  // WR-R2-05). Catching the throw HERE was still substitutive for every span the
+  // unwind skipped, because the throw came from INSIDE the recursion and took
+  // the parent's remaining `dollarRegions` loop and its whole single-quoted-body
+  // walk with it. MEASURED: `SIBLING then DEEP` named the credential,
+  // `DEEP then SIBLING` reported `["command-unjudgeable"]` alone — the same two
+  // statements, reordered. The depth cap now RECORDS a refusal and returns, so
+  // the traversal completes and the refusal is reported beside every finding the
+  // rest of the command produced. `codeSpans` appends into both out-parameters
+  // as it recurses, so passing our own arrays keeps everything it reached.
   const spans = [];
-  try {
-    codeSpans(text, 0, 0, spans);
-  } catch (err) {
+  const refusals = [];
+  codeSpans(text, 0, 0, spans, refusals);
+  if (refusals.length > 0) {
     say(
       "command-unjudgeable",
-      `job ${name} carries a command this module gave up lexing (${err && err.message ? err.message : String(err)}). The rules below still ran over the ${spans.length} span(s) that WERE read, and any finding they report is real — but the unread part was NOT judged, and an unjudged command is not a clean one.`,
+      `job ${name} carries a command this module gave up lexing (${refusals.join("; ")}). The rules ran over the ${spans.length} span(s) that WERE read, and any finding they report is real — but the unread part was NOT judged, and an unjudged command is not a clean one.`,
     );
   }
 
