@@ -135,5 +135,22 @@
       "long-token-anywhere"
     ],
     "expect_same_verdict_as": "bypass_var_key_job"
+  },
+  {
+    "shape": "(l) the credential in a URL PATH SEGMENT — BARE_URL_RE's own path charset swallowed it whole",
+    "jobname": "bypass_url_path_token_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://hook.invalid/t/FAKE-0123456789-0123456789-0123456789ab', body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ],
+    "expect_same_verdict_as": "bypass_url_query_token_job"
+  },
+  {
+    "shape": "(l-control) the SAME credential in the query string — the spelling that always fired",
+    "jobname": "bypass_url_query_token_job",
+    "command": "DO $$ BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://hook.invalid/t?k=FAKE-0123456789-0123456789-0123456789ab', body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ]
   }
 ]

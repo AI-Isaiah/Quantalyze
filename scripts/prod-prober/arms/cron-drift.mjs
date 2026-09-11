@@ -329,6 +329,43 @@ export const TOKEN_MIN = HEADERS_LITERAL_MAX;
  * shape in the committed corpus: a 79-character bare analytics URL.
  */
 export const BARE_URL_RE = /^https?:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[A-Za-z0-9._~/-]*)?$/;
+/**
+ * Is this token a URL carrying NOTHING — the exemption `long-token-anywhere`
+ * actually means?
+ *
+ * ⛔ `BARE_URL_RE.test(token)` ALONE WAS THE BUG (164.8.5-REVIEW CR-04). The
+ * docstring above reasons about `?`, `#` and `user:pw@` and NEVER about the
+ * PATH — which is the commonest webhook-token shape there is. Every character
+ * of a `FAKE-0123…` credential is inside the pattern's own path charset
+ * `[A-Za-z0-9._~/-]`, so `https://hook.invalid/t/<37-char token>` matched, was
+ * exempted, and reported `[]`; the query-string spelling of the SAME credential
+ * fired. Reproduced both ways before this fix.
+ *
+ * ⛔ THE SEGMENT THRESHOLD IS `TOKEN_MIN`, DERIVED AND NOT A NEW CONSTANT. The
+ * rule's own test is "a whitespace-delimited token of at least `TOKEN_MIN`
+ * characters containing a digit"; this asks the same question of each
+ * `/`-delimited PATH SEGMENT. A URL is exempt only while none of its segments
+ * would be a credential on its own, so the exemption can never be the reason a
+ * credential goes unreported.
+ *
+ * MEASURED on the committed corpus: the one URL the exemption exists for —
+ * `https://quantalyze-analytics-production.up.railway.app/api/match/cron-recompute`,
+ * 79 characters — has segments `api` (3), `match` (5) and `cron-recompute` (14),
+ * so it stays exempt and the false-positive budget stays at zero.
+ *
+ * ⚠️ ACCEPTED RESIDUAL, recorded beside the rule: a credential SPLIT across
+ * several short path segments (`/a1b2/c3d4/…`) evades this, exactly as a
+ * `||`-split value evades a first-literal length test. Closing it needs a
+ * whole-path measure, which would fire on long REST paths that carry no secret.
+ *
+ * @param {string} token a whitespace-delimited token from a literal's content
+ */
+export function isBareUrl(token) {
+  if (!BARE_URL_RE.test(token)) return false;
+  const path = token.replace(/^https?:\/\/[^/]*/, "");
+  return !path.split("/").some((segment) => segment.length >= TOKEN_MIN && /\d/.test(segment));
+}
+
 
 /**
  * The prefix that makes a QUOTED region CODE rather than DATA.
@@ -1002,7 +1039,7 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
       for (const token of lit.content.split(/\s+/)) {
         if (token.length < TOKEN_MIN) continue;
         if (!/\d/.test(token)) continue;
-        if (BARE_URL_RE.test(token)) continue;
+        if (isBareUrl(token)) continue;
         // Already `jwt-shape`'s finding. Without this the JWT red row would fire
         // TWO rules and its isolation assertion — the thing that makes a red row
         // attributable — would fail.

@@ -46,6 +46,7 @@ import {
   TOKEN_MIN,
   compareManifest,
   hygieneViolations,
+  isBareUrl,
   parseCronJobRows,
 } from "../../scripts/prod-prober/arms/cron-drift.mjs";
 
@@ -896,6 +897,48 @@ describe("[164.1-05] kinds and floors", () => {
     expect(loosened.test(RAILWAY)).toBe(true);
   });
 
+  it("CR-04: the exemption is `isBareUrl`, not `BARE_URL_RE` — a credential in a PATH SEGMENT is not a bare URL", () => {
+    // ⛔ THE DOCSTRING REASONED ABOUT `?`, `#` AND `user:pw@` AND NEVER ABOUT
+    // THE PATH — which is the commonest webhook-token shape there is. Every
+    // character of a `FAKE-0123…` credential is inside `BARE_URL_RE`'s own path
+    // charset, so `https://hook.invalid/t/<token>` MATCHED and was exempted,
+    // while the query-string spelling of the same credential fired. Both
+    // directions were reproduced before the fix.
+    const TOKEN = `FAKE${"-0123456789"}${"-0123456789"}${"-0123456789ab"}`;
+    const PATH_FORM = `https://hook.invalid/t/${TOKEN}`;
+    // The shape test still says "this looks like a URL" — which is precisely
+    // why it could not be the exemption on its own.
+    expect(BARE_URL_RE.test(PATH_FORM), "the raw shape test is still fooled, and always was").toBe(true);
+    expect(isBareUrl(PATH_FORM), "the EXEMPTION is not").toBe(false);
+
+    // The one URL the exemption exists for stays exempt, or the false-positive
+    // budget on the committed corpus goes from zero to one.
+    const RAILWAY = "https://quantalyze-analytics-production.up.railway.app/api/match/cron-recompute";
+    expect(isBareUrl(RAILWAY)).toBe(true);
+    expect(isBareUrl("https://x.invalid:8443/a/b")).toBe(true);
+    expect(isBareUrl("https://x.invalid/a?token=1"), "and everything BARE_URL_RE already rejected stays rejected").toBe(
+      false,
+    );
+
+    // ⛔ THE SEGMENT THRESHOLD IS `TOKEN_MIN`, DERIVED. Calibrated in both
+    // directions ON THE BOUNDARY so the number is measured, not asserted: one
+    // character under is exempt, exactly at it is not.
+    const digitSeg = (n: number) => `https://hook.invalid/${"a1".repeat(Math.ceil(n / 2)).slice(0, n)}`;
+    expect(isBareUrl(digitSeg(TOKEN_MIN - 1)), `a ${TOKEN_MIN - 1}-character segment is still a path`).toBe(true);
+    expect(isBareUrl(digitSeg(TOKEN_MIN)), `a ${TOKEN_MIN}-character segment is a credential`).toBe(false);
+    // …and the DIGIT half of the rule's own test applies to a segment too: a
+    // purely alphabetic segment of any length stays exempt, exactly as a purely
+    // alphabetic token does (the A2 residual, unchanged).
+    expect(isBareUrl(`https://hook.invalid/${"a".repeat(TOKEN_MIN + 8)}`)).toBe(true);
+
+    // End to end through the rule, both spellings of the same credential.
+    const ids = (cmd: string) => hygieneViolations("j", cmd).map((x) => x.slice(1, x.indexOf("]")));
+    expect(ids(`DO $$ BEGIN PERFORM net.http_post(url := '${PATH_FORM}'); END $$`)).toContain("long-token-anywhere");
+    expect(ids(`DO $$ BEGIN PERFORM net.http_post(url := 'https://hook.invalid/a?token=${TOKEN}'); END $$`)).toContain(
+      "long-token-anywhere",
+    );
+  });
+
   it("F5: the UNREACHABLE `vaultSpan` exemption is gone and cannot come back", () => {
     // ⛔ A DELETION OF PROVABLY-DEAD CODE HAS NO BEHAVIOUR TO NEUTER, so the
     // honest control is a PROOF plus a pin, not a red fixture.
@@ -920,14 +963,14 @@ describe("[164.1-05] kinds and floors", () => {
       .join("\n");
     expect(body, "the dead exemption's identifier is gone from the rule body").not.toContain("vaultSpan =");
     expect(body, "and the unconditional bare-URL exemption — the whole of what it duplicated — is still there").toContain(
-      "if (BARE_URL_RE.test(token)) continue;",
+      "if (isBareUrl(token)) continue;",
     );
     // CALIBRATION: the same predicate FINDS the line when it is spliced back
     // in, so "it is gone" is a reading rather than something this assertion
     // always says.
     const restored = body.replace(
-      "if (BARE_URL_RE.test(token)) continue;",
-      "const vaultSpan = VAULT_READ_RE.test(span.masked);\n        if (BARE_URL_RE.test(token)) continue;",
+      "if (isBareUrl(token)) continue;",
+      "const vaultSpan = VAULT_READ_RE.test(span.masked);\n        if (isBareUrl(token)) continue;",
     );
     expect(restored).not.toBe(body);
     expect(restored).toContain("vaultSpan =");
