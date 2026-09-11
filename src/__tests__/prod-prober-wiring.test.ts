@@ -1411,6 +1411,96 @@ describe("[164.1-05] kinds and floors", () => {
     expect(hygieneVerdict(map, "dirty_job").violations).toHaveLength(1);
   });
 
+  // -------------------------------------------------------------------------
+  // PROVENANCE TEXT READ AS A CREDENTIAL — found by the parallel hunt, not by
+  // the review, and IMMINENT rather than theoretical.
+  //
+  // WR-R1-01 gave `long-token-anywhere` a second producer — comment bodies —
+  // and comments are where PROVENANCE lives. MEASURED 2026-09-11, every one of
+  // these fired a rule whose remedy is "treat the named secret as EXPOSED and
+  // rotate it first", on text carrying no credential at all: a migration
+  // filename, a git sha, a phase-directory name, a bare UUID, a GitHub commit
+  // URL.
+  //
+  // ⚠️ `retention_compute_jobs_orphaned_running` lexes to a pure comment and is
+  // clean today only because its one long token, `CANARY_162_V1_PROSE_ONLY`, is
+  // 24 characters — EIGHT under TOKEN_MIN. That row has a pending PROD
+  // re-capture; one migration filename in the re-captured text makes
+  // `captureManifest` exit 1 under "Rotate the exposed secret" and write
+  // nothing.
+  //
+  // ⛔ TWO EXEMPTIONS, TWO `it()`s, because they are TWO EDITS. A single test
+  // covering both would credit one RED to two controls — the shape WR-R2-03 was
+  // filed for.
+  // -------------------------------------------------------------------------
+  const PROV_MIGRATION = "20260907130000_ledger_refresh_switch_to_system_flags.sql";
+  const PROV_UUID = "123e4567-e89b-12d3-a456-426614174000";
+  const PROV_KEY = `FAKE-0123456789${"-0123456789"}${"-0123456789ab"}`;
+  const provIds = (cmd: string) => hygieneViolations("j", cmd).map((x) => x.slice(1, anchorIndex(x, "]")));
+
+  it("PROVENANCE 1/2: a CANONICAL UUID is not a credential, in a comment or in a literal", () => {
+    // ⛔ `isBareUrl` has exempted a UUID since WR-R1-02 — but ONLY as a
+    // `/`-delimited PATH SEGMENT, so `-- strategy 123e4567-…` fired while
+    // `https://x/api/strategies/123e4567-…` did not. Same shape, same argument
+    // (fixed length, fixed 8-4-4-4-12 layout, cannot absorb an opaque key), two
+    // answers. Hoisted so the three producers give ONE answer.
+    expect(PROV_UUID.length).toBe(36);
+    expect(provIds(`-- strategy ${PROV_UUID}\nSELECT 1;`)).toEqual([]);
+    expect(provIds(`SELECT 'strategy ${PROV_UUID}';`)).toEqual([]);
+    expect(isBareUrl(`https://x.invalid/api/strategies/${PROV_UUID}`), "…and the URL walk agrees, as it already did").toBe(true);
+
+    // ⛔ CANONICAL AND NOTHING LOOSER, calibrated at the SAME LENGTH so it
+    // cannot absorb an opaque key.
+    const OPAQUE = `FAKE-${"a1".repeat(16)}`.slice(0, 36);
+    expect(OPAQUE.length).toBe(36);
+    expect(CANONICAL_UUID_RE.test(OPAQUE), "the control must NOT be a UUID or this proves nothing").toBe(false);
+    expect(provIds(`-- strategy ${OPAQUE}\nSELECT 1;`)).toEqual(["long-token-anywhere"]);
+    expect(provIds(`-- strategy ${PROV_UUID.replace("-e89b-", "e89b--")}\nSELECT 1;`), "one shifted hyphen breaks it").toEqual([
+      "long-token-anywhere",
+    ]);
+    // CONTROL: an ordinary opaque key in the same two positions is still named.
+    expect(provIds(`-- k = ${PROV_KEY}\nSELECT 1;`)).toEqual(["long-token-anywhere"]);
+    expect(provIds(`SELECT '${PROV_KEY}';`)).toEqual(["long-token-anywhere"]);
+  });
+
+  it("PROVENANCE 2/2: a migration FILENAME is not a credential — in a COMMENT ONLY, and only in this repo's exact shape", () => {
+    expect(PROV_MIGRATION.length).toBeGreaterThanOrEqual(TOKEN_MIN);
+    expect(provIds(`-- added by ${PROV_MIGRATION}\nSELECT 1;`)).toEqual([]);
+    expect(provIds(`/* added by ${PROV_MIGRATION} */ SELECT 1;`)).toEqual([]);
+
+    // ⛔ NOT EXEMPT IN A LITERAL. A filename inside a string literal is an
+    // argument to something, and this rule's subject is values.
+    expect(provIds(`SELECT 'see ${PROV_MIGRATION}';`)).toEqual(["long-token-anywhere"]);
+
+    // ⛔ BOTH HALVES OF THE SHAPE ARE LOAD-BEARING, EACH BROKEN ALONE. Without
+    // them, "any token ending in a source extension" would be a one-step
+    // off-switch: append `.sql` to a key inside a comment and the rule goes
+    // quiet — precisely the class WR-R1-01 closed.
+    expect(provIds(`-- ${PROV_KEY}.sql\nSELECT 1;`), "a key with .sql glued on is NOT a migration filename").toEqual([
+      "long-token-anywhere",
+    ]);
+    expect(provIds("-- 20260907130000_ledger_refresh_switch_to_system_flags.txt\nSELECT 1;"), "wrong suffix").toEqual([
+      "long-token-anywhere",
+    ]);
+    expect(provIds("-- 2026090713000_ledger_refresh_switch_to_system_flags.sql\nSELECT 1;"), "13-digit prefix").toEqual([
+      "long-token-anywhere",
+    ]);
+    expect(provIds(`-- ${PROV_MIGRATION.toUpperCase()}\nSELECT 1;`), "uppercase body").toEqual(["long-token-anywhere"]);
+
+    // ⚠️ MEASURED AND LEFT OPEN, pinned so a future reader finds the DECISION
+    // rather than re-discovering the behaviour: a bare 40-character git sha, a
+    // phase-directory name and a GitHub commit URL still fire. A hex-only token
+    // IS a credential family this arm names by name ("hex digests"), so
+    // exempting one would blind the rule to a shape it exists for.
+    expect(provIds("-- see commit 88581b8bc66415bfa86b7d5a019741b1cbd0ff49\nSELECT 1;")).toEqual(["long-token-anywhere"]);
+    expect(provIds("-- 164.8.5-proberparse-the-prod-prober-hygiene-rules-stop-being-dodgeab\nSELECT 1;")).toEqual([
+      "long-token-anywhere",
+    ]);
+    expect(
+      provIds("-- https://github.com/AI-Isaiah/quantalyze/commit/88581b8bc66415bfa86b7d5a019741b1cbd0ff49\nSELECT 1;"),
+    ).toEqual(["long-token-anywhere"]);
+  });
+
   it("F5: the UNREACHABLE `vaultSpan` exemption is gone and cannot come back", () => {
     // ⛔ A DELETION OF PROVABLY-DEAD CODE HAS NO BEHAVIOUR TO NEUTER, so the
     // honest control is a PROOF plus a pin, not a red fixture.
