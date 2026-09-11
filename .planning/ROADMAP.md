@@ -1906,6 +1906,17 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 166 to break down)
 
+### Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error
+
+**Goal:** A customer whose venue credentials stopped working is TOLD — in the product, on the surface where they notice the symptom — that the credential is the reason their factsheet stopped updating, and is nudged to reconnect. Key rotation is a NORMAL, recurring customer action, not an incident: the system must treat "your key no longer works" as an expected state it reports plainly, rather than a silent stall the customer discovers weeks later.
+**Requirements**: TBD (no v1.20 requirement IDs) + ⛔ **MEASURED ON PROD 2026-09-11, read these before planning:** (1) An invalid credential is reported today as `MT5 terminal unreachable — sync will retry automatically.` with `error_kind: transient` — the message names the WRONG CAUSE and promises a retry that can never succeed. Mechanism: a wrong password makes the MT5 terminal raise a MODAL LOGIN DIALOG, which blocks IPC, which the gateway reports as a transport failure (the `-10005` class). (2) Key `34043761` / `FX-AI-V-35` sat at `sync_status: error` with `is_active: true`, `disconnected_at: null` and NO alert for **17 days** (last good sync 2026-08-25, founder confirmed the password had been changed). (3) The `bybit` key has been failing since 2026-08-14 with `retCode 33004 "Your api key has expired."` — a SECOND venue, same class, also unsurfaced, so scope this off the venue-agnostic credential-failure shape and not off mt5. ⭐ The freshness substrate ALREADY EXISTS and should be consumed rather than reinvented: `supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql`, keyed on the max date inside `returns_series` — "a signal no status transition can advance".
+**Depends on:** ⛔ **Phase 164.7 — HARD, and the ordering is the whole point.** 164.7 plan 07 activates the 161.1 ledger refresh; until that is LIVE there is NO recurring recompute for ledger venues at all (`[LEDGER-BACKED VENUES HAVE NO RECURRING STRATEGY REFRESH]`, TODOS.md), so a stale ledger factsheet does NOT imply a bad credential. Measured 2026-09-11: strategy `MM1 --> Grid FX` has PERFECT credentials and syncs cleanly every 04:00Z, yet its `computed_at` is frozen at `2026-09-01 12:09:59` — 3m49s after onboarding, never since. Shipping this phase first would tell that customer to fix a key that is not broken. ⚠️ Adjacent but NOT the same phase: **164.8.3 PROBERAUTH** splits MT5's error vocabulary for the OPS-facing prober; this phase owns the CLIENT-facing surface. Same root, two audiences — do not merge them.
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 167 to break down)
+
 ---
 
 ### Phase 165: DEPS — The 9-PR dependabot campaign
