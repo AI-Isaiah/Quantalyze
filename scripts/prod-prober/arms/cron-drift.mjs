@@ -984,16 +984,25 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
     // `TOKEN_MIN`, which the wiring test pins.
     for (const lit of literalsIn(span)) {
       if (regions.some((r) => lit.start < r.to && lit.end > r.from)) continue;
-      // ⚠️ Documented as an explicit exemption because CONTEXT names it, and
-      // documented as REDUNDANT because it is: the Vault-backed job's own URL
-      // literal is already exempt via the bare-URL test below. Kept so the next
-      // reader does not "restore" it as a missing safeguard.
-      const vaultSpan = VAULT_READ_RE.test(span.masked);
+      // ⛔ THE `vaultSpan` EXEMPTION WAS DELETED IN 164.8.5-REVIEW F5, AND ITS
+      // ABSENCE IS THE SAFEGUARD. It read
+      //
+      //     const vaultSpan = VAULT_READ_RE.test(span.masked);
+      //     …
+      //     if (vaultSpan && BARE_URL_RE.test(token)) continue;
+      //
+      // one line BELOW the unconditional `BARE_URL_RE` test, which already
+      // handles the only condition that could make it true — and `vaultSpan`
+      // had no other reader, so the line could not execute. It was dressed as a
+      // security exemption, so the next reader had to re-derive its
+      // unreachability before touching anything near it, and an edit to the
+      // test ABOVE would have silently changed its meaning with NO test moving.
+      // A redundant line that cannot execute is worse than a deleted one. Do
+      // not "restore" it: the bare-URL exemption below is the whole of it.
       for (const token of lit.content.split(/\s+/)) {
         if (token.length < TOKEN_MIN) continue;
         if (!/\d/.test(token)) continue;
         if (BARE_URL_RE.test(token)) continue;
-        if (vaultSpan && BARE_URL_RE.test(token)) continue;
         // Already `jwt-shape`'s finding. Without this the JWT red row would fire
         // TWO rules and its isolation assertion — the thing that makes a red row
         // attributable — would fail.
