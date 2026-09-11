@@ -142,7 +142,7 @@ export const FUNCTIONS_DIR = resolve(HERE, "..", "..", "..", "supabase", "schema
 
 /** Bumping either of these invalidates every committed sha. Reviewed edit only. */
 export const MANIFEST_SCHEMA_VERSION = 1;
-export const NORMALIZATION = "ws-collapse-v1";
+export const NORMALIZATION = "ws-collapse-v2";
 
 /**
  * The hand-set `COMMENT ON DATABASE` marker CLAUDE.md requires before trusting
@@ -192,17 +192,50 @@ export const REMEDIES = {
 // ---------------------------------------------------------------------------
 
 /**
- * `ws-collapse-v1`: CRLF → LF, trim, every whitespace run → one space.
+ * `ws-collapse-v2`: `\r\n`/`\r` → `\n`, then per LINE collapse every run of
+ * HORIZONTAL whitespace to one space and trim it. **Line breaks SURVIVE.**
  *
  * Two commands whose normalized text is byte-equal are NOT drift — an operator
  * re-indenting a DO block, or a client that round-tripped it through CRLF, has
  * changed nothing that runs. One differing non-whitespace byte IS drift.
+ *
+ * ⛔ WHY `v1` HAD TO DIE, MEASURED ON COMMITTED TEXT (164.8.5-REVIEW CR-01).
+ * `v1` was `.replace(/\s+/g, " ")` — it collapsed NEWLINES too, and a newline is
+ * not whitespace in SQL: it is what TERMINATES a `--` comment. Fold a
+ * multi-line command onto one line and a leading `--` swallows the entire body.
+ *
+ * The victim is a REAL committed row. `retention_compute_jobs_orphaned_running`
+ * is 1791 characters, opens with a `-- CANARY_…` comment block, and carries the
+ * `DO $sweep$ … END $sweep$;` reaper that fails orphaned `compute_jobs`. Run
+ * through `v1` it becomes ONE line, `scanSql` masks it to 100% spaces, and
+ * EVERY lexer-based rule in this file sees an empty command. A 37-character
+ * token spliced anywhere into it was caught on 13 of the 14 committed
+ * commands and MISSED on that one.
+ *
+ * Worse than a blind row: the working program and its all-comment no-op twin
+ * HASHED IDENTICALLY under `v1`, so `compareManifest` reported `0 differing`
+ * between them — and `REMEDIES["cron-drift"]`'s own instruction to
+ * "re-schedule PROD from the manifest" would have silently disabled the reaper.
+ * Under `v2` the two texts differ by their newlines and therefore by their sha,
+ * which is the entire point of hashing a normalized form rather than a folded
+ * one.
+ *
+ * ⚠️ STILL LOSSY INSIDE LITERALS, deliberately and unchanged from `v1`:
+ * `'a  b'` normalizes to `'a b'`. Narrowing that would move every committed sha
+ * a second time for a shape nothing has measured; it is recorded here rather
+ * than fixed.
+ *
+ * ⚠️ BLANK LINES ARE PRESERVED (as empty lines). Dropping them would be a
+ * second semantic edit inside dollar-quoted literals, where a blank line is
+ * data.
  */
 export function normalizeCommand(text) {
   return String(text ?? "")
-    .replace(/\r\n/g, "\n")
-    .trim()
-    .replace(/\s+/g, " ");
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[^\S\n]+/g, " ").trim())
+    .join("\n")
+    .trim();
 }
 
 /** sha256 over the UTF-8 bytes of the NORMALIZED text. */
@@ -755,9 +788,23 @@ function reachesVaultRead(spans, functionsDir) {
  * exists to prevent, and it would print it into a public Actions log.
  *
  * @param {string} jobname
- * @param {string} command  the RAW command text (normalization does not change
- *        any of these judgements, and running on raw text keeps the rules
- *        readable against what an operator actually sees in `cron.job`)
+ * @param {string} command  the RAW command text.
+ *
+ *        ⛔ THIS PARAMETER USED TO CLAIM "normalization does not change any of
+ *        these judgements". That was MEASURABLY FALSE under `ws-collapse-v1`
+ *        and the correction is the reason `ws-collapse-v2` exists: folding a
+ *        multi-line command onto one line lets a leading `--` comment swallow
+ *        the body, which took the committed
+ *        `retention_compute_jobs_orphaned_running` row from TWO violations to
+ *        ZERO. Normalization is a SEMANTIC operation on SQL, never a cosmetic
+ *        one, and these rules are judged on the RAW text precisely so that a
+ *        future normalization bug cannot quietly blank them.
+ *
+ *        ⚠️ A manifest row's `command` is the text `captureManifest` STORED,
+ *        i.e. already normalized at capture time. A row captured under `v1`
+ *        therefore carries text whose newlines are gone for good; no change to
+ *        this function can put them back, which is why the `NORMALIZATION`
+ *        mismatch refuses such a manifest wholesale rather than scanning it.
  * @param {object} [opts]
  * @param {string} [opts.functionsDir]  the committed function snapshot
  *        `vault-absent` resolves callables against. Injected so the self-test's
