@@ -303,10 +303,15 @@ export const HYGIENE_RULE_IDS = [
   "header-unparseable",
   "long-token-anywhere",
   // ⛔ NOT A CREDENTIAL RULE — A REFUSAL, and it is in this list so a red row
-  // must prove it can fire (WR-R1-03). It is the second member of
+  // must prove it can fire (WR-R1-03). It is a member of
   // `UNJUDGEABLE_RULE_IDS` beside `header-unparseable`, so it routes to
   // `measure-fail` rather than to a rotation remedy.
   "command-unjudgeable",
+  // ⛔ ALSO A REFUSAL, AND ITS SCOPE IS ONE RULE (164.8.5-REVIEW-R2 CR-R2-01).
+  // It says "the jobname-SCOPED rule could not be applied to this row" and
+  // NOTHING ELSE — every other rule still ran beside it. See the derivation in
+  // `hygieneViolations`.
+  "jobname-absent",
 ];
 
 /**
@@ -1124,18 +1129,39 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
   // guard. The manifest side had its own totality check (a row whose `command`
   // is not a string is a WITHHELD row and is skipped); the PROD side had
   // nothing, and the PROD side is the one read live from a database.
+  // ⛔ THE JOBNAME REFUSAL IS ADDITIVE, NEVER SUBSTITUTIVE (164.8.5-REVIEW-R2
+  // CR-R2-01). This used to be a THROW beside the one above, and a throw here
+  // is REPLACEMENT: both callers route it to a per-row `measure-fail` and
+  // `continue`, so NO rule ran and no `cron-secret-in-command` was produced for
+  // that row. `cron.job.jobname` is NULLable and pg_cron's TWO-ARGUMENT
+  // `cron.schedule(schedule, command)` leaves it NULL — `psql -At` renders NULL
+  // as the empty string — so this needed no adversary, and it was a one-step
+  // off-switch (`cron.unschedule` + the two-arg `cron.schedule`).
+  //
+  // ORCHESTRATOR-REPRODUCED 2026-09-11 on the pre-fix file, one inline 39-char
+  // X-Service-Key in the command:
+  //   jobname "named_job" -> ["x-service-key-literal","long-literal-in-headers"]
+  //   jobname "" / "   " / null / undefined -> THROW, and compareManifest then
+  //   reported `measure-fail | prod: | …no usable jobname…` and NOTHING ELSE.
+  //
+  // ⛔ THE GUARD'S OWN JUSTIFICATION DID NOT SUPPORT ITS BLAST RADIUS. The
+  // jobname scopes exactly ONE rule — `vault-absent`, gated on
+  // `name === "match_engine_cron"` — and the refusal disabled EVERY rule in
+  // `HYGIENE_RULE_IDS`. So the loss is reported as its own id, BESIDE whatever
+  // the other rules found. That is WR-R1-03's own remedy, applied here.
+  //
+  // ⛔ THE `typeof command !== "string"` THROW BELOW STAYS A THROW, and the
+  // asymmetry is the point: a non-string command really cannot be scanned —
+  // there is no text to run a rule over — whereas a nameless one can be scanned
+  // completely except for the one rule keyed on the name.
+  const named = typeof jobname === "string" && jobname.trim().length > 0;
+  const name = named ? jobname.trim() : "an unnamed job";
   if (typeof command !== "string") {
     throw new Error(
-      `the cron.job command for ${typeof jobname === "string" && jobname.length > 0 ? jobname : "an unnamed job"} is ${command === null ? "null" : typeof command}, not a string — refusing to judge it. An unread command is not a clean one, and String(undefined ?? "") is the empty command, which trips no rule.`,
-    );
-  }
-  if (typeof jobname !== "string" || jobname.trim().length === 0) {
-    throw new Error(
-      "a cron.job row reached the hygiene rules with no usable jobname — refusing to judge it. The jobname SCOPES the vault-absent rule, so an unnamed row silently opts out of it.",
+      `the cron.job command for ${name} is ${command === null ? "null" : typeof command}, not a string — refusing to judge it. An unread command is not a clean one, and String(undefined ?? "") is the empty command, which trips no rule.`,
     );
   }
   const text = command;
-  const name = jobname;
   const out = [];
   const said = new Set();
   // A rule says its piece AT MOST ONCE per command. Every rule below runs over
@@ -1147,6 +1173,16 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
     said.add(id);
     out.push(`[${id}] ${sentence}`);
   };
+
+  // The ADDITIVE half of CR-R2-01. It is reported FIRST so an operator reads
+  // "one rule could not be applied" before the findings, and it changes NOTHING
+  // about whether the rules below run.
+  if (!named) {
+    say(
+      "jobname-absent",
+      "a cron.job row carries no jobname, so the vault-absent rule — the ONE rule in this file scoped to a single jobname — could not be applied to it. pg_cron's two-argument cron.schedule(schedule, command) leaves jobname NULL, so this is an ordinary API call and not an attack. EVERY OTHER RULE BELOW STILL RAN, and any finding they report is real.",
+    );
+  }
 
   // ⛔ EVERY RULE READS THE SPAN LIST, NOT THE RAW COMMAND. See `codeSpans`:
   // four of the fourteen committed commands are a top-level `DO $body$` block,
@@ -1510,7 +1546,16 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
 }
 
 /** Rule ids whose finding is "I could not judge this", not "this carries a secret". */
-const UNJUDGEABLE_RULE_IDS = ["header-unparseable", "command-unjudgeable"];
+const UNJUDGEABLE_RULE_IDS = ["header-unparseable", "command-unjudgeable", "jobname-absent"];
+
+/**
+ * How a jobname is PRINTED. Identical to `hygieneViolations`' own derivation so
+ * a defect detail and the rule sentence inside it name the row the same way.
+ * ⛔ It is for TEXT only — `subject` stays the raw jobname, because that is the
+ * key scenarios and the issue body match on.
+ */
+const shownName = (jobname) =>
+  typeof jobname === "string" && jobname.trim().length > 0 ? jobname.trim() : "an unnamed job";
 
 /**
  * Split a violation list into the two things a caller must report DIFFERENTLY.
@@ -1528,7 +1573,7 @@ const UNJUDGEABLE_RULE_IDS = ["header-unparseable", "command-unjudgeable"];
  * (`DEFECT_KINDS`, `EXPECTED_DEFECT_KINDS`, `KIND_ASSERTIONS`, the coverage
  * extractor) for no gain in meaning.
  */
-function splitHygiene(violations) {
+export function splitHygiene(violations) {
   const credential = [];
   const unjudgeable = [];
   for (const v of violations) {
@@ -1837,7 +1882,10 @@ export function compareManifest(manifest, prodRows, opts = {}) {
       defects.push({
         kind: "cron-secret-in-command",
         subject: `prod:${row.jobname}`,
-        detail: `the PROD cron.job row for ${row.jobname} fails ${credential.length} hygiene rule(s): ${credential.join(" ")}`,
+        // ⚠️ `shownName`, not `row.jobname`: an unnamed row is now JUDGED
+        // (CR-R2-01) and interpolating `""` produced "the PROD cron.job row for
+        //  fails 2 hygiene rule(s)", which reads like a truncation bug.
+        detail: `the PROD cron.job row for ${shownName(row.jobname)} fails ${credential.length} hygiene rule(s): ${credential.join(" ")}`,
       });
     }
     if (unjudgeable.length > 0) {
@@ -2018,7 +2066,7 @@ export function compareManifest(manifest, prodRows, opts = {}) {
       defects.push({
         kind: "cron-secret-in-command",
         subject: `manifest:${row.jobname}`,
-        detail: `the COMMITTED manifest row for ${row.jobname} fails ${credential.length} hygiene rule(s): ${credential.join(" ")}`,
+        detail: `the COMMITTED manifest row for ${shownName(row.jobname)} fails ${credential.length} hygiene rule(s): ${credential.join(" ")}`,
       });
     }
     if (unjudgeable.length > 0) {

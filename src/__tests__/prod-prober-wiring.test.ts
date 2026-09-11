@@ -51,6 +51,7 @@ import {
   hygieneViolations,
   isBareUrl,
   parseCronJobRows,
+  splitHygiene,
 } from "../../scripts/prod-prober/arms/cron-drift.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -1019,13 +1020,68 @@ describe("[164.1-05] kinds and floors", () => {
         /not a string/,
       );
     }
-    expect(() => hygieneViolations(undefined as unknown as string, "SELECT 1"), "an unnamed row scopes vault-absent out of existence").toThrow(
-      /no usable jobname/,
-    );
     // CALIBRATION: a real string on the same call path is judged rather than
     // refused, so "it throws" is a reading about the TYPE and not something
     // this function now always does.
     expect(hygieneViolations("a_job", "SELECT 1")).toEqual([]);
+  });
+
+  it("an ABSENT jobname is an ADDITIVE refusal, never a substitutive one — every other rule still runs and still reports (CR-R2-01)", () => {
+    // ⛔ THE THIRD TIME THIS PHASE SHIPPED A GUARD THAT CLOSED ITS OWN
+    // REPRODUCTION AND LEFT THE CLASS OPEN. Round 1 made an absent jobname
+    // THROW, beside the non-string-command throw above. A throw here is
+    // REPLACEMENT: `compareManifest` routes it to a per-row `measure-fail` and
+    // `continue`s, so NO credential rule ran for that row.
+    //
+    // ⛔ AND IT NEEDED NO ADVERSARY. `cron.job.jobname` is NULLable; pg_cron's
+    // TWO-ARGUMENT `cron.schedule(schedule, command)` leaves it NULL; `psql
+    // -At` renders NULL as the empty string. It was also a one-step off-switch
+    // (`cron.unschedule` then the two-arg `cron.schedule`).
+    //
+    // ⛔ THE SCOPE ARGUMENT DID NOT SUPPORT THE BLAST RADIUS: the jobname
+    // scopes exactly ONE rule (`vault-absent`, gated on
+    // `name === "match_engine_cron"`), and the refusal disabled every rule in
+    // `HYGIENE_RULE_IDS`. THE ASYMMETRY WITH THE TEST ABOVE IS THE POINT — a
+    // non-string COMMAND cannot be scanned at all; a nameless row can be
+    // scanned completely except for the one rule keyed on the name.
+    const ids = (jobname: unknown, cmd: string) =>
+      hygieneViolations(jobname as string, cmd).map((v: string) => v.slice(1, anchorIndex(v, "]")));
+    // 39 characters, digit-bearing, split into short operands so no
+    // credential-shaped token is typed whole into a PUBLIC repo.
+    const KEY = `FAKE-0123456789${"-0123456789"}${"-0123456789ab"}`;
+    const leaky = `SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', '${KEY}'));`;
+
+    // CONTROL — the same command under a jobname. This is the reading the
+    // unnamed spellings must not fall short of.
+    expect(ids("named_job", leaky)).toEqual(["x-service-key-literal", "long-literal-in-headers"]);
+
+    // ⭐ EVERY SPELLING OF "NO JOBNAME" REPORTS THE CREDENTIAL, plus the
+    // refusal. Before the fix each of these THREW and the credential was never
+    // named at all.
+    for (const absent of ["", "   ", null, undefined, 12345] as unknown[]) {
+      expect(ids(absent, leaky), `jobname ${String(absent)} must still name the credential`).toEqual([
+        "jobname-absent",
+        "x-service-key-literal",
+        "long-literal-in-headers",
+      ]);
+    }
+
+    // CALIBRATION THE OTHER WAY: the refusal is not a blanket finding — a clean
+    // command under an absent jobname reports the refusal ALONE, which is what
+    // keeps `hygiene-red.json`'s `jobname-absent` row one-rule isolated.
+    expect(ids("", "SELECT 1")).toEqual(["jobname-absent"]);
+    // …and a NAMED row never carries it, so the id cannot become noise.
+    expect(ids("a_job", "SELECT 1")).toEqual([]);
+
+    // ⛔ IT IS A REFUSAL, NOT A CREDENTIAL RULE: it must route to
+    // `measure-fail`, never to a rotation remedy. `splitHygiene` is the single
+    // place that partition is made.
+    const { credential, unjudgeable } = splitHygiene(hygieneViolations("", leaky));
+    expect(unjudgeable.map((v: string) => v.slice(1, anchorIndex(v, "]")))).toEqual(["jobname-absent"]);
+    expect(credential.map((v: string) => v.slice(1, anchorIndex(v, "]")))).toEqual([
+      "x-service-key-literal",
+      "long-literal-in-headers",
+    ]);
   });
 
   it("TOKEN_MIN equals HEADERS_LITERAL_MAX — ONE of the two conditions the Q2 region partition needs; the other is that the header measurement actually COUNTED the literal, asserted separately below", () => {
@@ -1282,7 +1338,7 @@ describe("[164.1-05] kinds and floors", () => {
     // is no literal `k/50` in the source to count. Executing the self-test is
     // the only honest way to derive the number — and it is fixtures-only, no
     // network, under a tenth of a second.
-    expect(SELF_TEST_SCENARIOS).toBe(73);
+    expect(SELF_TEST_SCENARIOS).toBe(74);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);

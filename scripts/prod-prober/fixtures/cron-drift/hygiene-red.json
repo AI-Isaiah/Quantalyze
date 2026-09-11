@@ -121,5 +121,11 @@
     "jobname": "fixture_deep_dollar_nesting_job",
     "note": "WR-R1-03. codeSpans gives up past MAX_DOLLAR_DEPTH and used to throw straight out of hygieneViolations — BEFORE ANY RULE RAN — so every finding on such a row was LOST and the row became a generic measure-fail, for ANY jobname (the residual as first recorded wrongly bounded this to match_engine_cron). The refusal is now ADDITIVE: the rules run over the spans that WERE read and this id is reported beside them. It carries NO credential on purpose, because this file asserts one-rule isolation.",
     "command": "DO $t5$ DO $t4$ DO $t3$ DO $t2$ DO $t1$ DO $t0$ PERFORM retention_sweep('compute_jobs_done', interval '30 days'); $t0$ $t1$ $t2$ $t3$ $t4$ $t5$"
+  },
+  {
+    "rule": "jobname-absent",
+    "jobname": "",
+    "note": "164.8.5-REVIEW-R2 CR-R2-01. cron.job.jobname is NULLable and pg_cron two-arg cron.schedule(schedule, command) leaves it NULL; psql -At renders NULL as the empty string. The guard shipped in round 1 THREW here, and a throw is SUBSTITUTIVE — compareManifest turned it into a per-row measure-fail and continued, so all thirteen other rules were silenced for the row. The refusal is now its own id and is ADDITIVE. The command is deliberately CLEAN so this row isolates one rule; the scenario that proves the additivity splices a credential into an unnamed row and requires BOTH findings.",
+    "command": "SELECT public.retention_sweep($q$compute_jobs_done$q$, interval $q$30 days$q$);"
   }
 ]
