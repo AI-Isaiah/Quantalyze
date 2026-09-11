@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 58;
+export const SELF_TEST_SCENARIOS = 60;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -864,18 +864,28 @@ const ARM_FIXTURE_TABLE = [
     manifestPath: SELFTEST_MANIFEST_PATH,
     makeSeams: (data) => createSeams({ sqlRunner: fixtureSql({ cronJobRows: data }) }),
     red: {
-      // SIX fixtures, ONE kind, six DIFFERENT causes. `cron-drift` is not six
-      // kinds pretending to be one: every one of them has the same two
-      // readings and the same remedy pair, and splitting them would multiply
-      // the defect vocabulary without changing what an operator does. What
-      // must NOT collapse is the DETAIL, so the extra/missing pair is asserted
-      // to name its job below.
+      // MANY fixtures, ONE kind, each with a DIFFERENT cause. `cron-drift` is
+      // not one kind per fixture: every one of them has the same two readings
+      // and the same remedy pair, and splitting them would multiply the defect
+      // vocabulary without changing what an operator does. What must NOT
+      // collapse is the DETAIL, so the extra/missing pair is asserted to name
+      // its job below.
+      //
+      // ⛔ No count is written here on purpose (SR-07). This map is appended to
+      // by design — the `-changed` rows below arrived a phase after the rest —
+      // and a hand-typed numeral in a comment beside a growing literal is a
+      // fact that rots on the very next line added.
       "prod-extra-job.json": "cron-drift",
       "prod-missing-job.json": "cron-drift",
       "prod-schedule-moved.json": "cron-drift",
       "prod-active-flipped.json": "cron-drift",
       "prod-zero-rows.json": "cron-drift",
       "prod-duplicate-jobname.json": "cron-drift",
+      // CR-01: the ROLE a job executes as and the DATABASE it runs in. One
+      // fixture each, so the neuter that darkens one comparison reddens
+      // exactly one scenario.
+      "prod-username-changed.json": "cron-drift",
+      "prod-database-changed.json": "cron-drift",
     },
   },
   {
