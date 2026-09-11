@@ -893,6 +893,51 @@ describe("[164.1-05] kinds and floors", () => {
     expect(parseCronJobRows(renderRecords([full])).malformed).toEqual([]);
   });
 
+  it("IN-R1-03: the main-module guard compares REAL PATHS, not a filename suffix", () => {
+    // ⛔ THE MIRROR OF THE `[VAC04-C2]` LESSON ITS SIBLING DOCUMENTS. That guard
+    // no-ops on a symlinked or space-bearing path and silently turns the CLI
+    // into a library; `argv[1].endsWith("run.mjs")` over-fires instead — ANY
+    // process whose argv[1] merely ENDS WITH `run.mjs`, including a future
+    // `scripts/<other>/run.mjs` that imports this module, would execute this
+    // CLI and call `process.exit`. Introduced in 42868a9b, not by this pass.
+    const runnerText = readFileSync(RUNNER_PATH, "utf8");
+    expect(runnerText, "the suffix test must be GONE, not merely joined by a better one").not.toContain(
+      'process.argv[1].endsWith("run.mjs")',
+    );
+    expect(runnerText).toContain("function invokedDirectly()");
+    expect(runnerText).toContain("if (invokedDirectly()) {");
+    // ⭐ IT IS THE SAME IDIOM AS THE SIBLING GATE, BYTE FOR BYTE at the line
+    // that does the work — one repository, one answer to "was I run directly".
+    const gucText = readFileSync(join(REPO_ROOT, "scripts", "lint-app-guc.mjs"), "utf8");
+    const CORE = "return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));";
+    expect(gucText, "PRECONDITION: the sibling really carries the idiom this one adopted").toContain(CORE);
+    expect(runnerText).toContain(CORE);
+    // CALIBRATION: the predicate finds what it forbids, so the `not` above is a
+    // reading rather than a regex that matches nothing.
+    expect(`${runnerText}\nif (process.argv[1].endsWith("run.mjs")) {}`).toContain(
+      'process.argv[1].endsWith("run.mjs")',
+    );
+  });
+
+  it("IN-R1-03: an UNPARSABLE jobid is refused by captureManifest, never serialised as null", () => {
+    // ⛔ `JSON.stringify(NaN)` IS `null`. `Number.parseInt("", 10)` is NaN, so a
+    // row whose jobid could not be read would have been written into the oracle
+    // as `"jobid": null` — and the next reader takes that null as the captured
+    // truth. jobid is deliberately NOT compared by compareManifest, but it IS
+    // printed beside every drift line so an operator can run `WHERE jobid = …`,
+    // which is exactly the use a null defeats.
+    expect(JSON.stringify({ jobid: Number.parseInt("", 10) }), "the mechanism, stated as a measurement").toBe(
+      '{"jobid":null}',
+    );
+    const runnerText = readFileSync(RUNNER_PATH, "utf8");
+    expect(runnerText).toContain("carry a jobid that is not an integer");
+    expect(runnerText, "the guard must run BEFORE the map that would serialise it").toContain(
+      "const badJobids = rows.filter(",
+    );
+    // The serialiser no longer reads the raw field directly.
+    expect(runnerText).not.toContain("jobid: Number.parseInt(r.jobid, 10)");
+  });
+
   it("the arm floor is FOUR and the registry meets it", () => {
     // Pinned at 4 while only one arm existed, on purpose: an incomplete prober
     // must be LOUD. From here a `floor` defect means an arm was REMOVED.
@@ -1237,7 +1282,7 @@ describe("[164.1-05] kinds and floors", () => {
     // is no literal `k/50` in the source to count. Executing the self-test is
     // the only honest way to derive the number — and it is fixtures-only, no
     // network, under a tenth of a second.
-    expect(SELF_TEST_SCENARIOS).toBe(72);
+    expect(SELF_TEST_SCENARIOS).toBe(73);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);

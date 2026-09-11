@@ -93,9 +93,9 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createSeams, realFetch, realSqlRunner, realSshRunner } from "./seams.mjs";
@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 72;
+export const SELF_TEST_SCENARIOS = 73;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -2628,6 +2628,30 @@ export async function selfTest() {
           `CALIBRATION: the SAME run prints the two-sided diff for ${CLEAN_BUT_DIFFERING}, which WAS judged and is clean (${lines.filter((l) => /^[+-] /.test(l)).length} diff line(s))`,
         ) &&
         expect(
+          // ⛔ IN-R1-01, AND IT IS ASSERTED ON PHYSICAL LINES BECAUSE THAT IS
+          // WHAT A READER SEES. `ws-collapse-v2` PRESERVES line breaks, so a
+          // multi-line command reaches the log as ONE array entry carrying
+          // embedded newlines — and the `-`/`+` used to mark only its FIRST
+          // physical line, leaving a reader unable to tell where the manifest
+          // text ended and PROD's began. Counting ARRAY ENTRIES cannot see
+          // that, which is exactly why nothing did. The fixture's clean-but-
+          // differing row is multi-line ON PURPOSE; the precondition below
+          // makes that a measurement rather than a hope.
+          (() => {
+            const diff = lines.filter((l) => /^[+-] /.test(l));
+            const physical = diff.flatMap((l) => l.split("\n"));
+            return physical.length > diff.length && physical.every((l) => /^[+-] /.test(l));
+          })(),
+          `and EVERY PHYSICAL LINE of that diff carries its marker — ${lines
+            .filter((l) => /^[+-] /.test(l))
+            .flatMap((l) => l.split("\n"))
+            .filter((l) => !/^[+-] /.test(l))
+            .map((l) => JSON.stringify(l))
+            .join(" ") || "none unmarked"} (physical ${lines
+            .filter((l) => /^[+-] /.test(l))
+            .flatMap((l) => l.split("\n")).length} vs ${lines.filter((l) => /^[+-] /.test(l)).length} entries — equal would mean the fixture is single-line and this assertion is inert)`,
+        ) &&
+        expect(
           lines.every((l) => !/^[+-] /.test(l) || !l.includes("match_engine_cron_tick")),
           `and NO diff line carries the UNJUDGED row's text (${lines.filter((l) => /^[+-] /.test(l) && l.includes("match_engine_cron_tick")).length} leaked)`,
         ) &&
@@ -3080,6 +3104,71 @@ export async function selfTest() {
             CRON_DRIFT_MOD.sha256Hex(CRON_DRIFT_MOD.normalizeCommand(source)) !==
               CRON_DRIFT_MOD.sha256Hex(CRON_DRIFT_MOD.normalizeCommand(folded)),
             "and the working command no longer HASHES THE SAME as its folded no-op twin — under v1 it did, so `compareManifest` reported `0 differing` between a live reaper and a command that does nothing",
+          ) &&
+          pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("IN-R1-02: captureManifest REFUSES a row it could not JUDGE, and by DECISION rather than by an uncaught throw");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE EXIT CODE USED TO BE RIGHT BY ACCIDENT. `hygieneViolations` throws
+    // on an absent functions snapshot, the loop was UNGUARDED, and the throw
+    // unwound to `main`'s catch — which leaves `code` at its initialiser 3, the
+    // value the docstring assigns to three OTHER refusals. Nothing was written
+    // either way, so it was fail-safe; what it cost was the exit code's
+    // meaning, and the exit code is the only thing a caller can read.
+    //
+    // ⭐ AND THE INVARIANT IS CR-R1-02's, ONE ARTEFACT OVER: an unjudged row is
+    // not a clean one, and an ORACLE is exactly the thing that must not record
+    // one as if it were.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const absent = join(FIXTURE_ROOT, "cron-drift", "functions-this-directory-does-not-exist");
+      const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
+      const outPath = join(dir, "cron-manifest.json");
+      const lines = [];
+      const controlLines = [];
+      try {
+        const code = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: prod.data }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath,
+          log: (x) => lines.push(x),
+          functionsDir: absent,
+        });
+        // CALIBRATION: the SAME rows with the REAL snapshot capture cleanly, so
+        // the refusal is attributable to the missing directory and to nothing
+        // else — and "exit 3" is a reading rather than this fixture's constant.
+        const controlPath = join(dir, "control.json");
+        const controlCode = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: prod.data }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath: controlPath,
+          log: (x) => controlLines.push(x),
+        });
+        pass =
+          expect(!existsSync(absent), `PRECONDITION: ${absent} really is absent`) &&
+          expect(code === 3, `an unjudgeable row returns 3 — hygiene never RAN, so it is not the hygiene refusal's 1 (got ${code})`) &&
+          expect(
+            existsSync(outPath) === false,
+            "and the out path DOES NOT EXIST — an oracle cannot record a row nobody judged as if it were clean",
+          ) &&
+          expect(
+            lines.some((l) => l.startsWith("REFUSED:") && l.includes("could not be JUDGED")),
+            `the refusal is a DECISION with its own sentence, not an unwound throw (${lines.join(" | ") || "NO LINES AT ALL — which is exactly what the uncaught throw produced"})`,
+          ) &&
+          expect(
+            lines.some((l) => l.includes("functions snapshot directory")),
+            `naming what could not be measured (${lines.join(" | ") || "nothing"})`,
+          ) &&
+          expect(
+            controlCode === 0 && existsSync(controlPath),
+            `CALIBRATION: the SAME rows against the REAL snapshot capture cleanly (got ${controlCode}; ${controlLines.join(" | ")})`,
           ) &&
           pass;
       } finally {
@@ -3686,7 +3775,8 @@ export async function selfTest() {
 /**
  * Capture `cron.job` into a manifest file.
  *
- * ⛔ FOUR REFUSALS, and each of them writes NOTHING:
+ * ⛔ EVERY REFUSAL BELOW WRITES NOTHING, and the count is deliberately not
+ * restated in prose — it has moved twice:
  *
  *   3 — no `--out` path. The destination is REQUIRED and is never defaulted to
  *       `MANIFEST_PATH`, so a capture is always a reviewed file MOVE rather
@@ -3699,11 +3789,28 @@ export async function selfTest() {
  *       the missing row would then be judged against nothing forever. This is
  *       a 3 rather than a 1 on purpose: hygiene never ran, so the two refusals
  *       must stay distinguishable by exit code alone.
+ *   3 — the reading's record count disagrees with `count(*) OVER ()`. A record
+ *       separator inside a command splits one row into two, and a truncated
+ *       read loses whole rows; either way the oracle would record a phantom
+ *       job, or the absence of a real one, as the standard forever (CR-R1-03).
+ *   3 — a row that could not be JUDGED AT ALL: `hygieneViolations` throws on an
+ *       absent functions snapshot and on a command that is not a string. This
+ *       used to be UNGUARDED, so the throw unwound to `main`'s catch and left
+ *       `code` at its initialiser 3 by accident rather than by decision
+ *       (IN-R1-02). A 3 rather than a 1 for the same reason as the row above:
+ *       hygiene did not run, so the two must stay distinguishable.
+ *   3 — a `jobid` that is not an integer. `JSON.stringify(NaN)` is `null`, and
+ *       an oracle recording `"jobid": null` hands the next reader a null as if
+ *       it were the captured truth.
  *   1 — ANY row fails ANY rule in `HYGIENE_RULE_IDS`. This is what makes the
  *       manifest an oracle of the ACHIEVABLE configuration rather than a
  *       photograph of whatever PROD has: it CANNOT be captured into a state
  *       that carries a credential. The refusal prints the jobname and the rule
  *       ids, never the offending text.
+ *
+ * ⛔ 1 IS "HYGIENE RAN AND FOUND SOMETHING"; 3 IS "NOTHING WAS MEASURED". That
+ * partition is the whole information content of the exit code, and it is why
+ * every refusal above is a 3 rather than a convenient 1.
  *
  * The command TEXT is written on success precisely because every row passed
  * those rules. A reviewer may still withhold any row to sha-only afterwards
@@ -3757,10 +3864,39 @@ export async function captureManifest({ seams, outPath, log = (s) => console.log
     return 3;
   }
 
+  // ⛔ THE HYGIENE LOOP IS WRAPPED, THE WAY `compareManifest`'s `judgeRow`
+  // ALREADY IS (164.8.5-REVIEW-R1 IN-R1-02). `hygieneViolations` throws on an
+  // absent `functionsDir` and on a command that is not a string. Neither was
+  // caught here, so the throw unwound to `main`'s catch, which leaves `code` at
+  // its initialiser 3 — the value this function's own docstring assigns to
+  // three DIFFERENT refusals. Nothing is written either way, so it was
+  // fail-safe; what it cost was the exit code's meaning, which is the only
+  // thing a caller reading it can use.
+  //
+  // ⭐ AND A ROW NOBODY COULD JUDGE REFUSES THE CAPTURE. That is the same
+  // invariant as CR-R1-02 on the comparison side: an unjudged row is not a
+  // clean one, and an oracle is exactly the artefact that must not record one
+  // as if it were.
   const dirty = [];
+  const unjudged = [];
   for (const r of rows) {
-    const v = CRON_DRIFT_MOD.hygieneViolations(r.jobname, r.command, { functionsDir });
+    let v;
+    try {
+      v = CRON_DRIFT_MOD.hygieneViolations(r.jobname, r.command, { functionsDir });
+    } catch (err) {
+      unjudged.push({ jobname: r.jobname, reason: err && err.message ? err.message : String(err) });
+      continue;
+    }
     if (v.length > 0) dirty.push({ jobname: r.jobname, rules: v.map((x) => x.slice(0, x.indexOf("]") + 1)) });
+  }
+  if (unjudged.length > 0) {
+    log(
+      `REFUSED: ${unjudged.length} cron.job row(s) could not be JUDGED at all, so this configuration cannot become the oracle. An unjudged row is not a clean one. Nothing was written.`,
+    );
+    for (const u of unjudged) log(`  ${u.jobname}: ${u.reason}`);
+    // 3, not 1: hygiene did not RUN on these rows, so this refusal must stay
+    // distinguishable by exit code from "hygiene ran and found a credential".
+    return 3;
   }
   if (dirty.length > 0) {
     log(`REFUSED: ${dirty.length} cron.job row(s) fail secret hygiene, so this configuration cannot become the oracle. Nothing was written.`);
@@ -3769,10 +3905,27 @@ export async function captureManifest({ seams, outPath, log = (s) => console.log
     return 1;
   }
 
+  // ⛔ AN UNPARSABLE `jobid` IS REFUSED, NEVER SERIALISED AS `null`
+  // (164.8.5-REVIEW-R1). `Number.parseInt("", 10)` and `parseInt("x", 10)` are
+  // `NaN`, and `JSON.stringify` writes `NaN` as `null` — so an oracle would
+  // have recorded `"jobid": null` for a row whose id could not be read, and the
+  // NEXT reader of that manifest would take the null as the captured truth.
+  // `jobid` is not compared by `compareManifest` (its absence from
+  // COMPARED_ROW_STRINGS is a recorded decision), but it IS printed beside
+  // every drift line so an operator can run `WHERE jobid = …`, which is exactly
+  // the use a null defeats.
+  const badJobids = rows.filter((r) => !Number.isInteger(Number.parseInt(String(r.jobid).trim(), 10)));
+  if (badJobids.length > 0) {
+    log(
+      `REFUSED: ${badJobids.length} cron.job row(s) carry a jobid that is not an integer (${badJobids.map((r) => r.jobname).join(", ")}), which JSON.stringify would have written into the oracle as null. Nothing was written.`,
+    );
+    return 3;
+  }
+
   const capturedAt = seams.now().toISOString();
   const jobs = rows
     .map((r) => ({
-      jobid: Number.parseInt(r.jobid, 10),
+      jobid: Number.parseInt(String(r.jobid).trim(), 10),
       jobname: r.jobname,
       schedule: r.schedule,
       active: r.active,
@@ -3877,7 +4030,33 @@ export async function main(argv) {
   return result.exitCode;
 }
 
-if (process.argv[1] && process.argv[1].endsWith("run.mjs")) {
+/**
+ * ⛔ THE REALPATH-SAFE MAIN-MODULE GUARD, ADOPTED FROM `scripts/lint-app-guc.mjs`
+ * (164.8.5-REVIEW-R1 IN-R1-03; pre-existing, introduced in `42868a9b`).
+ *
+ * The guard used to be a FILENAME-SUFFIX test on `process.argv[1]`, whose
+ * failure is the MIRROR of the `[VAC04-C2]` lesson its sibling documents. That
+ * one no-ops on a symlinked or space-bearing path and silently turns the CLI
+ * into a library; this one over-fired — ANY process whose `argv[1]` merely
+ * ended with this file's basename, including a future `scripts/<other>/run.mjs`
+ * that imports this module, would execute this CLI and call `process.exit`.
+ * ⛔ The old form is deliberately NOT quoted here: the wiring test asserts its
+ * ABSENCE from this file, so writing it in prose would red the suite.
+ *
+ * Comparing REAL PATHS answers both: the resolved entry point either is this
+ * file or it is not, however it was spelled. The `catch` keeps a
+ * non-existent-but-resolvable `argv[1]` from throwing at module load.
+ */
+function invokedDirectly() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  }
+}
+
+if (invokedDirectly()) {
   let code = 3;
   try {
     code = await main(process.argv.slice(2));
