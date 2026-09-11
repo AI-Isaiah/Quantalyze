@@ -2573,38 +2573,42 @@ export async function selfTest() {
     if (!prod.ok) {
       pass = expect(false, prod.reason) && pass;
     } else {
-      const UNJUDGEABLE = "audit_log_cold_purge";
+      const UNJUDGED = "match_engine_cron";
+      const CLEAN_BUT_DIFFERING = "audit_log_cold_purge";
       // The key as the fixture spells it — two short `||` operands, never one
       // credential-shaped string in a public repo (Q3).
       const KEY_PARTS = ["FAKE-abcdef0123", "456789abcdef0123456789"];
+      // ⛔ AN ABSENT FUNCTIONS SNAPSHOT IS WHAT MAKES A ROW UNJUDGED HERE, and
+      // `vault-absent` is scoped to `match_engine_cron` alone, so exactly ONE
+      // row is refused while the others are judged normally. (The dollar-depth
+      // refusal no longer produces this state: WR-R1-03 made it ADDITIVE, so
+      // such a row is now JUDGED and merely dirty — which withholds through the
+      // other half of the predicate and would not exercise this one.)
+      const absent = join(FIXTURE_ROOT, "cron-drift", "functions-this-directory-does-not-exist");
       const lines = [];
-      const r = await driftRun(prod.data, driftFixturePath("manifest.json"), (s) => lines.push(String(s)));
+      const r = await driftRun(prod.data, driftFixturePath("manifest.json"), (s) => lines.push(String(s)), undefined, absent);
       const log = lines.join("\n");
-      // CALIBRATION, and it is what makes "no diff was printed" a reading
-      // rather than something this arm always says: the SAME manifest against a
-      // row that IS judged and IS clean and DOES differ prints the diff.
-      const judged = prod.data.map((x) =>
-        x.jobname === UNJUDGEABLE ? { ...x, command: "SELECT purge_audit_log_cold(interval '91 days')" } : x,
-      );
-      const controlLines = [];
-      const rControl = await driftRun(prod.data.length ? judged : judged, driftFixturePath("manifest.json"), (s) =>
-        controlLines.push(String(s)),
-      );
-      const controlLog = controlLines.join("\n");
       pass =
+        expect(!existsSync(absent), `PRECONDITION: ${absent} really is absent`) &&
         expect(
           (() => {
             try {
-              CRON_DRIFT_MOD.hygieneViolations(UNJUDGEABLE, prod.data.find((x) => x.jobname === UNJUDGEABLE).command);
+              CRON_DRIFT_MOD.hygieneViolations(UNJUDGED, prod.data.find((x) => x.jobname === UNJUDGED).command, {
+                functionsDir: absent,
+              });
               return false;
             } catch {
               return true;
             }
           })(),
-          `PRECONDITION: the fixture's ${UNJUDGEABLE} command really is UNJUDGEABLE — hygieneViolations throws on it, so the row is absent from the hygiene map`,
+          `PRECONDITION: the ${UNJUDGED} row really is UNJUDGEABLE against that snapshot — hygieneViolations throws, so the row carries a judged:false verdict`,
         ) &&
         expect(
-          r.defects.some((x) => x.kind === "cron-drift" && String(x.subject) === UNJUDGEABLE),
+          CRON_DRIFT_MOD.hygieneViolations(UNJUDGED, prod.data.find((x) => x.jobname === UNJUDGED).command).length === 0,
+          `PRECONDITION: and it trips NO rule against the REAL snapshot — so the withholding below is driven by "nobody judged it", never by "it is dirty" (got ${CRON_DRIFT_MOD.hygieneViolations(UNJUDGED, prod.data.find((x) => x.jobname === UNJUDGED).command).join(" ") || "clean"})`,
+        ) &&
+        expect(
+          r.defects.some((x) => x.kind === "cron-drift" && String(x.subject) === UNJUDGED),
           `PRECONDITION: that same row really DRIFTS, so the withholding branch is reached at all (got ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ") || "no defects"})`,
         ) &&
         expect(
@@ -2612,16 +2616,20 @@ export async function selfTest() {
           `the credential is NOWHERE in the log — neither operand of the fixture's split key (${KEY_PARTS.filter((p) => log.includes(p)).join(", ") || "neither present"})`,
         ) &&
         expect(
-          lines.some((l) => l.startsWith("- ")) === false && lines.some((l) => l.startsWith("+ ")) === false,
-          `and NO diff line was printed at all for a run whose only differing row is unjudged (${lines.filter((l) => /^[+-] /.test(l)).length} printed)`,
-        ) &&
-        expect(
-          log.includes("command text withheld:") && log.includes("could not be judged"),
+          log.includes(`command text withheld:`) && log.includes("could not be judged"),
           `and the withholding SAYS WHY, in the words that send an operator to the right place (withheld line: ${log.includes("command text withheld:")}, reason given: ${log.includes("could not be judged")})`,
         ) &&
         expect(
-          controlLog.includes("- ") && controlLog.includes("+ ") && rControl.defects.some((x) => x.kind === "cron-drift"),
-          `CALIBRATION: the SAME arm on a row that WAS judged, is clean and still differs DOES print the two-sided diff (${controlLines.filter((l) => /^[+-] /.test(l)).length} diff line(s)) — so the assertion above is a reading, not a constant`,
+          // ⭐ THE CALIBRATION IS IN THE SAME RUN, which is stronger than a
+          // second run: the OTHER differing row WAS judged and IS clean, so its
+          // two-sided diff IS printed. "No diff line" would be a constant; "no
+          // diff line for THIS row while the other row has one" is a reading.
+          lines.some((l) => l.startsWith("- ")) && lines.some((l) => l.startsWith("+ ")),
+          `CALIBRATION: the SAME run prints the two-sided diff for ${CLEAN_BUT_DIFFERING}, which WAS judged and is clean (${lines.filter((l) => /^[+-] /.test(l)).length} diff line(s))`,
+        ) &&
+        expect(
+          lines.every((l) => !/^[+-] /.test(l) || !l.includes("match_engine_cron_tick")),
+          `and NO diff line carries the UNJUDGED row's text (${lines.filter((l) => /^[+-] /.test(l) && l.includes("match_engine_cron_tick")).length} leaked)`,
         ) &&
         expect(r.exitCode === 1, `the run still exits 1 — withholding is not passing (got ${r.exitCode})`) &&
         pass;

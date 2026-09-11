@@ -6,7 +6,7 @@
     "active": true,
     "database": "postgres",
     "username": "postgres",
-    "command": "DO $$ DECLARE k text; u text; BEGIN SELECT decrypted_secret INTO k FROM vault.decrypted_secrets WHERE name = 'analytics_service_key'; SELECT decrypted_secret INTO u FROM vault.decrypted_secrets WHERE name = 'analytics_base_url'; PERFORM net.http_post(url := u || '/api/match/cron-recompute', headers := jsonb_build_object('Content-Type', 'application/json', 'X-Service-Key', k), body := '{}'::jsonb, timeout_milliseconds := 60000); END $$"
+    "command": "SELECT public.match_engine_cron_tick('FAKE-abcdef0123' || '456789abcdef0123456789');"
   },
   {
     "jobid": 2,
@@ -15,7 +15,7 @@
     "active": true,
     "database": "postgres",
     "username": "postgres",
-    "command": "DO $t5$ DO $t4$ DO $t3$ DO $t2$ DO $t1$ DO $t0$ PERFORM net.http_post(url := https://x.invalid/a, headers := jsonb_build_object(X-Service-Key, FAKE-abcdef0123 || 456789abcdef0123456789)); $t0$ $t1$ $t2$ $t3$ $t4$ $t5$"
+    "command": "SELECT purge_audit_log_cold(interval '91 days')"
   },
   {
     "jobid": 3,
