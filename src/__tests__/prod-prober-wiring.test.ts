@@ -1501,6 +1501,56 @@ describe("[164.1-05] kinds and floors", () => {
     ).toEqual(["long-token-anywhere"]);
   });
 
+  it("IN-R2-03: `parseCronJobRows` addresses every field through CRON_JOB_COLUMNS — no hand-typed ordinals survive", () => {
+    // ⛔ A REFACTOR WITH NO OBSERVABLE BEHAVIOUR TODAY, SO THE CONTROL IS A PIN
+    // AND A PROOF, NOT A RED FIXTURE — the same idiom the F5 deletion uses
+    // below. Under the CURRENT column order, name-addressed and ordinal
+    // extraction return identical rows by construction, so any behavioural
+    // assertion here would be a control that cannot fail.
+    //
+    // THE DEFECT IT CLOSES: the WIDTH guard was derived
+    // (`f.length !== CRON_JOB_COLUMNS.length`) while the EXTRACTION was seven
+    // hand-typed ordinals plus `f[7]` for `total`. Reordering the file's own
+    // stated "one source of the field count" would have mis-assigned every
+    // field while the guard stayed green, and a NINTH column would have turned
+    // the `total` read — and therefore the whole CR-R1-03 count guard — into a
+    // no-op.
+    const armText = readFileSync(join(PROBER_DIR, "arms", "cron-drift.mjs"), "utf8");
+    const fn = armText.slice(anchorIndex(armText, "export function parseCronJobRows"));
+    const body = fn
+      .slice(0, fn.indexOf("\n}\n") + 2)
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//"))
+      .join("\n");
+    const ORDINALS = /\bf\[\d+\]/g;
+    expect(body.match(ORDINALS), "no hand-typed field ordinal survives in the parser body").toBeNull();
+    expect(body, "and the field count guard is still the derived one").toContain("f.length !== CRON_JOB_COLUMNS.length");
+    expect(body, "…addressed by NAME").toContain("CRON_JOB_COLUMNS.indexOf(column)");
+    // CALIBRATION: the same predicate FINDS an ordinal when one is spliced in,
+    // so "none survive" is a reading rather than something this assertion
+    // always says.
+    expect(body.replace("at(\"jobid\")", "f[0]").match(ORDINALS), "the predicate really can fire").not.toBeNull();
+
+    // And the behaviour is pinned end to end: every column's value arrives
+    // under its own name. The record is BUILT from CRON_JOB_COLUMNS, so a
+    // reordering changes both sides together and this stays true — which is
+    // exactly the property the refactor buys.
+    const { fieldSep, recordSep } = CRON_JOB_SEPARATORS;
+    const values = CRON_JOB_COLUMNS.map((c) => (c === "active" ? "t" : c === "total" ? "1" : `v_${c}`));
+    const { rows, malformed, total } = parseCronJobRows(values.join(fieldSep) + recordSep);
+    expect(malformed).toEqual([]);
+    expect(total).toBe(1);
+    expect(rows[0]).toEqual({
+      jobid: "v_jobid",
+      jobname: "v_jobname",
+      schedule: "v_schedule",
+      active: true,
+      database: "v_database",
+      username: "v_username",
+      command: "v_command",
+    });
+  });
+
   it("F5: the UNREACHABLE `vaultSpan` exemption is gone and cannot come back", () => {
     // ⛔ A DELETION OF PROVABLY-DEAD CODE HAS NO BEHAVIOUR TO NEUTER, so the
     // honest control is a PROOF plus a pin, not a red fixture.

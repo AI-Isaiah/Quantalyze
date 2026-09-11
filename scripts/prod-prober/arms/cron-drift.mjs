@@ -1890,15 +1890,28 @@ export function parseCronJobRows(stdout) {
       malformed.push({ index, fields: f.length });
       continue;
     }
-    if (/^\d+$/.test(f[7].trim())) totals.add(Number.parseInt(f[7].trim(), 10));
+    // ⛔ EVERY FIELD IS ADDRESSED BY NAME THROUGH `CRON_JOB_COLUMNS`
+    // (164.8.5-REVIEW-R2 IN-R2-03). The WIDTH guard above was already derived,
+    // but the EXTRACTION was seven hand-typed ordinals plus `f[7]` for `total`
+    // — so reordering the file's own stated "one source of the field count"
+    // would have silently mis-assigned every field while the guard stayed
+    // green, and a NINTH column would have turned the `total` read into a
+    // no-op. `f.length === CRON_JOB_COLUMNS.length` is already established here,
+    // so the lookup is total.
+    const at = (column) => f[CRON_JOB_COLUMNS.indexOf(column)];
+    const total_ = at("total").trim();
+    if (/^\d+$/.test(total_)) totals.add(Number.parseInt(total_, 10));
     out.push({
-      jobid: f[0].trim(),
-      jobname: f[1].trim(),
-      schedule: f[2].trim(),
-      active: f[3].trim() === "t",
-      database: f[4].trim(),
-      username: f[5].trim(),
-      command: f[6],
+      jobid: at("jobid").trim(),
+      jobname: at("jobname").trim(),
+      schedule: at("schedule").trim(),
+      active: at("active").trim() === "t",
+      database: at("database").trim(),
+      username: at("username").trim(),
+      // ⚠️ NOT trimmed, and that is the one deliberate asymmetry: `command` is
+      // the text every hygiene rule reads, and trimming it would change what a
+      // sha is computed over.
+      command: at("command"),
     });
   }
 
