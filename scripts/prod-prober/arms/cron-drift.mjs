@@ -451,6 +451,41 @@ export const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  * because trimming the comma leaves a URL whose PATH SEGMENT is a credential.
  */
 const TRIM_PUNCT = /^[('"`[]+|[)'"`\].,;:!?]+$/g;
+
+/**
+ * A migration FILENAME as this repository spells them — and NOTHING looser.
+ *
+ * ⛔ IT EXISTS TO NARROW A FALSE POSITIVE, NOT TO WIDEN AN EXEMPTION, and it is
+ * applied to COMMENT BODIES ONLY. MEASURED 2026-09-11, every one of these fired
+ * `long-token-anywhere` — whose remedy is "treat the named secret as EXPOSED and
+ * rotate it first" — on text carrying no credential at all:
+ *
+ *   -- added by 20260907130000_ledger_refresh_switch_to_system_flags.sql
+ *   -- see commit 88581b8bc66415bfa86b7d5a019741b1cbd0ff49
+ *   -- 164.8.5-proberparse-the-prod-prober-hygiene-rules-stop-being-dodgeab
+ *   -- strategy 123e4567-e89b-12d3-a456-426614174000
+ *
+ * ⚠️ AND IT IS IMMINENT RATHER THAN THEORETICAL. `retention_compute_jobs_orphaned_running`
+ * lexes to a pure comment and is clean today only because its one long token,
+ * `CANARY_162_V1_PROSE_ONLY`, is 24 characters — EIGHT under `TOKEN_MIN`. That
+ * row has a pending PROD re-capture; one migration filename in the re-captured
+ * text and `captureManifest` exits 1 under "Rotate the exposed secret" and
+ * writes nothing.
+ *
+ * ⛔ THE 14-DIGIT TIMESTAMP PREFIX AND THE `.sql` SUFFIX ARE BOTH LOAD-BEARING.
+ * A looser "any token ending in a source extension" would hand an operator a
+ * one-step off-switch — append `.sql` to a key inside a comment and
+ * `long-token-anywhere` goes quiet, which is precisely the class WR-R1-01
+ * closed. MEASURED: all 292 files under `supabase/migrations` match this
+ * pattern, and 0 do not, so nothing looser is needed to cover the corpus.
+ *
+ * ⚠️ NOT CLOSED, and recorded rather than fixed: a bare 40-character git sha, a
+ * phase-directory name, and a GitHub commit URL still fire. A hex-only token IS
+ * a credential family this file names by name ("sk_live_-style, eyJ… JWTs, hex
+ * digests"), so exempting one would blind the rule to a shape it exists for —
+ * the wrong trade, and the opposite of narrowing.
+ */
+const MIGRATION_FILENAME_RE = /^[0-9]{14}_[a-z0-9_]+\.sql$/;
 /**
  * Is this token a URL carrying NOTHING — the exemption `long-token-anywhere`
  * actually means?
@@ -1416,15 +1451,35 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
     // ABOVE would have silently changed its meaning with NO test moving. A
     // redundant line that cannot execute is worse than a deleted one. Do not
     // "restore" it: the bare-URL exemption below is the whole of it.
-    const testTokens = (text, where) => {
-      for (const token of String(text).split(/\s+/)) {
+    const testTokens = (text, where, { provenance = false } = {}) => {
+      for (const raw of String(text).split(/\s+/)) {
+        const token = raw;
         if (token.length < TOKEN_MIN) continue;
         if (!/\d/.test(token)) continue;
         // ⚠️ `TRIM_PUNCT` — see the constant. The LENGTH test above read the
         // real token; this reads the token without the prose punctuation glued
         // to it, which is the only difference between a URL in a sentence and
-        // the same URL alone.
-        if (isBareUrl(token.replace(TRIM_PUNCT, ""))) continue;
+        // the same URL alone. The trimmed spelling is what every EXEMPTION
+        // below tests, for the same reason.
+        const bare = token.replace(TRIM_PUNCT, "");
+        if (isBareUrl(bare)) continue;
+        // ⛔ A CANONICAL UUID, STANDING ALONE. `isBareUrl` has exempted one
+        // since WR-R1-02 — but only as a `/`-delimited PATH SEGMENT, so
+        // `-- strategy 123e4567-…` fired while
+        // `https://x/api/strategies/123e4567-…` did not. Same shape, same
+        // argument (fixed length, fixed 8-4-4-4-12 layout, cannot absorb an
+        // opaque key), two answers. The exemption is hoisted here so the two
+        // producers and the URL walk all ask ONE question.
+        // ⚠️ The recorded residual travels with it: a UUID that IS a secret (an
+        // unguessable capability link) needs a different control, and this arm
+        // says only that it will not call one a credential.
+        if (CANONICAL_UUID_RE.test(bare)) continue;
+        // ⛔ PROVENANCE TEXT, IN A COMMENT ONLY. See `MIGRATION_FILENAME_RE` for
+        // the measurement and for why the timestamp prefix and the `.sql`
+        // suffix are both load-bearing. It is NOT offered to the literal
+        // producer: a filename inside a string literal is an argument to
+        // something, and this rule's whole subject is values.
+        if (provenance && MIGRATION_FILENAME_RE.test(bare)) continue;
         // Already `jwt-shape`'s finding. Without this the JWT red row would fire
         // TWO rules and its isolation assertion — the thing that makes a red row
         // attributable — would fail.
@@ -1511,7 +1566,11 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
     // exclusion: it is never an argument of anything, so nothing else could
     // have counted it.
     for (const c of commentsIn(span)) {
-      testTokens(c.content, "COMMENT — commenting a key out does not remove it, and the next capture writes that comment into a manifest committed to a public repository");
+      testTokens(
+        c.content,
+        "COMMENT — commenting a key out does not remove it, and the next capture writes that comment into a manifest committed to a public repository",
+        { provenance: true },
+      );
     }
   }
 
