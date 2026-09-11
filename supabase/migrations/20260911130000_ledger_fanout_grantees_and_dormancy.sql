@@ -52,36 +52,53 @@
 -- has TODAY (the old one). The pragma is the designed resolution, and it means
 -- "I read PROD's body and intend to overwrite it".
 --
--- The evidence block plan 04 of this phase fills in, in the shape
--- 20260907130000:21-34 established — ONE ENTRY PER ARM, never one for the pair:
+-- MEASURED 2026-09-11, reproduced LOCALLY with the gate's own normalizer, aiming
+-- its `live` argument at origin/main's snapshot rather than at PROD
+-- (origin/main = 67aa1c21e775a53fc9f5f380cd8ebe4d8a5d3329). ONE ENTRY PER ARM,
+-- never one for the pair:
 --
---   MEASURED <date>, workflow run <id> at <sha>:
+--   node scripts/sql-body-normalize.mjs --diff-bodies \
+--     supabase/schema/functions/<fn>.sql <origin/main's copy of the same file>
+--
 --     enqueue_ledger_refresh_for_strategies/0
---       PROD live sha256                          <measured in plan 04>
---       committed snapshot at HEAD                <measured in plan 04>
+--       HEAD snapshot sha256      1faf8e9e323aaf4e60cba8a49124c217c4170db564382cc116481e1edd0066bc
+--       origin/main body sha256   adeb6d168187b2dfb22fa4798eb14972e233342e8721d7221323a9311053705f
+--       differing lines           17
 --     enqueue_ledger_composite_refresh/0
---       PROD live sha256                          <measured in plan 04>
---       committed snapshot at HEAD                <measured in plan 04>
---   and, reproduced LOCALLY with the gate's own normalizer, aiming its `live`
---   argument at origin/main's snapshot rather than at PROD:
---     node scripts/sql-body-normalize.mjs --diff-bodies \
---       supabase/schema/functions/<fn>.sql <origin/main's copy of the same file>
---     origin/main snapshot sha256                 <measured in plan 04>
---     HEAD snapshot sha256                        <measured in plan 04>
---     differing lines                             <measured in plan 04>
+--       HEAD snapshot sha256      b42efaa37f90f2bc309ea90881d7a10408651beed1518f9320f353f7b81cf6be
+--       origin/main body sha256   15e3ba963fa0349eec352e1a5f8a3be5258fe8f34ff996926e99b9d2f72996b5
+--       differing lines           17
 --
--- ⛔ THE TWO PRAGMA LINES ARE DELIBERATELY ABSENT FROM THIS FILE TODAY. The
--- pragma is the `prod-body-ack` token scripts/prod-body-drift-check.sh:1300
--- greps for as a FIXED STRING, followed by PROD's live body hash — and a
--- placeholder hash matches nothing while reading at a glance exactly like a real
--- acknowledgement. Absence is the honest state until the hashes are MEASURED.
--- Plan 04 of this phase measures them and adds the lines; nothing before that
--- may paste one.
+-- ⭐ EACH ACKED HASH IS THE `live` COLUMN OF --diff-bodies, NOT `--hash` OF THE
+-- SNAPSHOT FILE. scripts/prod-body-drift-check.sh reads the FIFTH TSV field of
+-- --diff-bodies into `live_hash` (:1271) and greps for that token followed by
+-- `live_hash` as a FIXED STRING (:1300), under its own comment "the ack must
+-- carry the hash of the NORMALIZED PROD body". `--hash <file>` returns a
+-- whole-FILE digest no gate ever greps: MEASURED, `--hash` of origin/main's two
+-- snapshot FILES returns cc77a2b9...6c63c93c and 81760333...659ef9e2, and
+-- NEITHER is a string below. A file digest here would read to a human exactly
+-- like an ack and be invisible to the gate.
 --
--- ⛔ AND WHEN THEY ARE MEASURED: had an origin/main snapshot hash NOT equalled
--- PROD's live hash FOR THAT ARM, the correct action is to FOLD the difference
--- into this migration — never to record the pragma anyway. The ack is evidence
--- that PROD was read, not a way to silence the gate. It is EARNED, not pasted.
+-- ⭐ AND THE METHOD IS CALIBRATED AGAINST A KNOWN-GOOD ACK — for THESE TWO
+-- FUNCTIONS. Re-run on Phase 164.7's own inputs, --diff-bodies of commit
+-- 14b3b6c3's snapshot against its parent's, it returns for the strategies arm
+-- snap adeb6d16...53705f / live 88e6af84...ae6e36 / 15 lines and for the
+-- composite arm snap 15e3ba96...2996b5 / live 7c3d33e9...4d81ac4 / 15 lines —
+-- both `live` values being 20260907130000:10-11's two pragmas VERBATIM, and both
+-- `snap` values being what this file now acks. Those pragmas were earned against
+-- REAL PROD in workflow run 34138679709, so the chain is: PROD's body at that
+-- merge became the snapshot this file overwrites, and the recipe below is
+-- measured against PROD once removed rather than merely self-consistent.
+--
+-- prod-body-ack: adeb6d168187b2dfb22fa4798eb14972e233342e8721d7221323a9311053705f
+-- prod-body-ack: 15e3ba963fa0349eec352e1a5f8a3be5258fe8f34ff996926e99b9d2f72996b5
+--
+-- ⚠️ BOTH ACKS ARE OF origin/main, WHICH STANDS IN FOR PROD (assumption A1).
+-- Each is EARNED only if VAC-04 on the PR reports that SAME hash for PROD for
+-- THAT ARM. If either differs, PROD drifted OUT OF BAND for that arm and the
+-- correct action is to FOLD the difference into this migration and re-derive —
+-- never to edit a pragma to match a gate log. The ack is evidence that PROD was
+-- read, not a way to silence the gate. It is EARNED, not pasted.
 --
 -- ══════════════════════════════════════════════════════════════════════════
 -- RE-BASE DISCIPLINE (DRIFT-02)

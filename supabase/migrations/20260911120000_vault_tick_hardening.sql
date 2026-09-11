@@ -38,31 +38,44 @@
 -- has TODAY (the old one). The pragma is the designed resolution, and it means
 -- "I read PROD's body and intend to overwrite it".
 --
--- The evidence block plan 04 of this phase fills in, in the shape
--- 20260907130000:130-140 established:
+-- MEASURED 2026-09-11, reproduced LOCALLY with the gate's own normalizer, aiming
+-- its `live` argument at origin/main's snapshot rather than at PROD
+-- (origin/main = 67aa1c21e775a53fc9f5f380cd8ebe4d8a5d3329):
 --
---   MEASURED <date>, workflow run <id> at <sha>:
---     PROD live sha256 (match_engine_cron_tick/0)   <measured in plan 04>
---     committed snapshot at HEAD                    <measured in plan 04>
---   and, reproduced LOCALLY with the gate's own normalizer, aiming its `live`
---   argument at origin/main's snapshot rather than at PROD:
---     node scripts/sql-body-normalize.mjs --diff-bodies \
---       supabase/schema/functions/match_engine_cron_tick.sql <origin/main's copy>
---     origin/main snapshot sha256                   <measured in plan 04>
---     HEAD snapshot sha256                          <measured in plan 04>
---     differing lines                               <measured in plan 04>
+--   node scripts/sql-body-normalize.mjs --diff-bodies \
+--     supabase/schema/functions/match_engine_cron_tick.sql <origin/main's copy>
 --
--- ⛔ THE PRAGMA LINE ITSELF IS DELIBERATELY ABSENT FROM THIS FILE TODAY. It is
--- the `prod-body-ack` token scripts/prod-body-drift-check.sh:1300 greps for as
--- a FIXED STRING, followed by PROD's live body hash — and a placeholder hash
--- matches nothing while reading at a glance exactly like a real ack.
--- Absence is the honest state until the hashes are MEASURED. Plan 04 measures
--- them and adds the line; nothing before that may paste one.
+--     HEAD snapshot sha256      277f02d6d0cfdffab2269fb3a146e9dc78cb47f47c7217101748fd47d5a65bd6
+--     origin/main body sha256   323330b42bdbbb8eaa797686ed80b5bf4f2a2bc9cb56f349838a72a524c943d9
+--     differing lines           8
 --
--- ⛔ AND WHEN THEY ARE MEASURED: had the origin/main snapshot hash NOT equalled
--- PROD's live hash, the correct action is to FOLD the difference into this
--- migration — never to record the pragma anyway. The ack is evidence that PROD
--- was read, not a way to silence the gate. It is EARNED, not pasted.
+-- ⭐ THE ACKED HASH IS THE `live` COLUMN OF --diff-bodies, NOT `--hash` OF THE
+-- SNAPSHOT FILE. scripts/prod-body-drift-check.sh reads the FIFTH TSV field of
+-- --diff-bodies into `live_hash` (:1271) and greps for that token followed by
+-- `live_hash` as a FIXED STRING (:1300), under its own comment "the ack must
+-- carry the hash of the NORMALIZED PROD body". `--hash <file>` returns a
+-- whole-FILE digest no gate ever greps: MEASURED, `--hash` of origin/main's
+-- snapshot FILE is 3a3fdd65f0412ad8bce83af7c79e0e3d210ecfd6165b27fac620fa2f947d6de3,
+-- which is NOT the string below. An ack carrying the file digest would read to a
+-- human exactly like an ack and be invisible to the gate — the precise failure
+-- this block exists to prevent, and the one this phase's RESEARCH §Q4 expected.
+--
+-- ⭐ AND THE METHOD IS CALIBRATED AGAINST A KNOWN-GOOD ACK. Re-run on Phase
+-- 164.7's own inputs — --diff-bodies of commit 14b3b6c3's snapshot against its
+-- parent's, for the two fan-outs — it reproduces 20260907130000:10-11's two
+-- pragma hashes (88e6af84...ae6e36 and 7c3d33e9...4d81ac4) and their 15
+-- differing lines EXACTLY. Those two were earned against REAL PROD in workflow
+-- run 34138679709, so this recipe is measured against PROD once removed rather
+-- than merely self-consistent.
+--
+-- prod-body-ack: 323330b42bdbbb8eaa797686ed80b5bf4f2a2bc9cb56f349838a72a524c943d9
+--
+-- ⚠️ THE ACK IS OF origin/main, WHICH STANDS IN FOR PROD (assumption A1). It is
+-- EARNED only if VAC-04 on the PR reports that SAME hash for PROD. If it reports
+-- a different one, PROD drifted OUT OF BAND and the correct action is to FOLD
+-- the difference into this migration and re-derive — never to edit the pragma to
+-- match a gate log. The ack is evidence that PROD was read, not a way to silence
+-- the gate. It is EARNED, not pasted.
 --
 -- ══════════════════════════════════════════════════════════════════════════
 -- THE DEFECT THIS FILE REPLACES (criterion 1 / 164.7-CR05)
