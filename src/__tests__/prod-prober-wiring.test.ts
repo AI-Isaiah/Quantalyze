@@ -1021,7 +1021,14 @@ describe("[164.1-05] kinds and floors", () => {
     expect(() => statSync(join(FUNCTIONS_DIR, "match_engine_cron_tick_MOVED.sql"))).toThrow();
   });
 
-  it("SELF_TEST_SCENARIOS is 71, and the runner PRINTS exactly 71 headers numbered 1..71", async () => {
+  // ⛔ THE TITLE INTERPOLATES AND THE ASSERTION PINS (164.8.5-REVIEW-R1 IN-02).
+  // The title used to hand-type `71` twice, so bumping `SELF_TEST_SCENARIOS`
+  // for a new scenario left a test NAME asserting a number the body no longer
+  // checked — a green test lying about what it measures, which is the one
+  // failure mode a title can have. `expect(SELF_TEST_SCENARIOS).toBe(…)` below
+  // stays a literal ON PURPOSE: it is D5's deliberate-edit pin, and it is now
+  // the ONLY hand-typed copy of the count outside `run.mjs`.
+  it(`SELF_TEST_SCENARIOS is ${SELF_TEST_SCENARIOS}, and the runner PRINTS exactly ${SELF_TEST_SCENARIOS} headers numbered 1..${SELF_TEST_SCENARIOS}`, async () => {
     // ⭐ SOURCE-DERIVED, not scraped. The headers are auto-numbered at RUNTIME
     // off the same counter the runner's completeness assertion reads, so there
     // is no literal `k/50` in the source to count. Executing the self-test is
