@@ -223,6 +223,17 @@
 -- separate diagnostic runs of this file (MEASURED 2026-09-07; the pre-164.7
 -- reading was 1.06 s over the 11-entry list, so the two extra apply entries cost
 -- nothing measurable).
+-- ⭐ CURRENCY 2026-09-11 (Phase 164.8.6 plan 03) — the LIVE reading, taken over
+--    the 15-entry list above at the final bytes of this file:
+--    `scripts/pg-lane/run.sh` exited 0 with the completion notice printing its
+--    full 15-arm roster and ZERO `TEST FAILED` lines anywhere in the stream, and
+--    the narrowed mutation run reported `arms: 20/20/0`, `biting: 20`,
+--    `lane-invocations: 20` (the two independent tallies AGREE), and a per-arm
+--    lane time whose mean read 1.1-1.2 s across three narrowed runs of this
+--    file — it fluctuated between those two readings run to run, so a single
+--    pinned figure here would be false precision. Three more arms and two more
+--    apply entries, and the per-arm cost did not measurably move off the 1.1 s
+--    above.
 -- ⚠️ The sentinel string itself is deliberately NOT repeated in this header:
 -- this file's own verify pins it to exactly ONE occurrence, so that the roster
 -- can only be edited where it is RAISED.
