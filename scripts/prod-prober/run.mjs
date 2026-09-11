@@ -762,6 +762,12 @@ function fixtureSql(data) {
 
     if (q.includes("cron.job")) {
       const rows = data.cronJobRows || [];
+      // ⚠️ THE TRAILING `total` COLUMN IS PART OF THE ANSWER psql WOULD GIVE —
+      // `CRON_JOB_SQL` carries `count(*) OVER () AS total`, so every record
+      // renders it, LAST. `cronJobTotal` lets a scenario render a count that
+      // DISAGREES with the rows (the truncated-read case), which is the only
+      // way to drive the completeness guard without a fragment.
+      const total = typeof data.cronJobTotal === "number" ? data.cronJobTotal : rows.length;
       const rendered = rows.map((r) =>
         [
           String(r.jobid),
@@ -771,6 +777,7 @@ function fixtureSql(data) {
           r.database,
           r.username,
           r.command,
+          String(total),
         ].join(fieldSep),
       );
       // psql prints the record separator AFTER every record, last one included.
@@ -2762,27 +2769,47 @@ export async function selfTest() {
   // -------------------------------------------------------------------------
   {
     // ⛔ The fixture carries ONE literal 0x1E — the arm's own record separator —
-    // inside jobid 1's body literal, so psql's answer splits into a 7-field head
-    // and a 1-field tail: three readable rows and one unreadable record. The
-    // parser used to `continue` past the tail, which removed a PROD row from
-    // every judgement this arm makes while the run still read green.
+    // inside jobid 1's body literal, so psql's answer splits that row in two.
+    // The parser used to `continue` past the short tail, which removed a PROD
+    // row from every judgement this arm makes while the run still read green.
+    //
+    // ⚠️ THE READING MOVED WHEN `total` BECAME THE LAST COLUMN (CR-R1-03), and
+    // it moved in the direction of catching MORE. The head fragment now loses
+    // the trailing count field, so BOTH halves of the split are unreadable
+    // (widths 7 and 2, where 8 are required) instead of the head passing as a
+    // full-width row with a silently truncated command — and the out-of-band
+    // count then disagrees as well. Two independent measure-fails, and the
+    // counts below are asserted rather than restated.
     const prod = loadFixture("cron-drift", "prod-malformed-record.json");
     if (!prod.ok) {
       pass = expect(false, prod.reason) && pass;
     } else {
       const r = await driftRun(prod.data, driftFixturePath("manifest.json"), quiet);
       const mf = r.defects.filter((x) => x.kind === "measure-fail");
-      const detail = String((mf[0] || {}).detail || "");
+      const widthMf = mf.filter((x) => String(x.detail).includes("could not be parsed"));
+      const countMf = mf.filter((x) => String(x.detail).includes("but this reading yielded"));
+      const details = mf.map((x) => String(x.detail)).join(" ");
       pass =
         expect(r.exitCode === 1, `an unreadable record exits 1, never 0 (got ${r.exitCode})`) &&
-        expect(mf.length === 1, `exactly one measure-fail (got ${mf.length})`) &&
-        expect(String((mf[0] || {}).subject) === "cron.job", `on subject cron.job (got ${(mf[0] || {}).subject})`) &&
         expect(
-          detail.includes("1 of 4 record(s)"),
-          `NAMING THE COUNT — three rows were read and a fourth record was not (detail: ${detail.slice(0, 80)}…)`,
+          mf.length === 2,
+          `TWO measure-fails, one per independent guard — the width of the fragments and the out-of-band row count (got ${mf.length}: ${mf.map((x) => String(x.detail).slice(0, 40)).join(" | ")})`,
+        ) &&
+        expect(mf.every((x) => String(x.subject) === "cron.job"), `both on subject cron.job (got ${mf.map((x) => x.subject).join(", ")})`) &&
+        expect(
+          widthMf.length === 1 && String(widthMf[0].detail).includes("2 of 4 record(s)"),
+          `NAMING THE COUNT — two records were read and two were not (detail: ${String((widthMf[0] || {}).detail || "none").slice(0, 90)}…)`,
         ) &&
         expect(
-          detail.includes("{}") === false,
+          widthMf.length === 1 && String(widthMf[0].detail).includes("field counts: 7, 2"),
+          `and NAMING BOTH FRAGMENT WIDTHS — 7 for the head that lost its count column, 2 for the tail (detail: ${String((widthMf[0] || {}).detail || "none").slice(0, 90)}…)`,
+        ) &&
+        expect(
+          countMf.length === 1 && String(countMf[0].detail).includes("reported 3 cron.job row(s)"),
+          `and the DATABASE's own count is reported against the reading — 3 rows, 4 records (detail: ${String((countMf[0] || {}).detail || "none").slice(0, 90)}…)`,
+        ) &&
+        expect(
+          details.includes("{}") === false,
           "and the record TEXT is never quoted — an unreadable record is exactly the place a credential could be hiding",
         ) &&
         pass;
@@ -2835,8 +2862,9 @@ export async function selfTest() {
         expect(mf.length === 1, `exactly one measure-fail (got ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ") || "no defects at all"})`) &&
         expect(String((mf[0] || {}).subject) === "cron.job", `on subject cron.job (got ${(mf[0] || {}).subject})`) &&
         expect(
-          detail.includes("1 of 3 record(s)") && detail.includes("field counts: 8"),
-          `NAMING THE COUNT AND THE WIDTH — two rows were read and a third record was EIGHT fields wide (detail: ${detail.slice(0, 110)}…)`,
+          detail.includes("1 of 3 record(s)") &&
+            detail.includes(`field counts: ${CRON_DRIFT_MOD.CRON_JOB_COLUMNS.length + 1}`),
+          `NAMING THE COUNT AND THE WIDTH — two rows were read and a third record was ONE FIELD TOO WIDE (detail: ${detail.slice(0, 120)}…)`,
         ) &&
         expect(
           detail.includes("X-Service-Key") === false && detail.includes("FAKE") === false,
@@ -2871,7 +2899,14 @@ export async function selfTest() {
           expect(code === 3, `an unreadable record returns 3, not the hygiene refusal's 1 (got ${code})`) &&
           expect(existsSync(outPath) === false, "and the out path DOES NOT EXIST afterwards — a reading with a hole in it can never become the oracle") &&
           expect(
-            lines.some((l) => l.startsWith("REFUSED:") && l.includes("1 ") && l.includes("record")),
+            // The count is DERIVED from the same parser the capture path calls,
+            // so this assertion cannot drift out of step with the fixture the
+            // way a hand-typed `1 ` did when `total` became the last column.
+            lines.some(
+              (l) =>
+                l.startsWith("REFUSED:") &&
+                l.includes(`${CRON_DRIFT_MOD.parseCronJobRows(fixtureSql({ cronJobRows: prod.data })(CRON_DRIFT_MOD.CRON_JOB_SQL, CRON_DRIFT_MOD.CRON_JOB_SEPARATORS).stdout).malformed.length} cron.job record(s) could not be parsed`),
+            ),
             `the refusal is explicit and names how many records it could not read (${lines.join(" | ") || "no lines"})`,
           ) &&
           expect(lines.every((l) => l.includes("{}") === false), "and never echoes the record text") &&
@@ -3664,16 +3699,27 @@ export async function captureManifest({ seams, outPath, log = (s) => console.log
     log(`ERROR: cron.job could not be read: ${res.measureFail}. Nothing was written.`);
     return 3;
   }
-  const { rows, malformed } = CRON_DRIFT_MOD.parseCronJobRows(res.stdout);
+  const { rows, malformed, countMismatch } = CRON_DRIFT_MOD.parseCronJobRows(res.stdout);
   if (malformed.length > 0) {
     // ⛔ BEFORE the hygiene loop, and deliberately: a record that could not be
     // parsed was never handed to the hygiene rules, so a capture that proceeded
     // would be certifying text nobody read. The counts are printed; the record
     // text never is.
     log(
-      `REFUSED: ${malformed.length} cron.job record(s) could not be parsed (field counts: ${malformed.map((m) => m.fields).join(", ")}; seven are required), so this reading has a hole in it and cannot become the oracle. Nothing was written.`,
+      `REFUSED: ${malformed.length} cron.job record(s) could not be parsed (field counts: ${malformed.map((m) => m.fields).join(", ")}; ${CRON_DRIFT_MOD.CRON_JOB_COLUMNS.length} are required), so this reading has a hole in it and cannot become the oracle. Nothing was written.`,
     );
     log("Read the affected command by hand — a record separator (0x1E) inside a cron.job command splits it in two — then capture again.");
+    return 3;
+  }
+  if (countMismatch !== null) {
+    // ⛔ THE SECOND, INDEPENDENT REFUSAL (164.8.5-REVIEW-R1 CR-R1-03). The width
+    // guard above reads FRAGMENTS and cannot tell a fabricated row from a real
+    // one; `count(*) OVER ()` is the database's own answer, computed before any
+    // separator was chosen. An oracle captured from a reading whose row count
+    // cannot be confirmed would record a phantom job — or the absence of a real
+    // one — as the standard, forever.
+    log(`REFUSED: ${countMismatch} Nothing was written.`);
+    log("Read cron.job by hand (SELECT jobid, jobname FROM cron.job ORDER BY jobid), fix the command carrying the separator, then capture again.");
     return 3;
   }
 

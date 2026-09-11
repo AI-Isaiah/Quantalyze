@@ -40,6 +40,8 @@ import {
 import {
   BARE_URL_RE,
   CRON_JOB_SEPARATORS,
+  CRON_JOB_COLUMNS,
+  CRON_JOB_SQL,
   FUNCTIONS_DIR,
   HEADERS_LITERAL_MAX,
   HYGIENE_RULE_IDS,
@@ -706,7 +708,13 @@ describe("[164.1-05] kinds and floors", () => {
   // judgement — the credential scan included — while the run still read green.
   // Both callers (the arm's run() and captureManifest) now refuse on the count.
   // -------------------------------------------------------------------------
-  const cronRecord = (fields: string[]) => fields.join(CRON_JOB_SEPARATORS.fieldSep);
+  // ⚠️ EVERY RECORD CARRIES THE TRAILING `total` COLUMN, because `CRON_JOB_SQL`
+  // does: `count(*) OVER () AS total` is the out-of-band row count, and it is
+  // LAST on purpose (CR-R1-03) so the head fragment of a payload-0x1E split
+  // loses it and is therefore SHORT, rather than a full-width record carrying a
+  // silently truncated command.
+  const cronRecord = (fields: string[], total = 2) =>
+    [...fields, String(total)].join(CRON_JOB_SEPARATORS.fieldSep);
   const GOOD_RECORD = cronRecord(["1", "a_job", "* * * * *", "t", "postgres", "postgres", "SELECT 1"]);
   const SHORT_RECORD = cronRecord(["2", "b_job", "*/5 * * * *", "t", "postgres"]);
   const renderRecords = (records: string[]) =>
@@ -714,20 +722,22 @@ describe("[164.1-05] kinds and floors", () => {
     // which is why the parser's EMPTY-record skip is correct and must stay.
     records.map((r) => `${r}${CRON_JOB_SEPARATORS.recordSep}`).join("");
 
-  it("a record with fewer than seven fields is COUNTED, never dropped (WR-05)", () => {
+  it("a record NARROWER than CRON_JOB_COLUMNS is COUNTED, never dropped (WR-05)", () => {
     const stdout = renderRecords([GOOD_RECORD, SHORT_RECORD]);
     const { rows, malformed } = parseCronJobRows(stdout);
     expect(rows.length, "the readable record still parses — one bad record does not blind the arm to the others").toBe(1);
     expect(rows[0].jobname).toBe("a_job");
     expect(malformed.length, "and the unreadable one is REPORTED rather than skipped").toBe(1);
-    expect(malformed[0].fields, "by its field count, so the reader can tell where the record split").toBe(5);
+    expect(malformed[0].fields, "by its field count, so the reader can tell where the record split").toBe(
+      CRON_JOB_COLUMNS.length - 2,
+    );
     expect(
       JSON.stringify(malformed),
       "and NEVER by its text — an unreadable record is exactly where a credential could be hiding",
     ).not.toContain("b_job");
   });
 
-  it("CALIBRATION: padding that same record to seven fields makes it a ROW and empties the malformed list", () => {
+  it("CALIBRATION: padding that same record to full width makes it a ROW and empties the malformed list", () => {
     const original = renderRecords([GOOD_RECORD, SHORT_RECORD]);
     const padded = renderRecords([
       GOOD_RECORD,
@@ -743,13 +753,18 @@ describe("[164.1-05] kinds and floors", () => {
     expect(parseCronJobRows(original).malformed.length).toBe(1);
   });
 
-  it("CR-02: a record with MORE than seven fields is COUNTED too, never a silently TRUNCATED command", () => {
+  it("CR-02: a record WIDER than CRON_JOB_COLUMNS is COUNTED too, never a silently TRUNCATED command", () => {
     // ⛔ THE EXACT MIRROR OF WR-05 ABOVE, AND IT IS THE WORSE DIRECTION. The
-    // guard was `f.length < 7`, so an EIGHT-field record parsed: `command`
-    // became `f[6]` — the text up to the stray separator — and the remainder
-    // was discarded while `malformed` stayed EMPTY, i.e. while the parser
-    // claimed it had read the row. Seven is the column count of `CRON_JOB_SQL`;
-    // anything else is a record this parser did not read.
+    // guard was `f.length < 7`, so an over-wide record parsed: `command` became
+    // `f[6]` — the text up to the stray separator — and the remainder was
+    // discarded while `malformed` stayed EMPTY, i.e. while the parser claimed
+    // it had read the row. The width is the column count of `CRON_JOB_SQL`,
+    // DERIVED from `CRON_JOB_COLUMNS`; anything else is a record this parser
+    // did not read.
+    //
+    // ⚠️ THIS GUARD ALONE NEVER CLOSED THE CLASS — see the 0x1E tests below.
+    // It answers a FIELD separator in the payload; a RECORD separator produced
+    // fragments it could not see, which is CR-R1-03.
     const head = "SELECT net.http_post(url := 'https://x.invalid/a'";
     const tail = ", headers := jsonb_build_object('X-Service-Key', 'FAKE-inline-key-0123456789abcdef'))";
     const WIDE_RECORD = cronRecord([
@@ -765,7 +780,9 @@ describe("[164.1-05] kinds and floors", () => {
     expect(rows.length, "the readable record still parses — one bad record does not blind the arm to the others").toBe(1);
     expect(rows[0].jobname).toBe("a_job");
     expect(malformed.length, "and the over-wide one is REPORTED rather than truncated into a row").toBe(1);
-    expect(malformed[0].fields, "by its field count, so the reader can tell how far the record over-ran").toBe(8);
+    expect(malformed[0].fields, "by its field count, so the reader can tell how far the record over-ran").toBe(
+      CRON_JOB_COLUMNS.length + 1,
+    );
     expect(
       JSON.stringify(malformed),
       "and NEVER by its text — this record is a worked example of a credential hiding past the separator",
@@ -775,6 +792,104 @@ describe("[164.1-05] kinds and floors", () => {
     // inline service key — not a downgrade to a weaker finding.
     expect(hygieneViolations("b_job", head)).toEqual([]);
     expect(hygieneViolations("b_job", `${head}${tail}`).length).toBeGreaterThan(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // CR-R1-03 — A DELIMITER-BASED PARSER CANNOT SELF-VALIDATE A DELIMITER IN ITS
+  // PAYLOAD. `!== 7` closed the SPELLING it was handed (a FIELD separator in a
+  // command) and left the CLASS open: a RECORD separator splits one row into two
+  // FRAGMENTS, and the head fragment used to carry exactly the required seven
+  // fields, so the width guard could never fire on it — by construction.
+  // MEASURED at the parent commit, BOTH surviving spellings reported
+  // `malformed: []`, i.e. the parser claiming it had read every row.
+  //
+  // The answer is an OUT-OF-BAND count (`count(*) OVER () AS total`), placed
+  // LAST so the head fragment loses it and the width guard bites as well. The
+  // three tests below exercise the two guards SEPARATELY, so neither can stand
+  // in for the other under a neuter.
+  // -------------------------------------------------------------------------
+  const KEY_IN_TAIL = ", headers := jsonb_build_object('X-Service-Key', 'FAKE-inline-key-0123456789abcdef'))";
+  const CLEAN_HEAD = "SELECT net.http_post(url := 'https://x.invalid/a'";
+
+  it("CR-R1-03: a 0x1E inside a command whose tail is WHITESPACE — both fragments are refused (the width guard)", () => {
+    const split = cronRecord(
+      ["2", "b_job", "*/5 * * * *", "t", "postgres", "postgres", `${CLEAN_HEAD}${KEY_IN_TAIL}${CRON_JOB_SEPARATORS.recordSep}   `],
+      2,
+    );
+    const { rows, malformed, total, countMismatch } = parseCronJobRows(renderRecords([GOOD_RECORD, split]));
+    // The head is SHORT because `total` is the last column and the split took
+    // it with the tail — that is the whole reason for the column's position.
+    expect(malformed.map((m) => m.fields), "the head lost its trailing count field, the tail is a stub").toEqual([
+      CRON_JOB_COLUMNS.length - 1,
+      2,
+    ]);
+    expect(rows.map((r) => r.jobname), "only the intact record survives as a row").toEqual(["a_job"]);
+    expect(total).toBe(2);
+    expect(countMismatch, "and the out-of-band count disagrees too — two independent readings, both loud").toContain(
+      "but this reading yielded",
+    );
+  });
+
+  it("CR-R1-03: a 0x1E whose tail is a FABRICATED well-formed record — a phantom job and a truncated real one", () => {
+    // ⛔ THE ONE THAT HIDES A CREDENTIAL. The tail carries enough field
+    // separators to look like a row of its own, so the real job's command is
+    // truncated to the clean head while the credential is attributed to a job
+    // that DOES NOT EXIST. Under `!== 7` this reported `malformed: []`.
+    const FS = CRON_JOB_SEPARATORS.fieldSep;
+    const fabricated = `9${FS}z_job${FS}* * * * *${FS}t${FS}postgres${FS}postgres${FS}${KEY_IN_TAIL}`;
+    const split = cronRecord(
+      ["3", "c_job", "*/5 * * * *", "t", "postgres", "postgres", `${CLEAN_HEAD}${CRON_JOB_SEPARATORS.recordSep}${fabricated}`],
+      2,
+    );
+    const { rows, malformed, countMismatch } = parseCronJobRows(renderRecords([GOOD_RECORD, split]));
+    expect(malformed.map((m) => m.fields), "the head is short by exactly the count column").toEqual([
+      CRON_JOB_COLUMNS.length - 1,
+    ]);
+    // The phantom is still PRESENT in `rows` — the parser cannot know it is a
+    // fragment. That is precisely why the refusal must come from the count.
+    expect(rows.map((r) => r.jobname)).toEqual(["a_job", "z_job"]);
+    expect(countMismatch, "2 rows in the database, 3 records in the reading — the only statement that catches it").toContain(
+      "reported 2 cron.job row(s) but this reading yielded 3 record(s)",
+    );
+    // CALIBRATION: the real command DOES carry a credential and the truncated
+    // head does NOT, so a reading that accepted the fragments would be a silent
+    // PASS on an inline service key and not merely a weaker finding.
+    expect(hygieneViolations("c_job", CLEAN_HEAD)).toEqual([]);
+    expect(hygieneViolations("c_job", `${CLEAN_HEAD}${KEY_IN_TAIL}`).length).toBeGreaterThan(0);
+  });
+
+  it("CR-R1-03: a stdout TRUNCATED at a record boundary is caught by the COUNT ALONE — every surviving record is well-formed", () => {
+    // ⭐ THE CASE THAT ISOLATES GUARD (B). Whole records are gone; nothing is a
+    // fragment; `malformed` is EMPTY and every width is exactly right. The
+    // field-count guard is structurally incapable of seeing this, which is what
+    // makes the out-of-band count a second guard rather than a belt on a belt.
+    const { rows, malformed, total, countMismatch } = parseCronJobRows(
+      renderRecords([cronRecord(["1", "a_job", "* * * * *", "t", "postgres", "postgres", "SELECT 1"], 3)]),
+    );
+    expect(malformed, "nothing is malformed — the width guard has nothing to say here").toEqual([]);
+    expect(rows.length).toBe(1);
+    expect(total).toBe(3);
+    expect(countMismatch).toContain("reported 3 cron.job row(s) but this reading yielded 1 record(s)");
+    // CALIBRATION: the same reading with the count AGREEING is silent, so
+    // "countMismatch is set" is a reading rather than a constant.
+    expect(
+      parseCronJobRows(renderRecords([cronRecord(["1", "a_job", "* * * * *", "t", "postgres", "postgres", "SELECT 1"], 1)]))
+        .countMismatch,
+    ).toBeNull();
+  });
+
+  it("CR-R1-03: CRON_JOB_SQL asks for the out-of-band count, and CRON_JOB_COLUMNS is the single source of the required width", () => {
+    // ⛔ THE QUERY AND THE PARSER MUST NOT DRIFT. A width the parser requires
+    // and a column list the query does not send is a reading that refuses
+    // everything; the reverse is a reading that refuses nothing.
+    expect(CRON_JOB_SQL).toContain("count(*) OVER () AS total");
+    expect(CRON_JOB_COLUMNS[CRON_JOB_COLUMNS.length - 1], "the count is LAST — see CR-R1-03 in the arm").toBe("total");
+    for (const col of CRON_JOB_COLUMNS.slice(0, -1)) expect(CRON_JOB_SQL).toContain(col);
+    // The parser requires exactly this width — asserted by construction rather
+    // than by a literal, so criterion 9 holds.
+    const full = cronRecord(["1", "a_job", "* * * * *", "t", "postgres", "postgres", "SELECT 1"], 1);
+    expect(full.split(CRON_JOB_SEPARATORS.fieldSep).length).toBe(CRON_JOB_COLUMNS.length);
+    expect(parseCronJobRows(renderRecords([full])).malformed).toEqual([]);
   });
 
   it("the arm floor is FOUR and the registry meets it", () => {

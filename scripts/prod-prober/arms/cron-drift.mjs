@@ -168,7 +168,32 @@ export const DB_MARKER_SQL = `SELECT shobj_description(oid, 'pg_database') AS ma
  * the columns the comparison or the report needs. `nodename` / `nodeport` are
  * deliberately absent.
  */
-export const CRON_JOB_SQL = `SELECT jobid, jobname, schedule, active, database, username, command FROM cron.job ORDER BY jobid`;
+/**
+ * The output columns of `CRON_JOB_SQL`, IN ORDER — the one source of the field
+ * count `parseCronJobRows` requires (criterion 9: no hand-typed counts).
+ *
+ * ⛔ `total` IS LAST AND THE POSITION IS LOAD-BEARING (164.8.5-REVIEW-R1 CR-R1-03).
+ * It is the out-of-band job count, and putting it AFTER `command` is what makes
+ * the field-count guard bite on a record separator INSIDE a command: the head
+ * fragment of such a split loses the trailing `total` field and is therefore
+ * SHORT, rather than being a full-width record carrying a silently truncated
+ * command. MEASURED 2026-09-11 with `total` FIRST instead: the head fragment
+ * had the full width, parsed as a row, and the whitespace-tail spelling was
+ * caught by nothing at all.
+ */
+export const CRON_JOB_COLUMNS = ["jobid", "jobname", "schedule", "active", "database", "username", "command", "total"];
+
+/**
+ * ⛔ `count(*) OVER ()` IS AN OUT-OF-BAND COUNT AND THE PARSER CANNOT WORK
+ * WITHOUT ONE. A delimiter-based parser CANNOT self-validate a delimiter that
+ * appears in its own payload: whatever the field count says, it says it about
+ * FRAGMENTS, and fragments can be well-formed. The window count is computed by
+ * Postgres over the real rows, so `rows + malformed === total` is the only
+ * statement about completeness this parser is entitled to make.
+ */
+export const CRON_JOB_SQL =
+  `SELECT ${CRON_JOB_COLUMNS.slice(0, -1).join(", ")}, count(*) OVER () AS ${CRON_JOB_COLUMNS[CRON_JOB_COLUMNS.length - 1]}` +
+  ` FROM cron.job ORDER BY jobid`;
 
 /**
  * ⚠️ THIS QUERY NEEDS NON-DEFAULT SEPARATORS, AND THAT IS NOT A STYLE CHOICE.
@@ -1366,39 +1391,81 @@ function splitHygiene(violations) {
  * and the run still read green. Such a record is COUNTED here and answered with
  * a `measure-fail` by both callers.
  *
- * ⛔ THE FIELD COUNT IS `!== 7`, NOT `< 7` (164.8.5-REVIEW CR-02). The guard
- * used to be `< 7` and was therefore blind in the OTHER direction, which is the
- * exact mirror of the defect above and strictly worse: a command carrying a
- * literal FIELD separator (0x1F) splits into EIGHT fields, `command` was taken
- * as `f[6]` — the text up to that byte — and the remainder was SILENTLY
- * DISCARDED with `malformed: []`. MEASURED: an eight-field record whose full
- * command reports `[x-service-key-literal, long-literal-in-headers]` reported
- * `[]` once truncated, and the run read green. Seven is the column count of
- * `CRON_JOB_SQL`; anything else is a record this parser did not read, in either
- * direction.
+ * ⛔ THE FIELD COUNT IS `!== CRON_JOB_COLUMNS.length`, NOT `< 7` (164.8.5-REVIEW
+ * CR-02). The guard used to be `< 7` and was therefore blind in the OTHER
+ * direction, which is the exact mirror of the defect above and strictly worse:
+ * a command carrying a literal FIELD separator (0x1F) splits into one field too
+ * many, `command` was taken as `f[6]` — the text up to that byte — and the
+ * remainder was SILENTLY DISCARDED with `malformed: []`. MEASURED: an over-wide
+ * record whose full command reports `[x-service-key-literal,
+ * long-literal-in-headers]` reported `[]` once truncated, and the run read
+ * green. The width is the column count of `CRON_JOB_SQL`, DERIVED from
+ * `CRON_JOB_COLUMNS`; anything else is a record this parser did not read, in
+ * either direction.
+ *
+ * ⛔ AND THE FIELD COUNT ALONE CANNOT CLOSE THE CLASS (164.8.5-REVIEW-R1
+ * CR-R1-03). `!== 7` was a fix for one SPELLING, not for the defect. A RECORD
+ * separator (0x1E) inside a command splits the record into two, and the head
+ * fragment of such a split used to carry EXACTLY the required seven fields — so
+ * `!== 7` could never fire on it, by construction. MEASURED at the parent
+ * commit, both surviving spellings reported `malformed: []`:
+ *
+ *   - a tail carrying six further 0x1F parsed as a FABRICATED row, while the
+ *     REAL row's command was truncated to the clean head — three rows out of a
+ *     two-row reading, one of them a job that does not exist, and the credential
+ *     attributed to the phantom;
+ *   - a whitespace-only tail was swallowed by the (correct-in-isolation)
+ *     empty-record skip, leaving only the truncation.
+ *
+ * ⭐ THE INVARIANT: A DELIMITER-BASED PARSER CANNOT SELF-VALIDATE A DELIMITER
+ * APPEARING IN ITS PAYLOAD. Whatever it counts, it counts about FRAGMENTS, and a
+ * fragment can be well-formed. It needs an OUT-OF-BAND count, which is why
+ * `CRON_JOB_SQL` carries `count(*) OVER () AS total` — computed by Postgres over
+ * the real rows, before any separator was chosen — and why `total` is the LAST
+ * column: the head fragment of a payload-RS split then loses it and is SHORT,
+ * so the width guard bites as well.
+ *
+ * Two guards, two failure modes, each independently neuterable:
+ *   (A) `f.length !== CRON_JOB_COLUMNS.length` — a fragment of any split.
+ *   (B) `rows.length + malformed.length === total` — a record that VANISHED or
+ *       a record that was FABRICATED. It catches what (A) cannot: a stdout
+ *       truncated at a record boundary loses whole rows and leaves every
+ *       surviving record perfectly well-formed.
  *
  * The EMPTY-record skip is different and is CORRECT: psql prints the record
  * separator AFTER every record, last one included, so the trailing empty string
- * is an artefact of the format rather than a row.
+ * is an artefact of the format rather than a row. ⛔ It is also why (B) is not
+ * optional — the skip is exactly what swallows a whitespace-only tail.
  *
- * @returns {{rows: Array<object>, malformed: Array<{index:number, fields:number}>}}
+ * ⚠️ REJECTED, and recorded so it is not re-proposed: "refuse any record whose
+ * `command` field contains either separator byte". MEASURED to be VACUOUS —
+ * `command` is produced by splitting on both bytes, so it can never contain
+ * one. A guard that cannot fail is worse than no guard, because it reads as
+ * coverage.
+ *
+ * @returns {{rows: Array<object>, malformed: Array<{index:number, fields:number}>, total: number|null, countMismatch: string|null}}
  *          `malformed` carries the record INDEX and its FIELD COUNT and never
  *          the record TEXT — that text is exactly what may hold the credential
  *          this arm exists to find, and every detail it produces is world-readable.
+ *          `total` is the database's own row count, or `null` when no record
+ *          carried one. `countMismatch` is a ready-to-print sentence, or `null`.
  */
 export function parseCronJobRows(stdout) {
   const out = [];
   const malformed = [];
+  const totals = new Set();
   let index = -1;
   for (const record of String(stdout || "").split(CRON_JOB_SEPARATORS.recordSep)) {
     index += 1;
     const rec = record.replace(/^[\r\n]+/, "");
     if (rec.trim().length === 0) continue;
     const f = rec.split(CRON_JOB_SEPARATORS.fieldSep);
-    if (f.length !== 7) {
+    // (A) WIDTH.
+    if (f.length !== CRON_JOB_COLUMNS.length) {
       malformed.push({ index, fields: f.length });
       continue;
     }
+    if (/^\d+$/.test(f[7].trim())) totals.add(Number.parseInt(f[7].trim(), 10));
     out.push({
       jobid: f[0].trim(),
       jobname: f[1].trim(),
@@ -1409,7 +1476,31 @@ export function parseCronJobRows(stdout) {
       command: f[6],
     });
   }
-  return { rows: out, malformed };
+
+  // (B) COMPLETENESS, against the count the DATABASE produced.
+  //
+  // ⛔ `total === null` IS ONLY BENIGN WITH NOTHING TO COUNT. `count(*) OVER ()`
+  // returns no rows at all for an empty `cron.job`, which is a state the arm
+  // already answers loudly ("every scheduled job has vanished"). With records in
+  // hand and no total, something between the query and this parser dropped the
+  // column, and that is a hole rather than a reading.
+  const total = totals.size === 1 ? [...totals][0] : null;
+  let countMismatch = null;
+  if (totals.size > 1) {
+    countMismatch =
+      `the cron.job records disagree about how many rows the database returned (${[...totals].sort((a, b) => a - b).join(", ")}). ` +
+      "count(*) OVER () is one number per reading, so two answers means the records were assembled from fragments of different records.";
+  } else if (out.length + malformed.length > 0 && total === null) {
+    countMismatch =
+      `${out.length + malformed.length} cron.job record(s) were read and NOT ONE carried the out-of-band row count that ${"count(*) OVER ()"} adds. ` +
+      "Without it nothing can say whether this reading is complete, and an unverifiable reading is not a complete one.";
+  } else if (total !== null && out.length + malformed.length !== total) {
+    countMismatch =
+      `the database reported ${total} cron.job row(s) but this reading yielded ${out.length + malformed.length} record(s) ` +
+      `(${out.length} parsed, ${malformed.length} unreadable). A record separator (0x1E) inside a command splits one row into two, and a truncated read loses whole rows; either way the rows and the count are the only two independent statements about completeness this arm has, and they disagree.`;
+  }
+
+  return { rows: out, malformed, total, countMismatch };
 }
 
 // ---------------------------------------------------------------------------
@@ -1999,14 +2090,27 @@ async function run({ seams, log, addDefect, manifestPath, functionsDir }) {
   //    through section (0) and the comparison: a parse failure on ONE record
   //    must not silence the credential scan on the others, which is the same
   //    "one bad input disables the instrument" shape the hoist exists to remove.
-  const { rows: prodRows, malformed } = parseCronJobRows(res.stdout);
+  const { rows: prodRows, malformed, countMismatch } = parseCronJobRows(res.stdout);
   if (malformed.length > 0) {
     addDefect(
       "measure-fail",
       "cron-drift",
       "cron.job",
-      `${malformed.length} of ${malformed.length + prodRows.length} record(s) returned by the cron.job read could not be parsed (field counts: ${malformed.map((m) => m.fields).join(", ")}; seven are required). Those rows were NOT judged by any check in this arm. An unreadable row is not an absent row and is not a clean one.`,
+      `${malformed.length} of ${malformed.length + prodRows.length} record(s) returned by the cron.job read could not be parsed (field counts: ${malformed.map((m) => m.fields).join(", ")}; ${CRON_JOB_COLUMNS.length} are required). Those rows were NOT judged by any check in this arm. An unreadable row is not an absent row and is not a clean one.`,
       "Read the affected cron.job command by hand: a record separator (0x1E) inside a command splits it, and the likeliest sources are a pasted control byte or an E'\\x1e' literal. Re-schedule that job onto a body without it, then re-capture the manifest.",
+    );
+  }
+  // ⛔ SEPARATE FROM THE WIDTH GUARD ABOVE, AND NOT REDUNDANT WITH IT. This is
+  // the out-of-band reading: a record that VANISHED, or one the split
+  // FABRICATED, leaves every surviving record perfectly well-formed. See the
+  // invariant beside `parseCronJobRows`.
+  if (countMismatch !== null) {
+    addDefect(
+      "measure-fail",
+      "cron-drift",
+      "cron.job",
+      `${countMismatch} The rows this arm did judge are reported above; the ones it never saw are the point.`,
+      "Read cron.job by hand (SELECT jobid, jobname FROM cron.job ORDER BY jobid) and compare it with the manifest. A command carrying a record separator (0x1E) is the likeliest cause; a truncated read is the other.",
     );
   }
 
