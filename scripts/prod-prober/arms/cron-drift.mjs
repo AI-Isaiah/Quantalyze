@@ -379,6 +379,33 @@ export const TOKEN_MIN = HEADERS_LITERAL_MAX;
  * shape in the committed corpus: a 79-character bare analytics URL.
  */
 export const BARE_URL_RE = /^https?:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[A-Za-z0-9._~/-]*)?$/;
+
+/**
+ * A canonical RFC-4122 UUID, and NOTHING looser.
+ *
+ * ⛔ IT EXISTS TO NARROW A FALSE POSITIVE, NOT TO WIDEN AN EXEMPTION
+ * (164.8.5-REVIEW-R1 WR-R1-02). CR-04's path-segment test asks whether any
+ * `/`-delimited segment would be a credential on its own — `TOKEN_MIN`+
+ * characters and containing a digit. A UUID is 36 characters and contains
+ * digits, so EVERY resource-scoped REST path failed the exemption and fired a
+ * rule whose remedy is "treat the named secret as EXPOSED and rotate it first".
+ * MEASURED 2026-09-11:
+ *   isBareUrl("https://x.invalid/api/strategies/123e4567-e89b-12d3-a456-426614174000") -> false
+ * An arm that cries wolf on a UUID is how a true positive gets ignored, which is
+ * the failure mode the zero-FP budget exists to prevent.
+ *
+ * ⛔ THE ANSWER IS NARROWING, NEVER RAISING `TOKEN_MIN` — per the rule's own
+ * instruction beside the constant, and because raising it re-opens the Q2 region
+ * partition. The shape is FIXED-LENGTH and FIXED-LAYOUT (8-4-4-4-12 hex), so it
+ * cannot absorb an opaque key: a `FAKE-…` segment of the same 36 characters is
+ * NOT a UUID and still fires. The wiring test calibrates both directions.
+ *
+ * ⚠️ A UUID *is* a secret in some designs (an unguessable share link). This
+ * exemption says only that this ARM will not call one a credential — a
+ * capability-URL scheme needs a different control, and the residual is recorded
+ * rather than closed.
+ */
+export const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /**
  * Is this token a URL carrying NOTHING — the exemption `long-token-anywhere`
  * actually means?
@@ -413,7 +440,9 @@ export const BARE_URL_RE = /^https?:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[A-Za-z0-9._
 export function isBareUrl(token) {
   if (!BARE_URL_RE.test(token)) return false;
   const path = token.replace(/^https?:\/\/[^/]*/, "");
-  return !path.split("/").some((segment) => segment.length >= TOKEN_MIN && /\d/.test(segment));
+  return !path
+    .split("/")
+    .some((segment) => segment.length >= TOKEN_MIN && /\d/.test(segment) && !CANONICAL_UUID_RE.test(segment));
 }
 
 

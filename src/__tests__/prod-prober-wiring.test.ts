@@ -39,6 +39,7 @@ import {
 } from "../../scripts/prod-prober/run.mjs";
 import {
   BARE_URL_RE,
+  CANONICAL_UUID_RE,
   CRON_JOB_SEPARATORS,
   CRON_JOB_COLUMNS,
   CRON_JOB_SQL,
@@ -1113,6 +1114,25 @@ describe("[164.1-05] kinds and floors", () => {
     // purely alphabetic segment of any length stays exempt, exactly as a purely
     // alphabetic token does (the A2 residual, unchanged).
     expect(isBareUrl(`https://hook.invalid/${"a".repeat(TOKEN_MIN + 8)}`)).toBe(true);
+
+    // ⛔ WR-R1-02 — THE UUID SEGMENT, CALIBRATED IN BOTH DIRECTIONS. A UUID is
+    // 36 characters and contains digits, so before this narrowing EVERY
+    // resource-scoped REST path failed the exemption and fired a rule whose
+    // remedy is "treat the named secret as EXPOSED and rotate it first". The
+    // exemption is the CANONICAL 8-4-4-4-12 layout and nothing looser, so it
+    // cannot absorb an opaque key of the same length.
+    const UUID = "123e4567-e89b-12d3-a456-426614174000";
+    expect(UUID.length, "the two sides of this calibration must be the SAME LENGTH or it proves nothing").toBe(36);
+    expect(isBareUrl(`https://x.invalid/api/strategies/${UUID}`), "an ordinary resource-scoped REST path is NOT a credential").toBe(
+      true,
+    );
+    const OPAQUE = `FAKE-${"a1".repeat(16)}`.slice(0, 36);
+    expect(OPAQUE.length).toBe(36);
+    expect(CANONICAL_UUID_RE.test(OPAQUE), "the control segment must NOT be a UUID or the calibration is vacuous").toBe(false);
+    expect(isBareUrl(`https://x.invalid/api/strategies/${OPAQUE}`), "a same-length OPAQUE segment still fires").toBe(false);
+    // And the layout is load-bearing, not the charset: shifting one hyphen by a
+    // single character breaks the exemption.
+    expect(isBareUrl(`https://x.invalid/api/strategies/${UUID.replace("-e89b-", "e89b--")}`)).toBe(false);
 
     // End to end through the rule, both spellings of the same credential.
     const ids = (cmd: string) => hygieneViolations("j", cmd).map((x) => x.slice(1, anchorIndex(x, "]")));
