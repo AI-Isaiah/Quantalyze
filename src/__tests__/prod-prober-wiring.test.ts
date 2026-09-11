@@ -49,6 +49,7 @@ import {
   TOKEN_MIN,
   compareManifest,
   hygieneVerdict,
+  hygieneWithholds,
   hygieneViolations,
   isBareUrl,
   parseCronJobRows,
@@ -1583,6 +1584,103 @@ describe("[164.8.5-02] compareManifest totality (CR-04)", () => {
 
   it("CR-04 totality: a manifest row missing `database` is manifest-invalid", () => {
     assertNamesJobAndField("database");
+  });
+
+  // -------------------------------------------------------------------------
+  // WR-R2-03 — THE WITHHOLDING PREDICATE'S TWO ARMS, EACH WITH ITS OWN RED
+  // SURFACE.
+  //
+  // ⛔ `manifestDirty` and `prodDirty` used to be TWO SPELLINGS of one
+  // predicate, and `164.8.5-FIX-R1-SUMMARY.md` recorded the pair as ONE
+  // neuter-proved control. It could only ever have proven one. MEASURED
+  // 2026-09-11, each `!…judged ||` arm dropped ALONE:
+  //     (B) prod side only     -> SELF-TEST PASSED: 73/73   (GREEN)
+  //     (C) manifest side only -> SELF-TEST PASSED: 73/73   (GREEN) + vitest GREEN
+  //     (B+C) both             -> SELF-TEST FAILED
+  // because the only scenario reaching them drove an absent `functionsDir`,
+  // which is SHARED, so BOTH verdicts were `judged: false` and the two terms
+  // were redundant. A future editor "simplifying" either line shipped the
+  // CR-R1-02 regression with a fully green suite.
+  //
+  // ⭐ The implementation is now ONE `hygieneWithholds` called twice, so there
+  // is one control; its two ARMS are what need separate surfaces, and these two
+  // tests are them. ⚠️ THEY DRIVE `compareManifest` DIRECTLY rather than through
+  // the runner ON PURPOSE: the runner's fixture path renders every field to psql
+  // TEXT, so a non-string command — the only asymmetric refusal this module has
+  // — cannot survive it. A scenario written there would have measured nothing.
+  // -------------------------------------------------------------------------
+  const LEAKY = `SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', 'FAKE-key-${"0123456789ab"}'), body := '{}'::jsonb)`;
+
+  /** The cron-drift defect for `SUBJECT_JOB` when its PROD command is replaced. */
+  const driftDetailWithProdCommand = (command: unknown) => {
+    const rows = JSON.parse(JSON.stringify(PROD_OK));
+    const row = rows.find((r: { jobname: string }) => r.jobname === SUBJECT_JOB);
+    if (!row) throw new Error(`fixture drift: prod-ok.json has no ${SUBJECT_JOB}`);
+    row.command = command;
+    const r = compareManifest(MANIFEST, rows, { liveMarker: MANIFEST.database_marker });
+    const drifts = r.defects.filter((d: { kind: string; subject: string }) => d.kind === "cron-drift" && d.subject === SUBJECT_JOB);
+    expect(drifts.length, "PRECONDITION: the row must DRIFT or the withholding branch is never reached").toBe(1);
+    return { detail: String(drifts[0].detail), all: r.defects as { kind: string; subject: string }[], lines: r.lines as string[] };
+  };
+
+  it("WR-R2-03 arm 1 — ONE side UNJUDGED withholds the text (`!judged`, with the other side judged and clean)", () => {
+    // The lever is an ASYMMETRIC refusal: the PROD command is not a STRING,
+    // which `hygieneViolations` refuses; the manifest row for the same jobname
+    // is an ordinary judged-and-clean string. Exactly one side is unjudged, so
+    // the `!judged` arm is the ONLY reason the text can be withheld.
+    const { detail, all, lines } = driftDetailWithProdCommand(12345);
+    expect(
+      all.some((d) => d.kind === "measure-fail" && d.subject === `prod:${SUBJECT_JOB}`),
+      "PRECONDITION: the PROD side really is unjudged",
+    ).toBe(true);
+    expect(
+      all.some((d) => d.kind === "measure-fail" && d.subject === `manifest:${SUBJECT_JOB}`),
+      "PRECONDITION: and the MANIFEST side is NOT — otherwise the two arms are redundant again",
+    ).toBe(false);
+    expect(detail).toContain("command text withheld");
+    expect(detail, "the line says WHICH side and WHY — 'fails hygiene' and 'could not be judged' send an operator to two different places").toContain(
+      "PROD could not be judged",
+    );
+    expect(detail).not.toContain("manifest fails hygiene");
+    expect(
+      lines.some((l) => l.startsWith(`--- manifest ${SUBJECT_JOB}`)),
+      "and NO unified diff — this arm is the only thing between an unjudged row and a PUBLIC Actions log",
+    ).toBe(false);
+  });
+
+  it("WR-R2-03 arm 2 — ONE side JUDGED-AND-DIRTY withholds the text (`violations.length`, with NEITHER side unjudged)", () => {
+    // The other arm, with its own surface, so neither can mask the other. The
+    // PROD row is JUDGED — nothing refuses it — and merely fails a rule.
+    expect(hygieneViolations(SUBJECT_JOB, LEAKY).length, "PRECONDITION: the replacement command is judged AND dirty").toBeGreaterThan(0);
+    const { detail, all, lines } = driftDetailWithProdCommand(LEAKY);
+    expect(
+      all.some((d) => d.kind === "measure-fail" && d.subject.endsWith(SUBJECT_JOB)),
+      "PRECONDITION: NEITHER side is unjudged, so the `!judged` arm cannot be the reason below",
+    ).toBe(false);
+    expect(detail).toContain("command text withheld");
+    expect(detail).toContain("PROD fails hygiene");
+    expect(detail).not.toContain("could not be judged");
+    expect(lines.some((l) => l.startsWith(`--- manifest ${SUBJECT_JOB}`))).toBe(false);
+  });
+
+  it("WR-R2-03 CALIBRATION — both sides JUDGED and CLEAN prints the diff, so the two arms above are readings and not constants", () => {
+    // ⛔ WITHOUT THIS THE TWO TESTS ABOVE COULD BOTH PASS ON A FUNCTION THAT
+    // ALWAYS WITHHOLDS. Here the PROD command differs from the manifest's and
+    // trips nothing, and the unified diff IS printed.
+    const CLEAN = "SELECT public.match_engine_cron_tick(); -- re-scheduled";
+    expect(hygieneViolations(SUBJECT_JOB, CLEAN, { functionsDir: FUNCTIONS_DIR })).toEqual([]);
+    const { detail, lines } = driftDetailWithProdCommand(CLEAN);
+    expect(detail).not.toContain("command text withheld");
+    expect(lines.some((l) => l.startsWith(`--- manifest ${SUBJECT_JOB}`))).toBe(true);
+  });
+
+  it("WR-R2-03: `hygieneWithholds` is ONE predicate, and each ARM is separately falsifiable", () => {
+    // The unit-level statement of the same thing: each arm alone withholds, and
+    // the clean verdict does not.
+    expect(hygieneWithholds({ judged: false, violations: [] }), "unjudged alone withholds").toBe(true);
+    expect(hygieneWithholds({ judged: true, violations: ["[x-service-key-literal] …"] }), "dirty alone withholds").toBe(true);
+    expect(hygieneWithholds({ judged: true, violations: [] }), "judged and clean does NOT").toBe(false);
+    expect(hygieneWithholds(UNRECORDED_VERDICT), "and the unrecorded sentinel withholds through the first arm").toBe(true);
   });
 
   it("CALIBRATION: the UNTOUCHED oracle over the same rows yields ZERO manifest-invalid, and every mutant really differs", () => {
