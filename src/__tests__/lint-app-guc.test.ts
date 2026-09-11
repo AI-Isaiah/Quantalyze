@@ -868,6 +868,126 @@ describe("lint-app-guc: IN-02 — the corpus walk follows case and symlinked dir
   });
 });
 
+/**
+ * ⛔ THE WALK CAN FAIL, AND A FAILED WALK MUST NOT READ AS AN EMPTY ONE
+ * (closed 2026-09-11).
+ *
+ * The symlink widening above shipped with an empty `catch { linkedDir = false; }`
+ * whose comment justified the swallow for a DANGLING link. It also swallowed
+ * EACCES, ELOOP, ENAMETOOLONG and a target on an unmounted volume, and
+ * MEASURED on this tree: a dangling link contributed zero entries and zero
+ * errors — indistinguishable from an empty directory, which is the very defect
+ * the widening's own docstring claims to be fixing.
+ *
+ * THE CALIBRATION for this whole block is the "descends into a SYMLINKED
+ * directory" arm above: a CONTAINED, non-cyclic link is still walked, and the
+ * same real subtree reached by two different paths is still counted twice
+ * (3 files for 2 real ones). That is what stops the containment and cycle
+ * guards below from being a walk that simply refuses everything.
+ */
+describe("lint-app-guc: a walk that could not enter a subtree MEASURE_FAILs by name", () => {
+  /** Builds the corpus, or SKIPS with a named reason if the platform refuses links. */
+  function withLink(dir: string, target: string, name: string): boolean {
+    try {
+      symlinkSync(target, join(dir, name), "dir");
+      return true;
+    } catch {
+      console.warn(
+        `SKIPPED (named): this platform refused symlinkSync for ${name} — this arm was NOT measured here.`,
+      );
+      return false;
+    }
+  }
+
+  it("a DANGLING link (unmounted volume, ENOENT) is a MEASURE_FAIL, never a skipped subtree", () => {
+    // THE SCENARIO: `supabase/migrations/vendor -> /mnt/shared/migrations` on a
+    // runner without that mount. Before this, statSync threw, the subtree was
+    // skipped, `requireNonEmpty` was satisfied by the other 292 files, and the
+    // gate reported `findings 0, exit 0` for a corpus it had never read.
+    const dir = tempDir("walk-dangling");
+    writeFileSync(join(dir, "ok.sql"), "SELECT 1;\n");
+
+    // CALIBRATION FIRST: the same corpus with NO link at all is clean, so the
+    // red below is caused by the link and not by the harness.
+    const control = scanCorpus({ migrationsDir: dir, allowlist: [] });
+    expect(control.measureFails).toEqual([]);
+    expect(control.ok, "the control corpus must be clean").toBe(true);
+    expect(control.filesScanned).toBe(1);
+
+    if (!withLink(dir, "/mnt/shared/migrations-that-are-not-mounted", "vendor")) return;
+    const r = scanCorpus({ migrationsDir: dir, allowlist: [] });
+    expect(r.ok, "a corpus with an unwalkable subtree is NOT a clean one").toBe(false);
+    expect(r.findings, "a walk failure is a MEASURE_FAIL, never a finding").toEqual([]);
+    expect(r.measureFails.length).toBe(1);
+    expect(r.measureFails[0].file).toContain("vendor");
+    expect(r.measureFails[0].reason).toContain("cannot stat the symlink");
+  });
+
+  it("a link resolving OUTSIDE the corpus root is refused — the walk cannot leave the corpus", () => {
+    // MEASURED before the fix: `ln -s .. migrations/loop` pulled 66,034 files
+    // in and walked out of the repo entirely, terminating only when
+    // ENAMETOOLONG hit the same swallowing catch. Unbounded work AND an escape
+    // from the root the gate claims to measure.
+    const outer = tempDir("walk-escape");
+    const dir = join(outer, "sub");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "ok.sql"), "SELECT 1;\n");
+    writeFileSync(join(outer, "not-in-the-corpus.sql"), "SELECT 1;\n");
+
+    if (!withLink(dir, "..", "loop")) return;
+    const r = scanCorpus({ migrationsDir: dir, allowlist: [] });
+    expect(r.ok).toBe(false);
+    expect(r.findings).toEqual([]);
+    expect(r.measureFails.length).toBe(1);
+    expect(r.measureFails[0].reason).toContain("OUTSIDE the corpus root");
+    // BOUNDED, and the escape did not happen: the file one level up must NOT
+    // have been dragged in. A refusal that still scanned it would be a message
+    // rather than a guard.
+    expect(r.filesScanned, "the walk must stay inside the root it was given").toBe(1);
+    expect(
+      r.measureFails[0].reason,
+      "it must be refused on CONTAINMENT, distinctly from the stat and cycle arms",
+    ).not.toContain("cannot stat the symlink");
+  });
+
+  it("a link resolving onto a directory already on the descent path is refused as a CYCLE", () => {
+    const dir = tempDir("walk-cycle");
+    writeFileSync(join(dir, "ok.sql"), "SELECT 1;\n");
+    if (!withLink(dir, ".", "self")) return;
+    const r = scanCorpus({ migrationsDir: dir, allowlist: [] });
+    expect(r.ok).toBe(false);
+    expect(r.findings).toEqual([]);
+    expect(r.measureFails.length).toBe(1);
+    expect(r.measureFails[0].reason).toContain("already on the descent path");
+    expect(r.filesScanned, "the cycle must not multiply the corpus").toBe(1);
+    // Pairwise-distinct fingerprints: three refusals, three messages, so a
+    // neuter of any one arm is attributable to that arm.
+    for (const otherArm of ["cannot stat the symlink", "OUTSIDE the corpus root"]) {
+      expect(r.measureFails[0].reason, `must not be refused on: ${otherArm}`).not.toContain(otherArm);
+    }
+  });
+
+  it("a walk failure SURVIVES the empty-corpus early return — both reasons are reported", () => {
+    // A directory whose ONLY entry is an unwalkable link yields zero files AND
+    // one walk failure. `requireNonEmpty` returns early; the seeded failure
+    // must not be dropped on the way out, or the emptier reason would hide the
+    // more specific one.
+    const dir = tempDir("walk-empty");
+    if (!withLink(dir, "/mnt/shared/migrations-that-are-not-mounted", "vendor")) return;
+    const r = scanCorpus({ migrationsDir: dir, allowlist: [] });
+    expect(r.ok).toBe(false);
+    expect(r.filesScanned).toBe(0);
+    expect(r.measureFails.map((m) => m.reason).join(" | ")).toContain("cannot stat the symlink");
+    expect(r.measureFails.map((m) => m.reason).join(" | ")).toContain("zero files");
+  });
+
+  it("the REAL corpus walks clean — this tightening flags nothing that exists (0 symlinks)", () => {
+    const r = scanCorpus({});
+    expect(r.measureFails).toEqual([]);
+    expect(r.filesScanned).toBeGreaterThan(200);
+  });
+});
+
 describe("lint-app-guc: IN-03 — two lineage markers is header-malformed, not 'first one wins'", () => {
   it("reports the COUNT and both line numbers when a file carries two markers", () => {
     const h = parseLineageHeader(
