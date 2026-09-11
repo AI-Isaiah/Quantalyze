@@ -123,6 +123,114 @@ describe("lint-app-guc: the shipped finding kinds", () => {
   });
 });
 
+/**
+ * ⭐ THE SECOND PIN on the widened detector (plan 164.8.5-07, 164.7-REVIEW
+ * WR-07). The FIRST pin is the five committed single-spelling red fixtures the
+ * script's own `--self-test` drives; this block is an independent statement of
+ * the same six facts that does not depend on the fixture files existing.
+ *
+ * ⛔ The MUTANT arms below are what stop this block being a tautology. A list
+ * of strings the regex matches is satisfied by a regex that matches
+ * everything; a mutant that must FAIL to match is not. Each mutant is asserted
+ * to actually DIFFER from the original source first — a "mutant" that is a
+ * copy of the original tests nothing at all, which is the vacuity this whole
+ * phase exists to eliminate.
+ */
+describe("lint-app-guc: DETECT_RE spelling calibration", () => {
+  const SPELLINGS: Record<string, string> = {
+    plain: "current_setting('app.x')",
+    "doubled quote": "current_setting(''app.x'')",
+    "E-string": "current_setting(E'app.x')",
+    "dollar-quoted": "current_setting($q$app.x$q$)",
+    "unicode string": "current_setting(U&'app.x')",
+    "block comment": "current_setting/*c*/('app.x')",
+  };
+
+  it("matches all SIX spellings Postgres accepts for the same call", () => {
+    for (const [name, sql] of Object.entries(SPELLINGS)) {
+      expect(new RegExp(DETECT_RE.source, "i").test(sql), `${name}: ${sql}`).toBe(true);
+    }
+  });
+
+  it("does NOT match a non-app GUC, nor an indirected read — the gate is not a `current_setting` grep", () => {
+    // `quantalyze.*` GUCs ARE settable on this platform and are used by the
+    // sanitize guards; flagging them would make the gate fire on the repo's own
+    // working mechanism. `v_guc_needle` is plan 164.7-03's deliberate
+    // concatenation, the one remaining blind spot, and it must stay a miss or
+    // that migration would match this lint inside its own verification block.
+    for (const sql of [
+      "current_setting('quantalyze.x')",
+      "current_setting('quantalyze.sanitize_in_progress', TRUE)",
+      "current_setting(v_guc_needle)",
+      "current_setting('app_x')",
+      "current_setting('application_name')",
+    ]) {
+      expect(new RegExp(DETECT_RE.source, "i").test(sql), sql).toBe(false);
+    }
+  });
+
+  it("MUTANT [EU]→[E]: narrowing the class blinds it to the unicode spelling and nothing else", () => {
+    const mutated = DETECT_RE.source.replace("[EU]", "[E]");
+    expect(mutated, "the mutant must actually differ, or this arm tests nothing").not.toBe(
+      DETECT_RE.source,
+    );
+    const mutant = new RegExp(mutated, "i");
+    expect(mutant.test(SPELLINGS["unicode string"]), "the mutant must MISS U&''").toBe(false);
+    expect(mutant.test(SPELLINGS["E-string"]), "the mutant must still see E''").toBe(true);
+  });
+
+  it("MUTANT [EU]→[U]: narrowing the class the other way blinds it to the E-string spelling", () => {
+    const mutated = DETECT_RE.source.replace("[EU]", "[U]");
+    expect(mutated, "the mutant must actually differ, or this arm tests nothing").not.toBe(
+      DETECT_RE.source,
+    );
+    const mutant = new RegExp(mutated, "i");
+    expect(mutant.test(SPELLINGS["E-string"]), "the mutant must MISS E''").toBe(false);
+    expect(mutant.test(SPELLINGS["unicode string"]), "the mutant must still see U&''").toBe(true);
+  });
+
+  it("MUTANT: dropping the second alternation blinds it to the dollar-quoted spelling", () => {
+    const mutated = DETECT_RE.source.split("|current_setting")[0];
+    expect(mutated).not.toBe(DETECT_RE.source);
+    const mutant = new RegExp(mutated, "i");
+    expect(mutant.test(SPELLINGS["dollar-quoted"])).toBe(false);
+    expect(mutant.test(SPELLINGS.plain)).toBe(true);
+  });
+
+  it("MUTANT: dropping the block-comment group blinds it to a comment between name and paren", () => {
+    const mutated = DETECT_RE.source.replace("(?:\\/\\*[\\s\\S]*?\\*\\/\\s*)?", "");
+    expect(mutated).not.toBe(DETECT_RE.source);
+    const mutant = new RegExp(mutated, "i");
+    expect(mutant.test(SPELLINGS["block comment"])).toBe(false);
+    expect(mutant.test(SPELLINGS.plain)).toBe(true);
+  });
+
+  it("MUTANT: `'{1,2}`→`'` blinds it to the doubled-quote spelling ([APPGUC-DETECT-DOUBLEQUOTE-01])", () => {
+    const mutated = DETECT_RE.source.replace("'{1,2}", "'");
+    expect(mutated).not.toBe(DETECT_RE.source);
+    const mutant = new RegExp(mutated, "i");
+    expect(mutant.test(SPELLINGS["doubled quote"]), "the mutant must MISS ''app.").toBe(false);
+    expect(mutant.test(SPELLINGS.plain), "the mutant must still see 'app.").toBe(true);
+  });
+
+  it("each widened spelling has its OWN red fixture, so a neuter can be attributed to ONE alternation", () => {
+    const reds = declaredReds(kinds.find((k) => k.id === "unannotated-reader")!);
+    for (const name of [
+      "spelling-doubled-quote.red.sql",
+      "spelling-e-string.red.sql",
+      "spelling-dollar-tag.red.sql",
+      "spelling-unicode.red.sql",
+      "spelling-block-comment.red.sql",
+    ]) {
+      expect(reds, `${name} must be declared by unannotated-reader`).toContain(name);
+      // And each fixture must hold exactly ONE site — a two-site fixture would
+      // keep firing after its own spelling was neutered.
+      const src = readFileSync(join(FIX_DIR, name), "utf8");
+      expect(countReads(src).length, `${name} must be a SINGLE-site fixture`).toBe(1);
+    }
+  });
+});
+
 describe("lint-app-guc: the fixture set, read off disk", () => {
   const listing = readdirSync(FIX_DIR).sort();
 
