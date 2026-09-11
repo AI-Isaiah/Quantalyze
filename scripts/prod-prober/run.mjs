@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 73;
+export const SELF_TEST_SCENARIOS = 74;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -1658,6 +1658,68 @@ export async function selfTest() {
           "and ZERO cron-secret-in-command — an unjudgeable command is never reported as a found credential",
         ) &&
         expect(r.exitCode === 1, `the run still exits 1 — refusing to judge is not passing (got ${r.exitCode})`) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("an UNNAMED PROD row carrying an inline key is STILL named as a credential — the jobname refusal is ADDITIVE");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ 164.8.5-REVIEW-R2 CR-R2-01, AND IT IS THE WHOLE POINT OF THE FIXTURE
+    // ROW BESIDE IT. `hygiene-red.json`'s `jobname-absent` row proves the
+    // refusal can FIRE; nothing there could prove it does not REPLACE anything,
+    // because that row carries no credential on purpose (one-rule isolation).
+    // This scenario is the other half: a row with BOTH, requiring BOTH.
+    //
+    // Round 1 shipped a THROW here. `cron.job.jobname` is NULLable and
+    // pg_cron's TWO-ARGUMENT `cron.schedule(schedule, command)` leaves it NULL,
+    // `psql -At` renders NULL as the empty string, and `compareManifest` routed
+    // the throw to a per-row `measure-fail` + `continue` — so an ordinary
+    // pg_cron API call silently switched off EVERY credential rule for its row.
+    // MEASURED before the fix: `measure-fail | prod: | …no usable jobname…` and
+    // nothing else; the identical command under a jobname reported
+    // `["x-service-key-literal","long-literal-in-headers"]`.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    const red = loadFixture("cron-drift", "hygiene-red.json");
+    if (!prod.ok || !red.ok) {
+      pass = expect(false, prod.ok ? red.reason : prod.reason) && pass;
+    } else {
+      const leak = red.data.find((r) => r.rule === "x-service-key-literal");
+      const rows = clone(prod.data);
+      const target = rows.find((r) => r.jobname === "audit_log_cold_purge");
+      if (target && leak) {
+        target.command = leak.command;
+        target.jobname = ""; // exactly what psql -At prints for a NULL jobname
+      }
+      const r = await driftRun(rows, driftFixturePath("manifest.json"), quiet);
+      const onUnnamed = r.defects.filter((x) => x.subject === "prod:");
+      const credential = onUnnamed.filter((x) => x.kind === "cron-secret-in-command");
+      const refusal = onUnnamed.filter(
+        (x) => x.kind === "measure-fail" && String(x.detail).includes("[jobname-absent]"),
+      );
+      pass =
+        expect(
+          leak !== undefined && target !== undefined,
+          "PRECONDITION: hygiene-red.json carries an x-service-key-literal row and prod-ok.json carries audit_log_cold_purge",
+        ) &&
+        expect(
+          credential.length === 1,
+          `the credential is NAMED on the unnamed row — cron-secret-in-command:prod: (got ${credential.length}: ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ")})`,
+        ) &&
+        expect(
+          credential.length === 1 && String(credential[0].detail).includes("[x-service-key-literal]"),
+          "naming the rule that found it, so the rotation remedy has evidence behind it",
+        ) &&
+        expect(
+          refusal.length === 1,
+          `and the scoping loss is reported BESIDE it as its own measure-fail (got ${refusal.length})`,
+        ) &&
+        expect(
+          refusal.length === 1 && !String(refusal[0].detail).includes("[x-service-key-literal]"),
+          "the two are SEPARATE defects — a refusal never carries a rotation remedy and a credential never hides inside one",
+        ) &&
+        expect(r.exitCode === 1, `the run exits 1 (got ${r.exitCode})`) &&
         pass;
     }
   }
