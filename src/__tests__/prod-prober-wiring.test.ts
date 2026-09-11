@@ -834,7 +834,7 @@ describe("[164.1-05] kinds and floors", () => {
     expect(uncommented).not.toBe(commented);
 
     const ids = (cmd: string) =>
-      hygieneViolations("fixture_anchor_job", cmd).map((v: string) => v.slice(1, v.indexOf("]")));
+      hygieneViolations("fixture_anchor_job", cmd).map((v: string) => v.slice(1, anchorIndex(v, "]")));
     expect(ids(commented)).not.toContain("x-service-key-literal");
     expect(ids(uncommented)).toContain("x-service-key-literal");
   });
@@ -932,7 +932,7 @@ describe("[164.1-05] kinds and floors", () => {
     expect(isBareUrl(`https://hook.invalid/${"a".repeat(TOKEN_MIN + 8)}`)).toBe(true);
 
     // End to end through the rule, both spellings of the same credential.
-    const ids = (cmd: string) => hygieneViolations("j", cmd).map((x) => x.slice(1, x.indexOf("]")));
+    const ids = (cmd: string) => hygieneViolations("j", cmd).map((x) => x.slice(1, anchorIndex(x, "]")));
     expect(ids(`DO $$ BEGIN PERFORM net.http_post(url := '${PATH_FORM}'); END $$`)).toContain("long-token-anywhere");
     expect(ids(`DO $$ BEGIN PERFORM net.http_post(url := 'https://hook.invalid/a?token=${TOKEN}'); END $$`)).toContain(
       "long-token-anywhere",
