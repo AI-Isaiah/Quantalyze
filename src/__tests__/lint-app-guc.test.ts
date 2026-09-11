@@ -600,8 +600,15 @@ describe("lint-app-guc: successor-invalid — the four arms (WR-06 / threat T-16
     // `notes.txt` is additionally a committed self-test fixture; the traversal
     // `.md` string is the second half of the closure evidence and fails on TYPE
     // before the separator is ever considered.
+    //
+    // ⛔ THE TARGET HOLDS ZERO APP-GUC READS, DELIBERATELY. That is what makes
+    // it the WR-06 defect: a content-clean non-SQL file is what the OLD check
+    // passed. A target carrying a read would be refused by the CONTENT arm
+    // instead, and the red would not be attributable to the TYPE arm —
+    // MEASURED on the committed fixture, where exactly that draft left the
+    // self-test GREEN with the type arm deleted.
     const dir = tempDir("succ-type");
-    writeFileSync(join(dir, "notes.txt"), "v_url := current_setting('app.x', TRUE);\n");
+    writeFileSync(join(dir, "notes.txt"), "plain text, no SQL, and nothing for the detector\n");
     for (const bad of ["notes.txt", "../out/escaped.md"]) {
       const target = join(dir, "a.sql");
       writeFileSync(target, annotated(bad));
