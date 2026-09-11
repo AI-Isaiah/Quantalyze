@@ -1576,7 +1576,7 @@ describe("[164.1-05] kinds and floors", () => {
     const armText = readFileSync(join(PROBER_DIR, "arms", "cron-drift.mjs"), "utf8");
     const fn = armText.slice(anchorIndex(armText, "export function parseCronJobRows"));
     const body = fn
-      .slice(0, fn.indexOf("\n}\n") + 2)
+      .slice(0, anchorIndex(fn, "\n}\n") + 2)
       .split("\n")
       .filter((l) => !l.trim().startsWith("//"))
       .join("\n");
