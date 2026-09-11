@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "normalization": "ws-collapse-v1",
-  "captured_at": "2026-09-06T07:15:05.335Z",
+  "normalization": "ws-collapse-v2",
+  "captured_at": "2026-09-11T14:41:44.056Z",
   "database_marker": "⛔ PRODUCTION — real customer data. No seeds, no fixtures, no DELETE without a scoped id.",
   "jobs": [
     {
@@ -11,8 +11,8 @@
       "active": true,
       "database": "postgres",
       "username": "postgres",
-      "command_sha256": "d19a855a8f814b1553a57994500e6387f20927ec35fc9e9281f028fd5a6e645f",
-      "command": "INSERT INTO notification_dispatches ( notification_type, recipient_email, subject, status, metadata ) SELECT 'api_key_rotation_reminder' AS notification_type, p.email, 'Rotate your exchange API key' AS subject, 'queued' AS status, jsonb_build_object( 'user_id', p.id, 'api_key_id', k.id, 'exchange', k.exchange, 'created_at', k.created_at ) AS metadata FROM api_keys k JOIN profiles p ON p.id = k.user_id WHERE k.is_active = TRUE AND k.created_at < now() - interval '90 days' AND p.email IS NOT NULL AND NOT EXISTS ( SELECT 1 FROM notification_dispatches nd WHERE nd.notification_type = 'api_key_rotation_reminder' AND nd.recipient_email = p.email AND nd.created_at > now() - interval '60 days' );"
+      "command_sha256": "996731ea7d3098ff9d405b13ac2d06a1d368656fba0777889f125f13eb81b663",
+      "command": "INSERT INTO notification_dispatches (\nnotification_type, recipient_email, subject, status, metadata\n)\nSELECT\n'api_key_rotation_reminder' AS notification_type,\np.email,\n'Rotate your exchange API key' AS subject,\n'queued' AS status,\njsonb_build_object(\n'user_id', p.id,\n'api_key_id', k.id,\n'exchange', k.exchange,\n'created_at', k.created_at\n) AS metadata\nFROM api_keys k\nJOIN profiles p ON p.id = k.user_id\nWHERE k.is_active = TRUE\nAND k.created_at < now() - interval '90 days'\nAND p.email IS NOT NULL\nAND NOT EXISTS (\nSELECT 1 FROM notification_dispatches nd\nWHERE nd.notification_type = 'api_key_rotation_reminder'\nAND nd.recipient_email = p.email\nAND nd.created_at > now() - interval '60 days'\n);"
     },
     {
       "jobid": 20,
@@ -21,8 +21,8 @@
       "active": true,
       "database": "postgres",
       "username": "postgres",
-      "command_sha256": "752f582a9ecce3e994325ad16b42835428aa6e9758edd4617d62f65c0759e1f3",
-      "command": "DELETE FROM audit_log_cold WHERE created_at < now() - interval '7 years';"
+      "command_sha256": "33cfd4944f3c22784ff3d6417cc773dcf797598d2c856edc6fe1c09eaf7948f1",
+      "command": "DELETE FROM audit_log_cold\nWHERE created_at < now() - interval '7 years';"
     },
     {
       "jobid": 24,
@@ -31,8 +31,8 @@
       "active": true,
       "database": "postgres",
       "username": "postgres",
-      "command_sha256": "c4712716d8abdb654dc010aa3f9a44cde79ae301372d13dd9dbf61c27541b2b8",
-      "command": "DO $body$ DECLARE v_archived INTEGER; v_inserted INTEGER; BEGIN WITH archived AS ( DELETE FROM audit_log WHERE created_at < now() - interval '2 years' RETURNING id, user_id, action, entity_type, entity_id, metadata, created_at ), inserted AS ( INSERT INTO audit_log_cold (id, user_id, action, entity_type, entity_id, metadata, created_at) SELECT id, user_id, action, entity_type, entity_id, metadata, created_at FROM archived ON CONFLICT (id) DO NOTHING RETURNING id ) SELECT (SELECT count(*) FROM archived), (SELECT count(*) FROM inserted) INTO v_archived, v_inserted; IF v_archived <> v_inserted THEN RAISE NOTICE 'audit-2026-05-07 H-0920: audit_log_hot_to_cold lost % rows to ON CONFLICT (archived=%, inserted=%). Investigate cold table for pre-existing UUID collisions.', (v_archived - v_inserted), v_archived, v_inserted; END IF; END $body$;"
+      "command_sha256": "a5835755bafdda0d767c37921550a7a216e3c46476b64b2c59bad68b45737f55",
+      "command": "DO $body$\nDECLARE\nv_archived INTEGER;\nv_inserted INTEGER;\nBEGIN\nWITH archived AS (\nDELETE FROM audit_log\nWHERE created_at < now() - interval '2 years'\nRETURNING id, user_id, action, entity_type, entity_id, metadata, created_at\n),\ninserted AS (\nINSERT INTO audit_log_cold (id, user_id, action, entity_type, entity_id, metadata, created_at)\nSELECT id, user_id, action, entity_type, entity_id, metadata, created_at\nFROM archived\nON CONFLICT (id) DO NOTHING\nRETURNING id\n)\nSELECT (SELECT count(*) FROM archived),\n(SELECT count(*) FROM inserted)\nINTO v_archived, v_inserted;\n\nIF v_archived <> v_inserted THEN\nRAISE NOTICE 'audit-2026-05-07 H-0920: audit_log_hot_to_cold lost % rows to ON CONFLICT (archived=%, inserted=%). Investigate cold table for pre-existing UUID collisions.',\n(v_archived - v_inserted), v_archived, v_inserted;\nEND IF;\nEND $body$;"
     },
     {
       "jobid": 8,
@@ -51,8 +51,8 @@
       "active": true,
       "database": "postgres",
       "username": "postgres",
-      "command_sha256": "225c37bd9650653bc5c58ecda47fdacc3b1fa8ff443bcb7476733c11c19c9730",
-      "command": "DO $body$ DECLARE v_key text; BEGIN SELECT decrypted_secret INTO v_key FROM vault.decrypted_secrets WHERE name = 'analytics_service_key'; IF v_key IS NULL OR v_key = '' THEN RAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header'; END IF; PERFORM net.http_post( url := 'https://quantalyze-analytics-production.up.railway.app/api/match/cron-recompute', headers := jsonb_build_object( 'Content-Type', 'application/json', 'X-Service-Key', v_key ), body := '{}'::jsonb, timeout_milliseconds := 60000 ); END $body$;"
+      "command_sha256": "1400dddd815b881b5426454b5271777e40f1f6c8825b7dfd75cae54fbc91ad71",
+      "command": "DO $body$\nDECLARE v_key text;\nBEGIN\nSELECT decrypted_secret INTO v_key\nFROM vault.decrypted_secrets WHERE name = 'analytics_service_key';\nIF v_key IS NULL OR v_key = '' THEN\nRAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header';\nEND IF;\nPERFORM net.http_post(\nurl := 'https://quantalyze-analytics-production.up.railway.app/api/match/cron-recompute',\nheaders := jsonb_build_object(\n'Content-Type', 'application/json',\n'X-Service-Key', v_key\n),\nbody := '{}'::jsonb,\ntimeout_milliseconds := 60000\n);\nEND\n$body$;"
     },
     {
       "jobid": 15,
@@ -71,8 +71,8 @@
       "active": true,
       "database": "postgres",
       "username": "postgres",
-      "command_sha256": "9b8bfbbbf1f7665c3c620641ccf2d18f2c78753fcadda9820a6770556471852e",
-      "command": "WITH batch AS MATERIALIZED ( SELECT s.strategy_id FROM public.strategy_analytics s WHERE s.computation_status = 'computing' AND s.computing_started_at IS NULL AND NOT EXISTS ( SELECT 1 FROM public.compute_jobs cj WHERE cj.strategy_id = s.strategy_id AND cj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry') ) LIMIT 25 FOR UPDATE SKIP LOCKED ) UPDATE public.strategy_analytics sa SET computing_started_at = now() FROM batch WHERE sa.strategy_id = batch.strategy_id AND sa.computation_status = 'computing' AND sa.computing_started_at IS NULL; WITH batch AS MATERIALIZED ( SELECT s.strategy_id FROM public.strategy_analytics s WHERE s.computation_status = 'computing' AND s.computing_started_at IS NOT NULL AND s.computing_started_at < now() - interval '16 hours' AND NOT EXISTS ( SELECT 1 FROM public.compute_jobs cj WHERE cj.strategy_id = s.strategy_id AND cj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry') ) ORDER BY s.computing_started_at ASC LIMIT 25 FOR UPDATE SKIP LOCKED ) UPDATE public.strategy_analytics sa SET computation_status = 'failed', computation_warned = FALSE, computation_error = 'Analytics was interrupted before it could finish and did not recover. Retry the sync.', computing_started_at = NULL FROM batch WHERE sa.strategy_id = batch.strategy_id AND sa.computation_status = 'computing';"
+      "command_sha256": "4c32375a1537119dea6d9dd450b6a5155de3c893bde98b77517d24606b16c5b9",
+      "command": "WITH batch AS MATERIALIZED (\nSELECT s.strategy_id\nFROM public.strategy_analytics s\nWHERE s.computation_status = 'computing'\nAND s.computing_started_at IS NULL\nAND NOT EXISTS (\nSELECT 1\nFROM public.compute_jobs cj\nWHERE cj.strategy_id = s.strategy_id\nAND cj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')\n)\nLIMIT 25\nFOR UPDATE SKIP LOCKED\n)\nUPDATE public.strategy_analytics sa\nSET computing_started_at = now()\nFROM batch\nWHERE sa.strategy_id = batch.strategy_id\nAND sa.computation_status = 'computing'\nAND sa.computing_started_at IS NULL;\n\nWITH batch AS MATERIALIZED (\nSELECT s.strategy_id\nFROM public.strategy_analytics s\nWHERE s.computation_status = 'computing'\nAND s.computing_started_at IS NOT NULL\nAND s.computing_started_at < now() - interval '16 hours'\nAND NOT EXISTS (\nSELECT 1\nFROM public.compute_jobs cj\nWHERE cj.strategy_id = s.strategy_id\nAND cj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')\n)\nORDER BY s.computing_started_at ASC\nLIMIT 25\nFOR UPDATE SKIP LOCKED\n)\nUPDATE public.strategy_analytics sa\nSET computation_status = 'failed',\ncomputation_warned = FALSE,\ncomputation_error = 'Analytics was interrupted before it could finish and did not recover. Retry the sync.',\ncomputing_started_at = NULL\nFROM batch\nWHERE sa.strategy_id = batch.strategy_id\nAND sa.computation_status = 'computing';"
     },
     {
       "jobid": 36,
@@ -81,8 +81,8 @@
       "active": true,
       "database": "postgres",
       "username": "postgres",
-      "command_sha256": "ae5f4bec2e755492e0f18e33b0912d0571235c49ac3eeba0adf347aa3de8e1e8",
-      "command": "DO $sweep$ DECLARE v_healed INTEGER; BEGIN WITH batch AS MATERIALIZED ( SELECT s.id FROM public.strategies s WHERE s.status <> 'archived' AND EXISTS ( SELECT 1 FROM public.csv_daily_returns d WHERE d.strategy_id = s.id ) AND NOT EXISTS ( SELECT 1 FROM public.compute_jobs cj WHERE cj.strategy_id = s.id AND NOT ((cj.status = 'failed_final' AND cj.last_error LIKE 'orphaned_running_reaped:%') IS TRUE) ) AND ( SELECT count(*) FROM public.compute_jobs cjc WHERE cjc.strategy_id = s.id AND cjc.status = 'failed_final' AND cjc.last_error LIKE 'orphaned_running_reaped:%' ) < 3 AND NOT EXISTS ( SELECT 1 FROM public.strategy_analytics sa WHERE sa.strategy_id = s.id AND sa.computation_status IN ('computing', 'complete', 'complete_with_warnings', 'failed') ) AND NOT EXISTS ( SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy_id = s.id ) AND ( SELECT max(dg.created_at) FROM public.csv_daily_returns dg WHERE dg.strategy_id = s.id ) < now() - interval '1 hour' ORDER BY ( SELECT max(dg.created_at) FROM public.csv_daily_returns dg WHERE dg.strategy_id = s.id ) ASC LIMIT 25 FOR UPDATE SKIP LOCKED ) INSERT INTO public.compute_jobs (strategy_id, kind, metadata) SELECT b.id, 'compute_analytics_from_csv', jsonb_build_object('source', 'reconcile-sweep', 'detected_at', now()) FROM batch b ON CONFLICT DO NOTHING; GET DIAGNOSTICS v_healed = ROW_COUNT; RAISE NOTICE 'JOB-04 reconcile_dropped_enqueue_sweep: healed % dropped-enqueue strategies this tick.', v_healed; END $sweep$;"
+      "command_sha256": "e40f1032a419b8f5507a1a0355343d9c7cf14b90dcd983628916cacbb01ff8c2",
+      "command": "DO $sweep$\nDECLARE\nv_healed INTEGER;\nBEGIN\nWITH batch AS MATERIALIZED (\nSELECT s.id\nFROM public.strategies s\nWHERE s.status <> 'archived'\nAND EXISTS (\nSELECT 1\nFROM public.csv_daily_returns d\nWHERE d.strategy_id = s.id\n)\nAND NOT EXISTS (\nSELECT 1\nFROM public.compute_jobs cj\nWHERE cj.strategy_id = s.id\nAND NOT ((cj.status = 'failed_final'\nAND cj.last_error LIKE 'orphaned_running_reaped:%') IS TRUE)\n)\nAND (\nSELECT count(*)\nFROM public.compute_jobs cjc\nWHERE cjc.strategy_id = s.id\nAND cjc.status = 'failed_final'\nAND cjc.last_error LIKE 'orphaned_running_reaped:%'\n) < 3\nAND NOT EXISTS (\nSELECT 1\nFROM public.strategy_analytics sa\nWHERE sa.strategy_id = s.id\nAND sa.computation_status IN ('computing', 'complete', 'complete_with_warnings', 'failed')\n)\nAND NOT EXISTS (\nSELECT 1\nFROM public.strategy_keys sk\nWHERE sk.strategy_id = s.id\n)\nAND (\nSELECT max(dg.created_at)\nFROM public.csv_daily_returns dg\nWHERE dg.strategy_id = s.id\n) < now() - interval '1 hour'\nORDER BY (\nSELECT max(dg.created_at)\nFROM public.csv_daily_returns dg\nWHERE dg.strategy_id = s.id\n) ASC\nLIMIT 25\nFOR UPDATE SKIP LOCKED\n)\nINSERT INTO public.compute_jobs (strategy_id, kind, metadata)\nSELECT b.id,\n'compute_analytics_from_csv',\njsonb_build_object('source', 'reconcile-sweep', 'detected_at', now())\nFROM batch b\nON CONFLICT DO NOTHING;\n\nGET DIAGNOSTICS v_healed = ROW_COUNT;\n\nRAISE NOTICE 'JOB-04 reconcile_dropped_enqueue_sweep: healed % dropped-enqueue strategies this tick.', v_healed;\nEND\n$sweep$;"
     },
     {
       "jobid": 17,
@@ -111,8 +111,8 @@
       "active": true,
       "database": "postgres",
       "username": "postgres",
-      "command_sha256": "a319075574d85a92a52bcb1a9176249905ca56c90aef584d3abdbe662295975e",
-      "command": "DELETE FROM compute_jobs WHERE status = 'done' AND created_at < now() - interval '30 days';"
+      "command_sha256": "6ba349f8fb3e07033161abf9b8bac84e7a9feebcd1843a6cc797322bd4906f5a",
+      "command": "DELETE FROM compute_jobs\nWHERE status = 'done'\nAND created_at < now() - interval '30 days';"
     },
     {
       "jobid": 26,
@@ -121,8 +121,8 @@
       "active": true,
       "database": "postgres",
       "username": "postgres",
-      "command_sha256": "8c443a7c73ff985600b8c7a4f55cbc806408dbfaa37146284b5944b49f524d8e",
-      "command": "DELETE FROM compute_jobs WHERE status IN ('failed_final', 'failed_retry') AND COALESCE(next_attempt_at, created_at) < now() - interval '90 days';"
+      "command_sha256": "ce103cd7f8b543a44a9826d0fc3712fe2f2ad943ef8d6cd446b955c0c65e2c1a",
+      "command": "DELETE FROM compute_jobs\nWHERE status IN ('failed_final', 'failed_retry')\nAND COALESCE(next_attempt_at, created_at) < now() - interval '90 days';"
     },
     {
       "jobid": 37,
@@ -131,8 +131,8 @@
       "active": true,
       "database": "postgres",
       "username": "postgres",
-      "command_sha256": "7e207161eb9e39897c6669f19aa0fc979ae4c69c0e9a8c1ece000931643f1c2c",
-      "command": "-- CANARY_162_V1_PROSE_ONLY — a prose-only token. It appears in this comment -- and in NO code, here or anywhere else in this body. Part 1 of -- supabase/tests/test_retention_orphaned_running.sql strips comments out of -- cron.job.command before matching, and asserts this token is present in the -- RAW command and ABSENT from the stripped one — which is the only way to -- tell \"the stripper ran\" from \"there was nothing to strip\". ⛔ Do not remove -- it to tidy up: that gate goes RED, on purpose (the F-5 lesson from mig -- 20260826130000, where removing a canary silently DISARMED the check that -- depended on it). ⚠️ Keep this comment free of every token Part 1 counts — -- it deliberately spells none of the quoted kind literals, none of the audit -- reason, and no removal keyword. DO $sweep$ BEGIN WITH batch AS MATERIALIZED ( SELECT id FROM public.compute_jobs WHERE status = 'running' AND claimed_at IS NOT NULL AND claimed_at < now() - interval '4 hours' ORDER BY claimed_at ASC LIMIT 100 FOR UPDATE SKIP LOCKED ) UPDATE public.compute_jobs cj SET status = 'failed_final', next_attempt_at = now(), error_kind = 'orphaned', last_error = 'orphaned_running_reaped: no worker completed this job within the 4h claim window' FROM batch b WHERE cj.id = b.id AND cj.status = 'running'; WITH batch AS MATERIALIZED ( SELECT id FROM public.compute_jobs WHERE status = 'running' AND claimed_at IS NULL AND created_at < now() - interval '48 hours' ORDER BY created_at ASC LIMIT 100 FOR UPDATE SKIP LOCKED ) UPDATE public.compute_jobs cj SET status = 'failed_final', next_attempt_at = now(), error_kind = 'orphaned', last_error = 'orphaned_running_reaped: running with no claim stamp (invariant violation) older than 48h' FROM batch b WHERE cj.id = b.id AND cj.status = 'running'; END $sweep$;"
+      "command_sha256": "7d454bf6c72db0f4354f51c4a6e795f79e323f38248133bfb695b0eee0a7d0bb",
+      "command": "-- CANARY_162_V1_PROSE_ONLY — a prose-only token. It appears in this comment\n-- and in NO code, here or anywhere else in this body. Part 1 of\n-- supabase/tests/test_retention_orphaned_running.sql strips comments out of\n-- cron.job.command before matching, and asserts this token is present in the\n-- RAW command and ABSENT from the stripped one — which is the only way to\n-- tell \"the stripper ran\" from \"there was nothing to strip\". ⛔ Do not remove\n-- it to tidy up: that gate goes RED, on purpose (the F-5 lesson from mig\n-- 20260826130000, where removing a canary silently DISARMED the check that\n-- depended on it). ⚠️ Keep this comment free of every token Part 1 counts —\n-- it deliberately spells none of the quoted kind literals, none of the audit\n-- reason, and no removal keyword.\nDO $sweep$\nBEGIN\nWITH batch AS MATERIALIZED (\nSELECT id\nFROM public.compute_jobs\nWHERE status = 'running'\nAND claimed_at IS NOT NULL\nAND claimed_at < now() - interval '4 hours'\nORDER BY claimed_at ASC\nLIMIT 100\nFOR UPDATE SKIP LOCKED\n)\nUPDATE public.compute_jobs cj\nSET status = 'failed_final',\nnext_attempt_at = now(),\nerror_kind = 'orphaned',\nlast_error = 'orphaned_running_reaped: no worker completed this job within the 4h claim window'\nFROM batch b\nWHERE cj.id = b.id\nAND cj.status = 'running';\n\nWITH batch AS MATERIALIZED (\nSELECT id\nFROM public.compute_jobs\nWHERE status = 'running'\nAND claimed_at IS NULL\nAND created_at < now() - interval '48 hours'\nORDER BY created_at ASC\nLIMIT 100\nFOR UPDATE SKIP LOCKED\n)\nUPDATE public.compute_jobs cj\nSET status = 'failed_final',\nnext_attempt_at = now(),\nerror_kind = 'orphaned',\nlast_error = 'orphaned_running_reaped: running with no claim stamp (invariant violation) older than 48h'\nFROM batch b\nWHERE cj.id = b.id\nAND cj.status = 'running';\nEND\n$sweep$;"
     },
     {
       "jobid": 25,
@@ -141,8 +141,8 @@
       "active": true,
       "database": "postgres",
       "username": "postgres",
-      "command_sha256": "fbac9eb522166ee090ea2a802e7b2e20577fbb7445c58a046a708ad0887b4ff0",
-      "command": "DO $body$ DECLARE v_queued_aged INTEGER; BEGIN DELETE FROM notification_dispatches WHERE created_at < now() - interval '180 days' AND status <> 'queued'; SELECT count(*) INTO v_queued_aged FROM notification_dispatches WHERE status = 'queued' AND created_at < now() - interval '180 days'; IF v_queued_aged > 1000 THEN RAISE NOTICE 'retention_notification_dispatches: % queued rows aged >180d — consumer drain missing or stalled. audit-2026-05-07 SFT #5.', v_queued_aged; END IF; END $body$;"
+      "command_sha256": "bb99861dd6ce581b2917b70f21cc6b4fe58c4f6305df757c552bf0862f30504d",
+      "command": "DO $body$\nDECLARE\nv_queued_aged INTEGER;\nBEGIN\nDELETE FROM notification_dispatches\nWHERE created_at < now() - interval '180 days'\nAND status <> 'queued';\n\nSELECT count(*) INTO v_queued_aged\nFROM notification_dispatches\nWHERE status = 'queued'\nAND created_at < now() - interval '180 days';\n\nIF v_queued_aged > 1000 THEN\nRAISE NOTICE 'retention_notification_dispatches: % queued rows aged >180d — consumer drain missing or stalled. audit-2026-05-07 SFT #5.',\nv_queued_aged;\nEND IF;\nEND $body$;"
     }
   ]
 }

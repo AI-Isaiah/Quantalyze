@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.77.33.3] - 2026-09-11 — regenerate the cron oracle the normalization bump invalidated
+
+### Fixed
+
+- **`manifest-invalid`: the cron-drift arm was performing NO comparison at all.** 164.8.5 bumped
+  the arm to `ws-collapse-v2` while `scripts/prod-prober/cron-manifest.json` still declared
+  `ws-collapse-v1`. Two normalizations produce two shas for identical text, so the arm refused the
+  oracle outright and degraded to a measure-fail — a control that had silently stopped being able
+  to find anything. Caught by the first prod-prober run after 164.8.5 landed (run `34609247983`).
+- Regenerated via the workflow's own `capture-manifest` mode (run `34611594511`), hand-reviewed
+  row by row, and committed. 14 jobs.
+
+### Notes
+
+- ⭐ **MEASURED: zero real production drift.** Ten of fourteen commands differ textually, and all
+  ten are whitespace-only — `v1(old) === v1(new)` for every row, which is exactly what a v1→v2
+  bump should produce (v1 collapsed newlines, v2 preserves them). Nothing hidden was absorbed
+  into the oracle. The four single-line jobs are byte-identical.
+- **No new disclosure.** Because the content is identical modulo whitespace, this publishes
+  nothing that the committed v1 manifest did not already carry in a public repo. The ten
+  key/token/url-shaped hits in the text are all benign and pre-existing: `api_key` is a column
+  name, `secret` is `vault.decrypted_secrets` (a column, not a value), the Railway URL is already
+  in the repo, and `token` is the `CANARY_162_V1_PROSE_ONLY` prose comment.
+- **The false-positive budget holds:** `hygieneViolations` reports 0 across all 14 captured rows.
+- ⚠️ **The residual gap is NOT closed by this commit.** Nothing in CI fails when the arm's
+  `NORMALIZATION` and the manifest's `normalization` disagree — the mismatch was found by an
+  hourly PRODUCTION probe, an hour after it shipped, not by a gate. Routed to a phase.
+
 ## [0.77.33.2] - 2026-09-11 — stop the CHANGELOG itself tripping the secret scan
 
 ### Fixed
