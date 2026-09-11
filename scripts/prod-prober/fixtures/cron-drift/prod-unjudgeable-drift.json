@@ -15,7 +15,7 @@
     "active": true,
     "database": "postgres",
     "username": "postgres",
-    "command": "SELECT purge_audit_log_cold(interval '91 days')"
+    "command": "SELECT purge_audit_log_cold(\n  interval '91 days'\n)"
   },
   {
     "jobid": 3,

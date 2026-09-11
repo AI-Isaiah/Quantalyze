@@ -2152,12 +2152,27 @@ export function compareManifest(manifest, prodRows, opts = {}) {
         .join("; ");
       headline += `\n      command text withheld: ${reasons}`;
     } else if (changed.includes("command")) {
-      // Both sides clean: a unified diff of the NORMALIZED text. Normalization
-      // collapses each side to one line, so the diff is exactly two lines.
+      // Both sides judged and clean: a unified diff of the NORMALIZED text.
+      //
+      // ⛔ EVERY PHYSICAL LINE CARRIES ITS MARKER (164.8.5-REVIEW-R1 IN-R1-01).
+      // This used to read "normalization collapses each side to one line, so the
+      // diff is exactly two lines" and push one array entry per side. That was
+      // true of `ws-collapse-v1` and has been FALSE since `ws-collapse-v2`,
+      // which PRESERVES line breaks by design — so a multi-line command reached
+      // the Actions log as two entries carrying embedded newlines, `-` and `+`
+      // marked only their FIRST physical line, and a reader could not tell where
+      // the manifest text ended and PROD's began. MEASURED 2026-09-11: 4 array
+      // entries, 10 physical lines, 6 of them unmarked. The assertion at
+      // `run.mjs` counts ARRAY ENTRIES, which is why nothing noticed.
+      const marked = (sign, text) =>
+        String(text)
+          .split("\n")
+          .map((physical) => `${sign} ${physical}`)
+          .join("\n");
       lines.push(`--- manifest ${name} (captured ${capturedAt})`);
       lines.push(`+++ PROD ${name}`);
-      lines.push(`- ${normalizeCommand(m.command)}`);
-      lines.push(`+ ${normalizeCommand(p.command)}`);
+      lines.push(marked("-", normalizeCommand(m.command)));
+      lines.push(marked("+", normalizeCommand(p.command)));
     }
 
     drift(name, headline);
