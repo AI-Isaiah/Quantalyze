@@ -1568,6 +1568,64 @@ true for 146 and half of 142–145, and **false for 141**.
       marker check confirms which DATABASE you are connected to; it says nothing about which
       SERVICE the tick calls. They are different questions and only the first has a guard.
 
+- [ ] **`[164.8.5-MANIFEST-SIDE-LOOP-DEAD]` `compareManifest`'s MANIFEST-side hygiene loop sits
+      BELOW all three early returns, so it is dead on every production run today (booked
+      2026-09-11, found by the round-3 silent-failure hunt).**
+      ⛔ **MEASURED, and the deadness is not hypothetical:** `scripts/prod-prober/cron-manifest.json`
+      declares `normalization: ws-collapse-v1` while the arm computes `ws-collapse-v2`, so the
+      `manifest-invalid` early return fires on every real run and the manifest-side loop is never
+      reached.
+      ```
+      CONTROL: valid manifest      -> manifest-side credential defects: 1
+      normalization ws-collapse-v1 -> 0        schema_version wrong -> 0        marker mismatch -> 0
+      ```
+      ⚠️ **Deliberately NOT graded Critical**, and the reasoning is worth keeping: a credential
+      LIVE IN PROD is still reported on every one of those paths, because decision D1 hoisted the
+      PROD-side loop above every `return`. What this loop uniquely catches is a credential in
+      COMMITTED REPO TEXT that is no longer in PROD — a real class, but repo text, which gitleaks
+      also scans.
+      ⭐ **The coupling is the point, and it is a trap for whoever does the re-capture:** the
+      pending PROD re-capture clears `manifest-invalid`, which SILENTLY RE-ANIMATES this loop.
+      A check that has not run for weeks starts running again as a side effect of an unrelated
+      action. Whoever re-captures should know that before, not after.
+      ⛔ The fix pass's own audit table justified these early returns as "ADDITIVE by construction
+      — D1 hoisted the PROD hygiene loop above every `return`". That is only half true: D1 hoisted
+      the PROD loop; the manifest loop was never hoisted. A recorded justification that is
+      narrower than it reads is exactly the class this phase exists to eliminate.
+      **Evidence:** `.planning/phases/164.8.5-proberparse-*/164.8.5-REVIEW-R3.md`.
+
+- [ ] **`[164.8.5-HYGIENE-RESIDUALS]` Five credential shapes the prod-prober's hygiene rules still
+      do not report, each measured and each individually below the bar that blocked the ship
+      (booked 2026-09-11, from three initial reviews + three bounded re-review rounds over
+      Phase 164.8.5).**
+      ⛔ **All five are MEASURED, not hypothetical, and none is a false green on a shape the arm
+      claims to cover** — they are gaps the arm's own docstrings now name honestly, which is the
+      change this phase made. Grouped as ONE entry on purpose: they share a cause (a rule that
+      reads a token must decide what a token IS) and no existing phase thematically owns them.
+      ⚠️ Phase 164.8.4 GATERESIDUE is NOT their home — its goal is scoped to Phase 164.8.2's
+      deferrals "and nothing else".
+      1. **A credential inside a too-deeply-nested `DO` body** reports `["command-unjudgeable"]`
+         alone. Honest — those spans were genuinely never read — but the key is not named.
+      2. **`DETECT_RE`'s concatenation blind spot** and the **`||`-split value OUTSIDE a header
+         region**: a value assembled from short operands is under every length threshold by
+         construction.
+      3. **The A2 alphabetic-token residual** — a long token carrying no digit is exempt, because
+         the digit test is what keeps `'application/json'`-class constants from firing.
+      4. **`MIGRATION_FILENAME_RE`'s body charset is `[a-z0-9_]`**, which is the charset of an
+         `sk_live_`-style key: `-- 20260907130000_<32 hex>.sql` is exempt while the bare token is
+         not. Needs deliberate construction and is comment-only, but the docstring's "the prefix
+         and suffix stop this being a one-step off-switch" reads stronger than it is.
+      5. **`captureManifest`'s malformed / `countMismatch` refusals return 3 before the hygiene
+         loop**, so findings on readable rows go unprinted. Documented as deliberate; recorded
+         because "deliberate" and "known to the next reader" are different things.
+      ⭐ **The honest remedy for 2-4 is a whole-token measure rather than five more exemptions —
+      which is a DECISION about what the arm is for, not a fix.** That is why this is booked
+      rather than patched: each individual narrowing risks the zero-false-positive budget the
+      whole arm depends on (an arm that cries wolf gets switched off), and the budget is the
+      reason the one true positive is still readable.
+      **Evidence:** `.planning/phases/164.8.5-proberparse-*/164.8.5-REVIEW-R2.md`,
+      `164.8.5-REVIEW-R3.md`, `164.8.5-FIX-R2-SUMMARY.md`.
+
 - [ ] **`[164.8.1-DISPATCH-RECORD-GAP]` A founder-dispatched `workflow_dispatch` leaves its
       evidence in GitHub Actions and NOTHING in `.planning/`, so a phase's record depends on
       someone remembering to write it afterwards (booked 2026-09-11, found while closing
