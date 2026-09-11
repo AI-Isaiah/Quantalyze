@@ -1592,6 +1592,11 @@ true for 146 and half of 142–145, and **false for 141**.
       — D1 hoisted the PROD hygiene loop above every `return`". That is only half true: D1 hoisted
       the PROD loop; the manifest loop was never hoisted. A recorded justification that is
       narrower than it reads is exactly the class this phase exists to eliminate.
+      <deferred>Phase 164.5.1 CRONREPOINT (the re-capture) AND Phase 164.8.6 VAULTTICKFIX (the
+      ordering fix)</deferred> — routed 2026-09-11. TWO destinations DELIBERATELY, not a
+      duplicate: 164.5.1 owns the re-capture that silently RE-ANIMATES the loop; 164.8.6 would
+      own moving the loop above `compareManifest`'s early returns so it stops being skippable
+      at all. Whichever lands first must say so in its SUMMARY.
       **Evidence:** `.planning/phases/164.8.5-proberparse-*/164.8.5-REVIEW-R3.md`.
 
 - [ ] **`[164.8.5-HYGIENE-RESIDUALS]` Five credential shapes the prod-prober's hygiene rules still
@@ -1623,6 +1628,10 @@ true for 146 and half of 142–145, and **false for 141**.
       rather than patched: each individual narrowing risks the zero-false-positive budget the
       whole arm depends on (an arm that cries wolf gets switched off), and the budget is the
       reason the one true positive is still readable.
+      <deferred>Phase 164.8.6 VAULTTICKFIX</deferred> — routed 2026-09-11 by founder decision.
+      ⚠️ THEMATIC MISMATCH, recorded in that phase's Requirements: 164.8.6 is the SQL-migration
+      phase and these are pure JavaScript. Plan them as a separate wave, and do not read the
+      migration's discipline (3 reviewers, TEST before PROD) as applying to them.
       **Evidence:** `.planning/phases/164.8.5-proberparse-*/164.8.5-REVIEW-R2.md`,
       `164.8.5-REVIEW-R3.md`, `164.8.5-FIX-R2-SUMMARY.md`.
 
