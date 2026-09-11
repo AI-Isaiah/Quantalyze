@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 70;
+export const SELF_TEST_SCENARIOS = 71;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -2586,6 +2586,60 @@ export async function selfTest() {
       // ⚠️ The drift side is deliberately NOT asserted: the truncated head
       // legitimately no longer matches its sha, and that IS drift by every
       // definition this arm has.
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("CR-02: a record with MORE than seven fields is a measure-fail too, never a SILENTLY TRUNCATED command");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE EXACT MIRROR OF WR-05, AND STRICTLY WORSE. The guard was
+    // `f.length < 7`, so a record with EIGHT fields sailed through: `command`
+    // was taken as `f[6]` — the text up to the stray separator — and everything
+    // after it was DISCARDED with `malformed: []`, i.e. with the parser
+    // claiming it read the row.
+    //
+    // ⛔ THE FIXTURE PUTS THE CREDENTIAL AFTER THE SEPARATOR ON PURPOSE.
+    // MEASURED on this fixture's row: the FULL command reports
+    // `[x-service-key-literal, long-literal-in-headers]`; the TRUNCATED head
+    // reports `[]`. Under `< 7` the arm therefore read GREEN on a row carrying
+    // an inline service key — a silent pass, not a downgrade.
+    //
+    // Seven is the column count of `CRON_JOB_SQL`. Anything else is a record
+    // this parser did not read, in EITHER direction.
+    const prod = loadFixture("cron-drift", "prod-wide-record.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const WIDE = "retention_compute_jobs_done";
+      const wideRow = prod.data.find((r) => r.jobname === WIDE) || {};
+      const halves = String(wideRow.command || "").split(CRON_DRIFT_MOD.CRON_JOB_SEPARATORS.fieldSep);
+      const headIds = CRON_DRIFT_MOD.hygieneViolations(WIDE, halves[0] || "").map((x) => x.slice(1, x.indexOf("]")));
+      const wholeIds = CRON_DRIFT_MOD.hygieneViolations(WIDE, halves.join("")).map((x) => x.slice(1, x.indexOf("]")));
+      const r = await driftRun(prod.data, driftFixturePath("manifest.json"), quiet);
+      const mf = r.defects.filter((x) => x.kind === "measure-fail");
+      const detail = String((mf[0] || {}).detail || "");
+      pass =
+        expect(
+          halves.length === 2,
+          `PRECONDITION: the fixture row really carries ONE literal field separator, so psql renders it as eight fields (${halves.length - 1} found)`,
+        ) &&
+        expect(
+          headIds.length === 0 && wholeIds.length > 0,
+          `PRECONDITION: the credential is hidden AFTER the separator — the truncated head is CLEAN (${headIds.join(", ") || "no rule"}) while the whole command is not (${wholeIds.join(", ") || "NO RULE — the fixture proves nothing"})`,
+        ) &&
+        expect(r.exitCode === 1, `an over-wide record exits 1, never 0 (got ${r.exitCode})`) &&
+        expect(mf.length === 1, `exactly one measure-fail (got ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ") || "no defects at all"})`) &&
+        expect(String((mf[0] || {}).subject) === "cron.job", `on subject cron.job (got ${(mf[0] || {}).subject})`) &&
+        expect(
+          detail.includes("1 of 3 record(s)") && detail.includes("field counts: 8"),
+          `NAMING THE COUNT AND THE WIDTH — two rows were read and a third record was EIGHT fields wide (detail: ${detail.slice(0, 110)}…)`,
+        ) &&
+        expect(
+          detail.includes("X-Service-Key") === false && detail.includes("FAKE") === false,
+          "and the record TEXT is never quoted — an unreadable record is exactly the place a credential could be hiding, and this one is",
+        ) &&
+        pass;
     }
   }
 
