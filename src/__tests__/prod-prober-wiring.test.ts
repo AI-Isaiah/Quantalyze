@@ -1243,6 +1243,50 @@ describe("[164.1-05] kinds and floors", () => {
     );
   });
 
+  it("WR-R2-01: a credential in a HOST LABEL is not a bare URL either — CR-04's question, asked of the AUTHORITY", () => {
+    // ⛔ CR-04 CLOSED THE PATH HALF AND THE AUTHORITY HALF WAS LEFT OPEN, WHILE
+    // TWO DOCSTRINGS ASSERTED IT WAS CLOSED — one of them literally "the
+    // exemption can never be the reason a credential goes unreported". A host
+    // label matches `[A-Za-z0-9.-]+` in full, so every character of an opaque
+    // key is inside `BARE_URL_RE`'s own authority charset: byte-for-byte the
+    // CR-04 defect moved LEFT of the first `/`.
+    //
+    // MEASURED on the parent commit: `isBareUrl('https://<39-char key>.invalid/a')`
+    // was `true` and the command reported `[]` from every rule, while the same
+    // key in a path segment and the same key bare both fired.
+    const TOKEN = `FAKE${"-0123456789"}${"-0123456789"}${"-0123456789ab"}`;
+    const HOST_FORM = `https://${TOKEN}.invalid/a`;
+    expect(BARE_URL_RE.test(HOST_FORM), "the raw shape test is fooled here too, and always was").toBe(true);
+    expect(isBareUrl(HOST_FORM), "the EXEMPTION is not").toBe(false);
+
+    // Both directions, ON THE BOUNDARY, so the threshold is measured rather
+    // than asserted — and it is the SAME `TOKEN_MIN` the path half uses.
+    const digitLabel = (n: number) => `https://${"a1".repeat(Math.ceil(n / 2)).slice(0, n)}.invalid/a`;
+    expect(isBareUrl(digitLabel(TOKEN_MIN - 1)), `a ${TOKEN_MIN - 1}-character host label is still a host`).toBe(true);
+    expect(isBareUrl(digitLabel(TOKEN_MIN)), `a ${TOKEN_MIN}-character host label is a credential`).toBe(false);
+    // The digit half applies to a label too (the A2 residual, unchanged).
+    expect(isBareUrl(`https://${"a".repeat(TOKEN_MIN + 8)}.invalid/a`)).toBe(true);
+
+    // ⛔ THE COMMITTED URL'S LONGEST LABEL IS 31 — ONE UNDER `TOKEN_MIN`. The
+    // margin is measured here rather than trusted, because the FP budget on the
+    // committed corpus depends on it and `TOKEN_MIN` (3) already names this
+    // one-character fragility as the rule's stated hazard.
+    const RAILWAY = "https://quantalyze-analytics-production.up.railway.app/api/match/cron-recompute";
+    const labels = RAILWAY.replace(/^https?:\/\//, "").split("/")[0].split(".");
+    expect(Math.max(...labels.map((l) => l.length))).toBe(TOKEN_MIN - 1);
+    expect(isBareUrl(RAILWAY), "so the one URL the exemption exists for stays exempt").toBe(true);
+
+    // A PORT is not a token: `app:8443` is judged as the label `app`.
+    expect(isBareUrl("https://x.invalid:8443/a/b")).toBe(true);
+
+    // End to end through the rule — and the two CONTROLs that make the reading
+    // attributable: the same key bare, and the same key in a path segment.
+    const ids = (cmd: string) => hygieneViolations("j", cmd).map((x) => x.slice(1, anchorIndex(x, "]")));
+    expect(ids(`PERFORM net.http_post(url := '${HOST_FORM}');`)).toEqual(["long-token-anywhere"]);
+    expect(ids(`PERFORM foo('${TOKEN}');`)).toEqual(["long-token-anywhere"]);
+    expect(ids(`PERFORM net.http_post(url := 'https://x.invalid/t/${TOKEN}');`)).toEqual(["long-token-anywhere"]);
+  });
+
   it("F5: the UNREACHABLE `vaultSpan` exemption is gone and cannot come back", () => {
     // ⛔ A DELETION OF PROVABLY-DEAD CODE HAS NO BEHAVIOUR TO NEUTER, so the
     // honest control is a PROOF plus a pin, not a red fixture.

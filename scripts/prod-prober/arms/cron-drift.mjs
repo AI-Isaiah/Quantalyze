@@ -383,10 +383,19 @@ export const TOKEN_MIN = HEADERS_LITERAL_MAX;
  *
  * ⛔ NARROW ON PURPOSE. `?`, `#` and `user:pw@` are all ABSENT from this
  * pattern, so a "URL" carrying a token in its query string
- * (`https://x.invalid/a?token=…`) or credentials in its authority
- * (`https://u:p1@x.invalid/`) is NOT exempt — those are two of the ways a key
- * actually reaches a cron command. The exemption exists for the ONE measured
- * shape in the committed corpus: a 79-character bare analytics URL.
+ * (`https://x.invalid/a?token=…`) or `user:pw@` credentials in its authority
+ * is NOT exempt — those are two of the ways a key actually reaches a cron
+ * command. The exemption exists for the ONE measured shape in the committed
+ * corpus: a 79-character bare analytics URL.
+ *
+ * ⛔ CORRECTED 2026-09-11 (164.8.5-REVIEW-R2 WR-R2-01). This paragraph used to
+ * claim the pattern rejected "credentials in its authority" FULL STOP. It is
+ * true only of the `user:pw@` spelling. A HOST LABEL matches `[A-Za-z0-9.-]+`
+ * in full, so every character of an opaque key fits inside the authority's own
+ * charset — MEASURED, `isBareUrl('https://<39-char key>.invalid/a')` returned
+ * `true` and the command reported `[]` from every rule. That is byte-for-byte
+ * the CR-04 path-segment defect moved LEFT of the first `/`. `isBareUrl` now
+ * asks the same question of each host label that it asks of each path segment.
  */
 export const BARE_URL_RE = /^https?:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[A-Za-z0-9._~/-]*)?$/;
 
@@ -431,14 +440,26 @@ export const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  * ⛔ THE SEGMENT THRESHOLD IS `TOKEN_MIN`, DERIVED AND NOT A NEW CONSTANT. The
  * rule's own test is "a whitespace-delimited token of at least `TOKEN_MIN`
  * characters containing a digit"; this asks the same question of each
- * `/`-delimited PATH SEGMENT. A URL is exempt only while none of its segments
- * would be a credential on its own, so the exemption can never be the reason a
- * credential goes unreported.
+ * `/`-delimited PATH SEGMENT **and of each `.`-delimited HOST LABEL**.
+ *
+ * ⛔ THE HOST-LABEL HALF WAS MISSING UNTIL 164.8.5-REVIEW-R2 WR-R2-01, AND THE
+ * SENTENCE HERE CLAIMED OTHERWISE. It read "the exemption can never be the
+ * reason a credential goes unreported"; MEASURED 2026-09-11 on the parent
+ * commit, a 39-character digit-bearing key spelled as a host label reported
+ * `[]` from EVERY rule while the identical key in a PATH SEGMENT and the
+ * identical key bare both reported `[long-token-anywhere]` — and
+ * `captureManifest` would have written that command into an oracle committed to
+ * a PUBLIC repository. The claim is now TRUE of both halves of the authority
+ * this pattern admits, which is what makes it safe to restate.
  *
  * MEASURED on the committed corpus: the one URL the exemption exists for —
  * `https://quantalyze-analytics-production.up.railway.app/api/match/cron-recompute`,
- * 79 characters — has segments `api` (3), `match` (5) and `cron-recompute` (14),
- * so it stays exempt and the false-positive budget stays at zero.
+ * 79 characters — has path segments `api` (3), `match` (5) and `cron-recompute`
+ * (14) and host labels `quantalyze-analytics-production` (31 — UNDER
+ * `TOKEN_MIN` by ONE character), `up`, `railway`, `app`, so it stays exempt and
+ * the false-positive budget stays at zero. ⚠️ That one-character margin is the
+ * same fragility `TOKEN_MIN` (3) already names; the committed-manifest budget
+ * scenario is its tripwire.
  *
  * ⚠️ ACCEPTED RESIDUAL, recorded beside the rule: a credential SPLIT across
  * several short path segments (`/a1b2/c3d4/…`) evades this, exactly as a
@@ -449,10 +470,18 @@ export const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  */
 export function isBareUrl(token) {
   if (!BARE_URL_RE.test(token)) return false;
-  const path = token.replace(/^https?:\/\/[^/]*/, "");
-  return !path
+  // ONE predicate, asked of both halves of the URL. Spelling it twice would be
+  // two chances for them to drift — which is exactly how the authority half
+  // came to be missing while the docstring said it was not.
+  const credentialish = (part) => part.length >= TOKEN_MIN && /\d/.test(part) && !CANONICAL_UUID_RE.test(part);
+  // `:port` is stripped so `app:8443` is judged as the label `app`, not as a
+  // 8-character token that happens to carry a digit.
+  const authority = token.replace(/^https?:\/\//, "").split("/")[0].replace(/:\d+$/, "");
+  if (authority.split(".").some(credentialish)) return false;
+  return !token
+    .replace(/^https?:\/\/[^/]*/, "")
     .split("/")
-    .some((segment) => segment.length >= TOKEN_MIN && /\d/.test(segment) && !CANONICAL_UUID_RE.test(segment));
+    .some(credentialish);
 }
 
 
