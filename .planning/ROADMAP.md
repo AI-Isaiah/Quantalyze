@@ -1460,6 +1460,20 @@ PROBE {"initialize": false, "last_error": [-6, "Terminal: Authorization failed"]
 5. ⛔ **Scope fence — `scripts/mt5-diag.sh` stays READ-ONLY.** It calls `initialize()` + `terminal_info()` and never `login()`, because a login is an "account change" and MT5 re-clears `[Experts] Enabled` on every account change while `Account=1` is armed — a probe that authenticated would re-break the thing it measures (the recorded 2026-08-13 incident, where each diagnostic round re-disabled algo trading). ⛔ Do not close this phase by making the probe log in.
 6. **Falsifier observed RED.** Neuter the `-6` branch, watch the fixture fall back to `mt5-terminal-error`, restore from pristine bytes. ⛔ Never `git checkout --` in the harness — it restores to HEAD and silently destroys uncommitted work.
 
+7. ⛔ **`terminal_info()` is recorded as `connected` and `trade_allowed`, two separate booleans — not as present/absent.** MEASURED 2026-09-10: `scripts/prod-prober/arms/mt5.mjs:113-117` sets `out["terminal_info"]` to the string `"present"` or to `None`, and nothing else. Those are precisely the **two fields `docs/runbooks/mt5-go-live.md` Step 2 names as the verification** (*"`terminal_info()` must report **`connected: true` AND `trade_allowed: true`** — both, not either"*), and precisely the two that separate "the terminal is not connected to the broker" from "the terminal is connected but the account is not authorized". Because the probe collapses them, a `-6` cannot be attributed from the prober's output at all. ⛔ This is the gate weaker than the sentence beside it: the runbook states a two-field criterion and the instrument that is supposed to check it records neither field.
+
+8. **The narrowed `--arm` diagnostic PUBLISHES what it measured.** MEASURED 2026-09-10 on dispatch run `34497471175`: `--arm mt5` printed `NARROWED DIAGNOSTIC dispatch of arm mt5: this mode never returns success.` and then `Process completed with exit code 1` — **no arm output at all**, because the step redirects the runner into `$RUNNER_LOG` and the narrowed path neither prints it nor uploads it. The one mode built for "tell me about this arm" is the one mode that tells you nothing, so the operator falls back to the full gate and the issue comment. Either echo `$RUNNER_LOG` on the narrowed path or upload it as an artifact; the mode's exit-2/never-green contract stays exactly as it is (`run.mjs:11,464`).
+
+⚠️ **DATED 2026-09-10 — the second time this remedy cost real debugging time, and the root cause is now on record.** The founder hit `-6` again and worked it with the assistant. What the remedy sent them to (the MT5 error table, "the fault is inside MT5 itself") was not where the answer was. The answer was in the terminal's own **Journal**, and it was unambiguous:
+
+```
+2026.09.07 04:05:03  '26547876': disconnected from VantageMarkets-Live 5
+2026.09.07 04:05:08  '34043761': authorization on VantageMarkets-Live 14 failed (Invalid account)
+2026.09.10 15:48:25  '34043761': authorization on VantageMarkets-Live 14 failed (Invalid account)
+```
+
+The terminal dropped a working session and re-attached to an account it could not authorize, then failed identically for three days. Resolved 2026-09-10 ~16:10Z by re-entering valid credentials — `authorized on VantageMarkets-Live 14 through AS05 (ping: 6.97 ms)`, `investor mode` on both trading and balance management. Verified by prober run `34500455961`, whose `Open or update the prod-prober issue` step was **skipped** (that step is gated on a `^❌` line, so skipped ⇒ zero defects); issue #753 closed. ⭐ **Criterion 2's remedy text should name the Journal explicitly** — it is the one place that distinguishes "invalid account" from "no connection", and neither the prober nor `mt5-diag.sh` can currently tell them apart.
+
 **Requirements**: TBD (no v1.20 requirement IDs) + GitHub issue #753 (`prod-prober` red since 2026-09-07)
 **Depends on:** Phase 164.1 (owns the prober's MT5 arm and its defect vocabulary)
 **Plans:** 0 plans
