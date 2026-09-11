@@ -742,6 +742,40 @@ describe("[164.1-05] kinds and floors", () => {
     expect(parseCronJobRows(original).malformed.length).toBe(1);
   });
 
+  it("CR-02: a record with MORE than seven fields is COUNTED too, never a silently TRUNCATED command", () => {
+    // ⛔ THE EXACT MIRROR OF WR-05 ABOVE, AND IT IS THE WORSE DIRECTION. The
+    // guard was `f.length < 7`, so an EIGHT-field record parsed: `command`
+    // became `f[6]` — the text up to the stray separator — and the remainder
+    // was discarded while `malformed` stayed EMPTY, i.e. while the parser
+    // claimed it had read the row. Seven is the column count of `CRON_JOB_SQL`;
+    // anything else is a record this parser did not read.
+    const head = "SELECT net.http_post(url := 'https://x.invalid/a'";
+    const tail = ", headers := jsonb_build_object('X-Service-Key', 'FAKE-inline-key-0123456789abcdef'))";
+    const WIDE_RECORD = cronRecord([
+      "2",
+      "b_job",
+      "*/5 * * * *",
+      "t",
+      "postgres",
+      "postgres",
+      `${head}${CRON_JOB_SEPARATORS.fieldSep}${tail}`,
+    ]);
+    const { rows, malformed } = parseCronJobRows(renderRecords([GOOD_RECORD, WIDE_RECORD]));
+    expect(rows.length, "the readable record still parses — one bad record does not blind the arm to the others").toBe(1);
+    expect(rows[0].jobname).toBe("a_job");
+    expect(malformed.length, "and the over-wide one is REPORTED rather than truncated into a row").toBe(1);
+    expect(malformed[0].fields, "by its field count, so the reader can tell how far the record over-ran").toBe(8);
+    expect(
+      JSON.stringify(malformed),
+      "and NEVER by its text — this record is a worked example of a credential hiding past the separator",
+    ).not.toContain("X-Service-Key");
+    // CALIBRATION: the head ALONE is clean and the whole command is not, so the
+    // truncation the old guard performed was a SILENT PASS on a row carrying an
+    // inline service key — not a downgrade to a weaker finding.
+    expect(hygieneViolations("b_job", head)).toEqual([]);
+    expect(hygieneViolations("b_job", `${head}${tail}`).length).toBeGreaterThan(0);
+  });
+
   it("the arm floor is FOUR and the registry meets it", () => {
     // Pinned at 4 while only one arm existed, on purpose: an incomplete prober
     // must be LOUD. From here a `floor` defect means an arm was REMOVED.
@@ -907,13 +941,13 @@ describe("[164.1-05] kinds and floors", () => {
     expect(() => statSync(join(FUNCTIONS_DIR, "match_engine_cron_tick_MOVED.sql"))).toThrow();
   });
 
-  it("SELF_TEST_SCENARIOS is 70, and the runner PRINTS exactly 70 headers numbered 1..70", async () => {
+  it("SELF_TEST_SCENARIOS is 71, and the runner PRINTS exactly 71 headers numbered 1..71", async () => {
     // ⭐ SOURCE-DERIVED, not scraped. The headers are auto-numbered at RUNTIME
     // off the same counter the runner's completeness assertion reads, so there
     // is no literal `k/50` in the source to count. Executing the self-test is
     // the only honest way to derive the number — and it is fixtures-only, no
     // network, under a tenth of a second.
-    expect(SELF_TEST_SCENARIOS).toBe(70);
+    expect(SELF_TEST_SCENARIOS).toBe(71);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);

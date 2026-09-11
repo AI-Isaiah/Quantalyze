@@ -1105,6 +1105,17 @@ function splitHygiene(violations) {
  * and the run still read green. Such a record is COUNTED here and answered with
  * a `measure-fail` by both callers.
  *
+ * ⛔ THE FIELD COUNT IS `!== 7`, NOT `< 7` (164.8.5-REVIEW CR-02). The guard
+ * used to be `< 7` and was therefore blind in the OTHER direction, which is the
+ * exact mirror of the defect above and strictly worse: a command carrying a
+ * literal FIELD separator (0x1F) splits into EIGHT fields, `command` was taken
+ * as `f[6]` — the text up to that byte — and the remainder was SILENTLY
+ * DISCARDED with `malformed: []`. MEASURED: an eight-field record whose full
+ * command reports `[x-service-key-literal, long-literal-in-headers]` reported
+ * `[]` once truncated, and the run read green. Seven is the column count of
+ * `CRON_JOB_SQL`; anything else is a record this parser did not read, in either
+ * direction.
+ *
  * The EMPTY-record skip is different and is CORRECT: psql prints the record
  * separator AFTER every record, last one included, so the trailing empty string
  * is an artefact of the format rather than a row.
@@ -1123,7 +1134,7 @@ export function parseCronJobRows(stdout) {
     const rec = record.replace(/^[\r\n]+/, "");
     if (rec.trim().length === 0) continue;
     const f = rec.split(CRON_JOB_SEPARATORS.fieldSep);
-    if (f.length < 7) {
+    if (f.length !== 7) {
       malformed.push({ index, fields: f.length });
       continue;
     }
