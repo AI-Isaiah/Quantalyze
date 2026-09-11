@@ -25,7 +25,7 @@
  * The oracle is instead a file — `scripts/prod-prober/cron-manifest.json` —
  * CAPTURED from PROD read-only through `--capture-manifest`, reviewed by a
  * human, and committed. What makes it an oracle rather than a photograph is
- * that a capture is REFUSED unless every row passes the ten secret-hygiene
+ * that a capture is REFUSED unless every row passes the secret-hygiene
  * rules below: the manifest records the ACHIEVABLE configuration, never
  * "whatever PROD happens to have".
  *
@@ -35,8 +35,8 @@
  * The manifest is committed. The drift diff is printed into a world-readable
  * Actions log. And the rows beyond jobid 1 have NEVER BEEN READ BY ANYONE
  * (RESEARCH Finding 3) — nobody can vouch for what is in fourteen other cron
- * commands. That is why there are TEN hygiene rules rather than the three
- * RESEARCH proposed, why they run on BOTH sides of the comparison, and why a
+ * commands. That is why the hygiene rules below are many rather than the
+ * three RESEARCH proposed, why they run on BOTH sides of the comparison, and why a
  * PROD command failing them is `cron-secret-in-command` EVEN WHEN ITS SHA
  * MATCHES THE MANIFEST — and even when there is no readable manifest at all,
  * because the PROD-side scan is section (0) of `compareManifest`, above every
@@ -83,6 +83,33 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// ⚠️ THE FIRST UPWARD `../` ESM IMPORT BETWEEN `.mjs` FILES UNDER `scripts/`,
+// AND IT IS DELIBERATE.
+//
+// The pattern census (164.8.5-PATTERNS §6) found 16 cross-module imports under
+// `scripts/`, every one of them same-directory or downward. This one goes up
+// two levels, so it is a NEW pattern rather than a stretch of an existing one,
+// and it is here for a measured reason:
+//
+//   The reverted repair `84b21cb5` shipped a NAIVE `stripSqlComments` of its
+//   own — one import away from the quote-aware, dollar-aware lexer this
+//   repository already owns and already unit-tests
+//   (`src/__tests__/sql-body-normalize.test.ts`). A second lexer is "a control
+//   that cannot fail": it drifts from the first, and nothing tells you which
+//   one is wrong. There is exactly ONE SQL lexer in this repo and this arm uses
+//   it.
+//
+// What the coupling costs, stated so the next editor knows: an edit to
+// `scanSql` can now break this arm. The tripwires are this file's own
+// `--self-test` scenarios and `src/__tests__/prod-prober-wiring.test.ts`, both
+// of which exercise real command text through `codeSpans` below. The three open
+// `[VAC04-C*]` items against the normalizer concern `extractFunctionDefs` and
+// `readQualifiedName`, NOT `scanSql`.
+//
+// Importing is side-effect-free: the module's CLI runs only under its
+// `invokedDirectly()` realpath guard (`sql-body-normalize.mjs:768-779`).
+import { scanSql } from "../../sql-body-normalize.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -165,7 +192,8 @@ export function sha256Hex(text) {
 }
 
 // ---------------------------------------------------------------------------
-// Secret hygiene — ten rules, each with a red fixture row and a green control
+// Secret hygiene — every rule in `HYGIENE_RULE_IDS` has a red fixture row and
+// a green control. The COUNT is never restated in prose: it moved once already.
 // ---------------------------------------------------------------------------
 
 /**
@@ -184,6 +212,7 @@ export const HYGIENE_RULE_IDS = [
   "service-role",
   "jwt-shape",
   "long-literal-in-headers",
+  "header-unparseable",
 ];
 
 /**
@@ -197,25 +226,126 @@ const HEADER_LITERAL_MIN = 16;
 /** A quoted literal at least this long inside a header argument list is a credential. */
 const HEADERS_LITERAL_MAX = 32;
 
-/** Walk to the `)` matching `text[openIdx]`, skipping over quoted literals. */
-function matchingParen(text, openIdx) {
+/**
+ * The prefix that makes a dollar-quoted region CODE rather than DATA.
+ *
+ * `DO $body$ … $body$` and `DO LANGUAGE plpgsql $$ … $$` are both valid; the
+ * suffix form (`DO $$…$$ LANGUAGE plpgsql`) needs no handling because the
+ * prefix is all this test reads. All four `DO` commands in the committed
+ * manifest use the bare `DO $tag$` form.
+ */
+const DO_PREFIX = /\bDO\s+(?:LANGUAGE\s+[A-Za-z_]+\s+)?$/i;
+
+/** Give-up depth for dollar nesting. No real command nests even one deep. */
+const MAX_DOLLAR_DEPTH = 4;
+
+/**
+ * Every span of EXECUTABLE text in a cron command: the outer command, plus each
+ * `DO` body, recursively.
+ *
+ * ⛔ WHY THIS EXISTS, AND WHY IT IS HERE RATHER THAN IN THE NORMALIZER.
+ * `scanSql` is a STRING lexer and it is right that `$$ … $$` is a string —
+ * `sql-body-normalize.mjs` exists to hash and diff FUNCTION BODIES, and
+ * re-entering a body as code would change what VAC-04 and VAC-08 compare. But a
+ * cron command is not a function body: a top-level `DO $body$ … $body$` is the
+ * thing that RUNS. MEASURED 2026-09-10: 4 of the 14 committed PROD commands are
+ * that shape, so a rule reading only `scanSql(cmd).masked` sees an empty
+ * command for the flagship job — the redesigned `vault-absent` would have fired
+ * on the exact configuration it exists to endorse.
+ *
+ * Nested tags need no special case: recursing into a `$a$` body means the
+ * body's own `scanSql` treats an inner `$b$…$b$` as the literal it is.
+ *
+ * @param {string} sql
+ * @returns {{base:number, sql:string, masked:string, dollarRegions:object[]}[]}
+ *   `base` is the offset of this span inside the ORIGINAL command, so a future
+ *   caller can report a position; `masked` is index-aligned with `sql`.
+ */
+export function codeSpans(sql, base = 0, depth = 0, out = []) {
+  if (depth > MAX_DOLLAR_DEPTH) {
+    // Thrown, not swallowed: `run()` maps an arm throw to `measure-fail`, which
+    // is the honest verdict for text this module gave up on.
+    throw new Error(`cron command has dollar-quote nesting deeper than ${MAX_DOLLAR_DEPTH} — refusing to judge it`);
+  }
+  const { masked, dollarRegions } = scanSql(sql);
+  out.push({ base, sql, masked, dollarRegions });
+  for (const r of dollarRegions) {
+    if (DO_PREFIX.test(masked.slice(0, r.start))) {
+      codeSpans(sql.slice(r.contentStart, r.contentEnd), base + r.contentStart, depth + 1, out);
+    }
+  }
+  return out;
+}
+
+/**
+ * The string builders whose arguments are still "the value" for length
+ * purposes. Anything NOT on this list is a black box the walk refuses to enter
+ * — see `derivedLiteralLength`'s accepted residual.
+ */
+const BUILDERS =
+  /^(?:concat|concat_ws|format|chr|decode|encode|convert_from|quote_literal|lower|upper|replace|reverse|translate|btrim|trim|substr|substring|left|right|repeat|lpad|rpad|regexp_replace|split_part|to_hex)$/i;
+
+/** The identifier immediately before a `(` — the callee, or null for a grouping paren. */
+const CALLEE_RE = /([A-Za-z_][A-Za-z0-9_.]*)\s*$/;
+
+/**
+ * `"quoted identifier"` — kept VERBATIM by `scanSql`'s mask (it is a name, not
+ * data), so every walk over masked text must step over it or a `'` or `(`
+ * inside a column name would desync the scan.
+ */
+function skipQuotedIdent(masked, i) {
+  let j = i + 1;
+  while (j < masked.length) {
+    if (masked[j] === '"') {
+      if (masked[j + 1] === '"') {
+        j += 2;
+        continue;
+      }
+      return j + 1;
+    }
+    j += 1;
+  }
+  return j;
+}
+
+/**
+ * The literal starting at `i`, or null. Boundaries come from `masked` (where a
+ * literal's CONTENT is blank, so the next `'` is always its closing quote);
+ * CONTENT comes from the original `sql`.
+ *
+ * This one primitive is what makes `E'…'`, `U&'…'` and `$q$…$q$` literals to
+ * this arm — the lexer already classified them, so bypass shapes (a) and (f)
+ * stop being spellings the rules cannot see.
+ */
+function literalAt(span, i) {
+  if (span.masked[i] === "'") {
+    let j = i + 1;
+    while (j < span.masked.length && span.masked[j] !== "'") j += 1;
+    return { start: i, end: j + 1, content: span.sql.slice(i + 1, j).replace(/''/g, "'") };
+  }
+  for (const r of span.dollarRegions) {
+    if (r.start === i) return { start: r.start, end: r.end, content: span.sql.slice(r.contentStart, r.contentEnd) };
+  }
+  return null;
+}
+
+/**
+ * The `)` matching `masked[openIdx]`, or **-1** when the parentheses do not
+ * balance.
+ *
+ * ⛔ -1 IS A REFUSAL, NOT A DEFAULT. The rule this replaced silently widened an
+ * unmatched region to the end of the text and kept judging; a region nobody can
+ * delimit is one nobody can clear, and `header-unparseable` says so out loud.
+ * No quote-skipping is needed here because literal contents are already blank
+ * in `masked` — that is the whole benefit of walking the mask.
+ */
+function closingParen(masked, openIdx) {
   let depth = 0;
   let i = openIdx;
-  while (i < text.length) {
-    const c = text[i];
-    if (c === "'") {
-      i += 1;
-      while (i < text.length) {
-        if (text[i] === "'") {
-          if (text[i + 1] === "'") {
-            i += 2;
-            continue;
-          }
-          break;
-        }
-        i += 1;
-      }
-      i += 1;
+  while (i < masked.length) {
+    const c = masked[i];
+    if (c === '"') {
+      i = skipQuotedIdent(masked, i);
       continue;
     }
     if (c === "(") depth += 1;
@@ -228,39 +358,112 @@ function matchingParen(text, openIdx) {
   return -1;
 }
 
-/** Every single-quoted literal in `[from, to)`, with `''` treated as an escape. */
-function singleQuotedLiterals(text, from, to) {
-  const out = [];
+/**
+ * The DERIVED length of the value expression in `[from, to)`: how many
+ * characters of literal text this expression can put on the wire.
+ *
+ * ⛔ THE POINT OF THE WORD "DERIVED". Testing the first literal's length is
+ * dodged by typing `'FAKE-key-' || '0123456789ab'`, and every one of the
+ * measured bypass family (chr/concat/format/decode/quote_literal) is the same
+ * dodge with a different builder. Summing operands closes the family rather
+ * than the cases. THE THRESHOLDS DID NOT MOVE (D4) — the MEASUREMENT fed to
+ * them did.
+ *
+ * Where it deliberately stops:
+ *  - `(SELECT …)` is NEVER entered. ⛔ MEASURED: the naive "every literal up to
+ *    the next depth-0 comma" sum reads **28** on the GREEN, achievable
+ *    `'Bearer ' || (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE
+ *    name = 'analytics_service_key')` shape — a false positive on committed
+ *    text, i.e. exactly D4's forbidden outcome. With the skip it reads **7**.
+ *  - a `(` whose callee is not in `BUILDERS` is skipped whole. ACCEPTED
+ *    RESIDUAL: `my_fn('FAKE-key-0123456789ab') || 'CCCCDDDD'` sums to 8 and does
+ *    not fire. Closing it by descending into every function re-creates the
+ *    `(SELECT …)` false positive, and it needs an adversary who both splits the
+ *    key AND routes it through a function this list does not name.
+ *  - `chr(...)` counts 1 — it emits one character however it spells its argument.
+ *  - a literal's length is its RAW content; `U&'\0046…'` over-counts 6:1 and
+ *    `E'\x46'` 4:1. Conservative, and the right direction for a credential test.
+ */
+function derivedLiteralLength(span, from, to) {
+  const { masked } = span;
+  let sum = 0;
   let i = from;
   while (i < to) {
-    if (text[i] !== "'") {
-      i += 1;
+    const c = masked[i];
+    if (c === '"') {
+      i = skipQuotedIdent(masked, i);
       continue;
     }
-    let j = i + 1;
-    let content = "";
-    while (j < to) {
-      if (text[j] === "'") {
-        if (text[j + 1] === "'") {
-          content += "'";
-          j += 2;
-          continue;
-        }
-        break;
-      }
-      content += text[j];
-      j += 1;
+    // End of THIS argument. The caller decides what the next one means.
+    if (c === "," || c === ")") break;
+    const lit = literalAt(span, i);
+    if (lit) {
+      sum += lit.content.length;
+      i = lit.end;
+      continue;
     }
-    out.push({ content, start: i, end: j });
-    i = j + 1;
+    if (c === "(") {
+      const close = closingParen(masked, i);
+      const end = close === -1 ? to : close;
+      const m = CALLEE_RE.exec(masked.slice(from, i));
+      const callee = m ? m[1] : null;
+      if (/^\s*SELECT\b/i.test(masked.slice(i + 1, end))) {
+        i = end + 1;
+        continue;
+      }
+      if (callee === null) {
+        // A grouping paren: `('a' || 'b')` still derives its operands.
+        sum += derivedLiteralLength(span, i + 1, end);
+      } else if (BUILDERS.test(callee)) {
+        if (/^chr$/i.test(callee)) sum += 1;
+        else for (const [a, b] of depth0Args(span, i + 1, end)) sum += derivedLiteralLength(span, a, b);
+      }
+      i = end + 1;
+      continue;
+    }
+    i += 1;
   }
-  return out;
+  return sum;
+}
+
+/**
+ * `[from, to)` split on commas at paren depth 0 — the `countArgs` idiom from
+ * `sql-body-normalize.mjs`. Literal contents are already blank in `masked`, so
+ * a comma inside a string cannot split an argument.
+ */
+function depth0Args(span, from, to) {
+  const { masked } = span;
+  const args = [];
+  let start = from;
+  let depth = 0;
+  let i = from;
+  while (i < to) {
+    const ch = masked[i];
+    if (ch === '"') {
+      i = skipQuotedIdent(masked, i);
+      continue;
+    }
+    const lit = literalAt(span, i);
+    if (lit) {
+      i = lit.end;
+      continue;
+    }
+    if (ch === "(") depth += 1;
+    else if (ch === ")") depth -= 1;
+    else if (ch === "," && depth === 0) {
+      args.push([start, i]);
+      start = i + 1;
+    }
+    i += 1;
+  }
+  args.push([start, to]);
+  return args;
 }
 
 const escapeRe = (s) => s.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
 
 /**
- * `'<header>' , '<literal>'` where the literal is long enough to BE a
+ * `'<header>', <value>` where the DERIVED value is long enough to BE a
  * credential.
  *
  * ⚠️ The length test is what separates the red shape from the green one, and it
@@ -268,42 +471,60 @@ const escapeRe = (s) => s.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
  * — the achievable Vault-backed shape — closes its quote immediately after the
  * space and concatenates; a bare `/Authorization'\s*,\s*'/` would fire on it,
  * i.e. on exactly the configuration this arm exists to endorse.
+ *
+ * ⛔ THE ANCHOR IS READ FROM `sql`, AND CONFIRMED ON `masked` (D7). The header
+ * NAME is itself a literal, so it is BLANK in the mask and cannot be matched
+ * there. Matching it on the raw text and then requiring `masked[idx] === "'"`
+ * gets both halves: the name is found, and a name that is really sitting inside
+ * a `--` comment or inside a bigger literal (a whole-header JSON blob) is NOT
+ * an anchor, because in the mask those positions are blank.
  */
-function headerCarriesLiteral(text, headerName) {
-  const re = new RegExp(`'${escapeRe(headerName)}'\\s*,\\s*'`, "gi");
-  for (const m of text.matchAll(re)) {
-    const quoteIdx = m.index + m[0].length - 1;
-    const first = singleQuotedLiterals(text, quoteIdx, text.length)[0];
-    if (first && first.content.length >= HEADER_LITERAL_MIN) return true;
+function headerCarriesLiteral(span, headerName) {
+  const re = new RegExp(`'${escapeRe(headerName)}'\\s*,`, "gi");
+  for (const m of span.sql.matchAll(re)) {
+    if (span.masked[m.index] !== "'") continue;
+    if (derivedLiteralLength(span, m.index + m[0].length, span.masked.length) >= HEADER_LITERAL_MIN) return true;
   }
   return false;
 }
 
-/** The argument-list regions a header value can hide in. */
-function headerRegions(text) {
+/**
+ * The argument-list regions a header value can hide in, as
+ * `{ from, to, unparseable }`.
+ *
+ * ⛔ AN `unparseable` REGION IS NEITHER CLEAN NOR DIRTY — IT IS REFUSED.
+ * Every header-rule walk below skips it, and `[header-unparseable]` is the only
+ * verdict it produces. (The token rule a later plan adds must exclude it too,
+ * for the same reason: a region whose end nobody can find has no contents
+ * anybody can enumerate.)
+ *
+ * The no-paren branch — `headers := '{"X-Service-Key":"…"}'::jsonb` — is
+ * PRESERVED as a `[from, semi)` region on purpose: that inline spelling is one
+ * of the measured bypass shapes, and dropping the branch would stop it being a
+ * header region at all.
+ */
+function headerRegions(span) {
+  const { masked } = span;
   const regions = [];
-  for (const m of text.matchAll(/jsonb_build_object\s*\(/gi)) {
-    const open = m.index + m[0].length - 1;
-    const close = matchingParen(text, open);
-    regions.push([open + 1, close === -1 ? text.length : close]);
-  }
-  for (const m of text.matchAll(/headers\s*:=/gi)) {
+  const push = (open) => {
+    const close = closingParen(masked, open);
+    if (close === -1) regions.push({ from: open + 1, to: masked.length, unparseable: true });
+    else regions.push({ from: open + 1, to: close, unparseable: false });
+  };
+  for (const m of masked.matchAll(/jsonb_build_object\s*\(/gi)) push(m.index + m[0].length - 1);
+  for (const m of masked.matchAll(/headers\s*:=/gi)) {
     const from = m.index + m[0].length;
-    const semi = text.indexOf(";", from);
-    const paren = text.indexOf("(", from);
-    if (paren !== -1 && (semi === -1 || paren < semi)) {
-      const close = matchingParen(text, paren);
-      regions.push([paren + 1, close === -1 ? text.length : close]);
-    } else {
-      // `headers := '{"X-Service-Key":"…"}'::jsonb` — no call to walk into.
-      regions.push([from, semi === -1 ? text.length : semi]);
-    }
+    const semi = masked.indexOf(";", from);
+    const paren = masked.indexOf("(", from);
+    if (paren !== -1 && (semi === -1 || paren < semi)) push(paren);
+    else regions.push({ from, to: semi === -1 ? masked.length : semi, unparseable: false });
   }
   return regions;
 }
 
 /**
- * Ten rules. Returns one sentence per violation, each prefixed with a stable
+ * Every rule in `HYGIENE_RULE_IDS`. Returns one sentence per violation, each
+ * prefixed with a stable
  * `[rule-id]`.
  *
  * ⛔ A VIOLATION NEVER QUOTES THE OFFENDING TEXT. It names the rule and the job.
@@ -320,71 +541,148 @@ export function hygieneViolations(jobname, command) {
   const text = String(command ?? "");
   const name = String(jobname ?? "");
   const out = [];
-  const say = (id, sentence) => out.push(`[${id}] ${sentence}`);
+  const said = new Set();
+  // A rule says its piece AT MOST ONCE per command. Every rule below runs over
+  // a LIST of spans and the outer span's raw text contains each `DO` body, so
+  // without this a text-shape rule would report the same finding twice for the
+  // same job.
+  const say = (id, sentence) => {
+    if (said.has(id)) return;
+    said.add(id);
+    out.push(`[${id}] ${sentence}`);
+  };
 
-  if (headerCarriesLiteral(text, "X-Service-Key")) {
-    say(
-      "x-service-key-literal",
-      `job ${name} passes an X-Service-Key header as an inline quoted literal — this is the exact pre-2026-09-01 shape that kept a live analytics key inside cron.job.command for months. Resolve it from vault.decrypted_secrets at execution time instead.`,
-    );
+  // ⛔ EVERY RULE READS THE SPAN LIST, NOT THE RAW COMMAND. See `codeSpans`:
+  // four of the fourteen committed commands are a top-level `DO $body$` block,
+  // which the string lexer correctly masks away in its entirety.
+  const spans = codeSpans(text);
+
+  for (const span of spans) {
+    if (headerCarriesLiteral(span, "X-Service-Key")) {
+      say(
+        "x-service-key-literal",
+        `job ${name} passes an X-Service-Key header as an inline quoted literal — this is the exact pre-2026-09-01 shape that kept a live analytics key inside cron.job.command for months. Resolve it from vault.decrypted_secrets at execution time instead.`,
+      );
+    }
+    if (headerCarriesLiteral(span, "Authorization")) {
+      say(
+        "authorization-literal",
+        `job ${name} passes an Authorization header as an inline quoted literal long enough to be a credential.`,
+      );
+    }
+    if (headerCarriesLiteral(span, "apikey")) {
+      say(
+        "apikey-literal",
+        `job ${name} passes an apikey header as an inline quoted literal long enough to be a credential.`,
+      );
+    }
+    for (const region of headerRegions(span)) {
+      if (region.unparseable) {
+        say(
+          "header-unparseable",
+          `job ${name} has a header argument list whose parentheses do not balance, so its contents cannot be delimited and its value cannot be judged. An unjudgeable command is not a clean one — fix the command text, or re-capture it if the reading itself was truncated.`,
+        );
+        continue;
+      }
+      // ⚠️ The DERIVED length of EVERY depth-0 argument, not of the first
+      // literal: a `||`-split or builder-assembled value under a header name
+      // outside the three anchored ones is the same defect spelled differently.
+      // A single literal sums to itself, so the pre-existing red row still
+      // fires and `HEADERS_LITERAL_MAX` never moved.
+      //
+      // ACCEPTED RESIDUAL, recorded beside the rule it belongs to: a derived
+      // value of 16-31 characters under a NON-anchored header name sits below
+      // this threshold, whose VALUE D4 locks. That is the pre-existing
+      // threshold POLICY — the three anchored names are the ones the achievable
+      // configuration sends a credential under, and lowering the general
+      // threshold fires on `'application/json'`-class constants. It is not a
+      // bypass family.
+      const long = depth0Args(span, region.from, region.to).some(
+        ([a, b]) => derivedLiteralLength(span, a, b) >= HEADERS_LITERAL_MAX,
+      );
+      if (long) {
+        say(
+          "long-literal-in-headers",
+          `job ${name} passes a value deriving ${HEADERS_LITERAL_MAX}+ characters of literal text inside a header argument list. Header constants are short ('application/json' is 16); anything that long is a value, and a value in a header is a credential.`,
+        );
+        // ⚠️ No `break`. The old loop broke out to avoid repeating itself;
+        // `say` now de-duplicates, and breaking would let a long literal in an
+        // EARLY region hide an unparseable region later in the same command.
+      }
+    }
   }
-  if (/current_setting\s*\(\s*'app\./i.test(text)) {
-    say(
-      "app-guc",
-      `job ${name} reads a current_setting('app.…') GUC. Setting those needs ALTER DATABASE … SET on a placeholder GUC, which returns 42501 on Supabase — a job carrying this design is not the achievable configuration and cannot be the standard PROD is judged against.`,
-    );
+
+  // The text-shape rules. They read each span's RAW `sql` rather than its mask
+  // BY DESIGN: `'app.` lives inside a literal, `service_role` is a literal in
+  // its own red row, and a JWT and a Bearer token are shapes of text. Masking
+  // those would blank the very thing they match. Iterating spans changes
+  // nothing today (the outer raw text already contains each body) — they are
+  // written this way so both families read the same input list.
+  for (const span of spans) {
+    if (/current_setting\s*\(\s*'app\./i.test(span.sql)) {
+      say(
+        "app-guc",
+        `job ${name} reads a current_setting('app.…') GUC. Setting those needs ALTER DATABASE … SET on a placeholder GUC, which returns 42501 on Supabase — a job carrying this design is not the achievable configuration and cannot be the standard PROD is judged against.`,
+      );
+    }
+    // ⚠️ IN-04. THREE ARMS, AND THEY ARE DELIBERATELY DISJOINT — each one can
+    // be neutered alone and exactly one red row goes clean.
+    //
+    //  1. `password :=` on MASKED — the plpgsql assignment. The `:=` is CODE,
+    //     so it survives masking. The mask is what makes this arm mean "an
+    //     assignment", because inside a literal it would be blank.
+    //  2. `PGPASSWORD` / `password=` on RAW — these live INSIDE a connection
+    //     string literal (`'host=… password=…'`), whose contents the mask
+    //     blanks, so raw text is the only place they exist.
+    //  3. the libpq URI on RAW — likewise a literal.
+    //
+    // ⛔ ARM 2 IS `password\s*=`, NOT `password\s*:?=`. With the colon
+    // optional it would also match `v_password :=` in the raw text and SUBSUME
+    // arm 1 entirely — arm 1 could then never be the reason a command is
+    // flagged, i.e. a control that cannot fail. The colon is what keeps them
+    // separable. MEASURED before this plan: the assignment form and the URI
+    // form were both MISSED; only the bare `PGPASSWORD` arm fired.
+    if (
+      /password\s*:=/i.test(span.masked) ||
+      /PGPASSWORD/i.test(span.sql) ||
+      /password\s*=/i.test(span.sql) ||
+      /postgres(?:ql)?:\/\/[^\s:]+:[^\s@]+@/i.test(span.sql)
+    ) {
+      say(
+        "pg-password",
+        `job ${name} carries a database password (a PGPASSWORD/password= assignment, a plpgsql password variable assignment, or a libpq URI with credentials in it). A cron command should never hold connection credentials in its text.`,
+      );
+    }
+    if (/'Bearer\s+[A-Za-z0-9._-]{8,}/i.test(span.sql)) {
+      say(
+        "bearer-literal",
+        `job ${name} carries a Bearer token that continues INSIDE its own quotes — the achievable shape closes the quote right after the space ('Bearer ' || <expr>) and does not match this.`,
+      );
+    }
+    if (/service_role/i.test(span.sql)) {
+      say(
+        "service-role",
+        `job ${name} names service_role. A cron command referencing the service role is either carrying a service-role key or escalating to it; both are findings.`,
+      );
+    }
+    if (/eyJ[A-Za-z0-9_-]{20,}/.test(span.sql)) {
+      say(
+        "jwt-shape",
+        `job ${name} contains a JWT-shaped literal (an eyJ… header segment). This is the shape Supabase's own pg_cron → pg_net documentation puts directly in headers, which is how it reaches production by copy-paste.`,
+      );
+    }
   }
+
+  // ⚠️ `vault-absent` KEEPS its `includes()` body in this plan, deliberately
+  // untouched, and it reads the WHOLE command rather than a span. Its redesign
+  // — "does this command reach a Vault read that EXECUTES" — is a later plan
+  // with its own red controls, and reaching into it here would make this plan's
+  // neuter matrix unable to attribute a RED to the lexer.
   if (name === "match_engine_cron" && !text.includes("vault.decrypted_secrets")) {
     say(
       "vault-absent",
       `job ${name} does not read vault.decrypted_secrets. The achievable configuration resolves its key from Vault at execution time, so a command without it is obtaining the key some other way — and the only other ways this project has used put it in the command text.`,
     );
-  }
-  if (/PGPASSWORD/i.test(text) || /password\s*=/i.test(text)) {
-    say(
-      "pg-password",
-      `job ${name} carries a database password assignment (PGPASSWORD or password=). A cron command should never hold connection credentials in its text.`,
-    );
-  }
-  if (headerCarriesLiteral(text, "Authorization")) {
-    say(
-      "authorization-literal",
-      `job ${name} passes an Authorization header as an inline quoted literal long enough to be a credential.`,
-    );
-  }
-  if (/'Bearer\s+[A-Za-z0-9._-]{8,}/i.test(text)) {
-    say(
-      "bearer-literal",
-      `job ${name} carries a Bearer token that continues INSIDE its own quotes — the achievable shape closes the quote right after the space ('Bearer ' || <expr>) and does not match this.`,
-    );
-  }
-  if (headerCarriesLiteral(text, "apikey")) {
-    say(
-      "apikey-literal",
-      `job ${name} passes an apikey header as an inline quoted literal long enough to be a credential.`,
-    );
-  }
-  if (/service_role/i.test(text)) {
-    say(
-      "service-role",
-      `job ${name} names service_role. A cron command referencing the service role is either carrying a service-role key or escalating to it; both are findings.`,
-    );
-  }
-  if (/eyJ[A-Za-z0-9_-]{20,}/.test(text)) {
-    say(
-      "jwt-shape",
-      `job ${name} contains a JWT-shaped literal (an eyJ… header segment). This is the shape Supabase's own pg_cron → pg_net documentation puts directly in headers, which is how it reaches production by copy-paste.`,
-    );
-  }
-  for (const [from, to] of headerRegions(text)) {
-    const long = singleQuotedLiterals(text, from, to).find((l) => l.content.length >= HEADERS_LITERAL_MAX);
-    if (long) {
-      say(
-        "long-literal-in-headers",
-        `job ${name} passes a quoted literal of ${HEADERS_LITERAL_MAX}+ characters inside a header argument list. Header constants are short ('application/json' is 16); anything that long is a value, and a value in a header is a credential.`,
-      );
-      break;
-    }
   }
 
   return out;

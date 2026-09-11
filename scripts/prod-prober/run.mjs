@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 62;
+export const SELF_TEST_SCENARIOS = 64;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -1899,7 +1899,7 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
-  scenario("hygiene RED: all ten rules fire on their own fixture row, and the id sets match exactly");
+  scenario("hygiene RED: every rule fires on its own fixture row, and the id sets match exactly");
   // -------------------------------------------------------------------------
   {
     const red = loadFixture("cron-drift", "hygiene-red.json");
@@ -1908,7 +1908,15 @@ export async function selfTest() {
     } else {
       const missed = [];
       const overlapping = [];
+      // ⛔ A COUNTED ROW AXIS, NOT A HAND-TYPED TOTAL. The old assertion was
+      // `red.data.length === 10`, a literal that equalled the rule count only
+      // by a one-row-per-rule coincidence — a rule needing two red rows broke
+      // it, and bumping the literal to match would have been the fix that
+      // measures nothing. `judged` counts the rows this loop actually reached,
+      // so a row skipped for any reason fails here rather than passing quietly.
+      let judged = 0;
       for (const row of red.data) {
+        judged += 1;
         const v = CRON_DRIFT_MOD.hygieneViolations(row.jobname, row.command);
         const ids = v.map((x) => x.slice(1, x.indexOf("]")));
         if (!ids.includes(row.rule)) missed.push(row.rule);
@@ -1918,12 +1926,19 @@ export async function selfTest() {
       const fixtureIds = [...new Set(red.data.map((x) => x.rule))].sort();
       const armIds = [...CRON_DRIFT_MOD.HYGIENE_RULE_IDS].sort();
       pass =
-        expect(missed.length === 0, `every red row fires the rule it names (${missed.join(", ") || "all ten fired"})`) &&
+        expect(
+          missed.length === 0,
+          `every red row fires the rule it names (${missed.join(", ") || `all ${judged} rows fired`})`,
+        ) &&
         expect(
           overlapping.length === 0,
           `and fires ONLY that rule — red-fixture ISOLATION, the lint-sql-gates idiom (${overlapping.join(" ") || "each row isolates one rule"})`,
         ) &&
-        expect(red.data.length === 10, `the fixture has exactly ten rows (got ${red.data.length})`) &&
+        expect(judged === red.data.length, `every row in the fixture was judged (${judged} of ${red.data.length})`) &&
+        expect(
+          red.data.length >= CRON_DRIFT_MOD.HYGIENE_RULE_IDS.length,
+          `the fixture carries at least one row per rule (${red.data.length} rows vs ${CRON_DRIFT_MOD.HYGIENE_RULE_IDS.length} rules)`,
+        ) &&
         expect(
           JSON.stringify(fixtureIds) === JSON.stringify(armIds),
           `the fixture's rule ids are EXACTLY the arm's HYGIENE_RULE_IDS — a rule added without a red row, or a red row whose rule was deleted, fails here (fixture [${fixtureIds.join(", ")}] vs arm [${armIds.join(", ")}])`,
@@ -1961,6 +1976,114 @@ export async function selfTest() {
         expect(
           flagged.length === 0,
           `no achievable shape is flagged (${flagged.map((x) => `${x.jobname}: ${x.v.join(" ")}`).join(" | ") || "all clean"})`,
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario(
+    "DERIVED LENGTH is calibrated: 'Bearer ' || (SELECT …) sums below HEADER_LITERAL_MIN while a split key sums above it",
+  );
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE FALSE-POSITIVE DIRECTION IS THE ONE THAT MATTERS HERE. The naive
+    // derived sum — every literal up to the next depth-0 comma, which is what
+    // the review finding literally asked for — MEASURES 28 on the achievable
+    // Vault-backed `'Bearer ' || (SELECT decrypted_secret FROM
+    // vault.decrypted_secrets WHERE name = 'analytics_service_key')` shape:
+    // `'Bearer '` (7) plus the secret's NAME (21). That fires on committed,
+    // correct configuration. Refusing to descend into `(SELECT …)` is what
+    // makes it 7, and this scenario is the control for that refusal.
+    const green = loadFixture("cron-drift", "hygiene-green.json");
+    if (!green.ok) {
+      pass = expect(false, green.reason) && pass;
+    } else {
+      const idsOf = (job, cmd) => CRON_DRIFT_MOD.hygieneViolations(job, cmd).map((x) => x.slice(1, x.indexOf("]")));
+      const HEADER_IDS = ["x-service-key-literal", "authorization-literal", "apikey-literal", "long-literal-in-headers"];
+      const bearer = green.data.find((g) => g.command.includes("'Bearer ' ||"));
+      const split =
+        "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', 'FAKE-key-' || '0123456789ab'), body := '{}'::jsonb)";
+      const bearerIds = bearer ? idsOf(bearer.jobname, bearer.command) : ["<no Bearer control in hygiene-green.json>"];
+      const splitIds = idsOf("fixture_split_key_job", split);
+
+      // The CORRECTION's measurement, kept as a permanent control rather than a
+      // note in a plan: `scanSql` alone masks a top-level `DO $body$ … $body$`
+      // as ONE string, so a masked-only rule reads the flagship job — and four
+      // of the fourteen committed commands — as having no body at all.
+      const mec = green.data.find((g) => g.jobname === "match_engine_cron");
+      const spans = mec ? CRON_DRIFT_MOD.codeSpans(mec.command) : [];
+
+      pass =
+        expect(
+          bearer !== undefined && bearerIds.every((id) => !HEADER_IDS.includes(id)),
+          `the 'Bearer ' || (SELECT …) shape derives BELOW the threshold and fires no header rule (${JSON.stringify(bearerIds)})`,
+        ) &&
+        expect(
+          splitIds.includes("x-service-key-literal"),
+          `while '<prefix>' || '<suffix>' under the SAME threshold DOES fire — the sum is over operands, not over the first literal (${JSON.stringify(splitIds)})`,
+        ) &&
+        expect(
+          spans.length === 2,
+          `codeSpans re-enters the DO body of the Vault-backed match_engine_cron command: 2 spans (got ${spans.length})`,
+        ) &&
+        expect(
+          spans.length === 2 && spans[1].masked.includes("vault.decrypted_secrets"),
+          "and the body's Vault read is visible on the SECOND span's MASKED text — a rule reading only scanSql(cmd).masked would see an empty command here",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("the COMMITTED cron manifest passes every hygiene rule — zero violations on all rows (the false-positive budget)");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THIS IS THE ORACLE'S OWN TEXT, NOT A FIXTURE. It is asserted in the
+    // same wave the derived-length rules land, because a rule that fires on
+    // real committed configuration turns the hourly prober into noise, and
+    // alert fatigue is how a true positive gets ignored.
+    //
+    // ⚠️ THE MARGIN HERE IS ONE CHARACTER WIDE. Measured token census of the
+    // committed commands: `retention_notification_dispatches:` is 34 characters
+    // and `reconcile_dropped_enqueue_sweep:` is exactly 32 — both at or over
+    // `HEADERS_LITERAL_MAX`, and clean only because they sit outside a header
+    // region. Whoever renames a cron job, or moves one of those strings into a
+    // header, is touching this scenario.
+    //
+    // ⛔ IF THIS GOES RED, NARROW THE RULE. Never edit the manifest to fit.
+    if (!existsSync(CRON_DRIFT_MOD.MANIFEST_PATH)) {
+      pass =
+        expect(
+          false,
+          `the committed cron manifest is MISSING at ${CRON_DRIFT_MOD.MANIFEST_PATH} — a missing oracle is a FAIL, never a skip`,
+        ) && pass;
+    } else {
+      let manifest = null;
+      let readError = null;
+      try {
+        manifest = JSON.parse(readFileSync(CRON_DRIFT_MOD.MANIFEST_PATH, "utf8"));
+      } catch (err) {
+        readError = err.message;
+      }
+      const jobs = manifest && Array.isArray(manifest.jobs) ? manifest.jobs : [];
+      let judged = 0;
+      const flagged = [];
+      for (const row of jobs) {
+        if (typeof row.command !== "string") continue; // a withheld row has no text to judge
+        judged += 1;
+        const v = CRON_DRIFT_MOD.hygieneViolations(row.jobname, row.command);
+        if (v.length > 0) flagged.push(`${row.jobname}: ${v.map((x) => x.slice(0, x.indexOf("]") + 1)).join(" ")}`);
+      }
+      pass =
+        expect(readError === null, `the committed manifest parses (${readError || "ok"})`) &&
+        expect(
+          judged >= 10,
+          `at least ten committed commands were judged — a manifest with fewer rows than that is not the oracle this scenario means (got ${judged})`,
+        ) &&
+        expect(
+          flagged.length === 0,
+          `and NONE of them trips a hygiene rule (${flagged.join(" | ") || `all ${judged} clean`})`,
         ) &&
         pass;
     }
@@ -2784,7 +2907,7 @@ export async function selfTest() {
  *       ids, never the offending text.
  *
  * The command TEXT is written on success precisely because every row passed
- * those ten rules. A reviewer may still withhold any row to sha-only afterwards
+ * those rules. A reviewer may still withhold any row to sha-only afterwards
  * — see the withhold procedure at the top of `arms/cron-drift.mjs`.
  *
  * @returns {Promise<number>} the CLI exit code (0 captured / 1 refused on hygiene / 3 refused on usage, an unidentified database, or an unreadable cron.job record)
@@ -2814,7 +2937,7 @@ export async function captureManifest({ seams, outPath, log = (s) => console.log
   const { rows, malformed } = CRON_DRIFT_MOD.parseCronJobRows(res.stdout);
   if (malformed.length > 0) {
     // ⛔ BEFORE the hygiene loop, and deliberately: a record that could not be
-    // parsed was never handed to the ten rules, so a capture that proceeded
+    // parsed was never handed to the hygiene rules, so a capture that proceeded
     // would be certifying text nobody read. The counts are printed; the record
     // text never is.
     log(
