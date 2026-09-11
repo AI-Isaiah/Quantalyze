@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 60;
+export const SELF_TEST_SCENARIOS = 62;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -1734,6 +1734,79 @@ export async function selfTest() {
         expect(
           r.defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:match_engine_cron"),
           "AND the PROD credential is STILL reported — the rows were really read, whatever database they came from",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("WR-11: a manifest row whose command does not hash to its own sha is manifest-invalid naming the jobname");
+  // -------------------------------------------------------------------------
+  {
+    // `manifest-sha-mismatch.json` is WR-11's exact adversary: a byte copy of
+    // `manifest-inline-key.json` whose match_engine_cron `command` was
+    // hand-edited to the CLEAN Vault-backed body while its `command_sha256`
+    // was left describing the DIRTY one. The committed text looks tidy; the
+    // sha still names the inline key. Without the binding this reports clean
+    // on the manifest side and prints a diff about text nobody ever captured.
+    const prod = loadFixture("cron-drift", "prod-inline-key.json");
+    const man = loadFixture("cron-drift", "manifest-sha-mismatch.json");
+    if (!prod.ok || !man.ok) {
+      pass = expect(false, prod.ok ? man.reason : prod.reason) && pass;
+    } else {
+      const manRow = man.data.jobs.find((j) => j.jobname === "match_engine_cron");
+      const derived = CRON_DRIFT_MOD.sha256Hex(CRON_DRIFT_MOD.normalizeCommand(manRow.command));
+      const r = await driftRun(prod.data, driftFixturePath("manifest-sha-mismatch.json"), quiet);
+      const invalid = r.defects.filter((x) => x.kind === "manifest-invalid");
+      pass =
+        expect(
+          derived !== manRow.command_sha256,
+          `PRECONDITION: the fixture really IS unbound (${derived.slice(0, 12)} vs ${String(manRow.command_sha256).slice(0, 12)}) — a bound fixture would make every assertion below vacuous`,
+        ) &&
+        expect(r.exitCode === 1, `an unbound manifest row exits 1 (got ${r.exitCode})`) &&
+        expect(invalid.length === 1, `exactly one manifest-invalid (got ${invalid.length})`) &&
+        expect(
+          String((invalid[0] || {}).detail).includes("match_engine_cron"),
+          "naming the row a reviewer has to re-capture",
+        ) &&
+        expect(
+          String((invalid[0] || {}).detail).includes("command_sha256 it publishes") &&
+            String((invalid[0] || {}).detail).includes(derived.slice(0, 12)) &&
+            String((invalid[0] || {}).detail).includes(String(manRow.command_sha256).slice(0, 12)),
+          "and naming BOTH 12-hex prefixes — the derived one and the published one",
+        ) &&
+        expect(
+          r.defects.filter((d) => d.subject === "manifest:match_engine_cron").length === 0,
+          "and NO manifest-side hygiene verdict about that row — the text it would have scanned was never captured, and a clean reading of fabricated text is worse than no reading",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("HOIST: the PROD credential scan fires with the oracle HAND-EDITED (sha mismatch)");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ THE FOURTH BROKEN-ORACLE STATE, and the one the reverted repair
+    // actually created. WR-11's return is a NEW way to collapse the whole
+    // result to `manifest-invalid`, so it is a new candidate off switch for
+    // the live credential scan — and hand-editing the committed text is
+    // precisely what this arm's adversary does. Same run as the scenario
+    // above, asserted for the opposite thing, so that one neuter reddens one
+    // of them and never both.
+    const prod = loadFixture("cron-drift", "prod-inline-key.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const r = await driftRun(prod.data, driftFixturePath("manifest-sha-mismatch.json"), quiet);
+      pass =
+        expect(
+          r.defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:match_engine_cron"),
+          "AND the PROD credential is STILL reported — a HAND-EDITED oracle is not an off switch either, which is the exact regression that reverted the first repair",
+        ) &&
+        expect(
+          r.defects.some((d) => d.kind === "manifest-invalid"),
+          "in the same run that refuses the oracle — both findings ride out together, they are not alternatives",
         ) &&
         pass;
     }
