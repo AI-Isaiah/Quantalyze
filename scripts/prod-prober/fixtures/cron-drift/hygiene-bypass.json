@@ -201,5 +201,19 @@
       "long-token-anywhere"
     ],
     "expect_same_verdict_as": "bypass_comment_borne_key_job"
+  },
+  {
+    "shape": "(p) WR-R1-03: an inline X-Service-Key in the OUTER command, beside SIX nested DO bodies that push codeSpans past MAX_DOLLAR_DEPTH. The throw used to leave hygieneViolations BEFORE ANY RULE RAN, so every finding on the row was LOST and it became a generic measure-fail — for ANY jobname, not only match_engine_cron as the residual first claimed. The refusal is now ADDITIVE: the row reports the credential AND the refusal. ⚠️ RESIDUAL, measured and recorded rather than closed: a credential INSIDE the too-deep body is still unreported — those spans were never read, and command-unjudgeable is the honest verdict about them.",
+    "jobname": "bypass_deep_nesting_hides_key_job",
+    "command": "PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', 'FAKE-0123456789-0123456789-0123456789ab')); DO $t5$ DO $t4$ DO $t3$ DO $t2$ DO $t1$ DO $t0$ PERFORM 1; $t0$ $t1$ $t2$ $t3$ $t4$ $t5$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers",
+      "command-unjudgeable"
+    ],
+    "expect_all_of": [
+      "x-service-key-literal",
+      "command-unjudgeable"
+    ]
   }
 ]

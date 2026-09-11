@@ -115,5 +115,11 @@
     "jobname": "fixture_var_key_job",
     "note": "BYPASS (h) AS A RED ROW. The header VALUE is a plpgsql VARIABLE, so every header-anchored rule has nothing to measure and this row fires long-token-anywhere ALONE — which is what makes it attributable. The literal sits OUTSIDE any header region: that is the Q2 partition working, not luck. Assembled from short operands so no credential-shaped token is typed whole into a public repo.",
     "command": "DO $$ DECLARE k text; BEGIN k := 'FAKE-0123456789-0123456789-0123456789ab'; PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', k), body := '{}'::jsonb); END $$"
+  },
+  {
+    "rule": "command-unjudgeable",
+    "jobname": "fixture_deep_dollar_nesting_job",
+    "note": "WR-R1-03. codeSpans gives up past MAX_DOLLAR_DEPTH and used to throw straight out of hygieneViolations — BEFORE ANY RULE RAN — so every finding on such a row was LOST and the row became a generic measure-fail, for ANY jobname (the residual as first recorded wrongly bounded this to match_engine_cron). The refusal is now ADDITIVE: the rules run over the spans that WERE read and this id is reported beside them. It carries NO credential on purpose, because this file asserts one-rule isolation.",
+    "command": "DO $t5$ DO $t4$ DO $t3$ DO $t2$ DO $t1$ DO $t0$ PERFORM retention_sweep('compute_jobs_done', interval '30 days'); $t0$ $t1$ $t2$ $t3$ $t4$ $t5$"
   }
 ]

@@ -302,6 +302,11 @@ export const HYGIENE_RULE_IDS = [
   "long-literal-in-headers",
   "header-unparseable",
   "long-token-anywhere",
+  // ⛔ NOT A CREDENTIAL RULE — A REFUSAL, and it is in this list so a red row
+  // must prove it can fire (WR-R1-03). It is the second member of
+  // `UNJUDGEABLE_RULE_IDS` beside `header-unparseable`, so it routes to
+  // `measure-fail` rather than to a rotation remedy.
+  "command-unjudgeable",
 ];
 
 /**
@@ -1146,7 +1151,36 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
   // ⛔ EVERY RULE READS THE SPAN LIST, NOT THE RAW COMMAND. See `codeSpans`:
   // four of the fourteen committed commands are a top-level `DO $body$` block,
   // which the string lexer correctly masks away in its entirety.
-  const spans = codeSpans(text);
+  //
+  // ⛔ THE REFUSAL IS ADDITIVE, NOT SUBSTITUTIVE (164.8.5-REVIEW-R1 WR-R1-03).
+  // `codeSpans` throws when dollar nesting exceeds `MAX_DOLLAR_DEPTH`, and it
+  // used to throw straight out of this function — BEFORE ANY RULE RAN. Every
+  // rule that would have fired on that command was lost, and the row became a
+  // generic `measure-fail`. MEASURED 2026-09-11: an `audit_log_hot_to_cold` row
+  // with six nested `DO` bodies and an inline `X-Service-Key` reported
+  // `credential findings: 0`.
+  //
+  // ⚠️ AND THE RESIDUAL AS FIRST RECORDED WAS UNDERSTATED. The FIX-PROBER
+  // summary bounded it to `match_engine_cron`, "the one job the rule resolves
+  // callables for". False: this call sits above every rule, so the loss applied
+  // to ANY jobname. That is the same shape as F2 — an off-switch an adversary
+  // holds with one character, on the rules that exist to catch bypasses — and
+  // the answer is the same: collect what CAN be measured, and report the
+  // refusal BESIDE it rather than instead of it.
+  //
+  // `codeSpans` appends into `out` as it recurses, so passing our own array
+  // keeps every span it reached before giving up. The outer span is pushed
+  // first, so the rules still see the whole command text; what is lost is only
+  // the too-deeply-nested bodies, and `command-unjudgeable` says so.
+  const spans = [];
+  try {
+    codeSpans(text, 0, 0, spans);
+  } catch (err) {
+    say(
+      "command-unjudgeable",
+      `job ${name} carries a command this module gave up lexing (${err && err.message ? err.message : String(err)}). The rules below still ran over the ${spans.length} span(s) that WERE read, and any finding they report is real — but the unread part was NOT judged, and an unjudged command is not a clean one.`,
+    );
+  }
 
   for (const span of spans) {
     if (headerCarriesLiteral(span, "X-Service-Key")) {
@@ -1476,7 +1510,7 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
 }
 
 /** Rule ids whose finding is "I could not judge this", not "this carries a secret". */
-const UNJUDGEABLE_RULE_IDS = ["header-unparseable"];
+const UNJUDGEABLE_RULE_IDS = ["header-unparseable", "command-unjudgeable"];
 
 /**
  * Split a violation list into the two things a caller must report DIFFERENTLY.
