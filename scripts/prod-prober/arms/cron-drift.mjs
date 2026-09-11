@@ -593,6 +593,85 @@ function literalAt(span, i) {
  * did not write one because nothing then needed it (03-SUMMARY deviation 7);
  * this is that rule's arrival, not a second helper.
  */
+/**
+ * EVERY COMMENT BODY in a span, as `{ start, end, content }` — the sibling
+ * producer of `literalsIn`, feeding the SAME token test.
+ *
+ * ⛔ WHY THIS EXISTS (164.8.5-REVIEW-R1 WR-R1-01). `long-token-anywhere` read
+ * `literalsIn(span)` only, and `literalsIn` walks `masked`, in which `scanSql`
+ * has blanked comment bodies AND their delimiters. So a comment was never a
+ * literal and never reached the token rule. MEASURED 2026-09-11: a
+ * 37-character digit-bearing key in a `--` comment, in a `/* *\/` comment and in
+ * a comment inside a `DO` body all reported `[]`, while the identical key in a
+ * literal reported `[long-token-anywhere]`.
+ *
+ * ⛔ IT IS THE CALL THIS REPOSITORY ALREADY MADE FOR THE SIBLING GATE.
+ * `scripts/lint-app-guc.mjs` (decision D-05) argues at length that "criterion
+ * 1's gate is a grep, and a grep does not know a comment from a statement. So
+ * neither may this gate." The token rule quietly did. The realistic path is not
+ * an adversary: it is an operator "removing" an inline key by commenting it
+ * out, after which the next `captureManifest` writes that comment byte for byte
+ * into a manifest committed to a PUBLIC repository while the arm reports the
+ * row clean. Comments in these commands are not hypothetical — the committed
+ * `retention_compute_jobs_orphaned_running` row opens with one.
+ *
+ * ⚠️ The four text-shape rules already read `span.sql` RAW, so a JWT, a
+ * `service_role` mention and a `'Bearer xxxxx` literal were caught in a comment
+ * all along. What was invisible was the OPAQUE non-JWT key — the one family
+ * `long-token-anywhere` exists for.
+ *
+ * The walk steps over quoted identifiers and literals with the same primitives
+ * every other walk here uses, so a `--` inside `"a--b"` or inside a string is
+ * not a comment start; the START is read from `sql` and CONFIRMED against
+ * `masked` being blank there, which is exactly "scanSql agreed this is a
+ * comment". Nested block comments are matched by depth, the way `scanSql`
+ * itself treats them (MEASURED: `/* a /* b *\/ c *\/` masks as one comment).
+ */
+function commentsIn(span) {
+  const { masked, sql } = span;
+  const out = [];
+  let i = 0;
+  while (i < masked.length) {
+    if (masked[i] === '"') {
+      i = skipQuotedIdent(masked, i);
+      continue;
+    }
+    const lit = literalAt(span, i);
+    if (lit) {
+      i = lit.end;
+      continue;
+    }
+    // `masked[i] === " "` is scanSql's own verdict that this is not code.
+    if (masked[i] === " " && sql[i] !== masked[i]) {
+      if (sql.startsWith("--", i)) {
+        const nl = sql.indexOf("\n", i);
+        const end = nl === -1 ? sql.length : nl;
+        out.push({ start: i, end, content: sql.slice(i + 2, end) });
+        i = end;
+        continue;
+      }
+      if (sql.startsWith("/*", i)) {
+        let depth = 1;
+        let j = i + 2;
+        while (j < sql.length && depth > 0) {
+          if (sql.startsWith("/*", j)) {
+            depth += 1;
+            j += 2;
+          } else if (sql.startsWith("*/", j)) {
+            depth -= 1;
+            j += 2;
+          } else j += 1;
+        }
+        out.push({ start: i, end: j, content: sql.slice(i + 2, depth === 0 ? j - 2 : j) });
+        i = j;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return out;
+}
+
 function literalsIn(span) {
   const out = [];
   const { masked } = span;
@@ -1131,6 +1210,44 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
     // enumerate them. The partition loses nothing while
     // `TOKEN_MIN >= HEADERS_LITERAL_MAX` — see the derivation beside
     // `TOKEN_MIN`, which the wiring test pins.
+    //
+    // ⛔ THE TOKEN TEST ITSELF IS ONE FUNCTION WITH TWO PRODUCERS — literals
+    // and comment bodies (164.8.5-REVIEW-R1 WR-R1-01). It is factored out
+    // rather than duplicated so the two can never drift: a threshold or an
+    // exemption added for one would otherwise silently not apply to the other,
+    // which is precisely how the comment path came to be uncovered.
+    //
+    // ⛔ THE `vaultSpan` EXEMPTION WAS DELETED IN 164.8.5-REVIEW F5, AND ITS
+    // ABSENCE IS THE SAFEGUARD. It read
+    //
+    //     const vaultSpan = VAULT_READ_RE.test(span.masked);
+    //     …
+    //     if (vaultSpan && BARE_URL_RE.test(token)) continue;
+    //
+    // one line BELOW the unconditional `BARE_URL_RE` test, which already
+    // handles the only condition that could make it true — and `vaultSpan` had
+    // no other reader, so the line could not execute. It was dressed as a
+    // security exemption, so the next reader had to re-derive its
+    // unreachability before touching anything near it, and an edit to the test
+    // ABOVE would have silently changed its meaning with NO test moving. A
+    // redundant line that cannot execute is worse than a deleted one. Do not
+    // "restore" it: the bare-URL exemption below is the whole of it.
+    const testTokens = (text, where) => {
+      for (const token of String(text).split(/\s+/)) {
+        if (token.length < TOKEN_MIN) continue;
+        if (!/\d/.test(token)) continue;
+        if (isBareUrl(token)) continue;
+        // Already `jwt-shape`'s finding. Without this the JWT red row would fire
+        // TWO rules and its isolation assertion — the thing that makes a red row
+        // attributable — would fail.
+        if (/eyJ[A-Za-z0-9_-]{20,}/.test(token)) continue;
+        say(
+          "long-token-anywhere",
+          `job ${name} carries a ${TOKEN_MIN}+ character whitespace-delimited token containing a digit inside a ${where}. A value that long is not a header constant or a message: it is a credential that has been moved out of the header expression — into a variable, into a whole-header JSON blob, or into a comment — where the header rules cannot see it.`,
+        );
+      }
+    };
+
     for (const lit of literalsIn(span)) {
       // ⛔ `!r.unparseable` — PARSEABLE REGIONS ONLY (164.8.5-REVIEW F2). The
       // exclusion used to cover UNPARSEABLE regions too, and an unparseable
@@ -1198,34 +1315,15 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
         )
       )
         continue;
-      // ⛔ THE `vaultSpan` EXEMPTION WAS DELETED IN 164.8.5-REVIEW F5, AND ITS
-      // ABSENCE IS THE SAFEGUARD. It read
-      //
-      //     const vaultSpan = VAULT_READ_RE.test(span.masked);
-      //     …
-      //     if (vaultSpan && BARE_URL_RE.test(token)) continue;
-      //
-      // one line BELOW the unconditional `BARE_URL_RE` test, which already
-      // handles the only condition that could make it true — and `vaultSpan`
-      // had no other reader, so the line could not execute. It was dressed as a
-      // security exemption, so the next reader had to re-derive its
-      // unreachability before touching anything near it, and an edit to the
-      // test ABOVE would have silently changed its meaning with NO test moving.
-      // A redundant line that cannot execute is worse than a deleted one. Do
-      // not "restore" it: the bare-URL exemption below is the whole of it.
-      for (const token of lit.content.split(/\s+/)) {
-        if (token.length < TOKEN_MIN) continue;
-        if (!/\d/.test(token)) continue;
-        if (isBareUrl(token)) continue;
-        // Already `jwt-shape`'s finding. Without this the JWT red row would fire
-        // TWO rules and its isolation assertion — the thing that makes a red row
-        // attributable — would fail.
-        if (/eyJ[A-Za-z0-9_-]{20,}/.test(token)) continue;
-        say(
-          "long-token-anywhere",
-          `job ${name} carries a ${TOKEN_MIN}+ character whitespace-delimited token containing a digit inside a string literal, outside any header argument list. A value that long is not a header constant or a message: it is a credential that has been moved out of the header expression — into a variable, or into a whole-header JSON blob — where the header rules cannot see it.`,
-        );
-      }
+      testTokens(lit.content, "string literal, outside any header argument list");
+    }
+
+    // ⛔ AND THE SAME TEST OVER COMMENT BODIES (164.8.5-REVIEW-R1 WR-R1-01) —
+    // the D-05 parallel is recorded on `commentsIn`. A comment needs NO header
+    // exclusion: it is never an argument of anything, so nothing else could
+    // have counted it.
+    for (const c of commentsIn(span)) {
+      testTokens(c.content, "COMMENT — commenting a key out does not remove it, and the next capture writes that comment into a manifest committed to a public repository");
     }
   }
 

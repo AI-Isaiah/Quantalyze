@@ -3008,6 +3008,15 @@ export async function selfTest() {
         CRON_DRIFT_MOD.hygieneViolations("probe_job", `${cmd} SELECT set_config('p', '${TOKEN}', false);`).map((x) =>
           x.slice(1, x.indexOf("]")),
         );
+      // The MASK-READING probe. `long-token-anywhere` reads literals and
+      // comment bodies and so survives the fold; the header rules anchor on
+      // STRUCTURE and cannot survive a command masked entirely to spaces. That
+      // asymmetry is what the control below measures.
+      const headerProbe = (cmd) =>
+        CRON_DRIFT_MOD.hygieneViolations(
+          "probe_job",
+          `${cmd} PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', '${TOKEN}'));`,
+        ).map((x) => x.slice(1, x.indexOf("]")));
       const executable = (cmd) => CRON_DRIFT_MOD.codeSpans(cmd)[0].masked.trim().length;
       const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
       const outPath = join(dir, "cron-manifest.json");
@@ -3039,8 +3048,25 @@ export async function selfTest() {
             `so a credential spliced into the STORED text is still CAUGHT (${probe(String(stored)).join(", ") || "NOTHING FIRED"})`,
           ) &&
           expect(
-            executable(folded) === 0 && probe(folded).length === 0,
-            `CONTROL, MEASURED NOT ARGUED: the v1-folded twin masks to ZERO executable characters (${executable(folded)}) and catches NOTHING (${probe(folded).join(", ") || "no rule fired"}) — that is the 1-of-14 blind row the review found`,
+            executable(folded) === 0,
+            `CONTROL, MEASURED NOT ARGUED: the v1-folded twin masks to ZERO executable characters (${executable(folded)}) — that is the 1-of-14 blind row the review found`,
+          ) &&
+          expect(
+            // ⛔ NARROWED 2026-09-11, AND THE NARROWING IS THE POINT
+            // (164.8.5-REVIEW-R1 WR-R1-01). This used to assert
+            // `probe(folded).length === 0` — "the folded twin catches NOTHING".
+            // That is no longer true and the change is an IMPROVEMENT:
+            // `long-token-anywhere` now reads COMMENT BODIES as well as
+            // literals, so a key folded into a comment IS named. Asserting the
+            // old blindness would have pinned a defect in place.
+            //
+            // What the fold still destroys is every MASK-READING rule, and that
+            // is what this control now measures by NAME. The header rules
+            // anchor on structure, and structure is exactly what a command
+            // masked 100% to spaces no longer has. Same splice, both sides.
+            headerProbe(String(stored)).includes("x-service-key-literal") &&
+              headerProbe(folded).includes("x-service-key-literal") === false,
+            `CONTROL: the same header splice fires the MASK-READING rules on the stored text (${headerProbe(String(stored)).join(", ") || "NOTHING"}) and NOT on the v1-folded twin (${headerProbe(folded).join(", ") || "nothing"}) — the fold costs every rule that needs executable structure, which is most of them`,
           ) &&
           expect(
             CRON_DRIFT_MOD.sha256Hex(CRON_DRIFT_MOD.normalizeCommand(source)) !==
