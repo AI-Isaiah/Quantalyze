@@ -896,6 +896,43 @@ describe("[164.1-05] kinds and floors", () => {
     expect(loosened.test(RAILWAY)).toBe(true);
   });
 
+  it("F5: the UNREACHABLE `vaultSpan` exemption is gone and cannot come back", () => {
+    // ⛔ A DELETION OF PROVABLY-DEAD CODE HAS NO BEHAVIOUR TO NEUTER, so the
+    // honest control is a PROOF plus a pin, not a red fixture.
+    //
+    // THE PROOF. The deleted line was `if (vaultSpan && BARE_URL_RE.test(token))
+    // continue;`, sitting one line BELOW the unconditional
+    // `if (BARE_URL_RE.test(token)) continue;`. Its condition implies the
+    // earlier one, so every token that could reach it had already been
+    // `continue`d — and `vaultSpan` had no other reader. It was dressed as a
+    // security exemption, which cost every subsequent reader the re-derivation,
+    // and an edit to the test ABOVE would have silently changed its meaning
+    // with no test moving.
+    const armText = readFileSync(join(PROBER_DIR, "arms", "cron-drift.mjs"), "utf8");
+    // ⚠️ COMMENT LINES ARE STRIPPED FIRST, and that is load-bearing rather than
+    // convenient: the arm QUOTES the deleted line in the comment that explains
+    // why it is gone, so a raw `not.toContain` would fail on the documentation
+    // of the fix. The pin is about CODE.
+    const body = armText
+      .slice(anchorIndex(armText, "export function hygieneViolations"))
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
+      .join("\n");
+    expect(body, "the dead exemption's identifier is gone from the rule body").not.toContain("vaultSpan =");
+    expect(body, "and the unconditional bare-URL exemption — the whole of what it duplicated — is still there").toContain(
+      "if (BARE_URL_RE.test(token)) continue;",
+    );
+    // CALIBRATION: the same predicate FINDS the line when it is spliced back
+    // in, so "it is gone" is a reading rather than something this assertion
+    // always says.
+    const restored = body.replace(
+      "if (BARE_URL_RE.test(token)) continue;",
+      "const vaultSpan = VAULT_READ_RE.test(span.masked);\n        if (BARE_URL_RE.test(token)) continue;",
+    );
+    expect(restored).not.toBe(body);
+    expect(restored).toContain("vaultSpan =");
+  });
+
   it("no hand-typed hygiene rule COUNT survives in the prober (criterion 9)", () => {
     // ⛔ THE COUNT MOVED ONCE ALREADY AND THE PROSE DID NOT. `run.mjs` used to
     // compare the red fixture's row count against a literal `10` that equalled
