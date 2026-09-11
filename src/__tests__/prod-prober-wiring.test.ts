@@ -1315,6 +1315,50 @@ describe("[164.1-05] kinds and floors", () => {
     expect(ids(`SELECT 'see https://${TOKEN}.invalid/a, then retry';`)).toEqual(["long-token-anywhere"]);
   });
 
+  it("WR-R2-05: the dollar-depth refusal is additive AT EVERY OFFSET — reordering two statements cannot silence a credential", () => {
+    // ⛔ WR-R1-03 MADE THE REFUSAL ADDITIVE AT THE CALL SITE AND LEFT IT
+    // SUBSTITUTIVE INSIDE THE RECURSION. `codeSpans` threw from within its own
+    // walk, so the PARENT's remaining `dollarRegions` loop and its entire
+    // single-quoted-body walk were abandoned — everything not yet pushed was
+    // lost, not merely the too-deeply-nested body.
+    //
+    // MEASURED on the parent commit:
+    //   SIBLING then DEEP -> ["command-unjudgeable","x-service-key-literal","long-literal-in-headers"]
+    //   DEEP then SIBLING -> ["command-unjudgeable"]                 <-- credential NOT named
+    // and `command-unjudgeable` is in UNJUDGEABLE_RULE_IDS, so the row routed
+    // to `measure-fail` with no rotation remedy. Order-dependence in a refusal
+    // is the substitutive bug wearing a different hat.
+    const ids = (cmd: string) => hygieneViolations("j", cmd).map((x) => x.slice(1, anchorIndex(x, "]")));
+    const KEY = `FAKE-0123456789${"-0123456789"}${"-0123456789ab"}`;
+    // Six nested DO bodies, carrying NO credential — it is the depth alone that
+    // makes the lexer give up.
+    const DEEP = "DO $t5$ DO $t4$ DO $t3$ DO $t2$ DO $t1$ DO $t0$ PERFORM noop(); $t0$ $t1$ $t2$ $t3$ $t4$ $t5$";
+    // An ordinary depth-1 DO body carrying the inline key. Nothing exotic.
+    const SIB = `DO $y$ BEGIN PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', '${KEY}')); END $y$`;
+
+    const EXPECTED = ["command-unjudgeable", "x-service-key-literal", "long-literal-in-headers"];
+    // CONTROLs first, so the two readings below are attributable.
+    expect(ids(`${SIB};`), "the sibling alone names the credential").toEqual([
+      "x-service-key-literal",
+      "long-literal-in-headers",
+    ]);
+    expect(ids(`${DEEP};`), "the deep block alone is the refusal and nothing else").toEqual(["command-unjudgeable"]);
+
+    // ⭐ THE INVARIANT: the SAME two statements, either order, the SAME verdict.
+    expect(ids(`${SIB}; ${DEEP};`)).toEqual(EXPECTED);
+    expect(ids(`${DEEP}; ${SIB};`)).toEqual(EXPECTED);
+
+    // ⚠️ THE RESIDUAL, AT ITS REAL WIDTH AND MEASURED RATHER THAN ARGUED: a
+    // credential INSIDE the too-deep body is still unreported. Those spans were
+    // never read and `command-unjudgeable` is the honest verdict about them.
+    // FIX-R1 recorded this residual with the key in the OUTER command, which is
+    // `spans[0]` and could never have been lost — so it measured the wrong
+    // thing. This assertion pins the residual where it actually lives, so a
+    // future narrowing of MAX_DOLLAR_DEPTH's blast radius has a red surface.
+    const DEEPKEY = `DO $t5$ DO $t4$ DO $t3$ DO $t2$ DO $t1$ DO $t0$ PERFORM foo('${KEY}'); $t0$ $t1$ $t2$ $t3$ $t4$ $t5$`;
+    expect(ids(`${DEEPKEY};`)).toEqual(["command-unjudgeable"]);
+  });
+
   it("F5: the UNREACHABLE `vaultSpan` exemption is gone and cannot come back", () => {
     // ⛔ A DELETION OF PROVABLY-DEAD CODE HAS NO BEHAVIOUR TO NEUTER, so the
     // honest control is a PROOF plus a pin, not a red fixture.

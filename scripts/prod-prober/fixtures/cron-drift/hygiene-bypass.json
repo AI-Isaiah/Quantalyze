@@ -203,9 +203,23 @@
     "expect_same_verdict_as": "bypass_comment_borne_key_job"
   },
   {
-    "shape": "(p) WR-R1-03: an inline X-Service-Key in the OUTER command, beside SIX nested DO bodies that push codeSpans past MAX_DOLLAR_DEPTH. The throw used to leave hygieneViolations BEFORE ANY RULE RAN, so every finding on the row was LOST and it became a generic measure-fail — for ANY jobname, not only match_engine_cron as the residual first claimed. The refusal is now ADDITIVE: the row reports the credential AND the refusal. ⚠️ RESIDUAL, measured and recorded rather than closed: a credential INSIDE the too-deep body is still unreported — those spans were never read, and command-unjudgeable is the honest verdict about them.",
+    "shape": "(p) WR-R1-03: an inline X-Service-Key in the OUTER command, beside SIX nested DO bodies that push codeSpans past MAX_DOLLAR_DEPTH. The throw used to leave hygieneViolations BEFORE ANY RULE RAN, so every finding on the row was LOST and it became a generic measure-fail — for ANY jobname, not only match_engine_cron as the residual first claimed. The refusal is now ADDITIVE: the row reports the credential AND the refusal. ⚠️ THE KEY IS IN THE OUTER COMMAND HERE — i.e. spans[0], pushed before any recursion — so this row could NEVER have shown the round-1 residual at its real width. Row (p-2) beside it is the ORDER-SWAPPED spelling that could, and the throw this row tolerated is exactly what (p-2) reddened (164.8.5-REVIEW-R2 WR-R2-05). ⚠️ RESIDUAL, measured and recorded rather than closed: a credential INSIDE the too-deep body is still unreported — those spans were never read, and command-unjudgeable is the honest verdict about them.",
     "jobname": "bypass_deep_nesting_hides_key_job",
     "command": "PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', 'FAKE-0123456789-0123456789-0123456789ab')); DO $t5$ DO $t4$ DO $t3$ DO $t2$ DO $t1$ DO $t0$ PERFORM 1; $t0$ $t1$ $t2$ $t3$ $t4$ $t5$",
+    "expect_any_of": [
+      "x-service-key-literal",
+      "long-literal-in-headers",
+      "command-unjudgeable"
+    ],
+    "expect_all_of": [
+      "x-service-key-literal",
+      "command-unjudgeable"
+    ]
+  },
+  {
+    "shape": "(p-2) 164.8.5-REVIEW-R2 WR-R2-05: the SAME two statements as (p), REORDERED — the too-deeply-nested DO block FIRST, the ordinary depth-1 DO body carrying the inline X-Service-Key SECOND. codeSpans threw from INSIDE its recursion, so the parent's remaining dollarRegions loop and its whole single-quoted-body walk were abandoned and everything not yet pushed was lost. MEASURED before the fix: (p) reported [command-unjudgeable, x-service-key-literal, long-literal-in-headers] and this row reported [command-unjudgeable] ALONE — a credential silenced by statement ORDER. The depth cap now records a refusal and returns, so the traversal completes.",
+    "jobname": "bypass_deep_nesting_before_key_job",
+    "command": "DO $t5$ DO $t4$ DO $t3$ DO $t2$ DO $t1$ DO $t0$ PERFORM 1; $t0$ $t1$ $t2$ $t3$ $t4$ $t5$; DO $y$ BEGIN PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', 'FAKE-' || '0123456789-0123456789' || '-0123456789ab')); END $y$",
     "expect_any_of": [
       "x-service-key-literal",
       "long-literal-in-headers",
