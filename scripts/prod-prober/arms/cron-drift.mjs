@@ -1404,7 +1404,7 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
     // 164.7-REVIEW WR-07) to the five spellings the single-quote form missed;
     // the six detected forms are tabulated in `lint-app-guc.mjs`'s docstring.
     if (
-      /current_setting\s*(?:\/\*[\s\S]*?\*\/\s*)?\(\s*(?:[EU]&?)?'{1,2}app\.|current_setting\s*\(\s*\$[A-Za-z_]*\$app\./i.test(
+      /current_setting\s*(?:\/\*[\s\S]*?\*\/\s*)?\(\s*(?:(?:\/\*[\s\S]*?\*\/|--[^\n]*\n)\s*)?(?:[EU]&?)?'{1,2}app\.|current_setting\s*(?:\/\*[\s\S]*?\*\/\s*)?\(\s*(?:(?:\/\*[\s\S]*?\*\/|--[^\n]*\n)\s*)?\$[A-Za-z_]*\$app\./i.test(
         span.sql,
       )
     ) {

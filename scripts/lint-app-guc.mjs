@@ -86,28 +86,49 @@ export const HEADER_SCAN_LINES = 40;
  * has ONE definition of what an app-GUC read looks like. `src/__tests__` pins
  * that identity by substring, so drifting either copy reds the suite.
  *
- * ── THE SIX SPELLINGS IT DETECTS (WIDENED 2026-09-11, plan 164.8.5-07) ──────
- * Postgres accepts the same call written six ways, and the pre-widening regex
- * saw exactly ONE of them — so the other five were a documented way to write a
- * new app-GUC reader that the gate waves through (164.7-REVIEW WR-07, and
- * `[APPGUC-DETECT-DOUBLEQUOTE-01]` for the second row, which was booked).
+ * ── WHAT IT DETECTS: TWO INDEPENDENT DIMENSIONS ────────────────────────────
+ * ⛔ THE COUNT IS DELIBERATELY NOT STATED HERE (164.8.5-REVIEW WR-05, closed
+ * 2026-09-11). This block used to say "THE SIX SPELLINGS IT DETECTS" and list
+ * six rows — and it was wrong in the direction that matters, because the list
+ * enumerated only one dimension and the prose promised totality. MEASURED at
+ * the time that prose was written: `current_setting(/*c*\/'app.x')` → FALSE,
+ * `current_setting(--c\n'app.x')` → FALSE, and
+ * `current_setting/*c*\/($q$app.x$q$)` → FALSE, because the comment group was
+ * absent from the SECOND alternation entirely. A count in prose is a claim
+ * nothing can check; the vitest below enumerates the matrix and IS the claim.
  *
+ * DIMENSION 1 — how the GUC NAME is quoted:
  *   plain            current_setting('app.x')
  *   doubled quote    current_setting(''app.x'')     inside an outer literal
  *   E-string         current_setting(E'app.x')
  *   unicode string   current_setting(U&'app.x')
  *   dollar-quoted    current_setting($q$app.x$q$)   any tag, including $$
- *   block comment    current_setting/*c*\/('app.x') between name and paren
  *
- * Each of the five widened spellings carries its OWN red fixture under
- * `FINDING_KINDS[unannotated-reader].redFixtures`, so `--self-test` can prove
- * each alternation individually rather than as a bundle.
+ * DIMENSION 2 — where a COMMENT may sit, since Postgres allows one wherever
+ * whitespace is allowed, and this gate must count comments (D-05):
+ *   none             current_setting('app.x')
+ *   before the paren current_setting/*c*\/('app.x')
+ *   after the paren  current_setting(/*c*\/'app.x')  block, or `--` + newline
  *
- * ⛔ MEASURED BEFORE AND AFTER (RESEARCH Q6, reproduced 2026-09-11 at this
- * commit): 292 migration files, 12 matches under the old source and 12 under
- * this one, ZERO per-file diffs. The widening therefore moves no allowlist
- * count. If a future widening DOES move one, the finding is real — fix the
- * regex or the prose it matched, never the count (decision D4).
+ * ⛔ BOTH DIMENSIONS APPLY TO BOTH ALTERNATIONS. That is the whole of the
+ * WR-05 fix: the second alternation (dollar-quoted) carried NEITHER comment
+ * position, so a reader who wrote `current_setting/*c*\/($q$app.x$q$)` — or
+ * anything with a comment inside the parentheses — had a documented way to add
+ * a new app-GUC reader the gate waves through. The pre-widening lineage is
+ * 164.7-REVIEW WR-07 and `[APPGUC-DETECT-DOUBLEQUOTE-01]`.
+ *
+ * The quoting spellings each carry their OWN red fixture under
+ * `FINDING_KINDS[unannotated-reader].redFixtures`, so `--self-test` proves each
+ * alternation individually rather than as a bundle; the comment POSITIONS are
+ * asserted as a full cross-product in `src/__tests__/lint-app-guc.test.ts`.
+ *
+ * ⛔ MEASURED BEFORE AND AFTER, TWICE. (1) RESEARCH Q6, reproduced 2026-09-11:
+ * 292 migration files, 12 matches under the pre-164.8.5-07 source and 12 under
+ * the post-07 one, ZERO per-file diffs. (2) The WR-05 widening the same day,
+ * over the same 292 files: 12 → 12 occurrences, ZERO per-file diffs, 71 ms.
+ * Neither widening moves an allowlist count. If a future widening DOES move
+ * one, the finding is real — fix the regex or the prose it matched, never the
+ * count (decision D4).
  *
  * ⚠️ KNOWN BLIND SPOT, booked as a criterion-1 limit and NOT fixed in this
  * phase: a read assembled by SQL string concatenation — e.g.
@@ -119,7 +140,7 @@ export const HEADER_SCAN_LINES = 40;
  * spelling that remains.
  */
 export const DETECT_RE =
-  /current_setting\s*(?:\/\*[\s\S]*?\*\/\s*)?\(\s*(?:[EU]&?)?'{1,2}app\.|current_setting\s*\(\s*\$[A-Za-z_]*\$app\./i;
+  /current_setting\s*(?:\/\*[\s\S]*?\*\/\s*)?\(\s*(?:(?:\/\*[\s\S]*?\*\/|--[^\n]*\n)\s*)?(?:[EU]&?)?'{1,2}app\.|current_setting\s*(?:\/\*[\s\S]*?\*\/\s*)?\(\s*(?:(?:\/\*[\s\S]*?\*\/|--[^\n]*\n)\s*)?\$[A-Za-z_]*\$app\./i;
 
 /** `-- APP-GUC-LINEAGE: …`, line-start anchored after optional indentation. */
 export const LINEAGE_MARKER_RE = /^\s*--\s*APP-GUC-LINEAGE:\s*(.*)$/;
@@ -411,7 +432,17 @@ export function parseLineageHeader(text) {
     };
   }
 
-  for (const i of markerLines) {
+  // ⛔ EXACTLY ZERO OR ONE MARKER REACHES HERE, AND THE CODE NOW SAYS SO
+  // (164.8.5-REVIEW IN-04). This was `for (const i of markerLines)`, which
+  // reads as "handle each of several markers" and could never iterate more than
+  // once: the `markerLines.length > 1` branch above RETURNS, and every path in
+  // the body below returns too. A loop that cannot loop is a false statement
+  // about the data, and the next reader has to prove it unreachable before
+  // touching anything near it — the same objection that got the dead `vaultSpan`
+  // line deleted in the sibling arm. ⚠️ NO BEHAVIOUR CHANGE: this is the same
+  // branch structure spelled honestly, and the app-GUC suite is its control.
+  if (markerLines.length === 1) {
+    const i = markerLines[0];
     const m = LINEAGE_MARKER_RE.exec(lines[i]);
     const line = i + 1;
     const payload = m[1].trim();

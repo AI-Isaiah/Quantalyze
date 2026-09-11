@@ -2700,6 +2700,37 @@ export async function selfTest() {
         const v = CRON_DRIFT_MOD.hygieneViolations(row.jobname, row.command);
         if (v.length > 0) flagged.push(`${row.jobname}: ${v.map((x) => x.slice(0, x.indexOf("]") + 1)).join(" ")}`);
       }
+
+      // ⛔ THE ANTI-VACUITY ARM (164.8.5-REVIEW WR-04, closed 2026-09-11).
+      // `judged >= 10` and `flagged.length === 0` are BOTH satisfied by a
+      // `hygieneViolations` that returns `[]` for everything — which is the one
+      // way this scenario could be catastrophically wrong while reading green,
+      // and it is the shape of the very defect the rules exist to prevent. The
+      // previous pass ran a 13-of-14 probe BY HAND and never committed it as a
+      // control; a measurement nobody committed is a measurement that will not
+      // be taken again.
+      //
+      // ⭐ THE INJECTION IS THE SAME FUNCTION ON THE SAME CORPUS, so it proves
+      // the RULES are live on THESE ROWS rather than that some rule fires
+      // somewhere. Each committed command is re-judged with a credential
+      // appended; every one of them must flip. Row-by-row and not "at least
+      // one": a rule set that woke up for a single row would otherwise pass.
+      const INJECT_KEY = `FAKE-${"0123456789"}-${"0123456789"}-${"0123456789ab"}`;
+      const inertRows = [];
+      for (const row of jobs) {
+        if (typeof row.command !== "string") continue;
+        const spiked = `${row.command}\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', '${INJECT_KEY}'));`;
+        let v = [];
+        try {
+          v = CRON_DRIFT_MOD.hygieneViolations(row.jobname, spiked);
+        } catch {
+          // A row this module refuses to lex is not an inert one — the refusal
+          // is itself a verdict, and `command-unjudgeable` reports it.
+          continue;
+        }
+        if (v.length === 0) inertRows.push(row.jobname);
+      }
+
       pass =
         expect(readError === null, `the committed manifest parses (${readError || "ok"})`) &&
         expect(
@@ -2709,6 +2740,10 @@ export async function selfTest() {
         expect(
           flagged.length === 0,
           `and NONE of them trips a hygiene rule (${flagged.join(" | ") || `all ${judged} clean`})`,
+        ) &&
+        expect(
+          inertRows.length === 0,
+          `ANTI-VACUITY: and the rules are LIVE on every one of those same rows — splicing a credential into each committed command makes each of them fire (${inertRows.join(", ") || `all ${judged} flipped`}). Without this, "zero violations" is equally the reading of a rule set that judges nothing at all.`,
         ) &&
         pass;
     }
