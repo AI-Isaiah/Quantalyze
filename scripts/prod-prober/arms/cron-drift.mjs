@@ -1020,7 +1020,29 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
     // `TOKEN_MIN >= HEADERS_LITERAL_MAX` — see the derivation beside
     // `TOKEN_MIN`, which the wiring test pins.
     for (const lit of literalsIn(span)) {
-      if (regions.some((r) => lit.start < r.to && lit.end > r.from)) continue;
+      // ⛔ `!r.unparseable` — PARSEABLE REGIONS ONLY (164.8.5-REVIEW F2). The
+      // exclusion used to cover UNPARSEABLE regions too, and an unparseable
+      // region runs to the END OF THE SPAN, so ONE stray `(` excluded every
+      // literal after it. REPRODUCED: a token that reports
+      // `["long-token-anywhere"]` reports `["header-unparseable"]` alone once a
+      // header argument list is left open, and `header-unparseable` is the sole
+      // `UNJUDGEABLE_RULE_IDS` member — so the finding routes to `measure-fail`
+      // and NO RULE NAMES THE TOKEN. Still exit 1, so a downgrade rather than a
+      // false green, but an off-switch an adversary holds with ONE CHARACTER,
+      // on the one rule that exists to catch bypasses (h) and (i).
+      //
+      // ⛔ THE OLD COMMENT'S DEFENCE — "nobody can delimit its contents to
+      // enumerate them" — IS TRUE OF THE WRONG WALK. It holds for
+      // `depth0Args`, which needs balanced parens to split arguments. It does
+      // NOT hold for `long-token-anywhere`, which splits a literal's CONTENT on
+      // whitespace and needs no paren structure at all.
+      //
+      // ⚠️ `header-unparseable` now fires ALONGSIDE this rule on such a
+      // command, so a fixture covering it declares BOTH ids. That is the right
+      // trade: one-rule isolation is a property of the RED fixture file, and
+      // preserving it at the cost of never naming the credential is the
+      // measurement serving the harness.
+      if (regions.some((r) => !r.unparseable && lit.start < r.to && lit.end > r.from)) continue;
       // ⛔ THE `vaultSpan` EXEMPTION WAS DELETED IN 164.8.5-REVIEW F5, AND ITS
       // ABSENCE IS THE SAFEGUARD. It read
       //

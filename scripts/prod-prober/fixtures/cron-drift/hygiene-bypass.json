@@ -152,5 +152,18 @@
     "expect_any_of": [
       "long-token-anywhere"
     ]
+  },
+  {
+    "shape": "(m) ONE stray `(` — an unparseable header region runs to the end of the span, and used to exclude every literal after it from the token rule",
+    "jobname": "bypass_unparseable_then_token_job",
+    "command": "DO $$ DECLARE k text; BEGIN -- resolves from vault.decrypted_secrets\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('Content-Type', 'application/json';\n  k := 'FAKE-0123456789-0123456789-0123456789ab';\nEND $$",
+    "expect_any_of": [
+      "long-token-anywhere",
+      "header-unparseable"
+    ],
+    "expect_all_of": [
+      "header-unparseable",
+      "long-token-anywhere"
+    ]
   }
 ]

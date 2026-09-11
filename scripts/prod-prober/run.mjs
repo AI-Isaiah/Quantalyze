@@ -1677,9 +1677,11 @@ export async function selfTest() {
       const silent = [];
       const unexpected = [];
       const forbidden = [];
+      const incomplete = [];
       const quoted = [];
       let judged = 0;
       let asserted_not = 0;
+      let asserted_all = 0;
       const byName = new Map();
       for (const row of bypass.data) {
         judged += 1;
@@ -1702,6 +1704,22 @@ export async function selfTest() {
         for (const id of row.expect_not || []) {
           asserted_not += 1;
           if (ids.includes(id)) forbidden.push(`${row.jobname}->${id}`);
+        }
+        // ⭐ `expect_all_of` — THE F2 DECISION, and the third thing a row can
+        // say. `expect_any_of` is satisfied by ONE id, which is exactly the
+        // reading that hid F2: a command with an unbalanced header region
+        // reported `header-unparseable` ALONE, `header-unparseable` is the sole
+        // `UNJUDGEABLE_RULE_IDS` member, so the run routed to `measure-fail` and
+        // NO RULE NAMED THE TOKEN. "At least one rule fired" is true of that
+        // state and says nothing about it.
+        //
+        // ⛔ THIS IS WHY THE ROW LIVES HERE AND NOT IN `hygiene-red.json`. That
+        // file asserts one-rule ISOLATION so a red row is attributable; this one
+        // must trip TWO. Isolation is a property of the RED file, not a thing
+        // worth keeping at the cost of never naming the credential.
+        for (const id of row.expect_all_of || []) {
+          asserted_all += 1;
+          if (!ids.includes(id)) incomplete.push(`${row.jobname}-> missing ${id} (got [${ids.join(",")}])`);
         }
         if (CRON_DRIFT_MOD.hygieneViolations(row.jobname, row.command).some((x) => x.includes(row.command))) {
           quoted.push(row.shape);
@@ -1731,6 +1749,14 @@ export async function selfTest() {
         expect(
           forbidden.length === 0,
           `and no row fires a rule its expect_not forbids — the header-region token belongs to long-literal-in-headers ALONE (${forbidden.join(" ") || "none forbidden fired"})`,
+        ) &&
+        expect(
+          asserted_all > 0,
+          `at least one row carries an expect_all_of — without it the F2 unparseable-region row would pass on "header-unparseable" alone, which IS the defect (${asserted_all} asserted)`,
+        ) &&
+        expect(
+          incomplete.length === 0,
+          `and every expect_all_of id really fired — a credential sitting after a stray \`(\` must be NAMED by a rule, not merely routed to measure-fail (${incomplete.join(" ") || "every declared id fired"})`,
         ) &&
         expect(quoted.length === 0, `and NO verdict quotes the offending command (${quoted.join(", ") || "none"})`) &&
         expect(pairs.length >= 2, `the SPELLING pairs are present (${pairs.length} paired rows)`) &&
