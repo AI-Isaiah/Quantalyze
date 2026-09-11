@@ -1411,7 +1411,7 @@ Plans:
 
 Plans:
 
-- [ ] 164.8.5-01-PLAN.md — Prober structure: section (0) PROD hygiene above every return in `compareManifest` (positional gate), `run()` never returns before it, mandatory + compared live marker, `{ rows, malformed }` parser with a measure-fail naming the count, `captureManifest` fourth refusal + its scenario; HOIST scenarios (absent / stale / marker-mismatched); individual neuter matrix
+- [x] 164.8.5-01-PLAN.md — Prober structure: section (0) PROD hygiene above every return in `compareManifest` (positional gate), `run()` never returns before it, mandatory + compared live marker, `{ rows, malformed }` parser with a measure-fail naming the count, `captureManifest` fourth refusal + its scenario; HOIST scenarios (absent / stale / marker-mismatched); individual neuter matrix
 - [ ] 164.8.5-02-PLAN.md — The four reverted repairs re-applied with a red control each: CR-01 username/database, CR-04 totality loop (three fields neutered ALONE), WR-11 sha binding + the HAND-EDITED hoist state, SR-05/07/08/09 comment fixes; eight-row individual neuter matrix
 - [ ] 164.8.5-03-PLAN.md — Hygiene lexer: import `scanSql`, `codeSpans()` DO-body recursion, header rules on masked text with derived-length sum (anchored ids at `HEADER_LITERAL_MIN`, every header argument at `HEADERS_LITERAL_MAX` — bypasses a–g, the non-anchored split, `$q$don't$q$` pair), `headerRegions` as a list with an unparseable state → `header-unparseable` measure-fail, IN-04 pg-password forms, `hygiene-bypass.json`, the committed-manifest zero-FP scenario
 - [ ] 164.8.5-04-PLAN.md — Individual neuter matrix for Plan 03's lexer-era controls (eleven rows) + the CR-03 reproduction
