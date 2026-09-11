@@ -1088,6 +1088,39 @@ describe("lint-app-guc: a walk that could not enter a subtree MEASURE_FAILs by n
     }
   });
 
+  it("IN-R2-05: `selfTest`'s fixture-directory reads are wrapped too — no bare `readdirSync` survives in it", () => {
+    // ⛔ A PIN, NOT A RED FIXTURE, AND THE REASON IS STATED. The arm above
+    // reddens by `chmod`-ing a TEMP directory it owns; the equivalent here
+    // would have to `chmod` the REAL `scripts/lint-app-guc-fixtures`, which is
+    // shared state across vitest shards. So the behaviour is measured by hand
+    // and PINNED here.
+    //
+    // MEASURED 2026-09-11, `chmod 111 scripts/lint-app-guc-fixtures`:
+    //   before — exit 1, `node:fs:1554 … binding.readdir(` (a stack trace)
+    //   after  — exit 1, "SELF-TEST FAIL: cannot READ the fixture directory
+    //            scripts/lint-app-guc-fixtures (EACCES) — …"
+    // The DIRECTION was already loud, so this is consistency and not a hole —
+    // but "the self-test could not run" and "the self-test failed" are two
+    // different sentences and only one sends an operator to a permission.
+    const src = readFileSync(join(ROOT, "scripts/lint-app-guc.mjs"), "utf8");
+    const at = src.indexOf("export function selfTest");
+    expect(at, "the anchor must resolve — a -1 slice would make every assertion below read the whole file").toBeGreaterThan(0);
+    const fn = src.slice(at);
+    const body = fn
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
+      .join("\n");
+    expect(body, "the enumeration goes through the wrapped helper").toContain("const fixtureNames = (suffix)");
+    expect(body.match(/readdirSync\(dir\)/g) ?? [], "and exactly ONE readdirSync survives — the one inside it").toHaveLength(1);
+    expect(body, "…and it is inside a try").toMatch(/try \{\s*\n\s*return readdirSync\(dir\)/);
+    expect(body, "whose catch names the directory and the errno").toContain("cannot READ the fixture directory");
+    // CALIBRATION: the predicate FINDS a second bare read when one is spliced
+    // back in, so "exactly one" is a reading rather than a constant.
+    const spliced = body.replace("const reds = fixtureNames(", "const reds = readdirSync(dir).filter(");
+    expect(spliced).not.toBe(body);
+    expect(spliced.match(/readdirSync\(dir\)/g) ?? []).toHaveLength(2);
+  });
+
   it("a directory that RESOLVES but cannot be READ is a MEASURE_FAIL, not an uncaught throw that loses the whole corpus", () => {
     // ⛔ THE ONE BARE CALL IN A BLOCK BUILT OUT OF WRAPPED ONES. `descend`
     // wraps `realpathSync` and the symlink arm wraps `statSync`; `readdirSync`

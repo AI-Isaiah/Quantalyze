@@ -730,23 +730,6 @@ function literalAt(span, i) {
 }
 
 /**
- * EVERY literal in a span, in order, as `{ start, end, content }`.
- *
- * ⛔ THE `DO` BODY IS SKIPPED, AND THAT IS NOT AN OPTIMISATION. At the OUTER
- * span a top-level `DO $body$ … $body$` is a dollar-quoted literal to
- * `scanSql`, so without this skip the whole procedural body would be handed to
- * the token rule as one enormous "literal" — and every CODE token in it
- * (identifiers, numeric arguments, `timeout_milliseconds := 60000`) would be
- * length-tested as if it were data. `codeSpans` already re-enters exactly these
- * regions as CODE and the rules run over the resulting span list, so the real
- * literals inside a `DO` body are reached on the CHILD span, once, correctly.
- * The predicate here is byte-identical to `codeSpans`' own, on purpose.
- *
- * ⚠️ Written for `long-token-anywhere`. Plan 03 specified a `literalsIn` and
- * did not write one because nothing then needed it (03-SUMMARY deviation 7);
- * this is that rule's arrival, not a second helper.
- */
-/**
  * EVERY COMMENT BODY in a span, as `{ start, end, content }` — the sibling
  * producer of `literalsIn`, feeding the SAME token test.
  *
@@ -825,6 +808,29 @@ function commentsIn(span) {
   return out;
 }
 
+/**
+ * EVERY literal in a span, in order, as `{ start, end, content }`.
+ *
+ * ⛔ THE `DO` BODY IS SKIPPED, AND THAT IS NOT AN OPTIMISATION. At the OUTER
+ * span a top-level `DO $body$ … $body$` is a dollar-quoted literal to
+ * `scanSql`, so without this skip the whole procedural body would be handed to
+ * the token rule as one enormous "literal" — and every CODE token in it
+ * (identifiers, numeric arguments, `timeout_milliseconds := 60000`) would be
+ * length-tested as if it were data. `codeSpans` already re-enters exactly these
+ * regions as CODE and the rules run over the resulting span list, so the real
+ * literals inside a `DO` body are reached on the CHILD span, once, correctly.
+ * The predicate here is byte-identical to `codeSpans`' own, on purpose.
+ *
+ * ⚠️ Written for `long-token-anywhere`. Plan 03 specified a `literalsIn` and
+ * did not write one because nothing then needed it (03-SUMMARY deviation 7);
+ * this is that rule's arrival, not a second helper.
+ *
+ * ⚠️ MOVED HERE 2026-09-11 (164.8.5-REVIEW-R2 IN-R2-01). This block sat ~45
+ * lines up, immediately above `commentsIn`, so every reader and every JSDoc
+ * tool attributed the `DO`-body argument to the COMMENT walker — which does not
+ * skip `DO` bodies at all and never needs to, because `literalAt` steps over
+ * them.
+ */
 function literalsIn(span) {
   const out = [];
   const { masked } = span;
@@ -1585,8 +1591,21 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
     // has ONE definition of what an app-GUC read looks like, and
     // `src/__tests__/lint-app-guc.test.ts` pins that identity by SUBSTRING, so
     // drifting either copy reds the suite. Widened 2026-09-11 (plan 164.8.5-07,
-    // 164.7-REVIEW WR-07) to the five spellings the single-quote form missed;
-    // the six detected forms are tabulated in `lint-app-guc.mjs`'s docstring.
+    // 164.7-REVIEW WR-07) to the spellings the single-quote form missed; the two
+    // detection DIMENSIONS are described in `lint-app-guc.mjs`'s docstring.
+    //
+    // ⛔ THE COUNT IS DELIBERATELY NOT STATED, HERE OR THERE (164.8.5-REVIEW-R2
+    // IN-R2-04). This comment said "the six detected forms are tabulated in
+    // `lint-app-guc.mjs`'s docstring" — and `113f9783` had DELETED that table
+    // on purpose the same day, replacing it with two dimensions under an
+    // explicit "⛔ THE COUNT IS DELIBERATELY NOT STATED HERE". So the sibling
+    // comment named a count and pointed at a table that no longer existed: the
+    // exact class the pass corrected twice elsewhere, committed a third time.
+    //
+    // ⚠️ The comment BODY is the non-crossing form, never `[\s\S]*?`
+    // (164.8.5-REVIEW-R2 WR-R2-06) — the lazy spelling BACKTRACKED across
+    // statements and reported a phantom read. The measurement is beside
+    // `DETECT_RE`.
     if (
       /current_setting\s*(?:\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\/\s*)?\(\s*(?:(?:\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\/|--[^\n]*\n)\s*)?(?:[EU]&?)?'{1,2}app\.|current_setting\s*(?:\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\/\s*)?\(\s*(?:(?:\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\/|--[^\n]*\n)\s*)?\$[A-Za-z_]*\$app\./i.test(
         span.sql,
