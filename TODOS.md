@@ -1669,9 +1669,23 @@ true for 146 and half of 142–145, and **false for 141**.
       pressure that justifies it.
       **Re-entry condition:** after the 04:00Z and 05:00Z ticks on **2026-09-11**, re-run P3-C from
       `164.7-ACTIVATION-PREFLIGHT.md` (P0 marker first). MT5 has been authorized again since
-      2026-09-10 ~16:10Z — issue #753 closed, prober run **34500455961** clean (its
-      `Open or update the prod-prober issue` step was SKIPPED, and that step is gated on a `^❌`
-      line, so skipped means zero defects).
+      2026-09-10 ~16:10Z — issue #753 closed, prober run **34500455961** reported `conclusion:
+      success` (its `Open or update the prod-prober issue` step was SKIPPED).
+      ⛔ **CORRECTED 2026-09-11 — the REASON recorded here was wrong, and it has been cited as
+      evidence in a later session.** That step is NOT gated on a `^❌` line. Its `if:` is
+      `failure() && steps.probe.outcome == 'failure' && inputs.arm == ''`
+      (`.github/workflows/prod-prober.yml:353`, measured at this commit), so a SKIP means the probe step did not end in
+      `failure` — which is not the same statement, and on a SCHEDULED run it is a much weaker one,
+      because the POSTURE LINE makes a scheduled probe exit 0 on purpose. Read `conclusion:` on the
+      run, or the runner log's own `❌ N defect(s)` line; never infer "zero defects" from a skipped
+      issue step.
+      ⚠️ **AND UNTIL 2026-09-11 THE PROBE STEP COULD NOT REACH ITS OWN POSTURE LINE.** GitHub runs
+      a `run:` block under `/usr/bin/bash -e {0}`, so the bare `node scripts/prod-prober/run.mjs >
+      "$RUNNER_LOG" 2>&1` terminated the step on any non-zero exit — before the `cat`, before the
+      `^❌` step-summary block and before the `exit 0`. Measured that day: 10 of the last 12
+      SCHEDULED runs `conclusion: failure`, i.e. an hourly red check on main's HEAD. Fixed with
+      `|| status=$?` in both branches. Any earlier reading of this workflow's conclusions predates
+      that fix and should be re-measured rather than trusted.
       **Nothing was written to PROD.** `scripts/prod-prober/cron-manifest.json` is untouched at 14
       jobs; `ledger_refresh_fanout` is still absent from it and from PROD.
       Owner: Phase 164.7 plan 07, re-entered at the same gate. Record:
