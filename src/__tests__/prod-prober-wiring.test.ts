@@ -1287,6 +1287,34 @@ describe("[164.1-05] kinds and floors", () => {
     expect(ids(`PERFORM net.http_post(url := 'https://x.invalid/t/${TOKEN}');`)).toEqual(["long-token-anywhere"]);
   });
 
+  it("WR-R2-07: an ordinary URL in PROSE does not fire a rotation remedy, and the same URL carrying a key still does", () => {
+    // ⛔ A ZERO-FP-BUDGET LEAK WITH A "ROTATE THE EXPOSED SECRET" REMEDY.
+    // `BARE_URL_RE` is anchored `^…$` and the exemption was applied to the whole
+    // whitespace-delimited token, so any adjacent character outside the path
+    // charset `[A-Za-z0-9._~/-]` destroyed it. `.` is in that charset; `,` `)`
+    // `;` `'` are not. MEASURED on the parent commit, prose carrying no
+    // credential anywhere, hourly against real PROD commands.
+    const ids = (cmd: string) => hygieneViolations("j", cmd).map((x) => x.slice(1, anchorIndex(x, "]")));
+    const URL_ = "https://api.example.com/v1/ingest";
+    expect(URL_.length).toBeGreaterThanOrEqual(TOKEN_MIN);
+    expect(/\d/.test(URL_), "the URL must carry a digit or this calibration is vacuous").toBe(true);
+
+    expect(ids(`DO $b$ BEGIN RAISE NOTICE 'see ${URL_}, then retry'; END $b$`)).toEqual([]);
+    expect(ids(`SELECT 'endpoint (${URL_})';`)).toEqual([]);
+    expect(ids(`SELECT 'see ${URL_}; retry';`)).toEqual([]);
+    // CONTROL — the same URL with nothing glued to it was already clean, so the
+    // three readings above measure the TRIM and not the URL.
+    expect(ids(`SELECT 'endpoint ${URL_}';`)).toEqual([]);
+
+    // ⛔ THE OTHER DIRECTION, AND IT IS THE ONE THAT MATTERS: trimming is for
+    // the EXEMPTION only. The length test still reads the real token, and a URL
+    // whose PATH SEGMENT is a credential still fires with punctuation attached.
+    const TOKEN = `FAKE${"-0123456789"}${"-0123456789"}${"-0123456789ab"}`;
+    expect(ids(`PERFORM net.http_post(url := 'https://hook.invalid/t/${TOKEN},');`)).toEqual(["long-token-anywhere"]);
+    expect(ids(`SELECT 'key (${TOKEN})';`)).toEqual(["long-token-anywhere"]);
+    expect(ids(`SELECT 'see https://${TOKEN}.invalid/a, then retry';`)).toEqual(["long-token-anywhere"]);
+  });
+
   it("F5: the UNREACHABLE `vaultSpan` exemption is gone and cannot come back", () => {
     // ⛔ A DELETION OF PROVABLY-DEAD CODE HAS NO BEHAVIOUR TO NEUTER, so the
     // honest control is a PROOF plus a pin, not a red fixture.
@@ -1309,16 +1337,22 @@ describe("[164.1-05] kinds and floors", () => {
       .split("\n")
       .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
       .join("\n");
+    // ⚠️ THE ANCHOR IS `if (isBareUrl(` AND NOT THE WHOLE LINE. WR-R2-07 gave
+    // the exemption an argument (`token.replace(TRIM_PUNCT, "")`), and pinning
+    // the argument here would make this proof-of-a-deletion red every time the
+    // exemption's INPUT is narrowed — which is a change this file wants, not
+    // one it should fight. What must stay is the UNCONDITIONAL call.
+    const EXEMPTION_ANCHOR = "if (isBareUrl(";
     expect(body, "the dead exemption's identifier is gone from the rule body").not.toContain("vaultSpan =");
     expect(body, "and the unconditional bare-URL exemption — the whole of what it duplicated — is still there").toContain(
-      "if (isBareUrl(token)) continue;",
+      EXEMPTION_ANCHOR,
     );
     // CALIBRATION: the same predicate FINDS the line when it is spliced back
     // in, so "it is gone" is a reading rather than something this assertion
     // always says.
     const restored = body.replace(
-      "if (isBareUrl(token)) continue;",
-      "const vaultSpan = VAULT_READ_RE.test(span.masked);\n        if (isBareUrl(token)) continue;",
+      EXEMPTION_ANCHOR,
+      `const vaultSpan = VAULT_READ_RE.test(span.masked);\n        ${EXEMPTION_ANCHOR}`,
     );
     expect(restored).not.toBe(body);
     expect(restored).toContain("vaultSpan =");

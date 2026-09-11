@@ -425,6 +425,32 @@ export const BARE_URL_RE = /^https?:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[A-Za-z0-9._
  * rather than closed.
  */
 export const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The punctuation a token picks up from the PROSE AROUND IT, stripped before —
+ * and ONLY before — the bare-URL exemption is tested.
+ *
+ * ⛔ ZERO-FP BUDGET LEAK (164.8.5-REVIEW-R2 WR-R2-07). `BARE_URL_RE` is anchored
+ * `^…$` and the exemption was applied to the whole whitespace-delimited token,
+ * so ANY adjacent character outside the path charset `[A-Za-z0-9._~/-]`
+ * destroyed it. `.` happens to be in that charset; `,` `)` `;` `'` are not.
+ * MEASURED 2026-09-11, ordinary prose carrying no credential at all:
+ *
+ *   RAISE NOTICE 'see https://api.example.com/v1/ingest, then retry' -> ["long-token-anywhere"]
+ *   SELECT 'endpoint (https://api.example.com/v1/ingest)'            -> ["long-token-anywhere"]
+ *   …the identical URL with no trailing punctuation                  -> []
+ *
+ * `long-token-anywhere` is a CREDENTIAL rule, so each of those became
+ * `cron-secret-in-command` — remedy "treat the named secret as EXPOSED and
+ * rotate it first" — hourly, on a real command, on no evidence. The `TOKEN_MIN`
+ * docstring already names that as the thing this rule must never do.
+ *
+ * ⛔ TRIMMED FOR THE EXEMPTION, NEVER FOR THE LENGTH. The length test still
+ * measures the REAL token, so trailing punctuation can never shrink a
+ * credential under `TOKEN_MIN`; and `https://hook.invalid/t/<key>,` still fires,
+ * because trimming the comma leaves a URL whose PATH SEGMENT is a credential.
+ */
+const TRIM_PUNCT = /^[('"`[]+|[)'"`\].,;:!?]+$/g;
 /**
  * Is this token a URL carrying NOTHING — the exemption `long-token-anywhere`
  * actually means?
@@ -1364,7 +1390,11 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
       for (const token of String(text).split(/\s+/)) {
         if (token.length < TOKEN_MIN) continue;
         if (!/\d/.test(token)) continue;
-        if (isBareUrl(token)) continue;
+        // ⚠️ `TRIM_PUNCT` — see the constant. The LENGTH test above read the
+        // real token; this reads the token without the prose punctuation glued
+        // to it, which is the only difference between a URL in a sentence and
+        // the same URL alone.
+        if (isBareUrl(token.replace(TRIM_PUNCT, ""))) continue;
         // Already `jwt-shape`'s finding. Without this the JWT red row would fire
         // TWO rules and its isolation assertion — the thing that makes a red row
         // attributable — would fail.
