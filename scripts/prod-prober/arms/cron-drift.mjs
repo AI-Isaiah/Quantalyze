@@ -331,14 +331,20 @@ export const TOKEN_MIN = HEADERS_LITERAL_MAX;
 export const BARE_URL_RE = /^https?:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[A-Za-z0-9._~/-]*)?$/;
 
 /**
- * The prefix that makes a dollar-quoted region CODE rather than DATA.
+ * The prefix that makes a QUOTED region CODE rather than DATA.
  *
  * `DO $body$ … $body$` and `DO LANGUAGE plpgsql $$ … $$` are both valid; the
  * suffix form (`DO $$…$$ LANGUAGE plpgsql`) needs no handling because the
- * prefix is all this test reads. All four `DO` commands in the committed
+ * prefix is all this test reads. All five `DO` commands in the committed
  * manifest use the bare `DO $tag$` form.
+ *
+ * ⛔ THE TRAILING `(?:[EU]&?)?` IS FOR `DO E'…'` AND `DO U&'…'`, and it is what
+ * keeps this ONE predicate honest for BOTH of its readers. `codeSpans` uses it
+ * to decide what to RE-ENTER as code and `literalsIn` uses it to decide what to
+ * SKIP; the two must range over the SAME set or a body is skipped by one and
+ * never re-entered by the other — which is exactly the CR-03 hole below.
  */
-const DO_PREFIX = /\bDO\s+(?:LANGUAGE\s+[A-Za-z_]+\s+)?$/i;
+const DO_PREFIX = /\bDO\s+(?:LANGUAGE\s+[A-Za-z_]+\s+)?(?:[EU]&?)?$/i;
 
 /** Give-up depth for dollar nesting. No real command nests even one deep. */
 const MAX_DOLLAR_DEPTH = 4;
@@ -360,6 +366,31 @@ const MAX_DOLLAR_DEPTH = 4;
  * Nested tags need no special case: recursing into a `$a$` body means the
  * body's own `scanSql` treats an inner `$b$…$b$` as the literal it is.
  *
+ * ⛔ BOTH SPELLINGS OF A `DO` BODY ARE RE-ENTERED (164.8.5-REVIEW CR-03 / F1,
+ * found independently by two reviewers). This loop used to iterate
+ * `dollarRegions` ONLY, while `literalsIn` below SKIPPED every `DO`-prefixed
+ * literal *including the single-quoted ones*, on the stated premise that
+ * "`codeSpans` already re-enters exactly these regions as CODE". For `DO '…'`
+ * NOBODY DID. The two predicates were byte-identical as documented and ranged
+ * over DIFFERENT SETS, so a single-quoted procedural body was a TOTAL blind
+ * spot — skipped as code, skipped as data. Orchestrator-reproduced:
+ *
+ *   DO $$ … k := '<37-char token>' … $$   =>  ["long-token-anywhere"]
+ *   DO '  … k := ''<same token>''  … '    =>  []
+ *
+ * `DO 'BEGIN … END'` is valid PostgreSQL — dollar-quoting is only RECOMMENDED —
+ * and five of the fourteen committed commands are `DO` blocks, so this was one
+ * spelling variant away from live exposure. Unlike the measured bypass family
+ * (a)-(g) it is not even obfuscation.
+ *
+ * ⚠️ THE SINGLE-QUOTED RECURSION IS ON `literalAt(...).content`, i.e. on the
+ * `''`-UNESCAPED text, because that is the program PostgreSQL actually runs.
+ * One consequence, recorded rather than fixed: `base` is only an approximation
+ * for such a child span — every `''` in the source shortens the body by one
+ * character. Nothing in this file reads `base` today (it is documented as "so a
+ * future caller can report a position"); that future caller must unescape-aware
+ * map its offsets or stop at the child's `base`.
+ *
  * @param {string} sql
  * @returns {{base:number, sql:string, masked:string, dollarRegions:object[]}[]}
  *   `base` is the offset of this span inside the ORIGINAL command, so a future
@@ -372,11 +403,36 @@ export function codeSpans(sql, base = 0, depth = 0, out = []) {
     throw new Error(`cron command has dollar-quote nesting deeper than ${MAX_DOLLAR_DEPTH} — refusing to judge it`);
   }
   const { masked, dollarRegions } = scanSql(sql);
-  out.push({ base, sql, masked, dollarRegions });
+  const span = { base, sql, masked, dollarRegions };
+  out.push(span);
   for (const r of dollarRegions) {
     if (DO_PREFIX.test(masked.slice(0, r.start))) {
       codeSpans(sql.slice(r.contentStart, r.contentEnd), base + r.contentStart, depth + 1, out);
     }
+  }
+  // The single-quoted body. Walked with the same primitives every other walk in
+  // this file uses — `skipQuotedIdent` so a `'` inside a "quoted identifier"
+  // cannot desync the scan, and `literalAt` so the lexer (not this loop) decides
+  // where a literal ends.
+  let i = 0;
+  while (i < masked.length) {
+    if (masked[i] === '"') {
+      i = skipQuotedIdent(masked, i);
+      continue;
+    }
+    if (masked[i] !== "'") {
+      i += 1;
+      continue;
+    }
+    const lit = literalAt(span, i);
+    if (!lit) {
+      i += 1;
+      continue;
+    }
+    if (DO_PREFIX.test(masked.slice(0, lit.start))) {
+      codeSpans(lit.content, base + lit.start + 1, depth + 1, out);
+    }
+    i = lit.end;
   }
   return out;
 }

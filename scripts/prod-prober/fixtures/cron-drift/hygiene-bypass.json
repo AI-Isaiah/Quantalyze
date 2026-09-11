@@ -126,5 +126,14 @@
     "expect_not": [
       "long-token-anywhere"
     ]
+  },
+  {
+    "shape": "(k) DO '…' — the SINGLE-QUOTED procedural body, valid PostgreSQL and re-entered by NOBODY before CR-03",
+    "jobname": "bypass_do_single_quoted_job",
+    "command": "DO ' DECLARE k text; BEGIN -- resolves from vault.decrypted_secrets\n  k := ''FAKE-0123456789-0123456789-0123456789ab'';\n  PERFORM net.http_post(url := ''https://x.invalid/a'', headers := jsonb_build_object(''X-Service-Key'', k), body := ''{}''::jsonb);\nEND '",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ],
+    "expect_same_verdict_as": "bypass_var_key_job"
   }
 ]
