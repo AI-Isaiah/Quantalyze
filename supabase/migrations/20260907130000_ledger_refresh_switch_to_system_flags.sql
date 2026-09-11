@@ -117,7 +117,7 @@
 --
 --
 -- ══════════════════════════════════════════════════════════════════════════
--- VAC-04 ACKNOWLEDGEMENT — EARNED. The two pragmas are at :10-11 above.
+-- VAC-04 ACKNOWLEDGEMENT — to be EARNED on the PR (plan 06)
 --
 -- This migration CREATE OR REPLACEs two function bodies that are live on PROD,
 -- so the repo-vs-PROD body gate will report DRIFT for exactly these two names on
@@ -127,23 +127,23 @@
 -- designed resolution of that pair, and it means "I read PROD's body and intend
 -- to overwrite it".
 --
--- The evidence, in the shape 20260906120000 established — MEASURED, not pending:
+-- The evidence block plan 06 fills in, in the shape 20260906120000 established:
 --
---   MEASURED 2026-09-07, workflow run 34138679709 at 51f576ef:
---     PROD live sha256 (enqueue_ledger_refresh_for_strategies)  88e6af84...ae6e36
---     PROD live sha256 (enqueue_ledger_composite_refresh)       7c3d33e9...4d81ac4
---     committed snapshots at HEAD (strategies / composite)      adeb6d16...53705f / 15e3ba96...2996b5
+--   MEASURED <date>, workflow run <id> at <sha>:
+--     PROD live sha256 (enqueue_ledger_refresh_for_strategies)  <measured in plan 06>
+--     PROD live sha256 (enqueue_ledger_composite_refresh)       <measured in plan 06>
+--     committed snapshot at HEAD                                <measured in plan 06>
 --   and, reproduced LOCALLY with the gate's own normalizer,
 --   `node scripts/sql-body-normalize.mjs --diff-bodies <origin/main snapshot> <HEAD snapshot>`:
---     origin/main snapshot sha256                               the SAME two hashes as PROD, above
---     HEAD snapshot sha256                                      adeb6d16...53705f / 15e3ba96...2996b5
---   differing lines                                             15 per body, both arms
+--     origin/main snapshot sha256                               <measured in plan 06>
+--     HEAD snapshot sha256                                      <measured in plan 06>
+--   differing lines                                             <measured in plan 06>
 --
--- ⛔ THE PRAGMA LINES ARE PRESENT AND EARNED — the two `prod-body-ack` lines at
--- :10-11, derived exactly as block ONE records. This block used to declare them
--- absent-until-measured, which CONTRADICTED block ONE; booked as
--- 164.7-MIGRATION-COMMENT-DRIFT and fixed by Phase 164.8.6, comment-only and
--- bundled with 20260911120000/130000 so the zero-applied guard is not taken.
+-- ⛔ The pragma line itself (the `prod-body-ack` token followed by PROD's live
+-- body hash, which scripts/prod-body-drift-check.sh greps for as a FIXED STRING)
+-- is DELIBERATELY ABSENT from this file today. A placeholder hash matches
+-- nothing, and an unmatched placeholder reads at a glance exactly like a real
+-- acknowledgement. Absence is the honest state until the hashes are measured.
 --
 -- ⛔ AND WHEN THEY ARE MEASURED: had the origin/main snapshot hash NOT equalled
 -- PROD's live hash, the correct action is to FOLD the difference into this
@@ -877,12 +877,12 @@ BEGIN
     --       happens to quote `IS DISTINCT FROM TRUE` would silently make check 5
     --       unfalsifiable, and nothing would report it.
     --
-    -- ⚠️ RESIDUAL, RECORDED not closed — and WHICH direction it runs in depends
-    -- on the CHECK KIND. `/* … */` is not stripped: a block comment quoting a
-    -- needle is a false PASS for the PRESENCE checks (4)/(5) and a loud false
-    -- FAILURE for the ABSENCE check (6). A `--` inside a string literal inverts
-    -- it — eaten code is a false FAILURE for (4)/(5), a false PASS for (6). Moot
-    -- today, measured: 0 `/*` and 0 trailing `--` on code lines in both bodies.
+    -- ⚠️ RESIDUAL, RECORDED not closed, and it is the FALSE-PASS direction: this
+    -- idiom does not strip `/* … */`. A block comment quoting a needle satisfies
+    -- these checks with the code gone. Neither body uses one today (measured: 0
+    -- occurrences of `/*` in both). The other direction is safe by construction —
+    -- a `--` inside a string literal makes the strip eat real code, which can
+    -- only cause a FALSE FAILURE, and a false failure is loud.
     --
     -- ⚠️ THE REGEXP FORM, matching this repo's R2 idiom and the sibling gates'.
     -- The line-based form this replaces (`btrim(src_line) NOT LIKE '--%'`) left

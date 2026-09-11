@@ -101,6 +101,42 @@
 -- read, not a way to silence the gate. It is EARNED, not pasted.
 --
 -- ══════════════════════════════════════════════════════════════════════════
+-- TWO CORRECTIONS TO 20260907130000, CARRIED HERE RATHER THAN MADE THERE
+-- ══════════════════════════════════════════════════════════════════════════
+-- That file is APPLIED — its row is in the migration ledger on PROD and on
+-- shared TEST — so it is not rewritten, not even comment-only. This file is the
+-- forward vehicle and it ships in the SAME pull request, so a reader who reaches
+-- either of its statements reaches the correction with it. Both defects are
+-- PROSE: nothing about that file's executable text changes and nothing about it
+-- is re-applied. Found by review 2026-09-11.
+--
+--   1. ITS VAC-04 BLOCK CONTRADICTS ITS OWN MASTHEAD. The block at
+--      20260907130000:120-146 declares the acknowledgement pragma "DELIBERATELY
+--      ABSENT from this file today" and every hash "<measured in plan 06>",
+--      while :10-11 of the SAME file carry two earned pragma lines. The PRAGMAS
+--      are right and the BLOCK is stale: those two values were earned against
+--      REAL PROD in workflow run 34138679709 at 51f576ef, and the calibration
+--      paragraph above re-derives both of them here, as the `live` column of
+--      --diff-bodies over commit 14b3b6c3's snapshots. ⛔ A reader who believes
+--      that block concludes the sibling's acks were never measured, and the
+--      obvious tidy is to delete two pragma lines the PROD-body gate needs on
+--      any PR that overwrites those bodies again.
+--
+--   2. ITS COMMENT-STRIP RESIDUAL NAMES ONE DIRECTION WHERE THERE ARE TWO.
+--      20260907130000:880-885 calls the residual "the FALSE-PASS direction" flat
+--      and says the string-literal accident "can only cause a FALSE FAILURE".
+--      Which way a given accident runs depends on the CHECK KIND, not on the
+--      accident: for a PRESENCE check an unstripped block comment is a false
+--      PASS and an over-eager strip is a loud false FAILURE; for an ABSENCE
+--      check the two swap. That file has BOTH kinds — its checks 4 and 5 are
+--      presence, its check 6 is absence — so the flat claim is wrong for exactly
+--      one of its three, and wrong in the quiet direction. ⭐ THE CORRECTED FORM
+--      IS ALREADY IN THIS FILE, stated per direction beside the strip itself in
+--      STEP 3 (checks 5-7 presence, check 8 absence). This entry is what says
+--      whose sentence it supersedes; without it the two files read as two
+--      independent opinions rather than a correction.
+--
+-- ══════════════════════════════════════════════════════════════════════════
 -- RE-BASE DISCIPLINE (DRIFT-02)
 -- ══════════════════════════════════════════════════════════════════════════
 -- The LEFT side of BOTH re-bases is the COMMITTED SNAPSHOT under
@@ -140,12 +176,29 @@
 -- is fixed at the source. The two sets, enumerated:
 --
 --   MIGRATION NEEDLES (asserted by position(needle IN v_def) in STEP 3)
---     FROM public.system_flags        — the activation read's own statement shape
+--     FROM public.system_⟦…⟧          — the activation read's own statement
+--                                       shape. ⛔ ELIDED. The DECLARE assembles
+--                                       this one by concatenation precisely so
+--                                       that the file carries it ONCE PER BODY
+--                                       and nowhere else; writing it whole in
+--                                       this list WAS the third raw occurrence
+--                                       that rationale exists to prevent, which
+--                                       made the rationale untrue in the same
+--                                       file that states it (MEASURED 2026-09-11
+--                                       at 3; now 2).
 --     v_enabled IS DISTINCT FROM TRUE — the NULL-safe comparison, bound to the
---                                       guarded variable rather than floating
---     INSERT INTO public.cron_runs    — the dormancy instrument's own statement
+--                                       guarded variable rather than floating.
+--                                       WHOLE, deliberately and consistently:
+--                                       the DECLARE holds this one as a literal
+--                                       too, for the measured reason stated
+--                                       there, and no gate arm's find string is
+--                                       this token alone.
+--     INSERT INTO public.cron_⟦…⟧     — the dormancy instrument's own statement.
+--                                       ⛔ ELIDED, same reason as the first.
 --     the retired app-namespace setting call — asserted ABSENT, and assembled by
---                                       concatenation (see the DECLARE)
+--                                       concatenation (see the DECLARE). Named
+--                                       in prose and never written, which is the
+--                                       treatment the other two now get.
 --
 --   GATE `find` STRINGS (mutated by the twins in
 --   supabase/tests/test_ledger_refresh_fanout.sql and
@@ -188,15 +241,50 @@
 --   ---------------------------  --------------------------------  -----------
 --   1 flag_read_failed           RAISE WARNING, then the NOTICE    YES
 --   2 flag_false_by_design       the NOTICE                        no
---   3 flag_row_invisible_or_absent  the NOTICE, BYTE-IDENTICAL      YES
+--   3a row ABSENT                the NOTICE, BYTE-IDENTICAL        YES
 --                                to cause 2's
+--   3b row PRESENT but not       the NOTICE, byte-identical        NOT ALWAYS —
+--     visible to this definer                                      see below
 --
--- Cause 3 is the one that matters and the one nothing reports: the row exists and
--- says TRUE, but the DEFINER has lost its RLS exemption, so the read returns NO
--- ROW and the platform is dormant while its own switch says it is live. Cause 1
--- does raise a WARNING — and MEASURED at HEAD, nothing reads it: no prober arm
--- touches public.cron_runs and no consumer reads the server log, which is what
--- APPGUC-WARNING-UNINSTRUMENTED-01 records.
+-- ⚠️ CAUSE 3 IS TWO STATES AND THE SECOND CANNOT ALWAYS WRITE ITS OWN ROW —
+-- recorded here because the earlier flat YES for the pair was an OVER-CLAIM. The
+-- instrument writes to a table that is itself row-security-enabled. When the
+-- definer's loss of visibility is at the ROLE level — the function's owner is
+-- changed to a role that owns neither table and is exempt by neither attribute,
+-- which is precisely the shape arm J of both ledger gates installs — the SAME
+-- loss refuses the instrument INSERT, and because that INSERT is deliberately
+-- NOT wrapped in a handler the tick RAISES instead of returning 0. That is the
+-- LOUD outcome this file wants and it is a DIFFERENT outcome from "a row
+-- appears": pg_cron records a FAILED job run rather than a dormant one, and an
+-- operator looking for the row will not find it. When the loss is local to the
+-- activation table instead — a FORCE ROW LEVEL SECURITY clause added to it and
+-- to nothing else — the instrument writes normally and 3b is reported exactly as
+-- 3a is. Both are covered; they are not covered the same way.
+--
+-- ⚠️ AND THE MECHANISM IS NOT THE ONE CHECK 3 REFUSES TO APPLY UNDER. MEASURED
+-- in supabase/schema/baseline.sql: the activation table (:10873) and the
+-- heartbeat table (:9864) are both `OWNER TO postgres`, and NEITHER is among the
+-- three relations this schema carries FORCE ROW LEVEL SECURITY on. A table owner
+-- is exempt from row security on its own table UNLESS FORCE is set — so on these
+-- two the definer's exemption comes from OWNERSHIP, and dropping the `rolsuper`
+-- / `rolbypassrls` pair from the owning role would NOT by itself hide the flag
+-- row. The earlier sentence here said it would, and that made "restore the
+-- attribute" look like the repair for a state it does not cause.
+--
+-- ⭐ CHECK 3 IS STILL LOAD-BEARING, on a different read and on a measurement
+-- rather than on the sentence above: public.compute_jobs DOES carry FORCE ROW
+-- LEVEL SECURITY (baseline.sql:1344), both bodies read it DIRECTLY in the
+-- in-flight conjunct, and FORCE is exactly the clause that stops ownership being
+-- an exemption. Lose the attribute pair and THAT read degrades — closed and
+-- silent, which is the wedge this phase removes. Check 3's own message is
+-- narrowed to say so.
+--
+-- Cause 3a is the state that matters most and the one nothing reported: the
+-- switch is believed live, the platform is dormant, and the NOTICE is byte-
+-- identical to the healthy case. Cause 1 does raise a WARNING — and MEASURED at
+-- HEAD, nothing reads it: no prober arm touches the heartbeat table and no
+-- consumer reads the server log, which is what APPGUC-WARNING-UNINSTRUMENTED-01
+-- records.
 --
 -- ⭐ THE DECISION, recorded rather than implied: causes 1 and 3 write one counted
 -- row each; cause 2 writes NOTHING. Cause 2 is the healthy dormant state, it is
@@ -242,14 +330,22 @@ DECLARE
   v_existing INTEGER;
   v_enqueued INTEGER := 0;
   -- ---- the dormancy instrument's locals (164.7 WR-10) --------------------
-  -- Three, because the dormant branch below has THREE causes and the single
-  -- NOTICE it raises cannot tell two of them apart. v_found is the row count of
-  -- the activation read and stays NULL until that read has actually completed;
-  -- v_read_failed is set by the handler after it has nulled the flag; v_cause is
+  -- FOUR, for a dormant branch with THREE causes whose single NOTICE cannot tell
+  -- two of them apart. v_found is the row count of the activation read and stays
+  -- NULL until that read has actually COMPLETED — ⛔ NULL therefore means NEVER
+  -- MEASURED, which is NOT the healthy row-present-and-FALSE case and must never
+  -- be folded into it; the cause branch below is written NULL-safely for exactly
+  -- that reason. v_read_failed is set by the handler after it has nulled the
+  -- flag. v_sqlstate carries the failing read's SQLSTATE OUT of the handler,
+  -- which is the only place it is defined — 42P01 (the table is gone), 42501
+  -- (the privilege was revoked) and a planner fault are three causes with three
+  -- different remediations, and the WARNING that already names it is read by
+  -- nobody (APPGUC-WARNING-UNINSTRUMENTED-01, this file's own header). v_cause is
   -- the string the instrument row carries. The cause table is in this file's
   -- header, under WR-10.
   v_found       INTEGER := NULL;
   v_read_failed BOOLEAN := FALSE;
+  v_sqlstate    TEXT;
   v_cause       TEXT;
 BEGIN
   -- ---- Lock B (D-08, 164.7 D-01): the fail-closed activation switch ------
@@ -304,13 +400,22 @@ BEGIN
   EXCEPTION WHEN OTHERS THEN
     RAISE WARNING 'enqueue_ledger_refresh_for_strategies: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;
     v_enabled := NULL;
-    -- ⚠️ The note above says NOTHING BUT THE ASSIGNMENT goes in this handler.
-    -- This IS an assignment — the second of them — and it is deliberately not a
-    -- probe, a read or a write: lint rule R1-exception-handler-probe forbids DML
-    -- and SELECT INTO here, and an INSERT in a handler is exactly the shape that
-    -- rule exists to keep out of the gate corpus. The cause is RECORDED here and
-    -- WRITTEN below, on the dormant path, where a write is legal.
+    -- ⚠️ The note above says NOTHING BUT ASSIGNMENTS go in this handler. Both of
+    -- these ARE assignments, and both are deliberately not a probe, a read or a
+    -- write: lint rule R1-exception-handler-probe forbids DML and SELECT INTO
+    -- here, and an INSERT in a handler is exactly the shape that rule exists to
+    -- keep out of the gate corpus. The cause is RECORDED here and WRITTEN below,
+    -- on the dormant path, where a write is legal.
+    --
+    -- ⛔ THE SQLSTATE IS CAPTURED HERE OR NOWHERE — it is defined only inside an
+    -- exception handler. The WARNING above already formats it, and this file's
+    -- header MEASURES that WARNING as having no consumer: pg_cron keeps no
+    -- WARNING output and no prober arm reads the server log. Computing a value
+    -- that separates "the table was dropped" from "the privilege was revoked"
+    -- from "the planner faulted" and then discarding it leaves all three causes
+    -- reporting the same thing, which is the shape this phase exists to remove.
     v_read_failed := TRUE;
+    v_sqlstate    := SQLSTATE;
   END;
   IF v_enabled IS DISTINCT FROM TRUE THEN
     RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant (system_flags.ledger_refresh_enabled is not TRUE); enqueued 0';
@@ -330,15 +435,55 @@ BEGIN
     -- unreadable by this definer while the platform believes itself live.
     IF v_read_failed THEN
       v_cause := 'flag_read_failed';
-    ELSIF v_found = 0 THEN
+    -- ⛔ `IS DISTINCT FROM 1`, NEVER `= 0`. Control reaches here only when the
+    -- read did NOT raise, so v_found holds the count that read produced — unless
+    -- the count was never TAKEN, in which case it is still NULL. Under `= 0` a
+    -- NULL makes the predicate NULL, the branch is not taken, control falls to
+    -- the ELSE, the cause is nulled and NO ROW IS WRITTEN: an UNMEASURED read
+    -- would be filed as the healthy row-present-and-FALSE case, silently. That
+    -- is the named failure mode of the invariant this whole phase is restoring,
+    -- and the apply-time block CANNOT catch it — check 7 below asserts only that
+    -- the instrument INSERT is PRESENT, so deleting the row-count read above
+    -- yields a migration that verifies itself green on the auto-apply-to-PROD
+    -- route. The NULL-safe form files an unmeasured read with the other
+    -- INVISIBLE cause, where it is counted and loud, instead of with the silent
+    -- one.
+    --
+    -- ⭐ A/B MEASURED 2026-09-11 on real pg-lanes, because "it would be silent"
+    -- is the kind of claim this repo does not take on argument. Delete the
+    -- row-count read one line up and run test_ledger_refresh_fanout.sql: with
+    -- this NULL-safe form the instrument still writes its row and the gate is
+    -- GREEN at exit 0 (15/15 arms), while with `= 0` in its place the SAME
+    -- deletion makes arm M1 report "wrote 0 instrument row(s) ... expected
+    -- exactly 1" and the lane exits 3. The gate is therefore NOT blind to the
+    -- deletion — it is the apply-time block that is — and the difference this
+    -- line buys is that the DECLINE keeps reaching a counted row instead of
+    -- going quiet the moment the count stops being taken.
+    --
+    -- ⚠️ RECORDED, not closed: the label then reads "invisible or absent"
+    -- for a state that is really "never measured". Naming it separately would
+    -- add a fourth cause no gate arm can reach, and an unfalsifiable branch is
+    -- the worse trade — the `sqlstate` key below is NULL on this path and the
+    -- row-count read is one line up, which is what tells the two apart on
+    -- inspection.
+    ELSIF v_found IS DISTINCT FROM 1 THEN
       v_cause := 'flag_row_invisible_or_absent';
     ELSE
       v_cause := NULL;
     END IF;
     IF v_cause IS NOT NULL THEN
+      -- ⛔ THE SQLSTATE GOES IN `metadata`, NEVER IN `error`. Both ledger gates'
+      -- M2 arms count rows whose `error` is EXACTLY the cause string; appending a
+      -- diagnostic there breaks that equality and the arm reddens for a reason
+      -- unrelated to what it tests. `metadata` carries no equality assertion,
+      -- which is what makes it the column a new diagnostic can join without
+      -- renegotiating a gate. It is NULL on the invisible-or-absent path, by
+      -- construction: there was no exception, so there was no SQLSTATE to read.
       INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
       VALUES ('ledger_refresh_fanout', 'error', now(), v_cause,
-              jsonb_build_object('function', 'enqueue_ledger_refresh_for_strategies', 'cause', v_cause));
+              jsonb_build_object('function', 'enqueue_ledger_refresh_for_strategies',
+                                 'cause', v_cause,
+                                 'sqlstate', v_sqlstate));
     END IF;
     RETURN 0;
   END IF;
@@ -596,14 +741,22 @@ DECLARE
   v_existing INTEGER;
   v_enqueued INTEGER := 0;
   -- ---- the dormancy instrument's locals (164.7 WR-10) --------------------
-  -- Three, because the dormant branch below has THREE causes and the single
-  -- NOTICE it raises cannot tell two of them apart. v_found is the row count of
-  -- the activation read and stays NULL until that read has actually completed;
-  -- v_read_failed is set by the handler after it has nulled the flag; v_cause is
+  -- FOUR, for a dormant branch with THREE causes whose single NOTICE cannot tell
+  -- two of them apart. v_found is the row count of the activation read and stays
+  -- NULL until that read has actually COMPLETED — ⛔ NULL therefore means NEVER
+  -- MEASURED, which is NOT the healthy row-present-and-FALSE case and must never
+  -- be folded into it; the cause branch below is written NULL-safely for exactly
+  -- that reason. v_read_failed is set by the handler after it has nulled the
+  -- flag. v_sqlstate carries the failing read's SQLSTATE OUT of the handler,
+  -- which is the only place it is defined — 42P01 (the table is gone), 42501
+  -- (the privilege was revoked) and a planner fault are three causes with three
+  -- different remediations, and the WARNING that already names it is read by
+  -- nobody (APPGUC-WARNING-UNINSTRUMENTED-01, this file's own header). v_cause is
   -- the string the instrument row carries. The cause table is in this file's
   -- header, under WR-10.
   v_found       INTEGER := NULL;
   v_read_failed BOOLEAN := FALSE;
+  v_sqlstate    TEXT;
   v_cause       TEXT;
 BEGIN
   -- ---- the fail-closed activation switch (164.7 D-01) --------------------
@@ -636,13 +789,22 @@ BEGIN
   EXCEPTION WHEN OTHERS THEN
     RAISE WARNING 'enqueue_ledger_composite_refresh: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;
     v_enabled := NULL;
-    -- ⚠️ The note above says NOTHING BUT THE ASSIGNMENT goes in this handler.
-    -- This IS an assignment — the second of them — and it is deliberately not a
-    -- probe, a read or a write: lint rule R1-exception-handler-probe forbids DML
-    -- and SELECT INTO here, and an INSERT in a handler is exactly the shape that
-    -- rule exists to keep out of the gate corpus. The cause is RECORDED here and
-    -- WRITTEN below, on the dormant path, where a write is legal.
+    -- ⚠️ The note above says NOTHING BUT ASSIGNMENTS go in this handler. Both of
+    -- these ARE assignments, and both are deliberately not a probe, a read or a
+    -- write: lint rule R1-exception-handler-probe forbids DML and SELECT INTO
+    -- here, and an INSERT in a handler is exactly the shape that rule exists to
+    -- keep out of the gate corpus. The cause is RECORDED here and WRITTEN below,
+    -- on the dormant path, where a write is legal.
+    --
+    -- ⛔ THE SQLSTATE IS CAPTURED HERE OR NOWHERE — it is defined only inside an
+    -- exception handler. The WARNING above already formats it, and this file's
+    -- header MEASURES that WARNING as having no consumer: pg_cron keeps no
+    -- WARNING output and no prober arm reads the server log. Computing a value
+    -- that separates "the table was dropped" from "the privilege was revoked"
+    -- from "the planner faulted" and then discarding it leaves all three causes
+    -- reporting the same thing, which is the shape this phase exists to remove.
     v_read_failed := TRUE;
+    v_sqlstate    := SQLSTATE;
   END;
   IF v_enabled IS DISTINCT FROM TRUE THEN
     RAISE NOTICE 'enqueue_ledger_composite_refresh: dormant (system_flags.ledger_refresh_enabled is not TRUE); enqueued 0';
@@ -662,15 +824,55 @@ BEGIN
     -- unreadable by this definer while the platform believes itself live.
     IF v_read_failed THEN
       v_cause := 'flag_read_failed';
-    ELSIF v_found = 0 THEN
+    -- ⛔ `IS DISTINCT FROM 1`, NEVER `= 0`. Control reaches here only when the
+    -- read did NOT raise, so v_found holds the count that read produced — unless
+    -- the count was never TAKEN, in which case it is still NULL. Under `= 0` a
+    -- NULL makes the predicate NULL, the branch is not taken, control falls to
+    -- the ELSE, the cause is nulled and NO ROW IS WRITTEN: an UNMEASURED read
+    -- would be filed as the healthy row-present-and-FALSE case, silently. That
+    -- is the named failure mode of the invariant this whole phase is restoring,
+    -- and the apply-time block CANNOT catch it — check 7 below asserts only that
+    -- the instrument INSERT is PRESENT, so deleting the row-count read above
+    -- yields a migration that verifies itself green on the auto-apply-to-PROD
+    -- route. The NULL-safe form files an unmeasured read with the other
+    -- INVISIBLE cause, where it is counted and loud, instead of with the silent
+    -- one.
+    --
+    -- ⭐ A/B MEASURED 2026-09-11 on real pg-lanes, because "it would be silent"
+    -- is the kind of claim this repo does not take on argument. Delete the
+    -- row-count read one line up and run test_ledger_refresh_fanout.sql: with
+    -- this NULL-safe form the instrument still writes its row and the gate is
+    -- GREEN at exit 0 (15/15 arms), while with `= 0` in its place the SAME
+    -- deletion makes arm M1 report "wrote 0 instrument row(s) ... expected
+    -- exactly 1" and the lane exits 3. The gate is therefore NOT blind to the
+    -- deletion — it is the apply-time block that is — and the difference this
+    -- line buys is that the DECLINE keeps reaching a counted row instead of
+    -- going quiet the moment the count stops being taken.
+    --
+    -- ⚠️ RECORDED, not closed: the label then reads "invisible or absent"
+    -- for a state that is really "never measured". Naming it separately would
+    -- add a fourth cause no gate arm can reach, and an unfalsifiable branch is
+    -- the worse trade — the `sqlstate` key below is NULL on this path and the
+    -- row-count read is one line up, which is what tells the two apart on
+    -- inspection.
+    ELSIF v_found IS DISTINCT FROM 1 THEN
       v_cause := 'flag_row_invisible_or_absent';
     ELSE
       v_cause := NULL;
     END IF;
     IF v_cause IS NOT NULL THEN
+      -- ⛔ THE SQLSTATE GOES IN `metadata`, NEVER IN `error`. Both ledger gates'
+      -- M2 arms count rows whose `error` is EXACTLY the cause string; appending a
+      -- diagnostic there breaks that equality and the arm reddens for a reason
+      -- unrelated to what it tests. `metadata` carries no equality assertion,
+      -- which is what makes it the column a new diagnostic can join without
+      -- renegotiating a gate. It is NULL on the invisible-or-absent path, by
+      -- construction: there was no exception, so there was no SQLSTATE to read.
       INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
       VALUES ('ledger_refresh_fanout', 'error', now(), v_cause,
-              jsonb_build_object('function', 'enqueue_ledger_composite_refresh', 'cause', v_cause));
+              jsonb_build_object('function', 'enqueue_ledger_composite_refresh',
+                                 'cause', v_cause,
+                                 'sqlstate', v_sqlstate));
     END IF;
     RETURN 0;
   END IF;
@@ -897,6 +1099,52 @@ REVOKE ALL ON FUNCTION public.enqueue_ledger_composite_refresh()
   FROM PUBLIC, anon, authenticated, service_role;
 
 -- --------------------------------------------------------------------------
+-- STEP 2b: the instrument's table, at the layer row security cannot reach
+-- --------------------------------------------------------------------------
+-- The heartbeat table became LOAD-BEARING at STEP 1. It is now the only place
+-- two of the three dormant causes leave a trace, and the whole value of writing
+-- that row is that somebody reads it LATER. MEASURED in
+-- supabase/schema/baseline.sql, and it is the Supabase project-bootstrap default
+-- rather than a decision anyone made for this table: anon and authenticated each
+-- hold `GRANT ALL ON TABLE` on it (:14808-14810) — and GRANT ALL INCLUDES
+-- TRUNCATE.
+--
+-- ⛔ TRUNCATE IS THE ONE STATEMENT ROW SECURITY NEVER EVALUATES. The table's two
+-- policies (baseline.sql:13049 and :13055) are consulted for SELECT, INSERT,
+-- UPDATE and DELETE and are not consulted for TRUNCATE, so RLS is not what
+-- stands between an ordinary authenticated session and an empty table. DELETE is
+-- genuinely covered — the admin policy is FOR SELECT and the service policy
+-- demands auth.role() = 'service_role' — which leaves TRUNCATE as the residual,
+-- and its effect is the erasure of exactly the evidence this migration exists to
+-- create: a platform that has been dormant on every tick for weeks afterwards
+-- reads as one that never was, and reads that way to the operator who is
+-- checking BECAUSE something looks wrong.
+--
+-- ⛔ FIXED AT THE GRANT LAYER, NEVER WITH A POLICY — a policy changes NOTHING
+-- for TRUNCATE. This is the remedy arm T1 of
+-- supabase/tests/test_analytics_service_settings_and_vault_tick.sql names in its
+-- own failure message for the sibling table, and the statement is
+-- 20260907120000:254's, retargeted. REFERENCES and TRIGGER go with it: neither
+-- has a legitimate caller here, and a trigger a non-admin installs on the table
+-- that records WHY the platform is dormant is its own escalation.
+-- SELECT/INSERT/UPDATE/DELETE are deliberately LEFT — those four are the ones
+-- row security does scope, and the two policies are what scope them.
+--
+-- ⚠️ anon is named beside authenticated because it holds the identical bootstrap
+-- grant. That no policy admits anon is irrelevant to this statement, which is
+-- the whole point: TRUNCATE never reaches a policy to be refused by one.
+--
+-- ⚠️ AND IT IS UNGUARDED, deliberately. This is the ONE place in the file that
+-- names the heartbeat table at STATEMENT level rather than inside a plpgsql body
+-- (see STEP 3's note), so the file now requires that table to EXIST where it
+-- applies. It does: PROD and shared TEST carry it from 20260408113029, and both
+-- fan-out lanes get scripts/pg-lane/fixtures/33-fixture-cron-runs.sql
+-- immediately before this file. A `to_regclass` guard would buy back the
+-- apply-anywhere property by SKIPPING the hardening in silence on any cluster
+-- that lacked the table, which is the trade this phase exists to refuse.
+REVOKE TRUNCATE, REFERENCES, TRIGGER ON TABLE public.cron_runs FROM anon, authenticated;
+
+-- --------------------------------------------------------------------------
 -- STEP 3: self-verifying DO block
 -- --------------------------------------------------------------------------
 -- House style: RAISE EXCEPTION, never a silent NOTICE-skip.
@@ -924,13 +1172,22 @@ REVOKE ALL ON FUNCTION public.enqueue_ledger_composite_refresh()
 -- The interim remedy for such a refusal is to REVERT THE MERGE; ⛔ never to edit
 -- supabase-migrate.yml.
 --
--- ⛔ AND IT MUST NEVER NAME public.cron_runs OR public.system_flags AS OBJECTS.
--- Every reference to them in this file lives INSIDE the plpgsql bodies above,
--- where it is resolved at CALL time — which is what lets this migration apply on
--- a cluster that has neither, and therefore appear in a gate's apply list at
--- all. The ONLY relations this block reads are pg_proc, pg_namespace and
--- pg_roles, plus the functions pg_get_functiondef, aclexplode, acldefault and
--- pg_get_userbyid.
+-- ⛔ AND THIS BLOCK MUST NEVER NAME public.cron_runs OR public.system_flags AS
+-- OBJECTS. The ONLY relations it reads are pg_proc, pg_namespace and pg_roles,
+-- plus the functions pg_get_functiondef, aclexplode, acldefault and
+-- pg_get_userbyid — it asserts the SHAPE of two function bodies, and a body
+-- resolves its own table references at CALL time, so this block stays correct on
+-- a cluster where neither table exists.
+--
+-- ⚠️ THE FILE AS A WHOLE NO LONGER HAS THAT PROPERTY, and the sentence that used
+-- to claim it here ("every reference lives inside the plpgsql bodies above") is
+-- what STEP 2b falsified. That step REVOKEs three privileges on the heartbeat
+-- table at statement level, so the file now requires it to exist where it
+-- applies — which it does, in all three places this file applies, for the
+-- reasons STEP 2b records. The narrow claim is the one that was load-bearing:
+-- what must not read those tables is THIS BLOCK, because an apply-time read of
+-- committed DATA is the escape class criterion 7 forbids. A REVOKE reads no
+-- rows.
 DO $verify$
 DECLARE
   -- ⛔ Every variable is DECLAREd up front: plpgsql compiles a DO block WHOLE,
@@ -940,9 +1197,11 @@ DECLARE
   --    two DECLAREs and could not apply at all. Since migrations AUTO-APPLY to
   --    PROD on merge, that lands on production.
   v_fn                TEXT;
+  v_overloads         INTEGER;
   v_nargs             SMALLINT;
   v_secdef            BOOLEAN;
   v_config            TEXT[];
+  v_search_path       TEXT;
   v_owner             TEXT;
   v_bypass            BOOLEAN;
   v_super             BOOLEAN;
@@ -989,6 +1248,31 @@ BEGIN
     -- 1. the function landed, and it takes ZERO arguments. A caller-supplied
     --    threshold on a cross-tenant SECURITY DEFINER function IS the attack
     --    surface (T-161.1-06/-15).
+    --
+    -- ⛔ BUT THE NAME MUST RESOLVE TO EXACTLY ONE FUNCTION FIRST, and that is
+    --    asserted rather than assumed. Every read in checks 1 to 8 keys on
+    --    (nspname, proname) and NOT on a signature, and `SELECT … INTO` WITHOUT
+    --    STRICT takes the first of several rows IN SILENCE — no error, no
+    --    notice, no clue in the apply log. Create a one-argument overload of
+    --    either name and those checks may measure whichever row the planner
+    --    hands back first, while check 9 cannot see the overload AT ALL: its own
+    --    read is narrowed to `pronargs = 0` deliberately, so that the grantee set
+    --    it reports belongs to the function the scheduler calls. A SECURITY
+    --    DEFINER overload created without an explicit REVOKE carries the default
+    --    ACL, which grants EXECUTE TO PUBLIC — so the exact state this file
+    --    exists to assert would be FALSE for a callable cross-tenant function
+    --    while every check below stayed green. One extra catalogue count buys
+    --    the difference between "the checks passed" and "the checks measured the
+    --    function they name".
+    SELECT count(*) INTO v_overloads
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname = 'public'
+       AND p.proname = v_fn;
+    IF v_overloads > 1 THEN
+      RAISE EXCEPTION 'Migration 20260911130000: public.% resolves to % functions in schema public, expected exactly 1. Checks 1-8 read (schema, name) with no signature and SELECT INTO without STRICT silently takes the first of several, while check 9 is narrowed to the zero-argument row and cannot see an overload at all — so an overload carrying the default ACL (EXECUTE TO PUBLIC on a SECURITY DEFINER body) would sit in the catalogue with every check below reporting green', v_fn, v_overloads;
+    END IF;
+
     SELECT p.pronargs, p.prosecdef, p.proconfig, pg_get_functiondef(p.oid)
       INTO v_nargs, v_secdef, v_config, v_def_raw
       FROM pg_proc p
@@ -1009,10 +1293,25 @@ BEGIN
     IF v_secdef IS NOT TRUE THEN
       RAISE EXCEPTION 'Migration 20260911130000: public.% is not SECURITY DEFINER — the re-base dropped it, and the activation read then runs as the CALLER against an RLS-enabled table that admits no such role', v_fn;
     END IF;
-    IF v_config IS NULL OR NOT EXISTS (
-      SELECT 1 FROM unnest(v_config) AS c WHERE c LIKE 'search_path=%'
-    ) THEN
-      RAISE EXCEPTION 'Migration 20260911130000: public.% does not pin search_path (proconfig=%) — the re-base dropped it, and on a SECURITY DEFINER function that is a privilege-escalation route', v_fn, v_config;
+    --
+    -- ⛔ THE VALUE, NOT THE PREFIX. The form this replaces asked only whether
+    --    SOME proconfig element began `search_path=`, and that test is satisfied
+    --    by the EMPTY path and by a path whose FIRST element is a schema the
+    --    caller can create objects in — while the message beside it claimed the
+    --    strictly stronger property, that nobody can interpose a schema ahead of
+    --    the ones this definer resolves. A prefix test cannot claim that. The
+    --    comparison below is against the value THIS FILE SETS in both CREATE
+    --    FUNCTION declarations above, with whitespace removed so it survives the
+    --    server's own rendering of the SET clause instead of pinning a spacing
+    --    convention. Check and message now claim the same thing.
+    SELECT c INTO v_search_path
+      FROM unnest(COALESCE(v_config, ARRAY[]::TEXT[])) AS c
+     WHERE c LIKE 'search_path=%';
+    IF v_search_path IS NULL THEN
+      RAISE EXCEPTION 'Migration 20260911130000: public.% does not pin search_path at all (proconfig=%) — the re-base dropped it, and on a SECURITY DEFINER function an unpinned search_path is a privilege-escalation route: the CALLER then decides which schema every unqualified name in the body resolves to', v_fn, v_config;
+    END IF;
+    IF regexp_replace(v_search_path, '\s', '', 'g') <> 'search_path=public,pg_catalog' THEN
+      RAISE EXCEPTION 'Migration 20260911130000: public.% pins search_path to "%", not to the "public, pg_catalog" its own CREATE FUNCTION sets. A pin that merely EXISTS proves nothing: an empty path, or one led by a schema the caller can create objects in, satisfies a prefix test while leaving the body resolvable by somebody else — and this body runs as a role that is exempt from row security', v_fn, v_search_path;
     END IF;
 
     -- 3. …and the DEFINER role can actually SEE what it reads (161.1-AUDIT F-2).
@@ -1022,11 +1321,19 @@ BEGIN
     --    the narrow predicate is a FALSE NEGATIVE that aborts a correct apply —
     --    on the auto-apply-to-PROD route, mid-file, with no rollback step.
     --
-    --    ⚠️ This check now guards THREE reads, not two. The cohort view, the
-    --    RLS-enabled activation table, and — new in this file — the RLS-enabled
-    --    heartbeat table the dormancy instrument WRITES. Lose the exemption and
-    --    the first two degrade CLOSED and silent, which is the wedge this phase
-    --    removes; the third degrades LOUD, which is the point of adding it.
+    --    ⚠️ WHICH READS THIS ACTUALLY GUARDS — narrowed to what is MEASURED,
+    --    because the wider claim it used to make was wrong in the direction that
+    --    flatters the check. The attribute pair is what carries the definer past
+    --    FORCE ROW LEVEL SECURITY, and public.compute_jobs is the relation under
+    --    these bodies that HAS it (supabase/schema/baseline.sql:1344); both
+    --    bodies read that table directly in the in-flight conjunct and write it
+    --    through the enqueue RPC, so losing the pair degrades that path CLOSED
+    --    and silent. It does NOT guard the activation read or the instrument
+    --    write: those two tables are owned by this definer and carry no FORCE
+    --    clause (:10873, :9864), so ownership alone exempts them and the pair is
+    --    not what is holding them open. See the WR-10 section of this file's
+    --    header for the full derivation and for what DOES make the flag row
+    --    invisible.
     SELECT r.rolname, r.rolbypassrls, r.rolsuper
       INTO v_owner, v_bypass, v_super
       FROM pg_proc p
@@ -1038,7 +1345,7 @@ BEGIN
       RAISE EXCEPTION 'Migration 20260911130000: could not resolve the owner of public.% — pg_proc.proowner has no matching pg_roles row', v_fn;
     END IF;
     IF NOT (COALESCE(v_bypass, FALSE) OR COALESCE(v_super, FALSE)) THEN
-      RAISE EXCEPTION 'Migration 20260911130000: public.% is owned by role "%" (rolsuper=%, rolbypassrls=%), which is exempt from row security by neither route. As SECURITY DEFINER it reads the cohort view AND the RLS-enabled activation table as that role, so the cohort collapses to empty and the flag reads NULL — both fail CLOSED, silently, which is byte-identical to "nothing was stale"', v_fn, v_owner, v_super, v_bypass;
+      RAISE EXCEPTION 'Migration 20260911130000: public.% is owned by role "%" (rolsuper=%, rolbypassrls=%), which is exempt from row security by neither route. As SECURITY DEFINER it reads public.compute_jobs as that role in the in-flight conjunct, and that table carries FORCE ROW LEVEL SECURITY — the one clause under which OWNING the table is not an exemption either. The conjunct then sees no in-flight work whatever is running, and the cohort reads degrade the same way for any relation this role neither owns nor is admitted to: all of it fails CLOSED and silently, which is byte-identical to "nothing was stale"', v_fn, v_owner, v_super, v_bypass;
     END IF;
 
     -- 4. THE BODY ITSELF, asserted on the EXECUTABLE text.
