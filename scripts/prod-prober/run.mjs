@@ -2043,7 +2043,12 @@ export async function selfTest() {
         judged += 1;
         const v = CRON_DRIFT_MOD.hygieneViolations(row.jobname, row.command);
         const ids = v.map((x) => x.slice(1, x.indexOf("]")));
-        if (!ids.includes(row.rule)) missed.push(row.rule);
+        // ⚠️ THE JOBNAME, NOT JUST THE RULE ID. A rule with several red rows —
+        // `pg-password` has one per detection ARM — reports the same sentence
+        // whichever row went silent, so the failure could not be attributed to
+        // the arm that broke. MEASURED: neutering the masked `:=` arm and
+        // neutering the libpq-URI arm produced BYTE-IDENTICAL output.
+        if (!ids.includes(row.rule)) missed.push(`${row.rule} (${row.jobname})`);
         if (ids.length !== 1) overlapping.push(`${row.rule}->[${ids.join(",")}]`);
         if (v.some((x) => x.includes(row.command))) missed.push(`${row.rule} (QUOTED THE COMMAND)`);
       }
