@@ -1181,6 +1181,38 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[STRATTABLE-DESC-01]` The strategy list shows only the NAME, so two strategies
+      with the same name are indistinguishable — the `description` that disambiguates them is
+      already fetched and simply not rendered (founder-reported 2026-09-11 from the /browse
+      list: *"would be good to have the comment of the strategy be displayed here, considering
+      it is there to know which one is which"*).**
+      **The collision is live, not hypothetical:** the current list renders **two rows both
+      named "Alpha Centauri"** (#1 Deribit / Other, #5 mt5 / Long-Short) with no way to tell
+      them apart from the row itself. The factsheet DOES show the field — `MM1 --> Grid FX`
+      renders *"MM1 turning to Grid FX"* as an italic subtitle under the title — so the data
+      exists and the list is the only surface that drops it.
+      - **Measured at HEAD 2026-09-11.** `getStrategiesByCategory` selects `*` on `strategies`
+        (`src/lib/queries.ts:343-344`), so `description` is ALREADY on the row — no query
+        change, no new column, no extra round trip. `StrategyWithAnalytics` is
+        `Strategy & {...}` (`src/components/strategy/StrategyTable.tsx:43`), so the field is
+        already in the row type and typechecks today. ⚠️ `grep -n description
+        src/components/strategy/StrategyTable.tsx` returns **ZERO hits**: the component simply
+        never reads it.
+      - **Shape of the fix.** Render `s.description` under the `{s.name}` link in the sticky
+        name cell (`StrategyTable.tsx:1093-1097`), muted and secondary to the name, beside the
+        existing venue/"Synced …" line. It is nullable (`description: null` across the test
+        fixtures) so the render must be conditional, and it is FREE TEXT — clamp it (one or two
+        lines) so a long comment cannot blow out a sticky column that already carries a
+        wrapping name, a verified tick, Private/Own-capital chips and the sync line.
+      - ⚠️ **Check `StrategyGrid.tsx` in the same pass** — the card surface has the same row
+        type and the same gap; fixing only the table leaves the class half-closed
+        (fix-campaign discipline: close the whole surface, not the instance reported).
+      - ⚠️ **`description` is user-authored free text on a PUBLIC surface** (`/browse` is
+        anon-readable). Render it as text, never as markup.
+      - **Severity: not user-facing-broken, not data-integrity — does not block.** Filed as a
+        founder feature request, not a review finding. No phase owns strategy-list presentation
+        today; per the severity rule this entry IS the complete routing unless one appears.
+
 - [ ] **`[WIZFORM-02-VE-CODECHANNEL]` `keys/validate-and-encrypt` has no code→copy render path,
       so criterion 3's fifth surface cannot be rendered (booked 2026-09-06, Phase 164.2 plan 09,
       FOUNDER DECISION at the plan-06 gate: accept 4-of-5 and book the wiring).**
