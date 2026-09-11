@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.77.33.2] - 2026-09-11 — stop the CHANGELOG itself tripping the secret scan
+
+### Fixed
+
+- **`secret-scan` went RED on `main` after 0.77.33.1 merged, on `CHANGELOG.md` itself.** The
+  0.77.33.1 entry documented the prod-prober split-literal fixtures by quoting them VERBATIM, so
+  `generic-api-key` extracted the 12-hex tails at entropy 3.585 out of the release notes. The
+  164.8.5 allowlist is path-scoped to `scripts/prod-prober/` and correctly does not cover
+  `CHANGELOG.md`.
+- ⛔ **Fixed by not spelling a scannable token in prose, NOT by widening the allowlist to
+  `CHANGELOG.md`** — that would be the "widen the gate to fit the content" move the 164.8.5 entry
+  below explicitly argues against. Both literals now read `'<12 hex>'`, which documents the shape
+  without carrying one.
+- ⚠️ The asymmetry that hid it: the PR scan and the push-to-main scan see different things. The PR
+  history scan passed because the branch's own commits were suppressed by path; the merge produced
+  ONE squash commit whose diff includes `CHANGELOG.md`, where nothing suppresses it.
+
 ## [0.77.33.1] - 2026-09-11 — two red gates nobody had run locally, and what each one was really saying
 
 Ship-time repair of PR #774. Both gates were red on CI at head `e7c57d7c` while every local
@@ -43,7 +60,7 @@ phase. `gitleaks` was run as `detect --no-git` over the working tree, while CI s
 ### Security
 
 - **`gitleaks` (8.30.1): 5 findings → 0, without weakening the gate.** `generic-api-key` fires on
-  164.8.5's SPLIT-literal fixtures — `'FAKE-key-' || '0123456789ab'`, `concat(…)`, `format(…)` —
+  164.8.5's SPLIT-literal fixtures — `'FAKE-key-' || '<12 hex>'`, `concat(…)`, `format(…)` —
   extracting the bare tail as the secret at entropy 3.585. Measured 2026-09-11: the split form is
   reported while the same key written whole is not. A fixture proving the arm catches a split
   credential cannot avoid looking like one.
@@ -60,7 +77,7 @@ phase. `gitleaks` was run as `detect --no-git` over the working tree, while CI s
 ### Tests
 
 - New guard arm in `src/__tests__/gitleaks-allowlist.test.ts` pinning that the new suppression is
-  keyed on the MARKER, not the directory: an UNMARKED split credential (`'live-key-' || '8f3a1c7e9b24'`)
+  keyed on the MARKER, not the directory: an UNMARKED split credential (`'live-key-' || '<12 hex>'`)
   planted in the same directory must still be reported.
 - **Both directions measured, and the arm was proven able to fail.** Neutering the block to `paths`
   alone (the exemption its own comment forbids) turns BOTH scanner-behaviour arms RED — the new one
