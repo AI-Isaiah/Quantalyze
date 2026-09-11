@@ -87,5 +87,44 @@
       "long-literal-in-headers"
     ],
     "expect_same_verdict_as": "pair_apostrophe"
+  },
+  {
+    "shape": "(h) variable indirection — k := '<key>' then jsonb_build_object(name, k)",
+    "jobname": "bypass_var_key_job",
+    "command": "DO $$ DECLARE k text; BEGIN -- resolves from vault.decrypted_secrets\n  k := 'FAKE-0123456789-0123456789-0123456789ab';\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Service-Key', k), body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ]
+  },
+  {
+    "shape": "(i) whole-header JSON — the header NAME is inside a bigger literal, so no anchor ever matches",
+    "jobname": "bypass_header_json_job",
+    "command": "DO $$ DECLARE h jsonb; BEGIN -- resolves from vault.decrypted_secrets\n  h := '{\"X-Service-Key\":\"FAKE-0123456789-0123456789-01\"}'::jsonb;\n  PERFORM net.http_post(url := 'https://x.invalid/a', headers := h, body := '{}'::jsonb);\nEND $$",
+    "expect_any_of": [
+      "long-token-anywhere"
+    ]
+  },
+  {
+    "shape": "Q2 SCOPING PROOF: a TOKEN_MIN+ digit-bearing token landing ONLY inside a header region is caught by long-literal-in-headers and NOT by the token rule",
+    "jobname": "header_region_only",
+    "command": "SELECT net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Trace', 'FAKE-0123456789-0123456789-0123456789'), body := '{}'::jsonb)",
+    "expect_any_of": [
+      "long-literal-in-headers"
+    ],
+    "expect_not": [
+      "long-token-anywhere"
+    ]
+  },
+  {
+    "shape": "Q2 SCOPING PROOF, INSIDE A DO BLOCK — the same header-region token wrapped in the shape 4 of the 14 committed PROD commands actually use",
+    "jobname": "header_region_only_in_do",
+    "note": "⭐ THIS ROW IS WHAT MAKES THE `DO`-BODY SKIP IN `literalsIn` A CONTROL THAT CAN FAIL. At the OUTER span a top-level `DO $$ … $$` is one dollar-quoted literal, and `headerRegions` finds NOTHING there because the whole body is blank in the outer mask. So without the skip, the body's every token is judged with NO region exclusion at all and this row fires long-token-anywhere ALONGSIDE long-literal-in-headers — the Q2 partition silently holds only for non-DO commands, which is the minority shape. MEASURED 2026-09-11: deleting the skip reds this row and the long-literal-in-headers red row's isolation, and nothing else.",
+    "command": "DO $$ BEGIN PERFORM net.http_post(url := 'https://x.invalid/a', headers := jsonb_build_object('X-Trace', 'FAKE-0123456789-0123456789-0123456789'), body := '{}'::jsonb); END $$",
+    "expect_any_of": [
+      "long-literal-in-headers"
+    ],
+    "expect_not": [
+      "long-token-anywhere"
+    ]
   }
 ]

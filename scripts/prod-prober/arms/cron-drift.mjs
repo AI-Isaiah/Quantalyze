@@ -232,6 +232,7 @@ export const HYGIENE_RULE_IDS = [
   "jwt-shape",
   "long-literal-in-headers",
   "header-unparseable",
+  "long-token-anywhere",
 ];
 
 /**
@@ -243,7 +244,58 @@ export const HYGIENE_RULE_IDS = [
 const HEADER_LITERAL_MIN = 16;
 
 /** A quoted literal at least this long inside a header argument list is a credential. */
-const HEADERS_LITERAL_MAX = 32;
+export const HEADERS_LITERAL_MAX = 32;
+
+/**
+ * The token threshold for `long-token-anywhere`.
+ *
+ * ⛔ DERIVED, NEVER A SECOND LITERAL — and the derivation is the invariant, not
+ * a tidiness preference.
+ *
+ * (1) THE Q2 REGION PARTITION. `long-token-anywhere` deliberately EXCLUDES
+ *     header regions, because `long-literal-in-headers` already owns them and
+ *     two rules firing on one red row would break the one-rule-isolation
+ *     assertion. That exclusion loses nothing ONLY while
+ *     `TOKEN_MIN >= HEADERS_LITERAL_MAX`: a whitespace-delimited token of
+ *     `TOKEN_MIN` characters lives inside a literal of at least `TOKEN_MIN`
+ *     characters, which is an argument of at least `HEADERS_LITERAL_MAX`
+ *     DERIVED length, which is exactly what `long-literal-in-headers` fires on.
+ *     Let the two constants drift apart and a token in the gap is caught by
+ *     NOBODY, silently — the whole point of writing one in terms of the other.
+ *
+ * (2) THE PIN. `src/__tests__/prod-prober-wiring.test.ts` asserts
+ *     `TOKEN_MIN === HEADERS_LITERAL_MAX` under a title that states this
+ *     argument. Equality rather than `>=`: `>=` is what the partition needs,
+ *     equality is what the DERIVATION says, and a divergence in either
+ *     direction is a decision somebody must make on purpose.
+ *
+ * (3) ⚠️ THE STATED FRAGILITY — THE MARGIN IS ONE CHARACTER WIDE. Measured on
+ *     the committed manifest (2026-09-10) the longest non-URL literal tokens
+ *     are `retention_notification_dispatches:` (34 — over the threshold, clean
+ *     ONLY for lack of a digit) and `reconcile_dropped_enqueue_sweep:`
+ *     (EXACTLY 32). A future cron job named `<32+ chars>_2` would fire this
+ *     rule on every hourly PROD run. The false-positive-budget scenario over
+ *     `cron-manifest.json` is the tripwire.
+ *
+ *     ⛔ THE ANSWER TO A RED THERE IS TO NARROW THE RULE. Never edit the
+ *     manifest to fit, and never raise this constant to dodge a job name —
+ *     raising it silently shrinks what the rule catches AND (per (1)) opens the
+ *     region partition.
+ */
+export const TOKEN_MIN = HEADERS_LITERAL_MAX;
+
+/**
+ * A URL with nothing hitchhiking on it. Exported so the wiring test can
+ * calibrate it in both directions.
+ *
+ * ⛔ NARROW ON PURPOSE. `?`, `#` and `user:pw@` are all ABSENT from this
+ * pattern, so a "URL" carrying a token in its query string
+ * (`https://x.invalid/a?token=…`) or credentials in its authority
+ * (`https://u:p1@x.invalid/`) is NOT exempt — those are two of the ways a key
+ * actually reaches a cron command. The exemption exists for the ONE measured
+ * shape in the committed corpus: a 79-character bare analytics URL.
+ */
+export const BARE_URL_RE = /^https?:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[A-Za-z0-9._~/-]*)?$/;
 
 /**
  * The prefix that makes a dollar-quoted region CODE rather than DATA.
@@ -346,6 +398,43 @@ function literalAt(span, i) {
     if (r.start === i) return { start: r.start, end: r.end, content: span.sql.slice(r.contentStart, r.contentEnd) };
   }
   return null;
+}
+
+/**
+ * EVERY literal in a span, in order, as `{ start, end, content }`.
+ *
+ * ⛔ THE `DO` BODY IS SKIPPED, AND THAT IS NOT AN OPTIMISATION. At the OUTER
+ * span a top-level `DO $body$ … $body$` is a dollar-quoted literal to
+ * `scanSql`, so without this skip the whole procedural body would be handed to
+ * the token rule as one enormous "literal" — and every CODE token in it
+ * (identifiers, numeric arguments, `timeout_milliseconds := 60000`) would be
+ * length-tested as if it were data. `codeSpans` already re-enters exactly these
+ * regions as CODE and the rules run over the resulting span list, so the real
+ * literals inside a `DO` body are reached on the CHILD span, once, correctly.
+ * The predicate here is byte-identical to `codeSpans`' own, on purpose.
+ *
+ * ⚠️ Written for `long-token-anywhere`. Plan 03 specified a `literalsIn` and
+ * did not write one because nothing then needed it (03-SUMMARY deviation 7);
+ * this is that rule's arrival, not a second helper.
+ */
+function literalsIn(span) {
+  const out = [];
+  const { masked } = span;
+  let i = 0;
+  while (i < masked.length) {
+    if (masked[i] === '"') {
+      i = skipQuotedIdent(masked, i);
+      continue;
+    }
+    const lit = literalAt(span, i);
+    if (lit) {
+      if (!DO_PREFIX.test(masked.slice(0, lit.start))) out.push(lit);
+      i = lit.end;
+      continue;
+    }
+    i += 1;
+  }
+  return out;
 }
 
 /**
@@ -718,7 +807,8 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
         `job ${name} passes an apikey header as an inline quoted literal long enough to be a credential.`,
       );
     }
-    for (const region of headerRegions(span)) {
+    const regions = headerRegions(span);
+    for (const region of regions) {
       if (region.unparseable) {
         say(
           "header-unparseable",
@@ -750,6 +840,65 @@ export function hygieneViolations(jobname, command, { functionsDir = FUNCTIONS_D
         // ⚠️ No `break`. The old loop broke out to avoid repeating itself;
         // `say` now de-duplicates, and breaking would let a long literal in an
         // EARLY region hide an unparseable region later in the same command.
+      }
+    }
+
+    // ⭐ `long-token-anywhere` — THE ONLY RULE THAT CATCHES BYPASSES (h) AND
+    // (i), WHICH ARE WHAT A NORMAL DEVELOPER WRITES:
+    //
+    //   (h) k := '<key>';                          … jsonb_build_object('X-Service-Key', k)
+    //   (i) h := '{"X-Service-Key":"<key>"}'::jsonb; … headers := h
+    //
+    // Neither obfuscates anything. In (h) the header VALUE is a variable, so
+    // every header-anchored rule sees nothing to measure; in (i) the header
+    // NAME lives inside a bigger literal, so the anchor never matches on the
+    // mask. Every other rule in this file looks at a header region, and the key
+    // in both shapes is somewhere else entirely.
+    //
+    // ⛔ WHY TOKENS AND NOT LITERALS, MEASURED. "any literal >= 32 anywhere"
+    // fires on 5 of the 14 committed PROD commands at EVERY threshold up to 64
+    // — six hits, all of them `RAISE` message prose or one URL, 73 to 156
+    // characters. An hourly prober that cries wolf on real configuration is how
+    // a true positive gets ignored. Splitting literal CONTENT on whitespace and
+    // testing TOKENS, then requiring a DIGIT and rejecting bare URLs, measures
+    // to ZERO false positives on that same corpus while still catching (h) and
+    // (i). The token census is in 164.8.5-RESEARCH.md Q4.
+    //
+    // ⚠️ ACCEPTED RESIDUAL (A2, T-164.8.5-21): a purely alphabetic 32+ character
+    // key evades the digit test. Every credential shape this repository has
+    // recorded — `sk_live_`-style, `eyJ…` JWTs, hex digests — carries a digit,
+    // and dropping the test costs the zero-FP budget outright (the two 32/34
+    // character job-name tokens in the committed corpus are clean ONLY for lack
+    // of one). Recorded rather than closed.
+    //
+    // ⛔ REGION EXCLUSION, BOTH KINDS (Q2 + W7). A token inside a header region
+    // belongs to `long-literal-in-headers`, and letting both fire would break
+    // the red fixtures' one-rule isolation. An UNPARSEABLE region is excluded
+    // too and for a different reason: its only honest verdict is
+    // `header-unparseable`, because nobody can delimit its contents to
+    // enumerate them. The partition loses nothing while
+    // `TOKEN_MIN >= HEADERS_LITERAL_MAX` — see the derivation beside
+    // `TOKEN_MIN`, which the wiring test pins.
+    for (const lit of literalsIn(span)) {
+      if (regions.some((r) => lit.start < r.to && lit.end > r.from)) continue;
+      // ⚠️ Documented as an explicit exemption because CONTEXT names it, and
+      // documented as REDUNDANT because it is: the Vault-backed job's own URL
+      // literal is already exempt via the bare-URL test below. Kept so the next
+      // reader does not "restore" it as a missing safeguard.
+      const vaultSpan = VAULT_READ_RE.test(span.masked);
+      for (const token of lit.content.split(/\s+/)) {
+        if (token.length < TOKEN_MIN) continue;
+        if (!/\d/.test(token)) continue;
+        if (BARE_URL_RE.test(token)) continue;
+        if (vaultSpan && BARE_URL_RE.test(token)) continue;
+        // Already `jwt-shape`'s finding. Without this the JWT red row would fire
+        // TWO rules and its isolation assertion — the thing that makes a red row
+        // attributable — would fail.
+        if (/eyJ[A-Za-z0-9_-]{20,}/.test(token)) continue;
+        say(
+          "long-token-anywhere",
+          `job ${name} carries a ${TOKEN_MIN}+ character whitespace-delimited token containing a digit inside a string literal, outside any header argument list. A value that long is not a header constant or a message: it is a credential that has been moved out of the header expression — into a variable, or into a whole-header JSON blob — where the header rules cannot see it.`,
+        );
       }
     }
   }

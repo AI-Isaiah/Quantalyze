@@ -38,9 +38,12 @@ import {
   selfTest,
 } from "../../scripts/prod-prober/run.mjs";
 import {
+  BARE_URL_RE,
   CRON_JOB_SEPARATORS,
   FUNCTIONS_DIR,
+  HEADERS_LITERAL_MAX,
   HYGIENE_RULE_IDS,
+  TOKEN_MIN,
   compareManifest,
   hygieneViolations,
   parseCronJobRows,
@@ -799,6 +802,87 @@ describe("[164.1-05] kinds and floors", () => {
       hygieneViolations("fixture_anchor_job", cmd).map((v: string) => v.slice(1, v.indexOf("]")));
     expect(ids(commented)).not.toContain("x-service-key-literal");
     expect(ids(uncommented)).toContain("x-service-key-literal");
+  });
+
+  it("TOKEN_MIN equals HEADERS_LITERAL_MAX — the Q2 region partition has no gap only while a TOKEN_MIN-length token inside a header literal is a HEADERS_LITERAL_MAX-length argument", () => {
+    // ⛔ THE INVARIANT, NOT THE VALUE. `long-token-anywhere` deliberately
+    // EXCLUDES header regions so it cannot collide with
+    // `long-literal-in-headers` on a red row. That exclusion loses nothing ONLY
+    // while `TOKEN_MIN >= HEADERS_LITERAL_MAX`: a whitespace-delimited token of
+    // `TOKEN_MIN` characters lives inside a literal of at least that length,
+    // which is an argument of at least `HEADERS_LITERAL_MAX` DERIVED length,
+    // which is precisely what `long-literal-in-headers` fires on. Raise
+    // `HEADERS_LITERAL_MAX` to 40 in some later phase and a 32-39 character
+    // digit-bearing token inside a header region is caught by NOBODY, silently.
+    // The `header_region_only` bypass row measures today's values; THIS pins the
+    // relation.
+    //
+    // Equality rather than `>=`: `>=` is what the partition needs, equality is
+    // what the DERIVATION in cron-drift.mjs says
+    // (`export const TOKEN_MIN = HEADERS_LITERAL_MAX;`), and a divergence in
+    // either direction is a decision somebody must make on purpose.
+    expect(TOKEN_MIN).toBe(HEADERS_LITERAL_MAX);
+
+    // ⭐ AND IT IS ONE SOURCE OF TRUTH BY SOURCE LINE, not merely two literals
+    // that happen to agree at runtime. A second `32` would satisfy the
+    // assertion above and re-open the drift it exists to close.
+    const armText = readFileSync(join(PROBER_DIR, "arms", "cron-drift.mjs"), "utf8");
+    expect(armText).toContain("export const TOKEN_MIN = HEADERS_LITERAL_MAX;");
+    expect(armText).toContain("export const HEADERS_LITERAL_MAX = 32;");
+    // CALIBRATION: the same predicate reports the literal spelling, so
+    // "the derivation is present" is a reading and not a tautology.
+    const mutated = armText.replace(
+      "export const TOKEN_MIN = HEADERS_LITERAL_MAX;",
+      "export const TOKEN_MIN = 32;",
+    );
+    expect(mutated).not.toBe(armText);
+    expect(mutated).not.toContain("export const TOKEN_MIN = HEADERS_LITERAL_MAX;");
+  });
+
+  it("BARE_URL_RE exempts a bare URL and NOTHING that carries a token or credentials", () => {
+    // ⛔ THE EXEMPTION IS THE RULE'S ONLY WAY TO BE WRONG IN THE QUIET
+    // DIRECTION. `long-token-anywhere` skips bare URLs because the committed
+    // corpus carries one 79-character analytics URL and firing on it every hour
+    // would train the reader to ignore the whole class. Widen the pattern by one
+    // character class and `…?token=<key>` — a real way a key reaches a cron
+    // command — becomes exempt too.
+    const RAILWAY =
+      "https://quantalyze-analytics-production.up.railway.app/api/match/cron-recompute-0123456789";
+    expect(BARE_URL_RE.test(RAILWAY)).toBe(true);
+    expect(BARE_URL_RE.test("https://x.invalid/a?token=1")).toBe(false);
+    expect(BARE_URL_RE.test("https://u:p1@x.invalid/")).toBe(false);
+    expect(BARE_URL_RE.test("https://x.invalid:8443/a/b")).toBe(true);
+
+    // CALIBRATION: a mutant that allows `?` flips the query-string case while
+    // leaving the bare URL exempt — so the `false` above is this pattern's
+    // reading rather than something every URL regex would say.
+    const loosened = new RegExp(BARE_URL_RE.source.replace("._~/-", "._~/?=-"));
+    expect(loosened.source).not.toBe(BARE_URL_RE.source);
+    expect(loosened.test("https://x.invalid/a?token=1")).toBe(true);
+    expect(loosened.test(RAILWAY)).toBe(true);
+  });
+
+  it("no hand-typed hygiene rule COUNT survives in the prober (criterion 9)", () => {
+    // ⛔ THE COUNT MOVED ONCE ALREADY AND THE PROSE DID NOT. `run.mjs` used to
+    // compare the red fixture's row count against a literal `10` that equalled
+    // the rule count only by a one-row-per-rule coincidence, and two docblocks
+    // said "the ten hygiene rules" in words. A number restated in prose is a
+    // claim nothing can check; `HYGIENE_RULE_IDS` is the one source.
+    const runnerText = readFileSync(RUNNER_PATH, "utf8");
+    const armText = readFileSync(join(PROBER_DIR, "arms", "cron-drift.mjs"), "utf8");
+    const SPELLED = /\b(?:ten|eleven|twelve|nine|10|11|12)\s+(?:hygiene\s+)?rules?\b/i;
+    expect(runnerText).not.toMatch(SPELLED);
+    expect(armText).not.toMatch(SPELLED);
+    // ⚠️ ANCHORED TO THE ASSERTION FORM, not to the bare expression. What
+    // criterion 9 forbids is a hand-typed count that JUDGES something; the
+    // dated lineage comment recording the old `red.data.length === 10` is
+    // history and must stay readable.
+    const HAND_TYPED = /expect\(\s*red\.data\.length\s*===\s*\d+/;
+    expect(runnerText).not.toMatch(HAND_TYPED);
+    // CALIBRATION: both predicates find what they forbid, so the two `not`s
+    // above are readings rather than regexes that match nothing.
+    expect(`${runnerText}\n * ANY of the ten hygiene rules`).toMatch(SPELLED);
+    expect(`${runnerText}\n expect(red.data.length === 11, \"x\")`).toMatch(HAND_TYPED);
   });
 
   it("FUNCTIONS_DIR resolves to a real directory that carries match_engine_cron_tick.sql", () => {
