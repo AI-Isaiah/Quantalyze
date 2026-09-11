@@ -127,20 +127,35 @@ function bareRunLines(text: string): string[] {
 }
 
 /**
- * True when the live command appears EXACTLY ONCE and the next non-empty line
- * captures its status. `status=$?` one line later is the whole point: a pipe
- * (or any interposed command) makes `$?` something else's, which is how a red
- * run reads green.
+ * True when the live command appears EXACTLY ONCE and captures its status ON
+ * THE SAME LINE.
+ *
+ * ⛔ THIS PREDICATE USED TO PIN THE BUG. It asserted `status=$?` on the NEXT
+ * line — which is right about PIPES (a pipe makes `$?` something else's) and
+ * BLIND to `-e`. GitHub's default shell for a `run:` block is
+ * `/usr/bin/bash -e {0}`, and the step's `set -uo pipefail` does not turn that
+ * off, so a bare `node … > log 2>&1` that exits non-zero TERMINATED THE STEP
+ * before the next line ever ran: no `status=$?`, no `cat`, no `^❌` step
+ * summary, and — the expensive part — no POSTURE LINE.
+ *
+ * MEASURED 2026-09-11: 10 of the last 12 scheduled runs `conclusion: failure`.
+ * Run 34565978460 logs `shell: /usr/bin/bash -e {0}` and then ZERO stdout
+ * between `##[endgroup]` and `##[error]Process completed with exit code 1.` An
+ * HOURLY red check on main's HEAD is exactly the Railway wait-for-CI deadlock
+ * the POSTURE LINE comment exists to prevent (incident 2026-06-21).
+ *
+ * ⭐ `|| status=$?` ON THE SAME LINE makes the call part of a TESTED compound,
+ * which is the condition `-e` exempts — so the step survives a defect run and
+ * every line below it executes. It also keeps the pipe property the old
+ * predicate had: a pipe changes the line and the exact-match below fails.
  */
+const STATUS_CAPTURE = "|| status=$?";
+
 function liveCommandCapturesItsOwnStatus(text: string): boolean {
   const lines = text.split("\n");
   const at = lines.map((l, i) => (l.includes(LIVE_COMMAND) ? i : -1)).filter((i) => i >= 0);
   if (at.length !== 1) return false;
-  for (let i = at[0] + 1; i < lines.length; i += 1) {
-    if (lines[i].trim() === "") continue;
-    return lines[i].trim() === "status=$?";
-  }
-  return false;
+  return lines[at[0]].trim() === `${LIVE_COMMAND} ${STATUS_CAPTURE}`;
 }
 
 /** The single `probe:` job block. */
@@ -324,29 +339,71 @@ describe("[164.1-05] mode identity", () => {
     expect(bareRunLines(without)).toEqual([]);
   });
 
-  it("the live command appears once and `status=$?` is the very next line", () => {
+  it("the live command captures its own status ON THE SAME LINE, so `-e` cannot kill the step", () => {
     expect(WORKFLOW_TEXT).toContain(LIVE_COMMAND);
     expect(liveCommandCapturesItsOwnStatus(WORKFLOW_TEXT)).toBe(true);
     // The bare form is the documented one, so a local run and CI are identical.
     expect(RUNNER_TEXT.slice(0, 4000)).toContain("node scripts/prod-prober/run.mjs  ");
   });
 
+  it("EVERY branch of the probe step captures its status the same way — the `--arm` branch too", () => {
+    // ⛔ BOTH BRANCHES OR NEITHER. The `--arm` diagnostic branch had the same
+    // bare shape, so a narrowed dispatch died at the node call as well — and
+    // that branch's whole purpose is to print a reading.
+    const job = probeJobText(WORKFLOW_TEXT);
+    const calls = job
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith("node scripts/prod-prober/run.mjs") && l.includes("$RUNNER_LOG"));
+    expect(calls.length, "the probe step invokes the runner in exactly two branches").toBe(2);
+    for (const c of calls) expect(c.endsWith(STATUS_CAPTURE), c).toBe(true);
+    // `set -u` is on, so the initialiser must exist or the first read of
+    // `$status` after a SUCCESSFUL run is an unbound-variable abort.
+    expect(job, "`status` is initialised before the branch").toContain("\n          status=0\n");
+  });
+
+  it("REGRESSION: a bare call with `status=$?` on the NEXT line is REFUSED — that shape is the 2026-09-11 outage", () => {
+    // ⛔ THE OLD PREDICATE ASSERTED EXACTLY THIS SHAPE, so it pinned the bug.
+    // GitHub runs `run:` under `/usr/bin/bash -e {0}`; a bare simple command
+    // that exits non-zero terminates the step and the next line never runs.
+    // MEASURED: run 34565978460, step "Probe production" -> failure, zero
+    // stdout between `##[endgroup]` and `##[error]Process completed with exit
+    // code 1.` — the `cat`, the step summary and the POSTURE LINE all skipped.
+    const reverted = WORKFLOW_TEXT.replace(
+      `${LIVE_COMMAND} ${STATUS_CAPTURE}`,
+      `${LIVE_COMMAND}\n            status=$?`,
+    );
+    expect(reverted, "the revert mutation must actually change the text").not.toBe(WORKFLOW_TEXT);
+    expect(liveCommandCapturesItsOwnStatus(reverted)).toBe(false);
+  });
+
   it("CALIBRATION: piping the live command into anything breaks the status capture", () => {
     const piped = WORKFLOW_TEXT.replace(
-      `${LIVE_COMMAND}\n            status=$?`,
-      `node scripts/prod-prober/run.mjs 2>&1 | tee "$RUNNER_LOG"\n            status=$?`,
+      `${LIVE_COMMAND} ${STATUS_CAPTURE}`,
+      `node scripts/prod-prober/run.mjs 2>&1 | tee "$RUNNER_LOG" ${STATUS_CAPTURE}`,
     );
     expect(piped, "the pipe mutation must actually change the text").not.toBe(WORKFLOW_TEXT);
     expect(liveCommandCapturesItsOwnStatus(piped)).toBe(false);
   });
 
-  it("CALIBRATION: moving `status=$?` off the next line flips the predicate", () => {
-    const moved = WORKFLOW_TEXT.replace(
-      `${LIVE_COMMAND}\n            status=$?`,
-      `${LIVE_COMMAND}\n            cat "$RUNNER_LOG"\n            status=$?`,
-    );
-    expect(moved, "the reorder must actually change the text").not.toBe(WORKFLOW_TEXT);
-    expect(liveCommandCapturesItsOwnStatus(moved)).toBe(false);
+  it("the POSTURE LINE and the step summary are REACHABLE — every line after the live call still runs", () => {
+    // ⛔ THE COMMENT WAS CAREFUL, CORRECT, AND HAD NEVER BEEN REACHED. This
+    // asserts the ORDER that makes it reachable: the status capture, then the
+    // `cat`, then the `^❌` summary, then the schedule branch that exits 0.
+    const job = probeJobText(WORKFLOW_TEXT);
+    const idx = (needle: string) => job.indexOf(needle);
+    const capture = idx(`${LIVE_COMMAND} ${STATUS_CAPTURE}`);
+    const cat = idx('cat "$RUNNER_LOG"');
+    const summary = idx("### prod-prober defects");
+    const posture = idx('if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]');
+    const exitStatus = idx("exit $status");
+    for (const [name, at] of Object.entries({ capture, cat, summary, posture, exitStatus })) {
+      expect(at, `${name} must be present in the probe step`).toBeGreaterThan(-1);
+    }
+    expect(capture).toBeLessThan(cat);
+    expect(cat).toBeLessThan(summary);
+    expect(summary).toBeLessThan(posture);
+    expect(posture).toBeLessThan(exitStatus);
   });
 
   it("self-test runs BEFORE the live probe, and both are in the SAME job", () => {

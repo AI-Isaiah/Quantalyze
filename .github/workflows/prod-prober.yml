@@ -244,13 +244,39 @@ jobs:
           RUNNER_LOG: ${{ runner.temp }}/prod-prober.log
         run: |
           set -uo pipefail
+          # ⛔ `-e` IS ON HERE WHATEVER THIS LINE SAYS, AND THAT WAS THE BUG.
+          # GitHub's default shell for a `run:` block is `/usr/bin/bash -e {0}`
+          # (printed verbatim in every run's log), so omitting `-e` from `set`
+          # does not turn it off. `node … > "$RUNNER_LOG" 2>&1` is a SIMPLE
+          # COMMAND whose status is not tested, so a non-zero exit TERMINATED
+          # THE STEP right there: `status=$?` on the next line, the `cat`, the
+          # `^❌` step-summary block and the ENTIRE POSTURE LINE below never
+          # executed.
+          #
+          # MEASURED 2026-09-11: 10 of the last 12 scheduled runs are
+          # `conclusion: failure`. Run 34565978460 (schedule, step "Probe
+          # production" -> failure) shows `shell: /usr/bin/bash -e {0}` and then
+          # ZERO stdout between `##[endgroup]` and `##[error]Process completed
+          # with exit code 1.` — no `cat` output at all. That is an HOURLY red
+          # check on main's HEAD, which is PRECISELY the Railway wait-for-CI
+          # deadlock the 25-line POSTURE LINE comment below exists to prevent
+          # (incident 2026-06-21). The comment is careful, correct, and had
+          # never once been reached.
+          #
+          # ⛔ THE STATUS IS CAPTURED ON THE SAME LINE, VIA `|| status=$?`, IN
+          # BOTH BRANCHES. `|| cmd` makes the node call part of a tested
+          # compound, which is exactly the condition `-e` exempts — so the step
+          # continues and every line below it runs. `status=0` is the
+          # initialiser `set -u` requires, since `||` assigns only on failure.
+          # ⚠️ Do NOT "simplify" this back to a bare call plus `status=$?`:
+          # `src/__tests__/prod-prober-wiring.test.ts` reds on that shape now,
+          # and it is the shape that produced the outage above.
+          status=0
           if [ -n "${ARM:-}" ]; then
             echo "NARROWED DIAGNOSTIC dispatch of arm ${ARM}: this mode never returns success."
-            node scripts/prod-prober/run.mjs --arm "$ARM" > "$RUNNER_LOG" 2>&1
-            status=$?
+            node scripts/prod-prober/run.mjs --arm "$ARM" > "$RUNNER_LOG" 2>&1 || status=$?
           else
-            node scripts/prod-prober/run.mjs > "$RUNNER_LOG" 2>&1
-            status=$?
+            node scripts/prod-prober/run.mjs > "$RUNNER_LOG" 2>&1 || status=$?
           fi
           cat "$RUNNER_LOG"
           if grep -q '^❌' "$RUNNER_LOG"; then
