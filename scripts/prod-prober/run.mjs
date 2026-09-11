@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 71;
+export const SELF_TEST_SCENARIOS = 72;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -2540,6 +2540,83 @@ export async function selfTest() {
               .sort(),
           )})`,
         ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("CR-R1-02: a row nobody could JUDGE withholds its command text, exactly as a DIRTY row does");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ "COULD NOT BE JUDGED" IS NOT "PASSED HYGIENE", AND THE DIFFERENCE IS
+    // PUBLISHED. `compareManifest` used to read `(map.get(name) || []).length >
+    // 0`; a row the F3 wrapper refused is ABSENT from the map, so `|| []` made
+    // that `false` and the text-withholding branch printed a unified diff of
+    // BOTH sides' command text — into the runner log `prod-prober.yml` `cat`s
+    // into a PUBLIC Actions log, which the step summary and the auto-filed
+    // issue copy verbatim (D-03). `makeScrubber` redacts each arm's
+    // `requiredEnv` VALUES and knows nothing about an inline key.
+    //
+    // ⛔ THE FIXTURE NEEDS NO OPERATOR MISTAKE. Its unjudgeable row is
+    // unjudgeable because of its OWN TEXT: `codeSpans` refuses dollar nesting
+    // deeper than `MAX_DOLLAR_DEPTH`, for ANY jobname. The F3 scenario above
+    // cannot see any of this — it passes `quiet` as the log sink and never
+    // inspects `lines`.
+    const prod = loadFixture("cron-drift", "prod-unjudgeable-drift.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const UNJUDGEABLE = "audit_log_cold_purge";
+      // The key as the fixture spells it — two short `||` operands, never one
+      // credential-shaped string in a public repo (Q3).
+      const KEY_PARTS = ["FAKE-abcdef0123", "456789abcdef0123456789"];
+      const lines = [];
+      const r = await driftRun(prod.data, driftFixturePath("manifest.json"), (s) => lines.push(String(s)));
+      const log = lines.join("\n");
+      // CALIBRATION, and it is what makes "no diff was printed" a reading
+      // rather than something this arm always says: the SAME manifest against a
+      // row that IS judged and IS clean and DOES differ prints the diff.
+      const judged = prod.data.map((x) =>
+        x.jobname === UNJUDGEABLE ? { ...x, command: "SELECT purge_audit_log_cold(interval '91 days')" } : x,
+      );
+      const controlLines = [];
+      const rControl = await driftRun(prod.data.length ? judged : judged, driftFixturePath("manifest.json"), (s) =>
+        controlLines.push(String(s)),
+      );
+      const controlLog = controlLines.join("\n");
+      pass =
+        expect(
+          (() => {
+            try {
+              CRON_DRIFT_MOD.hygieneViolations(UNJUDGEABLE, prod.data.find((x) => x.jobname === UNJUDGEABLE).command);
+              return false;
+            } catch {
+              return true;
+            }
+          })(),
+          `PRECONDITION: the fixture's ${UNJUDGEABLE} command really is UNJUDGEABLE — hygieneViolations throws on it, so the row is absent from the hygiene map`,
+        ) &&
+        expect(
+          r.defects.some((x) => x.kind === "cron-drift" && String(x.subject) === UNJUDGEABLE),
+          `PRECONDITION: that same row really DRIFTS, so the withholding branch is reached at all (got ${r.defects.map((x) => `${x.kind}:${x.subject}`).join(", ") || "no defects"})`,
+        ) &&
+        expect(
+          KEY_PARTS.every((p) => log.includes(p) === false),
+          `the credential is NOWHERE in the log — neither operand of the fixture's split key (${KEY_PARTS.filter((p) => log.includes(p)).join(", ") || "neither present"})`,
+        ) &&
+        expect(
+          lines.some((l) => l.startsWith("- ")) === false && lines.some((l) => l.startsWith("+ ")) === false,
+          `and NO diff line was printed at all for a run whose only differing row is unjudged (${lines.filter((l) => /^[+-] /.test(l)).length} printed)`,
+        ) &&
+        expect(
+          log.includes("command text withheld:") && log.includes("could not be judged"),
+          `and the withholding SAYS WHY, in the words that send an operator to the right place (withheld line: ${log.includes("command text withheld:")}, reason given: ${log.includes("could not be judged")})`,
+        ) &&
+        expect(
+          controlLog.includes("- ") && controlLog.includes("+ ") && rControl.defects.some((x) => x.kind === "cron-drift"),
+          `CALIBRATION: the SAME arm on a row that WAS judged, is clean and still differs DOES print the two-sided diff (${controlLines.filter((l) => /^[+-] /.test(l)).length} diff line(s)) — so the assertion above is a reading, not a constant`,
+        ) &&
+        expect(r.exitCode === 1, `the run still exits 1 — withholding is not passing (got ${r.exitCode})`) &&
         pass;
     }
   }

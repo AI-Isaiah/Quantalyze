@@ -1431,16 +1431,61 @@ export function compareManifest(manifest, prodRows, opts = {}) {
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // CR-R1-02 (164.8.5-REVIEW-R1) — THE HYGIENE MAPS RECORD A VERDICT, NEVER A
+  // BARE ARRAY, AND "NOT IN THE MAP" IS NOT A VERDICT.
+  //
+  // ⛔ THE INVARIANT: every consumer of a hygiene map must distinguish NO ENTRY
+  // (the row was never judged) from an EMPTY entry (the row was judged and is
+  // clean) — and an unjudged row must WITHHOLD exactly as a dirty one does.
+  //
+  // The F3 repair above scopes a refusal to its row by `continue`-ing without
+  // ever calling `.set(…)`, so the row is ABSENT. The consumer below used to
+  // read `(map.get(name) || []).length > 0`, which coerces absence to `false`:
+  // "could not be judged" became "passed hygiene", and the text-withholding
+  // rule then printed the full command text of the ONE row nobody could clear,
+  // into a log `prod-prober.yml` `cat`s into a PUBLIC Actions log and which the
+  // step summary and the auto-filed issue copy verbatim (D-03). `makeScrubber`
+  // redacts each arm's `requiredEnv` VALUES and knows nothing about an inline
+  // key in `cron.job.command`.
+  //
+  // REPRODUCED 2026-09-11, two independent triggers, neither needing an
+  // adversary: (a) an absent `supabase/schema/functions/` makes
+  // `reachesVaultRead` throw, (b) a command nesting `DO` bodies deeper than
+  // `MAX_DOLLAR_DEPTH` makes `codeSpans` throw — for ANY jobname. Both printed
+  // the credential.
+  //
+  // ⭐ THE REFUSAL IS NOW EXPLICIT AT THE POINT OF REFUSAL rather than
+  // inferable at the point of use: `recordVerdict` writes a `judged: false`
+  // sentinel into the map, and `hygieneVerdict` below still treats a MISSING
+  // entry as unjudged so that a future third producer that forgets to record
+  // cannot re-open this hole.
+  // ---------------------------------------------------------------------------
+  const recordVerdict = (map, jobname, judged) =>
+    map.set(
+      jobname,
+      judged.error !== null
+        ? { judged: false, violations: [], reason: judged.error }
+        : { judged: true, violations: judged.violations, reason: null },
+    );
+
+  const UNRECORDED = Object.freeze({
+    judged: false,
+    violations: [],
+    reason: "no hygiene verdict was recorded for this row at all",
+  });
+  const hygieneVerdict = (map, jobname) => map.get(jobname) ?? UNRECORDED;
+
   const rows = Array.isArray(prodRows) ? prodRows : [];
   const prodHygiene = new Map();
   for (const row of rows) {
     const judged = judgeRow(row.jobname, row.command);
+    recordVerdict(prodHygiene, row.jobname, judged);
     if (judged.error !== null) {
       defects.push({ kind: "measure-fail", subject: `prod:${row.jobname}`, detail: judged.error });
       continue;
     }
     const v = judged.violations;
-    prodHygiene.set(row.jobname, v);
     const { credential, unjudgeable } = splitHygiene(v);
     if (credential.length > 0) {
       defects.push({
@@ -1616,12 +1661,12 @@ export function compareManifest(manifest, prodRows, opts = {}) {
     if (typeof row.command !== "string") continue; // a withheld row was read by a human at capture time
     // Same F3 scoping as section (0): one unjudgeable row is one row.
     const judged = judgeRow(row.jobname, row.command);
+    recordVerdict(manifestHygiene, row.jobname, judged);
     if (judged.error !== null) {
       defects.push({ kind: "measure-fail", subject: `manifest:${row.jobname}`, detail: judged.error });
       continue;
     }
     const v = judged.violations;
-    manifestHygiene.set(row.jobname, v);
     const { credential, unjudgeable } = splitHygiene(v);
     if (credential.length > 0) {
       defects.push({
@@ -1727,8 +1772,13 @@ export function compareManifest(manifest, prodRows, opts = {}) {
     differing += 1;
 
     const withheld = typeof m.command !== "string";
-    const manifestDirty = (manifestHygiene.get(name) || []).length > 0;
-    const prodDirty = (prodHygiene.get(name) || []).length > 0;
+    // ⛔ UNJUDGED WITHHOLDS EXACTLY AS DIRTY DOES — see the invariant recorded
+    // beside `recordVerdict`. `!v.judged` is the whole of CR-R1-02's fix; the
+    // `.violations.length > 0` half is the pre-existing reading.
+    const manifestVerdict = hygieneVerdict(manifestHygiene, name);
+    const prodVerdict = hygieneVerdict(prodHygiene, name);
+    const manifestDirty = !manifestVerdict.judged || manifestVerdict.violations.length > 0;
+    const prodDirty = !prodVerdict.judged || prodVerdict.violations.length > 0;
 
     let headline =
       `cron-drift: manifest captured ${capturedAt} (marker ${marker}) sha ${m.command_sha256} — ` +
@@ -1738,16 +1788,23 @@ export function compareManifest(manifest, prodRows, opts = {}) {
       (changed.includes("username") ? ` (username ${m.username} → ${p.username} — the role the command EXECUTES AS)` : "") +
       (changed.includes("database") ? ` (database ${m.database} → ${p.database})` : "");
 
-    // ⛔ The command TEXT is printed only when BOTH sides pass hygiene AND the
-    // manifest row carries text. Otherwise: shas only, and SAY WHY.
+    // ⛔ The command TEXT is printed only when BOTH sides were JUDGED, both
+    // PASSED, and the manifest row carries text. Otherwise: shas only, and SAY
+    // WHY. "Judged" is the half CR-R1-02 added: between the F3 repair and this
+    // fix, a row nobody could judge satisfied "passes hygiene" and had its full
+    // text printed into a public log.
     if (withheld) {
       headline += `\n      command text withheld: manifest row is sha-only (${m.withheld_reason})`;
     } else if (manifestDirty || prodDirty) {
-      const which = [manifestDirty ? "manifest" : null, prodDirty ? "PROD" : null].filter(Boolean).join(" and ");
-      const ruleIds = [...(manifestHygiene.get(name) || []), ...(prodHygiene.get(name) || [])]
-        .map((v) => v.slice(0, v.indexOf("]") + 1))
-        .join(" ");
-      headline += `\n      command text withheld: ${which} fails hygiene (${ruleIds})`;
+      // The REASON is part of the withholding line, because "fails hygiene" and
+      // "could not be judged" send an operator to two different places and the
+      // second one used to print the text instead of saying anything at all.
+      const say = (side, v) =>
+        v.judged ? `${side} fails hygiene (${v.violations.map((x) => x.slice(0, x.indexOf("]") + 1)).join(" ")})` : `${side} could not be judged (${v.reason})`;
+      const reasons = [manifestDirty ? say("manifest", manifestVerdict) : null, prodDirty ? say("PROD", prodVerdict) : null]
+        .filter(Boolean)
+        .join("; ");
+      headline += `\n      command text withheld: ${reasons}`;
     } else if (changed.includes("command")) {
       // Both sides clean: a unified diff of the NORMALIZED text. Normalization
       // collapses each side to one line, so the diff is exactly two lines.
