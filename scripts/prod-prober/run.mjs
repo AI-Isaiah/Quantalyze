@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 75;
+export const SELF_TEST_SCENARIOS = 76;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -3386,6 +3386,60 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
+  scenario("IN-R2-02: a jobid of `12abc` is REFUSED, not silently captured as 12");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ `Number.parseInt("12abc", 10)` IS `12`. parseInt stops at the first
+    // non-digit and `Number.isInteger(12)` is `true`, so the guard that says "a
+    // jobid that is not an integer" let `12abc` through and the oracle recorded
+    // `"jobid": 12` — a value nobody read, written as if it were the captured
+    // truth. That is the same class as the NaN→null defect the guard was added
+    // for (IN-R1-03), one spelling over. `/^\d+$/` closes it.
+    const prod = loadFixture("cron-drift", "prod-ok.json");
+    if (!prod.ok) {
+      pass = expect(false, prod.reason) && pass;
+    } else {
+      const rows = clone(prod.data);
+      rows[0].jobid = "12abc";
+      const dir = mkdtempSync(join(tmpdir(), "prod-prober-capture-"));
+      const outPath = join(dir, "bad-jobid.json");
+      const controlPath = join(dir, "control.json");
+      const lines = [];
+      const controlLines = [];
+      try {
+        const code = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: rows }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath,
+          log: (x) => lines.push(String(x)),
+        });
+        const controlCode = await captureManifest({
+          seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: prod.data }), clock: () => new Date("2026-09-05T12:00:00Z") }),
+          outPath: controlPath,
+          log: (x) => controlLines.push(String(x)),
+        });
+        pass =
+          expect(
+            Number.isInteger(Number.parseInt("12abc", 10)),
+            "PRECONDITION: the OLD guard really did accept it — parseInt('12abc') is 12 and Number.isInteger(12) is true",
+          ) &&
+          expect(code === 3, `the capture is REFUSED (got ${code}; ${lines.join(" | ")})`) &&
+          expect(
+            lines.some((l) => l.includes("jobid that is not an integer") && l.includes(rows[0].jobname)),
+            `naming the row (${lines.join(" | ")})`,
+          ) &&
+          expect(existsSync(outPath) === false, "and nothing was written — an unread jobid is never serialised") &&
+          expect(
+            controlCode === 0 && existsSync(controlPath),
+            `CALIBRATION: the SAME rows with their real integer jobids capture cleanly (got ${controlCode}; ${controlLines.join(" | ")})`,
+          ) &&
+          pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   scenario("captureManifest REFUSES when the database has no COMMENT ON DATABASE marker");
   // -------------------------------------------------------------------------
   {
@@ -4155,7 +4209,14 @@ export async function captureManifest({ seams, outPath, log = (s) => console.log
   // COMPARED_ROW_STRINGS is a recorded decision), but it IS printed beside
   // every drift line so an operator can run `WHERE jobid = …`, which is exactly
   // the use a null defeats.
-  const badJobids = rows.filter((r) => !Number.isInteger(Number.parseInt(String(r.jobid).trim(), 10)));
+  // ⛔ `/^\d+$/`, NOT `Number.isInteger(parseInt(...))` (164.8.5-REVIEW-R2
+  // IN-R2-02). `Number.parseInt("12abc", 10)` is `12` — parseInt STOPS at the
+  // first non-digit — and `Number.isInteger(12)` is `true`, so a jobid of
+  // `12abc` passed this guard and was captured as `12`. The guard's own
+  // sentence says "a jobid that is not an integer"; it was weaker than it read.
+  // Harmless against a real `int` column, and the point of a totality guard is
+  // that it does not depend on that.
+  const badJobids = rows.filter((r) => !/^\d+$/.test(String(r.jobid).trim()));
   if (badJobids.length > 0) {
     log(
       `REFUSED: ${badJobids.length} cron.job row(s) carry a jobid that is not an integer (${badJobids.map((r) => r.jobname).join(", ")}), which JSON.stringify would have written into the oracle as null. Nothing was written.`,
