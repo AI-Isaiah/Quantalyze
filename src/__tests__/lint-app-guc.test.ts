@@ -27,7 +27,15 @@
  * goal, and the two anti-vacuity arms below are what keep the exemption honest.
  */
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -604,7 +612,7 @@ function scanOne(abs: string, successor: string, occurrences = 1) {
   }) as { findings: Finding[]; measureFails: { file: string; reason: string }[] };
 }
 
-describe("lint-app-guc: successor-invalid — the four arms (WR-06 / threat T-164.7-02)", () => {
+describe("lint-app-guc: successor-invalid — every arm, each with its OWN red surface (WR-06 / threat T-164.7-02)", () => {
   it("CALIBRATION: a sibling .sql successor that exists and reads nothing is clean", () => {
     const dir = tempDir("succ-ok");
     writeFileSync(join(dir, "later.sql"), "SELECT 1;\n");
@@ -692,6 +700,94 @@ describe("lint-app-guc: successor-invalid — the four arms (WR-06 / threat T-16
     const target = join(dir, "zzz.sql");
     writeFileSync(target, annotated("aaa.sql"));
     expect(kindsOf(scanOne(target, "aaa.sql").findings)).toEqual([]);
+  });
+
+  it("arm 4 UNREADABLE: a sibling .sql successor that exists but cannot be read is refused", () => {
+    // Same shape as the isFile arm: `existsSync` and `isFile()` both say yes,
+    // and the file is STILL not evidence that the mechanism moved — the gate
+    // could not read it, and "could not read" is never "reads zero". Until
+    // this arm the catch around `readFileSync(successorAbs)` had no surface of
+    // any kind.
+    //
+    // ⛔ The condition is BUILT with chmod 000 and then PROBED rather than
+    // assumed: a process running as root reads a 000 file anyway, so under
+    // root this arm would report a green it never measured. A platform that
+    // cannot produce the condition SKIPS with a NAMED reason — the same idiom
+    // the symlink arm below already uses for `symlinkSync`.
+    const dir = tempDir("succ-unreadable");
+    const succ = join(dir, "later.sql");
+    writeFileSync(succ, "SELECT 1;\n");
+    let unreadable = false;
+    try {
+      chmodSync(succ, 0o000);
+      readFileSync(succ, "utf8");
+    } catch {
+      unreadable = true;
+    }
+    if (!unreadable) {
+      console.warn(
+        "SKIPPED (named): chmod 000 left the successor readable here (root?) — the unreadable-successor arm was NOT measured on this platform.",
+      );
+      expect(unreadable, "unreadable-successor arm unmeasured on this platform").toBe(false);
+      return;
+    }
+    const target = join(dir, "a.sql");
+    writeFileSync(target, annotated("later.sql"));
+    const r = scanOne(target, "later.sql");
+    chmodSync(succ, 0o644);
+    expect(r.measureFails).toEqual([]);
+    expect(kindsOf(r.findings)).toEqual(["successor-invalid"]);
+    expect(r.findings[0].message).toContain("cannot be read");
+    // One defect, one finding: an unreadable successor must NOT also be
+    // reported as one that "still contains" reads, or the two arms become
+    // inseparable and neither is attributable.
+    expect(r.findings[0].message, "the CONTENT arm must not fire as well").not.toContain(
+      "still contains",
+    );
+  });
+
+  it("arm 5 CONTENT: a sibling .sql successor that ITSELF still reads an app GUC is refused", () => {
+    // ⛔ THE ARM CARRYING THE ORIGINAL SEMANTIC OF THE WHOLE CHECK — "the
+    // successor must itself contain ZERO app-GUC reads, else the lineage
+    // points at another copy of the same defect" — and until this test it had
+    // NO red surface of any kind. MEASURED 2026-09-11: neutering
+    // `if (successorReads !== null && successorReads !== 0)` to `if (false)`
+    // (edit verified present in the file) left `--self-test` at exit 0, the
+    // corpus at exit 0 and this suite at 53 passed. Nothing moved. The
+    // docstring nonetheless claimed each arm "can be disabled alone and
+    // exactly one red surface goes clean".
+    //
+    // THE FAILURE IT MUST CATCH: annotate a migration with
+    // `successor: <a sibling .sql that itself still reads an app GUC>`. The
+    // lineage now points at another copy of the defect and every gate in the
+    // repo is green.
+    //
+    // CALIBRATION is the first test in this block: the same corpus with
+    // `later.sql` holding `SELECT 1;` is clean, so the red below is caused by
+    // the successor's CONTENT and by nothing about the harness.
+    const dir = tempDir("succ-content");
+    writeFileSync(
+      join(dir, "later.sql"),
+      "DO $$ BEGIN PERFORM current_setting('app.x', TRUE); END $$;\n",
+    );
+    const target = join(dir, "a.sql");
+    writeFileSync(target, annotated("later.sql"));
+    const r = scanOne(target, "later.sql");
+    expect(r.measureFails).toEqual([]);
+    expect(kindsOf(r.findings)).toEqual(["successor-invalid"]);
+    expect(r.findings[0].message).toContain("still contains 1");
+    // Attribution: it must be refused on CONTENT, not on type, sibling-ness,
+    // existence or regular-file-ness — every one of which is a different arm.
+    for (const otherArm of [
+      "not a .sql file",
+      "not a SIBLING",
+      "does not exist beside",
+      "not a regular file",
+      "cannot point backwards",
+      "cannot be read",
+    ]) {
+      expect(r.findings[0].message, `must not be refused on: ${otherArm}`).not.toContain(otherArm);
+    }
   });
 });
 
