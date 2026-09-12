@@ -845,9 +845,16 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    sites (`deribit_txn.py`, the USD and native twins). So the next occurrence answers the deciding
    question by itself. ⛔ This does NOT close the item — nothing is classified yet.
    ⚠️ **EXPOSURE IS WIDER THAN ONE KEY:** the composite `Alpha Centauri` holds THREE deribit keys
-   and `deribit_ingest.py` imports the same classifier, so Phase 161.1's go-live step that requires
-   *one manual composite enqueue observed to advance `last_return_date`* is likely blocked by this
-   same defect rather than by scheduling. See item 0.3 below.
+   and `deribit_ingest.py` imports the same classifier, so the same refusal is reachable there.
+   ⛔ **BUT IT IS NOT WHAT BLOCKS 161.1 TODAY — MEASURED ON PROD 2026-09-12, correcting an earlier
+   guess in this entry.** Alpha Centauri (`081f2912`) last computed 2026-08-25 with
+   `complete_with_warnings` and 272 return points; its single failed job (`978e2d20`,
+   `stitch_composite`, `failed_final`) names a DIFFERENT cause:
+   `run_stitch_composite_job: member ledger unrecoverable — native_nav inception reconciliation
+   breached venue=deribit currencies=[BTC] breach_ratio=436`. That is a NAV reconciliation breach,
+   not a transaction-log classification refusal — the job never reached the classifier. So Phase
+   161.1's go-live step is blocked by the reconciliation breach, and `assignment` is a latent
+   exposure behind it rather than the live blocker. See item 0.3 below.
    ⭐ **OWNER: Phase 168 DRBOPTIONS** (added 2026-09-12 by founder decision — a new phase, not folded
    into 161.1 or 166). That entry carries the deciding question and the forbidden remedies.
    **Close condition:** `assignment` is classified against a captured row census, with a test and a
