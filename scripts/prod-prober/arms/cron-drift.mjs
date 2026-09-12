@@ -2224,6 +2224,59 @@ export function compareManifest(manifest, prodRows, opts = {}) {
   }
 
   // -------------------------------------------------------------------------
+  // (2) MANIFEST-side hygiene, INDEPENDENTLY of equality. (The PROD side ran in
+  //     section (0), directly above.) A PROD command that matches the
+  //     manifest byte for byte and still carries an inline key is STILL a
+  //     defect — that is what makes the oracle "achievable" rather than
+  //     "whatever PROD has".
+  //
+  //     ⛔ POSITION IS THE CONTROL. This loop runs ABOVE EVERY `return` in this
+  //     function, for the same reason section (0) does. A credential in
+  //     COMMITTED manifest text is a finding about repo text, so it must be
+  //     reported even when the manifest is `manifest-invalid` (normalization or
+  //     schema_version drift) or the database marker mismatches — states in
+  //     which NO comparison happens and every later section is skipped.
+  //
+  //     MEASURED 2026-09-11 (TODOS 164.8.5-MANIFEST-SIDE-LOOP-DEAD): with the
+  //     loop below the `:2244`/`invalid()`/marker returns,
+  //     `normalization ws-collapse-v1 -> 0 manifest-side credential defects`;
+  //     PR #776's re-capture (`ws-collapse-v2`) re-animated it as a SIDE
+  //     EFFECT — this position makes it un-skippable by the next oracle drift.
+  //
+  //     ⚠️ The shape checks at (1) have NOT run at this position, so `jobs` may
+  //     be any type: iterate defensively rather than assuming an array.
+  // -------------------------------------------------------------------------
+  const manifestHygiene = new Map();
+  for (const row of Array.isArray(manifest?.jobs) ? manifest.jobs : []) {
+    if (typeof row.command !== "string") continue; // a withheld row was read by a human at capture time
+    // Same F3 scoping as section (0): one unjudgeable row is one row.
+    const judged = judgeRow(row.jobname, row.command);
+    recordVerdict(manifestHygiene, row.jobname, judged);
+    if (judged.error !== null) {
+      defects.push({ kind: "measure-fail", subject: `manifest:${row.jobname}`, detail: judged.error });
+      const partial = partialCredentialDefect("manifest", row.jobname, judged);
+      if (partial !== null) defects.push(partial);
+      continue;
+    }
+    const v = judged.violations;
+    const { credential, unjudgeable } = splitHygiene(v);
+    if (credential.length > 0) {
+      defects.push({
+        kind: "cron-secret-in-command",
+        subject: `manifest:${row.jobname}`,
+        detail: `the COMMITTED manifest row for ${shownName(row.jobname)} fails ${credential.length} hygiene rule(s): ${credential.join(" ")}`,
+      });
+    }
+    if (unjudgeable.length > 0) {
+      defects.push({
+        kind: "measure-fail",
+        subject: `manifest:${row.jobname}`,
+        detail: `${unjudgeable.join(" ")} The command could not be judged, and an unjudged command is not a clean one.`,
+      });
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // (0b) WHICH DATABASE WAS THIS READ FROM? MANDATORY, and checked here rather
   //      than only at the call site so that a future second caller cannot omit
   //      it. Note the `return` carries section (0)'s findings with it: a
@@ -2368,44 +2421,6 @@ export function compareManifest(manifest, prodRows, opts = {}) {
     });
     return { defects, lines };
   }
-
-  // -------------------------------------------------------------------------
-  // (2) MANIFEST-side hygiene, INDEPENDENTLY of equality. (The PROD side ran in
-  //     section (0), above every return.) A PROD command that matches the
-  //     manifest byte for byte and still carries an inline key is STILL a
-  //     defect — that is what makes the oracle "achievable" rather than
-  //     "whatever PROD has".
-  // -------------------------------------------------------------------------
-  const manifestHygiene = new Map();
-  for (const row of manifest.jobs) {
-    if (typeof row.command !== "string") continue; // a withheld row was read by a human at capture time
-    // Same F3 scoping as section (0): one unjudgeable row is one row.
-    const judged = judgeRow(row.jobname, row.command);
-    recordVerdict(manifestHygiene, row.jobname, judged);
-    if (judged.error !== null) {
-      defects.push({ kind: "measure-fail", subject: `manifest:${row.jobname}`, detail: judged.error });
-      const partial = partialCredentialDefect("manifest", row.jobname, judged);
-      if (partial !== null) defects.push(partial);
-      continue;
-    }
-    const v = judged.violations;
-    const { credential, unjudgeable } = splitHygiene(v);
-    if (credential.length > 0) {
-      defects.push({
-        kind: "cron-secret-in-command",
-        subject: `manifest:${row.jobname}`,
-        detail: `the COMMITTED manifest row for ${shownName(row.jobname)} fails ${credential.length} hygiene rule(s): ${credential.join(" ")}`,
-      });
-    }
-    if (unjudgeable.length > 0) {
-      defects.push({
-        kind: "measure-fail",
-        subject: `manifest:${row.jobname}`,
-        detail: `${unjudgeable.join(" ")} The command could not be judged, and an unjudged command is not a clean one.`,
-      });
-    }
-  }
-
   // -------------------------------------------------------------------------
   // (3) Adjacency: zero rows and duplicates, before any set arithmetic.
   // -------------------------------------------------------------------------
