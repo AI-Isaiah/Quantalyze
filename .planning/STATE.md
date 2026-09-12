@@ -11,7 +11,13 @@ last_activity: 2026-09-12
 last_activity_desc: "164.8.6 VAULTTICKFIX SQL wave (plans 01-05) complete and SHIPPED as PR #778 (head of filtered branch phase-164.8.6-vaulttickfix-pr; 19 of 32 commits picked, the 13 dropped carry ZERO non-filtered files; CODE IDENTICAL 5069 == 5069 lines; deletion guard EMPTY; 0 forbidden paths; only structural ROADMAP.md kept). v0.77.34.0. Two NEW migrations apply to PROD on merge: 20260911120000_vault_tick_hardening (INTO STRICT, empty-key guard, explicit service_role EXECUTE) and 20260911130000_ledger_fanout_grantees_and_dormancy (whole-set REVOKE on cron_runs, dormancy instrument). Corpus 392 annotations / 411 steps; ARMS_FLOOR 384 -> 392 separated both directions on real lanes; full corpus run at bce4b3b0 clean (392/392/0, biting 392, lane-invocations 392, 0 defects). TWO reviewer rounds, three independent opus agents each: round 1 = 1 Critical / 2 High / 7 Medium, fixed across three file-disjoint passes (13f3ece6, 14462a48, bce4b3b0); round 2 = ZERO Critical, stopping rule met. The round-1 Critical was a comment-only edit to the ALREADY-APPLIED 20260907130000 — reverted, both corrections carried as header prose into the new 20260911130000, so no applied migration is in the diff and supabase-migrate.yml's 'applied ZERO migrations' guard cannot fire. Four residual findings DROPPED by founder decision rather than booked (they stay in the reviewer reports). KNOWN OPEN, disclosed in the migration header rather than fixed: ROADMAP criteria 2 and 3 are closed in the repo and OPEN in production — they land in match_engine_cron_tick(), which NO PROD cron job calls; cron job 1 match_engine_cron still inlines the unguarded Vault read and the v_key = '' fallthrough. Re-pointing that job row is Phase 164.5.1's live production DDL. CARRY-FORWARD: the all-candidates-failed branch of the ledger fan-out is unreachable while the fan-out is dormant and becomes reachable at the Phase 161.1 activation — exercise it deliberately there. EXPECTED RED on the PR before merge by construction: V2, G1, S1 (x2), M1 (x2), M2 (x2) probe applied-ness and these migrations apply on merge ([164.8-PUSH-RACE-VAC08] coupling (b)); sql-tests may race apply-test on the merge push (coupling (a)). If apply-test refuses on shared TEST the remedy is REVERT THE MERGE, never an edit to supabase-migrate.yml. UPDATED 2026-09-12 EOD: plan 06 recorded (v0.77.34.0, PR #778 squash ce7ac08a). A follow-up fix shipped as PR #779 (756469e6): apply-test's affirmative verifier had NEVER counted a migration because `supabase db push` writes its progress to STDERR and all four capture sites piped stdout only — an anti-vacuity INVERTED case, a control that could not SUCCEED. Both migrations then APPLIED TO PROD in run 34686331921 ('planned 2 migration version(s); push reported 2'), and PR #782 (88f395cd) regenerated baseline.sql from PROD afterwards, clearing sql-gate-lint on main (findings 3 -> 0) with the allowlist UNTOUCHED. Plan 07 (the manifest-side hoist + the CR-02 null-element guard) ships as PR #781. ⛔ PLAN 08 WAS WITHDRAWN, NOT SHIPPED: two independent reviewers found `tokenMeasure` fired the credential rule — whose remedy is 'treat the named secret as EXPOSED and rotate it' — on credential-free PROSE, hourly, into a PUBLIC log. MEASURED: 8 of the 14 committed PROD cron commands already carry its positive signal, and the only separator is the `fromConcat` waiver, which is set per CHAIN and inherited by every whitespace token. Two fix rounds each closed the named instance and produced a new class the next round found, including a FALSE-NEGATIVE band at 28-31 chars. It needs a REDESIGN, not a third repair, and is routed to Phase 164.8.4 GATERESIDUE with every measurement attached."
 state_head: fd0b66ec174893cba03cf8fb2d359f2e9707703f
 
-# ⚠️ progress: HAND-SET 2026-09-06 against `origin/main`, NOT derived from this checkout.
+# ⭐ progress: RE-DERIVED 2026-09-12 at `733a55f5` from ALL REFS — see the method block
+# immediately above the `progress:` keys below. This supersedes the HAND-SET note that stood
+# here from 2026-09-06: the values are no longer hand-set and are no longer taken from this
+# checkout, which is exactly why they moved (31/15/141/137 -> 33/19/163/160).
+# ⚠️ `percent` is PHASE-weighted and always has been. 58 means 19 of 33 PHASES; the PLANS
+# are 160 of 163, i.e. 98%. Do not read `percent` as a plan figure.
+# ⚠️ HISTORICAL, kept as lineage — everything below this line describes the 2026-09-06 state:
 
 # This branch is 1 commit behind main and is missing d679f638, so four SHIPPED phase
 
@@ -249,12 +255,42 @@ state_head: fd0b66ec174893cba03cf8fb2d359f2e9707703f
 #                                It FELL because eight phases were inserted, not because work
 #                                was lost — a lower percent here is the roadmap growing.
 
+# ⭐ RE-DERIVED 2026-09-12 at `733a55f5` — and for the first time NOT from local disk.
+#    Every previous value in this block was hand-set or handler-computed against this checkout,
+#    where the `-pr` filter has stripped `.planning/phases/**` for four COMPLETE phases (164.2,
+#    164.5, 164.8.2, 164.8.5 = 29 finished plans). Any count taken from disk is short by those.
+#    Method, re-runnable: enumerate every PLAN/SUMMARY path ever added under `.planning/phases/`
+#    across ALL REFS (`git log --all --diff-filter=A --name-only`), drop the ones whose newest
+#    history event is a deletion, then EXEMPT deletions made by the `-pr` filter commit
+#    (`22a5fe96 chore(pr): strip transient .planning/phases artifacts from the review diff`) —
+#    a filtered artifact is stranded, not withdrawn. A phase counts complete when plans>0 and
+#    every live plan index carries a SUMMARY.
+#
+#   total_phases     31 -> 33   — the roadmap's actual v1.20 row count, 158 through 168.
+#   total_plans     141 -> 163  — three plans are WITHDRAWN and correctly excluded from every
+#                                denominator, each with a commit saying so: 162-10 (`3fa26831`,
+#                                premise false), 164.4-12 (`9b83b064`, replanned 13 -> 12),
+#                                164.5-08 (`7910f614`, LIFTED into new Phase 164.5.2).
+#   completed_plans 137 -> 160  — the 3 live plans with no SUMMARY are 159-01 (its deliverable
+#                                `159-CENSUS.md` is on disk), 160-07 (a gap_closure plan whose
+#                                own output `160-VERIFICATION.md` reads `status: passed`), and
+#                                164.3-07 (the founder-deferred VAC-07). None is unfinished work.
+#   completed_phases 15 -> 19   — + 164.2 (10/10), 164.5 (7/7), 164.8.5 (7/7), 164.8.6 (8/8),
+#                                164.7 (7/7, finalized v0.77.32.1), 164.8.1 (4/4 — the 04-SUMMARY
+#                                is STRANDED off main, not missing; the 2026-09-11 note above
+#                                counted it conservatively at 3 and that was the disk lying),
+#                                164.2.1 (2/2). 164.3 (9/10) stays OUT: one deliberate deferral.
+#   percent          48 -> 58   — 19/33 phase-weighted, the convention fixed at 156-10.
+#                                ⚠️ `percent` has ALWAYS been PHASE-weighted, never plan-weighted.
+#                                Read beside `completed_plans`/`total_plans` it invites the
+#                                opposite reading — 160/163 of the PLANS are done, 98%.
+
 progress:
-  total_phases: 31
-  completed_phases: 15
-  total_plans: 141
-  completed_plans: 137
-  percent: 48
+  total_phases: 33
+  completed_phases: 19
+  total_plans: 163
+  completed_plans: 160
+  percent: 58
 ---
 
 # Project State — Quantalyze
