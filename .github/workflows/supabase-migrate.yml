@@ -749,7 +749,12 @@ jobs:
           # `set -u` makes an absent variable a hard failure here rather than a CLI
           # connection to a libpq default. NEVER echoed: this log is public.
           dsn="${TEST_DB_SESSION_URL}"
-          supabase db push --include-all --dry-run --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-dry-run.txt"
+          # ⛔ `2>&1` IS LOAD-BEARING, NOT TIDINESS. `supabase db push` writes its
+          # human-readable plan and progress ("Applying migration <version>...", the
+          # bullet list of pending files) to STDERR; only minimal output reaches
+          # STDOUT. A stdout-only capture hands the verifier below an empty file, so
+          # it counts ZERO versions no matter what the CLI actually did.
+          supabase db push --include-all --dry-run --db-url "${dsn}" 2>&1 | tee "${RUNNER_TEMP}/test-dry-run.txt"
 
       # ⚠️ THE ONE DELIBERATE DEVIATION FROM THE PROD APPLY'S SHAPE, stated out loud:
       # the CREDENTIAL MODE. PROD runs `supabase link --project-ref` with
@@ -824,7 +829,12 @@ jobs:
           set -euo pipefail
           # The session-mode DSN derived ONCE, in `Derive the session-mode TEST DSN`.
           dsn="${TEST_DB_SESSION_URL}"
-          supabase db push --include-all --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-push.txt"
+          # ⛔ `2>&1` — see the dry-run step. Without it the affirmative check below
+          # can NEVER report a non-zero applied set, which is exactly what happened:
+          # MEASURED run 34684247933, where both migrations applied (their server-side
+          # NOTICEs are in the log) and the verifier still printed "planned 0 migration
+          # version(s); push reported 0." and refused the PROD apply.
+          supabase db push --include-all --db-url "${dsn}" 2>&1 | tee "${RUNNER_TEMP}/test-push.txt"
           echo "::group::Post-apply applied-set verification (affirmative)"
           versions_of() {
             awk '{ while (match($0, /[0-9]{14}/)) { print substr($0, RSTART, RLENGTH); $0 = substr($0, RSTART + RLENGTH) } }' "$1" | sort -u
@@ -1153,8 +1163,15 @@ jobs:
         run: |
           set -euo pipefail
           supabase link --project-ref "$SUPABASE_PROJECT_REF"
-          supabase db push --include-all --dry-run | tee /tmp/prod-dry-run.txt
-          supabase db push --include-all | tee /tmp/prod-push.txt
+          # ⛔ `2>&1` ON BOTH, AND IT IS LOAD-BEARING. Identical bug to the TEST
+          # apply above: `supabase db push` writes its plan and its "Applying
+          # migration <version>..." progress to STDERR, so a stdout-only capture
+          # leaves the affirmative verifier below counting ZERO for any real apply.
+          # Here that is worse than on TEST — the migrations would already have been
+          # applied to PRODUCTION by the time the check refused, turning a successful
+          # deploy into a red run and inviting a re-run against an already-moved DB.
+          supabase db push --include-all --dry-run 2>&1 | tee /tmp/prod-dry-run.txt
+          supabase db push --include-all 2>&1 | tee /tmp/prod-push.txt
           echo "::group::Post-apply applied-set verification (affirmative)"
           versions_of() {
             awk '{ while (match($0, /[0-9]{14}/)) { print substr($0, RSTART, RLENGTH); $0 = substr($0, RSTART + RLENGTH) } }' "$1" | sort -u
