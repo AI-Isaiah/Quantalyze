@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.77.36.1] - 2026-09-12 — the Phase 164.8.6 ledger records reach main
+
+### Notes
+
+- **Recovers planning records stranded by the `-pr` branch filter.** Phase 164.8.6 shipped through
+  a filtered PR branch, which strips `.planning/phases/**`; the ROADMAP/STATE/TODOS updates that
+  recorded what it closed never reached `main`. This lands them: five `TODOS.md` entries move to
+  their true post-apply state — `[164.7-CR05-VACUOUS-MIGRATION-CHECK]` and
+  `[164.7-WR02-SERVICE-ROLE-EXECUTE]` ticked with PROD-confirmed evidence,
+  `[APPGUC-WARNING-UNINSTRUMENTED-01]` ticked via the dormancy instrument, and
+  `[164.7-WR01-VAULT-NOT-STRICT]` + `[VAULTTICK-EMPTYKEY-01]` left OPEN with the reason spelled
+  out: **closed in the repo, open in production**, because no PROD cron job calls the repaired
+  function — jobid 1 still inlines the unguarded Vault read. Owner: Phase 164.5.1 CRONREPOINT.
+- ⛔ **A stale routing is corrected in the same commit.** `[164.7-MIGRATION-COMMENT-DRIFT]` was
+  written here as routed to *"Phase 164.8.6.1 POSTAPPLY"*. That phase was dissolved the same day
+  rather than opening a third level of sub-iteration, so the pointer named nothing. The item is
+  owned by **Phase 164.5.1 CRONREPOINT**, which is where the ROADMAP carries it.
 ## [0.77.36.0] - 2026-09-12 — the Deribit unknown-type refusal carries its own evidence
 
 ### Added
