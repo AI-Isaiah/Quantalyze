@@ -1788,11 +1788,14 @@ Plans:
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS `CI-DOCSPATH-01`
 
 **Depends on:** Phase 164.6 (ordering), and runs AFTER 164.6.1 and 164.6.2 so it does not move the gate corpus underneath them.
-**Plans:** 0 plans
+**Plans:** 4 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.6.3 to break down)
+- [ ] 164.6.3-01-PLAN.md — (wave 1, TRACER) `scripts/classify-changed-paths.mjs` with its fixture self-test, the `changed-paths` job with no `if:` of its own, `sql-gate-lint` filtered end to end, the ONE uniform aggregator arm placed FIRST behind a declared `ALWAYS_ON` list, and a contract test that EXTRACTS and EXECUTES the aggregator's own shell — plus the guard's registration and shrink-floor bump in the same commit
+- [ ] 164.6.3-02-PLAN.md — (wave 2) the remaining fifteen filtered job keys, the exact-set partition pinned in BOTH directions against a population re-derived from `ci.yml`, scenarios S1–S8, and the anti-vacuity neuter OBSERVED red in a tempdir copy with a non-vacuity control, left running as a durable calibration arm
+- [ ] 164.6.3-03-PLAN.md — (wave 3) `[CI-DOCSPATH-01]`'s owner re-pointed from Phase 164.6 item (12) to this phase with the dated reason, its two-mutex claim corrected to THREE with `python` named, `[164.6.3-PLANNING-SUBJECT-DEFERRED-DETECTION]` booked to Phase 164.6 GATE-HYGIENE, and the byte-equal VERSION bump with one unified CHANGELOG entry cross-checked commit by commit
+- [ ] 164.6.3-04-PLAN.md — (wave 4, checkpointed) criteria 1–5 closed on TWO REAL PRs: the code-PR census with its three-acquire positive control, a blocking-human MERGE GATE, then the `.planning/`-only PR's skipped set, GREEN aggregator and zero-acquire absence. The `supabase/migrations/**` probe PR is REFUSED and replaced by a byte argument
 
 
 ### Phase 164.8.1: REFDATA — a schema-only restore destroys migration-seeded reference data while the ledger swears those migrations applied (INSERTED)
