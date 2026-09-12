@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.77.38.0] - 2026-09-12 — the prod-prober's auto-issue could not fire
+
+### Fixed
+
+- **The hourly prod-prober's auto-issue step was SKIPPED on every scheduled run — the only path
+  that runs hourly, and the only path its own warning calls "the signal".** The guard read
+  `failure() && steps.probe.outcome == 'failure'`, but the POSTURE LINE makes the probe step
+  `exit 0` on the `schedule` trigger so a red prober never blocks the deploy that fixes it. So
+  `failure()` was false and `outcome` was `success` **by design**, and the issue was never opened
+  or commented. A control that cannot fire.
+- The probe step now publishes its defect count (`status=$status` → `$GITHUB_OUTPUT`) and the
+  guard keys on **that measured value** instead of the job's outcome:
+  `!cancelled() && inputs.arm == '' && steps.probe.outcome != 'skipped' && steps.probe.outputs.status != '0'`.
+  ⚠️ The **exit code is unchanged** — the POSTURE LINE's trade is untouched and a red prober still
+  never blocks a deploy. Only the ISSUE GUARD moved off it.
+
+### Root cause
+
+- ⛔ **A FIX caused it, which is why nobody saw it.** Until PR #774 (Phase 164.8.5, merged
+  2026-09-11 **13:18Z**) this step died early on the shell's `-e`, the JOB failed, and
+  `failure()` was *incidentally* true — so issues were filed for the wrong reason. Closing that
+  silent failure opened this one. MEASURED: every scheduled run before 13:18Z concluded
+  `failure` (5 of 5) and filed; **every scheduled run since concluded `success` (8 of 8) and filed
+  nothing.**
+- **Impact, measured on PROD 2026-09-12:** issue #773 has had no comment since
+  **2026-09-11T14:18Z** while the prober reported real defects on every run —
+  `cron-non-2xx` (`match_engine_cron` answering **500 on 5 of the last 7 hourly ticks**, still
+  failing at 15:00Z) and `mt5-terminal-error -6` (the terminal is up but not logged in, so
+  MT5 strategies cannot sync). Roughly **26 hours** of production faults with the alerting dead
+  and the check-suite green.
+
+### Tests
+
+- `src/__tests__/prod-prober-wiring.test.ts` **pinned the broken shape** — it asserted
+  `expect(expr).toContain("failure()")`, so a test was enforcing the control that could not fire.
+  Replaced with an assertion that the guard reads `steps.probe.outputs.status`, does **not** read
+  `failure()`, carries `!cancelled()`, and that the probe actually publishes the status.
+- ANTI-VACUITY, OBSERVED not asserted — two independent levers, `cp` aside, one edit each,
+  `cp` back, `cmp`-verified (`RESTORE-CMP-OK` both times):
+  - restoring the old `failure()`-based guard → **3 failed / 75 passed**
+  - deleting the `$GITHUB_OUTPUT` publish → **1 failed / 77 passed**
+  Two levers, two different RED shapes, and 78/78 green after each restore.
 ## [0.77.37.0] - 2026-09-12 — two lint warnings main could not see
 
 ### Fixed
