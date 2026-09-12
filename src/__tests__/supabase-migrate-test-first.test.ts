@@ -153,9 +153,9 @@ function liveIndexContaining(block: string, needle: string): number {
  * `${RUNNER_TEMP}` are the SHELL's expansions and not TypeScript's.
  */
 const DRY_RUN_CMD =
-  'supabase db push --include-all --dry-run --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-dry-run.txt"';
+  'supabase db push --include-all --dry-run --db-url "${dsn}" 2>&1 | tee "${RUNNER_TEMP}/test-dry-run.txt"';
 const PUSH_CMD =
-  'supabase db push --include-all --db-url "${dsn}" | tee "${RUNNER_TEMP}/test-push.txt"';
+  'supabase db push --include-all --db-url "${dsn}" 2>&1 | tee "${RUNNER_TEMP}/test-push.txt"';
 
 /**
  * The C-0331-twin reverted-grep condition and the echo that opens its branch.
@@ -873,8 +873,8 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
           `softening scan bites on ${token} inside apply-test's own steps`,
           (s) =>
             s.replace(
-              `          supabase db push --include-all --db-url "\${dsn}" | tee "\${RUNNER_TEMP}/test-push.txt"\n`,
-              `          supabase db push --include-all --db-url "\${dsn}" | tee "\${RUNNER_TEMP}/test-push.txt"\n          : ${token}\n`,
+              `          supabase db push --include-all --db-url "\${dsn}" 2>&1 | tee "\${RUNNER_TEMP}/test-push.txt"\n`,
+              `          supabase db push --include-all --db-url "\${dsn}" 2>&1 | tee "\${RUNNER_TEMP}/test-push.txt"\n          : ${token}\n`,
             ),
           (t) => softeningOffenders(t).length === 0,
         );
@@ -1458,11 +1458,11 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       );
       const dry = liveCommandIndex(
         block,
-        "supabase db push --include-all --dry-run | tee /tmp/prod-dry-run.txt",
+        "supabase db push --include-all --dry-run 2>&1 | tee /tmp/prod-dry-run.txt",
       );
       const push = liveCommandIndex(
         block,
-        "supabase db push --include-all | tee /tmp/prod-push.txt",
+        "supabase db push --include-all 2>&1 | tee /tmp/prod-push.txt",
       );
       const list = liveCommandIndex(
         block,
@@ -1495,13 +1495,13 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
         "the PROD dry-run-before-push pin bites",
         (s) =>
           s.replace(
-            "          supabase db push --include-all --dry-run | tee /tmp/prod-dry-run.txt\n",
+            "          supabase db push --include-all --dry-run 2>&1 | tee /tmp/prod-dry-run.txt\n",
             "",
           ),
         (t) =>
           liveCommandIndex(
             jobBlock(t, APPLY_JOB),
-            "supabase db push --include-all --dry-run | tee /tmp/prod-dry-run.txt",
+            "supabase db push --include-all --dry-run 2>&1 | tee /tmp/prod-dry-run.txt",
           ) >= 0,
       );
     });

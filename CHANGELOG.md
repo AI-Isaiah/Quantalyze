@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.77.34.1] - 2026-09-12 — the apply-test verifier could never count a migration
+
+### Fixed
+
+- **`supabase-migrate.yml`'s affirmative applied-set verification was blind, on BOTH the TEST
+  and the PROD apply.** `supabase db push` writes its plan and its `Applying migration
+  <version>...` progress to **stderr**; all four capture sites piped **stdout only** into the
+  file the verifier parses. The parser therefore counted ZERO versions no matter what the CLI
+  actually did. Fixed by `2>&1` on the dry-run and the push, TEST and PROD alike.
+- ⚠️ **It fired for real.** Run `34684247933` (merge of PR #778, Phase 164.8.6): both migrations
+  applied to shared TEST — their server-side `NOTICE`s are in the log — and the step still
+  printed `planned 0 migration version(s); push reported 0.` and refused to green-light the PROD
+  apply. Production was correctly blocked by `needs.apply-test.result == 'success'`; the repo and
+  PROD were left split, with `main` carrying migrations PROD does not have.
+
+### Root cause
+
+- **A control that could not SUCCEED, which is the anti-vacuity class inverted.** The usual
+  failure here is a guard that cannot fail; this one could not pass. On `workflow_dispatch` a
+  zero count is *tolerated*, so the step went green by the tolerance path — run `34367135073`
+  (2026-09-09, the last "successful" apply) also printed `planned 0 … reported 0`. On a real
+  push-to-main the same zero is a hard refusal. The check has therefore **never once
+  affirmatively verified an apply** since it was written.
+- **The set-equality half was vacuous too**, and that was invisible behind the count: with both
+  sides empty, `planned != applied` compared `0` against `0` and always agreed.
+- The PROD copy is the more dangerous of the two: there the migrations would already have been
+  applied to production before the check refused, turning a completed deploy into a red run and
+  inviting a re-run against an already-moved database.
+
+### Tests
+
+- **Anti-vacuity proof, run against a stand-in CLI reproducing the measured stream split**
+  (plan and progress on stderr, `Finished supabase db push.` on stdout), using the workflow's
+  own awk parsers and the same `2>&1 | tee` idiom:
+  - **before** the fix, a real two-migration apply → `planned=0 applied=0` → REFUSE (reproduces
+    run `34684247933` exactly);
+  - **after** the fix, the same apply → `planned=2 applied=2` → PASS (affirmative, previously
+    unreachable);
+  - **after** the fix, an apply that does nothing → `planned=2 applied=0` → REFUSE, now tripping
+    the set-equality error rather than the count.
+- `supabase migration list` (the C-0331 twin's capture) writes its table to **stdout** and is
+  left untouched — verified against run `34367135073`, whose `MEASURE_FAIL: printed no migration
+  version at all` guard did not fire.
+
+### Notes
+
+- Scope is four lines in one workflow file. No migration, no schema change, nothing applies to
+  any database from this PR.
+- ⛔ This edits `supabase-migrate.yml`, which CLAUDE.md forbids **to get a deploy out**. It was
+  taken as a founder decision, on the distinction that this repairs a broken MEASUREMENT rather
+  than routing around a finding: the alternative on the table was the workflow's own documented
+  `workflow_dispatch` escape, which would have shipped to PROD while leaving the verifier unable
+  to see any apply, now or in future.
+
 ## [0.77.34.0] - 2026-09-12 — VAULTTICKFIX: the forward migration Phase 164.7 earned
 
 Phase 164.8.6. Two new migrations repair what 164.7's review found but 164.7 could not itself
