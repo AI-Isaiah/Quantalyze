@@ -15,8 +15,12 @@ fix, and the SQL gate corpus grows by 8 annotated arms to hold them. 30 commits 
   `match_engine_cron_tick()`. The Vault read becomes `SELECT … INTO STRICT` so a missing or
   duplicated secret raises instead of silently taking the first row (`164.7-WR01-VAULT-NOT-STRICT`);
   an empty decrypted key stops falling through as if it were a valid credential
-  (`VAULTTICK-EMPTYKEY-01`); `service_role` EXECUTE is granted explicitly rather than inherited
-  (`164.7-WR02-SERVICE-ROLE-EXECUTE`). Ships with a **check 0** that aborts on an overloaded
+  (`VAULTTICK-EMPTYKEY-01`); `service_role`'s EXECUTE is **REVOKED** alongside `PUBLIC`, `anon` and `authenticated`, leaving
+  EXECUTE held by the OWNER alone (`164.7-WR02-SERVICE-ROLE-EXECUTE`). No GRANT follows and none
+  is needed: the scheduler runs as `postgres` — measured across all 14 rows of
+  `scripts/prod-prober/cron-manifest.json` — and `postgres` owns the function. 164.7 narrowed
+  three of the four grantees and `service_role` survived because the check beside it probed only
+  `anon` and `authenticated`. Ships with a **check 0** that aborts on an overloaded
   catalogue row count, so a `pg_proc` read can never quietly pick the wrong overload.
 - **`supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql`** — whole-set
   `REVOKE TRUNCATE, REFERENCES, TRIGGER ON public.cron_runs FROM anon, authenticated`, plus a
