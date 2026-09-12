@@ -43,7 +43,15 @@ two call SITES against production, not the arm.**
 
 ## 2 — Phase 161 WIZERR · draft survives a gate refusal and a reload
 
-**Needs:** a browser. No special credentials.
+**Needs:** ⛔ **CORRECTED 2026-09-12 — this file said "a browser. No special credentials." and that
+was WRONG.** It needs (a) an **API key that FAILS the capability gate** — that is the only way to
+reach a gate refusal — and (b) a **manager** account. Measured in `161-UAT.md` on 2026-09-05: the
+browser account available to me is an ALLOCATOR (`/strategies` 307s to `/allocations`), so it
+cannot walk the manager wizard at all.
+⚠️ The error was mine and it is worth naming: I took the prerequisite from `161-VERIFICATION.md`,
+whose `blocked:` text says the blocker is a dead viewport. `161-UAT.md` — written LATER, on
+2026-09-05 — records that the viewport blocker is GONE (real logged-in Chrome was driven
+successfully twice) and that TWO different blockers replaced it. I read the older ledger.
 
 **Do:** walk the strategy wizard to a **gate refusal**, click **"Try another key"**, then
 **reload the page** and open the wizard again.
@@ -82,7 +90,12 @@ strategy `fc1b4014`: `Track record · old`, `Aug 28, 2026 (0d)`, `Track record t
 HONEST-02's purpose. No `Invalid Date`, no `NaN`, no `fresh` claim on any of the three published
 strategies.
 
-**(c) allocations drawer-add — the one to actually run.** Open the allocations drawer and add a
+**(c) allocations drawer-add — ⚠️ THE TWO LEDGERS DISAGREE; CHECK BEFORE SPENDING TIME.**
+`162-VERIFICATION.md` says `(c) STILL BLOCKED — measured 2026-08-28`. `161-UAT.md`, written
+2026-09-05, says in passing that *"Phase 162 item (c) was discharged by clicking through the
+scenario composer"*. The discharge, if it happened, was never written back to 162. I am not
+resolving this by guess — if the drawer behaves as described below, say so and I will record the
+discharge properly in 162. If it does not, that is the real finding. Open the allocations drawer and add a
 strategy. **Look for:** **em-dash cells while loading**, then real CAGR/Sharpe after settle. It is
 a TRANSIENT state that exists only between the click and the settle, so it cannot be read out of
 served HTML — it needs a painted, interactive viewport.
@@ -95,6 +108,22 @@ you sign in with. If you would rather not manufacture that state on production, 
 record (b) as "precondition declined" rather than leaving it looking untried.
 
 ---
+
+## ⛔ Correction 2026-09-12 — what this list is NOT missing
+
+An audit of `*-UAT.md` and `deferred-items.md` (ledgers this file's first draft never read) briefly
+suggested five further human items: a 161 KeyPermissions check on an undecryptable key, and four in
+162 — the HONEST-02 tick, a post-deploy PROD discovery look, the stale `D-162-1` TODOS filing, and
+the 162-01 backstop attestation.
+
+**All five are ALREADY CLOSED.** Each carries a `result:` in its own file: HONEST-02 is `[x]` at
+`.planning/REQUIREMENTS.md:63` with its traceability row reading `Complete`; `D-162-1` reads
+`- [x] CLOSED 2026-08-26 BY DELETION` in TODOS; the backstop attestation reads `DISCHARGED BY
+MEASUREMENT 2026-08-26`. They appeared open only because the audit tool labels an item `human_uat`
+from the presence of a `why_human:` key, not from the ABSENCE of a result — so a long-closed item
+with a `why_human:` note still shows up in the category.
+
+**The four items above are the whole human surface.** Nothing else is waiting on you.
 
 ## How to report back
 

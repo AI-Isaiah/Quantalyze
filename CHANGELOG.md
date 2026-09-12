@@ -80,6 +80,49 @@ the work had been done and the record never caught up.
   plus a test pinning its integers to `STATE.md`, so a stale ledger is a red check rather than
   prose nobody re-runs.
 
+### Changed
+
+- **The UAT ledger now agrees with the VERIFICATION ledger.** A `/gsd-audit-uat` pass found that
+  `*-UAT.md` and `deferred-items.md` are parallel ledgers the VERIFICATION sweep never touched —
+  v1.20 carried 56 items there, and several contradicted HEAD. **Ten closed**, each by measurement:
+  164.3 G1 (claimed `run.sh:57` still reads `${LANE_DIR}/baseline.sql`; it reads
+  `${REPO_ROOT}/supabase/schema/baseline.sql`), 159's concurrent-resubmit item, 164.3's VAC-04 item,
+  164.8's two restore-attribution items, 161's two owner-drift findings, 164.3's VAC-08 ratchet
+  finding, 159's user-facing copy gap, and 161.1's ordering hazard. 164.3's H-0001 mislabel routed to
+  164.6; 161.1's ACTIVATION marked re-routed while correctly staying `blocked`.
+- ⭐ **The 159 copy defect was fixed in production and nobody wrote it back.** An anonymous visitor on
+  an uncomputed factsheet used to read *"See the dev-server console for the exact gate…"*. Measured
+  2026-09-12 by anonymous fetch of the same URL: no `dev-server`, no `console`. It now reads *"The
+  detailed factsheet for this strategy is still computing… once the analytics service finishes the
+  first compute pass, the full panel set will render here"* plus an honest second line saying some
+  strategies stay in this state. Phase 164.2 CURATED-COPY shipped it on 2026-09-06 — the day after
+  the gap was filed — and the gap read `failed` for six days after it was fixed.
+- ⭐ **The most substantive gap in that list was graded `cosmetic` and was not.** VAC-08's ledger
+  ratchet drove its exit decision from two counts using `grep -ac … || true; ${:-0}` — the exact
+  pattern the same file documents as wrong (SP-M01), which turns "could not count" into "counted
+  zero". Measured at HEAD: both now `set +e; …; grep_rc=$?; set -e` and `fail "MEASURE_FAIL: … An
+  uncountable result is not a count of zero."`, 20 MEASURE_FAIL sites in the file. A control that
+  could not fire, inside the gate built to catch controls that cannot fire.
+- **Phase 164.5.1 gained clause (f): re-capture the cron manifest in the SAME act as the activation.**
+  Carried from `161.1-UAT.md`, where it sat as a `failed` truth owned by nobody. 164.1's CRON-DRIFT-01
+  fails loud on any `cron.job` drift over ALL rows, so registering the ledger-refresh job IS drift by
+  that arm's definition — the prober will go red and the red will be CORRECT. Unless the operator
+  re-captures the manifest, the first reading looks like a bug in a week-old prober, which is the
+  fastest way to teach people to ignore it. 164.5.1 already mutates `cron-manifest.json`, so it is
+  one act there rather than two.
+
+### Fixed
+
+- **`.planning/FOUNDER-UAT-v1.20.md` had a wrong prerequisite and I wrote it.** Item 2 said *"a
+  browser. No special credentials."* It needs an API key that FAILS the capability gate and a MANAGER
+  account — the available browser account is an allocator (`/strategies` 307s to `/allocations`). I
+  took the prerequisite from `161-VERIFICATION.md`, whose `blocked:` text blames a dead viewport;
+  `161-UAT.md`, written later, records that the viewport blocker is gone and two different blockers
+  replaced it. Corrected in place with the error named.
+- **162(c) is contested, not open-and-waiting.** `162-VERIFICATION.md` says `STILL BLOCKED` (measured
+  2026-08-28); `161-UAT.md` says it was discharged on 2026-09-05 by driving the scenario composer.
+  The checklist now flags the contradiction instead of asserting the older record.
+
 ### Notes
 
 - ⚠️ **Two residuals stay OPEN on purpose and say why.** Phase 160 carries one founder-gated item
