@@ -226,4 +226,108 @@ describe("[164.6.3 / CI-DOCSPATH-01] the docs-only filter's aggregator arm, EXEC
     expect(code, `an all-success board must be green.\n${out}`).toBe(0);
     expect(out).toContain("All frontend-* jobs succeeded.");
   });
+
+  // ── S5 — FAIL-CLOSED ─────────────────────────────────────────────────────
+  // ⭐ THE SINGLE MOST IMPORTANT PROPERTY IN THIS FILE. When `changed-paths`
+  // fails or is cancelled, `needs.changed-paths.outputs.docs_only` is the EMPTY
+  // STRING, not "false". That is why every filtered job's `if:` is written in
+  // the not-equals-true form (`!= 'true'`) rather than the equals-false form:
+  // `'' != 'true'` runs the gate, while `'' == 'false'` would skip it. This
+  // scenario discharges the research assumption directly — the behaviour for an
+  // empty output is ASSERTED here by execution, not inferred from documentation
+  // that does not state the value.
+  it("S5 — a failed/cancelled detector (empty output) reddens the board even with every row skipped", () => {
+    const { code, out } = runGate({ docsOnly: "", results: allFilterableSkipped() });
+    expect(code, `an empty detector output must FAIL CLOSED.\n${out}`).toBe(1);
+    expect(out).toContain("One or more frontend-* jobs did not succeed.");
+    expect(
+      out,
+      "an empty docs_only must never be read as a docs-only classification — that is the fail-OPEN direction",
+    ).not.toContain("skipped by the docs-only path filter");
+  });
+
+  // ── S2 — the ALWAYS_ON list bites, ONE LEG PER MEMBER ────────────────────
+  // ⛔ CALIBRATION, in the same words the sibling tests use: these legs are what
+  // make the ALWAYS_ON list non-decorative. Removing EITHER member from the list
+  // in ci.yml flips its own leg from exit 1 to exit 0, and that flip is the
+  // proof the list is load-bearing. A list nobody can fail is a comment.
+  //
+  // ⭐ The legs are GENERATED from the membership parsed out of the extracted
+  // script, not hand-typed as two blocks — so a third member added to ci.yml
+  // later gets a leg for free rather than going silently unproven, and a member
+  // deleted from ci.yml loses its leg loudly.
+  describe("S2 — under docs_only=true, a skipped ALWAYS_ON row is never excused", () => {
+    it.each(ALWAYS_ON)("S2 leg — %s skipped still exits 1", (member) => {
+      const docsOnly = String(judge([".planning/ROADMAP.md", ".planning/STATE.md"]));
+      expect(docsOnly, "CALIBRATION: S2 is only S2 under a docs-only classification").toBe("true");
+
+      // Every filterable row skipped (they are legitimately filtered), the
+      // member under test ALSO skipped, and the other ALWAYS_ON rows success —
+      // so the only thing that can redden the board is the member under test.
+      const results = allFilterableSkipped();
+      for (const m of ALWAYS_ON) results[m] = m === member ? "skipped" : "success";
+
+      const { code, out } = runGate({ docsOnly, results });
+      expect(
+        code,
+        `${member} is on the ALWAYS_ON list: its skip must NOT be excused by the docs-only arm.\n${out}`,
+      ).toBe(1);
+      expect(out).toContain("One or more frontend-* jobs did not succeed.");
+      // ⛔ In both legs the uniform arm must not have claimed this row.
+      expect(
+        out,
+        `the docs-only arm excused ${member}, which the ALWAYS_ON list exists to prevent`,
+      ).not.toContain(`${member}: skipped by the docs-only path filter`);
+    });
+
+    // S2a — `plan-anchor-verify` HAS its own strict arm, so the leg can assert
+    // the row fell through to that arm by its distinctive error text rather
+    // than merely that the board is red.
+    it("S2a — plan-anchor-verify falls through to its OWN strict arm, by its error text", () => {
+      const docsOnly = String(judge([".planning/ROADMAP.md", ".planning/STATE.md"]));
+      const results = allFilterableSkipped();
+      for (const m of ALWAYS_ON) results[m] = m === "plan-anchor-verify" ? "skipped" : "success";
+
+      const { code, out } = runGate({ docsOnly, results });
+      expect(code).toBe(1);
+      expect(
+        out,
+        "the leg must show plan-anchor-verify reached its own strict arm, not merely that something reddened",
+      ).toContain("::error::plan-anchor-verify result=skipped");
+    });
+
+    // S2b — `frontend-lint` has NO per-row arm; it takes the loop's STRICT
+    // DEFAULT, which prints no row-specific message. So the assertion is on the
+    // generic error PLUS an ABSENCE, and that distinction is what makes this leg
+    // able to fail rather than a restatement of S2a.
+    //
+    // ⭐ THIS IS THE LEG THAT MATTERS. `frontend-lint` runs `npm run lint`, which
+    // runs `scripts/check-planning-hygiene.ts` — the leak gate on a PUBLIC repo
+    // with `.planning/` TRACKED, whose subject IS a `.planning/`-only
+    // agent-written diff. Filtering it would silently regress the one gate aimed
+    // squarely at this PR class.
+    // ⚠️ The job CANNOT reach this state today: it carries no `if:` and no
+    // `needs:` edge, so it is never `skipped` and the arm can never see it. The
+    // leg is therefore DEFENCE IN DEPTH against a future edit that gives it a
+    // skip route. ⛔ Do not delete it as unreachable — unreachable-today is why
+    // it is cheap, not a reason it is useless.
+    it("S2b — frontend-lint takes the STRICT DEFAULT: aggregate error present, uniform arm's message absent", () => {
+      expect(
+        ALWAYS_ON,
+        "frontend-lint must be on the ALWAYS_ON list — it is the planning-hygiene leak gate on a public repo",
+      ).toContain("frontend-lint");
+
+      const docsOnly = String(judge([".planning/ROADMAP.md", ".planning/STATE.md"]));
+      const results = allFilterableSkipped();
+      for (const m of ALWAYS_ON) results[m] = m === "frontend-lint" ? "skipped" : "success";
+
+      const { code, out } = runGate({ docsOnly, results });
+      expect(code, `a skipped frontend-lint under docs_only=true must exit 1.\n${out}`).toBe(1);
+      // PRESENT: the strict default's aggregate verdict.
+      expect(out).toContain("One or more frontend-* jobs did not succeed.");
+      // ABSENT: the uniform arm never named it. `frontend-lint` prints no
+      // row-specific error of its own, so the absence IS the assertion.
+      expect(out).not.toContain("frontend-lint: skipped by the docs-only path filter");
+    });
+  });
 });
