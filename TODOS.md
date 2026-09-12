@@ -2680,7 +2680,7 @@ true for 146 and half of 142–145, and **false for 141**.
          independently by the lane's `--self-test` no-containers assertion and by the next `up`.
 
 
-- [ ] **`[VAC-07-DEFER]` Phase 164.3 plan 07 (VAC-07) was DEFERRED 2026-08-29 by founder decision — owned by Phase 164.5.**
+- [x] **`[VAC-07-DEFER]` Phase 164.3 plan 07 (VAC-07) was DEFERRED 2026-08-29 by founder decision — owned by Phase 164.5.**
       Booked 2026-08-29 (verification gap G2). Before this, the deferral existed only as an
       unchecked ROADMAP checkbox: no date, no reason, no owning phase. An unchecked box is
       inferable, not recorded — and it left Phase 159's two blocked items naming a completed
@@ -2719,6 +2719,37 @@ true for 146 and half of 142–145, and **false for 141**.
       `wizard_session_id`; exactly one 2xx applied receipt, one honest raced refusal, `category_id`
       holds the winner.
       Full record: `.planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-DEFERRED.md`.
+      ✅ **CLOSED 2026-09-12 — BOTH obligations this entry carried are now satisfied, which is the
+      only thing that was ever holding the box.** The ⚠️ note above states the rule plainly: the
+      checkbox stayed unchecked NOT because VAC-07 was outstanding but because ticking it would
+      also have attested to `VAC04-ARMS-OBSERVE`, a separate obligation plan 07 did not own.
+      Both are now discharged, each by measurement and each recorded elsewhere BEFORE this close:
+      (1) **VAC-07 itself** — `.planning/REQUIREMENTS.md:163` reads `[x]` and its traceability row
+      reads `Complete`, scored 2026-09-07 by Phase 164.5 plan 07 against this entry's own fence,
+      BY OBSERVATION: RED with `strategies_user_wizard_session_source_uniq` removed from the lane
+      schema (`Both outcomes were: A:200:ok, B:200:ok` — two applied receipts) and GREEN with it
+      restored from a byte backup, both runs pasted verbatim in `164.5-07-SUMMARY.md`.
+      (2) **`VAC04-ARMS-OBSERVE`** — `.planning/ROADMAP.md:471` reads `✅ RESOLVED 2026-09-07 …
+      DISCHARGED`. The roll-forward branch did NOT fire: Phase 164.7's migration `20260907130000`
+      DID change function bodies, so VAC-04's DRIFT branch executed against the real PROD
+      credential on BOTH ledger arms (`enqueue_ledger_refresh_for_strategies` and
+      `enqueue_ledger_composite_refresh`) with real hashes and 15-line counts, each acknowledged
+      by an earned `prod-body-ack:` pragma. The `:198` short-circuit that made `[VAC04-ARMS-UNRUN]`
+      necessary did not recur, and `WINDOWS.md` entry 25 has its measurement.
+      ⛔ **The prohibition stated above was HONOURED and stays in force for anything that cites
+      this entry: no PR was manufactured for the observation.** It rode a migration PR Phase 164.7
+      wrote anyway, exactly as the OWNER paragraph required — the obligation was to READ the
+      VAC-04 step's output and name the branch it took, and that is what happened.
+      ⚠️ **STILL OPEN and deliberately NOT carried by this close: `[VAC-04-ROLE]`** (the
+      zero-table-grant credential swap, immediately below). Its own entry says it changes WHICH
+      credential is used, not whether the control works, and that it must not gate a phase. It is
+      not a residual of this item and this close does not touch it.
+      ⚠️ Phase 164.3's ROADMAP row stays **9/10** and plan 07 stays without a SUMMARY. That is
+      correct and is not bookkeeping debt: the plan was never executed, and
+      `164.3-07-DEFERRED.md` is the honest marker `scripts/verify-plan-anchors.mjs --pending`
+      reads so the exemption is visible rather than silent. ⛔ Do NOT retro-fit a SUMMARY now that
+      the requirement is met elsewhere — fabricating one for work nobody did is the exact exit
+      that marker file exists to prevent, and it says so in its own body.
       ⭐ **OWNER 2026-09-05: the OBSERVATION half is Phase 164.7's**, the first migration-bearing
       phase in the queued order (164.1 → 164.2 → **164.7** → 164.5 → 164.6), rolling forward to
       **Phase 164.5** (DRIFT-04's `DROP FUNCTION`, CRON-DRIFT-01-REPAIR) if 164.7's migration does
@@ -7938,6 +7969,73 @@ gitleaks auto-loads `.gitleaks.toml` from cwd, so omitting `-c` tests nothing.
   Owner: unassigned — see the report accompanying this entry for the routing recommendation.
 
 ## Phase 164.7 (APPSETTINGS) — SQL-fixer + three-reviewer residuals (logged 2026-09-07)
+
+- [ ] **`[164.7-P3C-PRESENCE-ORACLE]` Plan 07's DEFER-branch verify leg cannot fail — a presence-only oracle on the one path that was actually taken. → Phase 164.5.1 CRONREPOINT.**
+      Booked 2026-09-12, closing the `missing:` clause of the 164.7 verification item *"Plan 07's
+      DEFER-branch verify leg can fail"*, which asked for exactly this: a TODOS entry with an
+      owning phase. Found by the phase's own verifier and, until now, booked NOWHERE — a grep of
+      `TODOS.md` and every 164.7 SUMMARY returned zero hits.
+      **The defect**, at `164.7-07-PLAN.md:149`: the `<automated>` block opens with
+      `grep -a -c 'which_database' "$R" | grep -v '^0$'`, applied to BOTH the ACTIVATED and the
+      DEFERRED branch. Its truth condition is **string presence**, so pasting the marker QUERY
+      satisfies it exactly as well as recording the marker's OUTPUT. ⭐ On the DEFER path — the
+      path actually taken — the leg **cannot fail**, and would have passed identically for a
+      dishonest record. ⛔ This is this milestone's own named defect class (a control that cannot
+      fire) sitting inside the plan that gates a PRODUCTION write, which is why it is booked
+      against the phase that will re-enter that plan rather than left as a note.
+      **Two fixes, both required at re-entry:** (a) move the precondition INSIDE the ACTIVATED
+      branch, where it belongs — it is not a precondition of deferring; (b) require an
+      OUTPUT-shaped match, e.g. `which_database:[[:space:]]*[^[:space:]]`, so the query text
+      alone cannot satisfy it. ⚠️ Anti-vacuity applies to the FIX: neuter it by pasting only the
+      query and observe the leg go RED before trusting it.
+      **Owner:** Phase 164.5.1 CRONREPOINT, which now owns the activation this plan gates
+      (`[164.7-ACTIVATION-OWNED-HERE]` in `.planning/ROADMAP.md`).
+
+- [ ] **`[164.8-APPLYTEST-CANNOT-TELL-SEEDED-FROM-APPLIED]` `apply-test`'s affirmative guard refuses on a CORRECT state, and the documented escape routes the migration to PROD without TEST. → Phase 164.9 TESTISOLATION.**
+      Booked 2026-09-12, MEASURED while trying to close Phase 164.8's *"land the next real
+      migration PR and read the applied-set group"* item. That item is STILL OPEN — the attempt
+      to close it is what found this.
+      **What happened.** On the Phase-164.8.6 merge push (run **34684247933**, head `ce7ac08a`),
+      `apply-test` FAILED in 32 s at step `Push migrations to TEST` with, verbatim:
+      *"the TEST push applied ZERO migrations on a push-to-main run … The likeliest cause is a
+      schema_migrations row that RECORDS a version whose SQL never executed on TEST … Refusing to
+      green-light the PROD apply on a stage nothing crossed."* `apply-test-verdict` then failed as
+      designed and `apply` was CANCELLED — the TEST-first gate blocking PROD, which is the gate
+      WORKING.
+      ⭐ **BUT THE REFUSAL WAS A FALSE POSITIVE, measured directly against TEST 2026-09-12**
+      (marker query first: `✅ TEST (shared with other CI)`). Both versions are present AND their
+      SQL genuinely ran: `20260911120000` carries **6 real statements** and `20260911130000`
+      carries **10**, i.e. actual migration SQL — NOT the seeded provenance sentence that
+      `20260907130000` carries (*"SEEDED 2026-09-09 by scripts/restore-test-from-baseline.sh …"*).
+      Confirmed by EFFECT rather than by the ledger alone: `match_engine_cron_tick` on TEST
+      contains both `INTO STRICT` and `btrim`, the two things `20260911120000` exists to add.
+      So the migrations HAD crossed TEST, `db push --include-all` correctly found nothing to do,
+      and the guard read a correct empty set as evidence of a poisoned ledger.
+      **The root cause is that the guard cannot distinguish two states it treats as one:**
+      (1) a version RECORDED but never executed — the real hazard the 266-row re-seed created —
+      and (2) a version recorded AND genuinely applied, where empty is the right answer. It
+      infers (1) from an empty set on a push, and on a repo where migrations can reach TEST
+      outside the push path that inference is unsound.
+      ⛔ **THE CONSEQUENCE IS THE SERIOUS PART.** The error message's own remedy is to re-run via
+      `gh workflow run supabase-migrate.yml --ref main`, *"where an empty set is tolerated"* — and
+      that is what happened: run **34686331921** (`workflow_dispatch`, `756469e6`) applied both
+      migrations to **PROD** (`Applying migration 20260911120000_vault_tick_hardening.sql...`,
+      `Applying migration 20260911130000_ledger_fanout_grantees_and_dormancy.sql...`,
+      `planned 2 migration version(s); push reported 2`) while its own `apply-test` printed
+      `planned 0 … push reported 0`. ⚠️ **In THIS instance nothing was harmed — the migrations
+      really had crossed TEST.** But the escape is generic: a genuinely-never-applied migration
+      produces the SAME red, and the SAME documented remedy sends it to production having crossed
+      nothing. The phase premise — *"every migration is proven on a real Postgres before it
+      reaches a customer"* — is one false positive away from being bypassed, and the bypass is in
+      the error text.
+      **Deliverable:** make the guard DISTINGUISH the two states instead of guessing — compare the
+      ledger row's `statements` against the repo file (a seeded row carries the provenance
+      sentence, an applied row carries SQL), or probe the migration's own effect, before refusing.
+      ⛔ Do NOT fix this by loosening the refusal: the empty-set refusal is correct for the hazard
+      it was built for, and weakening it re-opens the hole Phase 164.8 closed.
+      **Owner:** Phase 164.9 TESTISOLATION, which already owns TEST's ledger shape and the
+      `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` sibling.
+
 
 None of these is blocking under the stopping rule (no user-facing or data-integrity
 blast radius). All were surfaced while the fixer grew

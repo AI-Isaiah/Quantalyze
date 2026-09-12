@@ -37,10 +37,24 @@ about them changed; the set of unguarded writers simply got smaller.
 paragraphs above stay as lineage; they describe the world before the restore and are still true
 about the CLI link and the marker.
 
-- **TEST's `public` schema is a copy of PROD's catalogue.** Restore run **`34274355596`**, head
-  **`88581b8bc66415bfa86b7d5a019741b1cbd0ff49`**, COMMITTED: `public` was dropped and rebuilt from
+- **TEST's `public` schema is a copy of PROD's catalogue.** ⛔ **CORRECTED 2026-09-12 — TEST's
+  CURRENT state was NOT set by run `34274355596`, and this paragraph said it was.** Two FURTHER
+  dispatches of `test-restore-from-baseline.yml` ran on 2026-09-09 at head `a622df27`:
+  **`34329459044`** (preflight, 08:30Z) and **`34330741339`** (`mode=restore`, confirm token
+  enforced, 08:44Z), the latter reporting `restore: tables=62 policies=154 functions=120
+  ledger_rows=266 survivors=2/2 filtered=1 mode=restore`. **The 08:44Z restore is what left TEST
+  as it stands.** A second full `DROP SCHEMA public CASCADE` on a database other people's CI uses
+  was, until this correction, recorded in the phase log and NOWHERE ELSE — not here, not in the
+  ROADMAP. Found by Phase 164.8's own verifier under its non-negotiable premise *"a destructive
+  act on shared TEST is auditable"*; this file was the last place still carrying the old
+  attribution, and it is the file every session reads.
+  **What both runs did, and it is the same mechanism:** `public` was dropped and rebuilt from
   `supabase/schema/baseline.sql` at sha256 `27826b76…` (the sha recorded in `BASELINE.md`, not a
   fresh dump), inside the held shared-TEST mutex, behind an activity gate and a backup artifact.
+  ⚠️ Run `34274355596` (head `88581b8bc66415bfa86b7d5a019741b1cbd0ff49`, 2026-09-08) remains the
+  run that moved the ledger 243 → 266 and it committed — but it concluded `failure`, exiting 1
+  on a post-COMMIT extension guard that reports a GAIN (`pg_net`, which TEST lacked and PROD has)
+  as a LOSS. Cite it for the LEDGER MOVE; cite `34330741339` for the SCHEMA STATE.
 - **Its migration ledger holds ONE ROW PER REPO MIGRATION FILE** (243 → 266 at the restore).
   ⚠️ **`supabase_migrations.schema_migrations.statements` on TEST is a PROSE PROVENANCE SENTENCE,
   not the SQL that ran.** The re-seed TRUNCATEd the table and wrote that sentence into every row.
