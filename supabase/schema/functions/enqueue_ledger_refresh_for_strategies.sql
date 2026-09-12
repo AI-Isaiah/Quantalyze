@@ -23,14 +23,22 @@ DECLARE
   v_existing INTEGER;
   v_enqueued INTEGER := 0;
   -- ---- the dormancy instrument's locals (164.7 WR-10) --------------------
-  -- Three, because the dormant branch below has THREE causes and the single
-  -- NOTICE it raises cannot tell two of them apart. v_found is the row count of
-  -- the activation read and stays NULL until that read has actually completed;
-  -- v_read_failed is set by the handler after it has nulled the flag; v_cause is
+  -- FOUR, for a dormant branch with THREE causes whose single NOTICE cannot tell
+  -- two of them apart. v_found is the row count of the activation read and stays
+  -- NULL until that read has actually COMPLETED — ⛔ NULL therefore means NEVER
+  -- MEASURED, which is NOT the healthy row-present-and-FALSE case and must never
+  -- be folded into it; the cause branch below is written NULL-safely for exactly
+  -- that reason. v_read_failed is set by the handler after it has nulled the
+  -- flag. v_sqlstate carries the failing read's SQLSTATE OUT of the handler,
+  -- which is the only place it is defined — 42P01 (the table is gone), 42501
+  -- (the privilege was revoked) and a planner fault are three causes with three
+  -- different remediations, and the WARNING that already names it is read by
+  -- nobody (APPGUC-WARNING-UNINSTRUMENTED-01, this file's own header). v_cause is
   -- the string the instrument row carries. The cause table is in this file's
   -- header, under WR-10.
   v_found       INTEGER := NULL;
   v_read_failed BOOLEAN := FALSE;
+  v_sqlstate    TEXT;
   v_cause       TEXT;
 BEGIN
   -- ---- Lock B (D-08, 164.7 D-01): the fail-closed activation switch ------
@@ -85,13 +93,22 @@ BEGIN
   EXCEPTION WHEN OTHERS THEN
     RAISE WARNING 'enqueue_ledger_refresh_for_strategies: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;
     v_enabled := NULL;
-    -- ⚠️ The note above says NOTHING BUT THE ASSIGNMENT goes in this handler.
-    -- This IS an assignment — the second of them — and it is deliberately not a
-    -- probe, a read or a write: lint rule R1-exception-handler-probe forbids DML
-    -- and SELECT INTO here, and an INSERT in a handler is exactly the shape that
-    -- rule exists to keep out of the gate corpus. The cause is RECORDED here and
-    -- WRITTEN below, on the dormant path, where a write is legal.
+    -- ⚠️ The note above says NOTHING BUT ASSIGNMENTS go in this handler. Both of
+    -- these ARE assignments, and both are deliberately not a probe, a read or a
+    -- write: lint rule R1-exception-handler-probe forbids DML and SELECT INTO
+    -- here, and an INSERT in a handler is exactly the shape that rule exists to
+    -- keep out of the gate corpus. The cause is RECORDED here and WRITTEN below,
+    -- on the dormant path, where a write is legal.
+    --
+    -- ⛔ THE SQLSTATE IS CAPTURED HERE OR NOWHERE — it is defined only inside an
+    -- exception handler. The WARNING above already formats it, and this file's
+    -- header MEASURES that WARNING as having no consumer: pg_cron keeps no
+    -- WARNING output and no prober arm reads the server log. Computing a value
+    -- that separates "the table was dropped" from "the privilege was revoked"
+    -- from "the planner faulted" and then discarding it leaves all three causes
+    -- reporting the same thing, which is the shape this phase exists to remove.
     v_read_failed := TRUE;
+    v_sqlstate    := SQLSTATE;
   END;
   IF v_enabled IS DISTINCT FROM TRUE THEN
     RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant (system_flags.ledger_refresh_enabled is not TRUE); enqueued 0';
@@ -111,15 +128,121 @@ BEGIN
     -- unreadable by this definer while the platform believes itself live.
     IF v_read_failed THEN
       v_cause := 'flag_read_failed';
-    ELSIF v_found = 0 THEN
+    -- ⛔ `IS DISTINCT FROM 1`, NEVER `= 0`. Control reaches here only when the
+    -- read did NOT raise, so v_found holds the count that read produced — unless
+    -- the count was never TAKEN, in which case it is still NULL. Under `= 0` a
+    -- NULL makes the predicate NULL, the branch is not taken, control falls to
+    -- the ELSE, the cause is nulled and NO ROW IS WRITTEN: an UNMEASURED read
+    -- would be filed as the healthy row-present-and-FALSE case, silently. That
+    -- is the named failure mode of the invariant this whole phase is restoring,
+    -- and until check 7b was added the apply-time block COULD NOT catch it:
+    -- check 7 asserts only that the instrument INSERT is PRESENT, so deleting
+    -- the row-count read above yielded a migration that verified itself green on
+    -- the auto-apply-to-PROD route. The NULL-safe form files an unmeasured read
+    -- with the other INVISIBLE cause, where it is counted and loud, instead of
+    -- with the silent one.
+    --
+    -- ⭐ AND THE DETECTOR IS BACK, at the apply rather than in the gate. The
+    -- NULL-safe form is what made the deletion invisible to the GATES too — the
+    -- row now writes under it, so arm M1 no longer reddens (see the A/B below,
+    -- which measures exactly that). Check 7b holds needle (5) over the
+    -- row-count read itself and REFUSES THE APPLY when the line is gone, which
+    -- is the one layer the deletion cannot route around. The trade the M-3 fix
+    -- made is therefore paid back rather than merely recorded.
+    --
+    -- ⭐ A/B MEASURED 2026-09-11 on real pg-lanes, because "it would be silent"
+    -- is the kind of claim this repo does not take on argument. Delete the
+    -- row-count read one line up and run test_ledger_refresh_fanout.sql: with
+    -- this NULL-safe form the instrument still writes its row and the gate is
+    -- GREEN at exit 0 (15/15 arms), while with `= 0` in its place the SAME
+    -- deletion makes arm M1 report "wrote 0 instrument row(s) ... expected
+    -- exactly 1" and the lane exits 3. The gate is therefore NOT blind to the
+    -- deletion — it is the apply-time block that is — and the difference this
+    -- line buys is that the DECLINE keeps reaching a counted row instead of
+    -- going quiet the moment the count stops being taken.
+    --
+    -- ⚠️ RECORDED, not closed: the label then reads "invisible or absent"
+    -- for a state that is really "never measured". Naming it separately would
+    -- add a fourth cause no gate arm can reach, and an unfalsifiable branch is
+    -- the worse trade — the `sqlstate` key below is NULL on this path and the
+    -- row-count read is one line up, which is what tells the two apart on
+    -- inspection.
+    ELSIF v_found IS DISTINCT FROM 1 THEN
       v_cause := 'flag_row_invisible_or_absent';
     ELSE
       v_cause := NULL;
     END IF;
     IF v_cause IS NOT NULL THEN
-      INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
-      VALUES ('ledger_refresh_fanout', 'error', now(), v_cause,
-              jsonb_build_object('function', 'enqueue_ledger_refresh_for_strategies', 'cause', v_cause));
+      -- ⛔ THE SQLSTATE GOES IN `metadata`, NEVER IN `error`. Both ledger gates'
+      -- M2 arms count rows whose `error` is EXACTLY the cause string; appending a
+      -- diagnostic there breaks that equality and the arm reddens for a reason
+      -- unrelated to what it tests. `metadata` carries NO EQUALITY assertion,
+      -- which is what makes it the column a new diagnostic can join without
+      -- renegotiating a gate. It is NULL on the invisible-or-absent path, by
+      -- construction: there was no exception, so there was no SQLSTATE to read.
+      --
+      -- ⚠️ AMENDED 2026-09-12 — `metadata` now carries a PRESENCE assertion, and
+      -- the distinction from an EQUALITY one is the whole reason it could be
+      -- added without renegotiating anything. Both gates' M2 arms narrow their
+      -- count to rows whose `metadata->>'sqlstate'` IS NOT NULL. Deleting the
+      -- key pair below therefore makes M2 count 0 and redden by name, where
+      -- before it was read by nothing: check 7's needle is the INSERT's own
+      -- statement shape and SURVIVES the deletion intact, so a tidy-up of this
+      -- jsonb_build_object call silently collapsed 42P01, 42501 and a planner
+      -- fault back into one undifferentiated cause with every gate green. No
+      -- VALUE is pinned — an equality on a SQLSTATE would make the arm depend on
+      -- which failure the gate happens to provoke, which is the mistake the
+      -- paragraph above refuses for `error`.
+      --
+      -- ⛔ THE WRITE IS BEST-EFFORT; THE DORMANT RETURN IS THE CONTRACT — a
+      -- DECISION, recorded here because the file argues the handler's shape at
+      -- length above and was silent at the one place the argument also applies.
+      -- Control reaches the flag_read_failed branch BECAUSE a read raised
+      -- (42P01, 42501 or a planner fault), and two of those three plausibly
+      -- reach this INSERT as well. Unwrapped, the tick on which the instrument
+      -- matters MOST is the tick on which this function RAISES: the row rolls
+      -- back, the diagnostic is lost anyway, and a fail-closed dormant no-op on
+      -- a function slated for a schedule becomes a hard error — an hourly cron
+      -- that starts erroring is an incident, which is the exact thing arm L of
+      -- both gates exists to refuse one layer up. So the write is wrapped and
+      -- the dormancy survives it.
+      --
+      -- ⭐ A/B MEASURED 2026-09-12 on real pg-lanes, in the one state this whole
+      -- decision is about: the activation read raising 42P01 (system_flags
+      -- renamed away) AND the instrument's own table gone (cron_runs dropped).
+      -- WITH the wrap the function emitted the WARNING below and RETURNED 0.
+      -- With the wrap removed and nothing else changed, the SAME probe reported
+      -- `the fan-out RAISED (SQLSTATE 42P01)`. The decision is therefore a
+      -- measured difference in behaviour, not a preference.
+      --
+      -- ⚠️ THE WARNING IS NOT THE DETECTOR AND IS NOT CLAIMED AS ONE — this
+      -- file's header MEASURES a WARNING as having no consumer. What detects a
+      -- silently-failing instrument is both gates' M1/M2 arms, which count the
+      -- row inside their own transaction and redden at 0.
+      --
+      -- ⚠️ R1-exception-handler-probe is not imported by this shape: that rule
+      -- governs the GATE corpus (scripts/lint-sql-gates.mjs, CORPUS_DIR =
+      -- supabase/tests) and not migration bodies, and this handler holds neither
+      -- a probe nor a SELECT INTO — only the RAISE the rule exists to preserve.
+      --
+      -- ⛔ FORCE ROW LEVEL SECURITY on public.cron_runs IS THE CLAUSE THAT
+      -- BREAKS THIS WRITE. The definer is exempt from row security on this table
+      -- by OWNERSHIP ALONE (see check 3's derivation: the table carries no FORCE
+      -- clause at baseline.sql:9864, and neither policy admits this role), and
+      -- FORCE is the one clause under which owning a table stops being an
+      -- exemption. Add it at STEP 2b — which is where a future hardener will be
+      -- standing — and every dormant-with-cause tick loses its row. Before the
+      -- wrap below that was a RAISE; with it, it is a WARNING and a missing row,
+      -- which both gates' M1/M2 arms report by name.
+      BEGIN
+        INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+        VALUES ('ledger_refresh_fanout', 'error', now(), v_cause,
+                jsonb_build_object('function', 'enqueue_ledger_refresh_for_strategies',
+                                   'cause', v_cause,
+                                   'sqlstate', v_sqlstate));
+      EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'enqueue_ledger_refresh_for_strategies: dormancy instrument write failed (SQLSTATE %); the dormant cause was %', SQLSTATE, v_cause;
+      END;
     END IF;
     RETURN 0;
   END IF;
