@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.77.35.0] - 2026-09-12 — a credential scan oracle drift could silence
+
+Phase 164.8.6, the JavaScript wave — SHIPPED AS ITS ORDERING HALF ONLY. Four commits, two
+themes: the fix, and the controls that prove it can fail.
+
+### Fixed
+
+- **`compareManifest`'s manifest-side credential scan ran BELOW three early returns, so oracle
+  drift silenced findings about committed repo text** (`164.8.5-MANIFEST-SIDE-LOOP-DEAD`, the
+  ordering half). A `normalization` bump, a `schema_version` bump, or a database-marker mismatch
+  each returned before the loop, and a credential sitting in
+  `scripts/prod-prober/cron-manifest.json` stopped being reported. The scan is now the second
+  thing `compareManifest` does — above every `return` — and iterates
+  `Array.isArray(manifest?.jobs) ? manifest.jobs : []`, because at that position the eight shape
+  checks have not run yet.
+- ⚠️ **It had been dead, and it was re-animated by LUCK rather than by a fix.** PR #776
+  (`3412f3f9`, 2026-09-11) rewrote the manifest's `normalization` to `ws-collapse-v2` for an
+  unrelated reason; with the oracle back in agreement the loop silently started executing again.
+  Measured with the loop in its old position and `ws-collapse-v1`: **0 manifest-side credential
+  defects**, and nothing failed while that was true. Phase 164.5.1 still owns the re-capture half.
+- **A `null` (or non-object) element in `manifest.jobs` THREW, discarding live PROD findings.**
+  Found by code review after the hoist landed: the loop guarded the container but not the
+  element, and `typeof row.command` sat outside `judgeRow`'s try. Because the hoist put that loop
+  above every return, the throw escaped to the arm boundary and collapsed the whole run to ONE
+  `measure-fail` — eating a real production credential report that section (0) had ALREADY
+  collected. The guard is now additive: a malformed row is skipped by the hygiene scan and still
+  reported as `manifest-invalid` by the shape checks, and a credential beside it is still named.
+
+### Tests
+
+- Three one-lever controls (`normalization`, `schema_version`, a database-marker mismatch) plus a
+  calibration case, each observed RED against the pre-hoist file swapped in by `cp` and GREEN
+  after a `cmp`-proven restore. The asymmetry is the point: the three levers fail while the
+  calibration passes, which is what proves the LEVER rather than the fixture is what the hoist
+  fixes.
+- A control for the `null`-element guard, observed to redden that case and nothing else.
+
+### Notes
+
+- ⛔ **The whole-token measure (`tokenMeasure`) built for `[164.8.5-HYGIENE-RESIDUALS]` is NOT in
+  this release, deliberately.** Two independent reviewers found it fired the credential rule —
+  whose remedy is *"treat the named secret as EXPOSED and rotate it"* — on credential-free PROSE
+  assembled by `||`, `concat_ws` or `format`, hourly, into a PUBLIC Actions log. The measurement
+  that settled it: **8 of the 14** committed PROD cron commands already carry the rule's positive
+  signal, and the only thing separating them from a finding is the `fromConcat` waiver, which is
+  set per CHAIN and inherited by every whitespace token. Two fix rounds each closed the instance a
+  reviewer named and produced a new class the next round found — including a FALSE-NEGATIVE band
+  where an assembled credential with a 28-31 character whitespace-free segment went silent.
+  It needs a redesign, not a third repair, and it is routed to **Phase 164.8.4 GATERESIDUE**
+  by founder decision with every measurement attached.
+- The ordering half shipped here is independent of that work and closes on its own.
+
 ## [0.77.34.2] - 2026-09-12 — the committed PROD baseline catches up to the apply
 
 ### Changed
@@ -33,6 +85,7 @@
 - ⚠️ A `db dump` captures PROD's WHOLE catalogue, so unrelated drift would ride along silently.
   The diff was read hunk by hunk before committing: nothing in it is unexplained by the two
   migrations.
+
 
 ## [0.77.34.1] - 2026-09-12 — the apply-test verifier could never count a migration
 
