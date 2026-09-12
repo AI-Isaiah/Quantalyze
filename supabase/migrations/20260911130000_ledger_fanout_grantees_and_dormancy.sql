@@ -1522,7 +1522,7 @@ BEGIN
       RAISE EXCEPTION 'Migration 20260911130000: public.% does not pin search_path at all (proconfig=%) — the re-base dropped it, and on a SECURITY DEFINER function an unpinned search_path is a privilege-escalation route: the CALLER then decides which schema every unqualified name in the body resolves to', v_fn, v_config;
     END IF;
     IF regexp_replace(v_search_path, '\s', '', 'g') <> 'search_path=public,pg_catalog' THEN
-      RAISE EXCEPTION 'Migration 20260911130000: public.% pins search_path to "%", not to the "public, pg_catalog" its own CREATE FUNCTION sets. A pin that merely EXISTS proves nothing: an empty path, or one led by a schema the caller can create objects in, satisfies a prefix test while leaving the body resolvable by somebody else — and this body runs as a role that is exempt from row security', v_fn, v_search_path;
+      RAISE EXCEPTION 'Migration 20260911130000: public.% pins search_path to "%", not to the "public, pg_catalog" its own declaration sets. A pin that merely EXISTS proves nothing: an empty path, or one led by a schema the caller can create objects in, satisfies a prefix test while leaving the body resolvable by somebody else — and this body runs as a role that is exempt from row security', v_fn, v_search_path;
     END IF;
 
     -- 3. …and the DEFINER role can actually SEE what it reads (161.1-AUDIT F-2).

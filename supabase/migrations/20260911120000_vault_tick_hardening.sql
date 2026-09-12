@@ -507,7 +507,7 @@ BEGIN
     RAISE EXCEPTION 'Migration 20260911120000: match_engine_cron_tick does not pin search_path at all (proconfig=%). On a SECURITY DEFINER function that is a privilege-escalation route — the CALLER then decides which schema every unqualified name in the body resolves to, and a caller-created settings table earlier in the path would supply the url the service key is posted to', v_config;
   END IF;
   IF regexp_replace(v_srchpath, '\s', '', 'g') <> 'search_path=public,pg_catalog' THEN
-    RAISE EXCEPTION 'Migration 20260911120000: match_engine_cron_tick pins search_path to "%", not to the "public, pg_catalog" its own CREATE FUNCTION sets. A pin that merely EXISTS proves nothing: an empty path, or one led by a schema the caller can create objects in, satisfies a prefix test while still letting a caller-created settings table earlier in the path supply the url the service key is posted to — and this body runs as a role that is exempt from row security', v_srchpath;
+    RAISE EXCEPTION 'Migration 20260911120000: match_engine_cron_tick pins search_path to "%", not to the "public, pg_catalog" its own declaration sets. A pin that merely EXISTS proves nothing: an empty path, or one led by a schema the caller can create objects in, satisfies a prefix test while still letting a caller-created settings table earlier in the path supply the url the service key is posted to — and this body runs as a role that is exempt from row security', v_srchpath;
   END IF;
 
   -- 2b. …and the DEFINER role can actually SEE the row it reads (161.1-AUDIT
