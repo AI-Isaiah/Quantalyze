@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.8.6
-current_phase_name: VAULTTICKFIX
-status: shipped
-stopped_at: "164.5-05 tasks 1-2 complete; STOPPED at task 3 blocking-human checkpoint:decision (ROADMAP criterion 5 wording)"
-last_updated: "2026-09-12T21:22:00.000Z"
+current_phase: 164.6.3
+current_phase_name: CIDOCSPATH
+status: executing
+stopped_at: "164.6.3-01 (tracer) complete; BLOCKER for wave 2: [164.6.3-MW02-DOCSONLY-BLIND]"
+last_updated: "2026-09-13T00:16:55.000Z"
 last_activity: 2026-09-12
-last_activity_desc: "164.8.6 VAULTTICKFIX SQL wave (plans 01-05) complete and SHIPPED as PR #778 (head of filtered branch phase-164.8.6-vaulttickfix-pr; 19 of 32 commits picked, the 13 dropped carry ZERO non-filtered files; CODE IDENTICAL 5069 == 5069 lines; deletion guard EMPTY; 0 forbidden paths; only structural ROADMAP.md kept). v0.77.34.0. Two NEW migrations apply to PROD on merge: 20260911120000_vault_tick_hardening (INTO STRICT, empty-key guard, explicit service_role EXECUTE) and 20260911130000_ledger_fanout_grantees_and_dormancy (whole-set REVOKE on cron_runs, dormancy instrument). Corpus 392 annotations / 411 steps; ARMS_FLOOR 384 -> 392 separated both directions on real lanes; full corpus run at bce4b3b0 clean (392/392/0, biting 392, lane-invocations 392, 0 defects). TWO reviewer rounds, three independent opus agents each: round 1 = 1 Critical / 2 High / 7 Medium, fixed across three file-disjoint passes (13f3ece6, 14462a48, bce4b3b0); round 2 = ZERO Critical, stopping rule met. The round-1 Critical was a comment-only edit to the ALREADY-APPLIED 20260907130000 — reverted, both corrections carried as header prose into the new 20260911130000, so no applied migration is in the diff and supabase-migrate.yml's 'applied ZERO migrations' guard cannot fire. Four residual findings DROPPED by founder decision rather than booked (they stay in the reviewer reports). KNOWN OPEN, disclosed in the migration header rather than fixed: ROADMAP criteria 2 and 3 are closed in the repo and OPEN in production — they land in match_engine_cron_tick(), which NO PROD cron job calls; cron job 1 match_engine_cron still inlines the unguarded Vault read and the v_key = '' fallthrough. Re-pointing that job row is Phase 164.5.1's live production DDL. CARRY-FORWARD: the all-candidates-failed branch of the ledger fan-out is unreachable while the fan-out is dormant and becomes reachable at the Phase 161.1 activation — exercise it deliberately there. EXPECTED RED on the PR before merge by construction: V2, G1, S1 (x2), M1 (x2), M2 (x2) probe applied-ness and these migrations apply on merge ([164.8-PUSH-RACE-VAC08] coupling (b)); sql-tests may race apply-test on the merge push (coupling (a)). If apply-test refuses on shared TEST the remedy is REVERT THE MERGE, never an edit to supabase-migrate.yml. UPDATED 2026-09-12 EOD: plan 06 recorded (v0.77.34.0, PR #778 squash ce7ac08a). A follow-up fix shipped as PR #779 (756469e6): apply-test's affirmative verifier had NEVER counted a migration because `supabase db push` writes its progress to STDERR and all four capture sites piped stdout only — an anti-vacuity INVERTED case, a control that could not SUCCEED. Both migrations then APPLIED TO PROD in run 34686331921 ('planned 2 migration version(s); push reported 2'), and PR #782 (88f395cd) regenerated baseline.sql from PROD afterwards, clearing sql-gate-lint on main (findings 3 -> 0) with the allowlist UNTOUCHED. Plan 07 (the manifest-side hoist + the CR-02 null-element guard) ships as PR #781. ⛔ PLAN 08 WAS WITHDRAWN, NOT SHIPPED: two independent reviewers found `tokenMeasure` fired the credential rule — whose remedy is 'treat the named secret as EXPOSED and rotate it' — on credential-free PROSE, hourly, into a PUBLIC log. MEASURED: 8 of the 14 committed PROD cron commands already carry its positive signal, and the only separator is the `fromConcat` waiver, which is set per CHAIN and inherited by every whitespace token. Two fix rounds each closed the named instance and produced a new class the next round found, including a FALSE-NEGATIVE band at 28-31 chars. It needs a REDESIGN, not a third repair, and is routed to Phase 164.8.4 GATERESIDUE with every measurement attached."
-state_head: eab976bb26c2cba8155de2416b7614cc7e223f42
+last_activity_desc: "Phase 164.6.3 CIDOCSPATH execution started (4 plans, 4 waves). Planning closed on two gsd-plan-checker passes: revision 1 fixed a one-member ALWAYS_ON (frontend-lint is an aggregator row AND the check-planning-hygiene leak gate), a 23-vs-22 grep that would have halted the executor on the push: trigger leaking into a job-key derivation, and a byte-argument overclaim. Three corrections the ROADMAP did not carry: the always-on set is FIVE not four; THREE jobs take mutex 61616158 (python at ci.yml:3864 is the forgotten taker); the post-change code-PR board is 24 check rows, not the 23 baseline — a code PR showing 23 has LOST a gate. Wave 4 ends at a blocking-human MERGE GATE; plan 04 is autonomous: false."
+state_head: 0963ad6d9daaaf6957e73bbb2dfe631fc40b41e1
 
 # ⭐ progress: RE-DERIVED 2026-09-12 at `733a55f5` from ALL REFS — see the method block
 # immediately above the `progress:` keys below. This supersedes the HAND-SET note that stood
@@ -1251,6 +1251,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.8 P01 | 22min | 2 tasks | 6 files |
 | Phase 164.8 P02 | (executor died before reporting) | 3 tasks | 1 file |
 | Phase 164.8 P03 | 33min | 3 tasks | 2 files |
+| Phase 164.6.3 P01 | 55min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -2257,8 +2258,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-07T19:02:39.245Z
-**Stopped At:** 164.5-05 tasks 1-2 complete; STOPPED at task 3 blocking-human checkpoint:decision (ROADMAP criterion 5 wording)
+**Last Date:** 2026-09-13T00:16:55.388Z
+**Stopped At:** Completed 164.6.3-01-PLAN.md (tracer, wave 1). ⛔ BLOCKER raised for wave 2: [164.6.3-MW02-DOCSONLY-BLIND] — see the phase's deferred-items.md.
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -2267,7 +2268,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 **Stopped At:** Completed 162-09-PLAN.md
 **Last Date:** 2026-08-25T23:19:36.303Z
 **Stopped At:** Completed 162-02-PLAN.md
-**Resume File:** .planning/phases/164.5-baseline-snapshot-the-committed-prod-schema-baseline-becomes/164.5-05-PLAN.md
+**Resume File:** None
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
