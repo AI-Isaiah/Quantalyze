@@ -848,6 +848,8 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    and `deribit_ingest.py` imports the same classifier, so Phase 161.1's go-live step that requires
    *one manual composite enqueue observed to advance `last_return_date`* is likely blocked by this
    same defect rather than by scheduling. See item 0.3 below.
+   ⭐ **OWNER: Phase 168 DRBOPTIONS** (added 2026-09-12 by founder decision — a new phase, not folded
+   into 161.1 or 166). That entry carries the deciding question and the forbidden remedies.
    **Close condition:** `assignment` is classified against a captured row census, with a test and a
    fixture, and a deribit options account is observed to ingest end to end.
 

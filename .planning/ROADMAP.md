@@ -1917,6 +1917,30 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167 to break down)
 
+### Phase 168: DRBOPTIONS — a Deribit options account ingests end to end
+
+**Goal:** Classify Deribit's `assignment` transaction-log type **against a captured row census rather than a guess**, so an options account ingests end to end and the realized-cash series it feeds is neither silently dropped nor double-counted.
+
+⛔ **MEASURED IN PRODUCTION 2026-09-12 — a live customer-visible failure, not a hypothetical.** A real Iron Condor failed with `unknown Deribit transaction-log type 'assignment' carries nonzero change (-1.5e-05); it is in neither CASH_BEARING nor INFORMATIONAL` (job `0c5ad574`, `failed_final`/`permanent`). The customer saw `GATE_ANALYTICS_FAILED`. ⚠️ **The wizard's Retry button CANNOT clear it** — the ledger still holds the row, so every retry re-reads it and refuses identically.
+
+⭐ **THE DECIDING QUESTION, and NO DOCUMENT CAN ANSWER IT:** does Deribit ALSO emit a `delivery` row for the same instrument/expiry? `delivery` is already `CASH_BEARING` and books option expiry cash — if BOTH fire, summing `assignment` **DOUBLE-COUNTS realized cash** in customer-facing return series; if only `assignment` fires, it carries the settlement and MUST be summed. MEASURED 2026-09-12: Deribit does **not** enumerate the `type` enum in its published docs, and the repo's own `analytics-service/docs/evidence/drb-options-semantics-2026-07.json` covers `assignment`/`delivery`/`settlement` **zero** times.
+
+⛔ **DO NOT CLASSIFY IT FROM THE MAGNITUDE.** `-1.5e-05` looks fee-sized; acting on that is precisely the guess the guard exists to refuse, and it is wrong in a way that corrupts money **silently, in both directions**.
+
+✅ **THE EVIDENCE CHANNEL ALREADY EXISTS — this phase SPENDS it, it does not build it.** PR #783 made the refusal self-evidencing: it now prints the row's redacted shape plus a same-instrument `delivery`/`settlement`/`trade` census at BOTH refusal sites. So the next occurrence supplies the deciding measurement by itself. ⛔ Do not re-derive that mechanism; read its output.
+
+⚠️ **WHY IT HAD NEVER BEEN HIT, so nobody concludes the ingester was fine:** MEASURED — `derive_broker_dailies` has completed **7 times for mt5, once for okx, and ZERO times for deribit**. This was the first deribit options account ever put through it, and `assignment` is the defining event of a short-options strategy. ⚠️ A **zero-`change`** unknown type passes SILENTLY (only nonzero is loud), so this is the first **FAILURE**, not necessarily the first **occurrence** — do not treat prior green runs as evidence of absence.
+
+⚠️ **EXPOSURE IS WIDER THAN ONE KEY.** The composite `Alpha Centauri` holds **three** deribit keys and `deribit_ingest.py` imports the same classifier, so **Phase 161.1's go-live step** — one manual composite enqueue observed to advance `last_return_date` — is likely blocked by THIS, not by scheduling. Settle this phase before reading that step's failure as a scheduling problem.
+
+**Requirements**: TODOS entry `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` — read it before planning; it carries the dated measurements and the forbidden remedies. Do not re-derive them.
+**Depends on:** PR #783 merged (the evidence channel), and ONE observed occurrence carrying the census. ⚠️ The second is a WAITING dependency, not a code one — nothing in the repo produces it; a deribit options account must hit the refusal again.
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 168 to break down)
+
 ---
 
 ### Phase 165: DEPS — The 9-PR dependabot campaign

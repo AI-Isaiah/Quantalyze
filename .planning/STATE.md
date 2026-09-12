@@ -1284,6 +1284,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.8.6 inserted after Phase 164.8: VAULTTICKFIX — the forward migration for Phase 164.7's SQL-side findings, including a verification check that cannot fail (URGENT) Current Phase pointer deliberately NOT moved — these are DEFERRAL DESTINATIONS for Phase 164.7's post-merge review findings, scheduled rather than urgent-next (same precedent as the 164.1, 164.8 and 164.4.1 insertions). ⛔ `state.patch` cannot write `Current Phase` / `Next recommended run` in any case.
 - Phase 164.8.3 edited: routed: MT5 -6 confirmed live on prod-prober run 34609247983
 - Phase 164.5.1 edited: routed: cron-manifest re-captured at ws-collapse-v2 (PR #776); residual is the missing CI normalization-match gate
+- Phase 168 added: DRBOPTIONS — classify Deribit's `assignment` transaction-log type against a CAPTURED row census rather than a guess. Owner of [DERIBIT-ASSIGNMENT-UNCLASSIFIED], a live customer-visible ingestion failure measured on PROD 2026-09-12 (job 0c5ad574). Founder chose a NEW phase over folding it into 161.1 or 166.
 
 ### Decisions
 
