@@ -1,5 +1,103 @@
 # Changelog
 
+## [0.77.34.0] - 2026-09-12 — VAULTTICKFIX: the forward migration Phase 164.7 earned
+
+Phase 164.8.6. Two new migrations repair what 164.7's review found but 164.7 could not itself
+fix, and the SQL gate corpus grows by 8 annotated arms to hold them. 30 commits on the branch.
+
+### Added
+
+- **A non-vacuous migration self-check** (`164.7-CR05-VACUOUS-MIGRATION-CHECK`). 164.7's review
+  found the old check could pass without comparing anything; both new migrations replace it with
+  statement-shape needles plus a **check 0** that aborts on an unexpected catalogue row count, so
+  the check can no longer silently measure nothing.
+- **`supabase/migrations/20260911120000_vault_tick_hardening.sql`** — hardens
+  `match_engine_cron_tick()`. The Vault read becomes `SELECT … INTO STRICT` so a missing or
+  duplicated secret raises instead of silently taking the first row (`164.7-WR01-VAULT-NOT-STRICT`);
+  an empty decrypted key stops falling through as if it were a valid credential
+  (`VAULTTICK-EMPTYKEY-01`); `service_role`'s EXECUTE is **REVOKED** alongside `PUBLIC`, `anon` and `authenticated`, leaving
+  EXECUTE held by the OWNER alone (`164.7-WR02-SERVICE-ROLE-EXECUTE`). No GRANT follows and none
+  is needed: the scheduler runs as `postgres` — measured across all 14 rows of
+  `scripts/prod-prober/cron-manifest.json` — and `postgres` owns the function. 164.7 narrowed
+  three of the four grantees and `service_role` survived because the check beside it probed only
+  `anon` and `authenticated`. Ships with a **check 0** that aborts on an overloaded
+  catalogue row count, so a `pg_proc` read can never quietly pick the wrong overload.
+- **`supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql`** — whole-set
+  `REVOKE TRUNCATE, REFERENCES, TRIGGER ON public.cron_runs FROM anon, authenticated`, plus a
+  dormancy instrument that records why a fan-out found no candidates — causes 1 and 3 were
+  previously uninstrumented (`APPGUC-WARNING-UNINSTRUMENTED-01`, `164.7-DORMANCY-UNINSTRUMENTED`),
+  so the fan-out could go quiet for a reason nothing recorded. Both instrument INSERTs are
+  wrapped so an instrumentation failure downgrades to a `RAISE WARNING` and never takes the
+  refresh down with it.
+- **`scripts/pg-lane/fixtures/33-fixture-cron-runs.sql`** — a `public.cron_runs` stand-in for the
+  fan-out lanes, deliberately *stricter* than production (RLS on, no policies, no grants), so a
+  gate can never pass on the lane by being more permissive than the real table.
+- **New gate arms** on `test_ledger_refresh_fanout.sql` and `test_ledger_refresh_composite_arm.sql`
+  (M1, M2, S1 each) and on the tick gate (V2, G1), re-pointed onto the new migrations. Rosters
+  fully enumerated rather than range-formed — `ci.yml`'s F12 parser rejects `A-L,M1,M2,S1`.
+
+### Changed
+
+- **`ARMS_FLOOR` 384 → 392**, measured on real lanes and separated in both directions: the runner
+  catches the stale-high case, `src/__tests__/mutation-runner-floors.test.ts` catches the
+  stale-low one. Corpus is now **392 annotations / 411 steps**, 46/73 files, zero waivers.
+- Regenerated the three bridge snapshots and **earned** the three VAC-04 acknowledgements rather
+  than pasting them (`164.7-MIGRATION-COMMENT-DRIFT`).
+- `CLAUDE.md` now cites `sql-mutation`'s `timeout-minutes` **by symbol**, not by line number —
+  the prose had drifted to `:1259`/`:1069` while the job had moved to `:1196`
+  (`[164.7-CITATION-DRIFT-01]`).
+
+### Fixed
+
+- Two repo-wide gates the SQL tree had been failing are green again (`6b4005a8`).
+- Reviewer round 1 (1 Critical, 2 High, 7 Medium) closed across three sequential, file-disjoint
+  fix passes. The Critical: a comment-only edit to the **already-applied**
+  `20260907130000_ledger_refresh_switch_to_system_flags.sql`. Reverted; both corrections now ride
+  as header prose in the new `20260911130000`, so no applied migration appears in this diff.
+- The `REVOKE` and the sqlstate metadata key gained post-conditions that actually bite — the
+  `REVOKE` was proven to be a **silent** no-op under a grantor mismatch (PostgreSQL emits no
+  warning at all, and a superuser is not the escape; `SET ROLE <grantor>` is), so a
+  `has_table_privilege` post-condition is the only thing that can observe it.
+
+### Root cause
+
+- **`SELECT … INTO` without `STRICT` takes the first of N rows in silence.** That is the shape
+  behind `164.7-WR01`, and behind check 0 in both new migrations: any `pg_proc` read without a
+  `pronargs` filter is an overload hazard waiting for a second signature to exist.
+
+### Notes
+
+- ⚠️ **Criteria 2 and 3 are closed in the repo and OPEN in production.** They land in
+  `match_engine_cron_tick()`, which **no PROD cron job calls** — job 1 `match_engine_cron` still
+  inlines the unguarded Vault read and the `v_key = ''` fallthrough. Re-pointing that job row is
+  Phase 164.5.1's live production DDL. The migration carries a loud header saying so; this is a
+  disclosure, not a silent gap.
+- ⚠️ **Carry-forward:** the all-candidates-failed branch of the ledger fan-out is **unreachable
+  today** (the fan-out is dormant) and becomes reachable the moment Phase 161.1's recurring
+  ledger refresh is activated. Exercise it deliberately at activation; do not wait to learn about
+  it from a customer's frozen factsheet.
+- **Expect red checks on this PR before merge, by construction.** V2, G1, S1 (x2), M1 (x2) and
+  M2 (x2) probe applied-ness, and these migrations apply on merge — the documented
+  `[164.8-PUSH-RACE-VAC08]` coupling (b). `sql-tests` may also race `apply-test` on the merge
+  push (coupling (a)). ⛔ If `apply-test` refuses on shared TEST, the remedy is to **revert the
+  merge**, never to edit `supabase-migrate.yml`.
+- Two review rounds, three independent reviewers each (`migration-reviewer`,
+  `rls-policy-auditor`, `silent-failure-hunter`). Round 2 returned **0 Critical** — the stopping
+  rule. The four residual findings were dropped by founder decision rather than booked; they stay
+  written up in the phase's reviewer reports.
+- Roadmap: **Phase 167 CREDTRUST** inserted — tell a customer their venue credential broke, and
+  that this is why their factsheet stopped updating. Depends hard on Phase 164.7.
+- Phase artifacts (stripped from the PR diff by the `-pr` filter, kept on the phase branch):
+  discuss context, RESEARCH, VALIDATION, PATTERNS, the 8-plan decomposition, the plan-checker
+  corrections that serialised plans 03/04, and a per-plan SUMMARY for 01-05 — including the
+  closeout section recording both reviewer rounds and the corpus re-pin routed from plan 01
+  into plan 05.
+- The `+8` was carried through **every** artifact that mirrors the corpus, not just the floor:
+  `mutation-annotation-parser.test.ts` (392 arms / 411 needles), `mutation-runner-floors.test.ts`,
+  `drift-check-scripts.test.ts` and `gate-family-meta.test.ts`.
+- Backlog: `[STRATTABLE-DESC-01]` — the strategy list renders only the name though `description`
+  is already fetched.
+
 ## [0.77.33.3] - 2026-09-11 — regenerate the cron oracle the normalization bump invalidated
 
 ### Fixed

@@ -1374,7 +1374,7 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 **Goal:** One forward migration repairs every SQL-side finding Phase 164.7's post-merge audit produced, including a verification check that CANNOT FAIL — shipped through this repo's full migration discipline, not around it.
 **Requirements**: [164.7-CR05-VACUOUS-MIGRATION-CHECK], [164.7-WR01-VAULT-NOT-STRICT], [164.7-WR02-SERVICE-ROLE-EXECUTE], [VAULTTICK-EMPTYKEY-01], [164.7-MIGRATION-COMMENT-DRIFT], [APPGUC-WARNING-UNINSTRUMENTED-01] + [164.7-DORMANCY-UNINSTRUMENTED] (⛔ RE-ROUTED from 164.8.5 on 2026-09-10: ONE instrument closes both, and it is SQL in `20260907130000` — a phase whose fence forbids `supabase/**` cannot hold them. A prober-side `system_flags` read-back was considered and REJECTED by measurement: it cannot distinguish WR-10's third dormancy cause, so it would be a control that reports 'fine' for a case it cannot see) + `[164.8.5-HYGIENE-RESIDUALS]` + `[164.8.5-MANIFEST-SIDE-LOOP-DEAD]` (⚠️ ROUTED HERE 2026-09-11 by founder decision, from Phase 164.8.5's three review rounds and its SECURITY audit. ⛔ **THEMATIC MISMATCH, RECORDED SO IT IS A DECISION AND NOT A DRIFT:** this phase's own goal is *'one forward migration repairs every SQL-side finding'*, and it absorbed `[APPGUC-WARNING-UNINSTRUMENTED-01]` precisely BECAUSE those are SQL. These two are pure JavaScript — `scripts/prod-prober/arms/cron-drift.mjs` and its fixtures — so a planner opening this phase will find a `supabase/**` migration brief beside two prober-lexer items. Plan them as a separate wave, or split them out; do not let the migration's discipline (3 reviewers, TEST before PROD) be read as applying to them, nor its fence be read as excluding them. **HYGIENE-RESIDUALS** = five credential shapes still unreported: the `||`-split value outside a header region, a non-`BUILDERS` wrapper, an alphabetic-only 32+ token, a `MIGRATION_FILENAME_RE`-shaped token in a comment, and a credential in a too-deeply-nested `DO` body (that last one returns `command-unjudgeable` — LOUD, not silent). ⭐ The honest remedy is a WHOLE-TOKEN MEASURE rather than a sixth exemption, and that is a DECISION about what the arm is for: every further narrowing risks the zero-false-positive budget the whole instrument depends on, and that budget is why the one true positive is still readable. **MANIFEST-SIDE-LOOP-DEAD** is ALSO listed in Phase 164.5.1 — deliberately, not by duplication: 164.5.1 owns the RE-CAPTURE that silently re-animates the loop, this phase would own the ORDERING fix that stops the loop sitting below `compareManifest`'s early returns. Whichever lands first should say so in its SUMMARY)
 **Depends on:** Phase 164.8
-**Plans:** 0 plans
+**Plans:** 8 plans
 
 **Success Criteria**:
 
@@ -1388,7 +1388,16 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.8.6 to break down)
+⛔ **TWO migration files, not one — measured (RESEARCH §Q4), and it contradicts this phase's own goal sentence.** The tick gate's lane lacks the ledger stack and the fan-out lanes lack the vault stand-in, so a single file cannot apply on either lane. One PR, two files: "one shipped repair" is satisfied, "one forward migration" is not, and that is recorded here rather than silently satisfied. Waves 1-4 are the SQL wave (one PR); waves 5-6 are the JS wave (a second PR, opened after the first lands — founder decision, thematic mismatch recorded above).
+
+- [ ] 164.8.6-01-PLAN.md — WAVE 1 TRACER: `20260911120000_vault_tick_hardening.sql` (count+max Vault read, `IF v_cnt > 1 THEN`, `btrim`, four-role REVOKE, variable-bound needles, aclexplode whole set) + the tick gate re-pointed (V1/U1/C1/C2/C3) with arms V2 (mirror twin) and G1; narrowed lane run clean
+- [ ] 164.8.6-02-PLAN.md — WAVE 1: lane fixture `33-fixture-cron-runs.sql` + `20260911130000_ledger_fanout_grantees_and_dormancy.sql` (both fan-outs re-based with the `cron_runs` dormancy instrument for causes 1 and 3, four-role REVOKEs, catalogue-only verify)
+- [ ] 164.8.6-03-PLAN.md — WAVE 2: both ledger gates — 14 + 12 body-editing twins re-pointed, arms S1/M1/M2 per gate, rosters 15; narrowed lane runs clean
+- [ ] 164.8.6-04-PLAN.md — WAVE 2: the check-6 FALSIFIER (three neuters RED on scratch copies, source proven intact), the `20260907130000` ack-block reconciliation (comment-only, line-count-neutral, bundled — criterion 5's reading applied), snapshots regenerated and three VAC-04 acks EARNED from origin/main
+- [ ] 164.8.6-05-PLAN.md — WAVE 3: `ARMS_FLOOR` separated both ways on full-corpus lane runs and pinned with a dated derivation + `164.8.6-05-FLOORS.log`; every quick gate green at a named sha; the three reviewers BEFORE any PR exists (criterion 6)
+- [ ] 164.8.6-06-PLAN.md — WAVE 4: release commit v0.77.34.0 (VERSION/package.json/CHANGELOG via the commit checklist) → checkpoint:decision (the one-way door: merge auto-applies to PROD) → open the SQL PR
+- [ ] 164.8.6-07-PLAN.md — WAVE 5 (JS): hoist `compareManifest`'s manifest-side hygiene loop above every early return + three one-lever vitest cases with a cp-swapped RED control (164.8.5-MANIFEST-SIDE-LOOP-DEAD, ordering half; re-animated earlier by PR #776)
+- [ ] 164.8.6-08-PLAN.md — WAVE 6 (JS): `tokenMeasure` whole-token measure, red rows for hygiene shapes 2/3/4 with green/bypass corpora intact, `[164.8.6-08]` describe, release commit v0.77.34.1 and the JS PR after the SQL PR lands (164.8.5-HYGIENE-RESIDUALS)
 
 ### Phase 164.8.5: PROBERPARSE — the prod-prober hygiene rules stop being dodgeable and its parser stops dropping rows silently: the ||-split service key and the dollar-quoted literal both go RED, an unreadable oracle no longer disables the live credential scan, a malformed cron.job record becomes a measure-fail instead of a continue, and the app-GUC linter successor check stops accepting any readable file (INSERTED)
 
@@ -1896,6 +1905,17 @@ as part of the scalars closure, not before.
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 166 to break down)
+
+### Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error
+
+**Goal:** A customer whose venue credentials stopped working is TOLD — in the product, on the surface where they notice the symptom — that the credential is the reason their factsheet stopped updating, and is nudged to reconnect. Key rotation is a NORMAL, recurring customer action, not an incident: the system must treat "your key no longer works" as an expected state it reports plainly, rather than a silent stall the customer discovers weeks later.
+**Requirements**: TBD (no v1.20 requirement IDs) + ⛔ **MEASURED ON PROD 2026-09-11, read these before planning:** (1) An invalid credential is reported today as `MT5 terminal unreachable — sync will retry automatically.` with `error_kind: transient` — the message names the WRONG CAUSE and promises a retry that can never succeed. Mechanism: a wrong password makes the MT5 terminal raise a MODAL LOGIN DIALOG, which blocks IPC, which the gateway reports as a transport failure (the `-10005` class). (2) Key `34043761` / `FX-AI-V-35` sat at `sync_status: error` with `is_active: true`, `disconnected_at: null` and NO alert for **17 days** (last good sync 2026-08-25, founder confirmed the password had been changed). (3) The `bybit` key has been failing since 2026-08-14 with `retCode 33004 "Your api key has expired."` — a SECOND venue, same class, also unsurfaced, so scope this off the venue-agnostic credential-failure shape and not off mt5. ⭐ The freshness substrate ALREADY EXISTS and should be consumed rather than reinvented: `supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql`, keyed on the max date inside `returns_series` — "a signal no status transition can advance".
+**Depends on:** ⛔ **Phase 164.7 — HARD, and the ordering is the whole point.** 164.7 plan 07 activates the 161.1 ledger refresh; until that is LIVE there is NO recurring recompute for ledger venues at all (`[LEDGER-BACKED VENUES HAVE NO RECURRING STRATEGY REFRESH]`, TODOS.md), so a stale ledger factsheet does NOT imply a bad credential. Measured 2026-09-11: strategy `MM1 --> Grid FX` has PERFECT credentials and syncs cleanly every 04:00Z, yet its `computed_at` is frozen at `2026-09-01 12:09:59` — 3m49s after onboarding, never since. Shipping this phase first would tell that customer to fix a key that is not broken. ⚠️ Adjacent but NOT the same phase: **164.8.3 PROBERAUTH** splits MT5's error vocabulary for the OPS-facing prober; this phase owns the CLIENT-facing surface. Same root, two audiences — do not merge them.
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 167 to break down)
 
 ---
 

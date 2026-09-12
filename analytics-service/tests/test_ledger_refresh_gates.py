@@ -97,12 +97,29 @@ _STALENESS_VIEW_MIGRATION_NAME: Final[str] = (
 # So the two pointers below name the SAME migration now — the extractors still
 # find each body by its own dollar-quote tag, which is precisely why that
 # migration keeps the tags rather than renaming them.
+# ⛔ MOVED 2026-09-12 (Phase 164.8.6 VAULTTICKFIX), in the SAME COMMIT as the
+# migration that superseded the old bodies. 20260911130000 re-defines BOTH
+# enqueue functions (whole-set REVOKE on public.cron_runs + the dormancy
+# instrument), so it is the LIVE definition and the pointers must name it or
+# every body-shape gate below would guard a superseded body. It keeps the
+# $fanout$ / $composite$ / $verify$ tags for exactly that reason.
 _FANOUT_MIGRATION_NAME: Final[str] = (
-    "20260907130000_ledger_refresh_switch_to_system_flags.sql"
+    "20260911130000_ledger_fanout_grantees_and_dormancy.sql"
 )
 _COMPOSITE_MIGRATION_NAME: Final[str] = (
-    "20260907130000_ledger_refresh_switch_to_system_flags.sql"
+    "20260911130000_ledger_fanout_grantees_and_dormancy.sql"
 )
+# ⛔ SUPERSEDED-BUT-APPLIED definitions, named rather than dropped. The lineage
+# is no longer a PAIR: {original, live} was only ever right while there were
+# exactly two definitions. Widening the assertion to a count would destroy the
+# property it exists for, so the middle generations are ENUMERATED instead and
+# a silent further definition is still a distinguishable failure.
+_FANOUT_SUPERSEDED_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
+    "20260907130000_ledger_refresh_switch_to_system_flags.sql",
+})
+_COMPOSITE_SUPERSEDED_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
+    "20260907130000_ledger_refresh_switch_to_system_flags.sql",
+})
 # ⛔ The ORIGINAL definitions, kept as NAMED LINEAGE rather than deleted. Gates 3b
 # and 10c assert the EXACT SET {original, live} rather than a count, so a silent
 # THIRD definition and the disappearance of either one are distinguishable
@@ -231,6 +248,13 @@ _PHASE_MIGRATION_WINDOW_END: Final[str] = "20260826000000"
 # That is exactly why 20260907130000 may not carry a schedule token even in prose.
 _PHASE_MIGRATION_WINDOW_2_START: Final[str] = "20260907130000"
 _PHASE_MIGRATION_WINDOW_2_END: Final[str] = "20260907130001"
+
+# ⛔ A THIRD DISJOINT RANGE, added in the SAME COMMIT as 20260911130000 — never
+# by widening range 2, which would swallow every migration stamped between
+# 20260907130001 and 20260911130000 into a raw comments-included scan they were
+# never reviewed against. Half-open and one second wide, like its siblings.
+_PHASE_MIGRATION_WINDOW_3_START: Final[str] = "20260911130000"
+_PHASE_MIGRATION_WINDOW_3_END: Final[str] = "20260911130001"
 
 # ⛔ THE FLOOR IS A SET, NOT A COUNT. `len(paths) >= 4` is satisfiable by any
 # four files that happen to land in the window; this names the exact migrations
@@ -448,6 +472,7 @@ _MIGRATION_TIMESTAMP_RE: Final[re.Pattern[str]] = re.compile(r"^(\d{14})_")
 _PHASE_MIGRATION_WINDOWS: Final[tuple[tuple[str, str], ...]] = (
     (_PHASE_MIGRATION_WINDOW_START, _PHASE_MIGRATION_WINDOW_END),
     (_PHASE_MIGRATION_WINDOW_2_START, _PHASE_MIGRATION_WINDOW_2_END),
+    (_PHASE_MIGRATION_WINDOW_3_START, _PHASE_MIGRATION_WINDOW_3_END),
 )
 
 
@@ -1377,7 +1402,11 @@ class TestGate3Dormancy:
         SET names which two, so a third definition, a rename, or the silent
         disappearance of either is a distinguishable failure.
         """
-        expected = {_FANOUT_ORIGINAL_MIGRATION_NAME, _FANOUT_MIGRATION_NAME}
+        expected = {
+            _FANOUT_ORIGINAL_MIGRATION_NAME,
+            *_FANOUT_SUPERSEDED_MIGRATION_NAMES,
+            _FANOUT_MIGRATION_NAME,
+        }
         hits = {
             path.name
             for path in _migrations_dir().glob("*.sql")
@@ -1518,6 +1547,35 @@ _ACTIVATION_NULL_UNSAFE_SPELLINGS: Final[tuple[tuple[str, str], ...]] = (
 )
 
 
+def _dormant_branch(code: str, variable: str) -> str | None:
+    """Return the activation guard's OWN branch text, or None.
+
+    Walks forward from ``IF <variable> IS DISTINCT FROM TRUE THEN`` tracking
+    IF/END IF nesting, so the region ends at the closer belonging to the guard
+    rather than at the first one encountered. ``ELSIF`` continues a block and
+    must not increment the depth. None means the guard is absent or the block is
+    unterminated; the caller turns that into its own, more specific failure.
+    """
+    opener = re.compile(
+        r"IF\s+" + re.escape(variable) + r"\s+IS\s+DISTINCT\s+FROM\s+TRUE\s+THEN",
+        flags=re.IGNORECASE,
+    )
+    start = opener.search(code)
+    if start is None:
+        return None
+    token = re.compile(r"\bELSIF\b|\bIF\b|\bEND\s+IF\s*;", flags=re.IGNORECASE)
+    depth, pos = 1, start.end()
+    while depth:
+        tok = token.search(code, pos)
+        if tok is None:
+            return None
+        text, pos = tok.group(0).upper(), tok.end()
+        if text.startswith("ELSIF"):
+            continue
+        depth += -1 if text.startswith("END") else 1
+    return code[start.end() : tok.start()]
+
+
 def _assert_activation_is_fail_closed_table_read(code: str, *, arm: str) -> None:
     """Assert ``arm``'s body opens ONLY on a committed TRUE, and is dormant on
     every failure path — missing row, failing read, explicit FALSE."""
@@ -1608,13 +1666,18 @@ def _assert_activation_is_fail_closed_table_read(code: str, *, arm: str) -> None
     )
 
     # 3. the comparison is the NULL-SAFE one, and it returns 0.
-    comparison = re.search(
-        r"IF\s+"
-        + re.escape(variable)
-        + r"\s+IS\s+DISTINCT\s+FROM\s+TRUE\s+THEN(?P<then>.*?)\bEND\s+IF\s*;",
-        code,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
+    # ⛔ DELIMITED BY NESTING DEPTH, NOT BY THE FIRST `END IF;`. The lazy form
+    # was correct only while the dormant branch held no nested IF; Phase
+    # 164.8.6's dormancy instrument puts an `IF v_read_failed … ELSIF … ELSE …
+    # END IF;` inside it, and the lazy match then stopped at the INSTRUMENT's
+    # closer — truncating the branch before its `RETURN 0;` and reporting a
+    # return that is plainly there as missing.
+    #
+    # ⛔ AND THE FIX IS NOT A GREEDY `.*`. Greedy runs to the LAST `END IF;` in
+    # the function, so a `RETURN 0;` belonging to an unrelated later branch would
+    # satisfy this assertion and the gate would keep passing after the dormant
+    # return was deleted — the exact vacuity this file exists to prevent.
+    comparison = _dormant_branch(code, variable)
     assert comparison is not None, (
         f"LEDGER-02 LOCK B: the {arm} does not compare the activation value "
         f"with `IF {variable} IS DISTINCT FROM TRUE THEN`. That exact form is "
@@ -1623,7 +1686,7 @@ def _assert_activation_is_fail_closed_table_read(code: str, *, arm: str) -> None
         "NULL-unsafe form falls through on those two paths and opens the flag "
         "precisely when the switch could not be read."
     )
-    assert re.search(r"\bRETURN\s+0\s*;", comparison.group("then")), (
+    assert re.search(r"\bRETURN\s+0\s*;", comparison), (
         f"LEDGER-02 LOCK B: the {arm}'s dormant branch does not `RETURN 0;`. "
         "The integer this function returns is the INSERTION count the go-live "
         "runbook has the founder read back, so the dormant path must answer 0 "
@@ -2107,7 +2170,11 @@ class TestGate10CompositeArm:
         selection cannot see a migration whose timestamp falls outside it, so a
         differently-dated migration could register a schedule for THIS function
         and never enter that scan."""
-        expected = {_COMPOSITE_ORIGINAL_MIGRATION_NAME, _COMPOSITE_MIGRATION_NAME}
+        expected = {
+            _COMPOSITE_ORIGINAL_MIGRATION_NAME,
+            *_COMPOSITE_SUPERSEDED_MIGRATION_NAMES,
+            _COMPOSITE_MIGRATION_NAME,
+        }
         hits = {
             path.name
             for path in _migrations_dir().glob("*.sql")

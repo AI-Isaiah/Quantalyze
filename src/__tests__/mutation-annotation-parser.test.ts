@@ -806,9 +806,57 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // moved 109 -> 111 in lockstep.
     // MEASURED at this commit over scanCorpus: `arms=384 waivers=0
     // fileSteps=406 sqlSteps=111 totalSteps=517`.
-    expect(armsSeen).toBe(384);
-    expect(stepsSeen).toBe(406);
-  });
+    // ⚠️ CURRENCY 2026-09-11 (phase 164.8.6 VAULTTICKFIX, plan 05): arms
+    // 384 -> 392 and file steps 406 -> 411. EIGHT new arms, from THREE gates
+    // rather than one, all of them RED-UNDER-M twins of the phase's two new
+    // migrations:
+    //   * TWO in test_analytics_service_settings_and_vault_tick.sql (plan 01) —
+    //     V2, the single-space vault key that must still RAISE
+    //     `analytics_service_key missing from vault` (the empty-key hole
+    //     VAULTTICK-EMPTYKEY-01 names), and G1, service_role EXECUTE handed
+    //     back to the tick callable.
+    //   * THREE in EACH of test_ledger_refresh_fanout.sql and
+    //     test_ledger_refresh_composite_arm.sql (plan 03) — S1 (the
+    //     whole-grantee-set GRANT arm) plus the dormancy instrument pair
+    //     M1 / M2 (flag row absent / invisible must post a `cron_runs` row
+    //     naming the cause).
+    // ⚠️ WHY STEPS MOVED BY FIVE AND NOT EIGHT: three of the eight are `sql`
+    // steps carrying no file edit at all — the same shape the 2026-09-07 block
+    // above records — so sqlSteps moved 111 -> 116 while fileSteps moved
+    // 406 -> 411. Arms and steps are DIFFERENT derivations; each went stale on
+    // its own schedule here too.
+    // ⚠️ WHAT DID NOT MOVE, AND COULD HAVE: plan 03 re-pointed all 30 of the
+    // pre-existing edit-kind twins in the two ledger gates onto the SUPERSEDING
+    // migration 20260911130000, and re-observed every one biting afterwards
+    // (both gates 20/20/0). Had the re-point been split from the apply-list
+    // extension, up to 30 arms would have gone `no-red` — unabsorbable, since
+    // WAIVED_CEILING is 0. WAIVED_CEILING stays 0; waivers stay 0.
+    // ⛔ RUN, not reasoned about. MEASURED at this commit over scanCorpus:
+    // `arms=392 waivers=0 fileSteps=411 sqlSteps=116 totalSteps=527`, and
+    // corroborated by a clean-tree full-corpus lane run — `arms: 392/392/0`,
+    // `biting: 392`, `lane-invocations: 392` (the two independent tallies
+    // AGREE), `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`,
+    // exit 0. RECORD: 164.8.6-05-SUMMARY.md beside 164.8.6-05-FLOORS.log.
+    expect(armsSeen).toBe(392);
+    expect(stepsSeen).toBe(411);
+    // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
+    // the FIRST per-test timeout in this suite, so it is a deliberate new shape
+    // rather than a local convention being followed. MEASURED, not guessed:
+    //   unloaded, file-scoped   — the whole FILE runs in 2.19 s of test time
+    //   inside `npm run test:coverage` — THIS test alone took 6330 ms and FAILED
+    //     with `Test timed out in 5000ms`, vitest's default budget
+    // The assertion did not change and nothing is being relaxed: this walk does
+    // real work proportional to the corpus (392 arms x 411 file steps, each
+    // read, applied and identity-compared), so its cost grows with every arm
+    // this repo adds while the default budget stays 5 s. A green file-scoped run
+    // beside a red full-suite run is the exact shape VALIDATION.md warns about
+    // ("a file-scoped vitest run cannot clear a directory-scanning contract
+    // test" / "full vitest must not share the box").
+    // ⛔ 30 s is a HARNESS budget, not a gate threshold — it bounds how long the
+    // walk may take, never what it accepts. Every violation check still runs in
+    // full, and `violations` must still be empty. If this ever times out AGAIN,
+    // the answer is to make the walk cheaper, not to raise this number.
+  }, 30_000);
 
   // ══════════════════════════════════════════════════════════════════════════
   // R3-W01 + R3-C02 (secondary) — the two blind spots of the multiset compare
@@ -1583,7 +1631,20 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // test_analytics_service_settings_and_vault_tick.sql contribute exactly two
     // `edit` steps between them; the other two are `sql`.
     // MEASURED: `fileSteps=406 sqlSteps=111 totalSteps=517`.
-    expect(needles.length).toBe(406);
+    // ⚠️ CURRENCY 2026-09-11 (phase 164.8.6 VAULTTICKFIX, plan 05): 406 -> 411,
+    // once again in lockstep with `stepsSeen` above. The phase's EIGHT new arms
+    // — V2 and G1 in test_analytics_service_settings_and_vault_tick.sql, and
+    // S1 / M1 / M2 in EACH of test_ledger_refresh_fanout.sql and
+    // test_ledger_refresh_composite_arm.sql — contribute exactly FIVE `edit`
+    // needles between them; the other three are `sql` steps, which this walk
+    // and `stepsSeen` both skip, so both pins moved by five and not eight.
+    // ⛔ RUN SEPARATELY from `stepsSeen`, for the reason stated at the pin
+    // above: they are different derivations over different arm sets (this one
+    // ranges over waivers too, which is only harmless while waivers are 0 —
+    // they are, measured `waivers=0`) and each has gone stale on its own.
+    // MEASURED at this commit over scanCorpus: `arms=392 waivers=0
+    // fileSteps=411 sqlSteps=116 totalSteps=527 needles=411`.
+    expect(needles.length).toBe(411);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

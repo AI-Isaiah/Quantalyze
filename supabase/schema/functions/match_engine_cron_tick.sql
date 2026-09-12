@@ -2,9 +2,9 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260907120000_analytics_service_settings_and_vault_tick.sql
+-- source migration: 20260911120000_vault_tick_hardening.sql
 -- --------------------------------------------------------------------------
--- STEP 2: public.match_engine_cron_tick() — the callable half of the mechanism
+-- STEP 1: the re-based body
 -- --------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.match_engine_cron_tick()
 RETURNS BIGINT
@@ -14,6 +14,10 @@ SET search_path = public, pg_catalog
 AS $tick$
 DECLARE
   v_key TEXT;
+  -- ⛔ DECLAREd because plpgsql compiles the body WHOLE: a missing DECLARE does
+  --    not weaken the one statement that uses it, it raises 42601 and the
+  --    function does not compile at all (20260907130000:750-754).
+  v_cnt INTEGER;
   v_url TEXT;
   v_req BIGINT;
   -- ⛔ THE DESTINATION ALLOW-LIST, layer (b). BYTE-IDENTICAL to the CHECK
@@ -25,11 +29,27 @@ DECLARE
   c_url_allowed CONSTANT TEXT :=
     '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
 BEGIN
-  -- The Vault read, byte-for-byte the idiom the live job row already runs.
-  SELECT decrypted_secret INTO v_key
+  -- THE VAULT READ — ONE statement, count and value off the SAME scan.
+  -- ⛔ Not `INTO STRICT`, and the choice is not a style preference. STRICT
+  --    raises NO_DATA_FOUND on zero rows, which would REPLACE the by-name
+  --    message the gate's arm V1 asserts with a generic P0002; recovering the
+  --    name then needs `EXCEPTION WHEN NO_DATA_FOUND THEN RAISE …`, the shape
+  --    20260907130000:243-245 keeps out of the source because lint rule R1
+  --    flags it in the gate corpus. The count form refuses a duplicate BY NAME
+  --    and leaves the absent-secret message byte-identical.
+  --    count = 0 leaves v_key NULL and the existing guard fires.
+  SELECT count(*), max(decrypted_secret) INTO v_cnt, v_key
     FROM vault.decrypted_secrets
    WHERE name = 'analytics_service_key';
-  IF v_key IS NULL OR v_key = '' THEN
+  IF v_cnt > 1 THEN
+    RAISE EXCEPTION 'analytics_service_key is not unique in vault (% rows) — refusing to pick one', v_cnt;
+  END IF;
+  -- ⚠️ btrim() with no character set trims SPACES ONLY. A key of tabs or
+  --    newlines still passes this guard and still produces a header the
+  --    analytics service answers 401 to. RECORDED, not closed: the criterion
+  --    text is btrim(v_key) = '' and widening it to E' \t\r\n' is a decision
+  --    with its own evidence, not a silent improvement here.
+  IF v_key IS NULL OR btrim(v_key) = '' THEN
     RAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header';
   END IF;
 

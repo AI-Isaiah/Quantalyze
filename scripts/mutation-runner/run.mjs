@@ -1765,7 +1765,105 @@ export const FILES_FLOOR = 46;
 //                to-a-mechanism-this-p/164.7-05-SUMMARY.md, beside
 //                164.7-05-FLOORS.log, which carries all three runs with their
 //                exit codes, wall clocks and printed lines.
-export const ARMS_FLOOR = 384;
+// ⭐ RE-DERIVED 2026-09-11 BY MEASUREMENT (phase 164.8.6 VAULTTICKFIX, plan 05).
+// Value RAISED from 384 to 392 — EIGHT new arms, from THREE gate files rather
+// than one, every one a RED-UNDER-M twin of one of the phase's two NEW FORWARD
+// migrations (neither phase edits an applied migration; see each file's ⛔ IT IS
+// A FORWARD MIGRATION header):
+//   * TWO in supabase/tests/test_analytics_service_settings_and_vault_tick.sql
+//     against 20260911120000_vault_tick_hardening.sql (plan 01). Machine
+//     identities V2 and G1. V2 is the WHITESPACE key: it plants a single-space
+//     secret and asks the callable to still RAISE `analytics_service_key missing
+//     from vault` — the hole VAULTTICK-EMPTYKEY-01 names, which a `v_key IS
+//     NULL` guard alone sails straight past into net.http_post. G1 hands
+//     service_role EXECUTE back to the tick callable and asks the whole-grantee
+//     -set assertion to refuse it (164.7-WR02-SERVICE-ROLE-EXECUTE).
+//   * THREE in EACH of supabase/tests/test_ledger_refresh_fanout.sql and
+//     supabase/tests/test_ledger_refresh_composite_arm.sql against
+//     20260911130000_ledger_fanout_grantees_and_dormancy.sql (plan 03).
+//     Identities S1, M1, M2 in both files. S1 is the `sql`-step GRANT twin that
+//     proves a whole-grantee-set check bites on a lane where the migration's own
+//     REVOKE is a no-op. M1/M2 are the dormancy instrument pair: with the flag
+//     row ABSENT (M1) or INVISIBLE (M2) the fan-out must post ONE counted
+//     cron_runs row naming the cause, which is what turns the silent dormancy of
+//     164.7-DORMANCY-UNINSTRUMENTED into something a query can see.
+// ⚠️ WHAT DID NOT MOVE, AND WHY IT COULD HAVE. Plan 03 RE-POINTED all 30
+// pre-existing edit-kind twins in the two ledger gates at the superseding
+// migration 20260911130000 IN THE SAME COMMIT as the apply-list extension (13 ->
+// 15 entries in the fan-out gate, 12 -> 14 in the composite gate), and every one
+// was re-observed biting AFTER the re-point — both gates 20/20/0. Split across
+// two commits, up to 30 arms would have gone `no-red` against a body the new
+// migration overwrites, and WAIVED_CEILING = 0 can absorb exactly none of them.
+// That is why this floor moves by exactly +8 and not by less.
+// ⚠️ FILES_FLOOR DOES NOT MOVE. All eight new arms land in gate files that were
+// already annotated, so the corpus stays 46/73 — see the run's own
+// `coverage: files 46/73`. FILES_FLOOR stays 46 and WAIVED_CEILING stays 0:
+// eight arms added, thirty re-pointed, ZERO waivers.
+//   DATE         2026-09-11, on a CLEAN tree at the phase's final SQL bytes.
+//   SAMPLE SIZE  392 arms executed, all 392 `RED (identity ok)`. The two
+//                independent tallies AGREE: `arms: 392/392/0` and
+//                `lane-invocations: 392`, beside 46 baseline / 46 restore legs.
+//                `lane-blocked: 0 file(s)` with `lane-probe: pg_cron AVAILABLE`
+//                — the pairing the lane-blocked-stale tripwire requires.
+//   SEPARATION   Measured in BOTH directions on REAL full-corpus lane runs:
+//                  ARMS_FLOOR=393 (one higher) -> exit 1, EXACTLY one defect ->
+//                    `ARMS_FLOOR regression: 392 biting arm(s) < floor 393`
+//                  ARMS_FLOOR=392 (this value) -> 0 defects, EXIT 0
+//                So 392 is exactly the separation point, not a value below it.
+//                The STALE direction is NOT this runner's to report — see the
+//                ⛔ block above FILES_FLOOR. At 384 on this tree the run exits
+//                0, and it is src/__tests__/mutation-runner-floors.test.ts that
+//                fails, with `The corpus declares 392 twin(s) of which 0 are
+//                waivers, so a green run bites 392. ARMS_FLOOR is 384.`
+//                ⚠️ That same stale-384 run surfaced a THIRD pin no plan named:
+//                mutation-runner-floors.test.ts's `totalAnchored` prose-anchor
+//                count, also 384, invisible to BOTH layers (the runner gates
+//                biting arms; the ratchet pins twins - waivers). It is re-pinned
+//                to 392 in the same commit, with its own dated block.
+//   ⚠️ WALL CLOCK  546.3 / 547.4 / 537.8 / 542.6 / 539.2 s across the FIVE runs
+//                of record on the authoring macOS box — mean per-arm lane time
+//                1.1 s in every one, unchanged from 164.7's corpus, which is
+//                what says the spread is noise and not a corpus that got
+//                slower. FIVE and not three because TWO runs were re-taken:
+//                RUN 2 tripped the runner's own clean-tree assertion when this
+//                executor wrote a CURRENCY block mid-run, and RUN 3 tripped it
+//                when a CONCURRENT SESSION committed two .planning/ docs
+//                commits onto this branch mid-run (48b91f34 -> a0867c41). Both
+//                are kept in the log rather than deleted, and both are re-taken
+//                clean as RUN 2b and RUN 3b. ⛔ A mutation run asserts the
+//                working tree is unchanged across its own execution, so ANY
+//                concurrent writer — even one that never touches a line of SQL
+//                — costs a full nine minutes of lane time. Hold the tree still.
+//                ⛔ NONE of these is an ubuntu number.
+//                CEILING CHECK: 392 arms x 1.1 s = 431 s of lane time, and the
+//                slowest full run of record is 546 s = 9.1 min against the
+//                DECLARED CEILING of `timeout-minutes: 20` on the `sql-mutation`
+//                job (.github/workflows/ci.yml — cite BY SYMBOL: the
+//                `sql-mutation:` job key and its own `timeout-minutes:` entry,
+//                measured 2026-09-11 at :1196 and :1386 respectively; CLAUDE.md
+//                and 164.8.6-RESEARCH.md §Q6 both still say :1259 / :1069, stale
+//                by measurement — the [164.7-CITATION-DRIFT-01] class). Roughly
+//                2.2x headroom remains. ⛔ The ceiling is NEVER raised: its one
+//                permitted raise was taken on 2026-09-05. A future crossing is
+//                answered by [REDUNDER-SUBSET-SPLIT].
+//   RECORD       .planning/phases/164.8.6-vaulttickfix-the-forward-migration-
+//                phase-164-7-earned/164.8.6-05-SUMMARY.md, beside
+//                164.8.6-05-FLOORS.log, which carries all FIVE runs with their
+//                exit codes, wall clocks and printed lines: RUN 1 the
+//                measurement at the stale floor 384 (exit 0); RUN 2 the upper
+//                separation, contaminated-and-kept (exit 1, two defects); RUN 2b
+//                the clean upper separation (exit 1, EXACTLY one defect, the
+//                regression line above); RUN 3 the pin, contaminated by a
+//                concurrent session and kept (exit 1, zero arm defects); RUN 3b
+//                the pin, clean (exit 0, `✅ No defects`).
+//                ⚠️ SHA NOTE: runs 1, 2 and 2b were measured at 48b91f34 and
+//                runs 3 / 3b at a0867c41. The two intervening commits touch
+//                .planning/ROADMAP.md, one .gitkeep and TODOS.md and NOTHING
+//                else — `git diff --stat 48b91f34..a0867c41 -- supabase/
+//                scripts/ src/` is EMPTY — so the corpus and this runner are
+//                byte-identical across the move and the 392 is one measurement,
+//                not two that happen to agree.
+export const ARMS_FLOOR = 392;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

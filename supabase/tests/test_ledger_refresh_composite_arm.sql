@@ -1,32 +1,48 @@
 -- Test: public.enqueue_ledger_composite_refresh — the LEDGER-01 COMPOSITE refresh
 -- arm. Guards migration 20260825140000_ledger_refresh_composite_arm.sql
 -- (Phase 161.1 / D-01, D-11, D-12, D-13) AS SUPERSEDED BY
--- 20260907130000_ledger_refresh_switch_to_system_flags.sql (Phase 164.7 / D-01).
+-- 20260907130000_ledger_refresh_switch_to_system_flags.sql (Phase 164.7 / D-01)
+-- AND, IN TURN, BY
+-- 20260911130000_ledger_fanout_grantees_and_dormancy.sql (Phase 164.8.6 /
+-- 164.7-WR02, WR-10).
 --
--- ⛔ WHICH FILE THE ARMS ACTUALLY MEASURE (Phase 164.7 plan 04, TRAP E / C-02).
--- 20260907130000 `CREATE OR REPLACE`s this body, and this gate's apply list ends
--- with it, so the body running under every arm below is the NEW one. A
--- `CREATE OR REPLACE` does not alter the OLD migration's text — so a twin that
--- still mutated 20260825140000 would mutate a body that is overwritten before
--- the first assertion runs, apply cleanly, and report `no-red`: an arm that
--- cannot fail, inside the machine built to find arms that cannot fail. Every
--- edit-kind twin naming a fan-out BODY therefore names 20260907130000. The
--- precedent is test_sync_status_curated_sentence_survives.sql (164.2 plan 07).
+-- ⛔ WHICH FILE THE ARMS ACTUALLY MEASURE (Phase 164.7 plan 04, TRAP E / C-02;
+-- RE-POINTED ONE MIGRATION FURTHER BY Phase 164.8.6 plan 03). This gate's apply
+-- list ends with 20260911130000, so ITS `CREATE OR REPLACE` is the body running
+-- under every arm below. A `CREATE OR REPLACE` does not alter the earlier
+-- migrations' text — so a twin that still mutated 20260825140000, or
+-- 20260907130000, would mutate a body that is overwritten before the first
+-- assertion runs, apply cleanly, and report `no-red`: an arm that cannot fail,
+-- inside the machine built to find arms that cannot fail. Every edit-kind twin
+-- naming a fan-out BODY therefore names 20260911130000. The precedent is
+-- test_sync_status_curated_sentence_survives.sql (164.2 plan 07).
+--
+-- ⭐ THE 164.8.6 RE-POINT WAS A FILE-PATH SWAP AND NOTHING ELSE, and that is a
+-- MEASUREMENT, not a convenience. 20260911130000 re-bases both bodies from their
+-- committed snapshots and changes four things per body — three DECLAREs, a
+-- GET DIAGNOSTICS row-count read, one assignment inside the flag read's handler,
+-- and the cause branch plus the instrument INSERT inside the dormant branch —
+-- none of which falls inside any `find` below. All 12 `find` strings were
+-- re-counted against the new file before the swap and every occurrence count
+-- held. No `occurrences` or `nth` value moved.
 --
 -- ⚠️ EXACTLY TWO edit steps still name 20260825120000_ledger_refresh_staleness_
 -- view.sql, and that is CORRECT, not an oversight: the D/precondition and
--- E1/precondition twins mutate the staleness VIEW, which 20260907130000 does not
--- redefine. A view that is not superseded is not dead text.
+-- E1/precondition twins mutate the staleness VIEW, which neither 20260907130000
+-- nor 20260911130000 redefines. A view that is not superseded is not dead text.
 --
--- ⚠️ AND WHY SEVERAL TWINS CARRY `"occurrences":2,"nth":2`. 20260907130000 holds
--- BOTH fan-out bodies (single-key at STEP 2, composite at STEP 3), so needles
--- that were unique in the 20260825140000 file — `INTERVAL '20 hours'`,
--- `WHERE lrs.is_stale` — now match TWICE. `nth: 2` is the COMPOSITE body,
--- measured: the single-key `CREATE OR REPLACE` precedes the composite one in
--- that file. If the two are ever reordered, `nth: 2` mutates the single-key body,
--- this gate does not redden and the runner reports `no-red` — loudly. The three
--- activation-guard twins (A, K, L) do NOT use `nth`: their needles span a line
--- naming this function, so they are unique by construction.
+-- ⚠️ AND WHY SEVERAL TWINS CARRY `"occurrences":2,"nth":2`. 20260911130000, like
+-- 20260907130000 before it, holds BOTH fan-out bodies (single-key first,
+-- composite second), so needles that were unique in the 20260825140000 file —
+-- `INTERVAL '20 hours'`, `WHERE lrs.is_stale` — match TWICE. `nth: 2` is the
+-- COMPOSITE body, measured: the single-key `CREATE OR REPLACE` precedes the
+-- composite one in that file. If the two are ever reordered, `nth: 2` mutates
+-- the single-key body, this gate does not redden and the runner reports
+-- `no-red` — loudly. The three activation-guard twins (A, K, L) do NOT use
+-- `nth`: their needles span a line naming this function, so they are unique by
+-- construction. The two instrument twins (M1, M2) DO use `nth`, for the same
+-- reason and with the same measurement: their cause literal is assigned once per
+-- body, so it occurs twice in the file and `nth: 2` is the composite body.
 --
 -- What makes this gate worth having: MATCHED PAIRS
 -- ------------------------------------------------
@@ -167,7 +183,7 @@
 --
 -- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
 -- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
--- fails on a printed 'SKIP:', and reads the 'ALL 12 ARMS EXECUTED' sentinel back off
+-- fails on a printed 'SKIP:', and reads the 'ALL 15 ARMS EXECUTED' sentinel back off
 -- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
 -- edit that neuters an arm in place — deleting the assertion, short-circuiting
 -- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
@@ -192,18 +208,49 @@
 --     placement mirrors the sibling fan-out gate's list exactly. It carries NO
 --     seed row, which is what leaves arm A's missing-row case testable. It is a
 --     stand-in, so no twin may target it (GRAMMAR rule 4).
---   * `20260907130000_ledger_refresh_switch_to_system_flags.sql` is applied
---     LAST, because its `CREATE OR REPLACE` must be the definition the arms run
---     against — which is exactly why the body-mutating twins below name it.
--- Proven on this 12-entry list: the completion notice below printed with its
--- full roster A-L, and the runner reported `per-arm lane time: mean 1.1s` over
--- three separate diagnostic runs of this file (MEASURED 2026-09-07; the
--- pre-164.7 reading was 1.01 s over the 10-entry list, so the two extra apply
--- entries cost nothing measurable).
+--   * `20260907130000_ledger_refresh_switch_to_system_flags.sql` was applied
+--     LAST, because its `CREATE OR REPLACE` had to be the definition the arms
+--     run against. ⚠️ IT NO LONGER IS — see the 164.8.6 entries below. It stays
+--     in the list because it SEEDS the activation row at apply time, which is
+--     the state arms A and K describe.
+-- ⭐ PHASE 164.8.6 plan 03 added TWO MORE, and the ORDER of both is load-bearing:
+--   * `33-fixture-cron-runs.sql` sits IMMEDIATELY BEFORE the new migration, the
+--     way 31-fixture-system-flags.sql sits before its reader above. Both bodies
+--     in 20260911130000 WRITE public.cron_runs on the dormant-with-an-INVISIBLE-
+--     cause path, and the real creator, 20260408113029_cron_heartbeat.sql,
+--     cannot enter this list: its cron_runs_admin_read policy resolves
+--     profiles.is_admin (fixture 12) and its cron_runs_service_role policy
+--     resolves auth.role() (fixture 15), and NEITHER fixture is in this list, so
+--     CREATE POLICY — which resolves its columns and functions at declaration
+--     time — aborts the apply on 42703 before any arm runs. The fixture is a
+--     stand-in, so no twin may target it (GRAMMAR rule 4).
+--   * `20260911130000_ledger_fanout_grantees_and_dormancy.sql` is applied LAST,
+--     for exactly the reason 20260907130000 used to be: its `CREATE OR REPLACE`
+--     is the definition every edit-kind twin below now names. Leaving those 12
+--     twins pointed at 20260907130000 the moment this entry was appended would
+--     have made all 12 mutate dead text and report `no-red` in one commit —
+--     TRAP E / C-02 again, one migration later. That is why plan 03 exists.
+-- Proven on the 12-entry list this file carried through Phase 164.7 (LINEAGE,
+-- not a live reading): the completion notice below printed with its full roster
+-- A-L, and the runner reported `per-arm lane time: mean 1.1s` over three
+-- separate diagnostic runs of this file (MEASURED 2026-09-07; the pre-164.7
+-- reading was 1.01 s over the 10-entry list, so the two extra apply entries cost
+-- nothing measurable).
+-- ⭐ CURRENCY 2026-09-11 (Phase 164.8.6 plan 03) — the LIVE reading, taken over
+--    the 14-entry list above at the final bytes of this file:
+--    `scripts/pg-lane/run.sh` exited 0 with the completion notice printing its
+--    full 15-arm roster and ZERO `TEST FAILED` lines anywhere in the stream, and
+--    the narrowed mutation run reported `arms: 20/20/0`, `biting: 20`,
+--    `lane-invocations: 20` (the two independent tallies AGREE), and a per-arm
+--    lane time whose mean read 1.1-1.2 s across three narrowed runs of this
+--    file — it fluctuated between those two readings run to run, so a single
+--    pinned figure here would be false precision. Three more arms and two more
+--    apply entries, and the per-arm cost did not measurably move off the 1.1 s
+--    above.
 -- ⚠️ The sentinel string itself is deliberately NOT repeated in this header:
 -- this file's own verify pins it to exactly ONE occurrence, so that the roster
 -- can only be edited where it is RAISED.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","scripts/pg-lane/fixtures/31-fixture-system-flags.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","scripts/pg-lane/fixtures/31-fixture-system-flags.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","scripts/pg-lane/fixtures/33-fixture-cron-runs.sql","supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql"]}
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
@@ -249,6 +296,16 @@ DECLARE
   v_flag       BOOLEAN;  -- the COMMITTED activation row, read by the precondition
   v_ret_l      INTEGER;  -- arm L: survives its subtransaction's rollback
   v_body       TEXT;     -- arm 0: the comment-stripped body of the composite arm
+  -- ⛔ Arms M1, M2 and S1 (Phase 164.8.6 plan 03) add four more under the SAME
+  --    rule: a missing DECLARE is a 42601 that stops the WHOLE block compiling,
+  --    so every arm would vanish together.
+  v_cnt_m1     INTEGER;  -- arm M1: instrument rows naming the missing-row cause
+  v_cnt_m2     INTEGER;  -- arm M2: … and the raising-read cause. Like v_ret_l it
+                         --         survives arm L's P0164 rollback; the ROW it
+                         --         counts does not, which is why it is read
+                         --         inside that block and asserted after it.
+  v_grantees   TEXT;     -- arm S1: the WHOLE EXECUTE grantee set, comma-joined
+  v_owner_name TEXT;     -- arm S1: … and the owner name it must equal exactly
 BEGIN
   -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
   -- See the ⛔ block in this file's header for the measurement behind this.
@@ -303,6 +360,19 @@ BEGIN
      AND p.proname = 'enqueue_ledger_composite_refresh';
   IF v_body IS NULL OR v_body !~ 'FROM public\.system_flags' THEN
     RAISE EXCEPTION 'TEST FAILED (0): public.enqueue_ledger_composite_refresh exists on this database but its executable body does not read the activation flag from public.system_flags, so it is the PRE-164.7 revision that reads the retired app-namespace database setting. Arms A, K and L below describe the table-backed fail-closed guard and would measure something else entirely. Cause (iii): migration 20260907130000_ledger_refresh_switch_to_system_flags.sql has not been applied to THIS database. Apply it and re-run. ⛔ Do NOT relax this check to match either body: the two guards fail closed for different reasons, and a gate that accepts both cannot tell an un-applied migration from a regression.';
+  END IF;
+
+  -- ----- and the body carries the DORMANCY INSTRUMENT the M arms read -------
+  -- Cause (iv), added by Phase 164.8.6 plan 03. The function exists and reads
+  -- the activation table, but it is the 164.7 revision whose dormant branch
+  -- raises a NOTICE and writes NOTHING. Arms M1 and M2 below count instrument
+  -- rows, so without this check their `expected exactly 1` reads as "the
+  -- instrument is broken" on exactly the run where the truth is "20260911130000
+  -- has not reached this database yet" — the same mis-diagnosis cause (iii)
+  -- exists to prevent, one migration later. Same v_body, same comment strip,
+  -- same R2 reasoning as the check above; no second pg_get_functiondef read.
+  IF v_body !~ 'INSERT INTO public\.cron_runs' THEN
+    RAISE EXCEPTION 'TEST FAILED (0): public.enqueue_ledger_composite_refresh reads the activation flag but its executable body never writes the dormancy instrument row, so it is the 164.7 revision whose dormant branch cannot distinguish "the row says FALSE, as designed" from "the row is absent or invisible to this definer while the platform believes itself live". Arms M1 and M2 below would then fail with a count of 0 and read as a broken instrument rather than as a missing apply. Cause (iv): migration 20260911130000_ledger_fanout_grantees_and_dormancy.sql has not been applied to THIS database. Apply it and re-run; expect this exactly once, on the PR that introduces it, because migrations reach TEST only on merge.';
   END IF;
 
   -- ----- precondition: the switch must not be COMMITTED OPEN here -----------
@@ -498,14 +568,14 @@ BEGIN
   -- database where that migration has run the row EXISTS, and the missing-row
   -- state has to be created to be tested.
   -- ======================================================================
-  -- RED-UNDER: make the fail-closed activation guard in 20260907130000's
+  -- RED-UNDER: make the fail-closed activation guard in 20260911130000's
   --            COMPOSITE body NULL-UNSAFE — `IF v_enabled IS NOT NULL AND
   --            v_enabled IS DISTINCT FROM TRUE THEN`. A missing row leaves
   --            v_enabled NULL, the IF is no longer taken, and the body falls
   --            THROUGH to the fan-out instead of returning 0.
   -- ⚠️ WHY NOT the crude `IS DISTINCT FROM TRUE` -> `= FALSE` swap. MEASURED
-  --    (164.7-03 neuter N1(a)): that removes the token 20260907130000's OWN
-  --    verification block checks for at apply time — check 5, which LOOPS over
+  --    (164.7-03 neuter N1(a)): that removes the token 20260911130000's OWN
+  --    verification block checks for at apply time — check 6, which LOOPS over
   --    both function names, so the composite body is checked exactly as the
   --    single-key one is. The migration would ABORT, the gate would never run,
   --    and no arm could be the first failure.
@@ -515,7 +585,7 @@ BEGIN
   --    `wrong-first-failure: L` — the runner working, not a bug.
   -- ⚠️ The needle spans the NOTICE line, which names THIS function, so it is
   --    unique in a file holding both fan-out bodies. No `nth` is needed or used.
-  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"IF v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_composite_refresh: dormant","replace":"IF v_enabled IS NOT NULL AND v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_composite_refresh: dormant","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"IF v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_composite_refresh: dormant","replace":"IF v_enabled IS NOT NULL AND v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_composite_refresh: dormant","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_b;
 
   DELETE FROM public.system_flags WHERE key = 'ledger_refresh_enabled';
@@ -530,13 +600,67 @@ BEGIN
   END IF;
 
   -- ======================================================================
+  -- ARM M1 — THE MISSING-ROW DORMANCY LEAVES A COUNTED TRACE
+  --          (WR-10 cause 3 / APPGUC-WARNING-UNINSTRUMENTED-01).
+  --
+  -- Arm A above proved the composite arm DECLINED. It cannot prove anyone would
+  -- ever KNOW. The dormant branch raises one NOTICE whose text is BYTE-IDENTICAL
+  -- for the healthy "row present and FALSE" case and for the pathological "row
+  -- absent, or invisible to this definer, while the platform believes itself
+  -- live" case, and pg_cron keeps no NOTICE output — so cause 3 has been
+  -- reaching nothing at all, on a schedule. 20260911130000 writes ONE counted
+  -- public.cron_runs row naming the cause; this arm is what makes that
+  -- falsifiable rather than asserted.
+  --
+  -- ⚠️ IT REUSES ARM A'S STATE DELIBERATELY. The flag row is already deleted and
+  --    the composite arm has already been called, so this arm adds an ASSERTION,
+  --    not a second call. A second call would write a second row and the `= 1`
+  --    below would be measuring this file instead of the function.
+  --
+  -- ⚠️ metadata->>'function' IS THE DISCRIMINATOR, not cron_name. Both bodies
+  --    write cron_name = 'ledger_refresh_fanout' — one scheduled fan-out, two
+  --    arms — so filtering on cron_name alone would count the SINGLE-KEY arm's
+  --    row as well and this arm would pass on the sibling's evidence.
+  --
+  -- ⚠️ READING A ROW THIS TRANSACTION JUST WROTE IS FINE, and is not the thing
+  --    20260911130000's own verification block is forbidden to do (criterion 7,
+  --    catalogue-only). That prohibition is about an APPLY-TIME read of
+  --    committed state; this is the gate's own uncommitted write, and it unwinds
+  --    with the closing ROLLBACK like every other write in this file.
+  -- ======================================================================
+  -- RED-UNDER: stop naming the cause — `v_cause := NULL;` in place of
+  --            `v_cause := 'flag_row_invisible_or_absent';` in the COMPOSITE
+  --            body of 20260911130000. The `IF v_cause IS NOT NULL` gate then
+  --            skips the INSERT entirely: the decline still happens and reaches
+  --            no counted instrument. Arm A stays GREEN (still 0 returned, still
+  --            0 jobs), so this arm reddens alone.
+  -- ⚠️ The cause literal is deliberately NOT one of that migration's own
+  --    verification needles — its needle is the CONCATENATED
+  --    `INSERT INTO public.` || `cron_runs` — so this mutation does not abort
+  --    the apply, and the arm rather than the migration is the first failure.
+  -- ⚠️ nth 2: the literal is assigned ONCE PER BODY and that file holds both, so
+  --    it matches TWICE. `nth: 2` is the COMPOSITE body, MEASURED (the
+  --    single-key CREATE OR REPLACE is first in the file); the single-key body
+  --    is left UNMUTATED, which is what keeps the sibling gate's M1 independent
+  --    of this one.
+  -- RED-UNDER-M: {"arm":"M1","apply":[{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"v_cause := 'flag_row_invisible_or_absent';","replace":"v_cause := NULL;","occurrences":2,"nth":2}]}
+  SELECT count(*) INTO v_cnt_m1
+    FROM public.cron_runs
+   WHERE cron_name = 'ledger_refresh_fanout'
+     AND error = 'flag_row_invisible_or_absent'
+     AND metadata->>'function' = 'enqueue_ledger_composite_refresh';
+  IF v_cnt_m1 <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (M1): the composite arm declined with NO activation row and wrote % instrument row(s) naming flag_row_invisible_or_absent, expected exactly 1 — the decline reached no counted instrument (WR-10 cause 3 / APPGUC-WARNING-UNINSTRUMENTED-01). The dormant branch raises one NOTICE whose text is byte-identical for "the row says FALSE, as designed" and for "the row is absent or invisible to this definer while the platform believes itself live", and pg_cron keeps no NOTICE output, so without this row the second state is indistinguishable from the first and from a healthy, fully-fresh estate', v_cnt_m1;
+  END IF;
+
+  -- ======================================================================
   -- ARM K — DORMANCY, ROW PRESENT AND FALSE. The state migration 20260907130000
   -- actually leaves behind: the row exists and is closed. Arm A cannot cover
   -- this — a guard that opens on FALSE while still closing on NULL passes arm A
   -- and ships an activation switch that is on the moment an operator writes the
   -- row at all.
   -- ======================================================================
-  -- RED-UNDER: make the COMPOSITE guard in 20260907130000 fire ONLY on NULL —
+  -- RED-UNDER: make the COMPOSITE guard in 20260911130000 fire ONLY on NULL —
   --            `IF v_enabled IS NULL AND v_enabled IS DISTINCT FROM TRUE THEN`.
   --            A FALSE row no longer takes the IF and the fan-out proceeds.
   -- ⚠️ Deliberately the MIRROR of arm A's twin, and that is the proof the two
@@ -544,7 +668,7 @@ BEGIN
   --    still dormant) and only K reddens, while under arm A's twin K stays
   --    green. Neither mutation can redden both. The token
   --    `IS DISTINCT FROM TRUE` is preserved for the same apply-time reason.
-  -- RED-UNDER-M: {"arm":"K","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"IF v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_composite_refresh: dormant","replace":"IF v_enabled IS NULL AND v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_composite_refresh: dormant","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"K","apply":[{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"IF v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_composite_refresh: dormant","replace":"IF v_enabled IS NULL AND v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_composite_refresh: dormant","occurrences":1}]}
   INSERT INTO public.system_flags (key, enabled)
   VALUES ('ledger_refresh_enabled', FALSE)
   ON CONFLICT (key) DO UPDATE SET enabled = FALSE;
@@ -592,7 +716,7 @@ BEGIN
   -- already rolled back (lint rule R1).
   -- ======================================================================
   -- RED-UNDER: make the COMPOSITE guard's own EXCEPTION handler in
-  --            20260907130000 open the flag instead of closing it —
+  --            20260911130000 open the flag instead of closing it —
   --            `v_enabled := TRUE;` in place of `v_enabled := NULL;`. The read
   --            still fails, the handler now reports the failure as "enabled",
   --            and the fan-out proceeds and enqueues for the still-published
@@ -601,7 +725,7 @@ BEGIN
   --    so their handler never runs.
   -- ⚠️ The needle spans the WARNING text, which names THIS function, so it is
   --    unique in a file holding both fan-out bodies. No `nth` is needed or used.
-  -- RED-UNDER-M: {"arm":"L","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"'enqueue_ledger_composite_refresh: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;\n    v_enabled := NULL;","replace":"'enqueue_ledger_composite_refresh: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;\n    v_enabled := TRUE;","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"L","apply":[{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"'enqueue_ledger_composite_refresh: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;\n    v_enabled := NULL;","replace":"'enqueue_ledger_composite_refresh: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;\n    v_enabled := TRUE;","occurrences":1}]}
   SET LOCAL lock_timeout = '2s';
   BEGIN
     ALTER TABLE public.system_flags RENAME TO system_flags_arm_l;
@@ -610,12 +734,99 @@ BEGIN
     EXCEPTION WHEN OTHERS THEN
       RAISE EXCEPTION 'TEST FAILED (L): the composite arm RAISED (SQLSTATE %) when its activation-flag read failed, instead of treating the failure as dormant and returning 0. An hourly cron that starts erroring is an incident; the guard is required to swallow the error, WARN with the SQLSTATE, and stay closed', SQLSTATE;
     END;
+    -- ================================================================
+    -- ARM M2 (its READ) — THE RAISING-READ DORMANCY LEAVES A COUNTED TRACE
+    --                     (WR-10 cause 1 / APPGUC-WARNING-UNINSTRUMENTED-01).
+    --
+    -- ⛔ THE READ MUST SIT HERE AND NOWHERE ELSE, for two independent reasons
+    --    that point at the same three lines:
+    --      (i) AFTER the unwind it reads nothing. The `RAISE … 'P0164'` on the
+    --          next line IS a rollback: it discards every write made inside this
+    --          block, including the cron_runs row the composite arm just made.
+    --          v_ret_l survives because a plpgsql local assignment is not
+    --          transactional; a TABLE row does not.
+    --     (ii) INSIDE the handler it would be a lint R1 violation and a vacuous
+    --          read at once (scripts/lint-sql-gates.mjs, R1-exception-handler-
+    --          probe): a SELECT … INTO in an EXCEPTION handler reads the state
+    --          its own subtransaction rollback just restored. This is the block
+    --          BODY, which is not a handler.
+    --
+    -- ⛔ AND ITS ASSERTION SITS AFTER ARM L'S, NOT HERE. Under arm L's own twin
+    --    the handler reports the failed read as "enabled", the composite arm is
+    --    no longer dormant, and NO instrument row is written — so an assertion at
+    --    this point would be the FIRST failure under L's twin and the runner
+    --    would report `wrong-first-failure`. v_cnt_m2 is a plpgsql local and
+    --    survives the rollback exactly as v_ret_l does, so splitting the read
+    --    from the assertion costs nothing and keeps both identities correct.
+    -- ================================================================
+    -- ⭐ THE `sqlstate` KEY IS PART OF THIS ARM'S PREDICATE, and it is the key's
+    --    ONLY reader anywhere. The migration writes the failing read's SQLSTATE
+    --    into `metadata` so that 42P01 (the table was dropped), 42501 (the
+    --    privilege was revoked) and a planner fault stop reporting as one
+    --    undifferentiated cause — and check 7 of that migration asserts the
+    --    INSERT's own STATEMENT SHAPE, which survives deleting the key pair
+    --    intact. Without this conjunct a tidy-up of the jsonb_build_object call
+    --    silently collapses the three causes back into one with every gate
+    --    green. With it, the deletion makes this count 0 and THIS arm reddens by
+    --    name.
+    --
+    -- ⛔ PRESENCE, NEVER A VALUE. An equality on a SQLSTATE would bind the arm to
+    --    whichever failure the RENAME above happens to provoke, which is the
+    --    mistake the migration refuses for `error`. IS NOT NULL is falsifiable by
+    --    the deletion and by nothing else.
+    --
+    -- ⚠️ ARM M1's TWIN PREDICATE IS DELIBERATELY NOT NARROWED THE SAME WAY: on
+    --    the invisible-or-absent path there was no exception, so there was no
+    --    SQLSTATE to read and the key is NULL BY CONSTRUCTION. Asserting it there
+    --    would be an assertion that cannot hold.
+    SELECT count(*) INTO v_cnt_m2
+      FROM public.cron_runs
+     WHERE cron_name = 'ledger_refresh_fanout'
+       AND error = 'flag_read_failed'
+       AND metadata->>'function' = 'enqueue_ledger_composite_refresh'
+       AND metadata->>'sqlstate' IS NOT NULL;
     RAISE EXCEPTION USING ERRCODE = 'P0164', MESSAGE = 'arm L: unwinding the RENAME (not a failure)';
   EXCEPTION WHEN SQLSTATE 'P0164' THEN
     NULL;
   END;
   IF v_ret_l <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (L): the composite arm returned % when its activation-flag read RAISED, expected 0 — the handler is treating a FAILED read as an OPEN switch, which is the one direction a fail-closed guard may never fail in', v_ret_l;
+  END IF;
+
+  -- ======================================================================
+  -- ARM M2 (its ASSERTION) — see the block above for why the read is inside the
+  -- unwound block and this is out here, one line below arm L's own assertion.
+  -- ======================================================================
+  -- RED-UNDER: stop naming the cause — `v_cause := NULL;` in place of
+  --            `v_cause := 'flag_read_failed';` in the COMPOSITE body of
+  --            20260911130000. The read still raises, the guard still closes,
+  --            arm L still sees 0 — and the failure reaches no counted row, so
+  --            only this arm reddens.
+  -- ⚠️ Not a migration needle (the needle is the concatenated
+  --    `INSERT INTO public.` || `cron_runs`), so the apply survives and the arm
+  --    is the first failure. `nth: 2` is the composite body, MEASURED: the
+  --    literal is assigned once per body and the file holds both.
+  --
+  -- ⭐ THIS ARM NOW HAS A SECOND FALSIFIER, AND IT IS DELIBERATELY NOT A SECOND
+  --    ARM. Deleting the `sqlstate` key pair from the migration's
+  --    jsonb_build_object call also makes this count 0 and reddens this arm by
+  --    name — that is the whole reason the conjunct was added, since nothing
+  --    else anywhere reads the key. It is recorded in prose rather than
+  --    annotated because a second RED-UNDER-M step is a second ARM, and the
+  --    corpus arm count is ratcheted in both directions
+  --    (scripts/mutation-runner/run.mjs ARMS_FLOOR, read by symbol, plus the
+  --    stale-low detector in src/__tests__/mutation-runner-floors.test.ts).
+  --    Moving that count is a separate, deliberate change and not a side effect
+  --    of adding a conjunct. ⭐ PROVEN BY HAND on a real pg-lane 2026-09-12,
+  --    against a scratch COPY of the migration so no tracked file was mutated:
+  --    drop the sqlstate key pair from this body's jsonb_build_object call,
+  --    leaving every other line of it intact, and the APPLY SURVIVES (the
+  --    deletion is not a migration needle) while this arm is the FIRST failure —
+  --    `TEST FAILED (M2): … wrote 0 instrument row(s) …`, lane exit 3. Unmutated,
+  --    the same lane prints ALL 15 ARMS EXECUTED and exits 0.
+  -- RED-UNDER-M: {"arm":"M2","apply":[{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"v_cause := 'flag_read_failed';","replace":"v_cause := NULL;","occurrences":2,"nth":2}]}
+  IF v_cnt_m2 <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (M2): the flag read RAISED and the composite arm wrote % instrument row(s) naming flag_read_failed AND carrying a non-NULL metadata->>''sqlstate'', expected exactly 1. The guard swallows the error and WARNs, which is correct and is exactly what arm L proves — but a WARNING is not a trace pg_cron keeps, so without this row a composite arm that has been failing its activation read on every tick for weeks is indistinguishable from one that is dormant by design. This is the APPGUC-WARNING-UNINSTRUMENTED-01 half of WR-10. A count of 0 here is EITHER no row at all OR a row whose `sqlstate` key has gone: the key is what separates 42P01 from 42501 from a planner fault, check 7 of the migration cannot see its deletion (that check asserts the statement shape of the INSERT, which survives), and this arm is the only reader of the key.', v_cnt_m2;
   END IF;
 
   -- Everything below runs with the switch ON. The row is written inside this
@@ -628,12 +839,12 @@ BEGIN
 
   -- ======================================================================
   -- RED-UNDER: change the enqueued job's metadata `source` marker in
-  --            20260907130000 from the composite string to the SINGLE-KEY
+  --            20260911130000 from the composite string to the SINGLE-KEY
   --            arm's. The job still lands, so the count and target-shape
   --            assertions stay green — what reddens is the byte-for-byte
   --            marker the non-destructive failure guard in job_worker.py reads
   --            back before it declines to un-publish a live composite.
-  -- RED-UNDER-M: {"arm":"B","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"'ledger-refresh-composite'","replace":"'ledger-refresh'","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"B","apply":[{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"'ledger-refresh-composite'","replace":"'ledger-refresh'","occurrences":1}]}
   -- ARM B — POSITIVE (LEDGER-01). Same seed, switch on.
   -- ======================================================================
   v_ret := public.enqueue_ledger_composite_refresh();
@@ -689,19 +900,19 @@ BEGIN
 
   -- ======================================================================
   -- RED-UNDER: remove all three things that make a second tick a no-op, in one
-  --            LAYERED mutation of 20260907130000: the 20-hour attempt cooldown
+  --            LAYERED mutation of 20260911130000: the 20-hour attempt cooldown
   --            (interval -> 0), the non-terminal in-flight guard (status set ->
   --            a status nothing holds), and the INSERTIONS-not-CALLS counter
   --            (v_existing = 0 dropped). All three are needed: leave any one in
   --            place and the second tick still returns 0 for a different reason,
   --            which would make a green here prove the wrong conjunct.
-  -- ⚠️ nth 2: this needle now matches TWICE in 20260907130000 — that one file
+  -- ⚠️ nth 2: this needle now matches TWICE in 20260911130000 — that one file
   --    holds BOTH fan-out bodies. `nth: 2` selects the composite body,
   --    MEASURED (its CREATE OR REPLACE is second in the file). The composite
   --    body is left UNMUTATED, so this arm reddens on the body it names and
   --    nothing else. A reorder of the two bodies makes this mutate the wrong
   --    one and the runner reports `no-red` — loud, not silent.
-  -- RED-UNDER-M: {"arm":"F","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '0 hours'","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"AND cj2.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')","replace":"AND cj2.status IN ('cancelled')","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"IF v_existing = 0 AND v_job_id IS NOT NULL THEN","replace":"IF v_job_id IS NOT NULL THEN","occurrences":2,"nth":2}]}
+  -- RED-UNDER-M: {"arm":"F","apply":[{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '0 hours'","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"AND cj2.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')","replace":"AND cj2.status IN ('cancelled')","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"IF v_existing = 0 AND v_job_id IS NOT NULL THEN","replace":"IF v_job_id IS NOT NULL THEN","occurrences":2,"nth":2}]}
   -- ARM F — DEDUPE. A second tick while the job is in flight adds nothing.
   -- ======================================================================
   v_ret := public.enqueue_ledger_composite_refresh();
@@ -720,18 +931,18 @@ BEGIN
   -- ARM C — NEGATIVE CONTROL. A FRESH composite is not enqueued. Without this arm
   -- a body that enqueues every composite passes arm B.
   -- ======================================================================
-  -- RED-UNDER: make the staleness conjunct in 20260907130000's candidate CTE
+  -- RED-UNDER: make the staleness conjunct in 20260911130000's candidate CTE
   --            vacuous (`WHERE lrs.is_stale` -> `WHERE (lrs.is_stale OR TRUE)`).
   --            Only s_c is published at this point, so no earlier arm's cohort
   --            changes; the fresh composite becomes a candidate and every
   --            composite would be stitched on every tick.
-  -- ⚠️ nth 2: this needle now matches TWICE in 20260907130000 — that one file
+  -- ⚠️ nth 2: this needle now matches TWICE in 20260911130000 — that one file
   --    holds BOTH fan-out bodies. `nth: 2` selects the composite body,
   --    MEASURED (its CREATE OR REPLACE is second in the file). The composite
   --    body is left UNMUTATED, so this arm reddens on the body it names and
   --    nothing else. A reorder of the two bodies makes this mutate the wrong
   --    one and the runner reports `no-red` — loud, not silent.
-  -- RED-UNDER-M: {"arm":"C","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"WHERE lrs.is_stale","replace":"WHERE (lrs.is_stale OR TRUE)","occurrences":2,"nth":2}]}
+  -- RED-UNDER-M: {"arm":"C","apply":[{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"WHERE lrs.is_stale","replace":"WHERE (lrs.is_stale OR TRUE)","occurrences":2,"nth":2}]}
   UPDATE strategies SET status = 'published' WHERE id = s_c;
   v_ret := public.enqueue_ledger_composite_refresh();
   IF v_ret <> 0 THEN
@@ -793,13 +1004,13 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (D/precondition): the single-key fixture already has % compute_jobs row(s), so a green exclusion below could be the COOLDOWN or the IN-FLIGHT conjunct talking, not is_composite', v_cnt;
   END IF;
 
-  -- RED-UNDER: neuter THE partitioning conjunct in 20260907130000 —
+  -- RED-UNDER: neuter THE partitioning conjunct in 20260911130000 —
   --            `AND lrs.is_composite = TRUE` -> `AND lrs.is_composite IS NOT NULL`.
   --            The precondition above still measures the fixture as single-key,
   --            so what this proves is that is_composite, and nothing else, is
   --            what excludes it. This is the mandated is-composite neutering the
   --            file's header requires to be able to fire.
-  -- RED-UNDER-M: {"arm":"D","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"AND lrs.is_composite = TRUE","replace":"AND lrs.is_composite IS NOT NULL","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"D","apply":[{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"AND lrs.is_composite = TRUE","replace":"AND lrs.is_composite IS NOT NULL","occurrences":1}]}
   -- Every other conjunct measured clear. Now the exclusion itself.
   v_ret := public.enqueue_ledger_composite_refresh();
   IF v_ret <> 0 THEN
@@ -844,13 +1055,13 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (E1/precondition): the MIXED fixture reads is_stale=% is_composite=% has_mt5_member=%, expected true/true/true. Anything else and the exclusion below is not the membership conjunct', COALESCE(v_stale::text, '<null>'), COALESCE(v_comp::text, '<null>'), COALESCE(v_defer::text, '<null>');
   END IF;
 
-  -- RED-UNDER: make the membership deferral vacuous in 20260907130000 —
+  -- RED-UNDER: make the membership deferral vacuous in 20260911130000 —
   --            `AND lrs.has_mt5_member = FALSE` -> `AND lrs.has_mt5_member IS NOT NULL`.
   --            The view is untouched, so the precondition above still reads
   --            true/true/true and the exclusion below is the membership
   --            conjunct talking. Both E fixtures are published here, so the
   --            tick returns 2.
-  -- RED-UNDER-M: {"arm":"E","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"AND lrs.has_mt5_member = FALSE","replace":"AND lrs.has_mt5_member IS NOT NULL","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"E","apply":[{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"AND lrs.has_mt5_member = FALSE","replace":"AND lrs.has_mt5_member IS NOT NULL","occurrences":1}]}
   v_ret := public.enqueue_ledger_composite_refresh();
   IF v_ret <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (E): composites with a member on the DEFERRED venue produced % enqueue(s), expected 0 — the founder deferral is scoped to that venue''s path and a mixed composite would drag its single shared terminal registry into the composite crawl (D-01 / D-13)', v_ret;
@@ -860,7 +1071,7 @@ BEGIN
   --            any enqueue at all, so it must be suppressed for the per-fixture
   --            row count to be the first failure. The mixed composite (ONE
   --            member on the deferred venue) then carries a job it must not have.
-  -- RED-UNDER-M: {"arm":"E1/mixed","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"AND lrs.has_mt5_member = FALSE","replace":"AND lrs.has_mt5_member IS NOT NULL","occurrences":1}],"neuter":[{"arm":"E"}]}
+  -- RED-UNDER-M: {"arm":"E1/mixed","apply":[{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"AND lrs.has_mt5_member = FALSE","replace":"AND lrs.has_mt5_member IS NOT NULL","occurrences":1}],"neuter":[{"arm":"E"}]}
   SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_e_mixed;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (E1/mixed): a composite with ONE member on the deferred venue got % job(s), expected 0. Membership, not headline venue, is the rule', v_cnt;
@@ -870,7 +1081,7 @@ BEGIN
   --            each fires earlier. The ALL-deferred composite then carries a job
   --            it must not have, which is the headline-venue reading of the rule
   --            this arm refuses.
-  -- RED-UNDER-M: {"arm":"E2/all","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"AND lrs.has_mt5_member = FALSE","replace":"AND lrs.has_mt5_member IS NOT NULL","occurrences":1}],"neuter":[{"arm":"E"},{"arm":"E1/mixed"}]}
+  -- RED-UNDER-M: {"arm":"E2/all","apply":[{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"AND lrs.has_mt5_member = FALSE","replace":"AND lrs.has_mt5_member IS NOT NULL","occurrences":1}],"neuter":[{"arm":"E"},{"arm":"E1/mixed"}]}
   SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_e_all;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (E2/all): a composite whose members are ALL on the deferred venue got % job(s), expected 0', v_cnt;
@@ -883,20 +1094,20 @@ BEGIN
   -- the outstanding backlog at the cohort size regardless of tick rate. Both
   -- edges, so the interval cannot drift silently.
   -- ======================================================================
-  -- RED-UNDER: narrow the ATTEMPT cooldown in 20260907130000 from 20 hours to
+  -- RED-UNDER: narrow the ATTEMPT cooldown in 20260911130000 from 20 hours to
   --            1 hour. The fixture's prior attempt is 2 hours old, so the
   --            narrowed window no longer covers it and the composite is
   --            re-enqueued — a permanently-failing composite would get a
   --            20-minute job every tick. Arm F's second tick is unaffected: its
   --            job is created inside this transaction, so it is still inside a
   --            1-hour window.
-  -- ⚠️ nth 2: this needle now matches TWICE in 20260907130000 — that one file
+  -- ⚠️ nth 2: this needle now matches TWICE in 20260911130000 — that one file
   --    holds BOTH fan-out bodies. `nth: 2` selects the composite body,
   --    MEASURED (its CREATE OR REPLACE is second in the file). The composite
   --    body is left UNMUTATED, so this arm reddens on the body it names and
   --    nothing else. A reorder of the two bodies makes this mutate the wrong
   --    one and the runner reports `no-red` — loud, not silent.
-  -- RED-UNDER-M: {"arm":"G","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '1 hour'","occurrences":2,"nth":2}]}
+  -- RED-UNDER-M: {"arm":"G","apply":[{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '1 hour'","occurrences":2,"nth":2}]}
   UPDATE strategies SET status = 'published' WHERE id = s_g;
   v_ret := public.enqueue_ledger_composite_refresh();
   IF v_ret <> 0 THEN
@@ -921,11 +1132,11 @@ BEGIN
   -- Reading this arm as a throughput claim is what leads a future editor to raise
   -- the integer.
   -- ======================================================================
-  -- RED-UNDER: raise the per-tick burst cap in 20260907130000 from
+  -- RED-UNDER: raise the per-tick burst cap in 20260911130000 from
   --            `LIMIT 2` to `LIMIT 5`. Every earlier arm publishes at most two
   --            fixtures at a time, so the cap is invisible to them; this cohort
   --            of five is the only place the integer is measurable at all.
-  -- RED-UNDER-M: {"arm":"H","apply":[{"kind":"edit","file":"supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","find":"LIMIT 2","replace":"LIMIT 5","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"H","apply":[{"kind":"edit","file":"supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","find":"LIMIT 2","replace":"LIMIT 5","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = ANY(h_set);
   v_ret := public.enqueue_ledger_composite_refresh();
   IF v_ret <> 2 THEN
@@ -1020,7 +1231,7 @@ BEGIN
   --            role that is exempt from row security by NEITHER route. Editing
   --            20260825140000 cannot reach this arm: its own DO block asserts
   --            the same disjunction and would abort the apply.
-  -- ⚠️ The FOUR RLS-enabled tables move with the function DELIBERATELY. Left
+  -- ⚠️ The FIVE RLS-enabled tables move with the function DELIBERATELY. Left
   --    behind, the new owner reads them under RLS and the fan-out returns 0 on
   --    every tick — which is precisely the failure this arm's prose describes,
   --    and it reddens arm B four hundred lines earlier instead. Moving them
@@ -1035,7 +1246,19 @@ BEGIN
   --    ⛔ A table OWNER is not subject to RLS (absent FORCE ROW LEVEL SECURITY,
   --    which neither the fixture nor 20260407164606 sets), which is what makes
   --    the move sufficient.
-  -- RED-UNDER-M: {"arm":"J","apply":[{"kind":"sql","stmt":"CREATE ROLE lrc_owner_drift NOLOGIN"},{"kind":"sql","stmt":"GRANT USAGE ON SCHEMA public TO lrc_owner_drift"},{"kind":"sql","stmt":"GRANT SELECT ON ALL TABLES IN SCHEMA public TO lrc_owner_drift"},{"kind":"sql","stmt":"GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO lrc_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.strategies OWNER TO lrc_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.strategy_keys OWNER TO lrc_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.compute_jobs OWNER TO lrc_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.system_flags OWNER TO lrc_owner_drift"},{"kind":"sql","stmt":"ALTER FUNCTION public.enqueue_ledger_composite_refresh() OWNER TO lrc_owner_drift"}]}
+  -- ⭐ public.cron_runs is the FIFTH, added by 164.8.6 plan 03, and it too was
+  --    found by MEASUREMENT on the sibling fan-out gate: the first narrowed run
+  --    after the dormancy instrument landed reported that file's arm J as
+  --    `NO-IDENTITY` with `SIGHTINGS: none — the lane emitted no TEST FAILED (…)
+  --    at all`. The cause is one privilege: 20260911130000's dormant branch now
+  --    WRITES public.cron_runs, the drift role holds only SELECT on it and RLS
+  --    is enabled with no policies, so arm A's very first call died on a raw
+  --    42501 naming no arm at all — worse than the WRONG-ARM(B) the fourth table
+  --    was added for, because a raw permission error attributes to nothing.
+  --    Moving ownership is the same remedy for the same reason: it isolates the
+  --    ONE property under test from every privilege the drift role incidentally
+  --    lacks.
+  -- RED-UNDER-M: {"arm":"J","apply":[{"kind":"sql","stmt":"CREATE ROLE lrc_owner_drift NOLOGIN"},{"kind":"sql","stmt":"GRANT USAGE ON SCHEMA public TO lrc_owner_drift"},{"kind":"sql","stmt":"GRANT SELECT ON ALL TABLES IN SCHEMA public TO lrc_owner_drift"},{"kind":"sql","stmt":"GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO lrc_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.strategies OWNER TO lrc_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.strategy_keys OWNER TO lrc_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.compute_jobs OWNER TO lrc_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.system_flags OWNER TO lrc_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.cron_runs OWNER TO lrc_owner_drift"},{"kind":"sql","stmt":"ALTER FUNCTION public.enqueue_ledger_composite_refresh() OWNER TO lrc_owner_drift"}]}
   SELECT r.rolname, r.rolbypassrls, r.rolsuper
     INTO v_own_role, v_own_bypass, v_own_super
     FROM pg_proc p
@@ -1050,7 +1273,83 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (J): public.enqueue_ledger_composite_refresh is owned by role "%", which is exempt from row security by neither route (rolbypassrls=%, rolsuper=%). As SECURITY DEFINER it reads the security_invoker view ledger_refresh_staleness as that role, so api_keys/strategy_keys RLS empties `exchanges`, the venue conjunct drops every row, and the fan-out returns 0 on every tick — indistinguishable from a healthy, fully-fresh estate. Migration 20260825140000 asserts this at apply time; ownership can drift afterwards and this arm is what notices', v_own_role, v_own_bypass, v_own_super;
   END IF;
 
-  RAISE NOTICE 'ALL 12 ARMS EXECUTED (A-L) and passed — the composite refresh arm is dormant on a missing row, a FALSE row and a RAISING read, partitioned from the single-key arm, bounded, its exclusions are falsifiable, and its EXECUTE ACL and DEFINER exemption both still hold.';
+  -- ======================================================================
+  -- ARM S1 — THE WHOLE EXECUTE GRANTEE SET IS EXACTLY THE OWNER
+  --          (164.7-WR02-SERVICE-ROLE-EXECUTE, ROADMAP criterion 4).
+  --
+  -- ⭐ THE SET, NOT A SUBSET, and that distinction IS the finding. Arm I above
+  -- probes anon and authenticated BY NAME with has_function_privilege, and
+  -- 20260907130000's own apply-time check probed the same two — and PASSED while
+  -- service_role held EXECUTE on this function, because a subset probe is
+  -- satisfied by every role it does not name. aclexplode ENUMERATES the grantees
+  -- instead of interrogating a guessed list, so a grantee nobody thought of is a
+  -- FAILURE here rather than a silence. Arm I is not redundant with this one: it
+  -- names the two roles whose RLS makes this function's NOT EXISTS guards go
+  -- vacuously true, and says WHY those two are catastrophic.
+  --
+  -- ⚠️ COMPARED TO THE OWNER'S NAME, NEVER TO THE LITERAL 'postgres'. The pg-lane
+  -- boots as whatever role scripts/pg-lane/run.sh created, and a literal would
+  -- make this arm pass or fail for a reason unrelated to the estate.
+  --
+  -- ⚠️ COALESCE(proacl, acldefault(…)) is what makes a NULL acl EXPLICIT: a NULL
+  -- proacl MEANS the default ACL, and the default ACL for a function grants
+  -- EXECUTE to PUBLIC. Reading NULL as "no grantees" would report the widest
+  -- possible state as the tightest.
+  --
+  -- ⚠️ grantee = 0 is the PUBLIC pseudo-grantee and is mapped to a string here:
+  -- pg_get_userbyid(0) is not a role name.
+  --
+  -- ⚠️ PRE-MERGE ON SHARED TEST THIS ARM IS RED BY CONSTRUCTION, and that is not
+  -- a defect to route around: service_role still holds EXECUTE there until
+  -- 20260911130000 applies, and migrations reach TEST only on merge. Same
+  -- coupling as causes (iii) and (iv) in arm 0 (CLAUDE.md,
+  -- [164.8-PUSH-RACE-VAC08] (b)).
+  --
+  -- ⛔ AND IT IS THIS ARM, NOT THE MIGRATION'S OWN CHECK 9, THAT PROVES THE
+  -- GRANTEE SET IS GUARDED ON THIS LANE. MEASURED in plan 02: neither fan-out
+  -- apply list contains 07-fixture-supabase-default-privileges.sql, so nothing
+  -- ever GRANTS the bootstrap defaults here, and 20260907130000's earlier REVOKE
+  -- has already materialised proacl as the owner alone — which makes
+  -- 20260911130000's REVOKEs no-ops on this lane and its check 9 unfalsifiable
+  -- by deleting them. On PROD check 9 IS live. Here, this arm is the proof.
+  -- ======================================================================
+  -- RED-UNDER: hand the privilege back on the live lane —
+  --            `GRANT EXECUTE … TO service_role` after the apply. It is a `sql`
+  --            step and NOT an edit of 20260911130000's REVOKE, because that
+  --            file's own DO block (check 9) asserts this same set and an edit
+  --            would ABORT THE APPLY, so the gate would never run and no arm
+  --            could be the first failure. The lane's --post-apply hook exists
+  --            for exactly this shape; it is arm I's reasoning, one property
+  --            wider.
+  -- ⛔ ORDER: THIS ARM MUST STAY AFTER ARM J. J's twin GRANTs EXECUTE ON ALL
+  --    FUNCTIONS IN SCHEMA public to lrc_owner_drift and moves the ownership, so
+  --    it drifts this grantee set too. Placed BEFORE J it would be the FIRST
+  --    failure under J's twin and the runner would report `wrong-first-failure`.
+  --    Placed after, J fails first under J's twin (correct) and this arm reddens
+  --    alone under its own.
+  -- RED-UNDER-M: {"arm":"S1","apply":[{"kind":"sql","stmt":"GRANT EXECUTE ON FUNCTION public.enqueue_ledger_composite_refresh() TO service_role"}]}
+  SELECT g.owner_name, string_agg(g.grantee_name, ',' ORDER BY g.grantee_name)
+    INTO v_owner_name, v_grantees
+    FROM (
+      SELECT pg_get_userbyid(p.proowner) AS owner_name,
+             CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee_name
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+       WHERE n.nspname = 'public'
+         AND p.proname = 'enqueue_ledger_composite_refresh'
+         AND p.pronargs = 0
+         AND a.privilege_type = 'EXECUTE'
+    ) g
+   GROUP BY g.owner_name;
+  IF v_grantees IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (S1): could not read the EXECUTE grantee set of enqueue_ledger_composite_refresh — the function is missing, or it carries no EXECUTE aclitem at all. An empty answer here is indistinguishable from a locked-down one unless it is REFUSED, which is why this is an exception and not a pass';
+  END IF;
+  IF v_grantees IS DISTINCT FROM v_owner_name THEN
+    RAISE EXCEPTION 'TEST FAILED (S1): EXECUTE on enqueue_ledger_composite_refresh is held by [%], expected exactly the owner [%]. This is a cross-tenant SECURITY DEFINER enqueue path that fans work out for every tenant; it must be callable by the scheduler alone, and the scheduler IS the owner. service_role''s grant survived Phase 164.7 precisely because only anon and authenticated were ever probed — arm I is that subset probe, and this arm is what makes the set complete', v_grantees, v_owner_name;
+  END IF;
+
+  RAISE NOTICE 'ALL 15 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, S1) and passed — the composite refresh arm is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row naming this function, partitioned from the single-key arm, bounded, its exclusions are falsifiable, and its EXECUTE grantee set and DEFINER exemption both still hold.';
 END $$;
 
 ROLLBACK;
