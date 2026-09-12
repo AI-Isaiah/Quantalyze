@@ -1954,3 +1954,153 @@ describe("[164.8.5-02] compareManifest totality (CR-04)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// [164.8.6-07] THE MANIFEST-SIDE HYGIENE LOOP RUNS ABOVE EVERY `return`.
+//
+// ⛔ THE DEFECT (TODOS 164.8.5-MANIFEST-SIDE-LOOP-DEAD). Section (2) of
+// `compareManifest` scans the COMMITTED manifest text for credentials. It used
+// to sit BELOW the empty-marker return, BELOW every `invalid()`, and BELOW the
+// marker-mismatch return — so ANY oracle drift that tripped one of those
+// returns silenced the scan entirely. MEASURED 2026-09-11 with the loop in its
+// old position: `normalization ws-collapse-v1 -> 0 manifest-side credential
+// defects`. A credential sitting in repo text stopped being reported because a
+// FIELD ELSEWHERE IN THE SAME FILE disagreed with the arm.
+//
+// ⭐ AND IT READ GREEN THE WHOLE TIME. PR #776's re-capture (`3412f3f9`, run
+// 34611594511) wrote `ws-collapse-v2` into `cron-manifest.json:3` and
+// re-animated the loop as a SIDE EFFECT — the control was alive again by luck,
+// not by design, and the next normalization or schema bump would have killed it
+// again with nothing failing. 164.8.6 fixes it by ORDERING; these tests are
+// what stop the next editor from putting it back below a return.
+//
+// ⭐ THREE `it()`s, ONE LEVER EACH (the ":1789-1796" rule: "a single test
+// covering all three would credit one RED to three controls"). The three levers
+// reach three DIFFERENT returns — `invalid()` by the normalization route,
+// `invalid()` by the schema_version route, and the marker-mismatch return — so
+// a hoist that cleared only one of them cannot read as three passes. Each test
+// ALSO asserts its own early-return defect, so a lever that quietly stopped
+// tripping its return fails here rather than passing vacuously.
+//
+// ⚠️ PROD rows are the CLEAN `prod-ok.json` ON PURPOSE. The only credential
+// finding these tests can possibly see is the manifest-side one, so section
+// (0)'s PROD-side loop cannot supply the defect section (2) is meant to.
+// ---------------------------------------------------------------------------
+describe("[164.8.6-07] manifest-side hygiene survives every early return (TODOS 164.8.5-MANIFEST-SIDE-LOOP-DEAD)", () => {
+  // `subject` is `string | null` on the module side (an unnamed row records
+  // `null`, not an absence), so the local shape must admit null or `tsc` refuses
+  // the assignment — the narrower spelling would have been a lie about the data.
+  type Defect = { kind: string; subject?: string | null; detail?: unknown };
+
+  const DRIFT_FIXTURES = join(PROBER_DIR, "fixtures", "cron-drift");
+  const INLINE_KEY = JSON.parse(readFileSync(join(DRIFT_FIXTURES, "manifest-inline-key.json"), "utf8"));
+  const PROD_OK = JSON.parse(readFileSync(join(DRIFT_FIXTURES, "prod-ok.json"), "utf8"));
+  const SUBJECT_JOB = "match_engine_cron";
+  const LIVE_MARKER: string = INLINE_KEY.database_marker;
+
+  /**
+   * Deep-copy the dirty oracle and mutate ONE field.
+   *
+   * ⛔ THROWS when the mutation changed nothing. A mutant identical to its
+   * original makes every assertion below a statement about the committed
+   * fixture rather than about the lever.
+   */
+  const mutated = (mutate: (copy: Record<string, unknown>) => void) => {
+    const copy = JSON.parse(JSON.stringify(INLINE_KEY));
+    mutate(copy);
+    if (JSON.stringify(copy) === JSON.stringify(INLINE_KEY)) {
+      throw new Error("the mutant is IDENTICAL to the original — the lever did nothing and every assertion below would be vacuous");
+    }
+    return copy;
+  };
+
+  const defectsFor = (manifest: object, liveMarker: string = LIVE_MARKER): Defect[] =>
+    compareManifest(manifest, PROD_OK, { liveMarker }).defects;
+
+  /**
+   * What every lever must show: the committed credential is STILL reported, it
+   * came from the manifest side and nowhere else, and the report never quotes
+   * the credential itself.
+   */
+  const assertCommittedCredentialSurvives = (defects: Defect[]) => {
+    expect(
+      defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === `manifest:${SUBJECT_JOB}`),
+      "a credential in COMMITTED manifest text is a finding about REPO TEXT — no oracle state can make it not one",
+    ).toBe(true);
+    expect(
+      defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === `prod:${SUBJECT_JOB}`),
+      "PRECONDITION: the PROD rows are CLEAN, so the finding above can only have come from section (2)",
+    ).toBe(false);
+    expect(
+      defects.every((d) => !String(d.detail).includes("FAKE-inline-key")),
+      "and the OFFENDING TEXT is never quoted — this repo is PUBLIC and the prober log is `cat`ed into a public Actions log",
+    ).toBe(true);
+  };
+
+  it("lever 1 — `normalization` drift reaches `invalid()`, and the committed credential is reported anyway", () => {
+    const defects = defectsFor(mutated((copy) => {
+      copy.normalization = "ws-collapse-v1";
+    }));
+    const invalids = defects.filter((d) => d.kind === "manifest-invalid");
+    expect(invalids.length, "PRECONDITION: the lever really does reach the `invalid()` return").toBe(1);
+    expect(String(invalids[0].detail), "and it is the NORMALIZATION route, not some other invalidity").toContain("ws-collapse-v1");
+    assertCommittedCredentialSurvives(defects);
+  });
+
+  it("lever 2 — a `schema_version` bump reaches `invalid()` by a DIFFERENT route, and the credential is reported anyway", () => {
+    const defects = defectsFor(mutated((copy) => {
+      copy.schema_version = (copy.schema_version as number) + 1;
+    }));
+    const invalids = defects.filter((d) => d.kind === "manifest-invalid");
+    expect(invalids.length, "PRECONDITION: the lever really does reach the `invalid()` return").toBe(1);
+    expect(String(invalids[0].detail), "and it is the SCHEMA_VERSION route — two levers, two returns, two controls").toContain(
+      "schema_version",
+    );
+    assertCommittedCredentialSurvives(defects);
+  });
+
+  it("lever 3 — a marker MISMATCH (oracle untouched) reaches the third return, and the credential is reported anyway", () => {
+    // ⭐ The manifest here is BYTE-IDENTICAL to the committed fixture: the lever
+    // is entirely on the reading side. `run.mjs:1985-2022` drives the same
+    // `otherMarker` lever with DIRTY prod rows and asserts the PROD credential
+    // survives; this is the manifest-side half that had no surface at all.
+    const OTHER_MARKER = "quantalyze-fixture-OTHER";
+    expect(LIVE_MARKER, "PRECONDITION: the two markers genuinely differ").not.toBe(OTHER_MARKER);
+    const defects = defectsFor(JSON.parse(JSON.stringify(INLINE_KEY)), OTHER_MARKER);
+    const markerFails = defects.filter((d) => d.kind === "measure-fail" && d.subject === "database marker");
+    expect(markerFails.length, "PRECONDITION: exactly one measure-fail on the database marker").toBe(1);
+    expect(String(markerFails[0].detail), "naming the marker the ORACLE carries").toContain(LIVE_MARKER);
+    expect(String(markerFails[0].detail), "and the one the READING came from").toContain(OTHER_MARKER);
+    expect(
+      defects.some((d) => d.kind === "manifest-invalid"),
+      "PRECONDITION: the oracle itself is untouched, so this lever is NOT lever 1 or 2 wearing a different hat",
+    ).toBe(false);
+    assertCommittedCredentialSurvives(defects);
+  });
+
+  it("CALIBRATION — the UNTOUCHED inline-key pair trips NO early return and still yields exactly the manifest-side finding", () => {
+    // ⛔ WITHOUT THIS THE THREE TESTS ABOVE COULD PASS ON A FUNCTION THAT
+    // REPORTS THE CREDENTIAL AND NOTHING ELSE. Here no lever is pulled: there
+    // is no `manifest-invalid` and no marker `measure-fail`, the full
+    // comparison runs to the end, and the credential finding is the SAME one.
+    // It is also why a RED control against the pre-hoist file is readable —
+    // this case passes there too, so the three failures above are attributable
+    // to the LEVER and not to the fixture pair.
+    const result = compareManifest(JSON.parse(JSON.stringify(INLINE_KEY)), PROD_OK, { liveMarker: LIVE_MARKER });
+    const defects: Defect[] = result.defects;
+    expect(
+      defects.some((d) => d.kind === "manifest-invalid"),
+      "the committed fixture pair must reach the end or the three levers above prove nothing",
+    ).toBe(false);
+    expect(defects.some((d) => d.kind === "measure-fail" && d.subject === "database marker")).toBe(false);
+    expect(
+      `manifest:${SUBJECT_JOB}`,
+      "the subject spelling all four cases key on, pinned as a LITERAL: a rename would otherwise re-point every assertion above at a subject that never fires, and they would all still pass",
+    ).toBe("manifest:match_engine_cron");
+    assertCommittedCredentialSurvives(defects);
+    expect(
+      result.lines.every((l: unknown) => !String(l).includes("FAKE-inline-key")),
+      "and the printed diff withholds the text of a row that fails hygiene — the same rule, on the other output channel",
+    ).toBe(true);
+  });
+});
