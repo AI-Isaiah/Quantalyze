@@ -1,5 +1,140 @@
 # Changelog
 
+## [0.77.39.0] - 2026-09-12 — every open verification item in v1.20 closed, re-routed, or handed to the founder
+
+⭐ **What this is.** A sweep of every `*-VERIFICATION.md` in the milestone, not a phase. The
+trigger was a question about GSD reporting 48% — which turned out to be PHASE-weighted (19 of 33)
+while the PLANS were 160 of 163. Re-scanning to answer it found **eleven** phases carrying open
+items, not the four the progress table implied, and most of them were closeable by measurement:
+the work had been done and the record never caught up.
+
+### Fixed
+
+- **Phase 159 RANK is CLOSED** — `human_needed` → `passed`, `behavior_unverified: 1 → 0`. Its one
+  open item was the concurrent same-session CAS race, and the closing recipe the entry itself
+  specified is built and green: `scripts/local-stack/run.sh:57` points at the tracked
+  `supabase/schema/baseline.sql`, `src/__tests__/csv-finalize-concurrent-never-classified.test.ts`
+  exists as ONE spec, it carries **no skip gate by deliberate design** (*"This spec FAILS rather
+  than skips on an absent lane"*, `:156`), and `frontend-local-stack: success` in main run
+  `34712535912` at `733a55f5`.
+- **Phases 164.3, 164.7, 164.8.6 and 161.1 flipped to `passed`** after every item in each was
+  closed or given a named owner. 164.3's `behavior_unverified` went **3 → 0**: all three gates have
+  now executed against their real host or credential — `sql-mutation` on ubuntu (run
+  `33973362161`, head `ab0d5644`), VAC-08 against shared TEST (job `102416204141` in run
+  `34335526540`, head `b8951132`, `0 NEW drift`), VAC-04 against the real PROD credential (Phase
+  164.7 migration `20260907130000`, DRIFT branch fired on both ledger arms with earned
+  `prod-body-ack:` pragmas).
+- **`[VAC-07-DEFER]` is ticked.** It stayed unchecked not because VAC-07 was outstanding but
+  because ticking it would also have attested to `VAC04-ARMS-OBSERVE`. Both are now discharged.
+- **`CLAUDE.md` attributed shared TEST's state to the wrong run, and it was the last file still
+  doing so.** Two further restores ran 2026-09-09 at `a622df27` — `34329459044` (preflight) and
+  `34330741339` (`mode=restore`, 08:44Z) — and the 08:44Z one is what left TEST as it stands. A
+  second full `DROP SCHEMA public CASCADE` on a database other people's CI uses was recorded in one
+  phase log and nowhere else. The currency block now splits the citation: `34274355596` for the
+  LEDGER MOVE 243 → 266, `34330741339` for the SCHEMA STATE.
+- **Six verification items were stale rather than wrong** — written hours before the corrections
+  they demanded landed. 164.8's two record-defects, 164.7's two evidence-artifact defects and
+  164.8.6's ledger item were all re-measured and found satisfied; each now says so with the
+  measurement rather than sitting open.
+- **164.4 and 164.4.1 carried resolutions in sibling frontmatter keys** (`human_verification_resolved`,
+  `sc1_closed_by`) that no reader looking at the item would find. Inline `addressed_in:` pointers
+  added — bookkeeping only, no new evidence.
+
+### Changed
+
+- **Phase 164.7 criteria 3 and 4, and Phase 161.1's ACTIVATION, are ONE live PROD operation named
+  from two sides — and until now were routed from NEITHER.** Founder decision 2026-09-12:
+  re-routed to **Phase 164.5.1 CRONREPOINT**, with the kill switch fixed FIRST. ⛔ The order is
+  load-bearing: `_engine_is_enabled()` (`analytics-service/routers/match.py:306`) is fail-OPEN by
+  documented design, returning `True` on any exception, and criterion 4 is literally *"the kill
+  switch proven"* — activating first would verify a control in the state that makes it
+  unverifiable. Retry-with-backoff lets it fail CLOSED after exhausting retries, which also fixes
+  the `match_engine_cron` 500s from the same 504s.
+
+### Root cause
+
+- **`apply-test`'s affirmative guard cannot tell a seeded ledger row from a genuinely applied
+  one, and the documented escape routes the migration to PROD without TEST.** Found while trying
+  to close Phase 164.8's applied-set item. On the 164.8.6 merge push (run `34684247933`,
+  `ce7ac08a`) `apply-test` FAILED with *"the TEST push applied ZERO migrations"* and correctly
+  cancelled the PROD apply — but the refusal was a **false positive**: measured against TEST,
+  `20260911120000` carries **6 real SQL statements** and `20260911130000` carries **10** (not the
+  seeded provenance sentence), and `match_engine_cron_tick` on TEST has both `INTO STRICT` and
+  `btrim`. The migrations had crossed TEST. ⚠️ The error's own remedy — re-run via
+  `workflow_dispatch`, *"where an empty set is tolerated"* — is what then applied them to PROD. In
+  this instance nothing was harmed, but the escape is generic: a genuinely-never-applied migration
+  produces the same red and the same remedy. Booked as
+  `[164.8-APPLYTEST-CANNOT-TELL-SEEDED-FROM-APPLIED]` → Phase 164.9.
+
+### Added
+
+- **`.planning/FOUNDER-UAT-v1.20.md`** — the four items that need a human at a real browser or real
+  exchange credentials, each with the exact click path and the exact thing to look at. Founder
+  decision: *"You run them, I record."* This is now the entire remaining open surface of v1.20's
+  verification — **3 items across 2 phases**, down from eleven phases.
+- **`[164.7-P3C-PRESENCE-ORACLE]`** → Phase 164.5.1. `164.7-07-PLAN.md:149`'s verify leg tests
+  string PRESENCE, so pasting the marker QUERY satisfies it as well as recording its OUTPUT — on
+  the DEFER branch actually taken, the leg **cannot fail**. The milestone's own named defect class,
+  inside the plan that gates a production write, and booked nowhere until now.
+- **`[PROGRESS-COUNT-UNDERIVED]`** → Phase 164.6, from the same sweep: a `scripts/planning-progress.mjs`
+  plus a test pinning its integers to `STATE.md`, so a stale ledger is a red check rather than
+  prose nobody re-runs.
+
+### Changed
+
+- **The UAT ledger now agrees with the VERIFICATION ledger.** A `/gsd-audit-uat` pass found that
+  `*-UAT.md` and `deferred-items.md` are parallel ledgers the VERIFICATION sweep never touched —
+  v1.20 carried 56 items there, and several contradicted HEAD. **Ten closed**, each by measurement:
+  164.3 G1 (claimed `run.sh:57` still reads `${LANE_DIR}/baseline.sql`; it reads
+  `${REPO_ROOT}/supabase/schema/baseline.sql`), 159's concurrent-resubmit item, 164.3's VAC-04 item,
+  164.8's two restore-attribution items, 161's two owner-drift findings, 164.3's VAC-08 ratchet
+  finding, 159's user-facing copy gap, and 161.1's ordering hazard. 164.3's H-0001 mislabel routed to
+  164.6; 161.1's ACTIVATION marked re-routed while correctly staying `blocked`.
+- ⭐ **The 159 copy defect was fixed in production and nobody wrote it back.** An anonymous visitor on
+  an uncomputed factsheet used to read *"See the dev-server console for the exact gate…"*. Measured
+  2026-09-12 by anonymous fetch of the same URL: no `dev-server`, no `console`. It now reads *"The
+  detailed factsheet for this strategy is still computing… once the analytics service finishes the
+  first compute pass, the full panel set will render here"* plus an honest second line saying some
+  strategies stay in this state. Phase 164.2 CURATED-COPY shipped it on 2026-09-06 — the day after
+  the gap was filed — and the gap read `failed` for six days after it was fixed.
+- ⭐ **The most substantive gap in that list was graded `cosmetic` and was not.** VAC-08's ledger
+  ratchet drove its exit decision from two counts using `grep -ac … || true; ${:-0}` — the exact
+  pattern the same file documents as wrong (SP-M01), which turns "could not count" into "counted
+  zero". Measured at HEAD: both now `set +e; …; grep_rc=$?; set -e` and `fail "MEASURE_FAIL: … An
+  uncountable result is not a count of zero."`, 20 MEASURE_FAIL sites in the file. A control that
+  could not fire, inside the gate built to catch controls that cannot fire.
+- **Phase 164.5.1 gained clause (f): re-capture the cron manifest in the SAME act as the activation.**
+  Carried from `161.1-UAT.md`, where it sat as a `failed` truth owned by nobody. 164.1's CRON-DRIFT-01
+  fails loud on any `cron.job` drift over ALL rows, so registering the ledger-refresh job IS drift by
+  that arm's definition — the prober will go red and the red will be CORRECT. Unless the operator
+  re-captures the manifest, the first reading looks like a bug in a week-old prober, which is the
+  fastest way to teach people to ignore it. 164.5.1 already mutates `cron-manifest.json`, so it is
+  one act there rather than two.
+
+### Fixed
+
+- **`.planning/FOUNDER-UAT-v1.20.md` had a wrong prerequisite and I wrote it.** Item 2 said *"a
+  browser. No special credentials."* It needs an API key that FAILS the capability gate and a MANAGER
+  account — the available browser account is an allocator (`/strategies` 307s to `/allocations`). I
+  took the prerequisite from `161-VERIFICATION.md`, whose `blocked:` text blames a dead viewport;
+  `161-UAT.md`, written later, records that the viewport blocker is gone and two different blockers
+  replaced it. Corrected in place with the error named.
+- **162(c) is contested, not open-and-waiting.** `162-VERIFICATION.md` says `STILL BLOCKED` (measured
+  2026-08-28); `161-UAT.md` says it was discharged on 2026-09-05 by driving the scenario composer.
+  The checklist now flags the contradiction instead of asserting the older record.
+
+### Notes
+
+- ⚠️ **Two residuals stay OPEN on purpose and say why.** Phase 160 carries one founder-gated item
+  (two of three connect surfaces never exercised live; the writer and all three call sites ARE
+  proven). Phase 164.8 keeps `behavior_unverified: 1` — the non-empty `apply-test` branch still has
+  not run in the wild, and the `planned 2 migration version(s)` line that looks like its evidence
+  belongs to the PROD `apply` job, not `apply-test`. Reading it as closure would cite the wrong job
+  for the wrong database.
+- ⛔ **No SUMMARY was retro-fitted and no executed plan's record was rewritten.** 164.3 stays 9/10
+  with plan 07 unsummarised — it was never executed, and `164.3-07-DEFERRED.md` is the honest
+  marker. 164.3-01's VAC-02 over-claim is dispositioned in place rather than edited out.
+
 ## [0.77.38.1] - 2026-09-12 — correct a measured timestamp in the prober record
 
 ### Fixed
