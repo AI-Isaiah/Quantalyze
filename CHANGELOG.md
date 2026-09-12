@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.77.34.2] - 2026-09-12 — the committed PROD baseline catches up to the apply
+
+### Changed
+
+- **`supabase/schema/baseline.sql` regenerated from production** (`supabase db dump --linked`),
+  taken AFTER the Phase 164.8.6 migrations were applied — dispatched run `34686331921`, whose
+  `apply` reported `planned 2 migration version(s); push reported 2.` Taking it before the apply
+  would have recorded a production that did not yet exist. `BASELINE.md`'s sha256 moves from
+  `27826b76…` to `a00b3cc5…`, and the capture block records the 2026-09-12 lineage.
+
+### Fixed
+
+- **`sql-gate-lint` was RED on `main`** because the committed baseline still described PROD's
+  pre-apply function bodies. `baseline-content-drift` goes from `MATCH 116, DRIFT 6, findings 3`
+  to **`MATCH 119, DRIFT 3, findings 0`**.
+
+### Notes
+
+- **The measured shape is UNCHANGED** — 62 tables, 154 policies, 122 function statements (120
+  distinct names), **0 data statements**. The entire diff is 372 added / 11 removed lines, every
+  hunk attributable to the two migrations just applied.
+- ⭐ **Two ACL hunks are the hardening visible as PRODUCTION FACT rather than repo intent:**
+  `GRANT ALL ON FUNCTION match_engine_cron_tick() TO service_role` is **gone** (EXECUTE held by
+  the owner alone, `164.7-WR02-SERVICE-ROLE-EXECUTE`), and `cron_runs` for `anon`/`authenticated`
+  narrows from `GRANT ALL` to `GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE` — exactly the
+  `REVOKE TRUNCATE, REFERENCES, TRIGGER` from `20260911130000`.
+- ⛔ **`CONTENT_DRIFT_ALLOWLIST` was NOT edited** — it neither grew nor shrank. The rows the apply
+  made stale cleared themselves; the three that remain are Phase 164.10 BODYDRIFT's PERMANENT
+  rows, whose own text says a regeneration will never clear them. The list may only shrink, and
+  a red gate is never cleared by widening it.
+- ⚠️ A `db dump` captures PROD's WHOLE catalogue, so unrelated drift would ride along silently.
+  The diff was read hunk by hunk before committing: nothing in it is unexplained by the two
+  migrations.
+
 ## [0.77.34.1] - 2026-09-12 — the apply-test verifier could never count a migration
 
 ### Fixed

@@ -48,10 +48,10 @@ SP-M03 records what happens when they drift apart.
 
 | | |
 |---|---|
-| Taken | 2026-09-08 |
+| Taken | 2026-09-12 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
 | Supabase CLI | 2.84.2 (CI pins 2.98.2 — see the caveat below) |
-| sha256 | `27826b7660026a5b6a7fbee9223265ab98f8fbf485b87237498881034c558ec7` |
+| sha256 | `a00b3cc5ac6346130b4cd522c7e081fd42d306ccb59dbadcb2a130e5b67a36c1` |
 | Shape | 62 tables, 154 policies, 122 function statements (120 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
@@ -59,6 +59,44 @@ Secret-scanned before commit with the exact pattern recorded in
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-09-12 — the Phase 164.8.6 apply, and NOTHING else came with it
+
+⛔ **This regeneration is a SEPARATE REVIEWED ACT, as this file requires.** It was taken only
+AFTER the migrations were applied to production — dispatched run `34686331921`, whose `apply`
+reported `planned 2 migration version(s); push reported 2.` with both server-side NOTICEs.
+Regenerating BEFORE the apply would have recorded a PROD that did not yet exist.
+
+**The measured shape is UNCHANGED from the 2026-09-08 capture** — 62 tables, 154 policies, 122
+function statements (120 distinct names), **0 data statements** — so nothing was added or
+dropped. The whole diff is **372 added / 11 removed lines**, and every hunk is attributable to
+the two migrations this repository just applied:
+
+- **`match_engine_cron_tick`** — the cardinality-guarded Vault read (`INTO STRICT`), the
+  whitespace-aware `btrim(v_key) = ''` guard, and the overload census.
+- **`enqueue_ledger_refresh_for_strategies`** and **`enqueue_ledger_composite_refresh`** — both
+  fan-outs re-based with the dormancy instrument (`v_found` / `v_read_failed` / `v_sqlstate` /
+  `v_cause`).
+- ⭐ **Two ACL hunks that are the WHOLE POINT of the hardening, and are visible here as
+  production fact rather than as repo intent:**
+  `GRANT ALL ON FUNCTION "public"."match_engine_cron_tick"() TO "service_role"` is **GONE** —
+  EXECUTE is held by the owner alone (`164.7-WR02-SERVICE-ROLE-EXECUTE`); and `cron_runs` for
+  `anon`/`authenticated` narrows from `GRANT ALL` to
+  `GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE`, which is exactly
+  `REVOKE TRUNCATE, REFERENCES, TRIGGER` from `20260911130000`.
+
+⚠️ **The risk this regeneration carries, checked rather than assumed:** a `db dump` captures
+PROD's WHOLE catalogue, so anything else that drifted since 2026-09-07 would ride along
+silently. It was read hunk by hunk before committing — there is nothing in this diff that the
+two migrations do not explain.
+
+**Effect on the gate:** `node scripts/baseline-content-drift-check.mjs` goes from
+`MATCH 116, DRIFT 6, findings 3` to **`MATCH 119, DRIFT 3, findings 0`**. The three remaining
+DRIFT rows are exactly the three PERMANENTLY allowlisted ones — `check_fan_in_ready/1`,
+`reject_sentinel_writes/0`, `retention_delete_guard/0` — which belong to Phase 164.10 BODYDRIFT
+and whose own `reason`/`clearedBy` text says a regeneration will never clear them. ⛔ The
+allowlist was NOT edited: it neither grew nor shrank, and the rows this apply made stale
+cleared themselves.
 
 ### Regenerated 2026-09-08 — a PURE DELETION, 91 lines, nothing else moved
 
