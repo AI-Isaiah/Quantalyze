@@ -1,0 +1,165 @@
+# 164.7-03 — NEUTER EVIDENCE
+
+Phase 164.7 / plan 03. Nine assertions, each NEUTERED and observed RED before
+being committed, each restored and verified.
+
+WHY THIS FILE EXISTS. Every gate in this plan is either an absence assertion or
+an equality against extracted text, and both are green over an empty derivation.
+An assertion nobody has watched FAIL is indistinguishable from one that cannot.
+
+WHAT IS PROVEN, and by which oracle:
+
+| # | neuter | oracle |
+|---|--------|--------|
+| N1 | the NULL-safe comparison broken, two ways | lane tracer (T-a) + the migration's own verify |
+| N2 | the read handler assigns TRUE, not NULL | lane tracer (T-c) |
+| N3 | the guard moved below the advisory lock | pytest gate 4 (the migration's verify is BLIND, by design) |
+| N4 | the seed set TRUE / check (7) deleted | lane tracer (T-b) + the migration's own verify |
+| N-P1 | `IS DISTINCT FROM TRUE` -> `<> TRUE` | pytest gate 4 |
+| N-P2 | handler assigns TRUE instead of NULL | pytest gate 4 |
+| N-P3 | a statement inserted before the guard | pytest gate 4 |
+| N-P4 | the read deleted (0 reads) | pytest gate 4 |
+| N-P5 | `IF NOT v_enabled THEN` | pytest gate 4 |
+| N-P6 | a NULL-unsafe spelling ADDED beside a correct guard | pytest gate 4 |
+
+⭐ N1 and N3 are the two that say something the plan did not already assume:
+
+  * N1(a) shows the migration's OWN verify block catches the crude swap before
+    the tracer ever runs — two defences, and the outer one fires first. N1(b)
+    then defeats that text check with an edit that KEEPS the token and is still
+    NULL-unsafe (`IS NOT NULL AND …`), and only the behavioural arm sees it.
+    That pair is the argument for having both layers, measured rather than
+    asserted.
+  * N3 is the mirror: a guard in the WRONG PLACE satisfies every text check the
+    migration makes about itself, and only the pytest position assertion sees
+    it. Each layer catches what the other cannot.
+
+  * N-P6 exists for the same reason at the assertion level: N-P5 reddens on the
+    POSITIVE comparison assertion, so on its own it would leave the
+    must-not-appear list unproven. N-P6 keeps a correct guard and adds a
+    NULL-unsafe spelling beside it, which only that list can catch.
+
+═══════════════════════════════════════════════════════════════════════════
+PART 1 — THE MIGRATION, ON THE pg-lane
+═══════════════════════════════════════════════════════════════════════════
+Harness: scripts/pg-lane/run.sh, throwaway cluster, PGBIN=postgresql@16.
+⛔ It never touches TEST or PROD. Apply list = the fanout gate's current
+RED-UNDER-SETUP list, PLUS scripts/pg-lane/fixtures/31-fixture-system-flags.sql
+inserted before 20260825130000, PLUS 20260907130000 appended last.
+
+# 164.7-03 NEUTER LOG — the MIGRATION's guard, on the pg-lane
+
+migration: supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql
+byte backup: /private/tmp/claude-501/-Users-<user>-claude-projects-quantalyze/11a6e3f6-eb0f-46ac-ba88-a3d6767e5dd8/scratchpad/p03-tracer/20260907130000.byte-backup.sql
+pristine sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
+pristine 'IS DISTINCT FROM TRUE' count: 3
+⛔ The restore-from-HEAD checkout idiom is BANNED in this harness and
+   appears nowhere in it: every restore is a byte-for-byte copy back from
+   the backup above, verified by sha256 AND by re-counting the token the
+   newest edit touched.
+
+BASELINE lane: exit 0
+  TRACER-03 OK: (T-b) as applied (row FALSE) => 0, (T-a) no row => 0, (T-c) table renamed => 0 without raising, (T-d) TRUE => 1 with 1 marked job(s)
+
+## N1 — the NULL-safe comparison broken in the FANOUT body
+Both edits leave (T-b) passing (the row is FALSE, and FALSE compares
+correctly under either form), so each is a precise neuter of the NULL
+half — the half a missing row and a failed read both land on.
+Two observations under ONE backup/restore pair; the second exists
+BECAUSE of what the first measured.
+BEFORE sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
+  (a) `IS DISTINCT FROM TRUE` -> `= FALSE`. The tracer never runs:
+      the migration's OWN verify check (5) aborts the apply, because
+      the token it greps for is gone. Two defences, outer one first.
+      lane exit: 3   (expected non-zero)
+      RED: psql:supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql:869: ERROR:  P0001: Migration 20260907130000: public.enqueue_ledger_refresh_for_strategies does not compare the activation flag with the NULL-safe form "IS DISTINCT FROM TRUE" — a NULL-unsafe comparison opens the flag on the read-failure and missing-row paths, which are the two paths this guard exists for
+  (b) the token KEPT and the comparison still NULL-unsafe:
+      `IF v_enabled IS NOT NULL AND v_enabled IS DISTINCT FROM TRUE`.
+      ⛔ This is the edit that matters. It READS defensive, it passes
+      the migration's own text check (5) — the literal is still there —
+      and with v_enabled NULL the added conjunct is FALSE, so the IF is
+      not taken and the missing-row state falls THROUGH to the fan-out.
+      Only the tracer's (T-a) arm can see it, and that is exactly why a
+      behavioural oracle sits underneath the text gates.
+      lane exit: 3   (expected non-zero)
+      the apply itself: GREEN — its own NOTICE printed
+      RED: psql:/private/tmp/claude-501/-Users-<user>-claude-projects-quantalyze/11a6e3f6-eb0f-46ac-ba88-a3d6767e5dd8/scratchpad/p03-tracer/gate.sql:177: ERROR:  P0001: TEST FAILED (T-a): the fan-out returned 1 with NO system_flags row for the key, expected 0. A missing row is DORMANT here, deliberately — the inverse of send-intro/route.ts, whose missing-row branch is fail-OPEN because its switch defaults ON
+AFTER sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
+
+## N2 — the handler assigns TRUE instead of NULL, FANOUT body only
+Oracle: the lane tracer. The read only RAISES in (T-c), so this is the
+arm that sees it: a handler that assigns TRUE is a fail-OPEN switch
+wearing a fail-closed shape.
+BEFORE sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
+lane exit: 3   (expected non-zero)
+RED: psql:/private/tmp/claude-501/-Users-<user>-claude-projects-quantalyze/11a6e3f6-eb0f-46ac-ba88-a3d6767e5dd8/scratchpad/p03-tracer/gate.sql:177: ERROR:  P0001: TEST FAILED (T-c): the fan-out returned 1 with its flag table RENAMED AWAY, expected 0. The handler must leave the value NULL and the comparison must treat NULL as dormant — a NULL-unsafe comparison falls THROUGH here and opens the flag on exactly the failure path
+AFTER sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
+
+## N3 — the guard MOVED BELOW the advisory-lock block, FANOUT body only
+⛔ The migration's OWN verify block must NOT catch this, and does not:
+   its checks (4)-(6) are TEXT-PRESENCE tests over the comment-stripped
+   definition — 'the read is there', 'the NULL-safe comparison is
+   there' — and both remain true when the guard is merely in the wrong
+   PLACE. Position is asserted by pytest gate 4's
+   _GUARD_IS_FIRST_STATEMENT_RE, which is the oracle here.
+BEFORE sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
+pytest gate 4 (in process): exit 1   (expected non-zero)
+RED: LEDGER-02 LOCK B: the activation guard is NOT the first statement of the fan-out body. 161.1's own comment calls that placement deliberate, and the reason is concrete: a guard that runs after the advisory lock, the candidate query or the enqueue loop is a guard that runs after work has already happened. 'Present somewhere in the body' is not the property this switch needs.
+lane apply, same neutered file: the migration's own verify block PRINTED its success NOTICE (blind, as predicted)
+AFTER sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
+
+## N4 — the seed set TRUE, and the verify block's `enabled = FALSE`
+##      check (7) deleted
+Two observations under ONE backup/restore pair, because the second
+edit is only reachable once the first is in place.
+BEFORE sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
+  (a) seed TRUE, check (7) INTACT — the apply itself must ABORT:
+      lane exit: 3   (expected non-zero)
+      RED: psql:supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql:869: ERROR:  P0001: Migration 20260907130000: the ledger_refresh_enabled flag is already TRUE at apply time. STEP 1 cannot have set it (it seeds FALSE and DOES NOTHING on conflict), so an operator opened it before this migration applied. STOP and read: this apply has just replaced both fan-out bodies under a LIVE switch. Confirm the activation was intended, then re-run
+  (b) seed TRUE and check (7) DELETED — the apply now goes green and
+      the tracer's as-applied arm is the only thing left:
+      lane exit: 3   (expected non-zero)
+      the apply itself: GREEN — its own NOTICE printed
+      RED: psql:/private/tmp/claude-501/-Users-<user>-claude-projects-quantalyze/11a6e3f6-eb0f-46ac-ba88-a3d6767e5dd8/scratchpad/p03-tracer/gate.sql:177: ERROR:  P0001: TEST FAILED (T-b): the migration left the activation flag as true, expected FALSE. A migration that applies with this switch OPEN starts a cross-tenant fan-out on the next tick with no founder action — "merging changes ZERO production behaviour" would be false on the very apply that claims it
+AFTER sha256: 8aa35addf2c51229ba623d7deac9a33794e41657bee35ce2fc19412204484fa2
+
+FINAL lane on the restored file: exit 0
+  TRACER-03 OK: (T-b) as applied (row FALSE) => 0, (T-a) no row => 0, (T-c) table renamed => 0 without raising, (T-d) TRUE => 1 with 1 marked job(s)
+
+═══════════════════════════════════════════════════════════════════════════
+PART 2 — THE RE-ANCHORED PYTEST GATE 4
+═══════════════════════════════════════════════════════════════════════════
+Harness: a COPY of supabase/migrations/ under a scratch tree, with the gate
+module's `_migrations_dir()` monkeypatched at it. ⛔ The tracked repo is not
+written at ANY point in this part, so no restore of a repo file is involved and
+no sha256 pair is recorded for it — the pristine COPY is re-verified GREEN after
+every neuter instead, which is the equivalent proof for a harness that owns its
+own tree.
+
+Command, from analytics-service/:
+    python3 neuter_gate4.py     (see the plan's SUMMARY for the scratch path)
+
+BASELINE: gate 4 GREEN on the pristine copy of the migration tree
+N-P1  RED    IS DISTINCT FROM TRUE -> <> TRUE (fanout arm)
+       LEDGER-02 LOCK B: the fan-out body does not compare the activation value with `IF v_enabled IS DISTINCT FROM TRUE THEN`. That exact form is the fail-closed truth table: it is TRUE for FALSE and TRUE for NULL, and NULL is what BOTH a missing row and a failed read produce. Any NULL-unsafe form falls through on those two paths and opens the flag precisely when the switch could not be read.
+N-P2  RED    handler assigns TRUE instead of NULL (fanout arm)
+       LEDGER-02 LOCK B: the fan-out body's activation-read handler assigns `v_enabled := NULL;` 0 time(s), expected exactly 1. A handler that leaves the variable untouched, or assigns TRUE, is a fail-OPEN switch wearing a fail-closed shape: the read raised and the fan-out proceeds anyway.
+N-P3  RED    a statement inserted BEFORE the guard's inner BEGIN (fanout arm)
+       LEDGER-02 LOCK B: the activation guard is NOT the first statement of the fan-out body. 161.1's own comment calls that placement deliberate, and the reason is concrete: a guard that runs after the advisory lock, the candidate query or the enqueue loop is a guard that runs after work has already happened. 'Present somewhere in the body' is not the property this switch needs.
+N-P4  RED    the read DELETED (0 reads) — the switch is gone (fanout arm)
+       LEDGER-02 LOCK B: the fan-out body does not read the activation flag from public.system_flags. Lock B is what makes merging the migration behaviour-neutral, and it is the incident-pressure kill switch (rollback level 1 in the runbook). Without it this body fans out unconditionally on every tick.
+N-P5  RED    IF NOT v_enabled THEN — the NULL-unsafe truthiness form (fanout arm)
+       LEDGER-02 LOCK B: the fan-out body does not compare the activation value with `IF v_enabled IS DISTINCT FROM TRUE THEN`. That exact form is the fail-closed truth table: it is TRUE for FALSE and TRUE for NULL, and NULL is what BOTH a missing row and a failed read produce. Any NULL-unsafe form falls through on those two paths and opens the flag precisely when the switch could not be read.
+N-P6  RED    NULL-unsafe spelling ADDED BESIDE a correct guard — proves assertion (6) can be the FIRST failure rather than riding on (5)
+       LEDGER-02 LOCK B: the fan-out body contains ['IF NOT v_enabled THEN']. With v_enabled NULL — the state a MISSING ROW and a FAILED READ both produce — each of those evaluates to NULL, the IF is not taken, and the body falls THROUGH to the fan-out. They open the flag on exactly the failure path this guard exists for. This is the boolean form of the F16 defect: a comparison that reads as correct and is not.
+RESTORED: pristine copy GREEN after every neuter (6 of them)
+
+═══════════════════════════════════════════════════════════════════════════
+RESTORE VERIFICATION
+═══════════════════════════════════════════════════════════════════════════
+Each of N1-N4 restored the tracked migration by copying the byte backup back
+over it, then re-read its sha256 and re-counted its `IS DISTINCT FROM TRUE`
+tokens (3, the committed count). All four AFTER hashes equal their BEFORE hash
+and equal the pristine hash; the final lane run on the restored file is GREEN.
+
+RESTORE VERIFIED: sha256 equal x4; git status clean
