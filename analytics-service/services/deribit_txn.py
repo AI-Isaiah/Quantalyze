@@ -552,6 +552,93 @@ INFORMATIONAL_TYPES: frozenset[str] = frozenset(
 assert not (CASH_BEARING_TYPES & INFORMATIONAL_TYPES), (
     "Deribit CASH_BEARING_TYPES and INFORMATIONAL_TYPES must be disjoint"
 )
+# --- the unknown-type refusal's EVIDENCE (2026-09-12) -------------------------
+# ⛔ THE GUARD DEMANDED EVIDENCE IT NEVER COLLECTED. The unknown-type refusal
+# below says "classify it against fresh evidence before ingesting" and then
+# raises carrying only the type name and the `change`. MEASURED 2026-09-12 on
+# PROD: a real Deribit options account produced
+#     unknown Deribit transaction-log type 'assignment' carries nonzero
+#     change (-1.5e-05)
+# and that sentence is everything anyone downstream ever got. The row was not
+# persisted anywhere (there is no raw transaction-log store), the credential was
+# later removed, and Deribit does NOT enumerate the `type` enum in its published
+# docs — so the one measurement that could settle the classification was gone
+# the moment the worker exited. A refusal that names a decision it cannot supply
+# the inputs for is a control that reports a problem nobody can act on.
+#
+# ⭐ THE DECIDING QUESTION, and why the sibling scan is here rather than in the
+# message: for an option `assignment`, does Deribit ALSO emit a `delivery` row
+# for the same instrument? `delivery` is already CASH_BEARING and books "option/
+# future expiry cash settlement". If both fire for one expiry, summing
+# `assignment` too DOUBLE-COUNTS realized cash; if only `assignment` fires, it
+# carries the settlement and must be summed. The batch already in memory can
+# answer that, so it is answered here rather than left to a later guess.
+#
+# ⚠️ WHITELIST, NEVER A BLACKLIST. This text reaches `compute_jobs.last_error`
+# and a customer-facing diagnostics panel. A blacklist would leak the next field
+# Deribit adds; only the fields below are ever rendered, and anything unexpected
+# is dropped rather than passed through.
+_SHAPE_FIELDS: tuple[str, ...] = (
+    "type",
+    "currency",
+    "change",
+    "instrument_name",
+    "timestamp",
+    "side",
+)
+# Types whose presence for the SAME instrument is what makes the offending row
+# interpretable. Kept narrow and named, so the sentence stays readable.
+_SIBLING_TYPES: tuple[str, ...] = ("delivery", "settlement", "trade")
+
+
+def describe_unclassified_row(
+    row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
+) -> str:
+    """Render the REDACTED shape of an unclassifiable row plus the sibling-type
+    census for its instrument, so the refusal below carries the evidence its own
+    message asks for.
+
+    Pure and total: it is called only on the failing path and must never itself
+    raise, because an exception here would REPLACE a precise refusal with a
+    stack trace — the substitutive-failure shape this file already guards
+    against elsewhere.
+    """
+    try:
+        shape_parts: list[str] = []
+        for field in _SHAPE_FIELDS:
+            if field in row:
+                shape_parts.append(f"{field}={row.get(field)!r}")
+        # `info.reason` is the field `correction` is classified on per-row, so it
+        # is the first thing a reader will want for any NEW conditional type.
+        info = row.get("info")
+        if isinstance(info, Mapping) and "reason" in info:
+            shape_parts.append(f"info.reason={info.get('reason')!r}")
+        shape = " ".join(shape_parts) if shape_parts else "<no renderable fields>"
+
+        instrument = row.get("instrument_name")
+        if instrument in (None, ""):
+            siblings = "instrument_name absent — no sibling census possible"
+        else:
+            counts = []
+            for sibling_type in _SIBLING_TYPES:
+                n = sum(
+                    1
+                    for other in rows
+                    if other is not row
+                    and other.get("instrument_name") == instrument
+                    and str(other.get("type", "")).strip().lower() == sibling_type
+                )
+                counts.append(f"{sibling_type}={n}")
+            siblings = (
+                "same-instrument rows in this batch: " + " ".join(counts) +
+                " (a nonzero `delivery` means this type must NOT be summed as "
+                "settlement cash without checking for double-count)"
+            )
+        return f"OBSERVED SHAPE: {shape} | {siblings}"
+    except Exception as exc:  # pragma: no cover - defensive, never re-raises
+        return f"OBSERVED SHAPE: <unrenderable: {type(exc).__name__}>"
+
+
 # External capital-flow types that move value IN/OUT of the account but are NOT
 # trading PnL. The equity anchor must SUBTRACT their net so a large lifetime
 # transfer/withdrawal cannot distort initial_capital (review F1): with the
@@ -1378,7 +1465,8 @@ def txn_rows_to_daily_records(
                 f"unknown Deribit transaction-log type {row_type!r} carries "
                 f"nonzero change ({change}); it is in neither CASH_BEARING nor "
                 "INFORMATIONAL — classify it against fresh evidence before "
-                "ingesting (never silently drop nor double-count realized cash)"
+                "ingesting (never silently drop nor double-count realized cash). "
+                + describe_unclassified_row(row, rows)
             )
     return [
         {
@@ -2373,7 +2461,8 @@ def txn_rows_to_native_daily(
                 f"unknown Deribit transaction-log type {row_type!r} carries "
                 f"nonzero change ({change}); it is in neither CASH_BEARING nor "
                 "INFORMATIONAL — classify it against fresh evidence before "
-                "ingesting (never silently drop nor double-count realized cash)"
+                "ingesting (never silently drop nor double-count realized cash). "
+                + describe_unclassified_row(row, rows)
             )
     result: dict[str, dict[str, float]] = {}
     for (day, ccy), amount in sorted(by_day_ccy.items()):
