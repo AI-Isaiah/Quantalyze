@@ -1124,6 +1124,12 @@ export function EquityChart({
     overlaySeries,
     width,
     hasScenario,
+    // `visible` is `sliceByPeriod(composite, period, customRange)` (:609-612), so a
+    // `period` change already re-runs this memo through `visible`. Listing it is a
+    // behavioural NO-OP and is here to satisfy exhaustive-deps honestly rather than
+    // by a disable directive — `period` IS read in the body, at the degenerate-base
+    // captureChartIssue payload (:759).
+    period,
   ]);
 
   // ── Touch tap-to-pin (CHART-01b, additive) ─────────────────────────

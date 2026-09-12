@@ -118,7 +118,6 @@ export function ContributionWizardOverlay({
       // Close-reset (same pattern StrategyBrowseDrawer:210-227 blesses): the
       // overlay stays mounted while closed (renders null), so reset the source
       // toggle to its default so a reopen always starts on the API branch.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setSource("api");
       // 162-06 — the same close-reset, for the same reason: the dismissal
       // belongs to ONE open. Without it, an owner who clicked "Use a different

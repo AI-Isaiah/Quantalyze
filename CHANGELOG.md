@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.77.37.0] - 2026-09-12 — two lint warnings main could not see
+
+### Fixed
+
+- **`EquityChart.tsx`'s projection `useMemo` was missing its `period` dependency.**
+  `period` IS read in the body — the degenerate-base `captureChartIssue` payload at `:759`.
+  Listing it is a behavioural **NO-OP**, not a fix to reactivity: `visible` is
+  `sliceByPeriod(composite, period, customRange)` (`:609-612`), so a `period` change already
+  re-ran this memo through `visible`. Added to the dep array with that derivation recorded
+  inline, rather than silenced with a disable directive.
+- **`ContributionWizardOverlay.tsx:121` carried an `eslint-disable-next-line`
+  `react-hooks/set-state-in-effect` that suppressed nothing** — the rule reports no problem at
+  that site. Removed; a future edit that re-triggers the rule will now be caught instead of
+  pre-silenced.
+
+### Root cause
+
+- ⛔ **Neither warning is new, and `main` is latently RED on lint today.** `npm run lint` runs
+  `eslint --cache --cache-location node_modules/.cache/.eslintcache src/`, and on a **warm**
+  cache these two files are not re-reported — so `frontend-lint` passes on `main` and on other
+  PRs while the same tree fails from cold. MEASURED: `npx eslint --no-cache` on an unmodified
+  checkout of `main`'s `src/` reproduces both, `✖ 2 problems (0 errors, 2 warnings)`, and the
+  job exits 1 because lint runs at zero-warning tolerance.
+- It surfaced on a **planning-only** PR (#785, 56 files all under `.planning/phases/`, zero
+  `src/` changes) whose runner happened to have a cold cache. A gate whose verdict depends on
+  cache warmth is a control that can silently stop reporting — the class this milestone is
+  named for. Booked as `[LINT-CACHE-MASKS-WARNINGS]`, owner Phase 164.6 GATE-HYGIENE.
+
+### Notes
+
+- Verified with the cache DISABLED, which is the only reading that means anything here:
+  `npx eslint --no-cache src/` → **exit 0, zero findings**.
+
 ## [0.77.36.1] - 2026-09-12 — the Phase 164.8.6 ledger records reach main
 
 ### Notes
