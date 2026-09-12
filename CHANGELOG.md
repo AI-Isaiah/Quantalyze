@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.77.38.1] - 2026-09-12 — correct a measured timestamp in the prober record
+
+### Fixed
+
+- **v0.77.38.0's entry and `[PROBER-ISSUE-CANNOT-FIRE]` both gave the wrong time for issue #773's
+  last comment.** Stated `2026-09-11T14:18Z`; the actual value is **`2026-09-11T16:16:32Z`**. The
+  error came from reading a `head`-truncated comment listing as if it were the complete one.
+- The finding itself is UNCHANGED and the correction sharpens it: that 16:16:32Z comment came from
+  a **manual `workflow_dispatch`** (run `34620923255`, conclusion `failure`), not from a scheduled
+  run. A manual dispatch exits with the script's real status, so `failure()` was true and the old
+  guard fired — only the SCHEDULED path, which exits 0 by the POSTURE LINE, ever went silent.
+
+### Notes
+
+- ⛔ Recorded rather than quietly edited: a wrong MEASURED value in a TODOS entry is the defect
+  class this milestone exists to catch, and the ledger should show that it was corrected and why.
+
 ## [0.77.38.0] - 2026-09-12 — the prod-prober's auto-issue could not fire
 
 ### Fixed
@@ -25,7 +42,7 @@
   `failure` (5 of 5) and filed; **every scheduled run since concluded `success` (8 of 8) and filed
   nothing.**
 - **Impact, measured on PROD 2026-09-12:** issue #773 has had no comment since
-  **2026-09-11T14:18Z** while the prober reported real defects on every run —
+  **2026-09-11T16:16:32Z** while the prober reported real defects on every run —
   `cron-non-2xx` (`match_engine_cron` answering **500 on 5 of the last 7 hourly ticks**, still
   failing at 15:00Z) and `mt5-terminal-error -6` (the terminal is up but not logged in, so
   MT5 strategies cannot sync). Roughly **26 hours** of production faults with the alerting dead
