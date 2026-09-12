@@ -815,6 +815,51 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      and not ccxt. That is a third, separate population needing its own diagnosis — do not fold it
      into either fix.
 
+- [ ] **`[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` Deribit's `assignment` transaction-log type is in
+   neither `CASH_BEARING_TYPES` nor `INFORMATIONAL_TYPES`, so every options account carrying one
+   FAILS ingestion — and the classification cannot be decided without evidence nobody has yet.**
+   ⛔ MEASURED IN PRODUCTION 2026-09-12, not hypothetical. A real Deribit Iron Condor produced:
+   `unknown Deribit transaction-log type 'assignment' carries nonzero change (-1.5e-05); it is in
+   neither CASH_BEARING nor INFORMATIONAL`. Job `0c5ad574` → `status=failed_final`,
+   `error_kind=permanent`; the customer saw `GATE_ANALYTICS_FAILED`
+   (`correlation_id wizard:7d9a6fea-00a0-449c-9577-68f4d9fe0cb7`).
+   ⚠️ **The Retry button in that wizard panel CANNOT clear this** — the ledger still contains the
+   row, so every retry re-reads it and refuses identically. Retry is offered for a fault it cannot
+   fix.
+   ⭐ **Why it had never been seen:** MEASURED — `derive_broker_dailies` has completed 7 times for
+   mt5 and once for okx and **ZERO times for deribit**. This was the first deribit options account
+   ever put through it, and `assignment` is the defining event of a short-options strategy.
+   ⚠️ **A zero-`change` unknown type passes SILENTLY** (only nonzero is loud), so `assignment` rows
+   have very likely flowed through unnoticed before this one. Do not read "first failure" as "first
+   occurrence".
+   ⛔ **DO NOT classify it from the magnitude.** `-1.5e-05` looks fee-sized, and that inference is
+   exactly what the guard exists to refuse. **THE DECIDING QUESTION:** does Deribit ALSO emit a
+   `delivery` row for the same instrument/expiry? `delivery` is already CASH_BEARING and books
+   option expiry cash — if both fire, summing `assignment` DOUBLE-COUNTS realized cash in
+   customer-facing return series; if only `assignment` fires, it carries the settlement and must be
+   summed. Deribit does **not** enumerate the `type` enum in its published docs (checked
+   2026-09-12), so docs cannot settle it and the repo's `drb-options-semantics-2026-07.json`
+   evidence file does not cover `assignment`/`delivery`/`settlement` at all (0 occurrences).
+   ✅ **PARTIALLY ADDRESSED 2026-09-12** — the refusal is now SELF-EVIDENCING: it prints the row's
+   redacted shape plus a same-instrument `delivery`/`settlement`/`trade` census, at BOTH refusal
+   sites (`deribit_txn.py`, the USD and native twins). So the next occurrence answers the deciding
+   question by itself. ⛔ This does NOT close the item — nothing is classified yet.
+   ⚠️ **EXPOSURE IS WIDER THAN ONE KEY:** the composite `Alpha Centauri` holds THREE deribit keys
+   and `deribit_ingest.py` imports the same classifier, so the same refusal is reachable there.
+   ⛔ **BUT IT IS NOT WHAT BLOCKS 161.1 TODAY — MEASURED ON PROD 2026-09-12, correcting an earlier
+   guess in this entry.** Alpha Centauri (`081f2912`) last computed 2026-08-25 with
+   `complete_with_warnings` and 272 return points; its single failed job (`978e2d20`,
+   `stitch_composite`, `failed_final`) names a DIFFERENT cause:
+   `run_stitch_composite_job: member ledger unrecoverable — native_nav inception reconciliation
+   breached venue=deribit currencies=[BTC] breach_ratio=436`. That is a NAV reconciliation breach,
+   not a transaction-log classification refusal — the job never reached the classifier. So Phase
+   161.1's go-live step is blocked by the reconciliation breach, and `assignment` is a latent
+   exposure behind it rather than the live blocker. See item 0.3 below.
+   ⭐ **OWNER: Phase 168 DRBOPTIONS** (added 2026-09-12 by founder decision — a new phase, not folded
+   into 161.1 or 166). That entry carries the deciding question and the forbidden remedies.
+   **Close condition:** `assignment` is classified against a captured row census, with a test and a
+   fixture, and a deribit options account is observed to ingest end to end.
+
 0.3. **📋 DISPOSITION (D-COMP / D-01, decided 2026-08-25) — composite ledger strategies, and the
    coverage gap the decision leaves open until the composite arm lands.**
    - **Resolved: option (a) — MT5-only composite deferral.** Founder's words were *"on mt5 no

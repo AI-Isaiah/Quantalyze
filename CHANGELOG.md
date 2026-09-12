@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.77.36.0] - 2026-09-12 — the Deribit unknown-type refusal carries its own evidence
+
+### Added
+
+- **`describe_unclassified_row()` in `analytics-service/services/deribit_txn.py`** — when the
+  allow-list classifier meets a transaction-log `type` it does not know, the refusal now prints
+  the row's redacted shape (a WHITELIST of `type`, `currency`, `change`, `instrument_name`,
+  `timestamp`, `side` — never the whole row) plus a same-instrument census of the sibling types
+  `delivery`, `settlement` and `trade`. Wired into **both** refusal sites, the USD and the native
+  twin, so neither can regress to a bare message.
+- **`analytics-service/tests/test_deribit_unclassified_evidence.py`** — 6 tests pinning the
+  evidence contract: the whitelist excludes unlisted fields, the census counts siblings, and both
+  call sites emit it.
+
+### Why
+
+- MEASURED IN PRODUCTION 2026-09-12: a real Deribit Iron Condor failed with `unknown Deribit
+  transaction-log type 'assignment' carries nonzero change (-1.5e-05); it is in neither
+  CASH_BEARING nor INFORMATIONAL` (job `0c5ad574`, `failed_final`). The deciding question — does
+  Deribit ALSO emit a `delivery` row for the same instrument/expiry, which would make summing
+  `assignment` double-count realized cash? — cannot be answered from Deribit's docs (the `type`
+  enum is not published) or from this repo's own `drb-options-semantics-2026-07.json` (0
+  occurrences of the three types). This change does not classify anything; it makes the NEXT
+  occurrence supply the census that settles it.
+
+### Notes
+
+- `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` booked in root `TODOS.md`, owner **Phase 168 DRBOPTIONS**
+  (founder decision — a new phase, not folded into 161.1 or 166).
+- ⛔ **A speculation in that entry is corrected by measurement.** It read that the composite
+  `Alpha Centauri`'s go-live was *"likely blocked by this same defect"*. Measured on PROD
+  2026-09-12: Alpha Centauri's one failed job (`978e2d20`, `stitch_composite`) reports
+  `native_nav inception reconciliation breached venue=deribit currencies=[BTC] breach_ratio=436`
+  — a NAV reconciliation breach that never reached the classifier. `assignment` is a latent
+  exposure behind that breach, not the live blocker for Phase 161.1.
 ## [0.77.35.0] - 2026-09-12 — a credential scan oracle drift could silence
 
 Phase 164.8.6, the JavaScript wave — SHIPPED AS ITS ORDERING HALF ONLY. Four commits, two
