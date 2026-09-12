@@ -2078,6 +2078,48 @@ describe("[164.8.6-07] manifest-side hygiene survives every early return (TODOS 
     assertCommittedCredentialSurvives(defects);
   });
 
+  it("a `null` element in `manifest.jobs` is SKIPPED, not thrown on — the live PROD credential report survives it", () => {
+    // ⛔ 164.8.6-REVIEW CR-02, MADE FALSIFIABLE. The hoist put the manifest-side
+    // loop ABOVE every return, where the eight shape checks have NOT run — so
+    // `jobs` may hold anything JSON can express. The loop guarded the CONTAINER
+    // (`Array.isArray(manifest?.jobs)`) but not the ELEMENT, and `null.command`
+    // threw from a position OUTSIDE `judgeRow`'s try. `compareManifest` collects
+    // into a LOCAL array returned only at the end, so the unwind reached the arm
+    // wrapper and collapsed everything to ONE generic measure-fail — DELETING
+    // section (0)'s live PROD credential finding. A refusal that REPLACES
+    // findings is the one thing this phase's invariant forbids.
+    //
+    // MEASURED against the pre-fix bytes, this exact input:
+    //   THROW TypeError: Cannot read properties of null (reading 'command')
+    //
+    // ⚠️ THE PROD ROW IS DIRTY ON PURPOSE — the opposite of the three levers
+    // above. What this case protects is the PROD-side finding, so a clean
+    // `prod-ok.json` would make it vacuous.
+    const leakyProd = [
+      ...PROD_OK,
+      { ...PROD_OK[0], jobid: 9001, jobname: "leaky_job", command: INLINE_KEY.jobs[0].command },
+    ];
+    const withNullRow = mutated((copy) => {
+      copy.jobs = [null];
+    });
+    let defects: Defect[] = [];
+    expect(() => {
+      defects = compareManifest(withNullRow, leakyProd, { liveMarker: LIVE_MARKER }).defects;
+    }, "a null manifest row must never throw out of compareManifest — the throw is what discards the findings").not.toThrow();
+    expect(
+      defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:leaky_job"),
+      "the LIVE PROD credential report survives a malformed manifest element — the refusal is ADDITIVE, never substitutive",
+    ).toBe(true);
+    expect(
+      defects.some((d) => d.kind === "manifest-invalid"),
+      "and the malformed row is still REPORTED, by section (1)'s own guard — skipping it in section (2) hides nothing",
+    ).toBe(true);
+    expect(
+      defects.every((d) => !String(d.detail).includes("FAKE-inline-key")),
+      "and the offending text is still never quoted into a public log",
+    ).toBe(true);
+  });
+
   it("CALIBRATION — the UNTOUCHED inline-key pair trips NO early return and still yields exactly the manifest-side finding", () => {
     // ⛔ WITHOUT THIS THE THREE TESTS ABOVE COULD PASS ON A FUNCTION THAT
     // REPORTS THE CREDENTIAL AND NOTHING ELSE. Here no lever is pulled: there

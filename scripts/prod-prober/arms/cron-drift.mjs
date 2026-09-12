@@ -2245,9 +2245,31 @@ export function compareManifest(manifest, prodRows, opts = {}) {
   //
   //     ⚠️ The shape checks at (1) have NOT run at this position, so `jobs` may
   //     be any type: iterate defensively rather than assuming an array.
+  //
+  //     ⛔ AND THE GUARD IS ELEMENT-LEVEL, NOT JUST CONTAINER-LEVEL
+  //     (164.8.6-REVIEW CR-02). The container guard alone left `row.command` to
+  //     throw on a `null` element — from a position OUTSIDE `judgeRow`'s
+  //     try/catch, and `compareManifest` collects into a LOCAL `defects` array
+  //     returned only at the end, so the unwind reached `run.mjs`'s arm wrapper
+  //     and collapsed the whole arm to ONE generic measure-fail. That DELETED
+  //     section (0)'s live PROD credential findings, which is the substitutive
+  //     refusal this phase's governing invariant forbids.
+  //
+  //     MEASURED 2026-09-12, identical live PROD row carrying a split inline
+  //     `X-Service-Key`, three manifests:
+  //       jobs=[]     -> cron-secret-in-command:prod:leaky_job | manifest-invalid
+  //       jobs=[7]    -> cron-secret-in-command:prod:leaky_job | manifest-invalid
+  //       jobs=[null] -> THROW TypeError: Cannot read properties of null
+  //
+  //     `null` is trivially expressible in JSON and this arm's declared
+  //     adversary is "someone hand-cleaning the committed text". Skipping here
+  //     loses NOTHING: the validation loop at (1) — whose idiom this copies,
+  //     `if (!row || typeof row.jobname !== "string" …)` — still reports the
+  //     same row as `manifest-invalid`, so the refusal stays ADDITIVE.
   // -------------------------------------------------------------------------
   const manifestHygiene = new Map();
   for (const row of Array.isArray(manifest?.jobs) ? manifest.jobs : []) {
+    if (!row || typeof row !== "object") continue; // not a row at all; (1) reports it as manifest-invalid
     if (typeof row.command !== "string") continue; // a withheld row was read by a human at capture time
     // Same F3 scoping as section (0): one unjudgeable row is one row.
     const judged = judgeRow(row.jobname, row.command);
