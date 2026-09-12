@@ -648,20 +648,68 @@ describe("[164.1-05] workflow policy", () => {
   });
 
   it("the auto-issue step is gated on a NON-narrowed run", () => {
-    // A narrowed `--arm` dispatch exits 2 BY DESIGN even when it finds nothing,
-    // so `failure()` fires and an auto-issue reading "0 defect(s)" would be
-    // filed without this clause. On a schedule trigger the input is empty, so
-    // the guard is inert exactly where the real gate runs.
+    // A narrowed `--arm` dispatch returns 2 BY DESIGN even when it finds
+    // nothing, so an auto-issue reading "0 defect(s)" would be filed without
+    // this clause. On a schedule trigger the input is empty, so the guard is
+    // inert exactly where the real gate runs.
     const expr = issueStepIfExpression(WORKFLOW_TEXT);
     expect(expr.length, "the issue step's if: must be findable").toBeGreaterThan(10);
     expect(expr).toContain("inputs.arm == ''");
-    expect(expr).toContain("failure()");
+  });
+
+  it("⛔ the auto-issue guard keys on the MEASURED defect count, never on the job outcome", () => {
+    // MEASURED 2026-09-12, the reason this test exists and why it asserts a
+    // NEGATIVE. The guard read `failure() && steps.probe.outcome == 'failure'`.
+    // The POSTURE LINE makes the probe step `exit 0` on the SCHEDULED path, so
+    // `failure()` is false and `outcome` is `success` there — the issue step
+    // was SKIPPED on every scheduled run, which is the only path that runs
+    // hourly and the only path the POSTURE LINE's own warning calls "the
+    // signal". A control that cannot fire.
+    //
+    // It was masked, not noticed: until PR #774 the step died early on the
+    // shell's `-e`, the JOB failed, and `failure()` was incidentally true.
+    // Fixing that early death silenced the alerting — issue #773 took no
+    // comment after 2026-09-11T14:18Z while the prober kept reporting real
+    // PROD defects on every run.
+    const expr = issueStepIfExpression(WORKFLOW_TEXT);
+    expect(
+      expr,
+      "the guard must read the probe's published status, not the job's outcome",
+    ).toContain("steps.probe.outputs.status");
+    expect(
+      expr,
+      "`failure()` cannot be true on the scheduled path — the POSTURE LINE exits 0 there",
+    ).not.toContain("failure()");
+    expect(
+      expr,
+      "the step must still run even though the probe step SUCCEEDS by design",
+    ).toContain("!cancelled()");
+
+    // And the status the guard reads must actually be published by the probe.
+    expect(
+      WORKFLOW_TEXT,
+      'the probe step must write `status` to $GITHUB_OUTPUT or the guard reads ""',
+    ).toContain('echo "status=$status" >> "$GITHUB_OUTPUT"');
+  });
+
+  it("CALIBRATION: restoring the outcome-based guard flips the predicate this test pins", () => {
+    // The exact pre-2026-09-12 shape. If it were reintroduced, the assertions
+    // above must go RED — which is what makes them a control rather than a
+    // restatement of the current text.
+    const mutant = WORKFLOW_TEXT.replace(
+      "if: ${{ !cancelled() && inputs.arm == '' && steps.probe.outcome != 'skipped' && steps.probe.outputs.status != '0' }}",
+      "if: failure() && steps.probe.outcome == 'failure' && inputs.arm == ''",
+    );
+    expect(mutant, "the mutation must actually change the text").not.toBe(WORKFLOW_TEXT);
+    const mutantExpr = issueStepIfExpression(mutant);
+    expect(mutantExpr).toContain("failure()");
+    expect(mutantExpr).not.toContain("steps.probe.outputs.status");
   });
 
   it("CALIBRATION: dropping the narrowed-dispatch clause flips the guard predicate", () => {
     const mutant = WORKFLOW_TEXT.replace(
-      "if: failure() && steps.probe.outcome == 'failure' && inputs.arm == ''",
-      "if: failure() && steps.probe.outcome == 'failure'",
+      "if: ${{ !cancelled() && inputs.arm == '' && steps.probe.outcome != 'skipped' && steps.probe.outputs.status != '0' }}",
+      "if: ${{ !cancelled() && steps.probe.outcome != 'skipped' && steps.probe.outputs.status != '0' }}",
     );
     expect(mutant, "the deletion must actually change the text").not.toBe(WORKFLOW_TEXT);
     expect(issueStepIfExpression(mutant)).not.toContain("inputs.arm");

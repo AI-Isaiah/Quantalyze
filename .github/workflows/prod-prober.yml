@@ -313,6 +313,25 @@ jobs:
           # a truthful exit code. The SELF-TEST step above is untouched and still
           # hard-fails — a BROKEN prober stays loud in CI; only a prober reporting
           # a real PRODUCTION defect goes quiet at the check-suite level.
+          # ⛔ THE DEFECT COUNT IS PUBLISHED AS A STEP OUTPUT, AND THAT — NOT THE
+          # STEP'S EXIT CODE — IS WHAT GATES THE AUTO-ISSUE.
+          # MEASURED 2026-09-12: the issue step used to read
+          # `failure() && steps.probe.outcome == 'failure'`. On the SCHEDULED
+          # path this step exits 0 BY DESIGN (the POSTURE LINE above), so
+          # `failure()` is false and `outcome` is `success` — the issue step was
+          # SKIPPED on every scheduled run, i.e. on the only path that runs
+          # hourly and the only path the POSTURE LINE's own warning calls "the
+          # signal". A control that cannot fire.
+          # ⚠️ It was MASKED by a second bug rather than noticed: until PR #774
+          # (2026-09-11 13:18Z) this step died early on the shell's `-e`, the JOB
+          # failed, and `failure()` was incidentally true — so issues were filed
+          # for the wrong reason. Fixing the early death silenced the alerting:
+          # every scheduled run since has been `success`, and issue #773 has had
+          # no comment since 2026-09-11T14:18Z while the prober reported real
+          # PROD defects (match_engine_cron 500s, mt5 -6) on every run.
+          # The exit code stays exactly as the POSTURE LINE decided; only the
+          # ISSUE GUARD moves off it, so a red prober still never blocks a deploy.
+          echo "status=$status" >> "$GITHUB_OUTPUT"
           if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]; then
             if [ "$status" -ne 0 ]; then
               echo "::warning::prod-prober reported $status-status defect(s); the P1 issue is the signal. Exiting 0 so Railway's wait-for-CI does not skip the deploy (see the POSTURE LINE comment)."
@@ -350,7 +369,7 @@ jobs:
       # "0 defect(s)". On a `schedule` trigger `inputs.arm` is empty, so
       # the guard is inert exactly where the real gate runs.
       - name: Open or update the prod-prober issue
-        if: failure() && steps.probe.outcome == 'failure' && inputs.arm == ''
+        if: ${{ !cancelled() && inputs.arm == '' && steps.probe.outcome != 'skipped' && steps.probe.outputs.status != '0' }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           RUN_ID: ${{ github.run_id }}
