@@ -95,6 +95,64 @@ jobs:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
 
+  changed-paths:
+    # Phase 164.6.3 / CI-DOCSPATH-01 — the docs-only path filter's DETECTOR.
+    # It publishes ONE boolean, `docs_only`, computed by `scripts/classify-
+    # changed-paths.mjs` from the PR's own diff. Every filtered job below reads
+    # it through a job-level `if:`; the `frontend` aggregator reads it to judge
+    # the skips it causes. It changes WHEN gates are invoked and nothing else:
+    # no gate is added, removed, or made to assert anything different.
+    #
+    # ⛔ NO `if:` — BY CONSTRUCTION, and this is the single most load-bearing
+    # line in the job. Every filtered job carries `needs: [changed-paths]`, and
+    # a skipped `needs:` job SKIPS its dependents — the mechanism this file
+    # already states verbatim in the aggregator's `sql-tests` arm ("a skipped or
+    # failed `needs:` job SKIPS its dependents") and again for `e2e-seeded`. A
+    # conditional here would therefore not skip ONE gate, it would silently skip
+    # the whole corpus, which is the exact fail-open this phase exists to
+    # refuse. The job runs on EVERY event and hard-codes a code verdict for
+    # anything that is not a pull_request, so the push/dispatch corpus is never
+    # filtered (`ci.yml`'s own header: every commit to main must produce its own
+    # recorded green run, and Railway waits on main CI).
+    #
+    # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply to this
+    # one, for the same reason it does not apply to `sql-gate-lint` and
+    # `sql-mutation`: that ban exists because those jobs share the TEST
+    # advisory-lock mutex and their `if:` conditions diverge, so a chain edge can
+    # silently skip a dependent. `changed-paths` has no `if:`, shares no
+    # resource, waits on no mutex, touches no database and runs identically on a
+    # fork PR, a same-repo PR, a push and a workflow_dispatch. Without this
+    # paragraph a future reader reads the sixteen new edges as a violation of
+    # that ban; they are not.
+    #
+    # `permissions:` and `concurrency:` are inherited from the workflow level
+    # (lines ~40 and ~53) exactly as every other job here does; restating them
+    # per-job would fork two sources of truth for no gain, and a second
+    # concurrency group inside a workflow that already has one changes
+    # cancellation semantics rather than tightening them. `contents: read` is
+    # sufficient here — the `git diff` route was chosen over a third-party
+    # changed-files action precisely so no permission uplift and no new action
+    # SHA are needed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0   # the classifier diffs against the base branch
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+      # The red path first: a gate whose failure modes have never been observed
+      # is the defect Phase 164.3 exists to remove. Here it is stronger than
+      # convention — this classifier is the filter's single point of trust, and
+      # a wrong `true` skips sixteen gates at once.
+      - run: node scripts/classify-changed-paths.mjs --self-test
+      - id: classify
+        run: node scripts/classify-changed-paths.mjs
+
   # CI speedup PR-B (v0.22.1.2+): the prior monolithic `frontend` job ran
   # typecheck → lint → test → policy-checks → audit → build serially
   # (~5min wall clock). Split into 5 parallel jobs so wall-clock collapses
@@ -935,6 +993,15 @@ jobs:
     # per-job would fork two sources of truth for no gain, and a second
     # concurrency group inside a workflow that already has one changes
     # cancellation semantics rather than tightening them.
+    #
+    # Phase 164.6.3 / CI-DOCSPATH-01 — WHEN this gate is invoked, never WHAT it
+    # asserts: on a PR whose diff is entirely under `.planning/` it does not
+    # run. The NO-TOLERANCE rule stated above is untouched — a `skipped` here is
+    # judged by the aggregator's one uniform docs-only arm, not by a tolerance
+    # arm of this row's own, and on any code PR this `if:` is true and the job
+    # runs exactly as it did before.
+    needs: [changed-paths]
+    if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -2316,8 +2383,25 @@ jobs:
     # advisory-lock mutex and their `if:` conditions diverge, so a chain edge can
     # silently skip a dependent. This job shares no resource and waits on no mutex.
     # The full argument, including the timeout derivation, is in the job's own header.
+    #
+    # Phase 164.6.3 / CI-DOCSPATH-01 (2026-09-12): `changed-paths` joins `needs:`
+    # below — read for its `outputs.docs_only`, NOT for its result. It gets no row
+    # in the result loop; what it contributes is the one boolean the loop's uniform
+    # docs-only arm is driven by.
+    # NOTE: this `needs:` entry is NOT one of the ⛔-banned chain edges among the
+    # DB-touching jobs, for the same two reasons already recorded for
+    # `plan-anchor-verify` and `sql-gate-lint`: this aggregator carries
+    # `if: always()`, so an upstream skip reaches the loop as a RESULT to judge
+    # rather than skipping the gate, and `changed-paths` itself shares no resource,
+    # waits on no mutex and carries no `if:` at all.
+    # ⚠️ Keep the `needs:` list below a CONTIGUOUS run of `      - <name>` lines
+    # with no interleaved comments: `critical-regressions.test.ts` parses it with
+    # `/^ {4}needs:\n(?: {6}- [\w-]+\n)+/m` and a comment between entries makes that
+    # gate report "no needs: list found" — measured here 2026-09-12, which is why
+    # this paragraph lives in the header instead of beside the entry it describes.
     runs-on: ubuntu-latest
     needs:
+      - changed-paths
       - frontend-typecheck
       - frontend-lint
       - frontend-test
@@ -2336,6 +2420,48 @@ jobs:
       - name: Verify all frontend-* jobs succeeded
         run: |
           fail=0
+          # ── Phase 164.6.3 / CI-DOCSPATH-01 — the ONE uniform docs-only arm ──
+          # ⛔ THIS IS NOT A PER-ROW TOLERANCE ARM. It is ONE predicate, driven by
+          # ONE detector output, applied to every row EXCEPT the rows named in the
+          # declared ALWAYS_ON list below. The four job headers above that forbid a
+          # per-row tolerance arm BY NAME — frontend-seam-redis, sql-gate-lint,
+          # sql-mutation, frontend-local-stack — are therefore not breached: not one
+          # of them is given an arm of its own, and none of their no-legitimate-skip
+          # reasoning is weakened. What changed is WHEN those jobs are invoked, which
+          # is a different claim from what a `skipped` result means when they are.
+          #
+          # On a CODE PR this whole block is INERT: `docs_only` is not 'true', the
+          # first conjunct is false for every row, and every row takes BYTE-
+          # IDENTICALLY the path it took before this phase existed. That is the
+          # phase's criterion 2 as a structural property rather than a hope.
+          #
+          # ⭐ WHY THIS ARM IS FIRST IN THE CHAIN AND NOT APPENDED TO THE END.
+          # Appended after the existing arms it would be UNREACHABLE on exactly the
+          # PRs this phase exists to speed up: `e2e-seeded`'s arm and `sql-tests`'
+          # arm both compute `is_fork_pr=false` on a same-repo PR, so a `skipped`
+          # there falls into their `else` and sets fail=1 before control could ever
+          # reach a later branch. The board would be RED on every docs-only PR.
+          # Placing it first is required for correctness, and it is also what makes
+          # the "one arm, not a per-row tolerance" claim true on inspection.
+          docs_only='${{ needs.changed-paths.outputs.docs_only }}'
+          # The declared list of aggregator rows the docs-only filter may NEVER skip.
+          # DERIVED, not guessed: it is the five always-on job keys (plan-anchor-verify,
+          # secret-scan, version-gate, docs-link-check, frontend-lint) INTERSECTED with
+          # this aggregator's own `needs:` list. Exactly two survive — the other three
+          # are not rows in this loop at all, so naming them here would be decoration.
+          #   - plan-anchor-verify: its whole subject IS `.planning/**`, so a docs-only
+          #     PR is the PR where it matters most. A skip of this row is never excused
+          #     here; it falls through to its own strict arm below.
+          #   - frontend-lint: `npm run lint` also runs `scripts/check-planning-hygiene.ts`,
+          #     the leak gate on a PUBLIC repo with `.planning/` TRACKED, whose subject is
+          #     precisely a `.planning/`-only agent-written diff.
+          # ⚠️ frontend-lint CANNOT reach a `skipped` result today — it carries no `if:`
+          # and no `needs:` edge, so this arm can never see it. Its membership is DEFENCE
+          # IN DEPTH: it costs one word, and it is the only shell-level barrier if a
+          # future edit ever gives that job a skip route. ⛔ Do not delete it as dead
+          # weight; unreachable-today is why it is cheap, not why it is useless.
+          ALWAYS_ON="plan-anchor-verify frontend-lint"
+          echo "docs-only filter: docs_only='${docs_only}' always_on='${ALWAYS_ON}'"
           for r in \
             "frontend-typecheck=${{ needs.frontend-typecheck.result }}" \
             "frontend-lint=${{ needs.frontend-lint.result }}" \
@@ -2352,7 +2478,16 @@ jobs:
             "plan-anchor-verify=${{ needs.plan-anchor-verify.result }}"; do
             name="${r%=*}"; result="${r#*=}"
             echo "$name: $result"
-            if [ "$name" = "e2e-seeded" ]; then
+            case " $ALWAYS_ON " in *" $name "*) filterable=false;; *) filterable=true;; esac
+            # Three independent conjuncts must ALL hold, which is why this cannot
+            # green a code PR: the detector must have said exactly 'true' (it is the
+            # empty string when `changed-paths` failed or was cancelled, so a broken
+            # detector reddens rather than excuses), the row must not be ALWAYS_ON,
+            # and the result must be exactly `skipped` — a `failure` or `cancelled`
+            # falls through to the pre-existing arms untouched.
+            if [ "$docs_only" = "true" ] && [ "$filterable" = "true" ] && [ "$result" = "skipped" ]; then
+              echo "$name: skipped by the docs-only path filter (changed-paths said docs_only=true); tolerated UNIFORMLY, not per-row."
+            elif [ "$name" = "e2e-seeded" ]; then
               # Phase 126 / FACTSHEET-02 + RT-01 canary: e2e-seeded is BLOCKING
               # (the sfox-badge legs are the go-live gate). It legitimately
               # self-skips ONLY on a FORK PR — a different head repo has no
