@@ -2,23 +2,42 @@
 # TODAY. Phase 164.3.1 plan 08, [MUT-W02].
 #
 # PROVENANCE. Quoted from `.github/workflows/ci.yml`, the `frontend` job's
-# "Verify all frontend-* jobs succeeded" step, on 2026-09-01 at 420b8fcb. Every
-# `if`/`elif` CONDITION line is byte-faithful to the real file, including
-# indentation; only the `echo` bodies and the rows of the `for r in` list that
-# carry no per-job arm are trimmed, because the parser reads CONDITIONS and a
+# "Verify all frontend-* jobs succeeded" step, on 2026-09-01 at 420b8fcb and
+# RE-QUOTED 2026-09-13 (Phase 164.6.3 wave 2) after wave 1 added the uniform
+# docs-only arm. Every `if`/`elif` CONDITION line is byte-faithful to the real
+# file, including indentation; only the `echo` bodies are trimmed, because a
 # fixture carrying six paragraphs of error prose rots for reasons that have
 # nothing to do with what it pins.
 #
 # WHAT IT PINS. Parsing this file must yield EXACTLY the same classification —
 # the same job arms, the same tolerance-bearing set, the same guard variables —
-# as parsing the real `ci.yml`. That is the fixture-fidelity check: it proves
-# the red fixture below is being compared against a faithful model of today's
-# workflow rather than against a strawman.
+# as parsing the real `ci.yml`, AND executing it must yield exactly the same
+# tolerance posture in BOTH halves of the docs-only partition. That is the
+# fixture-fidelity check: it proves the red fixtures are being compared against
+# a faithful model of today's workflow rather than against a strawman.
 #
 # ⚠️ IF YOU EDIT THE AGGREGATOR'S RESULT LOOP, UPDATE THIS FILE. The fidelity
 # arm in `src/__tests__/lint-sql-gates.test.ts` will red until you do. That is
 # the intended coupling: a tolerance posture that changes in `ci.yml` and not
 # here is a change nobody wrote down.
+#
+# ⛔ DATED CORRECTION, 2026-09-13 — THAT COUPLING SILENTLY DISENGAGED ONCE, AND
+# THE SENTENCE ABOVE WAS FALSE FOR THE LENGTH OF ONE WAVE. Phase 164.6.3 wave 1
+# edited the result loop — a new uniform arm, eleven rows newly filterable — and
+# the fidelity arm stayed GREEN. Cause: both sides were executed through a slice
+# that started at `for r in \`, so the two prologue assignments the new arm
+# reads were outside what ran, on the fixture side and the real side alike. Two
+# programs that were equally wrong compared equal. Booked as
+# `[164.6.3-MW02-DOCSONLY-BLIND]`; the repair is `extractResultLoopScript`, which
+# slices from `fail=0`, plus an unset-variable check that turns the next such
+# omission into a named abort.
+#
+# ⛔ A RULE THIS HEADER USED TO CARRY IS NOW RETIRED (2026-09-13). It said rows
+# of the `for r in` list that carry no per-job arm may be trimmed, "because the
+# parser reads CONDITIONS". That stopped being true when the uniform arm landed:
+# a row's behaviour now depends on its membership of `ALWAYS_ON`, so a TRIMMED
+# ROW IS A BEHAVIOUR THE FIXTURE STOPS MODELLING. Every row the real loop
+# iterates is carried here, and the fidelity arm compares every one of them.
 #
 # Pair member: MW02-alternate-spelling.red.yml
 # House contract (`scripts/lint-sql-gates.mjs:33-40`): a rule without a firing
@@ -27,8 +46,23 @@
       - name: Verify all frontend-* jobs succeeded
         run: |
           fail=0
+          # ── Phase 164.6.3 / CI-DOCSPATH-01 — the ONE uniform docs-only arm ──
+          # ⛔ NOT a per-row tolerance. One predicate, one detector output,
+          # applied to every row EXCEPT those named in ALWAYS_ON. It is FIRST in
+          # the chain on purpose: appended after the existing arms it would be
+          # unreachable on exactly the PRs it exists to speed up.
+          docs_only='${{ needs.changed-paths.outputs.docs_only }}'
+          ALWAYS_ON="plan-anchor-verify frontend-lint"
+          echo "docs-only filter: docs_only='${docs_only}' always_on='${ALWAYS_ON}'"
           for r in \
             "frontend-typecheck=${{ needs.frontend-typecheck.result }}" \
+            "frontend-lint=${{ needs.frontend-lint.result }}" \
+            "frontend-test=${{ needs.frontend-test.result }}" \
+            "frontend-coverage=${{ needs.frontend-coverage.result }}" \
+            "frontend-seam-redis=${{ needs.frontend-seam-redis.result }}" \
+            "frontend-local-stack=${{ needs.frontend-local-stack.result }}" \
+            "frontend-policy=${{ needs.frontend-policy.result }}" \
+            "frontend-build=${{ needs.frontend-build.result }}" \
             "e2e-seeded=${{ needs.e2e-seeded.result }}" \
             "sql-tests=${{ needs.sql-tests.result }}" \
             "sql-gate-lint=${{ needs.sql-gate-lint.result }}" \
@@ -36,7 +70,10 @@
             "plan-anchor-verify=${{ needs.plan-anchor-verify.result }}"; do
             name="${r%=*}"; result="${r#*=}"
             echo "$name: $result"
-            if [ "$name" = "e2e-seeded" ]; then
+            case " $ALWAYS_ON " in *" $name "*) filterable=false;; *) filterable=true;; esac
+            if [ "$docs_only" = "true" ] && [ "$filterable" = "true" ] && [ "$result" = "skipped" ]; then
+              echo "$name: skipped by the docs-only path filter; tolerated UNIFORMLY, not per-row."
+            elif [ "$name" = "e2e-seeded" ]; then
               is_fork_pr='${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}'
               if [ "$result" = "success" ]; then
                 :
