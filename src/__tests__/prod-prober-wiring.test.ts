@@ -300,6 +300,42 @@ function proberSourceFiles(dir: string): string[] {
   return out;
 }
 
+/**
+ * ⛔ THE `.txt` TRANSCRIPTS — A SEPARATE WALK, ON PURPOSE.
+ *
+ * `proberSourceFiles` is the RAILWAY_TOKEN scan's subject and stays exactly
+ * what it was; silently widening it would change what that assertion means.
+ * This walk exists because the `.txt` fixtures are the one surface in this
+ * repo that is, by its nature, COPIED OUT OF A LIVE PRODUCTION CONTAINER — and
+ * it is the surface that actually held a production artifact:
+ * `fixtures/mt5/ok.txt` carried `"path": "C:\\Program Files\\MetaTrader 5"`
+ * until phase 164.8.3 removed it BY HAND. The runner's own public-log control
+ * scans `REMEDIES` — six static strings an author typed — so before this test
+ * every `.txt` transcript was outside every scan in the repo. A control
+ * narrower than the sentence beside it is this milestone's named defect class
+ * (Phase 164.8.4 GATERESIDUE).
+ */
+function proberTranscripts(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) out.push(...proberTranscripts(full));
+    else if (entry.endsWith(".txt")) out.push(full);
+  }
+  return out;
+}
+
+/** The shape of an MT5 account number in a world-readable log. */
+const ACCOUNT_SHAPED_RUN = /\b[0-9]{6,}\b/;
+/** A POSIX home directory or a Windows install path — the `ok.txt` offender's shape. */
+const ABSOLUTE_MACHINE_PATH = /\/(?:Users|home)\/|[A-Za-z]:\\/;
+function transcriptOffences(text: string): string[] {
+  const hits: string[] = [];
+  if (ACCOUNT_SHAPED_RUN.test(text)) hits.push("account-shaped digit run");
+  if (ABSOLUTE_MACHINE_PATH.test(text)) hits.push("absolute machine path");
+  return hits;
+}
+
 /** Run the runner's own self-test and read the headers it PRINTS. */
 async function runSelfTestHeaders(): Promise<{ code: number; numbers: number[]; denominators: number[] }> {
   const captured: string[] = [];
@@ -744,6 +780,37 @@ describe("[164.1-05] workflow policy", () => {
     expect(files.length, "the prober source walk found nothing — the glob broke").toBeGreaterThan(5);
     const offenders = files.filter((f) => containsProjectTokenSlot(readFileSync(f, "utf8")));
     expect(offenders.map((f) => f.slice(REPO_ROOT.length + 1))).toEqual([]);
+  });
+
+  it("no prober .txt transcript carries an account-shaped digit run or an absolute machine path", () => {
+    const files = proberTranscripts(PROBER_DIR);
+    // ⛔ THE WALK MUST REACH SOMETHING. An empty list passes every `toEqual([])`
+    //    below it, which is exactly how a narrowed scan reports as a clean one.
+    expect(files.length, "the .txt transcript walk found nothing — the walk broke").toBeGreaterThan(0);
+    expect(
+      files.map((f) => f.slice(REPO_ROOT.length + 1)),
+      "the walk must reach the mt5 transcripts — the files copied out of a live container",
+    ).toContain("scripts/prod-prober/fixtures/mt5/ok.txt");
+    const offenders = files
+      .map((f) => ({ f: f.slice(REPO_ROOT.length + 1), hits: transcriptOffences(readFileSync(f, "utf8")) }))
+      .filter((x) => x.hits.length > 0)
+      .map((x) => `${x.f} (${x.hits.join(", ")})`);
+    expect(offenders).toEqual([]);
+  });
+
+  it("CALIBRATION: the transcript scan FIRES on a synthetic planted value of each shape", () => {
+    // ⛔ SYNTHETIC AND IN-MEMORY. A repeated digit run that is not an account
+    //    and a path that is not this machine's, appended to a copy of a real
+    //    transcript. No real account number, broker server or home path may be
+    //    written into this repo — including into a calibration.
+    const clean = readFileSync(join(PROBER_DIR, "fixtures", "mt5", "ok.txt"), "utf8");
+    expect(transcriptOffences(clean)).toEqual([]);
+    expect(transcriptOffences(`${clean}login 99999999\n`)).toEqual(["account-shaped digit run"]);
+    expect(transcriptOffences(`${clean}"path": "C:\\Example\\Terminal"\n`)).toEqual(["absolute machine path"]);
+    expect(transcriptOffences(`${clean}/home/synthetic/terminal\n`)).toEqual(["absolute machine path"]);
+    // and a five-digit run is NOT an account shape — the predicate is not
+    // merely "contains digits", which would red every transcript on `-10004`.
+    expect(transcriptOffences(`${clean}12345\n`)).toEqual([]);
   });
 
   it("CALIBRATION: renaming the seam's child-env key to the project slot flips the scan", () => {
