@@ -3990,10 +3990,31 @@ export async function selfTest() {
       const mt5Lines = lines.map(String).filter((l) => l.startsWith("mt5: "));
       const infoLine = String(mt5Lines[0] || "");
       const carriesBuild = (s) => /build=/.test(s);
-      // CALIBRATION input: the same line with the clause this task removed put
-      // back. Without it the negative is a predicate only ever applied to
-      // passing input, which is not evidence in this repo.
-      const withBuild = `${infoLine} build=6182`;
+      // CALIBRATION input for the negative below.
+      //
+      // ⛔ THE MUTANT IS DERIVED FROM THE LIVE LINE, NEVER TYPED. This leg
+      //    shipped as `` `${infoLine} build=6182` `` — the mutant carried the
+      //    exact literal `carriesBuild` greps for, so BOTH halves were true no
+      //    matter what the arm did. It proved only that the predicate is not
+      //    INVERTED; it said nothing about the system, unlike CRITERION 2's
+      //    leg (d), which splices a live `REMEDIES` string.
+      //
+      //    So the mutant now RENAMES a field the arm REALLY EMITTED: the `=`
+      //    is borrowed from the arm's own output instead of being typed here.
+      //    What that buys, concretely and measured: if the arm ever printed an
+      //    excluded D-05 field with a NON-`=` separator — ` build:6182` — the
+      //    negative below passes VACUOUSLY (`/build=/` does not match
+      //    `build:6182`) and its ok line reads "carries NO build=" beside a log
+      //    line that carries one. Under the typed mutant the whole self-test
+      //    stayed 80/80 and exit 0 through exactly that. Under this one the leg
+      //    goes RED, because the renamed tail loses its `=` too.
+      //
+      // ⚠️ WHAT IT DOES NOT CLAIM: this is still a calibration, not a second
+      //    negative. It says the predicate can REJECT a build-bearing line
+      //    derived from the arm's own field syntax. The assertion that the
+      //    shipped line carries no build field is the leg below it.
+      const lastField = infoLine.slice(infoLine.lastIndexOf(" ") + 1);
+      const withBuild = `${infoLine} ${lastField.replace(/^[^=]*/, "build")}`;
       pass =
         expect(
           mt5Lines.length === 1,
@@ -4017,7 +4038,7 @@ export async function selfTest() {
       pass =
         expect(
           withBuild !== infoLine && carriesBuild(withBuild),
-          "164.8.3 CRITERION 7 CALIBRATION: the mutant differs from the original AND the same negative predicate REJECTS it — the no-build= assertion above can fail",
+          `164.8.3 CRITERION 7 CALIBRATION: the mutant — the live line with its OWN LAST FIELD renamed to build, so the "=" comes from the arm and not from this file — differs from the original AND the same negative predicate REJECTS it. A RED here means the arm's field syntax has drifted away from the "build=" the negative above greps for, so that negative has stopped being able to see an excluded field (mutant: ${JSON.stringify(withBuild)})`,
         ) && pass;
     }
   }
