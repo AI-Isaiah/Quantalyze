@@ -117,7 +117,7 @@ export const SSH_TIMEOUT_MS = 120000;
  * and `tradeapi_disabled`, `build` and `path` are not. Dropping `path` also
  * stops a production filesystem path reaching a PUBLIC Actions log.
  * ⛔ `scripts/mt5-diag.sh` is left byte-unchanged ON PURPOSE: its own
- * `Reading the result:` note at `:55-66` interprets `tradeapi_disabled` for a
+ * `Reading the result:` heredoc note interprets `tradeapi_disabled` for a
  * human operator, and phase 164.8.3 criterion 5 fences that file read-only.
  * The divergence is argued here rather than discovered later.
  *
@@ -262,7 +262,9 @@ export function classifyProbe(result) {
   if (probe.initialize === true && terminalInfoPresent) {
     return {
       ...none,
-      // ⛔ TWO BOOLEANS, RECORDED AND NEVER JUDGED (D-05; see `:61-64`). The
+      // ⛔ TWO BOOLEANS, RECORDED AND NEVER JUDGED (D-05; see this file's
+      //    header paragraph "`connected` and `trade_allowed` are printed and
+      //    NEVER JUDGED"). The
       //    runbook's Step 2 criterion is these two and only these two; the
       //    build number and the install path the arm used to print are fields
       //    the founder excluded, and `path` in particular was a production

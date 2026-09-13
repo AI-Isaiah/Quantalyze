@@ -2327,8 +2327,9 @@ describe("[164.8.3-01] AUTO-ISSUE DEDUP — issue selection cannot read a defect
 // These three tests pin that REMOVING it changes the verdict, which is the only
 // statement that distinguishes a live gate from a decorative one.
 //
-// ⭐ THREE `it()`s ON PURPOSE, one property each — the same discipline
-// `[164.8.5-02]` states at `:1840-1844`: a single test covering all three would
+// ⭐ THREE `it()`s ON PURPOSE, one property each — the same discipline the
+// `[164.8.5-02] compareManifest totality` block states in its own "FOUR
+// SEPARATE `it()`s ON PURPOSE" note: a single test covering all three would
 // credit ONE red to THREE controls.
 //   #1 CONTROL   — the SHIPPING module classifies `6.txt` as mt5-not-authorized.
 //   #2 FALSIFIER — the mutant, with the `-6` branch excised, falls back to
@@ -2453,7 +2454,8 @@ describe("[164.8.3-04] the -6 branch is load-bearing (criterion 6)", () => {
    * `slice(0, -1)` is nearly the WHOLE string, so a RENAMED or MOVED branch
    * would yield a mutant that is a near-copy of the original and a falsifier
    * that passes for the wrong reason. `anchorIndex` throws and names the anchor
-   * (ANCHOR DISCIPLINE, `:77-100`).
+   * (ANCHOR DISCIPLINE — see the `⛔ ANCHOR DISCIPLINE` block above
+   * `anchorIndex`'s own definition at the head of this file).
    */
   function exciseMinusSixBranch(text: string): string {
     const start = anchorIndex(text, MINUS_SIX_ANCHOR);
