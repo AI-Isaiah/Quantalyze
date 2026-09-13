@@ -26,7 +26,9 @@
  * file fails here.
  */
 import { describe, expect, it, vi } from "vitest";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -56,6 +58,7 @@ import {
   splitHygiene,
   UNRECORDED_VERDICT,
 } from "../../scripts/prod-prober/arms/cron-drift.mjs";
+import { classifyProbe } from "../../scripts/prod-prober/arms/mt5.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "prod-prober.yml");
@@ -295,6 +298,42 @@ function proberSourceFiles(dir: string): string[] {
     else if (entry.endsWith(".mjs") || entry.endsWith(".json")) out.push(full);
   }
   return out;
+}
+
+/**
+ * ⛔ THE `.txt` TRANSCRIPTS — A SEPARATE WALK, ON PURPOSE.
+ *
+ * `proberSourceFiles` is the RAILWAY_TOKEN scan's subject and stays exactly
+ * what it was; silently widening it would change what that assertion means.
+ * This walk exists because the `.txt` fixtures are the one surface in this
+ * repo that is, by its nature, COPIED OUT OF A LIVE PRODUCTION CONTAINER — and
+ * it is the surface that actually held a production artifact:
+ * `fixtures/mt5/ok.txt` carried `"path": "C:\\Program Files\\MetaTrader 5"`
+ * until phase 164.8.3 removed it BY HAND. The runner's own public-log control
+ * scans `REMEDIES` — six static strings an author typed — so before this test
+ * every `.txt` transcript was outside every scan in the repo. A control
+ * narrower than the sentence beside it is this milestone's named defect class
+ * (Phase 164.8.4 GATERESIDUE).
+ */
+function proberTranscripts(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) out.push(...proberTranscripts(full));
+    else if (entry.endsWith(".txt")) out.push(full);
+  }
+  return out;
+}
+
+/** The shape of an MT5 account number in a world-readable log. */
+const ACCOUNT_SHAPED_RUN = /\b[0-9]{6,}\b/;
+/** A POSIX home directory or a Windows install path — the `ok.txt` offender's shape. */
+const ABSOLUTE_MACHINE_PATH = /\/(?:Users|home)\/|[A-Za-z]:\\/;
+function transcriptOffences(text: string): string[] {
+  const hits: string[] = [];
+  if (ACCOUNT_SHAPED_RUN.test(text)) hits.push("account-shaped digit run");
+  if (ABSOLUTE_MACHINE_PATH.test(text)) hits.push("absolute machine path");
+  return hits;
 }
 
 /** Run the runner's own self-test and read the headers it PRINTS. */
@@ -743,6 +782,37 @@ describe("[164.1-05] workflow policy", () => {
     expect(offenders.map((f) => f.slice(REPO_ROOT.length + 1))).toEqual([]);
   });
 
+  it("no prober .txt transcript carries an account-shaped digit run or an absolute machine path", () => {
+    const files = proberTranscripts(PROBER_DIR);
+    // ⛔ THE WALK MUST REACH SOMETHING. An empty list passes every `toEqual([])`
+    //    below it, which is exactly how a narrowed scan reports as a clean one.
+    expect(files.length, "the .txt transcript walk found nothing — the walk broke").toBeGreaterThan(0);
+    expect(
+      files.map((f) => f.slice(REPO_ROOT.length + 1)),
+      "the walk must reach the mt5 transcripts — the files copied out of a live container",
+    ).toContain("scripts/prod-prober/fixtures/mt5/ok.txt");
+    const offenders = files
+      .map((f) => ({ f: f.slice(REPO_ROOT.length + 1), hits: transcriptOffences(readFileSync(f, "utf8")) }))
+      .filter((x) => x.hits.length > 0)
+      .map((x) => `${x.f} (${x.hits.join(", ")})`);
+    expect(offenders).toEqual([]);
+  });
+
+  it("CALIBRATION: the transcript scan FIRES on a synthetic planted value of each shape", () => {
+    // ⛔ SYNTHETIC AND IN-MEMORY. A repeated digit run that is not an account
+    //    and a path that is not this machine's, appended to a copy of a real
+    //    transcript. No real account number, broker server or home path may be
+    //    written into this repo — including into a calibration.
+    const clean = readFileSync(join(PROBER_DIR, "fixtures", "mt5", "ok.txt"), "utf8");
+    expect(transcriptOffences(clean)).toEqual([]);
+    expect(transcriptOffences(`${clean}login 99999999\n`)).toEqual(["account-shaped digit run"]);
+    expect(transcriptOffences(`${clean}"path": "C:\\Example\\Terminal"\n`)).toEqual(["absolute machine path"]);
+    expect(transcriptOffences(`${clean}/home/synthetic/terminal\n`)).toEqual(["absolute machine path"]);
+    // and a five-digit run is NOT an account shape — the predicate is not
+    // merely "contains digits", which would red every transcript on `-10004`.
+    expect(transcriptOffences(`${clean}12345\n`)).toEqual([]);
+  });
+
   it("CALIBRATION: renaming the seam's child-env key to the project slot flips the scan", () => {
     const seams = readFileSync(SEAMS_PATH, "utf8");
     const mutant = seams.replace("RAILWAY_API_TOKEN: token,", `${PROJECT_TOKEN_SLOT}: token,`);
@@ -756,7 +826,7 @@ describe("[164.1-05] kinds and floors", () => {
   /**
    * Hand-typed on purpose. Spelling it `[...DEFECT_KINDS]` would make the
    * assertion agree with the implementation by construction — a list that can
-   * never disagree with the thing it checks. Twenty names, sorted.
+   * never disagree with the thing it checks. Twenty-one names, sorted.
    */
   const EXPECTED_DEFECT_KINDS = [
     "absurdity",
@@ -771,6 +841,7 @@ describe("[164.1-05] kinds and floors", () => {
     "measure-fail",
     "mt5-ipc-timeout",
     "mt5-no-ipc",
+    "mt5-not-authorized",
     "mt5-probe-timeout",
     "mt5-ssh-transport",
     "mt5-terminal-error",
@@ -1819,7 +1890,7 @@ describe("[164.1-05] kinds and floors", () => {
     // is no literal `k/50` in the source to count. Executing the self-test is
     // the only honest way to derive the number — and it is fixtures-only, no
     // network, under a tenth of a second.
-    expect(SELF_TEST_SCENARIOS).toBe(78);
+    expect(SELF_TEST_SCENARIOS).toBe(80);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);
@@ -2192,5 +2263,466 @@ describe("[164.8.6-07] manifest-side hygiene survives every early return (TODOS 
       result.lines.every((l: unknown) => !String(l).includes("FAKE-inline-key")),
       "and the printed diff withholds the text of a row that fails hygiene — the same rule, on the other output channel",
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AUTO-ISSUE DEDUP — the publication path, proved KIND-INDEPENDENT.
+//
+// ⛔ THE PROOF THIS GATE MAKES DURABLE. Phase 164.8.3 adds `mt5-not-authorized`
+// to a roster that already had a `prod-prober`-labelled P1 issue OPEN. If issue
+// SELECTION read the defect kind, a new kind could be SUPPRESSED behind an old
+// kind's issue, or could open a SECOND parallel P1 beside it. It does neither,
+// and this is the expression that settles it, quoted verbatim from
+// `.github/workflows/prod-prober.yml`, step `Open or update the prod-prober
+// issue`:
+//
+//     const dedupLabel = "prod-prober";
+//     …
+//     const { data: existing } = await github.rest.issues.listForRepo({
+//       owner: context.repo.owner,
+//       repo: context.repo.repo,
+//       state: "open",
+//       labels: dedupLabel,
+//       per_page: 1,
+//     });
+//
+// The key is the CONSTANT STRING `"prod-prober"`. It is not derived from the
+// defect kind, the subject, the remedy, the defect count or the title. The
+// comment body is `["```", armsLine, "", table, "```"].join("\n")` where
+// `table = lines.slice(tableAt)` from the first `❌` line VERBATIM — so the
+// slicing is kind-agnostic too and a new kind's row reaches the operator whole,
+// remedy included.
+//
+// ⭐ The gate ranges over the EXPORTED `DEFECT_KINDS`, never a hand-typed list,
+// so it widened by itself the moment `mt5-not-authorized` was registered.
+//
+// ⚠️ ACCEPTED, RECORDED CONSEQUENCE — not a defect: while an issue is open the
+// step comments and returns, so the issue's TITLE and BODY keep whatever the
+// first filing said and only the newest COMMENT carries the new kind. Editing
+// that history is prohibited; the operator reads the newest comment.
+// ---------------------------------------------------------------------------
+
+const AUTO_ISSUE_ANCHOR = "- name: Open or update the prod-prober issue";
+
+/**
+ * The header of the NEXT step, at the job's step indent.
+ *
+ * ⚠️ ABSENT AT HEAD, ON PURPOSE. The auto-issue step is currently the LAST step
+ * in `prod-prober.yml`, so this anchor does not resolve and the last-step branch
+ * of `autoIssueStep` is the one that actually runs today. That is exactly why
+ * the branch is written out instead of being left implicit.
+ */
+const NEXT_STEP_ANCHOR = "\n      - name: ";
+
+/**
+ * The auto-issue step's slice, BOUNDED at the next step header. A missing START
+ * anchor THROWS by name — never `-1`.
+ *
+ * ⛔ THIS USED TO BE `text.slice(anchorIndex(text, AUTO_ISSUE_ANCHOR))`, i.e. to
+ * EOF, and it was correct only because the auto-issue step HAPPENS to be last.
+ * Appending any step after it would have silently widened the subject of every
+ * assertion documented as "the auto-issue step's slice" — including the
+ * load-bearing kind-independence one, which would then have been reporting a
+ * kind that belongs to somebody ELSE'S step while blaming issue selection.
+ * Step order is not a property this file should depend on.
+ *
+ * ⚠️ THE LAST-STEP CASE IS A DECISION, NOT A DEGENERATE SLICE. It is reached
+ * only when no further step header exists, and the start anchor is still
+ * `anchorIndex`-guarded, so neither branch can quietly become "nearly the whole
+ * file" the way a `-1` would.
+ */
+function autoIssueStep(text: string): string {
+  const start = anchorIndex(text, AUTO_ISSUE_ANCHOR);
+  const followingStep = text.indexOf(NEXT_STEP_ANCHOR, start + AUTO_ISSUE_ANCHOR.length);
+  return followingStep < 0
+    ? text.slice(start) // nothing follows this step — run to EOF, deliberately
+    : sliceBetweenAnchors(text, AUTO_ISSUE_ANCHOR, NEXT_STEP_ANCHOR);
+}
+
+/** Regex-escape, so a future kind carrying a metacharacter stays a LITERAL. */
+function reEscape(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Which defect kinds, if any, the given text mentions AS A STRING LITERAL.
+ * `[]` is the contract.
+ *
+ * ⛔ NOT `text.includes(k)`. Two members of the LIVE roster — `floor` and
+ * `absurdity` — are ORDINARY ENGLISH WORDS, and the step this runs over is
+ * largely comments. A substring scan therefore reds on innocuous future prose
+ * ("raise the floor", "an absurdity check") under a failure message reading
+ * *"selection has stopped being kind-independent"* — so whoever hit it would be
+ * told issue selection had broken when nothing had, with no way to tell that
+ * from the real thing. A gate that cannot distinguish a comment from a code
+ * path is not measuring what its own message names.
+ *
+ * WHAT IT MEASURES NOW: the kind appears with identifier boundaries on both
+ * sides (so `mt5-no-ipc` does not match inside `mt5-no-ipc-v2`) AND with a
+ * QUOTE or BACKTICK on at least one side — which is how a kind reaches the
+ * `actions/github-script` selection expression this gate is about.
+ *
+ * ⚠️ WHAT IT NO LONGER CATCHES, recorded rather than hidden: a kind pasted into
+ * an UNQUOTED YAML scalar (`labels: prod-prober-mt5-no-ipc`). That is a real
+ * narrowing against `includes`, accepted on two grounds — the selection this
+ * guards is JavaScript, where a kind is a string literal or it is nothing; and
+ * the false-positive class removed is live on two roster members TODAY while
+ * the narrowing is hypothetical.
+ */
+function kindsMentioned(text: string): string[] {
+  return DEFECT_KINDS.filter((k: string) =>
+    new RegExp(`["'\`](?:${reEscape(k)})(?![\\w-])|(?<![\\w-])(?:${reEscape(k)})["'\`]`).test(text),
+  );
+}
+
+describe("[164.8.3-01] AUTO-ISSUE DEDUP — issue selection cannot read a defect kind", () => {
+  it("AUTO-ISSUE DEDUP: the step selects on a CONSTANT label and mentions ZERO defect kinds", () => {
+    const slice = autoIssueStep(WORKFLOW_TEXT);
+    expect(slice.length, "the auto-issue step must be non-trivial for this to mean anything").toBeGreaterThan(1000);
+
+    // The key is declared once, as a constant, and passed as a VARIABLE to the
+    // selection call — not computed at the call site.
+    expect((slice.match(/const dedupLabel = "prod-prober";/g) || []).length).toBe(1);
+    expect((slice.match(/labels: dedupLabel,/g) || []).length).toBe(1);
+    expect(slice).toContain('state: "open",');
+
+    // ⛔ THE LOAD-BEARING ONE. An issue-selection path that reads a defect kind
+    // could suppress a NEW kind behind an OLD kind's open issue, or open a
+    // second parallel P1 beside it — and the operator would see neither the new
+    // row nor its remedy.
+    expect(
+      kindsMentioned(slice),
+      "the auto-issue step mentions a defect kind — selection has stopped being kind-independent",
+    ).toEqual([]);
+    expect(DEFECT_KINDS.length, "an emptied roster would make the filter above vacuous").toBeGreaterThanOrEqual(15);
+    expect(DEFECT_KINDS, "the roster this ranges over must cover the kind 164.8.3 added").toContain(
+      "mt5-not-authorized",
+    );
+  });
+
+  it("AUTO-ISSUE DEDUP: CALIBRATION — a kind-derived label is CAUGHT by the same predicate", () => {
+    const slice = autoIssueStep(WORKFLOW_TEXT);
+    const spliced = "mt5-no-ipc";
+    expect(DEFECT_KINDS, "the mutant must splice a REAL roster member").toContain(spliced);
+    const mutant = slice.replace(
+      'const dedupLabel = "prod-prober";',
+      `const dedupLabel = "prod-prober-" + "${spliced}";`,
+    );
+    expect(mutant, "the mutation must actually change the text").not.toBe(slice);
+    // Same predicate, mutated input: it reports exactly the kind that was spliced.
+    expect(kindsMentioned(mutant)).toEqual([spliced]);
+    expect((mutant.match(/const dedupLabel = "prod-prober";/g) || []).length).toBe(0);
+  });
+
+  it("AUTO-ISSUE DEDUP: CALIBRATION — the slice is BOUNDED, and the matcher does not fire on English prose", () => {
+    // ─── (1) THE BOUNDED SLICE ──────────────────────────────────────────────
+    // ⛔ CONSTRUCTED IN MEMORY. `prod-prober.yml` is BYTE-FROZEN for this phase
+    //    (criterion 5's sibling fence) and no test here ever writes it. The
+    //    appended step exists only in this string.
+    const APPENDED_NAME = "A step appended after the auto-issue step";
+    const appended = `${WORKFLOW_TEXT}\n      - name: ${APPENDED_NAME}\n        run: echo "mt5-no-ipc floor absurdity"\n`;
+    const unbounded = appended.slice(anchorIndex(appended, AUTO_ISSUE_ANCHOR));
+    const bounded = autoIssueStep(appended);
+
+    // The mutation has to reach the subject, or everything below is vacuous.
+    expect(unbounded, "the appended step must actually land inside an UNBOUNDED slice").toContain(APPENDED_NAME);
+    expect(bounded.length, "the bounded slice must still be the real step, not a stub").toBeGreaterThan(1000);
+    expect(bounded, "⛔ THE FINDING: the appended step must be EXCLUDED from the auto-issue slice").not.toContain(
+      APPENDED_NAME,
+    );
+
+    // ⛔ THE LOAD-BEARING CONSEQUENCE. Unbounded, a kind in somebody else's
+    //    step is reported as though issue selection had started reading kinds.
+    expect(
+      kindsMentioned(unbounded),
+      "unbounded, the assertion would have blamed issue selection for a foreign step's text",
+    ).toContain("mt5-no-ipc");
+    expect(kindsMentioned(bounded), "bounded, the foreign step is not this assertion's business").toEqual([]);
+
+    // And the last-step fallback is the branch that runs at HEAD: the real file
+    // has no following step, so the anchor is genuinely absent.
+    expect(
+      WORKFLOW_TEXT.indexOf(NEXT_STEP_ANCHOR, anchorIndex(WORKFLOW_TEXT, AUTO_ISSUE_ANCHOR)),
+      "at HEAD the auto-issue step is LAST — if this ever resolves, the bounded branch is live and that is fine, but say so here",
+    ).toBe(-1);
+
+    // ─── (2) THE MATCHER vs ENGLISH PROSE ───────────────────────────────────
+    expect(DEFECT_KINDS, "this calibration only means something while the roster carries a bare English word").toContain(
+      "floor",
+    );
+    const prose = "          // raise the floor when the absurdity budget is exceeded\n";
+    expect(prose.includes("floor"), "the predicate this replaced really did fire on this prose").toBe(true);
+    expect(
+      kindsMentioned(prose),
+      "⛔ THE FINDING: innocuous prose naming a floor is NOT a defect-kind mention",
+    ).toEqual([]);
+    // ⚠️ AND IT STILL CATCHES THE REAL SHAPE — otherwise the fix above would be
+    //    a scan narrowed into measuring nothing, which is worse than the noise.
+    expect(kindsMentioned('const k = "floor";'), "a quoted kind IS a mention").toEqual(["floor"]);
+    expect(kindsMentioned("const k = `absurdity`;"), "a backticked kind IS a mention").toEqual(["absurdity"]);
+    expect(kindsMentioned('"mt5-no-ipc-v2"'), "a LONGER identifier is not a mention of the shorter kind").toEqual([]);
+  });
+
+  it("AUTO-ISSUE DEDUP: criterion 8 was MET BEFORE THIS PHASE — both status captures and the one `cat`, PINNED", () => {
+    // ⭐ THIS IS A PIN, NOT A NEW REQUIREMENT. Criterion 8 asked for the probe
+    // step's output to survive a failing run. Commit `604d655f` already shipped
+    // it — every branch captures its own status on the same line via
+    // `|| status=$?`, and the `cat "$RUNNER_LOG"` is UNCONDITIONAL and outside
+    // both branches — and narrowed dispatch `34706551355` exercised it. No code
+    // is owed; this test is what stops the claim from rotting.
+    //
+    // ⛔ THE COMMENT FILTER IS LOAD-BEARING AND WAS MEASURED. The workflow's own
+    // 20-line argument QUOTES the idiom it mandates, so an UNFILTERED count
+    // reads 3 and would be satisfied by prose. Counting MATCHES rather than
+    // lines also stops two matches on one line from hiding as one.
+    const code = WORKFLOW_TEXT.split("\n")
+      .filter((l) => !/^\s*#/.test(l))
+      .join("\n");
+    expect(code.length, "the filter must not have eaten the file").toBeGreaterThan(1000);
+    expect(
+      (code.match(/\|\| status=\$\?/g) || []).length,
+      "both probe-step branches must capture their own status ON THE SAME LINE (criterion 8)",
+    ).toBe(2);
+    expect(
+      (code.match(/cat .{0,2}RUNNER_LOG/g) || []).length,
+      "exactly one UNCONDITIONAL `cat \"$RUNNER_LOG\"`, outside both branches (criterion 8)",
+    ).toBe(1);
+    // The filter is a reading, not a formality: unfiltered, the same count is 3.
+    expect((WORKFLOW_TEXT.match(/\|\| status=\$\?/g) || []).length).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [164.8.3-04] THE `-6` BRANCH CAN FAIL — OBSERVED, NOT ASSERTED.
+//
+// ⛔ A CONTROL ONLY EVER APPLIED TO PASSING INPUT IS NOT EVIDENCE. Phase 164.8.3
+// added `mt5-not-authorized` so a real -6 reading stops falling into the
+// residual `mt5-terminal-error`, whose remedy sends the operator to the MT5
+// error table — a WRONG INSTRUCTION that cost two investigations (2026-09-09 and
+// 2026-09-10). Everything else in this repo pins that the new branch EXISTS.
+// These three tests pin that REMOVING it changes the verdict, which is the only
+// statement that distinguishes a live gate from a decorative one.
+//
+// ⭐ THREE `it()`s ON PURPOSE, one property each — the same discipline the
+// `[164.8.5-02] compareManifest totality` block states in its own "FOUR
+// SEPARATE `it()`s ON PURPOSE" note: a single test covering all three would
+// credit ONE red to THREE controls.
+//   #1 CONTROL   — the SHIPPING module classifies `6.txt` as mt5-not-authorized.
+//   #2 FALSIFIER — the mutant, with the `-6` branch excised, falls back to
+//                  mt5-terminal-error. This is the defect, demonstrated.
+//   #3 SURGICAL  — the SAME mutant still reads -10005 and -10004 correctly, so
+//                  #2's red cannot have come from having deleted a region.
+//
+// ⚠️ NOTHING IS WRITTEN INTO THE WORKING TREE. The mutant lives in a
+// `mkdtempSync` directory and is removed in a `finally`, so the `git checkout --`
+// hazard — which restores to HEAD and silently destroys uncommitted work — never
+// arises here at all. That is why this idiom carries the DURABLE half of the
+// proof, and why it re-runs on every CI shard rather than once in a transcript.
+// ---------------------------------------------------------------------------
+
+/** What `classifyProbe` returns. Restated here because the arm is plain `.mjs`. */
+type Mt5Verdict = {
+  kind: string | null;
+  subject: string | null;
+  detail: string | null;
+  info: string | null;
+};
+
+/** The one export the mutant copy is driven through. */
+type MutantMt5Arm = { classifyProbe: (result: unknown) => Mt5Verdict };
+
+/**
+ * The driver that loads the mutant, written beside it in the same temp dir.
+ *
+ * ⚠️ WHY A CHILD PROCESS RATHER THAN `await import()` — MEASURED 2026-09-13,
+ * both failures observed here before this shape was chosen:
+ *   `await import(pathToFileURL(f).href)` -> Cannot find module 'file:///…/T/…/
+ *       mt5-mutant.mjs' imported from …/prod-prober-wiring.test.ts
+ *   `new Function("url", "return import(url)")` -> TypeError: A dynamic import
+ *       callback was not specified.
+ * Vitest rewrites every dynamic import into its own module runner, which
+ * resolves against the Vite project graph and cannot see a file outside the
+ * repo root; escaping that transform lands in a VM context with no import
+ * callback. ⛔ The remedy is NOT to write the mutant somewhere Vite can resolve
+ * — that is the working tree, and this whole idiom exists to stay out of it.
+ * ⭐ Spawning `process.execPath` on the temp file is the STRONGER property
+ * anyway: the mutant is parsed and linked by the SAME Node that runs the real
+ * arm in CI, with no bundler anywhere in the path.
+ */
+const MUTANT_DRIVER_SRC = [
+  'import { classifyProbe } from "./mt5-mutant.mjs";',
+  "process.stdout.write(JSON.stringify(classifyProbe(JSON.parse(process.argv[2]))));",
+  "",
+].join("\n");
+
+// ---------------------------------------------------------------------------
+// THE OTHER HALF OF CRITERION 6 — TWO ON-DISK LEVERS, OBSERVED RED THROUGH THE
+// REAL `--self-test`, EACH DROPPED ALONE.
+//
+// ⭐ The falsifier below proves the CLASSIFIER can fail. It does not prove the
+// SELF-TEST SCENARIO can, and those are different claims: the scenario is what
+// CI actually runs. So each lever was dropped on disk, the runner's own output
+// READ, and the file restored from a `cp` byte backup. ⛔ NEVER `git checkout --`
+// in that harness — it restores to HEAD and silently destroys uncommitted work;
+// byte backups only, re-taken between levers because a backup goes stale the
+// moment the file changes again.
+//
+// MEASURED 2026-09-13, `node scripts/prod-prober/run.mjs --self-test`, exit 1
+// both times. Pasted verbatim — these are the runner's own lines, not a
+// paraphrase, and each lever was run with the OTHER one left live so no single
+// red is credited to two controls.
+//
+//   LEVER 1 — the `-6` branch DELETED from `arms/mt5.mjs` (630 bytes), REMEDIES
+//   left untouched:
+//     === SELF-TEST 24/80: mt5-not-authorized fires on 6.txt, and NOTHING else does ===
+//       ok — 6.txt exits 1 (got 1)
+//       ok — 6.txt ISOLATES exactly one defect (got 1: mt5-terminal-error)
+//     SELF-TEST FAIL: the defect kind is mt5-not-authorized (got mt5-terminal-error)
+//   and, further down, the criterion-2 row check corroborating the same cause:
+//     SELF-TEST FAIL: (a) the -6 fixture's ROW is mt5-not-authorized on subject -6 (got mt5-terminal-error / -6)
+//     === SELF-TEST FAILED ===
+//   RESTORE-CMP-OK (lever 1) — `cmp` against the pristine backup was silent —
+//   then `=== SELF-TEST PASSED: 80/80 scenarios, …` before lever 2 was applied.
+//
+//   LEVER 2 — the `-6` branch left LIVE (verified present, count 1);
+//   `REMEDIES["mt5-not-authorized"]` pointed at the EXACT string
+//   `REMEDIES["mt5-terminal-error"]` already holds (1 -> 2 occurrences):
+//     ok — every mt5 kind carries a REMEDIES entry of at least 40 chars — a defect row that says what broke but not what to do is an alert nobody acts on
+//     SELF-TEST FAIL: no two mt5 remedies are the same string — two kinds with one remedy is two kinds pretending to be one
+//   and, further down, the criterion-2 remedy check corroborating the same cause:
+//     SELF-TEST FAIL: (b) ⛔ SUCCESS CRITERION 2: the -6 ROW's remedy names all FOUR required elements — VNC console=false, "Save password"=false, Expert Advisors=false, Journal=false
+//     === SELF-TEST FAILED ===
+//   RESTORE-CMP-OK (lever 2) — `cmp` silent again — then
+//     === SELF-TEST PASSED: 80/80 scenarios, every arm's kinds fired on their own fixtures and nowhere else ===
+//   with `git status --porcelain -- scripts/` silent, so the working tree is
+//   byte-identical to what it was before the harness ran.
+//
+// ⚠️ STATED LIMIT. Nothing in CI re-runs the two levers; a gate can only prove
+// this RECORD exists, not that it was observed. That asymmetry is exactly why
+// the three `it()`s below carry the re-running half of the proof.
+// ---------------------------------------------------------------------------
+
+describe("[164.8.3-04] the -6 branch is load-bearing (criterion 6)", () => {
+  const MT5_ARM_PATH = join(PROBER_DIR, "arms", "mt5.mjs");
+  const MT5_FIXTURES = join(PROBER_DIR, "fixtures", "mt5");
+  const MT5_ARM_TEXT = readFileSync(MT5_ARM_PATH, "utf8");
+
+  /** The `-6` branch's opening line, and the block terminator that closes it. */
+  const MINUS_SIX_ANCHOR = "  if (code === -6 && probe.initialize !== true) {";
+  const BLOCK_TERMINATOR = "\n  }\n";
+
+  /**
+   * One fixture transcript, shaped exactly as the arm's own caller shapes a
+   * `seams.ssh` result (`arms/mt5.mjs` `run()` → `classifyProbe(result)`).
+   */
+  const probeResultFor = (fixture: string) => ({
+    status: 0,
+    stdout: readFileSync(join(MT5_FIXTURES, fixture), "utf8"),
+    stderr: "",
+    timedOut: false,
+    measureFail: null,
+  });
+
+  /**
+   * The arm with the `-6` branch — and NOTHING else — removed.
+   *
+   * ⛔ `anchorIndex`, never `indexOf`. On a miss `indexOf` returns `-1`, and
+   * `slice(0, -1)` is nearly the WHOLE string, so a RENAMED or MOVED branch
+   * would yield a mutant that is a near-copy of the original and a falsifier
+   * that passes for the wrong reason. `anchorIndex` throws and names the anchor
+   * (ANCHOR DISCIPLINE — see the `⛔ ANCHOR DISCIPLINE` block above
+   * `anchorIndex`'s own definition at the head of this file).
+   */
+  function exciseMinusSixBranch(text: string): string {
+    const start = anchorIndex(text, MINUS_SIX_ANCHOR);
+    const end = anchorIndex(text, BLOCK_TERMINATOR, start) + BLOCK_TERMINATOR.length;
+    return text.slice(0, start) + text.slice(end);
+  }
+
+  /**
+   * Build the mutant in a temp directory, drive `fn` through it, and remove the
+   * directory in a `finally`. The mutant NEVER lands under `scripts/`.
+   */
+  function withMutantArm<T>(fn: (arm: MutantMt5Arm) => T): T {
+    // ⭐ THE PROPERTY THAT MAKES THIS WHOLE IDIOM POSSIBLE: the arm has ZERO
+    // `import`/`require` statements, so a copy of it stands alone in a temp
+    // directory with no module graph to resolve. Pinned rather than assumed, so
+    // a future import added to the arm reveals itself HERE, by name, instead of
+    // as a puzzling module-not-found inside a mutant nobody is looking at.
+    expect(
+      MT5_ARM_TEXT.split("\n").filter((l) => /^\s*import\s/.test(l) || /\brequire\s*\(/.test(l)),
+      "arms/mt5.mjs has acquired a module dependency — the standalone mutant copy below can no longer resolve it",
+    ).toEqual([]);
+
+    const mutant = exciseMinusSixBranch(MT5_ARM_TEXT);
+    expect(mutant, "the excision must actually change the text, or every assertion below is vacuous").not.toBe(
+      MT5_ARM_TEXT,
+    );
+    expect(
+      mutant.includes(MINUS_SIX_ANCHOR),
+      "the mutant must no longer contain the -6 branch it was built to remove",
+    ).toBe(false);
+    expect(
+      MT5_ARM_TEXT.length - mutant.length,
+      "the excision must be BRANCH-SIZED — a huge delta means the block terminator matched far past the branch",
+    ).toBeLessThan(1200);
+
+    const dir = mkdtempSync(join(tmpdir(), "mt5-minus-six-falsifier-"));
+    try {
+      writeFileSync(join(dir, "mt5-mutant.mjs"), mutant, "utf8");
+      const driver = join(dir, "drive.mjs");
+      writeFileSync(driver, MUTANT_DRIVER_SRC, "utf8");
+      const arm: MutantMt5Arm = {
+        classifyProbe: (result: unknown) => {
+          // `execFileSync` — no shell, so the JSON argument is passed as ONE
+          // argv entry and nothing in it is ever interpreted.
+          const out = execFileSync(process.execPath, [driver, JSON.stringify(result)], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          return JSON.parse(out) as Mt5Verdict;
+        },
+      };
+      return fn(arm);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("164.8.3 FALSIFIER — CONTROL: the SHIPPING arm reads 6.txt as mt5-not-authorized on subject -6", () => {
+    const verdict = classifyProbe(probeResultFor("6.txt"));
+    expect(verdict.kind, "the shipped classifier must name the -6 state as its own kind").toBe("mt5-not-authorized");
+    expect(verdict.subject, "carrying the raw code, so a PUBLIC log stays greppable by what the operator saw").toBe(
+      "-6",
+    );
+  });
+
+  it("164.8.3 FALSIFIER — with the `-6` branch EXCISED, the same transcript falls back to mt5-terminal-error", () => {
+    withMutantArm((arm) => {
+      const verdict = arm.classifyProbe(probeResultFor("6.txt"));
+      expect(
+        verdict.kind,
+        "WITHOUT the -6 branch a real live -6 reading lands in the unguarded tail, whose remedy tells the " +
+          "operator to read the code against the MT5 error table — the WRONG INSTRUCTION this phase removed. " +
+          "This test going green is what proves the branch is load-bearing rather than decorative.",
+      ).toBe("mt5-terminal-error");
+    });
+  });
+
+  it("164.8.3 FALSIFIER — SURGICAL: the SAME mutant still reads -10005 and -10004 correctly", () => {
+    withMutantArm((arm) => {
+      // ⭐ SEPARATE STATEMENTS, not one `&&` chain: a first failure must not
+      // mask the second reading.
+      expect(
+        arm.classifyProbe(probeResultFor("10005.txt")).kind,
+        "the excision must have removed ONE branch, not the classifier tail — otherwise the falsifier above " +
+          "would go green just as well on a mutant that classifies nothing at all",
+      ).toBe("mt5-ipc-timeout");
+      expect(
+        arm.classifyProbe(probeResultFor("10004.txt")).kind,
+        "and the branch ABOVE the excision is equally untouched",
+      ).toBe("mt5-no-ipc");
+    });
   });
 });

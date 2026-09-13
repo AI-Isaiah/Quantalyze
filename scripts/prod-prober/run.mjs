@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 78;
+export const SELF_TEST_SCENARIOS = 80;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -156,8 +156,14 @@ export const SELF_TEST_SCENARIOS = 78;
  * ⚠️ ALL TWENTY KINDS WERE REGISTERED UP FRONT in plan 01, including the cron
  * and mt5 kinds no arm raised yet. Plans 03 and 04 then added SCENARIOS, not
  * kinds, and the wiring test's `EXPECTED_DEFECT_KINDS` pin never had to move
- * for an arm that was always going to land. ✅ Every one of the twenty is now
- * raised by a registered arm and asserted BY NAME in `selfTest`.
+ * for an arm that was always going to land.
+ *
+ * ⚠️ THE TWENTY-FIRST, `mt5-not-authorized`, WAS NOT REGISTERED UP FRONT — it
+ * landed in phase 164.8.3 with its fixture, its remedy, its `KIND_ASSERTIONS`
+ * entry and both scenario counters in the SAME commit, because every gate below
+ * refuses a partial landing. That is the rule, not an exception to it.
+ * ✅ Every one of the twenty-one is now raised by a registered arm and asserted
+ * BY NAME in `selfTest`.
  */
 export const DEFECT_KINDS = [
   // harness-wide
@@ -179,6 +185,10 @@ export const DEFECT_KINDS = [
   // mt5 (plan 04)
   "mt5-no-ipc",
   "mt5-ipc-timeout",
+  // Added in phase 164.8.3: -6 has exactly ONE cause and ONE remedy, so
+  // reporting it as the residual `mt5-terminal-error` handed the operator a
+  // lookup instruction instead of the fix. Two real investigations paid for it.
+  "mt5-not-authorized",
   "mt5-ssh-transport",
   "mt5-probe-timeout",
   "mt5-terminal-error",
@@ -909,18 +919,28 @@ const ARM_FIXTURE_TABLE = [
     // every extra call into the container is another thing that can wedge the
     // terminal this arm exists to observe.
     greenSeamCalls: 1,
-    // ⚠️ FOUR kinds, not five. `mt5-probe-timeout` is deliberately NOT in this
+    // ⚠️ FIVE kinds, not six. `mt5-probe-timeout` is deliberately NOT in this
     // table: it is a property of the SPAWN (the prober's own 120 s budget
     // elapsed), so there is no stdout a transcript could contain that would
     // produce it. It gets its own scenario below, with its own by-name
     // assertion and an explicit absence check against the terminal's -10005 —
     // which is the boundary MT5-WEDGE-OBS-01 turns on.
-    kinds: ["mt5-no-ipc", "mt5-ipc-timeout", "mt5-ssh-transport", "mt5-terminal-error"],
+    kinds: [
+      "mt5-no-ipc",
+      "mt5-ipc-timeout",
+      "mt5-not-authorized",
+      "mt5-ssh-transport",
+      "mt5-terminal-error",
+    ],
     load: loadFixtureText,
     makeSeams: (text) => createSeams({ sshRunner: fixtureSsh({ stdout: text }) }),
     red: {
       "10004.txt": "mt5-no-ipc",
       "10005.txt": "mt5-ipc-timeout",
+      // ONE code, ONE cause, ONE remedy — which is exactly why it is NOT in the
+      // catch-all below: the residual's remedy sends the reader to an error
+      // table, and for -6 that lookup IS the defect (phase 164.8.3).
+      "6.txt": "mt5-not-authorized",
       "no-probe-line.txt": "mt5-ssh-transport",
       // TWO fixtures, ONE kind, two different causes on the same side of the
       // bridge: initialize() failing with a NON-IPC code, and initialize()
@@ -1006,6 +1026,7 @@ export async function selfTest() {
     "manifest-invalid": (d) => d.kind === "manifest-invalid",
     "mt5-no-ipc": (d) => d.kind === "mt5-no-ipc",
     "mt5-ipc-timeout": (d) => d.kind === "mt5-ipc-timeout",
+    "mt5-not-authorized": (d) => d.kind === "mt5-not-authorized",
     "mt5-ssh-transport": (d) => d.kind === "mt5-ssh-transport",
     "mt5-terminal-error": (d) => d.kind === "mt5-terminal-error",
     // ⚠️ Not reachable from the fixture table (see the mt5 entry's `kinds`
@@ -3675,27 +3696,44 @@ export async function selfTest() {
         log: quiet,
       });
       const d = r.defects[0] || {};
+      // ⛔ THE ABSENCE LEG IS ITS OWN STATEMENT, AND ITS LIST IS ROSTER-DERIVED.
+      //    As a by-name list at the tail of an `&&` chain it could not fail:
+      //    `defects.length === 1` and `d.kind === "mt5-ssh-transport"` had
+      //    already passed, so an absence check over a list that excludes
+      //    mt5-ssh-transport was true BY CONSTRUCTION — and on any earlier red
+      //    the `&&` short-circuited before it ever ran. Two changes make it a
+      //    reading: the list is `VERDICT_KINDS` minus the expected kind, so it
+      //    WIDENS BY ITSELF when a kind is registered (absence list C at
+      //    `noDefectOfKind`'s roster-derived call site already spells it this
+      //    way), and the leg is evaluated even when the `d.kind` pin is red —
+      //    which is the only run in which it has anything to say.
+      pass = expect(r.exitCode === 1, `a 255 with no PROBE line exits 1 (got ${r.exitCode})`) && pass;
       pass =
-        expect(r.exitCode === 1, `a 255 with no PROBE line exits 1 (got ${r.exitCode})`) &&
-        expect(r.defects.length === 1, `it ISOLATES one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
-        expect(d.kind === "mt5-ssh-transport", `the kind is mt5-ssh-transport (got ${d.kind})`) &&
+        expect(r.defects.length === 1, `it ISOLATES one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) && pass;
+      pass = expect(d.kind === "mt5-ssh-transport", `the kind is mt5-ssh-transport (got ${d.kind})`) && pass;
+      pass =
         expect(
           String(d.detail).includes("railway ssh exit 255"),
-          `the detail REPORTS the CLI's own exit status (${JSON.stringify(d.detail)}) — mt5-diag.sh:45-46 pipes into grep and throws that status away`,
-        ) &&
+          `the detail REPORTS the CLI's own exit status (${JSON.stringify(d.detail)}) — mt5-diag.sh's own ssh-into-grep pipeline throws that status away`,
+        ) && pass;
+      pass =
         expect(
           String(d.detail).includes("connection closed by remote host"),
           "and carries the first redacted stderr line, which is the only part of stderr that may be printed",
-        ) &&
+        ) && pass;
+      pass =
         expect(
           !String(d.detail).includes("python3: command not found"),
           "and does NOT echo raw ssh stdout — only the PROBE line and one stderr line may leave this arm",
-        ) &&
+        ) && pass;
+      pass =
         expect(
-          noDefectOfKind(r.defects, ["mt5-no-ipc", "mt5-ipc-timeout", "mt5-probe-timeout", "mt5-terminal-error"]),
-          "a transport failure is NOT reported as any statement about the terminal — nothing was measured about MT5 at all",
-        ) &&
-        pass;
+          noDefectOfKind(
+            r.defects,
+            VERDICT_KINDS.filter((k) => k !== "mt5-ssh-transport"),
+          ),
+          `a transport failure is NOT reported as any statement about the terminal — nothing was measured about MT5 at all (absence spelled through the ${VERDICT_KINDS.length - 1} other verdict kinds, not a hand-typed list)`,
+        ) && pass;
 
       // ⛔ THE POSITIVE CONTROL FOR THE SAME PROPERTY, and the more dangerous
       // direction. `scripts/mt5-diag.sh:45-46` pipes ssh into `grep '^PROBE '`,
@@ -3759,29 +3797,39 @@ export async function selfTest() {
     });
     const d = r.defects[0] || {};
     const byName = KIND_ASSERTIONS["mt5-probe-timeout"];
+    // ⛔ SAME TREATMENT AS THE TRANSPORT SCENARIO'S ABSENCE LEG, for the same
+    //    reason: a hand-typed list at the tail of an `&&` chain, behind pins
+    //    that already fixed the outcome, is an assertion that cannot fail.
+    //    Roster-derived, and its own statement.
+    pass = expect(r.exitCode === 1, `a timed-out spawn exits 1 (got ${r.exitCode})`) && pass;
     pass =
-      expect(r.exitCode === 1, `a timed-out spawn exits 1 (got ${r.exitCode})`) &&
-      expect(r.defects.length === 1, `it ISOLATES one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
-      expect(d.kind === "mt5-probe-timeout", `the kind is mt5-probe-timeout (got ${d.kind})`) &&
-      expect(byName(d), "the independently spelled KIND_ASSERTIONS entry for mt5-probe-timeout agrees") &&
-      expect(d.arm === "mt5", `the defect is attributed to mt5 (got ${d.arm})`) &&
+      expect(r.defects.length === 1, `it ISOLATES one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) && pass;
+    pass = expect(d.kind === "mt5-probe-timeout", `the kind is mt5-probe-timeout (got ${d.kind})`) && pass;
+    pass = expect(byName(d), "the independently spelled KIND_ASSERTIONS entry for mt5-probe-timeout agrees") && pass;
+    pass = expect(d.arm === "mt5", `the defect is attributed to mt5 (got ${d.arm})`) && pass;
+    pass =
       expect(
         d.remedy === MT5_MOD.REMEDIES["mt5-probe-timeout"],
         "it carries the mt5-probe-timeout remedy, which says this is OUR instrument's budget",
-      ) &&
+      ) && pass;
+    pass =
       expect(
         String(d.detail).includes("-10005") && String(d.detail).includes("NOT"),
         `the detail says in words that this is NOT the terminal's -10005 (${JSON.stringify(d.detail)})`,
-      ) &&
+      ) && pass;
+    pass =
       expect(
-        noDefectOfKind(r.defects, ["mt5-ipc-timeout", "mt5-no-ipc", "mt5-ssh-transport"]),
-        "and NONE of the three states that would send an operator to the gateway fired — the prober blamed itself, correctly",
-      ) &&
+        noDefectOfKind(
+          r.defects,
+          VERDICT_KINDS.filter((k) => k !== "mt5-probe-timeout"),
+        ),
+        `and NONE of the states that would send an operator to the gateway fired — the prober blamed itself, correctly (absence spelled through the ${VERDICT_KINDS.length - 1} other verdict kinds, not a hand-typed list)`,
+      ) && pass;
+    pass =
       expect(
         MT5_MOD.REMEDIES["mt5-probe-timeout"] !== MT5_MOD.REMEDIES["mt5-ipc-timeout"],
         "the two 'timeout' remedies are different strings",
-      ) &&
-      pass;
+      ) && pass;
   }
 
   // -------------------------------------------------------------------------
@@ -3809,12 +3857,18 @@ export async function selfTest() {
     if (!g.ok) {
       pass = expect(false, g.reason) && pass;
     } else {
+      // ⭐ A CAPTURING logger rather than `quiet`. The OK info line is the only
+      //    thing this arm tells an operator on a healthy terminal, and it is
+      //    observable end-to-end nowhere else — `verdict.info` is one call
+      //    short of the log, and the arm's source is not the string that
+      //    reaches the Actions log or the auto-filed issue.
+      const lines = [];
       const r = await runProber({
         arms: [MT5_MOD.ARM],
         env: { ...SELFTEST_ENV },
         seams: createSeams({ sshRunner: fixtureSsh({ stdout: g.data, capture }) }),
         armsFloor: 1,
-        log: quiet,
+        log: (s) => lines.push(s),
       });
       const argv = capture[0] || [];
       // The payload now lives INSIDE the single word after `--` (see
@@ -3916,6 +3970,367 @@ export async function selfTest() {
           `each row names its own code as the subject (${row4.subject} / ${row5.subject})`,
         ) &&
         pass;
+
+      // ─── 164.8.3 CRITERION 7 — the OK info line's FIELD SET ──────────────
+      // D-05 settles the shape at two booleans exactly, because
+      // `docs/runbooks/mt5-go-live.md` Step 2 states the verification as
+      // "terminal_info() must report connected: true AND trade_allowed: true.
+      // Both, not either". This group pins that SET on the CAPTURED LOG LINE.
+      //
+      // ⛔ FOUR SEPARATE `expect` CALLS, each its own statement rather than a
+      //    link in an `&&` chain, so one broken property names itself instead
+      //    of crediting a single RED to four controls — and so a failure in
+      //    the first does not silently prevent the other three from running.
+      //
+      // ⚠️ THE NEGATIVE IS WRITTEN OVER A RUNTIME STRING, NEVER OVER SOURCE.
+      //    `arms/mt5.mjs` legitimately MENTIONS `build` in the comment
+      //    explaining why the field was dropped; a source grep would make that
+      //    comment self-invalidating. The line an operator reads is the only
+      //    honest place to assert what the arm stopped printing.
+      const mt5Lines = lines.map(String).filter((l) => l.startsWith("mt5: "));
+      const infoLine = String(mt5Lines[0] || "");
+      const carriesBuild = (s) => /build=/.test(s);
+      // CALIBRATION input for the negative below.
+      //
+      // ⛔ THE MUTANT IS DERIVED FROM THE LIVE LINE, NEVER TYPED. This leg
+      //    shipped as `` `${infoLine} build=6182` `` — the mutant carried the
+      //    exact literal `carriesBuild` greps for, so BOTH halves were true no
+      //    matter what the arm did. It proved only that the predicate is not
+      //    INVERTED; it said nothing about the system, unlike CRITERION 2's
+      //    leg (d), which splices a live `REMEDIES` string.
+      //
+      //    So the mutant now RENAMES a field the arm REALLY EMITTED: the `=`
+      //    is borrowed from the arm's own output instead of being typed here.
+      //    What that buys, concretely and measured: if the arm ever printed an
+      //    excluded D-05 field with a NON-`=` separator — ` build:6182` — the
+      //    negative below passes VACUOUSLY (`/build=/` does not match
+      //    `build:6182`) and its ok line reads "carries NO build=" beside a log
+      //    line that carries one. Under the typed mutant the whole self-test
+      //    stayed 80/80 and exit 0 through exactly that. Under this one the leg
+      //    goes RED, because the renamed tail loses its `=` too.
+      //
+      // ⚠️ WHAT IT DOES NOT CLAIM: this is still a calibration, not a second
+      //    negative. It says the predicate can REJECT a build-bearing line
+      //    derived from the arm's own field syntax. The assertion that the
+      //    shipped line carries no build field is the leg below it.
+      const lastField = infoLine.slice(infoLine.lastIndexOf(" ") + 1);
+      const withBuild = `${infoLine} ${lastField.replace(/^[^=]*/, "build")}`;
+      pass =
+        expect(
+          mt5Lines.length === 1,
+          `164.8.3 CRITERION 7: the green ok.txt run logs EXACTLY ONE "mt5: " line (got ${mt5Lines.length}: ${JSON.stringify(mt5Lines)})`,
+        ) && pass;
+      pass =
+        expect(
+          infoLine.includes("connected="),
+          `164.8.3 CRITERION 7: that line names connected= — half of the runbook's two-field criterion (${JSON.stringify(infoLine)})`,
+        ) && pass;
+      pass =
+        expect(
+          infoLine.includes("trade_allowed="),
+          `164.8.3 CRITERION 7: that line names trade_allowed= — the other half, and "both, not either" is the criterion (${JSON.stringify(infoLine)})`,
+        ) && pass;
+      pass =
+        expect(
+          !carriesBuild(infoLine),
+          `164.8.3 CRITERION 7: and it carries NO build= — D-05 says two booleans exactly, and build is one of the three fields the founder excluded (${JSON.stringify(infoLine)})`,
+        ) && pass;
+      pass =
+        expect(
+          withBuild !== infoLine && carriesBuild(withBuild),
+          `164.8.3 CRITERION 7 CALIBRATION: the mutant — the live line with its OWN LAST FIELD renamed to build, so the "=" comes from the arm and not from this file — differs from the original AND the same negative predicate REJECTS it. A RED here means the arm's field syntax has drifted away from the "build=" the negative above greps for, so that negative has stopped being able to see an excluded field (mutant: ${JSON.stringify(withBuild)})`,
+        ) && pass;
+
+      // ─── 164.8.3 CRITERION 7 — the WHOLE-LINE pin ────────────────────────
+      //
+      // ⛔ THIRD RECURRENCE OF ONE SHAPE, SO THIS IS A MECHANISM AND NOT A
+      //    THIRD WIDENING. The control on this line has now been outrun twice,
+      //    each time by something its own message claimed to cover:
+      //      1. `build=` alone — one spelling carrying an exhaustive claim.
+      //         ` tradeapi_disabled=false` shipped GREEN, 80/80, exit 0.
+      //      2. a field-NAME SET — but `[...new Set(names)]` COLLAPSES a
+      //         duplicate, so an APPENDED fifth token `connected=C:\MT5\...`
+      //         shipped GREEN; and nothing constrained the VALUE side, so
+      //         `trade_allowed=true;path=C:\MT5\...` shipped GREEN too.
+      //    Both put a Windows path on a PUBLIC Actions log, beside a message
+      //    asserting "NOTHING else reaches the public log".
+      //    `[164.8.4-SCOPE-DEPTH-AXIS]` names the remedy at a third
+      //    recurrence: make the claim and the check agree BY CONSTRUCTION,
+      //    rather than widening the check one axis at a time.
+      //
+      // ⭐ ONE anchored pin does every axis at once — the field NAMES, their
+      //    ORDER, the TOKEN COUNT (`^`/`$` is what kills the de-dup hole) and
+      //    the VALUE domain. A field cannot be added, renamed, reordered,
+      //    duplicated, or smuggled inside a value without this going RED.
+      // ⚠️ It pins the line the SELF-TEST builds from fixtures, so a value
+      //    domain listed here is a claim about the arm's formatting, not about
+      //    the terminal: `undefined`/`null` are admitted because
+      //    `String(ti.connected)` produces them when the key is absent.
+      const INFO_LINE_PIN =
+        /^mt5: initialize=true last_error=(none|-?\d+) connected=(true|false|undefined|null) trade_allowed=(true|false|undefined|null)$/;
+      // Both mutants are DERIVED from the arm's own output, never typed — the
+      // rule IN-01 established directly above. (a) appends a whole token whose
+      // NAME is already permitted, the shape the field-set control missed;
+      // (b) appends the same text INSIDE the final value, with no space.
+      const mutantAppendedToken = `${infoLine} ${lastField}`;
+      const mutantInValue = `${infoLine};${lastField}`;
+
+      pass =
+        expect(
+          INFO_LINE_PIN.test(infoLine),
+          `164.8.3 CRITERION 7 (E): the info line matches the whole-line pin EXACTLY — field names, order, token count and value domain, anchored end to end, so nothing reaches the PUBLIC Actions log that D-05 did not authorise (got ${JSON.stringify(infoLine)})`,
+        ) && pass;
+      pass =
+        expect(
+          mutantAppendedToken !== infoLine && !INFO_LINE_PIN.test(mutantAppendedToken),
+          `164.8.3 CRITERION 7 (E-CALIBRATION a): APPENDING A WHOLE TOKEN whose name is already permitted differs from the original AND the pin REJECTS it. ⛔ A RED here means the token-count anchor has been lost and a duplicate-named field would ship green — the exact escape that defeated the field-set control this pin replaced (mutant: ${JSON.stringify(mutantAppendedToken)})`,
+        ) && pass;
+      pass =
+        expect(
+          mutantInValue !== infoLine && !INFO_LINE_PIN.test(mutantInValue),
+          `164.8.3 CRITERION 7 (E-CALIBRATION b): SMUGGLING the same text INSIDE the final value, with no space, differs from the original AND the pin REJECTS it. ⛔ A RED here means the value domain has stopped being pinned and a production path could ride inside a permitted field (mutant: ${JSON.stringify(mutantInValue)})`,
+        ) && pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("164.8.3 CRITERION 2: the -6 DEFECT ROW instructs instead of sending the operator to a lookup table, and the residual bucket still DISCRIMINATES (C2, C4, D-03, D-04)");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ EVERY ASSERTION BELOW READS THE DEFECT ROW AN OPERATOR SEES, never
+    // `arm.REMEDIES` directly. A table assertion would stay green even if
+    // `addDefect` stopped attaching the remedy to the row — the one failure
+    // that empties the operator's instruction while leaving the table perfect.
+    //
+    // ⛔ AND THE NEGATIVE IS A ROW PREDICATE, NOT A SOURCE GREP. The surviving
+    // `mt5-terminal-error` remedy legitimately still tells the operator to read
+    // the reported code against the MT5 error table — CORRECT advice for a
+    // genuinely unenumerated code such as the -2 that `init-false-other.txt`
+    // carries. A grep of `arms/mt5.mjs` for that sentence would therefore be
+    // permanently red, or would have to be narrowed into something that
+    // measures nothing. The row string is the only honest place to assert it.
+    const rowFor = async (fixture) => {
+      const fx = loadFixtureText("mt5", fixture);
+      if (!fx.ok) return null;
+      const rr = await runProber({
+        arms: [MT5_MOD.ARM],
+        env: { ...SELFTEST_ENV },
+        seams: createSeams({ sshRunner: fixtureSsh({ stdout: fx.data }) }),
+        armsFloor: 1,
+        log: quiet,
+      });
+      return rr.defects[0] || null;
+    };
+    const row6 = await rowFor("6.txt");
+    const rowIpc = await rowFor("10005.txt");
+    const rowOther = await rowFor("init-false-other.txt");
+    const rowNull = await rowFor("terminal-info-null.txt");
+
+    // The two predicates are written ONCE and applied to BOTH the real string
+    // and its mutant, so a calibration can never drift from the assertion it
+    // calibrates.
+    const saysLookUpTheCode = (s) => /error\s+table/i.test(String(s));
+    // A six-or-more-digit run is the shape of an MT5 account number, and every
+    // remedy here is printed into a PUBLIC Actions log and copied verbatim into
+    // a PUBLIC issue. The dated `2026-08-13` the -6 remedy legitimately carries
+    // is four digits between word boundaries and does not match.
+    const hasAccountShapedRun = (s) => /\b[0-9]{6,}\b/.test(String(s));
+
+    if (row6 === null || rowIpc === null || rowOther === null || rowNull === null) {
+      pass =
+        expect(
+          false,
+          `all four mt5 fixtures must produce a defect row (6.txt=${row6 && row6.kind}, 10005.txt=${rowIpc && rowIpc.kind}, init-false-other.txt=${rowOther && rowOther.kind}, terminal-info-null.txt=${rowNull && rowNull.kind})`,
+        ) && pass;
+    } else {
+      // The mutant is the REAL forbidden sentence, taken from the remedy that
+      // still legitimately carries it — not a paraphrase this file invented.
+      const spliced = `${row6.remedy} ${MT5_MOD.REMEDIES["mt5-terminal-error"]}`;
+      const mt5Kinds = DEFECT_KINDS.filter((k) => k.startsWith("mt5-"));
+      const remedyEntries = Object.entries(MT5_MOD.REMEDIES);
+      const offenders = remedyEntries.filter(([, v]) => hasAccountShapedRun(v)).map(([k]) => k);
+      // ⛔ SYNTHETIC, and it must stay synthetic: a repeated digit that is not
+      // an account, appended to an in-memory copy. No real account number may
+      // be written anywhere in this repo, least of all in a calibration.
+      const digitMutant = `${row6.remedy} account 99999999`;
+      // ⛔ THE REMEDY IS READ AS PLAIN TEXT, IN BOTH PLACES IT LANDS. The
+      // auto-issue step wraps the whole table in a FENCED CODE BLOCK
+      // (`["```", armsLine, "", table, "```"].join("\n")`) and the Actions log
+      // is plain text, so markdown emphasis is never rendered — an operator
+      // reads the asterisks themselves. The -6 remedy shipped with
+      // `**Journal**` and `*Tools → Options → Expert Advisors*`, which put
+      // literal punctuation around the two things this phase exists to tell
+      // the operator to look at. Every other remedy in the table already used
+      // plain prose, so this control lands at zero offenders rather than
+      // grandfathering anything.
+      // ⚠️ BACKTICKS ARE DELIBERATELY NOT SCANNED. Three remedies use them for
+      // file and command names and they are this table's settled convention;
+      // widening this scan to cover them would red four rows to no benefit.
+      const emphasised = remedyEntries.filter(([, v]) => String(v).includes("*")).map(([k]) => k);
+      const emphasisMutant = `${row6.remedy} read the **Journal** tab`;
+
+      // ⛔ ELEVEN SEPARATE `expect` CALLS, each its own statement rather than a
+      //    link in an `&&` chain — the same rule CRITERION 7 states thirty
+      //    lines above, applied here because `expect()` RETURNS FALSE on a red
+      //    and `&&` short-circuits. In the chain this replaced, a rename of
+      //    branch (6b) reddened (a) and then SKIPPED (b) through
+      //    (g-calibration) — including (g), the only gate in this repo standing
+      //    between an MT5 account number and a world-readable Actions log. One
+      //    unrelated regression must not blind the disclosure control, and one
+      //    RED must not be credited to eleven controls.
+      //    The `if (row6 === null || …)` guard above already covers the only
+      //    case where a later leg could THROW, so nothing here depended on the
+      //    short-circuit for safety.
+      pass =
+        expect(
+          row6.kind === "mt5-not-authorized" && row6.subject === "-6",
+          `(a) the -6 fixture's ROW is mt5-not-authorized on subject -6 (got ${row6.kind} / ${row6.subject})`,
+        ) && pass;
+      pass =
+        expect(
+          row6.remedy.includes("VNC console") &&
+            row6.remedy.includes("Save password") &&
+            row6.remedy.includes("Expert Advisors") &&
+            row6.remedy.includes("Journal"),
+          `(b) ⛔ SUCCESS CRITERION 2: the -6 ROW's remedy names all FOUR required elements — VNC console=${row6.remedy.includes("VNC console")}, "Save password"=${row6.remedy.includes("Save password")}, Expert Advisors=${row6.remedy.includes("Expert Advisors")}, Journal=${row6.remedy.includes("Journal")}`,
+        ) && pass;
+      pass =
+        expect(
+          saysLookUpTheCode(row6.remedy) === false,
+          "(c) ⛔ SUCCESS CRITERION 2, THE NEGATIVE: the -6 ROW's remedy carries NO lookup-table instruction — -6 has exactly one cause and exactly one remedy, so sending the operator to an error table IS the defect this phase removed, and it cost two real investigations",
+        ) && pass;
+      pass =
+        expect(
+          spliced !== row6.remedy && saysLookUpTheCode(spliced) === true,
+          "(d) CALIBRATION for (c): the SAME predicate REJECTS an in-memory copy of the -6 remedy with the catch-all's own lookup sentence spliced back in — so (c) is a reading, not a predicate only ever shown passing input",
+        ) && pass;
+      pass =
+        expect(
+          row6.remedy !== rowOther.remedy && row6.remedy.length >= 40 && rowOther.remedy.length >= 40,
+          `(e1) the -6 row and the residual row carry DIFFERENT remedy text, each substantial (${row6.remedy.length} / ${rowOther.remedy.length} chars)`,
+        ) && pass;
+      pass =
+        expect(
+          /modal/i.test(row6.remedy) === false && rowIpc.remedy.includes("Journal") === false,
+          "(e2) and the -6 and -10005 instructions cannot CONVERGE: the -6 remedy carries none of -10005's distinguishing modal-dialog wording, and the -10005 remedy does not name the Journal — two near-duplicates would pass the exact-string uniqueness gate and still fail the operator",
+        ) && pass;
+      pass =
+        expect(
+          rowOther.kind === "mt5-terminal-error" && rowNull.kind === "mt5-terminal-error",
+          `(f1) ⛔ SUCCESS CRITERION 4: BOTH catch-all fixtures still produce mt5-terminal-error (got ${rowOther.kind} / ${rowNull.kind}) — the residual bucket was NARROWED by -6 leaving it, not emptied`,
+        ) && pass;
+      pass =
+        expect(
+          rowOther.subject !== rowNull.subject,
+          `(f2) and their SUBJECTS DIFFER (${rowOther.subject} / ${rowNull.subject}) — one row comes from branch (8)'s unenumerated code and one from branch (7)'s null terminal_info, so the bucket still DISCRIMINATES rather than merely still existing`,
+        ) && pass;
+      pass =
+        expect(
+          mt5Kinds.length > 0 && mt5Kinds.every((k) => typeof MT5_MOD.REMEDIES[k] === "string"),
+          `(g0) the scan below ranges over a LIVE, COMPLETE table: every one of the ${mt5Kinds.length} mt5-* kinds registered in DEFECT_KINDS has a remedy string, so a green scan over a stale or half-landed REMEDIES is impossible`,
+        ) && pass;
+      pass =
+        expect(
+          offenders.length === 0,
+          `(g) THE PUBLIC-LOG CONTROL: no mt5 remedy carries a six-or-more-digit run — the shape of an MT5 account number in a world-readable Actions log and a world-readable issue (offenders: ${offenders.join(", ") || "none"} of ${remedyEntries.length} scanned)`,
+        ) && pass;
+      pass =
+        expect(
+          digitMutant !== row6.remedy && hasAccountShapedRun(digitMutant) === true,
+          "(g-calibration) the SAME predicate FIRES on an in-memory copy with a SYNTHETIC repeated-digit run appended — a real account number is never written anywhere, including here",
+        ) && pass;
+      pass =
+        expect(
+          emphasised.length === 0,
+          `(g2) THE PLAIN-TEXT CONTROL: no mt5 remedy carries markdown emphasis — the auto-issue step wraps this table in a FENCED CODE BLOCK and the Actions log is plain text, so an asterisk is read by the operator as an asterisk, around the very words the -6 row exists to point at (offenders: ${emphasised.join(", ") || "none"} of ${remedyEntries.length} scanned)`,
+        ) && pass;
+      pass =
+        expect(
+          emphasisMutant !== row6.remedy && String(emphasisMutant).includes("*") === true,
+          "(g2-calibration) the SAME predicate FIRES on an in-memory copy with emphasis markers spliced back in — so (g2) is a reading, not a predicate only ever shown passing input",
+        ) && pass;
+
+      // ─── (h) THE -6 ROW READS WHAT IT NARRATES ──────────────────────────
+      // Branch (6b) used to key on the CODE ALONE while its detail asserted
+      // two states it never consulted. These legs drive `classifyProbe`
+      // DIRECTLY with synthetic transcripts, because the states in question
+      // (a live `initialize` beside a stale -6; a -6 beside a live
+      // terminal_info) cannot be reached from a committed fixture without
+      // inventing a production transcript. Nothing here is a real reading:
+      // every field is hand-written in this file.
+      const probeTranscript = (obj) => ({
+        stdout: `Connecting to service mt5-gateway on environment production...\nPROBE ${JSON.stringify(obj)}\n`,
+        status: 0,
+        stderr: "",
+        timedOut: false,
+        measureFail: null,
+      });
+      const minusSix = [-6, "Terminal: Authorization failed"];
+      const staleSix = MT5_MOD.classifyProbe(
+        probeTranscript({ initialize: true, last_error: minusSix, terminal_info: null }),
+      );
+      const realSix = MT5_MOD.classifyProbe(
+        probeTranscript({ initialize: false, last_error: minusSix, terminal_info: null }),
+      );
+      const sixWithInfo = MT5_MOD.classifyProbe(
+        probeTranscript({
+          initialize: false,
+          last_error: minusSix,
+          terminal_info: { connected: true, trade_allowed: false },
+        }),
+      );
+      pass =
+        expect(
+          staleSix.kind === "mt5-terminal-error",
+          `(h1) THE GUARD: a transcript with initialize=TRUE and a stale -6 is NOT reported as mt5-not-authorized — its row would have told the operator "initialize() failed" about a run where initialize returned true (got ${staleSix.kind})`,
+        ) && pass;
+      pass =
+        expect(
+          String(staleSix.detail).includes("initialize ok"),
+          `(h1b) it falls to branch (7) instead, whose detail is TRUE of that state (${JSON.stringify(staleSix.detail)})`,
+        ) && pass;
+      pass =
+        expect(
+          realSix.kind === "mt5-not-authorized" && String(realSix.detail).includes("came back null"),
+          `(h2) CALIBRATION for (h1): the SAME transcript with initialize=FALSE still IS mt5-not-authorized and still carries the null-terminal_info sentence — so (h1)'s verdict comes from the new guard, not from a transcript nothing can classify (got ${realSix.kind})`,
+        ) && pass;
+      pass =
+        expect(
+          sixWithInfo.kind === "mt5-not-authorized" && String(sixWithInfo.detail).includes("came back null") === false,
+          `(h3) THE DERIVED CLAUSE: a -6 arriving BESIDE a live terminal_info is still mt5-not-authorized, but its detail no longer claims terminal_info came back null — the row cannot contradict its own transcript (${JSON.stringify(sixWithInfo.detail)})`,
+        ) && pass;
+
+      // ─── 164.8.3 IN-02 — branch (7) NAMES THE SHAPE IT READ ─────────────
+      // `terminalInfoPresent` is `ti !== null && typeof ti === "object" &&
+      // !Array.isArray(ti)`, so branch (7) catches a STRING, a NUMBER and an
+      // ARRAY as well as null — while its detail said "returned null" about
+      // all four. The string case is not hypothetical: `"present"` is the
+      // sentinel this very arm used to emit before D-05, so a container
+      // running a stale probe body produces it. Same synthetic-transcript
+      // seam as (h1)-(h3); nothing here is a real reading.
+      const tiString = MT5_MOD.classifyProbe(
+        probeTranscript({ initialize: true, last_error: [1, "Success"], terminal_info: "present" }),
+      );
+      const tiArray = MT5_MOD.classifyProbe(
+        probeTranscript({ initialize: true, last_error: [1, "Success"], terminal_info: [] }),
+      );
+      pass =
+        expect(
+          tiString.kind === "mt5-terminal-error" &&
+            String(tiString.detail).includes("got string") &&
+            String(tiString.detail).includes("null") === false,
+          `(h4) THE SHAPE IS READ, NOT ASSERTED: a terminal_info that is the retired "present" STRING lands in branch (7) and its detail names string — it does not tell the operator terminal_info returned null about a run where it returned a string (${JSON.stringify(tiString.detail)})`,
+        ) && pass;
+      pass =
+        expect(
+          tiArray.kind === "mt5-terminal-error" && String(tiArray.detail).includes("got array"),
+          `(h4b) and an ARRAY — the other shape the tightened guard rejects and \`typeof\` alone would call "object" — is named as an array (${JSON.stringify(tiArray.detail)})`,
+        ) && pass;
+      pass =
+        expect(
+          String(staleSix.detail).includes("got null") && String(staleSix.detail).includes("got string") === false,
+          `(h5) CALIBRATION for (h4): the SAME branch on a GENUINELY null terminal_info says null — so the shape word is read off the value, not re-hardcoded to a different constant (${JSON.stringify(staleSix.detail)})`,
+        ) && pass;
     }
   }
 
