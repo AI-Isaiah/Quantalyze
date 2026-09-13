@@ -60,6 +60,12 @@ jobs:
   # `needs:` this — they restore opportunistically and fall back to their own
   # npm ci on a miss, so this never serializes the graph (and is not a gate).
   deps-cache:
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
+    # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
+    # No downstream job `needs:` this one (see the header), so its skip skips
+    # nothing else and it is not an aggregator row — the saving is pure runner time.
+    needs: [changed-paths]
+    if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -162,6 +168,10 @@ jobs:
   # Branch protection still gates on a single check (the aggregator
   # `frontend` job below `needs:` all parallel jobs).
   frontend-typecheck:
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
+    # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
+    needs: [changed-paths]
+    if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -212,6 +222,23 @@ jobs:
       - run: npm run typecheck
 
   frontend-lint:
+    # ⛔ Phase 164.6.3 / CI-DOCSPATH-01 — THIS JOB IS DELIBERATELY NOT FILTERED, and
+    # it carries NEITHER `needs: [changed-paths]` NOR the docs-only conjunct. It is one
+    # of the five always-on gates, beside `plan-anchor-verify`, `secret-scan`,
+    # `version-gate` and `docs-link-check`.
+    # WHY, and it is not obvious from the job name: `npm run lint` is a CHAIN, and its
+    # last link is `tsx scripts/check-planning-hygiene.ts` — the gate whose stated
+    # subject is GSD tooling writing absolute worktree and scratchpad paths into NEW
+    # planning artifacts, on a repo that is PUBLIC with `.planning/` TRACKED, and which
+    # carries `⛔ NO PATH ALLOWLIST — BY CONSTRUCTION`. A `.planning/`-only PR is
+    # precisely the PR class that gate exists to catch, so filtering this job would
+    # have silently regressed the one gate aimed squarely at this phase's own subject.
+    # MEASURED COST OF KEEPING IT: ~70 s on every docs-only PR. Stated so the trade is
+    # legible rather than assumed.
+    # ⚠️ It is ALSO a member of the aggregator's `ALWAYS_ON` shell list below. That is
+    # DEFENCE IN DEPTH and is unreachable today (no `if:`, no `needs:` here means it
+    # can never report `skipped`); it is the only shell-level barrier if a future edit
+    # ever gives this job a skip route. ⛔ Do not delete either half as dead weight.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -269,6 +296,26 @@ jobs:
     # shards halve the runner fan-out without lengthening wall-clock. Also
     # cache vitest's transform graph at node_modules/.vite — on a warm
     # cache the TS/JSX transform step is largely a no-op.
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
+    # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
+    #
+    # ⚠️ THE ACCEPTED CONSEQUENCE, RECORDED HERE RATHER THAN DISCOVERED LATER.
+    # Two assertions hosted by this job take REAL `.planning/**` content as their
+    # subject: `src/__tests__/lint-sql-gates.test.ts` reads `.planning/REQUIREMENTS.md`
+    # and `.planning/ROADMAP.md` and reddens on a planning sentence that still claims
+    # five vacuity shapes, and `src/__tests__/verify-plan-anchors.test.ts` reads Phase
+    # 159's real `159-VERIFICATION.md` and reddens on a falsified closing recipe. On a
+    # `.planning/`-only PR those two no longer run — which is exactly the PR class that
+    # can move their subject. Their detection is therefore DEFERRED, not LOST: the
+    # merge push to main is UNFILTERED (see the `changed-paths` header) and runs them,
+    # and so does the next code PR.
+    # ⛔ The answer is NOT to move `frontend-test` into the always-on set. This job is
+    # most of the saving the filter exists to produce, and buying two deferred
+    # assertions back at that price is the trade this phase declines.
+    # Booked as `[164.6.3-PLANNING-SUBJECT-DEFERRED-DETECTION]`, owner Phase 164.6
+    # GATE-HYGIENE — so the ledger and this comment say the same thing.
+    needs: [changed-paths]
+    if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -381,9 +428,18 @@ jobs:
     # Same job NAME kept so the `frontend` aggregator's needs/result-check
     # wiring is untouched. No tests execute here → shallow checkout is fine
     # (the frozen-spine guards run in the shards, not in a report replay).
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
+    # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
+    # ⭐ The conjunct is EXPLICIT even though this job would inherit the skip through
+    # `needs: frontend-test`. An inherited skip is indistinguishable in the run log
+    # from the other skip causes the aggregator's `sql-tests` arm already warns it
+    # cannot tell apart; CONTEXT.md requires each job's own classification to be
+    # readable, so each filtered job states it for itself.
+    if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     needs:
       - frontend-test
+      - changed-paths
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -438,6 +494,14 @@ jobs:
     # purpose. That is what lets it run identically on a fork PR, which in turn
     # is what lets the aggregator treat ANY non-success (including `skipped`) as
     # a failure with no tolerance arm — see the `frontend:` result loop.
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
+    # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
+    # ⚠️ The paragraph above says a `skipped` here is judged with NO tolerance arm.
+    # That still holds: a skip caused by this `if:` is judged by the aggregator's ONE
+    # uniform docs-only arm, not by an arm of this row's own. What changed is when the
+    # job is invoked, which is a different claim from what a `skipped` means when it is.
+    needs: [changed-paths]
+    if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     services:
       # BOTH images pinned by sha256 DIGEST, never by tag (threats
@@ -609,6 +673,16 @@ jobs:
     # exists yet, so 20 is headroom over an unmeasured pull, NOT a measured total.
     # ⛔ When the first green ubuntu run reports its wall clock, REPLACE this with a
     # value derived from it. Do not answer a crossing by widening it again.
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
+    # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
+    # ⚠️ CORRECTION to the AGGREGATOR ROW paragraph above, which states this job
+    # "carries NO `if:`, holds NO `needs:`" and again that it "has no `needs:` of its
+    # own to skip through". As of this phase it holds both, and ONLY these two: the
+    # detector edge and the docs-only conjunct. Every other clause of that paragraph
+    # stands — no secret, no repo variable, no shared resource, no mutex — so its row
+    # keeps the STRICT DEFAULT ARM with no tolerance of its own.
+    needs: [changed-paths]
+    if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -712,6 +786,10 @@ jobs:
     # per-PR functional gate, (b) Dependabot/Snyk already cover the
     # critical-severity surface continuously, and (c) keeping it on the
     # per-PR critical path adds 15-30s with no behavior signal.
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
+    # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
+    needs: [changed-paths]
+    if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -809,6 +887,12 @@ jobs:
     # it never gates a merge; it surfaces NEW unused files/deps in the run
     # summary so the dead-code drift this finding cleaned up cannot silently
     # re-accumulate. Promote to a gate once the exports/types baseline is zero.
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
+    # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
+    # `knip` is deliberately NOT an aggregator row (see the header), so nothing judges
+    # its skip either way; the saving here is pure runner time.
+    needs: [changed-paths]
+    if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -873,6 +957,10 @@ jobs:
     # The seed-gated e2e specs now rebuild locally inside the e2e job
     # with the real env, and that rebuilt `.next/` stays on the runner
     # FS — it is never uploaded as an artifact.
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
+    # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
+    needs: [changed-paths]
+    if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -1449,6 +1537,16 @@ jobs:
     # rule's one permitted raise was already taken above, and 20 is the CEILING,
     # so there is nothing to raise: a future crossing is answered by
     # [REDUNDER-SUBSET-SPLIT], not by a third value.
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
+    # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
+    # ⚠️ CORRECTION to the two paragraphs above, which say this job has "no `if:`" and
+    # "NO `if:`". It now has exactly one, and only this one. The consequence those
+    # paragraphs draw is UNCHANGED: it consumes no secret, no repo variable and no
+    # shared resource, so it keeps the aggregator's STRICT default arm with no
+    # tolerance of its own, and a `skipped` under a CODE classification is still
+    # always a real fault.
+    needs: [changed-paths]
+    if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -2630,7 +2728,15 @@ jobs:
     # fuller derivation on the `python` job's identical TTL comment.
     # ⛔ The holder's `pg_sleep` must stay ABOVE this number (WR-01) — it is 6000s.
     timeout-minutes: 90
-    if: (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true'
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
+    # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
+    # ⭐ The docs-only conjunct goes FIRST and the pre-existing condition is conjoined
+    # behind it, on ONE physical line — `critical-regressions.test.ts` matches this
+    # `if:` with a single-line regex and a fold would read as a lost job-level gate.
+    # ⭐ EXPLICIT, not inherited: this job would skip anyway through `needs: python`,
+    # but its aggregator arm already warns that the loop cannot tell two skip causes
+    # apart, and an inherited skip would make a third indistinguishable one.
+    if: needs.changed-paths.outputs.docs_only != 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true'
     # Phase 142.1 (D-05): this job must SERIALIZE against the `python` and
     # `e2e-seeded` jobs. These SQL files run against the ONE
     # shared Supabase test project (`secrets.TEST_SUPABASE_DB_URL`), and
@@ -2697,7 +2803,14 @@ jobs:
     # `github.event_name == 'push'` (false on dispatch) while `e2e-seeded` only
     # requires `!= 'pull_request'` (true) — so the chain would disable
     # `e2e-seeded` on every manual run and trip the aggregator's skip check.
-    # `python` carries no `if:`, so this job's own dependency is always safe.
+    # ⚠️ CORRECTED, Phase 164.6.3 / CI-DOCSPATH-01. This line read "`python` carries no
+    # `if:`, so this job's own dependency is always safe". `python` now carries exactly
+    # one `if:` — the docs-only conjunct — so the edge CAN now skip this job. That is
+    # harmless here and only here: the two conditions do not diverge, because this job
+    # carries the SAME conjunct first in its own `if:` and would skip on the same input
+    # anyway. ⛔ The ban the paragraph above states is unchanged: no NEW `needs:` edge
+    # among these three DB-touching jobs, and no edge whose `if:` diverges from this
+    # job's own.
     # Found by the /ship pre-landing review, 2026-08-03. The mutex does NOT
     # change this: it serializes without any `needs:` edge, which is precisely
     # why no new edge among these three jobs is warranted.
@@ -2707,6 +2820,7 @@ jobs:
     # depended on for ordering.)
     needs:
       - python
+      - changed-paths
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -3782,6 +3896,18 @@ jobs:
             'docs/runbooks/**/*.md'
 
   python:
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
+    # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
+    # ⚠️ MUTEX COUNT, CORRECTED WHERE THE EVIDENCE WILL BE COUNTED. THREE jobs take
+    # the shared-TEST advisory lock `61616158` per run, not two — `python` (this job),
+    # `e2e-seeded` and `sql-tests`, exactly as this job's own 158-REVIEW CR-04
+    # derivation below already states. `.planning/ROADMAP.md`, the `[CI-DOCSPATH-01]`
+    # TODOS entry and this phase's CONTEXT.md all name only two and all undercount;
+    # `python` is the forgotten taker. A docs-only PR must therefore show THREE absent
+    # acquires in its run log, not two, and this phase's criterion-5 evidence must
+    # account for all three.
+    needs: [changed-paths]
+    if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     # TTL for the shared-test-db mutex (Phase 158 / OPS-01): GitHub kills the job
     # at 90m, the psql session drops, and Postgres releases the advisory lock.
@@ -4211,6 +4337,13 @@ jobs:
     # The former C-0300 --grep sentinel gate (whose only job was to fail
     # until baselines landed) has been dropped; the sentinel test itself
     # is harmless and still runs as part of the full spec.
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
+    # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
+    # ⭐ EXPLICIT, not inherited: this job would skip anyway through
+    # `needs: frontend-build/frontend-typecheck`, but an inherited skip is
+    # indistinguishable in the run log from the other skip causes. Each filtered job
+    # states its own classification (CONTEXT.md).
+    if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     # PR-B: depend on frontend-build (for the artifact) PLUS frontend-typecheck
     # so e2e doesn't burn ~3-5min when a typecheck failure is already known.
@@ -4224,6 +4357,7 @@ jobs:
     needs:
       - frontend-build
       - frontend-typecheck
+      - changed-paths
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -4542,7 +4676,15 @@ jobs:
     # Fork-PR composition (same as sql-tests): repo VARIABLES are readable in
     # fork-PR runs while secrets are withheld, so the vars gate alone would
     # start the job on a fork and die at the seed step with empty secrets.
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true' }}
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
+    # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
+    # ⭐ The wrapper is KEPT and the conjunct goes INSIDE it, first, on ONE physical
+    # line: `critical-regressions.test.ts` matches this `if:` with a single-line regex
+    # on `vars.E2E_TEST_DB_CONFIGURED == 'true'` and a fold reads as a lost job-level
+    # gate — a security regression that is not one.
+    # ⭐ EXPLICIT, not inherited: the aggregator's arm for this row already cannot tell
+    # its two skip causes apart, so an inherited skip would add a third.
+    if: ${{ needs.changed-paths.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true' }}
     # v1.16 close-out (2026-08-01): serialize against the `python` job (and
     # `sql-tests`). All three drive the ONE shared Supabase
     # test project (`secrets.TEST_SUPABASE_URL`), and `claim_compute_jobs_with_priority`
@@ -4583,6 +4725,7 @@ jobs:
     # now — the mutex does it, which is exactly why adding one is still wrong.
     needs:
       - frontend-typecheck
+      - changed-paths
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -5259,6 +5402,12 @@ jobs:
     # the unconditional e2e spec set — public routes render on placeholders.
     # Authed-route perf is covered by the human real-device sign-off
     # (48-HUMAN-UAT.md / SC#5), not by lhci.
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
+    # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
+    # ⭐ EXPLICIT, not inherited: this job is ADVISORY (not an aggregator row) and would
+    # skip anyway through `needs: frontend-build/frontend-typecheck`; it states its own
+    # classification so the run log names the cause (CONTEXT.md).
+    if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     # Depend on the artifact producer (frontend-build) + typecheck so we don't
     # burn a runner when the build/types are already known-broken. Same `needs`
@@ -5266,6 +5415,7 @@ jobs:
     needs:
       - frontend-build
       - frontend-typecheck
+      - changed-paths
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
