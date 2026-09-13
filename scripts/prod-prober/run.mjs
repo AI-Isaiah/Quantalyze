@@ -3713,7 +3713,7 @@ export async function selfTest() {
           "and does NOT echo raw ssh stdout — only the PROBE line and one stderr line may leave this arm",
         ) &&
         expect(
-          noDefectOfKind(r.defects, ["mt5-no-ipc", "mt5-ipc-timeout", "mt5-probe-timeout", "mt5-terminal-error"]),
+          noDefectOfKind(r.defects, ["mt5-no-ipc", "mt5-ipc-timeout", "mt5-probe-timeout", "mt5-terminal-error", "mt5-not-authorized"]),
           "a transport failure is NOT reported as any statement about the terminal — nothing was measured about MT5 at all",
         ) &&
         pass;
@@ -3795,8 +3795,8 @@ export async function selfTest() {
         `the detail says in words that this is NOT the terminal's -10005 (${JSON.stringify(d.detail)})`,
       ) &&
       expect(
-        noDefectOfKind(r.defects, ["mt5-ipc-timeout", "mt5-no-ipc", "mt5-ssh-transport"]),
-        "and NONE of the three states that would send an operator to the gateway fired — the prober blamed itself, correctly",
+        noDefectOfKind(r.defects, ["mt5-ipc-timeout", "mt5-no-ipc", "mt5-ssh-transport", "mt5-not-authorized"]),
+        "and NONE of the four states that would send an operator to the gateway fired — the prober blamed itself, correctly",
       ) &&
       expect(
         MT5_MOD.REMEDIES["mt5-probe-timeout"] !== MT5_MOD.REMEDIES["mt5-ipc-timeout"],
