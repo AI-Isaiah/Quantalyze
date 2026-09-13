@@ -3830,12 +3830,18 @@ export async function selfTest() {
     if (!g.ok) {
       pass = expect(false, g.reason) && pass;
     } else {
+      // ⭐ A CAPTURING logger rather than `quiet`. The OK info line is the only
+      //    thing this arm tells an operator on a healthy terminal, and it is
+      //    observable end-to-end nowhere else — `verdict.info` is one call
+      //    short of the log, and the arm's source is not the string that
+      //    reaches the Actions log or the auto-filed issue.
+      const lines = [];
       const r = await runProber({
         arms: [MT5_MOD.ARM],
         env: { ...SELFTEST_ENV },
         seams: createSeams({ sshRunner: fixtureSsh({ stdout: g.data, capture }) }),
         armsFloor: 1,
-        log: quiet,
+        log: (s) => lines.push(s),
       });
       const argv = capture[0] || [];
       // The payload now lives INSIDE the single word after `--` (see
@@ -3937,6 +3943,55 @@ export async function selfTest() {
           `each row names its own code as the subject (${row4.subject} / ${row5.subject})`,
         ) &&
         pass;
+
+      // ─── 164.8.3 CRITERION 7 — the OK info line's FIELD SET ──────────────
+      // D-05 settles the shape at two booleans exactly, because
+      // `docs/runbooks/mt5-go-live.md` Step 2 states the verification as
+      // "terminal_info() must report connected: true AND trade_allowed: true.
+      // Both, not either". This group pins that SET on the CAPTURED LOG LINE.
+      //
+      // ⛔ FOUR SEPARATE `expect` CALLS, each its own statement rather than a
+      //    link in an `&&` chain, so one broken property names itself instead
+      //    of crediting a single RED to four controls — and so a failure in
+      //    the first does not silently prevent the other three from running.
+      //
+      // ⚠️ THE NEGATIVE IS WRITTEN OVER A RUNTIME STRING, NEVER OVER SOURCE.
+      //    `arms/mt5.mjs` legitimately MENTIONS `build` in the comment
+      //    explaining why the field was dropped; a source grep would make that
+      //    comment self-invalidating. The line an operator reads is the only
+      //    honest place to assert what the arm stopped printing.
+      const mt5Lines = lines.map(String).filter((l) => l.startsWith("mt5: "));
+      const infoLine = String(mt5Lines[0] || "");
+      const carriesBuild = (s) => /build=/.test(s);
+      // CALIBRATION input: the same line with the clause this task removed put
+      // back. Without it the negative is a predicate only ever applied to
+      // passing input, which is not evidence in this repo.
+      const withBuild = `${infoLine} build=6182`;
+      pass =
+        expect(
+          mt5Lines.length === 1,
+          `164.8.3 CRITERION 7: the green ok.txt run logs EXACTLY ONE "mt5: " line (got ${mt5Lines.length}: ${JSON.stringify(mt5Lines)})`,
+        ) && pass;
+      pass =
+        expect(
+          infoLine.includes("connected="),
+          `164.8.3 CRITERION 7: that line names connected= — half of the runbook's two-field criterion (${JSON.stringify(infoLine)})`,
+        ) && pass;
+      pass =
+        expect(
+          infoLine.includes("trade_allowed="),
+          `164.8.3 CRITERION 7: that line names trade_allowed= — the other half, and "both, not either" is the criterion (${JSON.stringify(infoLine)})`,
+        ) && pass;
+      pass =
+        expect(
+          !carriesBuild(infoLine),
+          `164.8.3 CRITERION 7: and it carries NO build= — D-05 says two booleans exactly, and build is one of the three fields the founder excluded (${JSON.stringify(infoLine)})`,
+        ) && pass;
+      pass =
+        expect(
+          withBuild !== infoLine && carriesBuild(withBuild),
+          "164.8.3 CRITERION 7 CALIBRATION: the mutant differs from the original AND the same negative predicate REJECTS it — the no-build= assertion above can fail",
+        ) && pass;
     }
   }
 
