@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 79;
+export const SELF_TEST_SCENARIOS = 80;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -3935,6 +3935,119 @@ export async function selfTest() {
         expect(
           row4.subject === "-10004" && row5.subject === "-10005",
           `each row names its own code as the subject (${row4.subject} / ${row5.subject})`,
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("164.8.3 CRITERION 2: the -6 DEFECT ROW instructs instead of sending the operator to a lookup table, and the residual bucket still DISCRIMINATES (C2, C4, D-03, D-04)");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ EVERY ASSERTION BELOW READS THE DEFECT ROW AN OPERATOR SEES, never
+    // `arm.REMEDIES` directly. A table assertion would stay green even if
+    // `addDefect` stopped attaching the remedy to the row — the one failure
+    // that empties the operator's instruction while leaving the table perfect.
+    //
+    // ⛔ AND THE NEGATIVE IS A ROW PREDICATE, NOT A SOURCE GREP. The surviving
+    // `mt5-terminal-error` remedy legitimately still tells the operator to read
+    // the reported code against the MT5 error table — CORRECT advice for a
+    // genuinely unenumerated code such as the -2 that `init-false-other.txt`
+    // carries. A grep of `arms/mt5.mjs` for that sentence would therefore be
+    // permanently red, or would have to be narrowed into something that
+    // measures nothing. The row string is the only honest place to assert it.
+    const rowFor = async (fixture) => {
+      const fx = loadFixtureText("mt5", fixture);
+      if (!fx.ok) return null;
+      const rr = await runProber({
+        arms: [MT5_MOD.ARM],
+        env: { ...SELFTEST_ENV },
+        seams: createSeams({ sshRunner: fixtureSsh({ stdout: fx.data }) }),
+        armsFloor: 1,
+        log: quiet,
+      });
+      return rr.defects[0] || null;
+    };
+    const row6 = await rowFor("6.txt");
+    const rowIpc = await rowFor("10005.txt");
+    const rowOther = await rowFor("init-false-other.txt");
+    const rowNull = await rowFor("terminal-info-null.txt");
+
+    // The two predicates are written ONCE and applied to BOTH the real string
+    // and its mutant, so a calibration can never drift from the assertion it
+    // calibrates.
+    const saysLookUpTheCode = (s) => /error\s+table/i.test(String(s));
+    // A six-or-more-digit run is the shape of an MT5 account number, and every
+    // remedy here is printed into a PUBLIC Actions log and copied verbatim into
+    // a PUBLIC issue. The dated `2026-08-13` the -6 remedy legitimately carries
+    // is four digits between word boundaries and does not match.
+    const hasAccountShapedRun = (s) => /\b[0-9]{6,}\b/.test(String(s));
+
+    if (row6 === null || rowIpc === null || rowOther === null || rowNull === null) {
+      pass =
+        expect(
+          false,
+          `all four mt5 fixtures must produce a defect row (6.txt=${row6 && row6.kind}, 10005.txt=${rowIpc && rowIpc.kind}, init-false-other.txt=${rowOther && rowOther.kind}, terminal-info-null.txt=${rowNull && rowNull.kind})`,
+        ) && pass;
+    } else {
+      // The mutant is the REAL forbidden sentence, taken from the remedy that
+      // still legitimately carries it — not a paraphrase this file invented.
+      const spliced = `${row6.remedy} ${MT5_MOD.REMEDIES["mt5-terminal-error"]}`;
+      const mt5Kinds = DEFECT_KINDS.filter((k) => k.startsWith("mt5-"));
+      const remedyEntries = Object.entries(MT5_MOD.REMEDIES);
+      const offenders = remedyEntries.filter(([, v]) => hasAccountShapedRun(v)).map(([k]) => k);
+      // ⛔ SYNTHETIC, and it must stay synthetic: a repeated digit that is not
+      // an account, appended to an in-memory copy. No real account number may
+      // be written anywhere in this repo, least of all in a calibration.
+      const digitMutant = `${row6.remedy} account 99999999`;
+
+      pass =
+        expect(
+          row6.kind === "mt5-not-authorized" && row6.subject === "-6",
+          `(a) the -6 fixture's ROW is mt5-not-authorized on subject -6 (got ${row6.kind} / ${row6.subject})`,
+        ) &&
+        expect(
+          row6.remedy.includes("VNC console") &&
+            row6.remedy.includes("Save password") &&
+            row6.remedy.includes("Expert Advisors") &&
+            row6.remedy.includes("Journal"),
+          `(b) ⛔ SUCCESS CRITERION 2: the -6 ROW's remedy names all FOUR required elements — VNC console=${row6.remedy.includes("VNC console")}, "Save password"=${row6.remedy.includes("Save password")}, Expert Advisors=${row6.remedy.includes("Expert Advisors")}, Journal=${row6.remedy.includes("Journal")}`,
+        ) &&
+        expect(
+          saysLookUpTheCode(row6.remedy) === false,
+          "(c) ⛔ SUCCESS CRITERION 2, THE NEGATIVE: the -6 ROW's remedy carries NO lookup-table instruction — -6 has exactly one cause and exactly one remedy, so sending the operator to an error table IS the defect this phase removed, and it cost two real investigations",
+        ) &&
+        expect(
+          spliced !== row6.remedy && saysLookUpTheCode(spliced) === true,
+          "(d) CALIBRATION for (c): the SAME predicate REJECTS an in-memory copy of the -6 remedy with the catch-all's own lookup sentence spliced back in — so (c) is a reading, not a predicate only ever shown passing input",
+        ) &&
+        expect(
+          row6.remedy !== rowOther.remedy && row6.remedy.length >= 40 && rowOther.remedy.length >= 40,
+          `(e1) the -6 row and the residual row carry DIFFERENT remedy text, each substantial (${row6.remedy.length} / ${rowOther.remedy.length} chars)`,
+        ) &&
+        expect(
+          /modal/i.test(row6.remedy) === false && rowIpc.remedy.includes("Journal") === false,
+          "(e2) and the -6 and -10005 instructions cannot CONVERGE: the -6 remedy carries none of -10005's distinguishing modal-dialog wording, and the -10005 remedy does not name the Journal — two near-duplicates would pass the exact-string uniqueness gate and still fail the operator",
+        ) &&
+        expect(
+          rowOther.kind === "mt5-terminal-error" && rowNull.kind === "mt5-terminal-error",
+          `(f1) ⛔ SUCCESS CRITERION 4: BOTH catch-all fixtures still produce mt5-terminal-error (got ${rowOther.kind} / ${rowNull.kind}) — the residual bucket was NARROWED by -6 leaving it, not emptied`,
+        ) &&
+        expect(
+          rowOther.subject !== rowNull.subject,
+          `(f2) and their SUBJECTS DIFFER (${rowOther.subject} / ${rowNull.subject}) — one row comes from branch (8)'s unenumerated code and one from branch (7)'s null terminal_info, so the bucket still DISCRIMINATES rather than merely still existing`,
+        ) &&
+        expect(
+          mt5Kinds.length > 0 && mt5Kinds.every((k) => typeof MT5_MOD.REMEDIES[k] === "string"),
+          `(g0) the scan below ranges over a LIVE, COMPLETE table: every one of the ${mt5Kinds.length} mt5-* kinds registered in DEFECT_KINDS has a remedy string, so a green scan over a stale or half-landed REMEDIES is impossible`,
+        ) &&
+        expect(
+          offenders.length === 0,
+          `(g) THE PUBLIC-LOG CONTROL: no mt5 remedy carries a six-or-more-digit run — the shape of an MT5 account number in a world-readable Actions log and a world-readable issue (offenders: ${offenders.join(", ") || "none"} of ${remedyEntries.length} scanned)`,
+        ) &&
+        expect(
+          digitMutant !== row6.remedy && hasAccountShapedRun(digitMutant) === true,
+          "(g-calibration) the SAME predicate FIRES on an in-memory copy with a SYNTHETIC repeated-digit run appended — a real account number is never written anywhere, including here",
         ) &&
         pass;
     }
