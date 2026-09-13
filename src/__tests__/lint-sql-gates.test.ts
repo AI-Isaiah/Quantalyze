@@ -1187,7 +1187,7 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     ).toBeGreaterThanOrEqual(RESULT_LOOP_CONDITION_FLOOR);
   });
 
-  it("the FULL tolerance-bearing set is exactly the three skip-by-design jobs, in any if/elif spelling the parser reads", () => {
+  it("the EVENT-tolerance-bearing set is exactly the three skip-by-design jobs, in any if/elif spelling the parser reads", () => {
     const ci = readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8");
     const parsed = extractResultLoopConditions(ci);
     expect(parsed.measureFail).toBeNull();
@@ -1200,9 +1200,23 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // guard is invisible to it, which is why the EXECUTION oracle below makes
     // the same claim by running the loop. A fourth job appearing here — or one
     // of these three losing its arm — fails by name.
+    //
+    // ⚠️ SUBJECT NARROWED, Phase 164.6.3 wave 2: this arm asserts the EVENT set
+    // and nothing wider. The uniform docs-only arm is INVISIBLE to this parser
+    // BY CONSTRUCTION, not by oversight — the parser classifies a tolerance by
+    // finding a condition nested inside a branch that tests the loop's own
+    // `$name` against a literal, and the uniform arm tests the DETECTOR OUTPUT,
+    // the ALWAYS_ON membership and the RESULT, never the row name. It is
+    // therefore not a per-row tolerance and this parser is right not to report
+    // one. What pins it is the EXECUTION oracle below, which runs the loop.
+    //
+    // ⛔ Do NOT "fix" the parser to see the uniform arm. A condition that is
+    // not keyed to a row is not a per-row tolerance, and teaching the parser to
+    // report it as one would make the parser lie in the opposite direction —
+    // reporting eleven per-row tolerances that do not exist.
     expect(
       [...parsed.tolerance.keys()].sort(),
-      "the aggregator's set of EVENT-tolerant jobs changed. A job gaining tolerance means a `skipped` result now passes branch protection for it; a job losing it means it will redden every event it legitimately skips on. Either is a decision that belongs in EVENT_TOLERANT_JOBS with its reason, not a silent edit to ci.yml",
+      "the aggregator's set of EVENT-tolerant jobs changed. A job gaining tolerance means a `skipped` result now passes branch protection for it; a job losing it means it will redden every event it legitimately skips on. Either is a decision that belongs in EVENT_TOLERANT_JOBS with its reason, not a silent edit to ci.yml. ⚠️ This arm reads per-row `if`/`elif` arms ONLY — the uniform docs-only tolerance is structurally invisible to it and is pinned by the EXECUTION oracle's partitioned exact-set claims instead",
     ).toEqual([...EVENT_TOLERANT_JOBS].sort());
   });
 
@@ -1471,6 +1485,67 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
         ),
         "a row cannot be excused-by-nothing AND excused by something",
       ).toEqual([]);
+    });
+
+    it("the docs-only tolerance is UNIFORM — zero on a code PR, full on a docs-only PR, never in between", () => {
+      // ⭐ THE EXECUTABLE FORM of wave 1's claim that the new arm is ONE
+      // predicate and not eleven per-row tolerances. A per-row tolerance
+      // smuggled in later — an arm keyed to a job name, or a second detector
+      // output only some rows consult — would produce a count strictly between
+      // the two extremes for that row, and this arm reddens by name.
+      //
+      // Scoped to the rows the DOCS-ONLY filter excuses and the EVENT does not:
+      // for the two rows both excuse, the intermediate count is legitimate and
+      // is pinned by the event-conditioning arm below instead.
+      const script = loopOf(CI);
+      const split = partitionedTolerancePosture(script, docsGuardOf(script));
+      const uniformOnly = DOCS_ONLY_TOLERANT_JOBS.filter(
+        (j) => !(EVENT_TOLERANT_JOBS as readonly string[]).includes(j),
+      );
+      expect(
+        uniformOnly.length,
+        "no row is docs-only-tolerant without also being event-tolerant — this arm would be checking an empty set",
+      ).toBeGreaterThan(0);
+
+      for (const job of uniformOnly) {
+        expect(
+          split.notDocsOnly.toleratedSkips.get(job),
+          `${job}: its skip is tolerated on a combination where the detector did NOT say docs-only. The filter is leaking onto code PRs`,
+        ).toBe(0);
+        expect(
+          split.docsOnly.toleratedSkips.get(job),
+          `${job}: its skip is tolerated in only SOME docs-only combinations. The docs-only arm is supposed to be ONE predicate over a declared exclusion list; an intermediate count means something ELSE is conditioning this row — a per-row tolerance wearing the uniform arm's clothes`,
+        ).toBe(split.docsOnly.combos);
+      }
+    });
+
+    it("SLICE PIN — the executed script DEFINES the variables it reads", () => {
+      // ⛔ THE REGRESSION PIN AGAINST A RE-NARROWED SLICE. Without it the
+      // blindness returns with NO SIGNAL: the oracle would keep running, keep
+      // printing a posture, and keep passing — while measuring a program in
+      // which the docs-only arm is dead. That is exactly what happened for the
+      // length of Phase 164.6.3 wave 1.
+      //
+      // Two layers are pinned here. This arm is the first; the second is the
+      // unset-variable check in `executeResultLoop`, which converts the same
+      // omission into a named abort rather than an empty-string expansion.
+      const script = loopOf(CI);
+      expect(
+        script,
+        "the executed script no longer contains the `docs_only` assignment — it has been sliced above the prologue again, and every posture measured below is about a program that does not exist",
+      ).toMatch(/^[^\S\n]*docs_only=/m);
+      expect(
+        script,
+        "the executed script no longer contains the always-on list assignment — `ALWAYS_ON` will expand to the empty string, every row will read as filterable, and the posture will be a fiction",
+      ).toMatch(/^[^\S\n]*ALWAYS_ON=/m);
+
+      // And the guard the partition is keyed on is one the enumerator actually
+      // varies — a partition on a guard nobody varies reports one empty half.
+      const guard = docsGuardOf(script);
+      expect(
+        resultLoopGuardExpressions(script),
+        `the expression assigned to docs_only (\`${guard}\`) is not among the expressions the combination enumerator forces, so the two halves would not be two halves`,
+      ).toContain(guard);
     });
 
     it("every EVENT-tolerated skip is CONDITIONED on the event — within the not-docs-only half", () => {
