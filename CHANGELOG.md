@@ -1,5 +1,80 @@
 # Changelog
 
+## [0.77.41.1] - 2026-09-13 — correcting v0.77.41.0's own root cause, measured against the deploy it produced
+
+⭐ **What this is.** v0.77.41.0 shipped hours earlier with a root-cause story this release
+corrects. The FIX in that release is sound and stays exactly as it is — the probe compares the
+`analytics-service` tree object and converges in seconds. What was wrong is the explanation of
+WHY the deploy hung, and it was wrong in a way that would have misled the next reader of the
+workflow comment and of the auto-filed issue body.
+
+### Root cause
+
+The v0.77.41.0 entry and the workflow comment both asserted that the `WAITING` deployment
+"self-clears only when the convergence window expires, so the cost is a ~80-minute deploy delay
+on EVERY docs-only merge." **That termination was never observed.** It was inferred.
+
+Measuring the one real instance through the check-SUITE API (not the check-RUN API, which is
+what the first pass read) gives a different ending:
+
+- Deployment `b076139c` for `f10b0e23`: created `11:42:08.204Z`, resolved `13:04:44.531Z` —
+  **82m36s**, and it resolved as **`SKIPPED`**, not as a completed deploy.
+- Every check-suite on that commit was complete by `11:57:43Z` **except this workflow's own**
+  (`94130538971`, `11:52:59Z` → `13:13:29Z`). So from `11:57:43` to `12:57:44` the ONLY thing
+  Railway was waiting on was `verify`. ⭐ **The circular wait is CONFIRMED** — about 60 minutes
+  of it.
+- Then scheduled workflows attached three further suites, and `94138387603` (`npm-audit`)
+  concluded **`failure`** at `13:04:40Z`. The deployment flipped to `SKIPPED` **4.5 seconds
+  later**, with `verify` still running for another nine minutes.
+
+⛔ **So prod NEVER RECEIVED `f10b0e23`.** It was not delayed and then deployed; it was skipped.
+The WAIT ran into the SKIP — the 2026-06-21 red-check shape recorded in the workflow header.
+The two mechanisms were described as alternatives; they are sequential, and the second one is
+what actually decided the outcome.
+
+### Why the first reading missed it
+
+Reading `commits/{sha}/check-runs` shows 32 runs and their timestamps, which is enough to see
+that `verify` ran 80 minutes and NOT enough to see which suite Railway was gating on. The
+suite boundary is the unit Railway reacts to, and it is only visible in
+`commits/{sha}/check-suites`. ⚠️ A second, load-bearing fact only that endpoint reveals:
+**a scheduled workflow attaches a NEW check-suite to main's head commit hours after the push**,
+so the set Railway waits on GROWS over time. Any commit that sits at main HEAD across a cron
+boundary inherits that workflow's suite.
+
+### Changed
+
+- `.github/workflows/analytics-deploy-verify.yml` — the probe comment now records the measured
+  ending (WAIT → red suite → SKIP) instead of the inferred one, names the suite ids and
+  timestamps, and states the two lessons. The AUTO-FILED issue body's `WAITING` cause is
+  corrected the same way, and its recovery step (a) now says to list check-SUITES rather than
+  check-runs, and warns that a red suite means the deploy will skip rather than release.
+- ⚠️ No behaviour change. The tree comparison, the fail-toward-alerting path and all exit codes
+  are untouched; this release is the explanation catching up with the evidence.
+
+### Notes
+
+⭐ **The happy path is now measured too.** This release's own predecessor merge (`e7fd2a04`)
+carried no scheduled suite: all suites settled in 19m05s, the deployment left `WAITING` at
+`13:39:02Z`, and prod `/health` reported `git_sha=e7fd2a04` at `13:39:16Z` — 14 seconds later,
+because the `analytics-service` tree was unchanged and there was nothing to rebuild. That is
+the same tree-identity the probe now tests for, observed end to end.
+
+⚠️ **`nightly.yml` has concluded `failure` on main for three consecutive days** — 2026-09-11
+(`34599458067`), 2026-09-12 (`34692321372`), 2026-09-13 (`34758789452`) — and that is a separate
+live finding surfaced by this measurement, deliberately NOT fixed here. Two jobs are red:
+`npm-audit` (the production-tree high-severity gate: `brace-expansion` 4.0.0-5.0.8 and
+`browserslist` <=4.28.6 both HIGH, `baseline-browser-mapping` moderate, all with
+`npm audit fix` available) and `preflight`.
+
+⛔ **Why this is load-bearing and not housekeeping.** A red suite makes Railway SKIP, as
+measured above. `nightly` runs on a cron and attaches its suite to whatever commit is at main
+HEAD, so **any merge sitting at HEAD across the nightly boundary can have its analytics deploy
+silently skipped by a dependency advisory that has nothing to do with the merge.** That is a
+production deploy gated on an unrelated red, and it is the same "control fires for the wrong
+reason" class this milestone exists to remove. Needs its own phase — a drive-by `npm audit fix`
+would close the red without addressing the coupling.
+
 ## [0.77.41.0] - 2026-09-13 — the analytics deploy probe compares CODE, not commit SHAs
 
 ⭐ **What this is.** `analytics-deploy-verify.yml` asked "is prod running main HEAD?" by comparing
