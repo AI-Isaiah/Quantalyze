@@ -1002,3 +1002,99 @@ async def test_the_health_body_gained_no_mt5_key() -> None:
     )
     # And the two verdict keys are still the ones that were there.
     assert {"status", "config_ok", "config_degraded_secrets"} <= set(body)
+
+
+# --------------------------------------------------------------------------- #
+# ⛔ THE DURABLE FALSIFIER — criterion 1's "a test that FAILS when the call is
+# removed", re-checked on EVERY CI run rather than once in a session transcript.
+#
+# The manual two-lever harness (byte backup -> neuter -> prove it applied ->
+# observe RED -> `cmp`-verified restore) is recorded verbatim in the plan-02
+# SUMMARY. A transcript proves the property ONCE, in a file nobody re-runs. This
+# proves it again on every run — and it does so WITHOUT ever writing a mutant into
+# the working tree, so the destructive-restore hazard the manual harness carries
+# (a `git checkout --` would silently destroy the uncommitted work) simply does
+# not arise here.
+# --------------------------------------------------------------------------- #
+
+#: The exact call shape the excision removes. Reading it back through the same
+#: predicate the criterion-1 pin uses is the point: the mutant is judged by the
+#: SHIPPED predicate, not by a second copy of it that could drift.
+_HEAL_ENTRY_MARKER = f"create_task({_HEAL_SYMBOL}("
+
+#: A surgical excision removes ONE list entry. MEASURED 2026-09-13: the line is
+#: 72 characters including its indentation and newline. The ceiling is generous
+#: enough to survive a rename and tight enough that a runaway deletion reds.
+_MAX_EXCISED_CHARS = 200
+
+
+def _excise_the_heal_entry(source: str) -> str:
+    """An IN-MEMORY copy of `main.py` with the heal's `create_task` entry removed.
+
+    ⛔ The mutant is never written to disk. This is deliberate and is the whole
+    reason the durable half can be safe where the manual half needs a byte backup.
+    """
+    return "".join(
+        line
+        for line in source.splitlines(keepends=True)
+        if _HEAL_ENTRY_MARKER not in line
+    )
+
+
+def test_the_criterion_1_predicate_reds_on_a_mutant_with_the_entry_excised() -> None:
+    """⛔ CRITERION 1, DISCHARGED AS A MEASUREMENT.
+
+    The criterion-1 predicate must return TRUE for the shipped source and FALSE for
+    a source with the heal's task entry removed. A predicate that could not tell
+    those apart would leave `test_CRITERION_1_lifespan_starts_the_heal_exactly_once
+    _as_a_task` green over a production path that never heals anything — the whole
+    phase inert behind a passing suite.
+
+    ⭐ THE EXCISION IS PROVED SURGICAL FIRST. Without that, a green could come from
+    having deleted half the file: an empty `lifespan` trivially contains no call to
+    the heal, and the pin would "pass" for a reason that has nothing to do with the
+    property.
+    """
+    source = _main_source()
+    mutant = _excise_the_heal_entry(source)
+
+    # --- the excision is surgical ------------------------------------------
+    assert mutant != source, (
+        f"the excision removed NOTHING — the marker {_HEAL_ENTRY_MARKER!r} no "
+        f"longer matches the shipped wiring, so this falsifier is measuring an "
+        f"absent mutation. ⛔ Fix the marker; a falsifier that mutates nothing "
+        f"always 'passes'."
+    )
+    removed = len(source) - len(mutant)
+    assert 0 < removed <= _MAX_EXCISED_CHARS, (
+        f"the excision removed {removed} characters (ceiling "
+        f"{_MAX_EXCISED_CHARS}). A runaway deletion makes the FALSE below "
+        f"meaningless — an empty lifespan contains no heal call for reasons that "
+        f"have nothing to do with the wiring."
+    )
+    ast.parse(mutant)  # the mutant must still be valid Python, or the walk is moot
+    for survivor in (
+        "dispatch_loop",
+        "watchdog_loop",
+        "daily_enqueue_loop",
+        "_bridge_healthz",
+    ):
+        assert f"create_task({survivor}(" in mutant, (
+            f"the excision also removed the {survivor} task entry — it was not "
+            f"surgical and nothing below can be attributed to the heal."
+        )
+
+    # --- and the predicate tells them apart --------------------------------
+    assert len(_heal_task_lines(source)) == 1, (
+        "the criterion-1 predicate does not match the SHIPPED wiring — it is the "
+        "predicate that is wrong, not the code."
+    )
+    assert _heal_task_lines(mutant) == [], (
+        "the criterion-1 predicate STILL reports the heal after its task entry was "
+        "excised. It is matching something other than the wiring, so removing the "
+        "call would not red the pin — which is exactly the vacuous shape criterion "
+        "1 forbids."
+    )
+    assert len(_create_task_lines(mutant)) == (
+        _LIFESPAN_CREATE_TASK_COUNT_AT_164_6_2 - 1
+    ), "the count leg must fall by exactly one on the mutant"
