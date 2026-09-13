@@ -99,11 +99,32 @@ export const SSH_TIMEOUT_MS = 120000;
  * It is `scripts/mt5-diag.sh:30-41` ported unchanged IN WHAT IT CALLS:
  * `initialize()`, `last_error()`, `terminal_info()`. Nothing else.
  *
- * ⚠️ ONE DELIBERATE DIFFERENCE from mt5-diag.sh's output shape: `terminal_info`
- * is emitted in BOTH branches ("present" / null) rather than only when null. In
- * mt5-diag.sh the healthy reading is the ABSENCE of a key, which would make the
- * classifier's OK test satisfiable by a truncated or malformed line. A positive
- * marker cannot be produced by something going missing.
+ * ⚠️ TWO DELIBERATE DIFFERENCES from mt5-diag.sh's output shape.
+ *
+ * (1) SHAPE — `terminal_info` is emitted in BOTH branches (an OBJECT / null)
+ * rather than only when null. In mt5-diag.sh the healthy reading is the ABSENCE
+ * of a key, which would make the classifier's OK test satisfiable by a
+ * truncated or malformed line. A positive marker cannot be produced by
+ * something going missing, and a JSON OBJECT is exactly such a marker. An
+ * absent key is not one, and neither is a bare string — which is why
+ * `classifyProbe` tests the TYPE of what came back rather than merely that it
+ * is non-null.
+ *
+ * (2) FIELD SET (D-05, 2026-09-13) — this arm projects TWO fields where
+ * mt5-diag.sh copies five. `docs/runbooks/mt5-go-live.md` Step 2 states the
+ * verification as "`terminal_info()` must report `connected: true` AND
+ * `trade_allowed: true`. Both, not either", so those two ARE the measurement
+ * and `tradeapi_disabled`, `build` and `path` are not. Dropping `path` also
+ * stops a production filesystem path reaching a PUBLIC Actions log.
+ * ⛔ `scripts/mt5-diag.sh` is left byte-unchanged ON PURPOSE: its own
+ * `Reading the result:` note at `:55-66` interprets `tradeapi_disabled` for a
+ * human operator, and phase 164.8.3 criterion 5 fences that file read-only.
+ * The divergence is argued here rather than discovered later.
+ *
+ * ⛔ The two booleans are taken RAW via `d.get(...)`, never `bool(d.get(...))`.
+ * `bool(None)` is `False`, which would render a MISSING key as a confident
+ * measurement — the same "an absence produced a positive reading" failure that
+ * (1) exists to prevent.
  */
 export const MT5_PROBE_PY = [
   "import json",
@@ -114,10 +135,8 @@ export const MT5_PROBE_PY = [
   "if ti is None:",
   '    out["terminal_info"] = None',
   "else:",
-  '    out["terminal_info"] = "present"',
   "    d = ti._asdict()",
-  '    for k in ("trade_allowed", "tradeapi_disabled", "connected", "build", "path"):',
-  "        out[k] = d.get(k)",
+  '    out["terminal_info"] = {"connected": d.get("connected"), "trade_allowed": d.get("trade_allowed")}',
   'print("PROBE " + json.dumps(out))',
 ].join("\n");
 
@@ -229,17 +248,29 @@ export function classifyProbe(result) {
   }
 
   const code = Array.isArray(probe.last_error) ? probe.last_error[0] : null;
-  const terminalInfoPresent = probe.terminal_info !== null && probe.terminal_info !== undefined;
+  // ⚠️ An OBJECT test, not a mere non-null test. The probe emits a dict on a
+  //    healthy terminal, so anything that is not one — a bare string, a number,
+  //    a truncated array — is NOT a reading. `typeof null === "object"` in
+  //    JavaScript, so the null guard has to stay; `Array.isArray` closes the
+  //    other JSON shape that satisfies `typeof`. This is what the retired
+  //    "present" sentinel used to buy, now bought by the shape itself.
+  const ti = probe.terminal_info;
+  const terminalInfoPresent = ti !== null && typeof ti === "object" && !Array.isArray(ti);
 
   // (4) OK — and it needs BOTH halves. `initialize()` returning true while
   //     `terminal_info()` returns null is a real state (branch 7), not a pass.
   if (probe.initialize === true && terminalInfoPresent) {
     return {
       ...none,
+      // ⛔ TWO BOOLEANS, RECORDED AND NEVER JUDGED (D-05; see `:61-64`). The
+      //    runbook's Step 2 criterion is these two and only these two; the
+      //    build number and the install path the arm used to print are fields
+      //    the founder excluded, and `path` in particular was a production
+      //    filesystem path in a PUBLIC log. A `connected:false` still raises
+      //    NO defect here — that is MT5GW-COPY-01's concern, not this arm's.
       info:
         `initialize=true last_error=${code === null ? "none" : code} ` +
-        `connected=${String(probe.connected)} trade_allowed=${String(probe.trade_allowed)} ` +
-        `build=${String(probe.build)}`,
+        `connected=${String(ti.connected)} trade_allowed=${String(ti.trade_allowed)}`,
     };
   }
 
