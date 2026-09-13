@@ -1,5 +1,127 @@
 # Changelog
 
+## [0.77.42.0] - 2026-09-13 — the prod-prober names MT5 `-6` instead of sending the operator to an error table
+
+⭐ **What this is.** Phase 164.8.3 PROBERAUTH. Since 2026-09-07 the hourly `prod-prober` has been
+reporting the MT5 terminal's `-6` as the catch-all `mt5-terminal-error`, whose remedy tells the
+operator to *"read the reported code against the MT5 error table"*. `-6` has exactly one cause and
+exactly one remedy, so that instruction WAS the defect. It now has its own kind, its own fixture,
+and a remedy that instructs.
+
+⛔ **This does NOT clear the live outage.** The terminal has no authorized account; restoring it
+needs a VNC session and broker credentials, and that is a founder action. This makes the NEXT
+occurrence self-explanatory. A green prober is not this release's acceptance signal.
+⚠️ Measured 2026-09-13, run `34758502223`: `-6` is STILL firing, three days after the 2026-09-10
+resolution — the terminal lost its session again. What the prober SAYS about a lost session ships
+here; what the gateway DOES about one is Phase 164.6.2 MT5RELOGIN, still queued and founder-gated.
+
+### Added
+
+- `mt5-not-authorized` as a first-class defect kind for MT5 `-6`, wired end-to-end: fixture
+  `6.txt` → branch (6b) → remedy → five independent registrations → counters. Branch (6b) sits
+  ABOVE branches (7) and (8) so it is not dead code beneath an unguarded tail.
+- A remedy that tells the operator what to do — VNC console, the terminal's Journal tab, "Save
+  password", and the two Expert Advisors options — instead of naming an error table.
+- A DURABLE falsifier: a tmp-dir mutant with the `-6` branch excised, re-run on every CI shard,
+  so the `-6` gate's ability to fail is proven continuously rather than once.
+- An AUTO-ISSUE DEDUP proof pinning the dedup key's kind-independence.
+- Criteria 2 and 4 are gated on the DEFECT ROW an operator actually reads, not on the `REMEDIES`
+  table behind it — including a calibrated negative that splices the removed error-table sentence
+  back in and watches the predicate reject it.
+- The `-6` row now READS the two states its own detail narrates, so a row cannot contradict its
+  own transcript: a `-6` arriving beside a live `terminal_info` no longer claims it came back null.
+
+### Changed
+
+- `terminal_info()` is recorded as EXACTLY two booleans (`connected`, `trade_allowed`), nested.
+  The `"present"` sentinel, `path`, `build` and `tradeapi_disabled` are gone from the probe body.
+  ⛔ **This was a disclosure fix, not tidying:** a production filesystem path was reaching a
+  world-readable Actions log.
+- Branch (7) names the shape it actually read. Its detail claimed `terminal_info() returned null`
+  while the tightened guard also catches strings, numbers and arrays.
+- The `-6` remedy no longer carries markdown emphasis. The auto-issue step wraps the table in a
+  fenced code block and the Actions log is plain text, so `**Journal**` reached the operator as
+  literal asterisks.
+
+### Fixed
+
+- A tracked SUMMARY carried a literal absolute home path into a PUBLIC repo. Fixed by adopting the
+  hygiene scanner's own escaping convention; the gate was re-proven to bite.
+- `CRITERION 2`'s 14-link `&&` chain is split, so a red in an early link can no longer make the
+  public-log control unreachable — structural vacuity, where later assertions cannot run.
+- Both hand-kept mt5 ABSENCE lists were made able to fail rather than merely renamed.
+- `.txt` fixture transcripts were outside every disclosure scan and are now inside one.
+- This phase's four new `file:line` comment citations were replaced with SYMBOL citations.
+  `[164.7-CITATION-DRIFT-01]` is closed by convention, never by re-numbering prose that drifts
+  again — the same class that left `CLAUDE.md` pointing at a job which had moved 137 lines.
+- `autoIssueStep` sliced to EOF — correct only because that step happens to be last in the
+  workflow file, so any appended step would have silently widened the assertion's subject. Now
+  bounded through the existing `sliceBetweenAnchors`.
+- Kind matching no longer substring-matches the English words `floor` and `absurdity`, which
+  would have reddened a test whose failure message claims kind-independence.
+
+### Root cause
+
+⛔ **Two gates in this phase were structurally unable to fail, and both were found by review
+rather than by execution.**
+
+1. The `CRITERION 7` calibration built its mutant by concatenating the exact literal its own
+   predicate greps for, so both halves were true regardless of what the arm did. It was masking a
+   REACHABLE escape: with the arm emitting an excluded field under a non-`=` separator
+   (` build:6182`), the suite printed *"it carries NO `build=`"* BESIDE a log line that carried
+   one — 80/80, exit 0. The mutant is now derived from the arm's own output.
+2. That fix narrowed the escape without closing it. A one-spelling negative cannot carry an
+   exhaustive claim: ` tradeapi_disabled=false` — a field named in this phase's OWN rejected list —
+   still shipped green. Two exhaustive controls now cover the line: every token must be a
+   `name=value` pair, and the field-NAME set must be exactly the four D-05 permits.
+
+⭐ **The second narrowing entered at PLAN time, not execution.** Plan 03's must-have reads "no
+longer carries `build=`", and the gate implements that sentence exactly. No executor erred — the
+gate was as wide as the sentence it was given, and the sentence was narrower than the criterion.
+
+### Tests
+
+- Prober self-test 78 → 80 scenarios; `prod-prober-wiring` 81 → 87 tests.
+- Every gate added here was neutered, observed RED, and restored from a BYTE BACKUP verified with
+  `cmp`. ⛔ `git checkout --` was never used: it restores to HEAD and silently destroys
+  uncommitted work in a neuter/restore harness.
+- ⚠️ **A neuter silently failed to apply three times during this work and read as a clean 80/80
+  pass each time.** A neuter that does not APPLY is indistinguishable from a gate that does not
+  bite. Every neuter here was grepped as applied before its result was believed.
+
+### Why
+
+- Criterion 8 was found ALREADY MET before the phase began — by `604d655f` (PR #774), days
+  earlier. It was restated as MET-BEFORE-START rather than deleted, because the way it was wrong
+  is worth more than the criterion was: its stated cause had been fixed without the criterion
+  noticing. Re-measured at HEAD by the verifier rather than taken from the plan, so the phase is
+  not resting on a false premise.
+
+### Notes
+
+- Code review found 9 items (0 Critical, 5 Warning, 4 Info); all 9 are fixed. The first fix pass
+  ran without `--all` and silently dropped every Info finding — two of those four were themselves
+  tests that could not fail.
+- ⚠️ Branch (7)'s new detail string is operator-facing and REQUIRES HUMAN VERIFICATION: no syntax
+  gate can confirm the wording is what an operator needs.
+- `.github/workflows/prod-prober.yml` and `scripts/mt5-diag.sh` are byte-unchanged — both are
+  fenced READ-ONLY by this phase's criteria.
+- ⛔ The full 15,089-test suite was NOT run locally: four attempts, two OOM kills on this box. The
+  targeted subset (10 files, 436 tests, including 7 contract tests that scan all of `src/`) passed.
+  CI's shards are the merge gate's authority.
+- Planning artifacts for this phase (CONTEXT, RESEARCH, PATTERNS, VALIDATION, four PLANs, four
+  SUMMARYs, REVIEW, REVIEW-FIX, VERIFICATION) are stripped from the PR by the `-pr` filter and
+  reach `main` through the phase directory. ⚠️ `.planning/STATE.md`'s ALL-REFS progress block was
+  CLOBBERED to disk-derived values three times by state handlers during this phase and restored
+  from byte backups each time; the handler recomputes from local disk, where the `-pr` filter has
+  stripped artifacts for four complete phases.
+- Deferrals booked out of this phase, each naming a destination: `[164.9-SHARED-TEST-TRANSPORT-FLAKE]`,
+  `[164.9-MUTEX-HOLDER-DIED-UNSERIALIZED]` and `[164.9-CREDENTIALED-TESTS-RED-AND-UNGATED]` to
+  Phase 164.9; `[165-NIGHTLY-AUDIT-RED]` (including a CRITICAL Next.js advisory) to Phase 165;
+  `[164.8.3-CAPTURE-MANIFEST-ERREXIT]` to Phase 164.8.4 as ADMISSION 2. New Phase 164.11 DEPLOYGATE
+  was inserted for the five analytics deployments silently SKIPPED in three days.
+
+
 ## [0.77.41.1] - 2026-09-13 — correcting v0.77.41.0's own root cause, measured against the deploy it produced
 
 ⭐ **What this is.** v0.77.41.0 shipped hours earlier with a root-cause story this release
