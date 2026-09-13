@@ -4103,6 +4103,21 @@ export async function selfTest() {
       // an account, appended to an in-memory copy. No real account number may
       // be written anywhere in this repo, least of all in a calibration.
       const digitMutant = `${row6.remedy} account 99999999`;
+      // ⛔ THE REMEDY IS READ AS PLAIN TEXT, IN BOTH PLACES IT LANDS. The
+      // auto-issue step wraps the whole table in a FENCED CODE BLOCK
+      // (`["```", armsLine, "", table, "```"].join("\n")`) and the Actions log
+      // is plain text, so markdown emphasis is never rendered — an operator
+      // reads the asterisks themselves. The -6 remedy shipped with
+      // `**Journal**` and `*Tools → Options → Expert Advisors*`, which put
+      // literal punctuation around the two things this phase exists to tell
+      // the operator to look at. Every other remedy in the table already used
+      // plain prose, so this control lands at zero offenders rather than
+      // grandfathering anything.
+      // ⚠️ BACKTICKS ARE DELIBERATELY NOT SCANNED. Three remedies use them for
+      // file and command names and they are this table's settled convention;
+      // widening this scan to cover them would red four rows to no benefit.
+      const emphasised = remedyEntries.filter(([, v]) => String(v).includes("*")).map(([k]) => k);
+      const emphasisMutant = `${row6.remedy} read the **Journal** tab`;
 
       // ⛔ ELEVEN SEPARATE `expect` CALLS, each its own statement rather than a
       //    link in an `&&` chain — the same rule CRITERION 7 states thirty
@@ -4173,6 +4188,16 @@ export async function selfTest() {
         expect(
           digitMutant !== row6.remedy && hasAccountShapedRun(digitMutant) === true,
           "(g-calibration) the SAME predicate FIRES on an in-memory copy with a SYNTHETIC repeated-digit run appended — a real account number is never written anywhere, including here",
+        ) && pass;
+      pass =
+        expect(
+          emphasised.length === 0,
+          `(g2) THE PLAIN-TEXT CONTROL: no mt5 remedy carries markdown emphasis — the auto-issue step wraps this table in a FENCED CODE BLOCK and the Actions log is plain text, so an asterisk is read by the operator as an asterisk, around the very words the -6 row exists to point at (offenders: ${emphasised.join(", ") || "none"} of ${remedyEntries.length} scanned)`,
+        ) && pass;
+      pass =
+        expect(
+          emphasisMutant !== row6.remedy && String(emphasisMutant).includes("*") === true,
+          "(g2-calibration) the SAME predicate FIRES on an in-memory copy with emphasis markers spliced back in — so (g2) is a reading, not a predicate only ever shown passing input",
         ) && pass;
 
       // ─── (h) THE -6 ROW READS WHAT IT NARRATES ──────────────────────────
