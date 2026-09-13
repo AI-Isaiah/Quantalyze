@@ -317,7 +317,21 @@ export function classifyProbe(result) {
   //      ⛔ It must stay ABOVE branch (8). Branch (8) is the unguarded tail, so
   //      anything placed below it is dead code that nothing at review time
   //      would name.
-  if (code === -6) {
+  //      ⛔ THE GUARD AND THE DERIVED CLAUSE ARE THE SAME DOCTRINE AS (1):
+  //      NOTHING UNMEASURED MAY BE CLAIMED. This row used to key on the code
+  //      ALONE while its detail narrated two states it never read — that
+  //      `initialize()` failed, and that `terminal_info()` came back null.
+  //      Both are readable, so both are read:
+  //        · `probe.initialize !== true` is now a CONDITION. A transcript with
+  //          `initialize: true` and a stale `-6` falls through to branch (7),
+  //          whose detail ("initialize ok but terminal_info() …") is true of
+  //          that state, instead of being told its initialize failed.
+  //        · the terminal_info sentence is SELECTED by `terminalInfoPresent`
+  //          rather than asserted, so a -6 arriving beside a live
+  //          terminal_info no longer contradicts its own transcript.
+  //      Writing the wrong sentence to the operator IS this phase's defect
+  //      class; it is the same defect one level down.
+  if (code === -6 && probe.initialize !== true) {
     return {
       kind: "mt5-not-authorized",
       // The raw code, exactly as -10004/-10005 carry theirs, so the public log
@@ -325,9 +339,12 @@ export function classifyProbe(result) {
       subject: "-6",
       detail:
         "MT5 initialize() failed with -6: the rpyc bridge ANSWERED, so the terminal is up and the IPC " +
-        "transport is not implicated — but NO ACCOUNT IS AUTHORIZED on it. That is why terminal_info() " +
-        "came back null and neither connected nor trade_allowed could be read. One state, one cause — " +
-        "not a code to look up.",
+        "transport is not implicated — but NO ACCOUNT IS AUTHORIZED on it. " +
+        (terminalInfoPresent
+          ? "terminal_info() DID come back on this run, so read connected and trade_allowed against the " +
+            "terminal's Journal rather than as a verdict — an unauthorized terminal can still report them. "
+          : "That is why terminal_info() came back null and neither connected nor trade_allowed could be read. ") +
+        "One state, one cause — not a code to look up.",
       info: null,
     };
   }

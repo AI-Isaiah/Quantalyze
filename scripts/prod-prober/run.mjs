@@ -4126,6 +4126,56 @@ export async function selfTest() {
           digitMutant !== row6.remedy && hasAccountShapedRun(digitMutant) === true,
           "(g-calibration) the SAME predicate FIRES on an in-memory copy with a SYNTHETIC repeated-digit run appended — a real account number is never written anywhere, including here",
         ) && pass;
+
+      // ─── (h) THE -6 ROW READS WHAT IT NARRATES ──────────────────────────
+      // Branch (6b) used to key on the CODE ALONE while its detail asserted
+      // two states it never consulted. These legs drive `classifyProbe`
+      // DIRECTLY with synthetic transcripts, because the states in question
+      // (a live `initialize` beside a stale -6; a -6 beside a live
+      // terminal_info) cannot be reached from a committed fixture without
+      // inventing a production transcript. Nothing here is a real reading:
+      // every field is hand-written in this file.
+      const probeTranscript = (obj) => ({
+        stdout: `Connecting to service mt5-gateway on environment production...\nPROBE ${JSON.stringify(obj)}\n`,
+        status: 0,
+        stderr: "",
+        timedOut: false,
+        measureFail: null,
+      });
+      const minusSix = [-6, "Terminal: Authorization failed"];
+      const staleSix = MT5_MOD.classifyProbe(
+        probeTranscript({ initialize: true, last_error: minusSix, terminal_info: null }),
+      );
+      const realSix = MT5_MOD.classifyProbe(
+        probeTranscript({ initialize: false, last_error: minusSix, terminal_info: null }),
+      );
+      const sixWithInfo = MT5_MOD.classifyProbe(
+        probeTranscript({
+          initialize: false,
+          last_error: minusSix,
+          terminal_info: { connected: true, trade_allowed: false },
+        }),
+      );
+      pass =
+        expect(
+          staleSix.kind === "mt5-terminal-error",
+          `(h1) THE GUARD: a transcript with initialize=TRUE and a stale -6 is NOT reported as mt5-not-authorized — its row would have told the operator "initialize() failed" about a run where initialize returned true (got ${staleSix.kind})`,
+        ) && pass;
+      pass =
+        expect(
+          String(staleSix.detail).includes("initialize ok"),
+          `(h1b) it falls to branch (7) instead, whose detail is TRUE of that state (${JSON.stringify(staleSix.detail)})`,
+        ) && pass;
+      pass =
+        expect(
+          realSix.kind === "mt5-not-authorized" && String(realSix.detail).includes("came back null"),
+          `(h2) CALIBRATION for (h1): the SAME transcript with initialize=FALSE still IS mt5-not-authorized and still carries the null-terminal_info sentence — so (h1)'s verdict comes from the new guard, not from a transcript nothing can classify (got ${realSix.kind})`,
+        ) && pass;
+      pass =
+        expect(
+          sixWithInfo.kind === "mt5-not-authorized" && String(sixWithInfo.detail).includes("came back null") === false,
+          `(h3) THE DERIVED CLAUSE: a -6 arriving BESIDE a live terminal_info is still mt5-not-authorized, but its detail no longer claims terminal_info came back null — the row cannot contradict its own transcript (${JSON.stringify(sixWithInfo.detail)})`,
+        ) && pass;
     }
   }
 

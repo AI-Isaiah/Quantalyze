@@ -2431,7 +2431,7 @@ describe("[164.8.3-04] the -6 branch is load-bearing (criterion 6)", () => {
   const MT5_ARM_TEXT = readFileSync(MT5_ARM_PATH, "utf8");
 
   /** The `-6` branch's opening line, and the block terminator that closes it. */
-  const MINUS_SIX_ANCHOR = "  if (code === -6) {";
+  const MINUS_SIX_ANCHOR = "  if (code === -6 && probe.initialize !== true) {";
   const BLOCK_TERMINATOR = "\n  }\n";
 
   /**
