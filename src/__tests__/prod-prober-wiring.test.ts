@@ -2305,14 +2305,75 @@ describe("[164.8.6-07] manifest-side hygiene survives every early return (TODOS 
 
 const AUTO_ISSUE_ANCHOR = "- name: Open or update the prod-prober issue";
 
-/** The auto-issue step's slice. A missing anchor THROWS by name — never `-1`. */
+/**
+ * The header of the NEXT step, at the job's step indent.
+ *
+ * ⚠️ ABSENT AT HEAD, ON PURPOSE. The auto-issue step is currently the LAST step
+ * in `prod-prober.yml`, so this anchor does not resolve and the last-step branch
+ * of `autoIssueStep` is the one that actually runs today. That is exactly why
+ * the branch is written out instead of being left implicit.
+ */
+const NEXT_STEP_ANCHOR = "\n      - name: ";
+
+/**
+ * The auto-issue step's slice, BOUNDED at the next step header. A missing START
+ * anchor THROWS by name — never `-1`.
+ *
+ * ⛔ THIS USED TO BE `text.slice(anchorIndex(text, AUTO_ISSUE_ANCHOR))`, i.e. to
+ * EOF, and it was correct only because the auto-issue step HAPPENS to be last.
+ * Appending any step after it would have silently widened the subject of every
+ * assertion documented as "the auto-issue step's slice" — including the
+ * load-bearing kind-independence one, which would then have been reporting a
+ * kind that belongs to somebody ELSE'S step while blaming issue selection.
+ * Step order is not a property this file should depend on.
+ *
+ * ⚠️ THE LAST-STEP CASE IS A DECISION, NOT A DEGENERATE SLICE. It is reached
+ * only when no further step header exists, and the start anchor is still
+ * `anchorIndex`-guarded, so neither branch can quietly become "nearly the whole
+ * file" the way a `-1` would.
+ */
 function autoIssueStep(text: string): string {
-  return text.slice(anchorIndex(text, AUTO_ISSUE_ANCHOR));
+  const start = anchorIndex(text, AUTO_ISSUE_ANCHOR);
+  const followingStep = text.indexOf(NEXT_STEP_ANCHOR, start + AUTO_ISSUE_ANCHOR.length);
+  return followingStep < 0
+    ? text.slice(start) // nothing follows this step — run to EOF, deliberately
+    : sliceBetweenAnchors(text, AUTO_ISSUE_ANCHOR, NEXT_STEP_ANCHOR);
 }
 
-/** Which defect kinds, if any, the given text mentions. `[]` is the contract. */
+/** Regex-escape, so a future kind carrying a metacharacter stays a LITERAL. */
+function reEscape(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Which defect kinds, if any, the given text mentions AS A STRING LITERAL.
+ * `[]` is the contract.
+ *
+ * ⛔ NOT `text.includes(k)`. Two members of the LIVE roster — `floor` and
+ * `absurdity` — are ORDINARY ENGLISH WORDS, and the step this runs over is
+ * largely comments. A substring scan therefore reds on innocuous future prose
+ * ("raise the floor", "an absurdity check") under a failure message reading
+ * *"selection has stopped being kind-independent"* — so whoever hit it would be
+ * told issue selection had broken when nothing had, with no way to tell that
+ * from the real thing. A gate that cannot distinguish a comment from a code
+ * path is not measuring what its own message names.
+ *
+ * WHAT IT MEASURES NOW: the kind appears with identifier boundaries on both
+ * sides (so `mt5-no-ipc` does not match inside `mt5-no-ipc-v2`) AND with a
+ * QUOTE or BACKTICK on at least one side — which is how a kind reaches the
+ * `actions/github-script` selection expression this gate is about.
+ *
+ * ⚠️ WHAT IT NO LONGER CATCHES, recorded rather than hidden: a kind pasted into
+ * an UNQUOTED YAML scalar (`labels: prod-prober-mt5-no-ipc`). That is a real
+ * narrowing against `includes`, accepted on two grounds — the selection this
+ * guards is JavaScript, where a kind is a string literal or it is nothing; and
+ * the false-positive class removed is live on two roster members TODAY while
+ * the narrowing is hypothetical.
+ */
 function kindsMentioned(text: string): string[] {
-  return DEFECT_KINDS.filter((k: string) => text.includes(k));
+  return DEFECT_KINDS.filter((k: string) =>
+    new RegExp(`["'\`](?:${reEscape(k)})(?![\\w-])|(?<![\\w-])(?:${reEscape(k)})["'\`]`).test(text),
+  );
 }
 
 describe("[164.8.3-01] AUTO-ISSUE DEDUP — issue selection cannot read a defect kind", () => {
@@ -2352,6 +2413,55 @@ describe("[164.8.3-01] AUTO-ISSUE DEDUP — issue selection cannot read a defect
     // Same predicate, mutated input: it reports exactly the kind that was spliced.
     expect(kindsMentioned(mutant)).toEqual([spliced]);
     expect((mutant.match(/const dedupLabel = "prod-prober";/g) || []).length).toBe(0);
+  });
+
+  it("AUTO-ISSUE DEDUP: CALIBRATION — the slice is BOUNDED, and the matcher does not fire on English prose", () => {
+    // ─── (1) THE BOUNDED SLICE ──────────────────────────────────────────────
+    // ⛔ CONSTRUCTED IN MEMORY. `prod-prober.yml` is BYTE-FROZEN for this phase
+    //    (criterion 5's sibling fence) and no test here ever writes it. The
+    //    appended step exists only in this string.
+    const APPENDED_NAME = "A step appended after the auto-issue step";
+    const appended = `${WORKFLOW_TEXT}\n      - name: ${APPENDED_NAME}\n        run: echo "mt5-no-ipc floor absurdity"\n`;
+    const unbounded = appended.slice(anchorIndex(appended, AUTO_ISSUE_ANCHOR));
+    const bounded = autoIssueStep(appended);
+
+    // The mutation has to reach the subject, or everything below is vacuous.
+    expect(unbounded, "the appended step must actually land inside an UNBOUNDED slice").toContain(APPENDED_NAME);
+    expect(bounded.length, "the bounded slice must still be the real step, not a stub").toBeGreaterThan(1000);
+    expect(bounded, "⛔ THE FINDING: the appended step must be EXCLUDED from the auto-issue slice").not.toContain(
+      APPENDED_NAME,
+    );
+
+    // ⛔ THE LOAD-BEARING CONSEQUENCE. Unbounded, a kind in somebody else's
+    //    step is reported as though issue selection had started reading kinds.
+    expect(
+      kindsMentioned(unbounded),
+      "unbounded, the assertion would have blamed issue selection for a foreign step's text",
+    ).toContain("mt5-no-ipc");
+    expect(kindsMentioned(bounded), "bounded, the foreign step is not this assertion's business").toEqual([]);
+
+    // And the last-step fallback is the branch that runs at HEAD: the real file
+    // has no following step, so the anchor is genuinely absent.
+    expect(
+      WORKFLOW_TEXT.indexOf(NEXT_STEP_ANCHOR, anchorIndex(WORKFLOW_TEXT, AUTO_ISSUE_ANCHOR)),
+      "at HEAD the auto-issue step is LAST — if this ever resolves, the bounded branch is live and that is fine, but say so here",
+    ).toBe(-1);
+
+    // ─── (2) THE MATCHER vs ENGLISH PROSE ───────────────────────────────────
+    expect(DEFECT_KINDS, "this calibration only means something while the roster carries a bare English word").toContain(
+      "floor",
+    );
+    const prose = "          // raise the floor when the absurdity budget is exceeded\n";
+    expect(prose.includes("floor"), "the predicate this replaced really did fire on this prose").toBe(true);
+    expect(
+      kindsMentioned(prose),
+      "⛔ THE FINDING: innocuous prose naming a floor is NOT a defect-kind mention",
+    ).toEqual([]);
+    // ⚠️ AND IT STILL CATCHES THE REAL SHAPE — otherwise the fix above would be
+    //    a scan narrowed into measuring nothing, which is worse than the noise.
+    expect(kindsMentioned('const k = "floor";'), "a quoted kind IS a mention").toEqual(["floor"]);
+    expect(kindsMentioned("const k = `absurdity`;"), "a backticked kind IS a mention").toEqual(["absurdity"]);
+    expect(kindsMentioned('"mt5-no-ipc-v2"'), "a LONGER identifier is not a mention of the shorter kind").toEqual([]);
   });
 
   it("AUTO-ISSUE DEDUP: criterion 8 was MET BEFORE THIS PHASE — both status captures and the one `cat`, PINNED", () => {
