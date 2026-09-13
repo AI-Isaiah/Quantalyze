@@ -1669,7 +1669,22 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
           "the green fixture no longer executes like the real loop. ci.yml's result loop changed and the fixture was not updated with it, so the two RED fixtures are being compared against a stale model",
         ).toEqual(`${half}: ${r.combos} combos; ${spell(r)}`);
       }
-    });
+      // ⚠️ TIMEOUT RAISED from vitest's 5000 ms default, MEASURED 2026-09-13.
+      // This arm SPAWNS BASH over every row/spelling combination on BOTH sides,
+      // and it costs 7349 ms on a COLD path — 47% over the default — while
+      // passing when the file runs in order, because the arms above it warm the
+      // caches it reads. ⛔ That margin depended on TEST ORDERING, which is not
+      // a guarantee: it timed out twice in full-suite runs here, and the failure
+      // count varied 1 -> 2 across otherwise identical runs, the signature of a
+      // load-dependent timeout rather than a regression.
+      // ⭐ WHY IT MATTERS MORE THAN A FLAKE: a timeout renders as a red X
+      // indistinguishable from a real failure, and THIS is the arm whose own
+      // header records the coupling silently disengaging once. A false red on
+      // main HEAD is not cosmetic here — it is the 2026-06-21 mechanism that
+      // makes Railway treat the check-suite as failed and SKIP the deploy.
+      // CI passes today only because it shards, which keeps this arm warm.
+      // ⛔ This raises HEADROOM only. Not one assertion is relaxed.
+    }, 20000);
 
     // ── THE REPAIR PROOF ───────────────────────────────────────────────────
     //

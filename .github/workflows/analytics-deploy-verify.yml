@@ -29,7 +29,10 @@ name: Analytics deploy verify (prod SHA vs main HEAD)
 # ANALYTICS_HEALTH_URL repo variable only if the domain changes.
 #
 # Schedule + manual only (NO push trigger): on `push`, github.sha is the pushed
-# commit, but Railway deploys main HEAD on ANY push, so an interleaved
+# commit, but Railway deploys main HEAD on any push THAT CHANGES THE
+# SERVICE (⚠️ CORRECTED 2026-09-13 — this said "on ANY push" and that is
+# false: merge f10b0e23 touched only `.planning/` and produced no deploy,
+# which is what the tree comparison below exists to tolerate), so an interleaved
 # non-analytics merge advances prod past the analytics commit this run checks →
 # false alarm. On schedule/dispatch, github.sha IS current main HEAD, which is
 # exactly what prod converges to. After an analytics merge, dispatch this
@@ -63,10 +66,13 @@ jobs:
     # route WR-03 closed on main-ci-cancelled-watcher.yml.
     timeout-minutes: 90
     steps:
-      # This job doesn't actually need the repo (it curls /health and compares
-      # to github.sha), but the C-0293 critical-regressions invariant requires
-      # every workflow to check out with persist-credentials:false — so we
-      # conform rather than carve out a checkout-less exemption to that guard.
+      # ⚠️ This job DOES need the repo now: the convergence check resolves the
+      # `analytics-service` tree object at both the deployed SHA and main HEAD,
+      # so a docs-only merge is not reported as a stale deploy. (It also
+      # satisfies the C-0293 critical-regressions invariant, which requires
+      # every workflow to check out with persist-credentials:false.) The repo
+      # is PUBLIC, so fetching the deployed SHA needs no credential — which is
+      # why persist-credentials:false does not block it.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
@@ -121,6 +127,44 @@ jobs:
             fi
             if [ "$match" = "1" ]; then
               echo "OK: prod analytics is on main HEAD ($deployed)"
+              exit 0
+            fi
+            # ⭐ SHA drift is not CODE drift, and this probe DEADLOCKS on the
+            # difference. MEASURED 2026-09-13 with the Railway API, after a
+            # first reading got the mechanism wrong: merge f10b0e23 changed two
+            # `.planning/` files and nothing else, and the `analytics-service`
+            # TREE OBJECT is byte-identical across it and 0b9f0699 (e6d8e33f).
+            # ⛔ Railway did NOT decline the deploy — it QUEUED one
+            # (b076139c, created at the merge instant) and left it WAITING on
+            # the check-suite. That suite contains THIS workflow's `verify`
+            # check, which was looping because prod had not converged, while
+            # prod could not converge because Railway was holding the deploy
+            # behind the suite. A circular wait — and a DIFFERENT shape from
+            # the 2026-06-21 incident in the header above: that one is a RED
+            # check making Railway SKIP; this one is an INCOMPLETE check making
+            # Railway WAIT. It self-clears only when the window below expires,
+            # so the cost is a ~80-minute deploy delay on EVERY docs-only merge
+            # plus a P1 staleness issue about a service running the right code.
+            # ⛔ The class is NOT new: issue #751 has been open since
+            # 2026-09-07 with nine comments, and its ORIGINAL pair (prod
+            # 05994f1d vs main 45218594) carries the same signature — tree
+            # IDENTICAL (b2f9f92e) on both. Every comment since has been
+            # triaged against a cause that was never present.
+            # A P1 alert that is structurally unable to be true trains its
+            # readers to scroll past it, and the next genuinely skipped deploy
+            # lands in that same muted thread.
+            # ⚠️ FAILS TOWARD ALERTING, deliberately: if the deployed commit
+            # cannot be fetched, `tree_prod` is empty and we fall through to
+            # the stale path. A probe that converges when it cannot tell is the
+            # dead-alarm version of the bug this block fixes.
+            tree_prod=""
+            if [ -n "$deployed" ] && [ "$deployed" != "unknown" ]; then
+              git fetch --depth=1 origin "$deployed" >/dev/null 2>&1 || true
+              tree_prod="$(git rev-parse "${deployed}^{commit}:analytics-service" 2>/dev/null || echo "")"
+            fi
+            tree_main="$(git rev-parse "${MAIN_SHA}^{commit}:analytics-service" 2>/dev/null || echo "")"
+            if [ -n "$tree_prod" ] && [ -n "$tree_main" ] && [ "$tree_prod" = "$tree_main" ]; then
+              echo "OK: prod analytics tree matches main HEAD — SHA differs, code identical (tree $tree_prod; prod $deployed vs main $MAIN_SHA)"
               exit 0
             fi
             echo "prod git_sha='$deployed' vs main HEAD='$MAIN_SHA' — not converged; retrying in 60s"
