@@ -102,8 +102,25 @@ keeps paying for: an inference stated confidently enough starts getting quoted a
 now known to do MORE than silence an alert: by exiting in seconds it completes the check-suite,
 which releases the deployment Railway is holding.
 
-⚠️ Issue #751's triage text still names only the old causes and should gain this one; that edit
-is not part of this commit.
+⭐ **The auto-filed issue body was corrected too, because it is CODE, not prose.** Editing issue
+#751 by hand would have fixed one thread while the template kept re-filing the same misdirection.
+Three changes to the generated body:
+
+- The opening line asserted *"Most likely the Railway deploy was SKIPPED because the main CI
+  check-suite was not green."* That confident prior is what sent nine comments hunting a red suite
+  that was green every time. It now says to read the DEPLOYMENT STATE first — `SKIPPED`, `WAITING`
+  and absent are three faults with three different fixes.
+- The "known causes" list gains the two actually observed here: the `WAITING`-on-its-own-check
+  circular wait, and the identical-tree case (which should no longer reach the issue at all — if it
+  does, the tree comparison has regressed and THAT is the bug).
+- Recovery is now per-fault. The old blanket advice — *rerun main CI until green, then
+  `railway redeploy`* — is wrong for two of the three: re-running an already-green suite does
+  nothing, and `redeploy` is the wrong verb for a deployment that is `WAITING` rather than skipped.
+
+⚠️ **Issue #751 is being CLOSED, and that is functional rather than tidiness.** The dedup queries
+`state: "open"` on the `analytics-deploy-stale` label and comments on the first hit instead of
+filing. While it stays open, the next genuinely skipped deploy becomes comment ten on a thread that
+has been wrong nine times. Closing it is what restores the alert's ability to be seen.
 
 ## [0.77.40.0] - 2026-09-13 — CIDOCSPATH: a `.planning/`-only PR stops running sixteen code gates, and a code PR is proven to still run every one of them
 
