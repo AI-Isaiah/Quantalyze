@@ -3696,27 +3696,44 @@ export async function selfTest() {
         log: quiet,
       });
       const d = r.defects[0] || {};
+      // ⛔ THE ABSENCE LEG IS ITS OWN STATEMENT, AND ITS LIST IS ROSTER-DERIVED.
+      //    As a by-name list at the tail of an `&&` chain it could not fail:
+      //    `defects.length === 1` and `d.kind === "mt5-ssh-transport"` had
+      //    already passed, so an absence check over a list that excludes
+      //    mt5-ssh-transport was true BY CONSTRUCTION — and on any earlier red
+      //    the `&&` short-circuited before it ever ran. Two changes make it a
+      //    reading: the list is `VERDICT_KINDS` minus the expected kind, so it
+      //    WIDENS BY ITSELF when a kind is registered (absence list C at
+      //    `noDefectOfKind`'s roster-derived call site already spells it this
+      //    way), and the leg is evaluated even when the `d.kind` pin is red —
+      //    which is the only run in which it has anything to say.
+      pass = expect(r.exitCode === 1, `a 255 with no PROBE line exits 1 (got ${r.exitCode})`) && pass;
       pass =
-        expect(r.exitCode === 1, `a 255 with no PROBE line exits 1 (got ${r.exitCode})`) &&
-        expect(r.defects.length === 1, `it ISOLATES one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
-        expect(d.kind === "mt5-ssh-transport", `the kind is mt5-ssh-transport (got ${d.kind})`) &&
+        expect(r.defects.length === 1, `it ISOLATES one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) && pass;
+      pass = expect(d.kind === "mt5-ssh-transport", `the kind is mt5-ssh-transport (got ${d.kind})`) && pass;
+      pass =
         expect(
           String(d.detail).includes("railway ssh exit 255"),
-          `the detail REPORTS the CLI's own exit status (${JSON.stringify(d.detail)}) — mt5-diag.sh:45-46 pipes into grep and throws that status away`,
-        ) &&
+          `the detail REPORTS the CLI's own exit status (${JSON.stringify(d.detail)}) — mt5-diag.sh's own ssh-into-grep pipeline throws that status away`,
+        ) && pass;
+      pass =
         expect(
           String(d.detail).includes("connection closed by remote host"),
           "and carries the first redacted stderr line, which is the only part of stderr that may be printed",
-        ) &&
+        ) && pass;
+      pass =
         expect(
           !String(d.detail).includes("python3: command not found"),
           "and does NOT echo raw ssh stdout — only the PROBE line and one stderr line may leave this arm",
-        ) &&
+        ) && pass;
+      pass =
         expect(
-          noDefectOfKind(r.defects, ["mt5-no-ipc", "mt5-ipc-timeout", "mt5-probe-timeout", "mt5-terminal-error", "mt5-not-authorized"]),
-          "a transport failure is NOT reported as any statement about the terminal — nothing was measured about MT5 at all",
-        ) &&
-        pass;
+          noDefectOfKind(
+            r.defects,
+            VERDICT_KINDS.filter((k) => k !== "mt5-ssh-transport"),
+          ),
+          `a transport failure is NOT reported as any statement about the terminal — nothing was measured about MT5 at all (absence spelled through the ${VERDICT_KINDS.length - 1} other verdict kinds, not a hand-typed list)`,
+        ) && pass;
 
       // ⛔ THE POSITIVE CONTROL FOR THE SAME PROPERTY, and the more dangerous
       // direction. `scripts/mt5-diag.sh:45-46` pipes ssh into `grep '^PROBE '`,
@@ -3780,29 +3797,39 @@ export async function selfTest() {
     });
     const d = r.defects[0] || {};
     const byName = KIND_ASSERTIONS["mt5-probe-timeout"];
+    // ⛔ SAME TREATMENT AS THE TRANSPORT SCENARIO'S ABSENCE LEG, for the same
+    //    reason: a hand-typed list at the tail of an `&&` chain, behind pins
+    //    that already fixed the outcome, is an assertion that cannot fail.
+    //    Roster-derived, and its own statement.
+    pass = expect(r.exitCode === 1, `a timed-out spawn exits 1 (got ${r.exitCode})`) && pass;
     pass =
-      expect(r.exitCode === 1, `a timed-out spawn exits 1 (got ${r.exitCode})`) &&
-      expect(r.defects.length === 1, `it ISOLATES one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
-      expect(d.kind === "mt5-probe-timeout", `the kind is mt5-probe-timeout (got ${d.kind})`) &&
-      expect(byName(d), "the independently spelled KIND_ASSERTIONS entry for mt5-probe-timeout agrees") &&
-      expect(d.arm === "mt5", `the defect is attributed to mt5 (got ${d.arm})`) &&
+      expect(r.defects.length === 1, `it ISOLATES one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) && pass;
+    pass = expect(d.kind === "mt5-probe-timeout", `the kind is mt5-probe-timeout (got ${d.kind})`) && pass;
+    pass = expect(byName(d), "the independently spelled KIND_ASSERTIONS entry for mt5-probe-timeout agrees") && pass;
+    pass = expect(d.arm === "mt5", `the defect is attributed to mt5 (got ${d.arm})`) && pass;
+    pass =
       expect(
         d.remedy === MT5_MOD.REMEDIES["mt5-probe-timeout"],
         "it carries the mt5-probe-timeout remedy, which says this is OUR instrument's budget",
-      ) &&
+      ) && pass;
+    pass =
       expect(
         String(d.detail).includes("-10005") && String(d.detail).includes("NOT"),
         `the detail says in words that this is NOT the terminal's -10005 (${JSON.stringify(d.detail)})`,
-      ) &&
+      ) && pass;
+    pass =
       expect(
-        noDefectOfKind(r.defects, ["mt5-ipc-timeout", "mt5-no-ipc", "mt5-ssh-transport", "mt5-not-authorized"]),
-        "and NONE of the four states that would send an operator to the gateway fired — the prober blamed itself, correctly",
-      ) &&
+        noDefectOfKind(
+          r.defects,
+          VERDICT_KINDS.filter((k) => k !== "mt5-probe-timeout"),
+        ),
+        `and NONE of the states that would send an operator to the gateway fired — the prober blamed itself, correctly (absence spelled through the ${VERDICT_KINDS.length - 1} other verdict kinds, not a hand-typed list)`,
+      ) && pass;
+    pass =
       expect(
         MT5_MOD.REMEDIES["mt5-probe-timeout"] !== MT5_MOD.REMEDIES["mt5-ipc-timeout"],
         "the two 'timeout' remedies are different strings",
-      ) &&
-      pass;
+      ) && pass;
   }
 
   // -------------------------------------------------------------------------
