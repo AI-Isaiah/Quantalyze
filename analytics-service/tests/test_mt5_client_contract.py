@@ -40,6 +40,7 @@ Regression gates — WHY each case matters (Rule 9):
 """
 from __future__ import annotations
 
+import ast
 import pathlib
 import re
 import sys
@@ -2797,40 +2798,6 @@ def test_initialize_with_credentials_falsy_return_discloses_nothing_and_keeps_th
     assert exc_info.value.code == -6
 
 
-def test_the_shipped_falsy_arm_asymmetry_is_real_and_is_the_reason_the_gate_is_scoped():
-    """⭐ THE MEASUREMENT BEHIND `[164.6.2-RAISE-LAST-SHAPE-ONLY]`, asserted rather
-    than asserted-about.
-
-    A recorded asymmetry that no test exercises is a claim. This drives the
-    SHIPPED per-account verb down its falsy arm with the server echoed in the
-    terminal's `last_error()` text and pins what actually happens today: the
-    password (a `password='…'` SHAPE) is caught by `scrub_freeform_string`, while
-    the bare server literal — arriving with no key beside it — is NOT.
-
-    ⛔ This test documents a pre-existing posture; it is NOT a licence to weaken
-    anything. If a future phase closes the asymmetry, this case goes RED and is
-    DELETED, not relaxed. Its failure message is the signal that the booked item
-    was fixed."""
-    connect, _fake, _rec = _make(
-        {
-            "login": False,
-            "last_error": (-6, f"rejected by {_FAKE_SERVER}"),
-        }
-    )
-    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
-
-    with pytest.raises(Mt5ClientError) as exc_info:
-        client.login(_FAKE_LOGIN, password=_FAKE_PASSWORD, server=_FAKE_SERVER)
-
-    msg = str(exc_info.value)
-    assert _FAKE_PASSWORD not in msg  # never, on any arm
-    assert _FAKE_SERVER in msg, (
-        "the shipped verb's falsy arm now redacts the server BY VALUE — "
-        "[164.6.2-RAISE-LAST-SHAPE-ONLY] appears to be closed. Delete this test "
-        "and the asymmetry note it pins; do NOT relax it."
-    )
-
-
 @pytest.mark.parametrize(
     "method_name",
     ["assert_session_authorized", "initialize_with_credentials"],
@@ -2871,3 +2838,338 @@ def test_the_new_session_verbs_refuse_a_stale_generation(method_name):
         "the refused touch still reached the terminal — which is the harm itself"
     )
     assert not isinstance(Mt5SessionAbandoned(method_name), Mt5ClientError)
+
+
+# --------------------------------------------------------------------------- #
+# 164.6.2 — FENCING THE CLASS: A SIGNATURE-DERIVED CREDENTIAL-REDACTION GATE
+#
+# ⛔ THE HAZARD THIS EXISTS FOR IS NOT DUPLICATION, IT IS THE THIRD CALL SITE.
+# `Mt5Client.login` and `Mt5Client.initialize_with_credentials` each carry their
+# own copy of the by-value redaction loop, deliberately: extracting a shared
+# helper would mean rewriting `login()`, whose four per-account callers are
+# shipped and whose regression lands on live job processing (D-07). But a shared
+# helper would not have removed the real hazard anyway — a THIRD credential-
+# carrying verb landing one day without the loop. A new author simply would not
+# call the helper.
+#
+# So the roster is DERIVED FROM SOURCE by SIGNATURE and the property is asserted
+# BEHAVIOURALLY: a third drivable verb enters the parametrization by itself and
+# REDS until it redacts, with no pin to remember to edit. That is strictly
+# stronger than deduplication, which would only have made the text shorter.
+#
+# Every test in this block carries the token `CREDENTIAL_REDACTION` in its name so
+# the CI verify can filter on it AND assert the filtered COUNT — a name that lost
+# the token would collect nothing, and a zero-collected run reads as green.
+#
+# ⛔ ANTI-VACUITY (the argument `test_mt5_abandon_roster.py`'s floor makes, copied
+# on purpose): every assertion below is of the form "every derived X has property
+# P", and a derivation that collapsed to the EMPTY SET satisfies all of them —
+# an unredacted class and a fully redacted one look identical from here. The
+# hand-typed floor is what makes the difference observable.
+# --------------------------------------------------------------------------- #
+
+#: The credential triple, in the order a drivable verb must take it positionally.
+CREDENTIAL_PARAMETER_TRIPLE = ("login", "password", "server")
+PASSWORD_PARAMETER = "password"
+
+#: ⛔ HAND-TYPED, and NEVER derived from the set it bounds — a size compared
+#: against its own derivation cannot fail. MEASURED 2 on 2026-09-13 at this
+#: commit: `login` (the shipped per-account verb) and `initialize_with_credentials`
+#: (164.6.2 / D-07, the heal verb). Raise it when a third credentialed verb lands;
+#: ⛔ never lower it to clear a red run.
+CREDENTIALED_METHOD_FLOOR = 2
+
+
+def _credential_carrying_transport_calls(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[str, ...]:
+    """The `self._mt5.<name>` calls INSIDE `fn` that are handed one of the
+    credential parameters, in source order.
+
+    ⭐ WHY the argument text is inspected rather than the method's own name mapped
+    to a transport verb by hand. `login()` reaches the transport TWICE — a
+    credential-LESS `initialize()` first, then the credentialed `login()` — and
+    only the second is the arm the by-value redaction guards (the first is
+    shape-scrubbed only, correctly, because no credential is in scope there). A
+    driver that made the WRONG one raise would red shipped, unchanged code and the
+    remedy would be a `login()` edit D-07 forbids. Identifying the call by the
+    values it carries gets that right for a verb nobody has written yet, which a
+    hand-map cannot.
+
+    The walk descends into `lambda:` bodies because that is how both verbs pass
+    their transport call to `_timed`.
+    """
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(fn):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        base = node.func.value
+        if not (
+            isinstance(base, ast.Attribute)
+            and base.attr == "_mt5"
+            and isinstance(base.value, ast.Name)
+            and base.value.id == "self"
+        ):
+            continue
+        referenced = {
+            name.id
+            for arg in [*node.args, *(kw.value for kw in node.keywords)]
+            for name in ast.walk(arg)
+            if isinstance(name, ast.Name)
+        }
+        if referenced & set(CREDENTIAL_PARAMETER_TRIPLE):
+            found.append((node.lineno, node.func.attr))
+    return tuple(attr for _lineno, attr in sorted(found))
+
+
+def _credentialed_client_methods(
+    source: str,
+) -> tuple[dict[str, tuple[str, ...]], dict[str, tuple[str, ...]]]:
+    """Derive, FROM SOURCE, the credential-carrying methods of `Mt5Client`.
+
+    Returns `(drivable, residual)`:
+
+      * DRIVABLE — its POSITIONAL parameters are exactly the credential triple, in
+        order, with no keyword-only parameters. The value is the tuple of
+        transport verbs it hands a credential to, which is what tells the gate
+        which scenario key must raise.
+      * RESIDUAL — it names the password parameter but is not drivable, so the
+        gate physically cannot call it. Reported by name and asserted EMPTY: a
+        future credentialed verb with a different shape must force a DELIBERATE
+        driver extension rather than silently escaping the fence.
+
+    ⛔ Never hand-list the method names here. The entire value of this gate is that
+    a third credentialed verb lands in it WITHOUT a pin edit.
+    """
+    tree = ast.parse(source, filename="services/mt5_client.py")
+    drivable: dict[str, tuple[str, ...]] = {}
+    residual: dict[str, tuple[str, ...]] = {}
+    for cls in (
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "Mt5Client"
+    ):
+        for member in cls.body:
+            if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            positional = tuple(
+                arg.arg
+                for arg in (*member.args.posonlyargs, *member.args.args)
+                if arg.arg != "self"
+            )
+            keyword_only = tuple(arg.arg for arg in member.args.kwonlyargs)
+            if positional == CREDENTIAL_PARAMETER_TRIPLE and not keyword_only:
+                drivable[member.name] = _credential_carrying_transport_calls(member)
+            elif PASSWORD_PARAMETER in positional + keyword_only:
+                residual[member.name] = positional + keyword_only
+    return drivable, residual
+
+
+_CLIENT_SOURCE = pathlib.Path(mt5_client_mod.__file__).read_text()
+_DRIVABLE, _RESIDUAL = _credentialed_client_methods(_CLIENT_SOURCE)
+
+
+def test_CREDENTIAL_REDACTION_the_derived_roster_did_not_collapse():
+    """⛔ THE LOAD-BEARING FLOOR, and the ONLY assertion in this block that a
+    collapsed derivation cannot satisfy.
+
+    The parametrized gate below is of the form "every derived verb redacts". An
+    EMPTY derivation satisfies it VACUOUSLY — pytest reports an empty parameter
+    set, nothing runs, and the summary says nothing failed. That is precisely how
+    a source-derived gate rots into decoration. The floor is hand-typed and
+    compared with `>=`, never computed from the set it bounds.
+    """
+    assert len(_DRIVABLE) >= CREDENTIALED_METHOD_FLOOR, (
+        "the source-derived credentialed-method roster COLLAPSED — the DERIVATION "
+        "is broken, not the code. Nothing below can fail while it is empty: an "
+        "empty parametrization passes the redaction gate vacuously, so an "
+        "unredacted client and a fully redacted one are indistinguishable from "
+        f"here. derived={sorted(_DRIVABLE)!r}, floor={CREDENTIALED_METHOD_FLOOR}. "
+        "⛔ Fix the derivation; never lower the floor."
+    )
+
+
+def test_CREDENTIAL_REDACTION_no_password_carrying_method_escapes_the_driver():
+    """Any method that names the password parameter but is NOT drivable is
+    reported BY NAME AND SIGNATURE, and the set is asserted empty.
+
+    Without this, the gate's coverage would silently depend on a future author
+    happening to choose the same signature shape: a verb taking
+    `(login, password, server, *, timeout)` — an entirely reasonable thing to
+    write — would vanish from the parametrization and the fence would report
+    success over a smaller class than it claims.
+    """
+    assert not _RESIDUAL, (
+        "these Mt5Client methods carry the password parameter but the redaction "
+        f"driver cannot call them: { {k: list(v) for k, v in _RESIDUAL.items()} }. "
+        "⛔ EXTEND THE DRIVER to cover the new signature shape. Weakening the "
+        "derivation so it no longer sees them is the WRONG fix — it would make "
+        "this gate report success over a class it no longer covers."
+    )
+
+
+def test_CREDENTIAL_REDACTION_the_signature_classifier_is_itself_under_test():
+    """The derivation above, exercised on SYNTHETIC source — the same discipline
+    `test_timeout_call_extractor_ignores_comments_and_untimed_calls` applies to the
+    timeout extractor, and for the same reason: a classifier only ever run against
+    the file it polices is indistinguishable from one that returns a constant.
+
+    Four shapes, each of which has misled a reader before:
+      * the drivable shape, whose credential-carrying call is the SECOND transport
+        call in the body (the `login()` shape) — the first is credential-less and
+        must NOT be the one selected;
+      * a keyword-only variant — RESIDUAL, because the driver calls positionally;
+      * a wrong-ORDER variant — RESIDUAL, because a positional driver would hand
+        the password to the server parameter;
+      * a method with no credential at all — neither.
+    """
+    synthetic = "\n".join(
+        [
+            "class Mt5Client:",
+            "    def login(self, login, password, server):",
+            "        self._mt5.initialize(timeout=self._ipc_timeouts_ms['initialize'])",
+            "        self._mt5.login(login, password=password, server=server)",
+            "    def kwonly(self, login, *, password, server):",
+            "        self._mt5.login(login, password=password, server=server)",
+            "    def misordered(self, password, login, server):",
+            "        self._mt5.login(login, password=password, server=server)",
+            "    def account_info(self):",
+            "        return self._mt5.account_info()",
+        ]
+    )
+    drivable, residual = _credentialed_client_methods(synthetic)
+
+    assert drivable == {"login": ("login",)}, (
+        "the classifier must select the CREDENTIAL-CARRYING transport call, not "
+        f"merely the first one in the body: {drivable!r}"
+    )
+    assert set(residual) == {"kwonly", "misordered"}
+    assert "account_info" not in drivable and "account_info" not in residual
+
+
+@pytest.mark.parametrize("method_name", sorted(_DRIVABLE))
+def test_CREDENTIAL_REDACTION_a_transport_raise_discloses_none_of_the_three(
+    method_name,
+):
+    """⛔ THE PROPERTY THE WHOLE PHASE ORDERING EXISTS TO PROTECT (T-134-01).
+
+    `mt5linux` 0.1.9 builds every remote call as SOURCE TEXT with the arguments
+    f-string-interpolated and evals it on the far side, so a remote traceback
+    carries the login, the password and the broker server VERBATIM onto a PUBLIC
+    Actions log. `scrub_freeform_string` is SHAPE-based and cannot catch a bare
+    literal arriving without its key; only the by-value pass can.
+
+    Driven END TO END from the derivation: the method is resolved by name off the
+    instance and the scenario key that makes ITS credential-carrying transport
+    call raise is derived too. Nothing here is hand-mapped, so a third credentialed
+    verb is fenced the moment it is written.
+
+    ⛔ SCOPED TO THE TRANSPORT-RAISE ARM, deliberately. The shipped per-account
+    verb's FALSY arm goes through the shared `_raise_last` and is shape-scrubbed
+    only; asserting by-value redaction there would red shipped, unchanged code and
+    the only remedy would be a `login()` edit D-07 forbids. That asymmetry is
+    measured separately below as `[164.6.2-RAISE-LAST-SHAPE-ONLY]`.
+
+    Each literal is asserted absent INDIVIDUALLY so a partial redaction names the
+    one that escaped, and the marker is asserted present so an empty message
+    cannot satisfy the three absences vacuously.
+    """
+    carrying = _DRIVABLE[method_name]
+    assert len(carrying) == 1, (
+        f"Mt5Client.{method_name} hands a credential to {list(carrying)} — the "
+        "driver cannot tell which transport call to make raise. Extend the "
+        "derivation deliberately; do not guess."
+    )
+    scenario_key = f"{carrying[0]}_raises"
+
+    connect, _fake, _rec = _make(
+        {
+            scenario_key: RuntimeError(
+                "rpyc remote error while eval'ing "
+                f"mt5.{carrying[0]}({_FAKE_LOGIN}, "
+                f"password='{_FAKE_PASSWORD}', server='{_FAKE_SERVER}')"
+            )
+        }
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        getattr(client, method_name)(_FAKE_LOGIN, _FAKE_PASSWORD, _FAKE_SERVER)
+
+    msg = str(exc_info.value)
+    for label, literal in (
+        ("login", str(_FAKE_LOGIN)),
+        ("password", _FAKE_PASSWORD),
+        ("server", _FAKE_SERVER),
+    ):
+        assert literal not in msg, (
+            f"Mt5Client.{method_name} disclosed the {label} on its transport-raise "
+            f"arm: {msg!r}. ⛔ Add the by-value redaction loop to that arm — this "
+            "is T-134-01 and the message reaches a PUBLIC Actions log."
+        )
+    assert "[REDACTED]" in msg, (
+        f"Mt5Client.{method_name} produced a message with nothing redacted at all "
+        "— the three absence assertions above would pass vacuously on an empty or "
+        f"unrelated string: {msg!r}"
+    )
+
+
+def test_CREDENTIAL_REDACTION_the_falsy_arm_asymmetry_is_measured_not_assumed():
+    """⚠️ `[164.6.2-RAISE-LAST-SHAPE-ONLY]` — the ONE asymmetry this plan creates,
+    asserted rather than merely recorded. A documented posture no test exercises is
+    a claim, not a measurement.
+
+    Both drivable verbs are driven down their FALSY arm with the SAME terminal
+    `last_error()` text, which echoes the broker server back as a bare literal:
+
+      * `initialize_with_credentials` re-redacts that detail BY VALUE before it
+        escapes and preserves the original code — deliberately STRONGER than the
+        shipped verb, because it is the method a credential is about to be routed
+        through and it had to be safe BEFORE plan 02 routes one;
+      * `Mt5Client.login` goes through the shared `_raise_last`, which is
+        shape-scrubbed only, so the bare server literal survives. That is a
+        PRE-EXISTING posture of every shipped call site — NOT a regression
+        introduced here — and closing it would mean editing `login()`, which D-07
+        forbids because its four per-account callers are shipped and a regression
+        there lands on live job processing.
+
+    ⛔ This case documents a posture; it is NOT a licence to weaken anything. When
+    a future phase closes the asymmetry, the second half goes RED and must be
+    DELETED together with the booked item, never relaxed. The password is asserted
+    absent on BOTH arms, because that half is not asymmetric and never may be.
+    """
+    detail = f"Authorization failed on {_FAKE_SERVER} (password='{_FAKE_PASSWORD}')"
+
+    healing_connect, _f1, _r1 = _make(
+        {"initialize": False, "last_error": (-6, detail)}
+    )
+    healing = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=healing_connect)
+    with pytest.raises(Mt5ClientError) as healed:
+        healing.initialize_with_credentials(
+            _FAKE_LOGIN, _FAKE_PASSWORD, _FAKE_SERVER
+        )
+
+    shipped_connect, _f2, _r2 = _make({"login": False, "last_error": (-6, detail)})
+    shipped = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=shipped_connect)
+    with pytest.raises(Mt5ClientError) as legacy:
+        shipped.login(_FAKE_LOGIN, _FAKE_PASSWORD, _FAKE_SERVER)
+
+    healed_msg, legacy_msg = str(healed.value), str(legacy.value)
+
+    # The NEW verb: by-value redacted on the falsy arm, code preserved.
+    assert _FAKE_SERVER not in healed_msg
+    assert str(_FAKE_LOGIN) not in healed_msg
+    assert "[REDACTED]" in healed_msg
+    assert healed.value.code == -6
+
+    # The password is shape-scrubbed on BOTH — that half is not asymmetric.
+    assert _FAKE_PASSWORD not in healed_msg
+    assert _FAKE_PASSWORD not in legacy_msg
+
+    # The SHIPPED verb: the bare server literal survives. Pre-existing, booked.
+    assert _FAKE_SERVER in legacy_msg, (
+        "Mt5Client.login's falsy arm now redacts the server BY VALUE — "
+        "[164.6.2-RAISE-LAST-SHAPE-ONLY] appears to be CLOSED. Delete this half "
+        "and the asymmetry note it pins, and close the booked item. ⛔ Do NOT "
+        "relax the assertion to make it pass."
+    )
