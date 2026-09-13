@@ -763,6 +763,21 @@ _LEASE_VERB = "mt5_terminal_lease"
 #: MEASURED at 153.5 (five acquisitions, five DISTINCT enclosing functions — which
 #: is the invariant: at most one lease per function means no function can carry a
 #: client from one acquisition into the next).
+#:
+#: ⭐ RE-CUT 2026-09-13 (Phase 164.6.2 plan 02) to SIX, and the roster's own
+#: question was answered before the literal was touched: does the new site touch an
+#: `Mt5Client` that was ALREADY touched under a different lease? It does not — the
+#: heal CONSTRUCTS its client inside this lease (inside the `to_thread` body, so
+#: the unbounded rpyc connect is covered by the caller's `wait_for`) and closes it
+#: before the lease releases, so the lazy bind's first touch and its only touches
+#: all land on this one generation.
+#:
+#: ⚠️ THE ROSTER'S MEASURED SCOPE GAP, recorded here because it is exactly why the
+#: heal lives where it does: `_production_python_files` globs `services/` and
+#: `routers/` ONLY, so `main.py` is INVISIBLE to this walk. A lease taken in
+#: `main.py` would never appear here and the `==` would stay green over a roster
+#: that had silently stopped being complete. `services/mt5_relogin.py` is a
+#: `services/` module and `main.py` only CALLS it.
 _PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
     {
         ("services/allocator_positions.py", "_fetch_mt5_account_rows"),
@@ -770,6 +785,8 @@ _PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
         ("services/job_worker.py", "_fetch_mt5_account_balance"),
         ("services/job_worker.py", "run_derive_broker_dailies_job"),
         ("routers/exchange.py", "_validate_mt5_key_probe"),
+        # Phase 164.6.2 / D-08 — the boot heal. See the re-cut note above.
+        ("services/mt5_relogin.py", "heal_mt5_terminal_session"),
     }
 )
 
@@ -821,7 +838,8 @@ def test_no_production_function_holds_two_terminal_leases() -> None:
 
     One `Mt5Client` per lease acquisition. The reachable way to break it is a
     function that takes the lease TWICE with one client spanning both — so this
-    asserts the roster of lease sites is exactly the five measured at 153.5 AND
+    asserts the roster of lease sites is exactly the SIX on the hand-typed
+    literal above (five measured at 153.5, one added by 164.6.2) AND
     that their enclosing functions are all distinct.
 
     Reds in both directions, and both reds are useful:
@@ -922,3 +940,246 @@ def test_the_lease_site_scanner_reports_the_reuse_shape_and_ignores_prose() -> N
         "    return None\n"
     )
     assert _lease_sites(in_prose, "synthetic.py") == []
+
+
+# ---------------------------------------------------------------------------
+# CONC-2 / D-08 — THE PREFLIGHT TOUCHES NOTHING, and until Phase 164.6.2 plan 02
+# NOTHING PINNED IT.
+#
+# `job_worker._make_mt5_session` builds the derive/holdings job's `Mt5Client` in
+# PREFLIGHT — OUTSIDE and BEFORE the terminal lease. `Mt5Client._epoch` binds on
+# FIRST TOUCH and never rebinds, so a session verb called from there stamps the
+# generation EARLY; an unrelated lease releasing anywhere in the
+# preflight-to-lease window then bumps the terminal, and the job's own, entirely
+# legitimate derive read is refused with `Mt5SessionAbandoned` — "the lease it
+# operated under has ended", said to a caller that plainly holds the lease. D-40
+# classifies that transient, so it RETRIES, and retries the same way: a
+# permanent-looking loop with the most confusing message this subsystem can
+# produce.
+#
+# ⭐ That measurement is precisely what STRUCK D-01 (heal on session open) and
+# replaced it with D-08 (heal at startup only). This gate is the structural half
+# of that decision: the reasoning lives in CONTEXT.md, and from here on the SHAPE
+# cannot come back silently.
+#
+# ⛔ The verb set is DERIVED from `Mt5Client`'s own source, never hand-typed, so a
+# session verb added in a future phase is covered WITHOUT a pin edit — which is
+# the whole difference between this gate and a roster that rots.
+# ---------------------------------------------------------------------------
+
+#: The construction site the gate watches. Hand-named because it is the SUBJECT of
+#: the invariant, not a derived member of a set.
+_PREFLIGHT_FUNCTION = "_make_mt5_session"
+
+#: ⛔ HAND-TYPED anti-vacuity floor, and it is NEVER computed from the set it
+#: bounds — a derivation that collapsed would yield an EMPTY verb set, and "none of
+#: these verbs is called" is satisfied vacuously by an empty set, so a fully
+#: broken gate and a fully clean preflight would be indistinguishable.
+#: MEASURED 2026-09-13 (Phase 164.6.2 plan 02): 10 fenced methods on `Mt5Client`
+#: (`login`, `account_info`, `terminal_info`, `history_deals_get`, `order_check`,
+#: `restart`, `assert_session_authorized`, `initialize_with_credentials`,
+#: `_raise_last`, `_materialize_rows`). The floor sits below that so a deliberate
+#: verb removal does not red it, and far enough above zero to catch a collapse.
+_SESSION_VERB_FLOOR = 8
+_SESSION_VERBS_MEASURED_AT_164_6_2 = 10
+
+
+def _mt5_session_touching_methods(source: str) -> frozenset[str]:
+    """Every ``Mt5Client`` method that reaches the terminal's MT5 session, DERIVED
+    from that class's own source.
+
+    The derivation is ``self._assert_live(...)``: the WIZFORM-ABANDON / D-36 fence
+    is applied to exactly the methods that perform a session touch, and its four
+    exemptions (``__init__``, ``close``, ``release``, ``_teardown_transport``) are
+    exactly the methods that touch only OUR OWN rpyc socket — which is the same
+    line this gate needs to draw. ⛔ Deriving from "calls ``self._mt5.<x>``" instead
+    would MISS the verbs that reach the session through a helper, and hand-typing
+    the list would rot on the first new verb.
+    """
+    tree = ast.parse(source)
+    cls = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == "Mt5Client"
+        ),
+        None,
+    )
+    if cls is None:
+        return frozenset()
+    names: set[str] = set()
+    for node in cls.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for call in ast.walk(node):
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "_assert_live"
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "self"
+            ):
+                names.add(node.name)
+                break
+    return frozenset(names)
+
+
+def _session_touches_in(
+    source: str, function_name: str, verbs: frozenset[str]
+) -> list[tuple[str, int]]:
+    """Every ``<anything>.<verb>(...)`` call inside ``function_name``, as
+    ``(verb, lineno)``.
+
+    Deliberately receiver-BLIND. The receiver in the preflight is a local
+    (``Mt5Client(host, port)``'s result, or the `Mt5Session` wrapping it) and a
+    walk that insisted on a particular name would be defeated by renaming a
+    variable. Over-reporting is the safe direction here: the preflight calls
+    ``os.getenv`` and two module-level functions and nothing else, so a false
+    positive means somebody added an attribute call whose name collides with an
+    MT5 session verb, which is itself worth a look.
+    """
+    tree = ast.parse(source)
+    target = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == function_name
+        ),
+        None,
+    )
+    if target is None:
+        return []
+    found: list[tuple[str, int]] = []
+    for node in ast.walk(target):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in verbs
+        ):
+            found.append((node.func.attr, node.lineno))
+    return sorted(found)
+
+
+def test_the_mt5_preflight_touches_no_terminal_session() -> None:
+    """⛔ D-08 — ``job_worker._make_mt5_session`` must CONSTRUCT and nothing more.
+
+    A terminal touch there stamps `Mt5Client._epoch` on the PREFLIGHT generation,
+    outside the lease. An unrelated lease release in the window between the
+    preflight and this job's own acquisition then makes that stamp stale, and the
+    job's LEGITIMATE derive read is refused with `Mt5SessionAbandoned` — which D-40
+    classifies TRANSIENT, so it retries into the same refusal. That is the most
+    confusing failure this subsystem can produce, and it is why the per-session
+    half of Phase 164.6.2's criterion 1 (D-01) was STRUCK and replaced by a
+    startup-only heal (D-08).
+
+    ⛔ The remedy for a red here is to MOVE the touch inside a lease, never to
+    relax `Mt5Client._assert_live` and never to delete a verb from the derivation.
+    """
+    root = Path(__file__).resolve().parents[1]
+    verbs = _mt5_session_touching_methods(
+        (root / "services" / "mt5_client.py").read_text()
+    )
+
+    assert len(verbs) >= _SESSION_VERB_FLOOR, (
+        f"the Mt5Client session-verb derivation COLLAPSED — the DERIVATION is "
+        f"broken, not the code. Nothing below can fail while it is empty: 'the "
+        f"preflight calls none of these verbs' is satisfied VACUOUSLY by an empty "
+        f"set, so a preflight that touches the terminal and one that does not "
+        f"become indistinguishable from here. derived={sorted(verbs)}, "
+        f"floor={_SESSION_VERB_FLOOR} "
+        f"({_SESSION_VERBS_MEASURED_AT_164_6_2} measured at 164.6.2-02). "
+        f"⛔ Fix the derivation; never lower the floor."
+    )
+
+    job_worker_src = (root / "services" / "job_worker.py").read_text()
+    assert f"def {_PREFLIGHT_FUNCTION}(" in job_worker_src, (
+        f"harness: services/job_worker.py no longer defines "
+        f"{_PREFLIGHT_FUNCTION} — this gate's subject moved; re-anchor it rather "
+        f"than deleting it."
+    )
+
+    touches = _session_touches_in(job_worker_src, _PREFLIGHT_FUNCTION, verbs)
+    assert not touches, (
+        f"{_PREFLIGHT_FUNCTION} performs MT5 session touches {touches}. It runs in "
+        f"PREFLIGHT, outside and before the terminal lease, so each of those binds "
+        f"`Mt5Client._epoch` to a generation nobody holds; an unrelated lease "
+        f"release before this job acquires the terminal then refuses its own "
+        f"legitimate read with `Mt5SessionAbandoned` and D-40 retries it forever. "
+        f"⛔ Move the touch INSIDE a lease (Phase 164.6.2's boot heal is the worked "
+        f"example — it constructs its client inside its own lease); never weaken "
+        f"the fence."
+    )
+
+    assert (
+        _lease_sites(job_worker_src, "services/job_worker.py")
+        and (
+            "services/job_worker.py",
+            _PREFLIGHT_FUNCTION,
+        )
+        not in _lease_sites(job_worker_src, "services/job_worker.py")
+    ), (
+        f"{_PREFLIGHT_FUNCTION} now takes a terminal lease. The preflight builds a "
+        f"client for a job whose OWN lease comes later, so a lease here would be "
+        f"a SECOND acquisition over one client — the exact shape "
+        f"`test_no_production_function_holds_two_terminal_leases` exists to keep "
+        f"out (D-36 AMENDED: the lazy bind never rebinds)."
+    )
+
+
+def test_the_preflight_touch_scanner_fires_on_a_spliced_session_verb() -> None:
+    """CALIBRATION — the gate above must be able to FAIL, and must name the verb.
+
+    A structural pin nobody has watched bite is worth nothing: `_session_touches_in`
+    returning an empty list unconditionally would leave the gate permanently,
+    silently green. This drives the SAME predicate over a hand-written copy of the
+    preflight with one session verb spliced in, and over the clean copy, so both
+    directions are measured.
+    """
+    root = Path(__file__).resolve().parents[1]
+    verbs = _mt5_session_touching_methods(
+        (root / "services" / "mt5_client.py").read_text()
+    )
+
+    clean = (
+        "def _make_mt5_session(api_key, api_secret, passphrase):\n"
+        "    login, investor_pw, server = parse_mt5_credentials(\n"
+        "        api_key, api_secret, passphrase\n"
+        "    )\n"
+        "    host = os.getenv('MT5_GATEWAY_HOST')\n"
+        "    port_raw = os.getenv('MT5_GATEWAY_PORT')\n"
+        "    return Mt5Session(\n"
+        "        client=Mt5Client(host, int(port_raw)),\n"
+        "        login=login,\n"
+        "        investor_password=investor_pw,\n"
+        "        server=server,\n"
+        "    )\n"
+    )
+    assert _session_touches_in(clean, "_make_mt5_session", verbs) == []
+
+    spliced = (
+        "def _make_mt5_session(api_key, api_secret, passphrase):\n"
+        "    login, investor_pw, server = parse_mt5_credentials(\n"
+        "        api_key, api_secret, passphrase\n"
+        "    )\n"
+        "    host = os.getenv('MT5_GATEWAY_HOST')\n"
+        "    port_raw = os.getenv('MT5_GATEWAY_PORT')\n"
+        "    client = Mt5Client(host, int(port_raw))\n"
+        "    client.login(login, investor_pw, server)\n"
+        "    return Mt5Session(\n"
+        "        client=client,\n"
+        "        login=login,\n"
+        "        investor_password=investor_pw,\n"
+        "        server=server,\n"
+        "    )\n"
+    )
+    fired = _session_touches_in(spliced, "_make_mt5_session", verbs)
+    assert fired == [("login", 8)], (
+        f"the preflight scanner did not report the spliced session touch: {fired}. "
+        f"A gate that cannot fire is worthless — fix the scanner, never the gate."
+    )
+
+    # And the verb NAME comes from the derivation, not from a literal in this test:
+    # a `login` removed from Mt5Client would drop out of `verbs` and this
+    # calibration would stop reporting it, which is the honest coupling.
+    assert "login" in verbs
