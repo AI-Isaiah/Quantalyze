@@ -4040,6 +4040,60 @@ export async function selfTest() {
           withBuild !== infoLine && carriesBuild(withBuild),
           `164.8.3 CRITERION 7 CALIBRATION: the mutant — the live line with its OWN LAST FIELD renamed to build, so the "=" comes from the arm and not from this file — differs from the original AND the same negative predicate REJECTS it. A RED here means the arm's field syntax has drifted away from the "build=" the negative above greps for, so that negative has stopped being able to see an excluded field (mutant: ${JSON.stringify(withBuild)})`,
         ) && pass;
+
+      // ─── 164.8.3 CRITERION 7 — EXHAUSTIVE field-set control ──────────────
+      //
+      // ⛔ WHY THIS EXISTS, AND WHAT THE LEGS ABOVE COULD NOT SEE.
+      //    The negative above greps ONE spelling, `build=`, while its own
+      //    message claims D-05's "two booleans exactly". Measured at
+      //    `e5741e12`: with the arm emitting ` tradeapi_disabled=false` — a
+      //    field named in CONTEXT.md's OWN REJECTED list — the whole self-test
+      //    shipped GREEN, 80/80, exit 0. A one-spelling negative cannot carry
+      //    an exhaustive claim, and this info line goes to a PUBLIC Actions
+      //    log: the arm's own comment records that `path` was dropped partly
+      //    to keep a production filesystem path out of it.
+      //    Found by the phase verifier, `[164.8.3-C7-INFOLINE-FIELD-SET]`.
+      //
+      // ⚠️ TWO CONTROLS, because two different drifts reach the same log:
+      //    (E1) every whitespace token is a `name=value` pair — catches a
+      //         separator change (` build:6182`) AND a value containing
+      //         spaces (` path=C:\Program Files\...`, whose tail tokens
+      //         carry no `=`).
+      //    (E2) the field-NAME set is EXACTLY the four D-05 permits — catches
+      //         any added field regardless of its spelling.
+      //    Both mutants below are DERIVED from the arm's own last field, never
+      //    typed, for the reason IN-01 records directly above.
+      const tokensOf = (s) => s.replace(/^mt5:\s*/, "").split(/\s+/).filter(Boolean);
+      const isFieldTok = (tok) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(tok);
+      const namesOf = (s) =>
+        [...new Set(tokensOf(s).filter(isFieldTok).map((tok) => tok.slice(0, tok.indexOf("="))))].sort();
+      const D05_FIELDS = ["connected", "initialize", "last_error", "trade_allowed"];
+      const setEq = (s) => JSON.stringify(namesOf(s)) === JSON.stringify(D05_FIELDS);
+      const allTokensAreFields = (s) => tokensOf(s).every(isFieldTok);
+      // Mutants, both borrowing the live "=" and value from the arm's output.
+      const withFifthField = `${infoLine} ${lastField.replace(/^[^=]*/, "tradeapi_disabled")}`;
+      const withColonSep = `${infoLine} ${lastField.replace("=", ":")}`;
+
+      pass =
+        expect(
+          allTokensAreFields(infoLine),
+          `164.8.3 CRITERION 7 (E1): every token on the info line is a name=value pair — a separator change or a space-bearing value both put text on a PUBLIC Actions log that no name-based control can see (tokens: ${JSON.stringify(tokensOf(infoLine))})`,
+        ) && pass;
+      pass =
+        expect(
+          setEq(infoLine),
+          `164.8.3 CRITERION 7 (E2): the info line's field-NAME set is EXACTLY ${JSON.stringify(D05_FIELDS)} — D-05 says two booleans beside initialize and last_error, and NOTHING else reaches the public log (got ${JSON.stringify(namesOf(infoLine))})`,
+        ) && pass;
+      pass =
+        expect(
+          withFifthField !== infoLine && !setEq(withFifthField),
+          `164.8.3 CRITERION 7 (E2-CALIBRATION): appending a FIFTH field — the live last field renamed to an excluded name, so the "=" comes from the arm — differs from the original AND (E2) REJECTS it. ⛔ A RED here means (E2) has stopped being exhaustive and an excluded field would ship green, which is the escape this control was added to close (mutant: ${JSON.stringify(withFifthField)})`,
+        ) && pass;
+      pass =
+        expect(
+          withColonSep !== infoLine && !allTokensAreFields(withColonSep),
+          `164.8.3 CRITERION 7 (E1-CALIBRATION): the live last field with its separator changed to ":" differs from the original AND (E1) REJECTS it. ⛔ A RED here means (E1) has stopped seeing non-field text on the line (mutant: ${JSON.stringify(withColonSep)})`,
+        ) && pass;
     }
   }
 
