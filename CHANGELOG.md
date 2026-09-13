@@ -209,12 +209,17 @@ motivating incident does not classify the way the roadmap says it does.
   inputs. Links 1-3 of the fail-closed chain — a failing classifier reddens `changed-paths`, its
   dependents skip, and the output arrives as the empty string — are unproven locally, and are closed
   only by the two real PRs `[CI-DOCSPATH-01]` still requires. That is why the entry stays open.
-- **Process, for whoever reads `git log`.** The branch is **29 commits** over `eab976bb`, and they
-  account for exactly that: five waves executed in isolated worktrees (**2** `chore: merge executor
+- **Process, for whoever reads `git log`.** ⚠️ **Measured AT THIS RELEASE COMMIT, which is commit
+  29 of the branch — and the number MOVES UPWARD afterwards by construction**, because the wave-4
+  SUMMARY commit and all of wave 5 land after the entry that describes them. Do not read `29` as the
+  merged total; re-run `git rev-list --count eab976bb..HEAD` for that. At this commit the 29 account
+  for exactly themselves: five waves executed in isolated worktrees (**2** `chore: merge executor
   worktree` commits), **10** code commits, **4** roadmap-structure commits, **7** phase-artifact
   commits (discuss context, research, patterns, validation strategy, the plan, revision 1, the
   rebuilt 24-row validation map), **3** plan SUMMARYs, **1** plan inserted mid-phase (plan 05, for
-  the MW02 repair), **1** `TODOS.md` bookkeeping commit and **1** release commit. 2+10+4+7+3+1+1+1 = 29.
+  the MW02 repair), **1** `TODOS.md` bookkeeping commit and **1** release commit — 2+10+4+7+3+1+1+1
+  = 29 — and every one of them maps to at least one bullet above, which is the cross-check this
+  repo's CHANGELOG mechanism requires and which caught a double-count in this bullet's own draft.
 
 ## [0.77.39.0] - 2026-09-12 — every open verification item in v1.20 closed, re-routed, or handed to the founder
 
