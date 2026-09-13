@@ -4224,6 +4224,38 @@ export async function selfTest() {
           sixWithInfo.kind === "mt5-not-authorized" && String(sixWithInfo.detail).includes("came back null") === false,
           `(h3) THE DERIVED CLAUSE: a -6 arriving BESIDE a live terminal_info is still mt5-not-authorized, but its detail no longer claims terminal_info came back null — the row cannot contradict its own transcript (${JSON.stringify(sixWithInfo.detail)})`,
         ) && pass;
+
+      // ─── 164.8.3 IN-02 — branch (7) NAMES THE SHAPE IT READ ─────────────
+      // `terminalInfoPresent` is `ti !== null && typeof ti === "object" &&
+      // !Array.isArray(ti)`, so branch (7) catches a STRING, a NUMBER and an
+      // ARRAY as well as null — while its detail said "returned null" about
+      // all four. The string case is not hypothetical: `"present"` is the
+      // sentinel this very arm used to emit before D-05, so a container
+      // running a stale probe body produces it. Same synthetic-transcript
+      // seam as (h1)-(h3); nothing here is a real reading.
+      const tiString = MT5_MOD.classifyProbe(
+        probeTranscript({ initialize: true, last_error: [1, "Success"], terminal_info: "present" }),
+      );
+      const tiArray = MT5_MOD.classifyProbe(
+        probeTranscript({ initialize: true, last_error: [1, "Success"], terminal_info: [] }),
+      );
+      pass =
+        expect(
+          tiString.kind === "mt5-terminal-error" &&
+            String(tiString.detail).includes("got string") &&
+            String(tiString.detail).includes("null") === false,
+          `(h4) THE SHAPE IS READ, NOT ASSERTED: a terminal_info that is the retired "present" STRING lands in branch (7) and its detail names string — it does not tell the operator terminal_info returned null about a run where it returned a string (${JSON.stringify(tiString.detail)})`,
+        ) && pass;
+      pass =
+        expect(
+          tiArray.kind === "mt5-terminal-error" && String(tiArray.detail).includes("got array"),
+          `(h4b) and an ARRAY — the other shape the tightened guard rejects and \`typeof\` alone would call "object" — is named as an array (${JSON.stringify(tiArray.detail)})`,
+        ) && pass;
+      pass =
+        expect(
+          String(staleSix.detail).includes("got null") && String(staleSix.detail).includes("got string") === false,
+          `(h5) CALIBRATION for (h4): the SAME branch on a GENUINELY null terminal_info says null — so the shape word is read off the value, not re-hardcoded to a different constant (${JSON.stringify(staleSix.detail)})`,
+        ) && pass;
     }
   }
 

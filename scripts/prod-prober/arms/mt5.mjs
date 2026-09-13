@@ -353,12 +353,26 @@ export function classifyProbe(result) {
 
   // (7) initialize() succeeded, terminal_info() did not. The bridge answered,
   //     so neither IPC remedy applies.
+  //
+  //     ⛔ THE DETAIL NAMES THE SHAPE IT READ, IT DOES NOT ASSERT ONE. This
+  //     branch is reached whenever `terminalInfoPresent` is false, and that
+  //     guard was deliberately tightened (see its own comment above) from a
+  //     bare null check to `ti !== null && typeof ti === "object" &&
+  //     !Array.isArray(ti)` — so a string, a number and an array all land
+  //     here too. The detail said "returned null" for every one of them.
+  //     Unreachable from the COMMITTED probe body, which emits only `None` or
+  //     a dict — but the tightening's whole stated purpose is to survive a
+  //     probe body that is NOT the committed one, and the retired `"present"`
+  //     sentinel this arm used to emit is exactly such a string. A row that
+  //     narrates a shape it did not read is this phase's own defect class.
   if (probe.initialize === true) {
     return {
       kind: "mt5-terminal-error",
       subject: "terminal_info",
       detail:
-        `initialize ok but terminal_info() returned null (last_error ${code === null ? "none" : code}). ` +
+        `initialize ok but terminal_info() was not an object — got ` +
+        `${ti === null ? "null" : Array.isArray(ti) ? "array" : typeof ti} ` +
+        `(last_error ${code === null ? "none" : code}). ` +
         "The bridge answered, so this is the terminal itself, not the IPC transport.",
       info: null,
     };
