@@ -1599,10 +1599,20 @@ The terminal dropped a working session and re-attached to an account it could no
 ⛔ **FULLY SEQUENTIAL — waves 1→2→3→4, no parallelism, and that is a finding rather than a default.** Every plan touches at least one of `scripts/prod-prober/arms/mt5.mjs`, `scripts/prod-prober/run.mjs` or `src/__tests__/prod-prober-wiring.test.ts`, and the scenario-count pair (`run.mjs:149` ↔ `prod-prober-wiring.test.ts:1822`) moves twice, so any two plans sharing a wave would race on the same literal. Plan 04 additionally carries a NON-FILE coupling: its recorded neuter MUTATES `arms/mt5.mjs` on disk and restores it, so it must never share a wave with plan 03, which owns that file — file-disjointness in frontmatter is not isolation when a harness temporarily edits the tree.
 
 Plans:
+**Wave 1**
 
 - [ ] 164.8.3-01-PLAN.md — TRACER: the `mt5-not-authorized` kind wired end-to-end (fixture `6.txt` → branch (6b) → remedy → five registrations → counters), plus the auto-issue dedup-key proof and criterion 8's MET-at-HEAD pin (C1, C2, C3, C4, C8; D-01, D-02, D-03, D-04)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 164.8.3-02-PLAN.md — the criterion-2 row scenario (four required words + the calibrated negative + the account-number scan) and both by-name ABSENCE lists extended (C2, C4; D-03, D-04)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 164.8.3-03-PLAN.md — `terminal_info()` recorded as two booleans exactly, the `"present"` sentinel retired, `build=` dropped from the info line, `ok.txt` rewritten (C5, C7; D-05)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 164.8.3-04-PLAN.md — the falsifier: a durable tmp-dir mutant that re-runs every shard, plus two on-disk levers observed RED alone and restored from bytes, plus one booked deferral with a named owner (C6)
 
 ### Phase 164.8.2: GATEHARDENING — the five code-review warnings Phase 164.8 shipped: the VAC-08 frontier exemption gets a ceiling, the ledger drift-check gets an arms ratchet, the reverted-grep stops being NUL-blind, the destructive restore's artifact stops carrying unredacted policy text, and the softening-token scan reaches the workflow that can drop a schema (INSERTED)

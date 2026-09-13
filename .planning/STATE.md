@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.6.3
-current_phase_name: CIDOCSPATH
+current_phase: 164.8.3
+current_phase_name: PROBERAUTH
 status: executing
 stopped_at: "164.6.3-04 complete — all five ROADMAP criteria closed on two real PRs (#791 code, #792 docs-only). Phase 164.6.3 is 5/5 plans executed."
-last_updated: "2026-09-13T13:40:00Z"
+last_updated: "2026-09-13T17:10:00Z"
 last_activity: 2026-09-13
 last_activity_desc: "Phase 164.6.3 CIDOCSPATH plan 04 (wave 5) executed — the evidence half no local harness could close. CODE PR #791, ci.yml run 34748659917 @ 6a17adae: 24 check rows, every one success, none skipped, against a re-measured 23-row baseline (run 34717952454 @ c1262aff) — the only difference in the row set is the ADDITION of changed-paths. DOCS-ONLY PR #792 (two .planning/ paths), run 34754223975 @ d8afbe3d: 23 rows = 16 skipped / 7 success, 163 job-seconds, 1m45s, aggregator SUCCESS, echo quoted verbatim as docs_only='true'. Criterion 5 closed by an absence beside its positive control taken from the log ARCHIVE, never gh run view --log: 27 raw hits / THREE distinct 61616158 acquires attributed by archive entry to sql-tests, e2e-seeded and python on the code run; 0 / 0 on the docs run, both with entry counts and full job coverage. ⚠️ The plan's sort|uniq -c recipe would have under-counted to TWO (sql-tests and e2e-seeded both waited 5s and collapse) — attribution by entry is what recovers three. Criterion 4 re-measured 2026-09-13T11:51:17Z: protection 404, rulesets []. The byte argument covers FIVE paths-filtered workflows, not the four the plan names (supabase-migrate.yml carries one too), diff EMPTY — and its SCOPE is stated: whether those filters still FIRE is UNTESTED here. Saving is PR-side ONLY; the docs-only merge's own push run 34755121736 was observed running the full corpus. ⚠️ [WINDOWS-LEDGER-COUNT-DRIFT] refused this plan's one ledger append and the counts were NOT hand-forced."
-state_head: e7fd2a04d27d96c6bf5b8642f2c6bcea57c6874a
+state_head: 5cafb93b2a650393c98f6c7267712c692dcb97b0
 
 # ⭐ progress: RE-DERIVED 2026-09-12 at `733a55f5` from ALL REFS — see the method block
 # immediately above the `progress:` keys below. This supersedes the HAND-SET note that stood
