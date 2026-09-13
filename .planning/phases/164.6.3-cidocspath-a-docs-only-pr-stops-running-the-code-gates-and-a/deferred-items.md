@@ -157,3 +157,39 @@ replaced with Vercel Cron Jobs (`vercel.json crons`). Refused:
   credentials and a shared-TEST mutex; Vercel Cron is not a substitute for that.
 
 Recorded so a later reader does not re-litigate it as an unhandled suggestion.
+
+---
+
+## 4. `gdpr-export-coverage-hook.test.ts` cannot run in a GSD worktree — ENVIRONMENT, not a defect
+
+Recorded during plan 02 (wave 3) execution, 2026-09-13.
+
+**What.** Running the 20 `ci.yml`-reading test files from inside the isolated worktree gives
+`Test Files 1 failed | 24 passed (25)`. The single failure is
+`src/__tests__/gdpr-export-coverage-hook.test.ts`, and it is a COLLECTION error, not an
+assertion:
+
+```
+MEASURE_FAIL: the repo's pinned tsx is absent at
+  <worktree>/node_modules/.bin/tsx — run `npm ci`.
+```
+
+**Why it is NOT caused by this plan.** The throw is at module scope, in the file's own
+`if (!existsSync(TSX_BIN))` guard, BEFORE a single byte of `ci.yml` is read. `node_modules/` in a
+GSD worktree is empty (measured: 0 entries); Node's resolver walks UP to the main checkout's
+`node_modules`, which is why `npx vitest`, `npm run lint` and `npx tsc` all work — but that file
+resolves `tsx` by ABSOLUTE path under `process.cwd()`, deliberately (its own header forbids the
+`npx` fallback, because `npx` would fetch a DIFFERENT tsx from the registry).
+
+**Why NOT "fixed".** There is nothing in the repo to fix. The guard is correct and its message
+names the correct remedy. The remedy is `npm ci` inside the worktree, which this plan's scope
+fence does not cover and which would add a ~1 GB tree to a throwaway worktree. ⛔ It must NOT be
+"fixed" by relaxing the guard to `npx tsx` — that is the named defect the guard exists to prevent.
+
+**Consequence, stated rather than absorbed.** That one file's assertions were NOT executed by this
+plan. They do not read the docs-only filter: its subject is `scripts/check-gdpr-export-coverage.ts`
+and the GDPR export manifest, neither of which this plan touches. It runs unmodified in CI, where
+`npm ci` has run.
+
+**Owner: none needed — no repo change is owed.** Booked here so a future reader of this phase's
+verification does not see `24 passed (25)` and conclude a gate was lost.
