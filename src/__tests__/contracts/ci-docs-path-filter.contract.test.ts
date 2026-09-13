@@ -44,6 +44,7 @@ import { judge } from "../../../scripts/classify-changed-paths.mjs";
 const ROOT = process.cwd();
 const STEP_NAME = "Verify all frontend-* jobs succeeded";
 const CI_YML = join(ROOT, ".github/workflows/ci.yml");
+const CLASSIFIER = join(ROOT, "scripts/classify-changed-paths.mjs");
 
 /** Pull a step's `run: |` body out of the workflow, dedented. */
 function extractRunScript(yml: string, stepName: string): string {
@@ -833,5 +834,147 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
         "REFUSED in CONTEXT.md: every commit to main must produce its own recorded green run, and " +
         "Railway waits on main CI and SKIPS the analytics deploy when it is red.",
     ).toBe("    branches: [main]");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⛔ CALIBRATION — THE DETECTOR'S OWN RED PATH, MANUFACTURED AND OBSERVED.
+//
+// ⭐ THE DIRECTION MATTERS AND IT IS THE REASON THIS BLOCK EXISTS. Neutering the
+// detector produces a GREEN, SHORT board, not a red one: a classifier that says
+// `docs_only=true` on a code diff skips sixteen gates and the aggregator's
+// uniform arm excuses every one of them. A control that waits for red to appear
+// on its own would never fire here. So the red is MANUFACTURED — the allow-list
+// is widened on a COPY — and then OBSERVED.
+//
+// ⛔ The mutation is applied to a `mkdtempSync` copy and NEVER to the file on
+// disk, and nothing here restores with a checkout: this repo has a dated record
+// of `git checkout --` in a neuter/restore harness silently destroying
+// uncommitted work, and the byte-backup remedy goes stale mid-edit. A tempdir
+// copy has neither failure mode. `git status --porcelain
+// scripts/classify-changed-paths.mjs` is a verify command on this plan for
+// exactly that reason.
+//
+// ⭐ PLACEMENT, because this is the arm a reader will question. This file runs
+// in `frontend-test`, which this phase FILTERS. That is sound, not circular: a
+// docs-only PR cannot BY CONSTRUCTION change
+// `scripts/classify-changed-paths.mjs` — it is not under the `.planning/`
+// allow-list, and the classifier's own self-test row 4 pins that — so every PR
+// that can break this arm's subject is a code PR on which `frontend-test` runs.
+// ---------------------------------------------------------------------------
+describe("[164.6.3 / CI-DOCSPATH-01] CALIBRATION — the classifier's self-test can FAIL", () => {
+  const ORIGINAL = readFileSync(CLASSIFIER, "utf8");
+
+  /** The allow-list declaration — the widening neuter's target. */
+  const ALLOWLIST_DECL = 'export const DOCS_ONLY_PREFIXES = [".planning/"];';
+  /** The `.every` quantifier — the loosening neuter's target. */
+  const EVERY_DECL = "return changedFiles.every((f) => DOCS_ONLY_PREFIXES.some((p) => f.startsWith(p)));";
+
+  const FAILED_BANNER = "=== SELF-TEST FAILED ===";
+  const PASSED_BANNER = "=== SELF-TEST PASSED:";
+
+  let seq = 0;
+  /** Write `src` into the module tempdir and run ITS `--self-test`. */
+  function selfTest(src: string): { code: number | null; out: string } {
+    const path = join(workdir, `classifier-${seq++}.mjs`);
+    writeFileSync(path, src);
+    const res = spawnSync(process.execPath, [path, "--self-test"], { cwd: ROOT, encoding: "utf8" });
+    return { code: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
+  }
+
+  /**
+   * ⛔ ASSERT THE MUTATION APPLIED BEFORE BELIEVING ANYTHING. A neuter that does
+   * not APPLY reads as GREEN — the subject still holds its real predicate, the
+   * self-test still passes, and the arm certifies nothing while looking like
+   * evidence. This is the whole point of the block.
+   */
+  function mutate(target: string, replacement: string, label: string): string {
+    expect(
+      ORIGINAL.includes(target),
+      `CALIBRATION ${label}: the mutation target is not present in scripts/classify-changed-paths.mjs. ` +
+        `Nothing would be replaced, the copy would be byte-identical to the real classifier, its ` +
+        `self-test would PASS, and the red below would never be observed. Re-anchor the target.`,
+    ).toBe(true);
+    const mutated = ORIGINAL.replace(target, replacement);
+    expect(
+      mutated,
+      `CALIBRATION ${label}: the mutated text is identical to the original — the neuter did not apply`,
+    ).not.toBe(ORIGINAL);
+    expect(
+      mutated.includes(target),
+      `CALIBRATION ${label}: the original declaration SURVIVED the mutation, so the copy still carries ` +
+        `the real predicate and the red below would be measuring the wrong program`,
+    ).toBe(false);
+    return mutated;
+  }
+
+  // ── the non-vacuity control ──────────────────────────────────────────────
+  // ⛔ WITHOUT THIS THE TWO NEUTER LEGS PROVE NOTHING. An arm that always saw a
+  // non-zero exit — a broken spawn, a missing interpreter, a bad cwd, an
+  // unwritable tempdir — would pass both legs while measuring the harness
+  // instead of the subject. The control spawns the UNMUTATED copy through the
+  // SAME call and requires exit 0.
+  it("NON-VACUITY CONTROL — the UNMUTATED copy self-tests GREEN through the same spawn", () => {
+    const { code, out } = selfTest(ORIGINAL);
+    expect(code, `the unmutated classifier must exit 0 through this harness.\n${out}`).toBe(0);
+    expect(out).toContain(PASSED_BANNER);
+    expect(out, "a passing self-test must print no FAIL row").not.toContain("  FAIL");
+  });
+
+  // ── neuter leg 1: WIDEN the allow-list ───────────────────────────────────
+  it("CALIBRATION — widening the allow-list to accept everything turns the self-test RED", () => {
+    const mutated = mutate(ALLOWLIST_DECL, 'export const DOCS_ONLY_PREFIXES = [""];', "widening");
+
+    const { code, out } = selfTest(mutated);
+    expect(
+      code,
+      "the widened classifier must EXIT NON-ZERO. The empty-string prefix makes every path match, so " +
+        "EVERY fixture row whose expected verdict is CODE must break: the mixed diff, ci.yml alone, " +
+        "the classifier's own file, a migration alone, all five allow-list lookalikes " +
+        "(README.md / docs/runbooks / CHANGELOG.md / VERSION / TODOS.md), both prefix-boundary rows " +
+        "and the traversal row. If this exits 0 the self-test table has stopped covering the " +
+        "allow-list, and the filter's single point of trust is unguarded.\n" +
+        out,
+    ).not.toBe(0);
+    expect(out, "the terminal failed banner is absent — the self-test did not reach its own verdict").toContain(
+      FAILED_BANNER,
+    );
+    expect(out).toContain("FAIL — one code file anywhere in the list makes the whole diff code");
+    expect(out).toContain("FAIL — a sibling directory sharing the prefix does not launder into the allow-list");
+    expect(out).toContain("FAIL — a PR editing this very file is never filtered");
+  });
+
+  // ── neuter leg 2: the OTHER polarity ─────────────────────────────────────
+  // ⭐ Two independent mutations, so the arm shows that BOTH the widening
+  // (the allow-list accepts too much) and the loosening (the quantifier asks
+  // too little) are caught. One leg alone would leave the other untested.
+  it("CALIBRATION — loosening the quantifier (`every` → `some`) turns the self-test RED", () => {
+    const mutated = mutate(
+      EVERY_DECL,
+      "return changedFiles.some((f) => DOCS_ONLY_PREFIXES.some((p) => f.startsWith(p)));",
+      "loosening",
+    );
+
+    const { code, out } = selfTest(mutated);
+    expect(
+      code,
+      "the loosened classifier must EXIT NON-ZERO. `some` makes ONE `.planning/` file enough to " +
+        "classify a whole mixed diff as docs-only — a gate-disable primitive on any PR that touches " +
+        "a plan alongside code, which is the common GSD shape. The rows that must break are the " +
+        "mixed-diff row and the `.planningfake/` prefix-boundary row.\n" + out,
+    ).not.toBe(0);
+    expect(out).toContain(FAILED_BANNER);
+    expect(out).toContain("FAIL — one code file anywhere in the list makes the whole diff code");
+    expect(out).toContain("FAIL — a sibling directory sharing the prefix does not launder into the allow-list");
+  });
+
+  // ── the tree is untouched ────────────────────────────────────────────────
+  it("the checked-out classifier is byte-unchanged by the mutations above", () => {
+    expect(
+      readFileSync(CLASSIFIER, "utf8"),
+      "scripts/classify-changed-paths.mjs changed on disk while this block ran. The mutations are " +
+        "string operations on a tempdir copy and must NEVER reach the working tree — a mutation " +
+        "harness that writes to the tree can destroy concurrent uncommitted work.",
+    ).toBe(ORIGINAL);
   });
 });
