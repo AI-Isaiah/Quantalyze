@@ -732,3 +732,273 @@ async def test_the_client_is_closed_on_every_path(
     )
     assert any("login" in kw for kw in fake.initialize_kwargs) is expect_credentialed
     _assert_no_credential_value_escaped(_records(caplog))
+
+
+# --------------------------------------------------------------------------- #
+# ⛔ CRITERION 1's WIRING — `main.lifespan`, by SOURCE INSPECTION ONLY.
+#
+# ⛔ NO TEST HERE EXECUTES `main.lifespan`. It starts job-claiming loops, and a
+# local run claims REAL prod compute jobs. The repo's precedent for lifespan pins
+# is AST/source inspection and there are two shipped examples to copy
+# (`test_secret_misconfig_signal.py`, `test_local_worker_prod_guard.py`).
+# --------------------------------------------------------------------------- #
+
+#: The heal's public entry, as `main.lifespan` must name it.
+_HEAL_SYMBOL = "heal_mt5_terminal_session"
+
+#: ⛔ HAND-TYPED. MEASURED 2026-09-13 (Phase 164.6.2 plan 02): `main.lifespan`
+#: carried FOUR `create_task` calls before this plan (dispatch_loop, watchdog_loop,
+#: daily_enqueue_loop, healthz_bridge) and carries FIVE after it.
+#:
+#: ⭐ THIS IS THE ANTI-VACUITY LEG and it is not decoration. Without it, a
+#: `_heal_task_lines` predicate that silently stopped matching — a renamed symbol,
+#: a changed call shape — would report "zero calls found" and the criterion-1 pin
+#: would red for the right reason; but a predicate that matched NOTHING AT ALL for
+#: a different reason (a `lifespan` the walk can no longer find) would make BOTH
+#: halves vacuous together. The count is measured independently of the heal's name.
+_LIFESPAN_CREATE_TASK_COUNT_AT_164_6_2 = 5
+
+
+def _main_source() -> str:
+    return (Path(__file__).resolve().parents[1] / "main.py").read_text()
+
+
+def _lifespan_node(source: str) -> ast.AsyncFunctionDef:
+    tree = ast.parse(source)
+    node = next(
+        (
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "lifespan"
+        ),
+        None,
+    )
+    assert node is not None, (
+        "harness: main.py no longer defines an async `lifespan` — re-anchor these "
+        "pins rather than deleting them."
+    )
+    return node
+
+
+def _heal_task_lines(source: str) -> list[int]:
+    """Lines of every ``create_task(heal_mt5_terminal_session(...))`` in
+    ``lifespan``.
+
+    Both halves are required at once — the call must be to the heal AND it must be
+    the argument of a `create_task`. A bare `await heal_mt5_terminal_session()`
+    therefore reports ZERO here, which is correct: an inline await is the OTHER
+    way this wiring takes the service down.
+    """
+    lines: list[int] = []
+    for node in ast.walk(_lifespan_node(source)):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "create_task"
+        ):
+            continue
+        for arg in node.args:
+            if (
+                isinstance(arg, ast.Call)
+                and isinstance(arg.func, ast.Name)
+                and arg.func.id == _HEAL_SYMBOL
+            ):
+                lines.append(node.lineno)
+    return sorted(lines)
+
+
+def _create_task_lines(source: str) -> list[int]:
+    return sorted(
+        node.lineno
+        for node in ast.walk(_lifespan_node(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "create_task"
+    )
+
+
+def _named_call_lines(source: str, name: str) -> list[int]:
+    return sorted(
+        node.lineno
+        for node in ast.walk(_lifespan_node(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == name
+    )
+
+
+def test_CRITERION_1_lifespan_starts_the_heal_exactly_once_as_a_task() -> None:
+    """⛔ CRITERION 1's WIRING: the analytics WORKER re-establishes the terminal's
+    session ONCE at its own startup, in `main.lifespan`.
+
+    This is the test criterion 1 requires to FAIL when the call is removed — see
+    `test_the_criterion_1_predicate_reds_on_a_mutant_with_the_entry_excised` below
+    for the durable, in-suite falsifier, and the plan-02 SUMMARY for the manual
+    two-lever transcript.
+    """
+    source = _main_source()
+    heal_lines = _heal_task_lines(source)
+    assert len(heal_lines) == 1, (
+        f"`main.lifespan` must start {_HEAL_SYMBOL}() EXACTLY ONCE inside a "
+        f"create_task; found {len(heal_lines)} at {heal_lines}. Zero means the "
+        f"criterion-1 wiring is gone — production would never heal a lost broker "
+        f"session and the whole phase would be inert."
+    )
+
+    tasks = _create_task_lines(source)
+    assert len(tasks) == _LIFESPAN_CREATE_TASK_COUNT_AT_164_6_2, (
+        f"`main.lifespan` now creates {len(tasks)} tasks; "
+        f"{_LIFESPAN_CREATE_TASK_COUNT_AT_164_6_2} were measured at 164.6.2-02. "
+        f"This count is the ANTI-VACUITY leg: it is measured independently of the "
+        f"heal's NAME, so a predicate that silently stopped matching cannot take "
+        f"both halves of this pin down together. Re-cut it deliberately."
+    )
+
+
+def test_the_heal_is_never_awaited_inline_and_runs_after_both_startup_guards() -> None:
+    """ORDERING, and both directions take the service down if they move.
+
+      * BEFORE the guards -> the two SHIPPED ordering pins red
+        (`test_lifespan_calls_the_startup_assertion_before_starting_the_worker`
+        splits on the minimum create_task line;
+        `test_merged_lifespan_calls_the_guard` splits the comment-stripped source
+        at the FIRST create_task and demands the prod guard in the prefix).
+      * awaited inline -> uvicorn's startup aborts on an unreachable gateway, and
+        `restartPolicyMaxRetries = 3` turns that into a dead analytics service.
+    """
+    source = _main_source()
+    heal_line = _heal_task_lines(source)[0]
+
+    secret_check = _named_call_lines(source, "assert_platform_secrets_configured")
+    prod_guard = _named_call_lines(
+        source, "assert_worker_not_aimed_at_prod_off_platform"
+    )
+    assert len(secret_check) == 1 and len(prod_guard) == 1, (
+        f"harness: expected exactly one call to each startup guard, got "
+        f"{secret_check} and {prod_guard}"
+    )
+    assert heal_line > secret_check[0], "the heal must start AFTER the secret check"
+    assert heal_line > prod_guard[0], "the heal must start AFTER the prod guard"
+
+    # NOT awaited inline: every `await <name>(...)` in lifespan, and the heal must
+    # not be among them.
+    awaited = {
+        node.value.func.id
+        for node in ast.walk(_lifespan_node(source))
+        if isinstance(node, ast.Await)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+    }
+    assert _HEAL_SYMBOL not in awaited, (
+        f"{_HEAL_SYMBOL} is awaited INLINE in lifespan. An await before `yield` "
+        f"aborts uvicorn's startup; three of those under ON_FAILURE take the whole "
+        f"analytics service down for a gateway nobody needed."
+    )
+
+
+def test_the_heal_task_is_named_and_tracked_like_the_worker_loops() -> None:
+    """The heal joins the EXISTING `tasks` list — the one `_crash_handler` is
+    attached to and the one the shutdown `gather` ranges over — rather than being
+    orphaned beside it. An untracked task is neither crash-reported nor awaited at
+    shutdown."""
+    source = _main_source()
+    lifespan = _lifespan_node(source)
+
+    task_lists = [
+        node
+        for node in ast.walk(lifespan)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(t, ast.Name) and t.id == "tasks" for t in node.targets
+        )
+        and isinstance(node.value, ast.List)
+    ]
+    assert len(task_lists) == 1, (
+        f"harness: expected ONE `tasks = [...]` literal in lifespan, got "
+        f"{len(task_lists)}"
+    )
+    elements = task_lists[0].value.elts
+
+    healed = [
+        el
+        for el in elements
+        if isinstance(el, ast.Call)
+        and isinstance(el.func, ast.Attribute)
+        and el.func.attr == "create_task"
+        and any(
+            isinstance(a, ast.Call)
+            and isinstance(a.func, ast.Name)
+            and a.func.id == _HEAL_SYMBOL
+            for a in el.args
+        )
+    ]
+    assert len(healed) == 1, (
+        f"the heal's create_task is not a member of lifespan's `tasks` list "
+        f"({len(healed)} found). Outside that list it gets no `_crash_handler` "
+        f"and is not awaited by the shutdown gather — an orphan."
+    )
+    names = [kw.value for kw in healed[0].keywords if kw.arg == "name"]
+    assert names and isinstance(names[0], ast.Constant) and names[0].value, (
+        "the heal's task carries no explicit `name=` — an unnamed task reports as "
+        "`Task-N` in the crash handler's log, which is unreadable at 3am."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# ⛔ THE TWO REFUSALS — T-140.1-24. Written against the LIVE objects, never
+# against source text, so they measure what the handler actually answers.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_mt5_variables_were_NOT_added_to_the_required_platform_secrets() -> None:
+    """⛔ `REQUIRED_PLATFORM_SECRETS` is byte-unchanged, and the temptation is named
+    here so it is REFUSED rather than rediscovered.
+
+    That tuple is named REQUIRED. Railway's `healthcheckPath` is `/health`, and
+    `config_ok` is derived from exactly this tuple — so adding an OPTIONAL variable
+    to it reddens `/health`'s config verdict the moment it is unset, converting a
+    thirty-second human config gap into a pod restart loop. That is T-140.1-24
+    verbatim, recorded in `assert_platform_secrets_configured`'s own docstring.
+
+    ⭐ If a future phase wants an "MT5 is configured" signal on /health, it is a
+    SEPARATE key that moves neither `status` nor `config_ok` — and it is not this
+    phase's.
+    """
+    import main
+
+    assert main.REQUIRED_PLATFORM_SECRETS == ("SERVICE_KEY", "INTERNAL_API_TOKEN"), (
+        f"REQUIRED_PLATFORM_SECRETS moved to {main.REQUIRED_PLATFORM_SECRETS}. If "
+        f"an MT5 name was added: an unset OPTIONAL variable now reddens config_ok "
+        f"behind Railway's healthcheckPath — a restart loop, not a signal "
+        f"(T-140.1-24)."
+    )
+    for name in ("MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER", "MT5_ENABLED"):
+        assert name not in main.REQUIRED_PLATFORM_SECRETS
+
+
+async def test_the_health_body_gained_no_mt5_key() -> None:
+    """⛔ `/health`'s body carries no MT5 key. `status` stays the WORKER-heartbeat
+    verdict and `config_ok` stays the SECRET verdict; crossing them is the bug.
+
+    Asserted against the LIVE handler's answer, not its source: a source-text pin
+    would stay green if the key were added through a helper.
+    """
+    import json
+
+    import main
+    from fastapi.responses import JSONResponse
+
+    answer = await main.health()
+    body = (
+        json.loads(bytes(answer.body).decode())
+        if isinstance(answer, JSONResponse)
+        else answer
+    )
+    offenders = [key for key in body if "mt5" in key.lower()]
+    assert not offenders, (
+        f"/health's body gained MT5 key(s) {offenders}. Railway restarts the pod "
+        f"on a red /health; an MT5 term there couples a gateway nobody needs to "
+        f"the analytics service's liveness (T-140.1-24)."
+    )
+    # And the two verdict keys are still the ones that were there.
+    assert {"status", "config_ok", "config_degraded_secrets"} <= set(body)

@@ -283,6 +283,7 @@ async def lifespan(_app: FastAPI):
     # writes to main_worker_healthz.LAST_TICK_AT; read it on /health and
     # return 503 when stale. Same contract as the stand-alone worker had.
     import main_worker_healthz
+    from services.mt5_relogin import heal_mt5_terminal_session
 
     async def _bridge_healthz() -> None:
         global WORKER_LAST_TICK_AT
@@ -300,6 +301,17 @@ async def lifespan(_app: FastAPI):
         asyncio.create_task(watchdog_loop(), name="watchdog_loop"),
         asyncio.create_task(daily_enqueue_loop(), name="daily_enqueue_loop"),
         asyncio.create_task(_bridge_healthz(), name="healthz_bridge"),
+        # Phase 164.6.2 / D-08 — re-establish the MT5 terminal's broker session.
+        # A TASK, never an inline await: the boot must not depend on the gateway
+        # being reachable (an await before `yield` aborts uvicorn startup, and
+        # restartPolicyType ON_FAILURE x3 would take the whole analytics service
+        # down for a gateway nobody needed). It is safe under `_crash_handler`
+        # below ONLY because the coroutine cannot raise — its entire body sits
+        # inside a top-level catch-all, asserted structurally AND behaviourally.
+        # If that ever stops being true, this entry stops the dispatch, watchdog
+        # and enqueue loops behind a green /health. D-08: STARTUP ONLY — the
+        # per-session half of criterion 1 was STRUCK on a measurement.
+        asyncio.create_task(heal_mt5_terminal_session(), name="mt5_boot_heal"),
     ]
 
     # Fail loudly if any loop crashes. done_callback ensures a silent
