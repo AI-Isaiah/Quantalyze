@@ -5,11 +5,11 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 159
 current_phase_name: RANK — Public-ranking integrity
 status: planning
-stopped_at: "Phase 164.8.3 PROBERAUTH COMPLETE — 4/4 plans, VERIFICATION.md `status: passed`, 32/32 must-haves. Its one `human_needed` routing item was DISCHARGED: `[164.8.3-CAPTURE-MANIFEST-ERREXIT]` admitted to Phase 164.8.4 as ADMISSION 2 (founder decision 2026-09-13) via `/gsd-phase --edit`. ⛔ NOT YET SHIPPED — branch `phase-164.8.3-proberauth-r2` has 22+ commits and has never been pushed; the full 15,089-test suite has NOT been run locally (four attempts, two OOM kills) and CI is the authority. The prior in-flight narrative here is preserved at commit `cf2c3e9c`."
-last_updated: "2026-09-13T18:45:00Z"
+stopped_at: "Phase 164.6.2 MT5RELOGIN wave 1 COMPLETE — plan 01 of 4, executed sequentially on the main working tree (isolation resolved to `none`; the #683 fork-base auto-degrade fired). The phase's ORDERED SECURITY PRECONDITION is now DISCHARGED: `Mt5Client.initialize_with_credentials` and its by-value credential redaction landed in ONE commit, so plan 02 — the first plan that routes a credential — is unblocked and structurally cannot route one past the control. `Mt5Client.login`, `MT5_IPC_TIMEOUTS_MS` and `tests/test_mt5_abandon_roster.py` are all byte-unchanged and no floor was re-cut. ⛔ NOT SHIPPED — two commits on `phase-164.6.2-mt5relogin`, never pushed; `branching_strategy: none`. The prior PROBERAUTH narrative this key carried is preserved at commit `f7558d36`'s parent."
+last_updated: "2026-09-13T21:30:00Z"
 last_activity: 2026-09-13
-last_activity_desc: "Phase 164.8.3 PROBERAUTH plan 04 executed (sequential, main working tree — worktree isolation auto-degraded because the harness fork base origin/HEAD e64b0811 does not carry this phase's PLAN.md files). THREE task commits plus the SUMMARY: 9fb751d6 (the durable falsifier), 76cfb120 (the two recorded levers), 788d64e0 (the booked deferral), 7fbe70c9 (SUMMARY + self-check). TWO deviations, both auto-fixed. (1) Rule 3 BLOCKING — the plan prescribed `await import(pathToFileURL(f).href)` for the tmp-dir mutant and that is IMPOSSIBLE under vitest; both failures were measured and are quoted at the call site: `Cannot find module 'file:///…/T/…/mt5-mutant.mjs' imported from …prod-prober-wiring.test.ts`, and, when escaped via `new Function`, `TypeError: A dynamic import callback was not specified.` Vitest rewrites every dynamic import into its module runner, which resolves against the Vite project graph and cannot see a file outside the repo root. ⛔ The rejected remedy was relocating the mutant somewhere Vite CAN resolve — that place is the working tree, which is the one thing this idiom exists to stay out of. The mutant is instead driven by `execFileSync(process.execPath, [driver, JSON.stringify(result)])`, which is the STRONGER property: the SAME Node that runs the real arm in CI, no bundler in the path. (2) Rule 2 — the plan mandated only `expect(mutant).not.toBe(original)`, which cannot tell a branch-sized excision from a runaway one; added an anchor-absence check and a `< 1200` byte-delta bound (measured 630), plus a pinned assertion that `arms/mt5.mjs` still carries ZERO `import`/`require`, so a future module dependency reveals itself by name rather than as a puzzling failure inside a mutant nobody reads. ⛔ STATE HANDLERS CLOBBERED TWICE MORE (the TENTH and ELEVENTH this repo records, and the SECOND day running): `state.update-progress` and `state.record-metric` EACH produced ~70 insertions / 11 deletions and EACH reset the deliberately ALL-REFS-derived progress block (36/19/163/160/53, re-derived 2026-09-12 at 733a55f5) to disk-derived 37/13/141/135/35 — `total_phases` 36 -> 37 again purely because an UNTRACKED `164.11-*` directory sits on disk — while deleting `current_phase:`, requoting `gsd_state_version` and injecting 59 blank lines between comment lines. Both restored from `cp` byte backups verified with `cmp` (RESTORE-CMP-OK both times); only the metric row and these narrative keys were hand-applied. `state.advance-plan` refused again with `ambiguous_position_phase` and wrote NOTHING, exactly as diagnosed at STATE.md:691 — so the Current Position block was deliberately left untouched rather than hand-reconciled inside an execution. ⭐ `roadmap.update-plan-progress` was AGAIN the one clean handler — 2 insertions / 2 deletions, both wanted (`**Plans:** 4/4 plans executed` plus the plan-04 checkbox), no collateral. PRIOR ACTIVITY: Phase 164.8.3 plan 03 — the two-boolean `terminal_info` narrowing and the five CRITERION 7 assertions, self-test 80/80."
-state_head: cf2c3e9c49db96e370b5a6b4acd88edcbf72cc15
+last_activity_desc: "Phase 164.6.2 MT5RELOGIN plan 01 executed (wave 1, sequential, main working tree). TWO task commits plus the SUMMARY: e89e04d1 (the credential-free `-6` detector, the credentialed heal verb, `mt5_terminal_key`, and the by-value redaction on BOTH failure arms), f7558d36 (the signature-DERIVED credential-redaction gate that fences the CLASS). Verify: 216 passed across the plan's six-file block, `mypy --strict` clean over services/routers/models (92 files), the filtered gate `REDACTION-GATE-COUNT OK (6 passed)`. ⭐ BOTH CALIBRATIONS OBSERVED RED with their neuters ASSERTED APPLIED first and their restores `cmp`-verified. Lever 1 measured a REAL disclosure: with the by-value loop excised, `scrub_freeform_string` alone let the account number AND the whole broker server string through — it caught only the `password=` SHAPE — which is the concrete argument for why the by-value pass is a shipped control, not a nicety. Lever 2 collapsed the derivation: the FLOOR failed with its own message while the redaction gate reported `got empty parameter set` and did NOT fail, i.e. the vacuous pass demonstrated live. FOUR deviations, all documented in the SUMMARY; the substantive one is that the plan's own driver instruction (drive both scenario keys at once) was MEASURED to contradict the plan's own ⛔ two paragraphs later — `login` reaches the transport twice and the first call is shape-scrubbed by design, so the instruction would have redded shipped code. Replaced by a deeper derivation: the scenario key comes from the transport call that is handed a credential VALUE. ⛔ STATE HANDLERS CLOBBERED AGAIN (the THIRTEENTH this repo records, the THIRD day running): `state.update-progress` + `state.record-metric` + `state.record-session` together produced ~70 insertions / 11 deletions, reset the ALL-REFS-derived progress block (37/20/167/164/54) to disk-derived 37/14/145/136/38, MOVED `current_phase:` to the bottom of the frontmatter, requoted `gsd_state_version`, injected 59 blank lines between comment lines and rewrote the body `Progress:` bar. Restored from a `cp` byte backup verified with `cmp` (RESTORE-CMP-OK); only the metric row, the census DELTA and these narrative keys were hand-applied. `state.advance-plan` refused again with `ambiguous_position_phase` and wrote NOTHING — Current Position deliberately left untouched rather than hand-reconciled inside an execution, per the 2026-09-13 precedent. ⭐ `roadmap.update-plan-progress` was AGAIN the one clean handler: 2 insertions / 2 deletions, both wanted. PRIOR ACTIVITY: Phase 164.8.3 PROBERAUTH plan 04 — the durable falsifier, the two recorded levers and the booked deferral (4/4, VERIFICATION `status: passed`, not yet shipped)."
+state_head: f7558d3620765672708705603388fbee92788350
 
 # ⭐ progress: RE-DERIVED 2026-09-12 at `733a55f5` from ALL REFS — see the method block
 # immediately above the `progress:` keys below. This supersedes the HAND-SET note that stood
@@ -300,11 +300,33 @@ state_head: cf2c3e9c49db96e370b5a6b4acd88edcbf72cc15
 #   completed_plans 160 -> 164 — the same four, each with a SUMMARY on disk.
 #   percent          53 -> 54  — 20/37 phase-weighted, the convention fixed at 156-10.
 # ⚠️ Still PHASE-weighted. The PLANS are 164 of 167, i.e. 98%.
+
+# ⭐ ROLLED FORWARD 2026-09-13 (Phase 164.6.2 plan 01) — again a DELTA off the verified base,
+# not a fresh census, and again applied BY HAND because `state.update-progress` reset the block
+# to disk-derived 37/14/145/136/38 (the THIRTEENTH recorded clobber; restored from a `cp` byte
+# backup, RESTORE-CMP-OK). Every delta is measured:
+#   total_plans     167 -> 171 — Phase 164.6.2's FOUR PLANs. MEASURED as new, not assumed:
+#                                `git log --all --diff-filter=A` dates all four to `2eb79d09`
+#                                2026-09-13 22:31, i.e. AFTER the 2026-09-12 20:53 census sha
+#                                AND after the 164.8.3 delta above, so they cannot already be
+#                                inside the 167.
+#   completed_plans 164 -> 165 — 164.6.2-01-SUMMARY.md, on disk with `status: complete`.
+#   total_phases     37        — UNCHANGED. Phase 164.6.2 was inserted 2026-09-12 and the
+#                                census note above already records that insertion in the 36->37
+#                                denominator; only its PLANs are new.
+#   completed_phases 20        — UNCHANGED. 1 of 4 plans.
+#   percent          54        — UNCHANGED (phase-weighted, 20/37).
+# ⚠️ SCOPE OF THIS DELTA, stated so the next reader does not over-trust it: only Phase 164.6.2's
+# artifacts were re-measured. Phases 164.6.1 and 164.6.3 also authored plans after the census
+# (164.6.3-01 has a SUMMARY — see the Session block) and were NOT measured here, so the
+# denominator may still be short by those. ⛔ Fix that with a fresh ALL-REFS census, never by
+# running `state.update-progress`, which derives from THIS checkout and is blind to the
+# `-pr`-filtered phases by construction.
 progress:
   total_phases: 37
   completed_phases: 20
-  total_plans: 167
-  completed_plans: 164
+  total_plans: 171
+  completed_plans: 165
   percent: 54
 ---
 
@@ -1270,6 +1292,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.8.3 P02 | 12 min | 2 tasks | 2 files |
 | Phase 164.8.3 P03 | 22 min | 2 tasks | 3 files |
 | Phase 164.8.3 P04 | 9 min | 3 tasks | 2 files |
+| Phase 164.6.2 P01 | 41 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -2304,8 +2327,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-13T17:58:00Z
-**Stopped At:** Phase 164.8.3 PROBERAUTH COMPLETE (4/4, verification passed, not yet shipped). Previously: completed 164.8.3-04-PLAN.md — the LAST plan of Phase 164.8.3 PROBERAUTH (4/4). Criterion 6 discharged on both halves; `[164.8.3-CAPTURE-MANIFEST-ERREXIT]` nominated to Phase 164.8.4 GATERESIDUE under its `NOT A PRECEDENT` fence. ⚠️ Outstanding: the full `npm test` phase gate (not run by the executor, by dispatch constraint) and the `#753` requirements-row question.
+**Last Date:** 2026-09-13T21:30:00Z
+**Stopped At:** Completed 164.6.2-01-PLAN.md — Phase 164.6.2 MT5RELOGIN wave 1 (1/4). The ordered security precondition is DISCHARGED; plan 02 is unblocked. Two commits on `phase-164.6.2-mt5relogin`, not pushed. Previously: Phase 164.8.3 PROBERAUTH COMPLETE (4/4, verification passed, not yet shipped). Previously: completed 164.8.3-04-PLAN.md — the LAST plan of Phase 164.8.3 PROBERAUTH (4/4). Criterion 6 discharged on both halves; `[164.8.3-CAPTURE-MANIFEST-ERREXIT]` nominated to Phase 164.8.4 GATERESIDUE under its `NOT A PRECEDENT` fence. ⚠️ Outstanding: the full `npm test` phase gate (not run by the executor, by dispatch constraint) and the `#753` requirements-row question.
 **Resume File:** None
 **Last Date:** 2026-09-13T00:16:55.388Z
 **Stopped At:** Completed 164.6.3-01-PLAN.md (tracer, wave 1). ⛔ BLOCKER raised for wave 2: [164.6.3-MW02-DOCSONLY-BLIND] — see the phase's deferred-items.md.

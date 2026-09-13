@@ -1877,11 +1877,11 @@ Plans:
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS `MT5-GATEWAY-LOGIN-01`
 
 **Depends on:** Phase 164.6 (ordering only). ⚠️ Founder-gated at criterion 2 — it can be BUILT without the founder and cannot be CLOSED without them, so it must not block Phase 164.6.3.
-**Plans:** 4 plans
+**Plans:** 1/4 plans executed
 
 Plans:
 
-- [ ] 164.6.2-01-PLAN.md — wave 1: the credentialed-initialize verb on `Mt5Client` plus the by-value credential redaction that must travel with it, and a derived class-level gate proven able to fail on two levers. ⛔ FIRST BY ORDERING, not by convenience: criterion 1's security precondition forbids any plan routing a credential through `initialize()` before the redaction exists.
+- [x] 164.6.2-01-PLAN.md — wave 1: the credentialed-initialize verb on `Mt5Client` plus the by-value credential redaction that must travel with it, and a derived class-level gate proven able to fail on two levers. ⛔ FIRST BY ORDERING, not by convenience: criterion 1's security precondition forbids any plan routing a credential through `initialize()` before the redaction exists.
 - [ ] 164.6.2-02-PLAN.md — wave 2: `services/mt5_relogin.py` (kill-switch-gated, leased, off-loop, bounded, structurally incapable of raising), the re-cut lease roster, a new "preflight touches nothing" pin, one `create_task` in `main.lifespan`, and criterion 1's falsifier observed RED on two levers.
 - [ ] 164.6.2-03-PLAN.md — wave 3: the founder handover (exact `railway variables --set`, placeholders only) plus a runbook subsection, then a BLOCKING human-action gate — ⛔ criterion 3, no agent enters a credential.
 - [ ] 164.6.2-04-PLAN.md — wave 4: criterion 2's observation and D-06's measured window, question THREE's `trade_allowed` falsification riding along, the gated correction of the stale account-change sentence, and a BLOCKING decision routing every deferral to a named phase.
