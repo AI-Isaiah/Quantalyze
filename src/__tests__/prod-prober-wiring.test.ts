@@ -2195,3 +2195,120 @@ describe("[164.8.6-07] manifest-side hygiene survives every early return (TODOS 
     ).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// AUTO-ISSUE DEDUP — the publication path, proved KIND-INDEPENDENT.
+//
+// ⛔ THE PROOF THIS GATE MAKES DURABLE. Phase 164.8.3 adds `mt5-not-authorized`
+// to a roster that already had a `prod-prober`-labelled P1 issue OPEN. If issue
+// SELECTION read the defect kind, a new kind could be SUPPRESSED behind an old
+// kind's issue, or could open a SECOND parallel P1 beside it. It does neither,
+// and this is the expression that settles it, quoted verbatim from
+// `.github/workflows/prod-prober.yml`, step `Open or update the prod-prober
+// issue`:
+//
+//     const dedupLabel = "prod-prober";
+//     …
+//     const { data: existing } = await github.rest.issues.listForRepo({
+//       owner: context.repo.owner,
+//       repo: context.repo.repo,
+//       state: "open",
+//       labels: dedupLabel,
+//       per_page: 1,
+//     });
+//
+// The key is the CONSTANT STRING `"prod-prober"`. It is not derived from the
+// defect kind, the subject, the remedy, the defect count or the title. The
+// comment body is `["```", armsLine, "", table, "```"].join("\n")` where
+// `table = lines.slice(tableAt)` from the first `❌` line VERBATIM — so the
+// slicing is kind-agnostic too and a new kind's row reaches the operator whole,
+// remedy included.
+//
+// ⭐ The gate ranges over the EXPORTED `DEFECT_KINDS`, never a hand-typed list,
+// so it widened by itself the moment `mt5-not-authorized` was registered.
+//
+// ⚠️ ACCEPTED, RECORDED CONSEQUENCE — not a defect: while an issue is open the
+// step comments and returns, so the issue's TITLE and BODY keep whatever the
+// first filing said and only the newest COMMENT carries the new kind. Editing
+// that history is prohibited; the operator reads the newest comment.
+// ---------------------------------------------------------------------------
+
+const AUTO_ISSUE_ANCHOR = "- name: Open or update the prod-prober issue";
+
+/** The auto-issue step's slice. A missing anchor THROWS by name — never `-1`. */
+function autoIssueStep(text: string): string {
+  return text.slice(anchorIndex(text, AUTO_ISSUE_ANCHOR));
+}
+
+/** Which defect kinds, if any, the given text mentions. `[]` is the contract. */
+function kindsMentioned(text: string): string[] {
+  return DEFECT_KINDS.filter((k: string) => text.includes(k));
+}
+
+describe("[164.8.3-01] AUTO-ISSUE DEDUP — issue selection cannot read a defect kind", () => {
+  it("AUTO-ISSUE DEDUP: the step selects on a CONSTANT label and mentions ZERO defect kinds", () => {
+    const slice = autoIssueStep(WORKFLOW_TEXT);
+    expect(slice.length, "the auto-issue step must be non-trivial for this to mean anything").toBeGreaterThan(1000);
+
+    // The key is declared once, as a constant, and passed as a VARIABLE to the
+    // selection call — not computed at the call site.
+    expect((slice.match(/const dedupLabel = "prod-prober";/g) || []).length).toBe(1);
+    expect((slice.match(/labels: dedupLabel,/g) || []).length).toBe(1);
+    expect(slice).toContain('state: "open",');
+
+    // ⛔ THE LOAD-BEARING ONE. An issue-selection path that reads a defect kind
+    // could suppress a NEW kind behind an OLD kind's open issue, or open a
+    // second parallel P1 beside it — and the operator would see neither the new
+    // row nor its remedy.
+    expect(
+      kindsMentioned(slice),
+      "the auto-issue step mentions a defect kind — selection has stopped being kind-independent",
+    ).toEqual([]);
+    expect(DEFECT_KINDS.length, "an emptied roster would make the filter above vacuous").toBeGreaterThanOrEqual(15);
+    expect(DEFECT_KINDS, "the roster this ranges over must cover the kind 164.8.3 added").toContain(
+      "mt5-not-authorized",
+    );
+  });
+
+  it("AUTO-ISSUE DEDUP: CALIBRATION — a kind-derived label is CAUGHT by the same predicate", () => {
+    const slice = autoIssueStep(WORKFLOW_TEXT);
+    const spliced = "mt5-no-ipc";
+    expect(DEFECT_KINDS, "the mutant must splice a REAL roster member").toContain(spliced);
+    const mutant = slice.replace(
+      'const dedupLabel = "prod-prober";',
+      `const dedupLabel = "prod-prober-" + "${spliced}";`,
+    );
+    expect(mutant, "the mutation must actually change the text").not.toBe(slice);
+    // Same predicate, mutated input: it reports exactly the kind that was spliced.
+    expect(kindsMentioned(mutant)).toEqual([spliced]);
+    expect((mutant.match(/const dedupLabel = "prod-prober";/g) || []).length).toBe(0);
+  });
+
+  it("AUTO-ISSUE DEDUP: criterion 8 was MET BEFORE THIS PHASE — both status captures and the one `cat`, PINNED", () => {
+    // ⭐ THIS IS A PIN, NOT A NEW REQUIREMENT. Criterion 8 asked for the probe
+    // step's output to survive a failing run. Commit `604d655f` already shipped
+    // it — every branch captures its own status on the same line via
+    // `|| status=$?`, and the `cat "$RUNNER_LOG"` is UNCONDITIONAL and outside
+    // both branches — and narrowed dispatch `34706551355` exercised it. No code
+    // is owed; this test is what stops the claim from rotting.
+    //
+    // ⛔ THE COMMENT FILTER IS LOAD-BEARING AND WAS MEASURED. The workflow's own
+    // 20-line argument QUOTES the idiom it mandates, so an UNFILTERED count
+    // reads 3 and would be satisfied by prose. Counting MATCHES rather than
+    // lines also stops two matches on one line from hiding as one.
+    const code = WORKFLOW_TEXT.split("\n")
+      .filter((l) => !/^\s*#/.test(l))
+      .join("\n");
+    expect(code.length, "the filter must not have eaten the file").toBeGreaterThan(1000);
+    expect(
+      (code.match(/\|\| status=\$\?/g) || []).length,
+      "both probe-step branches must capture their own status ON THE SAME LINE (criterion 8)",
+    ).toBe(2);
+    expect(
+      (code.match(/cat .{0,2}RUNNER_LOG/g) || []).length,
+      "exactly one UNCONDITIONAL `cat \"$RUNNER_LOG\"`, outside both branches (criterion 8)",
+    ).toBe(1);
+    // The filter is a reading, not a formality: unfiltered, the same count is 3.
+    expect((WORKFLOW_TEXT.match(/\|\| status=\$\?/g) || []).length).toBe(3);
+  });
+});
