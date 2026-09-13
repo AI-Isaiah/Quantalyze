@@ -4041,58 +4041,54 @@ export async function selfTest() {
           `164.8.3 CRITERION 7 CALIBRATION: the mutant — the live line with its OWN LAST FIELD renamed to build, so the "=" comes from the arm and not from this file — differs from the original AND the same negative predicate REJECTS it. A RED here means the arm's field syntax has drifted away from the "build=" the negative above greps for, so that negative has stopped being able to see an excluded field (mutant: ${JSON.stringify(withBuild)})`,
         ) && pass;
 
-      // ─── 164.8.3 CRITERION 7 — EXHAUSTIVE field-set control ──────────────
+      // ─── 164.8.3 CRITERION 7 — the WHOLE-LINE pin ────────────────────────
       //
-      // ⛔ WHY THIS EXISTS, AND WHAT THE LEGS ABOVE COULD NOT SEE.
-      //    The negative above greps ONE spelling, `build=`, while its own
-      //    message claims D-05's "two booleans exactly". Measured at
-      //    `e5741e12`: with the arm emitting ` tradeapi_disabled=false` — a
-      //    field named in CONTEXT.md's OWN REJECTED list — the whole self-test
-      //    shipped GREEN, 80/80, exit 0. A one-spelling negative cannot carry
-      //    an exhaustive claim, and this info line goes to a PUBLIC Actions
-      //    log: the arm's own comment records that `path` was dropped partly
-      //    to keep a production filesystem path out of it.
-      //    Found by the phase verifier, `[164.8.3-C7-INFOLINE-FIELD-SET]`.
+      // ⛔ THIRD RECURRENCE OF ONE SHAPE, SO THIS IS A MECHANISM AND NOT A
+      //    THIRD WIDENING. The control on this line has now been outrun twice,
+      //    each time by something its own message claimed to cover:
+      //      1. `build=` alone — one spelling carrying an exhaustive claim.
+      //         ` tradeapi_disabled=false` shipped GREEN, 80/80, exit 0.
+      //      2. a field-NAME SET — but `[...new Set(names)]` COLLAPSES a
+      //         duplicate, so an APPENDED fifth token `connected=C:\MT5\...`
+      //         shipped GREEN; and nothing constrained the VALUE side, so
+      //         `trade_allowed=true;path=C:\MT5\...` shipped GREEN too.
+      //    Both put a Windows path on a PUBLIC Actions log, beside a message
+      //    asserting "NOTHING else reaches the public log".
+      //    `[164.8.4-SCOPE-DEPTH-AXIS]` names the remedy at a third
+      //    recurrence: make the claim and the check agree BY CONSTRUCTION,
+      //    rather than widening the check one axis at a time.
       //
-      // ⚠️ TWO CONTROLS, because two different drifts reach the same log:
-      //    (E1) every whitespace token is a `name=value` pair — catches a
-      //         separator change (` build:6182`) AND a value containing
-      //         spaces (` path=C:\Program Files\...`, whose tail tokens
-      //         carry no `=`).
-      //    (E2) the field-NAME set is EXACTLY the four D-05 permits — catches
-      //         any added field regardless of its spelling.
-      //    Both mutants below are DERIVED from the arm's own last field, never
-      //    typed, for the reason IN-01 records directly above.
-      const tokensOf = (s) => s.replace(/^mt5:\s*/, "").split(/\s+/).filter(Boolean);
-      const isFieldTok = (tok) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(tok);
-      const namesOf = (s) =>
-        [...new Set(tokensOf(s).filter(isFieldTok).map((tok) => tok.slice(0, tok.indexOf("="))))].sort();
-      const D05_FIELDS = ["connected", "initialize", "last_error", "trade_allowed"];
-      const setEq = (s) => JSON.stringify(namesOf(s)) === JSON.stringify(D05_FIELDS);
-      const allTokensAreFields = (s) => tokensOf(s).every(isFieldTok);
-      // Mutants, both borrowing the live "=" and value from the arm's output.
-      const withFifthField = `${infoLine} ${lastField.replace(/^[^=]*/, "tradeapi_disabled")}`;
-      const withColonSep = `${infoLine} ${lastField.replace("=", ":")}`;
+      // ⭐ ONE anchored pin does every axis at once — the field NAMES, their
+      //    ORDER, the TOKEN COUNT (`^`/`$` is what kills the de-dup hole) and
+      //    the VALUE domain. A field cannot be added, renamed, reordered,
+      //    duplicated, or smuggled inside a value without this going RED.
+      // ⚠️ It pins the line the SELF-TEST builds from fixtures, so a value
+      //    domain listed here is a claim about the arm's formatting, not about
+      //    the terminal: `undefined`/`null` are admitted because
+      //    `String(ti.connected)` produces them when the key is absent.
+      const INFO_LINE_PIN =
+        /^mt5: initialize=true last_error=(none|-?\d+) connected=(true|false|undefined|null) trade_allowed=(true|false|undefined|null)$/;
+      // Both mutants are DERIVED from the arm's own output, never typed — the
+      // rule IN-01 established directly above. (a) appends a whole token whose
+      // NAME is already permitted, the shape the field-set control missed;
+      // (b) appends the same text INSIDE the final value, with no space.
+      const mutantAppendedToken = `${infoLine} ${lastField}`;
+      const mutantInValue = `${infoLine};${lastField}`;
 
       pass =
         expect(
-          allTokensAreFields(infoLine),
-          `164.8.3 CRITERION 7 (E1): every token on the info line is a name=value pair — a separator change or a space-bearing value both put text on a PUBLIC Actions log that no name-based control can see (tokens: ${JSON.stringify(tokensOf(infoLine))})`,
+          INFO_LINE_PIN.test(infoLine),
+          `164.8.3 CRITERION 7 (E): the info line matches the whole-line pin EXACTLY — field names, order, token count and value domain, anchored end to end, so nothing reaches the PUBLIC Actions log that D-05 did not authorise (got ${JSON.stringify(infoLine)})`,
         ) && pass;
       pass =
         expect(
-          setEq(infoLine),
-          `164.8.3 CRITERION 7 (E2): the info line's field-NAME set is EXACTLY ${JSON.stringify(D05_FIELDS)} — D-05 says two booleans beside initialize and last_error, and NOTHING else reaches the public log (got ${JSON.stringify(namesOf(infoLine))})`,
+          mutantAppendedToken !== infoLine && !INFO_LINE_PIN.test(mutantAppendedToken),
+          `164.8.3 CRITERION 7 (E-CALIBRATION a): APPENDING A WHOLE TOKEN whose name is already permitted differs from the original AND the pin REJECTS it. ⛔ A RED here means the token-count anchor has been lost and a duplicate-named field would ship green — the exact escape that defeated the field-set control this pin replaced (mutant: ${JSON.stringify(mutantAppendedToken)})`,
         ) && pass;
       pass =
         expect(
-          withFifthField !== infoLine && !setEq(withFifthField),
-          `164.8.3 CRITERION 7 (E2-CALIBRATION): appending a FIFTH field — the live last field renamed to an excluded name, so the "=" comes from the arm — differs from the original AND (E2) REJECTS it. ⛔ A RED here means (E2) has stopped being exhaustive and an excluded field would ship green, which is the escape this control was added to close (mutant: ${JSON.stringify(withFifthField)})`,
-        ) && pass;
-      pass =
-        expect(
-          withColonSep !== infoLine && !allTokensAreFields(withColonSep),
-          `164.8.3 CRITERION 7 (E1-CALIBRATION): the live last field with its separator changed to ":" differs from the original AND (E1) REJECTS it. ⛔ A RED here means (E1) has stopped seeing non-field text on the line (mutant: ${JSON.stringify(withColonSep)})`,
+          mutantInValue !== infoLine && !INFO_LINE_PIN.test(mutantInValue),
+          `164.8.3 CRITERION 7 (E-CALIBRATION b): SMUGGLING the same text INSIDE the final value, with no space, differs from the original AND the pin REJECTS it. ⛔ A RED here means the value domain has stopped being pinned and a production path could ride inside a permitted field (mutant: ${JSON.stringify(mutantInValue)})`,
         ) && pass;
     }
   }
