@@ -771,10 +771,16 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
     const uniform = `if [ "$docs_only" = "true" ] && [ "$filterable" = "true" ] && [ "$result" = "skipped" ]; then`;
     const uniformAt = anchorIndex(SCRIPT, uniform);
 
-    const perRow = [...SCRIPT.matchAll(/elif \[ "\$name" = "([a-z0-9-]+)" \]; then/g)];
+    // ⚠️ BOTH spellings, deliberately. Matching only `elif` would miss the very
+    // mutation this pin exists for: moving the uniform arm to the bottom
+    // PROMOTES the first per-row branch to a bare `if`, the population would
+    // then be one short, and the arm would redden on its own vacuity FENCE
+    // instead of on the position — a red that names the wrong cause and sends
+    // the reader to the wrong place. Measured here while calibrating this pin.
+    const perRow = [...SCRIPT.matchAll(/\b(?:el)?if \[ "\$name" = "([a-z0-9-]+)" \]; then/g)];
     expect(
       perRow.length,
-      "no per-row `elif [ \"$name\" = ... ]` branches found in the extracted loop — the pre-existing " +
+      'no per-row `[el]if [ "$name" = ... ]` branches found in the extracted loop — the pre-existing ' +
         "tolerance arms are gone, and the position assertion below would have nothing to be before",
     ).toBeGreaterThanOrEqual(3);
     const firstPerRowAt = Math.min(...perRow.map((m) => m.index as number));
