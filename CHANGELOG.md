@@ -1,5 +1,221 @@
 # Changelog
 
+## [0.77.40.0] - 2026-09-13 — CIDOCSPATH: a `.planning/`-only PR stops running sixteen code gates, and a code PR is proven to still run every one of them
+
+⭐ **What this is.** Phase 164.6.3, executed as five waves. A pull request whose diff is entirely
+under `.planning/` no longer invokes the code-gate corpus; a pull request that touches any code
+path still invokes every single job, and that second half is the one carrying the evidence. The
+phase changes **WHEN** gates are invoked and nothing else — no gate was added, removed, or made to
+assert anything different.
+
+⚠️ **Read the `### Notes` section before quoting a saving from this entry.** The merge push to
+`main` is deliberately unfiltered, so the recoverable cost is the PR-side run only, and the
+motivating incident does not classify the way the roadmap says it does.
+
+### Added
+
+- **`scripts/classify-changed-paths.mjs`** — the filter's detector and its single point of trust.
+  A pure `judge()` over the changed-file list, an allow-list of exactly `.planning/` (never a
+  deny-list, under which a new top-level directory would default to "docs" and silently skip the
+  corpus), and an **11-row `--self-test`** that runs as its own CI step before the classification
+  does. ⛔ **Fail-closed by decision, and the asymmetry is the whole argument**: an empty diff, an
+  unreadable base ref, a prefix near-miss (`.planningfake/`, `.planning-notes/`, a bare
+  `.planning`) and a traversal form all classify as CODE, because a wrong `true` skips sixteen
+  gates at once while a wrong `false` costs a few runner minutes.
+- **The `changed-paths` job** in `ci.yml`, publishing one boolean output. ⛔ It carries **no `if:`
+  by construction** — the single most load-bearing line in the job, since a skipped `needs:` job
+  skips its dependents and a condition here would skip the whole corpus rather than one gate. It
+  hard-codes a code verdict for anything that is not a `pull_request`.
+- **The `frontend` aggregator's ONE uniform docs-only arm**, scoped by a declared `ALWAYS_ON`
+  shell list, placed **FIRST** in the result-loop chain. First is required for correctness, not
+  style: appended after the existing `e2e-seeded` / `sql-tests` arms it is unreachable on
+  same-repo PRs, which would have turned every docs-only PR's board RED rather than green.
+- **`src/__tests__/contracts/ci-docs-path-filter.contract.test.ts`** — an executed pin, registered
+  in `CONTRACT_GUARDS` and `REGISTRY.md`. It extracts the aggregator's own `run:` body out of
+  `ci.yml`, substitutes the GitHub expressions per scenario and runs it under bash, because a grep
+  pin goes green the moment someone keeps the strings and guts the logic.
+
+### Changed
+
+- **Sixteen job keys are now invoked conditionally** — `deps-cache`, `frontend-typecheck`,
+  `frontend-test`, `frontend-coverage`, `frontend-seam-redis`, `frontend-local-stack`,
+  `frontend-policy`, `knip`, `frontend-build`, `sql-gate-lint`, `sql-mutation`, `sql-tests`,
+  `python`, `e2e`, `e2e-seeded`, `lighthouse-mobile`. The partition reconciles exactly against
+  `ci.yml`'s 23 job keys: 16 filtered + 5 always-on + the aggregator + the detector, verified with
+  `js-yaml` over the parsed document rather than by grep.
+- **Five jobs got the conjunct EXPLICITLY rather than inheriting a skip** (`frontend-coverage`,
+  `sql-tests`, `e2e`, `e2e-seeded`, `lighthouse-mobile`). They would skip anyway through their
+  existing `needs:` edges, but an inherited skip is indistinguishable in the run log from the other
+  skip causes the aggregator's own `sql-tests` arm already warns it cannot tell apart.
+- **Three `ci.yml` job headers were CORRECTED rather than left stating something false.**
+  `frontend-local-stack` and `sql-mutation` each claimed to carry no `if:` and no `needs:`;
+  `sql-tests` claimed `python` carries no `if:`. All three became false the moment this phase
+  landed. Each correction names the sentence it corrects and states which consequences of the
+  original paragraph still stand — in every case the strict default arm is unchanged.
+- **`CONTRACT_GUARDS`' shrink floor raised 57 → 59**, a jump of two while this phase registered
+  one guard. The extra step is **slack that was already there and is named rather than absorbed**:
+  Phase 164.2.1 (`14dc1f5e`) registered `derive-resume-overrides-arity.contract.test.ts` without
+  moving the floor, so the roster stood at 58 against a floor of 57 and one row was deletable with
+  green CI.
+- **Roadmap structure: Phase 164.6 GATE-HYGIENE was split, one phase per item.** The founder was
+  offered three scopings, chose the split, then chose one phase per item over a single combined
+  GATEINFRA phase — items (9), (11) and (12) became `164.6.1 MYPYSTRICT`, `164.6.2 MT5RELOGIN` and
+  `164.6.3 CIDOCSPATH`, with their success criteria travelling with them and criteria 6/8/9 left as
+  struck-through numbered stubs so the existing cross-references stay resolvable. Phase 164.5.1
+  separately gained the gateway-ceiling inversion as criteria 7-9 with its 2026-09-12 PROD
+  measurement, and Phase 164.6 gained `[WINDOWS-LEDGER-COUNT-DRIFT]` as criterion 14.
+- **`TODOS.md`: `[CI-DOCSPATH-01]` re-pointed and corrected.** Its owner line still named Phase
+  164.6 item (12) and criterion 9 — a stub with no text since the split — and now names this phase
+  with the dated reason for the move. Its mutex claim is corrected from two takers to three. Its
+  checkbox stays **open** by design: the entry's own stated proof is two real pushes, and green
+  local tests do not discharge a measurement.
+
+### Fixed
+
+- ⭐ **The MW02 executed-tolerance oracle had gone blind to the very thing it measures, and this
+  phase is what blinded it.** `src/__tests__/lint-sql-gates.test.ts` asserts *"the jobs whose SKIP
+  is tolerated are exactly …"*, justified as *"a job gaining tolerance means branch protection now
+  passes on its skip"*. Wave 1 hoisted `docs_only=` and `ALWAYS_ON=` above the `for r in` anchor
+  the oracle slices from, so the executed script **mentioned both names and defined neither**; bash
+  expanded them to the empty string, the new arm was dead in simulation, **eleven jobs gained skip
+  tolerance and the oracle reported no change**. Its own green diagnostic printed
+  `sql-gate-lint=0`, false at that HEAD. Repaired in a wave inserted for exactly this, **before**
+  wave 3 widened the filter fifteenfold.
+- **The placement pin reddened naming the WRONG cause** — found by actually performing the mutation
+  it exists to catch. Moving the uniform arm to the bottom promotes the first per-row branch from
+  `elif` to a bare `if`; the population regex matched only `elif`, so the arm tripped its own
+  vacuity fence (*"no per-row branches found"*) instead of the position comparison, sending a
+  reader to debug a deleted tolerance arm when the real change was a reordered chain.
+- **The `changed-paths` header claimed the inline `needs:` spelling for all sixteen filtered jobs.**
+  Measured: `grep -c 'needs: [changed-paths]'` returns 13 — eleven real inline entries plus two
+  comment mentions — because the other five carry `- changed-paths` as an extra entry in a `needs:`
+  list they already had. True about the EDGE, false about the SPELLING, and a reader grepping the
+  inline form would find 11 against a stated 16 and conclude the filter was incomplete.
+- **The permanent script header's account of PR #750 was factually wrong as the plan specified it,
+  and was corrected before it shipped.** See `### Notes`. The plan's `23 rows / 4,760 job-seconds`
+  attribution was likewise re-bound: that census is from run `34717952454`, a different and later
+  PR, so each figure is now cited against the run that produced it.
+
+### Root cause
+
+- **The MW02 repair closed the CLASS, not just the instance.** The instance fix widens the slice
+  to start at the step's own `fail=0` so the prologue is inside what executes. The class fix spawns
+  bash with the **unset-variable check** added to the two flags GitHub's default `run:` shell sets,
+  so the next person who hoists a variable out of the extracted slice gets an abort naming that
+  variable instead of a green run reporting yesterday's world. The flat `TOLERANCE_BEARING_JOBS`
+  set was **restated as a three-way partition** — `EVENT_TOLERANT_JOBS` (3), `DOCS_ONLY_TOLERANT_JOBS`
+  (11), `NEVER_TOLERANT_JOBS` (1), union pinned against the loop's own row list — because a flat
+  set cannot express *"tolerated only when the detector said docs-only"*. ⛔ The exact-set assertion
+  was **not** deleted or weakened to make room for the filter; it was split into two exact-set
+  claims over the two halves plus a completeness claim, and the hermeticity arm came back
+  **stronger** than what shipped before (failure and cancelled rejected in all sixteen combinations,
+  not eight).
+
+### Tests
+
+- **Eight executed scenarios** over the aggregator's real shell body: S1 (docs-only greens), S2/S2a/S2b
+  (a skipped `ALWAYS_ON` row is never excused, one leg per member), S3 (a *failed* filterable row
+  still reddens — the tolerance is `skipped`-only), S4 (code PR, a skip still reddens), S5 (a failed
+  or cancelled detector arrives as the empty string and **fails closed**), S6 (the non-vacuity
+  control, without which a harness that always exited 1 would pass S4), S7 (fork PR — the uniform
+  arm composes with the two pre-existing arms), S8 (calibration: a code PR's pre-existing arm still
+  fires). 27 tests green in that file.
+- **Exact-set partition pins in both directions**, over a population re-derived from `ci.yml`'s own
+  text: a job silently losing the conjunct and a job silently gaining it both redden, by name. Plus
+  form pins (one physical line, not-equals-true spelling, the fail-OPEN `== 'false'` form absent),
+  a relative-position pin for the arm's placement, a pin that `changed-paths` carries no job-level
+  `if:`, and a pin that neither trigger grew a `paths:` / `paths-ignore:` key.
+- **A durable CALIBRATION block that runs every invocation**, not once: two neuters of the
+  classifier applied to a tempdir copy (empty the allow-list; loosen `.every` → `.some`), each
+  asserted to have APPLIED before its red is believed, plus a non-vacuity control requiring the
+  unmutated copy to exit 0 and a closing arm asserting the checked-out file is byte-unchanged.
+- **A standing REPAIR PROOF arm** showing the repaired MW02 oracle failing on a mutation the
+  pre-repair machinery passed with total confidence (dropping `frontend-lint` from the always-on
+  list: repaired sees 0/8 → 8/8 tolerated, pre-repair sees 0/8 → 0/8). `lint-sql-gates.test.ts`
+  went 71 → 74 tests; no test was removed, narrowed or special-cased to reach green.
+- **Seven `ci.yml` mutations were performed and each observed reddening by name**, then restored on
+  a fully-committed tree with `git status --porcelain` verified empty each time.
+- ⭐ **The `docs_only=false` half of the posture diagnostic is byte-identical to the pre-phase
+  reading** (`e2e-seeded=4, sql-tests=6, plan-anchor-verify=4`, every other row 0). That is this
+  phase's criterion 2 — *a code PR takes byte-identically its pre-change path* — as a measurement
+  rather than a comment.
+
+### Notes
+
+- ⛔ **THE CLAIMABLE SAVING IS THE PR-SIDE RUN ONLY, and a claim of the whole corpus's job-seconds
+  would be false.** The `push: branches: [main]` trigger is unfiltered by a locked decision:
+  `ci.yml`'s own header records that every commit must produce its own recorded green run (deploy
+  automation and branch-protection key on per-SHA status), and Railway waits on main CI and skips
+  the analytics-service deploy when it is red. A docs-only change therefore **still pays the full
+  corpus once, on the merge push, and still takes the shared-TEST advisory lock there.**
+- ⛔ **THE ROADMAP'S MOTIVATING EXAMPLE DOES NOT CLASSIFY THE WAY THE ROADMAP SAYS IT DOES.** PR
+  #750 — the "~50 job-minutes for a markdown edit" incident this whole phase was built on — also
+  changed `CHANGELOG.md`, `TODOS.md`, `VERSION` and `package.json`. Under the predicate actually
+  shipped here it is **CODE**, and would still run the entire corpus. Wave 1 refused to widen the
+  allow-list to make it fit, because a `VERSION` bump IS a release and a release runs every gate.
+  **So the headline overstates what this phase recovers.** What it does recover is the
+  `.planning/`-only PR class — the plan, summary and state commits that carry no release toll,
+  which is the common GSD case. Recorded here, in the classifier's permanent header and in the
+  `[CI-DOCSPATH-01]` entry, so a future reader does not open the motivating incident, see a full
+  corpus, and conclude the filter is broken.
+- ⚠️ **THREE jobs take the shared-TEST advisory lock `61616158` per run, not two** — `python`,
+  `e2e-seeded` and `sql-tests`. `python` is the forgotten taker, and its own 158-REVIEW CR-04
+  timeout derivation has said "THREE times" all along. The ROADMAP, the `[CI-DOCSPATH-01]` TODOS
+  entry and this phase's CONTEXT.md all undercounted at two; the measurement that settles it is run
+  `34717952454`'s log archive, carrying three distinct acquires (5s / 340s / 615s). Evidence for
+  this phase's criterion 5 must account for **three** absent acquires in a docs-only run, not two.
+- ⚠️ **A known, accepted limit, booked rather than absorbed: `[164.6.3-PLANNING-SUBJECT-DEFERRED-DETECTION]`,
+  owner Phase 164.6 GATE-HYGIENE.** Two assertions hosted by `frontend-test` take real `.planning/**`
+  content as their subject — `lint-sql-gates.test.ts` reads `REQUIREMENTS.md` and `ROADMAP.md`,
+  `verify-plan-anchors.test.ts` reads Phase 159's real `159-VERIFICATION.md` — and `frontend-test`
+  is now filtered on exactly the PR class that can move that subject. **Detection is DEFERRED, never
+  LOST**: the unfiltered merge push runs them, and so does the next code PR. Both obvious remedies
+  were refused with reasons (widening the always-on set gives back most of the saving; moving the
+  assertions changes which gates exist, which the phase boundary forbids). It is recorded in
+  `ci.yml` beside the job and in `TODOS.md`, so the workflow and the ledger say the same thing.
+- ⚠️ **`contracts.yml` still runs on a docs-only PR and is out of scope.** The phase boundary names
+  `ci.yml` as the only file that must change, and `contracts.yml` has no `paths:` filter of its own,
+  so a residual check board on a docs-only PR is **expected** and is not a filter failure.
+- **The always-on set is FIVE** — `plan-anchor-verify`, `secret-scan`, `version-gate`,
+  `docs-link-check` and `frontend-lint`. `frontend-lint` is on it for a reason invisible from the
+  job name: `npm run lint` is a chain whose last link is `tsx scripts/check-planning-hygiene.ts`,
+  the leak gate carrying `⛔ NO PATH ALLOWLIST — BY CONSTRUCTION` on a **public** repo with
+  `.planning/` **tracked**, whose subject is precisely a `.planning/`-only agent-written diff.
+  Measured cost of keeping it: ~70 s per docs-only PR, stated so the trade is legible.
+  ⭐ **There is a SECOND, shell-level layer and it must not be deleted as dead code.**
+  `frontend-lint` and `plan-anchor-verify` — the two always-on keys that are also aggregator rows —
+  are members of the aggregator's `ALWAYS_ON` list, so a `skipped` result for either under a
+  docs-only classification still reddens the board. `frontend-lint` cannot reach `skipped` today
+  (no `if:`, no `needs:` edge), which makes that membership **defence in depth against a future
+  edit**, not a live path. Unreachable-today is why it is cheap, not why it is useless.
+- ⚠️ **`gsd-tools windows append` refuses every write** and no finding from this phase reached the
+  cross-phase register: `frontmatter open/waived/fixed/total=36/0/11/47 but entries yield 40/0/10/50`.
+  The drift predates this branch (`WINDOWS.md` last moved in `604d655f`, Phase 164.8.5), so **every
+  phase since has been silently unable to book a broken window** — a ledger that refuses writes reads
+  as empty. Booked as `[WINDOWS-LEDGER-COUNT-DRIFT]`, now Phase 164.6 criterion 14; ⛔ not hand-fixed,
+  because editing the counts to agree is the silent absorption the register exists to prevent. This
+  phase's `deferred-items.md` is consequently load-bearing rather than a scratch list.
+- ⚠️ **`src/__tests__/gdpr-export-coverage-hook.test.ts` cannot be COLLECTED inside a GSD worktree**
+  (`MEASURE_FAIL: the repo's pinned tsx is absent at <worktree>/node_modules/.bin/tsx`). It throws at
+  module scope before a byte of `ci.yml` is read, so it is not caused by this phase; it runs normally
+  in CI where `npm ci` has run. ⛔ Not "fixed" by relaxing the guard to `npx tsx` — that is the named
+  defect the guard exists to prevent. Recorded so a reader of this phase's verification does not see
+  `24 passed (25)` and conclude a gate was lost.
+- ⚠️ **This phase's ordering note was overridden deliberately.** The roadmap says 164.6.3 "RUNS LAST
+  OF THE THREE"; it ran FIRST on the founder's explicit 2026-09-12 instruction, so 164.6.1 and
+  164.6.2 will land against a changed CI surface.
+- ⛔ **What is NOT closed by this release, stated plainly.** The contract test proves the
+  aggregator's **shell** under injected inputs; it does not prove GitHub's scheduler produces those
+  inputs. Links 1-3 of the fail-closed chain — a failing classifier reddens `changed-paths`, its
+  dependents skip, and the output arrives as the empty string — are unproven locally, and are closed
+  only by the two real PRs `[CI-DOCSPATH-01]` still requires. That is why the entry stays open.
+- **Process, for whoever reads `git log`.** The branch is **29 commits** over `eab976bb`, and they
+  account for exactly that: five waves executed in isolated worktrees (**2** `chore: merge executor
+  worktree` commits), **10** code commits, **4** roadmap-structure commits, **7** phase-artifact
+  commits (discuss context, research, patterns, validation strategy, the plan, revision 1, the
+  rebuilt 24-row validation map), **3** plan SUMMARYs, **1** plan inserted mid-phase (plan 05, for
+  the MW02 repair), **1** `TODOS.md` bookkeeping commit and **1** release commit. 2+10+4+7+3+1+1+1 = 29.
+
 ## [0.77.39.0] - 2026-09-12 — every open verification item in v1.20 closed, re-routed, or handed to the founder
 
 ⭐ **What this is.** A sweep of every `*-VERIFICATION.md` in the milestone, not a phase. The
