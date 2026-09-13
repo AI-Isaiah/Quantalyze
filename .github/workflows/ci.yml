@@ -110,7 +110,10 @@ jobs:
     # no gate is added, removed, or made to assert anything different.
     #
     # ⛔ NO `if:` — BY CONSTRUCTION, and this is the single most load-bearing
-    # line in the job. Every filtered job carries `needs: [changed-paths]`, and
+    # line in the job. Every filtered job depends on this one — eleven in the
+    # inline `needs: [changed-paths]` spelling and five (frontend-coverage,
+    # sql-tests, e2e, e2e-seeded, lighthouse-mobile) as an extra entry in a
+    # `needs:` list they already had; the SPELLING differs, the EDGE does not. And
     # a skipped `needs:` job SKIPS its dependents — the mechanism this file
     # already states verbatim in the aggregator's `sql-tests` arm ("a skipped or
     # failed `needs:` job SKIPS its dependents") and again for `e2e-seeded`. A
