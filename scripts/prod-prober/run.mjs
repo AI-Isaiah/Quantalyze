@@ -146,7 +146,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 78;
+export const SELF_TEST_SCENARIOS = 79;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -156,8 +156,14 @@ export const SELF_TEST_SCENARIOS = 78;
  * ⚠️ ALL TWENTY KINDS WERE REGISTERED UP FRONT in plan 01, including the cron
  * and mt5 kinds no arm raised yet. Plans 03 and 04 then added SCENARIOS, not
  * kinds, and the wiring test's `EXPECTED_DEFECT_KINDS` pin never had to move
- * for an arm that was always going to land. ✅ Every one of the twenty is now
- * raised by a registered arm and asserted BY NAME in `selfTest`.
+ * for an arm that was always going to land.
+ *
+ * ⚠️ THE TWENTY-FIRST, `mt5-not-authorized`, WAS NOT REGISTERED UP FRONT — it
+ * landed in phase 164.8.3 with its fixture, its remedy, its `KIND_ASSERTIONS`
+ * entry and both scenario counters in the SAME commit, because every gate below
+ * refuses a partial landing. That is the rule, not an exception to it.
+ * ✅ Every one of the twenty-one is now raised by a registered arm and asserted
+ * BY NAME in `selfTest`.
  */
 export const DEFECT_KINDS = [
   // harness-wide
@@ -179,6 +185,10 @@ export const DEFECT_KINDS = [
   // mt5 (plan 04)
   "mt5-no-ipc",
   "mt5-ipc-timeout",
+  // Added in phase 164.8.3: -6 has exactly ONE cause and ONE remedy, so
+  // reporting it as the residual `mt5-terminal-error` handed the operator a
+  // lookup instruction instead of the fix. Two real investigations paid for it.
+  "mt5-not-authorized",
   "mt5-ssh-transport",
   "mt5-probe-timeout",
   "mt5-terminal-error",
@@ -909,18 +919,28 @@ const ARM_FIXTURE_TABLE = [
     // every extra call into the container is another thing that can wedge the
     // terminal this arm exists to observe.
     greenSeamCalls: 1,
-    // ⚠️ FOUR kinds, not five. `mt5-probe-timeout` is deliberately NOT in this
+    // ⚠️ FIVE kinds, not six. `mt5-probe-timeout` is deliberately NOT in this
     // table: it is a property of the SPAWN (the prober's own 120 s budget
     // elapsed), so there is no stdout a transcript could contain that would
     // produce it. It gets its own scenario below, with its own by-name
     // assertion and an explicit absence check against the terminal's -10005 —
     // which is the boundary MT5-WEDGE-OBS-01 turns on.
-    kinds: ["mt5-no-ipc", "mt5-ipc-timeout", "mt5-ssh-transport", "mt5-terminal-error"],
+    kinds: [
+      "mt5-no-ipc",
+      "mt5-ipc-timeout",
+      "mt5-not-authorized",
+      "mt5-ssh-transport",
+      "mt5-terminal-error",
+    ],
     load: loadFixtureText,
     makeSeams: (text) => createSeams({ sshRunner: fixtureSsh({ stdout: text }) }),
     red: {
       "10004.txt": "mt5-no-ipc",
       "10005.txt": "mt5-ipc-timeout",
+      // ONE code, ONE cause, ONE remedy — which is exactly why it is NOT in the
+      // catch-all below: the residual's remedy sends the reader to an error
+      // table, and for -6 that lookup IS the defect (phase 164.8.3).
+      "6.txt": "mt5-not-authorized",
       "no-probe-line.txt": "mt5-ssh-transport",
       // TWO fixtures, ONE kind, two different causes on the same side of the
       // bridge: initialize() failing with a NON-IPC code, and initialize()
@@ -1006,6 +1026,7 @@ export async function selfTest() {
     "manifest-invalid": (d) => d.kind === "manifest-invalid",
     "mt5-no-ipc": (d) => d.kind === "mt5-no-ipc",
     "mt5-ipc-timeout": (d) => d.kind === "mt5-ipc-timeout",
+    "mt5-not-authorized": (d) => d.kind === "mt5-not-authorized",
     "mt5-ssh-transport": (d) => d.kind === "mt5-ssh-transport",
     "mt5-terminal-error": (d) => d.kind === "mt5-terminal-error",
     // ⚠️ Not reachable from the fixture table (see the mt5 entry's `kinds`

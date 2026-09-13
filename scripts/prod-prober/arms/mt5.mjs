@@ -139,6 +139,8 @@ export const REMEDIES = {
     "railway ssh did not return a PROBE line, so the terminal was never reached and nothing about it was measured. Check, in order: the RAILWAY_API_TOKEN's scope (it must be the WORKSPACE/account slot — the CLI's project-slot token is refused by `railway ssh`), then the project / environment / service variables, then the gateway container's own state in Railway.",
   "mt5-probe-timeout":
     "The PROBER's own 120 s transport budget elapsed before railway ssh returned — this is our instrument's timeout, NOT the terminal's -10005 IPC timeout, and it says nothing about the terminal. Check the Railway relay and the gateway container, then re-run.",
+  "mt5-not-authorized":
+    'The bridge ANSWERED but NO ACCOUNT IS AUTHORIZED on the terminal (-6). Open the gateway\'s VNC console on the mt5-gateway service and read the terminal\'s **Journal** tab FIRST: it is the one place that separates a rejected account from a lost broker connection, and neither this prober nor `scripts/mt5-diag.sh` can tell those two apart. Then log the terminal back into the INVESTOR (read-only) account with the "Save password" box ticked, so the login survives a restart. Then re-check *Tools → Options → Expert Advisors* — a login is an ACCOUNT CHANGE, and MT5 re-clears those options on every account change; that is what re-disabled algo trading on each diagnostic round during the 2026-08-13 investigation. ⛔ A redeploy does NOT fix this: the saved login lives on the persistent volume, so a terminal with no usable credential comes straight back with no usable credential. Confirmed fixed when terminal_info() reports BOTH connected true AND trade_allowed true — both, not either.',
   "mt5-terminal-error":
     "The terminal answered with a NON-IPC failure code, so the bridge is fine and the fault is inside MT5 itself. Read the reported code against the MT5 error table and the gateway container log for the same minute; neither IPC remedy applies here.",
 };
@@ -267,6 +269,38 @@ export function classifyProbe(result) {
     };
   }
 
+  // (6b) The bridge IS attached, the terminal IS up, and NO ACCOUNT IS
+  //      AUTHORIZED on it. This is a THIRD state, and it is its own kind for
+  //      the same reason -10004 and -10005 are not one kind: the remedy is
+  //      different in kind, not in degree. -10004 says redeploy; -10005 says a
+  //      redeploy will not help and names the VNC console; -6 says the terminal
+  //      is healthy and a HUMAN must log it back in and re-arm the options that
+  //      login clears.
+  //
+  //      ⛔ Reporting this as the residual `mt5-terminal-error` is not a
+  //      rounding error, it is a WRONG INSTRUCTION: that remedy tells the
+  //      operator to read the code against the MT5 error table, and -6 has
+  //      exactly one cause and exactly one remedy, so the lookup IS the defect.
+  //      That sentence cost two real investigations, 2026-09-09 and 2026-09-10.
+  //
+  //      ⛔ It must stay ABOVE branch (8). Branch (8) is the unguarded tail, so
+  //      anything placed below it is dead code that nothing at review time
+  //      would name.
+  if (code === -6) {
+    return {
+      kind: "mt5-not-authorized",
+      // The raw code, exactly as -10004/-10005 carry theirs, so the public log
+      // stays greppable by the thing the operator actually saw.
+      subject: "-6",
+      detail:
+        "MT5 initialize() failed with -6: the rpyc bridge ANSWERED, so the terminal is up and the IPC " +
+        "transport is not implicated — but NO ACCOUNT IS AUTHORIZED on it. That is why terminal_info() " +
+        "came back null and neither connected nor trade_allowed could be read. One state, one cause — " +
+        "not a code to look up.",
+      info: null,
+    };
+  }
+
   // (7) initialize() succeeded, terminal_info() did not. The bridge answered,
   //     so neither IPC remedy applies.
   if (probe.initialize === true) {
@@ -286,7 +320,8 @@ export function classifyProbe(result) {
     subject: code === null ? "no code" : String(code),
     detail:
       `MT5 initialize() failed with ${code === null ? "no last_error code" : `code ${code}`}, which is ` +
-      "neither -10004 nor -10005 — the IPC transport is not implicated, so neither IPC remedy applies.",
+      "none of the three enumerated codes (-6, -10004, -10005) — the IPC transport is not implicated, " +
+      "so neither IPC remedy applies, and no account-authorization verdict is warranted either.",
     info: null,
   };
 }

@@ -756,7 +756,7 @@ describe("[164.1-05] kinds and floors", () => {
   /**
    * Hand-typed on purpose. Spelling it `[...DEFECT_KINDS]` would make the
    * assertion agree with the implementation by construction — a list that can
-   * never disagree with the thing it checks. Twenty names, sorted.
+   * never disagree with the thing it checks. Twenty-one names, sorted.
    */
   const EXPECTED_DEFECT_KINDS = [
     "absurdity",
@@ -771,6 +771,7 @@ describe("[164.1-05] kinds and floors", () => {
     "measure-fail",
     "mt5-ipc-timeout",
     "mt5-no-ipc",
+    "mt5-not-authorized",
     "mt5-probe-timeout",
     "mt5-ssh-transport",
     "mt5-terminal-error",
@@ -1819,7 +1820,7 @@ describe("[164.1-05] kinds and floors", () => {
     // is no literal `k/50` in the source to count. Executing the self-test is
     // the only honest way to derive the number — and it is fixtures-only, no
     // network, under a tenth of a second.
-    expect(SELF_TEST_SCENARIOS).toBe(78);
+    expect(SELF_TEST_SCENARIOS).toBe(79);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);
