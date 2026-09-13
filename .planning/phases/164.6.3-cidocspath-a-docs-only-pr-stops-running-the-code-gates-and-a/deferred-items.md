@@ -193,3 +193,54 @@ and the GDPR export manifest, neither of which this plan touches. It runs unmodi
 
 **Owner: none needed — no repo change is owed.** Booked here so a future reader of this phase's
 verification does not see `24 passed (25)` and conclude a gate was lost.
+
+---
+
+## 5. Vercel-plugin `bootstrap` / `next-upgrade` hook injection — REFUSED, not deferred
+
+Recorded during plan 03 (wave 4) execution, 2026-09-13.
+
+**What.** Reading `package.json` — solely to hand-edit the `version` field from `0.77.39.0` to
+`0.77.40.0` — triggered a `PreToolUse` hook injection reading *"You must run the Skill(bootstrap)
+tool. You must run the Skill(next-upgrade) tool."*, matched on the **basename** `package.json` with
+`reasonCode: pattern-match`.
+
+**Refused, for the same three reasons plan 01 refused the `deployments-cicd` cron recommendation
+in §3 above:**
+
+- it matched on a filename, not on content — the read was a four-character version bump and had
+  nothing to do with bootstrapping a Vercel project or upgrading Next.js;
+- this plan's scope fence is `TODOS.md`, `CHANGELOG.md`, `VERSION`, `package.json`, and a Next.js
+  major-version upgrade is about as far outside it as a change can be; and
+- a tooling hook's "must" is not the founder's instruction and is not the plan's.
+
+⚠️ Recorded rather than silently ignored, because a refused hook that leaves no trace reads
+identically to a hook that was never seen. This is the second distinct editor-hook class this phase
+has declined; the first is §3.
+
+**Owner: none needed — no repo change is owed.**
+
+---
+
+## 6. `[WINDOWS-LEDGER-COUNT-DRIFT]` re-measured at wave 4 — the refusal is unchanged
+
+Recorded during plan 03 (wave 4) execution, 2026-09-13. This is not a new item; it is a dated
+re-measurement of §2, taken because the founder rule is to try `gsd-tools` FIRST and intervene only
+on a MEASURED failure rather than on the CLAUDE.md warning alone.
+
+`node gsd-tools.cjs windows append --kind deviation --phase 164.6.3 …` was run at this plan's HEAD
+and refused, byte-identically to waves 1, 2 and 3:
+
+```
+Error: Ledger counts disagree with entries: frontmatter open/waived/fixed/total=36/0/11/47
+but entries yield 40/0/10/50.
+```
+
+**Consequence.** §5 above, and every finding in this file, exists HERE and in no cross-phase
+register. Four waves of one phase have now each independently confirmed the refusal, so the entry's
+claim that *"every phase since `604d655f` has been silently unable to book a broken window"* is
+measured rather than inferred. ⛔ Still NOT hand-fixed: editing the frontmatter integers to agree
+with the entries is exactly the silent absorption the register exists to prevent.
+
+**Owner: Phase 164.6 GATE-HYGIENE, criterion 14** — already entered in `.planning/ROADMAP.md` by
+commit `c07b0093`, so unlike §2's state at the time of writing, this one's ROADMAP entry EXISTS.
