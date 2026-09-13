@@ -1557,11 +1557,16 @@ The terminal dropped a working session and re-attached to an account it could no
 
 **Requirements**: TBD (no v1.20 requirement IDs) + GitHub issue #753 (`prod-prober` red since 2026-09-07) + ⭐ **ROUTED HERE 2026-09-11 — `-6` is CONFIRMED LIVE, with the instrument now trustworthy.** The first prod-prober run after Phase 164.8.5 landed (run `34609247983`, head `62d2af8b`) reported `mt5-terminal-error / mt5 / -6` with exactly the remedy this phase exists to remove: *"Read the reported code against the MT5 error table."* ⚠️ **What changed is the EVIDENCE, not the finding.** Before 164.8.5 the probe STEP was dying — 5 of the 6 hourly runs to 2026-09-11T10:16 concluded `failure` without a defect table, so a `-6` in that window could not be distinguished from the prober falling over. That run printed `self-test 78/78`, `arms: 4/4/0` (none credential-blocked) and `seam-invocations: 9` BEFORE the table, so the `-6` is now a MEASURED live reading rather than an inference from a red check. ⛔ Do not re-derive the five-red-runs claim from the run list alone: those reds and this one have different causes.
 **Depends on:** Phase 164.1 (owns the prober's MT5 arm and its defect vocabulary)
-**Plans:** 0 plans
+**Plans:** 4 plans
+
+⛔ **FULLY SEQUENTIAL — waves 1→2→3→4, no parallelism, and that is a finding rather than a default.** Every plan touches at least one of `scripts/prod-prober/arms/mt5.mjs`, `scripts/prod-prober/run.mjs` or `src/__tests__/prod-prober-wiring.test.ts`, and the scenario-count pair (`run.mjs:149` ↔ `prod-prober-wiring.test.ts:1822`) moves twice, so any two plans sharing a wave would race on the same literal. Plan 04 additionally carries a NON-FILE coupling: its recorded neuter MUTATES `arms/mt5.mjs` on disk and restores it, so it must never share a wave with plan 03, which owns that file — file-disjointness in frontmatter is not isolation when a harness temporarily edits the tree.
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.8.3 to break down)
+- [ ] 164.8.3-01-PLAN.md — TRACER: the `mt5-not-authorized` kind wired end-to-end (fixture `6.txt` → branch (6b) → remedy → five registrations → counters), plus the auto-issue dedup-key proof and criterion 8's MET-at-HEAD pin (C1, C2, C3, C4, C8; D-01, D-02, D-03, D-04)
+- [ ] 164.8.3-02-PLAN.md — the criterion-2 row scenario (four required words + the calibrated negative + the account-number scan) and both by-name ABSENCE lists extended (C2, C4; D-03, D-04)
+- [ ] 164.8.3-03-PLAN.md — `terminal_info()` recorded as two booleans exactly, the `"present"` sentinel retired, `build=` dropped from the info line, `ok.txt` rewritten (C5, C7; D-05)
+- [ ] 164.8.3-04-PLAN.md — the falsifier: a durable tmp-dir mutant that re-runs every shard, plus two on-disk levers observed RED alone and restored from bytes, plus one booked deferral with a named owner (C6)
 
 ### Phase 164.8.2: GATEHARDENING — the five code-review warnings Phase 164.8 shipped: the VAC-08 frontier exemption gets a ceiling, the ledger drift-check gets an arms ratchet, the reverted-grep stops being NUL-blind, the destructive restore's artifact stops carrying unredacted policy text, and the softening-token scan reaches the workflow that can drop a schema (INSERTED)
 
