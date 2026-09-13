@@ -26,7 +26,9 @@
  * file fails here.
  */
 import { describe, expect, it, vi } from "vitest";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -56,6 +58,7 @@ import {
   splitHygiene,
   UNRECORDED_VERDICT,
 } from "../../scripts/prod-prober/arms/cron-drift.mjs";
+import { classifyProbe } from "../../scripts/prod-prober/arms/mt5.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "prod-prober.yml");
@@ -2310,5 +2313,190 @@ describe("[164.8.3-01] AUTO-ISSUE DEDUP — issue selection cannot read a defect
     ).toBe(1);
     // The filter is a reading, not a formality: unfiltered, the same count is 3.
     expect((WORKFLOW_TEXT.match(/\|\| status=\$\?/g) || []).length).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [164.8.3-04] THE `-6` BRANCH CAN FAIL — OBSERVED, NOT ASSERTED.
+//
+// ⛔ A CONTROL ONLY EVER APPLIED TO PASSING INPUT IS NOT EVIDENCE. Phase 164.8.3
+// added `mt5-not-authorized` so a real -6 reading stops falling into the
+// residual `mt5-terminal-error`, whose remedy sends the operator to the MT5
+// error table — a WRONG INSTRUCTION that cost two investigations (2026-09-09 and
+// 2026-09-10). Everything else in this repo pins that the new branch EXISTS.
+// These three tests pin that REMOVING it changes the verdict, which is the only
+// statement that distinguishes a live gate from a decorative one.
+//
+// ⭐ THREE `it()`s ON PURPOSE, one property each — the same discipline
+// `[164.8.5-02]` states at `:1840-1844`: a single test covering all three would
+// credit ONE red to THREE controls.
+//   #1 CONTROL   — the SHIPPING module classifies `6.txt` as mt5-not-authorized.
+//   #2 FALSIFIER — the mutant, with the `-6` branch excised, falls back to
+//                  mt5-terminal-error. This is the defect, demonstrated.
+//   #3 SURGICAL  — the SAME mutant still reads -10005 and -10004 correctly, so
+//                  #2's red cannot have come from having deleted a region.
+//
+// ⚠️ NOTHING IS WRITTEN INTO THE WORKING TREE. The mutant lives in a
+// `mkdtempSync` directory and is removed in a `finally`, so the `git checkout --`
+// hazard — which restores to HEAD and silently destroys uncommitted work — never
+// arises here at all. That is why this idiom carries the DURABLE half of the
+// proof, and why it re-runs on every CI shard rather than once in a transcript.
+// ---------------------------------------------------------------------------
+
+/** What `classifyProbe` returns. Restated here because the arm is plain `.mjs`. */
+type Mt5Verdict = {
+  kind: string | null;
+  subject: string | null;
+  detail: string | null;
+  info: string | null;
+};
+
+/** The one export the mutant copy is driven through. */
+type MutantMt5Arm = { classifyProbe: (result: unknown) => Mt5Verdict };
+
+/**
+ * The driver that loads the mutant, written beside it in the same temp dir.
+ *
+ * ⚠️ WHY A CHILD PROCESS RATHER THAN `await import()` — MEASURED 2026-09-13,
+ * both failures observed here before this shape was chosen:
+ *   `await import(pathToFileURL(f).href)` -> Cannot find module 'file:///…/T/…/
+ *       mt5-mutant.mjs' imported from …/prod-prober-wiring.test.ts
+ *   `new Function("url", "return import(url)")` -> TypeError: A dynamic import
+ *       callback was not specified.
+ * Vitest rewrites every dynamic import into its own module runner, which
+ * resolves against the Vite project graph and cannot see a file outside the
+ * repo root; escaping that transform lands in a VM context with no import
+ * callback. ⛔ The remedy is NOT to write the mutant somewhere Vite can resolve
+ * — that is the working tree, and this whole idiom exists to stay out of it.
+ * ⭐ Spawning `process.execPath` on the temp file is the STRONGER property
+ * anyway: the mutant is parsed and linked by the SAME Node that runs the real
+ * arm in CI, with no bundler anywhere in the path.
+ */
+const MUTANT_DRIVER_SRC = [
+  'import { classifyProbe } from "./mt5-mutant.mjs";',
+  "process.stdout.write(JSON.stringify(classifyProbe(JSON.parse(process.argv[2]))));",
+  "",
+].join("\n");
+
+describe("[164.8.3-04] the -6 branch is load-bearing (criterion 6)", () => {
+  const MT5_ARM_PATH = join(PROBER_DIR, "arms", "mt5.mjs");
+  const MT5_FIXTURES = join(PROBER_DIR, "fixtures", "mt5");
+  const MT5_ARM_TEXT = readFileSync(MT5_ARM_PATH, "utf8");
+
+  /** The `-6` branch's opening line, and the block terminator that closes it. */
+  const MINUS_SIX_ANCHOR = "  if (code === -6) {";
+  const BLOCK_TERMINATOR = "\n  }\n";
+
+  /**
+   * One fixture transcript, shaped exactly as the arm's own caller shapes a
+   * `seams.ssh` result (`arms/mt5.mjs` `run()` → `classifyProbe(result)`).
+   */
+  const probeResultFor = (fixture: string) => ({
+    status: 0,
+    stdout: readFileSync(join(MT5_FIXTURES, fixture), "utf8"),
+    stderr: "",
+    timedOut: false,
+    measureFail: null,
+  });
+
+  /**
+   * The arm with the `-6` branch — and NOTHING else — removed.
+   *
+   * ⛔ `anchorIndex`, never `indexOf`. On a miss `indexOf` returns `-1`, and
+   * `slice(0, -1)` is nearly the WHOLE string, so a RENAMED or MOVED branch
+   * would yield a mutant that is a near-copy of the original and a falsifier
+   * that passes for the wrong reason. `anchorIndex` throws and names the anchor
+   * (ANCHOR DISCIPLINE, `:77-100`).
+   */
+  function exciseMinusSixBranch(text: string): string {
+    const start = anchorIndex(text, MINUS_SIX_ANCHOR);
+    const end = anchorIndex(text, BLOCK_TERMINATOR, start) + BLOCK_TERMINATOR.length;
+    return text.slice(0, start) + text.slice(end);
+  }
+
+  /**
+   * Build the mutant in a temp directory, drive `fn` through it, and remove the
+   * directory in a `finally`. The mutant NEVER lands under `scripts/`.
+   */
+  function withMutantArm<T>(fn: (arm: MutantMt5Arm) => T): T {
+    // ⭐ THE PROPERTY THAT MAKES THIS WHOLE IDIOM POSSIBLE: the arm has ZERO
+    // `import`/`require` statements, so a copy of it stands alone in a temp
+    // directory with no module graph to resolve. Pinned rather than assumed, so
+    // a future import added to the arm reveals itself HERE, by name, instead of
+    // as a puzzling module-not-found inside a mutant nobody is looking at.
+    expect(
+      MT5_ARM_TEXT.split("\n").filter((l) => /^\s*import\s/.test(l) || /\brequire\s*\(/.test(l)),
+      "arms/mt5.mjs has acquired a module dependency — the standalone mutant copy below can no longer resolve it",
+    ).toEqual([]);
+
+    const mutant = exciseMinusSixBranch(MT5_ARM_TEXT);
+    expect(mutant, "the excision must actually change the text, or every assertion below is vacuous").not.toBe(
+      MT5_ARM_TEXT,
+    );
+    expect(
+      mutant.includes(MINUS_SIX_ANCHOR),
+      "the mutant must no longer contain the -6 branch it was built to remove",
+    ).toBe(false);
+    expect(
+      MT5_ARM_TEXT.length - mutant.length,
+      "the excision must be BRANCH-SIZED — a huge delta means the block terminator matched far past the branch",
+    ).toBeLessThan(1200);
+
+    const dir = mkdtempSync(join(tmpdir(), "mt5-minus-six-falsifier-"));
+    try {
+      writeFileSync(join(dir, "mt5-mutant.mjs"), mutant, "utf8");
+      const driver = join(dir, "drive.mjs");
+      writeFileSync(driver, MUTANT_DRIVER_SRC, "utf8");
+      const arm: MutantMt5Arm = {
+        classifyProbe: (result: unknown) => {
+          // `execFileSync` — no shell, so the JSON argument is passed as ONE
+          // argv entry and nothing in it is ever interpreted.
+          const out = execFileSync(process.execPath, [driver, JSON.stringify(result)], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          return JSON.parse(out) as Mt5Verdict;
+        },
+      };
+      return fn(arm);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("164.8.3 FALSIFIER — CONTROL: the SHIPPING arm reads 6.txt as mt5-not-authorized on subject -6", () => {
+    const verdict = classifyProbe(probeResultFor("6.txt"));
+    expect(verdict.kind, "the shipped classifier must name the -6 state as its own kind").toBe("mt5-not-authorized");
+    expect(verdict.subject, "carrying the raw code, so a PUBLIC log stays greppable by what the operator saw").toBe(
+      "-6",
+    );
+  });
+
+  it("164.8.3 FALSIFIER — with the `-6` branch EXCISED, the same transcript falls back to mt5-terminal-error", () => {
+    withMutantArm((arm) => {
+      const verdict = arm.classifyProbe(probeResultFor("6.txt"));
+      expect(
+        verdict.kind,
+        "WITHOUT the -6 branch a real live -6 reading lands in the unguarded tail, whose remedy tells the " +
+          "operator to read the code against the MT5 error table — the WRONG INSTRUCTION this phase removed. " +
+          "This test going green is what proves the branch is load-bearing rather than decorative.",
+      ).toBe("mt5-terminal-error");
+    });
+  });
+
+  it("164.8.3 FALSIFIER — SURGICAL: the SAME mutant still reads -10005 and -10004 correctly", () => {
+    withMutantArm((arm) => {
+      // ⭐ SEPARATE STATEMENTS, not one `&&` chain: a first failure must not
+      // mask the second reading.
+      expect(
+        arm.classifyProbe(probeResultFor("10005.txt")).kind,
+        "the excision must have removed ONE branch, not the classifier tail — otherwise the falsifier above " +
+          "would go green just as well on a mutant that classifies nothing at all",
+      ).toBe("mt5-ipc-timeout");
+      expect(
+        arm.classifyProbe(probeResultFor("10004.txt")).kind,
+        "and the branch ABOVE the excision is equally untouched",
+      ).toBe("mt5-no-ipc");
+    });
   });
 });
