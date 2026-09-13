@@ -1670,6 +1670,138 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
         ).toEqual(`${half}: ${r.combos} combos; ${spell(r)}`);
       }
     });
+
+    // ── THE REPAIR PROOF ───────────────────────────────────────────────────
+    //
+    // ⛔ THE GENERAL RULE THIS ARM EXISTS TO SATISFY. An oracle repair that
+    // does not demonstrate the REPAIRED oracle failing on a mutation the OLD
+    // one passed is a CLAIM about a gate, not EVIDENCE about one. Every arm
+    // above would read identically if the repair had done nothing; this one
+    // would not. It runs on every invocation rather than being a one-time
+    // ceremony recorded in a SUMMARY nobody re-runs.
+    //
+    // THE MUTATION IS BUILT IN MEMORY AND NEVER WRITTEN. `git status` on the
+    // workflow is asserted clean by the plan's own verification, and the
+    // restore is by construction — there is nothing to restore. ⛔ It is NOT
+    // restored by checkout: in this repo a `git checkout --` inside a
+    // neuter/restore harness has silently destroyed uncommitted work, and a
+    // harness that can destroy the tree is a worse liability than the defect it
+    // measures.
+    it("REPAIR PROOF — deleting an always-on row reddens the repaired oracle and is INVISIBLE to the pre-repair one", () => {
+      const ciPath = join(ROOT, ".github/workflows/ci.yml");
+      const original = readFileSync(ciPath, "utf8");
+      const TARGET = 'ALWAYS_ON="plan-anchor-verify frontend-lint"';
+      const DROPPED = "frontend-lint";
+
+      // (1) THE MUTATION-APPLIED PRECONDITION. ⭐ A neuter that does not APPLY
+      // reads as GREEN, and this repo has a dated record of that class. The
+      // target is asserted present BEFORE anything is concluded from its
+      // absence.
+      expect(
+        original,
+        "the aggregator's always-on list is no longer spelled as this arm expects, so the mutation below would be a no-op and this proof would measure NOTHING. Re-read the step and re-point the target — do not delete the arm",
+      ).toContain(TARGET);
+
+      const mutated = original.replace(TARGET, 'ALWAYS_ON="plan-anchor-verify"');
+      // Two assertions, not one: "differs" alone is satisfied by a replacement
+      // that did something other than what was intended.
+      expect(mutated, "the mutation changed nothing").not.toBe(original);
+      expect(
+        mutated,
+        "the mutated bytes still contain the original always-on assignment — the replacement did not do what it claims",
+      ).not.toContain(TARGET);
+
+      // (2) THE REPAIRED ORACLE GOES RED. Expressed as a NEGATION so this arm
+      // itself stays green while demonstrating the shipped claim failing: with
+      // `frontend-lint` off the always-on list, the docs-only half tolerates it
+      // and the exact-set claim the headline arm ships no longer holds.
+      const mutatedScript = extractResultLoopScript(mutated) as string;
+      expect(mutatedScript).not.toBeNull();
+      const mutatedSplit = partitionedTolerancePosture(
+        mutatedScript,
+        docsGuardOf(mutatedScript),
+      );
+      expect(
+        mutatedSplit.docsOnly.toleratedSkips.get(DROPPED),
+        `${DROPPED} was dropped from the always-on list and its skip is STILL tolerated nowhere. The repaired oracle cannot see this mutation either, and the repair is not proven`,
+      ).toBeGreaterThan(0);
+      expect(
+        tolerantOf(mutatedSplit.docsOnly),
+        "the shipped exact-set claim STILL HOLDS on the mutated bytes — the headline arm would not have caught a row being dropped from the always-on list, so it does not pin what it says it pins",
+      ).not.toEqual([...new Set([...EVENT_TOLERANT_JOBS, ...DOCS_ONLY_TOLERANT_JOBS])].sort());
+
+      // (3) THE RECORDED BLINDNESS, kept permanently beside the new visibility
+      // — the same shape as the case-spelling fixture's contrast pin above.
+      //
+      // ⛔ `runUnderPreRepairShell` is NOT exported, is used by NO live oracle,
+      // and exists only so this repair has a MEASURED contrast rather than an
+      // assertion of one. It reproduces the two-flag spawn this file used
+      // before Phase 164.6.3 wave 2, under which a name defined outside the
+      // slice expands to the empty string instead of aborting.
+      const runUnderPreRepairShell = (
+        block: string,
+        results: Record<string, string>,
+        guards: Record<string, boolean>,
+      ): boolean => {
+        const script = block
+          .replace(NEEDS_RESULT_RE, (_m, job: string) => results[job] ?? "success")
+          .replace(ANY_EXPRESSION_RE, (m, expr: string) => {
+            const key = expr.trim();
+            if (!(key in guards)) throw new Error(`unsubstituted expression: ${m}`);
+            return guards[key] ? "true" : "false";
+          });
+        const res = spawnSync("bash", ["-eo", "pipefail"], {
+          input: `fail=0\n${script}\nprintf 'FAIL=%s\\n' "$fail"\n`,
+          encoding: "utf8",
+        });
+        const m = /^FAIL=(\d+)$/m.exec(res.stdout ?? "");
+        if (res.status !== 0 || m === null) {
+          throw new Error(`the pre-repair run reached no verdict (status ${res.status})`);
+        }
+        return m[1] !== "0";
+      };
+
+      const preRepairCount = (yaml: string): number => {
+        const narrow = extractResultLoopBlock(yaml);
+        expect(narrow, "the pre-repair extractor found no loop — the contrast cannot be measured").not.toBeNull();
+        const combos = guardCombinations(resultLoopGuardExpressions(narrow as string));
+        return combos.filter(
+          (g) => !runUnderPreRepairShell(narrow as string, { [DROPPED]: "skipped" }, g),
+        ).length;
+      };
+
+      // WHY it is blind, named rather than implied: the mutated bytes are in
+      // the PROLOGUE, and the pre-repair slice starts below it. The two slices
+      // are byte-identical, so the old oracle never reads the thing that
+      // changed — and then reports the same number with total confidence.
+      expect(
+        extractResultLoopBlock(mutated),
+        "the pre-repair slice DOES differ across this mutation — then the blindness this arm records is not the blindness that was measured, and the contrast needs re-deriving",
+      ).toEqual(extractResultLoopBlock(original));
+      expect(
+        preRepairCount(mutated),
+        "the pre-repair machinery reports a DIFFERENT count across the mutation. It was measured blind to it on 2026-09-13; if it is not blind now, this contrast is stale and the repair's evidence must be re-derived rather than restated",
+      ).toBe(preRepairCount(original));
+
+      // (4) THE CLASS FIX, DEMONSTRATED RATHER THAN DESCRIBED. Under the
+      // repaired shell flags the old narrow slice does not reach a verdict at
+      // all: it aborts on the variable the slice failed to define, and the
+      // `did not run to its verdict` guard turns that into a MEASURE_FAIL.
+      const narrow = extractResultLoopBlock(original) as string;
+      const allFalse = Object.fromEntries(
+        resultLoopGuardExpressions(narrow).map((e) => [e, false]),
+      );
+      expect(
+        () => executeResultLoop(narrow, {}, allFalse),
+        "the pre-repair narrow slice now runs to a verdict under the repaired flags. The unset-variable check is what converts a hoisted variable from a silent empty string into a named abort; if this stops throwing, that half of the repair is gone",
+      ).toThrow(/unbound variable/);
+
+      // (5) THE TREE IS UNTOUCHED, re-read from disk rather than assumed.
+      expect(
+        readFileSync(ciPath, "utf8"),
+        "the workflow on disk no longer carries the unmutated always-on assignment — the mutation escaped into the working tree, which this harness is built specifically never to do",
+      ).toContain(TARGET);
+    });
   });
 
   it("leaves the corpus untouched — a linter that could edit gate files is a liability", () => {

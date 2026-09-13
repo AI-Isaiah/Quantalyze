@@ -66,9 +66,22 @@ surfaced rather than improvised.
 of them widens this blind spot, and the blindness is in the very oracle whose job is to notice
 a job gaining skip-tolerance. Fix the oracle BEFORE the filter is widened, not after.
 
-**Owner:** needs a founder decision on the oracle's semantics, then a named phase. Natural
-candidates: fold into plan 02 (it already owns the exact-set pinning) or Phase 164.6
-GATE-HYGIENE. ⛔ Do NOT close it by deleting or weakening the exact-set assertion.
+**Owner:** ✅ **CLOSED 2026-09-13 by Phase 164.6.3 plan 05 (wave 2)**, which was inserted for
+exactly this and runs BEFORE wave 3 widens the filter. The semantic decision the entry asked for
+was taken as a THREE-SET PARTITION, not a widened flat set: `EVENT_TOLERANT_JOBS` (3) is what the
+EVENT excuses, `DOCS_ONLY_TOLERANT_JOBS` (11) is what the path filter excuses, `NEVER_TOLERANT_JOBS`
+(1) is excused by nothing, and the union is pinned against the loop's own row list. ⛔ The
+exact-set assertion was NOT deleted or weakened — it was RESTATED as two exact-set claims over the
+two halves plus a completeness claim. The `docs_only` half's `sql-gate-lint` now reads 8, not the
+0 quoted above.
+
+Measured at the repair: the not-docs-only half reproduces the pre-phase posture byte for byte
+(`e2e-seeded=4, sql-tests=6, plan-anchor-verify=4`, every other row 0), which is this phase's
+criterion 2 as a measurement rather than a comment. The root cause is closed a layer deeper than
+the instance: the spawned shell now treats an unset variable as an error, so the NEXT hoisting of
+a variable out of the extracted slice aborts with that variable's name instead of expanding to the
+empty string. A standing REPAIR PROOF arm re-runs on every invocation and shows the repaired
+oracle failing on a mutation the pre-repair machinery passed.
 
 ---
 
@@ -92,7 +105,43 @@ silent-absorption this repo books defects for, and `.planning/WINDOWS.md` is out
 plan's `files_modified`. The counts must be RE-DERIVED from the entries, and whichever of the
 two numbers is wrong must be established rather than assumed.
 
-**Owner:** needs a named phase. Not this one.
+**Owner: Phase 164.6 GATE-HYGIENE.**
+
+**Why that phase and not another.** It is UPCOMING and still unplanned (`**Plans:** 0 plans`,
+`- [ ] TBD (run /gsd-plan-phase 164.6 to break down)`), so this can be entered as an item before
+breakdown rather than amended into an authored plan set. Its declared subject is gate hygiene and
+planning-tooling integrity, and it ALREADY owns two items of the SAME SHAPE — a planning ledger
+whose stored counts disagree with the artifacts they claim to count:
+
+- criterion 11, `[PROGRESS-COUNT-UNDERIVED]` — the `progress:` block and the ROADMAP progress
+  table were both wrong in the same direction because their figures were hand-set or derived from
+  local disk, and the correction shipped "as prose with a stated method and no mechanism";
+- criterion 13, `[PHASEDIR-ORPHAN-GITKEEP]` — an artifact-counting reader returning a clean
+  answer about a phase it could not actually see.
+
+This is the third instance of that class and belongs beside them, where one deliverable can serve
+all three. ⛔ It is NOT routed to Phase 164.9 TESTISOLATION (that phase's subject is shared-TEST
+isolation, unrelated) and NOT to this phase (`.planning/WINDOWS.md` is outside every plan's
+`files_modified` here, and wave 2's scope fence forbids writing it).
+
+**What must happen there, stated so it cannot be closed the wrong way.** The frontmatter counts
+are **RE-DERIVED FROM THE ENTRIES**, and whichever of the two numbers is wrong is **ESTABLISHED,
+not assumed**. ⛔ Hand-editing the header to match the entries would be the silent absorption the
+register exists to prevent — the counts are the anti-accumulation mechanism, and a header edited
+to agree with whatever is currently there has no power over anything. Ship it with a check that
+fails when the two disagree, so a future drift is a red check rather than a refused append nobody
+reads.
+
+⚠️ **This file is therefore LOAD-BEARING, not a scratch list.** Item 1 above could not be booked
+into the cross-phase register while the drift stands, so its record exists HERE and nowhere else
+until Phase 164.6 lands — and the same is true of every broken window any phase has tried to book
+since the drift began (`604d655f`, Phase 164.8.5). A ledger that refuses writes reads as empty.
+
+⚠️ **Entering it in the ROADMAP is a SEPARATE action this plan may not take.** The founder rule is
+that a deferral is entered via `/gsd-phase --edit`, never hand-edited into `ROADMAP.md`, and
+`ROADMAP.md` is not in this plan's `files_modified`. Run `/gsd-phase --edit 164.6` to add this
+item to that phase's requirements list. Naming the destination here is what stops it being blank;
+it is not a substitute for making the entry.
 
 ---
 
