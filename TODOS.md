@@ -7041,14 +7041,42 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   Source: `.planning/phases/164.1-prod-observability-…/deferred-items.md`.
 
 - [ ] **`[CI-DOCSPATH-01]` a PR that changes NO code runs the entire gate corpus — ~50 job-minutes
-  and two shared-TEST-DB mutex holds for a markdown edit (logged 2026-09-06, at the PR #750 merge).**
+  and THREE shared-TEST-DB mutex holds for a markdown edit (logged 2026-09-06, at the PR #750
+  merge; this line read "two" until 2026-09-13 — the correction and its measurement are below).**
   MEASURED on PR #750 itself, whose diff is FOUR `.planning/` markdown files and zero code, zero
   SQL, zero migrations: **21 jobs, ~3,001 job-seconds (~50 min)**, a total that EXCLUDES
   `e2e-seeded` and `sql-tests` because both were still running when the census was taken. The
   expensive jobs all ran in full — `sql-mutation` 559s, `python` 494s, `e2e` 405s, `frontend-test`
-  368s + 344s, `lighthouse-mobile` 305s. ⚠️ The wasted minutes are the SMALL half: `e2e-seeded`
-  and `sql-tests` each take the shared-TEST-DB advisory mutex, so a roadmap typo fix queues ahead
+  368s + 344s, `lighthouse-mobile` 305s. ⚠️ The wasted minutes are the SMALL half: THREE jobs each
+  take the shared-TEST-DB advisory mutex `61616158`, so a roadmap typo fix queues ahead
   of, and delays, real code PRs on a database SHARED with other people's CI.
+  ⛔ **CORRECTED 2026-09-13 — "FOUR `.planning/` markdown files and zero code" is FALSE about PR
+  #750, and it matters because #750 is this entry's motivating incident.** Re-measured from #750's
+  own file list (`gh pr view 750 --json files`): alongside four `.planning/` paths it also changed
+  `CHANGELOG.md`, `TODOS.md`, `VERSION` and `package.json`. Under the predicate Phase 164.6.3
+  actually shipped — the allow-list is `.planning/` and nothing else — **PR #750 classifies as CODE
+  and would still run the whole corpus.** The sentence above describes its SHAPE, not its
+  classification. ⛔ The allow-list was NOT widened to make it fit: `VERSION`/`CHANGELOG.md` moving
+  IS a release, and a release must run every gate. So the headline "~50 job-minutes for a markdown
+  edit" OVERSTATES what the filter recovers on THIS PR; what it does recover is the
+  `.planning/`-only PR class — the plan, summary and state commits that carry no release toll,
+  which is the common GSD case and the reason the allow-list is drawn where it is rather than one
+  file wider. The same correction is in `scripts/classify-changed-paths.mjs`'s permanent header, so
+  a future reader does not open the motivating incident, see a full corpus, and conclude the filter
+  is broken.
+  ⚠️ **CORRECTED 2026-09-13 (Phase 164.6.3 wave 4) — THREE mutex takers, not two.** The paragraph
+  above read *"`e2e-seeded` and `sql-tests` each take the shared-TEST-DB advisory mutex"*; that
+  superseded claim is recorded here rather than erased. The forgotten third taker is **`python`**,
+  and `python`'s own job header in `.github/workflows/ci.yml` has said so all along — its
+  158-REVIEW CR-04 TTL derivation reads *"Each CI run takes this lock THREE times (python ~7m,
+  e2e-seeded ~8-9m …, sql-tests the balance)"*. ⭐ THE MEASUREMENT THAT SETTLES IT is a log
+  reading, not a restated number: run `34717952454`'s log archive carries **three distinct acquires
+  of key `61616158` — 5s, 340s and 615s**. ⚠️ `.planning/ROADMAP.md` and this phase's
+  `164.6.3-CONTEXT.md` carry the SAME undercount at two; **this correction is the one to cite**,
+  and the `python` job header now carries it too, so the number is also stated where the evidence
+  will be counted. ⛔ Consequence for the proof below: a docs-only PR's run log must show **THREE**
+  absent acquires, not two. Counting to two and finding two absences would read as complete while
+  one taker went entirely unexamined.
   ⛔ The risk is the fix, not the problem. A path filter that skips jobs has exactly the shape of
   a gate silently not running — this milestone's named defect class — so it is NOT shippable on
   evidence that a docs PR got fast; it is shippable only on evidence that a CODE PR still runs
@@ -7060,10 +7088,76 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   on a changed-files step is usually safer than a workflow-level `paths-ignore`, and whichever is
   chosen must be shown not to wedge the `frontend` aggregator. A required check stuck pending is a
   WORSE outcome than the 50 minutes this saves.
-  **OWNER 2026-09-06: Phase 164.6 GATE-HYGIENE item (12)**, success criterion 9. Routed there
-  rather than left here because "when is a gate invoked, and can I prove it still bites" is
-  precisely 164.6's competence. ⛔ NOT in scope: changing WHICH gates exist or what they contain.
-  Source: measured live at the PR #750 merge gate; see `.planning/ROADMAP.md` Phase 164.6 item (12).
+  ~~**OWNER 2026-09-06: Phase 164.6 GATE-HYGIENE item (12)**, success criterion 9~~ — SUPERSEDED,
+  and kept as LINEAGE rather than deleted, per this file's convention of carrying the superseded
+  claim beside the correction. Routed there originally because "when is a gate invoked, and can I
+  prove it still bites" is precisely 164.6's competence.
+  ⭐ **OWNER 2026-09-13 (RE-POINTED): Phase 164.6.3 CIDOCSPATH**, its own success criteria.
+  WHY IT MOVED, dated: the founder's **2026-09-12 split** took items (9), (11) and (12) OUT of
+  Phase 164.6 into three phases of their own — `164.6.1 MYPYSTRICT`, `164.6.2 MT5RELOGIN` and
+  `164.6.3 CIDOCSPATH` — **and their success criteria moved with them**. Phase 164.6's criterion 9
+  is now a struck-through numbered stub reading *"MOVED 2026-09-12 to Phase 164.6.3 CIDOCSPATH"*,
+  kept only so the original numbering stays stable for the cross-references that cite it. Leaving
+  the old pointer would send a future reader to a phase that no longer holds the item, and to a
+  criterion that no longer has any text. ⛔ NOT in scope, unchanged by the move: changing WHICH
+  gates exist or what they contain.
+  ⚠️ **STATUS 2026-09-13 — the checkbox is DELIBERATELY STILL OPEN, and this line says what is
+  shipped and what is owed so the entry is not read as untouched.** SHIPPED on the `164.6.3`
+  branch: the `changed-paths` detector job and `scripts/classify-changed-paths.mjs` (fail-closed,
+  `--self-test` 11/11); the docs-only conjunct plus the detector `needs:` edge on all **sixteen**
+  filterable job keys; the `frontend` aggregator's **ONE uniform arm** and its declared `ALWAYS_ON`
+  list (not a per-row tolerance, and FIRST in the chain because appended it would be unreachable);
+  the executed contract guard `src/__tests__/contracts/ci-docs-path-filter.contract.test.ts`; and
+  the MW02 executed-tolerance oracle repaired so it can see the filter at all. **STILL OWED, and it
+  is the half that closes this entry: the TWO REAL PUSHES named above** — one `.planning/**`-only
+  diff and one touching `src/**` AND `supabase/migrations/**` — with both job sets enumerated from
+  `gh run view --json jobs`, every difference named, and the **three** absent `61616158` acquires
+  read out of the docs-only run's LOG rather than inferred from its job list. ⛔ Do NOT tick this on
+  the strength of shipped code and green local tests: this entry's own stated proof is a measurement
+  on real runs, and nothing else discharges it.
+  Source: measured live at the PR #750 merge gate; the re-point is recorded in
+  `.planning/ROADMAP.md` Phase 164.6's 2026-09-12 SPLIT block and its criterion-9 stub.
+
+- [ ] **`[164.6.3-PLANNING-SUBJECT-DEFERRED-DETECTION]` two assertions whose SUBJECT is real
+  `.planning/**` content are hosted by `frontend-test` — the job the docs-only filter now skips on
+  exactly the PR class that can move that subject (logged 2026-09-13, Phase 164.6.3 wave 3).**
+  MEASURED at the `164.6.3` branch HEAD, by reading both the assertions and the job's new
+  condition. `src/__tests__/lint-sql-gates.test.ts` reads `.planning/REQUIREMENTS.md` and
+  `.planning/ROADMAP.md` from disk — its `G3` arm, *"the PLANNING DOCUMENTS do not claim more shapes
+  than the linter ships"* — and reddens on a planning sentence that still claims FIVE vacuity shapes
+  while VAC-03 ships four. `src/__tests__/verify-plan-anchors.test.ts` reads Phase 159's real
+  `.planning/phases/159-rank-public-ranking-integrity/159-VERIFICATION.md` and reddens on a
+  falsified closing recipe. Both are hosted by `frontend-test`, which now carries
+  `needs: [changed-paths]` and `if: needs.changed-paths.outputs.docs_only != 'true'`.
+  **CONSEQUENCE.** A `.planning/`-only PR that reintroduces the forbidden five-shapes sentence, or
+  deletes or moves that VERIFICATION file, is not caught by its own check board.
+  ⭐ **BOTH HALVES, and the second is why this is an entry rather than a blocker: the detection is
+  DEFERRED, never LOST.** It still fires twice — on the UNFILTERED merge push to `main` (the
+  `push: branches: [main]` trigger is deliberately not filtered, because every commit to main must
+  produce its own recorded green run), and on the next code PR. The exposure window is between a
+  docs-only PR opening and either of those, and inside it a red arrives LATE, not never. ⛔ Do not
+  restate this as "the gate was lost", and do not restate it as "nothing changed" — both halves are
+  load-bearing and stating only one of them misroutes whoever picks this up.
+  ⛔ **TWO REMEDIES WERE CONSIDERED AND BOTH REFUSED, recorded so neither is re-proposed as new.**
+  (1) Widen the always-on set to include `frontend-test` — REFUSED: that job is most of the saving
+  the filter exists to produce, so buying two deferred assertions back at that price undoes the
+  phase. (2) Move the two assertions into an always-on job — REFUSED: that changes WHICH gates exist
+  and where they live, which Phase 164.6.3's boundary forbids by name.
+  Candidate direction, deliberately NOT chosen here: a cheap always-on job whose subject is exactly
+  the planning corpus — narrower than `frontend-test` and honest about what it covers. That is a
+  decision for the owning phase, not something to improvise at the next merge.
+  **OWNER 2026-09-13: Phase 164.6 GATE-HYGIENE.** Routed there for three stated reasons: "when is a
+  gate invoked, and can I prove it still bites" is precisely that phase's declared competence, and
+  this is a gate that still bites but is invoked LATER than its subject can change; it is the phase
+  Phase 164.6.3 was split OUT of on 2026-09-12; and it is still UNPLANNED (`**Plans:** 0 plans`), so
+  the item can be entered before breakdown rather than amended into an already-authored plan set.
+  ⚠️ Entering the matching ROADMAP criterion is a SEPARATE action this entry does not perform:
+  run `/gsd-phase --edit 164.6`. ⛔ A deferral is entered that way and NEVER hand-written into
+  `.planning/ROADMAP.md`; naming the destination here is what stops it being blank, and it is not a
+  substitute for making the entry.
+  Source: `.github/workflows/ci.yml`'s `frontend-test` job header, which carries this same record so
+  the ledger and the workflow say the same thing — until now only the workflow did; and
+  `.planning/phases/164.6.3-cidocspath-a-docs-only-pr-stops-running-the-code-gates-and-a/164.6.3-02-SUMMARY.md`.
 
 - [ ] **`[PLANANCHOR-SUMMARY-FILTER-01]` the `-pr` filter strips SUMMARY files, so every COMPLETED
   plan reads as PENDING on `main` forever — and `plan-anchor-verify` keeps its `file:line` anchors
