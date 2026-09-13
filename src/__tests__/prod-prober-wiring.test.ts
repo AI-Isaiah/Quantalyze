@@ -2378,6 +2378,53 @@ const MUTANT_DRIVER_SRC = [
   "",
 ].join("\n");
 
+// ---------------------------------------------------------------------------
+// THE OTHER HALF OF CRITERION 6 — TWO ON-DISK LEVERS, OBSERVED RED THROUGH THE
+// REAL `--self-test`, EACH DROPPED ALONE.
+//
+// ⭐ The falsifier below proves the CLASSIFIER can fail. It does not prove the
+// SELF-TEST SCENARIO can, and those are different claims: the scenario is what
+// CI actually runs. So each lever was dropped on disk, the runner's own output
+// READ, and the file restored from a `cp` byte backup. ⛔ NEVER `git checkout --`
+// in that harness — it restores to HEAD and silently destroys uncommitted work;
+// byte backups only, re-taken between levers because a backup goes stale the
+// moment the file changes again.
+//
+// MEASURED 2026-09-13, `node scripts/prod-prober/run.mjs --self-test`, exit 1
+// both times. Pasted verbatim — these are the runner's own lines, not a
+// paraphrase, and each lever was run with the OTHER one left live so no single
+// red is credited to two controls.
+//
+//   LEVER 1 — the `-6` branch DELETED from `arms/mt5.mjs` (630 bytes), REMEDIES
+//   left untouched:
+//     === SELF-TEST 24/80: mt5-not-authorized fires on 6.txt, and NOTHING else does ===
+//       ok — 6.txt exits 1 (got 1)
+//       ok — 6.txt ISOLATES exactly one defect (got 1: mt5-terminal-error)
+//     SELF-TEST FAIL: the defect kind is mt5-not-authorized (got mt5-terminal-error)
+//   and, further down, the criterion-2 row check corroborating the same cause:
+//     SELF-TEST FAIL: (a) the -6 fixture's ROW is mt5-not-authorized on subject -6 (got mt5-terminal-error / -6)
+//     === SELF-TEST FAILED ===
+//   RESTORE-CMP-OK (lever 1) — `cmp` against the pristine backup was silent —
+//   then `=== SELF-TEST PASSED: 80/80 scenarios, …` before lever 2 was applied.
+//
+//   LEVER 2 — the `-6` branch left LIVE (verified present, count 1);
+//   `REMEDIES["mt5-not-authorized"]` pointed at the EXACT string
+//   `REMEDIES["mt5-terminal-error"]` already holds (1 -> 2 occurrences):
+//     ok — every mt5 kind carries a REMEDIES entry of at least 40 chars — a defect row that says what broke but not what to do is an alert nobody acts on
+//     SELF-TEST FAIL: no two mt5 remedies are the same string — two kinds with one remedy is two kinds pretending to be one
+//   and, further down, the criterion-2 remedy check corroborating the same cause:
+//     SELF-TEST FAIL: (b) ⛔ SUCCESS CRITERION 2: the -6 ROW's remedy names all FOUR required elements — VNC console=false, "Save password"=false, Expert Advisors=false, Journal=false
+//     === SELF-TEST FAILED ===
+//   RESTORE-CMP-OK (lever 2) — `cmp` silent again — then
+//     === SELF-TEST PASSED: 80/80 scenarios, every arm's kinds fired on their own fixtures and nowhere else ===
+//   with `git status --porcelain -- scripts/` silent, so the working tree is
+//   byte-identical to what it was before the harness ran.
+//
+// ⚠️ STATED LIMIT. Nothing in CI re-runs the two levers; a gate can only prove
+// this RECORD exists, not that it was observed. That asymmetry is exactly why
+// the three `it()`s below carry the re-running half of the proof.
+// ---------------------------------------------------------------------------
+
 describe("[164.8.3-04] the -6 branch is load-bearing (criterion 6)", () => {
   const MT5_ARM_PATH = join(PROBER_DIR, "arms", "mt5.mjs");
   const MT5_FIXTURES = join(PROBER_DIR, "fixtures", "mt5");
