@@ -1815,7 +1815,7 @@ Plans:
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS `CI-DOCSPATH-01`
 
 **Depends on:** Phase 164.6 (ordering), and runs AFTER 164.6.1 and 164.6.2 so it does not move the gate corpus underneath them.
-**Plans:** 4/5 plans executed
+**Plans:** 5/5 plans executed
 
 Plans:
 
@@ -1823,8 +1823,7 @@ Plans:
 - [x] 164.6.3-05-PLAN.md — (wave 2, INSERTED mid-phase) repair the MW02 executed-tolerance oracle, which wave 1 made blind to its own subject by hoisting `docs_only`/`ALWAYS_ON` above the slice it executes. Runs BEFORE the filter is widened: `extractResultLoopScript` slices from `fail=0`, the spawned bash treats an unset variable as an error, and `TOLERANCE_BEARING_JOBS` becomes a three-set partition
 - [x] 164.6.3-02-PLAN.md — (wave 3) the remaining fifteen filtered job keys, the exact-set partition pinned in BOTH directions against a population re-derived from `ci.yml`, scenarios S1–S8, and the anti-vacuity neuter OBSERVED red in a tempdir copy with a non-vacuity control, left running as a durable calibration arm
 - [x] 164.6.3-03-PLAN.md — (wave 4) `[CI-DOCSPATH-01]`'s owner re-pointed from Phase 164.6 item (12) to this phase with the dated reason, its two-mutex claim corrected to THREE with `python` named, `[164.6.3-PLANNING-SUBJECT-DEFERRED-DETECTION]` booked to Phase 164.6 GATE-HYGIENE, and the byte-equal VERSION bump with one unified CHANGELOG entry cross-checked commit by commit
-- [ ] 164.6.3-04-PLAN.md — (wave 5, checkpointed) criteria 1–5 closed on TWO REAL PRs: the code-PR census with its three-acquire positive control, a blocking-human MERGE GATE, then the `.planning/`-only PR's skipped set, GREEN aggregator and zero-acquire absence. The `supabase/migrations/**` probe PR is REFUSED and replaced by a byte argument
-
+- [x] 164.6.3-04-PLAN.md — (wave 5, checkpointed) criteria 1–5 closed on TWO REAL PRs: the code-PR census with its three-acquire positive control, a blocking-human MERGE GATE, then the `.planning/`-only PR's skipped set, GREEN aggregator and zero-acquire absence. The `supabase/migrations/**` probe PR is REFUSED and replaced by a byte argument
 
 ### Phase 164.8.1: REFDATA — a schema-only restore destroys migration-seeded reference data while the ledger swears those migrations applied (INSERTED)
 
