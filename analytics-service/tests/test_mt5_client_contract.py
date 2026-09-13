@@ -1484,6 +1484,15 @@ def test_public_surface_is_exactly_the_contract():
         # surface: it closes our own rpyc socket and wraps no mt5linux call at all.
         "release",
         "restart",
+        # 164.6.2 / D-07 — the two SESSION verbs. Both wrap `initialize()` and
+        # NOTHING else, so the read-only-by-construction property is unchanged:
+        # `initialize` attaches the IPC pipe / authorizes an account, it is not a
+        # read and it is emphatically not the trade path. They are named
+        # `assert_session_authorized` / `initialize_with_credentials` and NOT
+        # `initialize`, which `test_read_only_surface_no_trade_methods` forbids as a
+        # raw-surface attribute — that prohibition is untouched and still bites.
+        "assert_session_authorized",
+        "initialize_with_credentials",
     }
 
 
@@ -2006,6 +2015,14 @@ def test_session_abandoned_cannot_be_absorbed_into_a_credential_verdict():
         "last_error",
         "restart",
         "connect",
+        # 164.6.2 — the two new fenced stages. Added because this case's own
+        # docstring claims the property holds "for EVERY stage name the fence can
+        # carry", and a roster that silently stopped enumerating them would make
+        # that sentence false. Both are near-misses by construction:
+        # `session_authorized` contains `auth`, `initialize_credentialed` contains
+        # `credential` — exactly the shape D-42 exists to keep OUT of the message.
+        "session_authorized",
+        "initialize_credentialed",
     ],
 )
 def test_session_abandoned_message_carries_no_classifier_token(stage):
@@ -2515,3 +2532,342 @@ async def test_a_construction_under_a_genuinely_held_lease_cannot_be_refused():
     # above non-vacuous: the generation the construction was checked against is
     # genuinely one a release can move.
     assert client.terminal_key == key
+
+
+# --------------------------------------------------------------------------- #
+# 164.6.2 / D-07 — THE CREDENTIAL-FREE DETECTOR AND THE CREDENTIALED HEAL VERB
+#
+# WHY these matter (Rule 9). `Mt5Client.login` opens with a credential-LESS
+# `initialize()` and raises on a falsy return — and a credential-less
+# `initialize()` is EXACTLY the call that returns `-6` when the terminal has no
+# authorized account. So `login()` raises before reaching its own `login()` and
+# is structurally incapable of healing the fault this phase exists for (probed
+# live, 2026-09-13). The heal is `initialize(login=…, password=…, server=…)`.
+#
+# ⛔ AND THE MOMENT A PASSWORD IS PASSED TO `initialize()`, T-134-01 APPLIES TO
+# IT. `mt5linux` 0.1.9 f-string-interpolates its arguments into remotely-eval'd
+# source, so a raw rpyc remote traceback carries the credentials verbatim onto a
+# PUBLIC Actions log. The by-value redaction is therefore a SHIPPED CONTROL
+# travelling with the credentials; the cases below are its behavioural proof and
+# the parametrized gate further down fences the CLASS so a THIRD credentialed
+# verb cannot land without it.
+#
+# ⛔ Every credential here is an obvious DOUBLE (D-04): a fake password, a
+# `Broker-Demo`-shaped server, the host/port this file already uses. This repo is
+# PUBLIC. No real credential, no real broker server, no account number.
+# --------------------------------------------------------------------------- #
+
+# The credential register for this section. Deliberately unmistakable as fakes.
+_FAKE_LOGIN = 4242424
+_FAKE_PASSWORD = "not-a-real-password-42"
+_FAKE_SERVER = "Broker-Demo-2"
+
+
+def test_terminal_key_has_one_spelling_reachable_without_a_client():
+    """Plan 02's blocker, and the two-registries hazard it removes.
+
+    `Mt5Client.__init__` performs a BLOCKING `rpyc.classic.connect` carrying no
+    timeout of its own, so a caller that must take the terminal LEASE before it is
+    willing to open a transport cannot read the key off an instance. The only
+    alternative was a second hand-spelled `f"{host}:{port}"` at the lease site —
+    and the lease key and the epoch key MUST be byte-identical or the fence guards
+    a different terminal than the lock serializes.
+
+    Both forms are asserted against the SAME hand-typed literal rather than
+    against each other: `a == b` would pass for any two equally-wrong spellings.
+    """
+    expected = "mt5-gw.internal:18812"
+    assert mt5_client_mod.mt5_terminal_key(_TERMINAL_HOST, _TERMINAL_PORT) == expected
+
+    connect, _fake, _rec = _make({})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    assert client.terminal_key == expected
+
+
+def test_terminal_key_property_still_reads_only_host_and_port_off_self():
+    """`tests/test_ingestion_mt5.py::_expected_terminal_key` reaches this property
+    through `.fget` on a `SimpleNamespace` carrying ONLY the two private
+    attributes — no client, no transport, no `__init__`. The delegation must not
+    have introduced a dependency on anything else on `self`.
+
+    Pinned HERE as well as there because the constraint belongs to this contract:
+    a future author reading only this file would otherwise have no warning."""
+    stub = types.SimpleNamespace(_host="other-gw.internal", _port=19000)
+    assert Mt5Client.terminal_key.fget(stub) == "other-gw.internal:19000"
+
+
+def test_assert_session_authorized_is_a_bare_bounded_initialize():
+    """The detector's happy path: it returns None, makes EXACTLY ONE `initialize`
+    round-trip, and passes the registered millisecond ceiling.
+
+    Asserted against the double's RECORDED kwargs (test-the-wiring, P115), never
+    against the client's own constant expression — an oracle that recomputed the
+    formula under test could not fail a dropped ceiling. D-24: an unbounded
+    `initialize()` runs on MetaTrader5's 60000ms vendor default INSIDE a 30s rpyc
+    bound and is structurally incapable of answering in time."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    assert client.assert_session_authorized() is None
+    assert fake.initialize_calls == 1
+    assert fake.initialize_kwargs[0]["timeout"] == MT5_INITIALIZE_TIMEOUT_MS
+    assert MT5_INITIALIZE_TIMEOUT_MS < MT5_REQUEST_TIMEOUT_S * 1000
+
+
+def test_assert_session_authorized_carries_no_credential_kwarg():
+    """⛔ THE PROPERTY THAT MAKES THE DETECTOR USABLE AS A DETECTOR.
+
+    It exists to DECIDE whether a credential should be sent. A detector that
+    carried one would already have sent it — the decision would be moot — and the
+    disclosure surface this plan fences would grow a second, unfenced mouth.
+
+    Oracled on the recorded kwargs, so it goes red the moment somebody "helpfully"
+    threads the credentials through for symmetry with the heal verb."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    client.assert_session_authorized()
+
+    recorded = fake.initialize_kwargs[0]
+    assert set(recorded) == {"timeout"}, (
+        f"the credential-free detector passed {sorted(set(recorded) - {'timeout'})} "
+        "to initialize() — it is no longer credential-free"
+    )
+    assert fake.login_calls == []
+
+
+def test_assert_session_authorized_surfaces_minus_six_as_the_code():
+    """RESEARCH question FOUR — the discriminator, WITHOUT a credential.
+
+    `-6` (no authorized account) is the ONE fault this phase heals; `-10003` /
+    `-10005` are IPC faults whose remedy is the opposite and to which re-sending a
+    credential does nothing. The code must therefore survive to the caller: plan
+    02 branches on it. And no `login` round-trip may be attempted — the detector
+    observes, it does not act."""
+    connect, fake, _rec = _make(
+        {
+            "initialize": False,
+            "last_error": (-6, "Terminal: Authorization failed"),
+        }
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.assert_session_authorized()
+
+    assert exc_info.value.code == -6
+    assert fake.login_calls == []
+
+
+@pytest.mark.parametrize(
+    "ipc_code",
+    [-10003, -10004, -10005],
+)
+def test_assert_session_authorized_keeps_the_ipc_codes_distinct_from_minus_six(
+    ipc_code,
+):
+    """The detector is only worth having if it SEPARATES the faults.
+
+    Phase 164.1 built the distinction between "the terminal lost its broker
+    session" and "the IPC pipe is broken"; a heal applied to the wrong one
+    re-collapses it. Parametrized over the three IPC codes so the separation is
+    proven, not assumed from the `-6` case alone."""
+    connect, _fake, _rec = _make(
+        {"initialize": False, "last_error": (ipc_code, "IPC fault")}
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.assert_session_authorized()
+
+    assert exc_info.value.code == ipc_code
+    assert exc_info.value.code != -6
+
+
+def test_initialize_with_credentials_passes_the_triple_as_keywords():
+    """D-07 — the heal verb's call FORM, which is the verbatim part that matters.
+
+    `mt5linux` forwards `**kwargs` unchanged into the real `MetaTrader5` module,
+    and `initialize(login=…, password=…, server=…)` is the only documented form
+    that can clear a `-6`. Asserted against the recorded kwargs, plus the
+    registered ms ceiling riding along (D-24).
+
+    ⛔ And NO `login` round-trip: this is not `Mt5Client.login`. A heal that also
+    called `login()` would re-point the shared terminal onto an account the caller
+    never asked for."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    assert (
+        client.initialize_with_credentials(
+            _FAKE_LOGIN, _FAKE_PASSWORD, _FAKE_SERVER
+        )
+        is None
+    )
+
+    recorded = fake.initialize_kwargs[0]
+    assert recorded["login"] == _FAKE_LOGIN
+    assert recorded["password"] == _FAKE_PASSWORD
+    assert recorded["server"] == _FAKE_SERVER
+    assert recorded["timeout"] == MT5_INITIALIZE_TIMEOUT_MS
+    assert fake.login_calls == []
+    assert fake.call_order == ["initialize"]
+
+
+def test_initialize_with_credentials_transport_raise_discloses_nothing():
+    """⛔ THE SECURITY PRECONDITION THIS WHOLE PLAN IS ORDERED AROUND (T-134-01).
+
+    `mt5linux` 0.1.9 builds the remote call as SOURCE TEXT with the arguments
+    interpolated and evals it on the far side, so a remote traceback carries the
+    login, the password and the broker server VERBATIM. The transport text below
+    mirrors that shape — all three literals in one string, exactly as
+    `test_login_transport_raise_is_scrubbed_and_typed` does for the shipped verb.
+
+    Each literal is asserted absent INDIVIDUALLY so a partial redaction names
+    which one escaped, and the marker is asserted PRESENT so a redaction that
+    "passed" by returning an empty message cannot read as green."""
+    connect, _fake, _rec = _make(
+        {
+            "initialize_raises": RuntimeError(
+                "rpyc remote error while eval'ing "
+                f"mt5.initialize(login={_FAKE_LOGIN}, "
+                f"password='{_FAKE_PASSWORD}', server='{_FAKE_SERVER}')"
+            )
+        }
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.initialize_with_credentials(
+            _FAKE_LOGIN, _FAKE_PASSWORD, _FAKE_SERVER
+        )
+
+    msg = str(exc_info.value)
+    assert str(_FAKE_LOGIN) not in msg
+    assert _FAKE_PASSWORD not in msg
+    assert _FAKE_SERVER not in msg
+    assert "[REDACTED]" in msg, (
+        "nothing was redacted at all — an empty or unrelated message would satisfy "
+        "the three absence assertions above vacuously"
+    )
+
+
+def test_initialize_with_credentials_falsy_return_discloses_nothing_and_keeps_the_code():
+    """The FALSY arm — the one place this verb is deliberately STRONGER than
+    `Mt5Client.login`.
+
+    `_raise_last` builds its detail from the TERMINAL's own `last_error()` text,
+    shape-scrubbed at construction and nothing more; a broker that echoes the
+    submitted account or server back would disclose it. This verb re-redacts BY
+    VALUE before the error escapes.
+
+    ⚠️ THE ASYMMETRY IS MEASURED, NOT ACCIDENTAL. `Mt5Client.login`'s falsy arm
+    goes through that same shared `_raise_last` and is shape-scrubbed only. That
+    is a PRE-EXISTING posture of every shipped call site, not a regression
+    introduced here, and closing it would mean editing `login()` — which D-07
+    forbids because its four per-account callers are shipped and a regression
+    there lands on live job processing. Booked as
+    `[164.6.2-RAISE-LAST-SHAPE-ONLY]` and routed to a NAMED phase, never
+    hand-edited into the ROADMAP.
+
+    The ORIGINAL code is preserved: plan 02 does not branch on it here, but a heal
+    that lost `-6` is undebuggable from a log."""
+    connect, _fake, _rec = _make(
+        {
+            "initialize": False,
+            "last_error": (
+                -6,
+                f"Authorization failed for {_FAKE_LOGIN} on {_FAKE_SERVER} "
+                f"(password '{_FAKE_PASSWORD}')",
+            ),
+        }
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.initialize_with_credentials(
+            _FAKE_LOGIN, _FAKE_PASSWORD, _FAKE_SERVER
+        )
+
+    msg = str(exc_info.value)
+    assert str(_FAKE_LOGIN) not in msg
+    assert _FAKE_PASSWORD not in msg
+    assert _FAKE_SERVER not in msg
+    assert "[REDACTED]" in msg
+    assert exc_info.value.code == -6
+
+
+def test_the_shipped_falsy_arm_asymmetry_is_real_and_is_the_reason_the_gate_is_scoped():
+    """⭐ THE MEASUREMENT BEHIND `[164.6.2-RAISE-LAST-SHAPE-ONLY]`, asserted rather
+    than asserted-about.
+
+    A recorded asymmetry that no test exercises is a claim. This drives the
+    SHIPPED per-account verb down its falsy arm with the server echoed in the
+    terminal's `last_error()` text and pins what actually happens today: the
+    password (a `password='…'` SHAPE) is caught by `scrub_freeform_string`, while
+    the bare server literal — arriving with no key beside it — is NOT.
+
+    ⛔ This test documents a pre-existing posture; it is NOT a licence to weaken
+    anything. If a future phase closes the asymmetry, this case goes RED and is
+    DELETED, not relaxed. Its failure message is the signal that the booked item
+    was fixed."""
+    connect, _fake, _rec = _make(
+        {
+            "login": False,
+            "last_error": (-6, f"rejected by {_FAKE_SERVER}"),
+        }
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.login(_FAKE_LOGIN, password=_FAKE_PASSWORD, server=_FAKE_SERVER)
+
+    msg = str(exc_info.value)
+    assert _FAKE_PASSWORD not in msg  # never, on any arm
+    assert _FAKE_SERVER in msg, (
+        "the shipped verb's falsy arm now redacts the server BY VALUE — "
+        "[164.6.2-RAISE-LAST-SHAPE-ONLY] appears to be closed. Delete this test "
+        "and the asymmetry note it pins; do NOT relax it."
+    )
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["assert_session_authorized", "initialize_with_credentials"],
+)
+def test_the_new_session_verbs_refuse_a_stale_generation(method_name):
+    """WIZFORM-ABANDON / D-36 — both new verbs are session touches and both must
+    refuse one that arrives after the lease they began under has released.
+
+    Oracled on the FAKE'S RECORDED CALL LOG — "no post-release round-trip landed"
+    — never on the exception type alone, exactly as the D-36 block above argues:
+    the economic harm is a touch LANDING on somebody else's terminal, not an
+    exception going unraised.
+
+    `Mt5SessionAbandoned` is a PLAIN Exception and must stay one: the credential
+    classify/stamp arms match on `Mt5ClientError`, so a refusal that could be
+    absorbed into one would blame a working key for OUR abandoned thread (D-42).
+    """
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    args = (
+        ()
+        if method_name == "assert_session_authorized"
+        else (_FAKE_LOGIN, _FAKE_PASSWORD, _FAKE_SERVER)
+    )
+
+    # First touch binds the generation (the LAZY BIND `_assert_live` documents).
+    getattr(client, method_name)(*args)
+    calls_before = fake.initialize_calls
+    assert calls_before == 1
+
+    # The lease releases and bumps: this client is now a zombie.
+    bump_mt5_terminal_epoch(client.terminal_key)
+
+    with pytest.raises(Mt5SessionAbandoned):
+        getattr(client, method_name)(*args)
+
+    assert fake.initialize_calls == calls_before, (
+        "the refused touch still reached the terminal — which is the harm itself"
+    )
+    assert not isinstance(Mt5SessionAbandoned(method_name), Mt5ClientError)

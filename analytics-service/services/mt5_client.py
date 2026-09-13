@@ -343,6 +343,62 @@ MT5_IPC_TIMEOUTS_MS: dict[str, int] = {
 _MT5_TERMINAL_EPOCHS: dict[str, int] = {}
 
 
+def mt5_terminal_key(host: str, port: int) -> str:
+    """The process-wide terminal identity (``host:port``) — ONE spelling, and one
+    that is reachable WITHOUT constructing an ``Mt5Client``.
+
+    It is the key of BOTH registries that fence the single shared Wine terminal:
+    the epoch registry above and ``mt5_concurrency._MT5_TERMINAL_LOCKS``. The two
+    MUST be byte-identical or the fence guards a different terminal than the lock
+    serializes, which is the two-registries class ``services/mt5_concurrency.py``'s
+    module header forbids.
+
+    ⭐ WHY a module function and not only the ``Mt5Client.terminal_key`` property it
+    now backs: ``Mt5Client.__init__`` performs a BLOCKING ``rpyc.classic.connect``
+    that carries no timeout of its own, so a caller that must know the LEASE KEY
+    *before* it is willing to open a transport — take the lease, then construct —
+    structurally cannot read it off an instance. The only alternative was a second
+    hand-spelled ``f"{host}:{port}"`` at that call site, i.e. the very drift this
+    function exists to remove.
+
+    ⛔ ``Mt5Client.terminal_key`` DELEGATES here. Do not let the two spellings drift
+    apart by "inlining" either one.
+    """
+    return f"{host}:{port}"
+
+
+def _redact_credential_values(
+    text: str, login: int, password: str, server: str
+) -> str:
+    """Shape-scrub ``text``, THEN redact the three credential values BY VALUE.
+
+    ⛔ T-134-01 — this is a SHIPPED CONTROL travelling with the credentials, not a
+    belt-and-braces nicety. ``mt5linux`` 0.1.9 builds every remote call as SOURCE
+    TEXT (``f'mt5.initialize(*{args},**{kwargs})'``) and evals it on the far side,
+    so a raw rpyc remote traceback carries the login, the password and the broker
+    server VERBATIM. ``scrub_freeform_string`` is SHAPE-based — it catches
+    ``password=<value>`` key/value shapes — and is structurally unable to catch a
+    bare literal that arrives without its key. Only the by-value pass can, which is
+    why routing a credential through a path that lacks this loop would be a
+    REGRESSION of the control rather than an omission from it.
+
+    Empty literals are skipped: ``"".replace`` splices the marker between every
+    character of the message.
+
+    ⛔ ``Mt5Client.login`` is NOT routed through here and its own copy of this loop
+    is left BYTE-UNCHANGED (D-07) — its four per-account callers are shipped and a
+    regression there lands on live job processing. The duplication is accepted
+    deliberately; the property is enforced instead by the signature-DERIVED
+    redaction gate in ``tests/test_mt5_client_contract.py``, which drives EVERY
+    credential-carrying verb, including a third one added later.
+    """
+    safe = scrub_freeform_string(str(text))
+    for literal in (str(login), password, server):
+        if literal:
+            safe = safe.replace(literal, "[REDACTED]")
+    return str(safe)
+
+
 def _mt5_epoch_for(terminal_key: str) -> int:
     """The current generation of one terminal. Unknown key -> generation 0.
 
@@ -1021,6 +1077,157 @@ class Mt5Client:
         if not ok:
             self._raise_last()
 
+    def assert_session_authorized(self) -> None:
+        """Assert that the terminal currently HAS an authorized broker account —
+        the CREDENTIAL-FREE detector (criterion 1(a), RESEARCH question FOUR).
+
+        Returns ``None`` when the terminal answers; raises a typed
+        ``Mt5ClientError`` carrying ``last_error()``'s CODE otherwise. That code is
+        the whole point: a bare ``initialize()`` is the one probe that distinguishes
+        the faults whose remedies are OPPOSITE.
+
+          * ``-6`` — no account is authorized. The saved Wine session was refused
+            (rotation, expiry, a broker-side event), the RPyC bridge is HEALTHY, and
+            this is the ONE fault this phase heals — by re-running ``initialize()``
+            in its CREDENTIALED form (``initialize_with_credentials`` below).
+          * ``-10003`` / ``-10004`` / ``-10005`` — IPC faults. The terminal is
+            wedged, unreachable or sitting behind a modal dialog. Re-sending a
+            credential heals NOTHING there and a caller that healed unconditionally
+            would re-collapse exactly the distinction Phase 164.1 built.
+
+        ⛔ NO credential is passed, and none may ever be added. A detector that
+        carried a credential could not be used to DECIDE whether to send one — it
+        would already have sent it — and the disclosure surface this phase spent a
+        whole plan fencing would grow a second, unfenced mouth. The bare call is
+        also the cheapest one available and, per ``login``'s ``[ASSUMED]``
+        idempotence note (owner Phase 155 / MT5-VERIFY, not this phase), a no-op
+        ``True`` when the terminal is already attached.
+
+        Like every other MT5 round-trip here it carries an explicit millisecond
+        ceiling from this instance's ``_ipc_timeouts_ms`` (registered under
+        ``initialize`` in ``MT5_IPC_TIMEOUTS_MS``, ordering-checked at
+        construction), so MT5 fails its own pipe before rpyc gives up (D-24).
+
+        Its ``_timed`` stage is deliberately NOT ``initialize``: this probe runs on
+        the boot path at a cadence nothing else shares, and folding its round-trips
+        into the ``initialize`` duration population would contaminate the very
+        measurement Phase 155 reads.
+        """
+        # WIZFORM-ABANDON / D-36 — FIRST executable statement, ahead of the `_timed`
+        # bracket (so a refusal never enters the D-32 duration population) and ahead
+        # of the except arm (so it cannot be rewritten into an `Mt5ClientError`).
+        self._assert_live("session_authorized")
+        try:
+            inited = self._timed(
+                "session_authorized",
+                lambda: self._mt5.initialize(
+                    timeout=self._ipc_timeouts_ms["initialize"]
+                ),
+            )
+        except Mt5ClientError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
+            # Shape-based scrubbing ONLY, and that is correct HERE and only here:
+            # no credential is in scope on this path, so there is no value to redact.
+            raise Mt5ClientError(0, scrub_freeform_string(str(exc))) from None
+        if not inited:
+            self._raise_last()
+
+    def initialize_with_credentials(
+        self, login: int, password: str, server: str
+    ) -> None:
+        """Re-establish the TERMINAL's broker session by calling ``initialize()`` in
+        its CREDENTIALED form — the heal verb (D-07, criterion 1(a)).
+
+        ⛔ WHY THIS IS NOT ``Mt5Client.login``, and why it is a new method rather
+        than an edit to that one. ``login()`` opens with a credential-LESS
+        ``initialize()`` and raises on a falsy return, and a credential-less
+        ``initialize()`` is EXACTLY the call that returns ``-6`` when the terminal
+        has no authorized account. So ``login()`` raises before it ever reaches its
+        own ``login()`` call and cannot heal the fault this phase exists for
+        (probed live, 2026-09-13). The documented call form that CAN clear a ``-6``
+        is ``initialize(login=…, password=…, server=…)``, which is what this method
+        sends. It lands beside ``login()`` and not inside it because ``login()``'s
+        four per-account callers are shipped and working (D-03/D-07) and a
+        regression there would land on live job processing.
+
+        ⛔ THE REDACTION IS NOT OPTIONAL AND IS THE REASON THIS METHOD'S PLAN RAN
+        FIRST (T-134-01). ``mt5linux`` 0.1.9 f-string-interpolates its arguments
+        into remotely-eval'd source, so the moment a password is passed here a raw
+        rpyc remote traceback is a real credential disclosure — on a PUBLIC Actions
+        log. BOTH failure arms therefore redact the three values BY VALUE on top of
+        the shape-based scrub (``_redact_credential_values``), which is strictly
+        more than the shared ``_raise_last`` path gives ``login()``'s falsy arm.
+        That asymmetry is measured and deliberate: closing it would mean editing
+        ``login()``, which D-07 forbids.
+
+        ⛔ The return value is NOT inspected beyond truthiness and must never be
+        treated as proof the heal worked: the oracle for "is the session
+        authorized" is the NEXT probe (``assert_session_authorized``), never this
+        call's own boolean.
+
+        ⚠️ The ``login``/``password``/``server`` KEYWORD names are the verbatim part
+        that matters — they are forwarded unchanged into the real ``MetaTrader5``
+        module, and no positional form is documented to work. The ``initialize``
+        millisecond ceiling rides along from ``_ipc_timeouts_ms`` exactly as every
+        other MT5 call's does (D-24).
+        """
+        # WIZFORM-ABANDON / D-36 — FIRST executable statement, for the same two
+        # reasons as `login`'s: ahead of the `_timed` bracket and ahead of the
+        # except arms that would otherwise absorb the refusal into a typed error.
+        self._assert_live("initialize_credentialed")
+        try:
+            inited = self._timed(
+                "initialize_credentialed",
+                lambda: self._mt5.initialize(
+                    login=login,
+                    password=password,
+                    server=server,
+                    timeout=self._ipc_timeouts_ms["initialize"],
+                ),
+            )
+        except Mt5ClientError:
+            raise
+        except Mt5SessionAbandoned:
+            # ⛔ EXPLICIT, ahead of the broad arm below. `Mt5SessionAbandoned` is a
+            # PLAIN Exception on purpose (D-42) so an OUR-INFRASTRUCTURE refusal can
+            # never be re-classified as a user credential fault; letting the
+            # `except Exception` arm wrap it into an `Mt5ClientError` is precisely
+            # the absorption that type choice exists to make impossible.
+            raise
+        except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
+            raise Mt5ClientError(
+                0, _redact_credential_values(str(exc), login, password, server)
+            ) from None
+        if not inited:
+            # ⛔ THE ARM WHERE THIS METHOD IS DELIBERATELY STRONGER THAN `login`.
+            # `_raise_last` builds its detail from the TERMINAL's own `last_error()`
+            # text, which is shape-scrubbed at `Mt5ClientError` construction and
+            # nothing more. A broker that echoes the submitted account or server
+            # back in that text would therefore disclose it. Re-redact by value
+            # before it escapes, preserving the ORIGINAL code — plan 02 does not
+            # branch on it here, but a heal that lost `-6` is undebuggable from a
+            # log.
+            #
+            # `except Mt5ClientError` and NOT `except Exception`: `_raise_last`
+            # opens with its own `_assert_live`, so an `Mt5SessionAbandoned` can
+            # arise on this line and must escape UNTOUCHED (D-42, as above). The
+            # narrow arm makes that structural rather than remembered.
+            try:
+                self._raise_last()
+            except Mt5ClientError as err:
+                # Unwrap the typed error's own prefix before re-wrapping so the
+                # message reads once rather than twice. `removeprefix` degrades to
+                # a no-op if that format ever changes — a doubled prefix, still
+                # fully redacted. The redaction must never depend on a string shape.
+                detail = str(err).removeprefix(
+                    f"MT5 client error (code={err.code}): "
+                )
+                raise Mt5ClientError(
+                    err.code,
+                    _redact_credential_values(detail, login, password, server),
+                ) from None
+
     def account_info(self) -> dict[str, Any]:
         """Current account snapshot as a native dict. None (error) -> typed raise."""
         # WIZFORM-ABANDON / D-36 — ahead of `_guarded_read` (which would convert
@@ -1480,8 +1687,13 @@ class Mt5Client:
         the ONE shared Wine terminal. It must be derived from the construction
         identity (``_host``/``_port``, stored in ``__init__``), never from a
         per-Session attribute that would differ per job and serialize nothing.
+
+        The identity itself lives in the module-level ``mt5_terminal_key`` so a
+        caller that needs the key BEFORE it is willing to pay this class's blocking
+        connect can reach it without constructing anything; this property is the
+        instance-bound spelling of that one function, never a second copy of it.
         """
-        return f"{self._host}:{self._port}"
+        return mt5_terminal_key(self._host, self._port)
 
 
 @dataclass
