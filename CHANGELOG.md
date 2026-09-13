@@ -1,5 +1,127 @@
 # Changelog
 
+## [0.77.41.0] - 2026-09-13 — the analytics deploy probe compares CODE, not commit SHAs
+
+⭐ **What this is.** `analytics-deploy-verify.yml` asked "is prod running main HEAD?" by comparing
+commit SHAs, while the question it actually needs answered is about CODE. A merge that changes no
+service code leaves prod on an older SHA forever — there is no later analytics commit to converge
+to — so the probe burned its whole convergence window and filed a P1 staleness issue about a
+service that was running exactly the right bytes.
+
+### Root cause
+
+SHA drift is not code drift — and the probe DEADLOCKS on the difference. MEASURED 2026-09-13
+against the Railway API, after a first reading got the mechanism wrong: merge `f10b0e23` changed
+two `.planning/` files and nothing else, and the `analytics-service` tree object is byte-identical
+across it and `0b9f0699` (`e6d8e33f`).
+
+⛔ **Railway did not decline the deploy.** It QUEUED one — deployment `b076139c`, created at the
+merge instant — and left it `WAITING` on the check-suite. That suite contains this workflow's own
+`verify` check, which loops while prod has not converged; prod cannot converge because Railway is
+holding the deploy behind the suite. A circular wait, and a DIFFERENT shape from the 2026-06-21
+incident the workflow header records: that one is a RED check making Railway SKIP, this one is an
+INCOMPLETE check making Railway WAIT. It self-clears only when the 4800s window expires.
+
+**So the cost was never just a spurious alert.** Every docs-only merge paid a ~80-minute deploy
+delay, then filed a P1 staleness issue about a service that was running the right code. Measured:
+`verify` started 11:53:02Z and was still `in_progress` 28 minutes later with the deployment still
+`WAITING`.
+
+⛔ **The class is not new, and that is the serious part.** Issue #751 had been open since
+2026-09-07 with nine comments, and its ORIGINAL pair carries the same signature: prod `05994f1d`
+vs main `45218594`, `analytics-service` tree IDENTICAL on both (`b2f9f92e`). Every comment since
+was triaged against a cause that was never present, because the issue body's "known causes" list
+names only red-check-suite and advisory-lock failures. A P1 alert that is STRUCTURALLY UNABLE TO
+BE TRUE trains its readers to scroll past it, and the next genuinely skipped deploy lands in that
+same muted thread — a control that cannot fire, which is the v1.20 defect class wearing an
+alert's clothes.
+
+⚠️ Phase 164.6.3 (v0.77.40.0, shipped hours earlier) makes this MORE frequent, not less: a
+docs-only PR went 22m29s → 1m45s, so docs-only merges get cheaper and each one trips this.
+
+### Fixed
+
+- Before declaring staleness, the probe now resolves the `analytics-service` **tree object** at
+  the deployed commit and at `main` HEAD. Identical tree ⇒ converged, exit clean. Every real
+  signal survives: a genuinely skipped deploy after a service change still shows differing trees.
+- ⚠️ **Fails toward alerting, deliberately.** If the deployed commit cannot be fetched the tree is
+  empty and the probe falls through to the stale path. A probe that converges when it cannot tell
+  is the dead-alarm version of the bug being fixed.
+- **It also breaks the circular wait.** The probe now exits within seconds on a docs-only merge
+  instead of looping 80 minutes, so the check-suite completes and Railway releases the queued
+  deployment promptly. The delay was self-inflicted by the probe that exists to detect delays.
+- Every path still exits 0. The workflow header records the 2026-06-21 incident in which a red
+  check on `main` HEAD made Railway treat the check-suite as failed and SKIP the very deploy the
+  probe verifies; that invariant is unchanged and is asserted by a test.
+
+### Tests
+
+- **A second, unrelated defect found while verifying this one, and fixed in the same commit
+  because leaving it measured-but-open is worse.** `lint-sql-gates.test.ts`'s MW02 fixture-fidelity
+  arm — the executed oracle whose own header records the coupling *silently disengaging once* —
+  ran on vitest's 5000 ms default while costing **7349 ms on a cold path**, 47% over budget. It
+  passed only when the file ran in order, because the arms above it warm the caches it reads: its
+  margin depended on TEST ORDERING, which is not a guarantee. It timed out twice in local
+  full-suite runs, and the failure count varied 1 → 2 across otherwise identical runs — the
+  signature of a load-dependent timeout, not a regression. CI passes today only because it shards.
+  ⭐ A timeout renders as a red X indistinguishable from a real failure, and a false red on `main`
+  HEAD is not cosmetic here: it is the 2026-06-21 mechanism that makes Railway treat the
+  check-suite as failed and skip the deploy. Timeout raised to 20000 ms.
+  ⛔ **Headroom only — not one assertion relaxed**, and proven: desynchronising the fixture
+  (`ALWAYS_ON` narrowed) still fails the arm in 2358 ms with a real assertion failure rather than a
+  timeout.
+
+
+- `src/__tests__/contracts/analytics-deploy-tree-compare.contract.test.ts` — EXTRACTS the probe
+  step's shell out of the workflow, stubs `curl`/`git`/`sleep` on PATH and RUNS it, rather than
+  grepping the YAML: a grep pin goes green the moment someone keeps the strings and guts the
+  branch. Four scenarios plus an exit-code sweep and an unsubstituted-`${{ }}` guard.
+- **Both polarities were observed RED before being restored**, per this repo's anti-vacuity rule.
+  Deleting the tree comparison (the pre-fix world) fails S2, the docs-only case. Replacing its
+  guard with `if true` — converge on everything — fails S3 and S4, which is the arm that keeps
+  this fix from replacing a false alarm with a dead one.
+
+### Changed
+
+- The workflow header asserted *"Railway deploys main HEAD on ANY push"*. The 2026-09-13
+  measurement contradicts it; corrected to name the service-change condition.
+- The checkout step's comment said the job "doesn't actually need the repo". It does now — the
+  tree lookup requires it. ⚠️ The repo is PUBLIC, which is why `persist-credentials: false` does
+  not block fetching the deployed commit.
+
+### Notes
+
+⭐ **An earlier draft of this entry said Railway "declined to rebuild" because of an inferred
+watch path. That was wrong and is corrected above.** The Railway MCP was `Unauthorized` at first
+reading; once it reconnected, the service config showed root directory `/analytics-service` and
+the deployment list showed a REAL queued deployment in `WAITING`. Root-directory scoping affects
+what Railway builds; it did not stop a deployment being created. The lesson is the one this repo
+keeps paying for: an inference stated confidently enough starts getting quoted as a measurement.
+
+⚠️ The fix does not depend on why the deploy was held — it compares trees either way — but it is
+now known to do MORE than silence an alert: by exiting in seconds it completes the check-suite,
+which releases the deployment Railway is holding.
+
+⭐ **The auto-filed issue body was corrected too, because it is CODE, not prose.** Editing issue
+#751 by hand would have fixed one thread while the template kept re-filing the same misdirection.
+Three changes to the generated body:
+
+- The opening line asserted *"Most likely the Railway deploy was SKIPPED because the main CI
+  check-suite was not green."* That confident prior is what sent nine comments hunting a red suite
+  that was green every time. It now says to read the DEPLOYMENT STATE first — `SKIPPED`, `WAITING`
+  and absent are three faults with three different fixes.
+- The "known causes" list gains the two actually observed here: the `WAITING`-on-its-own-check
+  circular wait, and the identical-tree case (which should no longer reach the issue at all — if it
+  does, the tree comparison has regressed and THAT is the bug).
+- Recovery is now per-fault. The old blanket advice — *rerun main CI until green, then
+  `railway redeploy`* — is wrong for two of the three: re-running an already-green suite does
+  nothing, and `redeploy` is the wrong verb for a deployment that is `WAITING` rather than skipped.
+
+⚠️ **Issue #751 is being CLOSED, and that is functional rather than tidiness.** The dedup queries
+`state: "open"` on the `analytics-deploy-stale` label and comments on the first hit instead of
+filing. While it stays open, the next genuinely skipped deploy becomes comment ten on a thread that
+has been wrong nine times. Closing it is what restores the alert's ability to be seen.
+
 ## [0.77.40.0] - 2026-09-13 — CIDOCSPATH: a `.planning/`-only PR stops running sixteen code gates, and a code PR is proven to still run every one of them
 
 ⭐ **What this is.** Phase 164.6.3, executed as five waves. A pull request whose diff is entirely

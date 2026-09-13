@@ -5,11 +5,11 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.6.3
 current_phase_name: CIDOCSPATH
 status: executing
-stopped_at: "164.6.3-01 (tracer) complete; BLOCKER for wave 2: [164.6.3-MW02-DOCSONLY-BLIND]"
-last_updated: "2026-09-13T09:03:40.485Z"
-last_activity: 2026-09-12
-last_activity_desc: "Phase 164.6.3 CIDOCSPATH execution started (4 plans, 4 waves). Planning closed on two gsd-plan-checker passes: revision 1 fixed a one-member ALWAYS_ON (frontend-lint is an aggregator row AND the check-planning-hygiene leak gate), a 23-vs-22 grep that would have halted the executor on the push: trigger leaking into a job-key derivation, and a byte-argument overclaim. Three corrections the ROADMAP did not carry: the always-on set is FIVE not four; THREE jobs take mutex 61616158 (python at ci.yml:3864 is the forgotten taker); the post-change code-PR board is 24 check rows, not the 23 baseline — a code PR showing 23 has LOST a gate. Wave 4 ends at a blocking-human MERGE GATE; plan 04 is autonomous: false."
-state_head: 5fcb1709cfdaa976475b00c538a14ec307ffd2af
+stopped_at: "164.6.3-04 complete — all five ROADMAP criteria closed on two real PRs (#791 code, #792 docs-only). Phase 164.6.3 is 5/5 plans executed."
+last_updated: "2026-09-13T12:05:00Z"
+last_activity: 2026-09-13
+last_activity_desc: "Phase 164.6.3 CIDOCSPATH plan 04 (wave 5) executed — the evidence half no local harness could close. CODE PR #791, ci.yml run 34748659917 @ 6a17adae: 24 check rows, every one success, none skipped, against a re-measured 23-row baseline (run 34717952454 @ c1262aff) — the only difference in the row set is the ADDITION of changed-paths. DOCS-ONLY PR #792 (two .planning/ paths), run 34754223975 @ d8afbe3d: 23 rows = 16 skipped / 7 success, 163 job-seconds, 1m45s, aggregator SUCCESS, echo quoted verbatim as docs_only='true'. Criterion 5 closed by an absence beside its positive control taken from the log ARCHIVE, never gh run view --log: 27 raw hits / THREE distinct 61616158 acquires attributed by archive entry to sql-tests, e2e-seeded and python on the code run; 0 / 0 on the docs run, both with entry counts and full job coverage. ⚠️ The plan's sort|uniq -c recipe would have under-counted to TWO (sql-tests and e2e-seeded both waited 5s and collapse) — attribution by entry is what recovers three. Criterion 4 re-measured 2026-09-13T11:51:17Z: protection 404, rulesets []. The byte argument covers FIVE paths-filtered workflows, not the four the plan names (supabase-migrate.yml carries one too), diff EMPTY — and its SCOPE is stated: whether those filters still FIRE is UNTESTED here. Saving is PR-side ONLY; the docs-only merge's own push run 34755121736 was observed running the full corpus. ⚠️ [WINDOWS-LEDGER-COUNT-DRIFT] refused this plan's one ledger append and the counts were NOT hand-forced."
+state_head: f10b0e2324fd392dd7e8c2eae39bad78e4f7e72a
 
 # ⭐ progress: RE-DERIVED 2026-09-12 at `733a55f5` from ALL REFS — see the method block
 # immediately above the `progress:` keys below. This supersedes the HAND-SET note that stood
@@ -1252,6 +1252,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.8 P02 | (executor died before reporting) | 3 tasks | 1 file |
 | Phase 164.8 P03 | 33min | 3 tasks | 2 files |
 | Phase 164.6.3 P01 | 55min | 2 tasks | 6 files |
+| Phase 164.6.3 P04 | 35min | 3 tasks | 0 files (evidence only) |
 
 ## Accumulated Context
 

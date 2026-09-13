@@ -29,7 +29,10 @@ name: Analytics deploy verify (prod SHA vs main HEAD)
 # ANALYTICS_HEALTH_URL repo variable only if the domain changes.
 #
 # Schedule + manual only (NO push trigger): on `push`, github.sha is the pushed
-# commit, but Railway deploys main HEAD on ANY push, so an interleaved
+# commit, but Railway deploys main HEAD on any push THAT CHANGES THE
+# SERVICE (⚠️ CORRECTED 2026-09-13 — this said "on ANY push" and that is
+# false: merge f10b0e23 touched only `.planning/` and produced no deploy,
+# which is what the tree comparison below exists to tolerate), so an interleaved
 # non-analytics merge advances prod past the analytics commit this run checks →
 # false alarm. On schedule/dispatch, github.sha IS current main HEAD, which is
 # exactly what prod converges to. After an analytics merge, dispatch this
@@ -63,10 +66,13 @@ jobs:
     # route WR-03 closed on main-ci-cancelled-watcher.yml.
     timeout-minutes: 90
     steps:
-      # This job doesn't actually need the repo (it curls /health and compares
-      # to github.sha), but the C-0293 critical-regressions invariant requires
-      # every workflow to check out with persist-credentials:false — so we
-      # conform rather than carve out a checkout-less exemption to that guard.
+      # ⚠️ This job DOES need the repo now: the convergence check resolves the
+      # `analytics-service` tree object at both the deployed SHA and main HEAD,
+      # so a docs-only merge is not reported as a stale deploy. (It also
+      # satisfies the C-0293 critical-regressions invariant, which requires
+      # every workflow to check out with persist-credentials:false.) The repo
+      # is PUBLIC, so fetching the deployed SHA needs no credential — which is
+      # why persist-credentials:false does not block it.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
@@ -123,6 +129,44 @@ jobs:
               echo "OK: prod analytics is on main HEAD ($deployed)"
               exit 0
             fi
+            # ⭐ SHA drift is not CODE drift, and this probe DEADLOCKS on the
+            # difference. MEASURED 2026-09-13 with the Railway API, after a
+            # first reading got the mechanism wrong: merge f10b0e23 changed two
+            # `.planning/` files and nothing else, and the `analytics-service`
+            # TREE OBJECT is byte-identical across it and 0b9f0699 (e6d8e33f).
+            # ⛔ Railway did NOT decline the deploy — it QUEUED one
+            # (b076139c, created at the merge instant) and left it WAITING on
+            # the check-suite. That suite contains THIS workflow's `verify`
+            # check, which was looping because prod had not converged, while
+            # prod could not converge because Railway was holding the deploy
+            # behind the suite. A circular wait — and a DIFFERENT shape from
+            # the 2026-06-21 incident in the header above: that one is a RED
+            # check making Railway SKIP; this one is an INCOMPLETE check making
+            # Railway WAIT. It self-clears only when the window below expires,
+            # so the cost is a ~80-minute deploy delay on EVERY docs-only merge
+            # plus a P1 staleness issue about a service running the right code.
+            # ⛔ The class is NOT new: issue #751 has been open since
+            # 2026-09-07 with nine comments, and its ORIGINAL pair (prod
+            # 05994f1d vs main 45218594) carries the same signature — tree
+            # IDENTICAL (b2f9f92e) on both. Every comment since has been
+            # triaged against a cause that was never present.
+            # A P1 alert that is structurally unable to be true trains its
+            # readers to scroll past it, and the next genuinely skipped deploy
+            # lands in that same muted thread.
+            # ⚠️ FAILS TOWARD ALERTING, deliberately: if the deployed commit
+            # cannot be fetched, `tree_prod` is empty and we fall through to
+            # the stale path. A probe that converges when it cannot tell is the
+            # dead-alarm version of the bug this block fixes.
+            tree_prod=""
+            if [ -n "$deployed" ] && [ "$deployed" != "unknown" ]; then
+              git fetch --depth=1 origin "$deployed" >/dev/null 2>&1 || true
+              tree_prod="$(git rev-parse "${deployed}^{commit}:analytics-service" 2>/dev/null || echo "")"
+            fi
+            tree_main="$(git rev-parse "${MAIN_SHA}^{commit}:analytics-service" 2>/dev/null || echo "")"
+            if [ -n "$tree_prod" ] && [ -n "$tree_main" ] && [ "$tree_prod" = "$tree_main" ]; then
+              echo "OK: prod analytics tree matches main HEAD — SHA differs, code identical (tree $tree_prod; prod $deployed vs main $MAIN_SHA)"
+              exit 0
+            fi
             echo "prod git_sha='$deployed' vs main HEAD='$MAIN_SHA' — not converged; retrying in 60s"
             sleep 60
           done
@@ -172,14 +216,16 @@ jobs:
               "",
               `Workflow run: ${runUrl}`,
               "",
-              "Most likely the Railway deploy was SKIPPED because the main CI check-suite for that SHA was not green. Triage the check-suite first — `docs/runbooks/shared-test-db-mutex.md` section 6 is the current guide.",
+              "⛔ TRIAGE THE DEPLOYMENT STATE FIRST, not the check-suite. This line used to read `Most likely the Railway deploy was SKIPPED because the main CI check-suite was not green`, and that confident prior sent NINE comments on issue #751 hunting a red suite that was green every time. Run `railway` list-deployments for the analytics service and read the deployment for this SHA: SKIPPED, WAITING and absent are three different faults with three different fixes.",
               "",
-              "Known causes, current as of phase 158:",
+              "Known causes, current as of 2026-09-13 — the first two are the ones actually observed in this repo:",
+              "- **The deployment is `WAITING`, not skipped, and it is waiting on THIS workflow.** Railway holds a deploy until the commit's check-suite completes, and that suite contains this workflow's own `verify` check — which loops while prod has not converged, while prod cannot converge because Railway is holding the deploy. A CIRCULAR WAIT. ⚠️ DISTINCT from the 2026-06-21 incident in this workflow's header: that one is a RED check making Railway SKIP; this is an INCOMPLETE check making Railway WAIT. It self-clears when the convergence window expires, at the cost of a ~80-minute deploy delay. Confirm with the deployment status before doing anything else.",
+              "- **The deployed SHA is older but the CODE is identical** — a merge that touched no `analytics-service/` path. Since v0.77.41.0 this is detected by comparing the `analytics-service` tree object and should no longer reach this issue; if you are reading it here anyway, the tree comparison itself has regressed and THAT is the bug.",
               "- A **red** `python` / `sql-tests` / `e2e-seeded` job from the shared-test-db **advisory lock** (key 61616158): either the acquire step hit its wait cap (deep cross-run queue OR a wedged holder — the step prints a `pg_locks` census naming both), or the job blew its `timeout-minutes`. Runbook sections 2-3.",
               "- A **cancelled** main-branch run, which `main-ci-cancelled-watcher.yml` files as a separate `main-ci-cancelled` issue. Check for one.",
               "- ⚠️ The `shared-test-db` **concurrency group** was DELETED in phase 158 and no longer exists anywhere in the repo. If you were sent here looking for it, that text was stale — the eviction failure mode it caused (issue #616) is what the advisory lock replaced.",
               "",
-              "Recover: rerun the main CI for the merge SHA until green, then `railway redeploy` (or `railway up`) the analytics service. Confirm by re-running this workflow.",
+              "Recover, BY FAULT — ⚠️ the old blanket advice (`rerun main CI until green, then railway redeploy`) is wrong for two of these three: re-running an already-green suite does nothing, and `redeploy` is the wrong verb for a deployment that is WAITING rather than skipped. (a) WAITING: find the check still in progress on this SHA and let it finish or cancel it; the deploy releases itself. (b) SKIPPED on a red suite: fix the suite, then `railway redeploy`. (c) Identical tree: nothing to recover — this issue should not have been filed, see above.",
               "",
               "Auto-filed by .github/workflows/analytics-deploy-verify.yml (tech-debt #9). Deduplicated by the `" + dedupLabel + "` label; subsequent failures comment here until closed.",
             ].join("\n");
