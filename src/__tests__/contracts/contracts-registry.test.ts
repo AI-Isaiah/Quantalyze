@@ -233,6 +233,7 @@ const CONTRACT_GUARDS: Guard[] = [
   { path: "scripts/check-admin-route-manifest.ts", batch: "C-0153", invariant: "ADMIN_ROUTE_MANIFEST ↔ admin route files completeness (lint gate)" },
   { path: "scripts/check-route-contract.ts", batch: "NAV-03", invariant: "ROUTE_CONTRACT_MANIFEST ↔ PUBLIC_ROUTES + redirects() lockstep (the #512 class, lint gate)" },
   { path: "scripts/check-gdpr-export-coverage.ts", batch: "GDPR", invariant: "all user-owned tables declared in the export manifest (CI gate)" },
+  { path: "src/__tests__/contracts/ci-docs-path-filter.contract.test.ts", batch: "164.6.3 / CI-DOCSPATH-01", invariant: "The docs-only CI path filter's aggregator arm, pinned by EXTRACTING the `frontend` aggregator's own shell body out of ci.yml, substituting the GitHub expressions per scenario and EXECUTING it under bash — never by grepping the YAML, because a grep pin goes green the moment someone keeps the strings and guts the logic. BOTH POLARITIES: a docs-only classification greens the board ONLY for rows outside the declared ALWAYS_ON list (S1), and a skipped ALWAYS_ON row still exits 1 — proven ONE LEG PER MEMBER, S2a for `plan-anchor-verify` by its own strict arm's error text and S2b for `frontend-lint` by the strict DEFAULT arm, which prints no row-specific message and is therefore asserted as the aggregate error PRESENT plus the uniform arm's message ABSENT. A code classification leaves every row's path byte-identical, so a skip still reddens (S4) and an all-success board still greens (S6, the harness non-vacuity control without which a harness that always exited 1 would pass S4). A FAILED or CANCELLED detector — whose `needs.changed-paths.outputs.docs_only` is the empty string — reddens rather than excusing (S5), which is the fail-closed property the whole filter rests on and is asserted here directly rather than inferred from documentation that does not state the value. The ALWAYS_ON membership and the row roster are PARSED OUT of the extracted script, so a third member added later without a leg cannot go silently unproven. ⚠️ DECLARED LIMIT, stated rather than implied: it proves the aggregator's SHELL under injected inputs, NOT that GitHub's scheduler produces those inputs — that a filtered job actually skips, and that the output actually arrives empty on a cancelled detector, is closed only by the two real PRs in this phase's wave 4. ⚠️ AND A KNOWN GAP IT DOES NOT COVER: `lint-sql-gates.test.ts`'s MW02 executed-tolerance oracle extracts only `for r in` … `done`, so the `docs_only`/`ALWAYS_ON` hoist above the loop is outside its block and its exact-set tolerance assertion is blind to this filter — booked as `[164.6.3-MW02-DOCSONLY-BLIND]`" },
 ];
 
 describe("[B25] contracts registry — by-construction invariant guards", () => {
@@ -265,6 +266,23 @@ describe("[B25] contracts registry — by-construction invariant guards", () => 
     // 52 + 5 = 57. The five: seam-venue-vocabulary (02), seam-transport-attribution
     // (03), seam-wire-vocabulary (05), spec-disabling (06), seam-citations (08).
     //
+    // ── 164.6.3 / CI-DOCSPATH-01 — RAISED 57 → 59, and the jump is TWO while
+    // this phase registered ONE guard. That is not an arithmetic slip; it is
+    // SLACK THAT WAS ALREADY HERE, and it is named rather than silently
+    // absorbed, because a silently-absorbed gap is the exact class this
+    // registry exists to surface.
+    //   $ grep -c '^  { path:' src/__tests__/contracts/contracts-registry.test.ts
+    //   58                                   # BEFORE this phase's edit, against a floor of 57
+    //   59                                   # AFTER — one row added by this phase
+    // ⚠️ THE MISSING BUMP: `src/lib/wizard/derive-resume-overrides-arity.contract.test.ts`
+    // was registered by Phase 164.2.1 (commit `14dc1f5e`) WITHOUT moving this
+    // floor, so the roster stood at 58 against a floor of 57 and ONE ROW WAS
+    // DELETABLE WITH GREEN CI — the same defect, one row wide, that 140.4-10
+    // recorded twenty-four rows wide. The floor now equals the measured count
+    // again. 57 + 1 (164.2.1, unbumped) + 1 (164.6.3) = 59.
+    // The row: `ci-docs-path-filter.contract.test.ts`, the executed pin for the
+    // docs-only CI path filter's aggregator arm.
+    //
     // ⚠️ THIS CLOSES SLACK, NOT A CLASS. Raising the floor stops rows being
     // dropped silently; it does nothing about guards that were never
     // registered, and the registry is a HAND-TYPED ROSTER — coverage-law row 2,
@@ -278,7 +296,7 @@ describe("[B25] contracts registry — by-construction invariant guards", () => 
     expect(
       CONTRACT_GUARDS.length,
       "CONTRACT_GUARDS shrank unexpectedly — did a registry entry get dropped?",
-    ).toBeGreaterThanOrEqual(57);
+    ).toBeGreaterThanOrEqual(59);
   });
 
   it.each(CONTRACT_GUARDS)("guard exists: $path [$batch]", ({ path }) => {

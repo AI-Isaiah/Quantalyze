@@ -654,6 +654,71 @@ export function extractResultLoopBlock(yamlText: string): string | null {
   return lines.slice(start, end + 1).join("\n");
 }
 
+/**
+ * The EXECUTABLE slice of the same loop: the step's own `fail=0` initialiser
+ * through the loop's closing `done`, so a PROLOGUE between the two — the
+ * assignments the loop's branches READ — is inside what actually gets run.
+ *
+ * ⛔ WHICH EXTRACTOR TO USE, AND WHY THERE ARE TWO OF THEM.
+ *   * `extractResultLoopBlock` — for CONDITIONS. It starts at `for r in \`
+ *     because `extractResultLoopConditions` walks `if`/`elif` lines and the
+ *     prologue has none. Widening its slice would change what the
+ *     condition-floor arm measures for a reason unrelated to what it guards, so
+ *     it is deliberately left alone.
+ *   * `extractResultLoopScript` — for EXECUTION. Every name the script READS
+ *     must be DEFINED inside the slice, or bash expands it to the empty string
+ *     and the oracle returns a confident verdict about a program that does not
+ *     exist.
+ *
+ * THE DEFECT THIS REPAIRS — `[164.6.3-MW02-DOCSONLY-BLIND]`, measured
+ * 2026-09-13 at the head of Phase 164.6.3 wave 1. That wave hoisted
+ * `docs_only='${{ … }}'` and `ALWAYS_ON="…"` ABOVE the `for r in \` anchor
+ * (the placement is required for correctness — the uniform arm must be FIRST in
+ * the chain). The narrow slice therefore MENTIONED both names and DEFINED
+ * neither; bash expanded both to the empty string; the uniform docs-only arm
+ * was dead in the simulation; eleven rows gained skip-tolerance; and the oracle
+ * whose entire subject is "which rows may skip" printed the pre-change answer
+ * and passed. ⭐ An oracle that cannot fire is worse than no oracle, because it
+ * is also a claim that nothing changed.
+ *
+ * WHY `fail=0` IS A SAFE ANCHOR. All three MW02 fixtures already carry it on
+ * the line immediately above their own `for r in \`, so the widening adds
+ * exactly one line to each and changes none of their postures (measured
+ * 2026-09-13). The match is on a WHOLE LINE: the case-spelling fixture also
+ * contains the characters `fail=0` inside a prose comment, and a substring
+ * anchor would slice from there.
+ */
+export function extractResultLoopScript(yamlText: string): string | null {
+  const lines = yamlText.split("\n");
+  const start = lines.findIndex((l) => /^\s*for r in \\\s*$/.test(l));
+  if (start < 0) return null;
+  let init = -1;
+  for (let i = start; i >= 0; i -= 1) {
+    if (/^\s*fail=0\s*$/.test(lines[i])) {
+      init = i;
+      break;
+    }
+  }
+  if (init < 0) return null;
+  const end = lines.findIndex((l, i) => i > start && /^\s*done\s*$/.test(l));
+  if (end < 0) return null;
+  return lines.slice(init, end + 1).join("\n");
+}
+
+/**
+ * The `${{ … }}` expression the script ASSIGNS to `docs_only`, read off the
+ * script's own assignment line. `null` when there is no such assignment.
+ *
+ * ⛔ The expression text is never hardcoded here or at any call site. Keying
+ * the partition on the ASSIGNMENT means a renamed detector output moves the
+ * partition with it, instead of silently splitting on a string that no longer
+ * exists — which would report one empty half and read as a pass.
+ */
+export function docsOnlyGuardExpression(script: string): string | null {
+  const m = /^[^\S\n]*docs_only=['"]?\$\{\{([^}]*)\}\}/m.exec(script);
+  return m === null ? null : m[1].trim();
+}
+
 // ── [MUT-W02] EXECUTION ORACLE (WR-03, 164.3.1 review) ─────────────────────
 //
 // `extractResultLoopConditions` above reads `if`/`elif` lines. That is a
@@ -703,6 +768,27 @@ export function guardCombinations(exprs: string[]): Array<Record<string, boolean
  * guard values. Throws — never returns a verdict — when the script does not
  * reach its own `fail` variable, so a broken substitution is a MEASURE_FAIL
  * rather than a pass.
+ *
+ * ⭐ THE ROOT-CAUSE HALF OF THE `[164.6.3-MW02-DOCSONLY-BLIND]` REPAIR, and the
+ * reason that repair is two layers rather than one. Widening the slice
+ * (`extractResultLoopScript`) fixes the INSTANCE; the unset-variable check
+ * below fixes the CLASS.
+ *
+ * BEFORE: the spawned shell took the two flags GitHub's default `run:` shell
+ * sets, so a name defined OUTSIDE the slice expanded to the empty string, every
+ * branch reading it took its false leg, and the loop returned a confident
+ * verdict about a script it had not really run. A measurement GAP looked
+ * exactly like a measured RESULT.
+ *
+ * AFTER: the same situation ABORTS with the variable's own name in the message,
+ * and the `did not run to its verdict` guard below turns that into a
+ * MEASURE_FAIL. So the next edit that hoists a variable out of the slice gets a
+ * named abort, not a green run reporting yesterday's world.
+ *
+ * MEASURED 2026-09-13, both directions, so the flag is not load-bearing on
+ * fixture shape: the PRE-REPAIR narrow slice of `ci.yml` aborts here with
+ * `ALWAYS_ON: unbound variable`, and all three MW02 fixtures still run to a
+ * verdict under BOTH slices.
  */
 export function executeResultLoop(
   block: string,
@@ -716,8 +802,10 @@ export function executeResultLoop(
       if (!(key in guards)) throw new Error(`unsubstituted expression in the result loop: ${m}`);
       return guards[key] ? "true" : "false";
     });
-  // `-eo pipefail` is what GitHub's default `run:` shell sets.
-  const res = spawnSync("bash", ["-eo", "pipefail"], {
+  // GitHub's default `run:` shell flags, PLUS the unset-variable check — see
+  // the ROOT-CAUSE paragraph in this function's header for why the addition is
+  // the repair rather than a strictness preference.
+  const res = spawnSync("bash", ["-euo", "pipefail"], {
     input: `fail=0\n${script}\nprintf 'FAIL=%s\\n' "$fail"\n`,
     encoding: "utf8",
   });
@@ -730,18 +818,27 @@ export function executeResultLoop(
   return { fail: m[1] !== "0", stdout: res.stdout };
 }
 
+export type TolerancePosture = {
+  jobs: string[];
+  combos: number;
+  toleratedSkips: Map<string, number>;
+};
+
 /**
  * The loop's tolerance POSTURE by execution: for every job, how many guard
  * combinations tolerate a `skipped` result (the loop passes with that one job
  * skipped and every other job successful).
  */
-export function executedTolerancePosture(block: string): {
-  jobs: string[];
-  combos: number;
-  toleratedSkips: Map<string, number>;
-} {
+export function executedTolerancePosture(block: string): TolerancePosture {
+  return tolerancePostureOver(block, guardCombinations(resultLoopGuardExpressions(block)));
+}
+
+/** The same posture, computed over a GIVEN set of guard combinations. */
+function tolerancePostureOver(
+  block: string,
+  combos: Array<Record<string, boolean>>,
+): TolerancePosture {
   const jobs = resultLoopJobs(block);
-  const combos = guardCombinations(resultLoopGuardExpressions(block));
   const toleratedSkips = new Map<string, number>();
   for (const job of jobs) {
     let n = 0;
@@ -749,6 +846,41 @@ export function executedTolerancePosture(block: string): {
     toleratedSkips.set(job, n);
   }
   return { jobs, combos: combos.length, toleratedSkips };
+}
+
+/**
+ * The posture SPLIT on one named guard expression: the combinations where it is
+ * false, and the combinations where it is true, measured separately.
+ *
+ * ⛔ WHY A PARTITION AND NOT ONE WIDENED TOTAL. "Tolerated" is no longer one
+ * claim. Some rows may skip because of the EVENT (a fork PR has no test-DB
+ * secret); eleven more may skip because the DOCS-ONLY path filter did not
+ * invoke them. A single flat count cannot say "only when the detector fired",
+ * so collapsing the two halves would silently accept the eleven — which is the
+ * `[164.6.3-MW02-DOCSONLY-BLIND]` defect re-committed one layer up.
+ *
+ * Throws when `guardExpr` is not among the expressions actually enumerated: a
+ * partition on a guard nobody is varying reports one empty half, and an empty
+ * half agrees with anything.
+ */
+export function partitionedTolerancePosture(
+  script: string,
+  guardExpr: string,
+): { guard: string; notDocsOnly: TolerancePosture; docsOnly: TolerancePosture } {
+  const exprs = resultLoopGuardExpressions(script);
+  if (!exprs.includes(guardExpr)) {
+    throw new Error(
+      `cannot partition on \`${guardExpr}\`: it is not one of the ${exprs.length} expression(s) the ` +
+        `enumerator varies [${exprs.join(" | ")}]. A partition on a guard nobody varies measures NOTHING`,
+    );
+  }
+  const all = guardCombinations(exprs);
+  const half = (want: boolean) =>
+    tolerancePostureOver(
+      script,
+      all.filter((g) => g[guardExpr] === want),
+    );
+  return { guard: guardExpr, notDocsOnly: half(false), docsOnly: half(true) };
 }
 
 /**
@@ -853,25 +985,83 @@ export function extractResultLoopConditions(yamlText: string): ResultLoopParse {
 const RESULT_LOOP_CONDITION_FLOOR = 8;
 
 /**
- * The FULL tolerance-bearing set of the real aggregator, measured 2026-09-01 at
- * 420b8fcb by the command in the floor's comment above. Pinned exactly TWICE:
- * by the `if`/`elif` parser over the spellings it reads, and — WR-03 (164.3.1
- * review) — by the EXECUTION oracle below, which RUNS the loop and so cannot
- * be re-spelled around (`case`, negated guards, `||` chains). [MUT-W02]
- * pinned one spelling of one arm; the parser widened that to a family; the
- * execution oracle closes the class.
+ * ── THE TOLERANCE POSTURE, AS A THREE-SET PARTITION ────────────────────────
  *
- * All three are tolerances of a SKIP-BY-DESIGN, and each is justified by
+ * The aggregator's rows used to fall into two classes — tolerance-bearing or
+ * strict — and one flat constant, `TOLERANCE_BEARING_JOBS`, held the first.
+ * Phase 164.6.3 gave the loop a SECOND, independent reason a row may be absent,
+ * so there are now three classes and one flat set can no longer express them:
+ * "tolerated" is not one claim, and a set that answers it as one silently
+ * accepts eleven rows it was never asked about. ⛔ Do NOT collapse these back
+ * into one widened set to make an assertion pass.
+ *
+ * Pinned exactly TWICE, as the retired constant was: by the `if`/`elif` parser
+ * over the spellings it reads, and — WR-03 (164.3.1 review) — by the EXECUTION
+ * oracle below, which RUNS the loop and so cannot be re-spelled around (`case`,
+ * negated guards, `||` chains). [MUT-W02] pinned one spelling of one arm; the
+ * parser widened that to a family; the execution oracle closes the class.
+ *
+ * ⛔ NONE of the three is derived from `ci.yml`. This file's house rule (the
+ * corpus-size pin above, and the `scanned 73 file` pin) is that a constant
+ * deriving itself from its own subject can only ever agree with it. The
+ * memberships stay hardcoded; the execution oracle is what proves them.
+ */
+
+/**
+ * Rows whose skip the EVENT excuses (3). Each is a SKIP-BY-DESIGN justified by
  * something the job cannot control:
  *   * `e2e-seeded`  — a fork PR cannot see `E2E_TEST_DB_CONFIGURED`.
  *   * `sql-tests`   — same, plus `workflow_dispatch`, which its `if:` excludes.
  *   * `plan-anchor-verify` — its `if:` scopes it to `pull_request` so a drifting
  *     anchor on main cannot stall the Railway deploy (D-13).
- * Every other row takes the strict default: any non-success fails the aggregate.
- * A FOURTH entry appearing here means some job grew a reason to be allowed to
- * skip, and that is a decision, not a refactor.
+ * A FOURTH entry here means some job grew a reason to be allowed to skip on an
+ * event, and that is a decision, not a refactor.
  */
-const TOLERANCE_BEARING_JOBS = ["e2e-seeded", "plan-anchor-verify", "sql-tests"] as const;
+const EVENT_TOLERANT_JOBS = ["e2e-seeded", "plan-anchor-verify", "sql-tests"] as const;
+
+/**
+ * Rows whose skip the DOCS-ONLY PATH FILTER excuses (11) — Phase 164.6.3 /
+ * CI-DOCSPATH-01. These are exactly the rows the loop iterates that are NOT on
+ * the aggregator's declared always-on shell list, and what excuses them is ONE
+ * predicate, not eleven per-row arms: the detector must have said exactly
+ * `true`, the row must not be always-on, and the result must be exactly
+ * `skipped`.
+ *
+ * ⭐ THE UNIFORMITY IS THE LEGITIMACY. A per-row tolerance would be eleven
+ * separate decisions, each able to drift on its own; one predicate over a
+ * declared exclusion list is a single reviewable claim. The uniformity arm
+ * below measures it: every member here that is not ALSO event-tolerant is
+ * tolerated in ZERO of the not-docs-only combinations and in ALL of the
+ * docs-only ones — never an intermediate count, which is what a per-row
+ * tolerance smuggled in later would produce.
+ *
+ * ⚠️ `e2e-seeded` and `sql-tests` appear in BOTH this set and the event set.
+ * That is not duplication: they are excused by two independent things, and the
+ * halves are asserted separately so losing either excuse still reddens.
+ */
+const DOCS_ONLY_TOLERANT_JOBS = [
+  "e2e-seeded",
+  "frontend-build",
+  "frontend-coverage",
+  "frontend-local-stack",
+  "frontend-policy",
+  "frontend-seam-redis",
+  "frontend-test",
+  "frontend-typecheck",
+  "sql-gate-lint",
+  "sql-mutation",
+  "sql-tests",
+] as const;
+
+/**
+ * Rows excused by NOTHING (1). `frontend-lint` is on the aggregator's always-on
+ * list — `npm run lint` also runs `scripts/check-planning-hygiene.ts`, the leak
+ * gate on a PUBLIC repo with `.planning/` TRACKED, whose subject is precisely a
+ * `.planning/`-only diff — and it carries no `if:` and no `needs:` edge, so no
+ * event excuses it either. It is the one row a skip can never be explained for,
+ * and pinning it as its own named set is what makes the partition total.
+ */
+const NEVER_TOLERANT_JOBS = ["frontend-lint"] as const;
 
 describe("lint-sql-gates: the CI invocation (mode identity)", () => {
   it("exits 0 over the real 72-file corpus with the allowlist applied", () => {
@@ -997,7 +1187,7 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     ).toBeGreaterThanOrEqual(RESULT_LOOP_CONDITION_FLOOR);
   });
 
-  it("the FULL tolerance-bearing set is exactly the three skip-by-design jobs, in any if/elif spelling the parser reads", () => {
+  it("the EVENT-tolerance-bearing set is exactly the three skip-by-design jobs, in any if/elif spelling the parser reads", () => {
     const ci = readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8");
     const parsed = extractResultLoopConditions(ci);
     expect(parsed.measureFail).toBeNull();
@@ -1010,10 +1200,24 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // guard is invisible to it, which is why the EXECUTION oracle below makes
     // the same claim by running the loop. A fourth job appearing here — or one
     // of these three losing its arm — fails by name.
+    //
+    // ⚠️ SUBJECT NARROWED, Phase 164.6.3 wave 2: this arm asserts the EVENT set
+    // and nothing wider. The uniform docs-only arm is INVISIBLE to this parser
+    // BY CONSTRUCTION, not by oversight — the parser classifies a tolerance by
+    // finding a condition nested inside a branch that tests the loop's own
+    // `$name` against a literal, and the uniform arm tests the DETECTOR OUTPUT,
+    // the ALWAYS_ON membership and the RESULT, never the row name. It is
+    // therefore not a per-row tolerance and this parser is right not to report
+    // one. What pins it is the EXECUTION oracle below, which runs the loop.
+    //
+    // ⛔ Do NOT "fix" the parser to see the uniform arm. A condition that is
+    // not keyed to a row is not a per-row tolerance, and teaching the parser to
+    // report it as one would make the parser lie in the opposite direction —
+    // reporting eleven per-row tolerances that do not exist.
     expect(
       [...parsed.tolerance.keys()].sort(),
-      "the aggregator's set of skip-tolerant jobs changed. A job gaining tolerance means a `skipped` result now passes branch protection for it; a job losing it means it will redden every event it legitimately skips on. Either is a decision that belongs in TOLERANCE_BEARING_JOBS with its reason, not a silent edit to ci.yml",
-    ).toEqual([...TOLERANCE_BEARING_JOBS].sort());
+      "the aggregator's set of EVENT-tolerant jobs changed. A job gaining tolerance means a `skipped` result now passes branch protection for it; a job losing it means it will redden every event it legitimately skips on. Either is a decision that belongs in EVENT_TOLERANT_JOBS with its reason, not a silent edit to ci.yml. ⚠️ This arm reads per-row `if`/`elif` arms ONLY — the uniform docs-only tolerance is structurally invisible to it and is pinned by the EXECUTION oracle's partitioned exact-set claims instead",
+    ).toEqual([...EVENT_TOLERANT_JOBS].sort());
   });
 
   it.each(AGGREGATED_JOBS)(
@@ -1171,10 +1375,27 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
 
   // ── [MUT-W02] by EXECUTION (WR-03) ────────────────────────────────────
   describe("EXECUTION ORACLE — the result loop is RUN, so a skip tolerance is observed in ANY spelling", () => {
+    // ⛔ EVERY call site in this block takes the SCRIPT slice — the one that
+    // starts at `fail=0` and therefore carries the step's prologue. One helper
+    // is used throughout precisely so "which extractor did this call use?"
+    // cannot be answered wrongly later; that question having two answers is
+    // what `[164.6.3-MW02-DOCSONLY-BLIND]` was.
     const loopOf = (rel: string): string => {
-      const block = extractResultLoopBlock(readFileSync(join(ROOT, rel), "utf8"));
-      expect(block, `${rel}: no \`for r in \\\` … \`done\` block — nothing was executed`).not.toBeNull();
-      return block as string;
+      const script = extractResultLoopScript(readFileSync(join(ROOT, rel), "utf8"));
+      expect(
+        script,
+        `${rel}: no \`fail=0\` … \`for r in \\\` … \`done\` script — nothing was executed`,
+      ).not.toBeNull();
+      return script as string;
+    };
+    /** The guard expression the two halves are keyed on, read off the script. */
+    const docsGuardOf = (script: string): string => {
+      const expr = docsOnlyGuardExpression(script);
+      expect(
+        expr,
+        "the executed script no longer assigns `docs_only` — the partition has nothing to split on, and a posture that cannot distinguish the halves is the blindness this oracle was repaired for",
+      ).not.toBeNull();
+      return expr as string;
     };
     const CI = ".github/workflows/ci.yml";
     const RED_ALT = "scripts/aggregator-tolerance-fixtures/MW02-alternate-spelling.red.yml";
@@ -1190,48 +1411,197 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
       for (const g of combos) expect(executeResultLoop(block, {}, g).fail, JSON.stringify(g)).toBe(false);
     });
 
-    it("the real loop: the jobs whose SKIP is tolerated are exactly TOLERANCE_BEARING_JOBS — by execution, spelling-free", () => {
-      const block = loopOf(CI);
-      const posture = executedTolerancePosture(block);
-      // DIAGNOSTIC-FIRST (D-12): what was executed, not only the verdict.
-      process.stdout.write(
-        `MW02 executed posture: ${posture.jobs.length} job(s) × ${posture.combos} guard combination(s); ` +
-          `tolerated skips: ${[...posture.toleratedSkips].map(([j, n]) => `${j}=${n}`).join(", ")}\n`,
-      );
-      // Non-vacuity: every aggregated job is in the loop and was executed.
-      for (const { job } of AGGREGATED_JOBS) expect(posture.jobs, `${job} is not iterated by the loop`).toContain(job);
-      expect(posture.combos).toBeGreaterThan(1);
+    /** `row=count, row=count …` over a posture, the greppable spelling. */
+    const spell = (p: TolerancePosture) =>
+      [...p.toleratedSkips].map(([j, n]) => `${j}=${n}`).join(", ");
+    /** The rows a posture tolerates at all, sorted. */
+    const tolerantOf = (p: TolerancePosture) =>
+      [...p.toleratedSkips].filter(([, n]) => n > 0).map(([j]) => j).sort();
 
-      const tolerant = [...posture.toleratedSkips].filter(([, n]) => n > 0).map(([j]) => j).sort();
+    it("the real loop: each HALF tolerates exactly its own named set — by execution, spelling-free", () => {
+      const script = loopOf(CI);
+      const guard = docsGuardOf(script);
+      const split = partitionedTolerancePosture(script, guard);
+
+      // DIAGNOSTIC-FIRST (D-12): what was executed, not only the verdict.
+      // Written with process.stdout.write, not console.log: vitest 4's default
+      // reporter swallows console output from PASSING tests, and a measurement
+      // visible only on failure is not one.
+      //
+      // ⛔ THE LINE MUST BE TRUE AT HEAD. Wave 1's version printed a SINGLE
+      // posture with `sql-gate-lint=0` on a tree where that row's skip WAS
+      // tolerated — a diagnostic that lies is worse than none, because it is
+      // read as confirmation. Both halves are named separately now, each with
+      // its own combination count.
+      process.stdout.write(
+        `MW02 executed posture, partitioned on \`${guard}\` ` +
+          `(${split.notDocsOnly.jobs.length} job(s)):\n` +
+          `  docs_only=false — ${split.notDocsOnly.combos} combination(s); tolerated skips: ${spell(split.notDocsOnly)}\n` +
+          `  docs_only=true  — ${split.docsOnly.combos} combination(s); tolerated skips: ${spell(split.docsOnly)}\n`,
+      );
+
+      // Non-vacuity: every aggregated job is in the loop and was executed, and
+      // NEITHER half is empty — an empty half agrees with anything.
+      for (const { job } of AGGREGATED_JOBS) {
+        expect(split.notDocsOnly.jobs, `${job} is not iterated by the loop`).toContain(job);
+      }
+      expect(split.notDocsOnly.combos).toBeGreaterThan(1);
+      expect(split.docsOnly.combos).toBeGreaterThan(1);
+
+      // ⭐ THIS ARM IS THE PHASE'S CRITERION 2, AS A MEASUREMENT. "On a code PR
+      // this whole block is INERT" is a comment in `ci.yml`; here it is run.
+      // The detector said NOT docs-only, so every row must take BYTE-
+      // IDENTICALLY the path it took before Phase 164.6.3 existed — which is
+      // exactly "the tolerated set is the EVENT set and nothing more".
       expect(
-        tolerant,
-        "the set of jobs whose `skipped` result passes the aggregate changed — by EXECUTION, so no spelling hides it. A job gaining tolerance means branch protection now passes on its skip; a job losing it reddens every event it legitimately skips on. Either belongs in TOLERANCE_BEARING_JOBS with its reason",
-      ).toEqual([...TOLERANCE_BEARING_JOBS].sort());
+        tolerantOf(split.notDocsOnly),
+        "on the combinations where the detector did NOT say docs-only, the set of jobs whose `skipped` passes the aggregate is no longer the pre-phase set. That is criterion 2 broken: a CODE PR's path through this loop changed. A job gaining tolerance here means branch protection now passes on its skip on ordinary PRs",
+      ).toEqual([...EVENT_TOLERANT_JOBS].sort());
+
+      // The docs-only half tolerates the union of both excuses and nothing
+      // else. ⛔ Do NOT merge these two claims into one widened set: a flat set
+      // cannot say "only when the detector fired", and collapsing it accepts
+      // the eleven filterable rows on every event — the very defect this oracle
+      // was repaired for, re-committed one layer up.
+      expect(
+        tolerantOf(split.docsOnly),
+        "on the combinations where the detector said docs-only, the tolerated set is not the union of EVENT_TOLERANT_JOBS and DOCS_ONLY_TOLERANT_JOBS. A row appearing here that is in neither set is a row the path filter may now skip with nothing declaring that it may",
+      ).toEqual([...new Set([...EVENT_TOLERANT_JOBS, ...DOCS_ONLY_TOLERANT_JOBS])].sort());
+
+      // PARTITION COMPLETENESS: every row the loop reports about itself belongs
+      // to at least one named set, so a NEW aggregator row reddens by name
+      // instead of arriving unclassified.
+      expect(
+        [
+          ...new Set([...EVENT_TOLERANT_JOBS, ...DOCS_ONLY_TOLERANT_JOBS, ...NEVER_TOLERANT_JOBS]),
+        ].sort(),
+        "the union of the three named tolerance sets is no longer the loop's own row list. A row in the loop and in none of the sets has an UNDECLARED tolerance posture; a name in the sets and not in the loop is a pin with no subject",
+      ).toEqual([...split.notDocsOnly.jobs].sort());
+      expect(
+        NEVER_TOLERANT_JOBS.filter(
+          (j) =>
+            (EVENT_TOLERANT_JOBS as readonly string[]).includes(j) ||
+            (DOCS_ONLY_TOLERANT_JOBS as readonly string[]).includes(j),
+        ),
+        "a row cannot be excused-by-nothing AND excused by something",
+      ).toEqual([]);
     });
 
-    it("every tolerated skip is CONDITIONED on the event — some guard combination still rejects it", () => {
-      // A tolerance that passes under EVERY combination tolerates the fault
-      // too (the same claim the parser arm makes via `toContain(tolerance)`).
-      const block = loopOf(CI);
-      const posture = executedTolerancePosture(block);
-      for (const job of TOLERANCE_BEARING_JOBS) {
-        const n = posture.toleratedSkips.get(job) ?? 0;
-        expect(n, `${job}: its skip is tolerated under no combination`).toBeGreaterThan(0);
-        expect(n, `${job}: its skip is tolerated UNCONDITIONALLY — the fault is tolerated with the design skip`).toBeLessThan(posture.combos);
+    it("the docs-only tolerance is UNIFORM — zero on a code PR, full on a docs-only PR, never in between", () => {
+      // ⭐ THE EXECUTABLE FORM of wave 1's claim that the new arm is ONE
+      // predicate and not eleven per-row tolerances. A per-row tolerance
+      // smuggled in later — an arm keyed to a job name, or a second detector
+      // output only some rows consult — would produce a count strictly between
+      // the two extremes for that row, and this arm reddens by name.
+      //
+      // Scoped to the rows the DOCS-ONLY filter excuses and the EVENT does not:
+      // for the two rows both excuse, the intermediate count is legitimate and
+      // is pinned by the event-conditioning arm below instead.
+      const script = loopOf(CI);
+      const split = partitionedTolerancePosture(script, docsGuardOf(script));
+      const uniformOnly = DOCS_ONLY_TOLERANT_JOBS.filter(
+        (j) => !(EVENT_TOLERANT_JOBS as readonly string[]).includes(j),
+      );
+      expect(
+        uniformOnly.length,
+        "no row is docs-only-tolerant without also being event-tolerant — this arm would be checking an empty set",
+      ).toBeGreaterThan(0);
+
+      for (const job of uniformOnly) {
+        expect(
+          split.notDocsOnly.toleratedSkips.get(job),
+          `${job}: its skip is tolerated on a combination where the detector did NOT say docs-only. The filter is leaking onto code PRs`,
+        ).toBe(0);
+        expect(
+          split.docsOnly.toleratedSkips.get(job),
+          `${job}: its skip is tolerated in only SOME docs-only combinations. The docs-only arm is supposed to be ONE predicate over a declared exclusion list; an intermediate count means something ELSE is conditioning this row — a per-row tolerance wearing the uniform arm's clothes`,
+        ).toBe(split.docsOnly.combos);
       }
     });
 
-    it("hermetic jobs reject skipped, failure AND cancelled under every combination", () => {
-      const block = loopOf(CI);
-      const combos = guardCombinations(resultLoopGuardExpressions(block));
+    it("SLICE PIN — the executed script DEFINES the variables it reads", () => {
+      // ⛔ THE REGRESSION PIN AGAINST A RE-NARROWED SLICE. Without it the
+      // blindness returns with NO SIGNAL: the oracle would keep running, keep
+      // printing a posture, and keep passing — while measuring a program in
+      // which the docs-only arm is dead. That is exactly what happened for the
+      // length of Phase 164.6.3 wave 1.
+      //
+      // Two layers are pinned here. This arm is the first; the second is the
+      // unset-variable check in `executeResultLoop`, which converts the same
+      // omission into a named abort rather than an empty-string expansion.
+      const script = loopOf(CI);
+      expect(
+        script,
+        "the executed script no longer contains the `docs_only` assignment — it has been sliced above the prologue again, and every posture measured below is about a program that does not exist",
+      ).toMatch(/^[^\S\n]*docs_only=/m);
+      expect(
+        script,
+        "the executed script no longer contains the always-on list assignment — `ALWAYS_ON` will expand to the empty string, every row will read as filterable, and the posture will be a fiction",
+      ).toMatch(/^[^\S\n]*ALWAYS_ON=/m);
+
+      // And the guard the partition is keyed on is one the enumerator actually
+      // varies — a partition on a guard nobody varies reports one empty half.
+      const guard = docsGuardOf(script);
+      expect(
+        resultLoopGuardExpressions(script),
+        `the expression assigned to docs_only (\`${guard}\`) is not among the expressions the combination enumerator forces, so the two halves would not be two halves`,
+      ).toContain(guard);
+    });
+
+    it("every EVENT-tolerated skip is CONDITIONED on the event — within the not-docs-only half", () => {
+      // A tolerance that passes under EVERY combination tolerates the fault
+      // too (the same claim the parser arm makes via `toContain(tolerance)`).
+      //
+      // ⚠️ RE-SCOPED, Phase 164.6.3 wave 2. Measured over all sixteen
+      // combinations this arm would still PASS — but for the wrong reason: the
+      // total now carries a docs-only contribution, so "conditioned on the
+      // event" would be compared against a number the event does not explain.
+      // Restricting it to the half where the detector said NOT docs-only keeps
+      // the sentence meaning what it says.
+      const script = loopOf(CI);
+      const half = partitionedTolerancePosture(script, docsGuardOf(script)).notDocsOnly;
+      for (const job of EVENT_TOLERANT_JOBS) {
+        const n = half.toleratedSkips.get(job) ?? 0;
+        expect(n, `${job}: its skip is tolerated under no combination`).toBeGreaterThan(0);
+        expect(
+          n,
+          `${job}: its skip is tolerated UNCONDITIONALLY on a code PR — the fault is tolerated with the design skip`,
+        ).toBeLessThan(half.combos);
+      }
+    });
+
+    it("hermetic jobs reject a skip on a code PR, and reject failure AND cancelled in EVERY combination", () => {
+      // ⚠️ SPLIT, Phase 164.6.3 wave 2, into two claims rather than weakened to
+      // one. Under the repaired oracle the old single claim is FALSE for
+      // `skipped` in the docs-only half BY DESIGN — that is what the path
+      // filter does — so asserting it unchanged would have forced the arm to be
+      // deleted. It is restated instead.
+      const script = loopOf(CI);
+      const guard = docsGuardOf(script);
+      const combos = guardCombinations(resultLoopGuardExpressions(script));
+      const codePr = combos.filter((g) => g[guard] === false);
+      expect(codePr.length).toBeGreaterThan(1);
       const hermetic = AGGREGATED_JOBS.filter((r) => r.tolerance === null).map((r) => r.job);
       expect(hermetic.length).toBeGreaterThan(0);
+
       for (const job of hermetic) {
-        for (const outcome of ["skipped", "failure", "cancelled"]) {
+        // (1) A skip is still a fault on every code-PR combination.
+        for (const g of codePr) {
+          expect(
+            executeResultLoop(script, { [job]: "skipped" }, g).fail,
+            `${job}=skipped PASSED the aggregate on a NON-docs-only combination ${JSON.stringify(g)} — it is hermetic and cannot legitimately skip there`,
+          ).toBe(true);
+        }
+        // (2) ⭐ STRONGER THAN WHAT THIS FILE ASSERTED BEFORE: a real FAULT is
+        // never excused, docs-only half included. The uniform arm demands the
+        // result be exactly `skipped`, so it can never launder a `failure` or a
+        // `cancelled` into a green aggregate. Measured 2026-09-13: 0/16 for
+        // each of the two hermetic rows and each of the two outcomes.
+        for (const outcome of ["failure", "cancelled"]) {
           for (const g of combos) {
             expect(
-              executeResultLoop(block, { [job]: outcome }, g).fail,
-              `${job}=${outcome} PASSED the aggregate under ${JSON.stringify(g)}`,
+              executeResultLoop(script, { [job]: outcome }, g).fail,
+              `${job}=${outcome} PASSED the aggregate under ${JSON.stringify(g)} — the docs-only filter must never excuse a real fault`,
             ).toBe(true);
           }
         }
@@ -1265,14 +1635,172 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
       expect(posture.toleratedSkips.get("sql-mutation")).toBeLessThan(posture.combos);
     });
 
-    it("MW02 green fixture executes to the SAME tolerance posture as the real ci.yml (fixture fidelity, by execution)", () => {
-      const real = executedTolerancePosture(loopOf(CI));
-      const fixture = executedTolerancePosture(loopOf(GREEN));
-      // Vacuity fence: the fixture parsed to real jobs before agreement means anything.
-      expect(fixture.jobs.length).toBeGreaterThanOrEqual(3);
-      const tolerant = (p: ReturnType<typeof executedTolerancePosture>) =>
-        [...p.toleratedSkips].filter(([, n]) => n > 0).map(([j, n]) => `${j}:${n}/${p.combos}`).sort();
-      expect(tolerant(fixture), "the green fixture no longer executes like the real loop").toEqual(tolerant(real));
+    it("MW02 green fixture executes to the SAME tolerance posture as the real ci.yml, BOTH halves (fixture fidelity, by execution)", () => {
+      // ⚠️ THE COUPLING THIS ARM PROMISES SILENTLY DISENGAGED ONCE. The
+      // fixture's own header says an edit to the aggregator's result loop must
+      // be mirrored here and that this arm will red until it is. Phase 164.6.3
+      // wave 1 edited the loop; this arm stayed GREEN, because both sides were
+      // being executed through the narrow slice that omitted the new prologue —
+      // the same blindness wearing a second face. Both sides take the SCRIPT
+      // slice now, and the comparison is over EVERY row rather than only the
+      // rows that happen to be tolerated.
+      //
+      // ⛔ Do NOT repair a future red here by comparing only the rows the
+      // fixture happens to carry. That converts an exact-equality pin into a
+      // subset pin, and a subset pin is satisfied by a fixture that quietly
+      // stops modelling whichever row changed.
+      const realScript = loopOf(CI);
+      const fixtureScript = loopOf(GREEN);
+      const realSplit = partitionedTolerancePosture(realScript, docsGuardOf(realScript));
+      const fixtureSplit = partitionedTolerancePosture(fixtureScript, docsGuardOf(fixtureScript));
+
+      // Vacuity fence: the fixture ran a real loop before agreement means
+      // anything — two empty postures are "identical" too.
+      expect(fixtureSplit.notDocsOnly.jobs.length).toBeGreaterThanOrEqual(3);
+      expect(fixtureSplit.notDocsOnly.combos).toBeGreaterThan(1);
+      expect(fixtureSplit.docsOnly.combos).toBeGreaterThan(1);
+
+      for (const [half, f, r] of [
+        ["docs_only=false", fixtureSplit.notDocsOnly, realSplit.notDocsOnly],
+        ["docs_only=true", fixtureSplit.docsOnly, realSplit.docsOnly],
+      ] as const) {
+        expect(
+          `${half}: ${f.combos} combos; ${spell(f)}`,
+          "the green fixture no longer executes like the real loop. ci.yml's result loop changed and the fixture was not updated with it, so the two RED fixtures are being compared against a stale model",
+        ).toEqual(`${half}: ${r.combos} combos; ${spell(r)}`);
+      }
+    });
+
+    // ── THE REPAIR PROOF ───────────────────────────────────────────────────
+    //
+    // ⛔ THE GENERAL RULE THIS ARM EXISTS TO SATISFY. An oracle repair that
+    // does not demonstrate the REPAIRED oracle failing on a mutation the OLD
+    // one passed is a CLAIM about a gate, not EVIDENCE about one. Every arm
+    // above would read identically if the repair had done nothing; this one
+    // would not. It runs on every invocation rather than being a one-time
+    // ceremony recorded in a SUMMARY nobody re-runs.
+    //
+    // THE MUTATION IS BUILT IN MEMORY AND NEVER WRITTEN. `git status` on the
+    // workflow is asserted clean by the plan's own verification, and the
+    // restore is by construction — there is nothing to restore. ⛔ It is NOT
+    // restored by checkout: in this repo a `git checkout --` inside a
+    // neuter/restore harness has silently destroyed uncommitted work, and a
+    // harness that can destroy the tree is a worse liability than the defect it
+    // measures.
+    it("REPAIR PROOF — deleting an always-on row reddens the repaired oracle and is INVISIBLE to the pre-repair one", () => {
+      const ciPath = join(ROOT, ".github/workflows/ci.yml");
+      const original = readFileSync(ciPath, "utf8");
+      const TARGET = 'ALWAYS_ON="plan-anchor-verify frontend-lint"';
+      const DROPPED = "frontend-lint";
+
+      // (1) THE MUTATION-APPLIED PRECONDITION. ⭐ A neuter that does not APPLY
+      // reads as GREEN, and this repo has a dated record of that class. The
+      // target is asserted present BEFORE anything is concluded from its
+      // absence.
+      expect(
+        original,
+        "the aggregator's always-on list is no longer spelled as this arm expects, so the mutation below would be a no-op and this proof would measure NOTHING. Re-read the step and re-point the target — do not delete the arm",
+      ).toContain(TARGET);
+
+      const mutated = original.replace(TARGET, 'ALWAYS_ON="plan-anchor-verify"');
+      // Two assertions, not one: "differs" alone is satisfied by a replacement
+      // that did something other than what was intended.
+      expect(mutated, "the mutation changed nothing").not.toBe(original);
+      expect(
+        mutated,
+        "the mutated bytes still contain the original always-on assignment — the replacement did not do what it claims",
+      ).not.toContain(TARGET);
+
+      // (2) THE REPAIRED ORACLE GOES RED. Expressed as a NEGATION so this arm
+      // itself stays green while demonstrating the shipped claim failing: with
+      // `frontend-lint` off the always-on list, the docs-only half tolerates it
+      // and the exact-set claim the headline arm ships no longer holds.
+      const mutatedScript = extractResultLoopScript(mutated) as string;
+      expect(mutatedScript).not.toBeNull();
+      const mutatedSplit = partitionedTolerancePosture(
+        mutatedScript,
+        docsGuardOf(mutatedScript),
+      );
+      expect(
+        mutatedSplit.docsOnly.toleratedSkips.get(DROPPED),
+        `${DROPPED} was dropped from the always-on list and its skip is STILL tolerated nowhere. The repaired oracle cannot see this mutation either, and the repair is not proven`,
+      ).toBeGreaterThan(0);
+      expect(
+        tolerantOf(mutatedSplit.docsOnly),
+        "the shipped exact-set claim STILL HOLDS on the mutated bytes — the headline arm would not have caught a row being dropped from the always-on list, so it does not pin what it says it pins",
+      ).not.toEqual([...new Set([...EVENT_TOLERANT_JOBS, ...DOCS_ONLY_TOLERANT_JOBS])].sort());
+
+      // (3) THE RECORDED BLINDNESS, kept permanently beside the new visibility
+      // — the same shape as the case-spelling fixture's contrast pin above.
+      //
+      // ⛔ `runUnderPreRepairShell` is NOT exported, is used by NO live oracle,
+      // and exists only so this repair has a MEASURED contrast rather than an
+      // assertion of one. It reproduces the two-flag spawn this file used
+      // before Phase 164.6.3 wave 2, under which a name defined outside the
+      // slice expands to the empty string instead of aborting.
+      const runUnderPreRepairShell = (
+        block: string,
+        results: Record<string, string>,
+        guards: Record<string, boolean>,
+      ): boolean => {
+        const script = block
+          .replace(NEEDS_RESULT_RE, (_m, job: string) => results[job] ?? "success")
+          .replace(ANY_EXPRESSION_RE, (m, expr: string) => {
+            const key = expr.trim();
+            if (!(key in guards)) throw new Error(`unsubstituted expression: ${m}`);
+            return guards[key] ? "true" : "false";
+          });
+        const res = spawnSync("bash", ["-eo", "pipefail"], {
+          input: `fail=0\n${script}\nprintf 'FAIL=%s\\n' "$fail"\n`,
+          encoding: "utf8",
+        });
+        const m = /^FAIL=(\d+)$/m.exec(res.stdout ?? "");
+        if (res.status !== 0 || m === null) {
+          throw new Error(`the pre-repair run reached no verdict (status ${res.status})`);
+        }
+        return m[1] !== "0";
+      };
+
+      const preRepairCount = (yaml: string): number => {
+        const narrow = extractResultLoopBlock(yaml);
+        expect(narrow, "the pre-repair extractor found no loop — the contrast cannot be measured").not.toBeNull();
+        const combos = guardCombinations(resultLoopGuardExpressions(narrow as string));
+        return combos.filter(
+          (g) => !runUnderPreRepairShell(narrow as string, { [DROPPED]: "skipped" }, g),
+        ).length;
+      };
+
+      // WHY it is blind, named rather than implied: the mutated bytes are in
+      // the PROLOGUE, and the pre-repair slice starts below it. The two slices
+      // are byte-identical, so the old oracle never reads the thing that
+      // changed — and then reports the same number with total confidence.
+      expect(
+        extractResultLoopBlock(mutated),
+        "the pre-repair slice DOES differ across this mutation — then the blindness this arm records is not the blindness that was measured, and the contrast needs re-deriving",
+      ).toEqual(extractResultLoopBlock(original));
+      expect(
+        preRepairCount(mutated),
+        "the pre-repair machinery reports a DIFFERENT count across the mutation. It was measured blind to it on 2026-09-13; if it is not blind now, this contrast is stale and the repair's evidence must be re-derived rather than restated",
+      ).toBe(preRepairCount(original));
+
+      // (4) THE CLASS FIX, DEMONSTRATED RATHER THAN DESCRIBED. Under the
+      // repaired shell flags the old narrow slice does not reach a verdict at
+      // all: it aborts on the variable the slice failed to define, and the
+      // `did not run to its verdict` guard turns that into a MEASURE_FAIL.
+      const narrow = extractResultLoopBlock(original) as string;
+      const allFalse = Object.fromEntries(
+        resultLoopGuardExpressions(narrow).map((e) => [e, false]),
+      );
+      expect(
+        () => executeResultLoop(narrow, {}, allFalse),
+        "the pre-repair narrow slice now runs to a verdict under the repaired flags. The unset-variable check is what converts a hoisted variable from a silent empty string into a named abort; if this stops throwing, that half of the repair is gone",
+      ).toThrow(/unbound variable/);
+
+      // (5) THE TREE IS UNTOUCHED, re-read from disk rather than assumed.
+      expect(
+        readFileSync(ciPath, "utf8"),
+        "the workflow on disk no longer carries the unmutated always-on assignment — the mutation escaped into the working tree, which this harness is built specifically never to do",
+      ).toContain(TARGET);
     });
   });
 

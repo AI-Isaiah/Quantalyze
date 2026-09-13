@@ -2,20 +2,22 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.8.6
-current_phase_name: VAULTTICKFIX
-status: shipped
-stopped_at: "164.5-05 tasks 1-2 complete; STOPPED at task 3 blocking-human checkpoint:decision (ROADMAP criterion 5 wording)"
-last_updated: "2026-09-12T10:33:24.615Z"
+current_phase: 164.6.3
+current_phase_name: CIDOCSPATH
+status: executing
+stopped_at: "164.6.3-01 (tracer) complete; BLOCKER for wave 2: [164.6.3-MW02-DOCSONLY-BLIND]"
+last_updated: "2026-09-13T00:16:55.000Z"
 last_activity: 2026-09-12
-last_activity_desc: "164.8.6 VAULTTICKFIX SQL wave (plans 01-05) complete and SHIPPED as PR #778 (head of filtered branch phase-164.8.6-vaulttickfix-pr; 19 of 32 commits picked, the 13 dropped carry ZERO non-filtered files; CODE IDENTICAL 5069 == 5069 lines; deletion guard EMPTY; 0 forbidden paths; only structural ROADMAP.md kept). v0.77.34.0. Two NEW migrations apply to PROD on merge: 20260911120000_vault_tick_hardening (INTO STRICT, empty-key guard, explicit service_role EXECUTE) and 20260911130000_ledger_fanout_grantees_and_dormancy (whole-set REVOKE on cron_runs, dormancy instrument). Corpus 392 annotations / 411 steps; ARMS_FLOOR 384 -> 392 separated both directions on real lanes; full corpus run at bce4b3b0 clean (392/392/0, biting 392, lane-invocations 392, 0 defects). TWO reviewer rounds, three independent opus agents each: round 1 = 1 Critical / 2 High / 7 Medium, fixed across three file-disjoint passes (13f3ece6, 14462a48, bce4b3b0); round 2 = ZERO Critical, stopping rule met. The round-1 Critical was a comment-only edit to the ALREADY-APPLIED 20260907130000 — reverted, both corrections carried as header prose into the new 20260911130000, so no applied migration is in the diff and supabase-migrate.yml's 'applied ZERO migrations' guard cannot fire. Four residual findings DROPPED by founder decision rather than booked (they stay in the reviewer reports). KNOWN OPEN, disclosed in the migration header rather than fixed: ROADMAP criteria 2 and 3 are closed in the repo and OPEN in production — they land in match_engine_cron_tick(), which NO PROD cron job calls; cron job 1 match_engine_cron still inlines the unguarded Vault read and the v_key = '' fallthrough. Re-pointing that job row is Phase 164.5.1's live production DDL. CARRY-FORWARD: the all-candidates-failed branch of the ledger fan-out is unreachable while the fan-out is dormant and becomes reachable at the Phase 161.1 activation — exercise it deliberately there. EXPECTED RED on the PR before merge by construction: V2, G1, S1 (x2), M1 (x2), M2 (x2) probe applied-ness and these migrations apply on merge ([164.8-PUSH-RACE-VAC08] coupling (b)); sql-tests may race apply-test on the merge push (coupling (a)). If apply-test refuses on shared TEST the remedy is REVERT THE MERGE, never an edit to supabase-migrate.yml. UPDATED 2026-09-12 EOD: plan 06 recorded (v0.77.34.0, PR #778 squash ce7ac08a). A follow-up fix shipped as PR #779 (756469e6): apply-test's affirmative verifier had NEVER counted a migration because `supabase db push` writes its progress to STDERR and all four capture sites piped stdout only — an anti-vacuity INVERTED case, a control that could not SUCCEED. Both migrations then APPLIED TO PROD in run 34686331921 ('planned 2 migration version(s); push reported 2'), and PR #782 (88f395cd) regenerated baseline.sql from PROD afterwards, clearing sql-gate-lint on main (findings 3 -> 0) with the allowlist UNTOUCHED. Plan 07 (the manifest-side hoist + the CR-02 null-element guard) ships as PR #781. ⛔ PLAN 08 WAS WITHDRAWN, NOT SHIPPED: two independent reviewers found `tokenMeasure` fired the credential rule — whose remedy is 'treat the named secret as EXPOSED and rotate it' — on credential-free PROSE, hourly, into a PUBLIC log. MEASURED: 8 of the 14 committed PROD cron commands already carry its positive signal, and the only separator is the `fromConcat` waiver, which is set per CHAIN and inherited by every whitespace token. Two fix rounds each closed the named instance and produced a new class the next round found, including a FALSE-NEGATIVE band at 28-31 chars. It needs a REDESIGN, not a third repair, and is routed to Phase 164.8.4 GATERESIDUE with every measurement attached."
-state_head: fd0b66ec174893cba03cf8fb2d359f2e9707703f
+last_activity_desc: "Phase 164.6.3 CIDOCSPATH execution started (4 plans, 4 waves). Planning closed on two gsd-plan-checker passes: revision 1 fixed a one-member ALWAYS_ON (frontend-lint is an aggregator row AND the check-planning-hygiene leak gate), a 23-vs-22 grep that would have halted the executor on the push: trigger leaking into a job-key derivation, and a byte-argument overclaim. Three corrections the ROADMAP did not carry: the always-on set is FIVE not four; THREE jobs take mutex 61616158 (python at ci.yml:3864 is the forgotten taker); the post-change code-PR board is 24 check rows, not the 23 baseline — a code PR showing 23 has LOST a gate. Wave 4 ends at a blocking-human MERGE GATE; plan 04 is autonomous: false."
+state_head: 0963ad6d9daaaf6957e73bbb2dfe631fc40b41e1
 
 # ⭐ progress: RE-DERIVED 2026-09-12 at `733a55f5` from ALL REFS — see the method block
 # immediately above the `progress:` keys below. This supersedes the HAND-SET note that stood
 # here from 2026-09-06: the values are no longer hand-set and are no longer taken from this
 # checkout, which is exactly why they moved (31/15/141/137 -> 33/19/163/160).
-# ⚠️ `percent` is PHASE-weighted and always has been. 58 means 19 of 33 PHASES; the PLANS
+# ⚠️ `percent` is PHASE-weighted and always has been. 53 means 19 of 36 PHASES (Phases 164.6.1/.2/.3
+# were inserted 2026-09-12, so the denominator grew by three and the percent FELL without
+# any work being lost — the same effect recorded for the 2026-09-06 insertions); the PLANS
 # are 160 of 163, i.e. 98%. Do not read `percent` as a plan figure.
 # ⚠️ HISTORICAL, kept as lineage — everything below this line describes the 2026-09-06 state:
 
@@ -286,11 +288,11 @@ state_head: fd0b66ec174893cba03cf8fb2d359f2e9707703f
 #                                opposite reading — 160/163 of the PLANS are done, 98%.
 
 progress:
-  total_phases: 33
+  total_phases: 36
   completed_phases: 19
   total_plans: 163
   completed_plans: 160
-  percent: 58
+  percent: 53
 ---
 
 # Project State — Quantalyze
@@ -1249,6 +1251,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.8 P01 | 22min | 2 tasks | 6 files |
 | Phase 164.8 P02 | (executor died before reporting) | 3 tasks | 1 file |
 | Phase 164.8 P03 | 33min | 3 tasks | 2 files |
+| Phase 164.6.3 P01 | 55min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -1325,6 +1328,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 168 added: DRBOPTIONS — classify Deribit's `assignment` transaction-log type against a CAPTURED row census rather than a guess. Owner of [DERIBIT-ASSIGNMENT-UNCLASSIFIED], a live customer-visible ingestion failure measured on PROD 2026-09-12 (job 0c5ad574). Founder chose a NEW phase over folding it into 161.1 or 166.
 - Phase 164.8.6.1 inserted after Phase 164.8.6 and then DISSOLVED the same day as over-booking: it held one finished chore (the baseline regen, done as a normal commit) and three documentation notes. The one genuinely deferred item — carrying the prod-body-ack / comment-drift corrections FORWARD in header prose — was folded into Phase 164.5.1, the next phase that writes a migration.
 - Phase 164.8.4 edited: absorbed [164.8.5-HYGIENE-RESIDUALS] from 164.8.6 by founder decision — tokenMeasure needs a REDESIGN, not a third repair (8 of 14 committed PROD commands already carry the rule's positive signal; the fromConcat waiver is the only separator and it is the broken part)
+- Phase 164.6.1 inserted after Phase 164.6: GATEINFRA — founder decision 2026-09-12. MYPY-MAINPY-01, MT5-GATEWAY-LOGIN-01 and CI-DOCSPATH-01 split out of Phase 164.6 because they differ in KIND from lint-and-prose hygiene: they change the Python type gate, a production gateway's login path, and WHEN CI gates fire — the last being the riskiest change in a milestone about controls that cannot fire. Folding them in would have given the riskiest items the lightest review posture. 164.6 keeps 10 live criteria and 3 numbered MOVED stubs so TODOS and Phase 164.1 cross-references stay valid; item numbering is deliberately NOT compacted. MT5 credentials are founder-set: no agent enters them, and criterion 2 closes only on an OBSERVED restart self-heal.
+- Phase 164.6.2 inserted after Phase 164.6: MT5RELOGIN. Founder decision 2026-09-12 chose ONE PHASE PER ITEM over a single combined GATEINFRA: 164.6.1 MYPYSTRICT, 164.6.2 MT5RELOGIN, 164.6.3 CIDOCSPATH. 164.6.1 was re-scoped from GATEINFRA (all three) to mypy only and its directory renamed. ORDER IS DELIBERATE: CIDOCSPATH runs LAST because it moves the gate corpus underneath the other two. MT5RELOGIN is founder-gated at criterion 2 (an OBSERVED restart self-heal) and must not block 164.6.3.
 
 ### Decisions
 
@@ -2253,8 +2258,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-07T19:02:39.245Z
-**Stopped At:** 164.5-05 tasks 1-2 complete; STOPPED at task 3 blocking-human checkpoint:decision (ROADMAP criterion 5 wording)
+**Last Date:** 2026-09-13T00:16:55.388Z
+**Stopped At:** Completed 164.6.3-01-PLAN.md (tracer, wave 1). ⛔ BLOCKER raised for wave 2: [164.6.3-MW02-DOCSONLY-BLIND] — see the phase's deferred-items.md.
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -2263,7 +2268,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 **Stopped At:** Completed 162-09-PLAN.md
 **Last Date:** 2026-08-25T23:19:36.303Z
 **Stopped At:** Completed 162-02-PLAN.md
-**Resume File:** .planning/phases/164.5-baseline-snapshot-the-committed-prod-schema-baseline-becomes/164.5-05-PLAN.md
+**Resume File:** None
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
