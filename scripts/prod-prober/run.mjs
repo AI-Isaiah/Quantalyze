@@ -4056,55 +4056,76 @@ export async function selfTest() {
       // be written anywhere in this repo, least of all in a calibration.
       const digitMutant = `${row6.remedy} account 99999999`;
 
+      // ⛔ ELEVEN SEPARATE `expect` CALLS, each its own statement rather than a
+      //    link in an `&&` chain — the same rule CRITERION 7 states thirty
+      //    lines above, applied here because `expect()` RETURNS FALSE on a red
+      //    and `&&` short-circuits. In the chain this replaced, a rename of
+      //    branch (6b) reddened (a) and then SKIPPED (b) through
+      //    (g-calibration) — including (g), the only gate in this repo standing
+      //    between an MT5 account number and a world-readable Actions log. One
+      //    unrelated regression must not blind the disclosure control, and one
+      //    RED must not be credited to eleven controls.
+      //    The `if (row6 === null || …)` guard above already covers the only
+      //    case where a later leg could THROW, so nothing here depended on the
+      //    short-circuit for safety.
       pass =
         expect(
           row6.kind === "mt5-not-authorized" && row6.subject === "-6",
           `(a) the -6 fixture's ROW is mt5-not-authorized on subject -6 (got ${row6.kind} / ${row6.subject})`,
-        ) &&
+        ) && pass;
+      pass =
         expect(
           row6.remedy.includes("VNC console") &&
             row6.remedy.includes("Save password") &&
             row6.remedy.includes("Expert Advisors") &&
             row6.remedy.includes("Journal"),
           `(b) ⛔ SUCCESS CRITERION 2: the -6 ROW's remedy names all FOUR required elements — VNC console=${row6.remedy.includes("VNC console")}, "Save password"=${row6.remedy.includes("Save password")}, Expert Advisors=${row6.remedy.includes("Expert Advisors")}, Journal=${row6.remedy.includes("Journal")}`,
-        ) &&
+        ) && pass;
+      pass =
         expect(
           saysLookUpTheCode(row6.remedy) === false,
           "(c) ⛔ SUCCESS CRITERION 2, THE NEGATIVE: the -6 ROW's remedy carries NO lookup-table instruction — -6 has exactly one cause and exactly one remedy, so sending the operator to an error table IS the defect this phase removed, and it cost two real investigations",
-        ) &&
+        ) && pass;
+      pass =
         expect(
           spliced !== row6.remedy && saysLookUpTheCode(spliced) === true,
           "(d) CALIBRATION for (c): the SAME predicate REJECTS an in-memory copy of the -6 remedy with the catch-all's own lookup sentence spliced back in — so (c) is a reading, not a predicate only ever shown passing input",
-        ) &&
+        ) && pass;
+      pass =
         expect(
           row6.remedy !== rowOther.remedy && row6.remedy.length >= 40 && rowOther.remedy.length >= 40,
           `(e1) the -6 row and the residual row carry DIFFERENT remedy text, each substantial (${row6.remedy.length} / ${rowOther.remedy.length} chars)`,
-        ) &&
+        ) && pass;
+      pass =
         expect(
           /modal/i.test(row6.remedy) === false && rowIpc.remedy.includes("Journal") === false,
           "(e2) and the -6 and -10005 instructions cannot CONVERGE: the -6 remedy carries none of -10005's distinguishing modal-dialog wording, and the -10005 remedy does not name the Journal — two near-duplicates would pass the exact-string uniqueness gate and still fail the operator",
-        ) &&
+        ) && pass;
+      pass =
         expect(
           rowOther.kind === "mt5-terminal-error" && rowNull.kind === "mt5-terminal-error",
           `(f1) ⛔ SUCCESS CRITERION 4: BOTH catch-all fixtures still produce mt5-terminal-error (got ${rowOther.kind} / ${rowNull.kind}) — the residual bucket was NARROWED by -6 leaving it, not emptied`,
-        ) &&
+        ) && pass;
+      pass =
         expect(
           rowOther.subject !== rowNull.subject,
           `(f2) and their SUBJECTS DIFFER (${rowOther.subject} / ${rowNull.subject}) — one row comes from branch (8)'s unenumerated code and one from branch (7)'s null terminal_info, so the bucket still DISCRIMINATES rather than merely still existing`,
-        ) &&
+        ) && pass;
+      pass =
         expect(
           mt5Kinds.length > 0 && mt5Kinds.every((k) => typeof MT5_MOD.REMEDIES[k] === "string"),
           `(g0) the scan below ranges over a LIVE, COMPLETE table: every one of the ${mt5Kinds.length} mt5-* kinds registered in DEFECT_KINDS has a remedy string, so a green scan over a stale or half-landed REMEDIES is impossible`,
-        ) &&
+        ) && pass;
+      pass =
         expect(
           offenders.length === 0,
           `(g) THE PUBLIC-LOG CONTROL: no mt5 remedy carries a six-or-more-digit run — the shape of an MT5 account number in a world-readable Actions log and a world-readable issue (offenders: ${offenders.join(", ") || "none"} of ${remedyEntries.length} scanned)`,
-        ) &&
+        ) && pass;
+      pass =
         expect(
           digitMutant !== row6.remedy && hasAccountShapedRun(digitMutant) === true,
           "(g-calibration) the SAME predicate FIRES on an in-memory copy with a SYNTHETIC repeated-digit run appended — a real account number is never written anywhere, including here",
-        ) &&
-        pass;
+        ) && pass;
     }
   }
 
