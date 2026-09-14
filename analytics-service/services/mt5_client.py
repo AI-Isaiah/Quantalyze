@@ -367,10 +367,42 @@ def mt5_terminal_key(host: str, port: int) -> str:
     return f"{host}:{port}"
 
 
+def _credential_renderings(literal: str) -> tuple[str, ...]:
+    """Every byte sequence ONE credential value can reach a log as.
+
+    ⛔ 164.6.2 CR-01 — THE RAW LITERAL IS NOT THE PRODUCTION SHAPE. ``mt5linux``
+    0.1.9 builds its remote call as SOURCE TEXT
+    (``f'mt5.initialize(*{args},**{kwargs})'``), so the credentials arrive in a
+    remote traceback as the ``repr()`` OF A DICT — and ``repr()`` ESCAPES. A
+    by-value pass matching only the unescaped literal fires on an
+    ``[A-Za-z0-9-]`` password and MISSES every password carrying a backslash, a
+    quote pair or a control character; MEASURED against the shipped loop on
+    2026-09-14, the login and the server were redacted and the password survived
+    verbatim.
+
+    ⛔ That miss is the WHOLE control, not half of it: ``scrub_freeform_string``
+    is a measured NO-OP on the kwargs-repr shape (its ``SENSITIVE_KEY_VALUE``
+    pattern needs ``key`` immediately followed by ``[:=]`` and the repr puts a
+    closing quote between them), so the by-value pass is the SOLE thing standing
+    between a broker password and a PUBLIC Actions log.
+
+    Returns the raw literal plus the ESCAPED BODIES ``repr()`` and
+    ``json.dumps()`` produce — the two differ for a value carrying both quote
+    types, and a structured-log encoder reaches for the JSON one. Empty renderings
+    are dropped: ``"".replace`` splices the marker between every character.
+
+    Ordered longest-first so a shorter rendering that is a SUBSTRING of a longer
+    one cannot consume part of it and strand the remainder unredacted.
+    """
+    forms = {literal, repr(literal)[1:-1], json.dumps(literal)[1:-1]}
+    return tuple(sorted((form for form in forms if form), key=len, reverse=True))
+
+
 def _redact_credential_values(
     text: str, login: int, password: str, server: str
 ) -> str:
-    """Shape-scrub ``text``, THEN redact the three credential values BY VALUE.
+    """Shape-scrub ``text``, THEN redact the three credential values BY VALUE —
+    in EVERY rendering, never only the raw literal (``_credential_renderings``).
 
     ⛔ T-134-01 — this is a SHIPPED CONTROL travelling with the credentials, not a
     belt-and-braces nicety. ``mt5linux`` 0.1.9 builds every remote call as SOURCE
@@ -385,17 +417,29 @@ def _redact_credential_values(
     Empty literals are skipped: ``"".replace`` splices the marker between every
     character of the message.
 
+    ⛔ ALL THREE VALUES GET THE ESCAPE-AWARE TREATMENT, not just the password. A
+    broker SERVER string can carry an escapable character too (a Windows-shaped
+    path, a tab from a mis-pasted Railway variable), and a fix applied to the
+    password alone would have stayed green against a corpus that never tried one.
+
     ⛔ ``Mt5Client.login`` is NOT routed through here and its own copy of this loop
     is left BYTE-UNCHANGED (D-07) — its four per-account callers are shipped and a
     regression there lands on live job processing. The duplication is accepted
     deliberately; the property is enforced instead by the signature-DERIVED
     redaction gate in ``tests/test_mt5_client_contract.py``, which drives EVERY
     credential-carrying verb, including a third one added later.
+
+    ⚠️ ONE CONSEQUENCE OF D-07, MEASURED AND BOOKED AS
+    ``[164.6.2-LOGIN-ESCAPE-BLIND]``: that untouched copy matches the RAW literal
+    only, so ``login()``'s transport-raise arm still discloses an escape-carrying
+    password in its ``repr()`` rendering. It is asserted in both directions by
+    ``test_CREDENTIAL_REDACTION_the_login_escape_residual_is_measured_not_assumed``
+    so the day D-07 is amended the residual reds instead of being forgotten.
     """
     safe = scrub_freeform_string(str(text))
     for literal in (str(login), password, server):
-        if literal:
-            safe = safe.replace(literal, "[REDACTED]")
+        for rendering in _credential_renderings(literal):
+            safe = safe.replace(rendering, "[REDACTED]")
     return str(safe)
 
 

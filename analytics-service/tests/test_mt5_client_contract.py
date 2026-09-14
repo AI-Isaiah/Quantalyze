@@ -47,6 +47,7 @@ import sys
 import threading
 import time
 import types
+from typing import NamedTuple
 
 import pytest
 from structlog.testing import capture_logs
@@ -2965,8 +2966,143 @@ def _credentialed_client_methods(
     return drivable, residual
 
 
+def _methods_routed_through_the_shared_redactor(source: str) -> frozenset[str]:
+    """The `Mt5Client` methods whose body references `_redact_credential_values`.
+
+    ⛔ DERIVED, never hand-listed, for the same reason the roster above is: the
+    escape-aware redaction lives in ONE helper, and the question this gate must
+    answer is "which verbs actually route through it" — not "which verbs did on
+    the day somebody typed the list". A third credentialed verb that calls the
+    helper enters the escape gate by itself; one that does not is reported by the
+    residual test below rather than silently escaping.
+    """
+    tree = ast.parse(source, filename="services/mt5_client.py")
+    routed: set[str] = set()
+    for cls in (
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "Mt5Client"
+    ):
+        for member in cls.body:
+            if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if any(
+                isinstance(node, ast.Name) and node.id == "_redact_credential_values"
+                for node in ast.walk(member)
+            ):
+                routed.add(member.name)
+    return frozenset(routed)
+
+
 _CLIENT_SOURCE = pathlib.Path(mt5_client_mod.__file__).read_text()
 _DRIVABLE, _RESIDUAL = _credentialed_client_methods(_CLIENT_SOURCE)
+_ESCAPE_AWARE = frozenset(_DRIVABLE) & _methods_routed_through_the_shared_redactor(
+    _CLIENT_SOURCE
+)
+
+#: ⛔ HAND-TYPED, and never derived from the set it bounds. MEASURED 1 on
+#: 2026-09-14: `initialize_with_credentials`. `login` carries its OWN copy of the
+#: by-value loop (D-07 keeps it byte-unchanged), so it is NOT in this set and its
+#: residual is measured separately below. Raise this when a second verb routes
+#: through the shared helper; ⛔ never lower it to clear a red run.
+ESCAPE_AWARE_METHOD_FLOOR = 1
+
+
+# --------------------------------------------------------------------------- #
+# ⛔ THE ESCAPE CORPUS — 164.6.2 CR-01, AND THE REASON IT EXISTS IS THAT THE
+# CORPUS ABOVE COULD NOT FAIL ON THIS CLASS.
+#
+# `mt5linux` 0.1.9 builds its remote call as SOURCE TEXT
+# (`f'mt5.initialize(*{args},**{kwargs})'`), so the credentials reach a remote
+# traceback as the `repr()` OF A DICT — and `repr()` ESCAPES. A by-value pass
+# that matches only the unescaped literal therefore fires on an `[A-Za-z0-9-]`
+# password and MISSES every password carrying a backslash, a quote pair or a
+# control character. Two measured facts make that the whole control rather than
+# half of it:
+#
+#   * `scrub_freeform_string` contributes NOTHING on the kwargs-repr shape — its
+#     `SENSITIVE_KEY_VALUE` pattern needs `key` immediately followed by `[:=]`,
+#     and the repr puts a closing quote between them. The by-value pass is the
+#     SOLE control on the production shape, not a second layer over a first.
+#   * every credential fixture in this file was `[A-Za-z0-9-]` only until
+#     2026-09-14, so NO test in the corpus could fail on the escaping class. The
+#     gate bit on the clean shape and was blind to the real one BY CONSTRUCTION
+#     OF ITS OWN CORPUS. These cases were OBSERVED RED against the shipped
+#     `_redact_credential_values` before it was fixed.
+#
+# ⛔ THE EXPECTED RENDERINGS ARE HAND-TYPED, never computed by calling the same
+# helper the production code calls. A test that derived its expectation from the
+# implementation it polices would forget exactly the form the implementation
+# forgot — which is how this defect shipped green in the first place.
+# --------------------------------------------------------------------------- #
+
+
+class _EscapeCase(NamedTuple):
+    """One credential whose `repr()` rendering differs from its raw literal.
+
+    ``password_renderings`` / ``server_renderings`` are every byte sequence that
+    value can reach a log as: the raw literal, the body `repr()` produces, and the
+    body `json.dumps()` produces (they differ for the quote case). EVERY one must
+    be absent from the message.
+    """
+
+    password: str
+    server: str
+    password_renderings: tuple[str, ...]
+    server_renderings: tuple[str, ...]
+
+
+_ESCAPE_CASES = (
+    pytest.param(
+        _EscapeCase(
+            # A broker-generated password containing a single backslash.
+            password=r"pa\ssw0rd",
+            server=_FAKE_SERVER,
+            #   raw:  pa\ssw0rd        repr/json body:  pa\\ssw0rd
+            password_renderings=(r"pa\ssw0rd", r"pa\\ssw0rd"),
+            server_renderings=(_FAKE_SERVER,),
+        ),
+        id="password-backslash",
+    ),
+    pytest.param(
+        _EscapeCase(
+            # BOTH quote types, which forces `repr` to escape the single quote
+            # and `json.dumps` to escape the double one — the two renderings
+            # differ, and neither equals the raw literal.
+            password="pa'sw\"0rd",
+            server=_FAKE_SERVER,
+            #   raw:  pa'sw"0rd     repr body: pa\'sw"0rd     json body: pa'sw\"0rd
+            password_renderings=("pa'sw\"0rd", "pa\\'sw\"0rd", "pa'sw\\\"0rd"),
+            server_renderings=(_FAKE_SERVER,),
+        ),
+        id="password-both-quote-types",
+    ),
+    pytest.param(
+        _EscapeCase(
+            # A control character. `repr` renders it as the two-character
+            # escape `\t`, which shares not one byte with the raw tab.
+            password="pa\tssw0rd",
+            server=_FAKE_SERVER,
+            password_renderings=("pa\tssw0rd", r"pa\tssw0rd"),
+            server_renderings=(_FAKE_SERVER,),
+        ),
+        id="password-tab",
+    ),
+    pytest.param(
+        _EscapeCase(
+            # ⛔ NOT ONLY THE PASSWORD. A broker SERVER string can carry an
+            # escapable character too (a Windows-shaped path, a tab from a
+            # mis-pasted Railway variable), and the reviewer's fix is explicitly
+            # "all three values". Without this case the fix could have been
+            # applied to `password` alone and stayed green.
+            password=_FAKE_PASSWORD,
+            server=r"Broker\Demo-2",
+            password_renderings=(_FAKE_PASSWORD,),
+            server_renderings=(r"Broker\Demo-2", r"Broker\\Demo-2"),
+        ),
+        id="server-backslash",
+    ),
+)
 
 
 def test_CREDENTIAL_REDACTION_the_derived_roster_did_not_collapse():
@@ -3111,6 +3247,154 @@ def test_CREDENTIAL_REDACTION_a_transport_raise_discloses_none_of_the_three(
         f"Mt5Client.{method_name} produced a message with nothing redacted at all "
         "— the three absence assertions above would pass vacuously on an empty or "
         f"unrelated string: {msg!r}"
+    )
+
+
+def test_CREDENTIAL_REDACTION_the_escape_aware_roster_did_not_collapse():
+    """⛔ THE ANTI-VACUITY FLOOR FOR THE ESCAPE GATE BELOW.
+
+    That gate is parametrized over `_ESCAPE_AWARE × _ESCAPE_CASES`. An EMPTY
+    `_ESCAPE_AWARE` collapses the product to nothing, pytest reports an empty
+    parameter set, and a client that redacts no escaped rendering at all is
+    indistinguishable from one that redacts every one. The floor is hand-typed
+    and compared with `>=`, never computed from the set it bounds.
+    """
+    assert len(_ESCAPE_AWARE) >= ESCAPE_AWARE_METHOD_FLOOR, (
+        "the escape-aware roster COLLAPSED — the DERIVATION is broken, not the "
+        f"code. derived={sorted(_ESCAPE_AWARE)!r}, "
+        f"floor={ESCAPE_AWARE_METHOD_FLOOR}. ⛔ Fix the derivation; never lower "
+        "the floor."
+    )
+    assert _ESCAPE_CASES, "the escape corpus is empty — the gate below is vacuous"
+
+
+def test_CREDENTIAL_REDACTION_the_verbs_outside_the_shared_redactor_are_exactly_login():
+    """⚠️ `[164.6.2-LOGIN-ESCAPE-BLIND]` — the residual, named and fenced.
+
+    `Mt5Client.login` carries its OWN copy of the by-value loop rather than
+    calling the shared helper, because D-07 keeps it BYTE-UNCHANGED: its four
+    per-account callers are shipped and a regression there lands on live job
+    processing. So the escape-aware fix landed in `_redact_credential_values`
+    and `login` did not get it.
+
+    This asserts the residual is EXACTLY that one verb. A THIRD credentialed verb
+    written without the shared helper grows this set and reds here — which is the
+    whole point: the next author must make that a decision, not an omission.
+    """
+    outside = frozenset(_DRIVABLE) - _ESCAPE_AWARE
+    assert outside == frozenset({"login"}), (
+        f"the set of credentialed verbs NOT routed through "
+        f"`_redact_credential_values` is {sorted(outside)}, expected ['login']. "
+        "⛔ If a new verb is here, route it through the shared helper — it is the "
+        "only copy of the loop that knows about `repr()` escaping (CR-01). If "
+        "`login` has LEFT this set, D-07 was amended: delete "
+        "`[164.6.2-LOGIN-ESCAPE-BLIND]` and the measured-residual test below "
+        "together with this expectation."
+    )
+
+
+def test_CREDENTIAL_REDACTION_the_login_escape_residual_is_measured_not_assumed():
+    """⚠️ `[164.6.2-LOGIN-ESCAPE-BLIND]` — the residual as a MEASUREMENT.
+
+    A documented posture no test exercises is a claim. `Mt5Client.login`'s
+    transport-raise arm redacts by RAW LITERAL only, so a password containing a
+    backslash survives into the message in its `repr()`-escaped rendering. That is
+    a REAL disclosure on a shipped path and it is recorded here rather than fixed,
+    because fixing it means editing `login()` — which D-07 forbids.
+
+    ⛔ This case documents a residual; it is NOT a licence to weaken anything.
+    When a future phase closes it, the second half goes RED and must be DELETED
+    together with the booked item, never relaxed. The RAW literal is asserted
+    absent on both arms, because that half is not asymmetric and never may be.
+    """
+    pw = r"pa\ssw0rd"
+    escaped = r"pa\\ssw0rd"  # what `repr(pw)` puts in the message body
+
+    connect, _fake, _rec = _make(
+        {
+            "login_raises": RuntimeError(
+                "rpyc remote error while eval'ing mt5.login(**%r)"
+                % ({"login": _FAKE_LOGIN, "password": pw, "server": _FAKE_SERVER},)
+            )
+        }
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.login(_FAKE_LOGIN, pw, _FAKE_SERVER)
+    msg = str(exc_info.value)
+
+    # The half that is NOT asymmetric: the raw literal never survives.
+    assert pw not in msg
+    assert "[REDACTED]" in msg
+
+    # The residual itself. ⛔ Do NOT relax this assertion to make it pass.
+    assert escaped in msg, (
+        "`Mt5Client.login` now redacts the `repr()`-escaped rendering too — "
+        "[164.6.2-LOGIN-ESCAPE-BLIND] appears to be CLOSED. Delete this test and "
+        "the expectation in "
+        "`test_CREDENTIAL_REDACTION_the_verbs_outside_the_shared_redactor_are_"
+        "exactly_login`, and close the booked item."
+    )
+
+
+@pytest.mark.parametrize("method_name", sorted(_ESCAPE_AWARE))
+@pytest.mark.parametrize("case", _ESCAPE_CASES)
+def test_CREDENTIAL_REDACTION_an_escaped_rendering_discloses_none_of_the_three(
+    method_name, case: _EscapeCase
+):
+    """⛔ CR-01 — THE FORM `mt5linux` ACTUALLY PRODUCES, WHICH THE CLEAN CORPUS
+    ABOVE CANNOT REACH.
+
+    The message is built exactly the way `mt5linux` 0.1.9 builds its remote call:
+    a `repr()` of the kwargs dict. With an `[A-Za-z0-9-]` password that rendering
+    is byte-identical to the raw literal and the shipped `str.replace` loop fired;
+    with a backslash, a quote pair or a tab it is NOT, and the credential survived
+    verbatim onto a PUBLIC Actions log.
+
+    ⛔ EVERY rendering is asserted absent, not just the raw literal — asserting
+    only the raw literal here would pass VACUOUSLY, because the raw literal does
+    not appear in an escaped message at all. That vacuity is the defect, restated
+    as a test-design rule.
+    """
+    carrying = _DRIVABLE[method_name]
+    assert len(carrying) == 1, carrying
+    scenario_key = f"{carrying[0]}_raises"
+
+    kwargs = {
+        "login": _FAKE_LOGIN,
+        "password": case.password,
+        "server": case.server,
+    }
+    connect, _fake, _rec = _make(
+        {
+            scenario_key: RuntimeError(
+                "rpyc remote error while eval'ing mt5.%s(**%r)"
+                % (carrying[0], kwargs)
+            )
+        }
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        getattr(client, method_name)(_FAKE_LOGIN, case.password, case.server)
+
+    msg = str(exc_info.value)
+    for label, renderings in (
+        ("login", (str(_FAKE_LOGIN),)),
+        ("password", case.password_renderings),
+        ("server", case.server_renderings),
+    ):
+        for rendering in renderings:
+            assert rendering not in msg, (
+                f"Mt5Client.{method_name} disclosed the {label} as {rendering!r} "
+                f"on its transport-raise arm: {msg!r}. ⛔ The by-value loop must "
+                "redact every RENDERING of each literal — `repr()` escapes, and "
+                "`scrub_freeform_string` is a measured no-op on the kwargs-repr "
+                "shape, so this loop is the SOLE control (CR-01, T-134-01)."
+            )
+    assert "[REDACTED]" in msg, (
+        f"Mt5Client.{method_name} produced a message with nothing redacted at all "
+        f"— the absence assertions above would pass vacuously: {msg!r}"
     )
 
 
