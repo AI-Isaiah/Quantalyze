@@ -1231,6 +1231,19 @@ class Mt5Client:
                 ),
             )
         except Mt5ClientError:
+            # ⛔ AN UNREDACTED PASS-THROUGH, AND THE ASYMMETRY WITH THE BROAD ARM
+            # BELOW IS SAFE ONLY FOR A REASON WORTH WRITING DOWN (IN-01).
+            # UNREACHABLE TODAY: nothing inside `self._timed(...)` can CONSTRUCT
+            # an `Mt5ClientError` — `_timed` only re-raises, and `self._mt5` is
+            # the raw mt5linux proxy. So the only `Mt5ClientError` that can arrive
+            # here is one WE built elsewhere, already scrubbed at construction.
+            # ⚠️ IF THAT EVER CHANGES — a future `_timed`/transport wrapper that
+            # WRAPS a raw remote traceback into an `Mt5ClientError` — this arm
+            # becomes a disclosure: the message would carry only the SHAPE scrub
+            # `Mt5ClientError.__init__` applies, and `_redact_credential_values`'s
+            # own docstring records that scrub as a measured NO-OP on the
+            # mt5linux kwargs-repr shape. Route it through the by-value redaction
+            # then; do not widen this arm and hope.
             raise
         except Mt5SessionAbandoned:
             # ⛔ EXPLICIT, ahead of the broad arm below. `Mt5SessionAbandoned` is a

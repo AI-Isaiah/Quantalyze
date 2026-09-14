@@ -121,12 +121,23 @@ class _FakeMt5:
       ``initialize_credentialed``    -> what a CREDENTIALED `initialize()` returns
       ``initialize_credentialed_raises`` -> exception the credentialed call raises
       ``initialize_sleep_s``         -> seconds every `initialize()` blocks for
+      ``initialize_after_heal``      -> what a BARE `initialize()` returns AFTER a
+                                        credentialed one succeeded (default True)
       ``last_error``                 -> the `(code, text)` tuple (default (0, ...))
 
     ⭐ The bare and credentialed forms are SEPARATE scenario keys because the whole
     branch under test is "answer the detector one way, the heal another". A double
     that answered both identically could not express the `-6`-then-healed sequence
     at all.
+
+    ⭐ AND IT IS STATEFUL ACROSS THE HEAL (WR-02). A real terminal that accepts a
+    credentialed `initialize()` then answers a BARE one truthily — that is what
+    "the session is authorized now" MEANS, and it is the only thing the re-probe
+    can measure. `initialize_after_heal` is the knob that expresses the case the
+    re-probe exists for: the broker accepted the CONNECTION and rejected the
+    ACCOUNT, so the credentialed call returned truthy and the session is still
+    down. A stateless double could not tell those two apart, which is exactly why
+    the un-probed `healed` verdict looked correct.
     """
 
     def __init__(self, scenario: dict) -> None:
@@ -134,6 +145,7 @@ class _FakeMt5:
         self._MetaTrader5__conn = _FakeRpycConn()
         self.initialize_kwargs: list[dict] = []
         self.call_order: list[str] = []
+        self.credentialed_accepted = False
 
     def initialize(self, **kwargs):
         credentialed = "login" in kwargs
@@ -141,6 +153,8 @@ class _FakeMt5:
         self.call_order.append(
             "initialize_credentialed" if credentialed else "initialize"
         )
+        if not credentialed and self.credentialed_accepted:
+            return self._scenario.get("initialize_after_heal", True)
         sleep_s = self._scenario.get("initialize_sleep_s")
         if sleep_s:
             # A REAL blocking sleep, on whatever thread the call arrives on — the
@@ -155,9 +169,12 @@ class _FakeMt5:
         exc = self._scenario.get(key)
         if exc is not None:
             raise exc
-        return self._scenario.get(
+        result = self._scenario.get(
             "initialize_credentialed" if credentialed else "initialize", True
         )
+        if credentialed and result:
+            self.credentialed_accepted = True
+        return result
 
     def last_error(self):
         return self._scenario.get("last_error", (0, "unknown"))
@@ -650,7 +667,20 @@ async def test_a_minus_six_terminal_is_healed_with_the_values_from_the_environme
     with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
         assert await mt5_relogin.heal_mt5_terminal_session() is None
 
-    assert fake.call_order == ["initialize", "initialize_credentialed"]
+    # ⭐ THREE calls, and the THIRD is WR-02's re-probe: the credential-free
+    # detector run AGAIN, inside the same lease and the same budget, because the
+    # credentialed call's own boolean is documented-as-untrustworthy and was
+    # nonetheless the sole basis for the `healed` verdict.
+    assert fake.call_order == [
+        "initialize",
+        "initialize_credentialed",
+        "initialize",
+    ]
+    assert len([kw for kw in fake.initialize_kwargs if "login" in kw]) == 1, (
+        "the credentialed form must be called EXACTLY once — the re-probe is the "
+        "credential-FREE detector, and a probe that carried a credential could "
+        "not be used to decide whether to send one"
+    )
     credentialed = [kw for kw in fake.initialize_kwargs if "login" in kw]
     assert len(credentialed) == 1, f"expected ONE credentialed call: {credentialed}"
     assert credentialed[0]["login"] == int(_FAKE_LOGIN)
@@ -678,9 +708,115 @@ async def test_an_ipc_fault_is_not_healed_and_the_verdict_names_the_code(
 
     assert fake.call_order == ["initialize"]
     assert not any("login" in kw for kw in fake.initialize_kwargs)
-    message = _records(caplog)[-1].getMessage()
+    record = _records(caplog)[-1]
+    message = record.getMessage()
     assert str(ipc_code) in message
     assert "healed" not in message.replace("not_healed", "")
+
+    # ⛔ WR-01 (severity). A wedged terminal behind a modal login dialog is a REAL
+    # gateway outage; it was emitted at INFO while a merely-unset
+    # `MT5_GATEWAY_PORT` is emitted at WARNING by `_log_configuration_fault_once`.
+    # A severity inversion inside a milestone whose purpose is removing silent
+    # failure.
+    assert record.levelno == logging.WARNING, (
+        f"a `not_healed` verdict was logged at {record.levelname}, not WARNING — "
+        "it is logged BELOW a config typo while naming a real gateway outage"
+    )
+    # ⛔ WR-01 (detail). `code=0` is the sentinel `_raise_last` uses for THREE
+    # distinct faults, so the code alone cannot be the whole verdict.
+    assert "No IPC connection" in message, (
+        "the verdict threw away the already-scrubbed failure detail — the "
+        "operator's only artefact was a bare code, and `code=0` names three "
+        "different faults (WR-01)"
+    )
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
+async def test_a_heal_the_broker_did_not_honour_is_NOT_reported_as_healed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ WR-02 — THE VERDICT IS MEASURED, NOT ASSUMED.
+
+    `_heal_blocking` used to return `healed` on the sole basis that
+    `initialize_with_credentials` did not raise — i.e. it named the verdict after
+    exactly the signal both docstrings say, twice and emphatically, must never be
+    trusted ("the oracle is the NEXT probe, never this call's own boolean"). There
+    was no next probe anywhere in the module, in `main.lifespan`, or on the boot
+    path.
+
+    THE CASE THIS CATCHES, and it is the silent-UNKNOWN class the milestone has
+    spent four phases closing: the broker accepts the CONNECTION and rejects the
+    ACCOUNT — a password rotated twice, a server rename. The credentialed
+    `initialize()` returns TRUTHY, the gateway is still down, and the log read
+    `healed`. An operator reads a green line and looks elsewhere.
+    """
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            "initialize": False,
+            "last_error": (-6, "Terminal: Authorization failed"),
+            "initialize_credentialed": True,
+            # The terminal STILL has no authorized account after the heal.
+            "initialize_after_heal": False,
+        },
+    )
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert fake.call_order == [
+        "initialize",
+        "initialize_credentialed",
+        "initialize",
+    ]
+    record = _records(caplog)[-1]
+    message = record.getMessage()
+    assert "still_unauthorized" in message, (
+        f"the heal reported {message!r} for a terminal that is STILL at -6. The "
+        "credentialed call's own boolean is not an oracle — re-probe (WR-02)."
+    )
+    assert message.replace("not_healed", "").count("healed") == 0
+    assert record.levelno == logging.WARNING
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
+async def test_a_verdict_detail_echoed_back_by_the_terminal_is_redacted_BY_VALUE(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ WR-01's detail is carried, and that is exactly why it must be redacted BY
+    VALUE rather than merely shape-scrubbed.
+
+    `Mt5ClientError.__init__` scrubs at construction, but that scrub is SHAPE
+    based — and this text is the TERMINAL's own `last_error()` message, which a
+    broker is free to echo the submitted account or server back into as bare
+    literals. `_heal_blocking` has the three values in scope, so the shipped
+    by-value control travels with them (T-164.6.2-12).
+
+    ⛔ Without this case, WR-01's fix would have OPENED a disclosure path while
+    closing a legibility one.
+    """
+    _set_full_env(monkeypatch)
+    _install_client(
+        monkeypatch,
+        {
+            "initialize": False,
+            "last_error": (
+                -10004,
+                f"No IPC connection for {_FAKE_LOGIN} on {_FAKE_SERVER}",
+            ),
+        },
+    )
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    records = _records(caplog)
+    _assert_no_credential_value_escaped(records)
+    assert "[REDACTED]" in records[-1].getMessage(), (
+        "nothing was redacted at all — the absence assertions above would pass "
+        "vacuously against a message that dropped the detail entirely"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -793,19 +929,18 @@ async def test_a_hung_terminal_is_abandoned_at_the_budget_and_raises_nothing(
     assert any("did not complete" in m for m in messages), messages
 
 
-def test_the_heal_body_sits_entirely_inside_one_top_level_except_exception() -> None:
-    """THE NEVER-RAISES PROPERTY AS A SHAPE, and it is not a duplicate of the
-    behaviour tests.
+def _heal_guard_defects(source: str) -> list[str]:
+    """THE NEVER-RAISES PREDICATE, as a reusable function returning NAMED defects.
 
-    A future edit can add a statement OUTSIDE the guard — an env read, a log line,
-    an early `import` — and no behaviour test above would notice, because none of
-    them injects a failure at a statement that does not exist yet. This asserts the
-    structure instead: the function's body is EXACTLY one `Try`, its single handler
-    catches bare `Exception`, and the kill-switch read is INSIDE it.
+    Extracted from the test below so the WR-04 calibration case can MUTATE the
+    source and observe the predicate go red. A structural gate that is only ever
+    run against the file it polices is indistinguishable from one that returns the
+    empty list — the same argument `test_the_criterion_1_predicate_reds_on_a_mutant_
+    with_the_entry_excised` already makes for the lifespan pin.
     """
-    source = textwrap.dedent(inspect.getsource(mt5_relogin.heal_mt5_terminal_session))
     fn = ast.parse(source).body[0]
-    assert isinstance(fn, ast.AsyncFunctionDef)
+    if not isinstance(fn, ast.AsyncFunctionDef):
+        return ["the parsed node is not an async function"]
 
     body = [
         node
@@ -816,27 +951,205 @@ def test_the_heal_body_sits_entirely_inside_one_top_level_except_exception() -> 
             and isinstance(node.value.value, str)
         )
     ]
-    assert len(body) == 1 and isinstance(body[0], ast.Try), (
-        f"`heal_mt5_terminal_session` has {len(body)} top-level statements outside "
-        f"its docstring; exactly ONE is allowed and it must be the `try`. A "
-        f"statement outside the guard can raise into `main.lifespan`'s "
-        f"`_crash_handler`, which calls SHUTDOWN.set() and stops the dispatch, "
-        f"watchdog and enqueue loops behind a green /health."
+    defects: list[str] = []
+    if len(body) != 1 or not isinstance(body[0], ast.Try):
+        return [
+            f"{len(body)} top-level statements outside the docstring; exactly ONE "
+            "is allowed and it must be the `try`"
+        ]
+
+    guard = body[0]
+    if len(guard.handlers) != 1:
+        defects.append(f"expected ONE handler, got {len(guard.handlers)}")
+    else:
+        handler = guard.handlers[0]
+        if not (
+            isinstance(handler.type, ast.Name) and handler.type.id == "Exception"
+        ):
+            defects.append("the handler does not catch bare `Exception`")
+        # ⛔ IN-06 — THE HANDLER BODY IS PART OF THE PROPERTY. `logger.warning`'s
+        # ARGUMENTS are evaluated before it is entered, and stdlib `logging`
+        # swallows formatting errors during emit but NOT the evaluation of its
+        # arguments. `str(exc)` on an exception whose `__str__` misbehaves, or a
+        # RecursionError/MemoryError at an exhausted stack, escapes the guard
+        # from INSIDE it. The body must therefore be exactly one nested `Try`
+        # with a `BaseException` handler.
+        nested = [node for node in handler.body if isinstance(node, ast.Try)]
+        if len(handler.body) != 1 or not nested:
+            defects.append(
+                f"the handler body has {len(handler.body)} statements and "
+                f"{len(nested)} nested `try` — it must be EXACTLY one nested "
+                "`try`, because its own argument evaluation is unguarded (IN-06)"
+            )
+        else:
+            inner = nested[0]
+            inner_types = [
+                h.type.id
+                for h in inner.handlers
+                if isinstance(h.type, ast.Name)
+            ]
+            if inner_types != ["BaseException"]:
+                defects.append(
+                    f"the nested handler catches {inner_types}, not "
+                    "['BaseException'] — a fallback narrower than the failure "
+                    "class it catches is not a fallback"
+                )
+            if inner.finalbody or inner.orelse:
+                defects.append(
+                    "the nested guard grew a `finally:`/`else:` — same escape "
+                    "route as the outer one"
+                )
+
+    # ⛔ WR-04 — `finalbody` and `orelse` sit OUTSIDE the handler. A cleanup
+    # `finally:` (a metric flush, a bookkeeping line, a `logger.info` formatting a
+    # value that is `None` on the early-return paths) raises straight past the
+    # catch, reaches `main.lifespan`'s `_crash_handler`, and `SHUTDOWN.set()`
+    # stops the dispatch, watchdog and enqueue loops behind a green `/health` —
+    # the exact silent analytics outage this gate is the control for. The gate
+    # asserted none of this and stayed green over both.
+    if guard.finalbody:
+        defects.append(
+            "the guard grew a `finally:` — its body sits OUTSIDE the handler, so "
+            "a raise there reaches _crash_handler and stops the worker loops "
+            "behind a green /health"
+        )
+    if guard.orelse:
+        defects.append("the guard grew an `else:` — same escape route")
+
+    dumped = ast.dump(ast.Module(body=guard.body, type_ignores=[]))
+    if "mt5_enabled_server" not in dumped:
+        defects.append(
+            "the kill-switch read is no longer inside the guard — the guard must "
+            "cover the body from the kill switch onward"
+        )
+    return defects
+
+
+def _heal_source() -> str:
+    return textwrap.dedent(inspect.getsource(mt5_relogin.heal_mt5_terminal_session))
+
+
+def test_the_heal_body_sits_entirely_inside_one_top_level_except_exception() -> None:
+    """THE NEVER-RAISES PROPERTY AS A SHAPE, and it is not a duplicate of the
+    behaviour tests.
+
+    A future edit can add a statement OUTSIDE the guard — an env read, a log line,
+    an early `import` — and no behaviour test above would notice, because none of
+    them injects a failure at a statement that does not exist yet. This asserts the
+    structure instead: the function's body is EXACTLY one `Try`, it has NO
+    `finally:` and NO `else:` (WR-04 — both sit outside the handler), its single
+    handler catches bare `Exception`, that handler's own body is itself guarded
+    (IN-06), and the kill-switch read is INSIDE it.
+    """
+    assert _heal_guard_defects(_heal_source()) == []
+
+
+#: The mutants, and each one is an escape route the gate was blind to before
+#: WR-04/IN-06. ⛔ Every entry must RED the predicate; a mutant the predicate
+#: tolerates is a hole, and this list is the proof the new assertions BITE rather
+#: than merely being present. The file already uses this idiom in
+#: `test_the_criterion_1_predicate_reds_on_a_mutant_with_the_entry_excised`.
+#:
+#: ⛔ EVERY MUTANT MUST BE VALID PYTHON, and that is not pedantry. A first draft
+#: spliced `finally:` BEFORE the `except:` — which is a SyntaxError, so the
+#: calibration "passed" without the `finalbody` assertion ever being reached. A
+#: mutant that cannot parse tests the parser, not the gate; the assertion below
+#: therefore requires a clean parse AND a named defect.
+_HEAL_GUARD_MUTANTS: dict[str, tuple[str, str]] = {
+    # Appended at the OUTER `try`'s indent level, after every handler, so it
+    # attaches to the guard itself — the real shape a cleanup edit would take.
+    "finally-outside-the-handler": (
+        "APPEND",
+        "\n    finally:\n        raise RuntimeError('cleanup')\n",
+    ),
+    "else-outside-the-handler": (
+        "APPEND",
+        "\n    else:\n        raise RuntimeError('else')\n",
+    ),
+    "narrowed-handler": (
+        "    except Exception as exc:",
+        "    except ValueError as exc:",
+    ),
+    # IN-06's two halves: a fallback NARROWER than the failure class it catches,
+    # and an UNGUARDED statement added to the handler body beside the nested try.
+    "fallback-narrower-than-the-failure": (
+        "        except BaseException:",
+        "        except Exception:",
+    ),
+    "handler-body-grew-an-unguarded-statement": (
+        "APPEND",
+        "\n        logger.info('an unguarded extra %s', type(exc).__name__)\n",
+    ),
+}
+
+
+@pytest.mark.parametrize("mutant_id", sorted(_HEAL_GUARD_MUTANTS))
+def test_the_never_raises_predicate_REDS_on_every_escape_route(mutant_id: str) -> None:
+    """⛔ THE CALIBRATION. Without it, the WR-04 assertions and the IN-06 one are
+    claims about the source rather than a gate: a predicate that never fires is
+    indistinguishable from one that cannot.
+
+    Each mutant is spliced into a COPY of the shipped source — nothing on disk is
+    touched — and the predicate must PARSE it and then name a defect. ⛔ A splice
+    that silently failed to apply would read as a passing gate, so the mutation is
+    asserted to have changed the text first.
+    """
+    needle, replacement = _HEAL_GUARD_MUTANTS[mutant_id]
+    source = _heal_source()
+    if needle == "APPEND":
+        mutated = source.rstrip("\n") + replacement
+    else:
+        assert needle in source, (
+            f"the mutation anchor {needle!r} is no longer in the source — the "
+            "mutant would not apply and this test would pass VACUOUSLY"
+        )
+        mutated = source.replace(needle, replacement, 1)
+    assert mutated != source
+
+    # ⛔ Parsed OUTSIDE the try, deliberately: an unparseable mutant must FAIL
+    # this test rather than be excused by it.
+    defects = _heal_guard_defects(mutated)
+    assert defects, (
+        f"the never-raises predicate tolerated the {mutant_id!r} mutant — that "
+        "escape route reaches `main.lifespan`'s `_crash_handler`, which calls "
+        "SHUTDOWN.set() and stops the dispatch, watchdog and enqueue loops behind "
+        "a green /health"
     )
 
-    handlers = body[0].handlers
-    assert len(handlers) == 1, f"expected ONE handler, got {len(handlers)}"
-    assert isinstance(handlers[0].type, ast.Name), handlers[0].type
-    assert handlers[0].type.id == "Exception", (
-        f"the handler catches {handlers[0].type.id}, not bare `Exception`. ⛔ "
-        f"Narrowing it re-opens the crash-handler route."
-    )
 
-    dumped = ast.dump(ast.Module(body=body[0].body, type_ignores=[]))
-    assert "mt5_enabled_server" in dumped, (
-        "the kill-switch read is no longer inside the guard — the guard must cover "
-        "the body from the kill switch onward"
+async def test_the_handler_body_cannot_escape_the_guard_either(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ IN-06, BEHAVIOURALLY. The structural half above says the handler body is
+    wrapped; this says the wrap WORKS against the failure it exists for.
+
+    The phase's declared standard is "structurally incapable", not "unlikely", and
+    `type(exc).__name__` / `scrub_freeform_string(str(exc))` are evaluated as
+    ARGUMENTS — i.e. before `logger.warning` is entered and outside any guard.
+    An exception whose `__str__` raises is the reachable representative of that
+    class.
+    """
+
+    class _UnprintableError(Exception):
+        def __str__(self) -> str:
+            raise RuntimeError("this exception cannot describe itself")
+
+    def _boom(*_a: object, **_k: object) -> str:
+        raise _UnprintableError()
+
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+    monkeypatch.setattr(mt5_relogin, "_heal_blocking", _boom)
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    records = _records(caplog)
+    assert records, (
+        "the heal swallowed a failure and emitted NOTHING — silence is the defect "
+        "class this milestone removes"
     )
+    assert "did not complete" in records[-1].getMessage()
 
 
 # --------------------------------------------------------------------------- #

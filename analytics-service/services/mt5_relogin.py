@@ -61,7 +61,12 @@ from typing import Final
 
 from services.closed_sets import mt5_enabled_server
 from services.mt5_client import MT5_REQUEST_TIMEOUT_S as _MT5_REQUEST_TIMEOUT_S
-from services.mt5_client import Mt5Client, Mt5ClientError, mt5_terminal_key
+from services.mt5_client import (
+    Mt5Client,
+    Mt5ClientError,
+    _redact_credential_values,
+    mt5_terminal_key,
+)
 from services.mt5_concurrency import mt5_terminal_lease
 from services.mt5_validation import Mt5ValidationError, parse_mt5_credentials
 from services.redact import scrub_freeform_string
@@ -137,6 +142,7 @@ _MT5_RELOGIN_LEASE_WAIT_ENV: Final[str] = "MT5_RELOGIN_LEASE_WAIT_S"
 #   |                                                 | failed attempt paying a |
 #   |                                                 | SECOND full 30 s here   |
 #   | `initialize_with_credentials` -> `initialize(…)` | 20 s MT5 IPC / 30 s rpyc|
+#   | the WR-02 RE-PROBE -> `initialize()`             | 20 s MT5 IPC / 30 s rpyc|
 #
 # The old `_MT5_REQUEST_TIMEOUT_S + 10.0` (40 s) bounded ~80 s of work, so a
 # genuinely-`-6` terminal on a slow Wine bridge — the condition under which a
@@ -145,7 +151,7 @@ _MT5_RELOGIN_LEASE_WAIT_ENV: Final[str] = "MT5_RELOGIN_LEASE_WAIT_S"
 # in-flight credentialed `initialize` is abandoned against the shared terminal,
 # and whether the session came up is unknowable from the log. Still DERIVED from
 # the rpyc bound (the house idiom) so a retune carries through.
-_MT5_RELOGIN_ROUND_TRIPS: Final[int] = 3
+_MT5_RELOGIN_ROUND_TRIPS: Final[int] = 4
 
 # The slack over the round-trips, covering the unbounded `rpyc.classic.connect`.
 _MT5_RELOGIN_CONNECT_SLACK_S: Final[float] = 10.0
@@ -178,6 +184,20 @@ _MT5_RELOGIN_BUDGET_CEILING_S: Final[float] = 300.0
 # timed-out acquire holds nothing, bumps nothing and stamps nothing
 # (`mt5_terminal_lease`'s release discipline), so skipping costs the next holder
 # exactly zero.
+#
+# ⚠️ IN-04 — THE ASYMMETRY, STATED RATHER THAN IMPLIED. This bound is deliberate
+# on ONE side only: the heal refuses to queue behind real work, but real work
+# DOES queue behind the heal. The three job call sites
+# (`run_derive_broker_dailies_job`, `_fetch_mt5_account_balance`,
+# `_fetch_mt5_account_rows`) acquire the same lease with `wait_s=None`, i.e.
+# UNBOUNDED. Concretely: the worker boots, `dispatch_loop` claims a
+# `derive_broker_dailies` job within a second or two, the heal already holds the
+# lease, and the job waits inside its own unbounded acquire for up to the whole
+# budget. That is harmless against the 15-minute dispatch ceiling and it is the
+# direction the "a busy terminal is a terminal somebody is already using"
+# argument above does NOT cover — and it grows in proportion to any budget
+# increase, which is why `_MT5_RELOGIN_BUDGET_CEILING_S` is derived from that
+# dispatch ceiling rather than picked.
 _MT5_RELOGIN_LEASE_WAIT_DEFAULT_S: Final[float] = 2.0
 
 # Its ceiling is ONE rpyc round-trip, and that follows from the argument above:
@@ -190,7 +210,19 @@ _MT5_RELOGIN_LEASE_WAIT_CEILING_S: Final[float] = _MT5_REQUEST_TIMEOUT_S
 # fixed strings: they name what happened to the SESSION and carry no credential,
 # no host and no port.
 _VERDICT_ALREADY_AUTHORIZED: Final[str] = "already_authorized"
+
+#: ⭐ WR-02 — this token is now MEASURED. It used to be returned on the sole basis
+#: that ``initialize_with_credentials`` did not raise, i.e. named after exactly
+#: the signal both docstrings say must never be trusted. ``_heal_blocking`` now
+#: re-runs the credential-free detector inside the same lease and the same budget
+#: before returning it, so the log line and the doctrine agree.
 _VERDICT_HEALED: Final[str] = "healed"
+
+#: Every non-heal verdict starts with this, and the caller's log LEVEL keys off
+#: it (WR-01). ⛔ A new failure verdict that does not carry the prefix is silently
+#: demoted to INFO — `_heal_blocking`'s verdicts are built through `_not_healed`
+#: for exactly that reason.
+_VERDICT_NOT_HEALED_PREFIX: Final[str] = "not_healed:"
 
 #: Reason keys already logged in THIS process. D-02 — an absent or unparseable
 #: configuration must LOG ONCE and then stay quiet: the heal runs once per boot
@@ -381,6 +413,39 @@ def read_env_gateway_endpoint() -> tuple[str, int] | None:
     return raw_host, port
 
 
+def _not_healed(
+    reason: str, err: Mt5ClientError, login: int, password: str, server: str
+) -> str:
+    """A ``not_healed`` verdict that CARRIES THE DETAIL — WR-01.
+
+    The verdict used to be ``not_healed:ipc_fault:code={code}`` and nothing else,
+    which threw away a failure description that was already safe to log. Two
+    measured consequences, both unactionable for an operator:
+
+      * ``code=0`` is the sentinel ``_raise_last`` uses for THREE distinct faults
+        — an unknown ``last_error``, a malformed ``last_error`` shape, and a
+        transport raise converted by its own except arm — so the one verdict named
+        neither the transport class nor the reason.
+      * it named no remedy. ``-10005`` is a modal login dialog on the VNC screen;
+        ``-10004`` is a dead IPC pipe. Same verdict, opposite remedies.
+
+    ⛔ REDACTED BY VALUE, not merely shape-scrubbed. ``Mt5ClientError.__init__``
+    scrubs at construction, but that scrub is SHAPE-based — and this text can be
+    the TERMINAL's own ``last_error()`` message, which a broker is free to echo
+    the submitted account or server back into. The three values are in scope here,
+    so the by-value control travels with them exactly as it does inside the client
+    (T-164.6.2-12: a value must never reach a log line).
+
+    ⛔ ``_redact_credential_values`` is imported from ``services.mt5_client``
+    despite its leading underscore, DELIBERATELY. It is the SHIPPED control and
+    the phase's signature-derived gate is written against that exact name; a
+    second copy here would be the drift the gate exists to prevent, and renaming
+    it for tidiness would silently take it out of the gate's derivation.
+    """
+    detail = _redact_credential_values(str(err), login, password, server)
+    return f"{_VERDICT_NOT_HEALED_PREFIX}{reason}:{detail}"
+
+
 def _heal_blocking(
     host: str, port: int, login: int, password: str, server: str
 ) -> str:
@@ -406,9 +471,26 @@ def _heal_blocking(
         NOTHING. Applying the session remedy to an IPC fault re-collapses the
         distinction Phase 164.1 built and Phase 164.8.3 shipped.
 
-    ⛔ The credentialed verb's return value is NOT inspected and must never be
-    treated as proof the heal worked — the oracle for "is the session authorized"
-    is the NEXT probe, never this call's own boolean (RESEARCH question TWO).
+    ⚠️ IN-02 — ``-6`` IS ONLY EVER OBSERVABLE THROUGH ``last_error()``, so the
+    branch table above is conditional on that SECOND round-trip working. If
+    ``last_error()`` itself raises, or answers a falsy/malformed shape,
+    ``_raise_last`` produces ``code=0`` and the fault is classified as an IPC
+    fault and healed NOT AT ALL. The fail-closed direction is the right one — a
+    credential is never sent on a guess — but the consequence is worth stating
+    plainly: the ONE fault this module exists for is UNDETECTABLE whenever the
+    second round-trip is the broken one. The verdict's detail (below) is what
+    tells an operator which of those it was.
+
+    ⛔ THE CREDENTIALED VERB'S RETURN VALUE IS NOT INSPECTED — the oracle for "is
+    the session authorized" is the NEXT PROBE, never this call's own boolean
+    (RESEARCH question TWO). ⭐ WR-02: that next probe is now ACTUALLY TAKEN. It
+    was not, and ``_VERDICT_HEALED`` was returned on the sole basis that
+    ``initialize_with_credentials`` did not raise — i.e. the verdict was named
+    after exactly the signal the design refuses to trust, and it was the only
+    thing an operator saw. A broker that accepts the connection but rejects the
+    account (a password rotated twice, a server rename) returns TRUTHY, and the
+    log read ``healed`` over a gateway that was still down. The re-probe is the
+    same credential-FREE detector, inside the same lease and the same budget.
 
     ⛔ An ``Mt5SessionAbandoned`` raised by any step is NOT absorbed here. It is a
     PLAIN exception on purpose (D-42) so an OUR-INFRASTRUCTURE refusal can never
@@ -421,10 +503,18 @@ def _heal_blocking(
             client.assert_session_authorized()
         except Mt5ClientError as err:
             if err.code != _MT5_NO_AUTHORIZED_ACCOUNT_CODE:
-                return f"not_healed:ipc_fault:code={err.code}"
+                return _not_healed(
+                    f"ipc_fault:code={err.code}", err, login, password, server
+                )
         else:
             return _VERDICT_ALREADY_AUTHORIZED
         client.initialize_with_credentials(login, password, server)
+        try:
+            client.assert_session_authorized()
+        except Mt5ClientError as err:
+            return _not_healed(
+                f"still_unauthorized:code={err.code}", err, login, password, server
+            )
         return _VERDICT_HEALED
     finally:
         # Closed on EVERY path, success and failure alike. `close` is deliberately
@@ -496,12 +586,40 @@ async def heal_mt5_terminal_session() -> None:
                 ),
                 timeout=_relogin_budget_s(),
             )
-        logger.info("mt5 boot heal: %s", verdict)
+        # ⛔ WR-01 — THE SEVERITY FOLLOWS THE VERDICT, and it did not. Every
+        # outcome was INFO, so a wedged terminal behind a modal login dialog
+        # (`-10005`) — a real gateway outage — was logged one level BELOW a
+        # merely-unset `MT5_GATEWAY_PORT`, which `_log_configuration_fault_once`
+        # emits at WARNING. That is a severity inversion inside a milestone whose
+        # stated purpose is removing silent failure.
+        if verdict.startswith(_VERDICT_NOT_HEALED_PREFIX):
+            logger.warning("mt5 boot heal: %s", verdict)
+        else:
+            logger.info("mt5 boot heal: %s", verdict)
     except Exception as exc:  # noqa: BLE001 — see the docstring; this is the control
-        logger.warning(
-            "mt5 boot heal did not complete — continuing without it; the terminal "
-            "keeps whatever session it already has and the next boot will try "
-            "again (exc_class=%s scrubbed=%s)",
-            type(exc).__name__,
-            scrub_freeform_string(str(exc)),
-        )
+        # ⛔ IN-06 — THE HANDLER BODY IS ITSELF GUARDED, because "structurally
+        # incapable of raising" is the declared standard and `logger.warning`'s
+        # ARGUMENTS are evaluated before it is entered. stdlib `logging` swallows
+        # formatting errors during emit; it does NOT swallow the evaluation of
+        # `type(exc).__name__` or `scrub_freeform_string(str(exc))`. An exception
+        # whose `__str__` misbehaves, or a `RecursionError`/`MemoryError` arriving
+        # at an already-exhausted stack, escapes the outer guard from INSIDE it and
+        # reaches `_crash_handler` — the one route this whole module is built to
+        # close. ⛔ `BaseException`, not `Exception`: `RecursionError` is an
+        # `Exception` but `MemoryError`'s neighbours in the stack-exhaustion class
+        # are not, and a fallback that is itself narrower than the failure it
+        # catches is not a fallback. The fallback line takes NO arguments to
+        # evaluate, so it has nothing left that can raise.
+        try:
+            logger.warning(
+                "mt5 boot heal did not complete — continuing without it; the "
+                "terminal keeps whatever session it already has and the next boot "
+                "will try again (exc_class=%s scrubbed=%s)",
+                type(exc).__name__,
+                scrub_freeform_string(str(exc)),
+            )
+        except BaseException:  # noqa: BLE001 — see the comment; this is the control
+            logger.warning(
+                "mt5 boot heal did not complete, and the failure could not be "
+                "described — continuing without it"
+            )
