@@ -3123,7 +3123,106 @@ _ESCAPE_CASES = (
         ),
         id="credential-substring-overlap",
     ),
+    pytest.param(
+        _EscapeCase(
+            # ⛔ IN-01 (round 2) — A NON-ASCII CREDENTIAL, WHERE `repr()`,
+            # `ascii()` AND `json.dumps()` ALL THREE DIVERGE. `repr()` keeps the
+            # character verbatim, `json.dumps()` emits the `\u00e4` escape, and
+            # `ascii()` emits the `\xe4` one — ONE password, THREE distinct byte
+            # sequences, of which the shipped loop matched two. A broker password
+            # carrying an umlaut is not exotic.
+            #
+            # ⛔ The renderings below are HAND-TYPED, like every other case here,
+            # and that rule is the reason this gap was findable at all: a test that
+            # derived its expectation by calling the same helper it polices would
+            # have forgotten exactly the form the helper forgot.
+            #
+            # ⚠️ STATED PLAINLY: the `ä`/`\xe4` entries here are ABSENCE checks
+            # in this gate's established idiom — the driven message is a kwargs
+            # `repr()`, which emits neither form, exactly as the existing quote
+            # case's `json` rendering does not appear in ITS message either. The
+            # BITING gate for the `ascii()` form is
+            # `test_CREDENTIAL_REDACTION_the_ascii_rendering_is_covered_not_merely_claimed`
+            # below, which builds its message with `%a`. This case's load-bearing
+            # half is the RAW non-ASCII literal.
+            password="pässw0rd",
+            server="Bröker-Demo-2",
+            #   raw / repr body:  pässw0rd
+            #   json body:        p\u00e4ssw0rd
+            #   ascii body:       p\xe4ssw0rd
+            password_renderings=(
+                "pässw0rd",
+                r"p\u00e4ssw0rd",
+                r"p\xe4ssw0rd",
+            ),
+            server_renderings=(
+                "Bröker-Demo-2",
+                r"Br\u00f6ker-Demo-2",
+                r"Br\xf6ker-Demo-2",
+            ),
+        ),
+        id="credential-non-ascii",
+    ),
 )
+
+
+def test_CREDENTIAL_REDACTION_the_ascii_rendering_is_covered_not_merely_claimed():
+    """⛔ IN-01 (164.6.2 round 2) — `_credential_renderings` PROMISED AN ABSOLUTE
+    AND DELIVERED TWO FORMS OF THREE.
+
+    Its first line reads *"Every byte sequence ONE credential value can reach a log
+    as"*, and the `ascii()` / `%a` / `{!a}` form was absent. MEASURED against the
+    shipped helper on 2026-09-14: with `password="pässw0rd"`, the `ascii` body
+    `p\\xe4ssw0rd` survived a `_redact_credential_values` pass VERBATIM while the
+    raw and `json.dumps` forms were masked.
+
+    ⛔ THIS CANNOT BE DRIVEN THROUGH THE VERB GATE ABOVE, which is why it is a
+    separate case. That gate builds its message as a kwargs `repr()` — the shape
+    `mt5linux` actually produces — and a `repr()` never emits the `\\xe4` form. The
+    producer here is `%a`, so the message is built with `%a`.
+
+    ⚠️ NO LIVE CALL SITE PRODUCING THIS FORM IS KNOWN — the round-2 review looked
+    and found none, and this test does NOT claim one. It pins the CONTRACT the
+    docstring states, on the argument that a redactor documented as covering "every
+    byte sequence" is read by every future caller as a licence not to check. The
+    alternative was to narrow the absolute, which is the more expensive of the two.
+    """
+    password = "pässw0rd"
+    server = "Bröker-Demo-2"
+
+    # `%a` is the reachable producer of this rendering. (`repr()` would keep the
+    # character verbatim and is already covered by the corpus case above.)
+    message = (
+        "rpyc remote error while eval'ing "
+        "mt5.initialize(login=%d, password=%a, server=%a)"
+        % (_FAKE_LOGIN, password, server)
+    )
+    # The mutant-detector: the message really does carry the ascii form, so an
+    # assertion below cannot pass because the form was never there.
+    assert r"p\xe4ssw0rd" in message, message
+
+    from services.mt5_client import _redact_credential_values
+
+    out = _redact_credential_values(message, _FAKE_LOGIN, password, server)
+
+    # ⛔ HAND-TYPED renderings, never computed from the helper under test.
+    for label, rendering in (
+        ("password (raw)", password),
+        ("password (ascii body)", r"p\xe4ssw0rd"),
+        ("server (raw)", server),
+        ("server (ascii body)", r"Br\xf6ker-Demo-2"),
+        ("login", str(_FAKE_LOGIN)),
+    ):
+        assert rendering not in out, (
+            f"the by-value pass disclosed the {label} as {rendering!r}: {out!r}. "
+            "⛔ `_credential_renderings` documents itself as covering EVERY byte "
+            "sequence a credential can reach a log as; `ascii()` / `%a` / `{!a}` "
+            "is one of them (IN-01 round 2)."
+        )
+    assert "[REDACTED]" in out, (
+        f"nothing was redacted at all — the absences above would pass vacuously: "
+        f"{out!r}"
+    )
 
 
 def test_CREDENTIAL_REDACTION_the_derived_roster_did_not_collapse():

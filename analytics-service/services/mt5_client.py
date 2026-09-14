@@ -386,15 +386,37 @@ def _credential_renderings(literal: str) -> tuple[str, ...]:
     closing quote between them), so the by-value pass is the SOLE thing standing
     between a broker password and a PUBLIC Actions log.
 
-    Returns the raw literal plus the ESCAPED BODIES ``repr()`` and
-    ``json.dumps()`` produce — the two differ for a value carrying both quote
-    types, and a structured-log encoder reaches for the JSON one. Empty renderings
-    are dropped: ``"".replace`` splices the marker between every character.
+    Returns the raw literal plus the ESCAPED BODIES ``repr()``, ``ascii()`` and
+    ``json.dumps()`` produce — the three differ for a value carrying both quote
+    types or any non-ASCII character, and a structured-log encoder reaches for the
+    JSON one. Empty renderings are dropped: ``"".replace`` splices the marker
+    between every character.
+
+    ⛔ IN-01 (164.6.2 round 2) — ``ascii()`` IS THE THIRD FORM AND IT WAS MISSING
+    WHILE THE FIRST LINE OF THIS DOCSTRING PROMISED AN ABSOLUTE. ``repr()`` and
+    ``ascii()`` are IDENTICAL for an ASCII-only value and DIVERGE the moment one
+    is not: MEASURED, ``ascii("pässw0rd")[1:-1]`` is ``p\\xe4ssw0rd`` while
+    ``repr()`` yields ``pässw0rd`` and ``json.dumps()`` yields ``p\\u00e4ssw0rd``
+    — three distinct byte sequences for one password, of which the loop matched
+    two. The ``%a`` conversion and ``{!a}`` are the reachable producers.
+
+    ⚠️ NO LIVE CALL SITE PRODUCING THE ``ascii()`` FORM WAS FOUND (the 164.6.2
+    round-2 review looked and says so), so this form is UNPROVEN-REACHABLE rather
+    than measured-reachable. It is added anyway, because the alternative was to
+    narrow an absolute this function's whole contract rests on: a redactor
+    documented as covering "every byte sequence" is read by every future caller as
+    a licence not to check, and a one-line form is cheaper than that ambiguity.
+    A broker password carrying a non-ASCII character is not exotic.
 
     Ordered longest-first so a shorter rendering that is a SUBSTRING of a longer
     one cannot consume part of it and strand the remainder unredacted.
     """
-    forms = {literal, repr(literal)[1:-1], json.dumps(literal)[1:-1]}
+    forms = {
+        literal,
+        repr(literal)[1:-1],
+        ascii(literal)[1:-1],
+        json.dumps(literal)[1:-1],
+    }
     return tuple(sorted((form for form in forms if form), key=len, reverse=True))
 
 
