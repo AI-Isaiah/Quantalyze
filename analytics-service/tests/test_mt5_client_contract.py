@@ -40,12 +40,14 @@ Regression gates — WHY each case matters (Rule 9):
 """
 from __future__ import annotations
 
+import ast
 import pathlib
 import re
 import sys
 import threading
 import time
 import types
+from typing import NamedTuple
 
 import pytest
 from structlog.testing import capture_logs
@@ -1484,6 +1486,15 @@ def test_public_surface_is_exactly_the_contract():
         # surface: it closes our own rpyc socket and wraps no mt5linux call at all.
         "release",
         "restart",
+        # 164.6.2 / D-07 — the two SESSION verbs. Both wrap `initialize()` and
+        # NOTHING else, so the read-only-by-construction property is unchanged:
+        # `initialize` attaches the IPC pipe / authorizes an account, it is not a
+        # read and it is emphatically not the trade path. They are named
+        # `assert_session_authorized` / `initialize_with_credentials` and NOT
+        # `initialize`, which `test_read_only_surface_no_trade_methods` forbids as a
+        # raw-surface attribute — that prohibition is untouched and still bites.
+        "assert_session_authorized",
+        "initialize_with_credentials",
     }
 
 
@@ -2006,6 +2017,14 @@ def test_session_abandoned_cannot_be_absorbed_into_a_credential_verdict():
         "last_error",
         "restart",
         "connect",
+        # 164.6.2 — the two new fenced stages. Added because this case's own
+        # docstring claims the property holds "for EVERY stage name the fence can
+        # carry", and a roster that silently stopped enumerating them would make
+        # that sentence false. Both are near-misses by construction:
+        # `session_authorized` contains `auth`, `initialize_credentialed` contains
+        # `credential` — exactly the shape D-42 exists to keep OUT of the message.
+        "session_authorized",
+        "initialize_credentialed",
     ],
 )
 def test_session_abandoned_message_carries_no_classifier_token(stage):
@@ -2515,3 +2534,1039 @@ async def test_a_construction_under_a_genuinely_held_lease_cannot_be_refused():
     # above non-vacuous: the generation the construction was checked against is
     # genuinely one a release can move.
     assert client.terminal_key == key
+
+
+# --------------------------------------------------------------------------- #
+# 164.6.2 / D-07 — THE CREDENTIAL-FREE DETECTOR AND THE CREDENTIALED HEAL VERB
+#
+# WHY these matter (Rule 9). `Mt5Client.login` opens with a credential-LESS
+# `initialize()` and raises on a falsy return — and a credential-less
+# `initialize()` is EXACTLY the call that returns `-6` when the terminal has no
+# authorized account. So `login()` raises before reaching its own `login()` and
+# is structurally incapable of healing the fault this phase exists for (probed
+# live, 2026-09-13). The heal is `initialize(login=…, password=…, server=…)`.
+#
+# ⛔ AND THE MOMENT A PASSWORD IS PASSED TO `initialize()`, T-134-01 APPLIES TO
+# IT. `mt5linux` 0.1.9 f-string-interpolates its arguments into remotely-eval'd
+# source, so a raw rpyc remote traceback carries the credentials verbatim onto a
+# PUBLIC Actions log. The by-value redaction is therefore a SHIPPED CONTROL
+# travelling with the credentials; the cases below are its behavioural proof and
+# the parametrized gate further down fences the CLASS so a THIRD credentialed
+# verb cannot land without it.
+#
+# ⛔ Every credential here is an obvious DOUBLE (D-04): a fake password, a
+# `Broker-Demo`-shaped server, the host/port this file already uses. This repo is
+# PUBLIC. No real credential, no real broker server, no account number.
+# --------------------------------------------------------------------------- #
+
+# The credential register for this section. Deliberately unmistakable as fakes.
+_FAKE_LOGIN = 4242424
+_FAKE_PASSWORD = "not-a-real-password-42"
+_FAKE_SERVER = "Broker-Demo-2"
+
+
+def test_terminal_key_has_one_spelling_reachable_without_a_client():
+    """Plan 02's blocker, and the two-registries hazard it removes.
+
+    `Mt5Client.__init__` performs a BLOCKING `rpyc.classic.connect` carrying no
+    timeout of its own, so a caller that must take the terminal LEASE before it is
+    willing to open a transport cannot read the key off an instance. The only
+    alternative was a second hand-spelled `f"{host}:{port}"` at the lease site —
+    and the lease key and the epoch key MUST be byte-identical or the fence guards
+    a different terminal than the lock serializes.
+
+    Both forms are asserted against the SAME hand-typed literal rather than
+    against each other: `a == b` would pass for any two equally-wrong spellings.
+    """
+    expected = "mt5-gw.internal:18812"
+    assert mt5_client_mod.mt5_terminal_key(_TERMINAL_HOST, _TERMINAL_PORT) == expected
+
+    connect, _fake, _rec = _make({})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    assert client.terminal_key == expected
+
+
+def test_terminal_key_property_still_reads_only_host_and_port_off_self():
+    """`tests/test_ingestion_mt5.py::_expected_terminal_key` reaches this property
+    through `.fget` on a `SimpleNamespace` carrying ONLY the two private
+    attributes — no client, no transport, no `__init__`. The delegation must not
+    have introduced a dependency on anything else on `self`.
+
+    Pinned HERE as well as there because the constraint belongs to this contract:
+    a future author reading only this file would otherwise have no warning."""
+    stub = types.SimpleNamespace(_host="other-gw.internal", _port=19000)
+    assert Mt5Client.terminal_key.fget(stub) == "other-gw.internal:19000"
+
+
+def test_assert_session_authorized_is_a_bare_bounded_initialize():
+    """The detector's happy path: it returns None, makes EXACTLY ONE `initialize`
+    round-trip, and passes the registered millisecond ceiling.
+
+    Asserted against the double's RECORDED kwargs (test-the-wiring, P115), never
+    against the client's own constant expression — an oracle that recomputed the
+    formula under test could not fail a dropped ceiling. D-24: an unbounded
+    `initialize()` runs on MetaTrader5's 60000ms vendor default INSIDE a 30s rpyc
+    bound and is structurally incapable of answering in time."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    assert client.assert_session_authorized() is None
+    assert fake.initialize_calls == 1
+    assert fake.initialize_kwargs[0]["timeout"] == MT5_INITIALIZE_TIMEOUT_MS
+    assert MT5_INITIALIZE_TIMEOUT_MS < MT5_REQUEST_TIMEOUT_S * 1000
+
+
+def test_assert_session_authorized_carries_no_credential_kwarg():
+    """⛔ THE PROPERTY THAT MAKES THE DETECTOR USABLE AS A DETECTOR.
+
+    It exists to DECIDE whether a credential should be sent. A detector that
+    carried one would already have sent it — the decision would be moot — and the
+    disclosure surface this plan fences would grow a second, unfenced mouth.
+
+    Oracled on the recorded kwargs, so it goes red the moment somebody "helpfully"
+    threads the credentials through for symmetry with the heal verb."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    client.assert_session_authorized()
+
+    recorded = fake.initialize_kwargs[0]
+    assert set(recorded) == {"timeout"}, (
+        f"the credential-free detector passed {sorted(set(recorded) - {'timeout'})} "
+        "to initialize() — it is no longer credential-free"
+    )
+    assert fake.login_calls == []
+
+
+def test_assert_session_authorized_surfaces_minus_six_as_the_code():
+    """RESEARCH question FOUR — the discriminator, WITHOUT a credential.
+
+    `-6` (no authorized account) is the ONE fault this phase heals; `-10003` /
+    `-10005` are IPC faults whose remedy is the opposite and to which re-sending a
+    credential does nothing. The code must therefore survive to the caller: plan
+    02 branches on it. And no `login` round-trip may be attempted — the detector
+    observes, it does not act."""
+    connect, fake, _rec = _make(
+        {
+            "initialize": False,
+            "last_error": (-6, "Terminal: Authorization failed"),
+        }
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.assert_session_authorized()
+
+    assert exc_info.value.code == -6
+    assert fake.login_calls == []
+
+
+@pytest.mark.parametrize(
+    "ipc_code",
+    [-10003, -10004, -10005],
+)
+def test_assert_session_authorized_keeps_the_ipc_codes_distinct_from_minus_six(
+    ipc_code,
+):
+    """The detector is only worth having if it SEPARATES the faults.
+
+    Phase 164.1 built the distinction between "the terminal lost its broker
+    session" and "the IPC pipe is broken"; a heal applied to the wrong one
+    re-collapses it. Parametrized over the three IPC codes so the separation is
+    proven, not assumed from the `-6` case alone."""
+    connect, _fake, _rec = _make(
+        {"initialize": False, "last_error": (ipc_code, "IPC fault")}
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.assert_session_authorized()
+
+    assert exc_info.value.code == ipc_code
+    assert exc_info.value.code != -6
+
+
+def test_initialize_with_credentials_passes_the_triple_as_keywords():
+    """D-07 — the heal verb's call FORM, which is the verbatim part that matters.
+
+    `mt5linux` forwards `**kwargs` unchanged into the real `MetaTrader5` module,
+    and `initialize(login=…, password=…, server=…)` is the only documented form
+    that can clear a `-6`. Asserted against the recorded kwargs, plus the
+    registered ms ceiling riding along (D-24).
+
+    ⛔ And NO `login` round-trip: this is not `Mt5Client.login`. A heal that also
+    called `login()` would re-point the shared terminal onto an account the caller
+    never asked for."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    assert (
+        client.initialize_with_credentials(
+            _FAKE_LOGIN, _FAKE_PASSWORD, _FAKE_SERVER
+        )
+        is None
+    )
+
+    recorded = fake.initialize_kwargs[0]
+    assert recorded["login"] == _FAKE_LOGIN
+    assert recorded["password"] == _FAKE_PASSWORD
+    assert recorded["server"] == _FAKE_SERVER
+    assert recorded["timeout"] == MT5_INITIALIZE_TIMEOUT_MS
+    assert fake.login_calls == []
+    assert fake.call_order == ["initialize"]
+
+
+def test_initialize_with_credentials_transport_raise_discloses_nothing():
+    """⛔ THE SECURITY PRECONDITION THIS WHOLE PLAN IS ORDERED AROUND (T-134-01).
+
+    `mt5linux` 0.1.9 builds the remote call as SOURCE TEXT with the arguments
+    interpolated and evals it on the far side, so a remote traceback carries the
+    login, the password and the broker server VERBATIM. The transport text below
+    mirrors that shape — all three literals in one string, exactly as
+    `test_login_transport_raise_is_scrubbed_and_typed` does for the shipped verb.
+
+    Each literal is asserted absent INDIVIDUALLY so a partial redaction names
+    which one escaped, and the marker is asserted PRESENT so a redaction that
+    "passed" by returning an empty message cannot read as green."""
+    connect, _fake, _rec = _make(
+        {
+            "initialize_raises": RuntimeError(
+                "rpyc remote error while eval'ing "
+                f"mt5.initialize(login={_FAKE_LOGIN}, "
+                f"password='{_FAKE_PASSWORD}', server='{_FAKE_SERVER}')"
+            )
+        }
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.initialize_with_credentials(
+            _FAKE_LOGIN, _FAKE_PASSWORD, _FAKE_SERVER
+        )
+
+    msg = str(exc_info.value)
+    assert str(_FAKE_LOGIN) not in msg
+    assert _FAKE_PASSWORD not in msg
+    assert _FAKE_SERVER not in msg
+    assert "[REDACTED]" in msg, (
+        "nothing was redacted at all — an empty or unrelated message would satisfy "
+        "the three absence assertions above vacuously"
+    )
+
+
+def test_initialize_with_credentials_falsy_return_discloses_nothing_and_keeps_the_code():
+    """The FALSY arm — the one place this verb is deliberately STRONGER than
+    `Mt5Client.login`.
+
+    `_raise_last` builds its detail from the TERMINAL's own `last_error()` text,
+    shape-scrubbed at construction and nothing more; a broker that echoes the
+    submitted account or server back would disclose it. This verb re-redacts BY
+    VALUE before the error escapes.
+
+    ⚠️ THE ASYMMETRY IS MEASURED, NOT ACCIDENTAL. `Mt5Client.login`'s falsy arm
+    goes through that same shared `_raise_last` and is shape-scrubbed only. That
+    is a PRE-EXISTING posture of every shipped call site, not a regression
+    introduced here, and closing it would mean editing `login()` — which D-07
+    forbids because its four per-account callers are shipped and a regression
+    there lands on live job processing. Booked as
+    `[164.6.2-RAISE-LAST-SHAPE-ONLY]` and routed to a NAMED phase, never
+    hand-edited into the ROADMAP.
+
+    The ORIGINAL code is preserved: plan 02 does not branch on it here, but a heal
+    that lost `-6` is undebuggable from a log."""
+    connect, _fake, _rec = _make(
+        {
+            "initialize": False,
+            "last_error": (
+                -6,
+                f"Authorization failed for {_FAKE_LOGIN} on {_FAKE_SERVER} "
+                f"(password '{_FAKE_PASSWORD}')",
+            ),
+        }
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.initialize_with_credentials(
+            _FAKE_LOGIN, _FAKE_PASSWORD, _FAKE_SERVER
+        )
+
+    msg = str(exc_info.value)
+    assert str(_FAKE_LOGIN) not in msg
+    assert _FAKE_PASSWORD not in msg
+    assert _FAKE_SERVER not in msg
+    assert "[REDACTED]" in msg
+    assert exc_info.value.code == -6
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["assert_session_authorized", "initialize_with_credentials"],
+)
+def test_the_new_session_verbs_refuse_a_stale_generation(method_name):
+    """WIZFORM-ABANDON / D-36 — both new verbs are session touches and both must
+    refuse one that arrives after the lease they began under has released.
+
+    Oracled on the FAKE'S RECORDED CALL LOG — "no post-release round-trip landed"
+    — never on the exception type alone, exactly as the D-36 block above argues:
+    the economic harm is a touch LANDING on somebody else's terminal, not an
+    exception going unraised.
+
+    `Mt5SessionAbandoned` is a PLAIN Exception and must stay one: the credential
+    classify/stamp arms match on `Mt5ClientError`, so a refusal that could be
+    absorbed into one would blame a working key for OUR abandoned thread (D-42).
+    """
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    args = (
+        ()
+        if method_name == "assert_session_authorized"
+        else (_FAKE_LOGIN, _FAKE_PASSWORD, _FAKE_SERVER)
+    )
+
+    # First touch binds the generation (the LAZY BIND `_assert_live` documents).
+    getattr(client, method_name)(*args)
+    calls_before = fake.initialize_calls
+    assert calls_before == 1
+
+    # The lease releases and bumps: this client is now a zombie.
+    bump_mt5_terminal_epoch(client.terminal_key)
+
+    with pytest.raises(Mt5SessionAbandoned):
+        getattr(client, method_name)(*args)
+
+    assert fake.initialize_calls == calls_before, (
+        "the refused touch still reached the terminal — which is the harm itself"
+    )
+    assert not isinstance(Mt5SessionAbandoned(method_name), Mt5ClientError)
+
+
+# --------------------------------------------------------------------------- #
+# 164.6.2 — FENCING THE CLASS: A SIGNATURE-DERIVED CREDENTIAL-REDACTION GATE
+#
+# ⛔ THE HAZARD THIS EXISTS FOR IS NOT DUPLICATION, IT IS THE THIRD CALL SITE.
+# `Mt5Client.login` and `Mt5Client.initialize_with_credentials` each carry their
+# own copy of the by-value redaction loop, deliberately: extracting a shared
+# helper would mean rewriting `login()`, whose four per-account callers are
+# shipped and whose regression lands on live job processing (D-07). But a shared
+# helper would not have removed the real hazard anyway — a THIRD credential-
+# carrying verb landing one day without the loop. A new author simply would not
+# call the helper.
+#
+# So the roster is DERIVED FROM SOURCE by SIGNATURE and the property is asserted
+# BEHAVIOURALLY: a third drivable verb enters the parametrization by itself and
+# REDS until it redacts, with no pin to remember to edit. That is strictly
+# stronger than deduplication, which would only have made the text shorter.
+#
+# Every test in this block carries the token `CREDENTIAL_REDACTION` in its name so
+# the CI verify can filter on it AND assert the filtered COUNT — a name that lost
+# the token would collect nothing, and a zero-collected run reads as green.
+#
+# ⛔ ANTI-VACUITY (the argument `test_mt5_abandon_roster.py`'s floor makes, copied
+# on purpose): every assertion below is of the form "every derived X has property
+# P", and a derivation that collapsed to the EMPTY SET satisfies all of them —
+# an unredacted class and a fully redacted one look identical from here. The
+# hand-typed floor is what makes the difference observable.
+# --------------------------------------------------------------------------- #
+
+#: The credential triple, in the order a drivable verb must take it positionally.
+CREDENTIAL_PARAMETER_TRIPLE = ("login", "password", "server")
+PASSWORD_PARAMETER = "password"
+
+#: ⛔ HAND-TYPED, and NEVER derived from the set it bounds — a size compared
+#: against its own derivation cannot fail. MEASURED 2 on 2026-09-13 at this
+#: commit: `login` (the shipped per-account verb) and `initialize_with_credentials`
+#: (164.6.2 / D-07, the heal verb). Raise it when a third credentialed verb lands;
+#: ⛔ never lower it to clear a red run.
+CREDENTIALED_METHOD_FLOOR = 2
+
+
+def _credential_carrying_transport_calls(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[str, ...]:
+    """The `self._mt5.<name>` calls INSIDE `fn` that are handed one of the
+    credential parameters, in source order.
+
+    ⭐ WHY the argument text is inspected rather than the method's own name mapped
+    to a transport verb by hand. `login()` reaches the transport TWICE — a
+    credential-LESS `initialize()` first, then the credentialed `login()` — and
+    only the second is the arm the by-value redaction guards (the first is
+    shape-scrubbed only, correctly, because no credential is in scope there). A
+    driver that made the WRONG one raise would red shipped, unchanged code and the
+    remedy would be a `login()` edit D-07 forbids. Identifying the call by the
+    values it carries gets that right for a verb nobody has written yet, which a
+    hand-map cannot.
+
+    The walk descends into `lambda:` bodies because that is how both verbs pass
+    their transport call to `_timed`.
+    """
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(fn):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        base = node.func.value
+        if not (
+            isinstance(base, ast.Attribute)
+            and base.attr == "_mt5"
+            and isinstance(base.value, ast.Name)
+            and base.value.id == "self"
+        ):
+            continue
+        referenced = {
+            name.id
+            for arg in [*node.args, *(kw.value for kw in node.keywords)]
+            for name in ast.walk(arg)
+            if isinstance(name, ast.Name)
+        }
+        if referenced & set(CREDENTIAL_PARAMETER_TRIPLE):
+            found.append((node.lineno, node.func.attr))
+    return tuple(attr for _lineno, attr in sorted(found))
+
+
+def _credentialed_client_methods(
+    source: str,
+) -> tuple[dict[str, tuple[str, ...]], dict[str, tuple[str, ...]]]:
+    """Derive, FROM SOURCE, the credential-carrying methods of `Mt5Client`.
+
+    Returns `(drivable, residual)`:
+
+      * DRIVABLE — its POSITIONAL parameters are exactly the credential triple, in
+        order, with no keyword-only parameters. The value is the tuple of
+        transport verbs it hands a credential to, which is what tells the gate
+        which scenario key must raise.
+      * RESIDUAL — it names the password parameter but is not drivable, so the
+        gate physically cannot call it. Reported by name and asserted EMPTY: a
+        future credentialed verb with a different shape must force a DELIBERATE
+        driver extension rather than silently escaping the fence.
+
+    ⛔ Never hand-list the method names here. The entire value of this gate is that
+    a third credentialed verb lands in it WITHOUT a pin edit.
+    """
+    tree = ast.parse(source, filename="services/mt5_client.py")
+    drivable: dict[str, tuple[str, ...]] = {}
+    residual: dict[str, tuple[str, ...]] = {}
+    for cls in (
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "Mt5Client"
+    ):
+        for member in cls.body:
+            if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            positional = tuple(
+                arg.arg
+                for arg in (*member.args.posonlyargs, *member.args.args)
+                if arg.arg != "self"
+            )
+            keyword_only = tuple(arg.arg for arg in member.args.kwonlyargs)
+            if positional == CREDENTIAL_PARAMETER_TRIPLE and not keyword_only:
+                drivable[member.name] = _credential_carrying_transport_calls(member)
+            elif PASSWORD_PARAMETER in positional + keyword_only:
+                residual[member.name] = positional + keyword_only
+    return drivable, residual
+
+
+def _methods_routed_through_the_shared_redactor(source: str) -> frozenset[str]:
+    """The `Mt5Client` methods whose body references `_redact_credential_values`.
+
+    ⛔ DERIVED, never hand-listed, for the same reason the roster above is: the
+    escape-aware redaction lives in ONE helper, and the question this gate must
+    answer is "which verbs actually route through it" — not "which verbs did on
+    the day somebody typed the list". A third credentialed verb that calls the
+    helper enters the escape gate by itself; one that does not is reported by the
+    residual test below rather than silently escaping.
+    """
+    tree = ast.parse(source, filename="services/mt5_client.py")
+    routed: set[str] = set()
+    for cls in (
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "Mt5Client"
+    ):
+        for member in cls.body:
+            if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if any(
+                isinstance(node, ast.Name) and node.id == "_redact_credential_values"
+                for node in ast.walk(member)
+            ):
+                routed.add(member.name)
+    return frozenset(routed)
+
+
+_CLIENT_SOURCE = pathlib.Path(mt5_client_mod.__file__).read_text()
+_DRIVABLE, _RESIDUAL = _credentialed_client_methods(_CLIENT_SOURCE)
+_ESCAPE_AWARE = frozenset(_DRIVABLE) & _methods_routed_through_the_shared_redactor(
+    _CLIENT_SOURCE
+)
+
+#: ⛔ HAND-TYPED, and never derived from the set it bounds. MEASURED 1 on
+#: 2026-09-14: `initialize_with_credentials`. `login` carries its OWN copy of the
+#: by-value loop (D-07 keeps it byte-unchanged), so it is NOT in this set and its
+#: residual is measured separately below. Raise this when a second verb routes
+#: through the shared helper; ⛔ never lower it to clear a red run.
+ESCAPE_AWARE_METHOD_FLOOR = 2
+
+
+# --------------------------------------------------------------------------- #
+# ⛔ THE ESCAPE CORPUS — 164.6.2 CR-01, AND THE REASON IT EXISTS IS THAT THE
+# CORPUS ABOVE COULD NOT FAIL ON THIS CLASS.
+#
+# `mt5linux` 0.1.9 builds its remote call as SOURCE TEXT
+# (`f'mt5.initialize(*{args},**{kwargs})'`), so the credentials reach a remote
+# traceback as the `repr()` OF A DICT — and `repr()` ESCAPES. A by-value pass
+# that matches only the unescaped literal therefore fires on an `[A-Za-z0-9-]`
+# password and MISSES every password carrying a backslash, a quote pair or a
+# control character. Two measured facts make that the whole control rather than
+# half of it:
+#
+#   * `scrub_freeform_string` contributes NOTHING on the kwargs-repr shape — its
+#     `SENSITIVE_KEY_VALUE` pattern needs `key` immediately followed by `[:=]`,
+#     and the repr puts a closing quote between them. The by-value pass is the
+#     SOLE control on the production shape, not a second layer over a first.
+#   * every credential fixture in this file was `[A-Za-z0-9-]` only until
+#     2026-09-14, so NO test in the corpus could fail on the escaping class. The
+#     gate bit on the clean shape and was blind to the real one BY CONSTRUCTION
+#     OF ITS OWN CORPUS. These cases were OBSERVED RED against the shipped
+#     `_redact_credential_values` before it was fixed.
+#
+# ⛔ THE EXPECTED RENDERINGS ARE HAND-TYPED, never computed by calling the same
+# helper the production code calls. A test that derived its expectation from the
+# implementation it polices would forget exactly the form the implementation
+# forgot — which is how this defect shipped green in the first place.
+# --------------------------------------------------------------------------- #
+
+
+class _EscapeCase(NamedTuple):
+    """One credential whose `repr()` rendering differs from its raw literal.
+
+    ``password_renderings`` / ``server_renderings`` are every byte sequence that
+    value can reach a log as: the raw literal, the body `repr()` produces, and the
+    body `json.dumps()` produces (they differ for the quote case). EVERY one must
+    be absent from the message.
+    """
+
+    password: str
+    server: str
+    password_renderings: tuple[str, ...]
+    server_renderings: tuple[str, ...]
+
+
+_ESCAPE_CASES = (
+    pytest.param(
+        _EscapeCase(
+            # A broker-generated password containing a single backslash.
+            password=r"pa\ssw0rd",
+            server=_FAKE_SERVER,
+            #   raw:  pa\ssw0rd        repr/json body:  pa\\ssw0rd
+            password_renderings=(r"pa\ssw0rd", r"pa\\ssw0rd"),
+            server_renderings=(_FAKE_SERVER,),
+        ),
+        id="password-backslash",
+    ),
+    pytest.param(
+        _EscapeCase(
+            # BOTH quote types, which forces `repr` to escape the single quote
+            # and `json.dumps` to escape the double one — the two renderings
+            # differ, and neither equals the raw literal.
+            password="pa'sw\"0rd",
+            server=_FAKE_SERVER,
+            #   raw:  pa'sw"0rd     repr body: pa\'sw"0rd     json body: pa'sw\"0rd
+            password_renderings=("pa'sw\"0rd", "pa\\'sw\"0rd", "pa'sw\\\"0rd"),
+            server_renderings=(_FAKE_SERVER,),
+        ),
+        id="password-both-quote-types",
+    ),
+    pytest.param(
+        _EscapeCase(
+            # A control character. `repr` renders it as the two-character
+            # escape `\t`, which shares not one byte with the raw tab.
+            password="pa\tssw0rd",
+            server=_FAKE_SERVER,
+            password_renderings=("pa\tssw0rd", r"pa\tssw0rd"),
+            server_renderings=(_FAKE_SERVER,),
+        ),
+        id="password-tab",
+    ),
+    pytest.param(
+        _EscapeCase(
+            # ⛔ NOT ONLY THE PASSWORD. A broker SERVER string can carry an
+            # escapable character too (a Windows-shaped path, a tab from a
+            # mis-pasted Railway variable), and the reviewer's fix is explicitly
+            # "all three values". Without this case the fix could have been
+            # applied to `password` alone and stayed green.
+            password=_FAKE_PASSWORD,
+            server=r"Broker\Demo-2",
+            password_renderings=(_FAKE_PASSWORD,),
+            server_renderings=(r"Broker\Demo-2", r"Broker\\Demo-2"),
+        ),
+        id="server-backslash",
+    ),
+    pytest.param(
+        _EscapeCase(
+            # ⛔ B1 — SUBSTRING OVERLAP, the case every prior assertion was blind
+            # to. A password containing the account number is the commonest human
+            # choice for a numeric login. Redacting per-literal in a FIXED ORDER
+            # consumed the login's span first, so the password's full-literal match
+            # then failed and only the overlapping slice was masked:
+            #     'password': 'Quant[REDACTED]!x'
+            # ⛔ The full literal WAS absent, so `_assert_no_credential_value_
+            # escaped` and the per-literal contract loop BOTH passed. What leaked
+            # was the remainder — prefix, suffix, length, structure — while the
+            # masked span was the account number the log reader already has.
+            # The renderings below are the REMAINDER, not the whole value: this
+            # case fails unless the redactor makes ONE global longest-first pass.
+            password=f"Quant{_FAKE_LOGIN}!x",
+            server=f"Broker-{_FAKE_LOGIN}-2",
+            password_renderings=(f"Quant{_FAKE_LOGIN}!x", "Quant", "!x"),
+            server_renderings=(f"Broker-{_FAKE_LOGIN}-2", "Broker-", "-2"),
+        ),
+        id="credential-substring-overlap",
+    ),
+    pytest.param(
+        _EscapeCase(
+            # ⛔ IN-01 (round 2) — A NON-ASCII CREDENTIAL, WHERE `repr()`,
+            # `ascii()` AND `json.dumps()` ALL THREE DIVERGE. `repr()` keeps the
+            # character verbatim, `json.dumps()` emits the `\u00e4` escape, and
+            # `ascii()` emits the `\xe4` one — ONE password, THREE distinct byte
+            # sequences, of which the shipped loop matched two. A broker password
+            # carrying an umlaut is not exotic.
+            #
+            # ⛔ The renderings below are HAND-TYPED, like every other case here,
+            # and that rule is the reason this gap was findable at all: a test that
+            # derived its expectation by calling the same helper it polices would
+            # have forgotten exactly the form the helper forgot.
+            #
+            # ⚠️ STATED PLAINLY: the `ä`/`\xe4` entries here are ABSENCE checks
+            # in this gate's established idiom — the driven message is a kwargs
+            # `repr()`, which emits neither form, exactly as the existing quote
+            # case's `json` rendering does not appear in ITS message either. The
+            # BITING gate for the `ascii()` form is
+            # `test_CREDENTIAL_REDACTION_the_ascii_rendering_is_covered_not_merely_claimed`
+            # below, which builds its message with `%a`. This case's load-bearing
+            # half is the RAW non-ASCII literal.
+            password="pässw0rd",
+            server="Bröker-Demo-2",
+            #   raw / repr body:  pässw0rd
+            #   json body:        p\u00e4ssw0rd
+            #   ascii body:       p\xe4ssw0rd
+            password_renderings=(
+                "pässw0rd",
+                r"p\u00e4ssw0rd",
+                r"p\xe4ssw0rd",
+            ),
+            server_renderings=(
+                "Bröker-Demo-2",
+                r"Br\u00f6ker-Demo-2",
+                r"Br\xf6ker-Demo-2",
+            ),
+        ),
+        id="credential-non-ascii",
+    ),
+)
+
+
+def test_CREDENTIAL_REDACTION_the_ascii_rendering_is_covered_not_merely_claimed():
+    """⛔ IN-01 (164.6.2 round 2) — `_credential_renderings` PROMISED AN ABSOLUTE
+    AND DELIVERED TWO FORMS OF THREE.
+
+    Its first line reads *"Every byte sequence ONE credential value can reach a log
+    as"*, and the `ascii()` / `%a` / `{!a}` form was absent. MEASURED against the
+    shipped helper on 2026-09-14: with `password="pässw0rd"`, the `ascii` body
+    `p\\xe4ssw0rd` survived a `_redact_credential_values` pass VERBATIM while the
+    raw and `json.dumps` forms were masked.
+
+    ⛔ THIS CANNOT BE DRIVEN THROUGH THE VERB GATE ABOVE, which is why it is a
+    separate case. That gate builds its message as a kwargs `repr()` — the shape
+    `mt5linux` actually produces — and a `repr()` never emits the `\\xe4` form. The
+    producer here is `%a`, so the message is built with `%a`.
+
+    ⚠️ NO LIVE CALL SITE PRODUCING THIS FORM IS KNOWN — the round-2 review looked
+    and found none, and this test does NOT claim one. It pins the CONTRACT the
+    docstring states, on the argument that a redactor documented as covering "every
+    byte sequence" is read by every future caller as a licence not to check. The
+    alternative was to narrow the absolute, which is the more expensive of the two.
+    """
+    password = "pässw0rd"
+    server = "Bröker-Demo-2"
+
+    # `%a` is the reachable producer of this rendering. (`repr()` would keep the
+    # character verbatim and is already covered by the corpus case above.)
+    message = (
+        "rpyc remote error while eval'ing "
+        "mt5.initialize(login=%d, password=%a, server=%a)"
+        % (_FAKE_LOGIN, password, server)
+    )
+    # The mutant-detector: the message really does carry the ascii form, so an
+    # assertion below cannot pass because the form was never there.
+    assert r"p\xe4ssw0rd" in message, message
+
+    from services.mt5_client import _redact_credential_values
+
+    out = _redact_credential_values(message, _FAKE_LOGIN, password, server)
+
+    # ⛔ HAND-TYPED renderings, never computed from the helper under test.
+    for label, rendering in (
+        ("password (raw)", password),
+        ("password (ascii body)", r"p\xe4ssw0rd"),
+        ("server (raw)", server),
+        ("server (ascii body)", r"Br\xf6ker-Demo-2"),
+        ("login", str(_FAKE_LOGIN)),
+    ):
+        assert rendering not in out, (
+            f"the by-value pass disclosed the {label} as {rendering!r}: {out!r}. "
+            "⛔ `_credential_renderings` documents itself as covering EVERY byte "
+            "sequence a credential can reach a log as; `ascii()` / `%a` / `{!a}` "
+            "is one of them (IN-01 round 2)."
+        )
+    assert "[REDACTED]" in out, (
+        f"nothing was redacted at all — the absences above would pass vacuously: "
+        f"{out!r}"
+    )
+
+
+def test_CREDENTIAL_REDACTION_the_derived_roster_did_not_collapse():
+    """⛔ THE LOAD-BEARING FLOOR, and the ONLY assertion in this block that a
+    collapsed derivation cannot satisfy.
+
+    The parametrized gate below is of the form "every derived verb redacts". An
+    EMPTY derivation satisfies it VACUOUSLY — pytest reports an empty parameter
+    set, nothing runs, and the summary says nothing failed. That is precisely how
+    a source-derived gate rots into decoration. The floor is hand-typed and
+    compared with `>=`, never computed from the set it bounds.
+    """
+    assert len(_DRIVABLE) >= CREDENTIALED_METHOD_FLOOR, (
+        "the source-derived credentialed-method roster COLLAPSED — the DERIVATION "
+        "is broken, not the code. Nothing below can fail while it is empty: an "
+        "empty parametrization passes the redaction gate vacuously, so an "
+        "unredacted client and a fully redacted one are indistinguishable from "
+        f"here. derived={sorted(_DRIVABLE)!r}, floor={CREDENTIALED_METHOD_FLOOR}. "
+        "⛔ Fix the derivation; never lower the floor."
+    )
+
+
+def test_CREDENTIAL_REDACTION_no_password_carrying_method_escapes_the_driver():
+    """Any method that names the password parameter but is NOT drivable is
+    reported BY NAME AND SIGNATURE, and the set is asserted empty.
+
+    Without this, the gate's coverage would silently depend on a future author
+    happening to choose the same signature shape: a verb taking
+    `(login, password, server, *, timeout)` — an entirely reasonable thing to
+    write — would vanish from the parametrization and the fence would report
+    success over a smaller class than it claims.
+    """
+    assert not _RESIDUAL, (
+        "these Mt5Client methods carry the password parameter but the redaction "
+        f"driver cannot call them: { {k: list(v) for k, v in _RESIDUAL.items()} }. "
+        "⛔ EXTEND THE DRIVER to cover the new signature shape. Weakening the "
+        "derivation so it no longer sees them is the WRONG fix — it would make "
+        "this gate report success over a class it no longer covers."
+    )
+
+
+def test_CREDENTIAL_REDACTION_the_signature_classifier_is_itself_under_test():
+    """The derivation above, exercised on SYNTHETIC source — the same discipline
+    `test_timeout_call_extractor_ignores_comments_and_untimed_calls` applies to the
+    timeout extractor, and for the same reason: a classifier only ever run against
+    the file it polices is indistinguishable from one that returns a constant.
+
+    Four shapes, each of which has misled a reader before:
+      * the drivable shape, whose credential-carrying call is the SECOND transport
+        call in the body (the `login()` shape) — the first is credential-less and
+        must NOT be the one selected;
+      * a keyword-only variant — RESIDUAL, because the driver calls positionally;
+      * a wrong-ORDER variant — RESIDUAL, because a positional driver would hand
+        the password to the server parameter;
+      * a method with no credential at all — neither.
+    """
+    synthetic = "\n".join(
+        [
+            "class Mt5Client:",
+            "    def login(self, login, password, server):",
+            "        self._mt5.initialize(timeout=self._ipc_timeouts_ms['initialize'])",
+            "        self._mt5.login(login, password=password, server=server)",
+            "    def kwonly(self, login, *, password, server):",
+            "        self._mt5.login(login, password=password, server=server)",
+            "    def misordered(self, password, login, server):",
+            "        self._mt5.login(login, password=password, server=server)",
+            "    def account_info(self):",
+            "        return self._mt5.account_info()",
+        ]
+    )
+    drivable, residual = _credentialed_client_methods(synthetic)
+
+    assert drivable == {"login": ("login",)}, (
+        "the classifier must select the CREDENTIAL-CARRYING transport call, not "
+        f"merely the first one in the body: {drivable!r}"
+    )
+    assert set(residual) == {"kwonly", "misordered"}
+    assert "account_info" not in drivable and "account_info" not in residual
+
+
+@pytest.mark.parametrize("method_name", sorted(_DRIVABLE))
+def test_CREDENTIAL_REDACTION_a_transport_raise_discloses_none_of_the_three(
+    method_name,
+):
+    """⛔ THE PROPERTY THE WHOLE PHASE ORDERING EXISTS TO PROTECT (T-134-01).
+
+    `mt5linux` 0.1.9 builds every remote call as SOURCE TEXT with the arguments
+    f-string-interpolated and evals it on the far side, so a remote traceback
+    carries the login, the password and the broker server VERBATIM onto a PUBLIC
+    Actions log. `scrub_freeform_string` is SHAPE-based and cannot catch a bare
+    literal arriving without its key; only the by-value pass can.
+
+    Driven END TO END from the derivation: the method is resolved by name off the
+    instance and the scenario key that makes ITS credential-carrying transport
+    call raise is derived too. Nothing here is hand-mapped, so a third credentialed
+    verb is fenced the moment it is written.
+
+    ⛔ SCOPED TO THE TRANSPORT-RAISE ARM, deliberately. The shipped per-account
+    verb's FALSY arm goes through the shared `_raise_last` and is shape-scrubbed
+    only; asserting by-value redaction there would red shipped, unchanged code and
+    the only remedy would be a `login()` edit D-07 forbids. That asymmetry is
+    measured separately below as `[164.6.2-RAISE-LAST-SHAPE-ONLY]`.
+
+    Each literal is asserted absent INDIVIDUALLY so a partial redaction names the
+    one that escaped, and the marker is asserted present so an empty message
+    cannot satisfy the three absences vacuously.
+    """
+    carrying = _DRIVABLE[method_name]
+    assert len(carrying) == 1, (
+        f"Mt5Client.{method_name} hands a credential to {list(carrying)} — the "
+        "driver cannot tell which transport call to make raise. Extend the "
+        "derivation deliberately; do not guess."
+    )
+    scenario_key = f"{carrying[0]}_raises"
+
+    connect, _fake, _rec = _make(
+        {
+            scenario_key: RuntimeError(
+                "rpyc remote error while eval'ing "
+                f"mt5.{carrying[0]}({_FAKE_LOGIN}, "
+                f"password='{_FAKE_PASSWORD}', server='{_FAKE_SERVER}')"
+            )
+        }
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        getattr(client, method_name)(_FAKE_LOGIN, _FAKE_PASSWORD, _FAKE_SERVER)
+
+    msg = str(exc_info.value)
+    for label, literal in (
+        ("login", str(_FAKE_LOGIN)),
+        ("password", _FAKE_PASSWORD),
+        ("server", _FAKE_SERVER),
+    ):
+        assert literal not in msg, (
+            f"Mt5Client.{method_name} disclosed the {label} on its transport-raise "
+            f"arm: {msg!r}. ⛔ Add the by-value redaction loop to that arm — this "
+            "is T-134-01 and the message reaches a PUBLIC Actions log."
+        )
+    assert "[REDACTED]" in msg, (
+        f"Mt5Client.{method_name} produced a message with nothing redacted at all "
+        "— the three absence assertions above would pass vacuously on an empty or "
+        f"unrelated string: {msg!r}"
+    )
+
+
+def test_CREDENTIAL_REDACTION_the_escape_aware_roster_did_not_collapse():
+    """⛔ THE ANTI-VACUITY FLOOR FOR THE ESCAPE GATE BELOW.
+
+    That gate is parametrized over `_ESCAPE_AWARE × _ESCAPE_CASES`. An EMPTY
+    `_ESCAPE_AWARE` collapses the product to nothing, pytest reports an empty
+    parameter set, and a client that redacts no escaped rendering at all is
+    indistinguishable from one that redacts every one. The floor is hand-typed
+    and compared with `>=`, never computed from the set it bounds.
+    """
+    assert len(_ESCAPE_AWARE) >= ESCAPE_AWARE_METHOD_FLOOR, (
+        "the escape-aware roster COLLAPSED — the DERIVATION is broken, not the "
+        f"code. derived={sorted(_ESCAPE_AWARE)!r}, "
+        f"floor={ESCAPE_AWARE_METHOD_FLOOR}. ⛔ Fix the derivation; never lower "
+        "the floor."
+    )
+    assert _ESCAPE_CASES, "the escape corpus is empty — the gate below is vacuous"
+
+
+def test_CREDENTIAL_REDACTION_every_credentialed_verb_routes_through_the_shared_redactor():
+    """⭐ `[164.6.2-LOGIN-ESCAPE-BLIND]` — CLOSED, and the fence STRENGTHENED.
+
+    D-07 was AMENDED (founder, 2026-09-14) and `Mt5Client.login` now routes its
+    transport-raise arm through `_redact_credential_values` instead of carrying a
+    private copy of the loop. The freeze existed to keep a shipped live-path method
+    out of a REFACTOR; applying the identical, already-proven escape-aware
+    redaction is not one, and the residual was a LIVE disclosure on four
+    per-account callers that pass a real vault password.
+
+    ⛔ The expectation is now the EMPTY SET, which is strictly stronger than the
+    `{"login"}` it replaces: EVERY credentialed verb must route through the one
+    copy of the loop that knows about `repr()` escaping (CR-01). A new verb written
+    without it grows this set and reds here — the next author must make that a
+    decision, not an omission.
+    """
+    outside = frozenset(_DRIVABLE) - _ESCAPE_AWARE
+    assert outside == frozenset(), (
+        f"credentialed verb(s) NOT routed through `_redact_credential_values`: "
+        f"{sorted(outside)}. ⛔ Route them through the shared helper — it is the "
+        "only copy of the loop that knows about `repr()` escaping (CR-01). "
+        "Redacting the raw literal alone lets any password carrying a backslash, "
+        "a quote or a tab survive into the rendering."
+    )
+
+
+def test_CREDENTIAL_REDACTION_login_discloses_no_escaped_rendering_either():
+    """⭐ `[164.6.2-LOGIN-ESCAPE-BLIND]` — the fix as a MEASUREMENT, not a claim.
+
+    This case used to assert the residual EXISTED. D-07 is amended and `login`
+    now shares the escape-aware helper, so it asserts the disclosure is CLOSED —
+    on the SHIPPED per-account path whose four callers pass a real vault password.
+
+    ⛔ Both renderings are asserted absent. Before the fix the `repr()` body
+    survived while the raw literal did not, so asserting only the raw literal
+    would pass vacuously against exactly the bug this closes.
+    """
+    pw = r"pa\ssw0rd"
+    escaped = r"pa\\ssw0rd"  # what `repr(pw)` puts in the message body
+
+    connect, _fake, _rec = _make(
+        {
+            "login_raises": RuntimeError(
+                "rpyc remote error while eval'ing mt5.login(**%r)"
+                % ({"login": _FAKE_LOGIN, "password": pw, "server": _FAKE_SERVER},)
+            )
+        }
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.login(_FAKE_LOGIN, pw, _FAKE_SERVER)
+    msg = str(exc_info.value)
+
+    assert pw not in msg, "the raw password literal survived login()'s scrub"
+    assert escaped not in msg, (
+        "`Mt5Client.login` disclosed the `repr()`-escaped rendering of the "
+        "password — [164.6.2-LOGIN-ESCAPE-BLIND] has REGRESSED. Route the arm "
+        "through `_redact_credential_values`; do NOT relax this assertion."
+    )
+    assert "[REDACTED]" in msg
+
+
+@pytest.mark.parametrize("method_name", sorted(_ESCAPE_AWARE))
+@pytest.mark.parametrize("case", _ESCAPE_CASES)
+def test_CREDENTIAL_REDACTION_an_escaped_rendering_discloses_none_of_the_three(
+    method_name, case: _EscapeCase
+):
+    """⛔ CR-01 — THE FORM `mt5linux` ACTUALLY PRODUCES, WHICH THE CLEAN CORPUS
+    ABOVE CANNOT REACH.
+
+    The message is built exactly the way `mt5linux` 0.1.9 builds its remote call:
+    a `repr()` of the kwargs dict. With an `[A-Za-z0-9-]` password that rendering
+    is byte-identical to the raw literal and the shipped `str.replace` loop fired;
+    with a backslash, a quote pair or a tab it is NOT, and the credential survived
+    verbatim onto a PUBLIC Actions log.
+
+    ⛔ EVERY rendering is asserted absent, not just the raw literal — asserting
+    only the raw literal here would pass VACUOUSLY, because the raw literal does
+    not appear in an escaped message at all. That vacuity is the defect, restated
+    as a test-design rule.
+    """
+    carrying = _DRIVABLE[method_name]
+    assert len(carrying) == 1, carrying
+    scenario_key = f"{carrying[0]}_raises"
+
+    kwargs = {
+        "login": _FAKE_LOGIN,
+        "password": case.password,
+        "server": case.server,
+    }
+    connect, _fake, _rec = _make(
+        {
+            scenario_key: RuntimeError(
+                "rpyc remote error while eval'ing mt5.%s(**%r)"
+                % (carrying[0], kwargs)
+            )
+        }
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        getattr(client, method_name)(_FAKE_LOGIN, case.password, case.server)
+
+    msg = str(exc_info.value)
+    for label, renderings in (
+        ("login", (str(_FAKE_LOGIN),)),
+        ("password", case.password_renderings),
+        ("server", case.server_renderings),
+    ):
+        for rendering in renderings:
+            assert rendering not in msg, (
+                f"Mt5Client.{method_name} disclosed the {label} as {rendering!r} "
+                f"on its transport-raise arm: {msg!r}. ⛔ The by-value loop must "
+                "redact every RENDERING of each literal — `repr()` escapes, and "
+                "`scrub_freeform_string` is a measured no-op on the kwargs-repr "
+                "shape, so this loop is the SOLE control (CR-01, T-134-01)."
+            )
+    assert "[REDACTED]" in msg, (
+        f"Mt5Client.{method_name} produced a message with nothing redacted at all "
+        f"— the absence assertions above would pass vacuously: {msg!r}"
+    )
+
+
+def test_CREDENTIAL_REDACTION_the_falsy_arm_asymmetry_is_measured_not_assumed():
+    """⚠️ `[164.6.2-RAISE-LAST-SHAPE-ONLY]` — the ONE asymmetry this plan creates,
+    asserted rather than merely recorded. A documented posture no test exercises is
+    a claim, not a measurement.
+
+    Both drivable verbs are driven down their FALSY arm with the SAME terminal
+    `last_error()` text, which echoes the broker server back as a bare literal:
+
+      * `initialize_with_credentials` re-redacts that detail BY VALUE before it
+        escapes and preserves the original code — deliberately STRONGER than the
+        shipped verb, because it is the method a credential is about to be routed
+        through and it had to be safe BEFORE plan 02 routes one;
+      * `Mt5Client.login` goes through the shared `_raise_last`, which is
+        shape-scrubbed only, so the bare server literal survives. That is a
+        PRE-EXISTING posture of every shipped call site — NOT a regression
+        introduced here — and closing it would mean editing `login()`, which D-07
+        forbids because its four per-account callers are shipped and a regression
+        there lands on live job processing.
+
+    ⛔ This case documents a posture; it is NOT a licence to weaken anything. When
+    a future phase closes the asymmetry, the second half goes RED and must be
+    DELETED together with the booked item, never relaxed. The password is asserted
+    absent on BOTH arms, because that half is not asymmetric and never may be.
+    """
+    detail = f"Authorization failed on {_FAKE_SERVER} (password='{_FAKE_PASSWORD}')"
+
+    healing_connect, _f1, _r1 = _make(
+        {"initialize": False, "last_error": (-6, detail)}
+    )
+    healing = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=healing_connect)
+    with pytest.raises(Mt5ClientError) as healed:
+        healing.initialize_with_credentials(
+            _FAKE_LOGIN, _FAKE_PASSWORD, _FAKE_SERVER
+        )
+
+    shipped_connect, _f2, _r2 = _make({"login": False, "last_error": (-6, detail)})
+    shipped = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=shipped_connect)
+    with pytest.raises(Mt5ClientError) as legacy:
+        shipped.login(_FAKE_LOGIN, _FAKE_PASSWORD, _FAKE_SERVER)
+
+    healed_msg, legacy_msg = str(healed.value), str(legacy.value)
+
+    # The NEW verb: by-value redacted on the falsy arm, code preserved.
+    assert _FAKE_SERVER not in healed_msg
+    assert str(_FAKE_LOGIN) not in healed_msg
+    assert "[REDACTED]" in healed_msg
+    assert healed.value.code == -6
+
+    # The password is shape-scrubbed on BOTH — that half is not asymmetric.
+    assert _FAKE_PASSWORD not in healed_msg
+    assert _FAKE_PASSWORD not in legacy_msg
+
+    # The SHIPPED verb: the bare server literal survives. Pre-existing, booked.
+    assert _FAKE_SERVER in legacy_msg, (
+        "Mt5Client.login's falsy arm now redacts the server BY VALUE — "
+        "[164.6.2-RAISE-LAST-SHAPE-ONLY] appears to be CLOSED. Delete this half "
+        "and the asymmetry note it pins, and close the booked item. ⛔ Do NOT "
+        "relax the assertion to make it pass."
+    )

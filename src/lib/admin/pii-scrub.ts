@@ -43,6 +43,17 @@ const DENYLIST_EXACT = new Set<string>([
   "ok-access-passphrase",
   "ok-access-key",
   "ok-access-timestamp",
+  // Phase 164.6.2 / WR-05 — the broker password, as a KEY. `password` was on
+  // the FREEFORM key alternates (a string pattern for `key=value` shapes) and
+  // NOT on this key denylist, which are different surfaces: the analytics
+  // service's Sentry `before_send` scrubs stack-frame `vars` by KEY, so a frame
+  // variable literally named `password` passed through untouched. Measured
+  // 2026-09-14 on the Python mirror. `investor_password` is the field name
+  // `Mt5Session` already uses, so the same value reaches a frame under a second
+  // spelling. ⛔ This set is mirrored byte-for-byte by
+  // `analytics-service/services/redact.py`; the two must move together.
+  "password",
+  "investor_password",
 ]);
 
 const DENYLIST_PREFIX = ["sb-ec-"];

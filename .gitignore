@@ -155,3 +155,6 @@ scripts/local-stack/baseline.sql
 # Derived per-run Supabase workdir (a copy of supabase/config.toml with
 # [db.migrations] disabled). Generated, never authored.
 scripts/local-stack/.stack/
+
+# GSD research tool fetch cache — regenerable, not an artifact
+.planning/research/.cache/

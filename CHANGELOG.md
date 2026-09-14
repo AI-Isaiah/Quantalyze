@@ -1,5 +1,129 @@
 # Changelog
 
+## [0.77.43.0] - 2026-09-14 — the analytics worker re-establishes the MT5 broker session without a human, and three live credential disclosures close
+
+⭐ **What this is.** Phase 164.6.2 MT5RELOGIN. Since the terminal's session was established once by
+hand over VNC, **nothing re-established it** — so any rotation, expiry or volume event took MT5 down
+silently, and it stayed silent until Phase 164.1's prober went looking. The analytics worker now
+heals the session from `MT5_LOGIN`/`MT5_PASSWORD`/`MT5_SERVER` at its own startup.
+
+⛔ **THE PHASE SHIPS OPEN, AND THAT IS THE RECORDED DECISION.** Its load-bearing criterion — restart
+the gateway, observe the prober return no defect, no VNC session in between — **is not closed**.
+Measured 2026-09-14: the founder set the three variables and the redeploy succeeded, but the deployed
+analytics sha was `5dead88a` (= `main`), at which `services/mt5_relogin.py` does not exist. The
+restart had exactly one possible outcome, entailed by the absence of the code, so it was deliberately
+**not performed** rather than recorded as a broker-side fault against a state nobody measured
+(`OUTCOME 0 — premise failure`). A post-ship wave 5 takes the real reading once this merge is
+**observed to have deployed** — ⚠️ Phase 164.11 measured **five SKIPPED analytics deployments in
+three days**, so a green merge is necessary and not sufficient.
+
+### Security
+
+- **Every RENDERING of a credential is redacted, not just the raw literal.** `_redact_credential_values`
+  matched only the bare string, so any password containing `\`, `'`, `"` or a tab survived into an
+  error message via its `repr()`-escaped form. `_credential_renderings` now covers raw, `repr`,
+  `ascii` and `json.dumps` bodies. ⛔ `mt5linux` f-string-interpolates arguments into remotely-eval'd
+  code (T-134-01), so a raw traceback here is a real disclosure, not a theoretical one.
+- **`Mt5Client.login` stopped keeping its own private redaction loop** — `[164.6.2-LOGIN-ESCAPE-BLIND]`,
+  a LIVE disclosure across four shipped per-account callers passing a real vault password. The
+  plan-time threat model declared `login` frozen under D-07 and therefore out of scope; **the scoping
+  rule was itself the blind spot.** D-07 is amended and `login` routes through the shared redactor.
+- **Redaction is ONE global longest-first pass, not per-literal in fixed order.** Per-literal
+  redaction let the login's span be consumed first, after which the password's own full-literal match
+  failed — leaving it **partially masked**. Correct per literal, wrong in composition.
+- **Sentry stopped capturing stack-frame locals, and `password` became a denylist KEY.**
+  `sentry_sdk.init` captured `vars` for every frame while `before_send` scrubbed by key, and
+  `password` sat on the freeform-string alternates but NOT on `DENYLIST_EXACT` — so all three frames
+  this phase adds held the plaintext password under exactly that name. Closed on both halves
+  (`include_local_variables=False` plus the denylist entry) in `services/redact.py` AND
+  `src/lib/admin/pii-scrub.ts`, with a set-equality gate so the two languages cannot drift.
+- Threat register audited whole: **28 of 28 closed, `threats_open: 0`**, with two risks formally
+  accepted — unauthenticated private-mesh RPyC (pre-existing, not widened here; conditional on no
+  public domain ever being attached to the gateway) and the supply-chain gate (not applicable: zero
+  dependency manifests in the branch diff).
+
+### Added
+
+- `services/mt5_relogin.py` — the boot heal: kill-switch-gated, leased with a bounded acquire,
+  off-loop under `to_thread`, budget-bounded, and **structurally incapable of raising**. The whole
+  body sits inside one top-level `except Exception`, asserted structurally AND behaviourally, because
+  `main.lifespan`'s `_crash_handler` calls `SHUTDOWN.set()` on ANY background-task exception — which
+  would stop the dispatch, watchdog and enqueue loops **behind a green `/health`**.
+- `Mt5Client.initialize_with_credentials` — the credentialed heal verb. ⛔ NOT `login()`: that
+  method's first statement is a credential-less `initialize()`, which is exactly the call that
+  returns `-6` when the terminal has no authorized account, so it raises before reaching the
+  credentialed call. The deliverable as first written was a no-op against its own target fault.
+- One `asyncio.create_task` in `main.lifespan` — the production path, and the only one. A heal added
+  to `main_worker` would never run in production and would pass every test.
+- The founder handover (exact `railway variables --set` commands, placeholders in every value
+  position) and a runbook subsection, so a hand VNC login is no longer described as the only remedy.
+
+### Changed
+
+- **A refused credential is a verdict, not a benign transient miss.** `initialize_with_credentials`
+  was the one credential-carrying call sitting unguarded between two typed handlers, so a refusal
+  escaped to the catch-all and the operator read *"the next boot will try again"* — actively
+  misleading when nothing will heal until a human edits a Railway variable.
+- **The kill-switch return stopped being the module's one silent exit.** Disabling via `MT5_ENABLED`
+  now logs at INFO naming the variable, gated by a census test that provokes every exit in turn.
+- **The re-probe classifies its own code** instead of folding every code into `still_unauthorized` —
+  a claim about the session it had not measured whenever the code was not `-6`.
+- Tuning values are clamped to a window with BOTH ends gated; a busy terminal is an INFO skip and an
+  abandoned thread an ERROR, which previously shared one WARNING.
+
+### Fixed
+
+- A tuning-value typo could abort uvicorn startup against `restartPolicyType ON_FAILURE` with 3
+  retries — a config typo became a restart loop.
+- The relogin round-trip budget forgot a round-trip: worst case was 5 against a budget of 4. The
+  count is now **measured from the double**, not restated, so a sixth reds instead of silently
+  re-opening the window.
+- The broken-windows ledger recorded entry 37 as fixed with no resolution; `check:planning-hygiene`
+  self-tripped on its own prose.
+
+### Tests
+
+- Gates DERIVE their rosters from source by signature, so a future third credentialed verb enters
+  the parametrization automatically and reds until it redacts. Expectation is the **empty set**.
+- ⭐ **The vacuous-corpus class is closed.** Every credential fixture was `[A-Za-z0-9-]` and every
+  assertion checked the FULL literal absent — neither could fail on the actual bug class. The corpus
+  now carries escape-bearing, non-ASCII and **substring-overlapping** values, and the overlap case
+  asserts the REMAINDER rather than the whole value.
+- Every new gate was calibrated by a neuter or mutant observed RED, including five escape-route
+  mutants for the never-raises property. Two calibrations that came back GREEN were recorded as
+  vacuous and rewritten rather than accepted.
+
+### Infrastructure
+
+- The terminal-lease roster is re-cut in the SAME diff that adds a lease, and the walk was widened
+  to SEE the top-level entrypoints — a lease landing in `main.py` would previously have been
+  invisible to it. That measured scope gap is CLOSED, not commented.
+- A "preflight touches nothing" pin on `job_worker._make_mt5_session`: a future terminal touch there
+  would manufacture `Mt5SessionAbandoned` on live derive reads, so it now reds instead.
+- Planning trail, all tracked: 4 plans revised against checker feedback (2 blockers, 4 warnings),
+  RESEARCH, PATTERNS, CONTEXT recording two founder decisions that changed the phase, two premise
+  corrections where a measurement contradicted the written deliverable, the D-06 MEASUREMENT record,
+  the founder HANDOVER, the round-2 REVIEW, SECURITY and VERIFICATION.
+- The GSD research fetch cache is gitignored rather than published — the repo is PUBLIC and
+  `.planning/` is TRACKED.
+
+### Notes
+
+- ⛔ The MT5 names are deliberately NOT in `REQUIRED_PLATFORM_SECRETS` and `/health` gains no key:
+  reddening `config_ok` on an unset OPTIONAL variable converts a human-only config gap into a pod
+  restart loop (T-140.1-24).
+- `[164.6.2-RAISE-LAST-SHAPE-ONLY]` — `Mt5Client.login`'s falsy arm goes through the shared
+  `_raise_last`, which scrubs by SHAPE only. **Pre-existing on every shipped call site and not a
+  regression**, now MEASURED in both directions by a test that will red loudly when a future phase
+  closes it. It stays in this phase as a post-ship plan of its own.
+- Question three (D-09, whether a login re-clears the Expert-Advisors options) is **UNSETTLED**:
+  `terminal_info()` returns null while the `-6` is in force, so `trade_allowed` has no readable
+  value. All four copies of the stale sentence ship unchanged and `cmp`-proven byte-identical to
+  their pre-edit backups — *"no change needed until the reading exists"* was the planned outcome.
+- `scripts/mt5-diag.sh` and the prober's mt5 arm are byte-identical to `main`. Both are READ-ONLY
+  instruments by decision: an instrument that heals what it measures destroys the observation.
+
+
 ## [0.77.42.0] - 2026-09-13 — the prod-prober names MT5 `-6` instead of sending the operator to an error table
 
 ⭐ **What this is.** Phase 164.8.3 PROBERAUTH. Since 2026-09-07 the hourly `prod-prober` has been

@@ -193,6 +193,32 @@ item, not a knob. Two gateways would need two accounts and a routing rule as wel
   ephemeral install. `trade_allowed` still false after clearing the option → do NOT flip;
   every validation would refuse permanently.
 
+### Step 2a — ⭐ Since Phase 164.6.2, the session is RE-established without a human (MT5-GATEWAY-LOGIN-01)
+
+Step 2 above is unchanged and still required. This subsection sits BESIDE it, not in place of it.
+
+- **The FIRST session still needs the one-time VNC login Step 2 describes.** Nothing here
+  installs the terminal, adds the broker account or ticks "save account / auto-login". ⛔ Do
+  not delete or soften Step 2 — it remains how a session comes into existence at stand-up.
+- **What changed:** since Phase 164.6.2 the ANALYTICS service re-establishes the terminal's
+  broker session from three of its OWN environment variables — `MT5_LOGIN`, `MT5_PASSWORD` and
+  `MT5_SERVER`, set on the **`quantalyze-analytics`** Railway service (⛔ NOT on `mt5-gateway`
+  — D-00 deliberately keeps the broker password out of the gateway container). It runs once at
+  each analytics startup, as `heal_mt5_terminal_session` started from `main.lifespan`. Absent
+  or malformed variables log one warning naming only the variable names and the boot continues.
+- ⚠️ **The measured limit, stated as a limit:** the heal fires at **ANALYTICS** startup, NOT
+  when the gateway restarts. A gateway restart that loses the saved session therefore leaves a
+  window in which the prober's mt5 arm can still report the authorization failure, until the
+  analytics service next starts. The size of that window is measured in Phase 164.6.2 (D-06);
+  read the number there rather than from a figure restated here, which would rot.
+- **If the session is lost:** first confirm the three variables are set on the analytics
+  service (key names only — never read a value back), then restart the **ANALYTICS** service.
+  ⛔ Not the gateway — "restart it" used to mean the gateway in this runbook, and restarting
+  the gateway is now the one action that does NOT trigger the heal. It never did help on its
+  own, either: the saved login lives on the persistent `/config` volume, so a terminal with no
+  usable credential comes straight back with no usable credential. Only when the variables are
+  absent, or the heal is observed not to fire, does Step 2's VNC route become necessary again.
+
 ## Step 3 — CREDENTIAL ISOLATION + BROKER ALLOWLISTING (MT5GOLIVE-01)
 
 - The gateway holds ONLY the **one investor login** it syncs (v1 = one serial terminal).
