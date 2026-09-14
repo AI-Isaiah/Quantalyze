@@ -357,6 +357,15 @@ def init_sentry() -> None:
         dsn=dsn,
         traces_sample_rate=0.1,
         send_default_pii=False,
+        # ⛔ Phase 164.6.2 / WR-05 — BOTH halves of that finding, and neither
+        # alone. Adding `password` to the canonical denylist closes the frames we
+        # know about; this closes the ones nobody has written yet. Local
+        # variables were captured for EVERY frame of every event, `before_send`
+        # scrubs them by KEY, and a credential held under any key the denylist
+        # does not name shipped to Sentry verbatim. No frame variable in this
+        # service is worth a credential — the `extra=`/`contexts=` payloads that
+        # ARE worth keeping are unaffected by this flag.
+        include_local_variables=False,
         integrations=[StarletteIntegration(), FastApiIntegration()],
         before_send=_redact_before_send,
         environment=_resolve_environment(),
