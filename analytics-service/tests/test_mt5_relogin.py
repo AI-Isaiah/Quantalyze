@@ -1210,7 +1210,26 @@ async def test_a_minus_six_terminal_is_healed_with_the_values_from_the_environme
     assert credentialed[0]["login"] == int(_FAKE_LOGIN)
     assert credentialed[0]["password"] == _FAKE_PASSWORD
     assert credentialed[0]["server"] == _FAKE_SERVER
-    assert "healed" in _records(caplog)[-1].getMessage()
+    # ⛔ IN-02 — `"healed" in message` CANNOT DISTINGUISH `healed` FROM
+    # `not_healed`, because one is a SUBSTRING of the other. This assertion was the
+    # positive half of the criterion-1 pin and it passed against EVERY verdict this
+    # module can emit except `already_authorized` — including
+    # `not_healed:still_unauthorized`, the exact outcome WR-02 exists to separate
+    # from this one. The sibling case a few lines down already uses the right
+    # idiom; it is used here too, plus the LEVEL, because WR-01's ladder puts a
+    # success at INFO and every failure at WARNING or above.
+    record = _outcome_records(caplog)[-1]
+    message = record.getMessage()
+    assert message.replace("not_healed", "").count("healed") == 1, (
+        f"expected the positive `healed` verdict, got {message!r}. ⛔ A bare "
+        "`\"healed\" in message` is satisfied by `not_healed:...` too — the two "
+        "verdicts this phase exists to tell apart differ by a prefix."
+    )
+    assert record.levelno == logging.INFO, (
+        f"the `healed` verdict was logged at {record.levelname}; WR-01's ladder "
+        "puts a success at INFO and every `not_healed:` verdict above it, so the "
+        "level is a second, independent oracle for which verdict this is"
+    )
     assert [(h, p) for h, p, _t in constructions] == [(_FAKE_HOST, int(_FAKE_PORT))]
 
 
