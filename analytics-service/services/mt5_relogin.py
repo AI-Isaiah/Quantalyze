@@ -240,6 +240,14 @@ def _reset_relogin_log_throttle_for_tests() -> None:
     ⛔ Test-only. Production wants exactly the opposite of this: the throttle is
     what keeps an unconfigured deploy from re-stating the same missing-variable
     line on every future call.
+
+    ⚠️ IN-03 — A TEST-ONLY MUTATOR SHIPPING IN A ``services/`` MODULE IS A
+    DECISION HERE, NOT AN OVERSIGHT. It is underscore-prefixed, documented as
+    test-only, and matches `mt5_client._reset_mt5_epochs_for_tests` — the same
+    shape, in the same package, for the same reason (module-level state a test
+    must be able to clear). ⛔ Production never calls it, and a future caller that
+    does is removing a log-once guarantee the operator depends on. Recorded so
+    the convention stays a decision rather than drifting into a habit.
     """
     _LOGGED_CONFIGURATION_FAULTS.clear()
 

@@ -627,13 +627,32 @@ def _raw_lock_acquisitions(source: str, rel: str) -> list[tuple[str, int]]:
     return found
 
 
+#: ⛔ THE TOP-LEVEL ENTRYPOINTS, ADDED BY 164.6.2 / IN-05 — and the reason is that
+#: a COMMENT was standing where a guard belonged. The walk globbed `services/`
+#: and `routers/` only, so `main.py` and `main_worker.py` were INVISIBLE to it: a
+#: `mt5_terminal_lease` taken in either would never have appeared in the roster
+#: and the `==` below would have stayed green over a roster that had silently
+#: stopped being complete. The old comment recorded that hole honestly; it did
+#: not close it. Both files are production modules that already reach MT5 (`main`
+#: starts the boot heal as a task), so the cheap close is simply to walk them.
+_PRODUCTION_ENTRYPOINT_FILES: tuple[str, ...] = ("main.py", "main_worker.py")
+
+
 def _production_python_files() -> list[Path]:
     root = Path(__file__).resolve().parents[1]  # analytics-service/
-    return sorted(
+    packaged = [
         p
         for pkg in ("services", "routers")
         for p in (root / pkg).rglob("*.py")
+    ]
+    entrypoints = [root / name for name in _PRODUCTION_ENTRYPOINT_FILES]
+    missing = [p.name for p in entrypoints if not p.is_file()]
+    assert not missing, (
+        f"the entrypoint walk names files that do not exist: {missing}. A "
+        f"renamed entrypoint must be re-cut here DELIBERATELY — silently "
+        f"dropping it restores the IN-05 hole this list closes."
     )
+    return sorted(packaged + entrypoints)
 
 
 def test_no_production_module_acquires_the_raw_terminal_lock() -> None:
@@ -772,12 +791,15 @@ _LEASE_VERB = "mt5_terminal_lease"
 #: before the lease releases, so the lazy bind's first touch and its only touches
 #: all land on this one generation.
 #:
-#: ⚠️ THE ROSTER'S MEASURED SCOPE GAP, recorded here because it is exactly why the
-#: heal lives where it does: `_production_python_files` globs `services/` and
-#: `routers/` ONLY, so `main.py` is INVISIBLE to this walk. A lease taken in
-#: `main.py` would never appear here and the `==` would stay green over a roster
-#: that had silently stopped being complete. `services/mt5_relogin.py` is a
-#: `services/` module and `main.py` only CALLS it.
+#: ⭐ THE ROSTER'S FORMER SCOPE GAP, now CLOSED (164.6.2 / IN-05).
+#: `_production_python_files` globbed `services/` and `routers/` only, so
+#: `main.py` was INVISIBLE to this walk — a lease taken there would never have
+#: appeared here and the `==` would have stayed green over a roster that had
+#: silently stopped being complete. That was recorded in a comment, which is a
+#: record of a hole and not a guard against it. The walk now includes both
+#: top-level entrypoints, and measured 2026-09-14 neither takes a lease: the
+#: roster below is unchanged by the widening, which is the point —
+#: `services/mt5_relogin.py` is a `services/` module and `main.py` only CALLS it.
 _PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
     {
         ("services/allocator_positions.py", "_fetch_mt5_account_rows"),
@@ -831,6 +853,24 @@ def _lease_sites(source: str, rel: str) -> list[tuple[str, str]]:
                     chain.append(cur.name)
             found.append((rel, ".".join(reversed(chain))))
     return found
+
+
+def test_the_lease_walk_can_SEE_the_top_level_entrypoints() -> None:
+    """164.6.2 / IN-05 — the scope of the walk, asserted rather than commented.
+
+    Both roster pins below are of the form "everything the walk sees has property
+    P", so a walk that cannot see a file is a hole neither of them can report. The
+    hole was `main.py` and `main_worker.py`, and it was recorded in a comment for
+    a whole phase. ⛔ This is the assertion that would have reported it, and it
+    fails if either entrypoint drops out of the walk again.
+    """
+    walked = {p.name for p in _production_python_files()}
+    for name in _PRODUCTION_ENTRYPOINT_FILES:
+        assert name in walked, (
+            f"{name} is no longer in the production lease walk — a "
+            f"`{_LEASE_VERB}` taken there would be invisible to the `==` roster "
+            "below, which would stay green over an incomplete roster (IN-05)"
+        )
 
 
 def test_no_production_function_holds_two_terminal_leases() -> None:
