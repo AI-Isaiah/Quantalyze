@@ -123,7 +123,12 @@ class _FakeMt5:
       ``initialize_sleep_s``         -> seconds every `initialize()` blocks for
       ``initialize_after_heal``      -> what a BARE `initialize()` returns AFTER a
                                         credentialed one succeeded (default True)
+      ``reprobe_raises``             -> exception the POST-HEAL bare `initialize()`
+                                        raises (falls back to `initialize_raises`)
       ``last_error``                 -> the `(code, text)` tuple (default (0, ...))
+      ``last_error_after_heal``      -> the `(code, text)` tuple once a credentialed
+                                        call has been accepted (falls back to
+                                        ``last_error``)
 
     ⭐ The bare and credentialed forms are SEPARATE scenario keys because the whole
     branch under test is "answer the detector one way, the heal another". A double
@@ -138,6 +143,16 @@ class _FakeMt5:
     ACCOUNT, so the credentialed call returned truthy and the session is still
     down. A stateless double could not tell those two apart, which is exactly why
     the un-probed `healed` verdict looked correct.
+
+    ⛔ IN-04 (round 2) — THE POST-HEAL BRANCH USED TO SHORT-CIRCUIT THE WHOLE BODY.
+    `initialize_after_heal` was consulted BEFORE `initialize_raises` and
+    `initialize_sleep_s`, so the double was STRUCTURALLY INCAPABLE of expressing a
+    re-probe that faults at the TRANSPORT — the Wine bridge dropping, or a modal
+    dialog appearing, between the credentialed call and the re-probe. That is
+    precisely the case the re-probe's own verdict classifier exists for, and it is
+    why it had no failing test available. The post-heal arm now consults the sleep
+    and the raise first, and `last_error_after_heal` lets the SECOND round-trip
+    answer a different code than the first.
     """
 
     def __init__(self, scenario: dict) -> None:
@@ -153,8 +168,7 @@ class _FakeMt5:
         self.call_order.append(
             "initialize_credentialed" if credentialed else "initialize"
         )
-        if not credentialed and self.credentialed_accepted:
-            return self._scenario.get("initialize_after_heal", True)
+        post_heal = not credentialed and self.credentialed_accepted
         sleep_s = self._scenario.get("initialize_sleep_s")
         if sleep_s:
             # A REAL blocking sleep, on whatever thread the call arrives on — the
@@ -163,6 +177,18 @@ class _FakeMt5:
             import time as _time
 
             _time.sleep(sleep_s)
+        if post_heal:
+            # ⭐ The re-probe is a REAL round-trip over the same wedgeable bridge,
+            # so it can raise like any other. `reprobe_raises` expresses a fault
+            # that appeared BETWEEN the credentialed call and the re-probe;
+            # falling back to `initialize_raises` keeps a bridge that was already
+            # down staying down.
+            exc = self._scenario.get(
+                "reprobe_raises", self._scenario.get("initialize_raises")
+            )
+            if exc is not None:
+                raise exc
+            return self._scenario.get("initialize_after_heal", True)
         key = (
             "initialize_credentialed_raises" if credentialed else "initialize_raises"
         )
@@ -177,6 +203,8 @@ class _FakeMt5:
         return result
 
     def last_error(self):
+        if self.credentialed_accepted and "last_error_after_heal" in self._scenario:
+            return self._scenario["last_error_after_heal"]
         return self._scenario.get("last_error", (0, "unknown"))
 
     def shutdown(self):  # pragma: no cover — the heal must never call it (D-35)
