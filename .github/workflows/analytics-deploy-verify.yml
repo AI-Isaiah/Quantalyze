@@ -190,7 +190,25 @@ jobs:
           # Do NOT exit non-zero (see the header): a failed check on this commit
           # makes Railway skip the deploy this probe verifies. Alert via the
           # dedup'd issue (next step) + this warning; keep the check green.
-          echo "::warning::prod analytics git_sha ('$deployed') != main HEAD ('$MAIN_SHA') after the convergence window. Likely a skipped/stuck Railway deploy — see the auto-filed 'analytics-deploy-stale' issue. Recover: 'railway redeploy' / 'railway up' the analytics service."
+          #
+          # ⛔ AN EMPTY READING IS NOT A MISMATCH, AND SAYING SO WAS A REAL DEFECT.
+          # MEASURED 2026-09-14 (v0.77.43.0 merge, run 34846043246): this block
+          # printed `prod analytics git_sha ('') != main HEAD ('f10b0e23…')` — a
+          # STALE-DEPLOY verdict — when what actually happened is that the loop
+          # never obtained a readable git_sha at all. `$deployed` is empty when
+          # /health is unreachable, returns no JSON, or reports no git_sha, and
+          # the old single message reported all of that as "prod is running the
+          # wrong code". An operator then chases a deploy that may be perfectly
+          # fine, and the real fault — we could not measure — goes unnamed.
+          # ⭐ This repo's rule: a verdict must not assert a measurement it never
+          # took. The two faults get two messages; `stale=true` still fires for
+          # BOTH so alerting never weakens (fail toward alerting, as S4 does).
+          if [ -z "$deployed" ] || [ "$deployed" = "unknown" ]; then
+            echo "unreadable=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::NO READING obtained from prod /health ('$HEALTH_URL') within the convergence window — git_sha was absent, empty or 'unknown' on every attempt. ⛔ This is NOT a stale-deploy verdict: the deployed commit is UNKNOWN, not known-wrong. Check the service is up and /health answers with a git_sha before concluding anything about which code is live."
+          else
+            echo "::warning::prod analytics git_sha ('$deployed') != main HEAD ('$MAIN_SHA') after the convergence window. Likely a skipped/stuck Railway deploy — see the auto-filed 'analytics-deploy-stale' issue. Recover: 'railway redeploy' / 'railway up' the analytics service."
+          fi
           exit 0
 
       - name: Open or update GitHub issue on persistent staleness

@@ -195,6 +195,39 @@ describe("[DEPLOYVERIFY-SHA-NOT-CODE] the convergence decision, EXECUTED", () =>
     expect(r.output, "an unresolvable tree must NOT be read as converged").toContain("stale=true");
   });
 
+  it("S5 — NO READING from /health is reported as unknown, never as a stale-deploy verdict", () => {
+    // ⭐ MEASURED 2026-09-14, run 34846043246 (the v0.77.43.0 merge). The probe
+    // printed `prod analytics git_sha ('') != main HEAD ('f10b0e23…')` — a
+    // STALE verdict — when the loop had never obtained a readable git_sha at
+    // all. An empty `$deployed` means /health was unreachable, returned no
+    // JSON, or reported no git_sha; the old single message called every one of
+    // those "prod is running the wrong code". The deployed commit was UNKNOWN,
+    // not known-wrong, and an operator reading that warning chases a deploy
+    // that may be perfectly healthy while the real fault goes unnamed.
+    //
+    // ⛔ A verdict must not assert a measurement it never took. That is this
+    // repo's own rule and it is what this scenario pins.
+    const r = runProbe({ deployed: "", mainSha: SHA_B, treeProd: "", treeMain: TREE });
+    expect(r.code).toBe(0);
+
+    // (a) it says what actually happened
+    expect(r.out, "an unreadable /health must be NAMED as such").toContain("NO READING obtained");
+    expect(r.out).toContain("not known-wrong");
+
+    // (b) ⛔ the anti-conflation arm — the arm that reds if the two faults are
+    // ever merged back into one message. Without the fix this is the ONLY leg
+    // that fails, and it fails on the exact string CI printed.
+    expect(
+      r.out,
+      "an empty reading must NOT be reported as a git_sha mismatch against main",
+    ).not.toContain("!= main HEAD");
+
+    // (c) alerting is NOT weakened by the new branch — both faults still alert,
+    // exactly as S4 insists for the unresolvable-tree case.
+    expect(r.output, "an unreadable probe must still alert").toContain("stale=true");
+    expect(r.output, "and must be distinguishable downstream").toContain("unreadable=true");
+  });
+
   it("every path exits 0 — a red check on main HEAD makes Railway skip the deploy", () => {
     // The 2026-06-21 incident recorded in the workflow header: the red check
     // made Railway skip the deploy, prod never converged, the check stayed red.
