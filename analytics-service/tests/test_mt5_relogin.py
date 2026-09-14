@@ -647,7 +647,36 @@ _TUNING_ENV_NAMES = ("MT5_RELOGIN_BUDGET_S", "MT5_RELOGIN_LEASE_WAIT_S")
 #: `"0"` disabled the heal silently on every boot forever; `"inf"`/`"nan"` removed
 #: the bound and held the terminal lease while the unbounded batch acquires
 #: queued behind it.
-_HOSTILE_TUNING_VALUES = ("45s", "", "   ", "60 x", "0", "-1", "inf", "-inf", "nan")
+#:
+#: ⛔ WR-03 (round 2) — `"3600"` AND `"301"` ARE THE LOAD-BEARING ADDITIONS, AND
+#: THEIR ABSENCE MADE THE CEILING A CLAIM RATHER THAN A GATE. Every value above
+#: except `inf`/`-inf`/`nan` is rejected by `float()` or by the SIGN, and
+#: `inf`/`nan` are rejected by the `math.isfinite` clause — NOT by the comparison.
+#: So no case in this corpus set either knob to a FINITE value above its ceiling,
+#: and deleting `value <= effective_ceiling` outright, or setting the ceiling to
+#: `1e9`, left the whole suite GREEN. Both are finite and both are above BOTH
+#: knobs' ceilings (30 s lease wait, 300 s budget), so they exercise the
+#: comparison at both sites.
+#:
+#: ⛔ `"0.5"` IS THE OTHER END (IN-03 round 2), and it was accepted SILENTLY. A
+#: sub-round-trip budget is strictly WORSE than `0`: zero cancels before the
+#: thread starts, `0.5` lets it start and then expires MID-`initialize_with_
+#: credentials` on the `-6` path, so every boot abandons a credentialed call
+#: against the shared terminal.
+_HOSTILE_TUNING_VALUES = (
+    "45s",
+    "",
+    "   ",
+    "60 x",
+    "0",
+    "-1",
+    "inf",
+    "-inf",
+    "nan",
+    "3600",
+    "301",
+    "0.5",
+)
 
 
 @pytest.mark.parametrize("name", _TUNING_ENV_NAMES)
@@ -742,6 +771,20 @@ async def test_a_hostile_budget_falls_back_to_the_derived_default_and_still_heal
     )
     messages = [r.getMessage() for r in _records(caplog)]
     assert any("already_authorized" in m for m in messages), messages
+    # ⛔ WR-03 (round 2) — THE WINDOW, for the same reason as the lease knob above.
+    # "the heal still reached the terminal" is satisfied by a 3600 s budget as
+    # happily as by a 160 s one, so the behavioural oracle alone cannot see a
+    # deleted ceiling comparison. Read BY SYMBOL, never restated.
+    budget = mt5_relogin._relogin_budget_s()
+    assert (
+        mt5_relogin._MT5_RELOGIN_BUDGET_FLOOR_S
+        <= budget
+        <= mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S
+    ), (
+        f"MT5_RELOGIN_BUDGET_S={value!r} resolved to {budget!r}, OUTSIDE its own "
+        f"declared window [{mt5_relogin._MT5_RELOGIN_BUDGET_FLOOR_S}, "
+        f"{mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S}]."
+    )
     _assert_no_credential_value_escaped(_records(caplog))
 
 
@@ -767,12 +810,36 @@ async def test_a_hostile_lease_wait_falls_back_to_the_derived_default(
         f"MT5_RELOGIN_LEASE_WAIT_S={value!r} reached the lease as {wait_s!r}. A "
         "tuning typo must fall back to the derived default (WR-06)."
     )
+    # ⛔ WR-03 (round 2) — THE WINDOW, not merely "positive and finite". The weaker
+    # assertion is what let `"3600"` sail through: 3600 is positive and finite, so
+    # a deleted ceiling comparison stayed GREEN here. The bounds are read BY SYMBOL
+    # so a retune of `MT5_REQUEST_TIMEOUT_S` — which both descend from — carries
+    # through instead of stranding a hand-typed number.
+    assert (
+        mt5_relogin._MT5_RELOGIN_LEASE_WAIT_FLOOR_S
+        <= wait_s
+        <= mt5_relogin._MT5_RELOGIN_LEASE_WAIT_CEILING_S
+    ), (
+        f"MT5_RELOGIN_LEASE_WAIT_S={value!r} reached the lease as {wait_s!r}, "
+        f"OUTSIDE its own declared window "
+        f"[{mt5_relogin._MT5_RELOGIN_LEASE_WAIT_FLOOR_S}, "
+        f"{mt5_relogin._MT5_RELOGIN_LEASE_WAIT_CEILING_S}]. Above the ceiling a "
+        "best-effort heal queues ahead of real work for longer than a single "
+        "round-trip takes, which contradicts the whole 'a busy terminal is "
+        "evidence the session is fine, so skip' posture this bound expresses."
+    )
 
 
 @pytest.mark.parametrize(
     "name,value,expected",
     [
-        ("MT5_RELOGIN_BUDGET_S", "12.5", 12.5),
+        # ⚠️ 45, not the 12.5 this case used to carry: IN-03 (round 2) floored the
+        # budget at ONE ROUND-TRIP (30 s), so 12.5 is no longer a LEGITIMATE value
+        # — it is one of the sub-round-trip values the floor exists to reject, and
+        # leaving it here would have turned an anti-vacuity case into a second
+        # assertion that the floor does not work. 45 sits inside [30, 300] and is
+        # not the derived default, which is what this case needs.
+        ("MT5_RELOGIN_BUDGET_S", "45", 45.0),
         ("MT5_RELOGIN_LEASE_WAIT_S", "5", 5.0),
     ],
 )
@@ -795,6 +862,250 @@ def test_a_LEGITIMATE_tuning_value_is_still_honoured(
     assert default != expected, (
         "the legitimate value happens to EQUAL the derived default, so this case "
         "cannot distinguish a real read from a hardcoded return — pick another."
+    )
+
+
+#: `(env name, reader, floor symbol, ceiling symbol, default symbol)` for the two
+#: knobs. ⛔ Read BY SYMBOL from the module, never restated: a bound restated in a
+#: test is a second source of truth that drifts, and this repo has a dated record
+#: of exactly that (`ARMS_FLOOR` prose said 380, the shipped value was 384).
+_TUNING_KNOBS = (
+    pytest.param(
+        "MT5_RELOGIN_BUDGET_S",
+        "_relogin_budget_s",
+        "_MT5_RELOGIN_BUDGET_FLOOR_S",
+        "_MT5_RELOGIN_BUDGET_CEILING_S",
+        id="budget",
+    ),
+    pytest.param(
+        "MT5_RELOGIN_LEASE_WAIT_S",
+        "_relogin_lease_wait_s",
+        "_MT5_RELOGIN_LEASE_WAIT_FLOOR_S",
+        "_MT5_RELOGIN_LEASE_WAIT_CEILING_S",
+        id="lease-wait",
+    ),
+)
+
+
+@pytest.mark.parametrize("name,reader_name,floor_name,ceiling_name", _TUNING_KNOBS)
+def test_a_FINITE_value_ABOVE_the_ceiling_falls_back_to_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    reader_name: str,
+    floor_name: str,
+    ceiling_name: str,
+) -> None:
+    """⛔ WR-03 (round 2) — THE RANGE CEILING HAD NO TEST THAT COULD FAIL.
+
+    The hostile corpus rejects `45s`/`60 x`/`""` at `float()`, `0`/`-1` by the
+    SIGN, and `inf`/`-inf`/`nan` at the `math.isfinite` clause. Not one case set
+    either knob to a FINITE value above its ceiling, so deleting
+    `value <= effective_ceiling` outright — or setting the ceiling to `1e9` — left
+    the whole suite GREEN. The ceiling existed as a claim and not as a gate.
+
+    ⛔ The bound is read BY SYMBOL and the probe is derived from it, so a retune of
+    `MT5_REQUEST_TIMEOUT_S` (which BOTH bounds descend from) carries through here
+    instead of stranding a hand-typed number.
+    """
+    reader = getattr(mt5_relogin, reader_name)
+    ceiling = getattr(mt5_relogin, ceiling_name)
+
+    monkeypatch.delenv(name, raising=False)
+    default = reader()
+
+    over = ceiling + 1.0
+    assert over > default, (
+        f"harness: {ceiling_name}+1 ({over}) is not above the derived default "
+        f"({default}), so this probe cannot distinguish a rejection from a "
+        "coincidence — re-anchor it"
+    )
+    monkeypatch.setenv(name, repr(over))
+    assert reader() == default, (
+        f"{name}={over!r} — a FINITE value above {ceiling_name} ({ceiling}) — was "
+        f"HONOURED. `{ceiling_name}` bounds a TYPO, not a tuning decision: an "
+        "over-large budget holds the terminal lease while every batch caller "
+        "queues behind it with `wait_s=None`, i.e. unbounded."
+    )
+
+
+@pytest.mark.parametrize("name,reader_name,floor_name,ceiling_name", _TUNING_KNOBS)
+def test_a_FINITE_value_BELOW_the_floor_falls_back_to_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    reader_name: str,
+    floor_name: str,
+    ceiling_name: str,
+) -> None:
+    """⛔ IN-03 (round 2) — THE KNOB HAD A CEILING AND NO FLOOR, AND THAT ASYMMETRY
+    WAS ITSELF THE HAZARD.
+
+    `MT5_RELOGIN_BUDGET_S=0` was rejected; `0.5` and `0.001` were accepted
+    SILENTLY (measured). A sub-round-trip budget is strictly WORSE than zero: zero
+    cancels before the thread starts, whereas `0.5` lets it start and then expires
+    MID-`initialize_with_credentials` on the `-6` path — so EVERY boot leaves a
+    credentialed call carrying the broker password in flight against the shared
+    terminal after the lease released and bumped the generation. That is the
+    abandoned-thread state WR-03's whole derivation exists to avoid, reached by a
+    typo rather than by a hang.
+
+    ⛔ A knob that rejects `inf` and `0` READS as range-checked. An operator has no
+    reason to go looking for the end that is not.
+    """
+    reader = getattr(mt5_relogin, reader_name)
+    floor = getattr(mt5_relogin, floor_name)
+
+    monkeypatch.delenv(name, raising=False)
+    default = reader()
+
+    under = floor / 2.0
+    assert 0.0 < under < default, (
+        f"harness: {floor_name}/2 ({under}) is not a positive value below the "
+        f"derived default ({default}) — re-anchor this probe"
+    )
+    monkeypatch.setenv(name, repr(under))
+    assert reader() == default, (
+        f"{name}={under!r} — a positive, finite value BELOW {floor_name} "
+        f"({floor}) — was HONOURED. Below one round-trip the budget expires "
+        "mid-call and abandons an in-flight credentialed `initialize()` against "
+        "the SHARED terminal on every boot (IN-03 round 2)."
+    )
+
+
+def test_the_declared_BOUNDS_are_derivations_and_not_free_numbers() -> None:
+    """⛔ WR-03 (round 2), THE OTHER MUTANT: SETTING A CEILING TO `1e9`.
+
+    A gate on the comparison alone does not see this. Every range test above keeps
+    passing against a ceiling of `1e9`, because the comparison still runs — it just
+    stops bounding anything. `_MT5_RELOGIN_BUDGET_CEILING_S`'s own comment says it
+    "bounds a TYPO, not a tuning decision; raising it means arguing about the
+    dispatch ceiling, not about this line", and this is that sentence made
+    enforceable.
+
+    BOTH bounds are DERIVED and both derivations are checked against the symbol
+    they descend from, never against a restated number:
+
+      * the lease-wait ceiling is ONE rpyc round-trip — waiting LONGER for a
+        terminal somebody else is driving than a single round-trip takes
+        contradicts the "a busy terminal is evidence the session is fine, so skip"
+        posture the bound exists to express;
+      * the budget ceiling is ONE THIRD of the 15-minute dispatch ceiling the
+        batch callers wait against with `wait_s=None`, i.e. UNBOUNDED — so even a
+        maximally mis-tuned budget leaves a derive job two thirds of its own
+        ceiling. That ceiling is `job_worker._DERIVE_OUTER_BUDGET_S`, imported here
+        rather than retyped;
+      * the budget FLOOR is one round-trip, for the reason IN-03 (round 2) gives.
+    """
+    from services.job_worker import _DERIVE_OUTER_BUDGET_S
+
+    assert (
+        mt5_relogin._MT5_RELOGIN_LEASE_WAIT_CEILING_S
+        == mt5_relogin._MT5_REQUEST_TIMEOUT_S
+    ), (
+        "the lease-wait ceiling is no longer ONE rpyc round-trip "
+        f"({mt5_relogin._MT5_RELOGIN_LEASE_WAIT_CEILING_S} vs "
+        f"{mt5_relogin._MT5_REQUEST_TIMEOUT_S}) — it has become a free number"
+    )
+    assert (
+        mt5_relogin._MT5_RELOGIN_BUDGET_FLOOR_S == mt5_relogin._MT5_REQUEST_TIMEOUT_S
+    ), (
+        "the budget floor is no longer ONE rpyc round-trip "
+        f"({mt5_relogin._MT5_RELOGIN_BUDGET_FLOOR_S} vs "
+        f"{mt5_relogin._MT5_REQUEST_TIMEOUT_S})"
+    )
+    assert mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S * 3 == _DERIVE_OUTER_BUDGET_S, (
+        f"the budget ceiling ({mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S}) is no "
+        f"longer one third of the dispatch ceiling ({_DERIVE_OUTER_BUDGET_S}). ⛔ "
+        "Raising it means arguing about the dispatch ceiling the unbounded batch "
+        "acquires wait against, not about that line."
+    )
+
+    # The ordering invariant, for both knobs: a window must be non-empty and the
+    # default must sit inside it, or the clamps in `_env_float` are the only thing
+    # keeping the module usable.
+    for floor, default, ceiling in (
+        (
+            mt5_relogin._MT5_RELOGIN_BUDGET_FLOOR_S,
+            mt5_relogin._relogin_budget_s(),
+            mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S,
+        ),
+        (
+            mt5_relogin._MT5_RELOGIN_LEASE_WAIT_FLOOR_S,
+            mt5_relogin._MT5_RELOGIN_LEASE_WAIT_DEFAULT_S,
+            mt5_relogin._MT5_RELOGIN_LEASE_WAIT_CEILING_S,
+        ),
+    ):
+        assert 0.0 < floor <= default <= ceiling, (
+            f"the window [{floor}, {ceiling}] does not contain its own default "
+            f"({default}) — a bound that forbids the value the module uses itself "
+            "is not a bound, it is a bug (WR-06's argument, both ends)"
+        )
+
+
+@pytest.mark.parametrize(
+    "clamp,name,raw,default,floor,ceiling",
+    [
+        pytest.param(
+            "max(ceiling, default)",
+            "GSD_TEST_CEILING_BELOW_DEFAULT",
+            "50",
+            50.0,
+            1.0,
+            10.0,
+            id="ceiling-below-its-own-default",
+        ),
+        pytest.param(
+            "min(floor, default)",
+            "GSD_TEST_FLOOR_ABOVE_DEFAULT",
+            "2",
+            2.0,
+            30.0,
+            300.0,
+            id="floor-above-its-own-default",
+        ),
+    ],
+)
+def test_a_BOUND_that_excludes_its_own_default_still_accepts_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    clamp: str,
+    name: str,
+    raw: str,
+    default: float,
+    floor: float,
+    ceiling: float,
+) -> None:
+    """⛔ THE TWO CLAMPS. `max(ceiling, default)` WAS THE ENTIRE CONTENT OF COMMIT
+    `fbbf7bf0` AND HAD NO ASSERTION ANYWHERE; `min(floor, default)` arrived with
+    IN-03 and would have re-opened the same hole from the other end.
+
+    Both defaults descend from `MT5_REQUEST_TIMEOUT_S`, which is itself tunable, so
+    a large retune there can push a default OUTSIDE its own window. A bound that
+    forbids the value the module would happily use itself is not a bound, it is a
+    bug: every operator value is rejected AND the fallback is a number the range
+    check has just declared invalid.
+
+    ⛔ THE ORACLE IS THE LOG RECORD, NOT THE RETURN VALUE, and a first draft of this
+    test got that wrong: a REJECTED value falls back to the default, so `got ==
+    default` is satisfied by both outcomes and both clamp mutants stayed GREEN
+    against it. Acceptance and rejection are distinguishable only by whether the
+    out-of-range fault was logged.
+
+    ⛔ Driven through `_env_float` directly, because the shipped constants are
+    (correctly) not in that relationship — the property belongs to the HELPER, and a
+    test that could only run while the constants were broken could never run.
+    """
+    monkeypatch.setenv(name, raw)
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        got = mt5_relogin._env_float(name, default, floor=floor, ceiling=ceiling)
+
+    assert got == default
+    assert _records(caplog) == [], (
+        f"a window [{floor}, {ceiling}] that excludes its own default ({default}) "
+        f"REJECTED the default itself — `{clamp}` is gone. The return value alone "
+        "cannot see this (a rejection falls back to the default); the operator's "
+        "log can, and it now reads as a misconfiguration on a correctly-configured "
+        f"deploy: {[r.getMessage() for r in _records(caplog)]}"
     )
 
 
@@ -1505,6 +1816,15 @@ async def test_a_hung_terminal_is_abandoned_at_the_budget_and_raises_nothing(
     # the heal would report `healed`, and the assertion below would red while
     # LOOKING like a budget regression. Driving the real reader is also strictly
     # more: it exercises the parse and the range check this test depends on.
+    # ⛔ IN-03 (round 2) floored the budget at ONE ROUND-TRIP, so a raw `0.05`
+    # would now be REJECTED as out of range and fall back to the 160 s default —
+    # the 0.4 s double would finish, the heal would report `healed`, and the
+    # assertions below would red while LOOKING like a budget regression. The floor
+    # is therefore lowered FOR THIS TEST, which is strictly more honest than
+    # stubbing the reader: the real parse, the real range check and the real
+    # `wait_for` all still run, and the only thing moved is the bound whose whole
+    # purpose is to be too large to observe in a unit test.
+    monkeypatch.setattr(mt5_relogin, "_MT5_RELOGIN_BUDGET_FLOOR_S", 0.01)
     monkeypatch.setenv("MT5_RELOGIN_BUDGET_S", "0.05")
     _install_client(monkeypatch, {"initialize": True, "initialize_sleep_s": 0.4})
 

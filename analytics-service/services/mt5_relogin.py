@@ -198,6 +198,16 @@ _MT5_RELOGIN_CONNECT_SLACK_S: Final[float] = 10.0
 # arguing about the dispatch ceiling, not about this line.
 _MT5_RELOGIN_BUDGET_CEILING_S: Final[float] = 300.0
 
+# ⛔ IN-03 (round 2) — THE FLOOR, and it is ONE ROUND-TRIP because anything less is
+# a budget that cannot complete a single bounded call. `MT5_RELOGIN_BUDGET_S=0` was
+# already rejected while `0.5` and `0.001` were accepted SILENTLY (measured), and
+# the sub-round-trip values are the WORSE of the two: zero cancels before the
+# thread starts, whereas `0.5` lets it start and then expires MID-`initialize_with_
+# credentials` on the `-6` path, so EVERY boot abandons a credentialed call against
+# the shared terminal after the lease released and bumped the generation. Derived
+# from the rpyc bound like every other number here, so a retune carries through.
+_MT5_RELOGIN_BUDGET_FLOOR_S: Final[float] = _MT5_REQUEST_TIMEOUT_S
+
 # ⭐ The bound on ACQUIRING the terminal, and it is deliberately SHORT — a
 # different quantity from the bound on OPERATING it (the D-29 distinction).
 #
@@ -231,6 +241,15 @@ _MT5_RELOGIN_LEASE_WAIT_DEFAULT_S: Final[float] = 2.0
 # takes contradicts the whole "a busy terminal is evidence the session is fine,
 # so skip" posture this bound exists to express.
 _MT5_RELOGIN_LEASE_WAIT_CEILING_S: Final[float] = _MT5_REQUEST_TIMEOUT_S
+
+# ⛔ Its floor is a DIFFERENT quantity from the budget's and is deliberately tiny.
+# This bound governs ACQUIRING, not operating (the D-29 distinction), and the
+# correct behaviour when the terminal is busy is to SKIP — so a short wait is a
+# legitimate tuning choice, not a typo. The floor exists only to keep the knob out
+# of the region where "bounded" stops meaning anything: a wait of `0.001 s` cannot
+# lose a race it never entered, so the heal would skip on every boot and the log
+# would fill with a designed-looking INFO skip forever.
+_MT5_RELOGIN_LEASE_WAIT_FLOOR_S: Final[float] = 0.1
 
 # The verdict tokens `_heal_blocking` hands back for the caller to log. Short,
 # fixed strings: they name what happened to the SESSION and carry no credential,
@@ -293,7 +312,7 @@ def _log_configuration_fault_once(reason: str, message: str, *args: object) -> N
     logger.warning(message, *args)
 
 
-def _env_float(name: str, default: float, *, ceiling: float) -> float:
+def _env_float(name: str, default: float, *, floor: float, ceiling: float) -> float:
     """One tuning knob, read PER CALL, with the SAME posture as the credential
     readers: a bad value logs once and falls back to the derived default.
 
@@ -301,6 +320,18 @@ def _env_float(name: str, default: float, *, ceiling: float) -> float:
     Absent, blank, non-numeric, zero, negative, `nan` and `inf` all take the
     default. There is no input that reaches an `asyncio.wait_for` unvalidated and
     none that reaches the caller as an exception.
+
+    ⛔ IN-03 (round 2) — THE WINDOW IS BOUNDED AT BOTH ENDS, AND THE FLOOR IS THE
+    HALF THAT WAS MISSING. `MT5_RELOGIN_BUDGET_S=0` was rejected while `0.5` and
+    `0.001` were accepted SILENTLY (measured) — and a SUB-ROUND-TRIP budget is
+    strictly WORSE than zero. Zero cancels before the thread starts; `0.5` lets the
+    thread start and then expires MID-`initialize_with_credentials` on the `-6`
+    path, so EVERY boot leaves a credentialed call in flight against the shared
+    terminal after the lease released and bumped the generation — the
+    abandoned-thread state WR-03's whole derivation exists to avoid, arrived at by
+    a typo. ⛔ The presence of a validated ceiling was itself the hazard: a knob
+    that rejects `inf` and `0` reads as "this one is range-checked", and an
+    operator has no reason to look for the end that is not.
 
     ⛔ The value is NEVER logged — only the variable NAME and the fault class.
     These knobs carry no credential today, but the module's rule (T-164.6.2-12)
@@ -327,19 +358,26 @@ def _env_float(name: str, default: float, *, ceiling: float) -> float:
     # module would happily use itself — a ceiling that forbids its own default is
     # not a bound, it is a bug.
     effective_ceiling = max(ceiling, default)
+    # ⚠️ And by the SAME argument in the other direction: a floor above the default
+    # would reject the value the module would happily use itself. Clamped to the
+    # default so the window can never be empty from either end.
+    effective_floor = min(floor, default)
     # `math.isfinite` covers BOTH `inf` and `nan`, and `float("nan")` is the
     # nastier of the two: every comparison against it is False, so a naive
-    # `0 < value <= ceiling` range check would ACCEPT it and hand `nan` to
+    # `floor <= value <= ceiling` range check would ACCEPT it and hand `nan` to
     # `wait_for`. Test the finiteness first, explicitly.
-    if not math.isfinite(value) or not 0.0 < value <= effective_ceiling:
+    if not math.isfinite(value) or not effective_floor <= value <= effective_ceiling:
         _log_configuration_fault_once(
             f"{name}_out_of_range",
-            "mt5 boot heal: %s is set to a value outside (0, %s] seconds; "
-            "falling back to the derived default. Zero would disable the heal "
-            "silently on every boot forever, and an unbounded value would hold "
-            "the terminal lease while the batch derive queues behind it. This is "
-            "a SERVER misconfiguration, never a credential failure (D-02).",
+            "mt5 boot heal: %s is set to a value outside [%s, %s] seconds; "
+            "falling back to the derived default. Below the floor the budget "
+            "expires MID-round-trip and leaves a call in flight against the "
+            "shared terminal on EVERY boot; zero would disable the heal silently "
+            "forever, and an unbounded value would hold the terminal lease while "
+            "the batch derive queues behind it. This is a SERVER "
+            "misconfiguration, never a credential failure (D-02).",
             name,
+            effective_floor,
             effective_ceiling,
         )
         return default
@@ -353,6 +391,7 @@ def _relogin_budget_s() -> float:
         _MT5_RELOGIN_BUDGET_ENV,
         _MT5_RELOGIN_ROUND_TRIPS * _MT5_REQUEST_TIMEOUT_S
         + _MT5_RELOGIN_CONNECT_SLACK_S,
+        floor=_MT5_RELOGIN_BUDGET_FLOOR_S,
         ceiling=_MT5_RELOGIN_BUDGET_CEILING_S,
     )
 
@@ -362,6 +401,7 @@ def _relogin_lease_wait_s() -> float:
     return _env_float(
         _MT5_RELOGIN_LEASE_WAIT_ENV,
         _MT5_RELOGIN_LEASE_WAIT_DEFAULT_S,
+        floor=_MT5_RELOGIN_LEASE_WAIT_FLOOR_S,
         ceiling=_MT5_RELOGIN_LEASE_WAIT_CEILING_S,
     )
 
