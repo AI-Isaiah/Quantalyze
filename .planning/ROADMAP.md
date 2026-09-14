@@ -1885,7 +1885,7 @@ Plans:
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS `MT5-GATEWAY-LOGIN-01`
 
 **Depends on:** Phase 164.6 (ordering only). ⚠️ Founder-gated at criterion 2 — it can be BUILT without the founder and cannot be CLOSED without them, so it must not block Phase 164.6.3.
-**Plans:** 3/4 plans executed
+**Plans:** 3/5 plans executed
 
 Plans:
 
@@ -1893,6 +1893,7 @@ Plans:
 - [x] 164.6.2-02-PLAN.md — wave 2: `services/mt5_relogin.py` (kill-switch-gated, leased, off-loop, bounded, structurally incapable of raising), the re-cut lease roster, a new "preflight touches nothing" pin, one `create_task` in `main.lifespan`, and criterion 1's falsifier observed RED on two levers.
 - [x] 164.6.2-03-PLAN.md — wave 3: the founder handover (exact `railway variables --set`, placeholders only) plus a runbook subsection, then a BLOCKING human-action gate — ⛔ criterion 3, no agent enters a credential.
 - [ ] 164.6.2-04-PLAN.md — wave 4: criterion 2's observation and D-06's measured window, question THREE's `trade_allowed` falsification riding along, the gated correction of the stale account-change sentence, and a BLOCKING decision routing every deferral to a named phase.
+- [ ] 164.6.2-05-PLAN.md — wave 5 (gap closure, post-ship): re-assert the two preconditions at execution time (merge on `main`; `/health` `git_sha` CONTAINS the heal — descendant + blob, never equality), restart `mt5-gateway`, poll to a second consecutive reading, take the POST-RESTART narrowed prober dispatch read from the log ARCHIVE, record D-06's delta and what closed it, carry question THREE's R1/R2, and a BLOCKING decision on the measured window. Instruments stay READ-ONLY; four enumerated outcomes (CLOSED / OPEN / UNREADABLE / PREMISE-FAILED) enforced by a consistency gate.
 
 ### Phase 164.6.3: CIDOCSPATH — a docs-only PR stops running the code gates, and a code PR is proven to still run every one of them (INSERTED)
 
