@@ -161,11 +161,21 @@ class _FakeMt5:
         self.initialize_kwargs: list[dict] = []
         self.call_order: list[str] = []
         self.credentialed_accepted = False
+        #: ⭐ EVERY remote round-trip, `last_error` included — the quantity
+        #: `_MT5_RELOGIN_ROUND_TRIPS` is a budget for. Deliberately a SECOND list
+        #: rather than an addition to `call_order`: that one is asserted
+        #: `==`-exactly by a dozen cases whose subject is the credential branch,
+        #: and folding a bookkeeping call into it would make every one of them
+        #: restate a fact they are not about.
+        self.round_trips: list[str] = []
 
     def initialize(self, **kwargs):
         credentialed = "login" in kwargs
         self.initialize_kwargs.append(dict(kwargs))
         self.call_order.append(
+            "initialize_credentialed" if credentialed else "initialize"
+        )
+        self.round_trips.append(
             "initialize_credentialed" if credentialed else "initialize"
         )
         post_heal = not credentialed and self.credentialed_accepted
@@ -203,6 +213,7 @@ class _FakeMt5:
         return result
 
     def last_error(self):
+        self.round_trips.append("last_error")
         if self.credentialed_accepted and "last_error_after_heal" in self._scenario:
             return self._scenario["last_error_after_heal"]
         return self._scenario.get("last_error", (0, "unknown"))
@@ -981,6 +992,74 @@ async def test_a_heal_the_broker_did_not_honour_is_NOT_reported_as_healed(
     assert message.replace("not_healed", "").count("healed") == 0
     assert record.levelno == logging.WARNING
     _assert_no_credential_value_escaped(_records(caplog))
+
+
+async def test_the_budget_covers_every_round_trip_the_worst_case_path_makes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ WR-02 (round 2) — THE BUDGET'S DERIVATION, MEASURED AGAINST THE PATH.
+
+    `_MT5_RELOGIN_ROUND_TRIPS` was 4 and the path makes 5. The table's last row was
+    missed: the re-probe is a DETECTOR, and a detector that answers falsy goes on to
+    `_raise_last` -> `last_error()` exactly as the first one does.
+
+    The five-trip path is not exotic. It is the path that produces
+    `still_unauthorized` / `heal_sent_ipc_fault_on_reprobe` — the single most
+    VALUABLE verdict this module emits, the one that says a human must act. At
+    5 x 30 s = 150 s against a 130 s budget the `wait_for` fired mid-`last_error`
+    on a slow Wine bridge, the lease released and bumped the generation, a zombie
+    thread was left in flight against the shared terminal, and the operator got the
+    generic `did not complete` INSTEAD of the verdict — precisely when a heal is
+    most needed.
+
+    ⛔ THE COUNT IS MEASURED FROM THE DOUBLE, NEVER RESTATED. A gate that asserted
+    `_MT5_RELOGIN_ROUND_TRIPS == 5` against a hand-typed 5 would pin a number; this
+    pins the DERIVATION, so a sixth round-trip added to the path reds here rather
+    than silently re-opening the window.
+    """
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            "initialize": False,
+            "last_error": (-6, "Terminal: Authorization failed"),
+            "initialize_credentialed": True,
+            "initialize_after_heal": False,
+        },
+    )
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert fake.round_trips == [
+        "initialize",
+        "last_error",
+        "initialize_credentialed",
+        "initialize",
+        "last_error",
+    ], f"the worst-case path changed shape: {fake.round_trips}"
+
+    measured = len(fake.round_trips)
+    assert mt5_relogin._MT5_RELOGIN_ROUND_TRIPS >= measured, (
+        f"the `-6` path makes {measured} bounded round-trips and the budget is "
+        f"derived from only {mt5_relogin._MT5_RELOGIN_ROUND_TRIPS}. On a slow Wine "
+        "bridge the `wait_for` fires MID-round-trip: the lease releases, bumps the "
+        "generation, and abandons an in-flight call against the SHARED terminal, "
+        "while the operator gets `did not complete` instead of the verdict."
+    )
+
+    monkeypatch.delenv("MT5_RELOGIN_BUDGET_S", raising=False)
+    budget = mt5_relogin._relogin_budget_s()
+    assert budget >= measured * mt5_relogin._MT5_REQUEST_TIMEOUT_S, (
+        f"the derived default budget {budget}s does not cover {measured} x "
+        f"{mt5_relogin._MT5_REQUEST_TIMEOUT_S}s of rpyc ceilings"
+    )
+    assert budget <= mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S, (
+        f"the derived default {budget}s now EXCEEDS its own ceiling "
+        f"{mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S}s — the ceiling is derived "
+        "from the 15-minute dispatch ceiling the unbounded batch acquires wait "
+        "against, so raising it means arguing about THAT, not about this line"
+    )
 
 
 @pytest.mark.parametrize("ipc_code", [-10003, -10004, -10005])

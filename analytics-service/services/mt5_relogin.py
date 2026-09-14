@@ -147,6 +147,11 @@ _MT5_RELOGIN_LEASE_WAIT_ENV: Final[str] = "MT5_RELOGIN_LEASE_WAIT_S"
 #   |                                                 | SECOND full 30 s here   |
 #   | `initialize_with_credentials` -> `initialize(…)` | 20 s MT5 IPC / 30 s rpyc|
 #   | the WR-02 RE-PROBE -> `initialize()`             | 20 s MT5 IPC / 30 s rpyc|
+#   | the RE-PROBE's `_raise_last` -> `last_error()`   | 30 s rpyc — the SAME     |
+#   |                                                 | second round-trip as row |
+#   |                                                 | three, on the second     |
+#   |                                                 | probe. This row was      |
+#   |                                                 | MISSING (WR-02 r2)       |
 #
 # The old `_MT5_REQUEST_TIMEOUT_S + 10.0` (40 s) bounded ~80 s of work, so a
 # genuinely-`-6` terminal on a slow Wine bridge — the condition under which a
@@ -155,7 +160,24 @@ _MT5_RELOGIN_LEASE_WAIT_ENV: Final[str] = "MT5_RELOGIN_LEASE_WAIT_S"
 # in-flight credentialed `initialize` is abandoned against the shared terminal,
 # and whether the session came up is unknowable from the log. Still DERIVED from
 # the rpyc bound (the house idiom) so a retune carries through.
-_MT5_RELOGIN_ROUND_TRIPS: Final[int] = 4
+#
+# ⛔ IT WAS 4, AND THE PATH MAKES 5. The table's last row was missed: WR-02's
+# re-probe is a DETECTOR, and a detector that answers falsy goes on to
+# `_raise_last` -> `last_error()` exactly as the first probe does. The five-trip
+# path is not an exotic one — it is the path that produces
+# `still_unauthorized` / `heal_sent_ipc_fault_on_reprobe`, i.e. the single most
+# VALUABLE verdict this module emits, the one that says a human must act.
+# MEASURED: 5 x 30 s = 150 s against a 130 s budget, so on a slow Wine bridge the
+# `wait_for` fired mid-`last_error` and the operator got the generic
+# `did not complete` INSTEAD of the verdict — and a zombie thread was left in
+# flight against the shared terminal for the difference. 5 x 30 + 10 = 160 s,
+# comfortably under the 300 s ceiling derived below.
+#
+# ⛔ The count is GATED, not asserted: `test_the_budget_covers_every_round_trip_
+# the_worst_case_path_makes` drives the five-trip path against the double and
+# counts the remote calls it actually makes. A sixth round-trip added to the path
+# reds there rather than silently re-opening this window.
+_MT5_RELOGIN_ROUND_TRIPS: Final[int] = 5
 
 # The slack over the round-trips, covering the unbounded `rpyc.classic.connect`.
 _MT5_RELOGIN_CONNECT_SLACK_S: Final[float] = 10.0
