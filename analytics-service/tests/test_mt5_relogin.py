@@ -983,6 +983,154 @@ async def test_a_heal_the_broker_did_not_honour_is_NOT_reported_as_healed(
     _assert_no_credential_value_escaped(_records(caplog))
 
 
+async def test_a_REFUSED_credential_is_a_verdict_and_never_a_transient_miss(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ HIGH-2 — THE ONE CREDENTIAL-CARRYING CALL THAT HAD NO VERDICT.
+
+    `initialize_with_credentials` sat UNGUARDED between two typed-handler blocks.
+    The reachable case is mundane and permanent: `MT5_PASSWORD` is rotated at the
+    broker and not updated in Railway. The detector correctly answers `-6`, the
+    credentialed verb is refused, `_raise_last` raises `Mt5ClientError` — and it
+    escaped to the entry's catch-all, where the operator read *"mt5 boot heal did
+    not complete — continuing without it … the next boot will try again"*.
+
+    That is this module's wording for a TRANSIENT fault, and the truth is the
+    opposite: nothing heals on this boot or on any future one until a human edits
+    a Railway variable. "The next boot will try again" is an actively misleading
+    sentence there.
+
+    ⛔ It also bypassed WR-01's severity ladder BY CONSTRUCTION — the ladder keys
+    off the `not_healed:` prefix and a verdict that is never produced carries no
+    prefix — so the one outcome that NAMES a human action was logged at the same
+    level as a gateway blip.
+    """
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            "initialize": False,
+            "last_error": (-6, "Terminal: Authorization failed"),
+            # The broker REFUSES the rotated credential. `initialize_with_credentials`
+            # raises `Mt5ClientError` through `_raise_last`, exactly as the shipped
+            # client does on a falsy credentialed return.
+            "initialize_credentialed": False,
+        },
+    )
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert fake.call_order == ["initialize", "initialize_credentialed"], (
+        "the re-probe must NOT run after a refusal — there is nothing to re-probe "
+        f"and the verdict is already known: {fake.call_order}"
+    )
+    record = _outcome_records(caplog)[-1]
+    message = record.getMessage()
+    assert "credential_refused" in message, (
+        f"a refused credential was reported as {message!r}. The catch-all's "
+        "wording ('the next boot will try again') describes a transient miss; a "
+        "rotated password is permanent until a human edits Railway (HIGH-2)."
+    )
+    assert "did not complete" not in message, (
+        "the refusal still escaped to the entry's catch-all (HIGH-2)"
+    )
+    assert "code=" in message, (
+        "the refusal carries no `code=` token, so it is the only failure here an "
+        "operator cannot classify (WR-01's detail half)"
+    )
+    assert record.levelno == logging.WARNING, (
+        f"a refused credential was logged at {record.levelname} — WR-01's ladder "
+        "keys off the `not_healed:` prefix, and a verdict built without "
+        "`_not_healed` is silently demoted to INFO"
+    )
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
+async def test_the_entry_catch_all_redacts_BY_VALUE_not_merely_by_shape(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ HIGH-2 (secondary) — THE LAST HANDLER ON THE PATH, MADE STRUCTURALLY SAFE.
+
+    The catch-all redacted with `scrub_freeform_string` ALONE, which
+    `_redact_credential_values`' own docstring records as a MEASURED NO-OP on the
+    `mt5linux` kwargs-repr shape: `SENSITIVE_KEY_VALUE` needs `key` immediately
+    followed by `[:=]`, and the repr puts a closing quote between them. The handler
+    was therefore safe only by the CALLEE's discipline — every credential-carrying
+    verb in `mt5_client` redacts before raising — and not by its own.
+
+    ⛔ An inherited property is one refactor away from being absent, and this is the
+    last handler on a path that carries a live broker password to a PUBLIC Actions
+    log. The oracle here is an exception raised from a step that does NOT redact:
+    `_heal_blocking` itself, replaced by one that raises the raw kwargs-repr text.
+    """
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+
+    # ⛔ The EXACT production shape: mt5linux 0.1.9 builds its remote call as
+    # SOURCE TEXT, `f'mt5.initialize(*{args},**{kwargs})'`, so the credentials
+    # arrive in a remote traceback as the repr() OF A DICT.
+    raw = (
+        "rpyc remote error while eval'ing mt5.initialize(*(),**"
+        + repr(
+            {
+                "login": int(_FAKE_LOGIN),
+                "password": _FAKE_PASSWORD,
+                "server": _FAKE_SERVER,
+            }
+        )
+        + ")"
+    )
+
+    def _raises_raw(*_a: object, **_k: object) -> str:
+        raise RuntimeError(raw)
+
+    monkeypatch.setattr(mt5_relogin, "_heal_blocking", _raises_raw)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    records = _records(caplog)
+    assert any("did not complete" in r.getMessage() for r in records), records
+    _assert_no_credential_value_escaped(records)
+    assert "[REDACTED]" in records[-1].getMessage(), (
+        "nothing was redacted at all — the absence assertions above would then "
+        "pass vacuously against a message that dropped the detail entirely"
+    )
+
+
+async def test_the_catch_all_still_describes_a_failure_raised_BEFORE_the_credentials(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ THE OTHER HALF OF HIGH-2 (secondary), and it is the one a naive fix breaks.
+
+    The by-value pass needs the three values, and on the kill-switch and
+    credential-read paths there are none. A handler that referenced an unbound
+    local would raise `NameError` from INSIDE itself and silently demote every
+    early failure to the argument-free fallback line — trading one silent class for
+    another. And placeholder values would be worse than useless: a placeholder
+    login of `0` would replace every `0` in the message with the marker.
+
+    So the `None` arm shape-scrubs, and this asserts the description SURVIVES.
+    """
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+    _fail_at_kill_switch(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    message = _outcome_records(caplog)[-1].getMessage()
+    assert "did not complete" in message
+    assert "RuntimeError" in message, (
+        f"the pre-credential failure lost its class: {message!r} — that is the "
+        "argument-free FALLBACK line, which means the handler itself raised"
+    )
+    assert "kill-switch read blew up" in message, (
+        f"the pre-credential failure lost its description: {message!r}"
+    )
+
+
 async def test_a_verdict_detail_echoed_back_by_the_terminal_is_redacted_BY_VALUE(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

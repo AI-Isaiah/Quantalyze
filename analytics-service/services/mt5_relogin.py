@@ -464,6 +464,39 @@ def _not_healed(
     return f"{_VERDICT_NOT_HEALED_PREFIX}{reason}:{detail}"
 
 
+def _describe_exception_for_log(
+    exc: BaseException, credentials: tuple[int, str, str] | None
+) -> str:
+    """The entry catch-all's scrubbed description of ``exc`` — BY VALUE whenever the
+    three values are known, shape-scrubbed only when they are not.
+
+    ⛔ HIGH-2 (secondary). The catch-all used to redact with ``scrub_freeform_string``
+    ALONE, which ``_redact_credential_values``' own docstring records as a MEASURED
+    NO-OP on the ``mt5linux`` kwargs-repr shape: its ``SENSITIVE_KEY_VALUE`` pattern
+    needs ``key`` immediately followed by ``[:=]`` and the repr puts a closing quote
+    between them. So the handler was safe only by the CALLEE's discipline — every
+    credential-carrying verb in ``mt5_client`` redacts before raising — and not by
+    its own. That is an inherited property, and an inherited property is one refactor
+    away from being absent: the catch-all is the LAST handler on a path that carries
+    a live broker password to a PUBLIC Actions log.
+
+    ⛔ THE ``None`` ARM IS NOT A WEAKENING, IT IS THE CORRECT BEHAVIOUR. Before the
+    credential read there is nothing to redact by value, and ``_redact_credential_values``
+    with placeholder values would be actively WORSE than useless: a placeholder login
+    of ``0`` would replace every ``0`` in the message with the marker, mangling the
+    very text an operator needs. The callers that HAVE credentials pass them.
+
+    ⛔ ``str(exc)`` is evaluated HERE, inside the function the caller invokes from
+    inside its own nested guard (IN-06), so an exception whose ``__str__`` misbehaves
+    still lands on the fallback line rather than escaping.
+    """
+    text = str(exc)
+    if credentials is None:
+        return str(scrub_freeform_string(text))
+    login, password, server = credentials
+    return _redact_credential_values(text, login, password, server)
+
+
 def _heal_blocking(
     host: str, port: int, login: int, password: str, server: str
 ) -> str:
@@ -526,7 +559,29 @@ def _heal_blocking(
                 )
         else:
             return _VERDICT_ALREADY_AUTHORIZED
-        client.initialize_with_credentials(login, password, server)
+        try:
+            client.initialize_with_credentials(login, password, server)
+        except Mt5ClientError as err:
+            # ⛔ HIGH-2 — A CREDENTIAL REFUSAL IS NOT A TRANSIENT MISS, AND IT USED
+            # TO BE LOGGED AS ONE. This was the ONLY credential-carrying call in
+            # the module sitting UNGUARDED between two typed-handler blocks, so its
+            # raise escaped to the entry's catch-all and the operator read
+            # "mt5 boot heal did not complete — continuing without it … the next
+            # boot will try again" — this module's wording for a TRANSIENT fault.
+            # The truth is the opposite: rotate `MT5_PASSWORD` at the broker
+            # without updating Railway and NOTHING heals, on this boot or any
+            # future one, until a human edits a Railway variable. "The next boot
+            # will try again" is then an actively misleading sentence.
+            #
+            # It also bypassed WR-01's severity ladder BY CONSTRUCTION: the ladder
+            # keys off the `not_healed:` prefix, and a verdict that is never
+            # produced carries no prefix. Routing it through `_not_healed` puts it
+            # back on the ladder (WARNING), gives it a `code=` token like every
+            # other failure here, and — because `_not_healed` redacts BY VALUE —
+            # carries the broker's own refusal text safely.
+            return _not_healed(
+                f"credential_refused:code={err.code}", err, login, password, server
+            )
         try:
             client.assert_session_authorized()
         except Mt5ClientError as err:
@@ -577,6 +632,14 @@ async def heal_mt5_terminal_session() -> None:
     forbids).
     """
     try:
+        # ⛔ HIGH-2 (secondary) — BOUND BEFORE THE FIRST STATEMENT THAT CAN RAISE, so
+        # the catch-all below can redact BY VALUE whenever the values are known and
+        # fall back to the shape scrub when they are not. An `except` arm that
+        # referenced an unbound local would raise `NameError` from INSIDE the
+        # handler and silently demote every early failure to the argument-free
+        # fallback line.
+        credentials: tuple[int, str, str] | None = None
+
         if not mt5_enabled_server():
             # ⛔ FIRST, and before any construction: fail-closed, read per call.
             #
@@ -673,7 +736,13 @@ async def heal_mt5_terminal_session() -> None:
                 "terminal keeps whatever session it already has and the next boot "
                 "will try again (exc_class=%s scrubbed=%s)",
                 type(exc).__name__,
-                scrub_freeform_string(str(exc)),
+                # ⛔ HIGH-2 (secondary) — BY VALUE, not merely shape-scrubbed. The
+                # bare `scrub_freeform_string` that stood here is a MEASURED NO-OP
+                # on the `mt5linux` kwargs-repr shape, so this handler's safety was
+                # INHERITED from the callee's discipline rather than structural —
+                # and this is the last handler on a path carrying a live broker
+                # password to a PUBLIC Actions log. See `_describe_exception_for_log`.
+                _describe_exception_for_log(exc, credentials),
             )
         except BaseException:  # noqa: BLE001 — see the comment; this is the control
             logger.warning(
