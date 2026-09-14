@@ -422,19 +422,21 @@ def _redact_credential_values(
     path, a tab from a mis-pasted Railway variable), and a fix applied to the
     password alone would have stayed green against a corpus that never tried one.
 
-    ⛔ ``Mt5Client.login`` is NOT routed through here and its own copy of this loop
-    is left BYTE-UNCHANGED (D-07) — its four per-account callers are shipped and a
-    regression there lands on live job processing. The duplication is accepted
-    deliberately; the property is enforced instead by the signature-DERIVED
-    redaction gate in ``tests/test_mt5_client_contract.py``, which drives EVERY
-    credential-carrying verb, including a third one added later.
+    ⭐ ``Mt5Client.login`` IS routed through here as of the D-07 amendment
+    (founder, 2026-09-14). It previously carried a private copy of this loop that
+    matched the RAW literal only, so its transport-raise arm disclosed an
+    escape-carrying password in its ``repr()`` rendering — a LIVE disclosure on
+    four shipped per-account callers that pass a real vault password, booked and
+    MEASURED as ``[164.6.2-LOGIN-ESCAPE-BLIND]``, now CLOSED. D-07's freeze existed
+    to keep a shipped live-path method out of a REFACTOR; applying the identical,
+    already-proven redaction was not one.
 
-    ⚠️ ONE CONSEQUENCE OF D-07, MEASURED AND BOOKED AS
-    ``[164.6.2-LOGIN-ESCAPE-BLIND]``: that untouched copy matches the RAW literal
-    only, so ``login()``'s transport-raise arm still discloses an escape-carrying
-    password in its ``repr()`` rendering. It is asserted in both directions by
-    ``test_CREDENTIAL_REDACTION_the_login_escape_residual_is_measured_not_assumed``
-    so the day D-07 is amended the residual reds instead of being forgotten.
+    The property is enforced by the signature-DERIVED redaction gate in
+    ``tests/test_mt5_client_contract.py``, which drives EVERY credential-carrying
+    verb — including a third one added later — and by
+    ``test_CREDENTIAL_REDACTION_every_credentialed_verb_routes_through_the_shared_redactor``,
+    whose expectation is now the EMPTY SET: a verb written without this helper reds
+    there rather than shipping a raw-literal-only scrub.
     """
     safe = scrub_freeform_string(str(text))
     for literal in (str(login), password, server):
@@ -1113,11 +1115,17 @@ class Mt5Client:
         except Mt5ClientError:
             raise
         except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
-            safe = scrub_freeform_string(str(exc))
-            for literal in (str(login), password, server):
-                if literal:
-                    safe = safe.replace(literal, "[REDACTED]")
-            raise Mt5ClientError(0, safe) from None
+            # D-07 AMENDED (founder, 2026-09-14) — this arm now routes through the
+            # SHARED helper instead of carrying its own copy of the loop. The freeze
+            # existed to keep a shipped live-path method out of a REFACTOR; applying
+            # the identical, already-proven escape-aware redaction is not one, and
+            # [164.6.2-LOGIN-ESCAPE-BLIND] was a LIVE disclosure on the four
+            # per-account callers: the old copy matched the RAW literal only, so a
+            # password carrying any character repr() escapes survived into the
+            # rendering (MEASURED: 'pa\\ssw0rd' reached the message intact).
+            raise Mt5ClientError(
+                0, _redact_credential_values(str(exc), login, password, server)
+            ) from None
         if not ok:
             self._raise_last()
 

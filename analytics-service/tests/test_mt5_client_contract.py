@@ -3268,44 +3268,42 @@ def test_CREDENTIAL_REDACTION_the_escape_aware_roster_did_not_collapse():
     assert _ESCAPE_CASES, "the escape corpus is empty — the gate below is vacuous"
 
 
-def test_CREDENTIAL_REDACTION_the_verbs_outside_the_shared_redactor_are_exactly_login():
-    """⚠️ `[164.6.2-LOGIN-ESCAPE-BLIND]` — the residual, named and fenced.
+def test_CREDENTIAL_REDACTION_every_credentialed_verb_routes_through_the_shared_redactor():
+    """⭐ `[164.6.2-LOGIN-ESCAPE-BLIND]` — CLOSED, and the fence STRENGTHENED.
 
-    `Mt5Client.login` carries its OWN copy of the by-value loop rather than
-    calling the shared helper, because D-07 keeps it BYTE-UNCHANGED: its four
-    per-account callers are shipped and a regression there lands on live job
-    processing. So the escape-aware fix landed in `_redact_credential_values`
-    and `login` did not get it.
+    D-07 was AMENDED (founder, 2026-09-14) and `Mt5Client.login` now routes its
+    transport-raise arm through `_redact_credential_values` instead of carrying a
+    private copy of the loop. The freeze existed to keep a shipped live-path method
+    out of a REFACTOR; applying the identical, already-proven escape-aware
+    redaction is not one, and the residual was a LIVE disclosure on four
+    per-account callers that pass a real vault password.
 
-    This asserts the residual is EXACTLY that one verb. A THIRD credentialed verb
-    written without the shared helper grows this set and reds here — which is the
-    whole point: the next author must make that a decision, not an omission.
+    ⛔ The expectation is now the EMPTY SET, which is strictly stronger than the
+    `{"login"}` it replaces: EVERY credentialed verb must route through the one
+    copy of the loop that knows about `repr()` escaping (CR-01). A new verb written
+    without it grows this set and reds here — the next author must make that a
+    decision, not an omission.
     """
     outside = frozenset(_DRIVABLE) - _ESCAPE_AWARE
-    assert outside == frozenset({"login"}), (
-        f"the set of credentialed verbs NOT routed through "
-        f"`_redact_credential_values` is {sorted(outside)}, expected ['login']. "
-        "⛔ If a new verb is here, route it through the shared helper — it is the "
-        "only copy of the loop that knows about `repr()` escaping (CR-01). If "
-        "`login` has LEFT this set, D-07 was amended: delete "
-        "`[164.6.2-LOGIN-ESCAPE-BLIND]` and the measured-residual test below "
-        "together with this expectation."
+    assert outside == frozenset(), (
+        f"credentialed verb(s) NOT routed through `_redact_credential_values`: "
+        f"{sorted(outside)}. ⛔ Route them through the shared helper — it is the "
+        "only copy of the loop that knows about `repr()` escaping (CR-01). "
+        "Redacting the raw literal alone lets any password carrying a backslash, "
+        "a quote or a tab survive into the rendering."
     )
 
 
-def test_CREDENTIAL_REDACTION_the_login_escape_residual_is_measured_not_assumed():
-    """⚠️ `[164.6.2-LOGIN-ESCAPE-BLIND]` — the residual as a MEASUREMENT.
+def test_CREDENTIAL_REDACTION_login_discloses_no_escaped_rendering_either():
+    """⭐ `[164.6.2-LOGIN-ESCAPE-BLIND]` — the fix as a MEASUREMENT, not a claim.
 
-    A documented posture no test exercises is a claim. `Mt5Client.login`'s
-    transport-raise arm redacts by RAW LITERAL only, so a password containing a
-    backslash survives into the message in its `repr()`-escaped rendering. That is
-    a REAL disclosure on a shipped path and it is recorded here rather than fixed,
-    because fixing it means editing `login()` — which D-07 forbids.
+    This case used to assert the residual EXISTED. D-07 is amended and `login`
+    now shares the escape-aware helper, so it asserts the disclosure is CLOSED —
+    on the SHIPPED per-account path whose four callers pass a real vault password.
 
-    ⛔ This case documents a residual; it is NOT a licence to weaken anything.
-    When a future phase closes it, the second half goes RED and must be DELETED
-    together with the booked item, never relaxed. The RAW literal is asserted
-    absent on both arms, because that half is not asymmetric and never may be.
+    ⛔ Both renderings are asserted absent. Before the fix the `repr()` body
+    survived while the raw literal did not, so asserting only the raw literal
+    would pass vacuously against exactly the bug this closes.
     """
     pw = r"pa\ssw0rd"
     escaped = r"pa\\ssw0rd"  # what `repr(pw)` puts in the message body
@@ -3323,18 +3321,13 @@ def test_CREDENTIAL_REDACTION_the_login_escape_residual_is_measured_not_assumed(
         client.login(_FAKE_LOGIN, pw, _FAKE_SERVER)
     msg = str(exc_info.value)
 
-    # The half that is NOT asymmetric: the raw literal never survives.
-    assert pw not in msg
-    assert "[REDACTED]" in msg
-
-    # The residual itself. ⛔ Do NOT relax this assertion to make it pass.
-    assert escaped in msg, (
-        "`Mt5Client.login` now redacts the `repr()`-escaped rendering too — "
-        "[164.6.2-LOGIN-ESCAPE-BLIND] appears to be CLOSED. Delete this test and "
-        "the expectation in "
-        "`test_CREDENTIAL_REDACTION_the_verbs_outside_the_shared_redactor_are_"
-        "exactly_login`, and close the booked item."
+    assert pw not in msg, "the raw password literal survived login()'s scrub"
+    assert escaped not in msg, (
+        "`Mt5Client.login` disclosed the `repr()`-escaped rendering of the "
+        "password — [164.6.2-LOGIN-ESCAPE-BLIND] has REGRESSED. Route the arm "
+        "through `_redact_credential_values`; do NOT relax this assertion."
     )
+    assert "[REDACTED]" in msg
 
 
 @pytest.mark.parametrize("method_name", sorted(_ESCAPE_AWARE))
