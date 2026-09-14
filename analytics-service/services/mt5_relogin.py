@@ -295,11 +295,17 @@ def _env_float(name: str, default: float, *, ceiling: float) -> float:
             name,
         )
         return default
+    # ⚠️ The ceiling can never sit BELOW the default it guards. Both defaults are
+    # derived from `MT5_REQUEST_TIMEOUT_S`, which is itself tunable, so a large
+    # retune there could otherwise produce a window that rejects every value the
+    # module would happily use itself — a ceiling that forbids its own default is
+    # not a bound, it is a bug.
+    effective_ceiling = max(ceiling, default)
     # `math.isfinite` covers BOTH `inf` and `nan`, and `float("nan")` is the
     # nastier of the two: every comparison against it is False, so a naive
     # `0 < value <= ceiling` range check would ACCEPT it and hand `nan` to
     # `wait_for`. Test the finiteness first, explicitly.
-    if not math.isfinite(value) or not 0.0 < value <= ceiling:
+    if not math.isfinite(value) or not 0.0 < value <= effective_ceiling:
         _log_configuration_fault_once(
             f"{name}_out_of_range",
             "mt5 boot heal: %s is set to a value outside (0, %s] seconds; "
@@ -308,7 +314,7 @@ def _env_float(name: str, default: float, *, ceiling: float) -> float:
             "the terminal lease while the batch derive queues behind it. This is "
             "a SERVER misconfiguration, never a credential failure (D-02).",
             name,
-            ceiling,
+            effective_ceiling,
         )
         return default
     return value
