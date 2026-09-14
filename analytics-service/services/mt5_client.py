@@ -439,9 +439,29 @@ def _redact_credential_values(
     there rather than shipping a raw-literal-only scrub.
     """
     safe = scrub_freeform_string(str(text))
-    for literal in (str(login), password, server):
-        for rendering in _credential_renderings(literal):
-            safe = safe.replace(rendering, "[REDACTED]")
+    # ⛔ ONE GLOBAL LONGEST-FIRST PASS ACROSS ALL THREE LITERALS, never a
+    # per-literal loop in a fixed order. `_credential_renderings` sorts
+    # longest-first WITHIN one literal, which is not enough: when one credential
+    # is a SUBSTRING of another — a password containing the account number is the
+    # commonest human choice for a numeric login — walking `login` first consumes
+    # that span, and the password's full-literal match then FAILS. MEASURED on the
+    # exact mt5linux kwargs-repr shape, login=<8 digits> inside the password:
+    #     'password': 'Quant[REDACTED]!x', 'server': 'Broker-[REDACTED]-2'
+    # The password's prefix, suffix, length and structure reach the log verbatim,
+    # and the span actually masked is the account number — which whoever reads
+    # that line already has. Every corpus assertion still PASSED, because they all
+    # assert the FULL literal absent and a partial mask is not the full literal.
+    renderings = sorted(
+        {
+            rendering
+            for literal in (str(login), password, server)
+            for rendering in _credential_renderings(literal)
+        },
+        key=len,
+        reverse=True,
+    )
+    for rendering in renderings:
+        safe = safe.replace(rendering, "[REDACTED]")
     return str(safe)
 
 

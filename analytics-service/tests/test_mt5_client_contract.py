@@ -3005,7 +3005,7 @@ _ESCAPE_AWARE = frozenset(_DRIVABLE) & _methods_routed_through_the_shared_redact
 #: by-value loop (D-07 keeps it byte-unchanged), so it is NOT in this set and its
 #: residual is measured separately below. Raise this when a second verb routes
 #: through the shared helper; ⛔ never lower it to clear a red run.
-ESCAPE_AWARE_METHOD_FLOOR = 1
+ESCAPE_AWARE_METHOD_FLOOR = 2
 
 
 # --------------------------------------------------------------------------- #
@@ -3101,6 +3101,27 @@ _ESCAPE_CASES = (
             server_renderings=(r"Broker\Demo-2", r"Broker\\Demo-2"),
         ),
         id="server-backslash",
+    ),
+    pytest.param(
+        _EscapeCase(
+            # ⛔ B1 — SUBSTRING OVERLAP, the case every prior assertion was blind
+            # to. A password containing the account number is the commonest human
+            # choice for a numeric login. Redacting per-literal in a FIXED ORDER
+            # consumed the login's span first, so the password's full-literal match
+            # then failed and only the overlapping slice was masked:
+            #     'password': 'Quant[REDACTED]!x'
+            # ⛔ The full literal WAS absent, so `_assert_no_credential_value_
+            # escaped` and the per-literal contract loop BOTH passed. What leaked
+            # was the remainder — prefix, suffix, length, structure — while the
+            # masked span was the account number the log reader already has.
+            # The renderings below are the REMAINDER, not the whole value: this
+            # case fails unless the redactor makes ONE global longest-first pass.
+            password=f"Quant{_FAKE_LOGIN}!x",
+            server=f"Broker-{_FAKE_LOGIN}-2",
+            password_renderings=(f"Quant{_FAKE_LOGIN}!x", "Quant", "!x"),
+            server_renderings=(f"Broker-{_FAKE_LOGIN}-2", "Broker-", "-2"),
+        ),
+        id="credential-substring-overlap",
     ),
 )
 
