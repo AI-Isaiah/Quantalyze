@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 from typing import Final
 
@@ -98,15 +99,72 @@ _MT5_GATEWAY_ENV_NAMES: Final[tuple[str, str]] = (
     "MT5_GATEWAY_PORT",
 )
 
-# The WHOLE heal's wall-clock budget: the rpyc connect plus at most two bounded
-# round-trips. DERIVED from the rpyc request bound (the house idiom —
-# `mt5_concurrency._MT5_DERIVE_READ_TIMEOUT_S` and `ingestion/mt5._MT5_PROBE_TIMEOUT_S`
-# are both derived the same way) so a retuned rpyc bound carries through here
-# instead of leaving a hardcoded ceiling behind to drift. It is the ONLY thing
-# bounding `rpyc.classic.connect`, which carries no timeout of its own.
-_MT5_RELOGIN_BUDGET_S: Final[float] = float(
-    os.getenv("MT5_RELOGIN_BUDGET_S", str(_MT5_REQUEST_TIMEOUT_S + 10.0))
-)
+# The two tuning knobs. ⛔ READ PER CALL AND NEVER AT IMPORT — 164.6.2 CR-02.
+#
+# They WERE `float(os.getenv(...))` at module scope, and `main.lifespan` imports
+# this module unguarded before its `yield`. MEASURED 2026-09-14:
+#
+#     $ MT5_RELOGIN_BUDGET_S="45s" python -c "import services.mt5_relogin"
+#     ValueError: could not convert string to float: '45s'
+#
+# so an operator typo in a Railway variable raised out of the lifespan context
+# manager, aborted uvicorn startup, and `restartPolicyType ON_FAILURE x3` took
+# the WHOLE analytics service down — the dispatch loop, the watchdog, the enqueue
+# loop and `/health` — for a best-effort heal of a gateway nobody needed. That is
+# VERBATIM the outcome D-08's own comment in `main.lifespan` says the
+# `create_task` shape exists to prevent; the unguarded import defeated it one
+# line above the task. The asymmetry was the tell: every OTHER misconfiguration
+# here is handled by log-once-and-return (D-02) and only the two knobs that exist
+# purely to TUNE the heal were fatal.
+#
+# Reading per call also restores the property `read_env_mt5_credentials`'s
+# docstring argues for at length — a go-live variable flip must take effect
+# without a reimport — which these two were the module's only violators of.
+_MT5_RELOGIN_BUDGET_ENV: Final[str] = "MT5_RELOGIN_BUDGET_S"
+_MT5_RELOGIN_LEASE_WAIT_ENV: Final[str] = "MT5_RELOGIN_LEASE_WAIT_S"
+
+# ⭐ THE BUDGET IS DERIVED FROM THE NUMBER OF ROUND-TRIPS THE PATH ACTUALLY
+# MAKES (WR-03), not from one. The `-6` path — the path a heal exists for — is:
+#
+#   | step                                            | ceiling                 |
+#   |-------------------------------------------------|-------------------------|
+#   | `rpyc.classic.connect` in `Mt5Client.__init__`   | NONE of its own; this   |
+#   |                                                 | `wait_for` is the only  |
+#   |                                                 | thing bounding it       |
+#   | `assert_session_authorized` -> `initialize()`    | 20 s MT5 IPC / 30 s rpyc|
+#   | `_raise_last` -> `last_error()`                  | 30 s rpyc — D-32's own  |
+#   |                                                 | EVIDENCE §1b records a  |
+#   |                                                 | failed attempt paying a |
+#   |                                                 | SECOND full 30 s here   |
+#   | `initialize_with_credentials` -> `initialize(…)` | 20 s MT5 IPC / 30 s rpyc|
+#
+# The old `_MT5_REQUEST_TIMEOUT_S + 10.0` (40 s) bounded ~80 s of work, so a
+# genuinely-`-6` terminal on a slow Wine bridge — the condition under which a
+# heal is MOST needed — had its `wait_for` fire MID-`initialize`: the coroutine
+# unwinds, the lease releases and bumps the generation, the zombie thread's
+# in-flight credentialed `initialize` is abandoned against the shared terminal,
+# and whether the session came up is unknowable from the log. Still DERIVED from
+# the rpyc bound (the house idiom) so a retune carries through.
+_MT5_RELOGIN_ROUND_TRIPS: Final[int] = 3
+
+# The slack over the round-trips, covering the unbounded `rpyc.classic.connect`.
+_MT5_RELOGIN_CONNECT_SLACK_S: Final[float] = 10.0
+
+# ⛔ WR-06 — THE DECLARED CEILING, and it is a DERIVATION rather than a taste.
+# Any value `float()` accepts was previously used verbatim as an `asyncio.wait_for`
+# timeout: `MT5_RELOGIN_BUDGET_S=0` cancelled the heal immediately and logged
+# "did not complete" on every boot FOREVER (indistinguishable from a transient
+# gateway problem), and `inf` removed the bound entirely and held
+# `mt5_terminal_lease` for as long as a wedged rpyc connect lasted — while every
+# batch caller (`run_derive_broker_dailies_job`, `_fetch_mt5_account_balance`,
+# `_fetch_mt5_account_rows`) acquires with `wait_s=None`, i.e. UNBOUNDED. A
+# best-effort heal took out the batch.
+#
+# 300 s is ONE THIRD of the 15-minute dispatch ceiling those batch callers wait
+# against, so even a maximally mis-tuned budget leaves a derive job two thirds of
+# its own ceiling. ⛔ It bounds a TYPO, not a tuning decision; raising it means
+# arguing about the dispatch ceiling, not about this line.
+_MT5_RELOGIN_BUDGET_CEILING_S: Final[float] = 300.0
 
 # ⭐ The bound on ACQUIRING the terminal, and it is deliberately SHORT — a
 # different quantity from the bound on OPERATING it (the D-29 distinction).
@@ -120,9 +178,13 @@ _MT5_RELOGIN_BUDGET_S: Final[float] = float(
 # timed-out acquire holds nothing, bumps nothing and stamps nothing
 # (`mt5_terminal_lease`'s release discipline), so skipping costs the next holder
 # exactly zero.
-_MT5_RELOGIN_LEASE_WAIT_S: Final[float] = float(
-    os.getenv("MT5_RELOGIN_LEASE_WAIT_S", "2.0")
-)
+_MT5_RELOGIN_LEASE_WAIT_DEFAULT_S: Final[float] = 2.0
+
+# Its ceiling is ONE rpyc round-trip, and that follows from the argument above:
+# waiting LONGER for a terminal somebody else is driving than a single round-trip
+# takes contradicts the whole "a busy terminal is evidence the session is fine,
+# so skip" posture this bound exists to express.
+_MT5_RELOGIN_LEASE_WAIT_CEILING_S: Final[float] = _MT5_REQUEST_TIMEOUT_S
 
 # The verdict tokens `_heal_blocking` hands back for the caller to log. Short,
 # fixed strings: they name what happened to the SESSION and carry no credential,
@@ -163,6 +225,73 @@ def _log_configuration_fault_once(reason: str, message: str, *args: object) -> N
         return
     _LOGGED_CONFIGURATION_FAULTS.add(reason)
     logger.warning(message, *args)
+
+
+def _env_float(name: str, default: float, *, ceiling: float) -> float:
+    """One tuning knob, read PER CALL, with the SAME posture as the credential
+    readers: a bad value logs once and falls back to the derived default.
+
+    ⛔ STRUCTURALLY INCAPABLE OF RAISING, and that is the whole point (CR-02).
+    Absent, blank, non-numeric, zero, negative, `nan` and `inf` all take the
+    default. There is no input that reaches an `asyncio.wait_for` unvalidated and
+    none that reaches the caller as an exception.
+
+    ⛔ The value is NEVER logged — only the variable NAME and the fault class.
+    These knobs carry no credential today, but the module's rule (T-164.6.2-12)
+    is names only, and an exception to it at one site is how a rule stops being
+    one.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        _log_configuration_fault_once(
+            f"{name}_not_numeric",
+            "mt5 boot heal: %s is set but is not a number; falling back to the "
+            "derived default. This is a SERVER misconfiguration, never a "
+            "credential failure — the heal still runs (D-02).",
+            name,
+        )
+        return default
+    # `math.isfinite` covers BOTH `inf` and `nan`, and `float("nan")` is the
+    # nastier of the two: every comparison against it is False, so a naive
+    # `0 < value <= ceiling` range check would ACCEPT it and hand `nan` to
+    # `wait_for`. Test the finiteness first, explicitly.
+    if not math.isfinite(value) or not 0.0 < value <= ceiling:
+        _log_configuration_fault_once(
+            f"{name}_out_of_range",
+            "mt5 boot heal: %s is set to a value outside (0, %s] seconds; "
+            "falling back to the derived default. Zero would disable the heal "
+            "silently on every boot forever, and an unbounded value would hold "
+            "the terminal lease while the batch derive queues behind it. This is "
+            "a SERVER misconfiguration, never a credential failure (D-02).",
+            name,
+            ceiling,
+        )
+        return default
+    return value
+
+
+def _relogin_budget_s() -> float:
+    """The WHOLE heal's wall-clock budget — the rpyc connect plus the bounded
+    round-trips the `-6` path actually makes (see the derivation above)."""
+    return _env_float(
+        _MT5_RELOGIN_BUDGET_ENV,
+        _MT5_RELOGIN_ROUND_TRIPS * _MT5_REQUEST_TIMEOUT_S
+        + _MT5_RELOGIN_CONNECT_SLACK_S,
+        ceiling=_MT5_RELOGIN_BUDGET_CEILING_S,
+    )
+
+
+def _relogin_lease_wait_s() -> float:
+    """The bound on ACQUIRING the terminal — deliberately short (D-29)."""
+    return _env_float(
+        _MT5_RELOGIN_LEASE_WAIT_ENV,
+        _MT5_RELOGIN_LEASE_WAIT_DEFAULT_S,
+        ceiling=_MT5_RELOGIN_LEASE_WAIT_CEILING_S,
+    )
 
 
 def read_env_mt5_credentials() -> tuple[int, str, str] | None:
@@ -359,13 +488,13 @@ async def heal_mt5_terminal_session() -> None:
         # registry and the lock registry must be keyed byte-identically or the
         # fence guards a different terminal than the lock serializes.
         async with mt5_terminal_lease(
-            mt5_terminal_key(host, port), wait_s=_MT5_RELOGIN_LEASE_WAIT_S
+            mt5_terminal_key(host, port), wait_s=_relogin_lease_wait_s()
         ):
             verdict = await asyncio.wait_for(
                 asyncio.to_thread(
                     _heal_blocking, host, port, login, password, server
                 ),
-                timeout=_MT5_RELOGIN_BUDGET_S,
+                timeout=_relogin_budget_s(),
             )
         logger.info("mt5 boot heal: %s", verdict)
     except Exception as exc:  # noqa: BLE001 — see the docstring; this is the control

@@ -49,6 +49,8 @@ import ast
 import asyncio
 import inspect
 import logging
+import math
+import os
 import textwrap
 import threading
 from contextlib import asynccontextmanager
@@ -401,6 +403,206 @@ async def test_an_unusable_gateway_endpoint_logs_once_and_constructs_nothing(
 
 
 # --------------------------------------------------------------------------- #
+# ⛔ THE TWO TUNING KNOBS — CR-02 / WR-06. A TYPO MUST NOT TAKE THE SERVICE DOWN,
+# AND A PARSEABLE-BUT-ABSURD VALUE MUST NOT DISABLE THE HEAL OR STARVE THE BATCH.
+# --------------------------------------------------------------------------- #
+
+_TUNING_ENV_NAMES = ("MT5_RELOGIN_BUDGET_S", "MT5_RELOGIN_LEASE_WAIT_S")
+
+#: Every value an operator can plausibly leave in a Railway variable, and what
+#: each one did BEFORE this gate. ⛔ `"45s"`, `""` and `"60 x"` aborted uvicorn
+#: startup at IMPORT — measured 2026-09-14,
+#: `ValueError: could not convert string to float: '45s'` — and
+#: `restartPolicyType ON_FAILURE x3` then took the WHOLE analytics service down.
+#: `"0"` disabled the heal silently on every boot forever; `"inf"`/`"nan"` removed
+#: the bound and held the terminal lease while the unbounded batch acquires
+#: queued behind it.
+_HOSTILE_TUNING_VALUES = ("45s", "", "   ", "60 x", "0", "-1", "inf", "-inf", "nan")
+
+
+@pytest.mark.parametrize("name", _TUNING_ENV_NAMES)
+@pytest.mark.parametrize("value", _HOSTILE_TUNING_VALUES)
+def test_a_malformed_tuning_variable_cannot_abort_the_import(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    """⛔ THE CRITICAL HALF (CR-02): RE-IMPORTING THE MODULE MUST NOT RAISE.
+
+    `main.lifespan` does `from services.mt5_relogin import heal_mt5_terminal_session`
+    in its body, BEFORE `yield` and outside any `try`. A `ValueError` at module
+    scope therefore propagates out of the lifespan context manager and aborts
+    uvicorn startup — the dispatch loop, the watchdog, the enqueue loop and
+    `/health`, all gone, for a best-effort heal of a gateway nobody needed. That
+    is verbatim the outcome D-08's comment in `main.lifespan` says the
+    `create_task` shape prevents.
+
+    ⚠️ `importlib.reload` is deliberately NOT used (the repo's own standing rule).
+    The property under test is that NOTHING is parsed at import, so a fresh
+    interpreter is the honest oracle — asserted by the subprocess case below —
+    and this case asserts the module-level names simply do not exist any more,
+    which is what makes the import safe in the first place.
+    """
+    monkeypatch.setenv(name, value)
+    # The import is already done; the load-bearing assertion is that no
+    # module-level constant holds a parsed value that a reimport would redo.
+    assert not hasattr(mt5_relogin, "_MT5_RELOGIN_BUDGET_S"), (
+        "the budget is a module-level parsed constant again — a malformed "
+        "MT5_RELOGIN_BUDGET_S would abort uvicorn startup at import (CR-02)"
+    )
+    assert not hasattr(mt5_relogin, "_MT5_RELOGIN_LEASE_WAIT_S"), (
+        "the lease wait is a module-level parsed constant again (CR-02)"
+    )
+
+
+def test_a_malformed_tuning_variable_cannot_abort_a_FRESH_import() -> None:
+    """The same property in a FRESH interpreter, which is the only place an
+    import-time parse can actually be observed.
+
+    ⛔ This is the case that REDS on the shipped-before-CR-02 shape. The in-process
+    case above can only assert the absence of a name; this one runs the import the
+    way uvicorn runs it, against the exact variable value that took the service
+    down.
+    """
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env["MT5_RELOGIN_BUDGET_S"] = "45s"
+    env["MT5_RELOGIN_LEASE_WAIT_S"] = "two seconds"
+    proc = subprocess.run(
+        [sys.executable, "-c", "import services.mt5_relogin"],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, (
+        "importing `services.mt5_relogin` with a malformed tuning variable "
+        f"RAISED — this aborts uvicorn startup before `yield` and ON_FAILURE x3 "
+        f"takes the whole analytics service down (CR-02). stderr:\n{proc.stderr}"
+    )
+
+
+@pytest.mark.parametrize("value", _HOSTILE_TUNING_VALUES)
+async def test_a_hostile_budget_falls_back_to_the_derived_default_and_still_heals(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, value: str
+) -> None:
+    """⛔ WR-06 — `0` MUST NOT SILENTLY DISABLE THE HEAL AND `inf` MUST NOT HOLD
+    THE TERMINAL LEASE.
+
+    Both are values `float()` accepts, and both were previously handed verbatim to
+    `asyncio.wait_for`. `0` cancelled immediately and logged "did not complete" on
+    every boot FOREVER — indistinguishable from a transient gateway problem. `inf`
+    removed the bound entirely while every batch caller acquires the same lease
+    with `wait_s=None`, i.e. unbounded, so a best-effort heal took out the derive.
+
+    The oracle is BEHAVIOURAL, not a read of the constant: with a hostile value the
+    heal still reaches the terminal and still reports a real verdict.
+    """
+    _set_full_env(monkeypatch)
+    monkeypatch.setenv("MT5_RELOGIN_BUDGET_S", value)
+    fake, _c = _install_client(monkeypatch, {"initialize": True})
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert fake.call_order == ["initialize"], (
+        f"MT5_RELOGIN_BUDGET_S={value!r} stopped the heal from reaching the "
+        "terminal at all — a tuning typo must fall back to the derived default, "
+        "never disable the heal (WR-06)"
+    )
+    messages = [r.getMessage() for r in _records(caplog)]
+    assert any("already_authorized" in m for m in messages), messages
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
+@pytest.mark.parametrize("value", _HOSTILE_TUNING_VALUES)
+async def test_a_hostile_lease_wait_falls_back_to_the_derived_default(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """The same, for the acquire bound. ⛔ The assertion that matters is that the
+    lease is still acquired with a FINITE POSITIVE bound: `wait_s=0` would make
+    the heal skip on every boot and `wait_s=inf` would put a best-effort heal
+    ahead of real work in the terminal queue for as long as that work takes —
+    the exact thing this bound exists to prevent (D-29)."""
+    _set_full_env(monkeypatch)
+    monkeypatch.setenv("MT5_RELOGIN_LEASE_WAIT_S", value)
+    acquisitions = _install_lease_counter(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+
+    assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert len(acquisitions) == 1
+    _key, wait_s = acquisitions[0]
+    assert wait_s is not None and math.isfinite(wait_s) and wait_s > 0, (
+        f"MT5_RELOGIN_LEASE_WAIT_S={value!r} reached the lease as {wait_s!r}. A "
+        "tuning typo must fall back to the derived default (WR-06)."
+    )
+
+
+@pytest.mark.parametrize(
+    "name,value,expected",
+    [
+        ("MT5_RELOGIN_BUDGET_S", "12.5", 12.5),
+        ("MT5_RELOGIN_LEASE_WAIT_S", "5", 5.0),
+    ],
+)
+def test_a_LEGITIMATE_tuning_value_is_still_honoured(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str, expected: float
+) -> None:
+    """⛔ ANTI-VACUITY for the two tests above: a reader that IGNORED the
+    environment entirely and always returned the default would satisfy every
+    hostile-value assertion. This is the half that can only pass if the knob is
+    genuinely read."""
+    reader = (
+        mt5_relogin._relogin_budget_s
+        if name == "MT5_RELOGIN_BUDGET_S"
+        else mt5_relogin._relogin_lease_wait_s
+    )
+    monkeypatch.delenv(name, raising=False)
+    default = reader()
+    monkeypatch.setenv(name, value)
+    assert reader() == expected
+    assert default != expected, (
+        "the legitimate value happens to EQUAL the derived default, so this case "
+        "cannot distinguish a real read from a hardcoded return — pick another."
+    )
+
+
+@pytest.mark.parametrize("name", _TUNING_ENV_NAMES)
+def test_a_rejected_tuning_value_is_logged_ONCE_by_NAME_and_never_by_value(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, name: str
+) -> None:
+    """D-02's posture, applied to the knobs: log-and-proceed, once per process,
+    NAMES only. ⛔ Silence is the defect class this milestone exists to remove, so
+    "it fell back to the default" must be visible in the operator's log — and the
+    value must not be, because T-164.6.2-12 is names-only and an exception at one
+    site is how a rule stops being one."""
+    sentinel = "4242424-not-a-number"
+    monkeypatch.setenv(name, sentinel)
+    reader = (
+        mt5_relogin._relogin_budget_s
+        if name == "MT5_RELOGIN_BUDGET_S"
+        else mt5_relogin._relogin_lease_wait_s
+    )
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        reader()
+        reader()
+
+    records = _records(caplog)
+    assert len(records) == 1, (
+        f"expected exactly ONE record across two calls, got {len(records)} — the "
+        "D-02 once-per-process throttle is not covering this reason key"
+    )
+    message = records[0].getMessage()
+    assert name in message
+    assert sentinel not in message, (
+        f"the rejected value {sentinel!r} reached the log: {message!r}. ⛔ NAMES "
+        "only — never a value, a length, a prefix or a hash (T-164.6.2-12)."
+    )
+
+
+# --------------------------------------------------------------------------- #
 # The branch: already authorized / -6 / an IPC code
 # --------------------------------------------------------------------------- #
 
@@ -575,7 +777,13 @@ async def test_a_hung_terminal_is_abandoned_at_the_budget_and_raises_nothing(
     by the client's own D-36 fence. That is the designed behaviour.
     """
     _set_full_env(monkeypatch)
-    monkeypatch.setattr(mt5_relogin, "_MT5_RELOGIN_BUDGET_S", 0.05)
+    # ⛔ The ENVIRONMENT, not a module attribute — CR-02 moved the knob to a
+    # per-call read, and a `setattr` on the old constant would now be a NO-OP
+    # that left the default 100 s budget in force. The 0.4 s double would finish,
+    # the heal would report `healed`, and the assertion below would red while
+    # LOOKING like a budget regression. Driving the real reader is also strictly
+    # more: it exercises the parse and the range check this test depends on.
+    monkeypatch.setenv("MT5_RELOGIN_BUDGET_S", "0.05")
     _install_client(monkeypatch, {"initialize": True, "initialize_sleep_s": 0.4})
 
     with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
