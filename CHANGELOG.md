@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.77.43.1] - 2026-09-14 — the deploy probe stops reporting "I could not read prod" as "prod is stale"
+
+⭐ **What this is.** A one-branch fix to `analytics-deploy-verify.yml`, found by the thing
+itself misfiring during the v0.77.43.0 merge.
+
+### Fixed
+
+- **An empty reading is no longer reported as a SHA mismatch.** MEASURED 2026-09-14, run
+  `34846043246`: the probe printed `prod analytics git_sha ('') != main HEAD ('f10b0e23…')`
+  — a stale-deploy verdict — when its loop had never obtained a readable `git_sha` at all.
+  `$deployed` is empty when /health is unreachable, returns no JSON, or reports no `git_sha`,
+  and the single message called every one of those *"prod is running the wrong code"*.
+  ⛔ The deployed commit was UNKNOWN, not known-wrong, and an operator reading that warning
+  chases a deploy that may be perfectly healthy while the real fault goes unnamed. The two
+  faults now get two messages.
+- ⭐ **Alerting is not weakened.** `stale=true` still fires for BOTH cases, so the dedup'd
+  issue still opens — the new `unreadable=true` output only makes the cause distinguishable
+  downstream. This follows S4's existing doctrine of failing toward alerting.
+
+### Tests
+
+- `S5` in `analytics-deploy-tree-compare.contract.test.ts`, calibrated: observed RED against
+  the pre-fix workflow (restored from a byte backup, never `git checkout --`) and GREEN with
+  the fix. Its anti-conflation arm asserts the empty-reading path does NOT contain
+  `!= main HEAD` — the exact string CI printed — so the two faults cannot silently merge back
+  into one message.
+
+### Notes
+
+- ⚠️ This does NOT explain why the read failed in that CI run, and the entry does not pretend
+  to. Reproduced locally only by stubbing a /health with no `git_sha`; 5/5 and 6/6-under-load
+  runs of the real test pass, and it is the first failure of a test one day old. What is fixed
+  is the REPORTING: the next occurrence will name itself instead of being archaeology.
+
+
 ## [0.77.43.0] - 2026-09-14 — the analytics worker re-establishes the MT5 broker session without a human, and three live credential disclosures close
 
 ⭐ **What this is.** Phase 164.6.2 MT5RELOGIN. Since the terminal's session was established once by
