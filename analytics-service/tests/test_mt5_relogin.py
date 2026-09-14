@@ -1416,15 +1416,68 @@ async def test_no_failure_mode_escapes_the_heal(
     _install_client(monkeypatch, {"initialize": True})
     inject(monkeypatch)
 
-    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+    # ⛔ INFO, not WARNING (WR-05). A busy terminal is a DESIGNED skip and is now
+    # reported at INFO; capturing at WARNING would silently stop observing it and
+    # this case would red for a reason that is not a defect. The other injections
+    # still emit at WARNING or above, which INFO capture includes.
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
         assert await mt5_relogin.heal_mt5_terminal_session() is None
 
-    records = _records(caplog)
-    assert records, (
+    # ⛔ `_outcome_records`, not `_records`: HIGH-1's "starting" announcement fires
+    # before the lease on most of these paths, so `assert records` would pass on
+    # the strength of the announcement alone and this gate would stop biting.
+    assert _outcome_records(caplog), (
         "the heal swallowed a failure and emitted NOTHING — a silent swallow is "
         "the defect class this milestone removes"
     )
-    _assert_no_credential_value_escaped(records)
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
+async def test_a_BUSY_terminal_is_an_INFO_skip_and_never_a_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ WR-05 — A DESIGNED SKIP WAS LOGGED IDENTICALLY TO A REAL FAILURE.
+
+    `_heal_blocking`'s own derivation argues that skipping a busy terminal is
+    CORRECT and "costs the next holder exactly zero" — yet `Mt5TerminalBusyError`
+    exited through the entry's catch-all as *"mt5 boot heal did not complete"* at
+    WARNING, this module's wording for a transient fault. And `mt5_terminal_lease`
+    fires a WARNING of its own, so a HEALTHY boot logged TWO warnings.
+
+    ⛔ The race is the ordinary one IN-04 describes, not a corner: `dispatch_loop`
+    claims a `derive_broker_dailies` job within a second or two of boot. An
+    operator who learns that a healthy boot warns twice has been taught to ignore
+    the channel this milestone exists to fill.
+
+    ⚠️ `mt5_terminal_lease`'s own WARNING is deliberately NOT changed: it belongs
+    to a shared helper whose other callers are the INTERACTIVE validate path,
+    where "gave up waiting for the terminal" genuinely is a warning. This test
+    scopes to THIS module's logger for exactly that reason.
+    """
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+    _fail_at_lease(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    records = _outcome_records(caplog)
+    assert len(records) == 1, [r.getMessage() for r in records]
+    record = records[0]
+    message = record.getMessage()
+    assert record.levelno == logging.INFO, (
+        f"a busy terminal — a DESIGNED skip this module argues for at length — "
+        f"was logged at {record.levelname}. Combined with the lease's own "
+        "WARNING, a healthy boot then warns twice (WR-05)."
+    )
+    assert "did not complete" not in message, (
+        f"the busy skip still exits through the entry's catch-all: {message!r}"
+    )
+    assert "busy terminal" in message and "session is fine" in message, (
+        f"the skip does not carry the reasoning the design already argues: "
+        f"{message!r} — an operator must be able to tell 'nothing to do' from "
+        "'something went wrong' from the line itself"
+    )
 
 
 async def test_a_hung_terminal_is_abandoned_at_the_budget_and_raises_nothing(
@@ -1436,6 +1489,14 @@ async def test_a_hung_terminal_is_abandoned_at_the_budget_and_raises_nothing(
     ⚠️ The thread is NOT cancelled — it keeps running while the lease releases and
     bumps the terminal's generation, after which the zombie's next touch is refused
     by the client's own D-36 fence. That is the designed behaviour.
+
+    ⛔ WR-05 — AND IT IS LOGGED AT ERROR, UNDER ITS OWN ARM. It used to share the
+    catch-all's generic *"did not complete … the next boot will try again"* with a
+    busy-terminal SKIP, which is the OPPOSITE event. A credentialed `initialize()`
+    carrying the broker password is still in flight against the SHARED terminal on
+    a thread nothing cancelled; whether the session came up is unknowable from the
+    log. It is the one outcome here that leaves the SYSTEM in a state nobody
+    measured, so it sits above every verdict.
     """
     _set_full_env(monkeypatch)
     # ⛔ The ENVIRONMENT, not a module attribute — CR-02 moved the knob to a
@@ -1447,11 +1508,30 @@ async def test_a_hung_terminal_is_abandoned_at_the_budget_and_raises_nothing(
     monkeypatch.setenv("MT5_RELOGIN_BUDGET_S", "0.05")
     _install_client(monkeypatch, {"initialize": True, "initialize_sleep_s": 0.4})
 
-    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
         assert await mt5_relogin.heal_mt5_terminal_session() is None
 
-    messages = [r.getMessage() for r in _records(caplog)]
-    assert any("did not complete" in m for m in messages), messages
+    records = _outcome_records(caplog)
+    assert len(records) == 1, [r.getMessage() for r in records]
+    record = records[0]
+    message = record.getMessage()
+    assert record.levelno == logging.ERROR, (
+        f"the abandoned budget was logged at {record.levelname}. It is the one "
+        "outcome here that leaves an in-flight call against the SHARED terminal "
+        "with nobody measuring whether the session came up — it cannot share a "
+        "level with a busy-terminal skip or a verdict (WR-05)."
+    )
+    assert "did not complete" not in message, (
+        f"the budget expiry still exits through the entry's catch-all, whose "
+        f"wording describes a transient miss: {message!r}"
+    )
+    assert "in flight" in message, (
+        f"the line does not name the abandoned in-flight call: {message!r} — that "
+        "is the whole reason this outcome outranks a verdict"
+    )
+    assert "0.1" in message or "0.0" in message, (
+        f"the line does not name the budget it fired at: {message!r}"
+    )
 
 
 def _heal_guard_defects(source: str) -> list[str]:

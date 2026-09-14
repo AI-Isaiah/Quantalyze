@@ -67,7 +67,7 @@ from services.mt5_client import (
     _redact_credential_values,
     mt5_terminal_key,
 )
-from services.mt5_concurrency import mt5_terminal_lease
+from services.mt5_concurrency import Mt5TerminalBusyError, mt5_terminal_lease
 from services.mt5_validation import Mt5ValidationError, parse_mt5_credentials
 from services.redact import scrub_freeform_string
 
@@ -681,7 +681,10 @@ async def heal_mt5_terminal_session() -> None:
     touch is refused by the client's own D-36 fence. That is the DESIGNED
     behaviour, not a leak; ⛔ do not "fix" it by joining the thread, which would
     hold the lease for exactly as long as the hang (the WEDGE-01 class D-25
-    forbids).
+    forbids). ⭐ WR-05: it is nonetheless the one outcome here that leaves the
+    SYSTEM in a state nobody measured, so it is logged at ERROR under its own arm —
+    above every verdict — rather than sharing the catch-all's transient wording
+    with a busy-terminal SKIP, which is logged at INFO for the opposite reason.
     """
     try:
         # ⛔ HIGH-2 (secondary) — BOUND BEFORE THE FIRST STATEMENT THAT CAN RAISE, so
@@ -749,15 +752,69 @@ async def heal_mt5_terminal_session() -> None:
         # site. ⛔ Never a second hand-spelled `f"{host}:{port}"`: the epoch
         # registry and the lock registry must be keyed byte-identically or the
         # fence guards a different terminal than the lock serializes.
-        async with mt5_terminal_lease(
-            mt5_terminal_key(host, port), wait_s=_relogin_lease_wait_s()
-        ):
-            verdict = await asyncio.wait_for(
-                asyncio.to_thread(
-                    _heal_blocking, host, port, login, password, server
-                ),
-                timeout=_relogin_budget_s(),
+        budget_s = _relogin_budget_s()
+        # ⛔ WR-05 — TWO OUTCOMES THAT ARE NOT FAILURES OF THE SAME KIND, AND WERE
+        # LOGGED AS ONE. Both used to exit through the entry's catch-all as
+        # "mt5 boot heal did not complete" at WARNING, which is this module's
+        # wording for a transient miss. ⛔ These handlers are NESTED inside the one
+        # top-level `except Exception`, never beside it: the never-raises gate
+        # requires the outer guard to carry exactly ONE handler, and narrowing or
+        # multiplying it is the escape route that reaches `_crash_handler`.
+        try:
+            async with mt5_terminal_lease(
+                mt5_terminal_key(host, port), wait_s=_relogin_lease_wait_s()
+            ):
+                verdict = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _heal_blocking, host, port, login, password, server
+                    ),
+                    timeout=budget_s,
+                )
+        except Mt5TerminalBusyError:
+            # ⭐ A DESIGNED SKIP, and this module's own derivation says so: "the
+            # correct behaviour when the terminal is already busy is to SKIP: a
+            # busy terminal is a terminal somebody is already successfully using,
+            # which is itself evidence that the session is fine and there is
+            # nothing here to heal … skipping costs the next holder exactly zero."
+            #
+            # The race is the ordinary one IN-04 describes: `dispatch_loop` claims
+            # a `derive_broker_dailies` job within a second or two of boot. So a
+            # HEALTHY boot logged TWO warnings — this one and `mt5_terminal_lease`'s
+            # own — and an operator who learns that a healthy boot warns twice has
+            # been taught to ignore the channel this milestone exists to fill.
+            #
+            # ⚠️ The lease's own WARNING is NOT changed here. It belongs to a shared
+            # helper whose other callers are the INTERACTIVE validate path, where
+            # "gave up waiting for the terminal" genuinely is a warning.
+            logger.info(
+                "mt5 boot heal: skipped — the terminal was already in use when "
+                "the bounded acquire expired, so the heal gave up rather than "
+                "queueing ahead of real work. A busy terminal is a terminal "
+                "somebody is already successfully using, which is itself evidence "
+                "the session is fine (D-29)."
             )
+            return
+        except asyncio.TimeoutError:
+            # ⛔ NOT a miss, and NOT the same event as a busy skip. The budget
+            # fired, and `wait_for` DOES NOT CANCEL THE THREAD: a credential-free
+            # probe, or a credentialed `initialize()` carrying the broker password,
+            # is STILL IN FLIGHT against the shared terminal. The lease has
+            # released and bumped the generation, so the zombie's next touch is
+            # fenced (D-36) — but whether the broker session came up is UNKNOWABLE
+            # from this log, and the next boot's detector is the only thing that
+            # will answer it.
+            #
+            # ERROR, above every verdict: it is the one outcome here that leaves
+            # the SYSTEM in a state nobody measured.
+            logger.error(
+                "mt5 boot heal: ABANDONED at the %.1fs budget — a round-trip is "
+                "still in flight against the shared terminal on a thread that was "
+                "NOT cancelled. The lease has released and fenced it (D-36), but "
+                "whether the broker session came up is unknowable from here; the "
+                "next boot's credential-free probe is what answers it.",
+                budget_s,
+            )
+            return
         # ⛔ WR-01 — THE SEVERITY FOLLOWS THE VERDICT, and it did not. Every
         # outcome was INFO, so a wedged terminal behind a modal login dialog
         # (`-10005`) — a real gateway outage — was logged one level BELOW a
