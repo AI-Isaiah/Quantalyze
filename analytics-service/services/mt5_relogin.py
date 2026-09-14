@@ -541,7 +541,11 @@ def _heal_blocking(
     thing an operator saw. A broker that accepts the connection but rejects the
     account (a password rotated twice, a server rename) returns TRUTHY, and the
     log read ``healed`` over a gateway that was still down. The re-probe is the
-    same credential-FREE detector, inside the same lease and the same budget.
+    same credential-FREE detector, inside the same lease and the same budget —
+    and, since WR-01 (round 2), it BRANCHES ON ITS CODE exactly as the first probe
+    does. Folding every code into ``still_unauthorized`` asserted a session state
+    the probe had not measured whenever the bridge dropped between the heal and the
+    re-probe, which is the first probe's own conflation arriving backwards.
 
     ⛔ An ``Mt5SessionAbandoned`` raised by any step is NOT absorbed here. It is a
     PLAIN exception on purpose (D-42) so an OUR-INFRASTRUCTURE refusal can never
@@ -585,6 +589,32 @@ def _heal_blocking(
         try:
             client.assert_session_authorized()
         except Mt5ClientError as err:
+            # ⛔ WR-01 (round 2) — THE RE-PROBE CLASSIFIES ITS CODE, EXACTLY AS THE
+            # FIRST PROBE DOES. It used to fold EVERY code into
+            # `still_unauthorized`, which is a claim about the SESSION that the
+            # probe did not measure whenever the code was not `-6`.
+            #
+            # The reachable sequence: the heal succeeds, and then the Wine bridge
+            # drops (`-10004`) or a modal dialog appears (`-10005`) BEFORE the
+            # re-probe returns. The verdict read
+            # `not_healed:still_unauthorized:code=-10004` and the operator rotated
+            # the broker password — while the session was fine and the actual
+            # remedy was restart-the-pipe / look at the VNC screen.
+            #
+            # ⛔ That is the SAME conflation the first probe's branch refuses at
+            # length ("re-sending a credential heals nothing while re-collapsing
+            # exactly the distinction Phase 164.1 built"), arriving in the other
+            # direction: WR-02 existed to stop the log asserting unmeasured session
+            # state, and this arm reintroduced it. The classifier is therefore the
+            # same constant, not a second spelling of the same rule.
+            if err.code != _MT5_NO_AUTHORIZED_ACCOUNT_CODE:
+                return _not_healed(
+                    f"heal_sent_ipc_fault_on_reprobe:code={err.code}",
+                    err,
+                    login,
+                    password,
+                    server,
+                )
             return _not_healed(
                 f"still_unauthorized:code={err.code}", err, login, password, server
             )

@@ -983,6 +983,102 @@ async def test_a_heal_the_broker_did_not_honour_is_NOT_reported_as_healed(
     _assert_no_credential_value_escaped(_records(caplog))
 
 
+@pytest.mark.parametrize("ipc_code", [-10003, -10004, -10005])
+async def test_an_ipc_fault_ON_THE_REPROBE_is_not_reported_as_still_unauthorized(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, ipc_code: int
+) -> None:
+    """⛔ WR-01 (round 2) — THE RE-PROBE USED TO REPORT A SESSION VERDICT IT HAD NOT
+    MEASURED.
+
+    The FIRST probe branches, and this module argues at length for why: `-6` is
+    ours, and anything else is an IPC fault whose remedy is the OPPOSITE one, so
+    conflating them "re-collapses exactly the distinction Phase 164.1 built". The
+    SECOND probe did not branch — EVERY code became `still_unauthorized`.
+
+    THE REACHABLE SEQUENCE, and it is this test: the heal succeeds, and then the
+    Wine bridge drops (`-10004`) or a modal dialog appears (`-10005`) before the
+    re-probe returns. The verdict read `not_healed:still_unauthorized:code=-10004`,
+    the operator rotated the broker password — and the session was fine. The
+    actual remedy was restart-the-pipe / look at the VNC screen.
+
+    ⛔ WR-02 existed to stop the log asserting unmeasured session state. This arm
+    reintroduced it in the other direction.
+
+    ⚠️ This test is why IN-04 had to land first: `_FakeMt5` consulted
+    `initialize_after_heal` BEFORE `initialize_raises`, so the post-heal transport
+    fault below could not be expressed at all.
+    """
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            "initialize": False,
+            "last_error": (-6, "Terminal: Authorization failed"),
+            "initialize_credentialed": True,
+            # The heal landed; the BRIDGE then dropped before the re-probe returned.
+            "initialize_after_heal": False,
+            "last_error_after_heal": (ipc_code, "No IPC connection"),
+        },
+    )
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert fake.call_order == [
+        "initialize",
+        "initialize_credentialed",
+        "initialize",
+    ]
+    record = _outcome_records(caplog)[-1]
+    message = record.getMessage()
+    assert str(ipc_code) in message
+    assert "still_unauthorized" not in message, (
+        f"the re-probe reported {message!r} for a code it never classified. "
+        f"`{ipc_code}` is an IPC fault — a wedged pipe or a modal dialog — and "
+        "the operator reading `still_unauthorized` rotates a broker password that "
+        "is fine while the terminal stays wedged (WR-01 round 2)."
+    )
+    assert "reprobe" in message, (
+        f"the verdict does not say WHERE the fault appeared: {message!r}. A fault "
+        "on the re-probe means the heal was SENT and its effect is unknown, which "
+        "is a different operator action than a fault on the first probe."
+    )
+    assert record.levelno == logging.WARNING
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
+async def test_the_reprobe_STILL_says_still_unauthorized_for_a_genuine_minus_six(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ ANTI-VACUITY for the case above. A classifier that answered
+    `heal_sent_ipc_fault_on_reprobe` for EVERY code would satisfy every assertion
+    there while destroying WR-02's own verdict — the one that catches a broker
+    accepting the CONNECTION and rejecting the ACCOUNT. `-6` on the re-probe is
+    still, and only, `still_unauthorized`.
+    """
+    _set_full_env(monkeypatch)
+    _install_client(
+        monkeypatch,
+        {
+            "initialize": False,
+            "last_error": (-6, "Terminal: Authorization failed"),
+            "initialize_credentialed": True,
+            "initialize_after_heal": False,
+        },
+    )
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    message = _outcome_records(caplog)[-1].getMessage()
+    assert "still_unauthorized" in message, (
+        f"a genuine post-heal `-6` was reported as {message!r} — WR-02's verdict, "
+        "the one that catches a broker rejecting the ACCOUNT, has been classified "
+        "away"
+    )
+    assert "reprobe" not in message.replace("still_unauthorized", "")
+
+
 async def test_a_REFUSED_credential_is_a_verdict_and_never_a_transient_miss(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
