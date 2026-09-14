@@ -104,6 +104,10 @@ _MT5_GATEWAY_ENV_NAMES: Final[tuple[str, str]] = (
     "MT5_GATEWAY_PORT",
 )
 
+# The kill switch's variable NAME, so the disabled-return log line can name it
+# without re-spelling the string `services/closed_sets.py` owns (HIGH-1).
+_MT5_ENABLED_ENV_NAME: Final[str] = "MT5_ENABLED"
+
 # The two tuning knobs. ⛔ READ PER CALL AND NEVER AT IMPORT — 164.6.2 CR-02.
 #
 # They WERE `float(os.getenv(...))` at module scope, and `main.lifespan` imports
@@ -575,6 +579,32 @@ async def heal_mt5_terminal_session() -> None:
     try:
         if not mt5_enabled_server():
             # ⛔ FIRST, and before any construction: fail-closed, read per call.
+            #
+            # ⛔ HIGH-1 — IT LOGS. This used to be the module's ONE unlogged exit,
+            # and zero log lines was simultaneously consistent with FIVE
+            # hypotheses: MT5 disabled, the `create_task` entry reverted, the
+            # import failing, the process killed before the task was scheduled, or
+            # `LOG_LEVEL` raised above INFO. Every OTHER early return here
+            # (credentials absent, credentials invalid, gateway absent, port not
+            # numeric) already obeys `_log_configuration_fault_once`'s stated
+            # doctrine — "LOG-AND-PROCEED, never silence … silence is the defect
+            # class this milestone exists to remove" — and the one exit that
+            # violated it was the one an operator is most likely to hit.
+            #
+            # ⚠️ It NAMES the variable, because `mt5_enabled_server` is
+            # `.strip().lower() == "true"`: `1`, `on` and `yes` all read OFF, so a
+            # future edit to any of them would otherwise disable the heal with an
+            # EMPTY log. (Booked as `[164.6.2-KILLSWITCH-COMMENT-DRIFT]`; this line
+            # makes the consequence visible without touching that gate.)
+            #
+            # INFO, not WARNING: a disabled kill switch is an operator DECISION,
+            # not a misconfiguration, and it is not throttled because it fires once
+            # per boot.
+            logger.info(
+                "mt5 boot heal: skipped — %s is not set to true, so the heal is "
+                "disabled. The terminal keeps whatever session it already has.",
+                _MT5_ENABLED_ENV_NAME,
+            )
             return
 
         credentials = read_env_mt5_credentials()
@@ -586,6 +616,19 @@ async def heal_mt5_terminal_session() -> None:
 
         login, password, server = credentials
         host, port = endpoint
+
+        # ⛔ HIGH-1's SECOND half, and the two only work together. The disabled
+        # return above removes ONE hypothesis from an empty log; this line removes
+        # the rest of them. Once it is present, an empty log means "the task never
+        # ran" and NOTHING else — a heal that reached the lease always emits a
+        # second line, whatever happens next (a verdict, a busy skip, a timeout, or
+        # the catch-all). ⛔ It carries no host, no port and no credential: the
+        # module's rule is NAMES ONLY (T-164.6.2-12), and the endpoint is not even
+        # a name.
+        logger.info(
+            "mt5 boot heal: starting — acquiring the terminal and probing the "
+            "broker session (a second line always follows)."
+        )
 
         # The lease key WITHOUT a client — plan 01's helper exists for this call
         # site. ⛔ Never a second hand-spelled `f"{host}:{port}"`: the epoch

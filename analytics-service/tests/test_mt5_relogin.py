@@ -266,6 +266,24 @@ def _records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.name == _LOGGER_NAME]
 
 
+#: HIGH-1's "starting" line. It is emitted on every path that reaches the lease, so
+#: a test asserting "an OUTCOME was reported" must exclude it or it would pass on
+#: the strength of the announcement alone.
+_STARTING_FRAGMENT = "mt5 boot heal: starting"
+
+
+def _outcome_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    """Every record EXCEPT the "starting" announcement.
+
+    ⛔ ANTI-VACUITY. HIGH-1 added a line before the lease precisely so an empty log
+    becomes unambiguous — which means `assert records` is no longer evidence that
+    an OUTCOME was reported. Every test whose subject is "the heal said what
+    happened" must filter it out, or HIGH-1's own fix would have made those tests
+    pass for free.
+    """
+    return [r for r in _records(caplog) if _STARTING_FRAGMENT not in r.getMessage()]
+
+
 def _assert_no_credential_value_escaped(records) -> None:
     """Each of the three literals, checked INDIVIDUALLY, so a partial leak names
     which value escaped rather than reporting "something leaked"."""
@@ -346,6 +364,162 @@ def test_the_kill_switch_tolerates_surrounding_whitespace_MEASURED(
     """
     monkeypatch.setenv("MT5_ENABLED", on_value)
     assert mt5_relogin.mt5_enabled_server() is True
+
+
+@pytest.mark.parametrize("off_value", [None, "", "1", "on", "false", "yes"])
+async def test_the_disabled_kill_switch_return_IS_LOGGED_by_name(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, off_value
+) -> None:
+    """⛔ HIGH-1 — THE MODULE'S ONE UNLOGGED EXIT, CLOSED.
+
+    This return used to emit NOTHING, which made an empty operator log
+    simultaneously consistent with FIVE hypotheses: MT5 disabled, the
+    `create_task` entry reverted, the import failing, the process killed before
+    the task was scheduled, or `LOG_LEVEL` raised above INFO. Every OTHER early
+    return in this module already logs, and `_log_configuration_fault_once`'s own
+    docstring states the doctrine it violated — *"LOG-AND-PROCEED, never silence …
+    silence is the defect class this milestone exists to remove"*.
+
+    ⛔ IT MUST NAME `MT5_ENABLED`. The switch is `.strip().lower() == "true"`, so
+    `1`, `on` and `yes` all read OFF (this parametrization is that claim, measured)
+    — a future edit to any of them would otherwise disable the heal with an empty
+    log and no way to tell it from a crash. Naming the variable in the line is what
+    turns that into a one-glance answer.
+    """
+    _set_full_env(monkeypatch)
+    if off_value is None:
+        monkeypatch.delenv("MT5_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("MT5_ENABLED", off_value)
+    _install_client(monkeypatch, {"initialize": True})
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    records = _outcome_records(caplog)
+    assert len(records) == 1, (
+        f"the disabled kill switch emitted {len(records)} outcome records, "
+        f"expected exactly ONE: {[r.getMessage() for r in records]}"
+    )
+    message = records[0].getMessage()
+    assert "MT5_ENABLED" in message, (
+        f"the disabled return did not NAME the kill switch: {message!r}. Without "
+        "the name an operator cannot tell 'MT5 is off' from 'the heal never ran'."
+    )
+    assert "skipped" in message.lower()
+    assert records[0].levelno == logging.INFO, (
+        f"the disabled return logged at {records[0].levelname}; a deliberate "
+        "operator choice is not a fault and must not sit at WARNING beside real "
+        "misconfiguration (WR-01's severity ladder)"
+    )
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
+#: Every way out of `heal_mt5_terminal_session`, as a driver that provokes it.
+#: ⛔ HIGH-1's claim is "there is no silent exit", and a claim of that shape is only
+#: worth anything as a CENSUS. A new early return added without a log line reds
+#: here rather than being discovered from an empty production log.
+def _exit_kill_switch_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MT5_ENABLED", "false")
+
+
+def _exit_credentials_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MT5_PASSWORD", raising=False)
+
+
+def _exit_credentials_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MT5_LOGIN", "not-a-number")
+
+
+def _exit_gateway_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MT5_GATEWAY_HOST", raising=False)
+
+
+def _exit_gateway_port_not_numeric(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "not-a-port")
+
+
+def _exit_normal_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    return None
+
+
+@pytest.mark.parametrize(
+    "provoke",
+    [
+        pytest.param(_exit_kill_switch_off, id="kill-switch-off"),
+        pytest.param(_exit_credentials_absent, id="credentials-absent"),
+        pytest.param(_exit_credentials_invalid, id="credentials-invalid"),
+        pytest.param(_exit_gateway_absent, id="gateway-absent"),
+        pytest.param(_exit_gateway_port_not_numeric, id="gateway-port-not-numeric"),
+        pytest.param(_exit_normal_verdict, id="normal-verdict"),
+    ],
+)
+async def test_NO_exit_from_the_heal_is_silent(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, provoke
+) -> None:
+    """⛔ HIGH-1 AS A CENSUS, not as a single case.
+
+    The heal is a fire-and-forget task on the boot path; the operator's ONLY
+    artefact is the log. So every way out of it must leave exactly that artefact,
+    and the property worth gating is the universal one rather than the one exit
+    that happened to be found. ⛔ The "starting" announcement is EXCLUDED from the
+    count (`_outcome_records`), or HIGH-1's own fix would make this pass for free
+    on every path that reaches the lease.
+    """
+    _set_full_env(monkeypatch)
+    provoke(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert _outcome_records(caplog), (
+        "this exit from the heal emitted NO outcome record — an empty operator "
+        "log then means 'MT5 disabled' and 'the task never ran' at the same time, "
+        "which is the defect class this milestone exists to remove (HIGH-1)"
+    )
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
+async def test_the_heal_ANNOUNCES_itself_before_it_takes_the_lease(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ HIGH-1's second half, and the ORDER is the property.
+
+    An outcome line alone still leaves an empty log ambiguous whenever the heal
+    dies between the task being scheduled and the outcome being decided — a lease
+    that never returns, a `to_thread` that never comes back, a SIGKILL mid-budget.
+    The announcement is what makes an empty log mean "the task never ran" and
+    nothing else, and it is only worth that if it lands BEFORE the first thing that
+    can hang.
+
+    The ordering is MEASURED, not read off the source: the lease wrapper records
+    how many records existed at acquisition time.
+    """
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+
+    seen_at_acquire: list[list[str]] = []
+    real = mt5_relogin.mt5_terminal_lease
+
+    @asynccontextmanager
+    async def _recording(terminal_key: str, *, wait_s=None):
+        seen_at_acquire.append([r.getMessage() for r in _records(caplog)])
+        async with real(terminal_key, wait_s=wait_s):
+            yield
+
+    monkeypatch.setattr(mt5_relogin, "mt5_terminal_lease", _recording)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert len(seen_at_acquire) == 1
+    assert any(_STARTING_FRAGMENT in m for m in seen_at_acquire[0]), (
+        "the heal took the terminal lease having announced NOTHING. A heal that "
+        "then hangs in the lease or in `to_thread` leaves an empty log that is "
+        "indistinguishable from a task that never started (HIGH-1). Recorded at "
+        f"acquisition: {seen_at_acquire[0]!r}"
+    )
 
 
 # --------------------------------------------------------------------------- #
