@@ -487,6 +487,39 @@ def _redact_credential_values(
     return str(safe)
 
 
+def _redact_with_optional_credentials(
+    text: str, credentials: tuple[int, str, str] | None
+) -> str:
+    """``text`` redacted BY VALUE whenever the three values are known, shape-scrubbed
+    only when they are not — the two-armed shape ``mt5_relogin._describe_exception_for_log``
+    already ships, reused here rather than re-derived.
+
+    ⛔ [164.6.2-RAISE-LAST-SHAPE-ONLY], CLOSED by Phase 164.6.4 criterion 5 (founder
+    decision 2026-09-15, routed in from Phase 164.6.2 criterion 9). ``Mt5Client._raise_last``
+    builds its detail from the TERMINAL's own ``last_error()`` text and used to scrub it
+    by SHAPE alone — and ``_redact_credential_values``' own docstring records that scrub
+    as a MEASURED NO-OP on the ``mt5linux`` kwargs-repr shape. A broker that echoes the
+    submitted account or server back into ``last_error()`` therefore disclosed it, on a
+    PUBLIC repo with Sentry attached. This helper is what the shared raise site now calls.
+
+    ⛔ THE ``None`` ARM IS NOT A WEAKENING, IT IS THE CORRECT BEHAVIOUR — the identical
+    argument ``_describe_exception_for_log`` records. Where no credential is in scope
+    there is nothing to redact BY, and calling ``_redact_credential_values`` with
+    placeholder values would be actively WORSE than useless: a placeholder login of ``0``
+    would replace every ``0`` in the message with the marker, mangling the very text an
+    operator needs. The callers that HOLD credentials pass them; the five that do not,
+    do not.
+
+    ⛔ A SECOND COPY OF THE REDACTION LOOP IS THE DRIFT ITS OWN GATE EXISTS TO PREVENT.
+    This function DELEGATES to ``_redact_credential_values``; a raw-literal-only
+    re-implementation was a MEASURED live disclosure ([164.6.2-LOGIN-ESCAPE-BLIND]).
+    """
+    if credentials is None:
+        return str(scrub_freeform_string(text))
+    login, password, server = credentials
+    return _redact_credential_values(text, login, password, server)
+
+
 def _mt5_epoch_for(terminal_key: str) -> int:
     """The current generation of one terminal. Unknown key -> generation 0.
 
@@ -1034,9 +1067,44 @@ class Mt5Client:
         )
         return result
 
-    def _raise_last(self) -> NoReturn:
+    def _raise_last(
+        self, *, credentials: tuple[int, str, str] | None = None
+    ) -> NoReturn:
         """Capture `last_error()` IMMEDIATELY (the next remote call overwrites it)
-        and raise a typed, secret-scrubbed error."""
+        and raise a typed, secret-scrubbed error.
+
+        ⛔ `credentials` CLOSES [164.6.2-RAISE-LAST-SHAPE-ONLY] AT THE ONE SHARED SITE
+        (Phase 164.6.4 criterion 5, founder decision 2026-09-15). The detail this method
+        raises is the TERMINAL's own `last_error()` text, and `Mt5ClientError.__init__`
+        scrubs it by SHAPE only — a measured NO-OP on the `mt5linux` kwargs-repr shape.
+        A broker echoing the submitted account or server back into that text disclosed
+        it. With the triple in scope every one of this method's THREE raise points now
+        redacts BY VALUE through the shipped `_redact_credential_values`, via
+        `_redact_with_optional_credentials`.
+
+        ⚠️ STATE THE PROMISE HONESTLY: this method has EIGHT callers, not two. Fixing it
+        here means every credential-CARRYING caller benefits, at one site, by
+        construction — NOT that every caller benefits. The five that hold no credential
+        (`assert_session_authorized`, `account_info`, `terminal_info`,
+        `history_deals_get`, `order_check`) pass nothing and keep today's shape-only
+        scrub, which is correct for them: there is no value to redact by.
+
+        ⛔ KEYWORD-ONLY, and ⛔ the client caches NO credential of its own. Keyword-only
+        so a positional mistake at any of the eight call sites is a `TypeError` rather
+        than a silent mis-bind. A cached credential would turn a formatter into a
+        credential holder — exactly the surface criterion 5 is shrinking.
+
+        ⚠️ THE PARAMETER'S NAME AND SHAPE ARE A DECISION, NOT AN ACCIDENT.
+        `tests/test_mt5_client_contract.py` classifies every `Mt5Client` method FROM
+        SOURCE: positional params spelling the login/password/server triple with no
+        keyword-only params make a method DRIVABLE, and the redaction driver then
+        demands its credential-carrying transport call raise — `_raise_last` makes no
+        such call, so that would red. A differently-spelled password parameter would
+        make it RESIDUAL, which another gate asserts is empty. A keyword-only
+        `credentials` TUPLE is NEITHER, and that is right rather than a dodge: the
+        gate's class is "methods that hand a credential to a transport call", and this
+        method hands credentials to nothing — it only formats.
+        """
         # WIZFORM-ABANDON / D-36 — the fence is the FIRST statement, BEFORE the
         # try/except below, for a reason specific to this method: that except arm
         # converts anything it catches into a scrubbed `Mt5ClientError`, and an
@@ -1059,9 +1127,13 @@ class Mt5Client:
         except Mt5ClientError:
             raise
         except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
-            raise Mt5ClientError(0, scrub_freeform_string(str(exc))) from None
+            raise Mt5ClientError(
+                0, _redact_with_optional_credentials(str(exc), credentials)
+            ) from None
         if not err:
-            raise Mt5ClientError(0, "unknown")
+            raise Mt5ClientError(
+                0, _redact_with_optional_credentials("unknown", credentials)
+            )
         # A truthy-but-malformed shape (wrong-length tuple, non-subscriptable
         # scalar, dict, non-int code) must NOT escape as a raw
         # IndexError/TypeError/KeyError/ValueError — that would bypass the single
@@ -1070,7 +1142,12 @@ class Mt5Client:
             code, text = int(err[0]), str(err[1])
         except (TypeError, IndexError, KeyError, ValueError):
             code, text = 0, "unknown (malformed last_error shape)"
-        raise Mt5ClientError(code, text)
+        # ⛔ THE CODE IS PRESERVED THROUGH THE REDACTION. A heal that lost `-6` is
+        # undebuggable from a log, and `-6` is the ONE fault this phase's detector
+        # distinguishes — only the freeform TEXT is rewritten.
+        raise Mt5ClientError(
+            code, _redact_with_optional_credentials(text, credentials)
+        )
 
     def _guarded_read(self, call: Callable[[], Any], *, stage: str | None = None) -> Any:
         """Run a raw transport read, converting ANY transport-RAISED exception
@@ -1143,7 +1220,10 @@ class Mt5Client:
         except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
             raise Mt5ClientError(0, scrub_freeform_string(str(exc))) from None
         if not inited:
-            self._raise_last()
+            # Criterion 5 — the terminal's own `last_error()` text can echo the
+            # submitted account or server back at us. The triple is in scope here, so
+            # the shared raise site redacts it BY VALUE.
+            self._raise_last(credentials=(login, password, server))
         try:
             ok = self._timed(
                 "login",
@@ -1169,7 +1249,9 @@ class Mt5Client:
                 0, _redact_credential_values(str(exc), login, password, server)
             ) from None
         if not ok:
-            self._raise_last()
+            # Criterion 5 — as above. This is the arm a bad credential or a wrong
+            # server actually lands on, so it is the likeliest to carry an echo.
+            self._raise_last(credentials=(login, password, server))
 
     def assert_session_authorized(self) -> None:
         """Assert that the terminal currently HAS an authorized broker account —
@@ -1250,10 +1332,21 @@ class Mt5Client:
         into remotely-eval'd source, so the moment a password is passed here a raw
         rpyc remote traceback is a real credential disclosure — on a PUBLIC Actions
         log. BOTH failure arms therefore redact the three values BY VALUE on top of
-        the shape-based scrub (``_redact_credential_values``), which is strictly
-        more than the shared ``_raise_last`` path gives ``login()``'s falsy arm.
-        That asymmetry is measured and deliberate: closing it would mean editing
-        ``login()``, which D-07 forbids.
+        the shape-based scrub (``_redact_credential_values``): the transport-raise arm
+        calls it DIRECTLY, and the falsy arm gets it from the shared ``_raise_last``,
+        which now takes the triple.
+
+        ⭐ THE ASYMMETRY WITH ``login()``'s FALSY ARM IS CLOSED, and this paragraph used
+        to say the opposite. It recorded the asymmetry as "measured and deliberate"
+        because "closing it would mean editing ``login()``, which D-07 forbids" —
+        false as of Phase 164.6.4 criterion 5 (founder decision 2026-09-15, routed in
+        from Phase 164.6.2 criterion 9, booked as [164.6.2-RAISE-LAST-SHAPE-ONLY], now
+        CLOSED). What closed it was PARAMETERISING THE SHARED SITE rather than editing
+        ``login()``'s body: D-07's freeze existed to keep a shipped live-path method
+        out of a REFACTOR, and adding a keyword-only argument to a helper both verbs
+        already call is not one. ⛔ It had to close here rather than later: this verb is
+        what the keepalive drives ON A CADENCE, so leaving it open would have
+        multiplied how often a known disclosure path can fire, forever.
 
         ⛔ The return value is NOT inspected beyond truthiness and must never be
         treated as proof the heal worked: the oracle for "is the session
@@ -1307,33 +1400,28 @@ class Mt5Client:
                 0, _redact_credential_values(str(exc), login, password, server)
             ) from None
         if not inited:
-            # ⛔ THE ARM WHERE THIS METHOD IS DELIBERATELY STRONGER THAN `login`.
-            # `_raise_last` builds its detail from the TERMINAL's own `last_error()`
-            # text, which is shape-scrubbed at `Mt5ClientError` construction and
-            # nothing more. A broker that echoes the submitted account or server
-            # back in that text would therefore disclose it. Re-redact by value
-            # before it escapes, preserving the ORIGINAL code — plan 02 does not
-            # branch on it here, but a heal that lost `-6` is undebuggable from a
-            # log.
+            # ⛔ THE ARM CRITERION 5 MOVED INTO THE SHARED SITE (Phase 164.6.4, founder
+            # decision 2026-09-15). `_raise_last` builds its detail from the TERMINAL's
+            # own `last_error()` text, which `Mt5ClientError` scrubs by SHAPE only, so a
+            # broker echoing the submitted account or server back in that text would
+            # disclose it. It now redacts BY VALUE itself, given the triple — so the
+            # catch/unwrap/re-raise this arm used to carry collapses to one call.
             #
-            # `except Mt5ClientError` and NOT `except Exception`: `_raise_last`
-            # opens with its own `_assert_live`, so an `Mt5SessionAbandoned` can
-            # arise on this line and must escape UNTOUCHED (D-42, as above). The
-            # narrow arm makes that structural rather than remembered.
-            try:
-                self._raise_last()
-            except Mt5ClientError as err:
-                # Unwrap the typed error's own prefix before re-wrapping so the
-                # message reads once rather than twice. `removeprefix` degrades to
-                # a no-op if that format ever changes — a doubled prefix, still
-                # fully redacted. The redaction must never depend on a string shape.
-                detail = str(err).removeprefix(
-                    f"MT5 client error (code={err.code}): "
-                )
-                raise Mt5ClientError(
-                    err.code,
-                    _redact_credential_values(detail, login, password, server),
-                ) from None
+            # Two consequences of the collapse, both improvements and both deliberate:
+            #
+            #   * THE ORIGINAL CODE SURVIVES BY CONSTRUCTION. `_raise_last` raises the
+            #     terminal's own code and nothing re-wraps it. The deleted block
+            #     preserved the code too, but only by stripping the typed prefix with
+            #     `removeprefix` — whose own comment admitted it degrades to a no-op if
+            #     the message format ever changes. There is no longer a string shape to
+            #     depend on.
+            #   * `Mt5SessionAbandoned` NOW ESCAPES UNTOUCHED STRUCTURALLY (D-42).
+            #     `_raise_last` opens with its own `_assert_live`, so a refusal can
+            #     arise on this line; the narrow `except Mt5ClientError` existed to keep
+            #     it from being re-classified as a user credential fault. Deleting the
+            #     catch entirely makes that structural more cheaply than the narrow arm
+            #     did — there is nothing left that could absorb it.
+            self._raise_last(credentials=(login, password, server))
 
     def account_info(self) -> dict[str, Any]:
         """Current account snapshot as a native dict. None (error) -> typed raise."""
