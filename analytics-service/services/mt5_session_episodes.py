@@ -7,8 +7,15 @@ WHAT THIS IS FOR (criterion 1). Phase 164.6.2 wave 5 measured the terminal
 at most ``00:03:43``. Sizing a keepalive against that ONE observation is the
 guess D-06 exists to prevent, so this phase ships the instrument that grows
 ``n`` instead: an AUTHORIZED run's duration is the session LIFETIME (the number
-a successor chooses the keepalive interval from) and a DARK run's duration is
-the EXPOSURE this phase exists to collapse.
+a successor chooses the keepalive interval from). ⛔ WR-04 — A DARK run's
+DURATION is NOT the exposure: on the heal-succeeds path (the ordinary one) the
+dark run is opened and closed inside ONE tick, so its duration measures the
+HEAL, not the dark window. The exposure is bounded by the dark row's own
+``since_previous_reading_s`` — the gap to the previous MEASURED reading — and
+is unbounded only where ``started_at_is_lower_bound`` is true. A successor
+computing ``SUM(completed_at - started_at) WHERE state = 'dark'`` would read
+the exposure as seconds when it is up to a poll interval; read
+``since_previous_reading_s`` instead.
 
 ⚠️ ``[MT5-VERDICT-SINK-01]`` is the defect class this module closes: a verdict
 that can only be seen while it scrolls past. MEASURED 2026-09-05 — ``railway

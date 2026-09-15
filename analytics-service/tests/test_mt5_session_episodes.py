@@ -1639,6 +1639,19 @@ async def test_a_DARK_reading_resets_the_blind_run_because_it_MEASURED_something
             "which is why a new cron_name raises no false alert",
             id="the-no-false-alert-reasoning",
         ),
+        pytest.param(
+            "A DARK run's",
+            "WR-04's correction — a dark run's DURATION is not the exposure on "
+            "the heal-succeeds path; a reader who trusts the OLD sentence would "
+            "compute the exposure as seconds when it is up to a poll interval",
+            id="the-WR-04-dark-duration-correction",
+        ),
+        pytest.param(
+            "since_previous_reading_s",
+            "the field a successor should read INSTEAD of the dark row's own "
+            "duration",
+            id="the-WR-04-field-to-read-instead",
+        ),
     ],
 )
 def test_the_module_header_records_what_this_sink_is_and_is_NOT(
