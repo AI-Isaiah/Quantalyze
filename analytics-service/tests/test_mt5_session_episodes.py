@@ -140,6 +140,32 @@ class _RaisingCronRuns(_OrderedCronRuns):
         return query
 
 
+class _MinimalReturningCronRuns(_OrderedCronRuns):
+    """⛔ WR-12 (round 2) — SIMULATES `returning='minimal'` ON EVERY UPDATE:
+    `.data` comes back EMPTY while `.count` still names how many rows the
+    UPDATE actually matched, exactly the shape postgrest-py produces for that
+    option. `_close_row` must read `.count`, never infer the CAS outcome from
+    an empty `.data` — this repo already takes the `returning='minimal'`
+    trade elsewhere (`services/equity_reconstruction.py`, for the stated
+    reason of not shipping row representations back over the wire), so the
+    dependency this test pins is not hypothetical.
+    """
+
+    def table(self, name: str) -> Any:
+        query = super().table(name)
+        original = query.execute
+
+        def _execute() -> Any:
+            response = original()
+            if query._op == "update":
+                response.count = len(response.data)
+                response.data = []
+            return response
+
+        query.execute = _execute  # type: ignore[method-assign]
+        return query
+
+
 @pytest.fixture
 def sink(monkeypatch: pytest.MonkeyPatch) -> Any:
     fake = _OrderedCronRuns()
@@ -732,6 +758,69 @@ async def test_a_LOST_compare_and_set_on_the_MEASURED_close_does_not_claim_one(
     assert any(
         "lost its compare-and-set" in r.getMessage() for r in _warnings(caplog)
     ), [r.getMessage() for r in _warnings(caplog)]
+
+
+async def test_WR_12_a_WON_compare_and_set_is_read_from_COUNT_not_inferred_from_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ WR-12 (round 2). Before the fix, `_close_row` inferred a WON
+    compare-and-set from `bool(rows(response))` — a shape that exists only
+    because postgrest-py currently defaults `returning='representation'`. A
+    transport configured with `returning='minimal'` (this repo already takes
+    that trade elsewhere) echoes an EMPTY `.data` on every winning UPDATE, and
+    the old inference would read every genuine close as a LOST one: every row
+    would stamp `started_at_is_lower_bound: true`, and a WARNING claiming
+    "another writer closed this run first" would fire on every ordinary
+    transition. `_close_row` must read `.count` instead, which survives the
+    minimal-returning shape.
+    """
+    fake = _MinimalReturningCronRuns()
+    _install_sink(monkeypatch, fake)
+    mt5_session_episodes._reset_session_episode_state_for_tests()
+
+    row = _seed_open_row(fake, mt5_session_episodes.STATE_AUTHORIZED, id="R")
+
+    won = await mt5_session_episodes._close_row(
+        row,
+        state=mt5_session_episodes.STATE_AUTHORIZED,
+        closing_kind=mt5_session_episodes.KIND_ALREADY_AUTHORIZED,
+        closing_code=None,
+        source=_SOURCE,
+        measured=True,
+    )
+
+    assert won is True, (
+        "a WON compare-and-set against a minimal-returning transport read as "
+        "LOST — the CAS oracle is inferred from an empty `.data` rather than "
+        "observed from `.count`"
+    )
+    assert row["status"] == "ok", "the row itself was not actually closed"
+
+
+async def test_WR_12_a_LOST_compare_and_set_still_reads_LOST_via_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ WR-12 (round 2) — THE OTHER DIRECTION, so the fix is not a
+    fail-open. A CAS whose predicate does not match (the row is no longer
+    `running`) must still read `False`, whether the count comes back `0` via
+    `.count` or via an empty `.data`."""
+    fake = _MinimalReturningCronRuns()
+    _install_sink(monkeypatch, fake)
+    mt5_session_episodes._reset_session_episode_state_for_tests()
+
+    row = _seed_open_row(fake, mt5_session_episodes.STATE_AUTHORIZED, id="R")
+    row["status"] = "ok"  # already closed by someone else
+
+    won = await mt5_session_episodes._close_row(
+        row,
+        state=mt5_session_episodes.STATE_AUTHORIZED,
+        closing_kind=mt5_session_episodes.KIND_ALREADY_AUTHORIZED,
+        closing_code=None,
+        source=_SOURCE,
+        measured=True,
+    )
+
+    assert won is False
 
 
 async def test_IN_02_a_measured_close_of_unparseable_metadata_never_writes_fabricated_None(

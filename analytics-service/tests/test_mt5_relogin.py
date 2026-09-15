@@ -2823,6 +2823,7 @@ class _FakeQuery:
         self._order: tuple[str, bool] | None = None
         self._op: str | None = None
         self._payload: dict | None = None
+        self._count_requested: str | None = None
 
     def select(self, _columns: str):
         self._op = "select"
@@ -2833,9 +2834,16 @@ class _FakeQuery:
         self._payload = payload
         return self
 
-    def update(self, payload: dict):
+    def update(self, payload: dict, count: str | None = None):
         self._op = "update"
         self._payload = payload
+        # ⛔ WR-12 (round 2) — stored, never interpreted by the base fake: the
+        # base transport still echoes `.data` by default (representation, the
+        # real client's own default), so the shipped `_close_row` fallback
+        # path (`len(rows(response))`) keeps exercising exactly what it did
+        # before. `_MinimalReturningCronRuns` below is the transport that
+        # actually simulates `count="exact"` + `returning="minimal"`.
+        self._count_requested = count
         return self
 
     def eq(self, column: str, value):
@@ -2875,13 +2883,25 @@ class _FakeQuery:
             self._sink.updates.append(
                 {"filters": list(self._filters), "applied": len(hits)}
             )
-            return _FakeResponse([dict(r) for r in hits])
+            response = _FakeResponse([dict(r) for r in hits])
+            # ⛔ WR-12 (round 2) — the base transport still echoes
+            # representation `.data` (the current real default), but a
+            # request carrying `count="exact"` also gets `.count` set, exactly
+            # as postgrest-py does. `_close_row`'s fallback to
+            # `len(rows(response))` is therefore never EXERCISED by this base
+            # fake — `.count` always wins — which is why
+            # `_MinimalReturningCronRuns` exists: it is the transport that
+            # blanks `.data` and forces the fallback path to matter.
+            if self._count_requested == "exact":
+                response.count = len(hits)
+            return response
         raise AssertionError(f"harness: unsupported operation {self._op!r}")
 
 
 class _FakeResponse:
-    def __init__(self, data: list[dict]) -> None:
+    def __init__(self, data: list[dict], *, count: int | None = None) -> None:
         self.data = data
+        self.count = count
 
 
 class _FakeCronRuns:

@@ -170,7 +170,14 @@ class _FakeQuery:
         self._payload = payload
         return self
 
-    def update(self, payload: dict):
+    def update(self, payload: dict, count: str | None = None):
+        # ⛔ WR-12 (round 2) — `count` accepted so `_close_row`'s real
+        # `.update(payload, count="exact")` call does not raise here. This
+        # module's own subject is the LOOP, not the row semantics (those are
+        # gated in `tests/test_mt5_relogin.py`), so `count` is unused: the
+        # fake's `.execute()` always echoes representation `.data`, which
+        # keeps `_close_row`'s fallback path exercising the same thing it did
+        # before this round.
         self._op = "update"
         self._payload = payload
         return self

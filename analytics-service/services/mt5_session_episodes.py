@@ -92,6 +92,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Final, NamedTuple
 
+from postgrest.types import CountMethod
+
 from services.db import db_execute, get_supabase, rows
 
 # ⛔ A STDLIB logger under the `quantalyze.analytics.` prefix — the convention
@@ -564,7 +566,17 @@ async def _close_row(
     def _update() -> Any:
         return (
             supabase.table("cron_runs")
-            .update(payload)
+            # ⛔ WR-12 (round 2) — `count="exact"` is the CAS's own answer,
+            # requested EXPLICITLY so the dependency is STATED rather than
+            # inferred from postgrest-py's current default. It survives a
+            # future `returning="minimal"` (this repo already takes that
+            # trade elsewhere — `services/equity_reconstruction.py`'s writes
+            # — for the stated reason of not shipping row representations
+            # back over the wire); `rows(response)` would not: an EMPTY
+            # `.data` under `returning="minimal"` is indistinguishable from a
+            # LOST compare-and-set, and every winning close would silently
+            # read as a loss.
+            .update(payload, count=CountMethod.exact)
             .eq("id", row.get("id"))
             # ⛔ THE COMPARE-AND-SET. Do not "simplify" this away.
             .eq("status", "running")
@@ -575,7 +587,19 @@ async def _close_row(
     # ⭐ WR-01 — A ZERO-ROW UPDATE MEANS THE CAS LOST: another writer closed
     # this row first. Fail CLOSED rather than assume the write bit; the caller
     # depends on this to know whether IT measured the transition.
-    return bool(rows(response))
+    #
+    # ⭐ WR-12 (round 2) — READ THE COUNT, FALL BACK TO ROWS. `response.count`
+    # is the request's own answer and is present whenever `count="exact"` was
+    # honoured; `len(rows(response))` is the fallback for a transport (real or
+    # faked) that does not set it. `isinstance(..., bool)` is excluded because
+    # `isinstance(False, int)` is True in Python and a stray `False` must not
+    # masquerade as `count=0` — the same guard
+    # `services/equity_reconstruction.py::_result_row_count` uses for the same
+    # reason.
+    matched = getattr(response, "count", None)
+    if not isinstance(matched, int) or isinstance(matched, bool):
+        matched = len(rows(response))
+    return bool(matched)
 
 
 async def _open_row(reading: SessionReading, *, source: str,
