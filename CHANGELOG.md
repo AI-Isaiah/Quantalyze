@@ -1,5 +1,84 @@
 # Changelog
 
+## [0.77.43.2] - 2026-09-15 — criterion 2 closes on an OBSERVATION, and the gate that guards the record is made able to fail
+
+⭐ **What this is.** Phase 164.6.2's load-bearing criterion — *the MT5 terminal's broker session is
+re-established WITHOUT a human* — was the one thing v0.77.43.0 shipped OPEN, because the branch
+carrying the heal had never reached production. It is now closed on a measured production
+observation. Planning artifacts only; no runtime code changed.
+
+### Added
+
+- `164.6.2-05-PLAN.md` — wave 5, the post-ship measurement that closes criterion 2. Re-asserts both
+  preconditions at execution time, restarts `mt5-gateway`, polls to a second consecutive reading,
+  takes a POST-RESTART narrowed prober dispatch read from the log ARCHIVE, records D-06's window and
+  carries question THREE's R1/R2. Three tasks, the last a blocking founder decision.
+- `164.6.2-MEASUREMENT-WAVE5.md` — the record, nine sections. Baseline prober run `34959312135`:
+  **1 defect**, `mt5-not-authorized`, `-6`. Closing run `34960346817` after the restart:
+  **0 defects**, `connected=true trade_allowed=true`. Restart `10:46:35Z` → first authorized reading
+  `10:50:18Z`, confirmed by a second at `10:52:47Z`; `delta 00:03:43`, `window class: BOUNDED`.
+- Phase **164.6.4 MT5KEEPALIVE**, booked on the founder's `book-keepalive` decision. ⛔ Its interval
+  is deliberately NOT chosen — wave 5 produced one observation of each quantity, and an interval set
+  from n=1 is the guess D-06 exists to prevent.
+
+### Changed
+
+- ROADMAP criterion 7: the deployed sha must **CONTAIN** the merge (descendant + `mt5_relogin.py`
+  present), no longer **MATCH** it. Equality was always a proxy and it breaks here — Railway SKIPPED
+  the merge commit `1f938d6d`'s own deployment, so production reached the heal via its descendant
+  `f901e4da`. An equality check would have reddened a correct deploy.
+- ROADMAP criteria 10 and 11 added: the closure and its three limits; the phase held OPEN
+  (`phase_closes: false`) for plan 06 and `[164.6.2-RAISE-LAST-SHAPE-ONLY]`.
+
+### Fixed
+
+Four false-green defects in wave 5's own verify gates, each found by RE-RUNNING the lever rather
+than reading the claim, and each fixed only after the neuter was observed to bite:
+
+- `git status --porcelain` is blind to a **committed** edit, and GSD executors commit after every
+  task — so the leg guaranteeing the instruments stayed read-only printed `OK` on a tree where
+  `scripts/mt5-diag.sh` had been edited, committed, *and deleted*. Now three checks: porcelain,
+  `git diff --quiet f901e4da HEAD` over the read-only roots, and hash pins on both D-09 sites.
+- A **column-1 duplicate** (a fenced template above the real readings) was read as the value by
+  `grep -m1`, greening a record whose real `precondition merged:` was `FAIL`. 36 assertions over 24
+  tokens now red with `DUPLICATE-COLUMN-1-TOKEN`.
+- ⛔ **The gates were calibrated under bash and run under zsh.** `$ROOTS` does not word-split and
+  `set -- $pin` leaves `$2` empty, so the read-only fix above and both hash pins were VACUOUS in the
+  shell that actually runs them; `test "$A" \> "$B"` either errored (false RED) or, unescaped,
+  redirected to a file and returned 0. Literal argument lists, explicit per-file pins, and a
+  digit-reduced `-gt` ordering proof replace them. Calibrated under BOTH shells.
+- Arms did not require what their own class ENTAILS: `CLOSED` + `UNBOUNDED-WITHOUT-ANALYTICS-RESTART`
+  passed with neither `analytics restart stamp:` nor `heal verdict line:`; `PREMISE-FAILED` passed
+  with both preconditions `PASS`; `verdict: STALE` passed with `R1: false`. Each arm now demands its
+  own entailments, and the closing defect count is re-measured from the run's log archive rather
+  than taken from the author's own outcome line.
+
+### Notes
+
+- ⚠️ **The boot heal never ran.** It was deployed, armed and idle; what re-authorized the terminal was
+  MT5's own saved session on container restart, attributed on four measured facts (fresh rpyc server
+  and thread-counter reset, no analytics deployment that day, no `mt5 boot heal:` line, only the
+  read-only diagnostic's loopback probe in between). Criterion 2's *observable* closed; the phase's
+  own mechanism is still unproven in production and RESEARCH assumption A3 is still untested.
+- ⚠️ The `00:03:43` delta is an **upper bound** — `railway restart` held the executor's shell for its
+  first 180 s, so no probe could be issued across the event; true recovery may be ≈23 s.
+- ⭐ **The real exposure is the dark window, not the recovery.** The terminal read `-6` at `08:12:37Z`
+  and was still dark at the `10:46:35Z` restart: **≥2h34m confirmed dark with nothing in the system
+  able to act**, inside a looser ≈8h05m bracket. Recovery takes minutes; nothing TRIGGERS it. That is
+  Phase 164.6.4's sizing input — not the flattering 3m43s.
+- ⛔ **A narrowed prober dispatch exits 1 WITH defects and 2 WITHOUT, and both carry GitHub
+  `conclusion: failure`.** The closing run reported `failure` and exit 2 while its anchored log region
+  read `No defects in the narrowed scope.` Reading the exit code or the check badge would have
+  reopened a criterion that had legitimately closed. `[164.6.2-PLAN04-GATE-INTENT-DRIFT]` stays
+  routed to Phase 164.8.4.
+- Question THREE (D-09) remains **UNSETTLED**: `R1: true` — a first for this phase — `R2: UNAVAILABLE`,
+  `r2 pending`. All four copies of the stale sentence are byte-unchanged and hash-pinned. R2 needs a
+  real per-account `Mt5Client.login()` from the job worker or allocator; a boot heal is only a proxy.
+- Verification is `human_needed`, 11/11 criteria, `gaps: []`. The one human item: at the next natural
+  `-6`, restart **analytics** (not the gateway) and read for a real heal verdict — the first actual
+  test of A3. The VNC prohibition was verified from the gateway container's own connection log (zero
+  sessions on 2026-09-15), not from any agent's report.
+
 ## [0.77.43.1] - 2026-09-14 — the deploy probe stops reporting "I could not read prod" as "prod is stale"
 
 ⭐ **What this is.** A one-branch fix to `analytics-deploy-verify.yml`, found by the thing
