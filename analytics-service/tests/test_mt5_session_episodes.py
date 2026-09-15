@@ -360,6 +360,15 @@ async def test_a_tick_that_observes_the_ALREADY_RECORDED_state_CONFIRMS_the_open
     assert seeded["completed_at"] is None
     assert len(sink.open_rows()) == 1
 
+    # --- WR-13 (round 3) — the closed set, walked at the ONE write path -----
+    # every prior gate here was blind to: a CONFIRMED row.
+    assert set(meta) == _OPEN_ROW_METADATA_KEYS | _CONFIRM_METADATA_KEYS, (
+        f"the CONFIRMED row's metadata keys drifted: "
+        f"{set(meta) ^ (_OPEN_ROW_METADATA_KEYS | _CONFIRM_METADATA_KEYS)}. ⛔ An "
+        f"ADDED key is the disclosure risk, and the confirm path is the one "
+        f"write path no closed-set gate covered before this fix."
+    )
+
     # a SECOND confirming tick ADVANCES the timestamp rather than leaving it
     # byte-identical — the liveness evidence a dead loop cannot fake.
     first_confirmed_at = meta["last_confirmed_at"]
@@ -1294,6 +1303,14 @@ _CLOSE_METADATA_KEYS = frozenset(
     {"closed_by", "closing_kind", "closing_code", "close_is_measured"}
 )
 
+#: ⛔ WR-13 (round 3) — `_confirm_row`'s OWN CLOSED SET. Its two keys sit
+#: OUTSIDE `_OPEN_ROW_METADATA_KEYS` and `_CLOSE_METADATA_KEYS`, and until
+#: this fix no gate walked a CONFIRMED row at all — a credential-shaped key
+#: injected through `_confirm_row` left all of `test_mt5_session_episodes.py`
+#: `test_mt5_relogin.py` `test_mt5_session_monitor.py`
+#: `test_mt5_concurrency.py` green. Declared here, driven below.
+_CONFIRM_METADATA_KEYS = frozenset({"last_confirmed_at", "last_confirmed_by"})
+
 
 async def test_every_honesty_field_is_present_on_a_written_row_by_NAME(
     sink: _OrderedCronRuns,
@@ -1756,12 +1773,30 @@ async def test_no_credential_host_or_port_reaches_ANY_field_of_ANY_row(
         outcome, source=_SOURCE, poll_interval_s=_CADENCE_S
     )
 
+    # ⛔ WR-13 (round 3) — DRIVE A CONFIRM TOO, so the scan below actually
+    # walks a row this gate used to be blind to. Every prior run of this test
+    # observed only a TRANSITION; `_confirm_row`'s two keys sit outside
+    # `_OPEN_ROW_METADATA_KEYS | _CLOSE_METADATA_KEYS` and no closed-set gate
+    # ever saw a MATCHING-state reading before this fix. The open row left by
+    # the outcome above is `authorized` (`final_kind=KIND_HEALED`); observing
+    # the same state again CONFIRMS it rather than opening or closing.
+    await mt5_session_episodes.record_mt5_session_reading(
+        mt5_session_episodes.KIND_HEALED,
+        None,
+        source=_SOURCE,
+        poll_interval_s=_CADENCE_S,
+    )
+
     # --- ANTI-VACUITY: the absences pass on nothing unless rows exist ------- #
     assert len(sink.rows) == 2, (
         f"the transition wrote {len(sink.rows)} rows; the scan below would "
         f"otherwise pass over an empty table"
     )
     assert all(sink.metadata(r) for r in sink.rows), "a row carries no fields"
+    assert "last_confirmed_at" in sink.metadata(sink.rows[1]), (
+        "harness: the confirm above did not land — the scan below would "
+        "otherwise pass over a row it never touched"
+    )
 
     _assert_no_secret_reached_any_row(sink)
 
@@ -1772,9 +1807,12 @@ async def test_no_credential_host_or_port_reaches_ANY_field_of_ANY_row(
             "the composed verdict reached a row; its tail is terminal-supplied "
             "text (T-164.6.4-08)"
         )
-        assert set(meta) <= _OPEN_ROW_METADATA_KEYS | _CLOSE_METADATA_KEYS | {
-            "completed_at_is_notice_time"
-        }, f"an undeclared field reached a row: {set(meta)}"
+        assert set(meta) <= (
+            _OPEN_ROW_METADATA_KEYS
+            | _CLOSE_METADATA_KEYS
+            | _CONFIRM_METADATA_KEYS
+            | {"completed_at_is_notice_time"}
+        ), f"an undeclared field reached a row: {set(meta)}"
     assert (
         sink.metadata(sink.rows[0])["opening_kind"]
         == mt5_session_episodes.KIND_NO_AUTHORIZED_ACCOUNT
