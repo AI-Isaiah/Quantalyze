@@ -592,6 +592,52 @@ async def test_the_ONE_OPEN_ROW_invariant_is_restored_by_the_WRITE_not_a_lucky_r
     )
 
 
+async def test_INFO_an_open_INSERT_that_returns_no_rows_is_LOGGED_not_silent(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ Info (round 2). `_open_row` used to discard the INSERT's result
+    entirely — `await db_execute(_insert)` with nothing read back. An INSERT
+    that landed zero rows (a transport edge case the shipped fake cannot
+    model but a future PostgREST behaviour might) would leave the caller's
+    "there is now an open run" assumption resting on a write that never
+    happened, with NOTHING in the log to say so. `_open_row` never raises —
+    that contract is unchanged — but the gap must be visible.
+    """
+
+    class _NoRowsOnInsert(_OrderedCronRuns):
+        def table(self, name: str) -> Any:
+            query = super().table(name)
+            original = query.execute
+
+            def _execute() -> Any:
+                response = original()
+                if query._op == "insert":
+                    response.data = []
+                return response
+
+            query.execute = _execute  # type: ignore[method-assign]
+            return query
+
+    fake = _NoRowsOnInsert()
+    _install_sink(monkeypatch, fake)
+    mt5_session_episodes._reset_session_episode_state_for_tests()
+
+    with caplog.at_level(logging.ERROR, logger=_LOGGER_NAME):
+        await mt5_session_episodes._open_row(
+            mt5_session_episodes.classify_reading(*_DARK_READING),
+            source=_SOURCE,
+            poll_interval_s=_CADENCE_S,
+            since_previous_reading_s=None,
+            first_reading_after_boot=True,
+            started_at_is_lower_bound=True,
+        )
+
+    assert any(
+        "the open INSERT returned no rows" in r.getMessage()
+        for r in _records(caplog)
+    ), [r.getMessage() for r in _records(caplog)]
+
+
 async def test_the_CRASH_case_a_closed_row_with_NO_open_row_opens_exactly_one(
     sink: _OrderedCronRuns,
 ) -> None:

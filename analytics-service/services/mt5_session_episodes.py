@@ -349,6 +349,20 @@ def _count_blind_reading() -> int:
     is one: the shared never-raises predicate requires
     `record_mt5_session_reading`'s body to be EXACTLY the `try`, and a `global`
     declaration beside it is a second top-level statement.
+
+    ⚠️ Info (round 2) — `_CONSECUTIVE_NOT_MEASURED_READINGS` IS SHARED WITH
+    THE BOOT HEAL, which calls this SAME function with `poll_interval_s=None`
+    on its own not_measured readings. It therefore CAN increment (this
+    function does not know or care who is calling) but can never ESCALATE —
+    `blind_run_escalation_threshold(None)` is always `None`, so `blind` is
+    always `False` for that caller (see its own docstring). The consequence:
+    if the boot heal records a blind reading before the monitor's first tick,
+    the monitor's own blind run does not start at 0 — it inherits whatever
+    the boot heal left. This is harmless for the escalation itself (a `None`
+    threshold never fires, and the monitor recomputes its OWN threshold from
+    its OWN cadence) but means "the monitor has been blind for N ticks" can
+    slightly over-count the monitor's own contribution on the very first
+    reading after boot.
     """
     global _CONSECUTIVE_NOT_MEASURED_READINGS
     _CONSECUTIVE_NOT_MEASURED_READINGS += 1
@@ -712,7 +726,20 @@ async def _open_row(reading: SessionReading, *, source: str,
     def _insert() -> Any:
         return supabase.table("cron_runs").insert(payload).execute()
 
-    await db_execute(_insert)
+    response = await db_execute(_insert)
+    # ⭐ Info (round 2) — the one write the whole dataset rests on, checked
+    # rather than discarded. An INSERT that silently landed zero rows (a
+    # transport shape this fake models but a future PostgREST edge case
+    # might not) would leave the in-process "there is now an open run"
+    # assumption believing a write that never happened — never raised,
+    # because this function's whole contract is never-raises, but logged so
+    # the gap is at least visible rather than silent.
+    if not rows(response):
+        logger.error(
+            "mt5 session episode: the open INSERT returned no rows — the "
+            "write may not have landed; the next reading will re-read the "
+            "open row from the database and open another if none is found",
+        )
 
 
 async def record_mt5_session_reading(
