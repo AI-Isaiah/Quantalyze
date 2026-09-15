@@ -3196,6 +3196,11 @@ async def test_TRACER_a_healthy_tick_CONFIRMS_the_open_row(
     REAL heal. Before this fix a healthy tick left the open row's metadata
     byte-unchanged forever — a dead loop and a live healthy one were
     identical in the durable record. Now it stamps `last_confirmed_at`.
+
+    ⛔ B3 (round 3) — NO `confirmations` COUNTER. It was a read-modify-write
+    of a stale snapshot that undercounts under the two-writer overlap this
+    module is designed for; `last_confirmed_at` alone is the liveness
+    answer.
     """
     seeded = _seed_open_row(sink, mt5_session_episodes.STATE_AUTHORIZED)
     _set_full_env(monkeypatch)
@@ -3208,7 +3213,9 @@ async def test_TRACER_a_healthy_tick_CONFIRMS_the_open_row(
     )
     meta = sink.metadata(seeded)
     assert meta["last_confirmed_at"]
-    assert meta["confirmations"] == 1
+    assert "confirmations" not in meta, (
+        "a `confirmations` counter reached a row — B3 (round 3) deleted it"
+    )
     assert len(sink.open_rows()) == 1
 
 

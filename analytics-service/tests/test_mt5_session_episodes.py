@@ -304,7 +304,10 @@ async def test_a_tick_that_observes_the_ALREADY_RECORDED_state_INSERTS_NOTHING(
     ],
 )
 async def test_a_tick_that_observes_the_ALREADY_RECORDED_state_CONFIRMS_the_open_row(
-    sink: _OrderedCronRuns, state: str, reading: tuple[str, int | None]
+    monkeypatch: pytest.MonkeyPatch,
+    sink: _OrderedCronRuns,
+    state: str,
+    reading: tuple[str, int | None],
 ) -> None:
     """⛔ WR-09 (round 2, HIGH-2 STEADY STATE). Before this fix a healthy
     session wrote ZERO rows FOREVER, so a dead loop (a process that stopped
@@ -312,9 +315,25 @@ async def test_a_tick_that_observes_the_ALREADY_RECORDED_state_CONFIRMS_the_open
     and a live healthy one were IDENTICAL in the durable record —
     `[MT5-VERDICT-SINK-01]`, this module's OWN stated reason for existing,
     left unapplied to the module itself. Each matching-state tick must now
-    UPDATE the open row's `last_confirmed_at`/`confirmations` — the per-tick
-    evidence that something actually looked — while inserting NO new row.
+    UPDATE the open row's `last_confirmed_at` — the per-tick evidence that
+    something actually looked — while inserting NO new row.
+
+    ⛔ B3 (round 3) — NO `confirmations` COUNTER. It was a read-modify-write
+    of a stale snapshot and undercounted under the very two-writer overlap
+    the module is designed for; `last_confirmed_at` alone is the liveness
+    answer, so the SECOND leg below asserts the TIMESTAMP ADVANCES rather
+    than a count incrementing.
     """
+    # ⛔ A DETERMINISTIC CLOCK, so the "the timestamp ADVANCES" leg below
+    # cannot flake on two `datetime.now()` calls landing in the same
+    # microsecond under a fast, real-time-free async test.
+    _timestamps = iter(
+        ["2026-09-15T01:00:00+00:00", "2026-09-15T01:00:01+00:00"]
+    )
+    monkeypatch.setattr(
+        mt5_session_episodes, "_now_iso", lambda: next(_timestamps)
+    )
+
     seeded = _seed_open_row(sink, state)
     assert "last_confirmed_at" not in sink.metadata(seeded)
 
@@ -328,7 +347,11 @@ async def test_a_tick_that_observes_the_ALREADY_RECORDED_state_CONFIRMS_the_open
     meta = sink.metadata(seeded)
     assert meta["last_confirmed_at"], "the confirmation timestamp did not land"
     assert meta["last_confirmed_by"] == _SOURCE
-    assert meta["confirmations"] == 1
+    assert "confirmations" not in meta, (
+        "a `confirmations` counter reached a row — B3 (round 3) deleted it: "
+        "it was a read-modify-write of a stale snapshot that undercounts "
+        "under the two-writer overlap this module exists to tolerate"
+    )
     assert meta["state"] == state, (
         "a confirm must preserve the row's own state — it is an UPDATE of "
         "metadata, never a state change"
@@ -337,9 +360,15 @@ async def test_a_tick_that_observes_the_ALREADY_RECORDED_state_CONFIRMS_the_open
     assert seeded["completed_at"] is None
     assert len(sink.open_rows()) == 1
 
-    # a SECOND confirming tick increments rather than resets the counter.
+    # a SECOND confirming tick ADVANCES the timestamp rather than leaving it
+    # byte-identical — the liveness evidence a dead loop cannot fake.
+    first_confirmed_at = meta["last_confirmed_at"]
     await _observe(reading)
-    assert sink.metadata(seeded)["confirmations"] == 2
+    assert sink.metadata(seeded)["last_confirmed_at"] != first_confirmed_at, (
+        "a second confirming tick left `last_confirmed_at` unchanged — a "
+        "dead loop and a live one would be identical in the durable record "
+        "again"
+    )
 
 
 @pytest.mark.parametrize(

@@ -643,9 +643,9 @@ async def _close_row(
 
 
 async def _confirm_row(row: dict[str, Any], *, source: str) -> None:
-    """UPDATE an open row's ``last_confirmed_at``/``confirmations`` — the
-    per-tick evidence for a reading that MATCHED the open state, in place of
-    writing nothing at all.
+    """UPDATE an open row's ``last_confirmed_at`` — the per-tick evidence for
+    a reading that MATCHED the open state, in place of writing nothing at
+    all.
 
     ⛔ WR-09 (round 2, HIGH-2 STEADY STATE) — THIS DOES NOT ADD A ROW. The
     sink stays per-TRANSITION for INSERTs, exactly as before: at a ten-minute
@@ -672,7 +672,15 @@ async def _confirm_row(row: dict[str, Any], *, source: str) -> None:
     metadata: dict[str, Any] = dict(previous) if isinstance(previous, dict) else {}
     metadata["last_confirmed_at"] = _now_iso()
     metadata["last_confirmed_by"] = source
-    metadata["confirmations"] = int(metadata.get("confirmations") or 0) + 1
+    # ⛔ B3 (round 3) — NO ``confirmations`` COUNTER. It was a read-modify-write
+    # of the whole ``metadata`` snapshot the caller read at ``_read_open_rows()``
+    # time, so two overlapping writers (the Railway deploy overlap this module
+    # is designed for) both read N and both write N+1 — undercounting in
+    # exactly the scenario it would matter. ``last_confirmed_at`` already
+    # answers the liveness question this phase needs; a count on top of it is a
+    # race with no reader (grepped: nothing in ``services/``, ``src/`` or
+    # ``supabase/`` reads it). Deleting it removes the race instead of making
+    # it atomic.
 
     def _update() -> Any:
         return (
@@ -808,8 +816,8 @@ async def record_mt5_session_reading(
         It did not measure that the session recovered, so it may never close an
         episode.
       * an open row exists and its ``metadata.state`` EQUALS the observed state ->
-        CONFIRM it (``_confirm_row`` — an UPDATE of ``last_confirmed_at``/
-        ``confirmations``, no new row) rather than write nothing (WR-09,
+        CONFIRM it (``_confirm_row`` — an UPDATE of ``last_confirmed_at``, no
+        new row) rather than write nothing (WR-09,
         round 2). ⭐ This is still what makes the sink per-TRANSITION FOR
         INSERTS rather than per-tick: at a ten-minute cadence a per-tick
         INSERT would be ~144 rows/day forever, into a shared and gated
