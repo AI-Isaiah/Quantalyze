@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import logging
 import subprocess
 import sys
 import threading
@@ -44,12 +45,41 @@ from pathlib import Path
 import pytest
 
 from services import job_worker as jw
-from services import mt5_client, mt5_concurrency
+from services import (
+    mt5_client,
+    mt5_concurrency,
+    mt5_relogin,
+    mt5_session_episodes,
+    mt5_session_monitor,
+)
 
 # ⚠️ Imported from the module that OWNS them (`services.mt5_client`), never via a
 # re-export. The 151 review-E2 trap: a name reached through a re-export is a
 # DIFFERENT binding, so patching or asserting on it is a silent no-op.
-from services.mt5_client import _mt5_epoch_for, bump_mt5_terminal_epoch
+from services.mt5_client import (
+    _mt5_epoch_for,
+    bump_mt5_terminal_epoch,
+    mt5_terminal_key,
+)
+
+# ⛔ IMPORTED, NEVER COPIED (Phase 164.6.4 plan 05). These are the SHIPPED heal
+# harness: the in-memory rpyc wire (`_install_client`), the lease WRAPPER that
+# still runs the real lease (`_install_lease_counter`), the full env
+# (`_set_full_env`), the `mt5_relogin` log filter (`_records`) and the PostgREST-
+# shaped `cron_runs` double (`_FakeCronRuns`). A second copy here would drift
+# from the one the heal's own suite exercises, and the criterion-4 test would
+# then be measuring a harness rather than the shipped path. `tests.` imports are
+# this suite's established idiom (a dozen modules already do it).
+from tests.test_mt5_relogin import (  # noqa: PLC2701 — deliberate, see above
+    _FAKE_HOST,
+    _FAKE_PORT,
+    _LOGGER_NAME as _RELOGIN_LOGGER_NAME,
+    _FakeCronRuns,
+    _install_client,
+    _install_lease_counter,
+    _records,
+    _set_full_env,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1223,3 +1253,347 @@ def test_the_preflight_touch_scanner_fires_on_a_spliced_session_verb() -> None:
     # a `login` removed from Mt5Client would drop out of `verbs` and this
     # calibration would stop reporting it, which is the honest coupling.
     assert "login" in verbs
+
+
+# ---------------------------------------------------------------------------
+# 164.6.4 / CRITERION 4 — THE PERIODIC TOUCH MUST NOT STEAL THE ONE SHARED
+# TERMINAL FROM LIVE JOB PROCESSING, AND THE TEST FAILS IF IT CAN.
+#
+# ⭐ THE NAIVE READING PICKS THE WRONG HAZARD, and the phase's own research
+# disposed of it: D-08's lease hazard does NOT transfer (the terminal epoch binds
+# on FIRST TOUCH rather than at construction, and the construction fence is a
+# ContextVar preflight never carries). The REAL cost is the ASYMMETRY, which
+# `mt5_relogin`'s own IN-04 comment states: the heal refuses to queue behind real
+# work by taking a BOUNDED acquire, but real work DOES queue behind the heal —
+# the three job sites acquire with `wait_s=None`, i.e. UNBOUNDED. So a tick can
+# make a job wait for up to the tick's budget, and Phase 164.6.4 turns that from
+# a once-per-boot event into a permanent CADENCE.
+#
+# ⛔ THE BUSY-SKIP DOCTRINE IS NOT INHERITED WITH THE BEHAVIOUR. The boot heal
+# reasons that "a busy terminal is a terminal somebody is already successfully
+# using, which is itself evidence that the session is fine". That is cheap and
+# defensible once per boot and UNSOUND for a loop: it is a standing claim about
+# session state the tick DID NOT MEASURE, and a terminal held by a FAILING job is
+# exactly where it is most wrong. The BEHAVIOUR is kept — skip, never queue — and
+# the CLAIM is refused: the skip is recorded as `not_measured` (the recorder's own
+# arm, gated in `tests/test_mt5_relogin.py`). Nothing below treats a skip as
+# evidence about the session.
+#
+# ⚠️ EVERY ORACLE HERE IS ORDERING, A ROUND-TRIP COUNT OR AN EPOCH DELTA — never
+# "the tick returned". The tick returns `None` on every path BY CONSTRUCTION
+# (it is structurally never-raising), so "it did not blow up" is green under
+# precisely the defect this section exists to catch.
+# ---------------------------------------------------------------------------
+
+#: The two actors in the interleave log. A job HOLDS the terminal lease across a
+#: measurable window; a monitor tick tries to use the terminal inside it.
+_JOB_TAG = "job"
+_TICK_TAG = "tick"
+
+#: The tick's ACQUISITION bound, driven through the SHIPPED env knob rather than a
+#: `setattr` on the constant — CR-02 moved that read per-call, so a `setattr`
+#: would be a silent no-op leaving the 2.0 s default in force and the test would
+#: pass or fail for harness reasons. `0.1` is the knob's own FLOOR
+#: (`_MT5_RELOGIN_LEASE_WAIT_FLOOR_S`), so the real parse and the real range check
+#: both still run.
+_TICK_LEASE_WAIT_S = "0.1"
+
+#: How long the job keeps the terminal when nothing interrupts it. FIVE TIMES the
+#: tick's bound, so "the tick gave up while the job still held the terminal" is
+#: established by construction rather than by a timing race. ⚠️ It is a CEILING,
+#: not a sleep: in the neutered arm the job leaves as soon as the tick's touch is
+#: observed, so the control costs nothing.
+_JOB_HOLD_CEILING_S = 0.5
+
+#: The `services.mt5_client` logger — where the D-36 refusal WARNING lands. It is
+#: the PARENT of `mt5_relogin`'s logger, so raising both to INFO is two calls and
+#: the second must be the one whose level the capturing handler keeps.
+_CLIENT_LOGGER_NAME = "quantalyze.analytics"
+
+
+@pytest.fixture
+def _episode_sink(monkeypatch: pytest.MonkeyPatch):
+    """The shipped `cron_runs` double, wired at the TRANSPORT seam.
+
+    The heal calls the REAL `record_mt5_session_reading` / `record_mt5_heal_outcome`
+    on every path this section drives, and those reach Supabase. Replacing
+    `get_supabase` is the same seam `_install_client` replaces for the rpyc wire —
+    everything between the tick and the wire stays real. ⛔ The recorder is NOT
+    stubbed out: a harness that removed it would stop exercising the code the
+    cadence actually runs.
+    """
+    fake = _FakeCronRuns()
+    monkeypatch.setattr(mt5_session_episodes, "get_supabase", lambda: fake)
+    mt5_session_episodes._reset_session_episode_state_for_tests()
+    yield fake
+    mt5_session_episodes._reset_session_episode_state_for_tests()
+
+
+async def _run_job_and_one_monitor_tick(
+    monkeypatch: pytest.MonkeyPatch, *, neuter_lock: bool
+):
+    """Drive ONE monitor tick concurrently with a job that HOLDS the terminal lease.
+
+    Returns ``(order, fake, constructions, acquisitions)`` where ``order`` is the
+    shared interleave log of ``(tag, "enter"/"exit"/"touch")``.
+
+    The shape is the shipped `_run_two_concurrent_mt5` harness's: an ordered
+    transport appending into a SHARED list, an index assertion, and an embedded
+    negative control. The job parks (BOUNDED) until the tick's first touch is
+    observed — under the real lock the tick can never touch, so the job times out
+    at its ceiling and its terminal window stays contiguous; with the lock neutered
+    the touch lands and the job leaves immediately. ⛔ A broken lock REDS here, it
+    never hangs CI.
+    """
+    _set_full_env(monkeypatch)
+    monkeypatch.setenv("MT5_RELOGIN_LEASE_WAIT_S", _TICK_LEASE_WAIT_S)
+
+    # The terminal answers the credential-free detector cleanly, so the ONLY reason
+    # the tick can fail to touch it is the lease. ⛔ Deliberately the simplest
+    # scenario available: a tick that failed for a SECOND reason would make an
+    # empty round-trip list ambiguous.
+    fake, constructions = _install_client(monkeypatch, {"initialize": True})
+    acquisitions = _install_lease_counter(monkeypatch)
+
+    order: list[tuple[str, str]] = []
+    loop = asyncio.get_running_loop()
+    job_holds = asyncio.Event()
+    tick_touched = asyncio.Event()
+
+    real_initialize = fake.initialize
+
+    def _recording_initialize(**kwargs):
+        # Appended from the TICK's worker thread. `list.append` is atomic, and the
+        # job's own `exit` is ordered AFTER this append by the event below — so the
+        # ordering under test rests on a happens-before, not on a sleep.
+        order.append((_TICK_TAG, "touch"))
+        loop.call_soon_threadsafe(tick_touched.set)
+        return real_initialize(**kwargs)
+
+    # WRAPPED, never replaced: `real_initialize` still records the round-trip into
+    # the double's own `round_trips` list, which is the separate oracle below.
+    fake.initialize = _recording_initialize
+
+    if neuter_lock:
+        # ⚠️ THE REGISTRY'S OWN MODULE, and nothing else. `mt5_terminal_lease`
+        # resolves `_mt5_terminal_lock_for` from `services.mt5_concurrency`'s OWN
+        # globals, so a patch aimed at a re-export (`services.job_worker`'s, which
+        # bound before the lease refactor) is a DOCUMENTED SILENT NO-OP — the
+        # shipped `_run_two_concurrent_mt5` carries that observation. A FRESH Lock
+        # per call serializes NOTHING, which is the whole point of the control.
+        monkeypatch.setattr(
+            mt5_concurrency, "_mt5_terminal_lock_for", lambda _k: asyncio.Lock()
+        )
+        # ⭐ ONE CONTROL, ONE VARIABLE. This arm isolates the LOCK; the
+        # abandoned-session FENCE is a DIFFERENT variable and must be held still or
+        # the control stops measuring what it names. With the lock neutered the two
+        # flows genuinely interleave against a LIVE epoch registry, and the job's
+        # lease release legitimately fences the tick's in-flight client — an
+        # `Mt5SessionAbandoned` that would be swallowed by the tick's own guard and
+        # would silently change WHY the tick made no further round-trip. The shipped
+        # harness records 2 failures in 10 consecutive local runs before it pinned
+        # this, and ⛔ it explicitly forbids "fixing" it by catching the abandonment:
+        # a harness that swallows a refusal stays green when a future change makes
+        # the fence fire where it should not.
+        #
+        # ⚠️ The target is `services.mt5_concurrency`, NOT the `services.mt5_client`
+        # that DEFINES the function — the lease binds the name into mt5_concurrency's
+        # globals at import, so that module is the READER (the 151 review-E2 rule).
+        monkeypatch.setattr(mt5_concurrency, "bump_mt5_terminal_epoch", lambda _k: 0)
+
+    # ⛔ THROUGH `mt5_terminal_key`, never a second hand-spelled `f"{host}:{port}"`:
+    # the epoch registry and the lock registry must be keyed byte-identically or
+    # the D-36 fence guards a different terminal than the lock serializes.
+    key = mt5_terminal_key(_FAKE_HOST, int(_FAKE_PORT))
+
+    async def _job() -> None:
+        # The JOB SITES' acquisition form: `wait_s=None`, i.e. UNBOUNDED. That
+        # asymmetry is the hazard — it is what makes a tick able to cost a job
+        # real time — so the stand-in must not quietly bound itself.
+        async with mt5_concurrency.mt5_terminal_lease(key):
+            order.append((_JOB_TAG, "enter"))
+            job_holds.set()
+            try:
+                await asyncio.wait_for(
+                    tick_touched.wait(), timeout=_JOB_HOLD_CEILING_S
+                )
+            except asyncio.TimeoutError:
+                pass
+            order.append((_JOB_TAG, "exit"))
+
+    job = asyncio.create_task(_job())
+    # The job holds the terminal BEFORE the tick starts — established by an event,
+    # never by a sleep, so the ordering under test cannot be timing-lucky.
+    await asyncio.wait_for(job_holds.wait(), timeout=5.0)
+    await mt5_session_monitor.run_mt5_session_monitor_tick()
+    await asyncio.wait_for(job, timeout=5.0)
+    return order, fake, constructions, acquisitions
+
+
+def _tick_touch_indices(order: list[tuple[str, str]]) -> tuple[int, int, list[int]]:
+    """``(job enter index, job exit index, tick touches strictly between them)``."""
+    assert (_JOB_TAG, "enter") in order and (_JOB_TAG, "exit") in order, (
+        f"harness: the job never bracketed its terminal window: {order!r}"
+    )
+    enter_i = order.index((_JOB_TAG, "enter"))
+    exit_i = order.index((_JOB_TAG, "exit"))
+    inside = [
+        i
+        for i, (tag, _event) in enumerate(order)
+        if tag == _TICK_TAG and enter_i < i < exit_i
+    ]
+    return enter_i, exit_i, inside
+
+
+async def test_CRITERION_4_a_monitor_tick_cannot_land_inside_a_live_jobs_terminal_window(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _episode_sink,
+) -> None:
+    """⭐ CRITERION 4, WITH TEETH. A monitor tick must not steal the ONE shared
+    terminal from live job processing, and this fails if it can.
+
+    THREE ORACLES, because they are three different failures:
+
+      1. ORDERING — no touch attributable to the tick falls between the job's
+         `enter` and `exit`.
+      2. THE EMPTY ROUND-TRIP LIST — ⛔ asserted EMPTY, never merely short. A tick
+         that QUEUED and then ran AFTER the job satisfies an ordering-only
+         assertion perfectly while having made the job wait, which is the exact
+         cost IN-04 names.
+      3. THE SKIP ITSELF — the bounded-acquire INFO line, naming the caller. A
+         tick that made no round-trip because the CLIENT failed to build would
+         satisfy (2) for a reason that has nothing to do with the lease.
+
+    THE TEETH ARE EMBEDDED IN THIS SAME TEST, deliberately: a positive assertion
+    with no failing control is indistinguishable from one that cannot fail. With
+    the lock neutered the tick's touch DOES land inside the job's window.
+    """
+    caplog.set_level(logging.INFO, logger=_CLIENT_LOGGER_NAME)
+    caplog.set_level(logging.INFO, logger=_RELOGIN_LOGGER_NAME)
+
+    order, fake, constructions, acquisitions = await _run_job_and_one_monitor_tick(
+        monkeypatch, neuter_lock=False
+    )
+
+    # ---- 1. ORDERING -------------------------------------------------------
+    _enter_i, _exit_i, inside = _tick_touch_indices(order)
+    assert not inside, (
+        f"a monitor tick touched the terminal INSIDE a live job's terminal "
+        f"window: {order!r}. The tick must take a BOUNDED acquire and SKIP — it "
+        f"can never pre-empt or interleave with real work on the ONE shared "
+        f"terminal (criterion 4)."
+    )
+
+    # ---- 2. AND IT MADE NO ROUND-TRIP AT ALL --------------------------------
+    assert fake.round_trips == [], (
+        f"the tick reached the terminal: {fake.round_trips!r}. ⛔ EMPTY, not "
+        f"short: a tick that QUEUED behind the job and ran afterwards would pass "
+        f"the ordering assertion above while having made the job wait for up to "
+        f"the tick's whole budget — and the three job sites acquire UNBOUNDED, so "
+        f"they cannot defend themselves (IN-04)."
+    )
+    assert constructions == [], (
+        f"the tick built an Mt5Client while the job held the terminal: "
+        f"{constructions!r}. The lease is taken BEFORE any client exists "
+        f"precisely so a skip opens no transport at all."
+    )
+
+    # ---- 3. AND IT SKIPPED, SAYING SO, AT INFO ------------------------------
+    skips = [
+        r
+        for r in _records(caplog)
+        if "skipped — the terminal was already in use" in r.getMessage()
+    ]
+    assert len(skips) == 1, (
+        f"the bounded-acquire skip was not reported exactly once: "
+        f"{[r.getMessage() for r in _records(caplog)]}"
+    )
+    assert skips[0].levelno == logging.INFO, (
+        f"the skip was logged at {skips[0].levelname}. A busy terminal is the "
+        f"DESIGNED outcome of a bounded acquire, not a fault — and an operator "
+        f"taught that a healthy cadence warns is an operator who stops reading "
+        f"the channel this milestone exists to fill."
+    )
+    assert "mt5 session monitor" in skips[0].getMessage(), (
+        f"the skip does not name the CALLER that made it: "
+        f"{skips[0].getMessage()!r}. At a cadence the caller is the whole "
+        f"difference between one boot-time line and 144 a day."
+    )
+
+    # ---- THE BOUND ITSELF, ASSERTED RATHER THAN ASSUMED ---------------------
+    # ⚠️ Read BEFORE the control runs: `_install_lease_counter` WRAPS the lease, so
+    # a second installation in the same test nests and both lists would grow.
+    assert len(acquisitions) == 1, (
+        f"the tick took {len(acquisitions)} lease acquisitions, not one: "
+        f"{acquisitions!r}. ONE acquisition per function is the shape the lazy "
+        f"epoch bind assumes (D-36 AMENDED); a second would be refused."
+    )
+    acquired_key, wait_s = acquisitions[0]
+    assert acquired_key == mt5_terminal_key(_FAKE_HOST, int(_FAKE_PORT)), (
+        f"the tick leased {acquired_key!r}. ⛔ The key must come from "
+        f"`mt5_terminal_key`, never a second hand-spelled host-and-port string: "
+        f"the epoch registry and the lock registry must be keyed byte-identically "
+        f"or the D-36 fence guards a different terminal than the lock serializes."
+    )
+    assert wait_s is not None, (
+        "the tick acquired the terminal with `wait_s=None` — the UNBOUNDED form "
+        "the three BATCH job sites use. On a cadence that is the wedge: the tick "
+        "would queue ahead of real work forever rather than skipping."
+    )
+    assert isinstance(wait_s, float) and 0.0 < wait_s < float("inf"), (
+        f"the acquisition bound is not a finite positive float: {wait_s!r}"
+    )
+    assert wait_s == mt5_relogin._relogin_lease_wait_s(), (
+        f"the tick's bound ({wait_s}) is not the shipped knob's value — it was "
+        f"hardcoded somewhere instead of read per call, so a retune would not "
+        f"reach it."
+    )
+
+    # ---- THE NEGATIVE CONTROL, IN THE SAME TEST ----------------------------
+    # ⚠️ SELF-DETECTING MIS-AIM. If the patch above were re-pointed at a re-export,
+    # the REAL registry would serialize the two flows and this arm would red with
+    # the fully-contiguous order printed — which is exactly what 153.5-03 OBSERVED
+    # before it re-pointed the shipped harness. Green here therefore means the
+    # patch genuinely bound. The structural half of the same claim is asserted
+    # directly below.
+    lease_impl = getattr(mt5_concurrency.mt5_terminal_lease, "__wrapped__", None)
+    assert lease_impl is not None and lease_impl.__globals__ is vars(
+        mt5_concurrency
+    ), (
+        "`mt5_terminal_lease` no longer reads its names out of "
+        "`services.mt5_concurrency`'s own globals, so the control below is "
+        "patching a module the lease does not read — the silent-no-op class."
+    )
+
+    (
+        neutered_order,
+        neutered_fake,
+        neutered_constructions,
+        neutered_acquisitions,
+    ) = await _run_job_and_one_monitor_tick(monkeypatch, neuter_lock=True)
+
+    _n_enter, _n_exit, n_inside = _tick_touch_indices(neutered_order)
+    assert n_inside, (
+        f"WITH THE LOCK NEUTERED the tick's touch MUST land inside the job's "
+        f"terminal window — otherwise the positive assertion above is vacuous. "
+        f"Observed order: {neutered_order!r}. If that log is fully contiguous "
+        f"(no `tick` entry at all) the patch is MIS-AIMED: "
+        f"`_mt5_terminal_lock_for` must be patched on "
+        f"`services.mt5_concurrency`, the module `mt5_terminal_lease` actually "
+        f"reads it from — a patch aimed at `services.job_worker`'s re-export is a "
+        f"documented SILENT NO-OP since the lease refactor."
+    )
+    assert neutered_fake.round_trips == ["initialize"], (
+        f"the neutered arm did not reach the terminal: "
+        f"{neutered_fake.round_trips!r}. The control must show the tick CAN make "
+        f"the round-trip the lock is what prevents."
+    )
+    assert neutered_constructions, (
+        "the neutered arm built no client — the control is not exercising the "
+        "path the positive assertion denies."
+    )
+    assert len(neutered_acquisitions) == 1, (
+        f"the neutered arm took {len(neutered_acquisitions)} acquisitions: "
+        f"{neutered_acquisitions!r}"
+    )
