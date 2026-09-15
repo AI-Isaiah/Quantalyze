@@ -1970,12 +1970,27 @@ def _heal_guard_defects(
     if guard.orelse:
         defects.append("the guard grew an `else:` — same escape route")
 
-    dumped = ast.dump(ast.Module(body=guard.body, type_ignores=[]))
+    # ⛔ CALIBRATION HOLE CLOSED 2026-09-15 (164.6.4 wave 3, neuter C5 read GREEN).
+    # This was `required not in ast.dump(...)` — a raw SUBSTRING test over the
+    # serialised tree. `ast.dump` serialises string literals too, so
+    # `globals()["run_mt5_session_monitor_tick"]()` satisfied the check while the
+    # real call was gone: the name survived as a `Constant`, not as a reference.
+    # The gate read green over a mutant that had removed the very thing it exists
+    # to prove. Resolve an ACTUAL reference instead — `Name` for a bare read,
+    # `Attribute` for a qualified one — so a literal spelling of the name cannot
+    # stand in for using it.
+    referenced: set[str] = set()
+    for node in ast.walk(ast.Module(body=guard.body, type_ignores=[])):
+        if isinstance(node, ast.Name):
+            referenced.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            referenced.add(node.attr)
     for required in required_names:
-        if required not in dumped:
+        if required not in referenced:
             defects.append(
-                f"`{required}` is no longer inside the guard — the guard must "
-                f"cover the body from that read onward"
+                f"`{required}` is no longer REFERENCED inside the guard — the guard "
+                f"must cover the body from that read onward (a bare string spelling "
+                f"of the name does not count)"
             )
     return defects
 
@@ -3313,6 +3328,41 @@ def test_the_recorder_carries_the_SAME_never_raises_shape_as_the_heal() -> None:
     ):
         source = textwrap.dedent(inspect.getsource(symbol))
         assert _heal_guard_defects(source, required_names=()) == [], symbol.__name__
+
+
+def test_required_names_is_NOT_satisfied_by_the_name_as_a_STRING_LITERAL() -> None:
+    """⛔ THE CALIBRATION FOR THE HOLE C5 FOUND — and the reason this predicate is
+    an AST walk rather than a substring test.
+
+    MEASURED 2026-09-15 (164.6.4 wave 3): with `required_names` implemented as
+    `required not in ast.dump(body)`, the neuter that replaced a direct call with
+    `globals()["<name>"]()` read **GREEN**. `ast.dump` serialises a `Constant`'s
+    value, so the name was still "present" in the dump while nothing referenced it
+    — the gate certified the exact edit it exists to forbid.
+
+    Deletion alone cannot separate a real check from that fake one: deletion bites
+    on both. Only a mutant that KEEPS the spelling and DROPS the reference can, so
+    that is what this drives.
+    """
+    literal_only = textwrap.dedent(
+        '''
+        async def f():
+            try:
+                globals()["mt5_enabled_server"]()
+            except Exception:
+                pass
+        '''
+    )
+    defects = _heal_guard_defects(literal_only, required_names=("mt5_enabled_server",))
+    assert any("no longer REFERENCED" in d for d in defects), (
+        "the name appears ONLY as a string literal and nothing reads it — the "
+        f"predicate must report it missing, got: {defects}"
+    )
+
+    # …and the control, on the REAL guard rather than a synthetic body: the shipped
+    # source references the same name for real and is CLEAN, so the assertion above
+    # is rejecting the missing REFERENCE and not merely rejecting everything.
+    assert _heal_guard_defects(_heal_source(), required_names=("mt5_enabled_server",)) == []
 
 
 def test_the_required_names_parameter_BITES() -> None:
