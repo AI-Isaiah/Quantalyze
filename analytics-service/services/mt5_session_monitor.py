@@ -74,7 +74,11 @@ from services.mt5_relogin import (
 # process, which is invisible after the first tick; recording the refusal as a
 # `not_measured` reading puts it on the SAME blind-run counter and escalation
 # that already covers `busy_skip`/`budget_abandoned`/the `code=0` sentinel.
-from services.mt5_session_episodes import KIND_DISABLED, record_mt5_session_reading
+from services.mt5_session_episodes import (
+    KIND_DISABLED,
+    KIND_TICK_DEADLINE,
+    record_mt5_session_reading,
+)
 
 logger = logging.getLogger("quantalyze.analytics.mt5_session_monitor")
 
@@ -217,6 +221,19 @@ async def run_mt5_session_monitor_tick() -> None:
                 "own %.1fs cadence — the terminal keeps whatever session it "
                 "already has and the next tick will try again.",
                 interval,
+            )
+            # ⛔ WR-07 (round 2) — COUNTED, exactly as `busy_skip`,
+            # `budget_abandoned` and the configuration refusals are. Without
+            # this, a degraded Supabase that cuts off every tick at this
+            # deadline freezes `_CONSECUTIVE_NOT_MEASURED_READINGS` at
+            # whatever it was, and `blind_run_escalation_threshold` can never
+            # fire — the ONE non-measuring exit WR-03 did not cover, on the
+            # exact fault class the escalation exists to surface.
+            await record_mt5_session_reading(
+                KIND_TICK_DEADLINE,
+                None,
+                source=HEAL_SOURCE_SESSION_MONITOR,
+                poll_interval_s=interval,
             )
     except Exception as exc:  # noqa: BLE001 — see the docstring; this is the control
         # ⛔ IN-06 — the handler body is itself guarded, because `logger`'s

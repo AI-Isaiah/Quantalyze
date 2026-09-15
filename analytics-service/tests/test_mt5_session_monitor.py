@@ -477,7 +477,7 @@ async def _wait_until(predicate, *, poll_s: float = 0.005) -> None:
 
 
 async def test_a_tick_that_outruns_its_own_cadence_is_BOUNDED_and_logged_distinctly(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, sink
 ) -> None:
     """⛔ WR-06. The heal's own `to_thread` budget bounds only its BLOCKING body —
     the bounded lease acquire and the recorder's Supabase round trips (up to six,
@@ -485,6 +485,14 @@ async def test_a_tick_that_outruns_its_own_cadence_is_BOUNDED_and_logged_distinc
     tick whose heal call outlives the configured cadence must be cut off AT the
     cadence rather than left to stretch it silently, and the log must name the
     budget bite distinctly from a generic fault.
+
+    ⛔ WR-07 (round 2) — THE DEADLINE BITE MUST BE COUNTED, not merely logged.
+    Before the fix this arm was the ONE non-measuring exit outside
+    `_CONSECUTIVE_NOT_MEASURED_READINGS`: a degraded Supabase cutting off every
+    tick at this deadline froze the counter at whatever it was and
+    `blind_run_escalation_threshold` could never fire. `sink` is installed so
+    this recording call stays OFFLINE — before this fix the arm made no DB
+    call at all, so nothing installed one.
     """
     cadence_s = 0.05
     monkeypatch.setattr(monitor, "_MT5_SESSION_POLL_INTERVAL_FLOOR_S", 0.001)
@@ -514,6 +522,11 @@ async def test_a_tick_that_outruns_its_own_cadence_is_BOUNDED_and_logged_distinc
         "line rather than its own distinct message — an operator could no longer "
         "tell a slow sink from a broken gateway"
     )
+    assert mt5_session_episodes._CONSECUTIVE_NOT_MEASURED_READINGS == 1, (
+        "the tick's own deadline bite did not extend the blind-run counter — it "
+        "is the one non-measuring exit that used to escape it entirely"
+    )
+    assert sink.rows == [], "a tick-deadline reading must write NOTHING durably"
 
 
 async def test_the_loop_exits_on_SHUTDOWN_well_inside_the_ten_second_gather(

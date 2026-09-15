@@ -148,6 +148,16 @@ KIND_STILL_UNAUTHORIZED: Final[str] = "still_unauthorized"
 KIND_BUSY_SKIP: Final[str] = "busy_skip"
 KIND_BUDGET_ABANDONED: Final[str] = "budget_abandoned"
 
+#: ⛔ WR-07 (round 2) — THE TICK's OWN OUTER DEADLINE, distinct from the heal's
+#: `KIND_BUDGET_ABANDONED`: that one names an abandoned thread inside the
+#: bounded heal budget; this one names a tick cut off ANYWHERE in its span —
+#: most often in the recorder's own Supabase round trips, which are unbounded
+#: at the tick level. COUNTED for the same reason every other non-measuring
+#: exit is: an uncounted exit is the one shape the blind-run escalation cannot
+#: see, and a degraded Supabase cutting off every tick is exactly the fault
+#: class that escalation exists to surface.
+KIND_TICK_DEADLINE: Final[str] = "tick_deadline"
+
 #: ⭐ WR-03 — CONFIGURATION REFUSALS ARE COUNTED, not merely logged-once. Four
 #: paths used to return before any reading was recorded — the monitor's own
 #: kill-switch arm, the heal's credentials-absent/invalid arms, and its
