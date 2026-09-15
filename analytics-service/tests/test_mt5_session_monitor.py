@@ -405,6 +405,52 @@ async def test_A_RAISING_TICK_NEVER_REACHES_THE_CRASH_HANDLER(
     )
 
 
+async def test_the_first_ITERATION_waits_BEFORE_ticking_so_the_boot_heal_owns_the_window(
+    monkeypatch: pytest.MonkeyPatch, shutdown: asyncio.Event
+) -> None:
+    """⛔ WR-02. `main.lifespan` starts `mt5_boot_heal` and `mt5_session_monitor`
+    back to back in the same gather, so a loop that ticks IMMEDIATELY drives two
+    tasks against the ONE shared terminal at the same instant on every deploy.
+    The loop must wait for (approximately) one full poll interval before its
+    first tick, so the boot heal owns the boot window uncontested.
+    """
+    cadence_s = 0.2
+    monkeypatch.setattr(monitor, "_MT5_SESSION_POLL_INTERVAL_FLOOR_S", 0.001)
+    monkeypatch.setenv(monitor.MT5_SESSION_POLL_INTERVAL_ENV, str(cadence_s))
+
+    started = asyncio.get_running_loop().time()
+    tick_offsets: list[float] = []
+
+    async def _record_tick() -> None:
+        tick_offsets.append(asyncio.get_running_loop().time() - started)
+
+    monkeypatch.setattr(monitor, "run_mt5_session_monitor_tick", _record_tick)
+
+    task = asyncio.create_task(monitor.mt5_session_monitor_loop())
+    await asyncio.sleep(cadence_s * 0.25)
+    assert tick_offsets == [], (
+        "the loop ticked before a quarter of its own cadence elapsed — it races "
+        "the boot heal for the ONE shared terminal on every deploy"
+    )
+
+    await asyncio.wait_for(
+        _wait_until(lambda: len(tick_offsets) >= 1), timeout=cadence_s * 10
+    )
+    assert tick_offsets[0] >= cadence_s * 0.5, (
+        f"the first tick fired {tick_offsets[0]:.3f}s after start against a "
+        f"{cadence_s}s cadence — it must wait for (approximately) one full "
+        "interval before ticking, so the boot heal owns the boot window"
+    )
+
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=_LIFESPAN_GATHER_BUDGET_S)
+
+
+async def _wait_until(predicate, *, poll_s: float = 0.005) -> None:
+    while not predicate():
+        await asyncio.sleep(poll_s)
+
+
 async def test_the_loop_exits_on_SHUTDOWN_well_inside_the_ten_second_gather(
     monkeypatch: pytest.MonkeyPatch, shutdown, sink
 ) -> None:

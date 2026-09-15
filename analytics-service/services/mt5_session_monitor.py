@@ -222,29 +222,18 @@ async def mt5_session_monitor_loop() -> None:
         from main_worker import SHUTDOWN
 
         while not SHUTDOWN.is_set():
-            # EVERY statement of the body sits inside a per-tick guard. The tick
-            # is already never-raising; this is the second half of the D-2
-            # property — outer CONTAINMENT and inner per-tick SURVIVAL — and it
-            # must hold even if the tick's own guard is one day narrowed.
-            try:
-                await run_mt5_session_monitor_tick()
-            except Exception as exc:  # noqa: BLE001 — the control; it CONTINUES
-                try:
-                    logger.error(
-                        "mt5 session monitor: a tick escaped its own guard — the "
-                        "LOOP CONTINUES (exc_class=%s)",
-                        type(exc).__name__,
-                    )
-                except BaseException:  # noqa: BLE001 — the control
-                    logger.error(
-                        "mt5 session monitor: a tick escaped its own guard and "
-                        "could not be described — the loop continues"
-                    )
-
-            # ⛔ THE HOUSE SLEEP IDIOM, never a bare `asyncio.sleep`: `lifespan`'s
-            # shutdown gather waits 10 s and then CANCELS, so a bare sleep on a
-            # ten-minute cadence would be force-cancelled on every deploy and the
-            # cancellation logged as a failure to exit cleanly.
+            # ⛔ WR-02 — WAIT FIRST, TICK SECOND. `main.lifespan` starts
+            # `mt5_boot_heal` and `mt5_session_monitor` back to back in the same
+            # gather, so ticking immediately here would drive TWO tasks against
+            # the ONE shared terminal at the same instant on every deploy — the
+            # loser's `busy_skip` is a blind reading, and if the winner finishes
+            # inside the lease-acquire window the loser probes the terminal a
+            # SECOND time for no information. Waiting first lets the boot heal
+            # own the boot window uncontested; the monitor owns everything after
+            # it. ⚠️ THE HOUSE SLEEP IDIOM, never a bare `asyncio.sleep`:
+            # `lifespan`'s shutdown gather waits 10 s and then CANCELS, so a bare
+            # sleep on a ten-minute cadence would be force-cancelled on every
+            # deploy and the cancellation logged as a failure to exit cleanly.
             #
             # ⚠️ HANDLER ORDER IS LOAD-BEARING. `asyncio.TimeoutError is
             # TimeoutError`, whose MRO runs through `OSError` and `Exception`, so
@@ -271,6 +260,25 @@ async def mt5_session_monitor_loop() -> None:
                     logger.error(
                         "mt5 session monitor: the interval wait failed and could "
                         "not be described — the loop continues"
+                    )
+
+            # EVERY statement of the body sits inside a per-tick guard. The tick
+            # is already never-raising; this is the second half of the D-2
+            # property — outer CONTAINMENT and inner per-tick SURVIVAL — and it
+            # must hold even if the tick's own guard is one day narrowed.
+            try:
+                await run_mt5_session_monitor_tick()
+            except Exception as exc:  # noqa: BLE001 — the control; it CONTINUES
+                try:
+                    logger.error(
+                        "mt5 session monitor: a tick escaped its own guard — the "
+                        "LOOP CONTINUES (exc_class=%s)",
+                        type(exc).__name__,
+                    )
+                except BaseException:  # noqa: BLE001 — the control
+                    logger.error(
+                        "mt5 session monitor: a tick escaped its own guard and "
+                        "could not be described — the loop continues"
                     )
 
         logger.info("mt5_session_monitor_loop exiting (shutdown)")
