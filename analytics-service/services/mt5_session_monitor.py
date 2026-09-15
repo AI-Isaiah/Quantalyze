@@ -166,10 +166,38 @@ async def run_mt5_session_monitor_tick() -> None:
                 _MT5_ENABLED_ENV_NAME,
             )
             return
-        await heal_mt5_terminal_session(
-            source=HEAL_SOURCE_SESSION_MONITOR,
-            poll_interval_s=session_poll_interval_s(),
-        )
+        # ⛔ WR-06 — READ ONCE, and used for BOTH the heal's `poll_interval_s`
+        # AND this tick's own outer deadline. The heal's `to_thread` budget
+        # bounds only its OWN blocking body — the bounded lease acquire and
+        # the recorder's Supabase round trips (up to six, each carrying
+        # postgrest-py's 120 s default) are UNBOUNDED at the tick level, so a
+        # degraded Supabase could otherwise stretch a single tick past its own
+        # configured cadence with nothing logging it. The loop is sequential
+        # (tick THEN wait), so this bound adds no overlap risk of its own.
+        interval = session_poll_interval_s()
+        try:
+            await asyncio.wait_for(
+                heal_mt5_terminal_session(
+                    source=HEAL_SOURCE_SESSION_MONITOR,
+                    poll_interval_s=interval,
+                ),
+                timeout=interval,
+            )
+        except asyncio.TimeoutError:
+            # ⛔ Distinguished from a fault, not folded into the generic "did
+            # not complete" wording below: this is a BUDGET BITE, and an
+            # operator who cannot tell it from a broken gateway cannot tell a
+            # slow sink from a wedged terminal. ⛔ Do NOT widen this to
+            # `except OSError`: `asyncio.TimeoutError is TimeoutError` and its
+            # MRO runs through `OSError`, which would silently eat this same
+            # budget expiry — and `heal_mt5_terminal_session`'s OWN internal
+            # `wait_for` too, if this arm were ever copied there.
+            logger.error(
+                "mt5 session monitor: the tick did not complete inside its "
+                "own %.1fs cadence — the terminal keeps whatever session it "
+                "already has and the next tick will try again.",
+                interval,
+            )
     except Exception as exc:  # noqa: BLE001 — see the docstring; this is the control
         # ⛔ IN-06 — the handler body is itself guarded, because `logger`'s
         # ARGUMENTS are evaluated before logging is entered and stdlib `logging`

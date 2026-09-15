@@ -1654,10 +1654,17 @@ _SESSION_MONITOR_REL = "services/mt5_session_monitor.py"
 _SESSION_EPISODES_REL = "services/mt5_session_episodes.py"
 
 #: The one statement in the monitor that reaches the terminal at all — it is an
-#: `await` on the heal, which is the site ALREADY on the roster. Used as the
+#: `await` on the heal (WR-06 wraps it in `asyncio.wait_for` so a degraded
+#: Supabase cannot silently stretch a tick past its own cadence; the heal call
+#: itself, and the roster's reasoning, are unchanged), which is the site
+#: ALREADY on the roster. ⛔ TWO LINES, not one: `mt5_session_monitor_loop`'s
+#: OWN `await asyncio.wait_for(SHUTDOWN.wait(), ...)` shares the first line's
+#: text, so the anchor must include the second line to stay unique. Used as the
 #: splice anchor for the calibration below, and asserted UNIQUE before it is
 #: used: a mutation that does not APPLY reads as GREEN.
-_MONITOR_DELEGATION_ANCHOR = "        await heal_mt5_terminal_session(\n"
+_MONITOR_DELEGATION_ANCHOR = (
+    "            await asyncio.wait_for(\n                heal_mt5_terminal_session(\n"
+)
 
 
 def test_the_session_monitor_module_holds_NO_lease_and_NO_raw_lock() -> None:
@@ -1712,7 +1719,7 @@ def test_the_session_monitor_module_holds_NO_lease_and_NO_raw_lock() -> None:
     # carries no meaning.
     spliced_lease = source.replace(
         _MONITOR_DELEGATION_ANCHOR,
-        "        async with mt5_terminal_lease(_k):\n    "
+        "            async with mt5_terminal_lease(_k):\n    "
         + _MONITOR_DELEGATION_ANCHOR,
     )
     assert spliced_lease != source, "harness: the lease splice did not apply"
@@ -1726,7 +1733,7 @@ def test_the_session_monitor_module_holds_NO_lease_and_NO_raw_lock() -> None:
 
     spliced_raw = source.replace(
         _MONITOR_DELEGATION_ANCHOR,
-        "        async with _mt5_terminal_lock_for(_k):\n    "
+        "            async with _mt5_terminal_lock_for(_k):\n    "
         + _MONITOR_DELEGATION_ANCHOR,
     )
     assert spliced_raw != source, "harness: the raw-lock splice did not apply"

@@ -451,6 +451,46 @@ async def _wait_until(predicate, *, poll_s: float = 0.005) -> None:
         await asyncio.sleep(poll_s)
 
 
+async def test_a_tick_that_outruns_its_own_cadence_is_BOUNDED_and_logged_distinctly(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ WR-06. The heal's own `to_thread` budget bounds only its BLOCKING body —
+    the bounded lease acquire and the recorder's Supabase round trips (up to six,
+    each carrying postgrest-py's 120 s default) are UNBOUNDED at the tick level. A
+    tick whose heal call outlives the configured cadence must be cut off AT the
+    cadence rather than left to stretch it silently, and the log must name the
+    budget bite distinctly from a generic fault.
+    """
+    cadence_s = 0.05
+    monkeypatch.setattr(monitor, "_MT5_SESSION_POLL_INTERVAL_FLOOR_S", 0.001)
+    monkeypatch.setenv(monitor.MT5_SESSION_POLL_INTERVAL_ENV, str(cadence_s))
+    monkeypatch.setenv("MT5_ENABLED", "true")
+
+    started = asyncio.get_running_loop().time()
+
+    async def _never_finishes(*, source: str, poll_interval_s: float | None) -> None:
+        await asyncio.sleep(100.0)
+
+    monkeypatch.setattr(monitor, "heal_mt5_terminal_session", _never_finishes)
+
+    with caplog.at_level(logging.ERROR, logger=_MONITOR_LOGGER):
+        await monitor.run_mt5_session_monitor_tick()
+
+    elapsed = asyncio.get_running_loop().time() - started
+    assert elapsed < 2.0, (
+        f"the tick took {elapsed:.2f}s against a {cadence_s}s cadence — an "
+        "UNBOUNDED heal call is exactly the silent cadence stretch WR-06 exists "
+        "to bound"
+    )
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("did not complete inside its own" in m for m in messages), messages
+    assert not any("exc_class=" in m for m in messages), (
+        "the budget bite fell through to the generic exc_class-carrying fault "
+        "line rather than its own distinct message — an operator could no longer "
+        "tell a slow sink from a broken gateway"
+    )
+
+
 async def test_the_loop_exits_on_SHUTDOWN_well_inside_the_ten_second_gather(
     monkeypatch: pytest.MonkeyPatch, shutdown, sink
 ) -> None:
