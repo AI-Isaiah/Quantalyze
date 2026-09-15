@@ -734,6 +734,49 @@ async def test_a_LOST_compare_and_set_on_the_MEASURED_close_does_not_claim_one(
     ), [r.getMessage() for r in _warnings(caplog)]
 
 
+async def test_IN_02_a_measured_close_of_unparseable_metadata_never_writes_fabricated_None(
+    sink: _OrderedCronRuns,
+) -> None:
+    """⛔ IN-02. Not reachable through `record_mt5_session_reading` TODAY —
+    `_recognised_open_state` only recognises a parsed dict, and an unparseable
+    row always takes the `measured=False` arm — but `_close_row` is driven
+    DIRECTLY here (this suite's own reason for existing: to reach states the
+    higher-level function cannot produce on demand) so the guard is proved
+    rather than merely argued, and stays proved if `_recognised_open_state` is
+    ever widened. The old shape (`f"{opening_kind}:code={opening_code}"`) would
+    write the fabricated-looking literal `"None:code=None"` into a DURABLE
+    column in place of an honestly-absent value.
+    """
+    row = {
+        "id": "unparseable-metadata",
+        "cron_name": mt5_session_episodes.MT5_SESSION_EPISODE_CRON_NAME,
+        "started_at": "2026-09-15T00:00:00+00:00",
+        "completed_at": None,
+        "status": "running",
+        "error": None,
+        # `row["metadata"]` is NOT a dict — `_close_row` starts `metadata = {}`
+        # for this row, so `opening_kind`/`opening_code` are both absent.
+        "metadata": "not-a-dict",
+    }
+    sink.rows.append(row)
+
+    won = await mt5_session_episodes._close_row(
+        row,
+        state=mt5_session_episodes.STATE_DARK,
+        closing_kind=mt5_session_episodes.KIND_ALREADY_AUTHORIZED,
+        closing_code=None,
+        source=_SOURCE,
+        measured=True,
+    )
+
+    assert won is True
+    assert row["error"] == "unknown:code=unknown", row["error"]
+    assert "None" not in row["error"], (
+        "a MEASURED close of unparseable metadata wrote the fabricated-looking "
+        "literal 'None:code=None' into a durable column"
+    )
+
+
 @pytest.mark.parametrize(
     "broken_metadata",
     [

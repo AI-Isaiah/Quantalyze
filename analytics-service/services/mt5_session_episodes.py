@@ -526,10 +526,22 @@ async def _close_row(
         status = "error"
         opening_kind = metadata.get("opening_kind")
         opening_code = metadata.get("opening_code")
+        # ⭐ IN-02 — a `measured=True` close of a row whose `metadata` was not
+        # a dict (`previous` above then starts `metadata = {}`) would otherwise
+        # write the literal `"None:code=None"` into `error`, a durable column,
+        # in place of an honestly-absent value. Not reachable TODAY —
+        # `_recognised_open_state` only recognises a parsed dict, and an
+        # unparseable row always takes the `measured=False` arm — but it
+        # becomes reachable the moment `_recognised_open_state` is widened, and
+        # a fabricated-looking string in a durable column is worse than an
+        # honest `"unknown"`.
         error = (
             KIND_SUPERSEDED
             if not measured
-            else f"{opening_kind}:code={opening_code}"
+            else (
+                f"{opening_kind if opening_kind is not None else 'unknown'}:"
+                f"code={opening_code if opening_code is not None else 'unknown'}"
+            )
         )
 
     payload: dict[str, Any] = {
