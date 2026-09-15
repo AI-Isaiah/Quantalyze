@@ -42,7 +42,7 @@ import asyncio
 import logging
 from typing import Final
 
-from services.closed_sets import mt5_enabled_server
+from services.closed_sets import mt5_enabled_is_deliberate, mt5_enabled_server
 from services.redact import scrub_freeform_string
 
 # ⛔ IMPORTED UNDER THEIR LEADING UNDERSCORES, DELIBERATELY, and for the reason
@@ -74,10 +74,15 @@ from services.mt5_relogin import (
 # ⛔ WR-03 — the disabled-switch reading, COUNTED rather than merely
 # logged-once. `_log_configuration_fault_once` throttles to ONE line per
 # process, which is invisible after the first tick; recording the refusal as a
-# `not_measured` reading puts it on the SAME blind-run counter and escalation
-# that already covers `busy_skip`/`budget_abandoned`/the `code=0` sentinel.
+# `not_measured` reading puts it on the SAME blind-run counter — ⛔ WR-14
+# (round 3) — but only `KIND_DISABLED` (a genuine operator decision) is
+# exempted from the blind-run ESCALATION; `KIND_KILL_SWITCH_UNPARSEABLE` (a
+# value `mt5_enabled_server()` could not recognise as a decision) is a
+# MISCONFIGURATION and stays on the same escalation as
+# `busy_skip`/`budget_abandoned`/the `code=0` sentinel.
 from services.mt5_session_episodes import (
     KIND_DISABLED,
+    KIND_KILL_SWITCH_UNPARSEABLE,
     KIND_TICK_DEADLINE,
     record_mt5_session_reading,
 )
@@ -197,11 +202,21 @@ async def run_mt5_session_monitor_tick() -> None:
             # above is invisible after the FIRST tick, so a kill switch that
             # was flipped and forgotten would otherwise be indistinguishable
             # in the logs from a monitor that has found the session healthy
-            # every tick. This reading is honestly `not_measured`; the point
-            # is that it is counted, so the same blind-run escalation covers
-            # it.
+            # every tick. This reading is honestly `not_measured` and is
+            # ALWAYS counted. ⛔ WR-14 (round 3) — whether it also ESCALATES
+            # depends on WHICH kind it records: `KIND_DISABLED` (an
+            # `""`/`false` — a genuine operator DECISION) is exempted from
+            # raising the log level by `_DECIDED_BLIND_KINDS`, while
+            # `KIND_KILL_SWITCH_UNPARSEABLE` (`1`/`on`/`yes`/anything else
+            # `mt5_enabled_server()` also reads as OFF) is a
+            # MISCONFIGURATION and stays on the same blind-run escalation as
+            # `busy_skip`/`budget_abandoned`/the `code=0` sentinel.
             await record_mt5_session_reading(
-                KIND_DISABLED,
+                (
+                    KIND_DISABLED
+                    if mt5_enabled_is_deliberate()
+                    else KIND_KILL_SWITCH_UNPARSEABLE
+                ),
                 None,
                 source=HEAL_SOURCE_SESSION_MONITOR,
                 poll_interval_s=session_poll_interval_s(),

@@ -167,11 +167,26 @@ KIND_TICK_DEADLINE: Final[str] = "tick_deadline"
 #: fault_once` throttles to ONE line per process, a monitor that had measured
 #: NOTHING for days was byte-identical in the logs to one that had found the
 #: session healthy every tick. Recording these as `not_measured` readings puts
-#: them on the SAME counter and the SAME blind-run escalation that already
-#: covers `busy_skip`/`budget_abandoned`/the `code=0` sentinel. ⛔ Never reuse
-#: `KIND_BUSY_SKIP` here — the class in a row and the class in a log line are
-#: pinned to each other on purpose.
+#: them all on the SAME counter — but ⛔ NOT all on the SAME escalation
+#: (corrected, WR-14 round 3): WR-10 (round 2) later exempts `KIND_DISABLED`
+#: from RAISING THE LOG LEVEL (see `_DECIDED_BLIND_KINDS`), because a
+#: deliberately-disabled switch is an operator DECISION rather than a fault.
+#: `KIND_CREDENTIALS_NOT_CONFIGURED` and `KIND_GATEWAY_NOT_CONFIGURED` carry
+#: no such exemption and DO escalate exactly like `busy_skip`/
+#: `budget_abandoned`/the `code=0` sentinel — as does
+#: `KIND_KILL_SWITCH_UNPARSEABLE` below, the MISCONFIGURATION sibling of
+#: `KIND_DISABLED` itself. ⛔ Never reuse `KIND_BUSY_SKIP` here — the class in
+#: a row and the class in a log line are pinned to each other on purpose.
 KIND_DISABLED: Final[str] = "disabled"
+
+#: ⛔ WR-14 (round 3) — the MISCONFIGURATION sibling of `KIND_DISABLED`.
+#: `mt5_enabled_server()` reads `1`/`on`/`yes` as OFF exactly like a
+#: deliberate `""`/`false` (see `closed_sets.mt5_enabled_is_deliberate`), so
+#: the kill-switch arm needs a SECOND kind for the value it could not
+#: recognise as a decision. Deliberately kept OUT of `_DECIDED_BLIND_KINDS` —
+#: widening that set to swallow this too is the exact regression WR-10's own
+#: comment ⛔-forbids.
+KIND_KILL_SWITCH_UNPARSEABLE: Final[str] = "kill_switch_unparseable"
 
 #: ⛔ IN-07 (round 2) — SPLIT FROM A SINGLE `KIND_NOT_CONFIGURED`. The heal's
 #: two configuration-refusal call sites (credentials absent/invalid, gateway
@@ -322,7 +337,10 @@ _CONSECUTIVE_NOT_MEASURED_READINGS: int = 0
 #: learn to ignore, which is round 1's own WR-02 standard turned on this
 #: phase's own fix. ⛔ Do NOT add `KIND_NOT_CONFIGURED`/its successors here —
 #: a Railway variable that was never set is a MISCONFIGURATION, precisely the
-#: case WR-03 was raised for.
+#: case WR-03 was raised for. ⛔ WR-14 (round 3) — AND DO NOT ADD
+#: `KIND_KILL_SWITCH_UNPARSEABLE` here either: it is the value
+#: `mt5_enabled_server()` could not recognise as a decision, which is the
+#: exact MISCONFIGURATION shape this comment already forbids.
 _DECIDED_BLIND_KINDS: Final[frozenset[str]] = frozenset({KIND_DISABLED})
 
 

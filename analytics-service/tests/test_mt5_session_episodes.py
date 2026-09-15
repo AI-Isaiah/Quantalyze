@@ -241,6 +241,9 @@ _BUSY_READING = (mt5_session_episodes.KIND_BUSY_SKIP, None)
 _BUDGET_READING = (mt5_session_episodes.KIND_BUDGET_ABANDONED, None)
 _ZERO_CODE_READING = (mt5_session_episodes.KIND_IPC_FAULT, 0)
 _DISABLED_READING = (mt5_session_episodes.KIND_DISABLED, None)
+_KILL_SWITCH_UNPARSEABLE_READING = (
+    mt5_session_episodes.KIND_KILL_SWITCH_UNPARSEABLE, None
+)
 _TICK_DEADLINE_READING = (mt5_session_episodes.KIND_TICK_DEADLINE, None)
 
 
@@ -1250,6 +1253,14 @@ async def test_a_SUPERSEDED_close_carries_the_error_status_REGARDLESS_of_state(
             "gateway not configured",
             id="gateway-not-configured",
         ),
+        # ⛔ WR-14 (round 3) — the kill switch's MISCONFIGURATION sibling,
+        # added at the same time it was introduced rather than left to drift
+        # the same way WR-11 (round 2) fixed for the two kinds above.
+        pytest.param(
+            _KILL_SWITCH_UNPARSEABLE_READING,
+            "kill switch unparseable",
+            id="kill-switch-unparseable",
+        ),
     ],
 )
 async def test_a_reading_that_MEASURED_NOTHING_writes_nothing_and_closes_nothing(
@@ -2043,22 +2054,54 @@ async def test_WR_10_a_DECIDED_kill_switch_is_COUNTED_but_NEVER_escalates_the_le
     assert all("blind=False" in r.getMessage() for r in _records(caplog))
 
 
+@pytest.mark.parametrize(
+    "reading,label",
+    [
+        pytest.param(_BUSY_READING, "busy skip", id="busy-skip"),
+        # ⛔ WR-14 (round 3) — the related gate gap the review flagged: this
+        # test previously drove ONLY `KIND_BUSY_SKIP`, so widening
+        # `_DECIDED_BLIND_KINDS` to also swallow the two configuration kinds
+        # or the new kill-switch-misconfiguration kind — the exact widening
+        # `_DECIDED_BLIND_KINDS`'s own comment ⛔-forbids — would have left
+        # this test green.
+        pytest.param(
+            (mt5_session_episodes.KIND_CREDENTIALS_NOT_CONFIGURED, None),
+            "credentials not configured",
+            id="credentials-not-configured",
+        ),
+        pytest.param(
+            (mt5_session_episodes.KIND_GATEWAY_NOT_CONFIGURED, None),
+            "gateway not configured",
+            id="gateway-not-configured",
+        ),
+        pytest.param(
+            _KILL_SWITCH_UNPARSEABLE_READING,
+            "kill switch unparseable",
+            id="kill-switch-unparseable",
+        ),
+    ],
+)
 async def test_WR_10_a_MISCONFIGURATION_kind_still_escalates_past_the_threshold(
-    sink: _OrderedCronRuns, caplog: pytest.LogCaptureFixture
+    sink: _OrderedCronRuns,
+    caplog: pytest.LogCaptureFixture,
+    reading: tuple[str, int | None],
+    label: str,
 ) -> None:
     """⛔ WR-10's OWN GUARD RAIL: `_DECIDED_BLIND_KINDS` must not be widened to
-    a genuine misconfiguration. `KIND_BUSY_SKIP` (any kind outside the decided
-    set) must still escalate exactly as before."""
+    a genuine misconfiguration. Every kind outside the decided set — a busy
+    skip, an unset credential, an unset gateway, or a kill switch set to a
+    value the reader could not parse — must still escalate exactly as
+    before."""
     threshold = mt5_session_episodes.blind_run_escalation_threshold(_CADENCE_S)
     assert threshold is not None and threshold > 1
 
     with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
         for _ in range(threshold):
-            await _observe(_BUSY_READING)
+            await _observe(reading)
 
     assert len(_warnings(caplog)) == 1, (
-        "WR-10's exemption leaked onto a kind that is a genuine "
-        "misconfiguration, not an operator decision"
+        f"WR-10's exemption leaked onto {label!r}, a genuine "
+        f"misconfiguration, not an operator decision"
     )
 
 

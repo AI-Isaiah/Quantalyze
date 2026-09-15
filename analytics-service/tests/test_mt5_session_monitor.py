@@ -413,18 +413,29 @@ async def test_A_RAISING_TICK_NEVER_REACHES_THE_CRASH_HANDLER(
 
 
 async def test_the_disabled_kill_switch_reading_is_COUNTED_not_merely_logged(
-    monkeypatch: pytest.MonkeyPatch, sink: _FakeCronRuns
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, sink: _FakeCronRuns
 ) -> None:
     """⛔ WR-03. `_log_configuration_fault_once` throttles the disabled-switch
-    log line to ONE per process — invisible after the first tick. The tick must
-    ALSO record the refusal as a `not_measured` reading, so the SAME blind-run
-    counter and escalation that already covers `busy_skip`/`budget_abandoned`/
-    the `code=0` sentinel also covers a kill switch flipped off and forgotten.
+    log line to ONE per process — invisible after the first tick. The tick
+    must ALSO record the refusal as a `not_measured` reading, so the SAME
+    blind-run COUNTER that already covers `busy_skip`/`budget_abandoned`/the
+    `code=0` sentinel also covers a kill switch flipped off and forgotten.
+
+    ⛔ WR-14 (round 3) — a deliberate `MT5_ENABLED=false` records
+    `KIND_DISABLED`, which `_DECIDED_BLIND_KINDS` exempts from RAISING THE
+    LEVEL (only the COUNTER, never the escalation, is guaranteed for this
+    kind); an unrecognised value like `1`/`on`/`yes` records
+    `KIND_KILL_SWITCH_UNPARSEABLE` instead — see
+    `test_the_kill_switch_reading_is_DISABLED_for_a_deliberate_value_and_UNPARSEABLE_otherwise`
+    for that kind's own escalation behaviour.
     """
     monkeypatch.setenv("MT5_ENABLED", "false")
 
-    for _ in range(3):
-        await monitor.run_mt5_session_monitor_tick()
+    with caplog.at_level(
+        logging.INFO, logger="quantalyze.analytics.mt5_session_episodes"
+    ):
+        for _ in range(3):
+            await monitor.run_mt5_session_monitor_tick()
 
     assert mt5_session_episodes._CONSECUTIVE_NOT_MEASURED_READINGS == 3, (
         "the disabled-switch tick did not extend the blind-run counter — the "
@@ -435,6 +446,44 @@ async def test_the_disabled_kill_switch_reading_is_COUNTED_not_merely_logged(
         "a not_measured reading must write NOTHING to the durable sink — only "
         "the in-process counter and the eventual log LEVEL are affected"
     )
+    messages = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "quantalyze.analytics.mt5_session_episodes"
+    ]
+    assert all("kind=disabled " in m for m in messages), (
+        f"a deliberate MT5_ENABLED=false must record KIND_DISABLED, not "
+        f"KIND_KILL_SWITCH_UNPARSEABLE — got {messages}"
+    )
+
+
+async def test_the_kill_switch_reading_is_DISABLED_for_a_deliberate_value_and_UNPARSEABLE_otherwise(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, sink: _FakeCronRuns
+) -> None:
+    """⛔ WR-14 (round 3). `mt5_enabled_server()` reads `1`/`on`/`yes` as OFF
+    exactly like a deliberate `""`/`false` — an operator who typed one of
+    those MEANT to switch MT5 ON and got the kill switch instead, and that is
+    a MISCONFIGURATION, not a decision. Before this fix BOTH recorded
+    `KIND_DISABLED`, so `_DECIDED_BLIND_KINDS` silently swallowed the
+    misconfiguration's own escalation too — this asserts the two now record
+    DIFFERENT kinds.
+    """
+    with caplog.at_level(
+        logging.INFO, logger="quantalyze.analytics.mt5_session_episodes"
+    ):
+        monkeypatch.setenv("MT5_ENABLED", "false")
+        await monitor.run_mt5_session_monitor_tick()
+        monkeypatch.setenv("MT5_ENABLED", "1")
+        await monitor.run_mt5_session_monitor_tick()
+
+    messages = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "quantalyze.analytics.mt5_session_episodes"
+    ]
+    assert any("kind=disabled " in m for m in messages), messages
+    assert any("kind=kill_switch_unparseable " in m for m in messages), messages
+    assert sink.rows == [], "neither reading measured anything — both wrote NOTHING"
 
 
 async def test_the_first_ITERATION_waits_BEFORE_ticking_so_the_boot_heal_owns_the_window(
