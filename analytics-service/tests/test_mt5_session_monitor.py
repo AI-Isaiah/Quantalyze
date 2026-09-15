@@ -614,9 +614,16 @@ async def test_a_tick_that_outruns_its_own_cadence_is_BOUNDED_and_logged_distinc
     Before the fix this arm was the ONE non-measuring exit outside
     `_CONSECUTIVE_NOT_MEASURED_READINGS`: a degraded Supabase cutting off every
     tick at this deadline froze the counter at whatever it was and
-    `blind_run_escalation_threshold` could never fire. `sink` is installed so
-    this recording call stays OFFLINE — before this fix the arm made no DB
-    call at all, so nothing installed one.
+    `blind_run_escalation_threshold` could never fire. `sink` is installed DEFENSIVELY, and the
+    sentence that used to stand here — "before this fix the arm made no DB call
+    at all, so nothing installed one" — was FALSE (IN-13, round 3).
+    `classify_reading(KIND_TICK_DEADLINE, None)` returns `STATE_NOT_MEASURED`,
+    and that branch of `record_mt5_session_reading` counts, logs and returns
+    BEFORE `get_supabase()` is ever called. ⭐ That is the better half of the
+    news: appending an unbounded recorder round trip to a tick which has
+    ALREADY blown its deadline would directly contradict WR-06's invariant, and
+    it does not happen — for a structural reason, not a lucky one. The
+    `sink.rows == []` assertion below is what pins it.
     """
     cadence_s = 0.05
     monkeypatch.setattr(monitor, "_MT5_SESSION_POLL_INTERVAL_FLOOR_S", 0.001)

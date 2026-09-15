@@ -112,9 +112,22 @@ MT5_SESSION_POLL_INTERVAL_ENV: Final[str] = "MT5_SESSION_POLL_INTERVAL_S"
 #     operate) still finishes inside one interval, and a retune of either
 #     ceiling carries through here rather than silently invalidating this
 #     bound. It is also what makes WR-02's "the boot heal owns the boot
-#     window uncontested" true BY CONSTRUCTION rather than only for some
-#     configurations: `interval >= floor >= actual_lease_wait +
-#     actual_budget` holds for every value each knob's own window admits.
+#     window uncontested" hold for every value each knob's own window admits:
+#     `interval >= floor >= actual_lease_wait + actual_budget`.
+#
+#     ⚠️ STATED HONESTLY (IN-12, round 3) — this is a SUM, not an ORDERING, and
+#     the two timers do NOT start together. The tick's own
+#     `asyncio.wait_for(..., timeout=interval)` begins at t0; the heal's bounded
+#     acquire begins at t0+e, after `mt5_enabled_server()`, the credential read,
+#     the endpoint read and the INFO line. So at the exact configuration
+#     `MT5_SESSION_POLL_INTERVAL_S=330`, `MT5_RELOGIN_LEASE_WAIT_S=30`,
+#     `MT5_RELOGIN_BUDGET_S=300` — each individually legal — a heal consuming
+#     both bounds in full expires at t0+e+330 while the outer deadline expires
+#     at t0+330, and the outer one pre-empts the heal's own `budget_abandoned`
+#     arm. That is BOUNDARY-ONLY: it needs all three knobs at their own extremes
+#     simultaneously, and the shipped defaults (600 / 2 / ~35) leave ~560 s of
+#     headroom. ⛔ Do not read the sentence above as "impossible"; read it as
+#     "true for the sum, with the preamble as the exception".
 #
 #   CEILING = 3600 s, the cadence of the independent hourly prod-prober. At or
 #     above it this loop measures nothing that instrument does not already
