@@ -259,8 +259,30 @@ async def run_mt5_session_monitor_tick() -> None:
             # this, a degraded Supabase that cuts off every tick at this
             # deadline freezes `_CONSECUTIVE_NOT_MEASURED_READINGS` at
             # whatever it was, and `blind_run_escalation_threshold` can never
-            # fire — the ONE non-measuring exit WR-03 did not cover, on the
-            # exact fault class the escalation exists to surface.
+            # fire, on the exact fault class the escalation exists to
+            # surface.
+            #
+            # ⚠️ B1 (round 3) — CORRECTED: this was NOT "the ONE
+            # non-measuring exit WR-03 did not cover" — measured at HEAD
+            # there are THREE more, and each is excluded for a DIFFERENT,
+            # stated reason rather than by oversight:
+            #   1. `heal_mt5_terminal_session`'s kill-switch arm (the BOOT
+            #      heal's, not this tick's) does not record at all — but it
+            #      is the single boot-only caller, so
+            #      `blind_run_escalation_threshold(None)` is always `None`
+            #      and a recording there could never escalate regardless.
+            #   2. the outer `except Exception` in `heal_mt5_terminal_session`
+            #      and 3. the outer `except Exception` in this module's own
+            #      `run_mt5_session_monitor_tick` are both STRUCTURALLY
+            #      BARRED from recording: the never-raises AST gate requires
+            #      each handler body to be EXACTLY one nested `try`, and a
+            #      `record_mt5_session_reading` call there is a second
+            #      top-level statement — the same reason
+            #      `_stamp_reading_and_measure_gap` and `_count_blind_reading`
+            #      are separate functions in `mt5_session_episodes.py`. ⛔ Do
+            #      NOT restructure either handler to count them; that fights
+            #      the gate this module depends on for its OWN never-raises
+            #      guarantee.
             await record_mt5_session_reading(
                 KIND_TICK_DEADLINE,
                 None,
