@@ -323,7 +323,7 @@ state_head: 22fa8db3f9bd8f7e02960dfbd88e8a9dd6542569
 # running `state.update-progress`, which derives from THIS checkout and is blind to the
 # `-pr`-filtered phases by construction.
 progress:
-  total_phases: 37
+  total_phases: 38
   completed_phases: 20
   total_plans: 171
   completed_plans: 166
@@ -1387,6 +1387,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.6 edited: edited fields: success_criteria (+1) — routed in from 164.6.2 plan 04: [164.6.2-KILLSWITCH-COMMENT-DRIFT]
 - Phase 164.8.4 edited: edited fields: success_criteria (+1) — routed in from 164.6.2 plan 04: [164.6.2-PLAN04-GATE-INTENT-DRIFT], three instrument defects
 - Phase 164.6.2 edited: edited fields: success_criteria (+4, --force: phase is in_progress) — held OPEN on OUTCOME 0; wave 5 post-ship; question THREE unsettled; [164.6.2-RAISE-LAST-SHAPE-ONLY] stays here as its own post-ship plan
+- Phase 164.6.2 edited: edited fields: success_criteria (criterion 7 amended MATCHES -> CONTAINMENT; +2, --force: phase is in_progress) — criterion 10 records criterion 2 CLOSED on the wave-5 observation (2026-09-15); criterion 11 holds the phase OPEN for plan 06 (question THREE R2) and [164.6.2-RAISE-LAST-SHAPE-ONLY]
+- Phase 164.6.4 inserted after Phase 164.6.3: MT5KEEPALIVE — booked on wave 5's measurement (founder decision 2026-09-15, option book-keepalive); the interval is deliberately NOT chosen there (URGENT)
 
 ### Decisions
 
