@@ -642,6 +642,54 @@ async def _close_row(
     return bool(matched)
 
 
+async def _confirm_row(row: dict[str, Any], *, source: str) -> None:
+    """UPDATE an open row's ``last_confirmed_at``/``confirmations`` — the
+    per-tick evidence for a reading that MATCHED the open state, in place of
+    writing nothing at all.
+
+    ⛔ WR-09 (round 2, HIGH-2 STEADY STATE) — THIS DOES NOT ADD A ROW. The
+    sink stays per-TRANSITION for INSERTs, exactly as before: at a ten-minute
+    cadence a per-tick INSERT would still be ~144 rows/day forever into a
+    shared and gated table, for no information. What it fixes is different: a
+    healthy session used to write ZERO rows FOREVER, so a dead loop (a
+    process that stopped after one tick, a crash loop, `LOG_LEVEL` raised
+    above INFO) and a live healthy one were IDENTICAL in the durable record —
+    `[MT5-VERDICT-SINK-01]`, this module's own reason for existing, left
+    unapplied to the module itself. An UPDATE on the SAME open row answers
+    "when did this instrument last actually look?" durably and queryably
+    without adding a row.
+
+    ⛔ NEVER RAISES from the caller's perspective — a lost CAS here (the row
+    was closed by another writer between the caller's read and this UPDATE)
+    is a genuine no-op with no consequence: there is nothing to confirm about
+    a row that no longer represents the live state, and the NEXT reading's
+    own read-then-decide sees the closed row and proceeds normally. Unlike
+    `_close_row`, the caller does not need to distinguish "won" from "lost"
+    here, so this returns nothing.
+    """
+    supabase = get_supabase()
+    previous = row.get("metadata")
+    metadata: dict[str, Any] = dict(previous) if isinstance(previous, dict) else {}
+    metadata["last_confirmed_at"] = _now_iso()
+    metadata["last_confirmed_by"] = source
+    metadata["confirmations"] = int(metadata.get("confirmations") or 0) + 1
+
+    def _update() -> Any:
+        return (
+            supabase.table("cron_runs")
+            .update({"metadata": metadata})
+            .eq("id", row.get("id"))
+            # ⛔ Not a CAS the caller reads an outcome from (see docstring),
+            # but still scoped to `running` so a row closed between the
+            # caller's read and this write is left untouched rather than
+            # having a confirmation stamped onto its already-closed metadata.
+            .eq("status", "running")
+            .execute()
+        )
+
+    await db_execute(_update)
+
+
 async def _open_row(reading: SessionReading, *, source: str,
                     poll_interval_s: float | None,
                     since_previous_reading_s: float | None,
@@ -760,9 +808,14 @@ async def record_mt5_session_reading(
         It did not measure that the session recovered, so it may never close an
         episode.
       * an open row exists and its ``metadata.state`` EQUALS the observed state ->
-        write NOTHING. ⭐ This is what makes the sink per-TRANSITION rather than
-        per-tick: at a ten-minute cadence a per-tick write would be ~144
-        rows/day forever, into a shared and gated table, for no information.
+        CONFIRM it (``_confirm_row`` — an UPDATE of ``last_confirmed_at``/
+        ``confirmations``, no new row) rather than write nothing (WR-09,
+        round 2). ⭐ This is still what makes the sink per-TRANSITION FOR
+        INSERTS rather than per-tick: at a ten-minute cadence a per-tick
+        INSERT would be ~144 rows/day forever, into a shared and gated
+        table, for no information. What the confirm fixes is a DIFFERENT
+        defect: a healthy session used to write ZERO rows forever, making a
+        dead loop and a live healthy one identical in the durable record.
       * an open row exists and its state is a RECOGNISED state that DIFFERS ->
         close it as a MEASURED transition, then open a run for the observed
         state whose start is MEASURED too (``started_at_is_lower_bound: false``).
@@ -871,6 +924,13 @@ async def record_mt5_session_reading(
         if live is not None:
             live_state = _recognised_open_state(live.get("metadata"))
             if live_state == reading.state:
+                # ⛔ WR-09 (round 2, HIGH-2 STEADY STATE) — CONFIRM, DON'T GO
+                # SILENT. This is still per-TRANSITION for INSERTs (no new
+                # row — see `_confirm_row`'s docstring); what changes is that
+                # a healthy session no longer writes NOTHING forever, which
+                # made a dead loop and a live one identical in the durable
+                # record.
+                await _confirm_row(live, source=source)
                 return
             if live_state is None:
                 logger.warning(
@@ -949,7 +1009,9 @@ async def record_mt5_heal_outcome(
     probe's reading, then — only if the credentialed heal actually ran — the
     FINAL one. A tick that finds ``-6`` and heals it therefore produces exactly
     TWO transitions (``authorized -> dark`` and ``dark -> authorized``) and so
-    exactly two rows, while a tick that finds the session healthy produces ZERO.
+    exactly two NEW ROWS, while a tick that finds the session healthy inserts
+    ZERO new rows (WR-09, round 2 — it now CONFIRMS the open row instead of
+    writing nothing at all; see ``_confirm_row``).
 
     ⛔ Never called from ``heal_mt5_terminal_session``'s OUTER catch-all: the
     never-raises AST gate requires that handler's body to be EXACTLY one nested

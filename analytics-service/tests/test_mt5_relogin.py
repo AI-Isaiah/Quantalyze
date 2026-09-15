@@ -3166,13 +3166,19 @@ async def test_TRACER_a_minus_six_that_heals_writes_exactly_TWO_rows_end_to_end(
     _assert_no_secret_reached_any_row(sink)
 
 
-async def test_TRACER_a_healthy_tick_against_an_open_authorized_run_writes_NOTHING(
+async def test_TRACER_a_healthy_tick_against_an_open_authorized_run_INSERTS_NOTHING(
     monkeypatch: pytest.MonkeyPatch, sink
 ) -> None:
-    """⭐ PER TRANSITION, NEVER PER TICK. At a ten-minute cadence a per-tick write
-    would be ~144 rows/day forever into a shared, gated table, for no
-    information — and the sink's whole value is that a row means something
-    CHANGED."""
+    """⭐ PER TRANSITION, NEVER PER TICK — for NEW ROWS. At a ten-minute cadence
+    a per-tick INSERT would be ~144 rows/day forever into a shared, gated
+    table, for no information — and the sink's whole value is that a NEW ROW
+    means something CHANGED.
+
+    ⛔ WR-09 (round 2) — RENAMED FROM `..._writes_NOTHING`. A healthy tick now
+    issues exactly ONE UPDATE (`_confirm_row`) instead of writing nothing at
+    all — see `test_TRACER_a_healthy_tick_CONFIRMS_the_open_row` for that
+    property. It still inserts NO new row and closes nothing.
+    """
     _seed_open_row(sink, mt5_session_episodes.STATE_AUTHORIZED)
     _set_full_env(monkeypatch)
     _install_client(monkeypatch, {"initialize": True})
@@ -3180,7 +3186,29 @@ async def test_TRACER_a_healthy_tick_against_an_open_authorized_run_writes_NOTHI
     assert await mt5_relogin.heal_mt5_terminal_session() is None
 
     assert sink.inserts == [], f"a healthy tick wrote {len(sink.inserts)} row(s)"
-    assert [u for u in sink.updates] == [], "a healthy tick closed something"
+    assert len(sink.open_rows()) == 1
+
+
+async def test_TRACER_a_healthy_tick_CONFIRMS_the_open_row(
+    monkeypatch: pytest.MonkeyPatch, sink
+) -> None:
+    """⛔ WR-09 (round 2, HIGH-2 STEADY STATE), driven end to end through the
+    REAL heal. Before this fix a healthy tick left the open row's metadata
+    byte-unchanged forever — a dead loop and a live healthy one were
+    identical in the durable record. Now it stamps `last_confirmed_at`.
+    """
+    seeded = _seed_open_row(sink, mt5_session_episodes.STATE_AUTHORIZED)
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+
+    assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert sink.updates and sink.updates[-1]["applied"] == 1, (
+        "a healthy tick did not confirm the open row"
+    )
+    meta = sink.metadata(seeded)
+    assert meta["last_confirmed_at"]
+    assert meta["confirmations"] == 1
     assert len(sink.open_rows()) == 1
 
 

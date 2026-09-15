@@ -262,29 +262,84 @@ def _warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
         pytest.param(mt5_session_episodes.STATE_DARK, _DARK_READING, id="dark"),
     ],
 )
-async def test_a_tick_that_observes_the_ALREADY_RECORDED_state_writes_NOTHING(
+async def test_a_tick_that_observes_the_ALREADY_RECORDED_state_INSERTS_NOTHING(
     sink: _OrderedCronRuns, state: str, reading: tuple[str, int | None]
 ) -> None:
     """⭐ THE ANTI-VACUITY LEG MATTERS MORE THAN THE POSITIVE ONE.
 
-    The write list is asserted EMPTY, not merely short. At the ten-minute
-    detection cadence a per-tick write is about 144 rows a day, forever, into a
-    SHARED and gated table, for no information at all — and the sink's entire
-    value is that a row means something CHANGED.
+    The INSERT list is asserted EMPTY, not merely short. At the ten-minute
+    detection cadence a per-tick INSERT is about 144 rows a day, forever, into
+    a SHARED and gated table, for no information at all — and the sink's
+    entire value is that a NEW ROW means something CHANGED.
+
+    ⛔ WR-09 (round 2) — RENAMED FROM `..._writes_NOTHING`. A matching-state
+    tick now issues exactly ONE UPDATE (`_confirm_row`'s
+    `last_confirmed_at`/`confirmations`) instead of writing nothing at all —
+    see `test_a_tick_that_observes_the_ALREADY_RECORDED_state_CONFIRMS_the_open_row`
+    for that property. What this test still pins is the INSERT-side of
+    per-TRANSITION-never-per-tick, which is unchanged: no new row, ever, for a
+    reading that matches what is already open.
     """
     seeded = _seed_open_row(sink, state)
 
     await _observe(reading)
 
-    assert sink.writes == [], (
-        f"a tick observing the already-recorded {state!r} state wrote "
-        f"{sink.writes} — the sink is per-TRANSITION, never per-tick"
+    assert sink.inserts == [], (
+        f"a tick observing the already-recorded {state!r} state inserted a "
+        f"NEW ROW ({sink.inserts}) — the sink is per-TRANSITION, never "
+        f"per-tick, for INSERTs"
     )
-    assert sink.inserts == []
-    assert sink.updates == []
     assert seeded["status"] == "running"
     assert seeded["completed_at"] is None
     assert len(sink.open_rows()) == 1
+
+
+@pytest.mark.parametrize(
+    "state,reading",
+    [
+        pytest.param(
+            mt5_session_episodes.STATE_AUTHORIZED, _AUTHORIZED_READING, id="authorized"
+        ),
+        pytest.param(mt5_session_episodes.STATE_DARK, _DARK_READING, id="dark"),
+    ],
+)
+async def test_a_tick_that_observes_the_ALREADY_RECORDED_state_CONFIRMS_the_open_row(
+    sink: _OrderedCronRuns, state: str, reading: tuple[str, int | None]
+) -> None:
+    """⛔ WR-09 (round 2, HIGH-2 STEADY STATE). Before this fix a healthy
+    session wrote ZERO rows FOREVER, so a dead loop (a process that stopped
+    ticking after one iteration, a crash loop, `LOG_LEVEL` raised above INFO)
+    and a live healthy one were IDENTICAL in the durable record —
+    `[MT5-VERDICT-SINK-01]`, this module's OWN stated reason for existing,
+    left unapplied to the module itself. Each matching-state tick must now
+    UPDATE the open row's `last_confirmed_at`/`confirmations` — the per-tick
+    evidence that something actually looked — while inserting NO new row.
+    """
+    seeded = _seed_open_row(sink, state)
+    assert "last_confirmed_at" not in sink.metadata(seeded)
+
+    await _observe(reading)
+
+    assert sink.writes == ["update"], (
+        f"a tick observing the already-recorded {state!r} state did not "
+        f"confirm the open row — got {sink.writes}"
+    )
+    assert sink.inserts == [], "a confirm must never insert a new row"
+    meta = sink.metadata(seeded)
+    assert meta["last_confirmed_at"], "the confirmation timestamp did not land"
+    assert meta["last_confirmed_by"] == _SOURCE
+    assert meta["confirmations"] == 1
+    assert meta["state"] == state, (
+        "a confirm must preserve the row's own state — it is an UPDATE of "
+        "metadata, never a state change"
+    )
+    assert seeded["status"] == "running"
+    assert seeded["completed_at"] is None
+    assert len(sink.open_rows()) == 1
+
+    # a SECOND confirming tick increments rather than resets the counter.
+    await _observe(reading)
+    assert sink.metadata(seeded)["confirmations"] == 2
 
 
 @pytest.mark.parametrize(
@@ -376,7 +431,10 @@ async def test_the_open_episode_is_RE_READ_from_the_database_every_observation(
     seeded = _seed_open_row(sink, mt5_session_episodes.STATE_AUTHORIZED, id="seeded")
 
     await _observe(_AUTHORIZED_READING)
-    assert sink.writes == []
+    # ⛔ WR-09 (round 2) — a matching-state reading now CONFIRMS the open row
+    # (an UPDATE) rather than writing nothing; it still inserts NO new row.
+    assert sink.inserts == []
+    assert sink.writes == ["update"]
 
     # THE REDEPLOY: every module-level name the recorder mutates, cleared.
     mt5_session_episodes._reset_session_episode_state_for_tests()
