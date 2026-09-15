@@ -1258,7 +1258,10 @@ def _loop_survival_defects(source: str) -> list[str]:
          OUTSIDE the `while`, so catching there ends the loop;
       3. a per-tick guard's FINAL handler does not catch bare `Exception`;
       4. a per-tick handler `break`s or `raise`s — a handler that ends the loop is
-         the silent death this predicate exists to prevent;
+         the silent death this predicate exists to prevent; ⛔ IN-06 (round 2) —
+         WIDENED to also scan the per-tick `try`'s OWN `else:`/`finally:`
+         clauses, which sit OUTSIDE every handler and were invisible to a scan
+         that only walked `handler.body`;
       5. that final handler's body is not EXACTLY one nested `try` with a
          `BaseException` handler and no `finally:`/`else:` (IN-06, for the same
          argument-evaluation reason as P-outer: `logger.error`'s ARGUMENTS are
@@ -1343,6 +1346,33 @@ def _loop_survival_defects(source: str) -> list[str]:
                     "`continue`s or re-`raise`s ENDS OR CORRUPTS THE LOOP, which "
                     "is the keepalive dying silently (or spinning hot) on tick 3 "
                     "behind a green worker"
+                )
+
+        # ⛔ IN-06 (round 2) — THE SAME SCAN, WIDENED TO THE PER-TICK `try`'s
+        # OWN `else:`/`finally:`. Rule 4 above walked `handler.body` for every
+        # handler; it did NOT look at `stmt.orelse`/`stmt.finalbody` — the two
+        # clauses that sit OUTSIDE every handler on the SAME `try`. A
+        # `finally: break` or `else: return` on a per-tick guard ends the loop
+        # exactly as a handler doing it would, and is invisible to the scan
+        # above: `stmt.finalbody` is a sibling of `stmt.handlers`, not a
+        # descendant of any of them.
+        for clause_name, clause in (("else", stmt.orelse), ("finally", stmt.finalbody)):
+            clause_escapes = sorted(
+                {
+                    type(node).__name__
+                    for statement in clause
+                    for node in ast.walk(statement)
+                    if isinstance(
+                        node, (ast.Break, ast.Raise, ast.Return, ast.Continue)
+                    )
+                }
+            )
+            if clause_escapes:
+                defects.append(
+                    f"a per-tick guard's `{clause_name}:` clause contains "
+                    f"{clause_escapes} — an escape there ENDS OR CORRUPTS THE "
+                    "LOOP exactly as a handler doing it would, and it sits "
+                    "OUTSIDE every handler this predicate otherwise scans"
                 )
 
         final = stmt.handlers[-1]
@@ -1561,6 +1591,18 @@ _LOOP_SURVIVAL_MUTANTS: Final[dict[str, tuple[str, str]]] = {
         "                    logger.error(\n"
         '                        "mt5 session monitor: a tick escaped its own '
         'guard and "',
+    ),
+    # ⛔ IN-06 (round 2) — a `finally:` on the PER-TICK TRY ITSELF, not inside
+    # any handler. Rule 4's scan walks `handler.body` for every handler of
+    # each per-tick guard; `stmt.finalbody` sits OUTSIDE every handler on the
+    # SAME `try` and was invisible to that scan before this fix.
+    "per-tick-guard-FINALLY-ends-the-loop": (
+        "                        \"could not be described — the loop continues\"\n"
+        "                    )\n",
+        "                        \"could not be described — the loop continues\"\n"
+        "                    )\n"
+        "            finally:\n"
+        "                break\n",
     ),
     # (8) the house sleep idiom replaced by the bare sleep it exists to avoid.
     "shutdown-aware-wait-replaced-by-a-bare-asyncio-sleep": (
