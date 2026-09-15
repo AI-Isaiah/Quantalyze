@@ -53,6 +53,17 @@ than reading the claim, and each fixed only after the neuter was observed to bit
   own entailments, and the closing defect count is re-measured from the run's log archive rather
   than taken from the author's own outcome line.
 
+- **`e2e/full-flow.spec.ts` sampled a locator that does not retry, then used one that does.** Both
+  `factsheet page loads for published strategy` and `strategy detail shows hero metrics` decided
+  "is there a strategy row?" with a point-in-time `isVisible()`, then called the auto-waiting
+  `getAttribute()` / `click()` on the same locator. MEASURED 2026-09-15 (run `34968717071`, 1 of 157
+  failed on all three attempts): the browse table rendered, an upstream fetch aborted with
+  `ECONNRESET`, the table re-rendered EMPTY, and the retrying call burned the whole 60 s budget on a
+  row that had just been seen. Both sites now settle on one of the page's two terminal states — a
+  row, or the documented "No strategies" empty state — before sampling. ⚠️ The
+  `INTERNAL_API_TOKEN is not configured` warning printed beside the failure is NOT the cause: it
+  appears twice in the GREEN `main` run at `f901e4da` too.
+
 ### Notes
 
 - ⚠️ **The boot heal never ran.** It was deployed, armed and idle; what re-authorized the terminal was

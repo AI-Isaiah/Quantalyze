@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page, type Locator } from "@playwright/test";
 
 /**
  * Audit 2026-05-07 C-0309: credentials are read from env vars at test
@@ -16,6 +16,40 @@ import { test, expect } from "@playwright/test";
 const E2E_EMAIL = process.env.E2E_TEST_EMAIL;
 const E2E_PASSWORD = process.env.E2E_TEST_PASSWORD;
 const HAS_E2E_CREDS = !!E2E_EMAIL && !!E2E_PASSWORD;
+
+/**
+ * Does the browse/discovery table actually have a strategy row?
+ *
+ * ⛔ `isVisible()` does NOT retry — it is a point-in-time sample — while every
+ * call these tests make after it (`getAttribute`, `click`) DOES auto-wait. That
+ * asymmetry is the bug this helper exists to remove.
+ *
+ * MEASURED 2026-09-15, CI run 34968717071 (`e2e-seeded`, 1 of 157 failed, all
+ * three attempts): the browse table rendered, an upstream fetch aborted
+ * (`ECONNRESET`), the table re-rendered EMPTY, and the retrying
+ * `getAttribute()` then burned the test's whole 60 s budget waiting for a row
+ * that `isVisible()` had seen a moment earlier. ⚠️ The
+ * `INTERNAL_API_TOKEN is not configured` proxy warning beside it is NOT the
+ * cause: it appears twice in the GREEN main run at `f901e4da` as well.
+ *
+ * Settling on one of the page's two terminal states first — a row, or the
+ * documented "No strategies" empty state, the same pair the "browse category
+ * page shows strategies without auth" test asserts — makes the branch decision
+ * deterministic. ⛔ It deliberately does NOT weaken the branch it guards: once a
+ * row is reported present, a row that then genuinely vanishes still fails the
+ * caller, because that is real page instability and not a sampling artefact.
+ */
+async function hasStrategyRow(page: Page, firstLink: Locator): Promise<boolean> {
+  await Promise.race([
+    firstLink.waitFor({ state: "visible", timeout: 15_000 }).catch(() => {}),
+    page
+      .locator("text=No strategies")
+      .first()
+      .waitFor({ state: "visible", timeout: 15_000 })
+      .catch(() => {}),
+  ]);
+  return firstLink.isVisible().catch(() => false);
+}
 
 test.describe("Public browsing flow", () => {
   test("landing page links to /browse", async ({ page }) => {
@@ -51,7 +85,7 @@ test.describe("Public browsing flow", () => {
     // First browse to find a strategy ID
     await page.goto("/browse/crypto-sma");
     const firstLink = page.locator("table tbody tr a").first();
-    const hasStrategies = await firstLink.isVisible().catch(() => false);
+    const hasStrategies = await hasStrategyRow(page, firstLink);
 
     if (hasStrategies) {
       const href = await firstLink.getAttribute("href");
@@ -156,7 +190,7 @@ test.describe("Authenticated flows", () => {
   test("strategy detail shows hero metrics", async ({ page }) => {
     await page.goto("/discovery/crypto-sma");
     const firstLink = page.locator("table tbody tr a").first();
-    const hasStrategies = await firstLink.isVisible().catch(() => false);
+    const hasStrategies = await hasStrategyRow(page, firstLink);
 
     if (hasStrategies) {
       await firstLink.click();
