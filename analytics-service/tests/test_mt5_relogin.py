@@ -675,6 +675,69 @@ async def test_a_configuration_refusal_is_COUNTED_as_a_not_measured_reading(
     )
 
 
+@pytest.mark.parametrize(
+    "provoke,expected_kind",
+    [
+        pytest.param(
+            _exit_credentials_absent,
+            mt5_session_episodes.KIND_CREDENTIALS_NOT_CONFIGURED,
+            id="credentials-absent",
+        ),
+        pytest.param(
+            _exit_credentials_invalid,
+            mt5_session_episodes.KIND_CREDENTIALS_NOT_CONFIGURED,
+            id="credentials-invalid",
+        ),
+        pytest.param(
+            _exit_gateway_absent,
+            mt5_session_episodes.KIND_GATEWAY_NOT_CONFIGURED,
+            id="gateway-absent",
+        ),
+        pytest.param(
+            _exit_gateway_port_not_numeric,
+            mt5_session_episodes.KIND_GATEWAY_NOT_CONFIGURED,
+            id="gateway-port-not-numeric",
+        ),
+    ],
+)
+async def test_IN_07_the_two_configuration_arms_record_DISTINGUISHABLE_kinds(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    provoke,
+    expected_kind: str,
+) -> None:
+    """⛔ IN-07 (round 2). Before the fix, BOTH arms recorded the SAME
+    `KIND_NOT_CONFIGURED`, so after the throttled once-per-process log line
+    scrolled, the recurring per-tick "reading MEASURED NOTHING" evidence named
+    neither the variable nor WHICH check refused — a credentials fault and a
+    gateway fault were indistinguishable in the only evidence left. The class
+    in a row and the class in a log line are pinned to each other on purpose
+    (the module's own comment); two genuinely different operator faults must
+    not share one class.
+    """
+    _set_full_env(monkeypatch)
+    provoke(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+
+    episodes_logger = "quantalyze.analytics.mt5_session_episodes"
+    with caplog.at_level(logging.INFO, logger=episodes_logger):
+        assert (
+            await mt5_relogin.heal_mt5_terminal_session(
+                source=mt5_relogin.HEAL_SOURCE_SESSION_MONITOR,
+                poll_interval_s=600.0,
+            )
+            is None
+        )
+
+    messages = [
+        r.getMessage() for r in caplog.records if r.name == episodes_logger
+    ]
+    assert any(f"kind={expected_kind}" in m for m in messages), (
+        f"expected kind={expected_kind!r} in the recurring per-tick evidence, "
+        f"got: {messages}"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # ⛔ THE TWO TUNING KNOBS — CR-02 / WR-06. A TYPO MUST NOT TAKE THE SERVICE DOWN,
 # AND A PARSEABLE-BUT-ABSURD VALUE MUST NOT DISABLE THE HEAL OR STARVE THE BATCH.

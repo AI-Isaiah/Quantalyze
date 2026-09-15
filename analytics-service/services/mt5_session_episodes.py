@@ -172,7 +172,19 @@ KIND_TICK_DEADLINE: Final[str] = "tick_deadline"
 #: `KIND_BUSY_SKIP` here — the class in a row and the class in a log line are
 #: pinned to each other on purpose.
 KIND_DISABLED: Final[str] = "disabled"
-KIND_NOT_CONFIGURED: Final[str] = "not_configured"
+
+#: ⛔ IN-07 (round 2) — SPLIT FROM A SINGLE `KIND_NOT_CONFIGURED`. The heal's
+#: two configuration-refusal call sites (credentials absent/invalid, gateway
+#: absent/port not numeric) used to record the SAME kind, and
+#: `_log_configuration_fault_once` throttles its own distinguishing log line
+#: to ONCE per process — so the recurring evidence (the per-tick "reading
+#: MEASURED NOTHING" line) named neither variable nor which check refused.
+#: The module comment on these constants says the class in a row and the
+#: class in a log line are "pinned to each other on purpose"; two genuinely
+#: different operator faults sharing one class broke that pin. ⛔ Whatever the
+#: source, these stay CONSTANTS — no env-var VALUE may ever enter a kind.
+KIND_CREDENTIALS_NOT_CONFIGURED: Final[str] = "credentials_not_configured"
+KIND_GATEWAY_NOT_CONFIGURED: Final[str] = "gateway_not_configured"
 
 #: ⭐ The close that is NOT a measurement. A row closed under this kind carries
 #: `close_is_measured: false`, and a successor computing lifetimes filters it out.

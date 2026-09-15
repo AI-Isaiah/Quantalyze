@@ -1030,6 +1030,18 @@ async def test_a_SUPERSEDED_close_carries_the_error_status_REGARDLESS_of_state(
         # introduced rather than left to drift the same way.
         pytest.param(_DISABLED_READING, "kill switch off", id="disabled"),
         pytest.param(_TICK_DEADLINE_READING, "tick deadline", id="tick-deadline"),
+        # ⛔ IN-07 (round 2) — the split successors of the old
+        # `KIND_NOT_CONFIGURED`.
+        pytest.param(
+            (mt5_session_episodes.KIND_CREDENTIALS_NOT_CONFIGURED, None),
+            "credentials not configured",
+            id="credentials-not-configured",
+        ),
+        pytest.param(
+            (mt5_session_episodes.KIND_GATEWAY_NOT_CONFIGURED, None),
+            "gateway not configured",
+            id="gateway-not-configured",
+        ),
     ],
 )
 async def test_a_reading_that_MEASURED_NOTHING_writes_nothing_and_closes_nothing(

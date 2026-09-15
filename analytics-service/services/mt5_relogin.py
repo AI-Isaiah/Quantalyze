@@ -73,11 +73,12 @@ from services.mt5_session_episodes import (
     KIND_BUDGET_ABANDONED,
     KIND_BUSY_SKIP,
     KIND_CREDENTIAL_REFUSED,
+    KIND_CREDENTIALS_NOT_CONFIGURED,
+    KIND_GATEWAY_NOT_CONFIGURED,
     KIND_HEAL_SENT_IPC_FAULT_ON_REPROBE,
     KIND_HEALED,
     KIND_IPC_FAULT,
     KIND_NO_AUTHORIZED_ACCOUNT,
-    KIND_NOT_CONFIGURED,
     KIND_STILL_UNAUTHORIZED,
     HealOutcome,
     record_mt5_heal_outcome,
@@ -952,15 +953,26 @@ async def heal_mt5_terminal_session(
             # escalation — which is the control for exactly this: a Railway
             # variable that was never set must not read byte-identical in the
             # logs to a monitor that has found the session healthy forever.
+            # ⛔ IN-07 (round 2) — `KIND_CREDENTIALS_NOT_CONFIGURED`, not the
+            # gateway arm's kind: the throttled log line names WHICH variable
+            # once, but the recurring per-tick reading is this row's only
+            # OTHER evidence, and it must say which check refused.
             await record_mt5_session_reading(
-                KIND_NOT_CONFIGURED, None, source=source, poll_interval_s=poll_interval_s
+                KIND_CREDENTIALS_NOT_CONFIGURED,
+                None,
+                source=source,
+                poll_interval_s=poll_interval_s,
             )
             return
         endpoint = read_env_gateway_endpoint()
         if endpoint is None:
-            # ⛔ WR-03 — same reasoning as the credentials arm above.
+            # ⛔ WR-03 / IN-07 (round 2) — same reasoning as the credentials
+            # arm above, `KIND_GATEWAY_NOT_CONFIGURED` for this one.
             await record_mt5_session_reading(
-                KIND_NOT_CONFIGURED, None, source=source, poll_interval_s=poll_interval_s
+                KIND_GATEWAY_NOT_CONFIGURED,
+                None,
+                source=source,
+                poll_interval_s=poll_interval_s,
             )
             return
 
