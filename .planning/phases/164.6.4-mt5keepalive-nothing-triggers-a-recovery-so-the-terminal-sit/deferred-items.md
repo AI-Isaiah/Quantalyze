@@ -34,7 +34,26 @@ POST-DEPLOY by construction and all carried in `164.6.4-02-SUMMARY.md` under *Ou
 2. Assumption A2 — the gateway's rpyc thread counter across two prober runs several hours apart.
 3. Criterion 2's cross-check against the independent hourly prod-prober.
 
-**Destination:** needs a named phase via `/gsd-phase --edit`. ⛔ Do not leave it as prose.
+**✅ RESOLVED 2026-09-15 — IN PLACE, and NOT routed to a phase.**
+
+⚠️ **The two claims above are FALSE at HEAD and are kept only as lineage.** The ledger no longer
+refuses appends, and this item no longer needs a destination.
+
+**What the condition actually was:** an exact SWAP between the rendered table and the fenced JSON,
+and each row's own CONTENT named the truth. Row 25's JSON said `open` with no disposition while the
+table carried the evidence (VAC-04 executed on PR #756, run 34146946050, head 7c9aea64) — the JSON
+was stale. Row 37's JSON said `fixed`, matching its own "⭐ CLOSED 2026-09-06" text, while the table
+said `open` — the table was stale. Cause: a HAND-EDITED rendered table, which the tool's own error
+message forbids. Repaired by editing the fenced JSON (the sanctioned path) and re-rendering the two
+rows from it; counts RECOMPUTED from the entries rather than hand-set (open 40⇒39, fixed 10⇒11).
+
+**The three entries this section was holding are now IN the ledger** — rows **51 (A4)**, **52 (A2)**
+and **53 (criterion 2's cross-check)**. ⭐ The successful append is itself the proof: the writer
+validates table/JSON agreement before writing and refuses otherwise.
+
+⛔ **Why this was NOT given a phase.** Founder rule, 2026-09-15: only DATA-INTEGRITY or
+USER-FACING items may be deferred at all. This was tooling — so it was fix-or-drop, and it got
+fixed. Do not route a resolved tooling condition to a successor phase.
 
 ---
 
