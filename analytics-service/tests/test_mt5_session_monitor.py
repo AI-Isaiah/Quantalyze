@@ -1201,20 +1201,31 @@ def _loop_survival_defects(source: str) -> list[str]:
             continue
 
         for handler in stmt.handlers:
+            # ⛔ WR-05 — `Return`/`Continue` WIDEN THE SAME SCAN, not a second
+            # one. `return` in a per-tick handler ends `mt5_session_monitor_loop`
+            # for the life of the process — the exact silent death this
+            # predicate is named for, with P-outer never entered so nothing
+            # logs. `continue` in the sleep handler skips the wait it just
+            # failed on and produces the hot loop the handler-order comment is
+            # written against. Both are escape routes `ast.Break`/`ast.Raise`
+            # alone cannot see, and this is the ONLY control for the property.
             escapes = sorted(
                 {
                     type(node).__name__
                     for statement in handler.body
                     for node in ast.walk(statement)
-                    if isinstance(node, (ast.Break, ast.Raise))
+                    if isinstance(
+                        node, (ast.Break, ast.Raise, ast.Return, ast.Continue)
+                    )
                 }
             )
             if escapes:
                 defects.append(
                     f"a per-tick handler (`except {_handler_type(handler)}`) "
-                    f"contains {escapes} — a handler that `break`s or re-`raise`s "
-                    "ENDS THE LOOP, which is the keepalive dying silently on tick "
-                    "3 behind a green worker"
+                    f"contains {escapes} — a handler that `break`s, `return`s, "
+                    "`continue`s or re-`raise`s ENDS OR CORRUPTS THE LOOP, which "
+                    "is the keepalive dying silently (or spinning hot) on tick 3 "
+                    "behind a green worker"
                 )
 
         final = stmt.handlers[-1]
@@ -1368,6 +1379,29 @@ _LOOP_SURVIVAL_MUTANTS: Final[dict[str, tuple[str, str]]] = {
         "                    logger.error(\n"
         '                        "mt5 session monitor: a tick escaped its own '
         'guard — the "',
+    ),
+    # ⛔ WR-05 — THE TWO ESCAPE ROUTES `ast.Break`/`ast.Raise` ALONE CANNOT SEE.
+    "per-tick-handler-RETURNS": (
+        "                try:\n"
+        "                    logger.error(\n"
+        '                        "mt5 session monitor: a tick escaped its own '
+        'guard — the "',
+        "                try:\n"
+        "                    return\n"
+        "                    logger.error(\n"
+        '                        "mt5 session monitor: a tick escaped its own '
+        'guard — the "',
+    ),
+    "sleep-handler-CONTINUES": (
+        "                try:\n"
+        "                    logger.error(\n"
+        '                        "mt5 session monitor: the interval wait failed '
+        '— the LOOP "',
+        "                try:\n"
+        "                    continue\n"
+        "                    logger.error(\n"
+        '                        "mt5 session monitor: the interval wait failed '
+        '— the LOOP "',
     ),
     # (4)(5)(6) the three handler-type mutants — ONE narrowing and TWO widenings.
     "per-tick-handler-NARROWED-to-ValueError": (
