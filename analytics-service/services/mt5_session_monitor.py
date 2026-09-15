@@ -63,6 +63,7 @@ from services.closed_sets import mt5_enabled_server
 from services.mt5_relogin import (
     _MT5_ENABLED_ENV_NAME,
     _MT5_RELOGIN_BUDGET_CEILING_S,
+    _MT5_RELOGIN_LEASE_WAIT_CEILING_S,
     _env_float,
     _log_configuration_fault_once,
     HEAL_SOURCE_SESSION_MONITOR,
@@ -89,12 +90,25 @@ MT5_SESSION_POLL_INTERVAL_ENV: Final[str] = "MT5_SESSION_POLL_INTERVAL_S"
 # THE CADENCE, DERIVED SO A READER CAN CHECK IT RATHER THAN TRUST IT. ⛔ NO
 # SESSION-LIFETIME OBSERVATION ENTERS ANY OF THESE THREE NUMBERS.
 #
-#   FLOOR = the heal's DECLARED BUDGET CEILING. A tick must never still be
-#     running when the next one starts, or the loop would overlap itself against
-#     a shared terminal. Taking the heal's own ceiling makes that structural: the
-#     slowest tick the heal permits itself still finishes inside one interval, and
-#     a retune of the budget ceiling carries through here rather than silently
-#     invalidating this bound.
+#   FLOOR = the heal's DECLARED BUDGET CEILING **plus its bounded lease-acquire
+#     CEILING** (WR-08, round 2). A tick must never still be running when the
+#     next one starts, or the loop would overlap itself against a shared
+#     terminal — but a tick's wall-clock cost is not the budget alone: it is
+#     `_relogin_lease_wait_s()` (bounded acquire) PLUS `_relogin_budget_s()`
+#     (bounded operation). ⛔ The budget bounds only the `to_thread` body; the
+#     acquire happens BEFORE it. A floor equal to the budget ceiling alone let
+#     this tick's own `wait_for` (WR-06) pre-empt the heal's own
+#     `except asyncio.TimeoutError` arm and its `budget_abandoned` reading —
+#     the ONE outcome the heal's own docstring calls "the outcome that leaves
+#     the SYSTEM in a state nobody measured" — turning a COUNTED exit into
+#     this tick's uncounted-until-WR-07 one. Summing both ceilings makes the
+#     bound structural: the slowest tick the heal permits itself (acquire AND
+#     operate) still finishes inside one interval, and a retune of either
+#     ceiling carries through here rather than silently invalidating this
+#     bound. It is also what makes WR-02's "the boot heal owns the boot
+#     window uncontested" true BY CONSTRUCTION rather than only for some
+#     configurations: `interval >= floor >= actual_lease_wait +
+#     actual_budget` holds for every value each knob's own window admits.
 #
 #   CEILING = 3600 s, the cadence of the independent hourly prod-prober. At or
 #     above it this loop measures nothing that instrument does not already
@@ -110,7 +124,9 @@ MT5_SESSION_POLL_INTERVAL_ENV: Final[str] = "MT5_SESSION_POLL_INTERVAL_S"
 #     pathological case where every tick both times out AND heals, and roughly one
 #     round-trip in the overwhelmingly common already-authorized case.
 # --------------------------------------------------------------------------- #
-_MT5_SESSION_POLL_INTERVAL_FLOOR_S: Final[float] = _MT5_RELOGIN_BUDGET_CEILING_S
+_MT5_SESSION_POLL_INTERVAL_FLOOR_S: Final[float] = (
+    _MT5_RELOGIN_BUDGET_CEILING_S + _MT5_RELOGIN_LEASE_WAIT_CEILING_S
+)
 _MT5_SESSION_POLL_INTERVAL_CEILING_S: Final[float] = 3600.0
 _MT5_SESSION_POLL_INTERVAL_DEFAULT_S: Final[float] = 600.0
 
@@ -295,7 +311,14 @@ async def mt5_session_monitor_loop() -> None:
             # inside the lease-acquire window the loser probes the terminal a
             # SECOND time for no information. Waiting first lets the boot heal
             # own the boot window uncontested; the monitor owns everything after
-            # it. ⚠️ THE HOUSE SLEEP IDIOM, never a bare `asyncio.sleep`:
+            # it. ⚠️ WR-08 (round 2) — "UNCONTESTED" HOLDS BY CONSTRUCTION,
+            # NOT ONLY FOR SOME CONFIGURATIONS: it depends on
+            # `interval >= _relogin_lease_wait_s() + _relogin_budget_s()`, and
+            # `_MT5_SESSION_POLL_INTERVAL_FLOOR_S`'s own derivation (see above)
+            # is exactly that sum's CEILING, so every value the cadence window
+            # admits satisfies it. Before that fix the floor was the budget
+            # ceiling alone, and at the floor with the budget at ITS ceiling the
+            # claim was false. ⚠️ THE HOUSE SLEEP IDIOM, never a bare `asyncio.sleep`:
             # `lifespan`'s shutdown gather waits 10 s and then CANCELS, so a bare
             # sleep on a ten-minute cadence would be force-cancelled on every
             # deploy and the cancellation logged as a failure to exit cleanly.

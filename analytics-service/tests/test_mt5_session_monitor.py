@@ -618,12 +618,20 @@ def test_EXACTLY_ONE_cadence_knob_exists_and_it_is_the_DETECTION_POLL_INTERVAL(
     budget ceiling carries through instead of silently invalidating the floor.
     """
     assert monitor.MT5_SESSION_POLL_INTERVAL_ENV == "MT5_SESSION_POLL_INTERVAL_S"
+    # ⛔ WR-08 (round 2) — THE FLOOR SUMS TWO CEILINGS, NOT ONE. A tick's
+    # wall-clock cost is the bounded lease ACQUIRE plus the bounded heal
+    # OPERATION; a floor equal to the budget ceiling alone let this tick's
+    # own outer deadline (WR-06) pre-empt the heal's abandoned-thread arm at
+    # the floor with the budget at its own ceiling.
     assert monitor._MT5_SESSION_POLL_INTERVAL_FLOOR_S == (
         mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S
+        + mt5_relogin._MT5_RELOGIN_LEASE_WAIT_CEILING_S
     ), (
-        "the FLOOR is the heal's DECLARED BUDGET CEILING, so a tick can never "
-        "still be running when the next one starts and the loop cannot overlap "
-        "itself against the ONE shared terminal"
+        "the FLOOR is the heal's DECLARED BUDGET CEILING plus its bounded "
+        "LEASE-WAIT CEILING, so a tick can never still be running when the "
+        "next one starts and the loop cannot overlap itself against the ONE "
+        "shared terminal — AND so this tick's own outer deadline can never "
+        "pre-empt the heal's own abandoned-thread arm"
     )
     # ⛔ RE-POINTED AT THE DERIVATION (plan 03, task 2(b)). This line restated the
     # literal `3600.0`, which made the test a SECOND SOURCE OF TRUTH for a number
@@ -639,6 +647,30 @@ def test_EXACTLY_ONE_cadence_knob_exists_and_it_is_the_DETECTION_POLL_INTERVAL(
     ceiling = monitor._MT5_SESSION_POLL_INTERVAL_CEILING_S
     default = monitor._MT5_SESSION_POLL_INTERVAL_DEFAULT_S
     assert floor <= default <= ceiling, (floor, default, ceiling)
+
+
+def test_the_FLOOR_bounds_the_heals_WORST_CASE_wall_clock_not_the_budget_alone() -> None:
+    """⛔ WR-08 (round 2). The heal's worst-case wall clock is the bounded lease
+    ACQUIRE plus the bounded OPERATION — the budget bounds only the `to_thread`
+    body, and the acquire happens before it. At the OLD floor (the budget
+    ceiling alone) a heal whose lease-wait AND budget both sit at THEIR OWN
+    ceiling — both legal, independently-validated configurations — costs MORE
+    than one interval, so this tick's own outer `wait_for` (WR-06) pre-empts
+    the heal's `except asyncio.TimeoutError` arm and its `budget_abandoned`
+    reading before either can fire — turning a COUNTED exit into an uncounted
+    one. Neutering the floor back to the budget ceiling alone (300.0) reds this
+    against the lease-wait ceiling's default (30.0): 300.0 < 330.0.
+    """
+    worst_case_heal_wall_clock_s = (
+        mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S
+        + mt5_relogin._MT5_RELOGIN_LEASE_WAIT_CEILING_S
+    )
+    assert monitor._MT5_SESSION_POLL_INTERVAL_FLOOR_S >= worst_case_heal_wall_clock_s, (
+        f"the floor ({monitor._MT5_SESSION_POLL_INTERVAL_FLOOR_S}s) is below the "
+        f"heal's own worst-case wall clock ({worst_case_heal_wall_clock_s}s) — a "
+        "tick at the floor with the budget at ITS ceiling pre-empts the heal's "
+        "own abandoned-thread ERROR arm before it can fire"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1971,11 +2003,13 @@ def test_the_declared_cadence_BOUNDS_are_DERIVATIONS_and_not_free_numbers() -> N
     that each bound still equals the quantity it descends FROM, recomputed rather
     than restated:
 
-      * FLOOR = the heal's DECLARED BUDGET CEILING, taken BY SYMBOL. A tick must
-        never still be running when the next one starts, or the loop overlaps
-        itself against the ONE shared terminal — and a retune of the budget
-        ceiling must carry through here rather than silently invalidating this
-        bound.
+      * FLOOR = the heal's DECLARED BUDGET CEILING plus its bounded LEASE-WAIT
+        CEILING (WR-08, round 2), both taken BY SYMBOL. A tick must never still
+        be running when the next one starts, or the loop overlaps itself
+        against the ONE shared terminal — and a retune of EITHER ceiling must
+        carry through here rather than silently invalidating this bound. The
+        budget alone bounds only the heal's `to_thread` OPERATION; the bounded
+        ACQUIRE happens before it and is a separate wall-clock cost.
       * CEILING = the independent hourly prod-prober's cadence, read from the
         workflow's own `schedule:`. At or above it this loop measures nothing that
         instrument does not already measure, so it would add contention without
@@ -1989,15 +2023,16 @@ def test_the_declared_cadence_BOUNDS_are_DERIVATIONS_and_not_free_numbers() -> N
     why choosing this cadence does not violate criterion 1, and it is asserted
     rather than asserted-about by the keepalive fence above.
     """
-    assert (
-        monitor._MT5_SESSION_POLL_INTERVAL_FLOOR_S
-        == mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S
+    assert monitor._MT5_SESSION_POLL_INTERVAL_FLOOR_S == (
+        mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S
+        + mt5_relogin._MT5_RELOGIN_LEASE_WAIT_CEILING_S
     ), (
-        "the cadence FLOOR is no longer the heal's DECLARED BUDGET CEILING "
-        f"({monitor._MT5_SESSION_POLL_INTERVAL_FLOOR_S} vs "
-        f"{mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S}) — it has become a free "
+        "the cadence FLOOR is no longer the heal's DECLARED BUDGET CEILING plus "
+        f"its LEASE-WAIT CEILING ({monitor._MT5_SESSION_POLL_INTERVAL_FLOOR_S} vs "
+        f"{mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S} + "
+        f"{mt5_relogin._MT5_RELOGIN_LEASE_WAIT_CEILING_S}) — it has become a free "
         "number, and the loop can now be tuned to overlap itself against the ONE "
-        "shared terminal"
+        "shared terminal, or to pre-empt the heal's own abandoned-thread arm"
     )
     assert monitor._MT5_SESSION_POLL_INTERVAL_CEILING_S == _prod_prober_cadence_s(), (
         "the cadence CEILING is no longer the independent hourly prober's cadence "
