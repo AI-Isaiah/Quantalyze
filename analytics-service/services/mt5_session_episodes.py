@@ -642,10 +642,10 @@ async def _close_row(
     return bool(matched)
 
 
-async def _confirm_row(row: dict[str, Any], *, source: str) -> None:
+async def _confirm_row(row: dict[str, Any], *, source: str) -> bool:
     """UPDATE an open row's ``last_confirmed_at`` — the per-tick evidence for
     a reading that MATCHED the open state, in place of writing nothing at
-    all.
+    all. Returns whether THIS call's compare-and-set won.
 
     ⛔ WR-09 (round 2, HIGH-2 STEADY STATE) — THIS DOES NOT ADD A ROW. The
     sink stays per-TRANSITION for INSERTs, exactly as before: at a ten-minute
@@ -659,13 +659,27 @@ async def _confirm_row(row: dict[str, Any], *, source: str) -> None:
     "when did this instrument last actually look?" durably and queryably
     without adding a row.
 
-    ⛔ NEVER RAISES from the caller's perspective — a lost CAS here (the row
-    was closed by another writer between the caller's read and this UPDATE)
-    is a genuine no-op with no consequence: there is nothing to confirm about
-    a row that no longer represents the live state, and the NEXT reading's
-    own read-then-decide sees the closed row and proceeds normally. Unlike
-    `_close_row`, the caller does not need to distinguish "won" from "lost"
-    here, so this returns nothing.
+    ⚠️ B4 (round 3) — THIS MAKES A DEAD LOOP DISTINGUISHABLE ON INSPECTION,
+    NOT DETECTABLE AUTOMATICALLY. Nothing reads `last_confirmed_at` today,
+    and `latest_cron_success` deliberately does NOT enumerate
+    `MT5_SESSION_EPISODE_CRON_NAME` (D-5) — a stale confirm raises no alert
+    on its own. "Durably and queryably" above means a human or a future
+    successor CAN ask the question by running one; the system does not ask
+    it for them.
+
+    ⭐ B2 (round 3) — THE CAS OUTCOME IS OBSERVED, NOT ASSUMED, COPYING
+    `_close_row`'s OWN PATTERN. A lost CAS here (the row was closed by
+    another writer between the caller's read and this UPDATE) is still a
+    genuine no-op with no consequence for the DATASET — there is nothing to
+    confirm about a row that no longer represents the live state, and the
+    NEXT reading's own read-then-decide sees the closed row and proceeds
+    normally. But it used to be a SILENT no-op, justified only by an
+    inference the code never checked ("the next tick will notice"). Under
+    the two-container Railway overlap this module exists to tolerate,
+    container B can close the row between container A's read and A's
+    confirm, and a measured reading then produced no row, no confirmation
+    and no log line at all — while `_close_row`, one function below, already
+    logs a WARNING naming exactly that race. This mirrors it.
     """
     supabase = get_supabase()
     previous = row.get("metadata")
@@ -685,17 +699,38 @@ async def _confirm_row(row: dict[str, Any], *, source: str) -> None:
     def _update() -> Any:
         return (
             supabase.table("cron_runs")
-            .update({"metadata": metadata})
+            # ⭐ B2 (round 3) — `count="exact"`, COPYING `_close_row`'s OWN
+            # REQUEST: the CAS outcome must be READ, never assumed, and
+            # `count` is the request's own answer.
+            .update({"metadata": metadata}, count=CountMethod.exact)
             .eq("id", row.get("id"))
-            # ⛔ Not a CAS the caller reads an outcome from (see docstring),
-            # but still scoped to `running` so a row closed between the
-            # caller's read and this write is left untouched rather than
-            # having a confirmation stamped onto its already-closed metadata.
+            # ⛔ THE COMPARE-AND-SET, exactly as `_close_row`'s: scoped to
+            # `running` so a row closed between the caller's read and this
+            # write is left untouched rather than having a confirmation
+            # stamped onto its already-closed metadata.
             .eq("status", "running")
             .execute()
         )
 
-    await db_execute(_update)
+    response = await db_execute(_update)
+    # ⭐ B2 (round 3) — READ THE COUNT, FALL BACK TO ROWS, COPYING
+    # `_close_row`'s OWN GUARD: `isinstance(matched, bool)` is excluded
+    # because `isinstance(False, int)` is True in Python and a stray `False`
+    # must not masquerade as `count=0`.
+    matched = getattr(response, "count", None)
+    if not isinstance(matched, int) or isinstance(matched, bool):
+        matched = len(rows(response))
+    won = bool(matched)
+    if not won:
+        logger.warning(
+            "mt5 session episode: the confirm lost its compare-and-set — "
+            "another writer closed this row first (id=%s state=%s). No "
+            "confirmation was stamped; the next reading's own "
+            "read-then-decide will see the closed row and proceed normally.",
+            row.get("id"),
+            metadata.get("state"),
+        )
+    return won
 
 
 async def _open_row(reading: SessionReading, *, source: str,

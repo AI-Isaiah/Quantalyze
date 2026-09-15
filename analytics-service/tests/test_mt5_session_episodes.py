@@ -904,6 +904,56 @@ async def test_a_LOST_compare_and_set_on_the_MEASURED_close_does_not_claim_one(
     ), [r.getMessage() for r in _warnings(caplog)]
 
 
+async def test_WR_15_a_confirm_that_LOST_its_race_leaves_the_SETTLED_row_untouched(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ WR-15 (round 3). `_confirm_row`'s `.eq("status", "running")` is the
+    ONE thing preventing a confirm from stamping an already-settled episode,
+    and until this fix nothing drove the interleave that would prove it —
+    deleting that line left all 356 MT5 tests green (MEASURED in round-3
+    review). Container A's own read (inside `record_mt5_session_reading`)
+    sees the row `running`, but container B closes it genuinely in the
+    window between A's READ and A's own UPDATE — the same interleave
+    `test_a_LOST_compare_and_set_on_the_MEASURED_close_does_not_claim_one`
+    drives for a close, reused here (`_OrderedCronRuns.after_select`) for the
+    confirm path. A confirm that ignored the predicate would stamp
+    `last_confirmed_at` LATER than `completed_at` on a SETTLED episode —
+    precisely the "resurrect/extend" shape a successor computing lifetimes
+    has no way to detect.
+    """
+    fake = _OrderedCronRuns()
+    _install_sink(monkeypatch, fake)
+    mt5_session_episodes._reset_session_episode_state_for_tests()
+
+    seeded = _seed_open_row(fake, mt5_session_episodes.STATE_AUTHORIZED, id="live")
+
+    def _container_a_closes_it_between_our_read_and_our_confirm() -> None:
+        seeded["status"] = "ok"
+        seeded["completed_at"] = "2026-09-15T02:00:00+00:00"
+
+    fake.after_select = _container_a_closes_it_between_our_read_and_our_confirm
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        await _observe(_AUTHORIZED_READING)
+
+    meta = fake.metadata(seeded)
+    assert "last_confirmed_at" not in meta, (
+        "a confirm stamped a settled episode — its `last_confirmed_at` would "
+        "post-date its own `completed_at`"
+    )
+    assert "last_confirmed_by" not in meta
+    assert seeded["completed_at"] == "2026-09-15T02:00:00+00:00", (
+        "the settled row's own completion time was overwritten by a lost confirm"
+    )
+    assert seeded["status"] == "ok"
+    # ⭐ B2 (round 3) — THE LOST CAS IS OBSERVED, NOT SILENT: `_confirm_row`
+    # now logs a WARNING naming the race, mirroring `_close_row`'s own.
+    assert any(
+        "confirm lost its compare-and-set" in r.getMessage()
+        for r in _warnings(caplog)
+    ), [r.getMessage() for r in _warnings(caplog)]
+
+
 async def test_WR_12_a_WON_compare_and_set_is_read_from_COUNT_not_inferred_from_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
