@@ -77,6 +77,7 @@ from services.mt5_session_episodes import (
     KIND_HEALED,
     KIND_IPC_FAULT,
     KIND_NO_AUTHORIZED_ACCOUNT,
+    KIND_NOT_CONFIGURED,
     KIND_STILL_UNAUTHORIZED,
     HealOutcome,
     record_mt5_heal_outcome,
@@ -944,9 +945,23 @@ async def heal_mt5_terminal_session(
 
         credentials = read_env_mt5_credentials()
         if credentials is None:
+            # ⛔ WR-03 — COUNTED, not merely logged-once (`read_env_mt5_
+            # credentials` already did the once-per-process log via D-02). On
+            # the session monitor's cadence this path is reachable on EVERY
+            # tick, and an uncounted refusal cannot reach the blind-run
+            # escalation — which is the control for exactly this: a Railway
+            # variable that was never set must not read byte-identical in the
+            # logs to a monitor that has found the session healthy forever.
+            await record_mt5_session_reading(
+                KIND_NOT_CONFIGURED, None, source=source, poll_interval_s=poll_interval_s
+            )
             return
         endpoint = read_env_gateway_endpoint()
         if endpoint is None:
+            # ⛔ WR-03 — same reasoning as the credentials arm above.
+            await record_mt5_session_reading(
+                KIND_NOT_CONFIGURED, None, source=source, poll_interval_s=poll_interval_s
+            )
             return
 
         login, password, server = credentials

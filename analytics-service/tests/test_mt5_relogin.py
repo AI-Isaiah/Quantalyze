@@ -632,6 +632,49 @@ async def test_an_unusable_gateway_endpoint_logs_once_and_constructs_nothing(
     assert constructions == []
 
 
+@pytest.mark.parametrize(
+    "provoke",
+    [
+        pytest.param(_exit_credentials_absent, id="credentials-absent"),
+        pytest.param(_exit_credentials_invalid, id="credentials-invalid"),
+        pytest.param(_exit_gateway_absent, id="gateway-absent"),
+        pytest.param(_exit_gateway_port_not_numeric, id="gateway-port-not-numeric"),
+    ],
+)
+async def test_a_configuration_refusal_is_COUNTED_as_a_not_measured_reading(
+    monkeypatch: pytest.MonkeyPatch, sink: "_FakeCronRuns", provoke
+) -> None:
+    """⛔ WR-03. `_log_configuration_fault_once` throttles each of these arms to
+    ONE line per process — invisible after the first tick on the session
+    monitor's cadence. The heal must ALSO record the refusal as a
+    `not_measured` reading, so the SAME blind-run counter and escalation that
+    already covers `busy_skip`/`budget_abandoned`/the `code=0` sentinel also
+    covers a Railway variable that was never set, or a triple that stopped
+    parsing.
+    """
+    _set_full_env(monkeypatch)
+    provoke(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+
+    for _ in range(3):
+        assert (
+            await mt5_relogin.heal_mt5_terminal_session(
+                source=mt5_relogin.HEAL_SOURCE_SESSION_MONITOR,
+                poll_interval_s=600.0,
+            )
+            is None
+        )
+
+    assert mt5_session_episodes._CONSECUTIVE_NOT_MEASURED_READINGS == 3, (
+        "the configuration-refusal path did not extend the blind-run counter — "
+        "the throttled log line is the ONLY evidence it left, and it fires "
+        "once per process"
+    )
+    assert sink.rows == [], (
+        "a not_measured reading must write NOTHING to the durable sink"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # ⛔ THE TWO TUNING KNOBS — CR-02 / WR-06. A TYPO MUST NOT TAKE THE SERVICE DOWN,
 # AND A PARSEABLE-BUT-ABSURD VALUE MUST NOT DISABLE THE HEAL OR STARVE THE BATCH.

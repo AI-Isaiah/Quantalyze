@@ -141,6 +141,20 @@ KIND_STILL_UNAUTHORIZED: Final[str] = "still_unauthorized"
 KIND_BUSY_SKIP: Final[str] = "busy_skip"
 KIND_BUDGET_ABANDONED: Final[str] = "budget_abandoned"
 
+#: ⭐ WR-03 — CONFIGURATION REFUSALS ARE COUNTED, not merely logged-once. Four
+#: paths used to return before any reading was recorded — the monitor's own
+#: kill-switch arm, the heal's credentials-absent/invalid arms, and its
+#: gateway-absent/port-not-numeric arms — and because `_log_configuration_
+#: fault_once` throttles to ONE line per process, a monitor that had measured
+#: NOTHING for days was byte-identical in the logs to one that had found the
+#: session healthy every tick. Recording these as `not_measured` readings puts
+#: them on the SAME counter and the SAME blind-run escalation that already
+#: covers `busy_skip`/`budget_abandoned`/the `code=0` sentinel. ⛔ Never reuse
+#: `KIND_BUSY_SKIP` here — the class in a row and the class in a log line are
+#: pinned to each other on purpose.
+KIND_DISABLED: Final[str] = "disabled"
+KIND_NOT_CONFIGURED: Final[str] = "not_configured"
+
 #: ⭐ The close that is NOT a measurement. A row closed under this kind carries
 #: `close_is_measured: false`, and a successor computing lifetimes filters it out.
 KIND_SUPERSEDED: Final[str] = "superseded"

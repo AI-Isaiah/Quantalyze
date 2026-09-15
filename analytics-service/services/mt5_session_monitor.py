@@ -69,6 +69,13 @@ from services.mt5_relogin import (
     heal_mt5_terminal_session,
 )
 
+# ⛔ WR-03 — the disabled-switch reading, COUNTED rather than merely
+# logged-once. `_log_configuration_fault_once` throttles to ONE line per
+# process, which is invisible after the first tick; recording the refusal as a
+# `not_measured` reading puts it on the SAME blind-run counter and escalation
+# that already covers `busy_skip`/`budget_abandoned`/the `code=0` sentinel.
+from services.mt5_session_episodes import KIND_DISABLED, record_mt5_session_reading
+
 logger = logging.getLogger("quantalyze.analytics.mt5_session_monitor")
 
 #: The ONE new knob this phase adds. ⛔ It is the DETECTION POLL INTERVAL.
@@ -164,6 +171,19 @@ async def run_mt5_session_monitor_tick() -> None:
                 "The loop keeps running, so flipping the variable takes effect "
                 "on the next tick without a redeploy.",
                 _MT5_ENABLED_ENV_NAME,
+            )
+            # ⛔ WR-03 — COUNTED, not merely logged-once. The throttled line
+            # above is invisible after the FIRST tick, so a kill switch that
+            # was flipped and forgotten would otherwise be indistinguishable
+            # in the logs from a monitor that has found the session healthy
+            # every tick. This reading is honestly `not_measured`; the point
+            # is that it is counted, so the same blind-run escalation covers
+            # it.
+            await record_mt5_session_reading(
+                KIND_DISABLED,
+                None,
+                source=HEAL_SOURCE_SESSION_MONITOR,
+                poll_interval_s=session_poll_interval_s(),
             )
             return
         # ⛔ WR-06 — READ ONCE, and used for BOTH the heal's `poll_interval_s`

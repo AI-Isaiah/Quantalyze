@@ -405,6 +405,31 @@ async def test_A_RAISING_TICK_NEVER_REACHES_THE_CRASH_HANDLER(
     )
 
 
+async def test_the_disabled_kill_switch_reading_is_COUNTED_not_merely_logged(
+    monkeypatch: pytest.MonkeyPatch, sink: _FakeCronRuns
+) -> None:
+    """⛔ WR-03. `_log_configuration_fault_once` throttles the disabled-switch
+    log line to ONE per process — invisible after the first tick. The tick must
+    ALSO record the refusal as a `not_measured` reading, so the SAME blind-run
+    counter and escalation that already covers `busy_skip`/`budget_abandoned`/
+    the `code=0` sentinel also covers a kill switch flipped off and forgotten.
+    """
+    monkeypatch.setenv("MT5_ENABLED", "false")
+
+    for _ in range(3):
+        await monitor.run_mt5_session_monitor_tick()
+
+    assert mt5_session_episodes._CONSECUTIVE_NOT_MEASURED_READINGS == 3, (
+        "the disabled-switch tick did not extend the blind-run counter — the "
+        "throttled log line is the ONLY evidence it left, and that line fires "
+        "once per process"
+    )
+    assert sink.rows == [], (
+        "a not_measured reading must write NOTHING to the durable sink — only "
+        "the in-process counter and the eventual log LEVEL are affected"
+    )
+
+
 async def test_the_first_ITERATION_waits_BEFORE_ticking_so_the_boot_heal_owns_the_window(
     monkeypatch: pytest.MonkeyPatch, shutdown: asyncio.Event
 ) -> None:
