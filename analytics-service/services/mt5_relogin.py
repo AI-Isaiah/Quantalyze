@@ -346,6 +346,20 @@ def _reset_relogin_log_throttle_for_tests() -> None:
 def _log_configuration_fault_once(reason: str, message: str, *args: object) -> None:
     """Emit ``message`` at WARNING at most once per process per ``reason``.
 
+    ⛔ **ITS CALLERS' SENTENCES NAME THE SESSION PATH, NOT A BOOT HEAL** (Phase
+    164.6.4 plan 02). The SIX messages emitted by this module's module-scope
+    configuration helpers — the two ``_env_float`` fault messages, the two
+    credential-read messages and the two gateway-endpoint messages — all began
+    "mt5 boot heal:". They were TRUE while the boot was the only caller; the
+    session monitor makes them false for half the traffic, and ``_env_float`` is
+    now reached from the monitor's OWN cadence knob. They describe CONFIGURATION
+    FAULTS OF THE MT5 SESSION PATH, which is what they are, and the prefix now
+    says so. ⛔ The SENTENCE was corrected, never the BEHAVIOUR: the throttle, the
+    names-only rule (T-164.6.2-12) and the fault classes are byte-unchanged.
+    ⚠️ MEASURED, and it corrects the plan's own arithmetic: there are SIX such
+    messages, not seven — the port message IS one of the two gateway-endpoint
+    messages rather than a seventh beside them.
+
     ⛔ LOG-AND-PROCEED, never silence (the posture `main_worker.daily_enqueue_loop`'s
     startup gate already uses in this repo's own voice). ⛔ Do NOT copy
     `sentry_init.init_sentry`'s silent early return: silence is the defect class
@@ -392,9 +406,9 @@ def _env_float(name: str, default: float, *, floor: float, ceiling: float) -> fl
     except ValueError:
         _log_configuration_fault_once(
             f"{name}_not_numeric",
-            "mt5 boot heal: %s is set but is not a number; falling back to the "
+            "mt5 session path: %s is set but is not a number; falling back to the "
             "derived default. This is a SERVER misconfiguration, never a "
-            "credential failure — the heal still runs (D-02).",
+            "credential failure — the session path still runs (D-02).",
             name,
         )
         return default
@@ -415,13 +429,21 @@ def _env_float(name: str, default: float, *, floor: float, ceiling: float) -> fl
     if not math.isfinite(value) or not effective_floor <= value <= effective_ceiling:
         _log_configuration_fault_once(
             f"{name}_out_of_range",
-            "mt5 boot heal: %s is set to a value outside [%s, %s] seconds; "
-            "falling back to the derived default. Below the floor the budget "
-            "expires MID-round-trip and leaves a call in flight against the "
-            "shared terminal on EVERY boot; zero would disable the heal silently "
-            "forever, and an unbounded value would hold the terminal lease while "
-            "the batch derive queues behind it. This is a SERVER "
-            "misconfiguration, never a credential failure (D-02).",
+            # ⛔ THE BODY IS CALLER-NEUTRAL TOO, not merely the prefix (164.6.4
+            # plan 02). It used to describe the BUDGET's specific hazard —
+            # "expires MID-round-trip", "on EVERY boot" — and `_env_float` is now
+            # also the reader for the session monitor's DETECTION POLL CADENCE,
+            # whose out-of-range hazard is the opposite shape (ticks overlapping
+            # each other against the ONE shared terminal). A message naming a
+            # hazard that does not apply to the knob that triggered it misleads
+            # the operator it exists for. The per-knob derivations stay where they
+            # belong, in each constant's own comment.
+            "mt5 session path: %s is set to a value outside [%s, %s] seconds; "
+            "falling back to the derived default. BOTH ends of the window are "
+            "deliberate: below the floor the bound stops being able to do its "
+            "job, and above the ceiling it stops bounding anything. See the "
+            "constant's own derivation for what that means for this knob. This "
+            "is a SERVER misconfiguration, never a credential failure (D-02).",
             name,
             effective_floor,
             effective_ceiling,
@@ -485,10 +507,10 @@ def read_env_mt5_credentials() -> tuple[int, str, str] | None:
     if missing:
         _log_configuration_fault_once(
             "mt5_credentials_absent",
-            "mt5 boot heal: skipped — the broker-session variables are not "
+            "mt5 session path: skipped — the broker-session variables are not "
             "configured: %s. This is a SERVER misconfiguration, never a "
             "credential failure; the terminal keeps whatever session it already "
-            "has and the next boot will try again (D-02).",
+            "has and the next attempt will try again (D-02).",
             ", ".join(missing),
         )
         return None
@@ -497,7 +519,7 @@ def read_env_mt5_credentials() -> tuple[int, str, str] | None:
     except Mt5ValidationError:
         _log_configuration_fault_once(
             "mt5_credentials_invalid",
-            "mt5 boot heal: skipped — the broker-session variables %s are set "
+            "mt5 session path: skipped — the broker-session variables %s are set "
             "but do not form a usable login/password/server triple. This is a "
             "SERVER misconfiguration, never a credential failure (D-02).",
             ", ".join(_MT5_CREDENTIAL_ENV_NAMES),
@@ -521,7 +543,7 @@ def read_env_gateway_endpoint() -> tuple[str, int] | None:
     if missing:
         _log_configuration_fault_once(
             "mt5_gateway_absent",
-            "mt5 boot heal: skipped — the gateway endpoint is not configured: "
+            "mt5 session path: skipped — the gateway endpoint is not configured: "
             "%s. This is a SERVER misconfiguration, never a credential failure.",
             ", ".join(missing),
         )
@@ -531,7 +553,7 @@ def read_env_gateway_endpoint() -> tuple[str, int] | None:
     except ValueError:
         _log_configuration_fault_once(
             "mt5_gateway_port_not_numeric",
-            "mt5 boot heal: skipped — %s is set but is not an integer port. "
+            "mt5 session path: skipped — %s is set but is not an integer port. "
             "This is a SERVER misconfiguration, never a credential failure.",
             _MT5_GATEWAY_ENV_NAMES[1],
         )

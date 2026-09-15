@@ -2223,8 +2223,18 @@ async def test_the_client_is_closed_on_every_path(
 _HEAL_SYMBOL = "heal_mt5_terminal_session"
 
 #: ⛔ HAND-TYPED. MEASURED 2026-09-13 (Phase 164.6.2 plan 02): `main.lifespan`
-#: carried FOUR `create_task` calls before this plan (dispatch_loop, watchdog_loop,
-#: daily_enqueue_loop, healthz_bridge) and carries FIVE after it.
+#: carried FOUR `create_task` calls before that plan (dispatch_loop, watchdog_loop,
+#: daily_enqueue_loop, healthz_bridge) and FIVE after it.
+#:
+#: ⭐ RE-CUT TO 6 ON 2026-09-15 (Phase 164.6.4 plan 02), DELIBERATELY AND IN THE
+#: SAME COMMIT AS THE SIXTH ENTRY. The sixth is `mt5_session_monitor_loop`, the
+#: detection loop criterion 2 requires. This pin RED as soon as `main.py` gained
+#: it — 6 != 5, with its own message saying "Re-cut it deliberately" — and that is
+#: THE PIN WORKING, not a regression. ⛔ It was NOT weakened to `>=`: an inequality
+#: would silently tolerate a seventh task nobody decided on, and clearing a red
+#: gate by relaxing it is this repo's cardinal sin. The MEASURED before/after is
+#: 5 -> 6, and `test_the_criterion_1_predicate_reds_on_a_mutant_with_the_entry_
+#: excised` re-confirms the "falls by exactly one" arithmetic still holds.
 #:
 #: ⭐ THIS IS THE ANTI-VACUITY LEG and it is not decoration. Without it, a
 #: `_heal_task_lines` predicate that silently stopped matching — a renamed symbol,
@@ -2232,7 +2242,7 @@ _HEAL_SYMBOL = "heal_mt5_terminal_session"
 #: would red for the right reason; but a predicate that matched NOTHING AT ALL for
 #: a different reason (a `lifespan` the walk can no longer find) would make BOTH
 #: halves vacuous together. The count is measured independently of the heal's name.
-_LIFESPAN_CREATE_TASK_COUNT_AT_164_6_2 = 5
+_LIFESPAN_CREATE_TASK_COUNT_AT_164_6_2 = 6
 
 
 def _main_source() -> str:
@@ -2283,6 +2293,38 @@ def _heal_task_lines(source: str) -> list[int]:
     return sorted(lines)
 
 
+#: Phase 164.6.4 plan 02 — the SIXTH task's symbol. Pinned by NAME, exactly as
+#: `_HEAL_SYMBOL` is, so removing the wiring reds rather than passing silently.
+_MONITOR_SYMBOL = "mt5_session_monitor_loop"
+
+
+def _monitor_task_lines(source: str) -> list[int]:
+    """Lines of every ``create_task(mt5_session_monitor_loop(...))`` in
+    ``lifespan``.
+
+    BOTH halves at once, for the same reason `_heal_task_lines` requires both: a
+    bare ``await mt5_session_monitor_loop()`` reports ZERO here, which is correct
+    — an inline await of an INFINITE loop would hang uvicorn's startup forever,
+    which is strictly worse than the heal's one-shot version of that mistake.
+    """
+    lines: list[int] = []
+    for node in ast.walk(_lifespan_node(source)):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "create_task"
+        ):
+            continue
+        for arg in node.args:
+            if (
+                isinstance(arg, ast.Call)
+                and isinstance(arg.func, ast.Name)
+                and arg.func.id == _MONITOR_SYMBOL
+            ):
+                lines.append(node.lineno)
+    return sorted(lines)
+
+
 def _create_task_lines(source: str) -> list[int]:
     return sorted(
         node.lineno
@@ -2324,7 +2366,7 @@ def test_CRITERION_1_lifespan_starts_the_heal_exactly_once_as_a_task() -> None:
     tasks = _create_task_lines(source)
     assert len(tasks) == _LIFESPAN_CREATE_TASK_COUNT_AT_164_6_2, (
         f"`main.lifespan` now creates {len(tasks)} tasks; "
-        f"{_LIFESPAN_CREATE_TASK_COUNT_AT_164_6_2} were measured at 164.6.2-02. "
+        f"{_LIFESPAN_CREATE_TASK_COUNT_AT_164_6_2} were measured at 164.6.4-02. "
         f"This count is the ANTI-VACUITY leg: it is measured independently of the "
         f"heal's NAME, so a predicate that silently stopped matching cannot take "
         f"both halves of this pin down together. Re-cut it deliberately."
@@ -2418,6 +2460,122 @@ def test_the_heal_task_is_named_and_tracked_like_the_worker_loops() -> None:
         "the heal's task carries no explicit `name=` — an unnamed task reports as "
         "`Task-N` in the crash handler's log, which is unreadable at 3am."
     )
+
+
+def test_CRITERION_2_lifespan_starts_the_session_monitor_exactly_once_as_a_task() -> None:
+    """⛔ CRITERION 2's WIRING (Phase 164.6.4 plan 02): something in the system
+    NOTICES a lapsed broker session without a human and without waiting on an
+    unrelated restart.
+
+    Zero here means the phase is INERT: the boot heal above fires once at
+    analytics startup, and wave 5 measured that analytics startup is not
+    correlated with the terminal losing its session at all.
+    """
+    source = _main_source()
+    monitor_lines = _monitor_task_lines(source)
+    assert len(monitor_lines) == 1, (
+        f"`main.lifespan` must start {_MONITOR_SYMBOL}() EXACTLY ONCE inside a "
+        f"create_task; found {len(monitor_lines)} at {monitor_lines}. Zero means "
+        f"nothing polls for a lapsed session and the terminal sits dark until an "
+        f"unrelated restart — the measured ≥2h34m window this phase exists to "
+        f"collapse."
+    )
+
+    # ⛔ NEVER awaited inline. The heal's version of this mistake aborts uvicorn
+    # startup; the MONITOR's version is strictly worse — an inline await of an
+    # INFINITE loop never returns, so `lifespan` never reaches its `yield`.
+    awaited = {
+        node.value.func.id
+        for node in ast.walk(_lifespan_node(source))
+        if isinstance(node, ast.Await)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+    }
+    assert _MONITOR_SYMBOL not in awaited, (
+        f"{_MONITOR_SYMBOL} is awaited INLINE in lifespan — it never returns, so "
+        f"`lifespan` would never reach its `yield` and the service would never "
+        f"finish starting."
+    )
+
+
+def test_the_monitor_task_is_named_and_tracked_like_the_worker_loops() -> None:
+    """It joins the EXISTING `tasks` list — the one `_crash_handler` is attached
+    to and the one the shutdown `gather` ranges over.
+
+    ⭐ That is a CONTAINMENT contract, not a crash contract: the loop's own
+    top-level guard is what makes `_crash_handler` INERT for it. Outside the list
+    it would be neither crash-reported nor awaited at shutdown — an orphan whose
+    ten-minute `wait_for` nothing cancels.
+    """
+    source = _main_source()
+    task_lists = [
+        node
+        for node in ast.walk(_lifespan_node(source))
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "tasks" for t in node.targets)
+        and isinstance(node.value, ast.List)
+    ]
+    assert len(task_lists) == 1
+    monitored = [
+        el
+        for el in task_lists[0].value.elts
+        if isinstance(el, ast.Call)
+        and isinstance(el.func, ast.Attribute)
+        and el.func.attr == "create_task"
+        and any(
+            isinstance(a, ast.Call)
+            and isinstance(a.func, ast.Name)
+            and a.func.id == _MONITOR_SYMBOL
+            for a in el.args
+        )
+    ]
+    assert len(monitored) == 1, (
+        f"the monitor's create_task is not a member of lifespan's `tasks` list "
+        f"({len(monitored)} found) — outside it, it gets no `_crash_handler` and "
+        f"is not awaited by the shutdown gather."
+    )
+    names = [kw.value for kw in monitored[0].keywords if kw.arg == "name"]
+    assert names and isinstance(names[0], ast.Constant) and names[0].value, (
+        "the monitor's task carries no explicit `name=` — an unnamed task reports "
+        "as `Task-N` in the crash handler's log, which is unreadable at 3am."
+    )
+
+
+def test_the_criterion_2_predicate_reds_on_a_mutant_with_the_monitor_excised() -> None:
+    """⛔ CRITERION 2's FALSIFIER, the same shape criterion 1's already has.
+
+    A predicate that could not tell the shipped wiring from one with the monitor
+    removed would leave the pin above green over a production path that never
+    polls — the whole phase inert behind a passing suite.
+    """
+    source = _main_source()
+    marker = f"create_task({_MONITOR_SYMBOL}("
+    mutant = "".join(
+        line for line in source.splitlines(keepends=True) if marker not in line
+    )
+    assert mutant != source, (
+        f"the excision removed NOTHING — the marker {marker!r} no longer matches "
+        f"the shipped wiring, so this falsifier measures an absent mutation."
+    )
+    removed = len(source) - len(mutant)
+    assert 0 < removed <= _MAX_EXCISED_CHARS, removed
+    ast.parse(mutant)
+    for survivor in (
+        "dispatch_loop",
+        "watchdog_loop",
+        "daily_enqueue_loop",
+        "_bridge_healthz",
+        _HEAL_SYMBOL,
+    ):
+        assert f"create_task({survivor}(" in mutant, survivor
+    assert len(_monitor_task_lines(source)) == 1
+    assert _monitor_task_lines(mutant) == [], (
+        "the criterion-2 predicate STILL reports the monitor after its task entry "
+        "was excised — it is matching something other than the wiring."
+    )
+    assert len(_create_task_lines(mutant)) == (
+        _LIFESPAN_CREATE_TASK_COUNT_AT_164_6_2 - 1
+    ), "the count leg must fall by exactly one on the mutant"
 
 
 # --------------------------------------------------------------------------- #
@@ -2554,6 +2712,9 @@ def test_the_criterion_1_predicate_reds_on_a_mutant_with_the_entry_excised() -> 
         "watchdog_loop",
         "daily_enqueue_loop",
         "_bridge_healthz",
+        # Added 164.6.4-02 with the sixth entry: an excision that also took the
+        # monitor out would make the FALSE below un-attributable to the heal.
+        "mt5_session_monitor_loop",
     ):
         assert f"create_task({survivor}(" in mutant, (
             f"the excision also removed the {survivor} task entry — it was not "
