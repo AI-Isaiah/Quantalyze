@@ -445,6 +445,13 @@ async def test_the_first_ITERATION_waits_BEFORE_ticking_so_the_boot_heal_owns_th
     tasks against the ONE shared terminal at the same instant on every deploy.
     The loop must wait for (approximately) one full poll interval before its
     first tick, so the boot heal owns the boot window uncontested.
+
+    ⛔ IN-08 (round 2) — THE "DOES NOT TICK IMMEDIATELY" HALF LIVES IN
+    `test_the_first_ITERATION_does_NOT_tick_before_a_LARGE_cadence_elapses`,
+    driven against a cadence far too large for ANY realistic scheduler delay
+    to close — never against a wall-clock race on a SHORT cadence. This test
+    keeps only the direction that is safe under load: load can only make the
+    first tick fire LATER relative to the cadence, never earlier.
     """
     cadence_s = 0.2
     monkeypatch.setattr(monitor, "_MT5_SESSION_POLL_INTERVAL_FLOOR_S", 0.001)
@@ -459,12 +466,6 @@ async def test_the_first_ITERATION_waits_BEFORE_ticking_so_the_boot_heal_owns_th
     monkeypatch.setattr(monitor, "run_mt5_session_monitor_tick", _record_tick)
 
     task = asyncio.create_task(monitor.mt5_session_monitor_loop())
-    await asyncio.sleep(cadence_s * 0.25)
-    assert tick_offsets == [], (
-        "the loop ticked before a quarter of its own cadence elapsed — it races "
-        "the boot heal for the ONE shared terminal on every deploy"
-    )
-
     await asyncio.wait_for(
         _wait_until(lambda: len(tick_offsets) >= 1), timeout=cadence_s * 10
     )
@@ -472,6 +473,44 @@ async def test_the_first_ITERATION_waits_BEFORE_ticking_so_the_boot_heal_owns_th
         f"the first tick fired {tick_offsets[0]:.3f}s after start against a "
         f"{cadence_s}s cadence — it must wait for (approximately) one full "
         "interval before ticking, so the boot heal owns the boot window"
+    )
+
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=_LIFESPAN_GATHER_BUDGET_S)
+
+
+async def test_the_first_ITERATION_does_NOT_tick_before_a_LARGE_cadence_elapses(
+    monkeypatch: pytest.MonkeyPatch, shutdown: asyncio.Event
+) -> None:
+    """⛔ IN-08 (round 2). The negative half of WR-02's property — "it did NOT
+    tick immediately" — used to be asserted after a real `asyncio.sleep(cadence_s
+    * 0.25)` against a 0.2s cadence: a 0.05s margin. Under `-n auto` on a loaded
+    box a starved event loop can overshoot that margin, the loop's own 0.2s wait
+    elapses for real, the first tick lands, and the gate REDS on a CORRECT
+    implementation.
+
+    ⭐ DRIVING THE CLOCK INSTEAD OF THE WALL: the cadence here is 300s — a
+    margin no realistic scheduler delay closes against the real ~0.05s sleep
+    below (a ~6000x safety factor) — so the assertion is robust regardless of
+    box load. The ORDERING claim this test drives does not need a real
+    cadence; the "fires at approximately the right time" half is covered
+    separately, against a short cadence, by
+    `test_the_first_ITERATION_waits_BEFORE_ticking_so_the_boot_heal_owns_the_window`.
+    """
+    monkeypatch.setattr(monitor, "session_poll_interval_s", lambda: 300.0)
+
+    tick_offsets: list[float] = []
+
+    async def _record_tick() -> None:
+        tick_offsets.append(asyncio.get_running_loop().time())
+
+    monkeypatch.setattr(monitor, "run_mt5_session_monitor_tick", _record_tick)
+
+    task = asyncio.create_task(monitor.mt5_session_monitor_loop())
+    await asyncio.sleep(0.05)
+    assert tick_offsets == [], (
+        "the loop ticked before its own (300s) cadence elapsed — it races the "
+        "boot heal for the ONE shared terminal on every deploy"
     )
 
     shutdown.set()
