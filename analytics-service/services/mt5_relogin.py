@@ -68,6 +68,20 @@ from services.mt5_client import (
     mt5_terminal_key,
 )
 from services.mt5_concurrency import Mt5TerminalBusyError, mt5_terminal_lease
+from services.mt5_session_episodes import (
+    KIND_ALREADY_AUTHORIZED,
+    KIND_BUDGET_ABANDONED,
+    KIND_BUSY_SKIP,
+    KIND_CREDENTIAL_REFUSED,
+    KIND_HEAL_SENT_IPC_FAULT_ON_REPROBE,
+    KIND_HEALED,
+    KIND_IPC_FAULT,
+    KIND_NO_AUTHORIZED_ACCOUNT,
+    KIND_STILL_UNAUTHORIZED,
+    HealOutcome,
+    record_mt5_heal_outcome,
+    record_mt5_session_reading,
+)
 from services.mt5_validation import Mt5ValidationError, parse_mt5_credentials
 from services.redact import scrub_freeform_string
 
@@ -107,6 +121,35 @@ _MT5_GATEWAY_ENV_NAMES: Final[tuple[str, str]] = (
 # The kill switch's variable NAME, so the disabled-return log line can name it
 # without re-spelling the string `services/closed_sets.py` owns (HIGH-1).
 _MT5_ENABLED_ENV_NAME: Final[str] = "MT5_ENABLED"
+
+# --------------------------------------------------------------------------- #
+# ⭐ THE CALLER'S NAME, IN THE RECORD AND IN THE LOG LINE (164.6.4 plan 02).
+#
+# The heal had exactly ONE caller — `main.lifespan`'s boot task — so every
+# sentence it emits says "boot heal". Phase 164.6.4 adds a SECOND caller (the
+# session monitor's tick), at which point those sentences stop being true for
+# half the traffic. ⛔ A log line that names the wrong caller is this repo's
+# recorded defect class, not a cosmetic issue: an operator reading "mt5 boot
+# heal: ABANDONED" at 14:05 on a container that booted at 09:12 has been handed
+# a false fact about WHEN it happened.
+#
+# The mapping is TOTAL by construction — an unknown source is NAMED as unknown
+# rather than silently mislabelled — and the label is bound as the FIRST
+# statement inside the entry's guard, beside the `credentials` binding, so the
+# outer handler can never hit an unbound local.
+# --------------------------------------------------------------------------- #
+HEAL_SOURCE_BOOT: Final[str] = "boot"
+HEAL_SOURCE_SESSION_MONITOR: Final[str] = "session_monitor"
+
+_HEAL_SOURCE_LABELS: Final[dict[str, str]] = {
+    HEAL_SOURCE_BOOT: "mt5 boot heal",
+    HEAL_SOURCE_SESSION_MONITOR: "mt5 session monitor",
+}
+
+#: ⛔ Never a silent fallback to the boot label. An unrecognised source is an
+#: EDITING mistake, and labelling it "boot heal" would hide it behind a sentence
+#: that reads correct.
+_HEAL_SOURCE_LABEL_UNKNOWN: Final[str] = "mt5 session heal (UNKNOWN caller)"
 
 # The two tuning knobs. ⛔ READ PER CALL AND NEVER AT IMPORT — 164.6.2 CR-02.
 #
@@ -254,14 +297,17 @@ _MT5_RELOGIN_LEASE_WAIT_FLOOR_S: Final[float] = 0.1
 # The verdict tokens `_heal_blocking` hands back for the caller to log. Short,
 # fixed strings: they name what happened to the SESSION and carry no credential,
 # no host and no port.
-_VERDICT_ALREADY_AUTHORIZED: Final[str] = "already_authorized"
+# ⭐ BOUND TO THE EPISODE RECORDER'S CLASS CONSTANT rather than re-spelled, so the
+# token in a log line and the token in a `cron_runs` row cannot drift apart. The
+# VALUE is byte-unchanged.
+_VERDICT_ALREADY_AUTHORIZED: Final[str] = KIND_ALREADY_AUTHORIZED
 
 #: ⭐ WR-02 — this token is now MEASURED. It used to be returned on the sole basis
 #: that ``initialize_with_credentials`` did not raise, i.e. named after exactly
 #: the signal both docstrings say must never be trusted. ``_heal_blocking`` now
 #: re-runs the credential-free detector inside the same lease and the same budget
 #: before returning it, so the log line and the doctrine agree.
-_VERDICT_HEALED: Final[str] = "healed"
+_VERDICT_HEALED: Final[str] = KIND_HEALED
 
 #: Every non-heal verdict starts with this, and the caller's log LEVEL keys off
 #: it (WR-01). ⛔ A new failure verdict that does not carry the prefix is silently
@@ -561,8 +607,18 @@ def _describe_exception_for_log(
 
 def _heal_blocking(
     host: str, port: int, login: int, password: str, server: str
-) -> str:
-    """The BLOCKING body, run under ``to_thread``. Returns a short verdict token.
+) -> HealOutcome:
+    """The BLOCKING body, run under ``to_thread``. Returns a ``HealOutcome``.
+
+    ⭐ STRUCTURED OUTCOME INSTEAD OF STRING PARSING (164.6.4 plan 02). This used
+    to return the composed verdict ``str``, and the episode recorder would have
+    had to PARSE it to learn the class — the exact string-shape dependency plan
+    01 removed from ``initialize_with_credentials``. ``HealOutcome.verdict``
+    carries that same string BYTE-UNCHANGED, so every log line and the
+    ``startswith(_VERDICT_NOT_HEALED_PREFIX)`` severity branch keep reading one
+    field and no log-content assertion moves; the other fields carry the FIRST
+    probe's class and code and the FINAL re-probe's, which is what the recorder
+    reads instead.
 
     ⛔ THE CLIENT IS CONSTRUCTED HERE, AS THIS FUNCTION'S FIRST ACT, AND THAT IS
     THE POINT OF THE FUNCTION. ``Mt5Client.__init__`` performs
@@ -620,11 +676,38 @@ def _heal_blocking(
             client.assert_session_authorized()
         except Mt5ClientError as err:
             if err.code != _MT5_NO_AUTHORIZED_ACCOUNT_CODE:
-                return _not_healed(
-                    f"ipc_fault:code={err.code}", err, login, password, server
+                return HealOutcome(
+                    verdict=_not_healed(
+                        f"{KIND_IPC_FAULT}:code={err.code}",
+                        err,
+                        login,
+                        password,
+                        server,
+                    ),
+                    first_kind=KIND_IPC_FAULT,
+                    first_code=err.code,
+                    # ⛔ No credentialed call ran, so there is NO final reading —
+                    # and `None` is what keeps "a tick that heals nothing writes
+                    # at most one observation" structural rather than incidental.
+                    final_kind=None,
+                    final_code=None,
                 )
+            # ⭐ THE ONE READING THAT ESTABLISHES DARKNESS. `-6` means the bridge
+            # ANSWERED and no account is authorized; every other code is an IPC
+            # fault that measured nothing about the session.
+            first_kind = KIND_NO_AUTHORIZED_ACCOUNT
+            first_code = err.code
         else:
-            return _VERDICT_ALREADY_AUTHORIZED
+            return HealOutcome(
+                verdict=_VERDICT_ALREADY_AUTHORIZED,
+                first_kind=KIND_ALREADY_AUTHORIZED,
+                # ⚠️ A clean probe RAISES NOTHING, so there is no `last_error()`
+                # to read and no code to record. `None` is the honest value;
+                # a `0` here would collide with the IN-02 sentinel.
+                first_code=None,
+                final_kind=None,
+                final_code=None,
+            )
         try:
             client.initialize_with_credentials(login, password, server)
         except Mt5ClientError as err:
@@ -645,8 +728,18 @@ def _heal_blocking(
             # back on the ladder (WARNING), gives it a `code=` token like every
             # other failure here, and — because `_not_healed` redacts BY VALUE —
             # carries the broker's own refusal text safely.
-            return _not_healed(
-                f"credential_refused:code={err.code}", err, login, password, server
+            return HealOutcome(
+                verdict=_not_healed(
+                    f"{KIND_CREDENTIAL_REFUSED}:code={err.code}",
+                    err,
+                    login,
+                    password,
+                    server,
+                ),
+                first_kind=first_kind,
+                first_code=first_code,
+                final_kind=KIND_CREDENTIAL_REFUSED,
+                final_code=err.code,
             )
         try:
             client.assert_session_authorized()
@@ -670,17 +763,39 @@ def _heal_blocking(
             # state, and this arm reintroduced it. The classifier is therefore the
             # same constant, not a second spelling of the same rule.
             if err.code != _MT5_NO_AUTHORIZED_ACCOUNT_CODE:
-                return _not_healed(
-                    f"heal_sent_ipc_fault_on_reprobe:code={err.code}",
+                return HealOutcome(
+                    verdict=_not_healed(
+                        f"{KIND_HEAL_SENT_IPC_FAULT_ON_REPROBE}:code={err.code}",
+                        err,
+                        login,
+                        password,
+                        server,
+                    ),
+                    first_kind=first_kind,
+                    first_code=first_code,
+                    final_kind=KIND_HEAL_SENT_IPC_FAULT_ON_REPROBE,
+                    final_code=err.code,
+                )
+            return HealOutcome(
+                verdict=_not_healed(
+                    f"{KIND_STILL_UNAUTHORIZED}:code={err.code}",
                     err,
                     login,
                     password,
                     server,
-                )
-            return _not_healed(
-                f"still_unauthorized:code={err.code}", err, login, password, server
+                ),
+                first_kind=first_kind,
+                first_code=first_code,
+                final_kind=KIND_STILL_UNAUTHORIZED,
+                final_code=err.code,
             )
-        return _VERDICT_HEALED
+        return HealOutcome(
+            verdict=_VERDICT_HEALED,
+            first_kind=first_kind,
+            first_code=first_code,
+            final_kind=KIND_HEALED,
+            final_code=None,
+        )
     finally:
         # Closed on EVERY path, success and failure alike. `close` is deliberately
         # EXEMPT from the D-36 session fence (D-41) precisely so a teardown is
@@ -689,8 +804,42 @@ def _heal_blocking(
         client.close()
 
 
-async def heal_mt5_terminal_session() -> None:
-    """Re-establish the terminal's broker session, once, at worker startup.
+async def heal_mt5_terminal_session(
+    *,
+    source: str = HEAL_SOURCE_BOOT,
+    poll_interval_s: float | None = None,
+) -> None:
+    """Re-establish the terminal's broker session when it has lapsed.
+
+    ⛔ **D-08's "STARTUP ONLY" IS AMENDED HERE, DELIBERATELY, AND NOT QUIETLY
+    CONTRADICTED** (164.6.4 plan 02, task 2). This sentence used to read "once,
+    at worker startup", and Phase 164.6.4 is CHARTERED to make it false: the
+    session monitor's tick is a second caller, on a DETECTION POLL CADENCE.
+    Nothing reds when a docstring goes false, which is exactly why the amendment
+    is written rather than left to be discovered — a reader who finds the
+    sentence false and the reason unwritten has found drift, which is the
+    record-versus-reality class this milestone exists to remove.
+
+    ⭐ **WHY D-08's ORIGINAL HAZARD DOES NOT TRANSFER, VERIFIED TWO INDEPENDENT
+    WAYS.** D-08 STRUCK "also heal on session open" because
+    ``job_worker._make_mt5_session`` runs in PREFLIGHT, outside and before the
+    terminal lease — so a touch there would stamp the generation early and an
+    unrelated lease release in the preflight-to-lease window would refuse a
+    LEGITIMATE derive read with ``Mt5SessionAbandoned``. The monitor is not that
+    call site: (a) the terminal epoch binds on FIRST TOUCH rather than at
+    construction, so a preflight-built client has no epoch until the job's own
+    login inside the job's own lease; and (b) the construction fence is a
+    ContextVar that preflight never carries — which ``mt5_client`` itself calls
+    "the honest encoding of 'this construction is not happening under anyone's
+    lease'". The monitor takes the SAME single bounded lease this entry already
+    takes, and adds no new lease site at all.
+
+    ``source`` names the caller so each in-heal sentence is true for the caller
+    that actually made it; ``poll_interval_s`` is the DETECTION POLL CADENCE in
+    effect (``None`` at boot, where there is no cadence) and rides into the
+    episode row. ⛔ Neither changes behaviour: the keyword defaults keep
+    ``main.lifespan``'s existing call and the "returns ``None`` on every path"
+    contract byte-identical.
 
     THE ONE lease site in this module, and the ONE public entry. Returns ``None``
     on every path; ⛔ the return value is NOT an oracle for success — the oracle is
@@ -734,6 +883,11 @@ async def heal_mt5_terminal_session() -> None:
         # handler and silently demote every early failure to the argument-free
         # fallback line.
         credentials: tuple[int, str, str] | None = None
+        # ⛔ BOUND HERE FOR THE SAME REASON `credentials` IS — before the first
+        # statement that can raise, so no handler below can reference an unbound
+        # local. The lookup is TOTAL: an unrecognised source is NAMED, never
+        # silently relabelled as the boot heal.
+        label = _HEAL_SOURCE_LABELS.get(source, _HEAL_SOURCE_LABEL_UNKNOWN)
 
         if not mt5_enabled_server():
             # ⛔ FIRST, and before any construction: fail-closed, read per call.
@@ -759,8 +913,9 @@ async def heal_mt5_terminal_session() -> None:
             # not a misconfiguration, and it is not throttled because it fires once
             # per boot.
             logger.info(
-                "mt5 boot heal: skipped — %s is not set to true, so the heal is "
+                "%s: skipped — %s is not set to true, so the heal is "
                 "disabled. The terminal keeps whatever session it already has.",
+                label,
                 _MT5_ENABLED_ENV_NAME,
             )
             return
@@ -784,8 +939,9 @@ async def heal_mt5_terminal_session() -> None:
         # module's rule is NAMES ONLY (T-164.6.2-12), and the endpoint is not even
         # a name.
         logger.info(
-            "mt5 boot heal: starting — acquiring the terminal and probing the "
-            "broker session (a second line always follows)."
+            "%s: starting — acquiring the terminal and probing the "
+            "broker session (a second line always follows).",
+            label,
         )
 
         # The lease key WITHOUT a client — plan 01's helper exists for this call
@@ -804,7 +960,7 @@ async def heal_mt5_terminal_session() -> None:
             async with mt5_terminal_lease(
                 mt5_terminal_key(host, port), wait_s=_relogin_lease_wait_s()
             ):
-                verdict = await asyncio.wait_for(
+                outcome = await asyncio.wait_for(
                     asyncio.to_thread(
                         _heal_blocking, host, port, login, password, server
                     ),
@@ -827,11 +983,23 @@ async def heal_mt5_terminal_session() -> None:
             # helper whose other callers are the INTERACTIVE validate path, where
             # "gave up waiting for the terminal" genuinely is a warning.
             logger.info(
-                "mt5 boot heal: skipped — the terminal was already in use when "
+                "%s: skipped — the terminal was already in use when "
                 "the bounded acquire expired, so the heal gave up rather than "
                 "queueing ahead of real work. A busy terminal is a terminal "
                 "somebody is already successfully using, which is itself evidence "
-                "the session is fine (D-29)."
+                "the session is fine (D-29).",
+                label,
+            )
+            # ⛔ RECORDED AS `not_measured`, AND THE SKIP'S OWN RATIONALE IS
+            # DELIBERATELY NOT CARRIED INTO THE RECORD. "A busy terminal is
+            # evidence the session is fine" is cheap and defensible for a
+            # once-per-boot heal and UNSOUND for a periodic one: it is a standing
+            # claim about session state this tick did not measure, and a terminal
+            # held by a FAILING job is exactly where it is most wrong. The SKIP
+            # stays (never queue ahead of real work) and the INFO stays; only the
+            # unmeasured claim is refused.
+            await record_mt5_session_reading(
+                KIND_BUSY_SKIP, None, source=source, poll_interval_s=poll_interval_s
             )
             return
         except asyncio.TimeoutError:
@@ -847,12 +1015,22 @@ async def heal_mt5_terminal_session() -> None:
             # ERROR, above every verdict: it is the one outcome here that leaves
             # the SYSTEM in a state nobody measured.
             logger.error(
-                "mt5 boot heal: ABANDONED at the %.1fs budget — a round-trip is "
+                "%s: ABANDONED at the %.1fs budget — a round-trip is "
                 "still in flight against the shared terminal on a thread that was "
                 "NOT cancelled. The lease has released and fenced it (D-36), but "
                 "whether the broker session came up is unknowable from here; the "
-                "next boot's credential-free probe is what answers it.",
+                "next credential-free probe is what answers it.",
+                label,
                 budget_s,
+            )
+            # ⛔ `not_measured`, and it CLOSES NOTHING. "Whether the broker session
+            # came up is unknowable from here" is the log line's own sentence; a
+            # row asserting either state would contradict it.
+            await record_mt5_session_reading(
+                KIND_BUDGET_ABANDONED,
+                None,
+                source=source,
+                poll_interval_s=poll_interval_s,
             )
             return
         # ⛔ WR-01 — THE SEVERITY FOLLOWS THE VERDICT, and it did not. Every
@@ -861,10 +1039,20 @@ async def heal_mt5_terminal_session() -> None:
         # merely-unset `MT5_GATEWAY_PORT`, which `_log_configuration_fault_once`
         # emits at WARNING. That is a severity inversion inside a milestone whose
         # stated purpose is removing silent failure.
-        if verdict.startswith(_VERDICT_NOT_HEALED_PREFIX):
-            logger.warning("mt5 boot heal: %s", verdict)
+        if outcome.verdict.startswith(_VERDICT_NOT_HEALED_PREFIX):
+            logger.warning("%s: %s", label, outcome.verdict)
         else:
-            logger.info("mt5 boot heal: %s", verdict)
+            logger.info("%s: %s", label, outcome.verdict)
+        # ⭐ THE SINK, BESIDE THE VERDICT THAT PRODUCED IT — and AFTER the log
+        # line, so a slow Supabase write can never delay the operator's sentence.
+        # ⛔ Never from the OUTER catch-all: the never-raises AST gate requires
+        # that handler's body to be EXACTLY one nested `try`, and an extra
+        # statement there is a named defect. This call cannot raise, so the
+        # verdict and the two lines above stay byte-identical whatever the sink
+        # does (T-153.3-24).
+        await record_mt5_heal_outcome(
+            outcome, source=source, poll_interval_s=poll_interval_s
+        )
     except Exception as exc:  # noqa: BLE001 — see the docstring; this is the control
         # ⛔ IN-06 — THE HANDLER BODY IS ITSELF GUARDED, because "structurally
         # incapable of raising" is the declared standard and `logger.warning`'s
@@ -881,9 +1069,10 @@ async def heal_mt5_terminal_session() -> None:
         # evaluate, so it has nothing left that can raise.
         try:
             logger.warning(
-                "mt5 boot heal did not complete — continuing without it; the "
-                "terminal keeps whatever session it already has and the next boot "
-                "will try again (exc_class=%s scrubbed=%s)",
+                "%s did not complete — continuing without it; the "
+                "terminal keeps whatever session it already has and the next "
+                "attempt will try again (exc_class=%s scrubbed=%s)",
+                label,
                 type(exc).__name__,
                 # ⛔ HIGH-2 (secondary) — BY VALUE, not merely shape-scrubbed. The
                 # bare `scrub_freeform_string` that stood here is a MEASURED NO-OP
@@ -895,6 +1084,6 @@ async def heal_mt5_terminal_session() -> None:
             )
         except BaseException:  # noqa: BLE001 — see the comment; this is the control
             logger.warning(
-                "mt5 boot heal did not complete, and the failure could not be "
-                "described — continuing without it"
+                "the mt5 session heal did not complete, and the failure could "
+                "not be described — continuing without it"
             )

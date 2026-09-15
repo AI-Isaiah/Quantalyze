@@ -58,7 +58,7 @@ from pathlib import Path
 
 import pytest
 
-from services import mt5_concurrency, mt5_relogin
+from services import mt5_concurrency, mt5_relogin, mt5_session_episodes
 from services.mt5_client import Mt5Client
 from services.mt5_concurrency import Mt5TerminalBusyError
 
@@ -1873,8 +1873,18 @@ async def test_a_hung_terminal_is_abandoned_at_the_budget_and_raises_nothing(
     )
 
 
-def _heal_guard_defects(source: str) -> list[str]:
+def _heal_guard_defects(
+    source: str, *, required_names: tuple[str, ...] = ("mt5_enabled_server",)
+) -> list[str]:
     """THE NEVER-RAISES PREDICATE, as a reusable function returning NAMED defects.
+
+    ⭐ ``required_names`` WIDENS THE ONE PREDICATE SO A SECOND MODULE CAN REACH IT
+    (164.6.4 plan 02). It defaults to the single kill-switch name this function
+    hard-coded before, so every existing call site is byte-identical; the episode
+    recorder is checked with an EMPTY tuple, because it carries no kill switch of
+    its own — it is INSTRUMENTATION, disabled by its caller not running.
+    ⛔ WIDEN the predicate, never COPY it: a copied structural gate is the drift
+    shape this repo has a dated record of, and the copy is what rots.
 
     Extracted from the test below so the WR-04 calibration case can MUTATE the
     source and observe the predicate go red. A structural gate that is only ever
@@ -1961,11 +1971,12 @@ def _heal_guard_defects(source: str) -> list[str]:
         defects.append("the guard grew an `else:` — same escape route")
 
     dumped = ast.dump(ast.Module(body=guard.body, type_ignores=[]))
-    if "mt5_enabled_server" not in dumped:
-        defects.append(
-            "the kill-switch read is no longer inside the guard — the guard must "
-            "cover the body from the kill switch onward"
-        )
+    for required in required_names:
+        if required not in dumped:
+            defects.append(
+                f"`{required}` is no longer inside the guard — the guard must "
+                f"cover the body from that read onward"
+            )
     return defects
 
 
@@ -2563,3 +2574,660 @@ def test_the_criterion_1_predicate_reds_on_a_mutant_with_the_entry_excised() -> 
     assert len(_create_task_lines(mutant)) == (
         _LIFESPAN_CREATE_TASK_COUNT_AT_164_6_2 - 1
     ), "the count leg must fall by exactly one on the mutant"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 164.6.4 plan 02, TASK 1 — THE TRACER: one session-state transition
+# reaches `public.cron_runs` end to end, through the heal that is ALREADY wired.
+#
+# ⛔ The sink is FAKED and the TERMINAL is faked, but nothing between them is:
+# the real `heal_mt5_terminal_session`, the real `_heal_blocking`, the real
+# classifier and the real `record_mt5_session_reading` all run. What is replaced
+# is `services.mt5_session_episodes.get_supabase`, i.e. exactly the transport —
+# the same seam `_install_client` replaces for the rpyc wire.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeQuery:
+    """A PostgREST-shaped query builder over an in-memory `cron_runs`.
+
+    ⛔ IT HONOURS EVERY `.eq(...)` ON AN UPDATE, and that is the whole point: the
+    COMPARE-AND-SET the recorder issues is `.eq("status", "running")` in the
+    UPDATE's own predicate, so a fake that ignored filters would make the guarded
+    and unguarded implementations indistinguishable — a harness that cannot tell
+    them apart is a harness that certifies the bug.
+    """
+
+    def __init__(self, sink: "_FakeCronRuns") -> None:
+        self._sink = sink
+        self._filters: list[tuple[str, object]] = []
+        self._order: tuple[str, bool] | None = None
+        self._op: str | None = None
+        self._payload: dict | None = None
+
+    def select(self, _columns: str):
+        self._op = "select"
+        return self
+
+    def insert(self, payload: dict):
+        self._op = "insert"
+        self._payload = payload
+        return self
+
+    def update(self, payload: dict):
+        self._op = "update"
+        self._payload = payload
+        return self
+
+    def eq(self, column: str, value):
+        self._filters.append((column, value))
+        return self
+
+    def order(self, column: str, desc: bool = False):
+        self._order = (column, desc)
+        return self
+
+    def _matches(self, row: dict) -> bool:
+        return all(row.get(col) == value for col, value in self._filters)
+
+    def execute(self):
+        if self._op == "select":
+            matched = [dict(r) for r in self._sink.rows if self._matches(r)]
+            if self._order is not None:
+                column, desc = self._order
+                matched.sort(key=lambda r: r.get(column) or "", reverse=desc)
+            return _FakeResponse(matched)
+        if self._op == "insert":
+            row = dict(self._payload or {})
+            row["id"] = f"row-{len(self._sink.rows) + 1}"
+            # The shipped table's own column defaults (migration
+            # 20260408113029): a fake that omitted them would let an assertion
+            # about `completed_at` pass or fail for harness reasons.
+            row.setdefault("completed_at", None)
+            row.setdefault("error", None)
+            row.setdefault("status", "running")
+            self._sink.rows.append(row)
+            self._sink.inserts.append(dict(row))
+            return _FakeResponse([dict(row)])
+        if self._op == "update":
+            hits = [r for r in self._sink.rows if self._matches(r)]
+            for row in hits:
+                row.update(dict(self._payload or {}))
+            self._sink.updates.append(
+                {"filters": list(self._filters), "applied": len(hits)}
+            )
+            return _FakeResponse([dict(r) for r in hits])
+        raise AssertionError(f"harness: unsupported operation {self._op!r}")
+
+
+class _FakeResponse:
+    def __init__(self, data: list[dict]) -> None:
+        self.data = data
+
+
+class _FakeCronRuns:
+    def __init__(self) -> None:
+        self.rows: list[dict] = []
+        self.inserts: list[dict] = []
+        self.updates: list[dict] = []
+
+    def table(self, name: str) -> _FakeQuery:
+        assert name == "cron_runs", (
+            f"the episode recorder wrote to {name!r}; D-5 locks the sink to "
+            "public.cron_runs under a NEW cron_name and forbids a migration"
+        )
+        return _FakeQuery(self)
+
+    # -- readers the assertions use ---------------------------------------- #
+    def open_rows(self) -> list[dict]:
+        return [r for r in self.rows if r.get("status") == "running"]
+
+    def metadata(self, row: dict) -> dict:
+        meta = row.get("metadata")
+        assert isinstance(meta, dict), f"harness: row has no metadata: {row!r}"
+        return meta
+
+    def states(self) -> list[str]:
+        return [self.metadata(r).get("state") for r in self.rows]
+
+    def lifetime_dataset(self) -> list[str]:
+        """The query the SUCCESSOR runs — measured closes only.
+
+        ⭐ This is the thing the compare-and-set protects. A superseded close
+        stamping `close_is_measured: false` over a genuine `true` does not merely
+        mislabel a row; it DELETES the episode from this list.
+        """
+        return [
+            str(r.get("id"))
+            for r in self.rows
+            if r.get("status") == "ok"
+            and self.metadata(r).get("close_is_measured") is True
+        ]
+
+
+@pytest.fixture
+def sink(monkeypatch: pytest.MonkeyPatch) -> _FakeCronRuns:
+    fake = _FakeCronRuns()
+    monkeypatch.setattr(mt5_session_episodes, "get_supabase", lambda: fake)
+    mt5_session_episodes._reset_session_episode_state_for_tests()
+    yield fake
+    mt5_session_episodes._reset_session_episode_state_for_tests()
+
+
+def _seed_open_row(fake: _FakeCronRuns, state: str, **overrides) -> dict:
+    """An OPEN run already standing when the tick arrives — the ordinary case, and
+    the one an analytics redeploy must not be able to truncate."""
+    metadata = {
+        "schema_version": mt5_session_episodes.SCHEMA_VERSION,
+        "state": state,
+        "opened_by": mt5_relogin.HEAL_SOURCE_BOOT,
+        "opening_kind": mt5_session_episodes.KIND_ALREADY_AUTHORIZED,
+        "opening_code": None,
+        "poll_interval_s": None,
+        "since_previous_reading_s": None,
+        "first_reading_after_boot": True,
+        "started_at_is_lower_bound": True,
+        "reading_attributes_account": False,
+        "attribution_limit": mt5_session_episodes.ATTRIBUTION_LIMIT,
+    }
+    metadata.update(overrides.pop("metadata", {}))
+    row = {
+        "id": overrides.pop("id", f"seed-{len(fake.rows) + 1}"),
+        "cron_name": mt5_session_episodes.MT5_SESSION_EPISODE_CRON_NAME,
+        "started_at": overrides.pop("started_at", "2026-09-15T00:00:00+00:00"),
+        "completed_at": None,
+        "status": "running",
+        "error": None,
+        "metadata": metadata,
+    }
+    row.update(overrides)
+    fake.rows.append(row)
+    return row
+
+
+#: Every value that may NEVER appear in ANY field of ANY written row. The three
+#: credential literals plus the gateway host and port — the endpoint is not even
+#: a name (T-164.6.2-12), and rows outlive every log.
+_FORBIDDEN_ROW_LITERALS = (
+    _FAKE_LOGIN,
+    _FAKE_PASSWORD,
+    _FAKE_SERVER,
+    _FAKE_HOST,
+    _FAKE_PORT,
+)
+
+
+def _assert_no_secret_reached_any_row(fake: _FakeCronRuns) -> None:
+    """FIELD BY FIELD, not a single `repr` scan of the whole store — a partial
+    leak must name WHICH value escaped and WHERE."""
+    import json
+
+    for row in fake.rows:
+        for column, value in row.items():
+            rendered = value if isinstance(value, str) else json.dumps(value, default=str)
+            for literal in _FORBIDDEN_ROW_LITERALS:
+                assert literal not in rendered, (
+                    f"the episode row disclosed {literal!r} in column {column!r}: "
+                    f"{rendered!r}. ⛔ Rows outlive every log; the row carries the "
+                    f"verdict CLASS and the CODE only, never the composed "
+                    f"verdict's terminal-supplied tail (T-164.6.4-08)."
+                )
+
+
+async def test_TRACER_a_minus_six_that_heals_writes_exactly_TWO_rows_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, sink
+) -> None:
+    """⭐ THE TRACER, and it is the thinnest path through every layer this phase
+    touches: credential-free detector -> verdict -> durable row.
+
+    A tick that finds `-6` and heals it is TWO transitions — `authorized -> dark`
+    and `dark -> authorized` — so it is exactly TWO rows, in that order, with the
+    classes and codes the terminal actually answered. Before this, those
+    transitions existed only as log lines that scroll past
+    (`[MT5-VERDICT-SINK-01]`; MEASURED 2026-09-05, `railway logs` returned ZERO
+    matching lines).
+    """
+    _set_full_env(monkeypatch)
+    _install_client(
+        monkeypatch,
+        {
+            "initialize": False,
+            # ⛔ THE TERMINAL ECHOES THE SUBMITTED SERVER AND ACCOUNT BACK, which
+            # is exactly what T-164.6.4-08 is written against and exactly what a
+            # broker is free to do. `assert_session_authorized` is CREDENTIAL-FREE,
+            # so its `_raise_last()` carries no triple and can only SHAPE-scrub —
+            # a bare `Broker-Demo-2` survives into `str(err)`. Any edit that lets
+            # that text reach a row is a disclosure on a table whose rows outlive
+            # every log.
+            "last_error": (
+                -6,
+                f"Terminal: Authorization failed for {_FAKE_SERVER} "
+                f"account {_FAKE_LOGIN}",
+            ),
+            "initialize_credentialed": True,
+            "initialize_after_heal": True,
+        },
+    )
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert len(sink.inserts) == 2, (
+        f"a `-6`-then-heal tick must write exactly TWO rows, got "
+        f"{len(sink.inserts)}: {sink.states()}"
+    )
+    dark, authorized = sink.rows[0], sink.rows[1]
+
+    # --- the dark run, opened on the DETECTOR's reading -------------------- #
+    dark_meta = sink.metadata(dark)
+    assert dark_meta["state"] == mt5_session_episodes.STATE_DARK
+    assert dark_meta["opening_kind"] == mt5_session_episodes.KIND_NO_AUTHORIZED_ACCOUNT
+    assert dark_meta["opening_code"] == -6
+    assert dark_meta["started_at_is_lower_bound"] is True
+    assert dark_meta["first_reading_after_boot"] is True, (
+        "the first reading of a process has NO previous reading to measure "
+        "against; `since_previous_reading_s` must be None and this flag True"
+    )
+    assert dark_meta["since_previous_reading_s"] is None
+    # ...and CLOSED by the re-probe, as a MEASURED transition.
+    assert dark["status"] == "error", (
+        "a DARK run closes `error` — `status='ok'` must keep meaning exactly "
+        "'an authorized run whose end we MEASURED'"
+    )
+    assert dark_meta["close_is_measured"] is True
+    assert dark_meta["closing_kind"] == mt5_session_episodes.KIND_HEALED
+    assert dark["error"] == f"{mt5_session_episodes.KIND_NO_AUTHORIZED_ACCOUNT}:code=-6"
+
+    # --- the authorized run, still open ----------------------------------- #
+    auth_meta = sink.metadata(authorized)
+    assert auth_meta["state"] == mt5_session_episodes.STATE_AUTHORIZED
+    assert auth_meta["opening_kind"] == mt5_session_episodes.KIND_HEALED
+    assert authorized["status"] == "running"
+    assert authorized["completed_at"] is None
+    assert auth_meta["since_previous_reading_s"] is not None, (
+        "the SECOND reading of the process has a MEASURED wall-clock gap; ⛔ it "
+        "must not be the configured cadence wearing a measured name"
+    )
+    assert auth_meta["first_reading_after_boot"] is False
+
+    # --- the invariant, and the attribution limit, on EVERY row ------------ #
+    assert len(sink.open_rows()) == 1, "at most ONE open row per cron_name"
+    for row in sink.rows:
+        meta = sink.metadata(row)
+        assert row["cron_name"] == mt5_session_episodes.MT5_SESSION_EPISODE_CRON_NAME
+        assert meta["reading_attributes_account"] is False
+        assert meta["attribution_limit"] == mt5_session_episodes.ATTRIBUTION_LIMIT
+        assert meta["opened_by"] == mt5_relogin.HEAL_SOURCE_BOOT
+
+    # --- and nothing secret reached either the log or the rows ------------- #
+    _assert_no_credential_value_escaped(_records(caplog))
+    _assert_no_secret_reached_any_row(sink)
+
+
+async def test_TRACER_a_healthy_tick_against_an_open_authorized_run_writes_NOTHING(
+    monkeypatch: pytest.MonkeyPatch, sink
+) -> None:
+    """⭐ PER TRANSITION, NEVER PER TICK. At a ten-minute cadence a per-tick write
+    would be ~144 rows/day forever into a shared, gated table, for no
+    information — and the sink's whole value is that a row means something
+    CHANGED."""
+    _seed_open_row(sink, mt5_session_episodes.STATE_AUTHORIZED)
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+
+    assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert sink.inserts == [], f"a healthy tick wrote {len(sink.inserts)} row(s)"
+    assert [u for u in sink.updates] == [], "a healthy tick closed something"
+    assert len(sink.open_rows()) == 1
+
+
+@pytest.mark.parametrize(
+    "scenario_name,scenario,expect_fragment",
+    [
+        # A bounded-acquire expiry. ⛔ The boot heal's busy-skip RATIONALE is
+        # deliberately NOT carried into the record: "a busy terminal is evidence
+        # the session is fine" is a standing claim about state this tick did not
+        # measure, and a terminal held by a FAILING job is where it is most wrong.
+        ("busy_skip", None, "skipped"),
+        # A budget abandon. The log line itself says whether the session came up
+        # is "unknowable from here"; a row asserting either state would
+        # contradict it.
+        ("budget_abandon", {"initialize_sleep_s": 0.25}, "ABANDONED"),
+    ],
+)
+async def test_TRACER_a_reading_that_measured_NOTHING_writes_no_row_and_closes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sink,
+    scenario_name: str,
+    scenario,
+    expect_fragment: str,
+) -> None:
+    seeded = _seed_open_row(sink, mt5_session_episodes.STATE_AUTHORIZED)
+    _set_full_env(monkeypatch)
+
+    if scenario_name == "busy_skip":
+        @asynccontextmanager
+        async def _always_busy(terminal_key: str, *, wait_s=None):
+            raise Mt5TerminalBusyError(terminal_key, wait_s or 0.0)
+            yield  # pragma: no cover — unreachable, keeps this a generator
+
+        monkeypatch.setattr(mt5_relogin, "mt5_terminal_lease", _always_busy)
+        _install_client(monkeypatch, {"initialize": True})
+    else:
+        # ⛔ The floor is lowered FOR THIS TEST exactly as
+        # `test_a_hung_terminal_is_abandoned_at_the_budget_and_raises_nothing`
+        # does, and for its stated reason: IN-03 (round 2) floors the budget at
+        # ONE ROUND-TRIP, so a raw `0.05` would be REJECTED, fall back to the
+        # 160 s default, the double would finish, and this test would assert an
+        # ABANDON that never happened.
+        monkeypatch.setattr(mt5_relogin, "_MT5_RELOGIN_BUDGET_FLOOR_S", 0.01)
+        monkeypatch.setenv("MT5_RELOGIN_BUDGET_S", "0.05")
+        _install_client(monkeypatch, scenario)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert any(
+        expect_fragment in r.getMessage() for r in _outcome_records(caplog)
+    ), [r.getMessage() for r in _outcome_records(caplog)]
+    assert sink.inserts == [], (
+        f"the {scenario_name} reading wrote a row — it MEASURED NOTHING, so it "
+        f"may neither open nor close an episode"
+    )
+    assert sink.updates == [], f"the {scenario_name} reading closed an episode"
+    assert seeded["status"] == "running"
+    assert seeded["completed_at"] is None
+
+
+@pytest.mark.parametrize(
+    "ipc_code,expect_state",
+    [
+        # ⚠️ IN-02, and it is load-bearing: `-6` is only ever observable through
+        # the SECOND `last_error()` round-trip, so when THAT is the broken one the
+        # fault classifies as `0` and is healed not at all. It must be recorded
+        # `unattributed`, NEVER guessed into `authorized` or `dark`.
+        (0, mt5_session_episodes.STATE_NOT_MEASURED),
+        (-10004, mt5_session_episodes.STATE_NOT_MEASURED),
+        (-10005, mt5_session_episodes.STATE_NOT_MEASURED),
+        (-6, mt5_session_episodes.STATE_DARK),
+    ],
+)
+def test_TRACER_the_reading_is_mapped_from_the_CODE_and_a_zero_is_UNATTRIBUTED(
+    ipc_code: int, expect_state: str
+) -> None:
+    reading = mt5_session_episodes.classify_reading(
+        mt5_session_episodes.KIND_IPC_FAULT, ipc_code
+    )
+    assert reading.state == expect_state
+    assert reading.unattributed is (ipc_code == 0), (
+        "`code=0` is the sentinel `_raise_last` uses for THREE distinct faults; "
+        "it attributes to none of them and must say so"
+    )
+
+
+def test_TRACER_the_two_positive_classes_are_mapped_by_CLASS_not_by_code() -> None:
+    """A clean probe RAISES NOTHING, so there is no `last_error()` to read and no
+    code to map from. ⛔ Substituting `0` there would collide with the IN-02
+    sentinel and turn every healthy reading into an unattributed one."""
+    for kind in (
+        mt5_session_episodes.KIND_ALREADY_AUTHORIZED,
+        mt5_session_episodes.KIND_HEALED,
+    ):
+        reading = mt5_session_episodes.classify_reading(kind, None)
+        assert reading.state == mt5_session_episodes.STATE_AUTHORIZED
+        assert reading.unattributed is False
+
+
+# --------------------------------------------------------------------------- #
+# (c2) MORE THAN ONE OPEN ROW IS REACHABLE AND MUST BE HANDLED, NOT ASSUMED AWAY
+# --------------------------------------------------------------------------- #
+
+
+async def test_an_ORPHANED_open_row_is_closed_as_superseded_and_never_as_measured(
+    monkeypatch: pytest.MonkeyPatch, sink
+) -> None:
+    """Railway OVERLAPS CONTAINERS ON DEPLOY — the old one drains while the new
+    one boots — so two monitor loops can observe the same terminal for a window.
+    A read that takes the newest row and never looks back leaves the older one
+    open FOREVER, and the episode it represents is LOST from the very lifetime
+    dataset criterion 1 exists to build."""
+    orphan = _seed_open_row(
+        sink,
+        mt5_session_episodes.STATE_DARK,
+        id="orphan",
+        started_at="2026-09-15T00:00:00+00:00",
+    )
+    live = _seed_open_row(
+        sink,
+        mt5_session_episodes.STATE_DARK,
+        id="live",
+        started_at="2026-09-15T02:00:00+00:00",
+    )
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+
+    assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert orphan["status"] == "error"
+    assert sink.metadata(orphan)["closing_kind"] == mt5_session_episodes.KIND_SUPERSEDED
+    assert sink.metadata(orphan)["close_is_measured"] is False, (
+        "a superseded close must stay DISTINGUISHABLE from a genuine dark-window "
+        "end, or this fix corrupts the dataset in a new way instead of an old one"
+    )
+    assert orphan["error"] == mt5_session_episodes.KIND_SUPERSEDED
+    # the NEWEST row is the live one and it was closed as a MEASURED transition
+    assert live["status"] == "error"
+    assert sink.metadata(live)["close_is_measured"] is True
+    assert sink.metadata(live)["closing_kind"] == mt5_session_episodes.KIND_ALREADY_AUTHORIZED
+    assert len(sink.open_rows()) == 1
+    assert sink.metadata(sink.open_rows()[0])["state"] == (
+        mt5_session_episodes.STATE_AUTHORIZED
+    )
+
+
+@pytest.mark.parametrize(
+    "broken_metadata",
+    [
+        pytest.param({"state": None}, id="state-absent"),
+        pytest.param({"state": "AUTHORISED"}, id="state-malformed"),
+        pytest.param({"schema_version": 99}, id="unrecognised-schema-version"),
+    ],
+)
+async def test_a_row_NOTHING_PARSED_is_superseded_and_never_becomes_a_lifetime(
+    monkeypatch: pytest.MonkeyPatch, sink, broken_metadata: dict
+) -> None:
+    """⛔ "Differs" is TOTAL and would otherwise swallow this case, closing a row
+    NOTHING PARSED with `close_is_measured` true — fabricating a measured
+    lifetime out of a row whose start state was never established."""
+    broken = _seed_open_row(
+        sink, mt5_session_episodes.STATE_AUTHORIZED, metadata=broken_metadata
+    )
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+
+    assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert broken["status"] == "error"
+    assert sink.metadata(broken)["close_is_measured"] is False
+    assert sink.metadata(broken)["closing_kind"] == mt5_session_episodes.KIND_SUPERSEDED
+    assert sink.lifetime_dataset() == [], (
+        "a row nothing parsed reached the lifetime dataset"
+    )
+    assert len(sink.open_rows()) == 1
+
+
+async def test_THE_COMPARE_AND_SET_a_superseded_close_cannot_overwrite_a_measured_one(
+    sink,
+) -> None:
+    """⛔ THE RACE THE PREDICATE EXISTS FOR, DRIVEN DIRECTLY.
+
+    Container A closes row R GENUINELY (`close_is_measured: true`). Container B —
+    already mid-open, having read R as live BEFORE A's write — then issues its
+    superseded close against the SAME row, from its STALE copy. With the
+    compare-and-set the second write is a no-op and the episode survives; without
+    it, `false` is stamped over `true` and the successor's `close_is_measured`
+    filter EXCLUDES a genuinely measured episode.
+
+    ⚠️ Reading the row first and branching in Python does NOT fix this: the
+    interleave is between the read and the write, which is exactly the window a
+    compare-and-set closes and a read-then-write does not.
+    """
+    row = _seed_open_row(sink, mt5_session_episodes.STATE_AUTHORIZED, id="R")
+    stale_copy = dict(row)  # container B's read, taken BEFORE A's write
+
+    # container A: the genuine, MEASURED close
+    await mt5_session_episodes._close_row(
+        row,
+        state=mt5_session_episodes.STATE_AUTHORIZED,
+        closing_kind=mt5_session_episodes.KIND_NO_AUTHORIZED_ACCOUNT,
+        closing_code=-6,
+        source=mt5_relogin.HEAL_SOURCE_SESSION_MONITOR,
+        measured=True,
+    )
+    assert sink.lifetime_dataset() == ["R"]
+
+    # container B: the superseded close, from its stale read
+    await mt5_session_episodes._close_row(
+        stale_copy,
+        state=mt5_session_episodes.STATE_AUTHORIZED,
+        closing_kind=mt5_session_episodes.KIND_SUPERSEDED,
+        closing_code=None,
+        source=mt5_relogin.HEAL_SOURCE_BOOT,
+        measured=False,
+    )
+
+    assert sink.lifetime_dataset() == ["R"], (
+        "the superseded close DELETED a genuinely measured episode from the "
+        "lifetime dataset — the `status='running'` predicate is missing from the "
+        "UPDATE, so the write landed on an already-closed row"
+    )
+    assert sink.metadata(row)["close_is_measured"] is True
+    assert row["status"] == "ok"
+    # and the no-op is MEASURED, not inferred: the second update matched 0 rows
+    assert sink.updates[-1]["applied"] == 0, (
+        "the second UPDATE matched a row; its predicate no longer carries "
+        "status='running'"
+    )
+    assert ("status", "running") in sink.updates[-1]["filters"]
+
+
+async def test_the_recorder_NEVER_raises_and_leaves_the_verdict_byte_identical(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ INSTRUMENTATION MUST NOT CHANGE WHAT A CALLER OBSERVES (T-153.3-24).
+
+    A sink that raises on every call must leave the heal's verdict line
+    BYTE-IDENTICAL — the recorder runs under `main.lifespan`'s `_crash_handler`,
+    which calls `SHUTDOWN.set()` on ANY background-task exception.
+    """
+
+    def _exploding_sink():
+        raise RuntimeError("supabase is unreachable")
+
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        monkeypatch.setattr(mt5_session_episodes, "get_supabase", _exploding_sink)
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    outcomes = _outcome_records(caplog)
+    assert [r.getMessage() for r in outcomes] == [
+        f"mt5 boot heal: {mt5_relogin._VERDICT_ALREADY_AUTHORIZED}"
+    ], [r.getMessage() for r in outcomes]
+
+
+def test_the_recorder_carries_the_SAME_never_raises_shape_as_the_heal() -> None:
+    """⭐ THE ONE PREDICATE, WIDENED — never a second copy.
+
+    The recorder is checked with an EMPTY `required_names`: it carries no kill
+    switch of its own, because it is INSTRUMENTATION and is disabled by its
+    caller not running.
+    """
+    for symbol in (
+        mt5_session_episodes.record_mt5_session_reading,
+        mt5_session_episodes.record_mt5_heal_outcome,
+    ):
+        source = textwrap.dedent(inspect.getsource(symbol))
+        assert _heal_guard_defects(source, required_names=()) == [], symbol.__name__
+
+
+def test_the_required_names_parameter_BITES() -> None:
+    """⛔ THE CALIBRATION FOR THE NEW PARAMETER. Without it, `required_names` is a
+    claim rather than a gate: a parameter that can never fire is indistinguishable
+    from one that is ignored."""
+    source = _heal_source()
+    assert _heal_guard_defects(source) == []
+    defects = _heal_guard_defects(
+        source, required_names=("a_name_that_is_not_in_the_guard_body",)
+    )
+    assert defects and any(
+        "a_name_that_is_not_in_the_guard_body" in d for d in defects
+    ), defects
+    # ...and the DEFAULT is still the kill-switch name, so every existing call
+    # site is byte-identical in behaviour.
+    assert (
+        inspect.signature(_heal_guard_defects).parameters["required_names"].default
+        == ("mt5_enabled_server",)
+    )
+
+
+async def test_orphans_are_closed_EVEN_WHEN_the_newest_row_needs_no_transition(
+    monkeypatch: pytest.MonkeyPatch, sink
+) -> None:
+    """⛔ THE CASE A `limit 1` READ LOSES FOREVER, AND IT IS WHY THE READ TAKES
+    ALL OPEN ROWS.
+
+    Two containers overlap on a Railway deploy and both open a run. The next tick
+    observes the state the NEWEST row already claims, so there is no transition to
+    write — and a recorder that read only the newest row would return right there,
+    leaving the older row open with a null `completed_at` FOREVER. The episode it
+    represents is then LOST from the very lifetime dataset criterion 1 exists to
+    build, and no later tick ever looks back far enough to find it.
+
+    ⭐ The orphan here is AUTHORIZED on purpose. Its superseded close must still
+    be `status='error'`, because `status='ok'` means exactly one thing — "an
+    authorized run whose end we MEASURED" — and an anomaly that borrowed `ok`
+    would be indistinguishable from a measured session lifetime to any reader who
+    filtered on `status` alone.
+    """
+    orphan = _seed_open_row(
+        sink,
+        mt5_session_episodes.STATE_AUTHORIZED,
+        id="orphan",
+        started_at="2026-09-15T00:00:00+00:00",
+    )
+    newest = _seed_open_row(
+        sink,
+        mt5_session_episodes.STATE_AUTHORIZED,
+        id="newest",
+        started_at="2026-09-15T02:00:00+00:00",
+    )
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+
+    assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    # nothing TRANSITIONED, so nothing was opened...
+    assert sink.inserts == [], "a tick with no transition wrote a row"
+    # ...and the NEWEST row is untouched, still live.
+    assert newest["status"] == "running"
+    assert newest["completed_at"] is None
+    # ...but the ORPHAN was closed, as an anomaly and never as a measurement.
+    assert orphan["status"] == "error", (
+        "a SUPERSEDED close borrowed `status='ok'` from the run's state. "
+        "`ok` must keep meaning 'an authorized run whose end we MEASURED', or a "
+        "reader filtering on status alone reads an anomaly as a session lifetime."
+    )
+    assert sink.metadata(orphan)["close_is_measured"] is False
+    assert sink.metadata(orphan)["closing_kind"] == mt5_session_episodes.KIND_SUPERSEDED
+    assert sink.metadata(orphan)["completed_at_is_notice_time"] is True, (
+        "a superseded row's `completed_at` is the time we NOTICED, not a measured "
+        "transition — the mirror of `started_at_is_lower_bound` at the other end"
+    )
+    assert sink.lifetime_dataset() == [], (
+        "the orphan reached the lifetime dataset as a measured episode"
+    )
+    assert len(sink.open_rows()) == 1
