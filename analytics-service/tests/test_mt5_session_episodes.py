@@ -670,6 +670,70 @@ async def test_a_SUPERSEDED_close_cannot_OVERWRITE_a_GENUINE_one(
     )
 
 
+async def test_a_LOST_compare_and_set_on_the_MEASURED_close_does_not_claim_one(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ WR-01. B reads R as live and its own reading DIFFERS, so it takes the
+    measured-close arm — but between B's read and B's own UPDATE, container A has
+    ALREADY closed R genuinely. B's compare-and-set therefore matches ZERO rows,
+    and B must NOT claim it measured that transition: the run it opens next must
+    carry ``started_at_is_lower_bound: true``, exactly as the crash/orphan cases
+    do, because THIS process measured no transition it can bound.
+
+    ⚠️ Before the fix, ``_close_row`` discarded the UPDATE's result and
+    ``record_mt5_session_reading`` set ``continued_a_measured_run = True``
+    unconditionally after reaching this branch — so a caller that LOST the race
+    stamped ``started_at_is_lower_bound: false`` regardless.
+    """
+    fake = _OrderedCronRuns()
+    _install_sink(monkeypatch, fake)
+    mt5_session_episodes._reset_session_episode_state_for_tests()
+
+    row = _seed_open_row(fake, mt5_session_episodes.STATE_AUTHORIZED, id="R")
+
+    def _container_a_closes_it_first() -> None:
+        metadata = dict(row["metadata"])
+        metadata.update(
+            {
+                "closed_by": _SOURCE,
+                "closing_kind": mt5_session_episodes.KIND_NO_AUTHORIZED_ACCOUNT,
+                "closing_code": -6,
+                "close_is_measured": True,
+            }
+        )
+        row["metadata"] = metadata
+        row["status"] = "ok"
+        row["completed_at"] = "2026-09-15T03:00:00+00:00"
+
+    # B's read (inside record_mt5_session_reading) returns R as live; A's
+    # genuine close lands immediately after it — the same interleave
+    # `test_a_SUPERSEDED_close_cannot_OVERWRITE_a_GENUINE_one` drives, but here
+    # B's OWN reading differs from R's stale state, so B takes the MEASURED
+    # branch rather than the superseded one.
+    fake.after_select = _container_a_closes_it_first
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        await _observe(_DARK_READING)
+
+    # --- A's genuine close survives untouched ------------------------------ #
+    assert row["metadata"]["close_is_measured"] is True, (
+        "B's lost compare-and-set overwrote A's genuine close"
+    )
+    assert row["completed_at"] == "2026-09-15T03:00:00+00:00"
+    assert row["status"] == "ok"
+
+    # --- B's own open must NOT claim a measured start ---------------------- #
+    opened = fake.open_rows()
+    assert len(opened) == 1, f"harness: {len(opened)} open rows, expected 1"
+    assert fake.metadata(opened[0])["started_at_is_lower_bound"] is True, (
+        "a caller that LOST the compare-and-set claimed a MEASURED transition — "
+        "the CAS protects the row but the inference was not gated on it"
+    )
+    assert any(
+        "lost its compare-and-set" in r.getMessage() for r in _warnings(caplog)
+    ), [r.getMessage() for r in _warnings(caplog)]
+
+
 @pytest.mark.parametrize(
     "broken_metadata",
     [

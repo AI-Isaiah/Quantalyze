@@ -435,8 +435,17 @@ async def _close_row(
     closing_code: int | None,
     source: str,
     measured: bool,
-) -> None:
-    """Close ONE open row — as a COMPARE-AND-SET.
+) -> bool:
+    """Close ONE open row — as a COMPARE-AND-SET. Returns whether THIS call won it.
+
+    ⭐ WR-01. The return value is the ONLY way a caller can tell a CAS that bit
+    from one that no-op'd against a row someone else already closed — and that
+    distinction is load-bearing for the caller's OWN inference (see
+    ``record_mt5_session_reading``, which must not claim a measured transition
+    about an UPDATE that matched zero rows). ``True`` means this call's
+    ``status='running'`` predicate matched and the row is now closed under this
+    call's payload; ``False`` means another writer closed it first and this call
+    was a genuine no-op — the row's content is UNCHANGED by this call.
 
     ⛔ THE ``status='running'`` PREDICATE IS LOAD-BEARING AND IT IS NOT
     DEFENSIVE PROGRAMMING. Without it the fix loses episodes through the very
@@ -510,7 +519,11 @@ async def _close_row(
             .execute()
         )
 
-    await db_execute(_update)
+    response = await db_execute(_update)
+    # ⭐ WR-01 — A ZERO-ROW UPDATE MEANS THE CAS LOST: another writer closed
+    # this row first. Fail CLOSED rather than assume the write bit; the caller
+    # depends on this to know whether IT measured the transition.
+    return bool(rows(response))
 
 
 async def _open_row(reading: SessionReading, *, source: str,
@@ -733,7 +746,14 @@ async def record_mt5_session_reading(
                     measured=False,
                 )
             else:
-                await _close_row(
+                # ⭐ WR-01 — THE INFERENCE IS GATED ON THE CAS OUTCOME, not
+                # assumed from having reached this branch. `_close_row`'s
+                # `status='running'` predicate is the only thing standing
+                # between "we measured this transition" and "another writer
+                # already closed this row" — a caller that lost the race must
+                # not stamp `started_at_is_lower_bound: false` about a
+                # transition it did not measure.
+                continued_a_measured_run = await _close_row(
                     live,
                     state=live_state,
                     closing_kind=reading.kind,
@@ -741,7 +761,14 @@ async def record_mt5_session_reading(
                     source=source,
                     measured=True,
                 )
-                continued_a_measured_run = True
+                if not continued_a_measured_run:
+                    logger.warning(
+                        "mt5 session episode: the measured close lost its "
+                        "compare-and-set — another writer closed this run "
+                        "first. The run opened next carries "
+                        "started_at_is_lower_bound: true, because THIS "
+                        "process measured no transition it can bound.",
+                    )
 
         await _open_row(
             reading,
