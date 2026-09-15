@@ -29,8 +29,17 @@ job-claiming loops and a local run claims REAL prod compute jobs.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import logging
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import textwrap
+from typing import Final
 
 import pytest
 
@@ -38,6 +47,14 @@ import main_worker
 from services import mt5_concurrency, mt5_relogin, mt5_session_episodes
 from services import mt5_session_monitor as monitor
 from services.mt5_client import Mt5Client
+
+# ⛔ IMPORTED, NEVER COPIED (plan 03, key_links). `_heal_guard_defects` is THE ONE
+# never-raises predicate; plan 02 widened it with a keyword-only `required_names`
+# precisely so a second module could reach it without a second copy. A copied
+# structural gate is the drift shape this repo has a dated record of, and the COPY
+# is what rots. `tests/` is a package and `pytest.ini` sets `pythonpath = .`, so
+# this import is a plain one — MEASURED to work before it was written.
+from tests.test_mt5_relogin import _HEAL_GUARD_MUTANTS, _heal_guard_defects
 
 # The obviously-fake register, matching `tests/test_mt5_relogin.py` byte for byte.
 _FAKE_LOGIN = "4242424"
@@ -662,3 +679,794 @@ async def test_A_FAILURE_OUTSIDE_THE_PER_TICK_GUARD_STILL_CANNOT_END_THE_WORKER(
         "milestone exists to remove, and from here nothing will notice a lapsed "
         "broker session until the process restarts"
     )
+
+
+# =========================================================================== #
+# PLAN 03, TASK 1 — THE TWO STRUCTURAL PROPERTIES, EACH WITH ITS OWN CALIBRATED
+# MUTANT TABLE.
+#
+# A LOOP NEEDS TWO PROPERTIES AND ONE OF THEM IS NOT THE HEAL'S.
+#
+#   P-outer — THE TASK CAN NEVER ESCAPE. The whole body inside one `try` /
+#     `except Exception`, the handler body itself guarded (IN-06), no `finally:`
+#     and no `else:` (both sit OUTSIDE the handler). This is EXACTLY the shipped
+#     `_heal_guard_defects`, imported above and widened by plan 02 — not copied.
+#
+#   P-inner — ONE TICK CAN NEVER KILL THE LOOP. Every statement of the `while`
+#     body inside a guard whose bare-`Exception` handler CONTINUES.
+#
+# ⛔ P-outer ALONE IS WORSE THAN NOTHING ON A LOOP. Its rule is "EXACTLY ONE
+# top-level statement and it must be the `try`", which for a loop puts the `while`
+# INSIDE the guard — so the handler runs ONCE and the `try` is then over and THE
+# LOOP IS GONE. A single transient error on tick 3 silently ends the keepalive for
+# the life of the process, behind a WARNING that looks like a transient miss and a
+# worker that stays green: this phase's own defect class arriving inside the fix.
+# =========================================================================== #
+
+
+def _tick_source() -> str:
+    """P-OUTER'S SECOND SOURCE. ⛔ A SIBLING FEEDER, never an edit to
+    `_heal_source` — that surface was fixed in wave 2 and plan 04 depends on it."""
+    return textwrap.dedent(inspect.getsource(monitor.run_mt5_session_monitor_tick))
+
+
+def _loop_source() -> str:
+    """P-OUTER'S THIRD SOURCE, and P-INNER'S ONLY ONE."""
+    return textwrap.dedent(inspect.getsource(monitor.mt5_session_monitor_loop))
+
+
+#: ⛔ `required_names` PER SOURCE, and the loop's entry is a MEASURED CORRECTION
+#: to the plan, which says "pass the kill-switch name for the tick AND the loop,
+#: both of which read the switch". MEASURED 2026-09-15: the LOOP DOES NOT READ THE
+#: SWITCH — `mt5_enabled_server` appears nowhere in its source, because the switch
+#: is read INSIDE the tick (first statement of the tick's guard, which is where
+#: criterion 3 needs it: before anything is constructed). Passing the plan's
+#: literal tuple would have redded the loop against a property it correctly does
+#: not have.
+#:
+#: What the loop owes is the SAME argument about a DIFFERENT name: the guard must
+#: cover the body from the point the terminal can first be touched onward, and for
+#: the loop that point is the call to the tick. `SHUTDOWN` rides along because a
+#: `while` header outside the guard is precisely the escape route
+#: `test_A_FAILURE_OUTSIDE_THE_PER_TICK_GUARD_STILL_CANNOT_END_THE_WORKER` found
+#: ungated in wave 2.
+_P_OUTER_REQUIRED_NAMES: Final[dict[str, tuple[str, ...]]] = {
+    "tick": ("mt5_enabled_server",),
+    "loop": ("run_mt5_session_monitor_tick", "SHUTDOWN"),
+}
+
+
+def _p_outer_sources() -> dict[str, str]:
+    return {"tick": _tick_source(), "loop": _loop_source()}
+
+
+def test_BOTH_new_symbols_satisfy_the_ONE_shared_never_raises_predicate() -> None:
+    """⛔ P-OUTER OVER BOTH NEW SYMBOLS, THROUGH THE IMPORTED PREDICATE.
+
+    `main.lifespan`'s `_crash_handler` calls `SHUTDOWN.set()` on ANY
+    background-task exception, which stops dispatch, watchdog and enqueue behind a
+    green `/health`. `heal_mt5_terminal_session` was built never to raise for
+    exactly that reason and is AST-asserted so; a keepalive is a LOOP, so the
+    hazard is PERMANENT here rather than one-shot, and both of its symbols carry
+    the same property or neither does.
+    """
+    sources = _p_outer_sources()
+    for source_id, source in sources.items():
+        defects = _heal_guard_defects(
+            source, required_names=_P_OUTER_REQUIRED_NAMES[source_id]
+        )
+        assert defects == [], (
+            f"the {source_id} does not satisfy the shared never-raises predicate: "
+            f"{defects}. ⛔ Fix the MODULE — never the predicate, and never a "
+            "waiver: this gate also polices `heal_mt5_terminal_session` and the "
+            "episode recorder, so weakening it to clear one red opens three."
+        )
+
+
+def test_the_GUARD_DEMONSTRABLY_COVERS_THE_TICK_CALL_and_not_merely_its_NAME() -> None:
+    """⭐ A HOLE THE CALIBRATION FOUND, CLOSED AT THIS END RATHER THAN THE SHARED ONE.
+
+    MEASURED 2026-09-15. `required_names` is implemented as a SUBSTRING test over
+    `ast.dump(...)` of the guard body, so ANY occurrence of the name satisfies it —
+    including a STRING LITERAL. Replacing the call with
+    `await globals()['run_mt5_session_monitor_tick']()` in the shipped module left
+    `test_BOTH_new_symbols_satisfy_the_ONE_shared_never_raises_predicate` **GREEN**:
+    the gate saw its name and concluded the call was covered, while the guard no
+    longer covers a call it can identify at all.
+
+    ⛔ THE SHARED PREDICATE IS NOT TOUCHED TO FIX THIS. Its signature and behaviour
+    were fixed in wave 2 and plan 04 imports them in this same wave; changing them
+    from here is the coupling the plan forbids. The missing half is asserted HERE
+    instead, where it costs one local test and no shared surface: the tick must be
+    reached by a PLAIN NAMED CALL inside the guard, which is the thing
+    `required_names` is a cheap proxy for.
+    """
+    fn = ast.parse(_loop_source()).body[0]
+    assert isinstance(fn, ast.AsyncFunctionDef)
+    body = [node for node in fn.body if not _is_docstring(node)]
+    assert len(body) == 1 and isinstance(body[0], ast.Try), body
+
+    named_calls = [
+        node
+        for node in ast.walk(body[0])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "run_mt5_session_monitor_tick"
+    ]
+    assert len(named_calls) == 1, (
+        f"the guard contains {len(named_calls)} plain named calls to "
+        "`run_mt5_session_monitor_tick`; exactly ONE is required. A dynamic or "
+        "aliased call still satisfies `required_names` — the NAME is present as a "
+        "string — while nothing checks that the guard covers the only statement "
+        "that can touch the terminal."
+    )
+
+
+#: ⛔ THE LOOP GETS ITS OWN P-OUTER TABLE, AND THE REASON IS MEASURED RATHER THAN
+#: STYLISTIC. The shared `_HEAL_GUARD_MUTANTS` needles are indentation-bearing
+#: strings spliced with `count=1`. Against the loop, `"    except Exception as
+#: exc:"` matches THREE times (the per-tick arm and the sleep arm at 12 spaces,
+#: and P-outer's own arm at 4) and the FIRST hit is the per-tick arm — so the
+#: shared table would silently mutate P-INNER's guard while claiming to calibrate
+#: P-outer's. The anchors below are asserted UNIQUE before they are spliced, which
+#: is what makes "the mutant applied where I said it did" a measurement.
+_LOOP_GUARD_MUTANTS: Final[dict[str, tuple[str, str]]] = {
+    "finally-outside-the-handler": (
+        "APPEND",
+        "\n    finally:\n        raise RuntimeError('cleanup')\n",
+    ),
+    "else-outside-the-handler": (
+        "APPEND",
+        "\n    else:\n        raise RuntimeError('else')\n",
+    ),
+    "outer-handler-narrowed": (
+        "    except Exception as exc:  # noqa: BLE001 — see the docstring; this "
+        "is the control",
+        "    except ValueError as exc:  # noqa: BLE001 — see the docstring; this "
+        "is the control",
+    ),
+    "outer-fallback-narrower-than-the-failure": (
+        "        except BaseException:  # noqa: BLE001 — see the comment; this is "
+        "the control",
+        "        except Exception:  # noqa: BLE001 — see the comment; this is "
+        "the control",
+    ),
+    "outer-handler-body-grew-an-unguarded-statement": (
+        "APPEND",
+        "\n        logger.info('an unguarded extra %s', type(exc).__name__)\n",
+    ),
+    # ⛔ THE CALIBRATION FOR THIS SOURCE'S `required_names`, which is the half of
+    # plan 02's widening that only becomes a gate once something drives it. An
+    # ALIASED tick call is the realistic edit: the guard still wraps everything, so
+    # every other arm stays green, but the gate can no longer SEE that the call it
+    # is supposed to cover is inside it.
+    "the-guard-no-longer-demonstrably-covers-the-tick-call": (
+        "await run_mt5_session_monitor_tick()",
+        "await _aliased_tick()",
+    ),
+}
+
+#: The PRODUCT of sources and mutants (plan 1(b)): every source P-outer polices is
+#: calibrated, not just the one the shipped table was written against.
+_P_OUTER_MUTANT_TABLES: Final[dict[str, dict[str, tuple[str, str]]]] = {
+    "tick": _HEAL_GUARD_MUTANTS,
+    "loop": _LOOP_GUARD_MUTANTS,
+}
+
+_P_OUTER_MUTANT_CASES: Final[list[tuple[str, str]]] = [
+    (source_id, mutant_id)
+    for source_id, table in sorted(_P_OUTER_MUTANT_TABLES.items())
+    for mutant_id in sorted(table)
+]
+
+
+def _splice(source: str, needle: str, replacement: str, *, mutant_id: str) -> str:
+    """Apply one mutant to a COPY of the shipped source. Nothing on disk is
+    touched.
+
+    ⛔ THREE THINGS ARE ASSERTED BEFORE ANY RED IS BELIEVED, and each of them is a
+    way a calibration has already passed VACUOUSLY in this repo:
+      * the anchor is PRESENT — a stale anchor makes the mutant a no-op;
+      * the anchor is UNIQUE — an ambiguous anchor mutates a DIFFERENT arm from
+        the one the mutant is named for, so the red proves the wrong thing;
+      * the text actually CHANGED — a neuter that does not apply reads as GREEN.
+    """
+    if needle == "APPEND":
+        mutated = source.rstrip("\n") + replacement
+    else:
+        occurrences = source.count(needle)
+        assert occurrences == 1, (
+            f"the {mutant_id!r} anchor occurs {occurrences} time(s) in the "
+            f"source; exactly ONE is required. 0 means the anchor is stale and "
+            f"the mutant would be a no-op that reads as a pass; >1 means the "
+            f"splice lands on whichever arm happens to come first, so the red "
+            f"would be evidence about a DIFFERENT arm. Anchor: {needle!r}"
+        )
+        mutated = source.replace(needle, replacement, 1)
+    assert mutated != source, (
+        f"the {mutant_id!r} mutation did not change the text — a neuter that does "
+        "not apply reads as GREEN"
+    )
+    return mutated
+
+
+@pytest.mark.parametrize("source_id,mutant_id", _P_OUTER_MUTANT_CASES)
+def test_P_OUTER_REDS_on_every_escape_route_in_EVERY_source_it_polices(
+    source_id: str, mutant_id: str
+) -> None:
+    """⛔ THE CALIBRATION, RUN OVER THE PRODUCT. Without it the P-outer assertions
+    are claims about the source rather than a gate: a predicate that never fires is
+    indistinguishable from one that cannot.
+
+    ⛔ EVERY MUTANT MUST BE VALID PYTHON — and that is not pedantry. A first draft
+    of the shipped table spliced `finally:` BEFORE the `except:`, which is a
+    SyntaxError, so the calibration "passed" without the assertion ever being
+    reached. The parse therefore happens OUTSIDE any `try` here: an unparseable
+    mutant must FAIL this test rather than be excused by it.
+    """
+    needle, replacement = _P_OUTER_MUTANT_TABLES[source_id][mutant_id]
+    source = _p_outer_sources()[source_id]
+    mutated = _splice(source, needle, replacement, mutant_id=mutant_id)
+
+    defects = _heal_guard_defects(
+        mutated, required_names=_P_OUTER_REQUIRED_NAMES[source_id]
+    )
+    assert defects, (
+        f"the never-raises predicate tolerated {mutant_id!r} in the {source_id} — "
+        "that escape route reaches `main.lifespan`'s `_crash_handler`, which "
+        "calls SHUTDOWN.set() and stops the dispatch, watchdog and enqueue loops "
+        "behind a green /health"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# P-INNER — THE LOOP CANNOT BE KILLED BY ONE TICK
+# --------------------------------------------------------------------------- #
+
+
+def _is_docstring(node: ast.stmt) -> bool:
+    return (
+        isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    )
+
+
+def _handler_type(handler: ast.ExceptHandler) -> str:
+    return "<bare except:>" if handler.type is None else ast.unparse(handler.type)
+
+
+def _loop_survival_defects(source: str) -> list[str]:
+    """P-INNER, AS A REUSABLE FUNCTION OVER SOURCE TEXT, returning NAMED defects.
+
+    ⛔ PARAMETERISED BY SOURCE TEXT ON PURPOSE, in the same shape as
+    `_heal_guard_defects`: a structural gate that is only ever run against the
+    file it polices is indistinguishable from one that returns the empty list.
+    The mutant table below feeds it text the shipped module never contains.
+
+    The escape routes it names, each of which ENDS THE KEEPALIVE while the worker
+    stays green and `/health` stays 200:
+
+      1. the guard body does not hold EXACTLY ONE `while`;
+      2. a statement in the `while` body is not itself a `try` — an unguarded
+         statement there escapes to P-OUTER's handler, and P-outer's handler is
+         OUTSIDE the `while`, so catching there ends the loop;
+      3. a per-tick guard's FINAL handler does not catch bare `Exception`;
+      4. a per-tick handler `break`s or `raise`s — a handler that ends the loop is
+         the silent death this predicate exists to prevent;
+      5. that final handler's body is not EXACTLY one nested `try` with a
+         `BaseException` handler and no `finally:`/`else:` (IN-06, for the same
+         argument-evaluation reason as P-outer: `logger.error`'s ARGUMENTS are
+         evaluated before logging is entered and stdlib `logging` does not swallow
+         that evaluation);
+      6. a bare `asyncio.sleep`, or no shutdown-aware wait at all — `lifespan`
+         gives loops 10 seconds to exit, and a bare sleep on a ten-minute cadence
+         is force-cancelled on EVERY deploy and logged as a failure to exit.
+
+    ⚠️ ASYMMETRY, AND IT IS DELIBERATE: rule 4 (`break`/`raise`) is checked over
+    EVERY handler of each per-tick guard, because an escape from any of them ends
+    the loop; rules 3 and 5 are checked over the FINAL handler only, because the
+    shipped sleep guard legitimately carries a narrow `except asyncio.TimeoutError:
+    pass` arm ahead of its broad one — and the narrow arm FIRST is itself
+    load-bearing (`asyncio.TimeoutError is TimeoutError`, whose MRO runs through
+    `OSError`).
+    """
+    fn = ast.parse(source).body[0]
+    if not isinstance(fn, ast.AsyncFunctionDef):
+        return ["the parsed node is not an async function"]
+
+    body = [node for node in fn.body if not _is_docstring(node)]
+    if len(body) != 1 or not isinstance(body[0], ast.Try):
+        return [
+            f"P-OUTER'S SHAPE IS P-INNER'S PRECONDITION and it no longer holds: "
+            f"{len(body)} top-level statements outside the docstring; exactly ONE "
+            "is allowed and it must be the `try`"
+        ]
+
+    guard = body[0]
+    whiles = [node for node in guard.body if isinstance(node, ast.While)]
+    if len(whiles) != 1:
+        return [
+            f"the guard body holds {len(whiles)} top-level `while` statements; "
+            "EXACTLY ONE is required — a scheduler that has stopped looping is a "
+            "keepalive that runs once and never again, which is indistinguishable "
+            "at runtime from the boot heal this phase exists to replace"
+        ]
+
+    loop = whiles[0]
+    defects: list[str] = []
+
+    for stmt in loop.body:
+        if not isinstance(stmt, ast.Try):
+            defects.append(
+                f"a bare `{type(stmt).__name__}` statement sits in the `while` "
+                "body OUTSIDE any per-tick guard — it escapes to P-OUTER's "
+                "handler, which sits outside the `while`, so catching it THERE "
+                "ends the loop for the life of the process"
+            )
+            continue
+        if not stmt.handlers:
+            defects.append(
+                "a per-tick guard has NO handler at all — a `try`/`finally` in "
+                "the `while` body guards nothing and re-raises everything"
+            )
+            continue
+
+        for handler in stmt.handlers:
+            escapes = sorted(
+                {
+                    type(node).__name__
+                    for statement in handler.body
+                    for node in ast.walk(statement)
+                    if isinstance(node, (ast.Break, ast.Raise))
+                }
+            )
+            if escapes:
+                defects.append(
+                    f"a per-tick handler (`except {_handler_type(handler)}`) "
+                    f"contains {escapes} — a handler that `break`s or re-`raise`s "
+                    "ENDS THE LOOP, which is the keepalive dying silently on tick "
+                    "3 behind a green worker"
+                )
+
+        final = stmt.handlers[-1]
+        caught = _handler_type(final)
+        if caught != "Exception":
+            defects.append(
+                f"a per-tick guard's FINAL handler catches `{caught}`, not bare "
+                "`Exception` — see the per-mutant cost messages in "
+                "`_P_INNER_HANDLER_TYPE_COSTS`; narrowing and widening are "
+                "DIFFERENT hazards and this one string cannot tell them apart"
+            )
+
+        nested = [node for node in final.body if isinstance(node, ast.Try)]
+        if len(final.body) != 1 or len(nested) != 1:
+            defects.append(
+                f"the per-tick handler body has {len(final.body)} statements and "
+                f"{len(nested)} nested `try` — it must be EXACTLY one nested "
+                "`try`, because its own argument evaluation is unguarded (IN-06)"
+            )
+        else:
+            inner = nested[0]
+            inner_types = [_handler_type(h) for h in inner.handlers]
+            if inner_types != ["BaseException"]:
+                defects.append(
+                    f"the per-tick nested handler catches {inner_types}, not "
+                    "['BaseException'] — a fallback narrower than the failure "
+                    "class it catches is not a fallback"
+                )
+            if inner.finalbody or inner.orelse:
+                defects.append(
+                    "the per-tick nested guard grew a `finally:`/`else:` — both "
+                    "sit OUTSIDE the handler, same escape route as P-outer's"
+                )
+
+    calls = [node for node in ast.walk(fn) if isinstance(node, ast.Call)]
+    rendered = [ast.unparse(node.func) for node in calls]
+    if any(name in ("asyncio.sleep", "sleep") for name in rendered):
+        defects.append(
+            "the loop uses a bare `asyncio.sleep` — `lifespan`'s shutdown gather "
+            "waits 10 s and then CANCELS, so a sleep on a ten-minute cadence is "
+            "force-cancelled on EVERY deploy and logged as a failure to exit "
+            "cleanly"
+        )
+
+    loop_calls = [
+        ast.unparse(node.func)
+        for statement in loop.body
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Call)
+    ]
+    if not any(name.endswith("SHUTDOWN.wait") for name in loop_calls):
+        defects.append(
+            "the `while` body never waits on SHUTDOWN — with no shutdown-aware "
+            "wait the loop either spins without delay or cannot be asked to stop "
+            "inside `lifespan`'s 10-second gather"
+        )
+    if not any(name.endswith("wait_for") for name in loop_calls):
+        defects.append(
+            "the `while` body never bounds its wait with `wait_for` — an "
+            "unbounded `SHUTDOWN.wait()` would tick exactly once, at shutdown"
+        )
+
+    return defects
+
+
+def test_the_loop_satisfies_P_INNER() -> None:
+    """⛔ THE PROPERTY THE HEAL'S PREDICATE CANNOT STATE, and the one whose absence
+    would make P-outer alone WORSE than no gate at all."""
+    defects = _loop_survival_defects(_loop_source())
+    assert defects == [], (
+        f"`mt5_session_monitor_loop` can be killed by ONE tick: {defects}. ⛔ Fix "
+        "the MODULE — a keepalive that dies silently on tick 3 behind a green "
+        "worker reproduces, inside the remedy, the exact failure this phase was "
+        "booked for."
+    )
+
+
+#: ⭐ THE THREE HANDLER-TYPE MUTANTS AND WHAT EACH ONE COSTS AT RUNTIME.
+#:
+#: ⛔ MEASURED, AND IT IS THE REASON THIS DICT EXISTS: the shipped
+#: `_heal_guard_defects` returns the IDENTICAL string — "the handler does not
+#: catch bare `Exception`" — for a handler NARROWED to `ValueError`, one WIDENED
+#: to `BaseException` and one WIDENED to `OSError`. Three different hazards
+#: collapse into one indistinguishable red, and a table that cannot tell them
+#: apart cannot tell you which hazard it just caught. The distinguishing text
+#: therefore lives HERE, in the test's own assertion message, and
+#: `test_the_THREE_handler_type_mutants_are_INDISTINGUISHABLE_to_the_SHARED_predicate`
+#: asserts that collapse rather than assuming it.
+#:
+#: ⛔ AND THE WIDENING DIRECTION IS NOT OPTIONAL. A narrowing-only table cannot
+#: see either of the two traps CONTEXT D-2 records as MEASURED, and both of them
+#: are edits a careful reader would make believing they were making the guard
+#: SAFER.
+_P_INNER_HANDLER_TYPE_COSTS: Final[dict[str, str]] = {
+    "per-tick-handler-NARROWED-to-ValueError": (
+        "NARROWED: a tick failure of any other class escapes the per-tick guard "
+        "to P-OUTER's handler — which sits OUTSIDE the `while`, so the loop ENDS "
+        "for the life of the process and nothing notices a lapsed broker session "
+        "until the container restarts. (If P-outer were ever narrowed too it "
+        "reaches `_crash_handler`, which calls SHUTDOWN.set().)"
+    ),
+    "per-tick-handler-WIDENED-to-BaseException": (
+        "WIDENED to `BaseException`: this arm wraps an `await`, and "
+        "`asyncio.CancelledError` is NOT an `Exception` subclass on this venv "
+        "(measured, Python 3.12.13) — so the widening SWALLOWS SHUTDOWN "
+        "CANCELLATION and HANGS `lifespan`'s 10-second gather on EVERY deploy. "
+        "⛔ This is the edit that looks like extra safety and is the opposite."
+    ),
+    "per-tick-handler-WIDENED-to-OSError": (
+        "WIDENED to `OSError`: `asyncio.TimeoutError is TimeoutError` and its MRO "
+        "runs through `OSError`, so the tick's BUDGET EXPIRY is silently eaten "
+        "and read as a completed tick — the abandoned in-flight call against the "
+        "shared terminal stops being reported at all."
+    ),
+}
+
+#: ⛔ A MUTANT THE PREDICATE TOLERATES IS A HOLE. This table is the proof P-inner's
+#: assertions BITE rather than merely being present. Every entry must be VALID
+#: PYTHON, its anchor is asserted PRESENT and UNIQUE before the splice, and the
+#: mutated text is asserted DIFFERENT before any red is believed.
+_LOOP_SURVIVAL_MUTANTS: Final[dict[str, tuple[str, str]]] = {
+    # (1) an unguarded statement appended to the `while` body — the escape route
+    # to P-outer's handler, which is outside the `while`.
+    "unguarded-statement-in-the-while-body": (
+        "            try:\n                await asyncio.wait_for(",
+        "            logger.info('an unguarded extra statement')\n"
+        "            try:\n                await asyncio.wait_for(",
+    ),
+    # (2)/(3) a handler that ENDS the loop. ⚠️ Spliced INSIDE the nested `try`
+    # rather than beside it, deliberately: beside it the handler body would stop
+    # being "exactly one nested try" and the red would come from the IN-06 rule
+    # instead of from the rule this mutant is named for.
+    "per-tick-handler-BREAKS": (
+        "                try:\n"
+        "                    logger.error(\n"
+        '                        "mt5 session monitor: a tick escaped its own '
+        'guard — the "',
+        "                try:\n"
+        "                    break\n"
+        "                    logger.error(\n"
+        '                        "mt5 session monitor: a tick escaped its own '
+        'guard — the "',
+    ),
+    "per-tick-handler-RAISES": (
+        "                try:\n"
+        "                    logger.error(\n"
+        '                        "mt5 session monitor: a tick escaped its own '
+        'guard — the "',
+        "                try:\n"
+        "                    raise RuntimeError('the tick failure ends the loop')\n"
+        "                    logger.error(\n"
+        '                        "mt5 session monitor: a tick escaped its own '
+        'guard — the "',
+    ),
+    # (4)(5)(6) the three handler-type mutants — ONE narrowing and TWO widenings.
+    "per-tick-handler-NARROWED-to-ValueError": (
+        "            except Exception as exc:  # noqa: BLE001 — the control; it "
+        "CONTINUES\n                try:\n                    logger.error(\n"
+        '                        "mt5 session monitor: a tick escaped its own '
+        'guard — the "',
+        "            except ValueError as exc:  # noqa: BLE001 — the control; it "
+        "CONTINUES\n                try:\n                    logger.error(\n"
+        '                        "mt5 session monitor: a tick escaped its own '
+        'guard — the "',
+    ),
+    "per-tick-handler-WIDENED-to-BaseException": (
+        "            except Exception as exc:  # noqa: BLE001 — the control; it "
+        "CONTINUES\n                try:\n                    logger.error(\n"
+        '                        "mt5 session monitor: a tick escaped its own '
+        'guard — the "',
+        "            except BaseException as exc:  # noqa: BLE001 — the control; "
+        "it CONTINUES\n                try:\n                    logger.error(\n"
+        '                        "mt5 session monitor: a tick escaped its own '
+        'guard — the "',
+    ),
+    "per-tick-handler-WIDENED-to-OSError": (
+        "            except Exception as exc:  # noqa: BLE001 — the control; it "
+        "CONTINUES\n                try:\n                    logger.error(\n"
+        '                        "mt5 session monitor: a tick escaped its own '
+        'guard — the "',
+        "            except OSError as exc:  # noqa: BLE001 — the control; it "
+        "CONTINUES\n                try:\n                    logger.error(\n"
+        '                        "mt5 session monitor: a tick escaped its own '
+        'guard — the "',
+    ),
+    # (7) IN-06's fallback, narrowed below the class it exists to catch.
+    "per-tick-IN-06-fallback-NARROWED": (
+        "                except BaseException:  # noqa: BLE001 — the control\n"
+        "                    logger.error(\n"
+        '                        "mt5 session monitor: a tick escaped its own '
+        'guard and "',
+        "                except Exception:  # noqa: BLE001 — the control\n"
+        "                    logger.error(\n"
+        '                        "mt5 session monitor: a tick escaped its own '
+        'guard and "',
+    ),
+    # (8) the house sleep idiom replaced by the bare sleep it exists to avoid.
+    "shutdown-aware-wait-replaced-by-a-bare-asyncio-sleep": (
+        "                await asyncio.wait_for(\n"
+        "                    SHUTDOWN.wait(), timeout=session_poll_interval_s()\n"
+        "                )",
+        "                await asyncio.sleep(session_poll_interval_s())",
+    ),
+    # (9) the `while` itself excised. ⚠️ Replaced by a one-shot `for` rather than
+    # by an `if`, and that is a MEASURED constraint rather than a preference: the
+    # sleep guard's legitimate `break` would be OUTSIDE a loop under an `if`, so
+    # the mutant would be a SyntaxError — i.e. it would test the parser instead of
+    # the gate, which is exactly the vacuous pass the shipped table's own comment
+    # was written about.
+    "while-excised-into-a-one-shot": (
+        "        while not SHUTDOWN.is_set():",
+        "        for _ in range(1):  # the loop is gone",
+    ),
+}
+
+
+@pytest.mark.parametrize("mutant_id", sorted(_LOOP_SURVIVAL_MUTANTS))
+def test_P_INNER_REDS_on_every_loop_death_shape(mutant_id: str) -> None:
+    """⛔ THE CALIBRATION FOR P-INNER, AND IT IS THE REASON THE PREDICATE EXISTS AS
+    A SEPARATE GATE AT ALL.
+
+    ⚠️ MEASURED 2026-09-15: ALL FOUR loop-death shapes below — an unguarded
+    statement in the `while` body, a `break` in the per-tick handler, the per-tick
+    handler widened to `BaseException`, and the same arm widened to `OSError` —
+    pass P-OUTER **CLEAN**. P-outer is satisfied by a function that loops once and
+    dies. That is not a gap in P-outer; it is the reason a loop needs two
+    predicates, and this test is the evidence that the second one bites.
+    """
+    needle, replacement = _LOOP_SURVIVAL_MUTANTS[mutant_id]
+    mutated = _splice(_loop_source(), needle, replacement, mutant_id=mutant_id)
+
+    # Parsed OUTSIDE any `try`: an unparseable mutant must FAIL this test rather
+    # than be excused by it.
+    defects = _loop_survival_defects(mutated)
+    cost = _P_INNER_HANDLER_TYPE_COSTS.get(
+        mutant_id,
+        "the loop stops ticking while the worker stays green and `/health` stays "
+        "200 — nothing then notices a lapsed broker session until the container "
+        "restarts, which is the ≥2h34m dark window this phase was booked for",
+    )
+    assert defects, (
+        f"P-INNER tolerated the {mutant_id!r} mutant. What that costs at runtime: "
+        f"{cost}"
+    )
+
+
+@pytest.mark.parametrize("mutant_id", sorted(_LOOP_SURVIVAL_MUTANTS))
+def test_P_OUTER_IS_BLIND_to_every_loop_death_shape_P_INNER_catches(
+    mutant_id: str,
+) -> None:
+    """⛔ WHY THERE ARE TWO PREDICATES, MEASURED RATHER THAN ARGUED.
+
+    MEASURED 2026-09-15: **every single one** of P-inner's mutants passes the
+    shared P-outer predicate CLEAN — the unguarded statement, the `break`, the
+    `raise`, all three handler-type shapes, the narrowed IN-06 fallback, the bare
+    `asyncio.sleep` and the excised `while`. P-outer is satisfied by a function
+    that loops once and dies, because "the whole body is inside one guard" says
+    nothing about what the guard's handler does to the loop.
+
+    Without this test, a reviewer could reasonably conclude P-inner is a second
+    copy of a gate the file already has, and delete it. This is the evidence that
+    deleting it would remove ALL structural coverage of nine distinct ways the
+    keepalive dies behind a green worker.
+
+    ⛔ If this ever reds because P-outer LEARNED to catch one of them, that is good
+    news: record it here. It is NEVER a reason to drop P-inner's arm.
+    """
+    needle, replacement = _LOOP_SURVIVAL_MUTANTS[mutant_id]
+    mutated = _splice(_loop_source(), needle, replacement, mutant_id=mutant_id)
+
+    assert (
+        _heal_guard_defects(mutated, required_names=_P_OUTER_REQUIRED_NAMES["loop"])
+        == []
+    ), (
+        f"P-outer now names a defect for {mutant_id!r}, which it was MEASURED not "
+        "to see. Re-record the measurement; ⛔ do not remove P-inner's arm for it "
+        "— the two predicates answer different questions and the overlap is "
+        "coverage, not duplication."
+    )
+    assert _loop_survival_defects(mutated), (
+        f"and P-INNER does not catch {mutant_id!r} either — this shape is now "
+        "ungated by BOTH predicates"
+    )
+
+
+def test_the_THREE_handler_type_mutants_carry_PAIRWISE_DISTINCT_costs() -> None:
+    """⛔ DISTINCTNESS AS A GATE RATHER THAN AN INTENTION.
+
+    Three different hazards share one predicate string (see the test below). If
+    their cost messages ever collapse into one another, the table quietly halves
+    its diagnostic value and NOTHING reds. This is the assertion that reds instead.
+    """
+    costs = list(_P_INNER_HANDLER_TYPE_COSTS.values())
+    assert len(costs) == 3, sorted(_P_INNER_HANDLER_TYPE_COSTS)
+    assert len(set(costs)) == 3, (
+        "two of the three handler-type cost messages are now IDENTICAL — the "
+        "table can no longer tell you which of a narrowing, a swallowed shutdown "
+        "cancellation and an eaten budget expiry it just caught"
+    )
+    for mutant_id in _P_INNER_HANDLER_TYPE_COSTS:
+        assert mutant_id in _LOOP_SURVIVAL_MUTANTS, (
+            f"{mutant_id!r} carries a cost message but is no longer in the mutant "
+            "table — a cost for a mutant nobody runs is documentation, not a gate"
+        )
+
+
+def test_the_THREE_handler_type_mutants_are_INDISTINGUISHABLE_to_the_SHARED_predicate() -> None:
+    """⛔ THE MEASUREMENT BEHIND THE TEST ABOVE, asserted rather than asserted-about.
+
+    The shipped `_heal_guard_defects` reports a narrowing, a widening to
+    `BaseException` and a widening to `OSError` with ONE identical string. That is
+    why the distinguishing text cannot be inherited from the predicate and has to
+    live in the test. ⛔ If this test ever reds because the strings became
+    distinct, that is GOOD NEWS and the fix is to record it — never to re-collapse
+    them.
+    """
+    source = _loop_source()
+    anchor = (
+        "    except Exception as exc:  # noqa: BLE001 — see the docstring; this "
+        "is the control"
+    )
+    strings = set()
+    for replacement_type in ("ValueError", "BaseException", "OSError"):
+        mutated = _splice(
+            source,
+            anchor,
+            anchor.replace("except Exception", f"except {replacement_type}", 1),
+            mutant_id=f"outer-handler-{replacement_type}",
+        )
+        defects = _heal_guard_defects(
+            mutated, required_names=_P_OUTER_REQUIRED_NAMES["loop"]
+        )
+        handler_defects = [d for d in defects if "handler" in d and "catch" in d]
+        assert handler_defects, (replacement_type, defects)
+        strings.update(handler_defects)
+
+    assert len(strings) == 1, (
+        "the shared predicate now distinguishes the three handler-type mutants — "
+        f"{sorted(strings)}. That is an IMPROVEMENT: record it and keep the "
+        "per-mutant cost messages, which say what each one costs at RUNTIME "
+        "rather than which name appears in the source."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# P-INNER, BEHAVIOURALLY. A shape assertion and a behaviour assertion catch
+# different things: the shape cannot see a guard that is present and wrong, and
+# the behaviour cannot see an escape route at a statement that does not exist yet.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_tick_that_fails_MID_FLIGHT_is_followed_by_more_ticks_and_a_CLEAN_exit(
+    monkeypatch: pytest.MonkeyPatch, fast_cadence, shutdown
+) -> None:
+    """⛔ THE Nth TICK, NOT THE FIRST — and the difference is the whole property.
+
+    `test_A_TICK_THAT_RAISES_DOES_NOT_END_THE_LOOP` fails tick 1, which a loop
+    whose guard survives exactly one failure would also pass. Failing tick 2 (with
+    a healthy tick before and after it) is the shape a real gateway blip takes:
+    the keepalive must resume, and it must still exit inside `lifespan`'s gather
+    rather than being left in a state that only a cancellation can end.
+    """
+    failing_tick = 2
+    ticks: list[int] = []
+
+    async def _raise_on_the_nth() -> None:
+        ticks.append(len(ticks) + 1)
+        if ticks[-1] == failing_tick:
+            raise RuntimeError("the Nth tick escaped its own guard")
+
+    monkeypatch.setattr(monitor, "run_mt5_session_monitor_tick", _raise_on_the_nth)
+
+    task = await _run_until(lambda: len(ticks) >= failing_tick + 2, shutdown)
+
+    assert len(ticks) >= failing_tick + 2, (
+        f"tick {failing_tick} failed and the loop produced only {len(ticks)} "
+        f"ticks — a guard that survives exactly one failure is not survival"
+    )
+    assert task.exception() is None, (
+        f"the loop raised {task.exception()!r} out to `_crash_handler`, which "
+        "calls SHUTDOWN.set() and stops dispatch, watchdog and enqueue behind a "
+        "green /health"
+    )
+    assert task.done() and not task.cancelled(), (
+        "the loop did not exit on its own — it had to be cancelled, which is what "
+        "`lifespan` logs as a failure to exit cleanly on every deploy"
+    )
+
+
+async def test_a_tick_that_fails_EVERY_time_neither_ends_the_loop_NOR_spins_without_delay(
+    monkeypatch: pytest.MonkeyPatch, shutdown, caplog
+) -> None:
+    """⛔ THE RATE IS ASSERTED FIRST, BECAUSE "THE LOOP SURVIVED" IS SATISFIED BY A
+    LOOP BURNING A CORE.
+
+    A per-tick handler that also swallowed the sleep's own failure would re-enter
+    the `while` immediately: every survival assertion in this file would stay
+    green while the container pinned a CPU and filled the operator's log at
+    whatever rate the event loop allows. So the ORDER matters — the bound on the
+    tick count is checked before the "it is still running" claim is made.
+
+    ⚠️ The cadence is set LOCALLY rather than through `fast_cadence`: the gap
+    between the permitted count and a hot loop's count is the entire measurement,
+    and at the 10 ms fixture cadence that gap is only ~2 orders of magnitude of
+    timing jitter away. At 50 ms over a ~300 ms window the expected count is ~6
+    and a hot loop is ~4 orders above the bound.
+    """
+    cadence_s = 0.05
+    window_s = 0.3
+    permitted = 40  # ~6 expected; a hot loop reaches five figures in this window
+
+    monkeypatch.setattr(monitor, "_MT5_SESSION_POLL_INTERVAL_FLOOR_S", 0.001)
+    monkeypatch.setenv(monitor.MT5_SESSION_POLL_INTERVAL_ENV, str(cadence_s))
+
+    ticks: list[int] = []
+
+    async def _always_raises() -> None:
+        ticks.append(len(ticks) + 1)
+        raise RuntimeError("every tick fails")
+
+    monkeypatch.setattr(monitor, "run_mt5_session_monitor_tick", _always_raises)
+
+    with caplog.at_level(logging.ERROR, logger=_MONITOR_LOGGER):
+        task = asyncio.create_task(monitor.mt5_session_monitor_loop())
+        await asyncio.sleep(window_s)
+        spun = len(ticks)
+        alive = not task.done()
+        shutdown.set()
+        await asyncio.wait_for(task, timeout=_LIFESPAN_GATHER_BUDGET_S)
+
+    assert spun <= permitted, (
+        f"{spun} ticks in {window_s}s against a {cadence_s}s cadence — the loop "
+        f"is HOT. It re-enters the `while` without delay, which pins a core and "
+        f"fills the operator's log while every 'the loop survived' assertion in "
+        f"this file stays green. A keepalive that survives by spinning is a "
+        f"different outage, not a fixed one."
+    )
+    assert spun >= 1, "the loop never ticked at all — this measures nothing"
+    assert alive, (
+        f"the loop ENDED after {spun} failing tick(s) — a handler that ends the "
+        "loop is the keepalive dying silently behind a green worker"
+    )
+    assert task.exception() is None, task.exception()
