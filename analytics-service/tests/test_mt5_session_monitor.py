@@ -517,6 +517,35 @@ async def test_the_first_ITERATION_does_NOT_tick_before_a_LARGE_cadence_elapses(
     await asyncio.wait_for(task, timeout=_LIFESPAN_GATHER_BUDGET_S)
 
 
+async def test_WR_09_the_loop_logs_that_it_STARTED_before_its_first_tick(
+    monkeypatch: pytest.MonkeyPatch, shutdown: asyncio.Event, fast_cadence,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """⛔ WR-09 (round 2). Before this fix the loop emitted NOTHING before its
+    first tick, and `main.lifespan` names no task either — so for one full
+    poll interval after every deploy, a healthy monitor and a monitor that
+    does not exist were byte-identical in the logs. A process that does not
+    outlive one interval (two deploys inside ten minutes, a crash loop, any
+    other background task raising and `_crash_handler` calling
+    `SHUTDOWN.set()`) now leaves at least ONE line saying the monitor ran.
+    """
+    async def _noop_tick() -> None:
+        return None
+
+    monkeypatch.setattr(monitor, "run_mt5_session_monitor_tick", _noop_tick)
+
+    with caplog.at_level(logging.INFO, logger=_MONITOR_LOGGER):
+        task = asyncio.create_task(monitor.mt5_session_monitor_loop())
+        # a process that never outlives one interval — the exact case this
+        # fix is for. No tick needs to fire for the boot line to have landed.
+        await asyncio.sleep(0.01)
+        shutdown.set()
+        await asyncio.wait_for(task, timeout=_LIFESPAN_GATHER_BUDGET_S)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("mt5 session monitor: started" in m for m in messages), messages
+
+
 async def _wait_until(predicate, *, poll_s: float = 0.005) -> None:
     while not predicate():
         await asyncio.sleep(poll_s)
@@ -1023,6 +1052,16 @@ async def test_A_FAILURE_OUTSIDE_THE_PER_TICK_GUARD_STILL_CANNOT_END_THE_WORKER(
         "milestone exists to remove, and from here nothing will notice a lapsed "
         "broker session until the process restarts"
     )
+    # ⛔ Info (round 2) — REAL CONTENT, not only the exception CLASS. No
+    # credential is ever in scope in this handler, so the exception's own
+    # (scrubbed) message must reach the log rather than being reduced to
+    # `exc_class=RuntimeError`.
+    stopped_messages = [
+        r.getMessage() for r in caplog.records if "THE LOOP ITSELF STOPPED" in r.getMessage()
+    ]
+    assert any(
+        "the shutdown event cannot answer" in m for m in stopped_messages
+    ), stopped_messages
 
 
 # =========================================================================== #

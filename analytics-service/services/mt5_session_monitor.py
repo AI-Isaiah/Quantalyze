@@ -43,6 +43,7 @@ import logging
 from typing import Final
 
 from services.closed_sets import mt5_enabled_server
+from services.redact import scrub_freeform_string
 
 # ⛔ IMPORTED UNDER THEIR LEADING UNDERSCORES, DELIBERATELY, and for the reason
 # `mt5_relogin` itself gives when it imports `_redact_credential_values` from
@@ -302,6 +303,24 @@ async def mt5_session_monitor_loop() -> None:
         # the guard instead of reaching `_crash_handler`.
         from main_worker import SHUTDOWN
 
+        # ⛔ WR-09 (round 2) — SAY THAT WE ARE WAITING. Before this line the
+        # loop emitted NOTHING before its first tick, and `main.lifespan`
+        # names no task either — so for one full poll interval after every
+        # deploy, a healthy monitor and a monitor that does not exist were
+        # BYTE-IDENTICAL in the logs. That is precisely the ambiguity this
+        # module's own HIGH-1 fix removed for the boot heal ("zero log lines
+        # was simultaneously consistent with FIVE hypotheses"): before that
+        # fix the monitor could not be in that state, because it ticked at
+        # once and a tick always logs; WR-02's reorder re-opened it. A
+        # process that does not outlive one interval — two deploys inside
+        # ten minutes, a crash loop, any other background task raising and
+        # `_crash_handler` calling `SHUTDOWN.set()` — now leaves at least
+        # this ONE line saying the monitor was scheduled at all.
+        logger.info(
+            "mt5 session monitor: started — the boot heal owns the boot "
+            "window; the first detection tick runs in %.0fs.",
+            session_poll_interval_s(),
+        )
         while not SHUTDOWN.is_set():
             # ⛔ WR-02 — WAIT FIRST, TICK SECOND. `main.lifespan` starts
             # `mt5_boot_heal` and `mt5_session_monitor` back to back in the same
@@ -378,8 +397,16 @@ async def mt5_session_monitor_loop() -> None:
                 "is contained rather than raised ON PURPOSE: a raise here reaches "
                 "`main.lifespan`'s `_crash_handler`, which calls SHUTDOWN.set() "
                 "and stops dispatch, watchdog and enqueue behind a green /health "
-                "(exc_class=%s)",
+                "(exc_class=%s scrubbed=%s)",
                 type(exc).__name__,
+                # ⛔ Info (round 2) — REAL CONTENT, not just the class. No
+                # credential is ever in scope in this handler (the loop's own
+                # body never touches one — the tick does, inside ITS OWN
+                # guard), so `scrub_freeform_string` is sufficient here; it is
+                # NOT the by-value `_describe_exception_for_log` redaction
+                # `mt5_relogin`'s outer handler needs, because that path
+                # carries a live broker password and this one never does.
+                scrub_freeform_string(str(exc)),
             )
         except BaseException:  # noqa: BLE001 — see the comment; this is the control
             logger.error(
