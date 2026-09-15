@@ -158,7 +158,23 @@ class _MinimalReturningCronRuns(_OrderedCronRuns):
         def _execute() -> Any:
             response = original()
             if query._op == "update":
-                response.count = len(response.data)
+                # ⛔ WR-16 (round 3) — HONOUR THE REQUEST rather than
+                # volunteering `.count` unconditionally. The base fake
+                # (`_FakeQuery.execute`, in `tests/test_mt5_relogin.py`)
+                # already sets `.count` ONLY when `count="exact"` was
+                # requested — exactly what real postgrest does for
+                # `Prefer: count=exact` — so this need only ASSERT that
+                # already happened rather than compute it a second way.
+                # Before this fix `response.count = len(response.data)` ran
+                # UNCONDITIONALLY here, so dropping `count=CountMethod.exact`
+                # from a `.update()` call (a reviewer "simplifying" it, a
+                # merge conflict resolution) still got a `.count` back — the
+                # exact WR-12 defect, one kwarg away, with the suite green.
+                assert response.count is not None, (
+                    "the UPDATE did not request `count=exact` — a real "
+                    "minimal-returning transport would answer `.count=None`, "
+                    "and every WON compare-and-set would read as LOST"
+                )
                 response.data = []
             return response
 
