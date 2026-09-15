@@ -218,12 +218,14 @@ def _seed_closed_row(
     return row
 
 
-# The four readings this suite drives, named rather than re-spelled per test.
+# The readings this suite drives, named rather than re-spelled per test.
 _AUTHORIZED_READING = (mt5_session_episodes.KIND_ALREADY_AUTHORIZED, None)
 _DARK_READING = (mt5_session_episodes.KIND_NO_AUTHORIZED_ACCOUNT, -6)
 _BUSY_READING = (mt5_session_episodes.KIND_BUSY_SKIP, None)
 _BUDGET_READING = (mt5_session_episodes.KIND_BUDGET_ABANDONED, None)
 _ZERO_CODE_READING = (mt5_session_episodes.KIND_IPC_FAULT, 0)
+_DISABLED_READING = (mt5_session_episodes.KIND_DISABLED, None)
+_TICK_DEADLINE_READING = (mt5_session_episodes.KIND_TICK_DEADLINE, None)
 
 
 async def _observe(
@@ -1021,6 +1023,13 @@ async def test_a_SUPERSEDED_close_carries_the_error_status_REGARDLESS_of_state(
         pytest.param(_BUSY_READING, "busy skip", id="busy-skip"),
         pytest.param(_BUDGET_READING, "budget abandon", id="budget-abandon"),
         pytest.param(_ZERO_CODE_READING, "code=0 sentinel", id="code-zero"),
+        # ⛔ WR-11 (round 2) — the two kinds that round 1's WR-03 shipped with
+        # NO test coverage under this, the ONE control for "a `not_measured`
+        # reading closes nothing" — measured zero occurrences in tests/ before
+        # this fix. Plus WR-07's new kind, added at the same time it was
+        # introduced rather than left to drift the same way.
+        pytest.param(_DISABLED_READING, "kill switch off", id="disabled"),
+        pytest.param(_TICK_DEADLINE_READING, "tick deadline", id="tick-deadline"),
     ],
 )
 async def test_a_reading_that_MEASURED_NOTHING_writes_nothing_and_closes_nothing(
@@ -1751,6 +1760,57 @@ async def test_the_boot_heals_single_shot_caller_never_escalates(
     assert _warnings(caplog) == []
     assert len(_records(caplog)) == 20, "the readings were not logged at all"
     assert all("blind=False" in r.getMessage() for r in _records(caplog))
+
+
+async def test_WR_10_a_DECIDED_kill_switch_is_COUNTED_but_NEVER_escalates_the_level(
+    sink: _OrderedCronRuns, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ WR-10 (round 2). `KIND_DISABLED` names a deliberate operator decision —
+    the comment at its own definition says so — and `_log_configuration_fault_
+    once` already throttles its log line for exactly that reason. Before the
+    fix, once the run crossed the threshold, EVERY subsequent tick logged a
+    WARNING forever: a service disabled on purpose paged its operator every
+    ~ten minutes past the first hour. The count must still extend (so a LATER
+    genuine fault's own escalation is not reset by a preceding decided run),
+    but the LEVEL must stay INFO.
+    """
+    threshold = mt5_session_episodes.blind_run_escalation_threshold(_CADENCE_S)
+    assert threshold is not None and threshold > 1
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        # well past the threshold — a genuine fault kind would be escalated by now.
+        for _ in range(threshold * 3):
+            await _observe(_DISABLED_READING)
+
+    assert _warnings(caplog) == [], (
+        "a deliberately-disabled kill switch escalated to WARNING — an alarm "
+        "that fires forever on a service turned off on purpose is an alarm "
+        "operators learn to ignore"
+    )
+    assert mt5_session_episodes._CONSECUTIVE_NOT_MEASURED_READINGS == threshold * 3, (
+        "the decided-blind kind must still EXTEND the counter — only the LOG "
+        "LEVEL is exempted, not the count itself"
+    )
+    assert all("blind=False" in r.getMessage() for r in _records(caplog))
+
+
+async def test_WR_10_a_MISCONFIGURATION_kind_still_escalates_past_the_threshold(
+    sink: _OrderedCronRuns, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ WR-10's OWN GUARD RAIL: `_DECIDED_BLIND_KINDS` must not be widened to
+    a genuine misconfiguration. `KIND_BUSY_SKIP` (any kind outside the decided
+    set) must still escalate exactly as before."""
+    threshold = mt5_session_episodes.blind_run_escalation_threshold(_CADENCE_S)
+    assert threshold is not None and threshold > 1
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        for _ in range(threshold):
+            await _observe(_BUSY_READING)
+
+    assert len(_warnings(caplog)) == 1, (
+        "WR-10's exemption leaked onto a kind that is a genuine "
+        "misconfiguration, not an operator decision"
+    )
 
 
 async def test_a_DARK_reading_resets_the_blind_run_because_it_MEASURED_something(

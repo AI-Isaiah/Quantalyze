@@ -299,6 +299,20 @@ _INDEPENDENT_INSTRUMENT_WINDOW_S: Final[float] = 3600.0
 
 _CONSECUTIVE_NOT_MEASURED_READINGS: int = 0
 
+#: ⛔ WR-10 (round 2) — KINDS WHOSE BLINDNESS IS AN OPERATOR DECISION, NOT A
+#: FAULT. `KIND_DISABLED` is the deliberately-disabled kill switch, and the
+#: comment at its own definition says so: "a disabled switch is an operator
+#: DECISION rather than a misconfiguration" — exactly why
+#: `_log_configuration_fault_once` throttles its log line in the first place.
+#: These kinds still EXTEND the blind run (so a later genuine fault's
+#: escalation is not reset by them) but never raise the log LEVEL: an alarm
+#: that fires forever on a deliberately-disabled service is an alarm operators
+#: learn to ignore, which is round 1's own WR-02 standard turned on this
+#: phase's own fix. ⛔ Do NOT add `KIND_NOT_CONFIGURED`/its successors here —
+#: a Railway variable that was never set is a MISCONFIGURATION, precisely the
+#: case WR-03 was raised for.
+_DECIDED_BLIND_KINDS: Final[frozenset[str]] = frozenset({KIND_DISABLED})
+
 
 def blind_run_escalation_threshold(poll_interval_s: float | None) -> int | None:
     """How many CONSECUTIVE ``not_measured`` readings cover the independent
@@ -748,7 +762,19 @@ async def record_mt5_session_reading(
             # measured nothing for at least as long as the INDEPENDENT hourly
             # instrument's own window, and a blind instrument at INFO forever
             # looks exactly like a healthy one.
-            blind = threshold is not None and consecutive >= threshold
+            #
+            # ⛔ WR-10 (round 2) — EXCEPT for a kind whose blindness is a
+            # DECIDED one (`_DECIDED_BLIND_KINDS`): a deliberately-disabled
+            # kill switch stays COUNTED (so a later genuine fault's own
+            # escalation is not reset by it) but never raises the LEVEL. An
+            # alarm that fires every threshold-multiple forever on a service
+            # an operator turned off on purpose is exactly the alarm shape
+            # this milestone's own WR-02 standard forbids.
+            blind = (
+                threshold is not None
+                and consecutive >= threshold
+                and reading.kind not in _DECIDED_BLIND_KINDS
+            )
             logger.log(
                 logging.WARNING if blind else logging.INFO,
                 "mt5 session episode: reading MEASURED NOTHING "
