@@ -778,6 +778,42 @@ async def test_a_row_NOTHING_PARSED_takes_the_SUPERSEDED_path_not_the_measured_o
     )
 
 
+def test_IN_01_close_row_state_is_OPTIONAL_and_no_call_site_fabricates_a_default() -> None:
+    """⛔ IN-01. `state` is read exactly once, in `if measured and state ==
+    STATE_AUTHORIZED` — every SUPERSEDED close passes `measured=False`, so
+    `state` is genuinely unused on those three call sites. `state=X or
+    STATE_DARK` fabricated a default nothing consumed, and invited a reader to
+    conclude a superseded close records the row as dark. It does not:
+    `_close_row` preserves the previous `metadata` and never overwrites
+    `metadata["state"]`.
+    """
+    sig = inspect.signature(mt5_session_episodes._close_row)
+    state_param = sig.parameters["state"]
+    assert state_param.annotation == "str | None", (
+        f"`_close_row`'s `state` parameter is {state_param.annotation!r}, not "
+        "optional — the None case (a row nothing parsed) is no longer visible "
+        "in the signature"
+    )
+
+    # ⛔ A CODE-SHAPE check, not a prose substring: this file's own comments
+    # legitimately say "no `or STATE_DARK` fabrication" in prose, which would
+    # make a bare substring scan self-defeating. `state=X or STATE_DARK` (the
+    # fabrication) and `state=STATE_DARK` (the hardcoded third site) are both
+    # code shapes; neither appears in a `# ` comment line.
+    source = inspect.getsource(mt5_session_episodes)
+    offending = [
+        line
+        for line in source.splitlines()
+        if "STATE_DARK" in line
+        and not line.strip().startswith("#")
+        and ("state=" in line or "state =" in line)
+    ]
+    assert offending == [], (
+        f"a call site still fabricates a STATE_DARK default that `_close_row` "
+        f"never reads on a measured=False call: {offending}"
+    )
+
+
 async def test_the_SUPERSEDED_row_is_EXCLUDED_from_the_dataset_a_successor_computes(
     sink: _OrderedCronRuns,
 ) -> None:

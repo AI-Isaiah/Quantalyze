@@ -451,13 +451,22 @@ async def _read_open_rows() -> list[dict[str, Any]]:
 async def _close_row(
     row: dict[str, Any],
     *,
-    state: str,
+    state: str | None,
     closing_kind: str,
     closing_code: int | None,
     source: str,
     measured: bool,
 ) -> bool:
     """Close ONE open row — as a COMPARE-AND-SET. Returns whether THIS call won it.
+
+    ⭐ IN-01 — ``state`` IS ``None``-ABLE ON PURPOSE. It is read exactly once,
+    in ``if measured and state == STATE_AUTHORIZED``, and every SUPERSEDED
+    close passes ``measured=False`` — so ``state`` is genuinely unused on those
+    paths. Making it optional (rather than fabricating a ``STATE_DARK``
+    default nothing consumes) makes that visible in the signature instead of
+    inviting a reader to infer that a superseded close records the row as
+    dark. It does not: this function preserves the previous ``metadata`` and
+    never overwrites ``metadata["state"]``.
 
     ⭐ WR-01. The return value is the ONLY way a caller can tell a CAS that bit
     from one that no-op'd against a row someone else already closed — and that
@@ -592,7 +601,9 @@ async def _open_row(reading: SessionReading, *, source: str,
         )
         await _close_row(
             stale,
-            state=stale_state or STATE_DARK,
+            # ⭐ IN-01 — no ``or STATE_DARK`` fabrication: this close is
+            # ``measured=False``, so `_close_row` never reads `state`.
+            state=stale_state,
             closing_kind=KIND_SUPERSEDED,
             closing_code=None,
             source=source,
@@ -733,7 +744,8 @@ async def record_mt5_session_reading(
             older_state = _recognised_open_state(older.get("metadata"))
             await _close_row(
                 older,
-                state=older_state or STATE_DARK,
+                # ⭐ IN-01 — no ``or STATE_DARK`` fabrication: `measured=False`.
+                state=older_state,
                 closing_kind=KIND_SUPERSEDED,
                 closing_code=None,
                 source=source,
@@ -760,7 +772,10 @@ async def record_mt5_session_reading(
                 )
                 await _close_row(
                     live,
-                    state=STATE_DARK,
+                    # ⭐ IN-01 — `live_state` IS `None` in this branch (that is
+                    # why it is reached); no `STATE_DARK` fabrication, and
+                    # `measured=False` means `_close_row` never reads it.
+                    state=live_state,
                     closing_kind=KIND_SUPERSEDED,
                     closing_code=None,
                     source=source,
