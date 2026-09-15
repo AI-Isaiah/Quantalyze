@@ -501,7 +501,13 @@ def test_EXACTLY_ONE_cadence_knob_exists_and_it_is_the_DETECTION_POLL_INTERVAL(
         "still be running when the next one starts and the loop cannot overlap "
         "itself against the ONE shared terminal"
     )
-    assert monitor._MT5_SESSION_POLL_INTERVAL_CEILING_S == 3600.0, (
+    # ⛔ RE-POINTED AT THE DERIVATION (plan 03, task 2(b)). This line restated the
+    # literal `3600.0`, which made the test a SECOND SOURCE OF TRUTH for a number
+    # whose whole justification lives in another instrument's schedule — the
+    # `[164.7-CITATION-DRIFT-01]` class. The derivation itself, and the window's
+    # strictness, are asserted by
+    # `test_the_declared_cadence_BOUNDS_are_DERIVATIONS_and_not_free_numbers`.
+    assert monitor._MT5_SESSION_POLL_INTERVAL_CEILING_S == _prod_prober_cadence_s(), (
         "the CEILING is the independent hourly prod-prober's cadence: at or above "
         "it this loop measures nothing that instrument does not already measure"
     )
@@ -578,54 +584,190 @@ def test_a_rejected_cadence_is_logged_ONCE_by_NAME_and_never_by_VALUE(
     )
 
 
-def test_NO_SYMBOL_IN_THIS_MODULE_NAMES_THE_KEEPALIVE_INTERVAL() -> None:
-    """⛔ SHIP NO SECOND KNOB "READY FOR LATER" (criterion 1, D-3, D-06).
+# =========================================================================== #
+# PLAN 03, TASK 2(c) — CRITERION 1'S PROHIBITION, MADE MECHANICAL.
+#
+# ⛔ SHIP NO SECOND KNOB "READY FOR LATER". The keepalive interval is a DIFFERENT
+# number from the detection poll cadence, and it is chosen in a follow-up against
+# `n>1`. Wave 5 produced exactly ONE observation of each quantity; an interval set
+# from `n=1` is the guess D-06 exists to prevent. The first reader who finds a
+# symbol, env var, constant, default or file name for it WILL set it — which is
+# how a refusal becomes a number without anybody deciding to.
+#
+# ⚠️ SYMBOLS, NEVER PROSE, AND THAT IS A MEASUREMENT RATHER THAN A PREFERENCE.
+# MEASURED at wave 2 and re-measured here: the token appears 9 times in
+# `analytics-service/services/` and ALL NINE ARE REFUSALS — `mt5_client.py` since
+# plan 01, plus the two modules wave 2 added, each of which says in its own
+# docstring that it will not choose the number. A naive `grep -i keepalive` gate
+# would red on the refusals themselves, i.e. it would punish the documentation
+# that exists to keep the decision open.
+# =========================================================================== #
 
-    The keepalive interval is a DIFFERENT number, chosen in a follow-up against
-    `n>1`. The first reader to find a symbol, env var, constant or default for it
-    will SET it — from the single wave-5 observation, which is exactly the guess
-    D-06 exists to prevent.
+#: ⛔ HAND-TYPED, AND IT LIVES IN `tests/` — NEVER INSIDE THE SCANNED TREE. A
+#: scanner whose own roster constant sits in the tree it scans FINDS ITSELF, and a
+#: self-matching gate is the self-invalidating class this repo has paid for. The
+#: scan root is asserted to be `services/` below for the same reason.
+_KEEPALIVE_TOKEN_ROSTER: Final[tuple[str, ...]] = (
+    "keepalive",
+    "keep_alive",
+    "keep-alive",
+)
 
-    ⚠️ SYMBOLS, not text. The token appears in PROSE in three `services/` files
-    (`mt5_client.py` since plan 01, plus the two this plan adds) precisely because
-    each one REFUSES to choose the number and says so. MEASURED 2026-09-15: 9
-    prose occurrences, 0 symbols, 0 file names. ⛔ A naive `grep -i keepalive`
-    gate would therefore red on the refusals themselves — plan 03 owns the
-    structural gate and must be written against SYMBOLS.
-    """
-    import ast
-    import pathlib
+#: ⛔ A PIN OVER A TRUNCATED OR EMPTY WALK PASSES IN SILENCE — an empty offender
+#: list is what a walk that visited NOTHING returns, and it is byte-identical to a
+#: clean tree. MEASURED 2026-09-15: 82 `.py` files under `services/`. The floor
+#: sits well below that on purpose: it is not a ratchet on the module count (a
+#: legitimate deletion must not red), it is the assertion that the walk saw a
+#: plausible tree at all. ⛔ If it ever reds, FIX THE WALK; never lower the floor.
+_SERVICES_WALK_FLOOR: Final[int] = 50
 
+#: ⭐ THE FAILURE MESSAGE SAYS WHY, NOT JUST WHAT. A fence whose message is "a
+#: forbidden name was found" invites the reader to rename the symbol.
+_KEEPALIVE_FENCE_REASON: Final[str] = (
+    "⛔ THE DETECTION POLL CADENCE AND THE KEEPALIVE INTERVAL ARE TWO DIFFERENT "
+    "NUMBERS. The cadence shipped here is chosen from INSTRUMENT BOUNDS and ZERO "
+    "session-lifetime observations, which is exactly why choosing it does not "
+    "violate criterion 1. The KEEPALIVE INTERVAL is forbidden in this phase and "
+    "is chosen in a follow-up against MORE THAN ONE measured session lifetime "
+    "(criterion 1, D-3, and D-06 of Phase 164.6.2). Wave 5 produced exactly ONE "
+    "observation of each quantity, and an interval set from n=1 is the guess D-06 "
+    "exists to prevent. ⛔ Do not rename the symbol to get past this gate — "
+    "delete it, and let the follow-up choose the number against the dataset this "
+    "phase exists to start."
+)
+
+
+def _services_root() -> pathlib.Path:
     root = pathlib.Path(__file__).resolve().parents[1] / "services"
+    assert root.name == "services" and root.is_dir(), root
+    return root
+
+
+def _keepalive_offenders(source: str, *, filename: str) -> list[str]:
+    """THE FENCE, OVER SOURCE TEXT so it can be calibrated in BOTH directions.
+
+    ⛔ NAMES, not text: file names, symbol names, argument names, attribute names,
+    and the string literals ASSIGNED to constants — because an env-var name is a
+    string literal assigned to a constant and would otherwise be invisible.
+    ⛔ It must NOT reach into docstrings or comments, which is where every
+    legitimate occurrence of the token lives.
+    """
+    offenders: list[str] = []
+    if any(token in filename.lower() for token in _KEEPALIVE_TOKEN_ROSTER):
+        offenders.append(f"{filename} (FILE NAME)")
+
+    for node in ast.walk(ast.parse(source)):
+        names: list[str] = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = [node.name]
+        elif isinstance(node, ast.Name):
+            names = [node.id]
+        elif isinstance(node, ast.Attribute):
+            names = [node.attr]
+        elif isinstance(node, ast.arg):
+            names = [node.arg]
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            value = node.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                names = [value.value]
+        for name in names:
+            lowered = name.lower()
+            if any(token in lowered for token in _KEEPALIVE_TOKEN_ROSTER):
+                offenders.append(f"{filename}: {name!r}")
+    return offenders
+
+
+def test_NO_SYMBOL_IN_SERVICES_NAMES_THE_KEEPALIVE_INTERVAL() -> None:
+    """⛔ CRITERION 1'S PROHIBITION, WALKED OVER THE WHOLE TREE IT APPLIES TO.
+
+    ⚠️ Renamed from `test_NO_SYMBOL_IN_THIS_MODULE_…` (wave 2): the walk was never
+    scoped to one module, and a test whose name claims a narrower subject than it
+    has is the defect class the monitor module's own header is written about.
+    """
+    root = _services_root()
+    scanned: list[str] = []
     offenders: list[str] = []
     for path in sorted(root.rglob("*.py")):
-        if "keepalive" in path.name.lower():
-            offenders.append(f"{path.name} (FILE NAME)")
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            names: list[str] = []
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                names = [node.name]
-            elif isinstance(node, ast.Name):
-                names = [node.id]
-            elif isinstance(node, ast.Attribute):
-                names = [node.attr]
-            elif isinstance(node, ast.arg):
-                names = [node.arg]
-            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-                # ⛔ An env-var NAME is a string literal ASSIGNED to a constant,
-                # which is why the scan reaches into assignment VALUES — and ⛔
-                # why it must NOT reach into docstrings, which is where every
-                # legitimate occurrence of the token lives (the refusals).
-                value = node.value
-                if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                    names = [value.value]
-            for name in names:
-                if "keepalive" in name.lower():
-                    offenders.append(f"{path.name}: {name!r}")
-    assert offenders == [], (
-        f"a keepalive-interval symbol exists in services/: {offenders}. ⛔ This "
-        f"phase starts the DATASET and does not choose that number."
+        scanned.append(path.name)
+        offenders.extend(
+            _keepalive_offenders(
+                path.read_text(encoding="utf-8"), filename=str(path.relative_to(root))
+            )
+        )
+
+    assert len(scanned) >= _SERVICES_WALK_FLOOR, (
+        f"the walk saw only {len(scanned)} file(s) under {root} — an empty or "
+        f"truncated walk returns NO offenders and is byte-identical to a clean "
+        f"tree. ⛔ Fix the walk, never the floor."
+    )
+    assert offenders == [], f"{offenders}\n\n{_KEEPALIVE_FENCE_REASON}"
+
+
+#: A source carrying the thing the fence forbids. ⛔ Kept as a SYNTHETIC string in
+#: `tests/`, never as a fixture file inside `services/` — a fixture inside the
+#: scanned tree would make the real walk red on the calibration's own bait.
+_KEEPALIVE_BAIT_SOURCE: Final[str] = '''\
+"""A module that says it refuses to choose the keepalive interval..."""
+from typing import Final
+
+MT5_SESSION_POLL_INTERVAL_ENV: Final[str] = "MT5_SESSION_POLL_INTERVAL_S"
+# ...and then ships one anyway, "ready for later".
+MT5_KEEPALIVE_INTERVAL_S: Final[float] = 900.0
+'''
+
+#: The same file WITHOUT the forbidden symbol — the detection cadence only, plus
+#: the prose refusals that are the whole reason this gate is written against
+#: symbols. ⚠️ Without this half the fence could be a function that ALWAYS reds
+#: and nobody would know until it did.
+_KEEPALIVE_CLEAN_SOURCE: Final[str] = '''\
+"""⛔ THIS IS THE DETECTION POLL CADENCE. IT IS NOT THE KEEPALIVE INTERVAL, and
+this phase does not choose that number: an interval set from n=1 is the guess
+D-06 exists to prevent. A keepalive that dies silently on tick 3 behind a green
+worker is this phase's own defect class arriving inside the fix.
+"""
+from typing import Final
+
+MT5_SESSION_POLL_INTERVAL_ENV: Final[str] = "MT5_SESSION_POLL_INTERVAL_S"
+# The keepalive interval is chosen in a follow-up, against n>1.
+_MT5_SESSION_POLL_INTERVAL_DEFAULT_S: Final[float] = 600.0
+
+
+def session_poll_interval_s() -> float:
+    """Read per call; the keepalive interval has no reader here at all."""
+    return _MT5_SESSION_POLL_INTERVAL_DEFAULT_S
+'''
+
+
+def test_the_keepalive_fence_NAMES_the_offender_it_is_shown() -> None:
+    """⛔ CALIBRATION, DIRECTION ONE: the fence can fire, and it says WHICH symbol."""
+    offenders = _keepalive_offenders(_KEEPALIVE_BAIT_SOURCE, filename="bait.py")
+    assert offenders, (
+        "the fence tolerated `MT5_KEEPALIVE_INTERVAL_S: Final[float] = 900.0` — "
+        "criterion 1's prohibition is prose again"
+    )
+    assert any("MT5_KEEPALIVE_INTERVAL_S" in offender for offender in offenders), (
+        f"the fence fired but did not NAME the offender: {offenders} — a gate that "
+        "says only 'something is wrong' sends the next reader hunting"
+    )
+    assert _keepalive_offenders("", filename="mt5_keepalive_interval.py"), (
+        "a FILE NAME carrying the token is not caught — the first knob would "
+        "arrive as a module, not as a constant"
+    )
+
+
+def test_the_keepalive_fence_is_GREEN_on_the_detection_cadence_and_on_the_refusals() -> None:
+    """⛔ CALIBRATION, DIRECTION TWO, AND IT IS THE HALF THAT IS EASY TO SKIP.
+
+    Without it the fence could be a function that ALWAYS reds and nobody would
+    know until it did. It also pins the property the whole design rests on: the
+    refusals — which are PROSE, in docstrings and comments, and which mention the
+    forbidden token by name on purpose — must not trip the gate that exists to
+    protect them.
+    """
+    assert _keepalive_offenders(_KEEPALIVE_CLEAN_SOURCE, filename="clean.py") == [], (
+        "the fence red on a source whose ONLY keepalive occurrences are the "
+        "REFUSALS — a gate that punishes the documentation keeping the decision "
+        "open would be removed within a week, and the prohibition with it"
     )
 
 
@@ -1470,3 +1612,248 @@ async def test_a_tick_that_fails_EVERY_time_neither_ends_the_loop_NOR_spins_with
         "loop is the keepalive dying silently behind a green worker"
     )
     assert task.exception() is None, task.exception()
+
+
+# =========================================================================== #
+# PLAN 03, TASK 2(a)(b) — THE ONE CADENCE KNOB: VALIDATED PER CALL, AND BOUNDED
+# BY DERIVATIONS RATHER THAN BY FREE NUMBERS.
+#
+# ⛔ PER CALL AND NEVER AT IMPORT. A module-scope `float()` on a typo'd Railway
+# variable took the WHOLE analytics service down (MEASURED 2026-09-14, CR-02):
+# `main.lifespan` imports from `services/` in its body, BEFORE `yield` and outside
+# any `try`, so a `ValueError` at module scope aborts uvicorn startup and
+# `restartPolicyType ON_FAILURE x3` finishes the job. `/health`, the dispatch
+# loop, the watchdog and the enqueue loop all go with it — for a best-effort MT5
+# instrument nobody was waiting on.
+# ⚠️ And `nan` passes a naive range check: `nan <= x` and `x <= nan` are BOTH
+# False, so a range test alone lets it through to `asyncio.wait_for`.
+# =========================================================================== #
+
+
+def test_the_cadence_knob_is_ABSENT_SAFE_and_returns_the_derived_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unset case, which is how it runs in production today: the variable is
+    not set on Railway and the module must not need it to be."""
+    monkeypatch.delenv(monitor.MT5_SESSION_POLL_INTERVAL_ENV, raising=False)
+    assert (
+        monitor.session_poll_interval_s()
+        == monitor._MT5_SESSION_POLL_INTERVAL_DEFAULT_S
+    )
+
+
+def test_a_FINITE_cadence_ABOVE_the_ceiling_falls_back_to_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ THE END A HOSTILE CORPUS CANNOT REACH. `45s`/`""` are rejected at
+    `float()`, `0`/`-1` by the sign and `inf`/`nan` by `math.isfinite` — not one
+    of them is a FINITE value above the ceiling, so deleting the ceiling
+    comparison outright would leave every one of those cases GREEN (this is WR-03
+    round 2, and it is why that test exists in the relogin suite).
+
+    ⛔ The probe is DERIVED from the bound, so a retune of the heal's budget
+    ceiling or of the prober's cadence carries through instead of stranding a
+    hand-typed number here.
+    """
+    ceiling = monitor._MT5_SESSION_POLL_INTERVAL_CEILING_S
+    monkeypatch.delenv(monitor.MT5_SESSION_POLL_INTERVAL_ENV, raising=False)
+    default = monitor.session_poll_interval_s()
+
+    over = ceiling + 1.0
+    assert over > default, (over, default)
+    monkeypatch.setenv(monitor.MT5_SESSION_POLL_INTERVAL_ENV, repr(over))
+    assert monitor.session_poll_interval_s() == default, (
+        f"a cadence of {over}s — above the ceiling — was HONOURED. At or above "
+        "the hourly prober's own cadence this loop measures nothing that "
+        "instrument does not already measure, so it would add contention for the "
+        "ONE shared terminal without adding information."
+    )
+
+
+def test_a_FINITE_cadence_BELOW_the_floor_falls_back_to_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ THE OTHER END, AND IT IS THE DANGEROUS ONE. A cadence below the heal's
+    DECLARED BUDGET CEILING lets tick N+1 start while tick N is still running —
+    the loop overlapping ITSELF against the ONE shared terminal, which is the
+    contention criterion 4 forbids, reached by a typo rather than by a decision.
+    """
+    floor = monitor._MT5_SESSION_POLL_INTERVAL_FLOOR_S
+    monkeypatch.delenv(monitor.MT5_SESSION_POLL_INTERVAL_ENV, raising=False)
+    default = monitor.session_poll_interval_s()
+
+    under = floor / 2.0
+    assert 0.0 < under < default, (under, default)
+    monkeypatch.setenv(monitor.MT5_SESSION_POLL_INTERVAL_ENV, repr(under))
+    assert monitor.session_poll_interval_s() == default, (
+        f"a cadence of {under}s — below the floor ({floor}s, the heal's declared "
+        "budget ceiling) — was HONOURED, so a slow tick can still be running when "
+        "the next one starts and the loop overlaps itself against the shared "
+        "terminal"
+    )
+
+
+def test_a_LEGITIMATE_cadence_is_still_honoured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ ANTI-VACUITY FOR EVERY TEST ABOVE: a reader that IGNORED the environment
+    and always returned the default would satisfy all of them. This is the half
+    that can only pass if the knob is genuinely read."""
+    monkeypatch.delenv(monitor.MT5_SESSION_POLL_INTERVAL_ENV, raising=False)
+    default = monitor.session_poll_interval_s()
+
+    floor = monitor._MT5_SESSION_POLL_INTERVAL_FLOOR_S
+    ceiling = monitor._MT5_SESSION_POLL_INTERVAL_CEILING_S
+    legitimate = (default + ceiling) / 2.0
+    assert floor <= legitimate <= ceiling and legitimate != default, (
+        f"harness: the probe {legitimate} is not a legitimate in-window value "
+        f"DISTINCT from the default ({default}) — re-anchor it, or this case "
+        "cannot distinguish a real read from a hardcoded return"
+    )
+
+    monkeypatch.setenv(monitor.MT5_SESSION_POLL_INTERVAL_ENV, repr(legitimate))
+    assert monitor.session_poll_interval_s() == legitimate, (
+        "an in-window operator value was ignored — the knob is decorative, and a "
+        "retune would need a redeploy that changes code"
+    )
+
+
+def test_a_malformed_cadence_cannot_abort_the_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The in-process half of CR-02: the load-bearing assertion is that NO
+    module-level constant holds a parsed value a reimport would redo.
+
+    ⚠️ `importlib.reload` is deliberately NOT used — the repo's own standing rule.
+    A fresh interpreter is the honest oracle, and it is the case below.
+    """
+    monkeypatch.setenv(monitor.MT5_SESSION_POLL_INTERVAL_ENV, "45s")
+    assert not hasattr(monitor, "_MT5_SESSION_POLL_INTERVAL_S"), (
+        "the DETECTION POLL INTERVAL is a module-level parsed constant again — a "
+        "malformed MT5_SESSION_POLL_INTERVAL_S would abort uvicorn startup at "
+        "import and take the whole analytics service down (CR-02)"
+    )
+
+
+def test_a_malformed_cadence_cannot_abort_a_FRESH_import() -> None:
+    """⛔ THE CASE THAT REDS ON THE SHIPPED-BEFORE-CR-02 SHAPE. The in-process case
+    can only assert the absence of a name; this one runs the import the way uvicorn
+    runs it, against the exact kind of variable value that took the service down.
+    """
+    env = dict(os.environ)
+    env[monitor.MT5_SESSION_POLL_INTERVAL_ENV] = "45s"
+    proc = subprocess.run(
+        [sys.executable, "-c", "import services.mt5_session_monitor"],
+        cwd=str(pathlib.Path(__file__).resolve().parents[1]),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, (
+        "importing `services.mt5_session_monitor` with a malformed cadence "
+        f"RAISED — this aborts uvicorn startup before `yield` and ON_FAILURE x3 "
+        f"takes the whole analytics service down (CR-02). stderr:\n{proc.stderr}"
+    )
+
+
+def _prod_prober_cadence_s() -> float:
+    """THE CEILING'S DERIVATION, READ FROM THE INSTRUMENT ITSELF.
+
+    ⛔ A bound re-typed as a literal drifts from its own reason — that is the
+    `[164.7-CITATION-DRIFT-01]` class, and this repo has a dated record of exactly
+    it (`ARMS_FLOOR` prose said 380 while the shipped value was 384). The hourly
+    prod-prober's cadence is not a Python symbol, so the derivation reads the
+    schedule the workflow actually runs on.
+
+    ⛔ EXACTLY ONE CRON SHAPE IS RECOGNISED — "at minute M of every hour". Anything
+    else RAISES rather than guessing, so a schedule change reds HERE, beside the
+    reason the ceiling exists, instead of silently invalidating it.
+    """
+    workflow = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / ".github"
+        / "workflows"
+        / "prod-prober.yml"
+    )
+    assert workflow.is_file(), (
+        f"{workflow} is missing — the DETECTION cadence CEILING is derived from "
+        "the independent hourly prober's schedule, and the derivation cannot be "
+        "checked without it. ⛔ Fix the path; do not replace the derivation with "
+        "the literal it is there to police."
+    )
+    crons = re.findall(
+        r'^\s*-\s*cron:\s*"([^"]+)"', workflow.read_text(encoding="utf-8"), re.M
+    )
+    assert len(crons) == 1, (
+        f"the prod-prober now declares {len(crons)} schedules ({crons}) — decide "
+        "which one the ceiling descends from and say so here"
+    )
+    fields = crons[0].split()
+    assert len(fields) == 5, crons
+    minute, hour, day_of_month, month, day_of_week = fields
+    assert re.fullmatch(r"\d+", minute) and (hour, day_of_month, month, day_of_week) == (
+        "*",
+        "*",
+        "*",
+        "*",
+    ), (
+        f"the prod-prober's schedule {crons[0]!r} is no longer 'at minute M of "
+        "every hour'. ⛔ Re-derive the DETECTION cadence CEILING from the new "
+        "cadence — at or above the prober's own interval this loop measures "
+        "nothing that instrument does not already measure."
+    )
+    return 3600.0
+
+
+def test_the_declared_cadence_BOUNDS_are_DERIVATIONS_and_not_free_numbers() -> None:
+    """⛔ THE MUTANT A COMPARISON-ONLY GATE CANNOT SEE: SETTING A BOUND TO `1e9`.
+
+    Every range test above keeps passing against a ceiling of `1e9` — the
+    comparison still runs, it just stops bounding anything. This is the assertion
+    that each bound still equals the quantity it descends FROM, recomputed rather
+    than restated:
+
+      * FLOOR = the heal's DECLARED BUDGET CEILING, taken BY SYMBOL. A tick must
+        never still be running when the next one starts, or the loop overlaps
+        itself against the ONE shared terminal — and a retune of the budget
+        ceiling must carry through here rather than silently invalidating this
+        bound.
+      * CEILING = the independent hourly prod-prober's cadence, read from the
+        workflow's own `schedule:`. At or above it this loop measures nothing that
+        instrument does not already measure, so it would add contention without
+        adding information.
+      * DEFAULT strictly INSIDE that window — and STRICTLY, not `<=`: a default
+        sitting ON a bound means one end of the operator's range is the fallback,
+        so a rejected value and an accepted one return the same number and the
+        operator cannot tell which happened.
+
+    ⛔ ZERO SESSION-LIFETIME OBSERVATIONS ENTER ANY OF THE THREE. That is precisely
+    why choosing this cadence does not violate criterion 1, and it is asserted
+    rather than asserted-about by the keepalive fence above.
+    """
+    assert (
+        monitor._MT5_SESSION_POLL_INTERVAL_FLOOR_S
+        == mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S
+    ), (
+        "the cadence FLOOR is no longer the heal's DECLARED BUDGET CEILING "
+        f"({monitor._MT5_SESSION_POLL_INTERVAL_FLOOR_S} vs "
+        f"{mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S}) — it has become a free "
+        "number, and the loop can now be tuned to overlap itself against the ONE "
+        "shared terminal"
+    )
+    assert monitor._MT5_SESSION_POLL_INTERVAL_CEILING_S == _prod_prober_cadence_s(), (
+        "the cadence CEILING is no longer the independent hourly prober's cadence "
+        f"({monitor._MT5_SESSION_POLL_INTERVAL_CEILING_S}s vs "
+        f"{_prod_prober_cadence_s()}s) — a ceiling that bounds nothing is not a "
+        "bound, and this one bounds a TYPO rather than a tuning decision"
+    )
+
+    floor = monitor._MT5_SESSION_POLL_INTERVAL_FLOOR_S
+    ceiling = monitor._MT5_SESSION_POLL_INTERVAL_CEILING_S
+    default = monitor._MT5_SESSION_POLL_INTERVAL_DEFAULT_S
+    assert floor < default < ceiling, (
+        f"the window [{floor}, {ceiling}] does not STRICTLY contain its own "
+        f"default ({default}) — a bound that forbids, or coincides with, the value "
+        "the module uses itself makes a rejection indistinguishable from an "
+        "acceptance in the operator's log"
+    )
