@@ -2755,22 +2755,25 @@ def test_initialize_with_credentials_transport_raise_discloses_nothing():
 
 
 def test_initialize_with_credentials_falsy_return_discloses_nothing_and_keeps_the_code():
-    """The FALSY arm — the one place this verb is deliberately STRONGER than
-    `Mt5Client.login`.
+    """The FALSY arm of the heal verb.
 
     `_raise_last` builds its detail from the TERMINAL's own `last_error()` text,
-    shape-scrubbed at construction and nothing more; a broker that echoes the
-    submitted account or server back would disclose it. This verb re-redacts BY
-    VALUE before the error escapes.
+    which `Mt5ClientError` scrubs by SHAPE only; a broker that echoes the submitted
+    account or server back would disclose it. The error that escapes here is
+    redacted BY VALUE.
 
-    ⚠️ THE ASYMMETRY IS MEASURED, NOT ACCIDENTAL. `Mt5Client.login`'s falsy arm
-    goes through that same shared `_raise_last` and is shape-scrubbed only. That
-    is a PRE-EXISTING posture of every shipped call site, not a regression
-    introduced here, and closing it would mean editing `login()` — which D-07
-    forbids because its four per-account callers are shipped and a regression
-    there lands on live job processing. Booked as
-    `[164.6.2-RAISE-LAST-SHAPE-ONLY]` and routed to a NAMED phase, never
-    hand-edited into the ROADMAP.
+    ⭐ THIS VERB IS NO LONGER STRONGER THAN `Mt5Client.login` — THEY ARE SYMMETRIC, and
+    this docstring recorded the opposite until 2026-09-15. The asymmetry was booked as
+    `[164.6.2-RAISE-LAST-SHAPE-ONLY]`, routed to a NAMED phase rather than hand-edited
+    into the ROADMAP, and CLOSED by Phase 164.6.4 criterion 5: `_raise_last` now takes
+    an optional keyword-only credential triple and redacts by value at the ONE shared
+    site, so `login`'s falsy arm gets it too. ⛔ D-07's freeze was never broken — the
+    close parameterised the shared helper, not `login()`'s body. The symmetry itself is
+    pinned by
+    `test_CREDENTIAL_REDACTION_the_falsy_arm_is_SYMMETRIC_across_both_drivable_verbs`
+    and, derived, by
+    `test_CREDENTIAL_REDACTION_neither_arm_of_any_drivable_verb_discloses_the_three`.
+    The assertions below are unchanged and still hold.
 
     The ORIGINAL code is preserved: plan 02 does not branch on it here, but a heal
     that lost `-6` is undebuggable from a log."""
@@ -3000,10 +3003,13 @@ _ESCAPE_AWARE = frozenset(_DRIVABLE) & _methods_routed_through_the_shared_redact
     _CLIENT_SOURCE
 )
 
-#: ⛔ HAND-TYPED, and never derived from the set it bounds. MEASURED 1 on
-#: 2026-09-14: `initialize_with_credentials`. `login` carries its OWN copy of the
-#: by-value loop (D-07 keeps it byte-unchanged), so it is NOT in this set and its
-#: residual is measured separately below. Raise this when a second verb routes
+#: ⛔ HAND-TYPED, and never derived from the set it bounds. MEASURED 2 on
+#: 2026-09-15: `initialize_with_credentials` AND `login`. ⚠️ THIS COMMENT SAID 1 AND
+#: NAMED `login` AS ABSENT until 2026-09-15, contradicting both the constant beside it
+#: and the code — the D-07 AMENDMENT (founder, 2026-09-14) routed `login`'s
+#: transport-raise arm through the shared helper and deleted its private copy of the
+#: loop, and only the prose was left behind ([164.7-CITATION-DRIFT-01]). ⛔ The CONSTANT
+#: was right; the comment was fixed to match it. Raise this when a THIRD verb routes
 #: through the shared helper; ⛔ never lower it to clear a red run.
 ESCAPE_AWARE_METHOD_FLOOR = 2
 
@@ -3304,8 +3310,9 @@ def test_CREDENTIAL_REDACTION_the_signature_classifier_is_itself_under_test():
 
 
 @pytest.mark.parametrize("method_name", sorted(_DRIVABLE))
-def test_CREDENTIAL_REDACTION_a_transport_raise_discloses_none_of_the_three(
-    method_name,
+@pytest.mark.parametrize("arm", ("transport_raise", "falsy_return"))
+def test_CREDENTIAL_REDACTION_neither_arm_of_any_drivable_verb_discloses_the_three(
+    method_name, arm
 ):
     """⛔ THE PROPERTY THE WHOLE PHASE ORDERING EXISTS TO PROTECT (T-134-01).
 
@@ -3316,15 +3323,22 @@ def test_CREDENTIAL_REDACTION_a_transport_raise_discloses_none_of_the_three(
     literal arriving without its key; only the by-value pass can.
 
     Driven END TO END from the derivation: the method is resolved by name off the
-    instance and the scenario key that makes ITS credential-carrying transport
-    call raise is derived too. Nothing here is hand-mapped, so a third credentialed
-    verb is fenced the moment it is written.
+    instance and the scenario that exercises ITS credential-carrying transport
+    call is derived too — both the RAISE key and the FALSY-return key. Nothing here
+    is hand-mapped, so a third credentialed verb is fenced the moment it is written.
 
-    ⛔ SCOPED TO THE TRANSPORT-RAISE ARM, deliberately. The shipped per-account
-    verb's FALSY arm goes through the shared `_raise_last` and is shape-scrubbed
-    only; asserting by-value redaction there would red shipped, unchanged code and
-    the only remedy would be a `login()` edit D-07 forbids. That asymmetry is
-    measured separately below as `[164.6.2-RAISE-LAST-SHAPE-ONLY]`.
+    ⭐ BOTH ARMS, as of Phase 164.6.4 criterion 5 — and the widening is the POINT.
+    This case was scoped to the transport-raise arm because the falsy arm went
+    through the shared `_raise_last`, which was shape-scrubbed only; asserting
+    by-value redaction there would have redded shipped code whose only remedy was a
+    `login()` edit D-07 forbade. Criterion 5 closed that by parameterising the
+    SHARED site instead, so the criterion lands here as a STRENGTHENING of the
+    signature-derived gate rather than as the deletion of a pin: a third
+    credentialed verb written later is now fenced on BOTH arms for free.
+
+    ⛔ THE FALSY ARM ALSO ASSERTS THE CODE SURVIVES. Redaction rewrites the freeform
+    TEXT and nothing else; a heal that lost its `-6` is undebuggable from a log, and
+    `-6` is the one fault this phase's detector exists to distinguish.
 
     Each literal is asserted absent INDIVIDUALLY so a partial redaction names the
     one that escaped, and the marker is asserted present so an empty message
@@ -3333,20 +3347,22 @@ def test_CREDENTIAL_REDACTION_a_transport_raise_discloses_none_of_the_three(
     carrying = _DRIVABLE[method_name]
     assert len(carrying) == 1, (
         f"Mt5Client.{method_name} hands a credential to {list(carrying)} — the "
-        "driver cannot tell which transport call to make raise. Extend the "
+        "driver cannot tell which transport call to drive. Extend the "
         "derivation deliberately; do not guess."
     )
-    scenario_key = f"{carrying[0]}_raises"
-
-    connect, _fake, _rec = _make(
-        {
-            scenario_key: RuntimeError(
-                "rpyc remote error while eval'ing "
-                f"mt5.{carrying[0]}({_FAKE_LOGIN}, "
-                f"password='{_FAKE_PASSWORD}', server='{_FAKE_SERVER}')"
-            )
-        }
+    # The echo a broker is free to put in `last_error()` / a remote traceback: the
+    # submitted server and password, back at us as bare literals.
+    detail = (
+        "rpyc remote error while eval'ing "
+        f"mt5.{carrying[0]}({_FAKE_LOGIN}, "
+        f"password='{_FAKE_PASSWORD}', server='{_FAKE_SERVER}')"
     )
+    if arm == "transport_raise":
+        scenario = {f"{carrying[0]}_raises": RuntimeError(detail)}
+    else:
+        scenario = {carrying[0]: False, "last_error": (-6, detail)}
+
+    connect, _fake, _rec = _make(scenario)
     client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
 
     with pytest.raises(Mt5ClientError) as exc_info:
@@ -3359,15 +3375,22 @@ def test_CREDENTIAL_REDACTION_a_transport_raise_discloses_none_of_the_three(
         ("server", _FAKE_SERVER),
     ):
         assert literal not in msg, (
-            f"Mt5Client.{method_name} disclosed the {label} on its transport-raise "
-            f"arm: {msg!r}. ⛔ Add the by-value redaction loop to that arm — this "
-            "is T-134-01 and the message reaches a PUBLIC Actions log."
+            f"Mt5Client.{method_name} disclosed the {label} on its {arm} "
+            f"arm: {msg!r}. ⛔ Route that arm through the by-value redaction — on "
+            "the falsy arm that means passing `credentials=` to `_raise_last`. "
+            "This is T-134-01 and the message reaches a PUBLIC Actions log."
         )
     assert "[REDACTED]" in msg, (
         f"Mt5Client.{method_name} produced a message with nothing redacted at all "
-        "— the three absence assertions above would pass vacuously on an empty or "
-        f"unrelated string: {msg!r}"
+        f"on its {arm} arm — the three absence assertions above would pass "
+        f"vacuously on an empty or unrelated string: {msg!r}"
     )
+    if arm == "falsy_return":
+        assert exc_info.value.code == -6, (
+            f"Mt5Client.{method_name} lost the terminal's own MT5 code through the "
+            f"redaction on its falsy arm (got {exc_info.value.code!r}). Only the "
+            "freeform TEXT may be rewritten."
+        )
 
 
 def test_CREDENTIAL_REDACTION_the_escape_aware_roster_did_not_collapse():
@@ -3386,6 +3409,107 @@ def test_CREDENTIAL_REDACTION_the_escape_aware_roster_did_not_collapse():
         "the floor."
     )
     assert _ESCAPE_CASES, "the escape corpus is empty — the gate below is vacuous"
+
+
+#: The name of the ONE method that must stay credential-free, and the shared raise
+#: site it may only ever call bare. Both are read by the fence below.
+_CREDENTIAL_FREE_DETECTOR = "assert_session_authorized"
+_SHARED_RAISE_SITE = "_raise_last"
+
+
+def _detector_raise_last_calls(source: str) -> tuple[int, tuple[str, ...]]:
+    """`(calls_seen, offenders)` for `_raise_last` inside the credential-free detector.
+
+    An OFFENDER is any such call carrying ANY positional argument or ANY keyword —
+    i.e. a call that hands the shared raise site a credential. `calls_seen` exists so
+    the gate can refuse to pass on a derivation that found nothing: a renamed method
+    or a restructured class would otherwise read as compliance.
+    """
+    tree = ast.parse(source, filename="services/mt5_client.py")
+    calls_seen = 0
+    offenders: list[str] = []
+    for cls in (
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "Mt5Client"
+    ):
+        for member in cls.body:
+            if (
+                not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                or member.name != _CREDENTIAL_FREE_DETECTOR
+            ):
+                continue
+            for node in ast.walk(member):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == _SHARED_RAISE_SITE
+                ):
+                    calls_seen += 1
+                    if node.args or node.keywords:
+                        offenders.append(
+                            f"line {node.lineno}: "
+                            f"{len(node.args)} positional / "
+                            f"{[kw.arg for kw in node.keywords]} keyword"
+                        )
+    return calls_seen, tuple(offenders)
+
+
+def test_CREDENTIAL_REDACTION_the_credential_free_detector_passes_no_credential_to_the_shared_raise():
+    """⛔ CRITERION 3, MADE STRUCTURAL. `Mt5Client.assert_session_authorized` is the
+    CREDENTIAL-FREE detector, and its own docstring already states why: a detector that
+    carried a credential could not be used to DECIDE whether to send one — it would
+    already have sent it.
+
+    That was a REMEMBERED property until criterion 5 gave `_raise_last` a `credentials=`
+    parameter. Adding the parameter made the drift one keyword wide, and this phase's
+    monitor calls the detector ON A CADENCE, so the surface criterion 5 just shrank would
+    grow a second, unfenced mouth at exactly the moment it starts firing more often.
+
+    The predicate is AST-based rather than textual: every `_raise_last` call inside the
+    detector must carry ZERO arguments and ZERO keywords.
+
+    ⛔ CALIBRATED. A predicate that cannot fail is worse than none, so the same predicate
+    is run against a COPY of the source with `credentials=` spliced into the detector —
+    never the file on disk — and the mutated text is asserted DIFFERENT from the original
+    first, because a splice that failed to apply reads as a pass.
+    """
+    calls_seen, offenders = _detector_raise_last_calls(_CLIENT_SOURCE)
+
+    assert calls_seen >= 1, (
+        f"no `{_SHARED_RAISE_SITE}` call was found inside "
+        f"`Mt5Client.{_CREDENTIAL_FREE_DETECTOR}` — the DERIVATION is broken (the "
+        "method was renamed or restructured), not the code. ⛔ Fix the derivation; a "
+        "gate that finds nothing reports compliance it never measured."
+    )
+    assert offenders == (), (
+        f"`Mt5Client.{_CREDENTIAL_FREE_DETECTOR}` hands a credential to "
+        f"`{_SHARED_RAISE_SITE}`: {list(offenders)}. ⛔ It is the CREDENTIAL-FREE "
+        "detector — a probe that carried a credential could not be used to decide "
+        "whether to send one. Remove the argument; never relax this fence."
+    )
+
+    # -- calibration: the predicate must NAME a defect when one is present ------
+    start = _CLIENT_SOURCE.index(f"def {_CREDENTIAL_FREE_DETECTOR}")
+    end = _CLIENT_SOURCE.index("def initialize_with_credentials", start)
+    region = _CLIENT_SOURCE[start:end]
+    mutated_region = region.replace(
+        f"self.{_SHARED_RAISE_SITE}()",
+        f"self.{_SHARED_RAISE_SITE}(credentials=(login, password, server))",
+    )
+    mutated = _CLIENT_SOURCE[:start] + mutated_region + _CLIENT_SOURCE[end:]
+    assert mutated != _CLIENT_SOURCE, (
+        "the calibration splice DID NOT APPLY — the detector's bare "
+        f"`self.{_SHARED_RAISE_SITE}()` call was not found in its source region, so "
+        "the red observed below would be meaningless. Fix the splice."
+    )
+    mutated_seen, mutated_offenders = _detector_raise_last_calls(mutated)
+    assert mutated_seen == calls_seen
+    assert mutated_offenders, (
+        "the fence did NOT fire on a detector that passes `credentials=` to "
+        f"`{_SHARED_RAISE_SITE}` — the predicate cannot fail and fences nothing."
+    )
+    assert "credentials" in mutated_offenders[0]
 
 
 def test_CREDENTIAL_REDACTION_every_credentialed_verb_routes_through_the_shared_redactor():
@@ -3511,29 +3635,27 @@ def test_CREDENTIAL_REDACTION_an_escaped_rendering_discloses_none_of_the_three(
     )
 
 
-def test_CREDENTIAL_REDACTION_the_falsy_arm_asymmetry_is_measured_not_assumed():
-    """⚠️ `[164.6.2-RAISE-LAST-SHAPE-ONLY]` — the ONE asymmetry this plan creates,
-    asserted rather than merely recorded. A documented posture no test exercises is
-    a claim, not a measurement.
+def test_CREDENTIAL_REDACTION_the_falsy_arm_is_SYMMETRIC_across_both_drivable_verbs():
+    """⭐ `[164.6.2-RAISE-LAST-SHAPE-ONLY]` IS CLOSED, and this case is what pins the
+    close in BOTH directions. It was `…_the_falsy_arm_asymmetry_is_measured_not_assumed`
+    and it asserted the DISCLOSURE: `login`'s falsy arm went through the shared
+    `_raise_last`, which scrubbed by SHAPE only, so a bare broker-server literal echoed
+    back by the terminal survived into the message. The pin worked exactly as written —
+    it redded the moment the fix landed, and its own message said to delete that half.
+
+    CLOSED by Phase 164.6.4 criterion 5 (founder decision 2026-09-15, routed in from
+    Phase 164.6.2 criterion 9): `_raise_last` now takes an optional keyword-only
+    credential triple and redacts BY VALUE at the one shared site. ⛔ The close was NOT
+    an edit to `login()`'s body — D-07's freeze stands; what changed is the shared
+    helper both verbs already called.
 
     Both drivable verbs are driven down their FALSY arm with the SAME terminal
-    `last_error()` text, which echoes the broker server back as a bare literal:
+    `last_error()` text, which echoes the broker server back as a bare literal, and
+    BOTH must now answer identically: server absent, login absent, marker present, and
+    the original `-6` preserved — a heal that lost the code is undebuggable from a log.
 
-      * `initialize_with_credentials` re-redacts that detail BY VALUE before it
-        escapes and preserves the original code — deliberately STRONGER than the
-        shipped verb, because it is the method a credential is about to be routed
-        through and it had to be safe BEFORE plan 02 routes one;
-      * `Mt5Client.login` goes through the shared `_raise_last`, which is
-        shape-scrubbed only, so the bare server literal survives. That is a
-        PRE-EXISTING posture of every shipped call site — NOT a regression
-        introduced here — and closing it would mean editing `login()`, which D-07
-        forbids because its four per-account callers are shipped and a regression
-        there lands on live job processing.
-
-    ⛔ This case documents a posture; it is NOT a licence to weaken anything. When
-    a future phase closes the asymmetry, the second half goes RED and must be
-    DELETED together with the booked item, never relaxed. The password is asserted
-    absent on BOTH arms, because that half is not asymmetric and never may be.
+    ⛔ BOTH PASSWORD LEGS STAY. That half was never asymmetric and never may be;
+    deleting one would leave the case unable to fail on a password regression.
     """
     detail = f"Authorization failed on {_FAKE_SERVER} (password='{_FAKE_PASSWORD}')"
 
@@ -3553,20 +3675,34 @@ def test_CREDENTIAL_REDACTION_the_falsy_arm_asymmetry_is_measured_not_assumed():
 
     healed_msg, legacy_msg = str(healed.value), str(legacy.value)
 
-    # The NEW verb: by-value redacted on the falsy arm, code preserved.
+    # The HEAL verb: by-value redacted on the falsy arm, code preserved.
     assert _FAKE_SERVER not in healed_msg
     assert str(_FAKE_LOGIN) not in healed_msg
     assert "[REDACTED]" in healed_msg
     assert healed.value.code == -6
 
-    # The password is shape-scrubbed on BOTH — that half is not asymmetric.
+    # The password is redacted on BOTH — that half was never asymmetric.
     assert _FAKE_PASSWORD not in healed_msg
     assert _FAKE_PASSWORD not in legacy_msg
 
-    # The SHIPPED verb: the bare server literal survives. Pre-existing, booked.
-    assert _FAKE_SERVER in legacy_msg, (
-        "Mt5Client.login's falsy arm now redacts the server BY VALUE — "
-        "[164.6.2-RAISE-LAST-SHAPE-ONLY] appears to be CLOSED. Delete this half "
-        "and the asymmetry note it pins, and close the booked item. ⛔ Do NOT "
-        "relax the assertion to make it pass."
+    # ⭐ THE SHIPPED VERB, SYMMETRIC WITH THE HEAL VERB. This block asserted the
+    # DISCLOSURE until criterion 5 closed it; it now asserts the positive form,
+    # literal by literal so a partial redaction names the one that escaped.
+    assert _FAKE_SERVER not in legacy_msg, (
+        "Mt5Client.login's falsy arm disclosed the broker SERVER — "
+        "[164.6.2-RAISE-LAST-SHAPE-ONLY] has REGRESSED. ⛔ The remedy is to restore "
+        "the `credentials=` argument at the `_raise_last` call site, never to relax "
+        "this assertion: the message reaches a PUBLIC Actions log and Sentry."
+    )
+    assert str(_FAKE_LOGIN) not in legacy_msg, (
+        "Mt5Client.login's falsy arm disclosed the ACCOUNT — see above."
+    )
+    assert "[REDACTED]" in legacy_msg, (
+        "Mt5Client.login's falsy arm produced a message with nothing redacted at "
+        f"all — the absences above would pass vacuously: {legacy_msg!r}"
+    )
+    assert legacy.value.code == -6, (
+        "Mt5Client.login's falsy arm lost the original MT5 code through the "
+        "redaction. Only the freeform TEXT may be rewritten — a failure that lost "
+        "its code is undebuggable from a log."
     )
