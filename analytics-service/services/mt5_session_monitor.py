@@ -241,8 +241,17 @@ async def run_mt5_session_monitor_tick() -> None:
         # the recorder's Supabase round trips (up to six, each carrying
         # postgrest-py's 120 s default) are UNBOUNDED at the tick level, so a
         # degraded Supabase could otherwise stretch a single tick past its own
-        # configured cadence with nothing logging it. The loop is sequential
-        # (tick THEN wait), so this bound adds no overlap risk of its own.
+        # configured cadence with nothing logging it. The loop is sequential, so
+        # this bound adds no overlap risk of its own.
+        #
+        # ⚠️ CORRECTED (round 3 verifier) — this said "(tick THEN wait)" and the
+        # loop WAITS THEN TICKS. WR-02 (`332d6620`) reordered it and WR-06
+        # (`62bb0a24`) wrote this parenthetical afterwards, so it was false the
+        # moment it was written and two review rounds read past it. The
+        # load-bearing conclusion is unaffected — the loop is sequential either
+        # way — which is exactly why it survived: a false clause riding on a true
+        # conclusion. `[164.6.2-KILLSWITCH-COMMENT-DRIFT]`, the class this
+        # module's own header warns about.
         interval = session_poll_interval_s()
         try:
             await asyncio.wait_for(
