@@ -35,6 +35,19 @@ under a NEW ``cron_name``, with NO MIGRATION. VERIFIED rather than assumed:
     the instrument is asserted by the presence of its INSERT in the body text and
     never by a row a tick may or may not have written yet.
 
+⚠️ AND IT IS A STRETCH OF THE TABLE'S OWN STATED PURPOSE, SAID OUT LOUD RATHER
+THAN HIDDEN. Migration ``20260408113029_cron_heartbeat.sql`` gives the table the
+``COMMENT`` "Heartbeat rows written by cron jobs at start + completion.
+Monitored by latest_cron_success() for the 36h stale alert." These rows are NOT
+written by a cron job and they are not heartbeats: they are SESSION EPISODES,
+written by a ``lifespan`` task, and their ``started_at``/``completed_at`` pair is
+a measured DURATION rather than a liveness ping. The shape fits exactly
+(``running`` is the open episode, the close carries the outcome), the stretch is
+in the WORDS, and a reader who notices the mismatch has found this paragraph
+rather than a lie. ⛔ Do NOT "fix" it by editing the table's ``COMMENT`` — that
+is a migration, which is precisely what D-5 chose this sink to avoid, and the
+comment is accurate about every OTHER writer.
+
 ⛔ NEVER ADD ``FORCE ROW LEVEL SECURITY`` TO ``cron_runs``. The heartbeat
 migration's own note calls that "the one clause under which owning a table stops
 being an exemption", and it would silently drop the dormancy rows this repo's
@@ -67,6 +80,7 @@ BYTE-IDENTICAL.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any, Final, NamedTuple
@@ -217,17 +231,94 @@ class HealOutcome(NamedTuple):
 _LAST_MEASURED_READING_MONOTONIC: float | None = None
 
 
+# --------------------------------------------------------------------------- #
+# (d) A BLIND INSTRUMENT MUST NOT LOOK LIKE A HEALTHY ONE.
+#
+# A run of consecutive `not_measured` readings means this mechanism has measured
+# NOTHING for that many intervals — and at INFO forever that is indistinguishable
+# from a quiet, healthy system. That is the defect class this whole phase exists
+# to remove, pointed at the fix: the terminal sat dark for ≥2h34m while every
+# instrument stayed quiet, because a quiet instrument and a healthy one emit the
+# same thing.
+#
+# ⭐ THE THRESHOLD IS DERIVED FROM THE CADENCE, NEVER HAND-TYPED. What matters is
+# WALL-CLOCK BLINDNESS, not a count of ticks, so the count is recomputed from the
+# poll interval the caller actually supplies. A retune of the cadence therefore
+# carries through instead of stranding a constant somebody would have to remember
+# to move.
+#
+# ⚠️ THE COUNTER IS IN-PROCESS AND RESETS ON DEPLOY, and that is ACCEPTABLE HERE
+# for a reason that does NOT generalise: it gates a LOG LEVEL and never a dataset
+# value. The dataset's own state lives in the database and is re-read on every
+# observation (see `record_mt5_session_reading`), which is why a redeploy cannot
+# truncate an episode. A redeploy CAN restart a blind run's count — the cost is a
+# late escalation on a mechanism that also writes nothing while blind, and paying
+# it is cheaper than a second durable write path.
+# --------------------------------------------------------------------------- #
+
+#: The INDEPENDENT instrument's own window: the hourly production prober's
+#: cadence. Re-spelled here rather than imported from
+#: `services.mt5_session_monitor` — that module imports `mt5_relogin`, which
+#: imports THIS one, so the import edge would be a cycle. ⛔ The re-spelling is
+#: pinned against the original by `test_the_independent_window_AGREES_with_the
+#: _monitors_own_ceiling`, so the duplication cannot drift silently.
+_INDEPENDENT_INSTRUMENT_WINDOW_S: Final[float] = 3600.0
+
+_CONSECUTIVE_NOT_MEASURED_READINGS: int = 0
+
+
+def blind_run_escalation_threshold(poll_interval_s: float | None) -> int | None:
+    """How many CONSECUTIVE ``not_measured`` readings cover the independent
+    instrument's own window, or ``None`` when no cadence was supplied.
+
+    ⚠️ ``None`` is the BOOT HEAL's answer and it is correct rather than
+    degenerate: that caller fires ONCE per process, so a "run" of blind readings
+    there can never exceed one and no wall-clock span can be derived from a
+    cadence that does not exist. ⛔ Do NOT substitute the monitor's default
+    interval for it — an assumed number wearing a measured name is the defect
+    class this phase is about.
+    """
+    if poll_interval_s is None or poll_interval_s <= 0:
+        return None
+    return max(1, math.ceil(_INDEPENDENT_INSTRUMENT_WINDOW_S / poll_interval_s))
+
+
+def _count_blind_reading() -> int:
+    """Extend the consecutive-blind run and return its new length.
+
+    ⛔ A SEPARATE FUNCTION for the same reason `_stamp_reading_and_measure_gap`
+    is one: the shared never-raises predicate requires
+    `record_mt5_session_reading`'s body to be EXACTLY the `try`, and a `global`
+    declaration beside it is a second top-level statement.
+    """
+    global _CONSECUTIVE_NOT_MEASURED_READINGS
+    _CONSECUTIVE_NOT_MEASURED_READINGS += 1
+    return _CONSECUTIVE_NOT_MEASURED_READINGS
+
+
+def _clear_blind_run() -> None:
+    """A reading that MEASURED something ends the blind run, whatever it found.
+
+    ⭐ `dark` resets it too, and deliberately: the instrument is not blind, it is
+    reporting. Darkness is the thing this phase exists to SEE.
+    """
+    global _CONSECUTIVE_NOT_MEASURED_READINGS
+    _CONSECUTIVE_NOT_MEASURED_READINGS = 0
+
+
 def _reset_session_episode_state_for_tests() -> None:
-    """Clear the previous-reading stamp.
+    """Clear the previous-reading stamp and the consecutive-blind counter.
 
     ⛔ Test-only, and underscore-prefixed for the same reason
     ``mt5_relogin._reset_relogin_log_throttle_for_tests`` is: module-level state a
     test must be able to clear, in the same package, under the same convention.
     Production never calls it — the stamp is what makes
-    ``first_reading_after_boot`` honest.
+    ``first_reading_after_boot`` honest, and a blind run that survived into the
+    next test would make "it escalated" and "it stayed quiet" indistinguishable.
     """
     global _LAST_MEASURED_READING_MONOTONIC
     _LAST_MEASURED_READING_MONOTONIC = None
+    _clear_blind_run()
 
 
 def _stamp_reading_and_measure_gap() -> tuple[float | None, bool]:
@@ -425,7 +516,8 @@ async def _close_row(
 async def _open_row(reading: SessionReading, *, source: str,
                     poll_interval_s: float | None,
                     since_previous_reading_s: float | None,
-                    first_reading_after_boot: bool) -> None:
+                    first_reading_after_boot: bool,
+                    started_at_is_lower_bound: bool) -> None:
     """Open a run for ``reading.state``, restoring the one-open-row invariant first.
 
     ⛔ THE INVARIANT IS RESTORED BY EVERY WRITE, not only by a read that happened
@@ -434,6 +526,24 @@ async def _open_row(reading: SessionReading, *, source: str,
     ``superseded`` before the insert. Each of those closes is the compare-and-set
     above, so re-closing a row we JUST closed truthfully is a NO-OP rather than a
     stamp of ``false`` over ``true``.
+
+    ⭐ ``started_at_is_lower_bound`` IS A PARAMETER AND NOT A CONSTANT ``True``,
+    and the distinction is the difference between a bounded and an unbounded
+    error on every duration a successor computes from these rows:
+
+      * ``True``  — there was NO open run to continue (a boot, a crash, or a row
+        nothing parsed). The state began at some UNKNOWABLE and UNBOUNDED time
+        before we first looked, so the run's duration is a lower bound with no
+        bound on how far it understates.
+      * ``False`` — the run was opened at an OBSERVED TRANSITION: the previous
+        state's run was just closed as MEASURED, so the flip happened inside the
+        last ``since_previous_reading_s`` seconds, which the row also carries.
+        The duration still understates slightly, but by a quantity THIS ROW
+        NAMES.
+
+    ⛔ Do NOT collapse them back to an unconditional ``True``. A successor that
+    cannot separate "unbounded" from "bounded by one poll interval" must discard
+    every row to stay honest, which is the dataset this phase exists to build.
     """
     for stale in await _read_open_rows():
         stale_state = _recognised_open_state(stale.get("metadata"))
@@ -474,8 +584,9 @@ async def _open_row(reading: SessionReading, *, source: str,
             "poll_interval_s": poll_interval_s,
             "since_previous_reading_s": since_previous_reading_s,
             "first_reading_after_boot": first_reading_after_boot,
-            # ⭐ Its start is when we first LOOKED, not when the state began.
-            "started_at_is_lower_bound": True,
+            # ⭐ True when its start is when we first LOOKED rather than a
+            # measured transition — see this function's docstring.
+            "started_at_is_lower_bound": started_at_is_lower_bound,
             "reading_attributes_account": False,
             "attribution_limit": ATTRIBUTION_LIMIT,
         },
@@ -509,10 +620,13 @@ async def record_mt5_session_reading(
         per-tick: at a ten-minute cadence a per-tick write would be ~144
         rows/day forever, into a shared and gated table, for no information.
       * an open row exists and its state is a RECOGNISED state that DIFFERS ->
-        close it as a MEASURED transition, then open a run for the observed state.
+        close it as a MEASURED transition, then open a run for the observed
+        state whose start is MEASURED too (``started_at_is_lower_bound: false``).
       * ⛔ an open row exists but its state is ABSENT, MALFORMED or from an
         unrecognised ``schema_version`` -> the SUPERSEDED path, never the
-        measured-close arm (see ``_recognised_open_state``).
+        measured-close arm (see ``_recognised_open_state``). The run opened after
+        it carries ``started_at_is_lower_bound: true``, because nothing measured
+        what it superseded.
       * no open row exists -> open one, ``started_at_is_lower_bound: true``.
 
     ⛔ NEVER RAISES, AND NEVER CHANGES THE VERDICT. The whole body sits inside ONE
@@ -536,16 +650,30 @@ async def record_mt5_session_reading(
             # sentinel all land here; the ABSENCE of a row is the record that
             # nothing was measured, and `unattributed` names WHY for the `0`
             # case rather than guessing a state out of it (IN-02).
-            logger.info(
+            consecutive = _count_blind_reading()
+            threshold = blind_run_escalation_threshold(poll_interval_s)
+            # ⛔ THE ESCALATION, and it is the point of the counter. Below the
+            # threshold this is ordinary; at or above it the mechanism has
+            # measured nothing for at least as long as the INDEPENDENT hourly
+            # instrument's own window, and a blind instrument at INFO forever
+            # looks exactly like a healthy one.
+            blind = threshold is not None and consecutive >= threshold
+            logger.log(
+                logging.WARNING if blind else logging.INFO,
                 "mt5 session episode: reading MEASURED NOTHING "
                 "(kind=%s code=%s unattributed=%s source=%s) — no row written "
-                "and no episode closed.",
+                "and no episode closed. consecutive_not_measured=%s "
+                "escalation_threshold=%s blind=%s",
                 reading.kind,
                 reading.code,
                 reading.unattributed,
                 source,
+                consecutive,
+                threshold,
+                blind,
             )
             return
+        _clear_blind_run()
 
         # ⛔ `None` on the first reading of a process, never the cadence
         # constant. An assumed number wearing a measured name is the defect class
@@ -578,6 +706,11 @@ async def record_mt5_session_reading(
                 measured=False,
             )
 
+        # ⭐ The run about to be opened has a MEASURED start only when a live run
+        # was closed as a measured transition immediately before it. Every other
+        # path — a boot, a crash, an orphan, a row nothing parsed — leaves the
+        # true start UNBOUNDEDLY earlier than `started_at` (see `_open_row`).
+        continued_a_measured_run = False
         if live is not None:
             live_state = _recognised_open_state(live.get("metadata"))
             if live_state == reading.state:
@@ -608,6 +741,7 @@ async def record_mt5_session_reading(
                     source=source,
                     measured=True,
                 )
+                continued_a_measured_run = True
 
         await _open_row(
             reading,
@@ -615,6 +749,7 @@ async def record_mt5_session_reading(
             poll_interval_s=poll_interval_s,
             since_previous_reading_s=since_previous_reading_s,
             first_reading_after_boot=first_reading_after_boot,
+            started_at_is_lower_bound=not continued_a_measured_run,
         )
     except Exception as exc:  # noqa: BLE001 — see the docstring; this is the control
         try:
