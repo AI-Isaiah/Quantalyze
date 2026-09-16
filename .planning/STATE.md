@@ -4,12 +4,12 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 159
 current_phase_name: RANK — Public-ranking integrity
-status: "Phase 164.5.1 CRONREPOINT plan 01 (wave 1, TODOSFANOUT) COMPLETE — see stopped_at"
-stopped_at: "Phase 164.5.1 CRONREPOINT plan 01 of 9 COMPLETE, executed sequentially on the main working tree (isolation `none`; branch `feat/v1.20-phase-164.5.1-cronrepoint`). Closed the `FANOUT-GLOBAL-01` failure mode for `[164.5.1-GATEWAY-CEILING-INVERSION]`, `[T-OPEN-03]` and `[T-OPEN-04]` — each previously existed only as ROADMAP prose (measured zero `TODOS.md` hits 2026-09-16) and now has a dated, owned entry. Discharged criterion 6 (amended 2026-09-16) across the three LIVE files (`TODOS.md` x2 sites, `docs/runbooks/match-engine.md`, `scripts/lint-app-guc.mjs`'s `LINEAGE_ALLOWLIST` `reason:` string) with a redirect beside every historical 'Phase 164.5 item (7)' mention; the three applied migrations under `supabase/migrations/` stayed byte-identical throughout (`git status --porcelain -- supabase/` empty at every task boundary). `lint-app-guc.mjs --self-test` and its corpus scan both stayed green at 0 findings with `occurrences: 4` / `successor:` unmoved. Commits `4890536b` (Task 1), `9f964f2d` (Task 2), `c9bd80cd` (SUMMARY) — NOT pushed; `branching_strategy: none`. Plan 02 (the phase's tracer — fail-closed kill switch) is next, wave 1, file-disjoint from this plan. See `.planning/phases/164.5.1-cronrepoint-the-live-match-engine-cron-row-is-repointed-at-t/164.5.1-01-SUMMARY.md`. The Phase 164.6.2 MT5RELOGIN narrative this key carried previously is preserved at commit `4890536b`'s parent (`ea61ca38`)."
-last_updated: "2026-09-16T09:21:41Z"
+status: "Phase 164.5.1 CRONREPOINT plan 02 (wave 1, fail-closed kill switch tracer) COMPLETE — see stopped_at"
+stopped_at: "Completed 164.5.1-02-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 02 of 9, wave 1 — the phase's TRACER, sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`). Fail-closed kill switch: async tri-state guard (`KILL_SWITCH_ENABLED`/`DISABLED`/`UNAVAILABLE`), `db_read_with_retry` retry seam beside `db_execute` (never inside it), fail-closed TTL cache contract (an exhausted poll invalidates the cache rather than populating it), and the anti-vacuity neuter/observe-RED/restore proof for both safety levers (the disposition and the predicate's wire type) — each neuter PROVEN applied via diff against a `cp` byte backup, observed RED naming the exact control, restored and PROVEN byte-identical via `cmp`. The tracer feedback gate (`gate=blocking-human`) was APPROVED by the founder after the orchestrator independently re-measured every Task 1 claim. Real test-surface count measured and reported: 36 `_engine_is_enabled` references (33 `monkeypatch.setattr` + 3 direct calls), not the plan's ~23 estimate. Four commits (`43ce2233`, `a909136c`, `1817bfff`, `fce3c151`) — NOT pushed. Full analytics suite `5828 passed, 89 skipped, 0 failed`; coverage 91.18% against the 80% gate; mypy clean; ruff clean (7 pre-existing unrelated findings, unchanged). `164.5.1-GATEWAY-CEILING-INVERSION` stays blocked (shared across plans 01/02/03/05/06/09, per the shared-ID gate) until the last declaring plan finishes. See `.planning/phases/164.5.1-cronrepoint-the-live-match-engine-cron-row-is-repointed-at-t/164.5.1-02-SUMMARY.md`."
+last_updated: "2026-09-16T16:42:29Z"
 last_activity: 2026-09-16
-last_activity_desc: "Phase 164.5.1 CRONREPOINT plan 01 (TODOSFANOUT) executed — wrote the three previously ROADMAP-only TODOS.md entries and discharged criterion 6's live-file redirects (amended 2026-09-16), leaving all applied migrations byte-identical. 2/2 tasks, 3 commits, lint-app-guc self-test + corpus scan green at 0 findings. NOT SHIPPED — 3 commits on `feat/v1.20-phase-164.5.1-cronrepoint`, not yet pushed. The prior Phase 164.6.4 MT5KEEPALIVE narrative this key carried is preserved at commit `4890536b`'s parent (`ea61ca38`)."
-state_head: 97389b31e8aa5331f35e55be08ca6f397404b389
+last_activity_desc: "Phase 164.5.1 CRONREPOINT plan 02 (fail-closed kill switch tracer) executed — async tri-state kill switch, gateway-timeout retry seam beside db_execute, fail-closed TTL cache contract, and an injected-failure anti-vacuity proof for both safety levers. 3/3 tasks, 4 commits (incl. SUMMARY), full suite 5828 passed / 89 skipped / 0 failed, coverage 91.18%. NOT SHIPPED — 4 commits on `feat/v1.20-phase-164.5.1-cronrepoint`, not yet pushed."
+state_head: fce3c151cb4b953c28a91677de6d17d95598ccc5
 
 # ⭐ progress: RE-DERIVED 2026-09-12 at `733a55f5` from ALL REFS — see the method block
 # immediately above the `progress:` keys below. This supersedes the HAND-SET note that stood
@@ -1299,6 +1299,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.6.4 P03 | ~1h40m | 2 tasks | 2 files |
 | Phase 164.6.4 P04 | ~28 min | 2 tasks | 3 files |
 | Phase 164.6.4 P05 | ~35 min | 2 tasks | 2 files |
+| Phase 164.5.1 P02 | 55min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -1406,6 +1407,12 @@ Load-bearing sequencing (real dependencies, do not reorder):
      every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
      The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
      FIRST match is used as the append target, and they are historical archives. -->
+
+*(execution-time, Phase 164.5.1 CRONREPOINT — plan 02, fail-closed kill switch tracer, 2026-09-16)*
+
+- **D-164.5.1-02-A — async tri-state kill switch (ENABLED/DISABLED/UNAVAILABLE) with a named retry seam beside `db_execute`; TTL cache invalidates rather than caches on failure.** Closes Sentry `QUANTALYZE-1D` (fail-open kill switch); the async structural fork CONTEXT.md left open was answered exactly as the plan's own objective directs (`_engine_is_enabled`/`_engine_is_enabled_cached` become `async def`, `db_read_with_retry` wraps `db_execute`), not re-derived. Proven by an injected neuter/observe-RED/restore for both safety levers (the disposition and `_is_gateway_timeout`'s wire-type predicate) — each neuter PROVEN applied via diff against a `cp` byte backup before the RED was believed, restored and PROVEN byte-identical via `cmp`.
+- **D-164.5.1-02-B — real test-surface count measured and reported plainly: 36 `_engine_is_enabled` references (33 `monkeypatch.setattr` + 3 direct calls), not the plan's ~23 estimate.** All 36 converted; a repo-wide grep confirmed only the 4 files this plan's frontmatter lists carry any reference.
+- **D-164.5.1-02-C — `pytest-timeout` was NOT installed (Rule 3's package-install exclusion) to satisfy task 3's `--timeout=600` verify flag.** Substituted an OS-level `timeout` shell wrapper for the identical safety property; both full-suite runs (task 3 and the plan-level coverage verification) reported `0 failed`.
 
 *(execution-time, Phase 164.5.1 CRONREPOINT — plan 01 TODOSFANOUT, 2026-09-16)*
 
@@ -2374,6 +2381,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
+
+**Last Date:** 2026-09-16T16:42:29Z
+**Stopped At:** Completed 164.5.1-02-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 02 of 9, wave 1 — the phase's TRACER, sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`). Fail-closed kill switch: async tri-state guard, `db_read_with_retry` seam beside `db_execute`, fail-closed TTL cache contract, anti-vacuity neuter/observe-RED/restore proof for both levers (disposition + predicate wire type). Tracer feedback gate was APPROVED by the founder after the orchestrator independently re-measured every Task 1 claim. Four commits (`43ce2233`, `a909136c`, `1817bfff`, `fce3c151`), NOT pushed. Full suite `5828 passed, 89 skipped, 0 failed`; coverage 91.18% against the 80% gate. `164.5.1-GATEWAY-CEILING-INVERSION` stays blocked (shared across plans 01/02/03/05/06/09) until the last declaring plan finishes. Next: plan 03 (statement_timeout migration).
+**Resume File:** None
 
 **Last Date:** 2026-09-16T09:21:41Z
 **Stopped At:** Completed 164.5.1-01-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 01 of 9, wave 1 — the phase's FIRST act, sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`). Closed `FANOUT-GLOBAL-01` for `[164.5.1-GATEWAY-CEILING-INVERSION]`, `[T-OPEN-03]`, `[T-OPEN-04]` (each previously ROADMAP-only prose, zero `TODOS.md` hits measured 2026-09-16, now dated and owned). Discharged criterion 6 (amended 2026-09-16) across three LIVE files with a redirect beside every historical "Phase 164.5 item (7)" mention; all applied migrations under `supabase/migrations/` stayed byte-identical throughout. `lint-app-guc.mjs --self-test` and its corpus scan both green at 0 findings, `occurrences: 4` / `successor:` unmoved. Three commits (`4890536b`, `9f964f2d`, `c9bd80cd`), NOT pushed. Plan 02 (the phase's tracer — fail-closed kill switch) is next, wave 1, file-disjoint from this plan.

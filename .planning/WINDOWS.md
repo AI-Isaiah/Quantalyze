@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 41
+open_count: 42
 waived_count: 0
 fixed_count: 12
-total_count: 53
-last_updated: 2026-09-16T07:20:33.058Z
+total_count: 54
+last_updated: 2026-09-16T16:36:49.788Z
 ---
 
 # Broken Windows Ledger
@@ -68,6 +68,7 @@ last_updated: 2026-09-16T07:20:33.058Z
 | 51 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_episodes.py |  | A4 POST-DEPLOY: no Python has ever written to public.cron_runs. READ THE FIRST ROW BACK on the first deploy rather than assuming the service-role INSERT lands; the table+policy pair is the untested surface, and a failure loses criterion 1's lifetime dataset while the heal itself keeps working. | fixed |  | 2026-09-15T21:45:02.884Z | 2026-09-16T07:20:33.058Z |
 | 52 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_monitor.py |  | A2 POST-DEPLOY: the tick opens a FRESH rpyc client per tick and closes it in a finally. At the 600s default that is ~144 connections/day against a gateway container already at a three-digit thread counter. CRITERION CORRECTED 2026-09-16, and the original could never pass: it asked that the thread counter NOT climb monotonically with tick count, but CPython names threads from a globally monotonic counter and rpyc ThreadedServer spawns one thread per connection, so the number climbs once per connection whether or not threads are reaped. The real falsifier is welcome versus goodbye in the mt5-gateway log, scoped to the CURRENT process (everything after the last server-started line): a leak is welcome running ahead of goodbye with the gap GROWING across two readings hours apart. A container restart resets the counter to Thread-1 and invalidates the pair, so re-scope before comparing. BASELINE 2026-09-16T06:50Z, pre-keepalive: max Thread-27, welcome 27, goodbye 27, 0 unclosed, ~36 conn/day over 18h. READING 2 at 07:17Z: Thread-30, welcome 30, goodbye 30, 0 unclosed; the +3 equals boot heal plus two ticks, which confirms the 600s cadence but is far too small a sample to clear a slow leak. The hours-apart reading still stands. A4 fails semi-loudly; this would degrade the gateway SILENTLY over days. | open |  | 2026-09-15T21:45:24.003Z |  |
 | 53 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_monitor.py |  | Criterion 2 POST-DEPLOY cross-check: reconcile this detector's recorded episodes against the INDEPENDENT hourly prod-prober, so the new instrument is not the only witness to its own claims. | open |  | 2026-09-15T21:45:24.211Z |  |
+| 54 | 164.5.1 | deviation | analytics-service/tests/test_match_router.py |  | pytest-timeout plugin absent from project deps; substituted OS-level timeout wrapper for task 3 full-suite verify (--timeout=600 flag) | open |  | 2026-09-16T16:36:49.788Z |  |
 
 ````json
 [
@@ -705,6 +706,18 @@ last_updated: 2026-09-16T07:20:33.058Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-15T21:45:24.211Z",
+    "resolved_at": null
+  },
+  {
+    "id": 54,
+    "kind": "deviation",
+    "phase": "164.5.1",
+    "file": "analytics-service/tests/test_match_router.py",
+    "line": null,
+    "description": "pytest-timeout plugin absent from project deps; substituted OS-level timeout wrapper for task 3 full-suite verify (--timeout=600 flag)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-16T16:36:49.788Z",
     "resolved_at": null
   }
 ]
