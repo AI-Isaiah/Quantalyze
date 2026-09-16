@@ -110,6 +110,33 @@ def mt5_enabled_server() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# WR-14 (Phase 164.6.4 round 3) — the kill-switch MISCONFIGURATION detector.
+#
+# mt5_enabled_server() above is fail-CLOSED on any value that is not exactly
+# "true" — by design, and correct for the go-live gate it serves. But that
+# means "1", "on" and "yes" read OFF exactly like a deliberate "" or "false":
+# an operator who typed one of those MEANT to switch MT5 ON and got the kill
+# switch instead. That is a MISCONFIGURATION, not a decision, and the ONE call
+# site that classifies the difference (the session monitor's tick, which
+# records a `not_measured` reading either way) needs to tell them apart so
+# only a genuine decision is exempt from the blind-run escalation. This does
+# NOT widen mt5_enabled_server() itself — every OTHER caller (the go-live
+# gate in routers/exchange.py, routers/process_key.py,
+# services/allocator_positions.py, services/job_worker.py,
+# services/ingestion/long_fetch.py) keeps the strict fail-closed "true" match
+# unchanged.
+# ---------------------------------------------------------------------------
+def mt5_enabled_is_deliberate() -> bool:
+    """True only when MT5_ENABLED names a value the reader RECOGNISES as off.
+
+    ⛔ `1`, `on`, `yes` are MISCONFIGURATIONS, not decisions: they read OFF
+    (see `mt5_enabled_server`) and the operator meant ON. Only absent, blank
+    or an explicit `false` is a DECISION.
+    """
+    return (os.getenv("MT5_ENABLED") or "").strip().lower() in ("", "false")
+
+
+# ---------------------------------------------------------------------------
 # smoothed_mtm worker kill-switch (Phase 134 — SAFE ROLLOUT of the v1.14 basis).
 #
 # The worker computes a THIRD factsheet basis (`smoothed_mtm`) at derive time for

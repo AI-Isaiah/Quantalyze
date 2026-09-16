@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import logging
 import subprocess
 import sys
 import threading
@@ -44,12 +45,41 @@ from pathlib import Path
 import pytest
 
 from services import job_worker as jw
-from services import mt5_client, mt5_concurrency
+from services import (
+    mt5_client,
+    mt5_concurrency,
+    mt5_relogin,
+    mt5_session_episodes,
+    mt5_session_monitor,
+)
 
 # ⚠️ Imported from the module that OWNS them (`services.mt5_client`), never via a
 # re-export. The 151 review-E2 trap: a name reached through a re-export is a
 # DIFFERENT binding, so patching or asserting on it is a silent no-op.
-from services.mt5_client import _mt5_epoch_for, bump_mt5_terminal_epoch
+from services.mt5_client import (
+    _mt5_epoch_for,
+    bump_mt5_terminal_epoch,
+    mt5_terminal_key,
+)
+
+# ⛔ IMPORTED, NEVER COPIED (Phase 164.6.4 plan 05). These are the SHIPPED heal
+# harness: the in-memory rpyc wire (`_install_client`), the lease WRAPPER that
+# still runs the real lease (`_install_lease_counter`), the full env
+# (`_set_full_env`), the `mt5_relogin` log filter (`_records`) and the PostgREST-
+# shaped `cron_runs` double (`_FakeCronRuns`). A second copy here would drift
+# from the one the heal's own suite exercises, and the criterion-4 test would
+# then be measuring a harness rather than the shipped path. `tests.` imports are
+# this suite's established idiom (a dozen modules already do it).
+from tests.test_mt5_relogin import (  # noqa: PLC2701 — deliberate, see above
+    _FAKE_HOST,
+    _FAKE_PORT,
+    _LOGGER_NAME as _RELOGIN_LOGGER_NAME,
+    _FakeCronRuns,
+    _install_client,
+    _install_lease_counter,
+    _records,
+    _set_full_env,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -800,6 +830,41 @@ _LEASE_VERB = "mt5_terminal_lease"
 #: top-level entrypoints, and measured 2026-09-14 neither takes a lease: the
 #: roster below is unchanged by the widening, which is the point —
 #: `services/mt5_relogin.py` is a `services/` module and `main.py` only CALLS it.
+#:
+#: ⭐ NOT RE-CUT 2026-09-15 (Phase 164.6.4 plan 05), AND THE REASONING IS RECORDED
+#: HERE RATHER THAN IN A COMMIT MESSAGE — because a roster that did not move is
+#: indistinguishable from a roster nobody checked, and the next reader would
+#: otherwise have to re-derive this from scratch.
+#:
+#: Phase 164.6.4 adds a SESSION MONITOR that drives the same heal on a DETECTION
+#: POLL CADENCE. The pattern-mapper's §5 expected that to make this roster SEVEN.
+#: It is still SIX, and that is a DECISION rather than an oversight:
+#: `services/mt5_session_monitor.run_mt5_session_monitor_tick` takes NO lease of
+#: its own. It reads the kill switch and then `await`s
+#: `heal_mt5_terminal_session` — the site already on this roster — which
+#: CONSTRUCTS its client inside its own single bounded lease (inside the
+#: `to_thread` body, so the unbounded rpyc connect is covered by the caller's
+#: `wait_for`) and closes it before that lease releases.
+#:
+#: So the roster's OWN question — *does the new caller touch an `Mt5Client` that
+#: was ALREADY touched under a DIFFERENT lease?* — is answered NO by
+#: construction, not by inspection: the monitor never holds a client at all, and
+#: every client the cadence creates begins and ends inside one acquisition. ⭐ The
+#: roster staying at SIX is therefore a real argument FOR the delegating design
+#: rather than an accident of it, and a seventh entry appearing here is the
+#: signal that the delegation was replaced by a second acquisition.
+#:
+#: ⛔ "The roster did not change" is ALSO what a broken walk looks like, which is
+#: why this note is not the evidence. `test_the_session_monitor_module_holds_NO_
+#: lease_and_NO_raw_lock` aims an AST check at the monitor module BY NAME (with a
+#: synthetic calibration proving the scanner would report a lease if one were
+#: there), and `test_both_new_session_modules_are_MEMBERS_of_the_production_
+#: lease_walk` asserts — positively, by name, one assertion each — that both new
+#: `services/` modules are actually IN `_production_python_files()`' output. The
+#: `>=` floor cannot do that job: MEASURED 2026-09-15 the walk returns 95 files
+#: against a floor of 40, i.e. 55 files of headroom, so a walk that silently
+#: stopped seeing exactly these two would leave this roster reading SIX and every
+#: lease assertion in this file green while measuring nothing about them.
 _PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
     {
         ("services/allocator_positions.py", "_fetch_mt5_account_rows"),
@@ -1223,3 +1288,772 @@ def test_the_preflight_touch_scanner_fires_on_a_spliced_session_verb() -> None:
     # a `login` removed from Mt5Client would drop out of `verbs` and this
     # calibration would stop reporting it, which is the honest coupling.
     assert "login" in verbs
+
+
+# ---------------------------------------------------------------------------
+# 164.6.4 / CRITERION 4 — THE PERIODIC TOUCH MUST NOT STEAL THE ONE SHARED
+# TERMINAL FROM LIVE JOB PROCESSING, AND THE TEST FAILS IF IT CAN.
+#
+# ⭐ THE NAIVE READING PICKS THE WRONG HAZARD, and the phase's own research
+# disposed of it: D-08's lease hazard does NOT transfer (the terminal epoch binds
+# on FIRST TOUCH rather than at construction, and the construction fence is a
+# ContextVar preflight never carries). The REAL cost is the ASYMMETRY, which
+# `mt5_relogin`'s own IN-04 comment states: the heal refuses to queue behind real
+# work by taking a BOUNDED acquire, but real work DOES queue behind the heal —
+# the three job sites acquire with `wait_s=None`, i.e. UNBOUNDED. So a tick can
+# make a job wait for up to the tick's budget, and Phase 164.6.4 turns that from
+# a once-per-boot event into a permanent CADENCE.
+#
+# ⛔ THE BUSY-SKIP DOCTRINE IS NOT INHERITED WITH THE BEHAVIOUR. The boot heal
+# reasons that "a busy terminal is a terminal somebody is already successfully
+# using, which is itself evidence that the session is fine". That is cheap and
+# defensible once per boot and UNSOUND for a loop: it is a standing claim about
+# session state the tick DID NOT MEASURE, and a terminal held by a FAILING job is
+# exactly where it is most wrong. The BEHAVIOUR is kept — skip, never queue — and
+# the CLAIM is refused: the skip is recorded as `not_measured` (the recorder's own
+# arm, gated in `tests/test_mt5_relogin.py`). Nothing below treats a skip as
+# evidence about the session.
+#
+# ⚠️ EVERY ORACLE HERE IS ORDERING, A ROUND-TRIP COUNT OR AN EPOCH DELTA — never
+# "the tick returned". The tick returns `None` on every path BY CONSTRUCTION
+# (it is structurally never-raising), so "it did not blow up" is green under
+# precisely the defect this section exists to catch.
+# ---------------------------------------------------------------------------
+
+#: The two actors in the interleave log. A job HOLDS the terminal lease across a
+#: measurable window; a monitor tick tries to use the terminal inside it.
+_JOB_TAG = "job"
+_TICK_TAG = "tick"
+
+#: The tick's ACQUISITION bound, driven through the SHIPPED env knob rather than a
+#: `setattr` on the constant — CR-02 moved that read per-call, so a `setattr`
+#: would be a silent no-op leaving the 2.0 s default in force and the test would
+#: pass or fail for harness reasons. `0.1` is the knob's own FLOOR
+#: (`_MT5_RELOGIN_LEASE_WAIT_FLOOR_S`), so the real parse and the real range check
+#: both still run.
+_TICK_LEASE_WAIT_S = "0.1"
+
+#: How long the job keeps the terminal when nothing interrupts it. FIVE TIMES the
+#: tick's bound, so "the tick gave up while the job still held the terminal" is
+#: established by construction rather than by a timing race. ⚠️ It is a CEILING,
+#: not a sleep: in the neutered arm the job leaves as soon as the tick's touch is
+#: observed, so the control costs nothing.
+_JOB_HOLD_CEILING_S = 0.5
+
+#: The `services.mt5_client` logger — where the D-36 refusal WARNING lands. It is
+#: the PARENT of `mt5_relogin`'s logger, so raising both to INFO is two calls and
+#: the second must be the one whose level the capturing handler keeps.
+_CLIENT_LOGGER_NAME = "quantalyze.analytics"
+
+
+@pytest.fixture
+def _episode_sink(monkeypatch: pytest.MonkeyPatch):
+    """The shipped `cron_runs` double, wired at the TRANSPORT seam.
+
+    The heal calls the REAL `record_mt5_session_reading` / `record_mt5_heal_outcome`
+    on every path this section drives, and those reach Supabase. Replacing
+    `get_supabase` is the same seam `_install_client` replaces for the rpyc wire —
+    everything between the tick and the wire stays real. ⛔ The recorder is NOT
+    stubbed out: a harness that removed it would stop exercising the code the
+    cadence actually runs.
+    """
+    fake = _FakeCronRuns()
+    monkeypatch.setattr(mt5_session_episodes, "get_supabase", lambda: fake)
+    mt5_session_episodes._reset_session_episode_state_for_tests()
+    yield fake
+    mt5_session_episodes._reset_session_episode_state_for_tests()
+
+
+async def _run_job_and_one_monitor_tick(
+    monkeypatch: pytest.MonkeyPatch, *, neuter_lock: bool
+):
+    """Drive ONE monitor tick concurrently with a job that HOLDS the terminal lease.
+
+    Returns ``(order, fake, constructions, acquisitions)`` where ``order`` is the
+    shared interleave log of ``(tag, "enter"/"exit"/"touch")``.
+
+    The shape is the shipped `_run_two_concurrent_mt5` harness's: an ordered
+    transport appending into a SHARED list, an index assertion, and an embedded
+    negative control. The job parks (BOUNDED) until the tick's first touch is
+    observed — under the real lock the tick can never touch, so the job times out
+    at its ceiling and its terminal window stays contiguous; with the lock neutered
+    the touch lands and the job leaves immediately. ⛔ A broken lock REDS here, it
+    never hangs CI.
+    """
+    _set_full_env(monkeypatch)
+    monkeypatch.setenv("MT5_RELOGIN_LEASE_WAIT_S", _TICK_LEASE_WAIT_S)
+
+    # The terminal answers the credential-free detector cleanly, so the ONLY reason
+    # the tick can fail to touch it is the lease. ⛔ Deliberately the simplest
+    # scenario available: a tick that failed for a SECOND reason would make an
+    # empty round-trip list ambiguous.
+    fake, constructions = _install_client(monkeypatch, {"initialize": True})
+    acquisitions = _install_lease_counter(monkeypatch)
+
+    order: list[tuple[str, str]] = []
+    loop = asyncio.get_running_loop()
+    job_holds = asyncio.Event()
+    tick_touched = asyncio.Event()
+
+    real_initialize = fake.initialize
+
+    def _recording_initialize(**kwargs):
+        # Appended from the TICK's worker thread. `list.append` is atomic, and the
+        # job's own `exit` is ordered AFTER this append by the event below — so the
+        # ordering under test rests on a happens-before, not on a sleep.
+        order.append((_TICK_TAG, "touch"))
+        loop.call_soon_threadsafe(tick_touched.set)
+        return real_initialize(**kwargs)
+
+    # WRAPPED, never replaced: `real_initialize` still records the round-trip into
+    # the double's own `round_trips` list, which is the separate oracle below.
+    fake.initialize = _recording_initialize
+
+    if neuter_lock:
+        # ⚠️ THE REGISTRY'S OWN MODULE, and nothing else. `mt5_terminal_lease`
+        # resolves `_mt5_terminal_lock_for` from `services.mt5_concurrency`'s OWN
+        # globals, so a patch aimed at a re-export (`services.job_worker`'s, which
+        # bound before the lease refactor) is a DOCUMENTED SILENT NO-OP — the
+        # shipped `_run_two_concurrent_mt5` carries that observation. A FRESH Lock
+        # per call serializes NOTHING, which is the whole point of the control.
+        monkeypatch.setattr(
+            mt5_concurrency, "_mt5_terminal_lock_for", lambda _k: asyncio.Lock()
+        )
+        # ⭐ ONE CONTROL, ONE VARIABLE. This arm isolates the LOCK; the
+        # abandoned-session FENCE is a DIFFERENT variable and must be held still or
+        # the control stops measuring what it names. With the lock neutered the two
+        # flows genuinely interleave against a LIVE epoch registry, and the job's
+        # lease release legitimately fences the tick's in-flight client — an
+        # `Mt5SessionAbandoned` that would be swallowed by the tick's own guard and
+        # would silently change WHY the tick made no further round-trip. The shipped
+        # harness records 2 failures in 10 consecutive local runs before it pinned
+        # this, and ⛔ it explicitly forbids "fixing" it by catching the abandonment:
+        # a harness that swallows a refusal stays green when a future change makes
+        # the fence fire where it should not.
+        #
+        # ⚠️ The target is `services.mt5_concurrency`, NOT the `services.mt5_client`
+        # that DEFINES the function — the lease binds the name into mt5_concurrency's
+        # globals at import, so that module is the READER (the 151 review-E2 rule).
+        monkeypatch.setattr(mt5_concurrency, "bump_mt5_terminal_epoch", lambda _k: 0)
+
+    # ⛔ THROUGH `mt5_terminal_key`, never a second hand-spelled `f"{host}:{port}"`:
+    # the epoch registry and the lock registry must be keyed byte-identically or
+    # the D-36 fence guards a different terminal than the lock serializes.
+    key = mt5_terminal_key(_FAKE_HOST, int(_FAKE_PORT))
+
+    async def _job() -> None:
+        # The JOB SITES' acquisition form: `wait_s=None`, i.e. UNBOUNDED. That
+        # asymmetry is the hazard — it is what makes a tick able to cost a job
+        # real time — so the stand-in must not quietly bound itself.
+        async with mt5_concurrency.mt5_terminal_lease(key):
+            order.append((_JOB_TAG, "enter"))
+            job_holds.set()
+            try:
+                await asyncio.wait_for(
+                    tick_touched.wait(), timeout=_JOB_HOLD_CEILING_S
+                )
+            except asyncio.TimeoutError:
+                pass
+            order.append((_JOB_TAG, "exit"))
+
+    job = asyncio.create_task(_job())
+    # The job holds the terminal BEFORE the tick starts — established by an event,
+    # never by a sleep, so the ordering under test cannot be timing-lucky.
+    await asyncio.wait_for(job_holds.wait(), timeout=5.0)
+    await mt5_session_monitor.run_mt5_session_monitor_tick()
+    await asyncio.wait_for(job, timeout=5.0)
+    return order, fake, constructions, acquisitions
+
+
+def _tick_touch_indices(order: list[tuple[str, str]]) -> tuple[int, int, list[int]]:
+    """``(job enter index, job exit index, tick touches strictly between them)``."""
+    assert (_JOB_TAG, "enter") in order and (_JOB_TAG, "exit") in order, (
+        f"harness: the job never bracketed its terminal window: {order!r}"
+    )
+    enter_i = order.index((_JOB_TAG, "enter"))
+    exit_i = order.index((_JOB_TAG, "exit"))
+    inside = [
+        i
+        for i, (tag, _event) in enumerate(order)
+        if tag == _TICK_TAG and enter_i < i < exit_i
+    ]
+    return enter_i, exit_i, inside
+
+
+async def test_CRITERION_4_a_monitor_tick_cannot_land_inside_a_live_jobs_terminal_window(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _episode_sink,
+) -> None:
+    """⭐ CRITERION 4, WITH TEETH. A monitor tick must not steal the ONE shared
+    terminal from live job processing, and this fails if it can.
+
+    THREE ORACLES, because they are three different failures:
+
+      1. ORDERING — no touch attributable to the tick falls between the job's
+         `enter` and `exit`.
+      2. THE EMPTY ROUND-TRIP LIST — ⛔ asserted EMPTY, never merely short. A tick
+         that QUEUED and then ran AFTER the job satisfies an ordering-only
+         assertion perfectly while having made the job wait, which is the exact
+         cost IN-04 names.
+      3. THE SKIP ITSELF — the bounded-acquire INFO line, naming the caller. A
+         tick that made no round-trip because the CLIENT failed to build would
+         satisfy (2) for a reason that has nothing to do with the lease.
+
+    THE TEETH ARE EMBEDDED IN THIS SAME TEST, deliberately: a positive assertion
+    with no failing control is indistinguishable from one that cannot fail. With
+    the lock neutered the tick's touch DOES land inside the job's window.
+    """
+    caplog.set_level(logging.INFO, logger=_CLIENT_LOGGER_NAME)
+    caplog.set_level(logging.INFO, logger=_RELOGIN_LOGGER_NAME)
+
+    order, fake, constructions, acquisitions = await _run_job_and_one_monitor_tick(
+        monkeypatch, neuter_lock=False
+    )
+
+    # ---- 1. ORDERING -------------------------------------------------------
+    _enter_i, _exit_i, inside = _tick_touch_indices(order)
+    assert not inside, (
+        f"a monitor tick touched the terminal INSIDE a live job's terminal "
+        f"window: {order!r}. The tick must take a BOUNDED acquire and SKIP — it "
+        f"can never pre-empt or interleave with real work on the ONE shared "
+        f"terminal (criterion 4)."
+    )
+
+    # ---- 2. AND IT MADE NO ROUND-TRIP AT ALL --------------------------------
+    assert fake.round_trips == [], (
+        f"the tick reached the terminal: {fake.round_trips!r}. ⛔ EMPTY, not "
+        f"short: a tick that QUEUED behind the job and ran afterwards would pass "
+        f"the ordering assertion above while having made the job wait for up to "
+        f"the tick's whole budget — and the three job sites acquire UNBOUNDED, so "
+        f"they cannot defend themselves (IN-04)."
+    )
+    assert constructions == [], (
+        f"the tick built an Mt5Client while the job held the terminal: "
+        f"{constructions!r}. The lease is taken BEFORE any client exists "
+        f"precisely so a skip opens no transport at all."
+    )
+
+    # ---- 3. AND IT SKIPPED, SAYING SO, AT INFO ------------------------------
+    skips = [
+        r
+        for r in _records(caplog)
+        if "skipped — the terminal was already in use" in r.getMessage()
+    ]
+    assert len(skips) == 1, (
+        f"the bounded-acquire skip was not reported exactly once: "
+        f"{[r.getMessage() for r in _records(caplog)]}"
+    )
+    assert skips[0].levelno == logging.INFO, (
+        f"the skip was logged at {skips[0].levelname}. A busy terminal is the "
+        f"DESIGNED outcome of a bounded acquire, not a fault — and an operator "
+        f"taught that a healthy cadence warns is an operator who stops reading "
+        f"the channel this milestone exists to fill."
+    )
+    assert "mt5 session monitor" in skips[0].getMessage(), (
+        f"the skip does not name the CALLER that made it: "
+        f"{skips[0].getMessage()!r}. At a cadence the caller is the whole "
+        f"difference between one boot-time line and 144 a day."
+    )
+
+    # ---- THE BOUND ITSELF, ASSERTED RATHER THAN ASSUMED ---------------------
+    # ⚠️ Read BEFORE the control runs: `_install_lease_counter` WRAPS the lease, so
+    # a second installation in the same test nests and both lists would grow.
+    assert len(acquisitions) == 1, (
+        f"the tick took {len(acquisitions)} lease acquisitions, not one: "
+        f"{acquisitions!r}. ONE acquisition per function is the shape the lazy "
+        f"epoch bind assumes (D-36 AMENDED); a second would be refused."
+    )
+    acquired_key, wait_s = acquisitions[0]
+    assert acquired_key == mt5_terminal_key(_FAKE_HOST, int(_FAKE_PORT)), (
+        f"the tick leased {acquired_key!r}. ⛔ The key must come from "
+        f"`mt5_terminal_key`, never a second hand-spelled host-and-port string: "
+        f"the epoch registry and the lock registry must be keyed byte-identically "
+        f"or the D-36 fence guards a different terminal than the lock serializes."
+    )
+    assert wait_s is not None, (
+        "the tick acquired the terminal with `wait_s=None` — the UNBOUNDED form "
+        "the three BATCH job sites use. On a cadence that is the wedge: the tick "
+        "would queue ahead of real work forever rather than skipping."
+    )
+    assert isinstance(wait_s, float) and 0.0 < wait_s < float("inf"), (
+        f"the acquisition bound is not a finite positive float: {wait_s!r}"
+    )
+    assert wait_s == mt5_relogin._relogin_lease_wait_s(), (
+        f"the tick's bound ({wait_s}) is not the shipped knob's value — it was "
+        f"hardcoded somewhere instead of read per call, so a retune would not "
+        f"reach it."
+    )
+
+    # ---- THE NEGATIVE CONTROL, IN THE SAME TEST ----------------------------
+    # ⚠️ SELF-DETECTING MIS-AIM. If the patch above were re-pointed at a re-export,
+    # the REAL registry would serialize the two flows and this arm would red with
+    # the fully-contiguous order printed — which is exactly what 153.5-03 OBSERVED
+    # before it re-pointed the shipped harness. Green here therefore means the
+    # patch genuinely bound. The structural half of the same claim is asserted
+    # directly below.
+    lease_impl = getattr(mt5_concurrency.mt5_terminal_lease, "__wrapped__", None)
+    assert lease_impl is not None and lease_impl.__globals__ is vars(
+        mt5_concurrency
+    ), (
+        "`mt5_terminal_lease` no longer reads its names out of "
+        "`services.mt5_concurrency`'s own globals, so the control below is "
+        "patching a module the lease does not read — the silent-no-op class."
+    )
+
+    (
+        neutered_order,
+        neutered_fake,
+        neutered_constructions,
+        neutered_acquisitions,
+    ) = await _run_job_and_one_monitor_tick(monkeypatch, neuter_lock=True)
+
+    _n_enter, _n_exit, n_inside = _tick_touch_indices(neutered_order)
+    assert n_inside, (
+        f"WITH THE LOCK NEUTERED the tick's touch MUST land inside the job's "
+        f"terminal window — otherwise the positive assertion above is vacuous. "
+        f"Observed order: {neutered_order!r}. If that log is fully contiguous "
+        f"(no `tick` entry at all) the patch is MIS-AIMED: "
+        f"`_mt5_terminal_lock_for` must be patched on "
+        f"`services.mt5_concurrency`, the module `mt5_terminal_lease` actually "
+        f"reads it from — a patch aimed at `services.job_worker`'s re-export is a "
+        f"documented SILENT NO-OP since the lease refactor."
+    )
+    assert neutered_fake.round_trips == ["initialize"], (
+        f"the neutered arm did not reach the terminal: "
+        f"{neutered_fake.round_trips!r}. The control must show the tick CAN make "
+        f"the round-trip the lock is what prevents."
+    )
+    assert neutered_constructions, (
+        "the neutered arm built no client — the control is not exercising the "
+        "path the positive assertion denies."
+    )
+    assert len(neutered_acquisitions) == 1, (
+        f"the neutered arm took {len(neutered_acquisitions)} acquisitions: "
+        f"{neutered_acquisitions!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 164.6.4 / CRITERION 4's INHERITED HALF — ZERO NEW LEASE SITES, ASSERTED
+# POSITIVELY RATHER THAN READ OFF AN UNCHANGED ROSTER.
+#
+# The `==` pin on `_PRODUCTION_LEASE_SITES` already reds if a SEVENTH site
+# appears. But "the roster did not change" is ALSO what a BROKEN WALK looks like,
+# and the two new `services/` modules carry no lease — so a walk that stopped
+# seeing them would leave the roster reading exactly SIX and every lease
+# assertion in this file green while measuring nothing about them. These two
+# cases close that, from the two independent directions: the MODULE holds no
+# lease (AST, by name, synthetically calibrated), and the WALK can SEE it.
+# ---------------------------------------------------------------------------
+
+#: The two modules Phase 164.6.4 added. Spelled as walk-relative paths because
+#: that is the form `_production_python_files()` yields and the roster is keyed
+#: on.
+_SESSION_MONITOR_REL = "services/mt5_session_monitor.py"
+_SESSION_EPISODES_REL = "services/mt5_session_episodes.py"
+
+#: The one statement in the monitor that reaches the terminal at all — it is an
+#: `await` on the heal (WR-06 wraps it in `asyncio.wait_for` so a degraded
+#: Supabase cannot silently stretch a tick past its own cadence; the heal call
+#: itself, and the roster's reasoning, are unchanged), which is the site
+#: ALREADY on the roster. ⛔ TWO LINES, not one: `mt5_session_monitor_loop`'s
+#: OWN `await asyncio.wait_for(SHUTDOWN.wait(), ...)` shares the first line's
+#: text, so the anchor must include the second line to stay unique. Used as the
+#: splice anchor for the calibration below, and asserted UNIQUE before it is
+#: used: a mutation that does not APPLY reads as GREEN.
+_MONITOR_DELEGATION_ANCHOR = (
+    "            await asyncio.wait_for(\n                heal_mt5_terminal_session(\n"
+)
+
+
+def test_the_session_monitor_module_holds_NO_lease_and_NO_raw_lock() -> None:
+    """⭐ THE MONITOR ADDS ZERO LEASE SITES, AIMED AT THE MODULE BY NAME.
+
+    It delegates: `run_mt5_session_monitor_tick` reads the kill switch and awaits
+    `heal_mt5_terminal_session`, which constructs its client INSIDE its own single
+    bounded lease and closes it before that lease releases. That is why
+    `_PRODUCTION_LEASE_SITES` stays at SIX (the reasoning is recorded beside the
+    roster itself), and it is why criterion 4's "must not steal the terminal" is
+    INHERITED rather than re-argued — the heal's acquire is bounded, so a busy
+    terminal means SKIP.
+
+    ⛔ THE SYNTHETIC HALF IS NOT OPTIONAL. "The monitor holds no lease" is
+    satisfied equally by a monitor that holds none and by a scanner that sees
+    nothing, so both scanners are driven over a MUTATED COPY of the monitor's own
+    text and must report the spliced acquisition, attributed to the monitor's real
+    enclosing function. This is the discipline
+    `test_the_raw_acquisition_scanner_reports_and_does_not_over_report` already
+    applies, pointed at this module.
+    """
+    root = Path(__file__).resolve().parents[1]
+    source = (root / _SESSION_MONITOR_REL).read_text()
+
+    assert _lease_sites(source, _SESSION_MONITOR_REL) == [], (
+        "`services/mt5_session_monitor.py` now takes a terminal lease of its own. "
+        "Before re-cutting the roster, answer the question it exists for: does "
+        "the new site touch an `Mt5Client` that was ALREADY touched under a "
+        "DIFFERENT lease? The monitor's whole design is that it holds no client "
+        "at all — it delegates to the heal, which owns one lease and one client "
+        "lifetime. ⛔ A second acquisition on a CADENCE is the wedge class D-25 "
+        "forbids, not a refactor."
+    )
+    assert _raw_lock_acquisitions(source, _SESSION_MONITOR_REL) == [], (
+        "the monitor holds the per-terminal Lock DIRECTLY. The raw Lock has no "
+        "release hook, so it releases the terminal without bumping the D-36 "
+        "epoch — and on a cadence that disarms the fence periodically, forever."
+    )
+
+    # ---- CALIBRATION, on the monitor's OWN text ----------------------------
+    assert source.count(_MONITOR_DELEGATION_ANCHOR) == 1, (
+        f"harness: the splice anchor is no longer unique in "
+        f"{_SESSION_MONITOR_REL} (found "
+        f"{source.count(_MONITOR_DELEGATION_ANCHOR)}). ⛔ A mutation that does not "
+        f"APPLY reads as GREEN — re-anchor this calibration rather than deleting "
+        f"it."
+    )
+
+    # The spliced acquisition wraps the real delegation, so the scanner must
+    # attribute it to the monitor's REAL enclosing function. The continuation
+    # lines stay put: they sit inside the call's parentheses, where indentation
+    # carries no meaning.
+    spliced_lease = source.replace(
+        _MONITOR_DELEGATION_ANCHOR,
+        "            async with mt5_terminal_lease(_k):\n    "
+        + _MONITOR_DELEGATION_ANCHOR,
+    )
+    assert spliced_lease != source, "harness: the lease splice did not apply"
+    assert _lease_sites(spliced_lease, _SESSION_MONITOR_REL) == [
+        (_SESSION_MONITOR_REL, "run_mt5_session_monitor_tick")
+    ], (
+        "the lease scanner did NOT report a lease spliced into the monitor's own "
+        "delegation — so the clean assertion above measures nothing. Fix the "
+        "scanner, never the assertion."
+    )
+
+    spliced_raw = source.replace(
+        _MONITOR_DELEGATION_ANCHOR,
+        "            async with _mt5_terminal_lock_for(_k):\n    "
+        + _MONITOR_DELEGATION_ANCHOR,
+    )
+    assert spliced_raw != source, "harness: the raw-lock splice did not apply"
+    fired = _raw_lock_acquisitions(spliced_raw, _SESSION_MONITOR_REL)
+    assert len(fired) == 1 and fired[0][0] == _SESSION_MONITOR_REL, (
+        f"the raw-acquisition scanner did not report a raw lock spliced into the "
+        f"monitor's own delegation: {fired!r}"
+    )
+
+
+def test_both_new_session_modules_are_MEMBERS_of_the_production_lease_walk() -> None:
+    """⛔ MEMBERSHIP, NOT HEADROOM — and it is a SHIPPED assertion, not a look.
+
+    `_PRODUCTION_FILE_FLOOR` is a `>=` floor and MEASURED 2026-09-15 the walk
+    returns 95 files against a floor of 40 — 55 files of headroom. A walk that
+    silently truncated to 41 files would still clear the floor; and because the
+    two NEW `services/` modules carry NO lease, a walk that stopped seeing THEM
+    specifically would leave `_PRODUCTION_LEASE_SITES` reading exactly SIX and
+    every lease assertion in this file green while measuring nothing about them.
+
+    ⚠️ The sibling test above reads the monitor module directly BY PATH, so it
+    proves the MODULE holds no lease and says nothing whatever about the WALK.
+    This is the other half, and it cannot be expressed as a count: a count cannot
+    distinguish "the walk grew by two" from "the walk lost two and gained four".
+    One assertion each, so a partial regression says WHICH module vanished.
+
+    ⛔ Fix the walk, never the floor.
+    """
+    root = Path(__file__).resolve().parents[1]
+    walked = {p.relative_to(root).as_posix() for p in _production_python_files()}
+
+    assert _SESSION_MONITOR_REL in walked, (
+        f"{_SESSION_MONITOR_REL} is NOT in the production walk the lease roster "
+        f"derives from. It is the module Phase 164.6.4 added to drive the "
+        f"terminal ON A CADENCE, so a lease taken there would be invisible to the "
+        f"`==` roster — which would stay green at SIX over a roster that had "
+        f"silently stopped being complete (the IN-05 hole, re-opened)."
+    )
+    assert _SESSION_EPISODES_REL in walked, (
+        f"{_SESSION_EPISODES_REL} is NOT in the production walk the lease roster "
+        f"derives from. The episode recorder runs on every tick; a lease taken "
+        f"there would be invisible to the `==` roster."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 164.6.4 / T-164.6.4-27 — THE CADENCE-BORNE ABANDONMENT, which is the one
+# GENUINELY NEW exposure this phase creates.
+#
+# A tick abandoned at its budget leaves a round-trip in flight against the shared
+# terminal on a thread that was NOT cancelled. That was true of the boot heal too
+# — but once per deploy. The monitor makes it PERIODIC, so the fence that makes it
+# safe now matters on a cadence rather than at one moment nobody is watching.
+#
+# ⛔ The remedy is NEVER to join the thread: that holds the lease for exactly as
+# long as the hang, which is the WEDGE-01 class D-25 forbids. The design is that
+# the lease's `finally` runs in its load-bearing order — bump the epoch, un-stamp
+# the occupancy, release the lock — and the zombie's next touch is then refused by
+# the client's own liveness fence.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_tick_abandoned_at_its_budget_bumps_the_epoch_and_fences_the_zombie(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _episode_sink,
+) -> None:
+    """⭐ THE EPOCH DELTA IS THE ORACLE, not "no exception escaped".
+
+    A fence that stopped bumping would leave every behavioural assertion in this
+    file green — the tick still returns `None`, the lock is still released, the
+    log line still says ABANDONED — while every zombie round-trip the cadence
+    produces landed unfenced on the NEXT holder's terminal. So the delta across
+    the abandoned tick is asserted directly.
+
+    Three claims, measured in order:
+      * the tick does NOT join the abandoned thread (it returns while the thread
+        is still parked mid-round-trip);
+      * the lease's `finally` still advanced the terminal's generation by EXACTLY
+        one;
+      * the zombie's NEXT touch is refused by `Mt5Client._assert_live` — the
+        refusal reaches the log (D-39: on the abandoned path the raise reaches
+        nobody, so the WARNING is the whole signal) and the round-trip never
+        reaches the wire.
+
+    ⚠️ Every wait here is BOUNDED. A "fix" that joined the thread would red this
+    test at the gate's own bound rather than hanging CI.
+    """
+    caplog.set_level(logging.INFO, logger=_CLIENT_LOGGER_NAME)
+    caplog.set_level(logging.INFO, logger=_RELOGIN_LOGGER_NAME)
+
+    _set_full_env(monkeypatch)
+    # ⛔ The ENVIRONMENT, not a module attribute — CR-02 made the budget a per-call
+    # read, so a `setattr` on the constant would be a NO-OP leaving the ~160 s
+    # default in force. IN-03 floors the budget at ONE ROUND-TRIP, so the floor is
+    # lowered FOR THIS TEST: the real parse, the real range check and the real
+    # `wait_for` all still run, and the only thing moved is the bound whose whole
+    # purpose is to be too large to observe in a unit test.
+    monkeypatch.setattr(mt5_relogin, "_MT5_RELOGIN_BUDGET_FLOOR_S", 0.01)
+    monkeypatch.setenv("MT5_RELOGIN_BUDGET_S", "0.05")
+
+    # A terminal that ANSWERS the detector falsily, so the probe goes on to read
+    # `last_error()` — i.e. there IS a second touch for the fence to refuse. A
+    # scenario whose first call succeeded would leave the fence unexercised.
+    fake, constructions = _install_client(
+        monkeypatch, {"initialize": False, "last_error": (-6, "no account")}
+    )
+
+    gate = threading.Event()
+    entered = threading.Event()
+    finished = threading.Event()
+
+    real_initialize = fake.initialize
+
+    def _hanging_initialize(**kwargs):
+        entered.set()
+        # BOUNDED (5 s): a tick that JOINED the thread must RED at this bound, not
+        # hang the suite. `asyncio.run` joins the default executor for 300 s, so an
+        # unbounded park here would stall the whole run instead of failing.
+        gate.wait(5.0)
+        return real_initialize(**kwargs)
+
+    fake.initialize = _hanging_initialize
+
+    # `close()` is deliberately EXEMPT from the D-36 fence (D-41) precisely so a
+    # teardown is never stranded — which makes the transport close the one signal
+    # that the zombie has finished unwinding.
+    conn = fake._MetaTrader5__conn
+    real_close = conn.close
+
+    def _closing() -> None:
+        real_close()
+        finished.set()
+
+    conn.close = _closing
+
+    key = mt5_terminal_key(_FAKE_HOST, int(_FAKE_PORT))
+    before = _mt5_epoch_for(key)
+
+    started = time.monotonic()
+    assert await mt5_session_monitor.run_mt5_session_monitor_tick() is None
+    elapsed = time.monotonic() - started
+
+    # ---- THE TICK DID NOT JOIN THE THREAD ----------------------------------
+    assert entered.wait(1.0), "harness: the round-trip never started"
+    assert not finished.is_set(), (
+        "the tick waited for the abandoned thread. ⛔ Joining it holds the lease "
+        "for exactly as long as the hang — the WEDGE-01 class D-25 forbids, and "
+        "on a CADENCE it is a periodic wedge of the ONE shared terminal."
+    )
+    assert elapsed < 2.0, (
+        f"the tick took {elapsed:.3f}s to return against a 0.05s budget — it did "
+        f"not abandon at its bound."
+    )
+
+    # ---- THE EPOCH ADVANCED BY EXACTLY ONE ---------------------------------
+    assert _mt5_epoch_for(key) - before == 1, (
+        f"the abandoned tick advanced the terminal generation by "
+        f"{_mt5_epoch_for(key) - before}, not 1. The lease's `finally` is the ONLY "
+        f"place a hand-over can be observed and therefore the only place the "
+        f"D-36 fence can be armed; at a cadence, a bump that stopped happening "
+        f"un-fences a zombie round-trip every interval, forever — with every "
+        f"other assertion here still green."
+    )
+
+    # ---- THE ZOMBIE'S NEXT TOUCH IS REFUSED --------------------------------
+    gate.set()
+    assert finished.wait(5.0), "harness: the abandoned thread never unwound"
+
+    assert "last_error" not in fake.round_trips, (
+        f"the zombie's next round-trip reached the wire: {fake.round_trips!r}. It "
+        f"was driving the shared terminal AFTER the lease it began under had "
+        f"released — which is the tampering this fence exists to refuse."
+    )
+    refusals = [
+        r
+        for r in caplog.records
+        if "refusing the last_error round-trip" in r.getMessage()
+    ]
+    assert len(refusals) == 1, (
+        f"the fence did not report refusing the zombie's touch: "
+        f"{[r.getMessage() for r in caplog.records]}. ⭐ On the abandoned path the "
+        f"raise reaches NOBODY (`_copy_future_state` returns early on a cancelled "
+        f"destination), so the WARNING is the whole signal (D-39)."
+    )
+    assert refusals[0].levelno == logging.WARNING
+
+    # ...and the ERROR arm named the in-flight call, rather than sharing the
+    # catch-all's transient wording with a busy-terminal SKIP (WR-05).
+    abandoned = [
+        r for r in _records(caplog) if "ABANDONED at the" in r.getMessage()
+    ]
+    assert len(abandoned) == 1 and abandoned[0].levelno == logging.ERROR, (
+        f"the budget expiry was not reported under its own ERROR arm: "
+        f"{[(r.levelname, r.getMessage()) for r in _records(caplog)]}"
+    )
+    assert "mt5 session monitor" in abandoned[0].getMessage(), (
+        "the abandonment does not name the CADENCE as its caller — at a cadence "
+        "the distinction between one boot-time abandonment and a periodic one is "
+        "the entire operational story."
+    )
+    assert constructions, "harness: no client was ever constructed"
+
+
+# ---------------------------------------------------------------------------
+# 164.6.4 / MT5CONC-02 + T-164.6.4-28 — THE ACCOUNT BRACKET.
+#
+# MT5 binds ONE account per terminal AT A TIME, so the standing question about any
+# new terminal toucher is what it does to the AUTHORIZED ACCOUNT. The monitor's
+# answer has three parts and they are stated here rather than left implicit:
+#
+#   (i)  on the overwhelmingly common path it sends NO CREDENTIAL AT ALL, so it
+#        switches no account — the only reading it takes is the credential-free
+#        detector (D-1, criterion 3);
+#   (ii) it sends one ONLY after a `-6`, which BY DEFINITION means no account is
+#        authorized — so there is no per-customer session for it to displace;
+#   (iii) it can never do either while a job HOLDS the lease, because the acquire
+#        is bounded and it skips — measured by
+#        `test_CRITERION_4_a_monitor_tick_cannot_land_inside_a_live_jobs_terminal_window`
+#        above, whose oracle is an EMPTY round-trip list.
+#
+# ⚠️ AND THE ROSTER'S OWN CEILING, SAID OUT LOUD WHILE WE ARE HERE:
+# `_PRODUCTION_LEASE_SITES` is a LEXICAL, per-function property. It cannot see a
+# client constructed in one function and handed to two others that each take a
+# lease. This argument is therefore about the SITES, not a proof about every
+# possible client lifetime — and pretending otherwise is how the sibling roster's
+# "the ONLY thing standing between" claim had to be re-cut.
+# ---------------------------------------------------------------------------
+
+
+async def test_MT5CONC_02_the_monitor_never_switches_the_terminals_authorized_account(
+    monkeypatch: pytest.MonkeyPatch, _episode_sink
+) -> None:
+    """The account bracket for the cadence, in both of its arms."""
+    _set_full_env(monkeypatch)
+    monkeypatch.setenv("MT5_RELOGIN_LEASE_WAIT_S", _TICK_LEASE_WAIT_S)
+
+    # ---- (i) THE COMMON PATH: an authorized terminal is sent NOTHING --------
+    authorized, _c = _install_client(monkeypatch, {"initialize": True})
+    acquisitions = _install_lease_counter(monkeypatch)
+    await mt5_session_monitor.run_mt5_session_monitor_tick()
+
+    assert authorized.call_order == ["initialize"], (
+        f"the tick made more than the credential-free probe on an ALREADY "
+        f"AUTHORIZED terminal: {authorized.call_order!r}. ⛔ A credential sent to "
+        f"a terminal that did not need one is a disclosure surface opened for "
+        f"nothing — and on a cadence it is opened 144 times a day."
+    )
+    assert all("login" not in kw for kw in authorized.initialize_kwargs), (
+        f"a credential rode into the probe: "
+        f"{[sorted(kw) for kw in authorized.initialize_kwargs]} (KEYS only — "
+        f"never the values). The detector must stay credential-FREE, or it could "
+        f"not be used to DECIDE whether to send one: it would already have sent "
+        f"it."
+    )
+
+    # (iii), asserted here too rather than only referenced: the acquisition that
+    # would have to expire for the SKIP to happen is a BOUNDED one.
+    assert len(acquisitions) == 1 and acquisitions[0][1] is not None, (
+        f"the tick's acquisition is not bounded: {acquisitions!r} — a `None` wait "
+        f"is the BATCH form, which queues rather than skipping."
+    )
+
+    # ---- (ii) AFTER A `-6`, WHICH MEANS NO ACCOUNT IS AUTHORIZED -----------
+    dark, _c2 = _install_client(
+        monkeypatch, {"initialize": False, "last_error": (-6, "no account")}
+    )
+    await mt5_session_monitor.run_mt5_session_monitor_tick()
+
+    assert dark.round_trips == [
+        "initialize",
+        "last_error",
+        "initialize_credentialed",
+        "initialize",
+    ], (
+        f"the credentialed verb did not follow a MEASURED `-6`: "
+        f"{dark.round_trips!r}. The order is the argument: the bare probe, then "
+        f"`last_error()` answering `-6` — the ONE reading that establishes no "
+        f"account is authorized — and only THEN the credential. A credential sent "
+        f"on any other code would be re-pointing a terminal whose session nobody "
+        f"measured, and would re-collapse the IPC-vs-session distinction Phase "
+        f"164.1 built."
+    )
+    assert "login" not in dark.initialize_kwargs[0], (
+        "the DETECTOR carried a credential — it can no longer decide whether to "
+        "send one"
+    )
+    assert "login" in dark.initialize_kwargs[1], (
+        f"the heal arm sent no credential: "
+        f"{[sorted(kw) for kw in dark.initialize_kwargs]}"
+    )
+
+    # ---- (ii-b) AND ON ANY OTHER CODE, NOTHING IS SENT ---------------------
+    # ⭐ THIS ARM IS WHY (ii) IS A CLAIM RATHER THAN AN OBSERVATION, and it was
+    # ADDED after the calibration found the gate could not fire without it. The
+    # `-6` arm above drives a terminal whose code IS `-6`, so it exercises the
+    # branch's TRUE side twice and its FALSE side not at all: MEASURED 2026-09-15,
+    # deleting the code check from `_heal_blocking` entirely (`if False:`) left
+    # everything above GREEN. That is the one-property-measured-twice shape this
+    # phase's wave 2 found four instances of, and it is the same shape here.
+    #
+    # An IPC fault means the terminal is WEDGED, UNREACHABLE or behind a modal
+    # dialog — the session was never measured at all. Re-sending a credential
+    # heals nothing there and re-collapses exactly the distinction Phase 164.1
+    # built; on a CADENCE it would also re-point the terminal's account every
+    # interval for the whole duration of a gateway outage.
+    ipc_fault, _c3 = _install_client(
+        monkeypatch, {"initialize": False, "last_error": (-10004, "no ipc")}
+    )
+    await mt5_session_monitor.run_mt5_session_monitor_tick()
+
+    assert ipc_fault.round_trips == ["initialize", "last_error"], (
+        f"the tick did more than PROBE on an IPC fault: "
+        f"{ipc_fault.round_trips!r}. `-10004` is a wedged pipe, not a lapsed "
+        f"session — the credential is reserved for the ONE code that establishes "
+        f"no account is authorized."
+    )
+    assert all("login" not in kw for kw in ipc_fault.initialize_kwargs), (
+        f"a credential was sent on an IPC fault: "
+        f"{[sorted(kw) for kw in ipc_fault.initialize_kwargs]} (KEYS only). The "
+        f"terminal's authorized account must never be re-pointed on a reading "
+        f"that measured nothing about the session."
+    )

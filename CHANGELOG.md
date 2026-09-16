@@ -1,5 +1,111 @@
 # Changelog
 
+## [0.77.44.0] - 2026-09-16 — the MT5 broker session gets something that NOTICES it has lapsed, instead of waiting hours for an unrelated event
+
+Phase 164.6.4 MT5KEEPALIVE. Recovery already took minutes; nothing TRIGGERED it, so the
+terminal could sit dark for hours. This adds the detector — and, deliberately, **not** a
+keepalive interval: D-06 defers that until more than one measurement exists.
+
+⚠️ **UNPROVEN IN PRODUCTION, and the phase says so.** No Python has ever written to
+`public.cron_runs`; the first deploy is the experiment. Three post-deploy checks are recorded
+as broken-windows ledger rows 51/52/53 and in `164.6.4-UAT.md`, skipped-with-reason rather
+than simulated green.
+
+### Added
+
+- **`services/mt5_session_monitor.py`** — a never-raising one-shot tick plus a thin loop,
+  registered as the SIXTH `main.lifespan` task on a DETECTION POLL cadence
+  (`MT5_SESSION_POLL_INTERVAL_S`, the only new knob). It delegates to the shipped heal and
+  takes no lease of its own.
+- **`services/mt5_session_episodes.py`** — a transition-only, stateless, never-raising episode
+  recorder. One row per session-state TRANSITION into `public.cron_runs` under a new
+  `cron_name` (D-5, no migration). The open episode is re-read from the database on every
+  observation, so an analytics deploy cannot truncate a session lifetime.
+- A steady-state liveness confirmation on the open row (`last_confirmed_at`), so a dead loop
+  and a healthy one are no longer byte-identical in the durable record.
+
+### Security
+
+- **`Mt5Client._raise_last` now redacts BY VALUE** at all three raise points via an optional
+  keyword-only credential triple, closing `[164.6.2-RAISE-LAST-SHAPE-ONLY]`. `_raise_last` is
+  SHARED by `login()` and `initialize_with_credentials()`, and a keepalive drives the
+  credentialed verb ON A SCHEDULE — so shipping the detector without this would have
+  multiplied how often a known disclosure path can fire, forever, on a PUBLIC repo with Sentry
+  attached. The falsy-arm asymmetry gate became a SYMMETRY gate; the `removeprefix` unwrap was
+  deleted rather than kept beside the fix.
+- Security audit: **SECURED, 32/32 threats closed, 0 open**, re-attacked with four injected
+  mutants that each produced named REDs.
+
+### Fixed
+
+Three review rounds (`gsd-code-reviewer` ‖ `silent-failure-hunter` in parallel), 0 Critical
+throughout, 26 fix commits. The ones that were real defects rather than tidying:
+
+- **WR-01** — `_close_row` discarded its compare-and-set result, so a container that LOST the
+  race still stamped `started_at_is_lower_bound: false`, asserting a measured transition on an
+  UPDATE that matched ZERO rows. The CAS protected the row; nothing protected the inference.
+- **WR-02** — the loop ticked before it slept while `lifespan` created it beside
+  `mt5_boot_heal`, so EVERY deploy drove two concurrent heals at one terminal.
+- **WR-07** — a tick deadline added by one fix bypassed the blind-run counter another fix had
+  just established, so a degraded Supabase would freeze the counter at 0 and the escalation
+  could never fire.
+- **WR-12 / WR-16** — the CAS outcome was inferred from a postgrest response SHAPE rather than
+  observed; now read from `count`, with the request half gated too.
+- **WR-13** — `_confirm_row` wrote metadata keys outside the declared closed set, and a
+  credential-shaped key injected through it left all 356 MT5 tests green. No live leak; a hole
+  in the control.
+- **WR-14** — `MT5_ENABLED=1`/`on`/`yes` read as OFF and was then exempt from escalation: the
+  mechanism silently disabled AND the alarm suppressed.
+- **WR-03, WR-04, WR-05, WR-06, WR-08, WR-09, WR-10, WR-11, WR-15, IN-01, IN-02, IN-06, IN-07,
+  IN-08, B1–B3** and the `_open_row` INSERT-result check.
+
+### Tests
+
+- Two AST predicates over the loop's safety properties, both calibrated: P-outer (the shared
+  never-raises predicate WIDENED, never copied) and P-inner (`_loop_survival_defects`, six
+  escape routes). ⚠️ All nine P-inner mutants pass P-outer CLEAN — which is why P-inner exists
+  and is now gated against being deleted as a duplicate.
+- Criterion 4's interleave falsifier with an embedded neutered-lock control; `_PRODUCTION_LEASE_SITES`
+  stays SIX, asserted by membership rather than by count.
+- The dataset-honesty gates, the cadence-knob validation, and a symbol-scoped fence that reds if
+  a KEEPALIVE interval symbol ever appears.
+- Suite: **5819 passed / 89 skipped** serially (CI's own mode), `mypy --strict` clean on 95 files.
+
+### Root cause
+
+- **A gate is written against the code paths that existed when it was written.** A fix that ADDS
+  a path — a new writer, a new exit, a new branch — is outside every existing gate by default,
+  and the suite stays green because nothing drives the new path through the old assertion. That
+  produced WR-07 and WR-13, each created BY a fix round. Recorded so the re-review after a fix
+  round is never treated as a formality.
+
+### Removed
+
+- The racy `confirmations` counter — a read-modify-write over a stale snapshot that undercounted
+  in exactly the overlap it would have mattered. Deleted rather than made atomic;
+  `last_confirmed_at` is the liveness answer.
+
+### Notes
+
+- Wave 3 executed as **three concurrent harness worktrees**, proven by probe before use rather
+  than assumed: all three forked from the same base, touched disjoint files, merged with zero
+  conflicts.
+- ⚠️ `analytics-service/.venv` does NOT exist inside a harness worktree (gitignored), and the
+  dead path exits 0 through an enclosing `echo` — a verify leg can read GREEN having run nothing.
+  All three executors hit it and resolved it the same way.
+- **A2 is the post-deploy check to watch, not A4.** A4 fails semi-loudly — the heal still works
+  and only the dataset goes missing, with logging. A2 (≈144 rpyc connections/day at the 600 s
+  default, against a container already at a three-digit thread counter) would degrade the gateway
+  SILENTLY over days.
+
+### Infrastructure
+
+- **`test_c19_portfolio_fixes`'s teardown evicted `routers.portfolio`/`routers.cron` without
+  re-importing them**, leaving the parent package without the attribute for the rest of the
+  process — so `monkeypatch.setattr("routers.portfolio.…")` died far from the line that looked
+  wrong. PRE-EXISTING (reproduced at this phase's own base commit), masked serially by luck,
+  and surfaced only under `-n auto`. CI is unaffected either way: it runs the suite SERIALLY.
+
 ## [0.77.43.2] - 2026-09-15 — criterion 2 closes on an OBSERVATION, and the gate that guards the record is made able to fail
 
 ⭐ **What this is.** Phase 164.6.2's load-bearing criterion — *the MT5 terminal's broker session is

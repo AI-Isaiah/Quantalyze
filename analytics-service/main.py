@@ -284,6 +284,7 @@ async def lifespan(_app: FastAPI):
     # return 503 when stale. Same contract as the stand-alone worker had.
     import main_worker_healthz
     from services.mt5_relogin import heal_mt5_terminal_session
+    from services.mt5_session_monitor import mt5_session_monitor_loop
 
     async def _bridge_healthz() -> None:
         global WORKER_LAST_TICK_AT
@@ -309,9 +310,36 @@ async def lifespan(_app: FastAPI):
         # below ONLY because the coroutine cannot raise — its entire body sits
         # inside a top-level catch-all, asserted structurally AND behaviourally.
         # If that ever stops being true, this entry stops the dispatch, watchdog
-        # and enqueue loops behind a green /health. D-08: STARTUP ONLY — the
-        # per-session half of criterion 1 was STRUCK on a measurement.
+        # and enqueue loops behind a green /health.
+        #
+        # ⛔ D-08's "STARTUP ONLY" IS AMENDED, NOT QUIETLY CONTRADICTED (Phase
+        # 164.6.4 plan 02). This comment said the heal runs at startup and NOWHERE
+        # ELSE; the session monitor entry below is a SECOND caller, on a detection
+        # poll cadence, and this phase is chartered to make that sentence false.
+        # D-08's original hazard does NOT transfer, verified two independent ways:
+        # the terminal epoch binds on FIRST TOUCH rather than at construction (so
+        # a preflight-built client has no epoch until the job's own login inside
+        # the job's own lease), and the construction fence is a ContextVar that
+        # preflight never carries. The monitor takes the SAME single bounded lease
+        # this heal already takes and adds no new lease site. ⚠️ Nothing reds when
+        # a comment goes false, which is exactly why the amendment is written.
         asyncio.create_task(heal_mt5_terminal_session(), name="mt5_boot_heal"),
+        # Phase 164.6.4 / D-2 — the SIXTH task: NOTICE a lapsed broker session
+        # without a human and without waiting on an unrelated restart
+        # (criterion 2). The boot heal above is idle between deploys, and analytics
+        # startup is not correlated with the terminal losing its session — wave 5
+        # measured NO analytics deployment at all on the day it lapsed.
+        #
+        # ⭐ IT JOINS THIS LIST, so it inherits `_crash_handler` and the shutdown
+        # gather. That is a CONTAINMENT contract, not a crash contract: the loop's
+        # own top-level guard is what makes the callback INERT. `_crash_handler`
+        # calls SHUTDOWN.set() on ANY background-task exception, so a loop that
+        # could raise would stop dispatch, watchdog and enqueue behind a green
+        # /health — a permanent hazard rather than a one-shot one, because a
+        # monitor is a LOOP. The loop is therefore guarded in TWO places: an outer
+        # containment guard and a per-tick survival guard that can neither `break`
+        # nor `raise`.
+        asyncio.create_task(mt5_session_monitor_loop(), name="mt5_session_monitor"),
     ]
 
     # Fail loudly if any loop crashes. done_callback ensures a silent

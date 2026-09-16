@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 40
+open_count: 42
 waived_count: 0
-fixed_count: 10
-total_count: 50
-last_updated: 2026-09-10T15:30:00.000Z
+fixed_count: 11
+total_count: 53
+last_updated: 2026-09-15T21:45:24.211Z
 ---
 
 # Broken Windows Ledger
@@ -51,7 +51,7 @@ last_updated: 2026-09-10T15:30:00.000Z
 | 34 | 164.1 | deviation | scripts/prod-prober/arms/cron-obs.mjs |  | cron-obs: an UNPARSABLE (non-null, non-empty) pg_net.ttl falls back to the documented 6h default with a printed note, rather than being a measure-fail — so a malformed TTL leaves the 3h scan window unclamped in the one direction that under-reports (pruned responses read as missing). Deliberate fail-open with a loud print; revisit if a real TTL ever fails to parse. | open |  | 2026-09-05T22:52:35.873Z |  |
 | 35 | 164.1 | deviation | scripts/prod-prober/arms/cron-drift.mjs |  | cron-drift: hygieneViolations never runs on a WITHHELD manifest row (command_withheld: true), by design — the row was read by a human at capture time. The gap is that a reviewer could withhold a row precisely to keep a dirty command out of the gate's reach; nothing mechanical prevents that. captureManifest still refuses to WRITE a dirty row, so the gap only opens if someone hand-edits the committed manifest. | open |  | 2026-09-05T22:52:35.974Z |  |
 | 36 | 164.1 | deviation | scripts/prod-prober/run.mjs |  | makeScrubber (plan 01) replaces EVERY occurrence of a requiredEnv VALUE anywhere in the output, with no minimum length. MEASURED during plan 03: with a one-character SUPABASE_DB_PASSWORD ('z') the log line 'cron-drift: database marker = quantalyze-fixture-db' printed as 'quantaly<redacted>e-fixture-db'. Fail-SAFE (it over-redacts, never under-redacts) and unreachable with a realistic credential, but it can mangle unrelated text. Out of plan 03's task scope (plan 01 owns the scrubber); recorded rather than fixed. | open |  | 2026-09-05T22:53:36.531Z |  |
-| 37 | 164.1 | deviation | scripts/prod-prober/run.mjs |  | makeScrubber over the mt5 arm's requiredEnv redacts ORDINARY WORDS in a live run. The mt5 arm must declare RAILWAY_PROJECT_ID / RAILWAY_MT5_SERVICE / RAILWAY_ENVIRONMENT as requiredEnv (D-06: an absent one is credential-absent, and they are 3 of the 10 slots the live run reports), but their LIVE values are 'production' and 'mt5-gateway' — short, common strings. MEASURED at plan 04: a defect detail carrying the CLI's stderr printed as 'the <redacted> relay refused the <redacted> session'. Fail-SAFE (over-redacts, never under-redacts) but it degrades the mt5-ssh-transport diagnostic, which is the one row an operator reads when the transport is broken. Extends WINDOWS entry 36 (plan 03's one-char case) with a value that is realistic rather than pathological. Not fixed here: the scrubber is plan 01's and classifying names as secret-vs-identifier is a change to a security control, out of this plan's task scope. ⭐ CLOSED 2026-09-06: fixed by NON_SECRET_ENV (run.mjs) — an allowlist BY NAME of the three Railway public identifiers, all GitHub vars that already appear verbatim in prod-prober.yml. Proven by self-test scenario 51, which uses the REAL live values ('mt5-gateway', 'production') and a SHORT secret; neutering the allowlist skip reproduces this entry's exact string and the scenario goes RED. ⛔ Entry 36 is left OPEN ON PURPOSE: a minimum-length exemption would have been fail-OPEN on a short real secret, so the mangling it describes is the deliberate fail-safe cost. | open |  | 2026-09-05T23:24:29.360Z |  |
+| 37 | 164.1 | deviation | scripts/prod-prober/run.mjs |  | makeScrubber over the mt5 arm's requiredEnv redacts ORDINARY WORDS in a live run. The mt5 arm must declare RAILWAY_PROJECT_ID / RAILWAY_MT5_SERVICE / RAILWAY_ENVIRONMENT as requiredEnv (D-06: an absent one is credential-absent, and they are 3 of the 10 slots the live run reports), but their LIVE values are 'production' and 'mt5-gateway' — short, common strings. MEASURED at plan 04: a defect detail carrying the CLI's stderr printed as 'the <redacted> relay refused the <redacted> session'. Fail-SAFE (over-redacts, never under-redacts) but it degrades the mt5-ssh-transport diagnostic, which is the one row an operator reads when the transport is broken. Extends WINDOWS entry 36 (plan 03's one-char case) with a value that is realistic rather than pathological. Not fixed here: the scrubber is plan 01's and classifying names as secret-vs-identifier is a change to a security control, out of this plan's task scope. ⭐ CLOSED 2026-09-06: fixed by NON_SECRET_ENV (run.mjs) — an allowlist BY NAME of the three Railway public identifiers, all GitHub vars that already appear verbatim in prod-prober.yml. Proven by self-test scenario 51, which uses the REAL live values ('mt5-gateway', 'production') and a SHORT secret; neutering the allowlist skip reproduces this entry's exact string and the scenario goes RED. ⛔ Entry 36 is left OPEN ON PURPOSE: a minimum-length exemption would have been fail-OPEN on a short real secret, so the mangling it describes is the deliberate fail-safe cost. | fixed |  | 2026-09-05T23:24:29.360Z |  |
 | 38 | 164.1 | unrun-verify | .github/workflows/prod-prober.yml |  | prod-prober.yml has NEVER been dispatched: plan 05 was instructed not to touch live infrastructure, so the credential-assert step, the supabase link + masked pooler export, the checksum-verified Railway CLI install and all four live arms are unexecuted on a GitHub-hosted runner. Whether the stored workspace-scoped RAILWAY_API_TOKEN authenticates railway ssh non-interactively from a hosted runner is likewise unmeasured (CONTEXT's own open question). Plan 164.1-06 owns the single first dispatch. | open |  | 2026-09-05T23:44:43.987Z |  |
 | 39 | 164.2 | unrun-verify | supabase/tests/test_sync_status_curated_sentence_survives.sql |  | The new gate is UNRUN on shared TEST and will report TEST FAILED (0) there from this PR's first CI run, alongside plan 06's TEST FAILED (0c), until 20260906120000_computation_error_provenance.sql is hand-applied to TEST. Nothing applies migrations to TEST (sql-tests has no apply step; the migrate workflow is PROD-only), so this is EXPECTED and is NOT a coupling regression - the three coupled gates' arms never read the new columns and stay green. Remedy booked as [164.2-TEST-APPLY-PROVENANCE] in TODOS.md: the which-database marker query against TEST_SUPABASE_DB_URL FIRST, then psql -f, never supabase db push (this checkout's CLI is linked to PROD). | open |  | 2026-09-06T17:20:07.111Z |  |
 | 40 | 164.2 | deviation | .planning/WINDOWS.md |  | This ledger refused every append during phase 164.2 - plans 06, 07 and 10 each recorded their deviations in their SUMMARY instead. Cause, found by the orchestrator 2026-09-06: row 37's RENDERED TABLE cell carried a closing paragraph (the NON_SECRET_ENV fix, dated 2026-09-06) that the FENCED JSON description did not, so the two sides disagreed and the writer refused. The table was hand-edited without the JSON. Repaired by syncing the JSON description to the table text (a clean prefix, +568 chars); no table cell was hand-edited, and the repair was validated by asserting the prefix invariant before writing. Lesson: hand-editing the rendered table silently disables the ledger for every later phase. | open |  | 2026-09-06T17:20:07.208Z |  |
@@ -65,6 +65,9 @@ last_updated: 2026-09-10T15:30:00.000Z
 | 48 | 164.5 | unrun-verify | scripts/local-stack/run.sh |  | run.sh up boots and loads the committed baseline on Supabase CLI 2.84.2 (measured 2026-09-07, macOS, 4 legs exit 0), but NOTHING in .github/workflows/ invokes the lane and the CI-pinned CLI 2.98.2 has never started this stack or loaded this dump. Criterion 1 is proven on one developer box only. | open |  | 2026-09-07T19:02:48.367Z |  |
 | 49 | 164.5 | unrun-verify | .github/workflows/sql-function-snapshot.yml |  | The two new baseline co-edit gate steps have never been executed by GitHub Actions. actionlint 1.7.12 (exit 0) and a js-yaml parse prove the file is valid and the step order is intended; neither proves the snapshot-drift job runs green on ubuntu. A SHA-bound run is owed at PR time. | open |  | 2026-09-07T19:04:26.108Z |  |
 | 50 | 164.5 | unrun-verify | .planning/phases/164.5-baseline-snapshot-the-committed-prod-schema-baseline-becomes/164.5-03-PLAN.md |  | 164.5-03: full serialized vitest run NOT executed — the plan scopes it to before the wave merges and the box is shared with concurrent wave-1 executors (contention fakes regressions). Targeted, contracts/ and all ci.yml-reading suites were run instead. | open |  | 2026-09-07T19:07:20.161Z |  |
+| 51 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_episodes.py |  | A4 POST-DEPLOY: no Python has ever written to public.cron_runs. READ THE FIRST ROW BACK on the first deploy rather than assuming the service-role INSERT lands; the table+policy pair is the untested surface, and a failure loses criterion 1's lifetime dataset while the heal itself keeps working. | open |  | 2026-09-15T21:45:02.884Z |  |
+| 52 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_monitor.py |  | A2 POST-DEPLOY: the tick opens a FRESH rpyc client per tick and closes it in a finally. At the 600s default that is ~144 connections/day against a gateway container already at a three-digit thread counter. Read the gateway's rpyc thread counter across two prober runs several hours apart. A4 fails semi-loudly; this would degrade the gateway SILENTLY over days. | open |  | 2026-09-15T21:45:24.003Z |  |
+| 53 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_monitor.py |  | Criterion 2 POST-DEPLOY cross-check: reconcile this detector's recorded episodes against the INDEPENDENT hourly prod-prober, so the new instrument is not the only witness to its own claims. | open |  | 2026-09-15T21:45:24.211Z |  |
 
 ````json
 [
@@ -362,11 +365,11 @@ last_updated: 2026-09-10T15:30:00.000Z
     "phase": "164.3",
     "file": "scripts/prod-body-drift-check.sh",
     "line": null,
-    "description": "VAC-04's first real-PROD execution pends the next migrations PR; the live supabase db dump path is stub-proven only",
-    "status": "open",
+    "description": "VAC-04's first real-PROD execution pends the next migrations PR; the live supabase db dump path is stub-proven only — ✅ DISPOSITIONED 2026-09-10 FROM MEASUREMENT (164.7 plan 06): it executed on PR #756, run 34146946050, job 101820921298, head 7c9aea64, 2026-09-07T17:17Z. Log carries `Drift-check credentials present.`, `Functions indexed in the PROD source: 120 (union of two independent readings)` and `4 body comparison(s) — 2 match, 2 acknowledged drift, 1 measured-absent (new)`. The live dump path is no longer stub-proven. Evidence: 164.7-VAC04-OBSERVED.md",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-08-29T02:10:57.580Z",
-    "resolved_at": null
+    "resolved_at": "2026-09-10T15:30:00.000Z"
   },
   {
     "id": 26,
@@ -662,10 +665,46 @@ last_updated: 2026-09-10T15:30:00.000Z
     "phase": "164.5",
     "file": ".planning/phases/164.5-baseline-snapshot-the-committed-prod-schema-baseline-becomes/164.5-03-PLAN.md",
     "line": null,
-    "description": "164.5-03: full serialized vitest run NOT executed \u2014 the plan scopes it to before the wave merges and the box is shared with concurrent wave-1 executors (contention fakes regressions). Targeted, contracts/ and all ci.yml-reading suites were run instead.",
+    "description": "164.5-03: full serialized vitest run NOT executed — the plan scopes it to before the wave merges and the box is shared with concurrent wave-1 executors (contention fakes regressions). Targeted, contracts/ and all ci.yml-reading suites were run instead.",
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-07T19:07:20.161Z",
+    "resolved_at": null
+  },
+  {
+    "id": 51,
+    "kind": "unrun-verify",
+    "phase": "164.6.4",
+    "file": "analytics-service/services/mt5_session_episodes.py",
+    "line": null,
+    "description": "A4 POST-DEPLOY: no Python has ever written to public.cron_runs. READ THE FIRST ROW BACK on the first deploy rather than assuming the service-role INSERT lands; the table+policy pair is the untested surface, and a failure loses criterion 1's lifetime dataset while the heal itself keeps working.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-15T21:45:02.884Z",
+    "resolved_at": null
+  },
+  {
+    "id": 52,
+    "kind": "unrun-verify",
+    "phase": "164.6.4",
+    "file": "analytics-service/services/mt5_session_monitor.py",
+    "line": null,
+    "description": "A2 POST-DEPLOY: the tick opens a FRESH rpyc client per tick and closes it in a finally. At the 600s default that is ~144 connections/day against a gateway container already at a three-digit thread counter. Read the gateway's rpyc thread counter across two prober runs several hours apart. A4 fails semi-loudly; this would degrade the gateway SILENTLY over days.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-15T21:45:24.003Z",
+    "resolved_at": null
+  },
+  {
+    "id": 53,
+    "kind": "unrun-verify",
+    "phase": "164.6.4",
+    "file": "analytics-service/services/mt5_session_monitor.py",
+    "line": null,
+    "description": "Criterion 2 POST-DEPLOY cross-check: reconcile this detector's recorded episodes against the INDEPENDENT hourly prod-prober, so the new instrument is not the only witness to its own claims.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-15T21:45:24.211Z",
     "resolved_at": null
   }
 ]
