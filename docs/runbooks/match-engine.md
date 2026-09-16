@@ -73,6 +73,25 @@ implementation plan at `docs/superpowers/plans/2026-04-07-perfect-match-engine.m
 - Benchmark per-allocator latency: `SELECT allocator_id, latency_ms FROM match_batches ORDER BY computed_at DESC LIMIT 50;`
 - If p95 latency > 10s per allocator, the universe caching isn't working or the pandas alignment loop is pathological. Profile with `py-spy` on the analytics service.
 
+### Consecutive `partial` cron runs — batching working, or stuck?
+Phase 164.5.1 criterion 9: `cron_recompute()` stops at a batch boundary (a
+count bound OR an elapsed-time bound, whichever comes first) rather than
+performing its whole unit of work inside one gateway-bounded request.
+- **Normal:** consecutive ticks returning `status="partial"` with an
+  ADVANCING `next_cursor` is the engine working through a large allocator
+  set in bounded slices — not a stall.
+- **The actual alarm signal:** a `next_cursor` that does NOT advance between
+  ticks, or `partial` persisting across a full day. Either means a tick is
+  failing to make progress on its slice, not merely taking several ticks to
+  finish the whole set.
+- The cursor lives in `system_settings.key = 'match_engine_cron_cursor'`.
+  It is ENGINE-INTERNAL BOOKKEEPING — an operator should not hand-edit this
+  row except to deliberately restart a pass (setting `value` to the empty
+  string, or deleting the row, makes the next tick start from the
+  beginning). A mid-run kill-switch flip never advances this cursor: the
+  founder flipping the switch off mid-batch does not cause the in-flight
+  slice to be silently skipped on the next tick.
+
 ### `is_admin` is false for the founder
 - Manual backfill:
   ```sql
@@ -106,9 +125,21 @@ Any profile with `role IN ('allocator', 'both')` is automatically included in th
   `ok` (failures don't outnumber successes), `degraded` (`failed > processed`,
   majority-failure but at least one row through), `total_failure`
   (`processed=0, failed>0` — structural fault, alert immediately),
-  `disabled`, `skipped` (recent batch), `no_allocators`, `empty_universe`.
+  `disabled`, `skipped` (recent batch), `no_allocators`, `empty_universe`,
+  `partial` (Phase 164.5.1 criterion 9: this run stopped at its batch
+  boundary — a NORMAL completion of one slice, orthogonal to the
+  processed/failed ratio above and never conflated with `degraded` or
+  `total_failure`; the `next_cursor` field on the response names where the
+  next tick resumes), `kill_switch_unavailable` (Phase 164.5.1 criterion 8:
+  the kill-switch read could not be completed after exhausting retries, so
+  the engine stopped FAIL-CLOSED — this is NOT the founder pressing the
+  switch, which is `disabled`, and the two must never be conflated).
   Pre-v0.22.37.0 this label was binary `ok`/`failed` and `total_failure` was
   masked as a green 200; alert on `degraded` or `total_failure` going forward.
+  These status values are documented HERE and NOWHERE ELSE in the repo, and
+  `match_engine_recompute_total` has no wired emitter in the repo today —
+  this bullet is aspirational documentation; a future dashboard reading it
+  should treat `partial` as a success, never as a failure.
 - `match_engine_candidates_generated_total` — should tick up each cron run
 - `match_engine_recompute_latency_seconds` — p95 < 30s
 - Eval dashboard hit rate — the single most important metric for v2 graduation

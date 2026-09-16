@@ -8,9 +8,13 @@ module-level Supabase factory only.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import datetime as _dt
+import inspect
 import re
+import textwrap
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -4778,3 +4782,140 @@ class TestCronBatchingCursor:
         body = await match_mod.cron_recompute()
         assert TestCronResponseShape._REQUIRED_KEYS <= set(body)
         assert body["status"] == "partial"
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.5.1 task 3 — the runbook's status vocabulary bound to the
+# router's ACTUAL derived status set (T-164.5.1-06-03)
+# ---------------------------------------------------------------------------
+
+_RUNBOOK_PATH = (
+    Path(__file__).resolve().parents[2] / "docs" / "runbooks" / "match-engine.md"
+)
+
+
+def _extract_metrics_bullet(doc_text: str) -> str:
+    """Extract the `match_engine_recompute_total{status}` bullet from the
+    runbook's Metrics section — the ONLY place cron_recompute's status
+    vocabulary is documented. Returns "" if the marker is not found (the
+    anti-vacuity floor in the test below fires on that, not a silent pass).
+    """
+    marker = "`match_engine_recompute_total{status}`"
+    start = doc_text.find(marker)
+    if start == -1:
+        return ""
+    rest = doc_text[start:]
+    lines = rest.splitlines()
+    bullet_lines = [lines[0]]
+    for line in lines[1:]:
+        # A new top-level bullet or the next section heading ends this one.
+        if line.startswith("- `") or line.startswith("## "):
+            break
+        bullet_lines.append(line)
+    return "\n".join(bullet_lines)
+
+
+def _derive_cron_status_vocabulary(match_mod) -> set[str]:
+    """Derive the FULL set of status values cron_recompute() can return —
+    from the module's KILL_SWITCH_* constants and the string literals
+    actually present in cron_recompute's own source, never a hand-typed
+    list. A future status added in code with no matching doc line fails
+    test_runbook_status_vocabulary_covers_every_router_status below rather
+    than drifting silently.
+    """
+    source = textwrap.dedent(inspect.getsource(match_mod.cron_recompute))
+    tree = ast.parse(source)
+    literals: set[str] = set()
+
+    for node in ast.walk(tree):
+        # status_value = "..." (the ok/degraded/total_failure discriminator)
+        if isinstance(node, ast.Assign):
+            target_names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if (
+                "status_value" in target_names
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                literals.add(node.value.value)
+        # _early_return("...", ...) — literal first positional arg
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_early_return"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            literals.add(node.args[0].value)
+        # {"status": "..."} — a literal "status" key in a returned dict
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if (
+                    isinstance(key, ast.Constant)
+                    and key.value == "status"
+                    and isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)
+                ):
+                    literals.add(value.value)
+
+    # The kill-switch statuses never appear as string LITERALS in
+    # cron_recompute's own source — they flow through the
+    # _kill_switch_state / mid_run_kill_switch_state variables. Pull them
+    # from the module constants directly ("the module constants" half of
+    # this function's contract). KILL_SWITCH_ENABLED is deliberately
+    # excluded: it is structurally never a terminal cron_recompute status —
+    # the loop only continues, never returns, while state == ENABLED.
+    literals.add(match_mod.KILL_SWITCH_DISABLED)
+    literals.add(match_mod.KILL_SWITCH_UNAVAILABLE)
+
+    return literals
+
+
+class TestRunbookStatusVocabulary:
+    """Binds cron_recompute's ACTUAL status vocabulary to the ONE place it
+    is documented (docs/runbooks/match-engine.md's Metrics bullet). A
+    status added in code with no doc line must fail this test — not drift
+    silently (Phase 164.5.1 task 3 / T-164.5.1-06-03)."""
+
+    def test_runbook_status_vocabulary_covers_every_router_status(self):
+        from routers import match as match_mod
+
+        doc_text = _RUNBOOK_PATH.read_text()
+        bullet = _extract_metrics_bullet(doc_text)
+
+        # Anti-vacuity floor FIRST — fires before any membership assertion,
+        # so a truncated/empty extraction can never pass vacuously.
+        assert len(bullet) > 200, (
+            "Metrics bullet extraction floor tripped (len<=200) — the doc "
+            "changed shape or the marker moved; extraction is empty/truncated"
+        )
+        assert "match_engine_recompute_total" in bullet, (
+            "extraction sentinel missing — the extracted text is not the "
+            "Metrics bullet"
+        )
+
+        derived = _derive_cron_status_vocabulary(match_mod)
+        assert derived, "derivation returned nothing — broken extractor, not a passing test"
+
+        missing = {status for status in derived if status not in bullet}
+        assert not missing, (
+            f"cron_recompute can return {sorted(missing)} but the runbook's "
+            "Metrics bullet does not mention it"
+        )
+
+    def test_calibration_synthetic_extra_status_is_caught(self):
+        """Proves the assertion above can actually go RED — inject a status
+        the doc does NOT mention into the derived set and confirm the SAME
+        membership check catches it. Without this, the test above could be
+        vacuously green forever (e.g. if the extractor silently returned
+        the whole file)."""
+        doc_text = _RUNBOOK_PATH.read_text()
+        bullet = _extract_metrics_bullet(doc_text)
+        assert len(bullet) > 200
+
+        synthetic = {"total_failure", "ok", "__synthetic_status_not_in_doc__"}
+        missing = {status for status in synthetic if status not in bullet}
+        assert missing == {"__synthetic_status_not_in_doc__"}, (
+            "calibration failed: the membership check did not catch an "
+            "undocumented synthetic status injected into the derived set"
+        )
