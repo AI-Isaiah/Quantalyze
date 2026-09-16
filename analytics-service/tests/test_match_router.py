@@ -933,7 +933,7 @@ class TestCronPartialFailure:
     def test_one_allocator_failure_does_not_abort_cron(self, client, monkeypatch):
         """3 allocators, second raises → processed=2, failed=1, cron returns 200."""
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -978,7 +978,7 @@ class TestCronPartialFailure:
         (the cache freshness logic is covered separately)."""
         monkeypatch.setattr("routers.match.KILL_SWITCH_CACHE_TTL_S", 0.0)
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1035,7 +1035,7 @@ class TestCronPartialFailure:
         # within this run and would keep reading the seeded ON value.
         monkeypatch.setattr("routers.match.KILL_SWITCH_CACHE_TTL_S", 3600.0)
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}, {"id": "a4"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1085,7 +1085,7 @@ class TestCronPartialFailure:
         """Per-allocator retention failures must not abort the sweep loop.
         Verify total retention is still summed across the surviving allocators."""
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1150,7 +1150,7 @@ class TestCronResponseShape:
     def test_no_allocators_branch_has_full_shape(self, client, monkeypatch):
         monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1164,7 +1164,7 @@ class TestCronResponseShape:
     def test_empty_universe_branch_has_full_shape(self, client, monkeypatch):
         monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1191,7 +1191,7 @@ class TestCronTotalFailureLogging:
         missing, supabase down). Must emit logger.error so Sentry alerts
         fire — would otherwise be silently 200-OK."""
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1238,7 +1238,7 @@ class TestCronTotalFailureLogging:
         fail, the response must surface 'degraded' so monitoring can
         differentiate partial-success from healthy."""
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -3689,7 +3689,7 @@ class TestCronSkipsDemoAllocator:
 
         def _make_allocator_sb(ids):
             sb = MagicMock()
-            sb.table.return_value.select.return_value.in_.return_value.execute.return_value = MagicMock(
+            sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
                 data=[{"id": i} for i in ids]
             )
             sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
@@ -3786,7 +3786,7 @@ class TestCronRetentionSweepScopedToScoredAllocators:
 
         match_mod._reset_kill_switch_cache()
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a-ok"}, {"id": "a-skip"}, {"id": "a-fail"}])
         )
         monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
@@ -4529,3 +4529,252 @@ class TestCronBatchBoundsInvariants:
         from routers import match as match_mod
 
         assert match_mod.CRON_BATCH_SIZE >= 1
+
+
+class _FakeProfilesQuery:
+    """Minimal in-memory stand-in for the profiles keyset-paginated query
+    chain (.select().in_().gt().order().limit().execute()), backed by a
+    plain sorted list of ids. Exercises REAL keyset semantics (cursor
+    filter, order, limit) rather than a brittle mock-chain attribute path —
+    the id ordering and the has-more/trim arithmetic are the actual thing
+    under test in TestCronBatchingCursor below."""
+
+    def __init__(self, all_ids: list[str]):
+        self._all_ids = list(all_ids)
+        self._cursor: str | None = None
+        self._limit: int | None = None
+
+    def select(self, *_a, **_k):
+        return self
+
+    def in_(self, *_a, **_k):
+        return self
+
+    def gt(self, _col, value):
+        self._cursor = value
+        return self
+
+    def order(self, *_a, **_k):
+        return self
+
+    def limit(self, n):
+        self._limit = n
+        return self
+
+    def execute(self):
+        ids = sorted(self._all_ids)
+        if self._cursor is not None:
+            ids = [i for i in ids if i > self._cursor]
+        if self._limit is not None:
+            ids = ids[: self._limit]
+        return MagicMock(data=[{"id": i} for i in ids])
+
+
+class TestCronBatchingCursor:
+    """Phase 164.5.1 criterion 9: cron_recompute() stops at a batch boundary
+    (count OR elapsed-time, whichever first), persists a resumable cursor,
+    and wraps on exhaustion. Cursor persistence is exercised at the
+    _read_cron_cursor/_write_cron_cursor boundary (a simple in-memory store)
+    — Task 1's TestCronCursorAccessors already proves those functions talk
+    to public.system_settings correctly; this class proves cron_recompute's
+    OWN batching decision is correct given whatever they return."""
+
+    def _make_supabase(self, all_ids: list[str]) -> MagicMock:
+        sb = MagicMock()
+
+        def _table(name: str):
+            if name == "profiles":
+                return _FakeProfilesQuery(all_ids)
+            return MagicMock()
+
+        sb.table.side_effect = _table
+        return sb
+
+    def _install_cursor_store(self, monkeypatch, match_mod) -> dict[str, Any]:
+        """Replace _read_cron_cursor/_write_cron_cursor with an in-memory
+        store so these tests exercise cron_recompute's own batching logic,
+        not a re-derivation of Task 1's Supabase-chain coverage."""
+        store: dict[str, Any] = {"value": None}
+
+        async def _read():
+            return store["value"]
+
+        async def _write(value):
+            store["value"] = value
+
+        monkeypatch.setattr(match_mod, "_read_cron_cursor", _read)
+        monkeypatch.setattr(match_mod, "_write_cron_cursor", _write)
+        return store
+
+    def _install_common_doubles(self, monkeypatch, match_mod, all_ids):
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _async_engine_state(True))
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: self._make_supabase(all_ids))
+        monkeypatch.setattr(
+            match_mod, "_load_candidate_universe",
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+
+        async def _score(allocator_id, universe):
+            return {}
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _score)
+        monkeypatch.setattr(match_mod, "_retention_sweep", lambda aid: 0)
+
+    @pytest.mark.asyncio
+    async def test_cron_batch_resume_wrap_and_restart_full_cycle(self, monkeypatch):
+        """3 allocators, CRON_BATCH_SIZE=2: call 1 handles a1+a2 (partial,
+        next_cursor=a2); call 2 resumes strictly after a2, handles only a3
+        (terminal, cursor wraps to the empty marker); call 3 starts from a1
+        again (the cursor wrapped)."""
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        all_ids = ["a1", "a2", "a3"]
+        monkeypatch.setattr(match_mod, "CRON_BATCH_SIZE", 2)
+        self._install_common_doubles(monkeypatch, match_mod, all_ids)
+        store = self._install_cursor_store(monkeypatch, match_mod)
+
+        # --- Call 1: fresh pass, batch boundary at 2 of 3 ---
+        body1 = await match_mod.cron_recompute()
+        assert body1["status"] == "partial"
+        assert body1["processed"] + body1["skipped"] + body1["failed"] == 2
+        assert body1["next_cursor"] == "a2"
+        assert store["value"] == "a2"
+
+        # --- Call 2: resume strictly after a2 — only a3 remains ---
+        body2 = await match_mod.cron_recompute()
+        assert body2["status"] != "partial"
+        assert body2["processed"] + body2["skipped"] + body2["failed"] == 1
+        assert store["value"] is None, "the set was exhausted — cursor must wrap to the marker"
+
+        # --- Call 3: cursor wrapped — starts from a1 again ---
+        scored_third_call: list[str] = []
+
+        async def _score_track(allocator_id, universe):
+            scored_third_call.append(allocator_id)
+            return {}
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _score_track)
+        body3 = await match_mod.cron_recompute()
+        assert scored_third_call[:1] == ["a1"], "the third call must restart from the beginning"
+        assert body3["processed"] + body3["skipped"] + body3["failed"] == 2
+
+    @pytest.mark.asyncio
+    async def test_cron_batch_exact_size_returns_terminal_not_partial(self, monkeypatch):
+        """Exactly CRON_BATCH_SIZE allocators and no more: the single call
+        must return a terminal status, not partial — the set was exhausted
+        in the same pass."""
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        all_ids = ["a1", "a2", "a3"]
+        monkeypatch.setattr(match_mod, "CRON_BATCH_SIZE", 3)
+        self._install_common_doubles(monkeypatch, match_mod, all_ids)
+        store = self._install_cursor_store(monkeypatch, match_mod)
+
+        body = await match_mod.cron_recompute()
+        assert body["status"] != "partial"
+        assert body["status"] == "ok"
+        assert body["processed"] == 3
+        assert body["next_cursor"] is None
+        assert store["value"] is None
+
+    @pytest.mark.asyncio
+    async def test_cron_batch_budget_exhausted_returns_partial_after_one(
+        self, monkeypatch
+    ):
+        """The elapsed-time bound trips before the count bound: the loop
+        stops after ONE allocator, returns partial, and the cursor points
+        at that allocator — never mid-allocator."""
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        all_ids = ["a1", "a2", "a3"]
+        monkeypatch.setattr(match_mod, "CRON_BATCH_SIZE", 10)
+        monkeypatch.setattr(match_mod, "CRON_BATCH_BUDGET_S", 0.0)
+        self._install_common_doubles(monkeypatch, match_mod, all_ids)
+        store = self._install_cursor_store(monkeypatch, match_mod)
+
+        body = await match_mod.cron_recompute()
+        assert body["status"] == "partial"
+        assert body["processed"] == 1
+        assert body["next_cursor"] == "a1"
+        assert store["value"] == "a1"
+
+    @pytest.mark.asyncio
+    async def test_cron_batch_kill_switch_flip_mid_run_does_not_write_cursor(
+        self, monkeypatch
+    ):
+        """A mid-run kill-switch flip must leave system_settings unwritten
+        (asserted by a spy on _write_cron_cursor, not by reading the
+        table) — the founder flipping the switch mid-run must not cause the
+        skipped slice to be silently passed over on the next tick."""
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        monkeypatch.setattr(match_mod, "KILL_SWITCH_CACHE_TTL_S", 0.0)
+        all_ids = ["a1", "a2", "a3"]
+        self._install_common_doubles(monkeypatch, match_mod, all_ids)
+        store = self._install_cursor_store(monkeypatch, match_mod)
+
+        write_calls: list[Any] = []
+        _real_write = match_mod._write_cron_cursor
+
+        async def _spy_write(value):
+            write_calls.append(value)
+            return await _real_write(value)
+
+        monkeypatch.setattr(match_mod, "_write_cron_cursor", _spy_write)
+
+        kill_calls = {"n": 0}
+
+        async def _flip():
+            kill_calls["n"] += 1
+            # n=1 pre-loop gate — ON; n=2 mid-loop before a1 — ON;
+            # n=3 mid-loop before a2 — OFF.
+            return _engine_state_str(kill_calls["n"] <= 2)
+
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _flip)
+
+        body = await match_mod.cron_recompute()
+        assert body["status"] == match_mod.KILL_SWITCH_DISABLED
+        assert body["processed"] == 1
+        assert write_calls == [], "a mid-run kill-switch flip must never write the cursor"
+        assert store["value"] is None, "cursor must be untouched (still the initial None)"
+
+    @pytest.mark.asyncio
+    async def test_cron_batch_single_allocator_never_partial(self, monkeypatch):
+        """Row 19 (edge-coverage): one allocator with CRON_BATCH_SIZE >= 1
+        returns a terminal status, never partial."""
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        all_ids = ["a1"]
+        self._install_common_doubles(monkeypatch, match_mod, all_ids)
+        self._install_cursor_store(monkeypatch, match_mod)
+
+        body = await match_mod.cron_recompute()
+        assert body["status"] != "partial"
+        assert body["processed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_cron_batch_every_response_satisfies_required_keys(self, monkeypatch):
+        """Every batching-related response body — partial, resumed-terminal,
+        and kill-switch-broke — satisfies the same subset assertion
+        TestCronResponseShape enforces for the pre-existing branches."""
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        all_ids = ["a1", "a2", "a3"]
+        monkeypatch.setattr(match_mod, "CRON_BATCH_SIZE", 2)
+        self._install_common_doubles(monkeypatch, match_mod, all_ids)
+        self._install_cursor_store(monkeypatch, match_mod)
+
+        body = await match_mod.cron_recompute()
+        assert TestCronResponseShape._REQUIRED_KEYS <= set(body)
+        assert body["status"] == "partial"

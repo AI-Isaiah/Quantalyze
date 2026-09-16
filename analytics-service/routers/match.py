@@ -2124,16 +2124,34 @@ async def cron_recompute() -> dict[str, Any]:
         )
         return _early_return(_kill_switch_state, disabled=True)
 
+    # Phase 164.5.1 criterion 9: read the persisted batching cursor BEFORE
+    # the allocator query — an absent/wrapped cursor means "start from the
+    # beginning" (cursor stays None, no .gt() filter is added below).
+    cursor = await _read_cron_cursor()
+
     supabase = get_supabase()
 
-    # Load allocators (role = 'allocator' OR 'both')
-    allocators_result = (
+    # Load allocators (role = 'allocator' OR 'both') as a keyset-paginated
+    # page: fetch CRON_BATCH_SIZE + 1 rows so the extra row tells the caller
+    # whether more remain WITHOUT a second count query. Ordered by
+    # profiles.id, a PRIMARY KEY — no two rows compare equal, so the keyset
+    # page has no tie to break (edge-coverage row 20).
+    allocators_query = (
         supabase.table("profiles")
         .select("id")
         .in_("role", ["allocator", "both"])
-        .execute()
     )
-    allocators = rows(allocators_result)
+    if cursor is not None:
+        allocators_query = allocators_query.gt("id", cursor)
+    allocators_result = (
+        allocators_query.order("id").limit(CRON_BATCH_SIZE + 1).execute()
+    )
+    _fetched_page = rows(allocators_result)
+    # has_more is computed from the RAW fetch (before trimming/demo-filter):
+    # CRON_BATCH_SIZE + 1 rows came back means at least one more exists
+    # beyond this page.
+    has_more = len(_fetched_page) > CRON_BATCH_SIZE
+    allocators = _fetched_page[:CRON_BATCH_SIZE]
     if not allocators:
         logger.info("match_engine cron: no allocators found")
         return _early_return("no_allocators")
@@ -2182,6 +2200,14 @@ async def cron_recompute() -> dict[str, Any]:
     # those (the comment at the old loop promised "per allocator that had a
     # batch this run" but the code iterated every allocator).
     swept_allocator_ids: list[str] = []
+    # Phase 164.5.1 criterion 9: the batching state this loop decides its
+    # return on. last_handled_id tracks the last allocator that COMPLETED
+    # (processed, skipped, or failed) — a cursor must never point at a
+    # half-processed allocator, so it is only set AFTER the per-allocator
+    # work below, never before or during it.
+    last_handled_id: str | None = None
+    budget_exhausted = False
+    mid_run_kill_switch_state: str | None = None
 
     for profile in allocators:
         allocator_id = profile["id"]
@@ -2198,14 +2224,20 @@ async def cron_recompute() -> dict[str, Any]:
         # Phase 164.5.1 task 2: the async conversion preserved this property
         # unchanged — this re-check still calls the UNCACHED accessor and
         # still polls fresh every iteration; only the CACHED accessor's
-        # failure contract changed (see _engine_is_enabled_cached).
+        # failure contract changed (see _engine_is_enabled_cached). Batching
+        # (this task) does not move this check onto the cached path either —
+        # a mid-run kill-switch flip must never wait on batching's own
+        # bookkeeping, and this UNCACHED re-check does not touch
+        # _read_cron_cursor/_write_cron_cursor at all.
         _mid_run_state = await _engine_is_enabled()
         if _mid_run_state != KILL_SWITCH_ENABLED:
             logger.info(
                 "match_engine cron: kill switch not enabled mid-run "
-                "(state=%s), aborting",
+                "(state=%s), aborting — cursor left unwritten so the next "
+                "tick re-attempts this slice",
                 _mid_run_state,
             )
+            mid_run_kill_switch_state = _mid_run_state
             break
 
         # NEW-C08-06: serialize skip-check → score per allocator (shared with
@@ -2216,16 +2248,25 @@ async def cron_recompute() -> dict[str, Any]:
         async with _get_recompute_lock(allocator_id):
             if await _should_skip_allocator(allocator_id, force=False):
                 skipped += 1
-                continue
+            else:
+                try:
+                    await _score_one_allocator(allocator_id, universe)
+                    processed += 1
+                    swept_allocator_ids.append(allocator_id)
+                except Exception as err:
+                    logger.exception("match_engine cron: allocator %s failed: %s", allocator_id, err)
+                    failed += 1
+                    # Continue the loop — one allocator failure doesn't fail the cron
 
-            try:
-                await _score_one_allocator(allocator_id, universe)
-                processed += 1
-                swept_allocator_ids.append(allocator_id)
-            except Exception as err:
-                logger.exception("match_engine cron: allocator %s failed: %s", allocator_id, err)
-                failed += 1
-                # Continue the loop — one allocator failure doesn't fail the cron
+        # This allocator is now COMPLETE (processed, skipped, or failed —
+        # all three count as "handled" for cursor purposes). Phase 164.5.1
+        # criterion 9: the elapsed-time batch bound is checked HERE, BETWEEN
+        # allocators, never inside _score_one_allocator — a cursor must
+        # never point at a half-processed allocator.
+        last_handled_id = allocator_id
+        if _duration() >= CRON_BATCH_BUDGET_S:
+            budget_exhausted = True
+            break
 
     # Retention sweep at end of cron. Log at ERROR so a silently-broken
     # sweep (RLS regression, FK error, URL truncation) lights up alerts
@@ -2253,10 +2294,64 @@ async def cron_recompute() -> dict[str, Any]:
 
     duration_s = _duration()
 
+    # Phase 164.5.1 criterion 9: a mid-run kill-switch flip takes priority
+    # over the batching decision below — the cursor is left UNWRITTEN (no
+    # _write_cron_cursor call at all) so the next tick re-attempts this same
+    # slice from the SAME starting cursor, rather than silently skipping the
+    # allocators this run never reached (T-164.5.1-06-04).
+    if mid_run_kill_switch_state is not None:
+        logger.info(
+            "match_engine cron complete: status=%s (mid-run kill-switch "
+            "abort) processed=%d skipped=%d failed=%d retention_deleted=%d "
+            "duration_s=%.2f",
+            mid_run_kill_switch_state, processed, skipped, failed,
+            retention_total, duration_s,
+        )
+        return {
+            "status": mid_run_kill_switch_state,
+            "processed": processed,
+            "skipped": skipped,
+            "failed": failed,
+            "retention_deleted": retention_total,
+            "duration_s": duration_s,
+        }
+
+    if has_more or budget_exhausted:
+        # Phase 164.5.1 criterion 9: this run stopped at its batch boundary
+        # (a count bound OR an elapsed-time bound, whichever came first).
+        # `partial` is a NORMAL completion of one slice — orthogonal to the
+        # processed/failed ratio the ok/degraded/total_failure block below
+        # decides on, never conflated with it. Persist the cursor so the
+        # NEXT tick resumes strictly after the last COMPLETED allocator.
+        await _write_cron_cursor(last_handled_id)
+        logger.info(
+            "match_engine cron: batch boundary reached (has_more=%s "
+            "budget_exhausted=%s) — next_cursor=%s processed=%d skipped=%d "
+            "failed=%d retention_deleted=%d duration_s=%.2f",
+            has_more, budget_exhausted, last_handled_id, processed, skipped,
+            failed, retention_total, duration_s,
+        )
+        return {
+            "status": "partial",
+            "processed": processed,
+            "skipped": skipped,
+            "failed": failed,
+            "retention_deleted": retention_total,
+            "duration_s": duration_s,
+            "next_cursor": last_handled_id,
+        }
+
+    # The set was exhausted in this pass (no has-more flag, no budget trip):
+    # wrap the cursor so the next tick starts from the beginning again.
+    await _write_cron_cursor(None)
+
     # Pick a status discriminator that lets monitoring switch on a single
     # field. Returning "ok" on a structural fault (every allocator failed)
     # would let dashboards stay green while the engine is broken — distinct
     # statuses surface the breakdown without forcing log-text parsing.
+    # `partial` (above) is a FOURTH, orthogonal axis — it says the pass is
+    # incomplete, never that anything failed; it is decided BEFORE this
+    # block runs and this block never sees a partial run.
     if failed > 0 and processed == 0:
         status_value = "total_failure"
         logger.error(
@@ -2285,4 +2380,5 @@ async def cron_recompute() -> dict[str, Any]:
         "failed": failed,
         "retention_deleted": retention_total,
         "duration_s": duration_s,
+        "next_cursor": None,
     }
