@@ -627,7 +627,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Phase 164.2 CURATED-COPY discussed and researched, NOT yet planned. Upstream 164.1 is closed-by-merge (PR #746 `42868a9b` + PR #748 `d679f638`, v0.77.15.0) but has NO VERIFICATION.md. Next: merge `origin/main` into `phase-164.2-curated-copy` (this checkout is 1 behind), then `/gsd-plan-phase 164.2`. Open production item: issue #747, MT5 `-6` authorization failure, founder action.
+Status: Phase 164.5.1 CRONREPOINT Wave A SHIPPED — PR #802 (v0.77.45.0). ⛔ The phase is NOT verified and that is an explicit founder override, not a green gate: `ship:pre` admits only `passed`, and this phase's goal is a PRODUCTION state, so it cannot reach `passed` before plan 09 — the live `cron.job` repoint — which its own runbook Step 0 blocks until this branch is merged AND deployed. Recorded in the ROADMAP, phase CONTEXT D5, and WINDOWS.md entry 60. Security is NOT overridden: `164.5.1-SECURITY.md` carries `threats_open: 0` for Wave A. Next, IN ORDER: (1) merge + wait for Railway, and confirm `/health` reports `git_sha` at or after the merge commit — a stale sha aborts, per runbook Step 0; (2) plan 09's live session, pre-flight first; (3) re-run `/gsd-secure-phase 164.5.1` — plan 09's T-164.5.1-09-02 and -09-07 are PENDING, not covered by the Wave A verdict.
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -643,7 +643,7 @@ Status: Phase 164.2 CURATED-COPY discussed and researched, NOT yet planned. Upst
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-06 — Phase 164.2 CURATED-COPY: CONTEXT (`24618f73`), RESEARCH (`cf402eb0`) and the four refuted CONTEXT decisions (`03ae5fa0`) committed; Phase 164.6 gained PROBER-CALIBRATION-01 (`61aa8cf0`); Phase 164.2.1 SESSIONID-FENCE inserted (`c1c8cf3c`); STATE.md reconciled
+Last activity: 2026-09-17 — Phase 164.5.1 Wave A shipped as PR #802: criterion 7 withdrawn on two measured grounds (no `supabase/` diff remains), two review-fix rounds closed 17 findings plus a regression round 1 introduced, first-ever SECURITY.md for the phase (49 threats closed, `threats_open: 0`), WINDOWS.md repaired and re-synced (48 open / 60 total)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
