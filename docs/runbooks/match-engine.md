@@ -119,6 +119,213 @@ DELETE FROM match_batches WHERE allocator_id = 'ALLOCATOR_UUID' ORDER BY compute
 ### Re-enable for new allocator
 Any profile with `role IN ('allocator', 'both')` is automatically included in the next cron run. No manual opt-in needed.
 
+## Go-live: repoint `match_engine_cron` + ledger-refresh activation (Phase 164.5.1 Wave B)
+
+**Owner:** founder (every LIVE op below is a founder gate — no autonomous run may execute them) ·
+**Risk:** production DDL on `cron.job` jobid 1, which carries a credential-bearing command, plus
+the SAME live write `docs/runbooks/ledger-refresh-go-live.md` documents on its own. This section
+is the ONE session that performs both, in the fixed order below, ending in exactly one manifest
+re-capture — running the two sessions separately means two re-captures, and two re-captures means
+two red prober runs (the Phase 164.1 `cron-drift` arm reports drift on every run between a live
+change and its re-capture).
+
+⛔ **Do this in ONE sitting, in this order and no other.** Splitting it across sessions or
+re-ordering the steps is exactly the ordering `164.5.1-CONTEXT.md` fixes and the DEFER branch below
+budgets for.
+
+### P0 — which database is this? (BLOCKING, and FIRST in this session — repeat CLAUDE.md's rule)
+
+```sql
+SELECT shobj_description(oid, 'pg_database') AS which_database
+  FROM pg_database WHERE datname = current_database();
+```
+
+- **Expected:** the hand-set marker naming **PROD**. RECORD THE OUTPUT into the execution record —
+  not the fact that the query was run, the actual row it returned.
+- **Abort if:** it names anything else, or comes back NULL.
+
+⛔ `current_database()` reads `postgres` on **both** PROD and TEST and proves nothing. Neither does
+a green query or a familiar-looking table. The Supabase CLI and the browser SQL editor have **no**
+automated production guard — this marker is the only one, and this checkout's CLI is linked to
+production. **Pasting the query text is not evidence; only its recorded output is.** This is the
+exact vacuity booked as `[164.7-P3C-PRESENCE-ORACLE]` — a verify leg that was satisfied once by the
+query's text rather than its answer. Do not repeat it here.
+
+### Step 0 — deploy Wave A first (Areas 1 and 2: kill switch, timeout, batching)
+
+The repointed job calls into `public.match_engine_cron_tick()`, which posts to the analytics
+service's `/api/match/cron-recompute` route — the same route Wave A's fail-closed kill switch, the
+`service_role` `statement_timeout`, and the batched `cron_recompute()` all harden. Repointing jobid
+1 before Wave A is live would repoint it at a route with the SAME gateway-ceiling and fail-open
+exposure this phase exists to close. Confirm Wave A (plans 02, 03, 05, 06) is merged and deployed
+before proceeding — do not restate what those plans do; see their SUMMARYs.
+
+- **Expected:** the Railway worker's `/health` (`docs/runbooks/railway-worker.md`) reports
+  `git_sha` at or after Wave A's merge commit.
+- **Abort if:** `git_sha` predates Wave A — the deploy was silently skipped (Railway skips a deploy
+  when the merge commit's CI check-suite is red) and the repoint below would run against a worker
+  that cannot yet serve it safely.
+
+### Step 1 — the pre-flight, and it can abort the whole session
+
+```bash
+node scripts/prod-prober/run.mjs --preflight-repoint [--manifest scripts/prod-prober/cron-manifest.json]
+```
+
+`preflightCronRepoint` (plan 04) reads the committed manifest, the P0 marker and live `cron.job`,
+and compares them with the SAME `compareManifest` the live `cron-drift` arm uses — no second notion
+of drift. It **writes nothing**, proven by a self-test scenario that hashes the manifest fixture
+before and after every invocation leg.
+
+- **Expected:** exit **0** — compared, clean. Record the marker the verb itself prints on success.
+- **Abort if:** exit **1** (compared, found a mismatch — PROD's `cron.job` has drifted from the
+  committed manifest somewhere this session is not looking) or exit **3** (nothing was measured —
+  an unreadable manifest, a P0-marker failure, or a malformed `cron.job` read). **ANY non-zero exit
+  stops the session here.** Do not proceed to Step 2 on a hunch that the mismatch is benign.
+
+### Step 2 — the repoint (LIVE op 1)
+
+```sql
+SELECT cron.schedule(
+  'match_engine_cron',
+  '0 * * * *',
+  $$SELECT public.match_engine_cron_tick();$$
+);
+```
+
+⛔ **This statement lives HERE and NEVER in a migration.** Migrations auto-apply to PROD on merge;
+a merge whose worker deploy is then silently skipped (Railway skips the deploy when the merge
+commit's CI check-suite is red) would start a schedule against a worker that cannot serve it — the
+v1.11 wedge, recreated verbatim. Both `docs/runbooks/ledger-refresh-go-live.md:412` and
+`docs/runbooks/flipretry-derived-equity-go-live.md:162` follow the same rule for the same reason;
+this is the third instance of a house convention, not a one-off.
+
+**Verify-back:**
+
+```sql
+SELECT jobid, jobname, schedule, command, active FROM cron.job WHERE jobname = 'match_engine_cron';
+```
+
+- **Expected:** one row, **jobid UNCHANGED** (the row this UPSERT touches is `cron.job` jobid 1 —
+  `cron.schedule` UPSERTs on `(jobname, username)` and PRESERVES the jobid, it does not create a
+  second row or renumber the existing one), `schedule = '0 * * * *'` (unchanged), `active = t`, and
+  `command` is the one-line `SELECT public.match_engine_cron_tick();` call.
+- **Abort if:** a second row appears, the jobid changed, or `active` is not `t`.
+
+### Step 2b — the `[VAULTTICK-EMPTYKEY-01]` side-effect check
+
+A post-repoint reading, not an argument: the repoint is what closes `[VAULTTICK-EMPTYKEY-01]` —
+before this step the guard was live in the repo and UNREACHED in production, because jobid 1's
+command contained no `btrim` call at all.
+
+```sql
+SELECT command FROM cron.job WHERE jobname = 'match_engine_cron';
+```
+
+- **Expected:** the command is `SELECT public.match_engine_cron_tick();` — i.e. it now reaches the
+  callable carrying `IF v_key IS NULL OR btrim(v_key) = '' THEN RAISE EXCEPTION …` (see
+  `supabase/schema/functions/match_engine_cron_tick.sql`). Record this reading; it is what closes
+  the item.
+- **Abort if:** the command does not match, or `match_engine_cron_tick`'s own guard has changed
+  since this section was written — re-read the callable before trusting this line.
+
+⚠️ **State the residual honestly, in the callable's own words:** `btrim()` with no character set
+trims **spaces only**, not tabs or newlines. A vault secret that is pure tabs or newlines still
+passes this guard and still produces a header the analytics service answers 401 to. That residual
+is explicitly OUT OF SCOPE here — widening the guard to `E' \t\r\n'` is a decision with its own
+evidence, tracked separately, not a silent improvement folded into this step.
+
+### Step 3 — the activation (LIVE op 2), only if Step 1 and Step 2 both cleared
+
+Re-run the repaired P3-C from `docs/runbooks/ledger-refresh-go-live.md` § "P3 — venue enable flags"
+Part C (reference it; do not paste a third copy here that can rot independently of the other two).
+
+- **Expected:** both mt5-keyed kinds present, healthy counts, `newest` within hours (see that
+  section's `Abort if:` bar). Record the OUTPUT.
+- **Abort if:** either kind is absent or `newest` is stale by more than a day — in which case skip
+  the rest of Step 3 and go to **Step 3-DEFER** below.
+
+If P3-C clears: run the sibling runbook's **Step 1 — the activation flag** (1a throw it, 1b verify
+in the SAME session, 1d execution record — `docs/runbooks/ledger-refresh-go-live.md:350`) and then
+its **Step 2 — the schedule** (`:412`), which registers:
+
+```sql
+SELECT cron.schedule(
+  'ledger_refresh_fanout',
+  '25 * * * *',
+  $$SELECT public.enqueue_ledger_refresh_for_strategies();$$
+);
+```
+
+- **Expected:** `system_flags.ledger_refresh_enabled` reads `enabled = t` (1b's verify-back), and
+  `SELECT jobname, schedule, active FROM cron.job WHERE jobname = 'ledger_refresh_fanout';` returns
+  one row, `25 * * * *`, `active = t`.
+- **Abort if:** either verify-back fails its sibling section's own bar — do not re-derive a
+  different bar here.
+
+**The deliberate exercise.** `enqueue_ledger_refresh_for_strategies()`'s per-candidate handler
+(`supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql`) wraps each
+candidate's `enqueue_compute_job` call in its own `EXCEPTION WHEN OTHERS` — one poisoned candidate
+logs a `WARNING` and the loop continues rather than aborting. **This whole branch is UNREACHABLE
+while the flag is FALSE** (the function returns before ever reaching the candidate loop) and
+**becomes reachable only from this moment** — it has never run, on any real candidate, until this
+activation. Deliberately fabricating a PROD failure to trigger it was considered and rejected: it
+would mean forcing a real `enqueue_compute_job` call to fail against funded strategies, which is
+exactly the invented-failure-state this repo's own rules forbid. Instead:
+1. **Invoke the fan-out manually once, in this same session, BEFORE Step 2's schedule fires it on
+   its own** — `SELECT public.enqueue_ledger_refresh_for_strategies();` run interactively in the SQL
+   editor. This is a genuine LIVE op (it can enqueue real jobs), not a dry run — treat it as part of
+   the activation, not a rehearsal. Read BOTH the returned integer and the interactive session's
+   `NOTICE`/`WARNING` panel — the SQL editor surfaces both live, unlike `cron.job_run_details`,
+   whose `return_message` never carries a function's `RAISE NOTICE` output.
+2. **If any `WARNING` naming `'one candidate failed to enqueue'` appears**, the branch has been
+   genuinely exercised on real data — record the SQLSTATE it carried and confirm the tick still
+   returned a non-error result and the advisory lock was released (`pg_try_advisory_lock`/
+   `pg_advisory_unlock` pair one level up from the per-candidate handler).
+3. **If no `WARNING` appears** (the expected/happy case — none of the current cohort should fail),
+   the branch remains formally unexercised on live data. Confirm its SAFETY instead by reading the
+   code: the `EXCEPTION WHEN OTHERS` inside the loop catches without re-raising and does not touch
+   the advisory lock (the lock is released by the OUTER `EXCEPTION WHEN OTHERS … PERFORM
+   pg_advisory_unlock(...); RAISE;` wrapper, one level up), so a poisoned candidate cannot leak the
+   lock or abort the tick for the rest of the cohort. Record that this was a code-read confirmation,
+   not a live exercise, so a future reader does not mistake it for one.
+
+### Step 3-DEFER — the branch that is expected, not a failed session
+
+If P3-C fails its bar in Step 3: **STOP after Step 2b.** The repoint half is complete; the
+activation half defers. This leaves: jobid 1 repointed at `match_engine_cron_tick()` and verified,
+`[VAULTTICK-EMPTYKEY-01]` closed, no `ledger_refresh_fanout` row, `system_flags.ledger_refresh_enabled`
+still `FALSE`. **Step 4's re-capture still runs** — for the repoint alone. Use the DEFER template in
+`164.7-ACTIVATION-PREFLIGHT.md` § 5 to record it: criterion 3 BLOCKED by an operational fault outside
+this phase, re-entry condition MT5 terminal authorized and P3-C re-run clean. A DEFER here is a
+**legitimate outcome**, not a failure of this session — its last real reading (2026-09-12) FAILED the
+freshness bar, so budget for this outcome rather than assume the gate opens.
+
+### Step 4 — ONE re-capture, at the end, whichever branch above was taken
+
+```bash
+node scripts/prod-prober/run.mjs --capture-manifest --out scripts/prod-prober/cron-manifest.json
+```
+
+Then **read the `command` text of every job in the resulting diff before committing** — the
+manifest is a committed, world-readable file in a **public** repository, and each command string
+was individually approved for publication when first captured.
+
+- **Expected:** the diff changes jobid 1's `command` and its `command_sha256`, and — only if Step 3
+  ran — ADDS exactly one job, `ledger_refresh_fanout`, `25 * * * *`, active.
+- **Abort if:** any OTHER job moved. A second unexplained difference means PROD drifted somewhere
+  this section is not looking, and committing the manifest would bless it.
+
+⚠️ **Standing warning:** clearing `manifest-invalid` re-animates `compareManifest`'s manifest-side
+hygiene loop, which has been dead on every production run for weeks (the committed manifest and the
+arm's exported normalization disagreed). Expect manifest-side `cron-secret-in-command` findings
+nobody has seen before — measured, a valid manifest yields **1** — and do NOT read them as new
+leaks; they are the loop waking back up, not a new credential exposure.
+
+⛔ This repository is **PUBLIC**. Never paste a secret, an MT5 account number, or a broker server
+name into the execution record — the manifest re-capture above already covers what is safe to
+commit.
+
 ## Metrics to watch
 
 - `match_engine_recompute_total{status}` — cron status. Discrete values:
