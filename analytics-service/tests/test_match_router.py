@@ -381,6 +381,52 @@ class TestKillSwitchCacheFailClosed:
 
 
 # ---------------------------------------------------------------------------
+# Criterion 8, task 3 — A2 calibration: _is_gateway_timeout against a REAL
+# postgrest.exceptions.APIError shape, not only a hand-built mock
+# (Phase 164.5.1, RESEARCH.md Assumptions Log row A2)
+# ---------------------------------------------------------------------------
+
+
+class TestGatewayTimeoutCalibration:
+    """`_is_gateway_timeout` must fire on a REAL `postgrest.exceptions.APIError`
+    — instantiated the way the library constructs it, from the
+    `{message, code, hint, details}` dict shape, not a bare object with a
+    `.code` attribute bolted on — AND on the int wire-type of `.code`. The
+    two together make the dual (str, int) comparison non-decorative: a
+    single-type predicate checking only `code == "504"` would pass the real
+    APIError case below and silently never match the int case, recreating
+    the exact fail-open shape this phase exists to close."""
+
+    def test_gateway_timeout_fires_on_real_postgrest_api_error(self):
+        """The real library shape, str `.code` — mirrors the ROADMAP's
+        cited CI sighting (`postgrest.exceptions.APIError: {'message': ...,
+        'code': 504, ...}`)."""
+        from postgrest.exceptions import APIError
+
+        from services.db import _is_gateway_timeout
+
+        exc = APIError(
+            {
+                "message": "JSON could not be generated",
+                "code": "504",
+                "hint": None,
+                "details": None,
+            }
+        )
+        assert _is_gateway_timeout(exc) is True
+
+    def test_gateway_timeout_fires_on_int_code(self):
+        """Hand-built int-`.code` case, kept alongside the real-APIError str
+        case above — see class docstring for why keeping both is load-bearing."""
+        from services.db import _is_gateway_timeout
+
+        class _IntCodeExc(Exception):
+            code = 504
+
+        assert _is_gateway_timeout(_IntCodeExc()) is True
+
+
+# ---------------------------------------------------------------------------
 # M-0606 — routers/match.py _records_to_series
 # ---------------------------------------------------------------------------
 
