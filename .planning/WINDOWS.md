@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 42
+open_count: 43
 waived_count: 0
 fixed_count: 12
-total_count: 54
-last_updated: 2026-09-16T16:36:49.788Z
+total_count: 55
+last_updated: 2026-09-16T18:05:09.913Z
 ---
 
 # Broken Windows Ledger
@@ -69,6 +69,7 @@ last_updated: 2026-09-16T16:36:49.788Z
 | 52 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_monitor.py |  | A2 POST-DEPLOY: the tick opens a FRESH rpyc client per tick and closes it in a finally. At the 600s default that is ~144 connections/day against a gateway container already at a three-digit thread counter. CRITERION CORRECTED 2026-09-16, and the original could never pass: it asked that the thread counter NOT climb monotonically with tick count, but CPython names threads from a globally monotonic counter and rpyc ThreadedServer spawns one thread per connection, so the number climbs once per connection whether or not threads are reaped. The real falsifier is welcome versus goodbye in the mt5-gateway log, scoped to the CURRENT process (everything after the last server-started line): a leak is welcome running ahead of goodbye with the gap GROWING across two readings hours apart. A container restart resets the counter to Thread-1 and invalidates the pair, so re-scope before comparing. BASELINE 2026-09-16T06:50Z, pre-keepalive: max Thread-27, welcome 27, goodbye 27, 0 unclosed, ~36 conn/day over 18h. READING 2 at 07:17Z: Thread-30, welcome 30, goodbye 30, 0 unclosed; the +3 equals boot heal plus two ticks, which confirms the 600s cadence but is far too small a sample to clear a slow leak. The hours-apart reading still stands. A4 fails semi-loudly; this would degrade the gateway SILENTLY over days. | open |  | 2026-09-15T21:45:24.003Z |  |
 | 53 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_monitor.py |  | Criterion 2 POST-DEPLOY cross-check: reconcile this detector's recorded episodes against the INDEPENDENT hourly prod-prober, so the new instrument is not the only witness to its own claims. | open |  | 2026-09-15T21:45:24.211Z |  |
 | 54 | 164.5.1 | deviation | analytics-service/tests/test_match_router.py |  | pytest-timeout plugin absent from project deps; substituted OS-level timeout wrapper for task 3 full-suite verify (--timeout=600 flag) | open |  | 2026-09-16T16:36:49.788Z |  |
+| 55 | 164.5.1 | deviation | .planning/config.json |  | parallelization:true in .planning/config.json was NOT the effective value for phase 164.5.1 — every wave ran SEQUENTIALLY, and the reason GSD gave for it is MEASURABLY FALSE. `worktree base-check` returned shouldDegrade:true / baseref-head-ignored-by-harness, asserting the harness forks worktrees from origin/HEAD (main at de66d1b0, 27 commits behind). MEASURED 2026-09-16 on Claude Code 2.1.265 by spawning a throwaway isolation:"worktree" agent: CLAUDE_BASE == 4bd9028f == the orchestrator's own HEAD (0 commits distance), the phase PLAN.md files were PRESENT in the worktree, and SELF_TEST_SCENARIOS read 81 (the post-plan-04 value) where origin/HEAD still has 80. The harness forks from HEAD; it was fixed upstream in Claude Code 2.1.128 (anthropics/claude-code#27134 -> #54940). GSD's degrade rests on the hardcoded line `headIgnoredByHarness = deps?.effectiveBaseRef === 'head'` in bin/lib/worktree-base-ref.cjs, which infers the harness's behaviour from the SETTING HAVING A VALUE and never inspects the real fork base. Already filed by us as open-gsd/gsd-core#4588 (opened 2026-09-09, labels bug + confirmed-bug, OPEN); this entry is a fresh reproduction on 2.1.265. Note the loop #4588 records: GSD's own `worktree apply-base-ref` writes worktree.baseRef:"head" into project-local .claude/settings.local.json, and that is exactly the layer the evaluator treats as proof the harness ignores it — applying the documented mitigation is what selects the degrade. The wave labels in this phase remain CORRECT as dependency statements; they were never a concurrency guarantee. INDEPENDENT of all this and still true: analytics-service/.venv is gitignored, so it is absent in any worktree and the dead pytest path exits 0 through an echo (false green) — plans 02/05/06 belonged on the main checkout regardless. Only plan 07 (vitest-only) could have run isolated in parallel; not taken, to avoid running an untested merge-back path mid-phase across the 81->82 renumber. Do NOT read wave:2 in this phase as evidence that 05/06/07 ran concurrently. | open |  | 2026-09-16T18:05:09.913Z |  |
 
 ````json
 [
@@ -718,6 +719,18 @@ last_updated: 2026-09-16T16:36:49.788Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-16T16:36:49.788Z",
+    "resolved_at": null
+  },
+  {
+    "id": 55,
+    "kind": "deviation",
+    "phase": "164.5.1",
+    "file": ".planning/config.json",
+    "line": null,
+    "description": "parallelization:true in .planning/config.json was NOT the effective value for phase 164.5.1 — every wave ran SEQUENTIALLY, and the reason GSD gave for it is MEASURABLY FALSE. `worktree base-check` returned shouldDegrade:true / baseref-head-ignored-by-harness, asserting the harness forks worktrees from origin/HEAD (main at de66d1b0, 27 commits behind). MEASURED 2026-09-16 on Claude Code 2.1.265 by spawning a throwaway isolation:\"worktree\" agent: CLAUDE_BASE == 4bd9028f == the orchestrator's own HEAD (0 commits distance), the phase PLAN.md files were PRESENT in the worktree, and SELF_TEST_SCENARIOS read 81 (the post-plan-04 value) where origin/HEAD still has 80. The harness forks from HEAD; it was fixed upstream in Claude Code 2.1.128 (anthropics/claude-code#27134 -> #54940). GSD's degrade rests on the hardcoded line `headIgnoredByHarness = deps?.effectiveBaseRef === 'head'` in bin/lib/worktree-base-ref.cjs, which infers the harness's behaviour from the SETTING HAVING A VALUE and never inspects the real fork base. Already filed by us as open-gsd/gsd-core#4588 (opened 2026-09-09, labels bug + confirmed-bug, OPEN); this entry is a fresh reproduction on 2.1.265. Note the loop #4588 records: GSD's own `worktree apply-base-ref` writes worktree.baseRef:\"head\" into project-local .claude/settings.local.json, and that is exactly the layer the evaluator treats as proof the harness ignores it — applying the documented mitigation is what selects the degrade. The wave labels in this phase remain CORRECT as dependency statements; they were never a concurrency guarantee. INDEPENDENT of all this and still true: analytics-service/.venv is gitignored, so it is absent in any worktree and the dead pytest path exits 0 through an echo (false green) — plans 02/05/06 belonged on the main checkout regardless. Only plan 07 (vitest-only) could have run isolated in parallel; not taken, to avoid running an untested merge-back path mid-phase across the 81->82 renumber. Do NOT read wave:2 in this phase as evidence that 05/06/07 ran concurrently.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-16T18:05:09.913Z",
     "resolved_at": null
   }
 ]
