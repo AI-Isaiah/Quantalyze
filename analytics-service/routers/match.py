@@ -34,6 +34,8 @@ stops non-allocator UUIDs from manufacturing batches.
 
 import asyncio
 import logging
+import os
+import re
 import time
 from datetime import datetime, timezone
 from functools import partial
@@ -49,6 +51,7 @@ from services.db import (
     Row,
     _is_gateway_timeout,
     chunked_in_query,
+    db_execute,
     db_read_with_retry,
     get_supabase,
     one,
@@ -1972,6 +1975,112 @@ async def eval_metrics(
             detail="Eval failed on our side. This has been logged.",
             correlation_id=correlation_id,
         ) from err
+
+
+# ---------------------------------------------------------------------------
+# Cron batching cursor (Phase 164.5.1 criterion 9 /
+# [164.5.1-GATEWAY-CEILING-INVERSION]) — persisted in public.system_settings
+# so a slice survives across separately-scheduled pg_cron ticks. Three
+# strictly-nested bounds keep one request inside the gateway window:
+# CRON_BATCH_BUDGET_S < the 45s statement_timeout plan 03 sets on
+# service_role < the 60s API gateway ceiling (see
+# [164.5.1-GATEWAY-CEILING-INVERSION] in TODOS.md for the measured numbers).
+# ---------------------------------------------------------------------------
+MATCH_ENGINE_CURSOR_KEY = "match_engine_cron_cursor"
+CRON_BATCH_SIZE = max(1, int(os.getenv("MATCH_ENGINE_CRON_BATCH_SIZE", "10")))
+CRON_BATCH_BUDGET_S = float(os.getenv("MATCH_ENGINE_CRON_BUDGET_S", "25.0"))
+
+# Canonical lowercase-or-uppercase-hex UUID shape (Postgres uuid columns
+# normalize to lowercase on read, but a hand-edited system_settings row is
+# not guaranteed to). Anything else is treated as corrupt.
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+async def _read_cron_cursor() -> str | None:
+    """Read the persisted cron batching cursor from public.system_settings.
+
+    This is the FIRST Python read/write path against public.system_settings
+    in this service (measured 2026-09-16, zero non-test hits) — it follows
+    db_execute's/db_read_with_retry's general shape because there is no
+    table-specific pattern to follow, it does not "consume" an existing
+    system_settings convention. The cursor is ENGINE-INTERNAL BOOKKEEPING
+    even though the table's grants do not distinguish it from
+    operator-editable configuration — an admin hand-editing this row
+    restarts a pass and nothing worse.
+
+    Returns None for an absent row, for the empty-string wrap marker (an
+    exhausted cursor means the same "start from the beginning" thing to the
+    caller as no cursor at all), and for a value that is not a canonical
+    UUID (logged at ERROR — a corrupt cursor restarts the pass loudly rather
+    than poisoning the keyset filter). A read that exhausts
+    db_read_with_retry's retries is NOT swallowed here — it propagates so
+    the caller decides, matching every other db_read_with_retry consumer; a
+    failed read must never be indistinguishable from "start over".
+    """
+    supabase = get_supabase()
+
+    def _read() -> Any:
+        return (
+            supabase.table("system_settings")
+            .select("value")
+            .eq("key", MATCH_ENGINE_CURSOR_KEY)
+            .maybe_single()
+            .execute()
+        )
+
+    result = await db_read_with_retry(_read)
+    row = one(result)
+    if not row:
+        return None
+    value = row.get("value") or ""
+    if value == "":
+        return None
+    if not _UUID_RE.match(value):
+        logger.error(
+            "match_engine cron: cursor value for %s is not a canonical "
+            "UUID (%r) — restarting the pass from the beginning",
+            MATCH_ENGINE_CURSOR_KEY, value,
+        )
+        return None
+    return value
+
+
+async def _write_cron_cursor(value: str | None) -> None:
+    """Upsert the cron batching cursor into public.system_settings.
+
+    This is the FIRST Python read/write path against public.system_settings
+    in this service (measured 2026-09-16, zero non-test hits) — it follows
+    db_execute's general shape because there is no table-specific pattern to
+    follow, it does not "consume" an existing system_settings convention.
+    The cursor is ENGINE-INTERNAL BOOKKEEPING even though the table's grants
+    do not distinguish it from operator-editable configuration — an admin
+    hand-editing this row restarts a pass and nothing worse.
+
+    `value=None` writes the empty-string wrap marker rather than deleting
+    the row, so the row's updated_at stays a usable "last completed pass"
+    signal. updated_by is deliberately left NULL (no acting human/service
+    identity for an engine-internal write).
+    """
+    supabase = get_supabase()
+    stored = value if value is not None else ""
+
+    def _write() -> Any:
+        return (
+            supabase.table("system_settings")
+            .upsert(
+                {
+                    "key": MATCH_ENGINE_CURSOR_KEY,
+                    "value": stored,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="key",
+            )
+            .execute()
+        )
+
+    await db_execute(_write)
 
 
 @router.post("/cron-recompute")

@@ -4375,3 +4375,157 @@ class TestScoreOneAllocatorPrecomputedCtx:
         # would mean a duplicate audit event + _persist_overrides write.
         alloc_mock.assert_called_once_with("alloc-default")
         weights_mock.assert_called_once_with("alloc-default")
+
+
+# ---------------------------------------------------------------------------
+# Criterion 9 — the cron batching cursor (public.system_settings)
+# (Phase 164.5.1 / [164.5.1-GATEWAY-CEILING-INVERSION])
+# ---------------------------------------------------------------------------
+
+
+class TestCronCursorAccessors:
+    """_read_cron_cursor / _write_cron_cursor — the FIRST Python read/write
+    path against public.system_settings. An absent row, the empty-string
+    wrap marker, and a corrupt value must never be indistinguishable from a
+    failed (retries-exhausted) read — only the last of those propagates."""
+
+    @pytest.mark.asyncio
+    async def test_read_cron_cursor_absent_row_returns_none(self, monkeypatch):
+        from routers import match as match_mod
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
+            MagicMock(data=None)
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        assert await match_mod._read_cron_cursor() is None
+
+    @pytest.mark.asyncio
+    async def test_read_cron_cursor_present_uuid_returned(self, monkeypatch):
+        from routers import match as match_mod
+
+        cursor_id = str(uuid4())
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
+            MagicMock(data={"value": cursor_id})
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        assert await match_mod._read_cron_cursor() == cursor_id
+
+    @pytest.mark.asyncio
+    async def test_read_cron_cursor_empty_string_wrap_marker_returns_none_no_error(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
+            MagicMock(data={"value": ""})
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            result = await match_mod._read_cron_cursor()
+
+        assert result is None
+        assert not any(rec.levelname == "ERROR" for rec in caplog.records), (
+            "the wrap marker is a normal value, not a corruption — must not "
+            "log ERROR"
+        )
+
+    @pytest.mark.asyncio
+    async def test_read_cron_cursor_non_uuid_value_returns_none_and_logs_error(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
+            MagicMock(data={"value": "not-a-uuid"})
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            result = await match_mod._read_cron_cursor()
+
+        assert result is None
+        assert any(
+            "not a canonical" in rec.getMessage() and rec.levelname == "ERROR"
+            for rec in caplog.records
+        ), "a corrupt cursor must log ERROR naming the key"
+
+    @pytest.mark.asyncio
+    async def test_read_cron_cursor_exhausted_retries_raises_not_none(
+        self, monkeypatch
+    ):
+        """A failed read must never be indistinguishable from 'start over' —
+        it propagates, it is not swallowed into None."""
+        from routers import match as match_mod
+
+        monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.side_effect = (
+            _make_api_error("504")
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        with pytest.raises(Exception) as exc_info:
+            await match_mod._read_cron_cursor()
+
+        assert exc_info.value.code == "504"
+
+    @pytest.mark.asyncio
+    async def test_write_cron_cursor_upserts_value_and_updated_at(self, monkeypatch):
+        from routers import match as match_mod
+
+        cursor_id = str(uuid4())
+        sb = MagicMock()
+        sb.table.return_value.upsert.return_value.execute.return_value = MagicMock(
+            data=[{"key": match_mod.MATCH_ENGINE_CURSOR_KEY}]
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        await match_mod._write_cron_cursor(cursor_id)
+
+        upsert_call = sb.table.return_value.upsert.call_args
+        payload = upsert_call.args[0]
+        assert payload["key"] == match_mod.MATCH_ENGINE_CURSOR_KEY
+        assert payload["value"] == cursor_id
+        assert "updated_at" in payload
+        assert upsert_call.kwargs.get("on_conflict") == "key"
+
+    @pytest.mark.asyncio
+    async def test_write_cron_cursor_none_writes_empty_string_wrap_marker(
+        self, monkeypatch
+    ):
+        from routers import match as match_mod
+
+        sb = MagicMock()
+        sb.table.return_value.upsert.return_value.execute.return_value = MagicMock(
+            data=[{"key": match_mod.MATCH_ENGINE_CURSOR_KEY}]
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        await match_mod._write_cron_cursor(None)
+
+        payload = sb.table.return_value.upsert.call_args.args[0]
+        assert payload["value"] == ""
+
+
+class TestCronBatchBoundsInvariants:
+    """CRON_BATCH_BUDGET_S / CRON_BATCH_SIZE — the two statement-level knobs
+    controlling the batch boundary (Phase 164.5.1 criterion 9)."""
+
+    def test_batch_budget_strictly_below_statement_timeout(self):
+        from routers import match as match_mod
+
+        assert match_mod.CRON_BATCH_BUDGET_S < 45.0
+
+    def test_batch_size_floor_is_one(self):
+        from routers import match as match_mod
+
+        assert match_mod.CRON_BATCH_SIZE >= 1
