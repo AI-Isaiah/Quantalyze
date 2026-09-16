@@ -4,12 +4,12 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 159
 current_phase_name: RANK — Public-ranking integrity
-status: "Phase 164.5.1 CRONREPOINT plan 02 (wave 1, fail-closed kill switch tracer) COMPLETE — see stopped_at"
-stopped_at: "Completed 164.5.1-02-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 02 of 9, wave 1 — the phase's TRACER, sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`). Fail-closed kill switch: async tri-state guard (`KILL_SWITCH_ENABLED`/`DISABLED`/`UNAVAILABLE`), `db_read_with_retry` retry seam beside `db_execute` (never inside it), fail-closed TTL cache contract (an exhausted poll invalidates the cache rather than populating it), and the anti-vacuity neuter/observe-RED/restore proof for both safety levers (the disposition and the predicate's wire type) — each neuter PROVEN applied via diff against a `cp` byte backup, observed RED naming the exact control, restored and PROVEN byte-identical via `cmp`. The tracer feedback gate (`gate=blocking-human`) was APPROVED by the founder after the orchestrator independently re-measured every Task 1 claim. Real test-surface count measured and reported: 36 `_engine_is_enabled` references (33 `monkeypatch.setattr` + 3 direct calls), not the plan's ~23 estimate. Four commits (`43ce2233`, `a909136c`, `1817bfff`, `fce3c151`) — NOT pushed. Full analytics suite `5828 passed, 89 skipped, 0 failed`; coverage 91.18% against the 80% gate; mypy clean; ruff clean (7 pre-existing unrelated findings, unchanged). `164.5.1-GATEWAY-CEILING-INVERSION` stays blocked (shared across plans 01/02/03/05/06/09, per the shared-ID gate) until the last declaring plan finishes. See `.planning/phases/164.5.1-cronrepoint-the-live-match-engine-cron-row-is-repointed-at-t/164.5.1-02-SUMMARY.md`."
-last_updated: "2026-09-16T16:42:29Z"
+status: "Phase 164.5.1 CRONREPOINT plan 03 (wave 1, gateway-ceiling migration + static gate) COMPLETE — see stopped_at"
+stopped_at: "Completed 164.5.1-03-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 03 of 9, wave 1 — sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`). Forward migration `20260916120000_service_role_statement_timeout.sql`: `ALTER ROLE service_role SET statement_timeout = '45s'`, strictly inside the (44.67s, 60s) band, registers no schedule and removes none, carries no prod-body-ack/APP-GUC-LINEAGE pragma. Paired vitest static gate `src/__tests__/service-role-statement-timeout-migration.test.ts` (12/12 passed) calibrated against 9 synthetic mutants covering both value-band directions, comment-embedded and concatenation-assembled schedule verbs, and misapplied pragmas. No local push performed — apply path is merge -> `apply-test` (shared TEST) -> PROD's human-reviewed `apply`, per the schema-push gate's recorded project override. Measured (not transcribed) the superseded prod-body-ack pragma count at HEAD: 6 across 4 files (1+2+1+2). Two commits (`5acfb710`, `6dfcdf44`) — NOT pushed. `164.5.1-GATEWAY-CEILING-INVERSION` stays blocked (shared across plans 01/02/03/05/06/09, per the shared-ID gate) until the last declaring plan finishes. Whether the statement applies on PROD is deliberately NOT verified here — that is plan 09's D4-gated `pg_roles.rolconfig` read. See `.planning/phases/164.5.1-cronrepoint-the-live-match-engine-cron-row-is-repointed-at-t/164.5.1-03-SUMMARY.md`."
+last_updated: "2026-09-16T19:10:00Z"
 last_activity: 2026-09-16
-last_activity_desc: "Phase 164.5.1 CRONREPOINT plan 02 (fail-closed kill switch tracer) executed — async tri-state kill switch, gateway-timeout retry seam beside db_execute, fail-closed TTL cache contract, and an injected-failure anti-vacuity proof for both safety levers. 3/3 tasks, 4 commits (incl. SUMMARY), full suite 5828 passed / 89 skipped / 0 failed, coverage 91.18%. NOT SHIPPED — 4 commits on `feat/v1.20-phase-164.5.1-cronrepoint`, not yet pushed."
-state_head: fce3c151cb4b953c28a91677de6d17d95598ccc5
+last_activity_desc: "Phase 164.5.1 CRONREPOINT plan 03 (gateway-ceiling migration + static gate) executed — forward migration setting service_role's statement_timeout to 45s, paired calibrated vitest gate. 2/2 tasks, 2 commits (+ this docs commit), 12/12 gate tests passed including 9 calibration mutants. No local push performed. NOT SHIPPED — commits on `feat/v1.20-phase-164.5.1-cronrepoint`, not yet pushed."
+state_head: 6dfcdf44b750041a30372b1b761256b7615042b8
 
 # ⭐ progress: RE-DERIVED 2026-09-12 at `733a55f5` from ALL REFS — see the method block
 # immediately above the `progress:` keys below. This supersedes the HAND-SET note that stood
@@ -1300,6 +1300,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.6.4 P04 | ~28 min | 2 tasks | 3 files |
 | Phase 164.6.4 P05 | ~35 min | 2 tasks | 2 files |
 | Phase 164.5.1 P02 | 55min | 3 tasks | 5 files |
+| Phase 164.5.1 P03 | ~35min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -1407,6 +1408,12 @@ Load-bearing sequencing (real dependencies, do not reorder):
      every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
      The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
      FIRST match is used as the append target, and they are historical archives. -->
+
+*(execution-time, Phase 164.5.1 CRONREPOINT — plan 03, gateway-ceiling migration + static gate, 2026-09-16)*
+
+- **D-164.5.1-03-A — Corrected a self-contradiction between Task 1's acceptance criteria (zero raw-text occurrences of the `prod-body-ack`/`APP-GUC-LINEAGE` tokens) and its own action prose (which spelled both repeatedly).** Resolved under Rule 1: extended the same "describe, don't spell" hygiene the plan already mandated for the schedule-registration verbs to these two tokens as well, since the acceptance criteria and Task 2's static gate are the actual verifiable contract.
+- **D-164.5.1-03-B — the superseded `prod-body-ack` pragma count was MEASURED at HEAD (6 across 4 files: 1+2+1+2) rather than transcribed from the ROADMAP's "three" beside four named files.** Per-file breakdown and the measurement date are carried in the new migration's header.
+- **D-164.5.1-03-C — the vitest gate's string-concatenation-fold regex omits the ES2018-only `s` (dotAll) flag present in the shape of the Python original, since this repo's `tsconfig.json` targets ES2017** (confirmed by a real `tsc --noEmit` error during verification). No semantic change — the character classes used never rely on `.` matching a newline.
 
 *(execution-time, Phase 164.5.1 CRONREPOINT — plan 02, fail-closed kill switch tracer, 2026-09-16)*
 
@@ -2381,6 +2388,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
+
+**Last Date:** 2026-09-16T19:10:00Z
+**Stopped At:** Completed 164.5.1-03-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 03 of 9, wave 1 — sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`). Wrote the reviewable forward migration `supabase/migrations/20260916120000_service_role_statement_timeout.sql` (`ALTER ROLE service_role SET statement_timeout = '45s'`, strictly inside the (44.67s, 60s) band) and its calibrated vitest static gate `src/__tests__/service-role-statement-timeout-migration.test.ts` (12/12 passed, 9 calibration mutants covering both value-band directions, comment-embedded and concatenation-assembled schedule verbs, and misapplied prod-body-ack/APP-GUC-LINEAGE pragmas). No local push performed — the schema-push gate's recorded project override was honored throughout; apply path is merge -> `apply-test` (shared TEST) -> PROD's human-reviewed `apply`. Measured (not transcribed) the superseded prod-body-ack pragma count at HEAD: 6 across 4 files. Two commits (`5acfb710`, `6dfcdf44`), NOT pushed. `164.5.1-GATEWAY-CEILING-INVERSION` stays blocked (shared across plans 01/02/03/05/06/09) until the last declaring plan finishes. Deliberately NOT verified here: whether the ALTER ROLE statement applies on PROD — that is plan 09's D4-gated, recorded `pg_roles.rolconfig` read. Next: plan 04 or later Wave A plans (batching/retry consumers), per phase ordering.
+**Resume File:** None
 
 **Last Date:** 2026-09-16T16:42:29Z
 **Stopped At:** Completed 164.5.1-02-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 02 of 9, wave 1 — the phase's TRACER, sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`). Fail-closed kill switch: async tri-state guard, `db_read_with_retry` seam beside `db_execute`, fail-closed TTL cache contract, anti-vacuity neuter/observe-RED/restore proof for both levers (disposition + predicate wire type). Tracer feedback gate was APPROVED by the founder after the orchestrator independently re-measured every Task 1 claim. Four commits (`43ce2233`, `a909136c`, `1817bfff`, `fce3c151`), NOT pushed. Full suite `5828 passed, 89 skipped, 0 failed`; coverage 91.18% against the 80% gate. `164.5.1-GATEWAY-CEILING-INVERSION` stays blocked (shared across plans 01/02/03/05/06/09) until the last declaring plan finishes. Next: plan 03 (statement_timeout migration).
