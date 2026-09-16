@@ -48,6 +48,9 @@ import {
   FUNCTIONS_DIR,
   HEADERS_LITERAL_MAX,
   HYGIENE_RULE_IDS,
+  MANIFEST_PATH,
+  MANIFEST_SCHEMA_VERSION,
+  NORMALIZATION,
   TOKEN_MIN,
   compareManifest,
   hygieneVerdict,
@@ -2071,6 +2074,97 @@ describe("[164.8.5-02] compareManifest totality (CR-04)", () => {
         JSON.stringify(MANIFEST),
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [164.5.1-07] THE COMMITTED ORACLE DECLARES WHAT THE ARM COMPUTES.
+//
+// ⛔ THE 2026-09-11 INCIDENT THIS GATE CLOSES, IN TWO SENTENCES. The first
+// prober run after Phase 164.8.5 reported `manifest-invalid` — the committed
+// `cron-manifest.json` still declared `ws-collapse-v1` while `cron-drift.mjs`'s
+// exported `NORMALIZATION` had moved to `ws-collapse-v2`, so `compareManifest`
+// performed NO comparison at all for weeks. An HOURLY PRODUCTION PROBE caught
+// it; nothing in CI did.
+//
+// ⭐ THE DATA HALF IS ALREADY DISCHARGED (PR #776, run 34611594511, re-captured
+// the manifest at `ws-collapse-v2`). This describe block is the GATE half —
+// the control that turns the NEXT such divergence into a red CI check instead
+// of another silent hole an hourly probe has to find first.
+//
+// ⛔ THIS DOES NOT DUPLICATE `lever 1 — normalization drift reaches invalid()`
+// below. That lever proves the RUNTIME route to `invalid()` on a SYNTHETIC
+// copy of a different fixture; it never reads the committed file. This block
+// reads `scripts/prod-prober/cron-manifest.json` from disk and asks whether
+// the artifact ITSELF still agrees with the arm — the exact comparison that
+// was silently absent on 2026-09-11.
+// ---------------------------------------------------------------------------
+describe("[164.5.1-07] the committed oracle declares the normalization the arm computes", () => {
+  const COMMITTED_MANIFEST = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
+
+  /**
+   * The gate itself. Throws by name — never returns a boolean — because "the
+   * committed oracle declares what the arm computes" has exactly one honest
+   * failure shape: name the disagreement, or say nothing happened.
+   *
+   * ⛔ ANTI-VACUITY FIRST, AND ITS OWN GUARD. `{}` is a valid, non-array
+   * object, so a check that only compared `manifest.normalization !==
+   * NORMALIZATION` would still throw on it — but for the WRONG reason, and
+   * with a message indistinguishable from an ordinary mismatch. The empty-input
+   * case is asserted separately below specifically so a reviewer can tell "the
+   * gate has nothing to compare" from "the gate compared and found a
+   * disagreement" — two different repo states with two different remedies.
+   */
+  function assertManifestDeclaresArmConstants(manifest: Record<string, unknown> | null | undefined) {
+    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest) || Object.keys(manifest).length === 0) {
+      throw new Error(
+        "[164.5.1-07] ANTI-VACUITY GUARD: the manifest is missing, not an object, or empty — there is nothing to compare, and an absent oracle must never read as agreement",
+      );
+    }
+    if (manifest.normalization !== NORMALIZATION) {
+      throw new Error(
+        `[164.5.1-07] the committed manifest declares normalization ${JSON.stringify(manifest.normalization)}; the arm computes ${JSON.stringify(NORMALIZATION)}. Two different normalizations produce two different shas for identical text — re-capture with captureManifest, never hand-edit.`,
+      );
+    }
+    if (manifest.schema_version !== MANIFEST_SCHEMA_VERSION) {
+      throw new Error(
+        `[164.5.1-07] the committed manifest declares schema_version ${JSON.stringify(manifest.schema_version)}; the arm reads ${JSON.stringify(MANIFEST_SCHEMA_VERSION)}. Every committed sha depends on the schema — re-capture with captureManifest, never hand-edit.`,
+      );
+    }
+  }
+
+  it("the COMMITTED manifest at MANIFEST_PATH agrees with the arm — read from disk, not through the arm's own runtime", () => {
+    expect(() => assertManifestDeclaresArmConstants(COMMITTED_MANIFEST), "PRECONDITION: the committed oracle must be clean or the calibration below proves nothing about a real disagreement").not.toThrow();
+  });
+
+  it("CALIBRATION 1/5 — the SUPERSEDED normalization value throws", () => {
+    const mutant = { ...COMMITTED_MANIFEST, normalization: "ws-collapse-v1" };
+    expect(mutant.normalization, "the mutant must differ from the committed value").not.toBe(COMMITTED_MANIFEST.normalization);
+    expect(() => assertManifestDeclaresArmConstants(mutant)).toThrow(/normalization/);
+  });
+
+  it("CALIBRATION 2/5 — a THIRD, never-used normalization value throws too — this is an equality, not a two-value allowlist", () => {
+    const mutant = { ...COMMITTED_MANIFEST, normalization: "ws-collapse-v99-never-shipped" };
+    expect(mutant.normalization).not.toBe(COMMITTED_MANIFEST.normalization);
+    expect(mutant.normalization).not.toBe("ws-collapse-v1");
+    expect(() => assertManifestDeclaresArmConstants(mutant)).toThrow(/normalization/);
+  });
+
+  it("CALIBRATION 3/5 — a `schema_version` bump throws, by the SCHEMA_VERSION route", () => {
+    const mutant = { ...COMMITTED_MANIFEST, schema_version: (COMMITTED_MANIFEST.schema_version as number) + 1 };
+    expect(mutant.schema_version).not.toBe(COMMITTED_MANIFEST.schema_version);
+    expect(() => assertManifestDeclaresArmConstants(mutant)).toThrow(/schema_version/);
+  });
+
+  it("CALIBRATION 4/5 — a manifest missing the `normalization` key throws, rather than comparing `undefined` to agreement", () => {
+    const mutant: Record<string, unknown> = { ...COMMITTED_MANIFEST };
+    delete mutant.normalization;
+    expect("normalization" in mutant, "PRECONDITION: the key is really gone").toBe(false);
+    expect(() => assertManifestDeclaresArmConstants(mutant)).toThrow(/normalization/);
+  });
+
+  it("CALIBRATION 5/5 — an EMPTY object throws on the anti-vacuity guard specifically, not on a downstream equality", () => {
+    expect(() => assertManifestDeclaresArmConstants({})).toThrow(/ANTI-VACUITY GUARD/);
   });
 });
 
