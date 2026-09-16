@@ -1222,6 +1222,41 @@ true for 146 and half of 142–145, and **false for 141**.
       `passed` verdict, because the phase's own criteria are about the **preselect** path and
       here there is no preselect at all.
 
+- [ ] **`[164.5.1-GATEWAY-CEILING-INVERSION]` `service_role` is the only PROD role with no
+      `statement_timeout` of its own, so a slow service-role read crosses the API gateway's 60s
+      wall before Postgres's own 120000 ms default ever would, and returns an opaque 504 instead
+      of a catchable Postgres error.**
+      MEASURED on PROD 2026-09-13, `pg_roles.rolconfig`: `anon` = `statement_timeout=3s`,
+      `authenticated` = `8s`, `authenticator` = `8s`, `service_role` = NULL (inherits the database
+      default of `120000` ms) — against Supabase's API gateway, which gives up at `60` s. The
+      analytics service authenticates as `service_role`, so every one of its reads runs under the
+      only role in the project with no timeout of its own, and the ceiling that actually bites
+      sits BELOW the one Postgres enforces.
+      **Not contention, not a slow statement:** same session, `pg_stat_statements` returns ZERO
+      rows with `max_exec_time > 20s`; 17 of 60 connections, 1 active, 0 idle-in-transaction, 0
+      waiting on a lock. No individual statement is slow — the cron's AGGREGATE work is what
+      approaches the wall.
+      **The cron is brushing the ceiling now:** the one run in the observed window that succeeded
+      — `net._http_response` id `3758` — reported `duration_s: 44.67` against the `60` s gateway
+      limit. Of the 6 runs still inside pg_net's retention window, 5 returned 500 (ids 3755, 3756,
+      3757, 3759, 3760), all with `timed_out: false` and `error_msg: null` — pg_net reached the
+      service and the service itself errored.
+      **The safety control is the thing degrading, in production, right now:** Sentry
+      `QUANTALYZE-1D` ("match_engine: kill switch check FAILED (fail-open, engine still
+      running)") — 5 events, 2026-09-12 — is a dated production sighting of the fail-open guard
+      actually failing open, not a hypothetical. Blast radius extends past the cron: the same 504s
+      hit `main_worker`'s `_claim_priority` (Sentry `QUANTALYZE-11`, 14 events) and `_reset`
+      (`QUANTALYZE-X`, 3 events).
+      **Fix:** `ALTER ROLE service_role SET statement_timeout = '45s'`, by FORWARD MIGRATION —
+      ⛔ never a console statement, which leaves no reproducible trace and is the exact class
+      `CRON-DRIFT-01` exists because of. Verify by reading `pg_roles.rolconfig` on PROD AFTER the
+      apply and recording the output, not the statement. ⛔ This makes nothing faster and must not
+      be described as if it did — it is a LEGIBILITY fix converting an opaque gateway 504 into a
+      catchable Postgres timeout.
+      ⚠️ These are dated readings bound to one session (2026-09-12/13) and must be REGENERATED
+      rather than trusted at face value by a later reader.
+      Owner: Phase 164.5.1 CRONREPOINT.
+
 ---
 
 ## 🟡 FIX MID-TERM
@@ -1676,6 +1711,35 @@ true for 146 and half of 142–145, and **false for 141**.
       own moving the loop above `compareManifest`'s early returns so it stops being skippable
       at all. Whichever lands first must say so in its SUMMARY.
       **Evidence:** `.planning/phases/164.8.5-proberparse-*/164.8.5-REVIEW-R3.md`.
+
+- [ ] **`[T-OPEN-03]` `retention_compute_jobs_orphaned_running` was committed to
+      `scripts/prod-prober/cron-manifest.json` with 0 newlines and lexed to a pure comment, so
+      `visible = 0 of 1791` characters — an ATTRIBUTION gap, not a credential blind spot.**
+      MEASURED: a spliced key in that row still fires `long-token-anywhere` via the comment
+      producer, and `jwt-shape` / `service-role` / `pg-password` all still fire — only the
+      header-anchored rules and `vault-absent` were lost to the newline fold. Graded `low` on
+      measurement rather than accepted as booked, because the credential itself remains
+      detectable through the surviving rules; what is lost is which specific rule would have
+      named it.
+      **The DATA half was already discharged** by the 2026-09-11 re-capture at `ws-collapse-v2`
+      (capture run `34611594511`, landed by PR #776) — the newline fold is restored in the
+      committed manifest today. **The RESIDUAL owned here is the CI GATE, not the data:** nothing
+      in CI catches a future re-fold of the same shape, so this entry stays open until that gate
+      exists.
+      Owner: Phase 164.5.1 CRONREPOINT, plan 07.
+
+- [ ] **`[T-OPEN-04]` The committed manifest declared `normalization: ws-collapse-v1` while the
+      cron-drift arm computed `ws-collapse-v2`, and two normalizations produce two different shas
+      for identical text — so the cron-drift arm was performing NO comparison at all and
+      `manifest-invalid` fired on every production run.**
+      MEASURED: the mismatch was caught by an hourly PRODUCTION probe an hour after it shipped,
+      and by nothing in CI — a control that silently stopped being able to find anything. The
+      DATA half was discharged by the same 2026-09-11 re-capture (`ws-collapse-v2`, run
+      `34611594511`, PR #776).
+      **The RESIDUAL owned here is the missing CI gate:** any future normalization bump re-opens
+      this identically, because nothing asserts the arm's exported `NORMALIZATION` and the
+      manifest's `normalization` key agree.
+      Owner: Phase 164.5.1 CRONREPOINT, plan 07.
 
 - [ ] **`[164.8.5-HYGIENE-RESIDUALS]` ◆ **IN PROGRESS 2026-09-12 — code-complete on `phase-164.8.6-proberhygiene` (v0.77.35.0) but NOT MERGED, and NOT yet clean.** Phase 164.8.6 plan 08 replaced the per-shape exemptions with ONE whole-token measure (`tokenMeasure`). ⛔ A code review then found the new measure fires the credential rule — whose remedy is "treat the named secret as EXPOSED and rotate it" — on credential-free PROSE assembled by `concat_ws` / `format` / `||`, hourly, against production. Reproduced independently. Under fix. **Do not tick until merged and the false-positive class is closed with green-corpus rows that exercise the new mechanism** (the original zero-FP evidence was vacuous for it: zero of the 14 committed manifest commands contain `||` or any builder callee).
   ↳ ORIGINAL ENTRY: Five credential shapes the prod-prober's hygiene rules still
