@@ -659,6 +659,23 @@ function deriveEmitterSites(
  * `VENUE_WIRE_CODES_WITHOUT_VERDICT` in `wizardErrors.ts` for why a verdict
  * would be false-by-construction.
  *
+ * ⭐ 39th ARRIVAL, 2026-09-16 (Phase 164.5.1 plan 02): `KILL_SWITCH_UNAVAILABLE`.
+ * The match engine's fail-CLOSED status — `cron_recompute()` returns it when
+ * `_engine_is_enabled` exhausts its retry budget against an unreadable kill
+ * switch and DECLINES to score rather than failing open (criterion 8). It is
+ * dispositioned as an EXEMPTION, not a verdict row: MEASURED the same day, the
+ * string occurs ZERO times in `src/`, and the only TypeScript consumer of that
+ * endpoint (`src/app/api/cron/flag-monitor/route.ts`) alerts on status codes
+ * and renders no wizard error — so a verdict row could never fire. See
+ * `VENUE_WIRE_CODES_WITHOUT_VERDICT` in `wizardErrors.ts` for why reusing
+ * `SERVICE_UNAVAILABLE_RETRY` or `SERVICE_UNREACHABLE` would be
+ * false-by-construction.
+ * ⭐ OBSERVED, NOT ASSUMED: the member-for-member assertion below was seen RED
+ * on this arrival before this line was added, and the disposition assertion
+ * was seen RED before the exemption entry was added.
+ * `DERIVED_FLOOR` moves 22 → 23 by this file's own stated rule: 0.6 × 39 = 23.4,
+ * floored to 23.
+ *
  * ⭐ This roster is HAND-TYPED for exactly this moment. The arrival reddened
  * the member-for-member assertion below BEFORE this line was added — observed,
  * not assumed — which is what makes the green that follows a design and not an
@@ -694,6 +711,7 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   "KEK_UNAVAILABLE",
   "KEY_MISSING_EXCHANGE",
   "KEY_UNDECRYPTABLE",
+  "KILL_SWITCH_UNAVAILABLE",
   "MISSING_SCOPE",
   "MT5_GATEWAY_UNCONFIGURED",
   "MT5_GATEWAY_UNREACHABLE",
@@ -725,6 +743,9 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * reads as protection while measuring nothing, and `it.each([])` is zero cases,
  * which is a passing suite.
  *
+ * 22 → 23 (2026-09-16, Phase 164.5.1): 0.6 × 39 measured codes = 23.4,
+ * floored to 23 — same rule, one new arrival.
+ *
  * 10 → 22 (2026-08-14, Phase 153.7-01 / WIZFORM-02). The arithmetic, stated so
  * the next re-cut does not have to guess the rule: 0.6 × 37 measured codes =
  * 22.2, floored to 22. ⛔ NEVER `derived.size`, and never `0.6 * derived.size`
@@ -737,7 +758,7 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * absence assertion in this file — the hand-typed roster above, the reach pin
  * and the both-shapes assertion are what stand against it.
  */
-const DERIVED_FLOOR = 22;
+const DERIVED_FLOOR = 23;
 
 /**
  * ⭐ THE REACH PIN — hand-typed, because today nothing else asserts WHERE the

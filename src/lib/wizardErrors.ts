@@ -4431,6 +4431,26 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
 export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
   new Map([
     [
+      "KILL_SWITCH_UNAVAILABLE",
+      "NOT a key-validation code at all — it is the match engine's fail-CLOSED " +
+        "status, returned by `cron_recompute()` (analytics-service/routers/match.py) " +
+        "when `_engine_is_enabled` exhausts its retry budget against an unreadable " +
+        "kill switch and DECLINES to score rather than failing open. Phase 164.5.1 " +
+        "criterion 8. MEASURED 2026-09-16, which is why there is no verdict row: " +
+        "the string occurs ZERO times anywhere in `src/`; the only TypeScript " +
+        "consumer of that endpoint is `src/app/api/cron/flag-monitor/route.ts`, a " +
+        "cron/admin route that reads status codes for Sentry alerting and renders " +
+        "no wizard error (zero `wizardErrors` references). It never reaches a user " +
+        "surface, so a verdict row would be a row that can never fire. " +
+        "\u26d4 Do NOT reuse `SERVICE_UNAVAILABLE_RETRY` (its copy says the request " +
+        "was never sent \u2014 false here, the read WAS attempted) or " +
+        "`SERVICE_UNREACHABLE` (its copy says we cannot tell whether it was " +
+        "processed \u2014 false here, we know nothing was scored). Both are the " +
+        "match-the-fact-not-the-name trap this file documents at MT5_GATEWAY_UNREACHABLE. " +
+        "If this status ever DOES reach a user surface, it earns a new member " +
+        "stating the actual fact, not one of those two.",
+    ],
+    [
       "UNSUPPORTED_EXCHANGE",
       "Detail: 'Unsupported exchange for permission verification.' Reaches the " +
         "cascade's terminal UNKNOWN/500, and that is the HONEST answer: it is " +
