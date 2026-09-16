@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 42
+open_count: 41
 waived_count: 0
-fixed_count: 11
+fixed_count: 12
 total_count: 53
-last_updated: 2026-09-15T21:45:24.211Z
+last_updated: 2026-09-16T07:20:33.058Z
 ---
 
 # Broken Windows Ledger
@@ -65,8 +65,8 @@ last_updated: 2026-09-15T21:45:24.211Z
 | 48 | 164.5 | unrun-verify | scripts/local-stack/run.sh |  | run.sh up boots and loads the committed baseline on Supabase CLI 2.84.2 (measured 2026-09-07, macOS, 4 legs exit 0), but NOTHING in .github/workflows/ invokes the lane and the CI-pinned CLI 2.98.2 has never started this stack or loaded this dump. Criterion 1 is proven on one developer box only. | open |  | 2026-09-07T19:02:48.367Z |  |
 | 49 | 164.5 | unrun-verify | .github/workflows/sql-function-snapshot.yml |  | The two new baseline co-edit gate steps have never been executed by GitHub Actions. actionlint 1.7.12 (exit 0) and a js-yaml parse prove the file is valid and the step order is intended; neither proves the snapshot-drift job runs green on ubuntu. A SHA-bound run is owed at PR time. | open |  | 2026-09-07T19:04:26.108Z |  |
 | 50 | 164.5 | unrun-verify | .planning/phases/164.5-baseline-snapshot-the-committed-prod-schema-baseline-becomes/164.5-03-PLAN.md |  | 164.5-03: full serialized vitest run NOT executed — the plan scopes it to before the wave merges and the box is shared with concurrent wave-1 executors (contention fakes regressions). Targeted, contracts/ and all ci.yml-reading suites were run instead. | open |  | 2026-09-07T19:07:20.161Z |  |
-| 51 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_episodes.py |  | A4 POST-DEPLOY: no Python has ever written to public.cron_runs. READ THE FIRST ROW BACK on the first deploy rather than assuming the service-role INSERT lands; the table+policy pair is the untested surface, and a failure loses criterion 1's lifetime dataset while the heal itself keeps working. | open |  | 2026-09-15T21:45:02.884Z |  |
-| 52 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_monitor.py |  | A2 POST-DEPLOY: the tick opens a FRESH rpyc client per tick and closes it in a finally. At the 600s default that is ~144 connections/day against a gateway container already at a three-digit thread counter. Read the gateway's rpyc thread counter across two prober runs several hours apart. A4 fails semi-loudly; this would degrade the gateway SILENTLY over days. | open |  | 2026-09-15T21:45:24.003Z |  |
+| 51 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_episodes.py |  | A4 POST-DEPLOY: no Python has ever written to public.cron_runs. READ THE FIRST ROW BACK on the first deploy rather than assuming the service-role INSERT lands; the table+policy pair is the untested surface, and a failure loses criterion 1's lifetime dataset while the heal itself keeps working. | fixed |  | 2026-09-15T21:45:02.884Z | 2026-09-16T07:20:33.058Z |
+| 52 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_monitor.py |  | A2 POST-DEPLOY: the tick opens a FRESH rpyc client per tick and closes it in a finally. At the 600s default that is ~144 connections/day against a gateway container already at a three-digit thread counter. CRITERION CORRECTED 2026-09-16, and the original could never pass: it asked that the thread counter NOT climb monotonically with tick count, but CPython names threads from a globally monotonic counter and rpyc ThreadedServer spawns one thread per connection, so the number climbs once per connection whether or not threads are reaped. The real falsifier is welcome versus goodbye in the mt5-gateway log, scoped to the CURRENT process (everything after the last server-started line): a leak is welcome running ahead of goodbye with the gap GROWING across two readings hours apart. A container restart resets the counter to Thread-1 and invalidates the pair, so re-scope before comparing. BASELINE 2026-09-16T06:50Z, pre-keepalive: max Thread-27, welcome 27, goodbye 27, 0 unclosed, ~36 conn/day over 18h. READING 2 at 07:17Z: Thread-30, welcome 30, goodbye 30, 0 unclosed; the +3 equals boot heal plus two ticks, which confirms the 600s cadence but is far too small a sample to clear a slow leak. The hours-apart reading still stands. A4 fails semi-loudly; this would degrade the gateway SILENTLY over days. | open |  | 2026-09-15T21:45:24.003Z |  |
 | 53 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_monitor.py |  | Criterion 2 POST-DEPLOY cross-check: reconcile this detector's recorded episodes against the INDEPENDENT hourly prod-prober, so the new instrument is not the only witness to its own claims. | open |  | 2026-09-15T21:45:24.211Z |  |
 
 ````json
@@ -678,10 +678,10 @@ last_updated: 2026-09-15T21:45:24.211Z
     "file": "analytics-service/services/mt5_session_episodes.py",
     "line": null,
     "description": "A4 POST-DEPLOY: no Python has ever written to public.cron_runs. READ THE FIRST ROW BACK on the first deploy rather than assuming the service-role INSERT lands; the table+policy pair is the untested surface, and a failure loses criterion 1's lifetime dataset while the heal itself keeps working.",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-09-15T21:45:02.884Z",
-    "resolved_at": null
+    "resolved_at": "2026-09-16T07:20:33.058Z"
   },
   {
     "id": 52,
@@ -689,7 +689,7 @@ last_updated: 2026-09-15T21:45:24.211Z
     "phase": "164.6.4",
     "file": "analytics-service/services/mt5_session_monitor.py",
     "line": null,
-    "description": "A2 POST-DEPLOY: the tick opens a FRESH rpyc client per tick and closes it in a finally. At the 600s default that is ~144 connections/day against a gateway container already at a three-digit thread counter. Read the gateway's rpyc thread counter across two prober runs several hours apart. A4 fails semi-loudly; this would degrade the gateway SILENTLY over days.",
+    "description": "A2 POST-DEPLOY: the tick opens a FRESH rpyc client per tick and closes it in a finally. At the 600s default that is ~144 connections/day against a gateway container already at a three-digit thread counter. CRITERION CORRECTED 2026-09-16, and the original could never pass: it asked that the thread counter NOT climb monotonically with tick count, but CPython names threads from a globally monotonic counter and rpyc ThreadedServer spawns one thread per connection, so the number climbs once per connection whether or not threads are reaped. The real falsifier is welcome versus goodbye in the mt5-gateway log, scoped to the CURRENT process (everything after the last server-started line): a leak is welcome running ahead of goodbye with the gap GROWING across two readings hours apart. A container restart resets the counter to Thread-1 and invalidates the pair, so re-scope before comparing. BASELINE 2026-09-16T06:50Z, pre-keepalive: max Thread-27, welcome 27, goodbye 27, 0 unclosed, ~36 conn/day over 18h. READING 2 at 07:17Z: Thread-30, welcome 30, goodbye 30, 0 unclosed; the +3 equals boot heal plus two ticks, which confirms the 600s cadence but is far too small a sample to clear a slow leak. The hours-apart reading still stands. A4 fails semi-loudly; this would degrade the gateway SILENTLY over days.",
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-15T21:45:24.003Z",
