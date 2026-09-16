@@ -5064,7 +5064,7 @@ class TestCronPassAgeObservability:
             return None
 
         monkeypatch.setattr(
-            match_mod, "_read_cron_cursor_updated_at", _previous_wrap_long_ago
+            match_mod, "_read_pass_started_at", _previous_wrap_long_ago
         )
         monkeypatch.setattr(match_mod, "_write_cron_cursor", _noop_write)
 
@@ -5092,7 +5092,7 @@ class TestCronPassAgeObservability:
             return None
 
         monkeypatch.setattr(
-            match_mod, "_read_cron_cursor_updated_at", _previous_wrap_recent
+            match_mod, "_read_pass_started_at", _previous_wrap_recent
         )
         monkeypatch.setattr(match_mod, "_write_cron_cursor", _noop_write)
 
@@ -5433,3 +5433,150 @@ def _synthetic_cron():
         assert "ok" in bullet, "precondition: the bare substring IS present"
         assert "`ok_undocumented`" not in bullet
         assert "ok_undocumented" not in bullet
+
+
+# ---------------------------------------------------------------------------
+# WR-12 round-2 REGRESSION: the pass-duration instrument must measure the
+# PASS, not the gap between the last two ticks.
+#
+# ⛔ Why this test exists and why it is shaped this way. The original WR-12
+# tests monkeypatched `_read_pass_started_at` (then named
+# `_read_cron_cursor_updated_at`) and asserted only the formatting of the two
+# log branches — so they exercised the BRANCHES and never the QUANTITY. The
+# instrument was reading the cursor row's own `updated_at`, which
+# `_write_cron_cursor` rewrites at every partial batch boundary, so the
+# measured interval was ~one tick and the WARNING was unreachable in the
+# batched regime. Both round-2 reviewers found it independently. This test
+# drives the REAL reader and writer against a fake `system_settings` across a
+# partial -> partial -> wrap sequence, which is the only shape that can tell
+# "time since last tick" from "time since the pass began".
+# ---------------------------------------------------------------------------
+class _FakeSystemSettings:
+    """A two-row `system_settings` stand-in supporting exactly the chains the
+    cursor and pass-start helpers use. Rows are shared and observable, so a
+    test can assert WHICH key a write landed on."""
+
+    def __init__(self, rows: dict[str, dict[str, Any]]):
+        self._rows = rows
+        self._key: str | None = None
+
+    def select(self, *_a, **_k):
+        return self
+
+    def eq(self, _col, value):
+        self._key = value
+        return self
+
+    def maybe_single(self):
+        return self
+
+    def upsert(self, payload, **_k):
+        self._rows[payload["key"]] = dict(payload)
+        self._pending = [dict(payload)]
+        return self
+
+    def execute(self):
+        if getattr(self, "_pending", None) is not None:
+            out, self._pending = self._pending, None
+            return MagicMock(data=out)
+        return MagicMock(data=self._rows.get(self._key))
+
+
+@pytest.mark.asyncio
+async def test_pass_duration_measures_the_pass_not_the_last_tick_gap(monkeypatch):
+    """A 3-tick pass whose ticks are 1h apart must report ~2h, not ~1h.
+
+    Pre-fix this asserted 1.0h (the gap to the previous PARTIAL write) and the
+    WARNING could never fire. `RECOMPUTE_MIN_AGE_HOURS` is patched to 1.5 so a
+    2h pass is genuinely over the bar — the point is the MEASURED VALUE, not
+    the production constant.
+    """
+    from routers import match as m
+
+    rows: dict[str, dict[str, Any]] = {}
+    # ⚠️ Canonical UUIDs, not placeholders: `_read_cron_cursor` validates the
+    # stored value against _UUID_RE and RESTARTS the pass on anything else, so
+    # a non-UUID id would make this test measure a permanently-restarting pass
+    # rather than the quantity under test. (Observed: the guard fired.)
+    ALL = [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+    ]
+
+    def _table(name):
+        if name == "profiles":
+            return _FakeProfilesQuery(ALL)
+        if name == "system_settings":
+            return _FakeSystemSettings(rows)
+        return MagicMock()
+
+    sb = MagicMock(); sb.table.side_effect = _table
+    monkeypatch.setattr(m, "get_supabase", lambda: sb)
+
+    async def _enabled():
+        return m.KILL_SWITCH_ENABLED
+    monkeypatch.setattr(m, "_engine_is_enabled", _enabled)
+    monkeypatch.setattr(m, "_engine_is_enabled_cached", _enabled)
+    monkeypatch.setattr(
+        m, "_load_candidate_universe",
+        lambda *_a, **_k: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+    )
+
+    async def _no_skip(aid, force):
+        return False
+    monkeypatch.setattr(m, "_should_skip_allocator", _no_skip)
+
+    async def _score(aid, universe):
+        return {}
+    monkeypatch.setattr(m, "_score_one_allocator", _score)
+    monkeypatch.setattr(m, "_retention_sweep", lambda *_a, **_k: 0)
+    # One allocator per tick, so the 3-allocator set takes 3 ticks.
+    monkeypatch.setattr(m, "CRON_BATCH_SIZE", 1)
+    monkeypatch.setattr(m, "CRON_BATCH_BUDGET_S", 3600.0)
+    monkeypatch.setattr(m, "RECOMPUTE_MIN_AGE_HOURS", 1.5)
+
+    # Ticks one hour apart. The pass therefore spans 2h from first to last.
+    base = _dt.datetime(2026, 9, 16, 0, 0, tzinfo=_dt.timezone.utc)
+    clock = {"now": base}
+
+    real_datetime = m.datetime
+
+    class _FrozenDatetime:
+        @staticmethod
+        def now(tz=None):
+            return clock["now"]
+
+        @staticmethod
+        def fromisoformat(v):
+            return real_datetime.fromisoformat(v)
+    monkeypatch.setattr(m, "datetime", _FrozenDatetime)
+
+    caplog_records: list[str] = []
+    monkeypatch.setattr(
+        m.logger, "warning",
+        lambda msg, *a, **k: caplog_records.append(("W", msg % a if a else msg)),
+    )
+    monkeypatch.setattr(
+        m.logger, "info",
+        lambda msg, *a, **k: caplog_records.append(("I", msg % a if a else msg)),
+    )
+
+    for i in range(3):
+        clock["now"] = base + _dt.timedelta(hours=i)
+        await m.cron_recompute()
+
+    pass_lines = [t for t in caplog_records if "full pass" in t[1]]
+    assert pass_lines, f"no pass-duration line was emitted at all: {caplog_records}"
+    kind, line = pass_lines[-1]
+
+    # THE ASSERTION THAT BITES: 2.0h is the pass; 1.0h is the last tick gap.
+    assert "1.0h" not in line, (
+        "the instrument measured the gap to the PREVIOUS TICK (1.0h) instead "
+        f"of the pass duration (2.0h) — this is the WR-12 regression: {line}"
+    )
+    assert "2.0h" in line, f"expected a 2.0h pass duration, got: {line}"
+    assert kind == "W", (
+        "a 2.0h pass against a 1.5h freshness window must WARN, not reassure — "
+        f"got {kind}: {line}"
+    )

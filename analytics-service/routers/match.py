@@ -2011,6 +2011,22 @@ async def eval_metrics(
 # (measured read-only on PROD), not the 120s the phase had assumed.
 # ---------------------------------------------------------------------------
 MATCH_ENGINE_CURSOR_KEY = "match_engine_cron_cursor"
+# ⛔ A SECOND key, and the reason is a defect this phase shipped and then caught.
+# WR-12's pass-duration observable originally read the CURSOR row's
+# `updated_at`, calling it "the moment the previous pass ended". That is false
+# for every multi-tick pass: `_write_cron_cursor` stamps `updated_at` on EVERY
+# call, including at each partial batch boundary, so at wrap time the column
+# held the PREVIOUS TICK's timestamp. `now() - updated_at` was therefore ~one
+# tick interval, never the pass duration — the WARNING could not fire in the
+# batched regime, and the else-branch printed a REASSURING but false all-clear
+# ("full pass completed in 1.0h") for a pass that had really taken 50h. Found
+# independently by both round-2 reviewers, confidence 90.
+# ⛔ The obvious fix — stop stamping `updated_at` on the partial path — is
+# WRONG and would break a sibling instrument: `docs/runbooks/match-engine.md`'s
+# batching alarm REQUIRES that column to move every tick ("Expected: updated_at
+# within one tick interval"). One column cannot mean both "last touched" and
+# "last wrapped". So the pass start gets its own key, written ONCE per pass.
+MATCH_ENGINE_PASS_START_KEY = "match_engine_cron_pass_started_at"
 
 
 def _bounded_env(name: str, default: float, low: float, high: float) -> float:
@@ -2181,20 +2197,19 @@ async def _write_cron_cursor(value: str | None) -> None:
         )
 
 
-async def _read_cron_cursor_updated_at() -> datetime | None:
-    """Read the cursor row's `updated_at` — the moment the PREVIOUS pass ended.
+async def _read_pass_started_at() -> datetime | None:
+    """Read when the CURRENT pass began — a value written once per pass.
 
-    Called only on the wrap path (once per full pass, never per allocator),
-    to give WR-12 an observable: `now() - updated_at` at the moment the
-    cursor wraps IS the duration of the pass that just finished. Before
-    batching, the hourly cron walked every allocator each tick, so an
-    allocator crossing RECOMPUTE_MIN_AGE_HOURS was rescored within the hour.
-    A batched pass takes ceil(N / effective_slice) ticks, and nothing in the
-    engine measures that — so a pass silently drifting past the freshness
-    window the skip logic treats as the SLA had no signal at all.
+    ⛔ Deliberately NOT the cursor row's `updated_at`. That column is
+    rewritten at every partial batch boundary, so reading it here measured
+    the gap between the last two TICKS and reported it as the pass duration.
+    See MATCH_ENGINE_PASS_START_KEY for the full record.
 
-    Purely diagnostic: every failure is swallowed (returning None) because
-    an observability read must never be able to fail a cron tick.
+    Purely diagnostic: a failure must never be able to fail a cron tick, so
+    everything is caught. ⚠️ It is caught but NOT silent — a read that keeps
+    failing would otherwise be indistinguishable from a genuine first pass,
+    and an operator watching for the pass-duration line would see the same
+    nothing in both cases.
     """
     try:
         supabase = get_supabase()
@@ -2202,18 +2217,63 @@ async def _read_cron_cursor_updated_at() -> datetime | None:
         def _read() -> Any:
             return (
                 supabase.table("system_settings")
-                .select("updated_at")
-                .eq("key", MATCH_ENGINE_CURSOR_KEY)
+                .select("value")
+                .eq("key", MATCH_ENGINE_PASS_START_KEY)
                 .maybe_single()
                 .execute()
             )
 
         row = one(await db_execute(_read))
-        if not row or not row.get("updated_at"):
+        if not row or not row.get("value"):
+            # The genuine no-row case: the first pass after deploy, or right
+            # after the key was cleared. Silent on purpose — there is nothing
+            # wrong and nothing to measure yet.
             return None
-        return datetime.fromisoformat(str(row["updated_at"]).replace("Z", "+00:00"))
-    except Exception:
+        return datetime.fromisoformat(str(row["value"]).replace("Z", "+00:00"))
+    except Exception as err:
+        logger.warning(
+            "match_engine cron: pass-start read failed (%s: %s) — this tick's "
+            "pass-duration line will be MISSING, which is NOT the same as a "
+            "healthy pass. If it repeats, the WR-12 freshness instrument is "
+            "dead rather than quiet.",
+            type(err).__name__, err,
+        )
         return None
+
+
+async def _write_pass_started_at() -> None:
+    """Stamp the start of a fresh pass. Called ONCE, on the tick that begins
+    one (cursor absent or wrapped), never at a batch boundary.
+
+    Diagnostic-only, like its reader: a failure here costs the next wrap its
+    duration line and nothing else, so it must never fail the tick.
+    """
+    try:
+        supabase = get_supabase()
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        def _write() -> Any:
+            return (
+                supabase.table("system_settings")
+                .upsert(
+                    {
+                        "key": MATCH_ENGINE_PASS_START_KEY,
+                        "value": now_iso,
+                        "updated_at": now_iso,
+                    },
+                    on_conflict="key",
+                )
+                .execute()
+            )
+
+        await db_execute(_write)
+    except Exception as err:
+        logger.warning(
+            "match_engine cron: could not stamp the pass start (%s: %s) — the "
+            "next wrap will report no duration. Correctness is unaffected; the "
+            "WR-12 instrument is.",
+            type(err).__name__, err,
+        )
 
 
 async def _wrap_cron_cursor(*, allocators_handled: int) -> None:
@@ -2225,12 +2285,12 @@ async def _wrap_cron_cursor(*, allocators_handled: int) -> None:
     LONGER than it means batches routinely age past the threshold the skip
     logic assumes they never exceed.
     """
-    _previous_wrap_at = await _read_cron_cursor_updated_at()
+    _pass_started_at = await _read_pass_started_at()
     await _write_cron_cursor(None)
-    if _previous_wrap_at is None:
+    if _pass_started_at is None:
         return
     _pass_hours = (
-        datetime.now(timezone.utc) - _previous_wrap_at
+        datetime.now(timezone.utc) - _pass_started_at
     ).total_seconds() / 3600.0
     if _pass_hours > RECOMPUTE_MIN_AGE_HOURS:
         logger.warning(
@@ -2331,6 +2391,16 @@ async def cron_recompute() -> dict[str, Any]:
             retry_after=RETRY_AFTER_SECONDS["supabase"],
             detail="batching cursor read temporarily unavailable — please retry",
         ) from err
+
+    # WR-12 / round-2 regression fix: a NULL cursor means this tick BEGINS a
+    # pass — either the first one after deploy, or the one after a wrap. That
+    # is the only moment a pass start exists, so it is the only moment the
+    # stamp is written. Writing it anywhere else (in particular at a batch
+    # boundary, which is what reading the cursor row's own `updated_at`
+    # effectively did) collapses the measured interval to one tick and makes
+    # the freshness WARNING unreachable.
+    if cursor is None:
+        await _write_pass_started_at()
 
     supabase = get_supabase()
 

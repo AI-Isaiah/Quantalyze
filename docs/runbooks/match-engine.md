@@ -110,6 +110,16 @@ performing its whole unit of work inside one gateway-bounded request.
     moving. Ticks are firing and re-reading the same slice without progressing past it.
   - A row that is ABSENT entirely is not an alarm: the next tick starts a fresh pass from the
     beginning and writes the row again.
+- ⚠️ **A SIBLING key shares this table and is NOT the cursor:**
+  `system_settings.key = 'match_engine_cron_pass_started_at'` holds the ISO timestamp at which the
+  CURRENT pass began. It is written ONCE per pass (on the tick that starts one) and read once (at
+  the wrap), solely to log how long the pass took against the freshness window. ⛔ Do NOT use it as
+  a liveness signal and do NOT alarm on it — it is deliberately stale for the whole duration of a
+  pass, which is exactly what makes it useful. The cursor row is the LIVENESS instrument; this one
+  is the DURATION instrument. It exists because reading the cursor row's own `updated_at` for that
+  purpose measured the gap between the last two TICKS and reported it as the pass duration — the
+  WARNING then could not fire and the engine logged a false all-clear instead (round-2 review,
+  164.5.1).
 - The cursor lives in `system_settings.key = 'match_engine_cron_cursor'`.
   It is ENGINE-INTERNAL BOOKKEEPING — an operator should not hand-edit this
   row except to deliberately restart a pass (setting `value` to the empty
