@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 43
+open_count: 44
 waived_count: 0
 fixed_count: 12
-total_count: 55
-last_updated: 2026-09-16T18:05:09.913Z
+total_count: 56
+last_updated: 2026-09-16T19:13:36.708Z
 ---
 
 # Broken Windows Ledger
@@ -70,6 +70,7 @@ last_updated: 2026-09-16T18:05:09.913Z
 | 53 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_monitor.py |  | Criterion 2 POST-DEPLOY cross-check: reconcile this detector's recorded episodes against the INDEPENDENT hourly prod-prober, so the new instrument is not the only witness to its own claims. | open |  | 2026-09-15T21:45:24.211Z |  |
 | 54 | 164.5.1 | deviation | analytics-service/tests/test_match_router.py |  | pytest-timeout plugin absent from project deps; substituted OS-level timeout wrapper for task 3 full-suite verify (--timeout=600 flag) | open |  | 2026-09-16T16:36:49.788Z |  |
 | 55 | 164.5.1 | deviation | .planning/config.json |  | parallelization:true in .planning/config.json was NOT the effective value for phase 164.5.1 — every wave ran SEQUENTIALLY, and the reason GSD gave for it is MEASURABLY FALSE. `worktree base-check` returned shouldDegrade:true / baseref-head-ignored-by-harness, asserting the harness forks worktrees from origin/HEAD (main at de66d1b0, 27 commits behind). MEASURED 2026-09-16 on Claude Code 2.1.265 by spawning a throwaway isolation:"worktree" agent: CLAUDE_BASE == 4bd9028f == the orchestrator's own HEAD (0 commits distance), the phase PLAN.md files were PRESENT in the worktree, and SELF_TEST_SCENARIOS read 81 (the post-plan-04 value) where origin/HEAD still has 80. The harness forks from HEAD; it was fixed upstream in Claude Code 2.1.128 (anthropics/claude-code#27134 -> #54940). GSD's degrade rests on the hardcoded line `headIgnoredByHarness = deps?.effectiveBaseRef === 'head'` in bin/lib/worktree-base-ref.cjs, which infers the harness's behaviour from the SETTING HAVING A VALUE and never inspects the real fork base. Already filed by us as open-gsd/gsd-core#4588 (opened 2026-09-09, labels bug + confirmed-bug, OPEN); this entry is a fresh reproduction on 2.1.265. Note the loop #4588 records: GSD's own `worktree apply-base-ref` writes worktree.baseRef:"head" into project-local .claude/settings.local.json, and that is exactly the layer the evaluator treats as proof the harness ignores it — applying the documented mitigation is what selects the degrade. The wave labels in this phase remain CORRECT as dependency statements; they were never a concurrency guarantee. INDEPENDENT of all this and still true: analytics-service/.venv is gitignored, so it is absent in any worktree and the dead pytest path exits 0 through an echo (false green) — plans 02/05/06 belonged on the main checkout regardless. Only plan 07 (vitest-only) could have run isolated in parallel; not taken, to avoid running an untested merge-back path mid-phase across the 81->82 renumber. Do NOT read wave:2 in this phase as evidence that 05/06/07 ran concurrently. | open |  | 2026-09-16T18:05:09.913Z |  |
+| 56 | 164.5.1 | unrun-verify | src/__tests__/contracts/analytics-deploy-tree-compare.contract.test.ts, src/__tests__/lint-sql-gates.test.ts, src/__tests__/verify-plan-anchors.test.ts, src/lib/seam-venue-vocabulary.invariant.test.ts |  | plan 164.5.1-07: full-suite npx vitest run is not green at HEAD due to 4 pre-existing, unrelated failures (network-dependent, timeout-sensitive, stale plan anchor, missing KILL_SWITCH_UNAVAILABLE TS disposition) — see phase deferred-items.md | open |  | 2026-09-16T19:13:36.708Z |  |
 
 ````json
 [
@@ -731,6 +732,18 @@ last_updated: 2026-09-16T18:05:09.913Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-16T18:05:09.913Z",
+    "resolved_at": null
+  },
+  {
+    "id": 56,
+    "kind": "unrun-verify",
+    "phase": "164.5.1",
+    "file": "src/__tests__/contracts/analytics-deploy-tree-compare.contract.test.ts, src/__tests__/lint-sql-gates.test.ts, src/__tests__/verify-plan-anchors.test.ts, src/lib/seam-venue-vocabulary.invariant.test.ts",
+    "line": null,
+    "description": "plan 164.5.1-07: full-suite npx vitest run is not green at HEAD due to 4 pre-existing, unrelated failures (network-dependent, timeout-sensitive, stale plan anchor, missing KILL_SWITCH_UNAVAILABLE TS disposition) — see phase deferred-items.md",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-16T19:13:36.708Z",
     "resolved_at": null
   }
 ]
