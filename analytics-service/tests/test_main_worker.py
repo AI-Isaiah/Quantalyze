@@ -19,6 +19,7 @@ import json
 import logging
 import pathlib
 import re
+import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1721,6 +1722,253 @@ class TestClaimRpcFallback:
         )
         assert main_worker._FALLBACK_CLAIM_RPC is False, (
             "a successful re-probe must clear the latch"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Gateway-timeout retry seam (Phase 164.5.1 plan 05 /
+# [164.5.1-GATEWAY-CEILING-INVERSION]) — `_claim_priority` (dispatch_tick)
+# and `_reset` (watchdog_tick) both route through services.db's
+# `db_read_with_retry` instead of the fail-fast `db_execute`. These tests
+# prove the retry is NARROW (never fires on the 42883 latch predicate), that
+# exhaustion preserves the ORIGINAL exception's identity (the bare-re-raise
+# contract `db_read_with_retry` documents), and that the permanent
+# `_FALLBACK_CLAIM_RPC` latch cannot be set by an availability failure.
+# `pytest -k gateway_timeout` selects this class alongside plan 02's
+# `TestGatewayTimeoutCalibration` (tests/test_match_router.py).
+# ---------------------------------------------------------------------------
+
+
+def _make_worker_api_error(code: str | int):
+    """A postgrest.exceptions.APIError carrying `code` — the real shape the
+    library constructs (`{message, code, hint, details}` dict), not a bare
+    object with `.code` bolted on. Mirrors tests/test_match_router.py's
+    `_make_api_error` (same library, same predicate); not imported across
+    files so this test file's fixtures stay self-contained."""
+    from postgrest.exceptions import APIError
+
+    return APIError(
+        {"message": "JSON could not be generated", "code": code, "hint": None, "details": None}
+    )
+
+
+class TestWorkerGatewayTimeoutRetry:
+    """`_claim_priority` (dispatch_tick) and `_reset` (watchdog_tick) both
+    consume `db_read_with_retry` (plan 02's seam) instead of the fail-fast
+    `db_execute`. A gateway-shaped 504 is retried up to DB_READ_MAX_RETRIES
+    times; a structured SQLSTATE 42883 is NOT gateway-shaped and must never
+    be retried — it propagates on the first attempt, unchanged, straight
+    into the claim site's own 42883 classification and latch."""
+
+    def setup_method(self) -> None:
+        # Same module-wide latch reset as TestClaimRpcFallback — necessary
+        # because _FALLBACK_CLAIM_RPC is process-wide state that would
+        # otherwise leak across tests in this class and its siblings.
+        main_worker._FALLBACK_CLAIM_RPC = False
+        main_worker._FALLBACK_LATCHED_AT = 0.0
+
+    @pytest.mark.asyncio
+    async def test_claim_site_retries_gateway_timeout_then_succeeds(
+        self, monkeypatch
+    ) -> None:
+        """Two gateway-shaped 504s then a success at the priority claim RPC:
+        exactly one claim result returns, the legacy fallback is NEVER
+        reached (the seam absorbs the failure before dispatch_tick's own
+        except arm ever sees an exception), and the permanent latch stays
+        False."""
+        monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+        gateway_exc = _make_worker_api_error("504")
+        mock_supabase = MagicMock()
+        priority_chain = MagicMock()
+        priority_chain.execute.side_effect = [gateway_exc, gateway_exc, MagicMock(data=[])]
+        legacy_chain = MagicMock()
+        legacy_chain.execute.return_value = MagicMock(data=[])
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return priority_chain
+            return legacy_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            await dispatch_tick("worker-gateway-timeout-retry")
+
+        assert priority_chain.execute.call_count == 3, (
+            "db_read_with_retry must attempt the priority claim RPC "
+            "DB_READ_MAX_RETRIES=3 times (2 failures + 1 success)"
+        )
+        called_rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+        assert "claim_compute_jobs" not in called_rpc_names, (
+            "a gateway timeout absorbed by the retry seam must never reach "
+            f"the legacy-claim fallback; got {called_rpc_names}"
+        )
+        assert main_worker._FALLBACK_CLAIM_RPC is False, (
+            "a gateway timeout must never latch the legacy-claim fallback"
+        )
+
+    @pytest.mark.asyncio
+    async def test_claim_site_exhausted_gateway_timeout_preserves_exception_identity(
+        self, monkeypatch
+    ) -> None:
+        """Exhausting all DB_READ_MAX_RETRIES attempts on a gateway-shaped
+        504 must propagate the ORIGINAL exception object (identity, not just
+        type) out of dispatch_tick unchanged — a re-wrap would silently
+        break every downstream classification the claim site's except arm
+        performs. The latch must stay False (an availability failure is not
+        a 42883)."""
+        monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+        gateway_exc = _make_worker_api_error("504")
+        mock_supabase = MagicMock()
+        priority_chain = MagicMock()
+        priority_chain.execute.side_effect = gateway_exc
+        legacy_chain = MagicMock()
+        legacy_chain.execute.return_value = MagicMock(data=[])
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return priority_chain
+            return legacy_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        from postgrest.exceptions import APIError
+
+        start = time.monotonic()
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            with pytest.raises(APIError) as excinfo:
+                await dispatch_tick("worker-gateway-timeout-exhausted")
+        elapsed = time.monotonic() - start
+
+        assert excinfo.value is gateway_exc, (
+            "the exhausted exception reaching the claim site's except arm "
+            "must be the SAME object db_read_with_retry raised — a bare "
+            "re-raise, not a re-wrap"
+        )
+        assert priority_chain.execute.call_count == 3, (
+            "db_read_with_retry must attempt exactly DB_READ_MAX_RETRIES=3 "
+            "times before giving up"
+        )
+        assert main_worker._FALLBACK_CLAIM_RPC is False, (
+            "an exhausted gateway timeout must never latch the legacy-claim "
+            "fallback -- it is not a structured 42883"
+        )
+        assert elapsed < 1.0, (
+            "the backoff patch must have applied -- an unpatched retry "
+            "would sleep ~3s across 3 attempts; a >=1s elapsed time means "
+            "the patch silently missed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_claim_site_structured_42883_is_not_retried_as_gateway_timeout(
+        self, monkeypatch
+    ) -> None:
+        """A structured SQLSTATE 42883 is NOT gateway-shaped
+        (`_is_gateway_timeout` returns False for it), so db_read_with_retry
+        must make exactly ONE attempt — a second invocation would prove the
+        retry is not narrow. The latch fires and the legacy fallback runs,
+        byte-identical to the pre-existing 42883 contract."""
+        monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+        undefined_exc = _make_worker_api_error("42883")
+        mock_supabase = MagicMock()
+        priority_chain = MagicMock()
+        priority_chain.execute.side_effect = undefined_exc
+        legacy_chain = MagicMock()
+        legacy_chain.execute.return_value = MagicMock(data=[])
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return priority_chain
+            return legacy_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            await dispatch_tick("worker-42883-no-retry")
+
+        assert priority_chain.execute.call_count == 1, (
+            "a retry would show as a second invocation -- a structured "
+            "42883 is not gateway-shaped and must be attempted exactly once"
+        )
+        assert main_worker._FALLBACK_CLAIM_RPC is True, (
+            "a structured 42883 must still latch the legacy-claim fallback "
+            "exactly as it did before the retry seam existed"
+        )
+        called_rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+        assert "claim_compute_jobs" in called_rpc_names, (
+            "the legacy fallback must still run for a structured 42883"
+        )
+
+    @pytest.mark.asyncio
+    async def test_watchdog_reset_retries_gateway_timeout_then_succeeds(
+        self, monkeypatch, caplog
+    ) -> None:
+        """Two gateway-shaped 504s then a success at the watchdog reset RPC:
+        reset_count is read from the SUCCESSFUL attempt and the WARNING logs
+        the count from that attempt, not a stale/failed one."""
+        monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+        gateway_exc = _make_worker_api_error("504")
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.side_effect = [gateway_exc, gateway_exc, MagicMock(data=5)]
+        mock_supabase.rpc.return_value = chain
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            with caplog.at_level(logging.WARNING):
+                await watchdog_tick()
+
+        assert chain.execute.call_count == 3, (
+            "db_read_with_retry must attempt the reset RPC "
+            "DB_READ_MAX_RETRIES=3 times (2 failures + 1 success)"
+        )
+        assert any(
+            "Watchdog reclaimed 5 stalled jobs" in rec.getMessage()
+            for rec in caplog.records
+        ), "the WARNING must report the count from the SUCCESSFUL retry attempt"
+
+    @pytest.mark.asyncio
+    async def test_watchdog_reset_exhausted_gateway_timeout_propagates(
+        self, monkeypatch
+    ) -> None:
+        """Exhausting all DB_READ_MAX_RETRIES attempts on the watchdog reset
+        RPC propagates the ORIGINAL exception out of watchdog_tick exactly
+        as it does today (unchanged type and identity)."""
+        monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+        gateway_exc = _make_worker_api_error("504")
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.side_effect = gateway_exc
+        mock_supabase.rpc.return_value = chain
+
+        from postgrest.exceptions import APIError
+
+        start = time.monotonic()
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            with pytest.raises(APIError) as excinfo:
+                await watchdog_tick()
+        elapsed = time.monotonic() - start
+
+        assert excinfo.value is gateway_exc, (
+            "the exception propagating out of watchdog_tick must be the "
+            "SAME object db_read_with_retry raised"
+        )
+        assert chain.execute.call_count == 3, (
+            "db_read_with_retry must attempt exactly DB_READ_MAX_RETRIES=3 "
+            "times before giving up"
+        )
+        assert elapsed < 1.0, (
+            "the backoff patch must have applied -- an unpatched retry "
+            "would sleep ~3s across 3 attempts"
         )
 
 
