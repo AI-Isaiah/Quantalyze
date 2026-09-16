@@ -388,14 +388,24 @@ async def _engine_is_enabled_cached() -> str:
     otherwise re-polls and refreshes the cache. The TTL bounds the staleness of
     a mid-run flip to KILL_SWITCH_CACHE_TTL_S seconds.
 
-    Task 2 (Phase 164.5.1) owns the cache's failure contract — whether an
-    exhausted poll invalidates the cache rather than being stored.
+    Fail-closed cache contract (Phase 164.5.1 criterion 8, task 2): the cache
+    NEVER serves a value produced by a failed poll — an exhausted poll
+    (KILL_SWITCH_UNAVAILABLE) INVALIDATES the cache instead of being stored,
+    so a stale prior ENABLED value can never be resurrected by a subsequent
+    outage. Only KILL_SWITCH_ENABLED and KILL_SWITCH_DISABLED are ever
+    written to the cache.
     """
     now = time.monotonic()
     cached_at = _kill_switch_cache.get("at")
     if isinstance(cached_at, float) and (now - cached_at) < KILL_SWITCH_CACHE_TTL_S:
         return str(_kill_switch_cache.get("value", KILL_SWITCH_ENABLED))
     value = await _engine_is_enabled()
+    if value == KILL_SWITCH_UNAVAILABLE:
+        # A failed poll invalidates rather than caches — never serve a value
+        # produced by a failed poll, and never let a stale ENABLED/DISABLED
+        # entry survive an outage.
+        _kill_switch_cache.clear()
+        return KILL_SWITCH_UNAVAILABLE
     _kill_switch_cache["at"] = now
     _kill_switch_cache["value"] = value
     return value
@@ -2076,6 +2086,10 @@ async def cron_recompute() -> dict[str, Any]:
         # so the safety re-check polls fresh every iteration. (The pre-loop gate
         # at the top of cron_recompute still uses the cached accessor — it only
         # seeds the value once and a sub-TTL staleness there is harmless.)
+        # Phase 164.5.1 task 2: the async conversion preserved this property
+        # unchanged — this re-check still calls the UNCACHED accessor and
+        # still polls fresh every iteration; only the CACHED accessor's
+        # failure contract changed (see _engine_is_enabled_cached).
         _mid_run_state = await _engine_is_enabled()
         if _mid_run_state != KILL_SWITCH_ENABLED:
             logger.info(

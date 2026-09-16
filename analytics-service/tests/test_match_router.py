@@ -270,6 +270,117 @@ class TestKillSwitchFailClosed:
 
 
 # ---------------------------------------------------------------------------
+# Criterion 8, task 2 — the TTL cache never serves a value produced by a
+# failed poll (Phase 164.5.1)
+# ---------------------------------------------------------------------------
+
+
+class TestKillSwitchCacheFailClosed:
+    """Task 2: the TTL cache's own failure contract. A poll that exhausts
+    retries must INVALIDATE the cache rather than populate it, so a stale
+    prior ENABLED value can never be resurrected by a subsequent outage."""
+
+    async def test_kill_switch_cache_hit_never_calls_a_failing_poll(self, monkeypatch):
+        """A fresh cache entry within the TTL is served WITHOUT even calling
+        the underlying poll — the cache-hit path must short-circuit before a
+        poll that would fail is ever invoked."""
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        monkeypatch.setattr(match_mod, "KILL_SWITCH_CACHE_TTL_S", 30.0)
+        match_mod._kill_switch_cache["at"] = match_mod.time.monotonic()
+        match_mod._kill_switch_cache["value"] = match_mod.KILL_SWITCH_ENABLED
+
+        async def _would_fail():
+            raise AssertionError("poll must not be called on a cache hit")
+
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _would_fail)
+
+        assert (
+            await match_mod._engine_is_enabled_cached()
+            == match_mod.KILL_SWITCH_ENABLED
+        )
+
+    async def test_kill_switch_cache_exhausted_poll_invalidates_empty_cache(
+        self, monkeypatch
+    ):
+        """After an exhausted poll, the cache is an empty dict and the
+        accessor returns KILL_SWITCH_UNAVAILABLE."""
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        monkeypatch.setattr(match_mod, "KILL_SWITCH_CACHE_TTL_S", 30.0)
+
+        async def _unavailable():
+            return match_mod.KILL_SWITCH_UNAVAILABLE
+
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _unavailable)
+
+        result = await match_mod._engine_is_enabled_cached()
+
+        assert result == match_mod.KILL_SWITCH_UNAVAILABLE
+        assert match_mod._kill_switch_cache == {}, (
+            "an exhausted poll must invalidate the cache, never populate it"
+        )
+
+    async def test_kill_switch_cache_stale_enabled_not_resurrected_by_exhausted_repoll(
+        self, monkeypatch
+    ):
+        """A stale-but-ENABLED cache entry plus an exhausted re-poll must
+        yield KILL_SWITCH_UNAVAILABLE, never the stale KILL_SWITCH_ENABLED —
+        a failed poll must never resurrect a prior success."""
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        monkeypatch.setattr(match_mod, "KILL_SWITCH_CACHE_TTL_S", 30.0)
+        # Seed a STALE entry (older than the TTL) reading ENABLED.
+        match_mod._kill_switch_cache["at"] = match_mod.time.monotonic() - 60.0
+        match_mod._kill_switch_cache["value"] = match_mod.KILL_SWITCH_ENABLED
+
+        async def _unavailable():
+            return match_mod.KILL_SWITCH_UNAVAILABLE
+
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _unavailable)
+
+        result = await match_mod._engine_is_enabled_cached()
+
+        assert result == match_mod.KILL_SWITCH_UNAVAILABLE
+        assert match_mod._kill_switch_cache == {}, (
+            "the stale ENABLED entry must be cleared, not returned, by an "
+            "exhausted re-poll"
+        )
+
+    async def test_kill_switch_cache_repopulates_normally_after_invalidation(
+        self, monkeypatch
+    ):
+        """A successful poll immediately after an exhausted one is cached
+        normally (`at` and `value` present) — the invalidation is not
+        sticky."""
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        monkeypatch.setattr(match_mod, "KILL_SWITCH_CACHE_TTL_S", 30.0)
+
+        poll_results = iter(
+            [match_mod.KILL_SWITCH_UNAVAILABLE, match_mod.KILL_SWITCH_ENABLED]
+        )
+
+        async def _poll():
+            return next(poll_results)
+
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _poll)
+
+        first = await match_mod._engine_is_enabled_cached()
+        assert first == match_mod.KILL_SWITCH_UNAVAILABLE
+        assert match_mod._kill_switch_cache == {}
+
+        second = await match_mod._engine_is_enabled_cached()
+        assert second == match_mod.KILL_SWITCH_ENABLED
+        assert match_mod._kill_switch_cache.get("value") == match_mod.KILL_SWITCH_ENABLED
+        assert isinstance(match_mod._kill_switch_cache.get("at"), float)
+
+
+# ---------------------------------------------------------------------------
 # M-0606 — routers/match.py _records_to_series
 # ---------------------------------------------------------------------------
 
