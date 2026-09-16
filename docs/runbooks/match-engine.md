@@ -25,6 +25,7 @@ implementation plan at `docs/superpowers/plans/2026-04-07-perfect-match-engine.m
 1a-bis. The match-engine cron's mechanism — same correction, same cause:
    - The hourly `match_engine_cron` job no longer resolves anything from `app.*`. PROD's jobid 1 was hand-repaired on 2026-09-01 onto a `DO` block reading the key from `vault.decrypted_secrets`, and the repo now describes that mechanism as `public.match_engine_cron_tick()` in `20260907120000_analytics_service_settings_and_vault_tick.sql` — key from Vault, URL from `public.system_settings`, a loud `RAISE` on either absence.
    - ⚠️ **The LIVE `cron.job` row is not yet pointed at that function.** Repointing it is Phase 164.5 item (7), against the captured `scripts/prod-prober/cron-manifest.json`. Until then the repo and the live row agree in MECHANISM but not in TEXT, and the Phase 164.1 `cron-drift` arm is the instrument that says so. Phase 164.5 item 7 was SPLIT OUT to Phase 164.5.1 CRONREPOINT on 2026-09-07 by founder decision — not renamed, not dropped; see Phase 164.5.1 CRONREPOINT for the live repoint.
+   - ↳ **The procedure that changes it is below, in this same file:** see "## Go-live: repoint `match_engine_cron` + ledger-refresh activation (Phase 164.5.1 Wave B)".
    - ✅ **`[A1]` MEASURED 2026-09-09 on shared TEST — the assumption HELD, and it no longer gates the repoint.** The question was whether a `SECURITY DEFINER` function owned by `postgres` may read the real encrypted `vault.decrypted_secrets` view on a hosted Supabase project. Read in the TEST SQL editor by the founder:
 
      ```sql
@@ -132,6 +133,40 @@ change and its re-capture).
 ⛔ **Do this in ONE sitting, in this order and no other.** Splitting it across sessions or
 re-ordering the steps is exactly the ordering `164.5.1-CONTEXT.md` fixes and the DEFER branch below
 budgets for.
+
+### Decisions this section implements (D1, D2, D3 — settled 2026-09-09, not re-opened here)
+
+These were DECIDED on 2026-09-09 and are transcribed here with the measurement or precedent each
+rests on. They are ANSWERS, not open questions — this section records them, it does not re-derive
+them.
+
+- **D1 — Registration lives in the RUNBOOK, never in a migration.** Basis: the 164.7 rule shipped
+  in `20260907120000` (*"A migration that schedules is a scope violation"*), plus two in-tree
+  precedents already following it — `docs/runbooks/ledger-refresh-go-live.md:412` and
+  `docs/runbooks/flipretry-derived-equity-go-live.md:162`. Step 2 and Step 3's fan-out registration
+  above both follow it.
+- **D2 — what a rebuild-from-migrations produces: NO `match_engine_cron` job at all, plus one loud
+  row.** MEASURED, not assumed: migration `20260408215026` skips scheduling whenever the two
+  `app.*` GUCs (`app.analytics_service_url`, `app.analytics_service_key`) are empty, and they are
+  ALWAYS empty here because setting either one returns `42501: permission denied to set parameter`
+  on this platform (measured on PROD **2026-09-05**). So a rebuilt database has no hourly job and
+  one `cron_runs` row reading `error = 'GUC unset at migration 015'` — the exact string the
+  migration's `RAISE NOTICE` / `INSERT INTO cron_runs` branch writes — and the registration in
+  Step 2 above is what creates the job. This is the runbook convention working **as designed**: the
+  migration fails CLOSED and leaves a trace, not a gap to be patched.
+
+  **The window, named in the exact words this criterion requires:** *from a rebuild until the
+  registration step is run, the hourly recompute does not fire, and `cron_runs` says why.*
+- **D3 — the manifest re-capture (Step 4 above) is a SCRIPT, not hand work.** `captureManifest`
+  (`scripts/prod-prober/run.mjs`) already exists; Step 4 consumes it unchanged rather than
+  describing a hand-edited manifest, which the drift arm's `command_sha256` check would refuse
+  anyway.
+
+⛔ **The losing convention is flagged, not left to disagree silently.** Phase 164.5's old
+criterion 7 said: *"Write ONE forward migration re-scheduling `match_engine_cron` to the achievable
+Vault-backed command."* **D1 supersedes it** — the registration this section performs in Step 2 is
+a runbook-hosted LIVE op, never a migration. The old wording is not deleted anywhere it survives as
+lineage; this is an additive flag, matched by a line in `TODOS.md`'s `[CRON-DRIFT-01]` entry.
 
 ### P0 — which database is this? (BLOCKING, and FIRST in this session — repeat CLAUDE.md's rule)
 

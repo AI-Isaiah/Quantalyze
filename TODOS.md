@@ -3425,6 +3425,14 @@ bracketed form is the entry's unique key and a cross-reference must not create a
 because the repoint trips the `vault-absent` hygiene rule unless the rule, the manifest and the
 row move in the same change.
 
+⛔ **FLAGGED 2026-09-16 (Phase 164.5.1 plan 08, D1) — the old repoint convention is SUPERSEDED, not
+merely superseded implicitly.** Phase 164.5 item 7's old wording — *"Write ONE forward migration
+re-scheduling `match_engine_cron` to the achievable Vault-backed command"* — is REPLACED by D1: the
+repoint registration lives in the RUNBOOK (`docs/runbooks/match-engine.md` § "Go-live: repoint
+`match_engine_cron` + ledger-refresh activation"), never in a migration. The old wording is not
+deleted anywhere it survives as lineage; this is an additive flag so both ledgers agree rather than
+disagreeing silently.
+
 ⭐ **Standing rule until CRON-OBS-01 lands: `cron.job_run_details.status = 'succeeded'` is NOT
 evidence that a pg_net-based job worked.** Read `net._http_response`.
 
