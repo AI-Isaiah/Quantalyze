@@ -148,7 +148,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 81;
+export const SELF_TEST_SCENARIOS = 82;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -2120,6 +2120,56 @@ export async function selfTest() {
         expect(
           r.defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:match_engine_cron"),
           "AND the PROD credential is STILL reported — a HAND-EDITED oracle is not an off switch either, which is the exact regression that reverted the first repair",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("HOIST: the PROD credential scan fires with the oracle STALE (normalization superseded)");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ [164.5.1-07] THE FIFTH `invalid()`-ADJACENT STATE, AND THE ONE THAT
+    // ACTUALLY FIRED IN PRODUCTION. `compareManifest` reaches `invalid()` by
+    // several independent routes — absent oracle, schema_version bump,
+    // sha-mismatch/hand-edit — and each is a separate candidate off switch
+    // for the live credential scan. The three HOIST scenarios above cover
+    // absent, schema-bumped and hand-edited; this is the NORMALIZATION
+    // route, the one the 2026-09-11 incident actually took: the committed
+    // manifest still declared `ws-collapse-v1` while this arm's exported
+    // `NORMALIZATION` had moved to `ws-collapse-v2`, so `compareManifest`
+    // performed NO comparison at all for weeks. An HOURLY PRODUCTION PROBE
+    // caught it that day; nothing in CI did until [164.5.1-07]'s contract
+    // test (`src/__tests__/prod-prober-wiring.test.ts`).
+    const prod = loadFixture("cron-drift", "prod-inline-key.json");
+    const man = loadFixture("cron-drift", "manifest-normalization-stale.json");
+    if (!prod.ok || !man.ok) {
+      pass = expect(false, prod.ok ? man.reason : prod.reason) && pass;
+    } else {
+      // ⛔ FIXTURE-INTEGRITY PRECONDITION, hashed from the fixture itself —
+      // not from the control's verdict — following the sha-mismatch
+      // scenario's own shape above. It survives any neuter of the branch
+      // under test and fails only if the fixture stops being stale.
+      const r = await driftRun(prod.data, driftFixturePath("manifest-normalization-stale.json"), quiet);
+      const invalid = r.defects.filter((x) => x.kind === "manifest-invalid");
+      pass =
+        expect(
+          man.data.normalization !== CRON_DRIFT_MOD.NORMALIZATION,
+          `PRECONDITION: the fixture really IS stale (${man.data.normalization} vs ${CRON_DRIFT_MOD.NORMALIZATION}) — a fresh fixture would make this the ordinary path, not a broken-oracle state`,
+        ) &&
+        expect(r.exitCode === 1, `a normalization-stale oracle over dirty rows exits 1 (got ${r.exitCode})`) &&
+        expect(invalid.length === 1, `exactly one manifest-invalid (got ${invalid.length})`) &&
+        expect(
+          String((invalid[0] || {}).detail).includes("ws-collapse-v1"),
+          "naming the superseded normalization value — the NORMALIZATION route, not some other invalidity",
+        ) &&
+        expect(
+          r.defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:match_engine_cron"),
+          "AND the PROD credential is STILL reported — a normalization-stale oracle is not an off switch either",
+        ) &&
+        expect(
+          noDefectOfKind(r.defects, ["cron-drift"]),
+          "and ZERO cron-drift — no comparison happened, so a drift verdict from an uncomparable oracle would be a fabricated measurement",
         ) &&
         pass;
     }
