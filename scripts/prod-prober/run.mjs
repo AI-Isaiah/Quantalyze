@@ -148,7 +148,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 80;
+export const SELF_TEST_SCENARIOS = 81;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -3627,6 +3627,123 @@ export async function selfTest() {
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario("the repoint pre-flight ABORTS on a mismatched manifest (prod-schedule-moved.json: match_engine_cron's schedule) and writes nothing");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ PLAN 04, CRITERION 3. `preflightCronRepoint` is the gate the Wave B
+    // runbook session runs BEFORE the live `cron.schedule`; this scenario is
+    // its own proof, driven through the fixture-injection seam every other
+    // cron-drift scenario uses — never by inspecting the source.
+    const manifestFixturePath = driftFixturePath("manifest.json");
+    const cleanProd = loadFixture("cron-drift", "prod-ok.json");
+    const movedProd = loadFixture("cron-drift", "prod-schedule-moved.json");
+    if (!cleanProd.ok || !movedProd.ok) {
+      pass = expect(false, cleanProd.ok ? movedProd.reason : cleanProd.reason) && pass;
+    } else {
+      const digest = () => CRON_DRIFT_MOD.sha256Hex(readFileSync(manifestFixturePath, "utf8"));
+      const digestBefore = digest();
+
+      // (1) MATCH: a live reading that agrees with the oracle returns 0 and
+      // logs the marker.
+      const matchLines = [];
+      const matchCode = await preflightCronRepoint({
+        seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: cleanProd.data }) }),
+        manifestPath: manifestFixturePath,
+        log: (x) => matchLines.push(String(x)),
+      });
+      const digestAfterMatch = digest();
+
+      // (2) MISMATCH: the SAME oracle against a live reading that drifted
+      // match_engine_cron's schedule ("0 * * * *" -> "5 * * * *").
+      const abortLines = [];
+      const abortCode = await preflightCronRepoint({
+        seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: movedProd.data }) }),
+        manifestPath: manifestFixturePath,
+        log: (x) => abortLines.push(String(x)),
+      });
+      const digestAfterAbort = digest();
+
+      // (3) MARKER FAILURE: refuses with 3, and — proven by the seam tally,
+      // never merely by the exit code — the cron.job read is NEVER reached.
+      const markerLines = [];
+      const markerSeams = createSeams({ sqlRunner: fixtureSql({ cronJobRows: cleanProd.data, marker: null }) });
+      const sqlBefore = markerSeams.tally.sql;
+      const markerCode = await preflightCronRepoint({
+        seams: markerSeams,
+        manifestPath: manifestFixturePath,
+        log: (x) => markerLines.push(String(x)),
+      });
+      const sqlDelta = markerSeams.tally.sql - sqlBefore;
+      const digestAfterMarker = digest();
+
+      // (4) SOURCE SCAN: the exported function's own body carries no write
+      // call — the region is anchored STRUCTURALLY, by the documented
+      // placement ("immediately after captureManifest") rather than by the
+      // function's own name: this scenario's source runs BEFORE the real
+      // declaration in the file and calls it (and now also names
+      // captureManifest) many times over, so searching for either name as a
+      // CONTIGUOUS literal would find THIS scenario's own text first, not the
+      // declaration below. `.join("")` keeps the searched phrase from ever
+      // appearing contiguously in this scenario's own source bytes, so the
+      // only place it can match is the real declaration.
+      const runnerSrc = readFileSync(fileURLToPath(import.meta.url), "utf8");
+      const prevExportAnchor = ["export async function ", "captureManifest", "({"].join("");
+      const prevExportIdx = runnerSrc.indexOf(prevExportAnchor);
+      const startRe = /\nexport /g;
+      startRe.lastIndex = prevExportIdx >= 0 ? prevExportIdx + prevExportAnchor.length : 0;
+      const startMatch = prevExportIdx >= 0 ? startRe.exec(runnerSrc) : null;
+      const regionStart = startMatch ? startMatch.index + 1 : -1; // +1 skips the leading \n
+      const endRe = /\nexport /g;
+      endRe.lastIndex = regionStart >= 0 ? regionStart + "export ".length : 0;
+      const endMatch = regionStart >= 0 ? endRe.exec(runnerSrc) : null;
+      const regionEnd = endMatch ? endMatch.index : runnerSrc.length;
+      const region = regionStart >= 0 ? runnerSrc.slice(regionStart, regionEnd) : "";
+      const writeCallNames = ["writeFileSync", "appendFileSync", "mkdirSync"];
+      const writesFound = writeCallNames.filter((name) => region.includes(name));
+
+      pass =
+        expect(
+          prevExportIdx >= 0 && regionStart >= 0 && region.includes("async function ") && region.includes("preflightCronRepoint"),
+          "ANCHOR: the export immediately after captureManifest resolves and its body names the repoint verb — a miss here would degenerate the source scan to an empty or wrong region",
+        ) &&
+        expect(
+          digestBefore === digestAfterMatch,
+          "the committed manifest.json fixture is BYTE-IDENTICAL before and after the MATCH invocation (sha256 of the file, not a mtime check)",
+        ) &&
+        expect(matchCode === 0, `a live reading matching the oracle returns 0 (got ${matchCode})`) &&
+        expect(matchLines.some((l) => l.includes(FIXTURE_DB_MARKER)), "the marker is LOGGED on the match path") &&
+        expect(
+          abortCode === 1,
+          `a live reading that drifted on match_engine_cron's schedule returns NON-ZERO — 'the comparison ran and found something' (got ${abortCode})`,
+        ) &&
+        expect(abortLines.some((l) => l.includes("match_engine_cron")), "the drifting jobname is NAMED") &&
+        expect(
+          abortLines.every((l) => !l.includes("vault.decrypted_secrets") && !l.includes("net.http_post") && !l.includes("DO $$")),
+          "and the command TEXT is never printed, even on the abort path — only kind, subject and remedy reach the log",
+        ) &&
+        expect(
+          digestBefore === digestAfterAbort,
+          "'writes nothing' is a BYTE-DIGEST equality, not an assumption — the fixture is unchanged after the ABORT invocation too, so a verb that aborted by writing would still fail this leg",
+        ) &&
+        expect(markerCode === 3, `a marker read that fails refuses with 3, never a verdict (got ${markerCode})`) &&
+        expect(
+          markerLines.some((l) => l.includes("Nothing was written.")),
+          "the marker refusal carries the same sentence every other refusal in this verb does",
+        ) &&
+        expect(
+          sqlDelta === 1,
+          `the marker refusal NEVER reaches the comparison — only ONE sql seam call happened, the marker query itself (got ${sqlDelta})`,
+        ) &&
+        expect(digestBefore === digestAfterMarker, "and the fixture is unchanged after the MARKER-FAILURE invocation too") &&
+        expect(
+          writesFound.length === 0,
+          `the function's own source carries zero occurrences of any write-call name (found: ${writesFound.join(", ") || "none"}) — a future edit that adds one reddens this scenario`,
+        ) &&
+        pass;
     }
   }
 
