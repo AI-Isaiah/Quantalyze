@@ -239,15 +239,21 @@ flag AND the terminal serves the read:
 ```sql
 SELECT cj.kind,
        count(*)          AS done_jobs,
-       max(cj.completed_at) AS newest
+       max(cj.updated_at) AS newest
   FROM compute_jobs cj
   JOIN api_keys ak ON ak.id = cj.api_key_id
  WHERE ak.exchange = 'mt5'
    AND cj.kind IN ('refresh_allocator_equity_daily', 'poll_allocator_positions')
    AND cj.status = 'done'
-   AND cj.completed_at > now() - INTERVAL '3 days'
+   AND cj.updated_at > now() - INTERVAL '3 days'
  GROUP BY cj.kind;
 ```
+
+⚠️ **Repointed 2026-09-16 from `completed_at`, which does not exist on `compute_jobs`** (measured on
+PROD 2026-09-12, `ERROR: 42703: column cj.completed_at does not exist`, and re-read from
+`supabase/schema/baseline.sql` — the table carries `claimed_at`, `created_at`, `updated_at` and
+`next_attempt_at`, no `completed_at`). `updated_at` is the terminal-status timestamp for a `done`
+row — the query aborted with 42703 before, it did not return a stale answer.
 
 - **Expected:** both kinds present, each with a healthy count and a `newest` within hours. The
   2026-08-25 pre-tracer reading was **12 `done` of each within 3 days, newest 5 h old**.
@@ -265,6 +271,16 @@ gateway is on record wedging three times in a single day. **Run the query at act
 read its answer.** If the reading is stale, the ABORT rule above applies as written: criterion 3
 is then blocked by an operational fault outside this activation, and the honest outcome is to say
 so, not to activate around it.
+
+⛔ **DATED 2026-09-16 — the 2026-09-10 and 2026-09-12 readings recorded in this runbook's own prose
+(and in `TODOS.md`'s `[PREFLIGHT-P3C-UNRUNNABLE]` / `[164.7-ACTIVATION-DEFERRED]` entries) are
+DATED, and neither was produced by running this query.** The `completed_at` column did not exist,
+so the query aborted 42703 every time it was actually run; both recorded values were derived by
+arithmetic from the terminal Journal instead. Re-run this repaired query FRESH at activation time
+and record its OUTPUT — do not carry either dated value forward as current. The 2026-09-12
+arithmetic reading found `poll_allocator_positions` at **34.7 hours** old, FAILING the one-day
+`Abort if` bar above (MT5 was at `-6` that day) — so a DEFER at Step 3 is the expected-value
+outcome of a fresh run, not a surprise if it recurs.
 
 ### P4 — the BEFORE census
 
@@ -489,8 +505,8 @@ they are not retuned on one measurement.
 Re-run the P4 census query. Then:
 
 ```sql
-SELECT cj.kind, cj.status, cj.created_at, cj.completed_at,
-       cj.completed_at - cj.claimed_at AS duration,
+SELECT cj.kind, cj.status, cj.created_at, cj.updated_at,
+       cj.updated_at - cj.claimed_at AS duration,
        cj.error_message
   FROM compute_jobs cj
  WHERE cj.metadata ->> 'source' = 'ledger-refresh'
@@ -499,6 +515,13 @@ SELECT cj.kind, cj.status, cj.created_at, cj.completed_at,
  ORDER BY cj.created_at DESC
  LIMIT 20;
 ```
+
+⚠️ **Repointed 2026-09-16 from `completed_at`** (does not exist on `compute_jobs` — measured on PROD
+2026-09-12, `ERROR: 42703`, re-read from `supabase/schema/baseline.sql`). `updated_at` is the
+terminal-status timestamp for a `done` row. The `duration` expression therefore changed meaning:
+`updated_at - claimed_at` is a PROXY for completion latency, not an exact completion duration — it
+is only meaningful for a row whose terminal `status` is `done`, since `updated_at` moves on any
+write to the row, not only on completion.
 
 **Success is the stale count going down and the maximum `days_since_last_return` going down.**
 
@@ -649,10 +672,10 @@ SELECT sa.strategy_id,
        jsonb_array_length(sa.returns_series) AS series_len,
        tail.kind        AS attributing_kind,
        tail.status      AS attributing_status,
-       tail.completed_at
+       tail.updated_at
   FROM strategy_analytics sa
   JOIN LATERAL (
-         SELECT cj.kind, cj.status, cj.completed_at
+         SELECT cj.kind, cj.status, cj.updated_at
            FROM compute_jobs cj
           WHERE cj.strategy_id = sa.strategy_id
             AND cj.kind IN ('derive_broker_dailies', 'compute_analytics_from_csv')
@@ -669,8 +692,12 @@ SELECT sa.strategy_id,
             AND m.metadata ->> 'source' = 'ledger-refresh'
             AND m.created_at > now() - INTERVAL '48 hours'
        )
- ORDER BY tail.completed_at DESC NULLS LAST;
+ ORDER BY tail.updated_at DESC NULLS LAST;
 ```
+
+⚠️ **Repointed 2026-09-16 from `completed_at`** (does not exist on `compute_jobs` — measured on PROD
+2026-09-12, `ERROR: 42703`, re-read from `supabase/schema/baseline.sql`). `updated_at` is the
+terminal-status timestamp for a `done` row.
 
 Each conjunct, and why none may be dropped:
 
