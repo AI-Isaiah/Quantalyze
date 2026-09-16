@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import random
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -157,6 +158,95 @@ async def db_execute(fn: Callable[[], _T]) -> _T:
         pass
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_DB_EXECUTOR, fn)
+
+
+# ---------------------------------------------------------------------------
+# Gateway-timeout retry seam (Phase 164.5.1 criterion 8 / [164.5.1-GATEWAY-
+# CEILING-INVERSION]) — a NAMED seam BESIDE db_execute, never inside it.
+# Putting the retry inside db_execute would silently change timing semantics
+# for every caller, including ones that must fail fast (CONTEXT.md Area 1).
+# ---------------------------------------------------------------------------
+
+
+def _is_gateway_timeout(exc: BaseException) -> bool:
+    """Return True iff `exc` is a postgrest.exceptions.APIError surfacing a
+    Supabase API-gateway 504 — the gateway gave up before Postgres did, so a
+    second attempt may land inside the window.
+
+    Checks BOTH the string ``"504"`` and the int ``504`` on ``.code``
+    (RESEARCH.md assumption A2): the ROADMAP's cited CI sighting prints
+    ``'code': 504`` unquoted in a Python repr, so the wire type is genuinely
+    ambiguous, and a single-type ``==`` comparison would silently never
+    match — recreating the exact fail-open shape this phase exists to close.
+
+    Mirrors the structural ``getattr(exc, "code", None)`` shape of
+    `main_worker._is_undefined_function_structured` rather than a loose
+    message-substring match — a permanent disposition (here: stopping the
+    match engine) rests on the STRUCTURED SQLSTATE/gateway code, never on
+    prose inside the exception's string form.
+    """
+    code = getattr(exc, "code", None)
+    return code in ("504", 504)
+
+
+DB_READ_MAX_RETRIES = 3
+DB_READ_BACKOFF_BASE_S = 1.0
+DB_READ_JITTER_MAX_S = 0.5
+
+
+async def db_read_with_retry(fn: Callable[[], _T]) -> _T:
+    """Retry a synchronous Supabase read (via db_execute) with exponential
+    backoff+jitter, but ONLY on a gateway-timeout-shaped exception
+    (`_is_gateway_timeout`). A non-gateway exception propagates on the FIRST
+    attempt, unchanged in type, so fail-fast callers keep their timing.
+
+    Bounded budget: DB_READ_MAX_RETRIES=3 attempts, backoff
+    DB_READ_BACKOFF_BASE_S * (2 ** attempt) + jitter in
+    [0, DB_READ_JITTER_MAX_S) — worst case about 1 + 2 + (a final attempt
+    with no further sleep) ≈ 3-4 seconds of sleeping across 3 attempts
+    (attempts 0 and 1 sleep; attempt 2 raises without sleeping), strictly
+    below the 60s API gateway window. The retries therefore finish inside
+    ONE gateway window rather than stacking three separate 60s waits.
+
+    ⛔ This bound is deliberately stated against the GATEWAY, not against a
+    `service_role` `statement_timeout`. Phase 164.5.1 planned an
+    `ALTER ROLE service_role SET statement_timeout` migration and this
+    comment named its 45s value; the migration was WITHDRAWN at the plan-09
+    D4 gate on 2026-09-16 after a read-only PROD measurement (see that
+    phase's CONTEXT.md, Area 2). Two reasons, either sufficient: a
+    per-STATEMENT timeout cannot bound a per-REQUEST gateway 504 when the
+    request issues many short statements, which is what this service does;
+    and `service_role` carries no row in `pg_db_role_setting` at all, so a
+    PostgREST request inherits `authenticator`'s login-applied 8s rather
+    than the 120s server default the phase had assumed — the migration
+    would have LOOSENED the real ceiling sevenfold.
+
+    Exhaustion signal is a BARE re-raise of the ORIGINAL exception, unchanged
+    — mirrors `_okx_bills_fetch_with_backoff`'s "let the caller decide"
+    contract, not `paginate_txn_log`'s named-exception one. Each of the call
+    sites that consume this seam (the kill switch, `cron_recompute`,
+    `_claim_priority`/`_reset`) decides its OWN disposition on exhaustion;
+    this helper never decides for them.
+    """
+    for attempt in range(DB_READ_MAX_RETRIES):
+        try:
+            return await db_execute(fn)
+        except Exception as exc:  # noqa: BLE001 — re-raised unchanged below
+            if not _is_gateway_timeout(exc) or attempt == DB_READ_MAX_RETRIES - 1:
+                raise
+            delay = DB_READ_BACKOFF_BASE_S * (2 ** attempt) + random.uniform(
+                0, DB_READ_JITTER_MAX_S
+            )
+            logger.warning(
+                "db_read_with_retry: gateway timeout (attempt %d/%d) — "
+                "backing off %.2fs, retrying: %s",
+                attempt + 1,
+                DB_READ_MAX_RETRIES,
+                delay,
+                exc,
+            )
+            await asyncio.sleep(delay)
+    raise RuntimeError("unreachable: db_read_with_retry")
 
 
 # ---------------------------------------------------------------------------

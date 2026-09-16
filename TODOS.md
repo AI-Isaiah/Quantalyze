@@ -1222,6 +1222,52 @@ true for 146 and half of 142–145, and **false for 141**.
       `passed` verdict, because the phase's own criteria are about the **preselect** path and
       here there is no preselect at all.
 
+- [ ] **`[164.5.1-GATEWAY-CEILING-INVERSION]` `service_role` is the only PROD role with no
+      `statement_timeout` of its own, so a slow service-role read crosses the API gateway's 60s
+      wall before Postgres's own 120000 ms default ever would, and returns an opaque 504 instead
+      of a catchable Postgres error.**
+      MEASURED on PROD 2026-09-13, `pg_roles.rolconfig`: `anon` = `statement_timeout=3s`,
+      `authenticated` = `8s`, `authenticator` = `8s`, `service_role` = NULL (inherits the database
+      default of `120000` ms) — against Supabase's API gateway, which gives up at `60` s. The
+      analytics service authenticates as `service_role`, so every one of its reads runs under the
+      only role in the project with no timeout of its own, and the ceiling that actually bites
+      sits BELOW the one Postgres enforces.
+      **Not contention, not a slow statement:** same session, `pg_stat_statements` returns ZERO
+      rows with `max_exec_time > 20s`; 17 of 60 connections, 1 active, 0 idle-in-transaction, 0
+      waiting on a lock. No individual statement is slow — the cron's AGGREGATE work is what
+      approaches the wall.
+      **The cron is brushing the ceiling now:** the one run in the observed window that succeeded
+      — `net._http_response` id `3758` — reported `duration_s: 44.67` against the `60` s gateway
+      limit. Of the 6 runs still inside pg_net's retention window, 5 returned 500 (ids 3755, 3756,
+      3757, 3759, 3760), all with `timed_out: false` and `error_msg: null` — pg_net reached the
+      service and the service itself errored.
+      **The safety control is the thing degrading, in production, right now:** Sentry
+      `QUANTALYZE-1D` ("match_engine: kill switch check FAILED (fail-open, engine still
+      running)") — 5 events, 2026-09-12 — is a dated production sighting of the fail-open guard
+      actually failing open, not a hypothetical. Blast radius extends past the cron: the same 504s
+      hit `main_worker`'s `_claim_priority` (Sentry `QUANTALYZE-11`, 14 events) and `_reset`
+      (`QUANTALYZE-X`, 3 events).
+      ⛔ **THE FIX BELOW WAS WITHDRAWN 2026-09-16 — do not re-attempt it.** ~~`ALTER ROLE
+      service_role SET statement_timeout`, by FORWARD MIGRATION~~ — written, reviewed, and
+      REMOVED at phase 164.5.1's plan-09 D4 gate without ever being applied. Two measured
+      reasons: (1) `statement_timeout` bounds ONE STATEMENT while the gateway 504 bounds ONE
+      REQUEST, and this service's slow requests are slow by COMPOSITION (many short statements),
+      so the conversion this entry wants cannot happen — the Sentry evidence is 504s and never
+      `57014`; (2) MEASURED read-only on PROD, `pg_db_role_setting` has NO ROW for `service_role`
+      and `authenticator` carries 8s, which PostgREST applies at login — so the effective ceiling
+      is 8s, not the 120s this entry assumed from `rolconfig = NULL`, and any value in the 45-55s
+      range would have LOOSENED it sevenfold. ⭐ **The real fix is a REQUEST-level deadline plus
+      explicit 504 classification**, which phase 164.5.1 criterion 9's batching already ships.
+      The historical note below is kept for its Sentry evidence, not for its remedy —
+      ⛔ never a console statement, which leaves no reproducible trace and is the exact class
+      `CRON-DRIFT-01` exists because of. Verify by reading `pg_roles.rolconfig` on PROD AFTER the
+      apply and recording the output, not the statement. ⛔ This makes nothing faster and must not
+      be described as if it did — it is a LEGIBILITY fix converting an opaque gateway 504 into a
+      catchable Postgres timeout.
+      ⚠️ These are dated readings bound to one session (2026-09-12/13) and must be REGENERATED
+      rather than trusted at face value by a later reader.
+      Owner: Phase 164.5.1 CRONREPOINT.
+
 ---
 
 ## 🟡 FIX MID-TERM
@@ -1677,6 +1723,35 @@ true for 146 and half of 142–145, and **false for 141**.
       at all. Whichever lands first must say so in its SUMMARY.
       **Evidence:** `.planning/phases/164.8.5-proberparse-*/164.8.5-REVIEW-R3.md`.
 
+- [ ] **`[T-OPEN-03]` `retention_compute_jobs_orphaned_running` was committed to
+      `scripts/prod-prober/cron-manifest.json` with 0 newlines and lexed to a pure comment, so
+      `visible = 0 of 1791` characters — an ATTRIBUTION gap, not a credential blind spot.**
+      MEASURED: a spliced key in that row still fires `long-token-anywhere` via the comment
+      producer, and `jwt-shape` / `service-role` / `pg-password` all still fire — only the
+      header-anchored rules and `vault-absent` were lost to the newline fold. Graded `low` on
+      measurement rather than accepted as booked, because the credential itself remains
+      detectable through the surviving rules; what is lost is which specific rule would have
+      named it.
+      **The DATA half was already discharged** by the 2026-09-11 re-capture at `ws-collapse-v2`
+      (capture run `34611594511`, landed by PR #776) — the newline fold is restored in the
+      committed manifest today. **The RESIDUAL owned here is the CI GATE, not the data:** nothing
+      in CI catches a future re-fold of the same shape, so this entry stays open until that gate
+      exists.
+      Owner: Phase 164.5.1 CRONREPOINT, plan 07.
+
+- [ ] **`[T-OPEN-04]` The committed manifest declared `normalization: ws-collapse-v1` while the
+      cron-drift arm computed `ws-collapse-v2`, and two normalizations produce two different shas
+      for identical text — so the cron-drift arm was performing NO comparison at all and
+      `manifest-invalid` fired on every production run.**
+      MEASURED: the mismatch was caught by an hourly PRODUCTION probe an hour after it shipped,
+      and by nothing in CI — a control that silently stopped being able to find anything. The
+      DATA half was discharged by the same 2026-09-11 re-capture (`ws-collapse-v2`, run
+      `34611594511`, PR #776).
+      **The RESIDUAL owned here is the missing CI gate:** any future normalization bump re-opens
+      this identically, because nothing asserts the arm's exported `NORMALIZATION` and the
+      manifest's `normalization` key agree.
+      Owner: Phase 164.5.1 CRONREPOINT, plan 07.
+
 - [ ] **`[164.8.5-HYGIENE-RESIDUALS]` ◆ **IN PROGRESS 2026-09-12 — code-complete on `phase-164.8.6-proberhygiene` (v0.77.35.0) but NOT MERGED, and NOT yet clean.** Phase 164.8.6 plan 08 replaced the per-shape exemptions with ONE whole-token measure (`tokenMeasure`). ⛔ A code review then found the new measure fires the credential rule — whose remedy is "treat the named secret as EXPOSED and rotate it" — on credential-free PROSE assembled by `concat_ws` / `format` / `||`, hourly, against production. Reproduced independently. Under fix. **Do not tick until merged and the false-positive class is closed with green-corpus rows that exercise the new mechanism** (the original zero-FP evidence was vacuous for it: zero of the 14 committed manifest commands contain `||` or any builder callee).
   ↳ ORIGINAL ENTRY: Five credential shapes the prod-prober's hygiene rules still
       do not report, each measured and each individually below the bar that blocked the ship
@@ -1969,14 +2044,17 @@ true for 146 and half of 142–145, and **false for 141**.
       `public.match_engine_cron_tick()` (migration `20260907120000`), which reads Vault INSIDE its
       body. So the moment Phase 164.5 item (7) repoints the live row to
       `SELECT public.match_engine_cron_tick();`, the command text no longer contains the literal
-      and the rule fires **against a correct repair**. ⛔ Do not discover this at repair time and
+      and the rule fires **against a correct repair**. Phase 164.5 item 7 was SPLIT OUT to
+      Phase 164.5.1 CRONREPOINT on 2026-09-07 by founder decision — not renamed, not dropped.
+      ⛔ Do not discover this at repair time and
       "fix" it by keeping a decorative `DO` wrapper around the call purely to satisfy a grep —
       that is a gate shaped by its own false positive. **Three things move together, in one
       commit:** (a) the rule — accept EITHER the literal or a call to a function whose committed
       body contains it, and ship a RED fixture for the new arm, because a widened rule with no
       fixture is a rule nobody has watched fail; (b)
       `scripts/prod-prober/cron-manifest.json`, re-captured from PROD after the repair; and (c)
-      the live row itself. Owner: Phase 164.5 item (7).
+      the live row itself. Owner: Phase 164.5.1 CRONREPOINT (Phase 164.5 item 7 was SPLIT OUT
+      here on 2026-09-07 by founder decision — not renamed, not dropped).
 
 - [ ] **`[164.2-TYPES-REGEN-CHECK]` After the migration PR merges and auto-applies to PROD,
       re-derive the six `database.types.ts` lines that were hand-extended, and confirm no
@@ -3342,7 +3420,9 @@ of its 14 `command` strings was read individually and approved for publication b
 read GREEN on live run 34018874984.
 
 ⭐ **DATED 2026-09-07 (Phase 164.7 APPSETTINGS) — the GUC half of `CRON-DRIFT-01` is CLOSED; the
-LIVE-ROW half stays open for Phase 164.5 item (7).** What 164.7 closed: the repo now DESCRIBES the
+LIVE-ROW half stays open for Phase 164.5 item (7).** Phase 164.5 item 7 was SPLIT OUT to
+Phase 164.5.1 CRONREPOINT on 2026-09-07 by founder decision — not renamed, not dropped. What
+164.7 closed: the repo now DESCRIBES the
 mechanism PROD has been running since the 2026-09-01 hand repair — `public.match_engine_cron_tick()`
 in `20260907120000_analytics_service_settings_and_vault_tick.sql`, key from `vault.decrypted_secrets`,
 URL from `public.system_settings`, a loud `RAISE` on either absence — so a rebuild from migrations
@@ -3355,6 +3435,14 @@ the callable, so repo and PROD agree in MECHANISM but not in TEXT. Repointing it
 bracketed form is the entry's unique key and a cross-reference must not create a second one),
 because the repoint trips the `vault-absent` hygiene rule unless the rule, the manifest and the
 row move in the same change.
+
+⛔ **FLAGGED 2026-09-16 (Phase 164.5.1 plan 08, D1) — the old repoint convention is SUPERSEDED, not
+merely superseded implicitly.** Phase 164.5 item 7's old wording — *"Write ONE forward migration
+re-scheduling `match_engine_cron` to the achievable Vault-backed command"* — is REPLACED by D1: the
+repoint registration lives in the RUNBOOK (`docs/runbooks/match-engine.md` § "Go-live: repoint
+`match_engine_cron` + ledger-refresh activation"), never in a migration. The old wording is not
+deleted anywhere it survives as lineage; this is an additive flag so both ledgers agree rather than
+disagreeing silently.
 
 ⭐ **Standing rule until CRON-OBS-01 lands: `cron.job_run_details.status = 'succeeded'` is NOT
 evidence that a pg_net-based job worked.** Read `net._http_response`.
@@ -8143,7 +8231,8 @@ read the result.
 
 - [ ] **[MATCHCRON-500-INTERMITTENT] `match_engine_cron` is answering HTTP 500 on most hourly ticks, live and unfixed.** MEASURED on PROD 2026-09-12 from `net._http_response`: 09:00 **500**, 10:00 **500**, 11:00 **500**, 12:00 200, 13:00 **500**, 14:00 200, 15:00 **500** — 5 of 7. The 200s return `{"status":"ok","processed":0,"skipped":14,...}` in ~27-28 s; the 500s return a bare `Internal Server Error`. ⚠️ The Railway worker LOOP is healthy (`claim_compute_jobs_with_priority` returning 200 every 30 s), so this is the match-engine cron ROUTE, not the worker. ⛔ Not caused by the deploy churn: the 500s start at 09:00Z, before the day's 13:44Z and 14:39Z deploys. ⚠️ **Blocks nothing today but gates the ledger fan-out**: `enqueue_ledger_refresh_for_strategies` feeds the SAME analytics service, so activating Phase 164.5.1's `ledger_refresh_fanout` into a service failing two thirds of its ticks would manufacture an incident. ⚠️ Root cause NOT established — the current deployment post-dates the failures so its logs do not cover them. ⭐ Side observation while looking: the service logs EVERY line at `severity: error`, including `httpx INFO ... 200 OK`, so a real error is indistinguishable from routine traffic in Railway's log view. **Owner: Phase 164.6 GATE-HYGIENE.**
 
-- [ ] **[PREFLIGHT-P3C-UNRUNNABLE] Phase 164.7's activation pre-flight P3-C cannot execute — it selects a column that does not exist.** `164.7-ACTIVATION-PREFLIGHT.md` and `docs/runbooks/ledger-refresh-go-live.md` both specify `max(cj.completed_at)` over `compute_jobs`. MEASURED on PROD 2026-09-12: `ERROR: 42703: column cj.completed_at does not exist` — the table has `created_at`, `updated_at`, `claimed_at`, `next_attempt_at` and no `completed_at`. So the ONE gate standing between a deferred activation and a live production `cron.schedule` errors instead of measuring. ⚠️ The 2026-09-10 DEFER record reports a P3-C value anyway ("newest mt5 job ~2026-09-07 04:0xZ"), derived from the terminal Journal and arithmetic rather than from this query — so the recorded measurement and the written gate are not the same act, and only the arithmetic one has ever run. **Fix:** repoint both copies to `updated_at` (re-run with it: `refresh_allocator_equity_daily` 15 done / 9.8 h old; `poll_allocator_positions` 4 done / **34.7 h** old, FAILING the 1-day bar because MT5 is at `-6`), and add the query to a place that executes rather than two prose copies that rot. **Owner: Phase 164.5.1 CRONREPOINT** — it owns `[164.7-ACTIVATION-DEFERRED]` and is the phase that must re-run P3-C.
+- [x] **[PREFLIGHT-P3C-UNRUNNABLE] ✅ CLOSED 2026-09-16 by Phase 164.5.1 plan 08 — every dead `compute_jobs` column reference repointed to `updated_at`, in BOTH copies of P3-C and the two later diagnostics that shared the defect.** Repaired sites: `docs/runbooks/ledger-refresh-go-live.md` § "P3 — venue enable flags" Part C (the gate itself); the same file's § "Watching it" query (`cj.completed_at` selection + the `cj.completed_at - cj.claimed_at AS duration` expression, now `updated_at - claimed_at`, labelled a completion-latency PROXY rather than an exact duration); the same file's § "Rollback, part 2 — Detect" LATERAL query (`tail.completed_at`); and `.planning/phases/164.7-appsettings-.../164.7-ACTIVATION-PREFLIGHT.md`'s P3-C copy, verified byte-identical to the runbook's in the SQL body. Each repaired query carries a dated sentence naming the 42703 and the column that does not exist. The gate returns a measurement instead of aborting.
+  ↳ ORIGINAL ENTRY: **Phase 164.7's activation pre-flight P3-C cannot execute — it selects a column that does not exist.** `164.7-ACTIVATION-PREFLIGHT.md` and `docs/runbooks/ledger-refresh-go-live.md` both specify `max(cj.completed_at)` over `compute_jobs`. MEASURED on PROD 2026-09-12: `ERROR: 42703: column cj.completed_at does not exist` — the table has `created_at`, `updated_at`, `claimed_at`, `next_attempt_at` and no `completed_at`. So the ONE gate standing between a deferred activation and a live production `cron.schedule` errors instead of measuring. ⚠️ The 2026-09-10 DEFER record reports a P3-C value anyway ("newest mt5 job ~2026-09-07 04:0xZ"), derived from the terminal Journal and arithmetic rather than from this query — so the recorded measurement and the written gate are not the same act, and only the arithmetic one has ever run. **Fix:** repoint both copies to `updated_at` (re-run with it: `refresh_allocator_equity_daily` 15 done / 9.8 h old; `poll_allocator_positions` 4 done / **34.7 h** old, FAILING the 1-day bar because MT5 is at `-6`), and add the query to a place that executes rather than two prose copies that rot. **Owner: Phase 164.5.1 CRONREPOINT** — it owns `[164.7-ACTIVATION-DEFERRED]` and is the phase that must re-run P3-C.
 - [ ] **[LINT-CACHE-MASKS-WARNINGS] `npm run lint` uses `eslint --cache`, so a warning can stop being reported and the job's verdict depends on cache warmth.** ⛔ MEASURED 2026-09-12: `frontend-lint` FAILED on PR #785 — a **planning-only** PR, 56 files all under `.planning/phases/`, **zero `src/` changes** — with `✖ 2 problems (0 errors, 2 warnings)` and exit 1 (lint runs at zero-warning tolerance). The same two warnings were GREEN on `main` and on PR #784 at the same time. Reproduced on an unmodified checkout of `main`'s `src/`: `npx eslint --no-cache` reports both, `--cache` on a warm `node_modules/.cache/.eslintcache` reports neither. So `main` was latently RED and every green `frontend-lint` was a cache hit, not a measurement. ⚠️ The two instances are fixed in v0.77.37.0 (`EquityChart.tsx` exhaustive-deps `period`; an `eslint-disable-next-line` in `ContributionWizardOverlay.tsx:121` that suppressed nothing) — **the MECHANISM is what this entry owns**, not those two. **THE CLASS:** a control whose report depends on a cache is a control that can go quiet without anything changing — the absence-reads-as-a-pass shape this milestone is named for, same family as the `pg_net` green-cron lesson. **Fix options, to be decided rather than assumed:** (a) drop `--cache` from the CI invocation only (keeps the local dev speed-up, makes the gate a real measurement), (b) key the cache on config+lockfile so a stale entry cannot survive, or (c) a dedicated `--no-cache --max-warnings 0` CI step. ⛔ Do NOT 'fix' this by raising the warning tolerance — the tolerance is not the defect. **Owner: Phase 164.6 GATE-HYGIENE.**
 - [ ] **[PHASEDIR-ORPHAN-GITKEEP] An empty orphan phase directory makes `gsd-tools` BLIND to the phase, and the `-pr` filter recreates it after it is fixed.** ⛔ MEASURED 2026-09-12: `.planning/phases/` held TWO directories matching `164.1-*` — the live `164.1-prod-observability-…` and a stale `164.1-harden-guards-…` containing nothing but a `.gitkeep` (the phase's ORIGINAL name, before it was renamed). `find-phase` cannot disambiguate two prefix matches, so `query init.phase-op 164.1` returned `phase_found: false`, `roadmap analyze` reported the phase as **`empty` with `plan_count: 0`** despite 6 PLANs and 6 SUMMARYs tracked on `main`, and `roadmap.update-plan-progress 164.1` refused with `"No plans found"`. **Consequence, and it is the reason this is not cosmetic:** Phase 164.1's ROADMAP line sat at `5/6 plans executed` with `164.1-06` unchecked for six days while the plan was `status: complete` and fully shipped to `main` — the bookkeeping could not be corrected by the tool that exists to correct it. ⚠️ This was ALREADY FIXED ONCE and REGRESSED: commit `46daa47c` *"drop the empty 164.1-harden-guards orphan dir that broke find-phase"* removed it, and `22a5fe96` *"strip transient .planning/phases artifacts from the review diff"* put a `.gitkeep` back — the `-pr` filter empties a phase directory but keeps the directory, which is exactly the orphan. So this recurs on every future rename-then-filter, silently. **Fix:** the filter must drop an emptied phase directory entirely rather than leave a `.gitkeep`, AND `find-phase` must FAIL LOUD on an ambiguous prefix match naming both candidates instead of returning `phase_found: false` (a not-found answer for a phase that exists is the absence-reads-as-a-pass shape this milestone is named for). ⚠️ The filter lives in GLOBAL gsd-core (`~/.claude/gsd-core/workflows/pr-branch.md`), which `/gsd-update` overwrites — so per this repo's own precedent the durable backstop is a REPO-OWNED check that fails when two directories share a phase-number prefix. **Owner: Phase 164.6 GATE-HYGIENE.**
 

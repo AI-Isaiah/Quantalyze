@@ -34,6 +34,8 @@ stops non-allocator UUIDs from manufacturing batches.
 
 import asyncio
 import logging
+import os
+import re
 import time
 from datetime import datetime, timezone
 from functools import partial
@@ -47,7 +49,10 @@ from pydantic import BaseModel
 from services.db import (
     PaginatedSelectTruncated,
     Row,
+    _is_gateway_timeout,
     chunked_in_query,
+    db_execute,
+    db_read_with_retry,
     get_supabase,
     one,
     rows,
@@ -303,8 +308,19 @@ def _parse_supabase_ts(raw: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _engine_is_enabled() -> bool:
-    """Return True if the match engine should run (the kill switch is OFF).
+# Tri-state kill-switch status (Phase 164.5.1 criterion 8). The closed state
+# is DISTINCT from the founder's own switch: a database outage yields
+# KILL_SWITCH_UNAVAILABLE, the founder flipping system_flags yields
+# KILL_SWITCH_DISABLED. No input may produce the same status for both
+# causes — a database outage must never be mistaken for the founder pressing
+# the switch (Sentry QUANTALYZE-1D, 5 events, 2026-09-12).
+KILL_SWITCH_ENABLED = "enabled"
+KILL_SWITCH_DISABLED = "disabled"
+KILL_SWITCH_UNAVAILABLE = "kill_switch_unavailable"
+
+
+async def _engine_is_enabled() -> str:
+    """Return the kill switch's tri-state status.
 
     M-0609: named to match the DB flag ``match_engine_enabled`` — an
     engine-ON flag, not a kill-switch flag. The previous name
@@ -312,27 +328,49 @@ def _engine_is_enabled() -> bool:
     (``if not _kill_switch_enabled(): skip``), which conventionally means "if
     the kill switch is NOT enabled, skip" — the opposite of the actual logic.
 
-    Fail-OPEN contract: any Supabase exception (network blip, RLS rejection,
-    schema drift, table missing post-rollback) keeps the engine running and
-    logs at ERROR. Fail-closed would silently disable the engine on transient
-    DB blips, which is a worse failure mode for a manual founder kill switch.
+    Fail-CLOSED contract (Phase 164.5.1 criterion 8, superseding the former
+    fail-open one): the Supabase read goes through `db_read_with_retry`,
+    which retries ONLY a gateway-timeout-shaped exception
+    (`_is_gateway_timeout`) up to DB_READ_MAX_RETRIES times. After retries
+    are exhausted — or on any other exception — the engine STOPS:
+    KILL_SWITCH_UNAVAILABLE is returned and logged at ERROR so Sentry fires.
+    There is no surviving fail-open arm; a transient DB blip that outlasts
+    the retry budget is no longer a "blip" and must not be treated as one.
     """
     supabase = get_supabase()
-    try:
-        result = supabase.table("system_flags").select("enabled").eq(
+
+    def _read() -> Any:
+        return supabase.table("system_flags").select("enabled").eq(
             "key", "match_engine_enabled"
         ).maybe_single().execute()
+
+    try:
+        result = await db_read_with_retry(_read)
         row = one(result)
         if not row:
-            return True  # No row / null maybe_single response = default enabled
-        return bool(row.get("enabled", True))
+            return KILL_SWITCH_ENABLED  # No row / null maybe_single response = default enabled
+        return (
+            KILL_SWITCH_ENABLED
+            if bool(row.get("enabled", True))
+            else KILL_SWITCH_DISABLED
+        )
     except Exception as err:
+        # WR-14: one log that INTERPOLATES the classification, not twelve
+        # lines of branch between two messages differing by a parenthetical.
+        # The two arms shared their prefix and their suffix, no test could
+        # tell them apart, and the branch was therefore unexercised in the
+        # direction that mattered. `_is_gateway_timeout` is `services.db`'s
+        # own retry predicate — the classification is only ever a log
+        # adjective here; both arms stop the engine FAIL-CLOSED identically.
         logger.error(
-            "match_engine: kill switch check FAILED (fail-open, engine "
-            "still running): %s",
+            "match_engine: kill switch check FAILED (%s) — engine STOPPED "
+            "(kill_switch_unavailable): %s",
+            "gateway timeout, retries exhausted"
+            if _is_gateway_timeout(err)
+            else "non-retryable",
             err,
         )
-        return True
+        return KILL_SWITCH_UNAVAILABLE
 
 
 # M-0603 (part 1): the cron's mid-run kill-switch re-check used to call
@@ -345,21 +383,34 @@ def _engine_is_enabled() -> bool:
 # reads it once and does not benefit, but is unharmed — a fresh process or a
 # stale-by-<TTL cache value is still correct enough for a one-shot request).
 KILL_SWITCH_CACHE_TTL_S = 30.0
-_kill_switch_cache: dict[str, float | bool] = {}  # {"at": monotonic, "value": bool}
+_kill_switch_cache: dict[str, float | str] = {}  # {"at": monotonic, "value": str}
 
 
-def _engine_is_enabled_cached() -> bool:
+async def _engine_is_enabled_cached() -> str:
     """TTL-cached view over _engine_is_enabled for the per-allocator cron loop.
 
     Returns the cached value when it is younger than KILL_SWITCH_CACHE_TTL_S,
     otherwise re-polls and refreshes the cache. The TTL bounds the staleness of
     a mid-run flip to KILL_SWITCH_CACHE_TTL_S seconds.
+
+    Fail-closed cache contract (Phase 164.5.1 criterion 8, task 2): the cache
+    NEVER serves a value produced by a failed poll — an exhausted poll
+    (KILL_SWITCH_UNAVAILABLE) INVALIDATES the cache instead of being stored,
+    so a stale prior ENABLED value can never be resurrected by a subsequent
+    outage. Only KILL_SWITCH_ENABLED and KILL_SWITCH_DISABLED are ever
+    written to the cache.
     """
     now = time.monotonic()
     cached_at = _kill_switch_cache.get("at")
     if isinstance(cached_at, float) and (now - cached_at) < KILL_SWITCH_CACHE_TTL_S:
-        return bool(_kill_switch_cache.get("value", True))
-    value = _engine_is_enabled()
+        return str(_kill_switch_cache.get("value", KILL_SWITCH_ENABLED))
+    value = await _engine_is_enabled()
+    if value == KILL_SWITCH_UNAVAILABLE:
+        # A failed poll invalidates rather than caches — never serve a value
+        # produced by a failed poll, and never let a stale ENABLED/DISABLED
+        # entry survive an outage.
+        _kill_switch_cache.clear()
+        return KILL_SWITCH_UNAVAILABLE
     _kill_switch_cache["at"] = now
     _kill_switch_cache["value"] = value
     return value
@@ -1710,7 +1761,17 @@ async def recompute(request: Request, req: RecomputeRequest) -> dict[str, Any]:
             detail=f"allocator_id {allocator_id} is not an allocator profile",
         )
 
-    if not await asyncio.to_thread(_engine_is_enabled):
+    _kill_switch_state = await _engine_is_enabled()
+    if _kill_switch_state == KILL_SWITCH_UNAVAILABLE:
+        raise service_error(
+            503,
+            "KILL_SWITCH_UNAVAILABLE",
+            dependency="supabase",
+            retryable=True,
+            retry_after=RETRY_AFTER_SECONDS["supabase"],
+            detail="kill switch check temporarily unavailable — please retry",
+        )
+    if _kill_switch_state == KILL_SWITCH_DISABLED:
         logger.info("match_engine recompute: kill switch off, skipping allocator=%s", allocator_id)
         return {"status": "disabled", "disabled": True}
 
@@ -1918,6 +1979,335 @@ async def eval_metrics(
         ) from err
 
 
+# ---------------------------------------------------------------------------
+# Cron batching cursor (Phase 164.5.1 criterion 9 /
+# [164.5.1-GATEWAY-CEILING-INVERSION]) — persisted in public.system_settings
+# so a slice survives across separately-scheduled pg_cron ticks.
+# CRON_BATCH_BUDGET_S (25s) is set below the 60s API gateway ceiling (see
+# [164.5.1-GATEWAY-CEILING-INVERSION] in TODOS.md for the measured numbers).
+# ⚠️ It is a BEST-EFFORT BOUNDARY CHECKED BETWEEN ALLOCATORS, not a cap on
+# the request. The comment here claimed "three bounds keep one request
+# inside the gateway window" until 2026-09-16; that was never what the code
+# did and the test that "pinned" it compared two constants. The real wall
+# time of one request is
+#   cursor read + page fetch + universe load
+#     + Σ(allocators handled) + THE FULL DURATION OF THE ALLOCATOR THAT
+#       CROSSED THE BUDGET,
+# and `_score_one_allocator` is pandas/numpy work whose own documented SLA
+# is p95 < 30s. One slow allocator therefore takes the request past 60s no
+# matter what this constant says. What the budget DOES buy is that the
+# NEXT allocator is never started once the clock is spent, so the overshoot
+# is bounded by one allocator rather than by the size of the platform.
+# The budget clock starts AFTER the universe load (see _budget_elapsed in
+# cron_recompute): measuring the shared O(strategies) scan against a
+# PER-SLICE budget spent the whole allowance before allocator #1 on a large
+# universe, which made every tick a one-allocator tick.
+# ⛔ A `service_role` statement_timeout is deliberately NOT part of this
+# nesting. Plan 03 planned one and this comment named its value; the
+# migration was WITHDRAWN at the plan-09 D4 gate 2026-09-16 — a
+# per-STATEMENT timeout cannot bound a per-REQUEST 504 for a request that
+# issues many short statements, and `service_role` has no row in
+# pg_db_role_setting, so its real inherited ceiling is authenticator's 8s
+# (measured read-only on PROD), not the 120s the phase had assumed.
+# ---------------------------------------------------------------------------
+MATCH_ENGINE_CURSOR_KEY = "match_engine_cron_cursor"
+# ⛔ A SECOND key, and the reason is a defect this phase shipped and then caught.
+# WR-12's pass-duration observable originally read the CURSOR row's
+# `updated_at`, calling it "the moment the previous pass ended". That is false
+# for every multi-tick pass: `_write_cron_cursor` stamps `updated_at` on EVERY
+# call, including at each partial batch boundary, so at wrap time the column
+# held the PREVIOUS TICK's timestamp. `now() - updated_at` was therefore ~one
+# tick interval, never the pass duration — the WARNING could not fire in the
+# batched regime, and the else-branch printed a REASSURING but false all-clear
+# ("full pass completed in 1.0h") for a pass that had really taken 50h. Found
+# independently by both round-2 reviewers, confidence 90.
+# ⛔ The obvious fix — stop stamping `updated_at` on the partial path — is
+# WRONG and would break a sibling instrument: `docs/runbooks/match-engine.md`'s
+# batching alarm REQUIRES that column to move every tick ("Expected: updated_at
+# within one tick interval"). One column cannot mean both "last touched" and
+# "last wrapped". So the pass start gets its own key, written ONCE per pass.
+MATCH_ENGINE_PASS_START_KEY = "match_engine_cron_pass_started_at"
+
+
+def _bounded_env(name: str, default: float, low: float, high: float) -> float:
+    """Parse a numeric env knob, clamped to [low, high], defaulting loudly.
+
+    Both knobs are operator-set. A bare `int(os.getenv(...))` raised
+    ValueError at MODULE IMPORT on a typo, i.e. the whole FastAPI app failed
+    to start with a traceback naming `int()` rather than the variable —
+    the operator learns nothing and the service is down. Log the offending
+    variable and fall back instead: a knob at its default is a degraded
+    tuning decision, a dead service is an outage.
+
+    The clamp is the other half. CRON_BATCH_SIZE carried a `max(1, ...)`
+    floor and CRON_BATCH_BUDGET_S carried none, so
+    `MATCH_ENGINE_CRON_BUDGET_S=0` tripped the batch bound after every
+    single allocator (one allocator per tick, forever), and a value above
+    the gateway ceiling defeated the constant's entire purpose.
+    """
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        value = default
+    else:
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.error(
+                "match_engine cron: %s=%r is not a number — falling back to "
+                "the default %s rather than failing the service at import",
+                name, raw, default,
+            )
+            value = default
+    clamped = min(high, max(low, value))
+    if clamped != value:
+        logger.warning(
+            "match_engine cron: %s=%s is outside [%s, %s] — clamped to %s",
+            name, value, low, high, clamped,
+        )
+    return clamped
+
+
+CRON_BATCH_SIZE = int(_bounded_env("MATCH_ENGINE_CRON_BATCH_SIZE", 10.0, 1.0, 1000.0))
+# Upper clamp at 55s: strictly below the 60s gateway ceiling, so a knob set
+# to "120" cannot silently disable the boundary it exists to enforce.
+CRON_BATCH_BUDGET_S = _bounded_env("MATCH_ENGINE_CRON_BUDGET_S", 25.0, 1.0, 55.0)
+
+# Canonical lowercase-or-uppercase-hex UUID shape (Postgres uuid columns
+# normalize to lowercase on read, but a hand-edited system_settings row is
+# not guaranteed to). Anything else is treated as corrupt.
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+async def _read_cron_cursor() -> str | None:
+    """Read the persisted cron batching cursor from public.system_settings.
+
+    This is the FIRST Python read/write path against public.system_settings
+    in this service (measured 2026-09-16, zero non-test hits) — it follows
+    db_execute's/db_read_with_retry's general shape because there is no
+    table-specific pattern to follow, it does not "consume" an existing
+    system_settings convention. The cursor is ENGINE-INTERNAL BOOKKEEPING
+    that the table's grants do NOT distinguish from operator-editable
+    configuration — see _write_cron_cursor's docstring for what an app-admin
+    who PATCHes this row can actually do, and for what bounds it.
+
+    Returns None for an absent row, for the empty-string wrap marker (an
+    exhausted cursor means the same "start from the beginning" thing to the
+    caller as no cursor at all), and for a value that is not a canonical
+    UUID (logged at ERROR — a corrupt cursor restarts the pass loudly rather
+    than poisoning the keyset filter). A read that exhausts
+    db_read_with_retry's retries is NOT swallowed here — it propagates so
+    the caller decides, matching every other db_read_with_retry consumer; a
+    failed read must never be indistinguishable from "start over".
+    """
+    supabase = get_supabase()
+
+    def _read() -> Any:
+        return (
+            supabase.table("system_settings")
+            .select("value")
+            .eq("key", MATCH_ENGINE_CURSOR_KEY)
+            .maybe_single()
+            .execute()
+        )
+
+    result = await db_read_with_retry(_read)
+    row = one(result)
+    if not row:
+        return None
+    value = row.get("value") or ""
+    if value == "":
+        return None
+    if not _UUID_RE.match(value):
+        logger.error(
+            "match_engine cron: cursor value for %s is not a canonical "
+            "UUID (%r) — restarting the pass from the beginning",
+            MATCH_ENGINE_CURSOR_KEY, value,
+        )
+        return None
+    return value
+
+
+async def _write_cron_cursor(value: str | None) -> None:
+    """Upsert the cron batching cursor into public.system_settings.
+
+    This is the FIRST Python read/write path against public.system_settings
+    in this service (measured 2026-09-16, zero non-test hits) — it follows
+    db_execute's general shape because there is no table-specific pattern to
+    follow, it does not "consume" an existing system_settings convention.
+
+    ⚠️ The cursor is ENGINE-INTERNAL BOOKKEEPING and the table's grants do
+    NOT distinguish it from operator-editable configuration.
+    `system_settings_admin_all FOR ALL TO authenticated` (migration
+    20260907120000) is gated only on `profiles.is_admin = true`, and the
+    table's single CHECK constraint is scoped to `key =
+    'analytics_service_url'` — so ANY app-admin can PATCH this row through
+    PostgREST. This docstring said an admin edit "restarts a pass and
+    nothing worse" until 2026-09-16; that was wrong in the direction that
+    HIDES harm. The real residual: an admin who can write this row can
+    STARVE the pass (while a high-valued UUID stands, every allocator
+    ordered below it is never reached) or STALL it by rewriting it each
+    tick. Two things bound the blast radius, and both are worth keeping:
+    `_UUID_RE` rejects a non-UUID before it can ever reach `.gt("id",
+    cursor)`, so there is no filter-injection route; and cron_recompute now
+    WRAPS on an empty keyset page past a live cursor (CR-01), so even a
+    maximal UUID costs one wasted tick instead of wedging the engine
+    permanently. Moving the fail-loud into the schema — a CHECK pinning
+    this key to `value = '' OR value ~ '^[0-9a-f]{8}-...'` — is a migration,
+    not a change here.
+
+    `value=None` writes the empty-string wrap marker rather than deleting
+    the row, so the row's updated_at stays a usable "last completed pass"
+    signal. updated_by is deliberately left NULL (no acting human/service
+    identity for an engine-internal write).
+    """
+    supabase = get_supabase()
+    stored = value if value is not None else ""
+
+    def _write() -> Any:
+        return (
+            supabase.table("system_settings")
+            .upsert(
+                {
+                    "key": MATCH_ENGINE_CURSOR_KEY,
+                    "value": stored,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="key",
+            )
+            .execute()
+        )
+
+    _res = await db_execute(_write)
+    # A3-01 / candidates-insert convention: this file inspects `.data` on
+    # every write whose silence would be indistinguishable from success, and
+    # the cursor is the ONE piece of state resume correctness depends on. A
+    # zero-row upsert (RLS regression, a CHECK added later, a PostgREST
+    # `Prefer: return=minimal` default change) leaves the cursor stale, and
+    # the next tick re-processes the identical slice — where
+    # `_should_skip_allocator`'s 12h age guard turns every allocator into a
+    # `skipped`, so the counters read healthy while the pass never advances.
+    if not getattr(_res, "data", None):
+        logger.error(
+            "match_engine cron: cursor upsert for %s returned no rows — the "
+            "cursor did NOT advance to %r and the next tick will REPLAY this "
+            "slice (expect a run of all-skipped ticks)",
+            MATCH_ENGINE_CURSOR_KEY, stored,
+        )
+
+
+async def _read_pass_started_at() -> datetime | None:
+    """Read when the CURRENT pass began — a value written once per pass.
+
+    ⛔ Deliberately NOT the cursor row's `updated_at`. That column is
+    rewritten at every partial batch boundary, so reading it here measured
+    the gap between the last two TICKS and reported it as the pass duration.
+    See MATCH_ENGINE_PASS_START_KEY for the full record.
+
+    Purely diagnostic: a failure must never be able to fail a cron tick, so
+    everything is caught. ⚠️ It is caught but NOT silent — a read that keeps
+    failing would otherwise be indistinguishable from a genuine first pass,
+    and an operator watching for the pass-duration line would see the same
+    nothing in both cases.
+    """
+    try:
+        supabase = get_supabase()
+
+        def _read() -> Any:
+            return (
+                supabase.table("system_settings")
+                .select("value")
+                .eq("key", MATCH_ENGINE_PASS_START_KEY)
+                .maybe_single()
+                .execute()
+            )
+
+        row = one(await db_execute(_read))
+        if not row or not row.get("value"):
+            # The genuine no-row case: the first pass after deploy, or right
+            # after the key was cleared. Silent on purpose — there is nothing
+            # wrong and nothing to measure yet.
+            return None
+        return datetime.fromisoformat(str(row["value"]).replace("Z", "+00:00"))
+    except Exception as err:
+        logger.warning(
+            "match_engine cron: pass-start read failed (%s: %s) — this tick's "
+            "pass-duration line will be MISSING, which is NOT the same as a "
+            "healthy pass. If it repeats, the WR-12 freshness instrument is "
+            "dead rather than quiet.",
+            type(err).__name__, err,
+        )
+        return None
+
+
+async def _write_pass_started_at() -> None:
+    """Stamp the start of a fresh pass. Called ONCE, on the tick that begins
+    one (cursor absent or wrapped), never at a batch boundary.
+
+    Diagnostic-only, like its reader: a failure here costs the next wrap its
+    duration line and nothing else, so it must never fail the tick.
+    """
+    try:
+        supabase = get_supabase()
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        def _write() -> Any:
+            return (
+                supabase.table("system_settings")
+                .upsert(
+                    {
+                        "key": MATCH_ENGINE_PASS_START_KEY,
+                        "value": now_iso,
+                        "updated_at": now_iso,
+                    },
+                    on_conflict="key",
+                )
+                .execute()
+            )
+
+        await db_execute(_write)
+    except Exception as err:
+        logger.warning(
+            "match_engine cron: could not stamp the pass start (%s: %s) — the "
+            "next wrap will report no duration. Correctness is unaffected; the "
+            "WR-12 instrument is.",
+            type(err).__name__, err,
+        )
+
+
+async def _wrap_cron_cursor(*, allocators_handled: int) -> None:
+    """Write the wrap marker, logging how long the completed pass took.
+
+    The WARNING bar is RECOMPUTE_MIN_AGE_HOURS because that is the number
+    the engine already treats as its freshness promise: `_should_skip_allocator`
+    declines to rescore anything younger than it, so a pass that takes
+    LONGER than it means batches routinely age past the threshold the skip
+    logic assumes they never exceed.
+    """
+    _pass_started_at = await _read_pass_started_at()
+    await _write_cron_cursor(None)
+    if _pass_started_at is None:
+        return
+    _pass_hours = (
+        datetime.now(timezone.utc) - _pass_started_at
+    ).total_seconds() / 3600.0
+    if _pass_hours > RECOMPUTE_MIN_AGE_HOURS:
+        logger.warning(
+            "match_engine cron: full pass took %.1fh, longer than the %dh "
+            "freshness window _should_skip_allocator enforces — allocators "
+            "are ageing past the SLA between rescores (allocators handled on "
+            "the wrapping tick: %d). The batch bound is throttling the pass; "
+            "see [164.5.1] WR-12.",
+            _pass_hours, RECOMPUTE_MIN_AGE_HOURS, allocators_handled,
+        )
+    else:
+        logger.info(
+            "match_engine cron: full pass completed in %.1fh (freshness "
+            "window %dh)", _pass_hours, RECOMPUTE_MIN_AGE_HOURS,
+        )
+
+
 @router.post("/cron-recompute")
 async def cron_recompute() -> dict[str, Any]:
     """Daily cron. Loops every allocator (+ role 'both'), recomputes their batch."""
@@ -1929,10 +2319,21 @@ async def cron_recompute() -> dict[str, Any]:
     def _early_return(status: str, **extras: Any) -> dict[str, Any]:
         """Build the uniform early-return response shape.
 
-        Every cron return carries `status` + the four counters + `duration_s` so
-        monitoring can switch on one field instead of guessing at key presence
-        (see TestCronResponseShape._REQUIRED_KEYS). `extras` carries
-        branch-specific flags (e.g. `disabled=True`, `reason=...`).
+        Every cron return carries `status` + the four counters + `duration_s`
+        + `next_cursor` so monitoring can switch on one field instead of
+        guessing at key presence (see TestCronResponseShape._REQUIRED_KEYS).
+        `extras` carries branch-specific flags (e.g. `disabled=True`,
+        `reason=...`).
+
+        `next_cursor` defaults to None on every early return because none of
+        them leaves a resume point: they either never wrote the cursor
+        (`disabled`, `kill_switch_unavailable`, `empty_universe`) or wrote
+        the wrap marker (`no_allocators` past a live cursor). It is in the
+        BASE dict rather than passed per-branch because it was absent from
+        all five early returns until 2026-09-16, which made a consumer
+        reading `body.next_cursor` get `undefined` — indistinguishable from
+        the terminal `null` that means "wrapped". That is exactly the
+        "guessing at key presence" this helper exists to prevent.
         """
         return {
             "status": status,
@@ -1941,6 +2342,7 @@ async def cron_recompute() -> dict[str, Any]:
             "failed": 0,
             "retention_deleted": 0,
             "duration_s": _duration(),
+            "next_cursor": None,
             **extras,
         }
 
@@ -1948,24 +2350,104 @@ async def cron_recompute() -> dict[str, Any]:
     # poll rather than a value cached by a prior cron invocation, then use the
     # cached accessor for the initial gate (seeds the cache) AND the mid-run
     # re-check below — collapsing O(allocators) round-trips into one per TTL
-    # window. _engine_is_enabled does sync Supabase IO; off-load to keep the
-    # event loop unblocked.
+    # window.
     _reset_kill_switch_cache()
-    if not await asyncio.to_thread(_engine_is_enabled_cached):
-        logger.info("match_engine cron: kill switch off, skipping")
-        return _early_return("disabled", disabled=True)
+    _kill_switch_state = await _engine_is_enabled_cached()
+    if _kill_switch_state != KILL_SWITCH_ENABLED:
+        logger.info(
+            "match_engine cron: kill switch not enabled (state=%s), skipping",
+            _kill_switch_state,
+        )
+        return _early_return(_kill_switch_state, disabled=True)
+
+    # Phase 164.5.1 criterion 9: read the persisted batching cursor BEFORE
+    # the allocator query — an absent/wrapped cursor means "start from the
+    # beginning" (cursor stays None, no .gt() filter is added below).
+    #
+    # `_read_cron_cursor` deliberately PROPAGATES an exhausted read rather
+    # than swallowing it into None, "so the caller decides". This IS that
+    # decision, and it was missing: the call sat in no `try`, so the
+    # exception escaped the handler and FastAPI answered a bare 500 with no
+    # `service_error` envelope — contradicting this file's own header rule
+    # that every deliberate error in a seam-reachable arm goes through
+    # `service_error`. Declining is the only correct disposition: falling
+    # back to `cursor = None` would make a FAILED READ indistinguishable
+    # from "start over" and silently restart a pass mid-flight, which is the
+    # exact property `_read_cron_cursor` was written to preserve.
+    try:
+        cursor = await _read_cron_cursor()
+    except Exception as err:
+        logger.error(
+            "match_engine cron: cursor read FAILED after exhausting retries "
+            "— declining to run rather than restarting the pass from an "
+            "unknown position: %s",
+            err,
+        )
+        raise service_error(
+            503,
+            "CURSOR_UNAVAILABLE",
+            dependency="supabase",
+            retryable=True,
+            retry_after=RETRY_AFTER_SECONDS["supabase"],
+            detail="batching cursor read temporarily unavailable — please retry",
+        ) from err
+
+    # WR-12 / round-2 regression fix: a NULL cursor means this tick BEGINS a
+    # pass — either the first one after deploy, or the one after a wrap. That
+    # is the only moment a pass start exists, so it is the only moment the
+    # stamp is written. Writing it anywhere else (in particular at a batch
+    # boundary, which is what reading the cursor row's own `updated_at`
+    # effectively did) collapses the measured interval to one tick and makes
+    # the freshness WARNING unreachable.
+    if cursor is None:
+        await _write_pass_started_at()
 
     supabase = get_supabase()
 
-    # Load allocators (role = 'allocator' OR 'both')
-    allocators_result = (
+    # Load allocators (role = 'allocator' OR 'both') as a keyset-paginated
+    # page: fetch CRON_BATCH_SIZE + 1 rows so the extra row tells the caller
+    # whether more remain WITHOUT a second count query. Ordered by
+    # profiles.id, a PRIMARY KEY — no two rows compare equal, so the keyset
+    # page has no tie to break (edge-coverage row 20).
+    allocators_query = (
         supabase.table("profiles")
         .select("id")
         .in_("role", ["allocator", "both"])
-        .execute()
     )
-    allocators = rows(allocators_result)
+    if cursor is not None:
+        allocators_query = allocators_query.gt("id", cursor)
+    allocators_result = (
+        allocators_query.order("id").limit(CRON_BATCH_SIZE + 1).execute()
+    )
+    _fetched_page = rows(allocators_result)
+    # has_more is computed from the RAW fetch (before trimming/demo-filter):
+    # CRON_BATCH_SIZE + 1 rows came back means at least one more exists
+    # beyond this page.
+    has_more = len(_fetched_page) > CRON_BATCH_SIZE
+    allocators = _fetched_page[:CRON_BATCH_SIZE]
     if not allocators:
+        # CR-01: an empty keyset page means two COMPLETELY different things
+        # depending on whether a cursor is live, and conflating them gave
+        # the cursor an ABSORBING state.
+        #
+        # With a live cursor the pass has simply run off the end of the set
+        # (the tail was consumed, or the remaining rows lost their allocator
+        # role / were deleted between ticks). That is "the pass is over",
+        # not "there is nothing to do" — and leaving the cursor pinned made
+        # `.gt("id", cursor)` match zero rows on EVERY subsequent tick,
+        # forever: no allocator rescored, no retention sweep, and a status
+        # the runbook documents as benign. This was the ONLY terminal path
+        # reachable with a non-null cursor that wrote nothing; every other
+        # one either wraps or advances.
+        if cursor is not None:
+            logger.info(
+                "match_engine cron: keyset page past cursor %s came back "
+                "empty — the pass reached the end of the set; wrapping so "
+                "the next tick restarts from the beginning",
+                cursor,
+            )
+            await _wrap_cron_cursor(allocators_handled=0)
+            return _early_return("no_allocators", wrapped=True)
         logger.info("match_engine cron: no allocators found")
         return _early_return("no_allocators")
 
@@ -1998,6 +2480,18 @@ async def cron_recompute() -> dict[str, Any]:
     # POST /recompute path, which is the endpoint reachable from the anon demo
     # surface — the cron runs with SERVICE_KEY under internal trust.
     universe = await asyncio.to_thread(_load_candidate_universe)
+    # WR-04: the batch budget is a PER-SLICE allowance for allocator work,
+    # so its clock starts here, after the shared universe load. Measuring
+    # the O(strategies) scan against it spent the whole allowance before
+    # allocator #1 on a large universe, which made `budget_exhausted` fire
+    # on every tick — one allocator per hour, and (pre-CR-01-fix) a wedge on
+    # the tail. `duration_s` on the response still reports TOTAL request
+    # time from `overall_start`; only the bound moved.
+    _budget_start = time.monotonic()
+
+    def _budget_elapsed() -> float:
+        return time.monotonic() - _budget_start
+
     if not universe["strategies_by_id"]:
         logger.warning("match_engine cron: no strategies in universe")
         return _early_return("empty_universe", reason="empty_universe")
@@ -2013,6 +2507,14 @@ async def cron_recompute() -> dict[str, Any]:
     # those (the comment at the old loop promised "per allocator that had a
     # batch this run" but the code iterated every allocator).
     swept_allocator_ids: list[str] = []
+    # Phase 164.5.1 criterion 9: the batching state this loop decides its
+    # return on. last_handled_id tracks the last allocator that COMPLETED
+    # (processed, skipped, or failed) — a cursor must never point at a
+    # half-processed allocator, so it is only set AFTER the per-allocator
+    # work below, never before or during it.
+    last_handled_id: str | None = None
+    budget_exhausted = False
+    mid_run_kill_switch_state: str | None = None
 
     for profile in allocators:
         allocator_id = profile["id"]
@@ -2026,8 +2528,23 @@ async def cron_recompute() -> dict[str, Any]:
         # so the safety re-check polls fresh every iteration. (The pre-loop gate
         # at the top of cron_recompute still uses the cached accessor — it only
         # seeds the value once and a sub-TTL staleness there is harmless.)
-        if not await asyncio.to_thread(_engine_is_enabled):
-            logger.info("match_engine cron: kill switch flipped mid-run, aborting")
+        # Phase 164.5.1 task 2: the async conversion preserved this property
+        # unchanged — this re-check still calls the UNCACHED accessor and
+        # still polls fresh every iteration; only the CACHED accessor's
+        # failure contract changed (see _engine_is_enabled_cached). Batching
+        # (this task) does not move this check onto the cached path either —
+        # a mid-run kill-switch flip must never wait on batching's own
+        # bookkeeping, and this UNCACHED re-check does not touch
+        # _read_cron_cursor/_write_cron_cursor at all.
+        _mid_run_state = await _engine_is_enabled()
+        if _mid_run_state != KILL_SWITCH_ENABLED:
+            logger.info(
+                "match_engine cron: kill switch not enabled mid-run "
+                "(state=%s), aborting — cursor left unwritten so the next "
+                "tick re-attempts this slice",
+                _mid_run_state,
+            )
+            mid_run_kill_switch_state = _mid_run_state
             break
 
         # NEW-C08-06: serialize skip-check → score per allocator (shared with
@@ -2038,16 +2555,34 @@ async def cron_recompute() -> dict[str, Any]:
         async with _get_recompute_lock(allocator_id):
             if await _should_skip_allocator(allocator_id, force=False):
                 skipped += 1
-                continue
+            else:
+                try:
+                    await _score_one_allocator(allocator_id, universe)
+                    processed += 1
+                    swept_allocator_ids.append(allocator_id)
+                except Exception as err:
+                    logger.exception("match_engine cron: allocator %s failed: %s", allocator_id, err)
+                    failed += 1
+                    # Continue the loop — one allocator failure doesn't fail the cron
 
-            try:
-                await _score_one_allocator(allocator_id, universe)
-                processed += 1
-                swept_allocator_ids.append(allocator_id)
-            except Exception as err:
-                logger.exception("match_engine cron: allocator %s failed: %s", allocator_id, err)
-                failed += 1
-                # Continue the loop — one allocator failure doesn't fail the cron
+        # This allocator is now COMPLETE (processed, skipped, or failed —
+        # all three count as "handled" for cursor purposes). Phase 164.5.1
+        # criterion 9: the elapsed-time batch bound is checked HERE, BETWEEN
+        # allocators, never inside _score_one_allocator — a cursor must
+        # never point at a half-processed allocator.
+        last_handled_id = allocator_id
+        # CR-01: the budget is a bound on STARTING MORE WORK, so it must not
+        # fire when there IS no more work. Evaluated unconditionally, it set
+        # budget_exhausted=True after the LAST allocator of the LAST page —
+        # `has_more` false, nothing left to resume — and the boundary branch
+        # below then wrote the MAXIMUM profiles.id as the cursor instead of
+        # the wrap marker. Every later tick matched zero rows. With the
+        # measured 25s budget against a measured 44.67s real cron run this
+        # was the ordinary path, not an edge case.
+        _is_tail_of_set = not has_more and allocator_id == allocators[-1]["id"]
+        if _budget_elapsed() >= CRON_BATCH_BUDGET_S and not _is_tail_of_set:
+            budget_exhausted = True
+            break
 
     # Retention sweep at end of cron. Log at ERROR so a silently-broken
     # sweep (RLS regression, FK error, URL truncation) lights up alerts
@@ -2075,10 +2610,96 @@ async def cron_recompute() -> dict[str, Any]:
 
     duration_s = _duration()
 
+    # Phase 164.5.1 criterion 9: a mid-run kill-switch flip takes priority
+    # over the batching decision below — the cursor is left UNWRITTEN (no
+    # _write_cron_cursor call at all) so the next tick re-attempts this same
+    # slice from the SAME starting cursor, rather than silently skipping the
+    # allocators this run never reached (T-164.5.1-06-04).
+    if mid_run_kill_switch_state is not None:
+        logger.info(
+            "match_engine cron complete: status=%s (mid-run kill-switch "
+            "abort) processed=%d skipped=%d failed=%d retention_deleted=%d "
+            "duration_s=%.2f",
+            mid_run_kill_switch_state, processed, skipped, failed,
+            retention_total, duration_s,
+        )
+        return {
+            "status": mid_run_kill_switch_state,
+            "processed": processed,
+            "skipped": skipped,
+            "failed": failed,
+            "retention_deleted": retention_total,
+            "duration_s": duration_s,
+            # The cursor was deliberately NOT written, so the resume point
+            # is still whatever this tick started from. Reporting None here
+            # would advertise "start over" for a run that does the opposite.
+            "next_cursor": cursor,
+        }
+
+    if has_more or budget_exhausted:
+        # Phase 164.5.1 criterion 9: this run stopped at its batch boundary
+        # (a count bound OR an elapsed-time bound, whichever came first).
+        # `partial` is a NORMAL completion of one slice — orthogonal to the
+        # processed/failed ratio the ok/degraded/total_failure block below
+        # decides on, never conflated with it. Persist the cursor so the
+        # NEXT tick resumes strictly after the last COMPLETED allocator.
+        #
+        # WR-01: last_handled_id is None when the loop body never ran — the
+        # `if not allocators` guard above fires BEFORE the demo-allocator
+        # filter, so a page whose only non-trimmed member is the demo
+        # allocator reaches here with nothing handled. Writing None there
+        # would write the WRAP MARKER while `has_more` says more allocators
+        # exist: `{"status": "partial", "next_cursor": null}` is a
+        # self-contradiction (partial means "resume after next_cursor"),
+        # and the pass would loop over the same prefix forever, never
+        # reaching anything ordered after it. Writing a half-page id would
+        # skip the rest. So write NOTHING and say so loudly — the next tick
+        # re-attempts this same slice from the same starting cursor, which
+        # is the identical disposition the mid-run kill-switch abort takes.
+        if last_handled_id is None:
+            logger.error(
+                "match_engine cron: batch boundary reached with NOTHING "
+                "handled (has_more=%s budget_exhausted=%s) — cursor left "
+                "unwritten so the next tick re-attempts this slice. The "
+                "usual cause is a page trimmed to empty by the demo-allocator "
+                "filter; check the preceding demo-boundary ERROR.",
+                has_more, budget_exhausted,
+            )
+        else:
+            await _write_cron_cursor(last_handled_id)
+        logger.info(
+            "match_engine cron: batch boundary reached (has_more=%s "
+            "budget_exhausted=%s) — next_cursor=%s processed=%d skipped=%d "
+            "failed=%d retention_deleted=%d duration_s=%.2f",
+            has_more, budget_exhausted, last_handled_id, processed, skipped,
+            failed, retention_total, duration_s,
+        )
+        return {
+            "status": "partial",
+            "processed": processed,
+            "skipped": skipped,
+            "failed": failed,
+            "retention_deleted": retention_total,
+            "duration_s": duration_s,
+            # WR-01: when nothing was handled the cursor was left unwritten
+            # (above), so the truthful resume point is the cursor this tick
+            # STARTED from — never a null, which reads as "start over".
+            "next_cursor": last_handled_id if last_handled_id is not None else cursor,
+        }
+
+    # The set was exhausted in this pass (no has-more flag, no budget trip):
+    # wrap the cursor so the next tick starts from the beginning again.
+    await _wrap_cron_cursor(
+        allocators_handled=processed + skipped + failed,
+    )
+
     # Pick a status discriminator that lets monitoring switch on a single
     # field. Returning "ok" on a structural fault (every allocator failed)
     # would let dashboards stay green while the engine is broken — distinct
     # statuses surface the breakdown without forcing log-text parsing.
+    # `partial` (above) is a FOURTH, orthogonal axis — it says the pass is
+    # incomplete, never that anything failed; it is decided BEFORE this
+    # block runs and this block never sees a partial run.
     if failed > 0 and processed == 0:
         status_value = "total_failure"
         logger.error(
@@ -2107,4 +2728,5 @@ async def cron_recompute() -> dict[str, Any]:
         "failed": failed,
         "retention_deleted": retention_total,
         "duration_s": duration_s,
+        "next_cursor": None,
     }

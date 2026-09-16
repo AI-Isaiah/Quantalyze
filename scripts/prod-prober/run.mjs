@@ -10,6 +10,8 @@
  *   node scripts/prod-prober/run.mjs --self-test                  # fixtures only, NO network
  *   node scripts/prod-prober/run.mjs --arm <name>                 # narrowed DIAGNOSTIC (never exits 0)
  *   node scripts/prod-prober/run.mjs --capture-manifest --out <p> # capture the cron oracle FROM PROD
+ *   node scripts/prod-prober/run.mjs --preflight-repoint [--manifest <p>] # ABORT non-zero on a
+ *                                                                 # live-vs-manifest mismatch; WRITES NOTHING (plan 04)
  *
  * Registered arms (FOUR, equal to ARMS_FLOOR): pyapi06, cron-obs, cron-drift, mt5.
  *
@@ -146,7 +148,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 80;
+export const SELF_TEST_SCENARIOS = 82;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -2124,6 +2126,56 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
+  scenario("HOIST: the PROD credential scan fires with the oracle STALE (normalization superseded)");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ [164.5.1-07] THE FIFTH `invalid()`-ADJACENT STATE, AND THE ONE THAT
+    // ACTUALLY FIRED IN PRODUCTION. `compareManifest` reaches `invalid()` by
+    // several independent routes — absent oracle, schema_version bump,
+    // sha-mismatch/hand-edit — and each is a separate candidate off switch
+    // for the live credential scan. The three HOIST scenarios above cover
+    // absent, schema-bumped and hand-edited; this is the NORMALIZATION
+    // route, the one the 2026-09-11 incident actually took: the committed
+    // manifest still declared `ws-collapse-v1` while this arm's exported
+    // `NORMALIZATION` had moved to `ws-collapse-v2`, so `compareManifest`
+    // performed NO comparison at all for weeks. An HOURLY PRODUCTION PROBE
+    // caught it that day; nothing in CI did until [164.5.1-07]'s contract
+    // test (`src/__tests__/prod-prober-wiring.test.ts`).
+    const prod = loadFixture("cron-drift", "prod-inline-key.json");
+    const man = loadFixture("cron-drift", "manifest-normalization-stale.json");
+    if (!prod.ok || !man.ok) {
+      pass = expect(false, prod.ok ? man.reason : prod.reason) && pass;
+    } else {
+      // ⛔ FIXTURE-INTEGRITY PRECONDITION, hashed from the fixture itself —
+      // not from the control's verdict — following the sha-mismatch
+      // scenario's own shape above. It survives any neuter of the branch
+      // under test and fails only if the fixture stops being stale.
+      const r = await driftRun(prod.data, driftFixturePath("manifest-normalization-stale.json"), quiet);
+      const invalid = r.defects.filter((x) => x.kind === "manifest-invalid");
+      pass =
+        expect(
+          man.data.normalization !== CRON_DRIFT_MOD.NORMALIZATION,
+          `PRECONDITION: the fixture really IS stale (${man.data.normalization} vs ${CRON_DRIFT_MOD.NORMALIZATION}) — a fresh fixture would make this the ordinary path, not a broken-oracle state`,
+        ) &&
+        expect(r.exitCode === 1, `a normalization-stale oracle over dirty rows exits 1 (got ${r.exitCode})`) &&
+        expect(invalid.length === 1, `exactly one manifest-invalid (got ${invalid.length})`) &&
+        expect(
+          String((invalid[0] || {}).detail).includes("ws-collapse-v1"),
+          "naming the superseded normalization value — the NORMALIZATION route, not some other invalidity",
+        ) &&
+        expect(
+          r.defects.some((d) => d.kind === "cron-secret-in-command" && d.subject === "prod:match_engine_cron"),
+          "AND the PROD credential is STILL reported — a normalization-stale oracle is not an off switch either",
+        ) &&
+        expect(
+          noDefectOfKind(r.defects, ["cron-drift"]),
+          "and ZERO cron-drift — no comparison happened, so a drift verdict from an uncomparable oracle would be a fabricated measurement",
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
   scenario("MARKER MANDATORY: compareManifest called without a liveMarker is a measure-fail, never a pass");
   // -------------------------------------------------------------------------
   {
@@ -3629,6 +3681,192 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
+  scenario("the repoint pre-flight ABORTS on a mismatched manifest (prod-schedule-moved.json: match_engine_cron's schedule) and writes nothing");
+  // -------------------------------------------------------------------------
+  {
+    // ⛔ PLAN 04, CRITERION 3. `preflightCronRepoint` is the gate the Wave B
+    // runbook session runs BEFORE the live `cron.schedule`; this scenario is
+    // its own proof, driven through the fixture-injection seam every other
+    // cron-drift scenario uses — never by inspecting the source.
+    const manifestFixturePath = driftFixturePath("manifest.json");
+    const cleanProd = loadFixture("cron-drift", "prod-ok.json");
+    const movedProd = loadFixture("cron-drift", "prod-schedule-moved.json");
+    if (!cleanProd.ok || !movedProd.ok) {
+      pass = expect(false, cleanProd.ok ? movedProd.reason : cleanProd.reason) && pass;
+    } else {
+      const digest = () => CRON_DRIFT_MOD.sha256Hex(readFileSync(manifestFixturePath, "utf8"));
+      const digestBefore = digest();
+
+      // (1) MATCH: a live reading that agrees with the oracle returns 0 and
+      // logs the marker.
+      const matchLines = [];
+      const matchCode = await preflightCronRepoint({
+        seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: cleanProd.data }) }),
+        manifestPath: manifestFixturePath,
+        log: (x) => matchLines.push(String(x)),
+      });
+      const digestAfterMatch = digest();
+
+      // (2) MISMATCH: the SAME oracle against a live reading that drifted
+      // match_engine_cron's schedule ("0 * * * *" -> "5 * * * *").
+      const abortLines = [];
+      const abortCode = await preflightCronRepoint({
+        seams: createSeams({ sqlRunner: fixtureSql({ cronJobRows: movedProd.data }) }),
+        manifestPath: manifestFixturePath,
+        log: (x) => abortLines.push(String(x)),
+      });
+      const digestAfterAbort = digest();
+
+      // (3) MARKER FAILURE: refuses with 3, and — proven by the seam tally,
+      // never merely by the exit code — the cron.job read is NEVER reached.
+      const markerLines = [];
+      const markerSeams = createSeams({ sqlRunner: fixtureSql({ cronJobRows: cleanProd.data, marker: null }) });
+      const sqlBefore = markerSeams.tally.sql;
+      const markerCode = await preflightCronRepoint({
+        seams: markerSeams,
+        manifestPath: manifestFixturePath,
+        log: (x) => markerLines.push(String(x)),
+      });
+      const sqlDelta = markerSeams.tally.sql - sqlBefore;
+      const digestAfterMarker = digest();
+
+      // (4) SOURCE SCAN: the exported function's own body carries no write
+      // call — the region is anchored STRUCTURALLY, by the documented
+      // placement ("immediately after captureManifest") rather than by the
+      // function's own name: this scenario's source runs BEFORE the real
+      // declaration in the file and calls it (and now also names
+      // captureManifest) many times over, so searching for either name as a
+      // CONTIGUOUS literal would find THIS scenario's own text first, not the
+      // declaration below. `.join("")` keeps the searched phrase from ever
+      // appearing contiguously in this scenario's own source bytes, so the
+      // only place it can match is the real declaration.
+      const runnerSrc = readFileSync(fileURLToPath(import.meta.url), "utf8");
+      const prevExportAnchor = ["export async function ", "captureManifest", "({"].join("");
+      const prevExportIdx = runnerSrc.indexOf(prevExportAnchor);
+      const startRe = /\nexport /g;
+      startRe.lastIndex = prevExportIdx >= 0 ? prevExportIdx + prevExportAnchor.length : 0;
+      const startMatch = prevExportIdx >= 0 ? startRe.exec(runnerSrc) : null;
+      const regionStart = startMatch ? startMatch.index + 1 : -1; // +1 skips the leading \n
+      const endRe = /\nexport /g;
+      endRe.lastIndex = regionStart >= 0 ? regionStart + "export ".length : 0;
+      const endMatch = regionStart >= 0 ? endRe.exec(runnerSrc) : null;
+      const regionEnd = endMatch ? endMatch.index : runnerSrc.length;
+      const region = regionStart >= 0 ? runnerSrc.slice(regionStart, regionEnd) : "";
+      // ⛔ COMMENTS ARE STRIPPED BEFORE THE SCAN, so this leg measures CODE
+      // rather than comment PLACEMENT (164.5.1-REVIEW IN-04). It used to pass
+      // only because the JSDoc spelling all three call names verbatim happens
+      // to sit ABOVE the `export` the region starts at: a formatter moving
+      // that doc inside the function, or any future in-body comment naming a
+      // write call, would have turned this gate red for a reason that has
+      // nothing to do with writes. A state scanner and not a regex, because a
+      // `//` INSIDE a string literal must not swallow the rest of its line —
+      // that direction would HIDE a real call and read GREEN.
+      const stripJsComments = (src) => {
+        let out = "";
+        let i = 0;
+        let quote = null;
+        while (i < src.length) {
+          const c = src[i];
+          const next = src[i + 1];
+          if (quote) {
+            out += c;
+            if (c === "\\") {
+              out += next === undefined ? "" : next;
+              i += 2;
+              continue;
+            }
+            if (c === quote) quote = null;
+            i += 1;
+          } else if (c === '"' || c === "'" || c === "`") {
+            quote = c;
+            out += c;
+            i += 1;
+          } else if (c === "/" && next === "/") {
+            while (i < src.length && src[i] !== "\n") i += 1;
+          } else if (c === "/" && next === "*") {
+            i += 2;
+            while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i += 1;
+            i += 2;
+          } else {
+            out += c;
+            i += 1;
+          }
+        }
+        return out;
+      };
+      // CALIBRATION of the stripper itself, on a synthetic snippet: a scan
+      // whose stripper silently removed everything would report "no writes"
+      // forever. Each write name below sits in exactly ONE of the three
+      // positions, so each assertion is sharp.
+      const commentProbe = [
+        'const s = "http://example/ok"; appendFileSync(d);',
+        "/* writeFileSync(b) */",
+        "noop(); // mkdirSync(c)",
+      ].join("\n");
+      const probeStripped = stripJsComments(commentProbe);
+      const codeOnly = stripJsComments(region);
+      const writeCallNames = ["writeFileSync", "appendFileSync", "mkdirSync"];
+      const writesFound = writeCallNames.filter((name) => codeOnly.includes(name));
+
+      pass =
+        expect(
+          prevExportIdx >= 0 && regionStart >= 0 && region.includes("async function ") && region.includes("preflightCronRepoint"),
+          "ANCHOR: the export immediately after captureManifest resolves and its body names the repoint verb — a miss here would degenerate the source scan to an empty or wrong region",
+        ) &&
+        expect(
+          digestBefore === digestAfterMatch,
+          "the committed manifest.json fixture is BYTE-IDENTICAL before and after the MATCH invocation (sha256 of the file, not a mtime check)",
+        ) &&
+        expect(matchCode === 0, `a live reading matching the oracle returns 0 (got ${matchCode})`) &&
+        expect(matchLines.some((l) => l.includes(FIXTURE_DB_MARKER)), "the marker is LOGGED on the match path") &&
+        expect(
+          abortCode === 1,
+          `a live reading that drifted on match_engine_cron's schedule returns NON-ZERO — 'the comparison ran and found something' (got ${abortCode})`,
+        ) &&
+        expect(abortLines.some((l) => l.includes("match_engine_cron")), "the drifting jobname is NAMED") &&
+        expect(
+          abortLines.every((l) => !l.includes("vault.decrypted_secrets") && !l.includes("net.http_post") && !l.includes("DO $$")),
+          "and the command TEXT is never printed, even on the abort path — only kind, subject and remedy reach the log",
+        ) &&
+        expect(
+          digestBefore === digestAfterAbort,
+          "'writes nothing' is a BYTE-DIGEST equality, not an assumption — the fixture is unchanged after the ABORT invocation too, so a verb that aborted by writing would still fail this leg",
+        ) &&
+        expect(markerCode === 3, `a marker read that fails refuses with 3, never a verdict (got ${markerCode})`) &&
+        expect(
+          markerLines.some((l) => l.includes("Nothing was written.")),
+          "the marker refusal carries the same sentence every other refusal in this verb does",
+        ) &&
+        expect(
+          sqlDelta === 1,
+          `the marker refusal NEVER reaches the comparison — only ONE sql seam call happened, the marker query itself (got ${sqlDelta})`,
+        ) &&
+        expect(digestBefore === digestAfterMarker, "and the fixture is unchanged after the MARKER-FAILURE invocation too") &&
+        expect(
+          probeStripped.includes("appendFileSync"),
+          "CALIBRATION: the comment stripper keeps CODE, and a `//` inside a string literal does not swallow the rest of its line — a stripper that ate either would report 'no writes' for a function full of them",
+        ) &&
+        expect(
+          !probeStripped.includes("writeFileSync"),
+          "CALIBRATION: a write-call name inside a BLOCK comment is stripped",
+        ) &&
+        expect(
+          !probeStripped.includes("mkdirSync"),
+          "CALIBRATION: a write-call name inside a LINE comment is stripped",
+        ) &&
+        expect(
+          codeOnly.includes("compareManifest") && codeOnly.length > 400,
+          `CALIBRATION: stripping leaves the function's actual CODE behind (${codeOnly.length} byte(s)) — an over-eager stripper would make the scan below vacuous`,
+        ) &&
+        expect(
+          writesFound.length === 0,
+          `the function's own CODE, comments stripped, carries zero occurrences of any write-call name (found: ${writesFound.join(", ") || "none"}) — a future edit that adds one reddens this scenario, and a comment that merely NAMES one does not`,
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
   scenario("no env VALUE reaches the log or a defect row (threat T-164.1-01)");
   // -------------------------------------------------------------------------
   {
@@ -4833,6 +5071,153 @@ export async function captureManifest({ seams, outPath, log = (s) => console.log
 }
 
 // ---------------------------------------------------------------------------
+// --preflight-repoint: ABORT non-zero WITHOUT WRITING on a live-vs-manifest
+// mismatch (phase 164.5.1 plan 04, criterion 3).
+// ---------------------------------------------------------------------------
+
+/**
+ * Read PROD `cron.job`, compare it against the committed manifest with the
+ * SAME `compareManifest` the live `cron-drift` arm calls, and ABORT non-zero
+ * on a mismatch. This is the gate the Wave B runbook session runs BEFORE the
+ * live `cron.schedule` — without it, the operator's only check that PROD is
+ * where the manifest says it is would be a human reading two strings.
+ *
+ * ⛔ IT INTRODUCES NO SECOND NOTION OF DRIFT. It consumes
+ * `CRON_DRIFT_MOD.CRON_JOB_SQL`, `parseCronJobRows` and `compareManifest`
+ * unchanged — the SAME normalization, the SAME `command_sha256` logic, the
+ * SAME hygiene rules the live arm and `captureManifest` already use. Nothing
+ * here re-derives what "matches" means.
+ *
+ * ⛔ EVERY REFUSAL BELOW WRITES NOTHING — this verb has NO `writeFileSync`,
+ * `appendFileSync` or `mkdirSync` call anywhere in its body, asserted from the
+ * module source by the self-test scenario beside it. Mirroring
+ * `captureManifest`'s own partition:
+ *
+ *   3 — no `manifestPath` (absent, non-existent file, or unparsable JSON). A
+ *       pre-flight that cannot read its oracle measured nothing.
+ *   3 — the database has no `COMMENT ON DATABASE` marker, or the read failed.
+ *       An unlabelled database is one whose identity was never established;
+ *       `current_database()` is `postgres` on every Supabase project.
+ *   3 — a `cron.job` record the parser could not read, or whose count
+ *       disagrees with `count(*) OVER ()` — the SAME two refusals
+ *       `captureManifest` applies to the same reading, for the same reason:
+ *       an incomplete reading is not something to compare through.
+ *   1 — `compareManifest` ran and reported ANY defect (drift, a credential in
+ *       either side's command, an unjudgeable row, a bumped schema/normalization,
+ *       …). The comparison RAN; it found something.
+ *   0 — `compareManifest` ran and reported NOTHING. Safe to proceed.
+ *
+ * ⛔ 1 IS "THE COMPARISON RAN AND FOUND SOMETHING"; 3 IS "NOTHING WAS
+ * MEASURED". Same partition as `captureManifest`, same reason: the two must
+ * stay distinguishable by exit code alone, or a "nothing was measured" state
+ * could be mistaken for a passing gate.
+ *
+ * ⛔ NEVER PRINTS A DEFECT'S COMMAND TEXT. Only `kind`, `subject` and the
+ * per-kind remedy from `CRON_DRIFT_MOD.REMEDIES` reach the log — this mirrors
+ * `captureManifest`'s own rule, and these logs land in a PUBLIC Actions log.
+ *
+ * @param {object} args
+ * @param {object} args.seams        the I/O seams (see `createSeams`)
+ * @param {string} [args.manifestPath] the committed oracle to read. NOT
+ *        defaulted here — unlike `--capture-manifest --out`, the CLI DOES
+ *        default this to `CRON_DRIFT_MOD.MANIFEST_PATH`, because this verb
+ *        only ever READS the oracle and never rewrites it, so defaulting
+ *        carries none of the "silent overwrite" risk a capture default would.
+ * @param {string} [args.functionsDir] the committed function snapshot
+ *        `vault-absent` resolves callables against; defaults to
+ *        `CRON_DRIFT_MOD.FUNCTIONS_DIR`.
+ * @param {(s: string) => void} [args.log]
+ * @returns {Promise<number>} the CLI exit code (0 matches / 1 comparison found a
+ *   defect / 3 nothing was measured)
+ */
+export async function preflightCronRepoint({ seams, manifestPath, functionsDir, log = (s) => console.log(s) }) {
+  // (1) THE ORACLE, FIRST — unlike the live arm, which reads it LAST so a bad
+  // oracle never silences the PROD-side credential scan. This verb has no
+  // credential scan of its own to protect: it is a single yes/no gate, so
+  // refusing immediately on an unreadable oracle is the more honest order.
+  if (!manifestPath) {
+    log("ERROR: preflightCronRepoint requires a manifestPath (--preflight-repoint defaults it to CRON_DRIFT_MOD.MANIFEST_PATH). Nothing was written.");
+    return 3;
+  }
+  if (!existsSync(manifestPath)) {
+    log(`ERROR: the cron manifest at ${manifestPath} does not exist. Nothing was written.`);
+    return 3;
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch (err) {
+    log(`ERROR: the cron manifest at ${manifestPath} could not be parsed as JSON: ${err && err.message ? err.message : String(err)}. Nothing was written.`);
+    return 3;
+  }
+
+  // (2) WHICH DATABASE AM I ON? current_database() is `postgres` on every
+  // Supabase project and proves nothing; the hand-set COMMENT ON DATABASE
+  // marker is the only identification that exists. LOG THE MARKER on
+  // success — the operator records its OUTPUT, never its text.
+  const markerRes = await seams.sql("cron-drift", CRON_DRIFT_MOD.DB_MARKER_SQL);
+  if (markerRes.measureFail) {
+    log(`ERROR: the database marker could not be read: ${markerRes.measureFail}. Nothing was written.`);
+    return 3;
+  }
+  const marker = String(markerRes.stdout || "").trim();
+  if (marker.length === 0) {
+    log(
+      "ERROR: the database has no COMMENT ON DATABASE marker, so which database this reading came from was never established. current_database() is `postgres` on every Supabase project and proves nothing. Nothing was written.",
+    );
+    return 3;
+  }
+  log(`preflight-repoint: database marker = ${marker}`);
+
+  // (3) All rows of cron.job, with the same separators a multi-line command
+  // survives, and the SAME two completeness refusals `captureManifest` uses.
+  const res = await seams.sql("cron-drift", CRON_DRIFT_MOD.CRON_JOB_SQL, CRON_DRIFT_MOD.CRON_JOB_SEPARATORS);
+  if (res.measureFail) {
+    log(`ERROR: cron.job could not be read: ${res.measureFail}. Nothing was written.`);
+    return 3;
+  }
+  const { rows, malformed, countMismatch } = CRON_DRIFT_MOD.parseCronJobRows(res.stdout);
+  if (malformed.length > 0) {
+    log(
+      `ERROR: ${malformed.length} cron.job record(s) could not be parsed (field counts: ${malformed.map((m) => m.fields).join(", ")}; ${CRON_DRIFT_MOD.CRON_JOB_COLUMNS.length} are required), so this reading has a hole in it. Nothing was written.`,
+    );
+    return 3;
+  }
+  if (countMismatch !== null) {
+    log(`ERROR: ${countMismatch} Nothing was written.`);
+    return 3;
+  }
+
+  // (4) Compare — the SAME function the live cron-drift arm calls, no second
+  // notion of drift.
+  const { defects } = CRON_DRIFT_MOD.compareManifest(manifest, rows, {
+    liveMarker: marker,
+    manifestPath,
+    functionsDir: functionsDir || CRON_DRIFT_MOD.FUNCTIONS_DIR,
+  });
+
+  if (defects.length > 0) {
+    log(
+      `ABORT: ${defects.length} defect(s) between PROD cron.job and the committed manifest at ${manifestPath} — the repoint session must NOT proceed.`,
+    );
+    for (const d of defects) {
+      const remedy = CRON_DRIFT_MOD.REMEDIES[d.kind];
+      log(`  ${d.kind} ${d.subject || "-"}${remedy ? ` — remedy: ${remedy}` : ""}`);
+    }
+    return 1;
+  }
+
+  // (5) There is no step 5 — no filesystem WRITE of any kind anywhere above
+  // (see this function's own docstring for the three call names the self-test
+  // scenario scans for). ⚠️ Those names are still avoided HERE only as a
+  // reading convenience: since 164.5.1-REVIEW IN-04 the scenario strips
+  // comments before scanning, so naming one in a comment no longer reddens
+  // the gate — only a call in CODE does.
+  log(`preflight-repoint: PROD cron.job matches the committed manifest (${rows.length} row(s)). Safe to proceed.`);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -4861,6 +5246,8 @@ export async function main(argv) {
   let onlyArm = null;
   let wantCapture = false;
   let outPath = null;
+  let wantPreflight = false;
+  let manifestArg = null;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -4879,19 +5266,68 @@ export async function main(argv) {
         console.error("ERROR: --out needs a path");
         return 3;
       }
+    } else if (arg === "--preflight-repoint") {
+      wantPreflight = true;
+    } else if (arg === "--manifest") {
+      manifestArg = argv[++i];
+      if (!manifestArg) {
+        console.error("ERROR: --manifest needs a path");
+        return 3;
+      }
     } else {
       console.error(`ERROR: unknown argument ${JSON.stringify(arg)}`);
       console.error(
-        "Usage: node scripts/prod-prober/run.mjs [--self-test] [--arm <name>] [--capture-manifest --out <path>]",
+        "Usage: node scripts/prod-prober/run.mjs [--self-test] [--arm <name>] [--capture-manifest --out <path>] [--preflight-repoint [--manifest <path>]]",
       );
       return 3;
     }
+  }
+
+  if (wantCapture && wantPreflight) {
+    // ⛔ MUTUALLY EXCLUSIVE, REFUSED RATHER THAN GUESSED. One flag WRITES the
+    // oracle, the other only ever READS it — running both in one invocation
+    // is an ambiguous request, not two independent operations to sequence.
+    console.error(
+      "ERROR: --capture-manifest and --preflight-repoint are mutually exclusive (one writes the oracle, the other only reads it). Nothing was written.",
+    );
+    return 3;
+  }
+
+  // ⛔ A FLAG THAT DOES NOT APPLY TO THE SELECTED VERB IS REFUSED, NEVER
+  // SILENTLY DROPPED. `--arm x --preflight-repoint` used to run the gate and
+  // throw `onlyArm` away; `--capture-manifest --out p --manifest q` used to
+  // accept and ignore `--manifest`. Both leave the operator believing they
+  // scoped an invocation that was never scoped — the same "ambiguous request,
+  // not two independent operations" shape the pair above refuses.
+  if (manifestArg !== null && !wantPreflight) {
+    console.error("ERROR: --manifest only applies to --preflight-repoint (the verb that READS the oracle). Nothing was written.");
+    return 3;
+  }
+  if (outPath !== null && !wantCapture) {
+    console.error("ERROR: --out only applies to --capture-manifest (the verb that WRITES the oracle artifact). Nothing was written.");
+    return 3;
+  }
+  if (onlyArm !== null && (wantCapture || wantPreflight)) {
+    console.error("ERROR: --arm narrows the live prober run only; it does not apply to --capture-manifest or --preflight-repoint. Nothing was written.");
+    return 3;
   }
 
   if (wantCapture) {
     // ⛔ Refuses without --out, and never defaults to MANIFEST_PATH: the
     // capture writes an ARTIFACT a human reviews and moves into place.
     return captureManifest({ seams: seamsFactory(), outPath, log: (s) => console.log(s) });
+  }
+
+  if (wantPreflight) {
+    // ⚠️ UNLIKE --capture-manifest --out, DEFAULTING IS CORRECT HERE: this verb
+    // only ever READS the committed oracle and never rewrites it, so a default
+    // destination carries none of the "silent overwrite" risk a capture
+    // default would.
+    return preflightCronRepoint({
+      seams: seamsFactory(),
+      manifestPath: manifestArg || CRON_DRIFT_MOD.MANIFEST_PATH,
+      log: (s) => console.log(s),
+    });
   }
 
   console.log(

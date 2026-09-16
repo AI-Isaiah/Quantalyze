@@ -37,6 +37,7 @@ import {
   ARMS_FLOOR,
   DEFECT_KINDS,
   SELF_TEST_SCENARIOS,
+  main,
   selfTest,
 } from "../../scripts/prod-prober/run.mjs";
 import {
@@ -48,6 +49,9 @@ import {
   FUNCTIONS_DIR,
   HEADERS_LITERAL_MAX,
   HYGIENE_RULE_IDS,
+  MANIFEST_PATH,
+  MANIFEST_SCHEMA_VERSION,
+  NORMALIZATION,
   TOKEN_MIN,
   compareManifest,
   hygieneVerdict,
@@ -1890,7 +1894,7 @@ describe("[164.1-05] kinds and floors", () => {
     // is no literal `k/50` in the source to count. Executing the self-test is
     // the only honest way to derive the number — and it is fixtures-only, no
     // network, under a tenth of a second.
-    expect(SELF_TEST_SCENARIOS).toBe(80);
+    expect(SELF_TEST_SCENARIOS).toBe(82);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);
@@ -2071,6 +2075,97 @@ describe("[164.8.5-02] compareManifest totality (CR-04)", () => {
         JSON.stringify(MANIFEST),
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [164.5.1-07] THE COMMITTED ORACLE DECLARES WHAT THE ARM COMPUTES.
+//
+// ⛔ THE 2026-09-11 INCIDENT THIS GATE CLOSES, IN TWO SENTENCES. The first
+// prober run after Phase 164.8.5 reported `manifest-invalid` — the committed
+// `cron-manifest.json` still declared `ws-collapse-v1` while `cron-drift.mjs`'s
+// exported `NORMALIZATION` had moved to `ws-collapse-v2`, so `compareManifest`
+// performed NO comparison at all for weeks. An HOURLY PRODUCTION PROBE caught
+// it; nothing in CI did.
+//
+// ⭐ THE DATA HALF IS ALREADY DISCHARGED (PR #776, run 34611594511, re-captured
+// the manifest at `ws-collapse-v2`). This describe block is the GATE half —
+// the control that turns the NEXT such divergence into a red CI check instead
+// of another silent hole an hourly probe has to find first.
+//
+// ⛔ THIS DOES NOT DUPLICATE `lever 1 — normalization drift reaches invalid()`
+// below. That lever proves the RUNTIME route to `invalid()` on a SYNTHETIC
+// copy of a different fixture; it never reads the committed file. This block
+// reads `scripts/prod-prober/cron-manifest.json` from disk and asks whether
+// the artifact ITSELF still agrees with the arm — the exact comparison that
+// was silently absent on 2026-09-11.
+// ---------------------------------------------------------------------------
+describe("[164.5.1-07] the committed oracle declares the normalization the arm computes", () => {
+  const COMMITTED_MANIFEST = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
+
+  /**
+   * The gate itself. Throws by name — never returns a boolean — because "the
+   * committed oracle declares what the arm computes" has exactly one honest
+   * failure shape: name the disagreement, or say nothing happened.
+   *
+   * ⛔ ANTI-VACUITY FIRST, AND ITS OWN GUARD. `{}` is a valid, non-array
+   * object, so a check that only compared `manifest.normalization !==
+   * NORMALIZATION` would still throw on it — but for the WRONG reason, and
+   * with a message indistinguishable from an ordinary mismatch. The empty-input
+   * case is asserted separately below specifically so a reviewer can tell "the
+   * gate has nothing to compare" from "the gate compared and found a
+   * disagreement" — two different repo states with two different remedies.
+   */
+  function assertManifestDeclaresArmConstants(manifest: Record<string, unknown> | null | undefined) {
+    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest) || Object.keys(manifest).length === 0) {
+      throw new Error(
+        "[164.5.1-07] ANTI-VACUITY GUARD: the manifest is missing, not an object, or empty — there is nothing to compare, and an absent oracle must never read as agreement",
+      );
+    }
+    if (manifest.normalization !== NORMALIZATION) {
+      throw new Error(
+        `[164.5.1-07] the committed manifest declares normalization ${JSON.stringify(manifest.normalization)}; the arm computes ${JSON.stringify(NORMALIZATION)}. Two different normalizations produce two different shas for identical text — re-capture with captureManifest, never hand-edit.`,
+      );
+    }
+    if (manifest.schema_version !== MANIFEST_SCHEMA_VERSION) {
+      throw new Error(
+        `[164.5.1-07] the committed manifest declares schema_version ${JSON.stringify(manifest.schema_version)}; the arm reads ${JSON.stringify(MANIFEST_SCHEMA_VERSION)}. Every committed sha depends on the schema — re-capture with captureManifest, never hand-edit.`,
+      );
+    }
+  }
+
+  it("the COMMITTED manifest at MANIFEST_PATH agrees with the arm — read from disk, not through the arm's own runtime", () => {
+    expect(() => assertManifestDeclaresArmConstants(COMMITTED_MANIFEST), "PRECONDITION: the committed oracle must be clean or the calibration below proves nothing about a real disagreement").not.toThrow();
+  });
+
+  it("CALIBRATION 1/5 — the SUPERSEDED normalization value throws", () => {
+    const mutant = { ...COMMITTED_MANIFEST, normalization: "ws-collapse-v1" };
+    expect(mutant.normalization, "the mutant must differ from the committed value").not.toBe(COMMITTED_MANIFEST.normalization);
+    expect(() => assertManifestDeclaresArmConstants(mutant)).toThrow(/normalization/);
+  });
+
+  it("CALIBRATION 2/5 — a THIRD, never-used normalization value throws too — this is an equality, not a two-value allowlist", () => {
+    const mutant = { ...COMMITTED_MANIFEST, normalization: "ws-collapse-v99-never-shipped" };
+    expect(mutant.normalization).not.toBe(COMMITTED_MANIFEST.normalization);
+    expect(mutant.normalization).not.toBe("ws-collapse-v1");
+    expect(() => assertManifestDeclaresArmConstants(mutant)).toThrow(/normalization/);
+  });
+
+  it("CALIBRATION 3/5 — a `schema_version` bump throws, by the SCHEMA_VERSION route", () => {
+    const mutant = { ...COMMITTED_MANIFEST, schema_version: (COMMITTED_MANIFEST.schema_version as number) + 1 };
+    expect(mutant.schema_version).not.toBe(COMMITTED_MANIFEST.schema_version);
+    expect(() => assertManifestDeclaresArmConstants(mutant)).toThrow(/schema_version/);
+  });
+
+  it("CALIBRATION 4/5 — a manifest missing the `normalization` key throws, rather than comparing `undefined` to agreement", () => {
+    const mutant: Record<string, unknown> = { ...COMMITTED_MANIFEST };
+    delete mutant.normalization;
+    expect("normalization" in mutant, "PRECONDITION: the key is really gone").toBe(false);
+    expect(() => assertManifestDeclaresArmConstants(mutant)).toThrow(/normalization/);
+  });
+
+  it("CALIBRATION 5/5 — an EMPTY object throws on the anti-vacuity guard specifically, not on a downstream equality", () => {
+    expect(() => assertManifestDeclaresArmConstants({})).toThrow(/ANTI-VACUITY GUARD/);
   });
 });
 
@@ -2724,5 +2819,63 @@ describe("[164.8.3-04] the -6 branch is load-bearing (criterion 6)", () => {
         "and the branch ABOVE the excision is equally untouched",
       ).toBe("mt5-no-ipc");
     });
+  });
+});
+
+describe("[164.5.1-REVIEW IN-03] a CLI flag that does not apply to the selected verb is REFUSED, never dropped", () => {
+  // ⛔ THE DEFECT. `--arm x --preflight-repoint` ran the gate and threw
+  // `onlyArm` away; `--capture-manifest --out p --manifest q` accepted and
+  // ignored `--manifest`. The operator reads an exit code believing they
+  // scoped an invocation that was never scoped — the same shape the
+  // capture/preflight mutual-exclusion guard already refuses.
+  //
+  // ⛔ EVERY CASE HERE RETURNS BEFORE ANY SEAM IS BUILT, so none of these
+  // calls can reach the network or a database. A case that ever did would
+  // show up as a hang or a credential error, never as a silent pass.
+  const cases: Array<{ argv: string[]; message: string }> = [
+    { argv: ["--arm", "pyapi06", "--preflight-repoint"], message: "--arm narrows the live prober run only" },
+    { argv: ["--arm", "pyapi06", "--capture-manifest", "--out", "/tmp/nope"], message: "--arm narrows the live prober run only" },
+    { argv: ["--capture-manifest", "--out", "/tmp/nope", "--manifest", "/tmp/nope"], message: "--manifest only applies to --preflight-repoint" },
+    { argv: ["--manifest", "/tmp/nope"], message: "--manifest only applies to --preflight-repoint" },
+    { argv: ["--out", "/tmp/nope"], message: "--out only applies to --capture-manifest" },
+    { argv: ["--preflight-repoint", "--out", "/tmp/nope"], message: "--out only applies to --capture-manifest" },
+  ];
+
+  for (const { argv, message } of cases) {
+    it(`refuses ${argv.join(" ")} with exit 3 and says why`, async () => {
+      const errors: string[] = [];
+      const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+        errors.push(args.map(String).join(" "));
+      });
+      try {
+        expect(await main(argv)).toBe(3);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(errors.join("\n")).toContain(message);
+      // Every refusal in this CLI carries the same sentence, so an operator
+      // never has to infer whether a rejected invocation left something behind.
+      expect(errors.join("\n")).toContain("Nothing was written.");
+    });
+  }
+
+  it("CALIBRATION: the guards do NOT fire on the applicable pairings — a guard that rejected everything would be indistinguishable here", async () => {
+    // Parsed-and-accepted, then refused for its OWN reason (a manifest path
+    // that does not exist / the two verbs together), which is a DIFFERENT
+    // message from the applicability guards above. That difference is the
+    // proof the flag reached its verb rather than being rejected as
+    // inapplicable.
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    });
+    try {
+      expect(await main(["--capture-manifest", "--preflight-repoint"])).toBe(3);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(errors.join("\n")).toContain("mutually exclusive");
+    expect(errors.join("\n")).not.toContain("only applies to");
+    expect(errors.join("\n")).not.toContain("narrows the live prober run only");
   });
 });

@@ -306,7 +306,9 @@ export const LINEAGE_ALLOWLIST = [
       "Same two kinds as its predecessor, which it supersedes (same jobname, daily -> hourly). It " +
       "is itself superseded on PROD by the 2026-09-01 hand repair captured in " +
       "scripts/prod-prober/cron-manifest.json jobid 1; repointing that LIVE row at the successor's " +
-      "public.match_engine_cron_tick() is Phase 164.5 item 7, outside this phase's fence.",
+      "public.match_engine_cron_tick() is Phase 164.5 item 7, outside this phase's fence. " +
+      "Phase 164.5 item 7 was SPLIT OUT to Phase 164.5.1 CRONREPOINT on 2026-09-07 by founder " +
+      "decision — not renamed, not dropped; see Phase 164.5.1 CRONREPOINT for the live repoint.",
   },
   {
     file: `${MIGRATIONS_DIR}/20260825130000_ledger_refresh_fanout_dormant.sql`,

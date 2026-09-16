@@ -659,6 +659,68 @@ function deriveEmitterSites(
  * `VENUE_WIRE_CODES_WITHOUT_VERDICT` in `wizardErrors.ts` for why a verdict
  * would be false-by-construction.
  *
+ * ⭐ 39th ARRIVAL, 2026-09-16 (Phase 164.5.1 plan 02): `KILL_SWITCH_UNAVAILABLE`.
+ * The match engine's fail-CLOSED answer when `_engine_is_enabled` exhausts its
+ * retry budget against an unreadable kill switch and DECLINES to score rather
+ * than failing open (criterion 8). It is a SHAPE 2 arrival: the ONE literal the
+ * scanner sees is the `service_error(503, 'KILL_SWITCH_UNAVAILABLE', ...)` raise
+ * inside `recompute()` (`POST /api/match/recompute`) in `routers/match.py` —
+ * the only occurrence of that string outside `analytics-service/tests/`.
+ * ⛔ CORRECTED 2026-09-16 (164.5.1 review, WR-06). This paragraph first said the
+ * code was returned by `cron_recompute()` and that the endpoint's only
+ * TypeScript consumer was `src/app/api/cron/flag-monitor/route.ts`, so it could
+ * never reach a user. BOTH were false, and they were the whole argument for the
+ * exemption. Re-MEASURED at HEAD: the emitter is `recompute()`, not
+ * `cron_recompute()` (which only returns the LOWERCASE value
+ * `kill_switch_unavailable` as a 200 `status` field, never an error-contract
+ * code); `flag-monitor` calls NEITHER endpoint (its `cron-recompute` mention is
+ * prose about Sentry TRANSACTION NAMES); and the real chain is
+ * `AllocatorMatchQueue.tsx` -> `/api/admin/match/recompute` -> `recomputeMatch()`
+ * -> `/api/match/recompute`, whose terminal arm forwards `code: seamCode` on a
+ * 5xx as well as a 4xx — so the code DOES reach a browser.
+ * The disposition is STILL an EXEMPTION, on the measured reason: the axis is not
+ * "does it reach a user" but "can a verdict row ever fire", and
+ * `VENUE_WIRE_CODE_TO_VERDICT` is read only by `classifyKeyValidationError`,
+ * which the admin match-recompute route never calls (it reads `err.seamCode`
+ * directly, and the component renders `error`, never `code`). That is exactly
+ * how its two siblings from the same `recompute()`, `ADMIN_CHECK_UNAVAILABLE`
+ * and `ROLE_CHECK_UNAVAILABLE`, are already dispositioned. See
+ * `VENUE_WIRE_CODES_WITHOUT_VERDICT` in `wizardErrors.ts` for the full
+ * measurement and for why reusing `SERVICE_UNAVAILABLE_RETRY` or
+ * `SERVICE_UNREACHABLE` would be false-by-construction.
+ * ⭐ OBSERVED, NOT ASSUMED: the member-for-member assertion below was seen RED
+ * on this arrival before this line was added, and the disposition assertion
+ * was seen RED before the exemption entry was added.
+ * `DERIVED_FLOOR` moves 22 → 23 by this file's own stated rule: 0.6 × 39 = 23.4,
+ * floored to 23.
+ *
+ * ⭐ 40th ARRIVAL, 2026-09-16 (Phase 164.5.1 review fix, WR-02): `CURSOR_UNAVAILABLE`.
+ * A SHAPE 2 arrival — `service_error(503, 'CURSOR_UNAVAILABLE', ...)` in the
+ * `except` wrapped around `_read_cron_cursor()` inside `cron_recompute()`
+ * (`POST /api/match/cron-recompute`), the only occurrence of that literal
+ * outside `analytics-service/tests/`. It CONVERTS a failure that already
+ * existed (the read propagated out and FastAPI answered a bare `500
+ * text/plain`) into the seam envelope; it does not add one. ⛔ There is
+ * deliberately no `cursor = None` fallback: that would make a FAILED READ
+ * indistinguishable from "start over".
+ * ⭐ THE MIRROR IMAGE OF ITS NEIGHBOUR ABOVE, which is worth stating because the
+ * two are easy to swap and one of them already was. `KILL_SWITCH_UNAVAILABLE`
+ * is emitted by `recompute()` and DOES cross to a browser; `CURSOR_UNAVAILABLE`
+ * is emitted by `cron_recompute()` and does NOT reach TypeScript at all —
+ * MEASURED at HEAD, `/api/match/cron-recompute` has ZERO callers under `src/`
+ * (its only mentions there are a Sentry transaction-name comment in
+ * `flag-monitor/route.ts` and prose). Its one production caller is
+ * `public.match_engine_cron_tick()` via `net.http_post` (pg_cron jobid 1),
+ * which is pg_net — fire-and-forget, the response body discarded. So the
+ * sentence that was FALSE for `KILL_SWITCH_UNAVAILABLE` is TRUE here.
+ * Dispositioned as an EXEMPTION: no TypeScript surface reads it, so
+ * `classifyKeyValidationError` is unreachable on this path and a verdict row
+ * could never fire. See `VENUE_WIRE_CODES_WITHOUT_VERDICT` in `wizardErrors.ts`.
+ * Independently corroborated by `analytics-service/docs/STATUS_CONTRACT.md`
+ * row S-26, written from the Python side without reference to this file.
+ * `DERIVED_FLOOR` moves 23 → 24 by this file's own stated rule: 0.6 × 40 = 24.0,
+ * floored to 24.
+ *
  * ⭐ This roster is HAND-TYPED for exactly this moment. The arrival reddened
  * the member-for-member assertion below BEFORE this line was added — observed,
  * not assumed — which is what makes the green that follows a design and not an
@@ -683,6 +745,7 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   "CSV_FORMAT_UNSUPPORTED",
   "CSV_TOO_LARGE",
   "CSV_VALIDATION_FAILED",
+  "CURSOR_UNAVAILABLE",
   "DDOS_PROTECTION",
   "EGRESS_PROXY_MISCONFIGURED",
   "EVAL_FAILED",
@@ -694,6 +757,7 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   "KEK_UNAVAILABLE",
   "KEY_MISSING_EXCHANGE",
   "KEY_UNDECRYPTABLE",
+  "KILL_SWITCH_UNAVAILABLE",
   "MISSING_SCOPE",
   "MT5_GATEWAY_UNCONFIGURED",
   "MT5_GATEWAY_UNREACHABLE",
@@ -725,6 +789,15 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * reads as protection while measuring nothing, and `it.each([])` is zero cases,
  * which is a passing suite.
  *
+ * 23 → 24 (2026-09-16, Phase 164.5.1 review fix): 0.6 × 40 measured codes
+ * = 24.0 exactly, floored to 24 — same rule, one further arrival
+ * (`CURSOR_UNAVAILABLE`). ⚠️ The product is a whole number at this population,
+ * which is the one case where "floored" changes nothing; it is still the rule
+ * that produced the value, not a typed number.
+ *
+ * 22 → 23 (2026-09-16, Phase 164.5.1): 0.6 × 39 measured codes = 23.4,
+ * floored to 23 — same rule, one new arrival.
+ *
  * 10 → 22 (2026-08-14, Phase 153.7-01 / WIZFORM-02). The arithmetic, stated so
  * the next re-cut does not have to guess the rule: 0.6 × 37 measured codes =
  * 22.2, floored to 22. ⛔ NEVER `derived.size`, and never `0.6 * derived.size`
@@ -737,7 +810,7 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * absence assertion in this file — the hand-typed roster above, the reach pin
  * and the both-shapes assertion are what stand against it.
  */
-const DERIVED_FLOOR = 22;
+const DERIVED_FLOOR = 24;
 
 /**
  * ⭐ THE REACH PIN — hand-typed, because today nothing else asserts WHERE the

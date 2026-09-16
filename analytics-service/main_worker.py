@@ -109,7 +109,7 @@ configure_logging()
 
 import main_worker_healthz  # top-level module (not in services/); stdlib-only, no cycle
 from sentry_init import init_sentry
-from services.db import db_execute, get_supabase
+from services.db import db_execute, db_read_with_retry, get_supabase
 from services.encryption import validate_kek_on_startup
 from services.job_worker import DispatchOutcome, JobStatus, Priority, dispatch
 
@@ -743,7 +743,11 @@ async def dispatch_tick(worker_id: str) -> None:
             )
             _FALLBACK_CLAIM_RPC = False
         try:
-            claim_result = await db_execute(_claim_priority)
+            # [164.5.1-GATEWAY-CEILING-INVERSION]: the Supabase API gateway
+            # cuts off and answers 504 before Postgres reports anything, so a
+            # transient gateway timeout on this claim read is retried rather
+            # than costing the worker a whole tick.
+            claim_result = await db_read_with_retry(_claim_priority)
         except Exception as exc:  # noqa: BLE001
             if _is_undefined_function(exc):
                 # Only a STRUCTURED SQLSTATE 42883 latches; a message-only
@@ -764,6 +768,11 @@ async def dispatch_tick(worker_id: str) -> None:
                         "latched": structured,
                     },
                 )
+                # This fallback is the LAST resort of an already-failed tick
+                # (the priority RPC just raised); it deliberately stays on
+                # the fail-fast db_execute seam, not db_read_with_retry, so
+                # it does not spend a second retry budget on top of the one
+                # the priority claim already spent.
                 claim_result = await db_execute(_claim_legacy)
             else:
                 raise
@@ -1051,10 +1060,21 @@ async def watchdog_tick() -> None:
     """Call reset_stalled_compute_jobs with per-kind thresholds."""
     supabase = get_supabase()
 
+    # `reset_stalled_compute_jobs` is a WRITE: it flips stalled `running`
+    # rows back to `pending`. It is nonetheless SAFE to retry, because its
+    # WHERE clause only matches rows that are still `status='running'` past
+    # the staleness threshold — a second attempt after a first one already
+    # committed matches nothing and is a no-op. What a retry CANNOT recover
+    # is the COUNT: the committed rows are gone from the filter, so the
+    # returned number under-states what was actually reset (WR-10).
+    attempts = 0
+
     # Pass the overrides dict directly; PostgREST coerces a JSON object to
     # JSONB. json.dumps() would send a JSON string, which becomes a JSONB
     # scalar and trips jsonb_object_keys() with "cannot call ... on a scalar".
     def _reset():
+        nonlocal attempts
+        attempts += 1
         return supabase.rpc(
             "reset_stalled_compute_jobs",
             {
@@ -1063,9 +1083,27 @@ async def watchdog_tick() -> None:
             },
         ).execute()
 
-    result = await db_execute(_reset)
+    # [164.5.1-GATEWAY-CEILING-INVERSION]: retry a transient Supabase gateway
+    # timeout on this watchdog write rather than losing a whole tick. The
+    # seam is named for reads; this call site is idempotent-by-filter (see
+    # above), which is what makes consuming it legitimate here.
+    result = await db_read_with_retry(_reset)
     reset_count = result.data or 0
-    if reset_count:
+    if attempts > 1:
+        # A 504 delivered AFTER the server committed is indistinguishable
+        # here from one delivered before it, so `reset_count` is a LOWER
+        # BOUND, not a measurement. Log unconditionally at WARNING — a
+        # silent zero would make "reclaimed nothing" and "reclaimed, then
+        # lost the receipt to a post-commit gateway timeout" look identical.
+        logger.warning(
+            "Watchdog reclaimed at least %d stalled jobs (count is a LOWER "
+            "BOUND: the reset RPC was retried across %d attempts after a "
+            "gateway timeout, and an attempt that committed before timing "
+            "out no longer matches the staleness filter)",
+            reset_count,
+            attempts,
+        )
+    elif reset_count:
         logger.warning("Watchdog reclaimed %d stalled jobs", reset_count)
 
 

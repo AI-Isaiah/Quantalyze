@@ -4431,6 +4431,101 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
 export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
   new Map([
     [
+      "KILL_SWITCH_UNAVAILABLE",
+      "NOT a key-validation code at all — it is the match engine's " +
+        "fail-CLOSED answer when `_engine_is_enabled` exhausts its retry budget " +
+        "against an unreadable kill switch and DECLINES to score rather than " +
+        "failing open (Phase 164.5.1 criterion 8). " +
+        "⛔ CORRECTED 2026-09-16 (164.5.1 review, WR-06): this entry " +
+        "previously said the code was returned by `cron_recompute()`, and that " +
+        "its only TypeScript consumer was `src/app/api/cron/flag-monitor/route.ts` " +
+        "so it never reached a user surface. BOTH were false, and both were " +
+        "load-bearing — together they WERE the argument for the exemption. " +
+        "Re-MEASURED at HEAD: " +
+        "(1) THE EMITTER IS `recompute()`, NOT `cron_recompute()`. The wire code " +
+        "is minted at exactly one site: the `service_error(503, " +
+        "'KILL_SWITCH_UNAVAILABLE', dependency='supabase', retryable=True, " +
+        "retry_after=...)` raise inside `recompute()` (`POST /api/match/recompute`) " +
+        "in `analytics-service/routers/match.py` — the only occurrence of that " +
+        "string literal outside `analytics-service/tests/`, which is why it is the " +
+        "only occurrence the vocabulary scanner sees. `cron_recompute()` never puts " +
+        "it on the error contract at all: it returns the LOWERCASE constant VALUE " +
+        "`kill_switch_unavailable` as a 200 `status` field through `_early_return`. " +
+        "(Cited by SYMBOL, not by line, per [164.7-CITATION-DRIFT-01].) " +
+        "(2) THE CODE DOES REACH A BROWSER — the withdrawn sentence claimed the " +
+        "opposite. `flag-monitor` calls NEITHER endpoint; its one mention of " +
+        "`cron-recompute` is prose about Sentry TRANSACTION NAMES. The real chain is " +
+        "`src/components/admin/AllocatorMatchQueue.tsx` -> `POST " +
+        "/api/admin/match/recompute` -> `recomputeMatch()` in `analytics-client.ts` " +
+        "-> `/api/match/recompute`. That client lifts `seamErrorCode(error)` off the " +
+        "envelope on EVERY error status including 503 and carries it on " +
+        "`AnalyticsUpstreamError.seamCode`, and the route's terminal arm forwards " +
+        "`code: seamCode` on a 5xx as well as a 4xx (its own 161-08 / WIZERR-06 " +
+        "note: THE CODE CROSSES; THE MESSAGE STILL DOES NOT). The founder's browser " +
+        "really does receive `{error: <static generic copy>, " +
+        "code: 'KILL_SWITCH_UNAVAILABLE'}` at 500. " +
+        "WHY IT IS STILL AN EXEMPTION, on the measured reason rather than the " +
+        "withdrawn one: the axis is not 'does it reach a user', it is 'can a " +
+        "verdict row ever fire'. This table is read at exactly ONE place — " +
+        "`classifyKeyValidationError` below — whose only callers are " +
+        "`strategies/create-with-key` and `strategies/composite/add-key`. The admin " +
+        "match-recompute route never calls it; it reads `err.seamCode` directly. So " +
+        "a row here is unreachable from this emitter, and `AllocatorMatchQueue` " +
+        "renders `errBody.error` (the route's STATIC generic copy on a 5xx) and " +
+        "reads `code` nowhere. That is the SAME disposition and the SAME reason as " +
+        "its two structural siblings raised by the same `recompute()` on the same " +
+        "route, `ADMIN_CHECK_UNAVAILABLE` and `ROLE_CHECK_UNAVAILABLE` (their " +
+        "entries below): the honest remedy is a status-aware 5xx arm in that route, " +
+        "not a row here — and giving this one a verdict row while those two keep " +
+        "an exemption would split one family across both dispositions. " +
+        "⛔ Do NOT reuse `SERVICE_UNAVAILABLE_RETRY` (its copy says the request " +
+        "was never sent — false here, the read WAS attempted) or " +
+        "`SERVICE_UNREACHABLE` (its copy says we cannot tell whether it was " +
+        "processed — false here, we know nothing was scored). Both are the " +
+        "match-the-fact-not-the-name trap this file documents at MT5_GATEWAY_UNREACHABLE. " +
+        "If the admin route ever grows an arm that RENDERS this code, or if " +
+        "`classifyKeyValidationError` ever gains that route as a caller, it earns a " +
+        "new member stating the actual fact — not one of those two.",
+    ],
+    [
+      "CURSOR_UNAVAILABLE",
+      "Detail: 'batching cursor read temporarily unavailable — please retry', " +
+        "503, dependency 'supabase', retryable, with a Retry-After. Raised in the " +
+        "`except` wrapped around `_read_cron_cursor()` inside `cron_recompute()` " +
+        "(`POST /api/match/cron-recompute`) in `analytics-service/routers/match.py` " +
+        "— the only occurrence of that literal outside `analytics-service/tests/`, " +
+        "cited by SYMBOL not line per [164.7-CITATION-DRIFT-01]. It CONVERTS an " +
+        "existing failure rather than adding one: the cursor read already " +
+        "propagated out and FastAPI answered a bare 500 text/plain, which R-1 " +
+        "reads as 'do not retry' — backwards for a gateway blip. Declining is the " +
+        "point; a `cursor = None` fallback would make a FAILED READ " +
+        "indistinguishable from 'start over' and silently restart a pass from an " +
+        "unknown position. " +
+        "EXEMPT, and here the no-reach claim is the MEASURED one rather than the " +
+        "assumed one — the distinction matters because the entry directly above " +
+        "this table's `KILL_SWITCH_UNAVAILABLE` member made exactly that claim " +
+        "falsely and had to be withdrawn (WR-06). MEASURED at HEAD: " +
+        "`/api/match/cron-recompute` has ZERO callers anywhere under `src/`. There " +
+        "is no route handler, no `analytics-client` wrapper and no component fetch " +
+        "for it; its only appearances in `src/` are a comment in " +
+        "`cron/flag-monitor/route.ts` about Sentry TRANSACTION NAMES and prose. " +
+        "Its one production caller is `public.match_engine_cron_tick()` calling " +
+        "`net.http_post` (pg_cron jobid 1), i.e. pg_net — fire-and-forget, the " +
+        "response body discarded, so not even a server-side reader exists. No " +
+        "TypeScript ever sees this code, therefore `classifyKeyValidationError` " +
+        "— the ONLY reader of `VENUE_WIRE_CODE_TO_VERDICT` — is unreachable on " +
+        "this path and a verdict row could never fire. " +
+        "⚠️ CONTRAST ITS NEIGHBOUR, because the two are mirror images and were " +
+        "confused once already: `KILL_SWITCH_UNAVAILABLE` comes from `recompute()` " +
+        "and DOES cross to a browser; this one comes from `cron_recompute()` and " +
+        "does not reach TypeScript at all. Same exemption, opposite reasons — do " +
+        "not fold them together. " +
+        "Corroborated independently from the Python side by " +
+        "`analytics-service/docs/STATUS_CONTRACT.md` row S-26. If a TypeScript " +
+        "caller for the cron endpoint is ever written, this disposition has to be " +
+        "argued again from scratch.",
+    ],
+    [
       "UNSUPPORTED_EXCHANGE",
       "Detail: 'Unsupported exchange for permission verification.' Reaches the " +
         "cascade's terminal UNKNOWN/500, and that is the HONEST answer: it is " +
