@@ -2033,14 +2033,17 @@ true for 146 and half of 142–145, and **false for 141**.
       `public.match_engine_cron_tick()` (migration `20260907120000`), which reads Vault INSIDE its
       body. So the moment Phase 164.5 item (7) repoints the live row to
       `SELECT public.match_engine_cron_tick();`, the command text no longer contains the literal
-      and the rule fires **against a correct repair**. ⛔ Do not discover this at repair time and
+      and the rule fires **against a correct repair**. Phase 164.5 item 7 was SPLIT OUT to
+      Phase 164.5.1 CRONREPOINT on 2026-09-07 by founder decision — not renamed, not dropped.
+      ⛔ Do not discover this at repair time and
       "fix" it by keeping a decorative `DO` wrapper around the call purely to satisfy a grep —
       that is a gate shaped by its own false positive. **Three things move together, in one
       commit:** (a) the rule — accept EITHER the literal or a call to a function whose committed
       body contains it, and ship a RED fixture for the new arm, because a widened rule with no
       fixture is a rule nobody has watched fail; (b)
       `scripts/prod-prober/cron-manifest.json`, re-captured from PROD after the repair; and (c)
-      the live row itself. Owner: Phase 164.5 item (7).
+      the live row itself. Owner: Phase 164.5.1 CRONREPOINT (Phase 164.5 item 7 was SPLIT OUT
+      here on 2026-09-07 by founder decision — not renamed, not dropped).
 
 - [ ] **`[164.2-TYPES-REGEN-CHECK]` After the migration PR merges and auto-applies to PROD,
       re-derive the six `database.types.ts` lines that were hand-extended, and confirm no
@@ -3406,7 +3409,9 @@ of its 14 `command` strings was read individually and approved for publication b
 read GREEN on live run 34018874984.
 
 ⭐ **DATED 2026-09-07 (Phase 164.7 APPSETTINGS) — the GUC half of `CRON-DRIFT-01` is CLOSED; the
-LIVE-ROW half stays open for Phase 164.5 item (7).** What 164.7 closed: the repo now DESCRIBES the
+LIVE-ROW half stays open for Phase 164.5 item (7).** Phase 164.5 item 7 was SPLIT OUT to
+Phase 164.5.1 CRONREPOINT on 2026-09-07 by founder decision — not renamed, not dropped. What
+164.7 closed: the repo now DESCRIBES the
 mechanism PROD has been running since the 2026-09-01 hand repair — `public.match_engine_cron_tick()`
 in `20260907120000_analytics_service_settings_and_vault_tick.sql`, key from `vault.decrypted_secrets`,
 URL from `public.system_settings`, a loud `RAISE` on either absence — so a rebuild from migrations
