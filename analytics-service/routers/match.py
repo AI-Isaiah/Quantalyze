@@ -47,7 +47,9 @@ from pydantic import BaseModel
 from services.db import (
     PaginatedSelectTruncated,
     Row,
+    _is_gateway_timeout,
     chunked_in_query,
+    db_read_with_retry,
     get_supabase,
     one,
     rows,
@@ -303,8 +305,19 @@ def _parse_supabase_ts(raw: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _engine_is_enabled() -> bool:
-    """Return True if the match engine should run (the kill switch is OFF).
+# Tri-state kill-switch status (Phase 164.5.1 criterion 8). The closed state
+# is DISTINCT from the founder's own switch: a database outage yields
+# KILL_SWITCH_UNAVAILABLE, the founder flipping system_flags yields
+# KILL_SWITCH_DISABLED. No input may produce the same status for both
+# causes — a database outage must never be mistaken for the founder pressing
+# the switch (Sentry QUANTALYZE-1D, 5 events, 2026-09-12).
+KILL_SWITCH_ENABLED = "enabled"
+KILL_SWITCH_DISABLED = "disabled"
+KILL_SWITCH_UNAVAILABLE = "kill_switch_unavailable"
+
+
+async def _engine_is_enabled() -> str:
+    """Return the kill switch's tri-state status.
 
     M-0609: named to match the DB flag ``match_engine_enabled`` — an
     engine-ON flag, not a kill-switch flag. The previous name
@@ -312,27 +325,47 @@ def _engine_is_enabled() -> bool:
     (``if not _kill_switch_enabled(): skip``), which conventionally means "if
     the kill switch is NOT enabled, skip" — the opposite of the actual logic.
 
-    Fail-OPEN contract: any Supabase exception (network blip, RLS rejection,
-    schema drift, table missing post-rollback) keeps the engine running and
-    logs at ERROR. Fail-closed would silently disable the engine on transient
-    DB blips, which is a worse failure mode for a manual founder kill switch.
+    Fail-CLOSED contract (Phase 164.5.1 criterion 8, superseding the former
+    fail-open one): the Supabase read goes through `db_read_with_retry`,
+    which retries ONLY a gateway-timeout-shaped exception
+    (`_is_gateway_timeout`) up to DB_READ_MAX_RETRIES times. After retries
+    are exhausted — or on any other exception — the engine STOPS:
+    KILL_SWITCH_UNAVAILABLE is returned and logged at ERROR so Sentry fires.
+    There is no surviving fail-open arm; a transient DB blip that outlasts
+    the retry budget is no longer a "blip" and must not be treated as one.
     """
     supabase = get_supabase()
-    try:
-        result = supabase.table("system_flags").select("enabled").eq(
+
+    def _read() -> Any:
+        return supabase.table("system_flags").select("enabled").eq(
             "key", "match_engine_enabled"
         ).maybe_single().execute()
+
+    try:
+        result = await db_read_with_retry(_read)
         row = one(result)
         if not row:
-            return True  # No row / null maybe_single response = default enabled
-        return bool(row.get("enabled", True))
-    except Exception as err:
-        logger.error(
-            "match_engine: kill switch check FAILED (fail-open, engine "
-            "still running): %s",
-            err,
+            return KILL_SWITCH_ENABLED  # No row / null maybe_single response = default enabled
+        return (
+            KILL_SWITCH_ENABLED
+            if bool(row.get("enabled", True))
+            else KILL_SWITCH_DISABLED
         )
-        return True
+    except Exception as err:
+        if _is_gateway_timeout(err):
+            logger.error(
+                "match_engine: kill switch check FAILED after exhausting "
+                "retries (gateway timeout) — engine STOPPED "
+                "(kill_switch_unavailable): %s",
+                err,
+            )
+        else:
+            logger.error(
+                "match_engine: kill switch check FAILED — engine STOPPED "
+                "(kill_switch_unavailable): %s",
+                err,
+            )
+        return KILL_SWITCH_UNAVAILABLE
 
 
 # M-0603 (part 1): the cron's mid-run kill-switch re-check used to call
@@ -345,21 +378,24 @@ def _engine_is_enabled() -> bool:
 # reads it once and does not benefit, but is unharmed — a fresh process or a
 # stale-by-<TTL cache value is still correct enough for a one-shot request).
 KILL_SWITCH_CACHE_TTL_S = 30.0
-_kill_switch_cache: dict[str, float | bool] = {}  # {"at": monotonic, "value": bool}
+_kill_switch_cache: dict[str, float | str] = {}  # {"at": monotonic, "value": str}
 
 
-def _engine_is_enabled_cached() -> bool:
+async def _engine_is_enabled_cached() -> str:
     """TTL-cached view over _engine_is_enabled for the per-allocator cron loop.
 
     Returns the cached value when it is younger than KILL_SWITCH_CACHE_TTL_S,
     otherwise re-polls and refreshes the cache. The TTL bounds the staleness of
     a mid-run flip to KILL_SWITCH_CACHE_TTL_S seconds.
+
+    Task 2 (Phase 164.5.1) owns the cache's failure contract — whether an
+    exhausted poll invalidates the cache rather than being stored.
     """
     now = time.monotonic()
     cached_at = _kill_switch_cache.get("at")
     if isinstance(cached_at, float) and (now - cached_at) < KILL_SWITCH_CACHE_TTL_S:
-        return bool(_kill_switch_cache.get("value", True))
-    value = _engine_is_enabled()
+        return str(_kill_switch_cache.get("value", KILL_SWITCH_ENABLED))
+    value = await _engine_is_enabled()
     _kill_switch_cache["at"] = now
     _kill_switch_cache["value"] = value
     return value
@@ -1710,7 +1746,17 @@ async def recompute(request: Request, req: RecomputeRequest) -> dict[str, Any]:
             detail=f"allocator_id {allocator_id} is not an allocator profile",
         )
 
-    if not await asyncio.to_thread(_engine_is_enabled):
+    _kill_switch_state = await _engine_is_enabled()
+    if _kill_switch_state == KILL_SWITCH_UNAVAILABLE:
+        raise service_error(
+            503,
+            "KILL_SWITCH_UNAVAILABLE",
+            dependency="supabase",
+            retryable=True,
+            retry_after=RETRY_AFTER_SECONDS["supabase"],
+            detail="kill switch check temporarily unavailable — please retry",
+        )
+    if _kill_switch_state == KILL_SWITCH_DISABLED:
         logger.info("match_engine recompute: kill switch off, skipping allocator=%s", allocator_id)
         return {"status": "disabled", "disabled": True}
 
@@ -1951,9 +1997,13 @@ async def cron_recompute() -> dict[str, Any]:
     # window. _engine_is_enabled does sync Supabase IO; off-load to keep the
     # event loop unblocked.
     _reset_kill_switch_cache()
-    if not await asyncio.to_thread(_engine_is_enabled_cached):
-        logger.info("match_engine cron: kill switch off, skipping")
-        return _early_return("disabled", disabled=True)
+    _kill_switch_state = await _engine_is_enabled_cached()
+    if _kill_switch_state != KILL_SWITCH_ENABLED:
+        logger.info(
+            "match_engine cron: kill switch not enabled (state=%s), skipping",
+            _kill_switch_state,
+        )
+        return _early_return(_kill_switch_state, disabled=True)
 
     supabase = get_supabase()
 
@@ -2026,8 +2076,13 @@ async def cron_recompute() -> dict[str, Any]:
         # so the safety re-check polls fresh every iteration. (The pre-loop gate
         # at the top of cron_recompute still uses the cached accessor — it only
         # seeds the value once and a sub-TTL staleness there is harmless.)
-        if not await asyncio.to_thread(_engine_is_enabled):
-            logger.info("match_engine cron: kill switch flipped mid-run, aborting")
+        _mid_run_state = await _engine_is_enabled()
+        if _mid_run_state != KILL_SWITCH_ENABLED:
+            logger.info(
+                "match_engine cron: kill switch not enabled mid-run "
+                "(state=%s), aborting",
+                _mid_run_state,
+            )
             break
 
         # NEW-C08-06: serialize skip-check → score per allocator (shared with

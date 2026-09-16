@@ -21,6 +21,34 @@ from fastapi.testclient import TestClient
 from services import rate_limit as _rl
 
 
+def _engine_state_str(value: bool) -> str:
+    """Map a bool onto the KILL_SWITCH_ENABLED/DISABLED constant.
+
+    Phase 164.5.1 criterion 8: `_engine_is_enabled`/`_engine_is_enabled_cached`
+    became async and tri-state (KILL_SWITCH_ENABLED/DISABLED/UNAVAILABLE).
+    Deferred import mirrors this file's existing convention of importing
+    routers.match symbols inside test bodies rather than at module scope.
+    """
+    from routers.match import KILL_SWITCH_DISABLED, KILL_SWITCH_ENABLED
+
+    return KILL_SWITCH_ENABLED if value else KILL_SWITCH_DISABLED
+
+
+def _async_engine_state(value: bool | str):
+    """Build an async test double for `_engine_is_enabled`/`_cached`.
+
+    Accepts either a bool (mapped via `_engine_state_str`) or one of the
+    KILL_SWITCH_* constants directly, so a former `lambda: True`/`lambda:
+    False` double becomes `_async_engine_state(True)`/`_async_engine_state(False)`.
+    """
+    resolved = _engine_state_str(value) if isinstance(value, bool) else value
+
+    async def _f(*_a, **_k):
+        return resolved
+
+    return _f
+
+
 @pytest.fixture(autouse=True)
 def _reset_limiter_buckets():
     """Ship-review fix 2026-08-18: ~23 claimless POSTs here share the
@@ -54,16 +82,19 @@ def client() -> TestClient:
 
 
 # ---------------------------------------------------------------------------
-# _engine_is_enabled fail-open contract
+# _engine_is_enabled fail-CLOSED contract (Phase 164.5.1 criterion 8)
 # ---------------------------------------------------------------------------
 
 
 class TestKillSwitchEnabled:
-    """Lock the documented fail-open behaviour. Flipping to fail-closed is a
-    SECURITY-relevant change that should require an explicit test update."""
+    """Lock the fail-CLOSED contract: after DB_READ_MAX_RETRIES exhausted
+    gateway-timeout-shaped exceptions (or on any other exception), the guard
+    STOPS the engine (KILL_SWITCH_UNAVAILABLE) rather than running open.
+    Flipping back to fail-open is a SAFETY regression that should require an
+    explicit test update."""
 
-    def test_returns_false_when_row_disabled(self, monkeypatch):
-        from routers.match import _engine_is_enabled
+    async def test_returns_disabled_when_row_disabled(self, monkeypatch):
+        from routers.match import KILL_SWITCH_DISABLED, _engine_is_enabled
 
         sb = MagicMock()
         sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
@@ -71,10 +102,10 @@ class TestKillSwitchEnabled:
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
 
-        assert _engine_is_enabled() is False
+        assert await _engine_is_enabled() == KILL_SWITCH_DISABLED
 
-    def test_returns_true_when_no_row(self, monkeypatch):
-        from routers.match import _engine_is_enabled
+    async def test_returns_enabled_when_no_row(self, monkeypatch):
+        from routers.match import KILL_SWITCH_ENABLED, _engine_is_enabled
 
         sb = MagicMock()
         sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
@@ -83,26 +114,159 @@ class TestKillSwitchEnabled:
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
 
         # Default: no row → engine runs.
-        assert _engine_is_enabled() is True
+        assert await _engine_is_enabled() == KILL_SWITCH_ENABLED
 
-    def test_fail_open_on_supabase_exception(self, monkeypatch, caplog):
-        """A Supabase exception logs at ERROR and the engine stays running.
-        Flipping to fail-closed would silently disable the engine on any
-        transient DB blip — a worse failure mode than the (loud) contract."""
-        from routers.match import _engine_is_enabled
+    async def test_fail_closed_on_non_gateway_exception(self, monkeypatch, caplog):
+        """A non-retryable Supabase exception logs at ERROR and the engine
+        STOPS. Fail-open on ANY Supabase exception was the safety bug this
+        phase closes (Sentry QUANTALYZE-1D) — CONTEXT.md's fail-closed
+        contract has no surviving fail-open arm, gateway-shaped or not."""
+        from routers.match import KILL_SWITCH_UNAVAILABLE, _engine_is_enabled
 
         sb = MagicMock()
         sb.table.return_value.select.side_effect = RuntimeError("db down")
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
 
         with caplog.at_level("ERROR", logger="quantalyze.analytics"):
-            result = _engine_is_enabled()
+            result = await _engine_is_enabled()
 
-        assert result is True
+        assert result == KILL_SWITCH_UNAVAILABLE
         assert any(
             "kill switch check FAILED" in rec.getMessage()
+            and "kill_switch_unavailable" in rec.getMessage()
             for rec in caplog.records
-        ), "kill-switch failure must log at ERROR level"
+        ), "kill-switch failure must log at ERROR level naming kill_switch_unavailable"
+
+
+def _make_api_error(code: str | int):
+    """A postgrest.exceptions.APIError carrying `code` — the real shape the
+    library constructs (`{message, code, hint, details}` dict), not a bare
+    object with `.code` bolted on."""
+    from postgrest.exceptions import APIError
+
+    return APIError(
+        {"message": "JSON could not be generated", "code": code, "hint": None, "details": None}
+    )
+
+
+# ---------------------------------------------------------------------------
+# Criterion 8 — fail-closed kill switch, end to end
+# (Phase 164.5.1 / [164.5.1-GATEWAY-CEILING-INVERSION])
+# ---------------------------------------------------------------------------
+
+
+class TestKillSwitchFailClosed:
+    """After DB_READ_MAX_RETRIES consecutive gateway-timeout-shaped
+    exceptions, the kill switch STOPS the engine end to end through
+    POST /api/match/cron-recompute — never a silent True/ok. The closed
+    status is DISTINCT from the founder's own `disabled` flag, so a database
+    outage can never be mistaken for the founder pressing the switch."""
+
+    def test_kill_switch_stops_cron_on_exhausted_gateway_timeout(
+        self, client, monkeypatch, caplog
+    ):
+        """End-to-end: a gateway 504 on every retry attempt makes
+        POST /api/match/cron-recompute respond kill_switch_unavailable, all
+        four counters at 0, a numeric duration_s, and _score_one_allocator is
+        never called."""
+        monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+        call_count = {"n": 0}
+
+        def _raise_gateway_timeout(*_a, **_k):
+            call_count["n"] += 1
+            raise _make_api_error("504")
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.side_effect = (
+            _raise_gateway_timeout
+        )
+        monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
+
+        scored: list[str] = []
+
+        async def _score(*_a, **_k):
+            scored.append("called")
+            return {}
+
+        monkeypatch.setattr("routers.match._score_one_allocator", _score)
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            r = client.post("/api/match/cron-recompute")
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "kill_switch_unavailable"
+        assert body["processed"] == 0
+        assert body["skipped"] == 0
+        assert body["failed"] == 0
+        assert body["retention_deleted"] == 0
+        assert isinstance(body["duration_s"], (int, float))
+        assert scored == [], (
+            "_score_one_allocator must never be called when the kill switch "
+            "is unavailable"
+        )
+        assert call_count["n"] == 3, (
+            "db_read_with_retry must attempt exactly DB_READ_MAX_RETRIES=3 "
+            "times on an exhausted gateway timeout"
+        )
+        assert any(
+            "kill_switch_unavailable" in rec.getMessage() for rec in caplog.records
+        ), "the outage must log ERROR naming kill_switch_unavailable"
+
+    def test_kill_switch_unavailable_is_distinct_from_founder_disabled(
+        self, client, monkeypatch
+    ):
+        """The outage status and the founder-flip status must NEVER be
+        equal — a database outage must never be mistaken for the founder
+        pressing the switch (criterion 8's DISTINCT-status requirement)."""
+        monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+        sb_outage = MagicMock()
+        sb_outage.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.side_effect = (
+            _make_api_error("504")
+        )
+        monkeypatch.setattr("routers.match.get_supabase", lambda: sb_outage)
+        r_outage = client.post("/api/match/cron-recompute")
+        outage_status = r_outage.json()["status"]
+
+        sb_disabled = MagicMock()
+        sb_disabled.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
+            MagicMock(data={"enabled": False})
+        )
+        monkeypatch.setattr("routers.match.get_supabase", lambda: sb_disabled)
+        r_disabled = client.post("/api/match/cron-recompute")
+        disabled_status = r_disabled.json()["status"]
+
+        assert outage_status == "kill_switch_unavailable"
+        assert disabled_status == "disabled"
+        assert outage_status != disabled_status, (
+            "a database outage and the founder's flag must never produce "
+            "the same cron status"
+        )
+
+    def test_kill_switch_non_gateway_exception_is_not_retried(self, monkeypatch):
+        """A non-gateway exception (SQLSTATE 42883, undefined function) must
+        propagate on the FIRST attempt — db_read_with_retry must not spend
+        its retry budget on an error retrying can never fix."""
+        from services.db import db_read_with_retry
+
+        call_count = {"n": 0}
+
+        def _raise_non_gateway():
+            call_count["n"] += 1
+            raise _make_api_error("42883")
+
+        with pytest.raises(Exception) as exc_info:
+            asyncio.run(db_read_with_retry(_raise_non_gateway))
+
+        assert call_count["n"] == 1, (
+            "a non-gateway exception must propagate on the FIRST attempt, "
+            "unretried"
+        )
+        assert exc_info.value.code == "42883"
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +363,7 @@ class TestRecomputeEndpoint:
     def test_kill_switch_off_returns_disabled_status(self, client, monkeypatch):
         """Every branch carries a `status` discriminator; kill-switch off → 'disabled'."""
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: False)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(False))
 
         r = client.post(
             "/api/match/recompute",
@@ -213,7 +377,7 @@ class TestRecomputeEndpoint:
     def test_skip_path_returns_skipped_status(self, client, monkeypatch):
         """Skipped branch carries status='skipped' + reason."""
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
 
         async def _skip(allocator_id, force):
             return True
@@ -232,7 +396,7 @@ class TestRecomputeEndpoint:
     def test_empty_universe_returns_400(self, client, monkeypatch):
         """Empty candidate universe → 400."""
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
 
         async def _no_skip(allocator_id, force):
             return False
@@ -252,7 +416,7 @@ class TestRecomputeEndpoint:
     def test_score_exception_returns_500(self, client, monkeypatch):
         """_score_one_allocator raising → 500."""
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
 
         async def _no_skip(allocator_id, force):
             return False
@@ -296,7 +460,7 @@ class TestRecomputeEndpoint:
     def test_ok_path_carries_status_ok(self, client, monkeypatch):
         """Success branch carries status='ok' alongside the result fields."""
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
 
         async def _no_skip(allocator_id, force):
             return False
@@ -341,7 +505,7 @@ class TestRecomputeEndpoint:
         produces a partial-success state with no rollback. Log loudly and
         return the result."""
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
 
         async def _no_skip(allocator_id, force):
             return False
@@ -616,7 +780,7 @@ class TestCronPartialFailure:
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
             lambda: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
@@ -675,12 +839,12 @@ class TestCronPartialFailure:
         # mid-loop check before a2 → loop breaks before scoring a2.
         kill_calls = {"n": 0}
 
-        def _flip():
+        async def _flip():
             kill_calls["n"] += 1
             # n=1 initial check (route entry) — ON
             # n=2 mid-loop check before allocator a1 — ON
             # n=3 mid-loop check before allocator a2 — OFF
-            return kill_calls["n"] <= 2
+            return _engine_state_str(kill_calls["n"] <= 2)
 
         monkeypatch.setattr("routers.match._engine_is_enabled", _flip)
 
@@ -733,8 +897,8 @@ class TestCronPartialFailure:
         # re-check observes the flip on the iteration after the 2nd score.
         scored: list[str] = []
 
-        def _engine_state():
-            return len(scored) < 2
+        async def _engine_state():
+            return _engine_state_str(len(scored) < 2)
 
         monkeypatch.setattr("routers.match._engine_is_enabled", _engine_state)
 
@@ -768,7 +932,7 @@ class TestCronPartialFailure:
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
             lambda: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
@@ -818,7 +982,7 @@ class TestCronResponseShape:
     }
 
     def test_kill_switch_branch_has_full_shape(self, client, monkeypatch):
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: False)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(False))
 
         r = client.post("/api/match/cron-recompute")
         body = r.json()
@@ -827,7 +991,7 @@ class TestCronResponseShape:
         assert isinstance(body["duration_s"], (int, float))
 
     def test_no_allocators_branch_has_full_shape(self, client, monkeypatch):
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
         sb = MagicMock()
         sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
             MagicMock(data=[])
@@ -841,7 +1005,7 @@ class TestCronResponseShape:
         assert isinstance(body["duration_s"], (int, float))
 
     def test_empty_universe_branch_has_full_shape(self, client, monkeypatch):
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
         sb = MagicMock()
         sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}])
@@ -874,7 +1038,7 @@ class TestCronTotalFailureLogging:
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
             lambda: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
@@ -921,7 +1085,7 @@ class TestCronTotalFailureLogging:
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
             lambda: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
@@ -1248,7 +1412,7 @@ class TestRecomputeRoleValidation:
     def test_allocator_uuid_passes_role_check(self, client, monkeypatch):
         """A valid allocator profile UUID must proceed past the role check."""
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: False)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(False))
 
         r = client.post(
             "/api/match/recompute",
@@ -1271,7 +1435,7 @@ class TestRecomputeActorBinding:
         the admin check entirely."""
         alloc_id = str(uuid4())
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: False)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(False))
         # _is_admin_profile would error if called — assert it isn't.
         def _raise(*_args, **_kw):
             raise AssertionError("_is_admin_profile must not be called on self-path")
@@ -1291,7 +1455,7 @@ class TestRecomputeActorBinding:
         admin_id = str(uuid4())
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
         monkeypatch.setattr("routers.match._is_admin_profile", lambda uid: uid == admin_id)
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: False)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(False))
 
         r = client.post(
             "/api/match/recompute",
@@ -1340,7 +1504,7 @@ class TestRecomputeActorBinding:
         get the same behavior, but the gap is observable in logs so the
         rollout is trackable."""
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: False)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(False))
         # If actor_id were treated as required, this would 422.
         with caplog.at_level("WARNING"):
             r = client.post(
@@ -1371,7 +1535,7 @@ class TestForceRecomputeThrottle:
 
         alloc_id = str(uuid4())
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _async_engine_state(True))
 
         async def _no_skip(allocator_id, force):
             return False
@@ -1451,7 +1615,7 @@ class TestForceRecomputeThrottle:
 
         alloc_id = str(uuid4())
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _async_engine_state(True))
 
         async def _no_skip(allocator_id, force):
             return False
@@ -1507,7 +1671,7 @@ class TestRecomputeDemoOnlyWiring:
             return {"strategies_by_id": {}, "returns_by_id": {}}
 
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _async_engine_state(True))
 
         async def _no_skip(allocator_id, force):
             return False
@@ -1537,7 +1701,7 @@ class TestRecomputeDemoOnlyWiring:
             return {"strategies_by_id": {}, "returns_by_id": {}}
 
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _async_engine_state(True))
 
         async def _no_skip(allocator_id, force):
             return False
@@ -2506,7 +2670,7 @@ class TestForceThrottleStampAfterSuccess:
 
         alloc_id = str(uuid4())
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _async_engine_state(True))
 
         async def _no_skip(allocator_id, force):
             return False
@@ -2548,7 +2712,7 @@ class TestForceThrottleStampAfterSuccess:
 
         alloc_id = str(uuid4())
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _async_engine_state(True))
 
         async def _no_skip(allocator_id, force):
             return False
@@ -3324,7 +3488,7 @@ class TestForceThrottleLockAtomicity:
             }
 
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _async_engine_state(True))
         monkeypatch.setattr(match_mod, "_should_skip_allocator", lambda *_: asyncio.coroutine(lambda: False)())
         monkeypatch.setattr(
             match_mod, "_load_candidate_universe",
@@ -3376,7 +3540,7 @@ class TestCronSkipsDemoAllocator:
             )
             return sb
 
-        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _async_engine_state(True))
         monkeypatch.setattr(match_mod, "get_supabase", lambda: _make_allocator_sb([demo_id, real_id]))
         monkeypatch.setattr(
             match_mod, "_load_candidate_universe",
@@ -3412,43 +3576,43 @@ class TestKillSwitchTTLCache:
     Supabase round-trip per allocator. The cron loops through the TTL cache so
     the underlying poll runs at most once per TTL window."""
 
-    def test_engine_is_enabled_cached_reuses_within_ttl(self, monkeypatch):
+    async def test_engine_is_enabled_cached_reuses_within_ttl(self, monkeypatch):
         from routers import match as match_mod
 
         match_mod._reset_kill_switch_cache()
         monkeypatch.setattr(match_mod, "KILL_SWITCH_CACHE_TTL_S", 30.0)
         calls = {"n": 0}
 
-        def _poll():
+        async def _poll():
             calls["n"] += 1
-            return True
+            return match_mod.KILL_SWITCH_ENABLED
 
         monkeypatch.setattr(match_mod, "_engine_is_enabled", _poll)
 
         # 5 cached reads within the TTL must hit the underlying poll ONCE.
-        results = [match_mod._engine_is_enabled_cached() for _ in range(5)]
-        assert all(results)
+        results = [await match_mod._engine_is_enabled_cached() for _ in range(5)]
+        assert all(r == match_mod.KILL_SWITCH_ENABLED for r in results)
         assert calls["n"] == 1, (
             "TTL cache must collapse repeated reads into a single poll "
             "(pre-fix this was one DB round-trip per allocator)"
         )
 
-    def test_engine_is_enabled_cached_repolls_after_ttl_zero(self, monkeypatch):
+    async def test_engine_is_enabled_cached_repolls_after_ttl_zero(self, monkeypatch):
         from routers import match as match_mod
 
         match_mod._reset_kill_switch_cache()
         monkeypatch.setattr(match_mod, "KILL_SWITCH_CACHE_TTL_S", 0.0)
         calls = {"n": 0}
 
-        def _poll():
+        async def _poll():
             calls["n"] += 1
-            return True
+            return match_mod.KILL_SWITCH_ENABLED
 
         monkeypatch.setattr(match_mod, "_engine_is_enabled", _poll)
 
         # TTL=0 → every read re-polls (used by the flip-detection test).
         for _ in range(3):
-            match_mod._engine_is_enabled_cached()
+            await match_mod._engine_is_enabled_cached()
         assert calls["n"] == 3
 
 
@@ -3469,7 +3633,7 @@ class TestCronRetentionSweepScopedToScoredAllocators:
             MagicMock(data=[{"id": "a-ok"}, {"id": "a-skip"}, {"id": "a-fail"}])
         )
         monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
-        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _async_engine_state(True))
         monkeypatch.setattr(
             match_mod, "_load_candidate_universe",
             lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
@@ -3783,7 +3947,7 @@ class TestForceThrottleStateEviction:
 
         alloc_id = str(uuid4())
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _async_engine_state(True))
 
         async def _no_skip(allocator_id, force):
             return False
@@ -3877,7 +4041,7 @@ class TestRecomputeSerializationLock:
 
         # Stub the cheap gates so recompute() reaches the locked section.
         monkeypatch.setattr(m, "_is_allocator_profile", lambda a: True)
-        monkeypatch.setattr(m, "_engine_is_enabled", lambda: True)
+        monkeypatch.setattr(m, "_engine_is_enabled", _async_engine_state(True))
         monkeypatch.setattr(m, "_should_skip_allocator", fake_skip)
         monkeypatch.setattr(m, "_score_one_allocator", fake_score)
         monkeypatch.setattr(
@@ -3929,7 +4093,7 @@ class TestRecomputeSerializationLock:
             return {"batch_id": f"b-{allocator_id}", "candidate_count": 0}
 
         monkeypatch.setattr(m, "_is_allocator_profile", lambda a: True)
-        monkeypatch.setattr(m, "_engine_is_enabled", lambda: True)
+        monkeypatch.setattr(m, "_engine_is_enabled", _async_engine_state(True))
         monkeypatch.setattr(m, "_should_skip_allocator", fake_skip)
         monkeypatch.setattr(m, "_score_one_allocator", fake_score)
         monkeypatch.setattr(

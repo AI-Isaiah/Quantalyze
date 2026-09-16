@@ -78,7 +78,11 @@ def _arrange_recompute(monkeypatch, scorer) -> None:
     from routers import match as match_mod
 
     monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-    monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
+
+    async def _engine_enabled(*_a, **_k):
+        return match_mod.KILL_SWITCH_ENABLED
+
+    monkeypatch.setattr(match_mod, "_engine_is_enabled", _engine_enabled)
 
     async def _no_skip(allocator_id, force):
         return False
