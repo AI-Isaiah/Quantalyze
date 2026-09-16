@@ -1981,10 +1981,16 @@ async def eval_metrics(
 # Cron batching cursor (Phase 164.5.1 criterion 9 /
 # [164.5.1-GATEWAY-CEILING-INVERSION]) — persisted in public.system_settings
 # so a slice survives across separately-scheduled pg_cron ticks. Three
-# strictly-nested bounds keep one request inside the gateway window:
-# CRON_BATCH_BUDGET_S < the 45s statement_timeout plan 03 sets on
-# service_role < the 60s API gateway ceiling (see
+# bounds keep one request inside the gateway window:
+# CRON_BATCH_BUDGET_S (25s) < the 60s API gateway ceiling (see
 # [164.5.1-GATEWAY-CEILING-INVERSION] in TODOS.md for the measured numbers).
+# ⛔ A `service_role` statement_timeout is deliberately NOT part of this
+# nesting. Plan 03 planned one and this comment named its value; the
+# migration was WITHDRAWN at the plan-09 D4 gate 2026-09-16 — a
+# per-STATEMENT timeout cannot bound a per-REQUEST 504 for a request that
+# issues many short statements, and `service_role` has no row in
+# pg_db_role_setting, so its real inherited ceiling is authenticator's 8s
+# (measured read-only on PROD), not the 120s the phase had assumed.
 # ---------------------------------------------------------------------------
 MATCH_ENGINE_CURSOR_KEY = "match_engine_cron_cursor"
 CRON_BATCH_SIZE = max(1, int(os.getenv("MATCH_ENGINE_CRON_BATCH_SIZE", "10")))

@@ -745,6 +745,42 @@ last_updated: 2026-09-16T19:13:36.708Z
     "reason": "",
     "recorded_at": "2026-09-16T19:13:36.708Z",
     "resolved_at": null
+  },
+  {
+    "id": 57,
+    "kind": "deviation",
+    "phase": "164.5.3",
+    "file": ".planning/ROADMAP.md, .planning/STATE.md",
+    "line": null,
+    "description": "/gsd-phase --insert for the MT5CREDS phase deviated from the workflow in three MEASURED places, all recorded rather than silently absorbed. (1) NUMBERING: `phase.insert 164.5.1` computed **164.5.1.1** — a four-level number reading as a CHILD of the cron-repoint phase, which it is unrelated to. Re-run against the integer-level parent (`phase.insert 164.5`) yielded **164.5.3**, the correct SIBLING of 164.5.1/164.5.2. The stub block the first run wrote was reverted from a byte backup (cmp-verified) and its .gitkeep directory removed. (2) ORDERING: the CLI inserts the block immediately after the TARGET heading, so 164.5.3 landed at line 1357 — physically BEFORE 164.5.1 (1672) and 164.5.2 (1771). Moved by hand to line 1788, after 164.5.2 and before 164.6; the full diff against the pre-insert byte backup is exactly the 11 new lines, no collateral. (3) STATE POINTER: the workflow's `state.patch` step (Current Phase -> the inserted phase) was DELIBERATELY NOT RUN. Phase 164.5.1 is mid-flight — plan 09 and the D4 three-reviewer gate are still open — so repointing STATE.md at 164.5.3 would misdirect the next session away from an unfinished phase. `state.add-roadmap-evolution` WAS run per the try-gsd-tools-first rule and clobbered again, exactly as the memory predicts: alongside the one wanted line it injected ~100 blank lines, moved `current_phase: 159` out of the header into the progress block, rewrote the quoting of gsd_state_version/status/last_activity_desc, and recomputed progress 54% -> 36% (the -pr-filter under-count). Reverted from the byte backup and the single evolution line inserted by hand; the resulting STATE.md diff is exactly one added line.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-16T20:30:00.000Z",
+    "resolved_at": null
+  },
+  {
+    "id": 58,
+    "kind": "deviation",
+    "phase": "164.5.4",
+    "file": ".planning/ROADMAP.md, .planning/STATE.md",
+    "line": null,
+    "description": "Phase 164.5.4 MT5RECON-GAP was inserted with the SAME three deviations recorded in entry 57, handled the same way: (1) the block again landed immediately after the 164.5 heading, physically before 164.5.1/.2/.3, and was moved by hand to sit before 164.6 — diff against the pre-insert byte backup is exactly the 11 new lines, 0 removed; (2) the workflow's `state.patch` step was again DELIBERATELY NOT RUN, because 164.5.1 is still mid-flight (plan 09 + the D4 gate) and repointing STATE.md would misdirect the next session; (3) `state.add-roadmap-evolution` was NOT re-run this time and the evolution line was written by hand. ⚠️ That third point is a departure from the try-gsd-tools-first rule and is recorded as such: the clobber it is meant to detect was MEASURED on the identical operation against the identical file minutes earlier in the same session (entry 57 — ~100 injected blank lines, `current_phase` moved out of the header, quoting rewritten, progress recomputed 54% -> 36%), so re-running it only to revert it again would have measured nothing new. The resulting STATE.md diff is exactly one added line.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-16T20:36:00.000Z",
+    "resolved_at": null
+  },
+  {
+    "id": 59,
+    "kind": "deviation",
+    "phase": "164.5.1",
+    "file": "supabase/migrations/20260916120000_service_role_statement_timeout.sql, src/__tests__/service-role-statement-timeout-migration.test.ts, .planning/ROADMAP.md, .planning/phases/164.5.1-cronrepoint-the-live-match-engine-cron-row-is-repointed-at-t/164.5.1-CONTEXT.md, TODOS.md",
+    "line": null,
+    "description": "Phase 164.5.1 criterion 7 WITHDRAWN at the plan-09 D4 gate, and the withdrawal itself is the finding: the criterion rested on an ABSENCE read as a VALUE, and it survived a planner, a plan-checker, an executor and one full reviewer round before anyone measured it. The criterion and 164.5.1-CONTEXT.md/03-PLAN asserted that `service_role`'s NULL `pg_roles.rolconfig` means it 'inherits the 120000 ms database default'. MEASURED read-only on PROD 2026-09-16 (marker query first, all outputs in 164.5.1-PROD-SESSION.md): pg_db_role_setting carries anon 3s, authenticated 8s, authenticator 8s, and NO ROW AT ALL for service_role; the postgres database sets no timeout. PostgREST logs in as authenticator, so 8s lands on the session at login and the subsequent SET ROLE finds nothing to override it — the effective ceiling is 8s, meaning the planned 45s (briefly raised to 55s on a founder fix-first decision) would have LOOSENED it sevenfold across the whole service_role surface, the exact inverse of the recorded justification. ⛔ The phase's OWN 164.5.1-RESEARCH.md:441 had it right from the start, citing Supabase's docs verbatim: 'service_role: none (defaults to authenticator's 8s if unset)'. Two artifacts of one phase contradicted each other for three days and the unsourced inference won, because it was the one written into CONTEXT.md, which is what every downstream agent reads. INDEPENDENTLY sufficient second reason, found by the same reviewer: statement_timeout bounds ONE STATEMENT while the gateway 504 bounds ONE REQUEST, and cron_recompute() issues many short statements per request — the measured 44.67s is a request duration — so the conversion criterion 7 promised is unreachable by this mechanism regardless of the value; the Sentry evidence being 504s and never 57014 corroborates it. REMOVED from the branch: supabase/migrations/20260916120000_service_role_statement_timeout.sql and src/__tests__/service-role-statement-timeout-migration.test.ts (recoverable from commit 5acfb710; nothing ever reached origin/main, nothing was ever applied). Two stale live claims found in the same sweep and rebound to the real 60s gateway bound rather than deleted: analytics-service/services/db.py (retry budget described as 'strictly below the 45s statement_timeout') and analytics-service/tests/test_match_router.py's test_batch_budget_strictly_below_statement_timeout, which asserted `< 45.0` under a name claiming a statement_timeout nesting and stayed GREEN at 25 < 45 — a stale claim inside a gate, the worst place for one. ⭐ The intent is not lost: a REQUEST-level deadline plus explicit 504 classification is what criterion 9's batching already ships.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-16T20:52:00.000Z",
+    "resolved_at": null
   }
 ]
 ````

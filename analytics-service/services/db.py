@@ -203,10 +203,23 @@ async def db_read_with_retry(fn: Callable[[], _T]) -> _T:
     Bounded budget: DB_READ_MAX_RETRIES=3 attempts, backoff
     DB_READ_BACKOFF_BASE_S * (2 ** attempt) + jitter in
     [0, DB_READ_JITTER_MAX_S) — worst case about 1 + 2 + (a final attempt
-    with no further sleep) ≈ 3 seconds of sleeping across 3 attempts,
-    strictly below the 45s `statement_timeout` plan 03 sets on
-    `service_role`. The retries therefore finish inside ONE gateway window
-    rather than stacking three separate 60s waits.
+    with no further sleep) ≈ 3-4 seconds of sleeping across 3 attempts
+    (attempts 0 and 1 sleep; attempt 2 raises without sleeping), strictly
+    below the 60s API gateway window. The retries therefore finish inside
+    ONE gateway window rather than stacking three separate 60s waits.
+
+    ⛔ This bound is deliberately stated against the GATEWAY, not against a
+    `service_role` `statement_timeout`. Phase 164.5.1 planned an
+    `ALTER ROLE service_role SET statement_timeout` migration and this
+    comment named its 45s value; the migration was WITHDRAWN at the plan-09
+    D4 gate on 2026-09-16 after a read-only PROD measurement (see that
+    phase's CONTEXT.md, Area 2). Two reasons, either sufficient: a
+    per-STATEMENT timeout cannot bound a per-REQUEST gateway 504 when the
+    request issues many short statements, which is what this service does;
+    and `service_role` carries no row in `pg_db_role_setting` at all, so a
+    PostgREST request inherits `authenticator`'s login-applied 8s rather
+    than the 120s server default the phase had assumed — the migration
+    would have LOOSENED the real ceiling sevenfold.
 
     Exhaustion signal is a BARE re-raise of the ORIGINAL exception, unchanged
     — mirrors `_okx_bills_fetch_with_backoff`'s "let the caller decide"

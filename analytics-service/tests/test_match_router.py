@@ -4726,10 +4726,25 @@ class TestCronBatchBoundsInvariants:
     """CRON_BATCH_BUDGET_S / CRON_BATCH_SIZE — the two statement-level knobs
     controlling the batch boundary (Phase 164.5.1 criterion 9)."""
 
-    def test_batch_budget_strictly_below_statement_timeout(self):
+    def test_batch_budget_strictly_below_gateway_ceiling(self):
+        """The batch budget must close a request before the API gateway does.
+
+        ⛔ Asserted against the 60s GATEWAY ceiling, not against a
+        `service_role` `statement_timeout`. This test was named
+        `..._below_statement_timeout` and pinned `45.0` until 2026-09-16,
+        when phase 164.5.1's D4 gate WITHDREW the planned
+        `ALTER ROLE service_role SET statement_timeout` migration: a
+        per-STATEMENT timeout does not bound a per-REQUEST 504 for a
+        multi-statement request, and `service_role` has no row in
+        `pg_db_role_setting`, so the real inherited ceiling is
+        `authenticator`'s 8s — measured read-only on PROD. The literal 45.0
+        was a stale claim that stayed green (25 < 45) while measuring a
+        bound that no longer existed.
+        """
         from routers import match as match_mod
 
-        assert match_mod.CRON_BATCH_BUDGET_S < 45.0
+        GATEWAY_CEILING_S = 60.0
+        assert match_mod.CRON_BATCH_BUDGET_S < GATEWAY_CEILING_S
 
     def test_batch_size_floor_is_one(self):
         from routers import match as match_mod

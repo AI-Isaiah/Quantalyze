@@ -1247,7 +1247,18 @@ true for 146 and half of 142–145, and **false for 141**.
       actually failing open, not a hypothetical. Blast radius extends past the cron: the same 504s
       hit `main_worker`'s `_claim_priority` (Sentry `QUANTALYZE-11`, 14 events) and `_reset`
       (`QUANTALYZE-X`, 3 events).
-      **Fix:** `ALTER ROLE service_role SET statement_timeout = '45s'`, by FORWARD MIGRATION —
+      ⛔ **THE FIX BELOW WAS WITHDRAWN 2026-09-16 — do not re-attempt it.** ~~`ALTER ROLE
+      service_role SET statement_timeout`, by FORWARD MIGRATION~~ — written, reviewed, and
+      REMOVED at phase 164.5.1's plan-09 D4 gate without ever being applied. Two measured
+      reasons: (1) `statement_timeout` bounds ONE STATEMENT while the gateway 504 bounds ONE
+      REQUEST, and this service's slow requests are slow by COMPOSITION (many short statements),
+      so the conversion this entry wants cannot happen — the Sentry evidence is 504s and never
+      `57014`; (2) MEASURED read-only on PROD, `pg_db_role_setting` has NO ROW for `service_role`
+      and `authenticator` carries 8s, which PostgREST applies at login — so the effective ceiling
+      is 8s, not the 120s this entry assumed from `rolconfig = NULL`, and any value in the 45-55s
+      range would have LOOSENED it sevenfold. ⭐ **The real fix is a REQUEST-level deadline plus
+      explicit 504 classification**, which phase 164.5.1 criterion 9's batching already ships.
+      The historical note below is kept for its Sentry evidence, not for its remedy —
       ⛔ never a console statement, which leaves no reproducible trace and is the exact class
       `CRON-DRIFT-01` exists because of. Verify by reading `pg_roles.rolconfig` on PROD AFTER the
       apply and recording the output, not the statement. ⛔ This makes nothing faster and must not
