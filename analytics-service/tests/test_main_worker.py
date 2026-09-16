@@ -1930,9 +1930,76 @@ class TestWorkerGatewayTimeoutRetry:
             "DB_READ_MAX_RETRIES=3 times (2 failures + 1 success)"
         )
         assert any(
-            "Watchdog reclaimed 5 stalled jobs" in rec.getMessage()
+            "Watchdog reclaimed at least 5 stalled jobs" in rec.getMessage()
             for rec in caplog.records
-        ), "the WARNING must report the count from the SUCCESSFUL retry attempt"
+        ), (
+            "the WARNING must report the count from the SUCCESSFUL retry "
+            "attempt, hedged as a LOWER BOUND because an earlier attempt may "
+            "have committed before its gateway timeout (WR-10)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_watchdog_reset_retry_then_zero_still_logs_lower_bound(
+        self, monkeypatch, caplog
+    ) -> None:
+        """WR-10: a 504 delivered AFTER the server committed makes the retry
+        find nothing past the staleness filter and return 0. The reclaim
+        HAPPENED; if the zero is silent the only record of it is gone, and
+        "reclaimed nothing" is indistinguishable from "reclaimed, then lost
+        the receipt". The tick must therefore log at WARNING whenever a
+        retry occurred, and must not claim the count as a measurement."""
+        monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+        gateway_exc = _make_worker_api_error("504")
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.side_effect = [gateway_exc, MagicMock(data=0)]
+        mock_supabase.rpc.return_value = chain
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            with caplog.at_level(logging.WARNING):
+                await watchdog_tick()
+
+        assert chain.execute.call_count == 2, (
+            "the post-commit 504 must be retried exactly once here"
+        )
+        retry_records = [
+            rec
+            for rec in caplog.records
+            if rec.levelno == logging.WARNING
+            and "Watchdog reclaimed" in rec.getMessage()
+        ]
+        assert retry_records, (
+            "a retried reset that returns 0 must STILL emit a watchdog "
+            "WARNING — silence erases the only record that rows were reset"
+        )
+        message = retry_records[0].getMessage()
+        assert "at least 0" in message and "LOWER BOUND" in message, (
+            "the retried tick must not assert the count as a measurement; "
+            f"got {message!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_watchdog_reset_zero_without_retry_stays_silent(self) -> None:
+        """The control for the test above: with NO retry the count IS a
+        measurement, so a genuine zero stays silent exactly as it did before
+        WR-10. Without this, the lower-bound WARNING could be satisfied by
+        logging on every tick, which would measure nothing."""
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=0)
+        mock_supabase.rpc.return_value = chain
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            with patch.object(main_worker.logger, "warning") as mock_warning:
+                await watchdog_tick()
+
+        assert chain.execute.call_count == 1, "no retry should have occurred"
+        assert mock_warning.call_count == 0, (
+            "an un-retried zero is a real measurement of 'nothing was "
+            f"stalled' and must stay silent; got {mock_warning.call_args_list}"
+        )
 
     @pytest.mark.asyncio
     async def test_watchdog_reset_exhausted_gateway_timeout_propagates(

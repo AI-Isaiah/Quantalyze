@@ -1,11 +1,11 @@
-"""PYAPI-05 — the status-attributability contract at S-13..S-20 and S-23.
+"""PYAPI-05 — the status-attributability contract at S-13..S-20, S-23, S-25/S-26.
 
 The contract itself lives at ``analytics-service/docs/STATUS_CONTRACT.md``; its
 executable half is ``services/error_contract.py``. Plan 140.1-03 pinned
 S-01..S-12 in ``tests/test_status_contract_exchange_internal.py``; this suite
-pins the remaining nine explicit sites: ``routers/match.py`` S-13..S-17,
-``routers/simulator.py`` S-18, ``routers/portfolio.py`` S-19/S-20 and
-``main.py`` S-23.
+pins the remaining eleven explicit sites: ``routers/match.py`` S-13..S-17 and
+S-25/S-26, ``routers/simulator.py`` S-18, ``routers/portfolio.py`` S-19/S-20
+and ``main.py`` S-23.
 
 Why each case matters (Rule 9 — these encode ECONOMICS, not the
 implementation's own formula):
@@ -32,6 +32,17 @@ implementation's own formula):
   - **A Supabase insert that returns no row (S-19) is a transient blip, not a
     bug.** Answering ``500`` marks it non-retryable, so the caller gives up on
     a condition that clears in seconds.
+  - **A kill switch that cannot be READ answering ``500`` (S-25) tells the
+    admin queue to give up on a Supabase blip.** The engine stopping is
+    fail-closed by design; the *cause* is transient and an identical retry
+    succeeds, so R-1 makes it a ``503``. Its calibration leg pins the other
+    direction: the founder DELIBERATELY pressing the switch stays a ``200``
+    ``{"status":"disabled"}``, because answering ``503`` there would turn an
+    intentional pause into a breaker-tripping fake outage.
+  - **An unhandled cursor read escaping ``cron_recompute`` (S-26) is a bare
+    ``500 text/plain``.** R-1 reads that as "do not retry" for what is a
+    gateway timeout, and it carries no envelope at all — the exact shape
+    ``routers/match.py``'s header rule exists to prevent.
   - **``/health``'s ``503`` (S-24) is CORRECT and must survive this plan
     untouched** — routing the health warmer through the seam would let the
     breaker block its own recovery probe (O-7). It is pinned here precisely so
@@ -162,6 +173,123 @@ def test_s14_profile_role_check_transient_is_503_naming_supabase(
     # A bare `> 0` inequality was survivor #6: 15 -> 900 shipped green, and 900s
     # is a fifteen-minute wait advertised for a Supabase blip.
     assert retry_after == "15"
+
+
+def test_s25_kill_switch_check_transient_is_503_naming_supabase(
+    match_client, monkeypatch
+) -> None:
+    """S-25 — the kill-switch read exhausted its retries (WR-05).
+
+    This is the third of ``recompute()``'s three ``503`` arms and, until
+    2026-09-16, the only one with no test and no row in
+    ``STATUS_CONTRACT.md`` — while S-13 and S-14, twelve and forty lines
+    above it, had both. It is also the ONLY new client-facing wire code
+    Phase 164.5.1 introduced, so "no coverage" meant the phase's only wire
+    change was the one thing nothing pinned.
+
+    Why it must be a transient 503 and not a 500: the engine stopping is
+    FAIL-CLOSED by design (a kill switch that cannot be read must be
+    assumed pressed), but the *cause* is a Supabase gateway blip, and an
+    identical retry seconds later succeeds. R-1 says a 500 means "do not
+    retry"; answering 500 here would make the admin queue give up on a
+    condition that clears itself. ``dependency:"supabase"`` keys 140.2's
+    breaker on Supabase alone rather than globally (O-2), and the
+    ``Retry-After`` lets 140.3 name the real wait instead of guessing (O-6).
+
+    Distinct from ``disabled``: the founder pressing the switch is a 200
+    with ``{"status": "disabled"}``, and the two must never be conflated.
+    """
+    from routers import match as match_mod
+
+    monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+
+    async def _unavailable(*_a, **_k):
+        return match_mod.KILL_SWITCH_UNAVAILABLE
+
+    monkeypatch.setattr(match_mod, "_engine_is_enabled", _unavailable)
+
+    resp = match_client.post(
+        "/api/match/recompute",
+        json={"allocator_id": str(uuid4()), "force": False},
+    )
+
+    assert resp.status_code == 503
+    envelope = resp.json()["detail"]
+    assert envelope["code"] == "KILL_SWITCH_UNAVAILABLE"
+    assert envelope["dependency"] == "supabase"
+    assert envelope["retryable"] is True
+    assert isinstance(envelope["detail"], str)
+    retry_after = resp.headers.get("Retry-After")
+    assert retry_after is not None, "a SERVICE-TRANSIENT 503 must carry Retry-After"
+    # Literal, NOT imported from RETRY_AFTER_SECONDS — this pins the wire value.
+    # A bare `> 0` inequality was survivor #6: 15 -> 900 shipped green, and 900s
+    # is a fifteen-minute wait advertised for a Supabase blip.
+    assert retry_after == "15"
+
+
+def test_s25_pressed_kill_switch_is_still_a_200_not_a_503(
+    match_client, monkeypatch
+) -> None:
+    """S-25 calibration — the 503 is keyed on UNAVAILABLE, not on "not enabled".
+
+    Without this leg, an implementation that answered 503 for BOTH
+    tri-state off-values would pass the test above while turning the
+    founder's deliberate kill switch into a fake outage that trips 140.2's
+    breaker for every Supabase-backed route.
+    """
+    from routers import match as match_mod
+
+    monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+
+    async def _disabled(*_a, **_k):
+        return match_mod.KILL_SWITCH_DISABLED
+
+    monkeypatch.setattr(match_mod, "_engine_is_enabled", _disabled)
+
+    resp = match_client.post(
+        "/api/match/recompute",
+        json={"allocator_id": str(uuid4()), "force": False},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "disabled"
+
+
+def test_s26_cron_cursor_read_failure_is_503_naming_supabase(
+    match_client, monkeypatch
+) -> None:
+    """S-26 — the batching-cursor read exhausted its retries (WR-02).
+
+    A CONVERSION, not a new failure. ``_read_cron_cursor`` deliberately
+    propagates rather than swallowing an exhausted read into ``None`` —
+    "a failed read must never be indistinguishable from start over" — but
+    ``cron_recompute`` caught nothing, so the exception escaped the handler
+    and FastAPI answered a bare ``500 text/plain``. R-1 reads that as "do
+    not retry", which is exactly backwards for a gateway blip, and it
+    carries no envelope at all, contradicting ``routers/match.py``'s own
+    header rule.
+    """
+    from routers import match as match_mod
+
+    async def _engine_enabled(*_a, **_k):
+        return match_mod.KILL_SWITCH_ENABLED
+
+    monkeypatch.setattr(match_mod, "_engine_is_enabled", _engine_enabled)
+    monkeypatch.setattr(match_mod, "_engine_is_enabled_cached", _engine_enabled)
+
+    async def _boom():
+        raise RuntimeError("gateway 504, retries exhausted")
+
+    monkeypatch.setattr(match_mod, "_read_cron_cursor", _boom)
+
+    resp = match_client.post("/api/match/cron-recompute")
+
+    assert resp.status_code == 503
+    envelope = resp.json()["detail"]
+    assert envelope["code"] == "CURSOR_UNAVAILABLE"
+    assert envelope["dependency"] == "supabase"
+    assert envelope["retryable"] is True
+    assert resp.headers.get("Retry-After") == "15"
 
 
 def test_s15_scoring_failure_is_permanent_500(match_client, monkeypatch) -> None:

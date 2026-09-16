@@ -3752,8 +3752,61 @@ export async function selfTest() {
       const endMatch = regionStart >= 0 ? endRe.exec(runnerSrc) : null;
       const regionEnd = endMatch ? endMatch.index : runnerSrc.length;
       const region = regionStart >= 0 ? runnerSrc.slice(regionStart, regionEnd) : "";
+      // ⛔ COMMENTS ARE STRIPPED BEFORE THE SCAN, so this leg measures CODE
+      // rather than comment PLACEMENT (164.5.1-REVIEW IN-04). It used to pass
+      // only because the JSDoc spelling all three call names verbatim happens
+      // to sit ABOVE the `export` the region starts at: a formatter moving
+      // that doc inside the function, or any future in-body comment naming a
+      // write call, would have turned this gate red for a reason that has
+      // nothing to do with writes. A state scanner and not a regex, because a
+      // `//` INSIDE a string literal must not swallow the rest of its line —
+      // that direction would HIDE a real call and read GREEN.
+      const stripJsComments = (src) => {
+        let out = "";
+        let i = 0;
+        let quote = null;
+        while (i < src.length) {
+          const c = src[i];
+          const next = src[i + 1];
+          if (quote) {
+            out += c;
+            if (c === "\\") {
+              out += next === undefined ? "" : next;
+              i += 2;
+              continue;
+            }
+            if (c === quote) quote = null;
+            i += 1;
+          } else if (c === '"' || c === "'" || c === "`") {
+            quote = c;
+            out += c;
+            i += 1;
+          } else if (c === "/" && next === "/") {
+            while (i < src.length && src[i] !== "\n") i += 1;
+          } else if (c === "/" && next === "*") {
+            i += 2;
+            while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i += 1;
+            i += 2;
+          } else {
+            out += c;
+            i += 1;
+          }
+        }
+        return out;
+      };
+      // CALIBRATION of the stripper itself, on a synthetic snippet: a scan
+      // whose stripper silently removed everything would report "no writes"
+      // forever. Each write name below sits in exactly ONE of the three
+      // positions, so each assertion is sharp.
+      const commentProbe = [
+        'const s = "http://example/ok"; appendFileSync(d);',
+        "/* writeFileSync(b) */",
+        "noop(); // mkdirSync(c)",
+      ].join("\n");
+      const probeStripped = stripJsComments(commentProbe);
+      const codeOnly = stripJsComments(region);
       const writeCallNames = ["writeFileSync", "appendFileSync", "mkdirSync"];
-      const writesFound = writeCallNames.filter((name) => region.includes(name));
+      const writesFound = writeCallNames.filter((name) => codeOnly.includes(name));
 
       pass =
         expect(
@@ -3790,8 +3843,24 @@ export async function selfTest() {
         ) &&
         expect(digestBefore === digestAfterMarker, "and the fixture is unchanged after the MARKER-FAILURE invocation too") &&
         expect(
+          probeStripped.includes("appendFileSync"),
+          "CALIBRATION: the comment stripper keeps CODE, and a `//` inside a string literal does not swallow the rest of its line — a stripper that ate either would report 'no writes' for a function full of them",
+        ) &&
+        expect(
+          !probeStripped.includes("writeFileSync"),
+          "CALIBRATION: a write-call name inside a BLOCK comment is stripped",
+        ) &&
+        expect(
+          !probeStripped.includes("mkdirSync"),
+          "CALIBRATION: a write-call name inside a LINE comment is stripped",
+        ) &&
+        expect(
+          codeOnly.includes("compareManifest") && codeOnly.length > 400,
+          `CALIBRATION: stripping leaves the function's actual CODE behind (${codeOnly.length} byte(s)) — an over-eager stripper would make the scan below vacuous`,
+        ) &&
+        expect(
           writesFound.length === 0,
-          `the function's own source carries zero occurrences of any write-call name (found: ${writesFound.join(", ") || "none"}) — a future edit that adds one reddens this scenario`,
+          `the function's own CODE, comments stripped, carries zero occurrences of any write-call name (found: ${writesFound.join(", ") || "none"}) — a future edit that adds one reddens this scenario, and a comment that merely NAMES one does not`,
         ) &&
         pass;
     }
@@ -5140,8 +5209,10 @@ export async function preflightCronRepoint({ seams, manifestPath, functionsDir, 
 
   // (5) There is no step 5 — no filesystem WRITE of any kind anywhere above
   // (see this function's own docstring for the three call names the self-test
-  // scenario scans for, deliberately NOT spelled out here so this comment
-  // itself does not trip that scan).
+  // scenario scans for). ⚠️ Those names are still avoided HERE only as a
+  // reading convenience: since 164.5.1-REVIEW IN-04 the scenario strips
+  // comments before scanning, so naming one in a comment no longer reddens
+  // the gate — only a call in CODE does.
   log(`preflight-repoint: PROD cron.job matches the committed manifest (${rows.length} row(s)). Safe to proceed.`);
   return 0;
 }
@@ -5219,6 +5290,25 @@ export async function main(argv) {
     console.error(
       "ERROR: --capture-manifest and --preflight-repoint are mutually exclusive (one writes the oracle, the other only reads it). Nothing was written.",
     );
+    return 3;
+  }
+
+  // ⛔ A FLAG THAT DOES NOT APPLY TO THE SELECTED VERB IS REFUSED, NEVER
+  // SILENTLY DROPPED. `--arm x --preflight-repoint` used to run the gate and
+  // throw `onlyArm` away; `--capture-manifest --out p --manifest q` used to
+  // accept and ignore `--manifest`. Both leave the operator believing they
+  // scoped an invocation that was never scoped — the same "ambiguous request,
+  // not two independent operations" shape the pair above refuses.
+  if (manifestArg !== null && !wantPreflight) {
+    console.error("ERROR: --manifest only applies to --preflight-repoint (the verb that READS the oracle). Nothing was written.");
+    return 3;
+  }
+  if (outPath !== null && !wantCapture) {
+    console.error("ERROR: --out only applies to --capture-manifest (the verb that WRITES the oracle artifact). Nothing was written.");
+    return 3;
+  }
+  if (onlyArm !== null && (wantCapture || wantPreflight)) {
+    console.error("ERROR: --arm narrows the live prober run only; it does not apply to --capture-manifest or --preflight-repoint. Nothing was written.");
     return 3;
   }
 

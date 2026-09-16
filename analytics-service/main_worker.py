@@ -1060,10 +1060,21 @@ async def watchdog_tick() -> None:
     """Call reset_stalled_compute_jobs with per-kind thresholds."""
     supabase = get_supabase()
 
+    # `reset_stalled_compute_jobs` is a WRITE: it flips stalled `running`
+    # rows back to `pending`. It is nonetheless SAFE to retry, because its
+    # WHERE clause only matches rows that are still `status='running'` past
+    # the staleness threshold — a second attempt after a first one already
+    # committed matches nothing and is a no-op. What a retry CANNOT recover
+    # is the COUNT: the committed rows are gone from the filter, so the
+    # returned number under-states what was actually reset (WR-10).
+    attempts = 0
+
     # Pass the overrides dict directly; PostgREST coerces a JSON object to
     # JSONB. json.dumps() would send a JSON string, which becomes a JSONB
     # scalar and trips jsonb_object_keys() with "cannot call ... on a scalar".
     def _reset():
+        nonlocal attempts
+        attempts += 1
         return supabase.rpc(
             "reset_stalled_compute_jobs",
             {
@@ -1072,11 +1083,27 @@ async def watchdog_tick() -> None:
             },
         ).execute()
 
-    # [164.5.1-GATEWAY-CEILING-INVERSION]: retry a transient Supabase
-    # gateway timeout on this watchdog read rather than losing a whole tick.
+    # [164.5.1-GATEWAY-CEILING-INVERSION]: retry a transient Supabase gateway
+    # timeout on this watchdog write rather than losing a whole tick. The
+    # seam is named for reads; this call site is idempotent-by-filter (see
+    # above), which is what makes consuming it legitimate here.
     result = await db_read_with_retry(_reset)
     reset_count = result.data or 0
-    if reset_count:
+    if attempts > 1:
+        # A 504 delivered AFTER the server committed is indistinguishable
+        # here from one delivered before it, so `reset_count` is a LOWER
+        # BOUND, not a measurement. Log unconditionally at WARNING — a
+        # silent zero would make "reclaimed nothing" and "reclaimed, then
+        # lost the receipt to a post-commit gateway timeout" look identical.
+        logger.warning(
+            "Watchdog reclaimed at least %d stalled jobs (count is a LOWER "
+            "BOUND: the reset RPC was retried across %d attempts after a "
+            "gateway timeout, and an attempt that committed before timing "
+            "out no longer matches the staleness filter)",
+            reset_count,
+            attempts,
+        )
+    elif reset_count:
         logger.warning("Watchdog reclaimed %d stalled jobs", reset_count)
 
 

@@ -1140,6 +1140,13 @@ class TestCronResponseShape:
         "failed",
         "retention_deleted",
         "duration_s",
+        # WR-13: `next_cursor` was present on four branches and absent on
+        # five, so a consumer reading `body.next_cursor` got `undefined` on
+        # `disabled`/`kill_switch_unavailable`/`no_allocators`/
+        # `empty_universe`/the mid-run abort — indistinguishable from the
+        # terminal `null` that means "the pass wrapped". Enforcing it here
+        # makes the uniformity the helper's docstring CLAIMS actually hold.
+        "next_cursor",
     }
 
     def test_kill_switch_branch_has_full_shape(self, client, monkeypatch):
@@ -1328,6 +1335,180 @@ class TestCronResponseShape:
         assert self._REQUIRED_KEYS <= set(body)
 
     @pytest.mark.asyncio
+    async def test_cron_batch_budget_on_last_allocator_still_wraps(
+        self, monkeypatch
+    ):
+        """CR-01 regression — the cursor must never reach an ABSORBING state.
+
+        Why this matters (Rule 9 — this encodes the ENGINE's obligation, not
+        the implementation's control flow): the match engine promises that
+        every allocator is rescored on a bounded cadence. A cursor that can
+        only ever match zero rows breaks that promise PERMANENTLY and
+        SILENTLY — the status reads `no_allocators`, which the runbook
+        documents as benign, `match_batches` simply stops growing, and the
+        retention sweep stops with it.
+
+        The pre-fix mechanism: the elapsed-time bound was evaluated after
+        EVERY allocator including the last one of the last page, so a run
+        that crossed the budget while handling the final allocator set
+        `budget_exhausted=True` with `has_more=False` and wrote the MAXIMUM
+        profiles.id as the cursor instead of the wrap marker. The next tick's
+        `.gt("id", cursor)` returned zero rows, took the `no_allocators`
+        early return — the one terminal path that writes NOTHING — and the
+        state repeated forever. With the measured 25s budget against a
+        measured 44.67s real cron run, this is the ORDINARY path, not an
+        edge case.
+        """
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        all_ids = ["a1", "a2", "a3"]
+        # Budget 0.0 => the bound trips after every single allocator, which
+        # is exactly the shape a 25s budget takes against a 44.67s run.
+        monkeypatch.setattr(match_mod, "CRON_BATCH_SIZE", 10)
+        monkeypatch.setattr(match_mod, "CRON_BATCH_BUDGET_S", 0.0)
+        self._install_batching_doubles(monkeypatch, match_mod, all_ids)
+        store = self._install_cursor_store(monkeypatch, match_mod)
+
+        scored_per_tick: list[list[str]] = []
+
+        async def _score_track(allocator_id, universe):
+            scored_per_tick[-1].append(allocator_id)
+            return {}
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _score_track)
+
+        ticks: list[dict[str, Any]] = []
+        for _ in range(8):
+            scored_per_tick.append([])
+            body = await match_mod.cron_recompute()
+            ticks.append({**body, "cursor_after": store["value"]})
+
+        # 1. The tick that handles the LAST allocator must WRAP, not pin the
+        #    cursor at the maximum id. Pre-fix this was ('partial', 'a3').
+        tail_tick = ticks[2]
+        assert tail_tick["cursor_after"] is None, (
+            "the tick that handled the last allocator left the cursor at "
+            f"{tail_tick['cursor_after']!r} instead of the wrap marker — the "
+            "next tick can only ever match zero rows"
+        )
+
+        # 2. No tick may be a no-op. An absorbing state shows up here as a
+        #    tail of ticks that handle nothing at all, forever.
+        for i, tick in enumerate(ticks):
+            handled = tick["processed"] + tick["skipped"] + tick["failed"]
+            assert handled > 0, (
+                f"tick {i + 1} handled 0 allocators (status={tick['status']!r}, "
+                f"cursor={tick['cursor_after']!r}) — the pass is WEDGED; every "
+                "subsequent tick repeats it and no allocator is ever scored again"
+            )
+
+        # 3. The engine really did keep cycling the whole set, not just avoid
+        #    returning zero. 8 ticks at one allocator per tick over 3
+        #    allocators = every allocator scored at least twice.
+        flat = [aid for tick in scored_per_tick for aid in tick]
+        assert set(flat) == set(all_ids)
+        for aid in all_ids:
+            assert flat.count(aid) >= 2, (
+                f"{aid} was scored {flat.count(aid)}x across 8 ticks — the "
+                "pass is not cycling"
+            )
+
+    @pytest.mark.asyncio
+    async def test_cron_batch_empty_page_past_live_cursor_wraps(self, monkeypatch):
+        """CR-01's second, independent trigger: the rows BEYOND the cursor
+        stop being allocators between two ticks (a role change to
+        'strategy_manager', or a profile deletion). The keyset page comes
+        back empty while the cursor is live.
+
+        That is "the pass ran off the end of the set", not "the platform has
+        no allocators" — and the difference is the whole engine. Wrapping is
+        the only answer that can ever recover; leaving the cursor pinned is
+        an absorbing state no operator has an instrument for.
+        """
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        # a1..a3 exist, but the cursor already sits past all of them.
+        self._install_batching_doubles(monkeypatch, match_mod, ["a1", "a2", "a3"])
+        store = self._install_cursor_store(monkeypatch, match_mod)
+        store["value"] = "zzz"
+
+        body = await match_mod.cron_recompute()
+
+        assert store["value"] is None, (
+            "an empty keyset page past a LIVE cursor must wrap the cursor — "
+            "leaving it pinned makes every future tick match zero rows"
+        )
+        assert self._REQUIRED_KEYS <= set(body)
+
+        # And the very next tick must be back at the top of the set.
+        scored: list[str] = []
+
+        async def _score_track(allocator_id, universe):
+            scored.append(allocator_id)
+            return {}
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _score_track)
+        await match_mod.cron_recompute()
+        assert scored[:1] == ["a1"], "the tick after the wrap must restart at a1"
+
+    @pytest.mark.asyncio
+    async def test_batch_budget_actually_stops_the_loop_on_observed_elapsed_time(
+        self, monkeypatch
+    ):
+        """WR-04 — the budget must be measured against REAL elapsed time.
+
+        This replaces `test_batch_budget_strictly_below_gateway_ceiling`,
+        which asserted `CRON_BATCH_BUDGET_S < 60.0`: a comparison of two
+        literals that could never fail for any reason connected to request
+        duration. It was green while the budget clock included the shared
+        universe load, i.e. while the bound it claimed to pin was already
+        spent before allocator #1.
+
+        What matters economically: the budget buys "never START another
+        allocator once the clock is spent". It does NOT cap a single
+        allocator's scoring time — `_score_one_allocator` is pandas/numpy
+        work with its own p95 < 30s SLA — so the honest property is that
+        the overshoot is bounded by ONE allocator, and that the run ends at
+        a batch boundary with a resumable cursor rather than running the
+        whole platform.
+        """
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        all_ids = ["a1", "a2", "a3", "a4", "a5"]
+        monkeypatch.setattr(match_mod, "CRON_BATCH_SIZE", 10)
+        monkeypatch.setattr(match_mod, "CRON_BATCH_BUDGET_S", 0.25)
+        self._install_batching_doubles(monkeypatch, match_mod, all_ids)
+        store = self._install_cursor_store(monkeypatch, match_mod)
+
+        scored: list[str] = []
+
+        async def _slow_score(allocator_id, universe):
+            scored.append(allocator_id)
+            await asyncio.sleep(0.15)
+            return {}
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _slow_score)
+
+        body = await match_mod.cron_recompute()
+
+        # 0.25s budget / 0.15s per allocator: the second allocator is the
+        # one that crosses it, so the loop stops after 2 and never starts a
+        # third. The observed duration confirms the clock is real elapsed
+        # time, not a constant.
+        assert body["status"] == "partial"
+        assert len(scored) == 2, (
+            f"expected the budget to stop the loop after 2 allocators, scored {scored}"
+        )
+        assert body["duration_s"] >= 0.25, (
+            "the run did not actually spend the budget — the bound is not "
+            "measured against elapsed time"
+        )
+        assert body["next_cursor"] == scored[-1] == store["value"]
+
+    @pytest.mark.asyncio
     async def test_cron_batch_kill_switch_flip_mid_run_does_not_write_cursor(
         self, monkeypatch
     ):
@@ -1368,6 +1549,92 @@ class TestCronResponseShape:
         assert write_calls == [], "a mid-run kill-switch flip must never write the cursor"
         assert store["value"] is None, "cursor must be untouched (still the initial None)"
         assert self._REQUIRED_KEYS <= set(body)
+
+    @pytest.mark.asyncio
+    async def test_cron_batch_boundary_with_nothing_handled_leaves_cursor_alone(
+        self, monkeypatch
+    ):
+        """WR-01 — a `partial` run must never write the WRAP marker.
+
+        The `if not allocators` guard runs BEFORE the demo-allocator filter,
+        so a page whose only non-trimmed member is the demo allocator
+        reaches the batch boundary with `last_handled_id is None`. Writing
+        that None is writing the wrap marker: the response becomes
+        `{"status": "partial", "next_cursor": null}` — "resume after
+        nothing" — and the pass restarts at the beginning while it has just
+        MEASURED that more allocators exist. Every allocator ordered after
+        that page is then never reached, forever.
+
+        The correct disposition is the one the mid-run kill-switch abort
+        already takes: write nothing, leave the resume point where it was,
+        and say so at ERROR.
+        """
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        demo = match_mod._DEMO_ALLOCATOR_ID
+        all_ids = sorted([demo, "zz1", "zz2"])
+        assert all_ids[0] == demo, "fixture assumes the demo id sorts first"
+        monkeypatch.setattr(match_mod, "CRON_BATCH_SIZE", 1)
+        self._install_batching_doubles(monkeypatch, match_mod, all_ids)
+        store = self._install_cursor_store(monkeypatch, match_mod)
+
+        write_calls: list[Any] = []
+        _real_write = match_mod._write_cron_cursor
+
+        async def _spy_write(value):
+            write_calls.append(value)
+            return await _real_write(value)
+
+        monkeypatch.setattr(match_mod, "_write_cron_cursor", _spy_write)
+
+        body = await match_mod.cron_recompute()
+
+        assert body["status"] == "partial"
+        assert body["processed"] + body["skipped"] + body["failed"] == 0
+        assert write_calls == [], (
+            "a batch boundary that handled NOTHING must not write the "
+            f"cursor — it wrote {write_calls!r}"
+        )
+        assert store["value"] is None, "the resume point must be untouched"
+        assert self._REQUIRED_KEYS <= set(body)
+
+    @pytest.mark.asyncio
+    async def test_cron_cursor_read_failure_is_a_503_not_a_bare_500(
+        self, monkeypatch
+    ):
+        """WR-02 — `_read_cron_cursor` propagates "so the caller decides";
+        this pins WHAT the caller decides.
+
+        Pre-fix the call sat in no `try`, so an exhausted read escaped the
+        handler and FastAPI answered a bare 500 with no envelope — against
+        this file's own rule that every deliberate error in a seam-reachable
+        arm goes through `service_error`. Falling back to `cursor = None` is
+        the one answer that is WORSE than either: it makes a failed read
+        indistinguishable from "start over".
+        """
+        from fastapi import HTTPException
+
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        self._install_batching_doubles(monkeypatch, match_mod, ["a1"])
+
+        async def _boom():
+            raise RuntimeError("gateway 504, retries exhausted")
+
+        monkeypatch.setattr(match_mod, "_read_cron_cursor", _boom)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await match_mod.cron_recompute()
+
+        # Literals, never imported from error_contract — an oracle that
+        # reads its expectation out of the thing under test cannot fail.
+        assert exc_info.value.status_code == 503
+        envelope = exc_info.value.detail
+        assert envelope["code"] == "CURSOR_UNAVAILABLE"
+        assert envelope["dependency"] == "supabase"
+        assert envelope["retryable"] is True
 
     @pytest.mark.asyncio
     async def test_cron_batch_single_allocator_never_partial(self, monkeypatch):
@@ -4721,30 +4988,207 @@ class TestCronCursorAccessors:
         payload = sb.table.return_value.upsert.call_args.args[0]
         assert payload["value"] == ""
 
+    @pytest.mark.asyncio
+    async def test_write_cron_cursor_zero_row_upsert_logs_error(
+        self, monkeypatch, caplog
+    ):
+        """WR-03 — a SILENT no-op write replays the same slice forever.
+
+        This file inspects `.data` on every other write whose silence would
+        be indistinguishable from success (the A3-01 rollback DELETE, the
+        candidates INSERT) precisely because a zero-row result is a real,
+        reachable outcome — an RLS regression, a CHECK added later, a
+        PostgREST return-preference change. The cursor is the ONE piece of
+        state resume correctness depends on and it was the one new write
+        that checked nothing.
+
+        Why the failure is invisible without this log: a stale cursor makes
+        the next tick re-process the IDENTICAL slice, where
+        `_should_skip_allocator`'s 12h age guard turns every allocator into
+        a `skipped`. `processed=0, skipped=N, failed=0` reads as a perfectly
+        healthy tick while the pass never advances.
+
+        The sibling test above asserts only `upsert.call_args` — the call
+        ARGUMENTS — so it cannot see the returned data at all.
+        """
+        from routers import match as match_mod
+
+        cursor_id = str(uuid4())
+        sb = MagicMock()
+        sb.table.return_value.upsert.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        with caplog.at_level("ERROR"):
+            await match_mod._write_cron_cursor(cursor_id)
+
+        assert any(
+            "returned no rows" in rec.getMessage()
+            and match_mod.MATCH_ENGINE_CURSOR_KEY in rec.getMessage()
+            and rec.levelname == "ERROR"
+            for rec in caplog.records
+        ), (
+            "a zero-row cursor upsert must log ERROR naming the key — "
+            f"records: {[r.getMessage() for r in caplog.records]}"
+        )
+
+
+class TestCronPassAgeObservability:
+    """WR-12 — a full pass that outruns the freshness window must SAY so.
+
+    Before batching, the hourly cron walked every allocator each tick, so an
+    allocator crossing `RECOMPUTE_MIN_AGE_HOURS` was rescored within the
+    hour. A batched pass takes `ceil(N / effective_slice)` ticks, and the
+    effective slice is whatever the elapsed-time budget allows — so batches
+    can routinely age past the 12h threshold `_should_skip_allocator` treats
+    as the SLA. Nothing measured pass duration and nothing alarmed on it.
+
+    `system_settings.updated_at` at the moment the cursor wraps IS the end
+    of the previous pass, so `now() - updated_at` at a wrap is exactly the
+    duration of the pass that just finished.
+    """
+
+    @pytest.mark.asyncio
+    async def test_slow_pass_warns_naming_the_freshness_window(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        async def _previous_wrap_long_ago():
+            return _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(
+                hours=match_mod.RECOMPUTE_MIN_AGE_HOURS + 6
+            )
+
+        async def _noop_write(_value):
+            return None
+
+        monkeypatch.setattr(
+            match_mod, "_read_cron_cursor_updated_at", _previous_wrap_long_ago
+        )
+        monkeypatch.setattr(match_mod, "_write_cron_cursor", _noop_write)
+
+        with caplog.at_level("WARNING"):
+            await match_mod._wrap_cron_cursor(allocators_handled=1)
+
+        assert any(
+            "longer than the" in rec.getMessage() and rec.levelname == "WARNING"
+            for rec in caplog.records
+        ), (
+            "a pass slower than the freshness window must WARN — "
+            f"records: {[r.getMessage() for r in caplog.records]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_fast_pass_does_not_warn(self, monkeypatch, caplog):
+        """Calibration: the WARNING is keyed on the measurement, not emitted
+        unconditionally (an alarm that always fires is not an alarm)."""
+        from routers import match as match_mod
+
+        async def _previous_wrap_recent():
+            return _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=30)
+
+        async def _noop_write(_value):
+            return None
+
+        monkeypatch.setattr(
+            match_mod, "_read_cron_cursor_updated_at", _previous_wrap_recent
+        )
+        monkeypatch.setattr(match_mod, "_write_cron_cursor", _noop_write)
+
+        with caplog.at_level("WARNING"):
+            await match_mod._wrap_cron_cursor(allocators_handled=3)
+
+        assert not [
+            rec for rec in caplog.records if rec.levelname == "WARNING"
+        ], "a pass well inside the freshness window must not warn"
+
+    @pytest.mark.asyncio
+    async def test_observability_read_failure_never_fails_the_wrap(
+        self, monkeypatch
+    ):
+        """The wrap is CORRECTNESS (it is what breaks CR-01's absorbing
+        state); the pass-age log is diagnostics. A diagnostic read must
+        never be able to take the correctness write down with it."""
+        from routers import match as match_mod
+
+        written: list[Any] = []
+
+        async def _noop_write(value):
+            written.append(value)
+
+        def _boom():
+            raise RuntimeError("system_settings unreadable")
+
+        monkeypatch.setattr(match_mod, "get_supabase", _boom)
+        monkeypatch.setattr(match_mod, "_write_cron_cursor", _noop_write)
+
+        await match_mod._wrap_cron_cursor(allocators_handled=0)
+
+        assert written == [None], "the wrap marker must still be written"
+
 
 class TestCronBatchBoundsInvariants:
     """CRON_BATCH_BUDGET_S / CRON_BATCH_SIZE — the two statement-level knobs
     controlling the batch boundary (Phase 164.5.1 criterion 9)."""
 
-    def test_batch_budget_strictly_below_gateway_ceiling(self):
-        """The batch budget must close a request before the API gateway does.
+    def test_batch_budget_is_clamped_below_the_gateway_ceiling(self):
+        """The CONSTANT'S half of WR-04/WR-11: a clamp, not a coincidence.
 
-        ⛔ Asserted against the 60s GATEWAY ceiling, not against a
-        `service_role` `statement_timeout`. This test was named
-        `..._below_statement_timeout` and pinned `45.0` until 2026-09-16,
-        when phase 164.5.1's D4 gate WITHDREW the planned
-        `ALTER ROLE service_role SET statement_timeout` migration: a
-        per-STATEMENT timeout does not bound a per-REQUEST 504 for a
-        multi-statement request, and `service_role` has no row in
-        `pg_db_role_setting`, so the real inherited ceiling is
-        `authenticator`'s 8s — measured read-only on PROD. The literal 45.0
-        was a stale claim that stayed green (25 < 45) while measuring a
-        bound that no longer existed.
+        `< 60.0` held by luck of the default. `_bounded_env`'s upper clamp
+        is what makes it hold for an operator-set value too.
         """
         from routers import match as match_mod
 
         GATEWAY_CEILING_S = 60.0
         assert match_mod.CRON_BATCH_BUDGET_S < GATEWAY_CEILING_S
+        assert match_mod._bounded_env("__ABSENT__", 25.0, 1.0, 55.0) == 25.0
+        # An operator value above the ceiling is clamped, not honoured.
+        import os as _os
+
+        _os.environ["__TEST_BUDGET_KNOB__"] = "120"
+        try:
+            assert match_mod._bounded_env("__TEST_BUDGET_KNOB__", 25.0, 1.0, 55.0) == 55.0
+        finally:
+            del _os.environ["__TEST_BUDGET_KNOB__"]
+
+    def test_batch_budget_has_a_positive_floor(self):
+        """WR-11 — the count knob had a floor and the time knob had none.
+
+        `MATCH_ENGINE_CRON_BUDGET_S=0` tripped the bound after every single
+        allocator: one allocator per tick forever, and (pre-CR-01) straight
+        into the wedge on the tail of the set.
+        """
+        from routers import match as match_mod
+
+        assert match_mod.CRON_BATCH_BUDGET_S > 0
+        assert match_mod._bounded_env("__ZERO_KNOB__", 0.0, 1.0, 55.0) == 1.0
+
+    def test_bad_env_value_falls_back_instead_of_killing_the_service(self, caplog):
+        """WR-11 — a typo'd knob must not take the whole FastAPI app down.
+
+        Pre-fix both knobs were parsed with a bare `int()`/`float()` at
+        MODULE IMPORT, so `MATCH_ENGINE_CRON_BATCH_SIZE=ten` raised
+        ValueError before the app existed, with a traceback naming `int()`
+        and not the variable. The operator learns nothing and the service is
+        an outage; a knob at its default is merely a tuning regression.
+        """
+        import os as _os
+
+        from routers import match as match_mod
+
+        _os.environ["__BAD_KNOB__"] = "twenty-five"
+        try:
+            with caplog.at_level("ERROR"):
+                value = match_mod._bounded_env("__BAD_KNOB__", 25.0, 1.0, 55.0)
+        finally:
+            del _os.environ["__BAD_KNOB__"]
+
+        assert value == 25.0
+        assert any(
+            "__BAD_KNOB__" in rec.getMessage() and rec.levelname == "ERROR"
+            for rec in caplog.records
+        ), "the fallback must name the OFFENDING VARIABLE, not int()"
 
     def test_batch_size_floor_is_one(self):
         from routers import match as match_mod
@@ -4822,16 +5266,16 @@ def _extract_metrics_bullet(doc_text: str) -> str:
     return "\n".join(bullet_lines)
 
 
-def _derive_cron_status_vocabulary(match_mod) -> set[str]:
-    """Derive the FULL set of status values cron_recompute() can return —
-    from the module's KILL_SWITCH_* constants and the string literals
-    actually present in cron_recompute's own source, never a hand-typed
-    list. A future status added in code with no matching doc line fails
-    test_runbook_status_vocabulary_covers_every_router_status below rather
-    than drifting silently.
+def _extract_status_literals(source: str) -> set[str]:
+    """The AST half of the derivation, over SOURCE TEXT.
+
+    Split out from _derive_cron_status_vocabulary so the calibration test
+    can run the REAL extractor against a synthetic function carrying a
+    synthetic status. The old calibration only re-ran the membership
+    EXPRESSION against a hand-made set, so it proved the `in` operator
+    works and nothing about whether this walk can see a new literal.
     """
-    source = textwrap.dedent(inspect.getsource(match_mod.cron_recompute))
-    tree = ast.parse(source)
+    tree = ast.parse(textwrap.dedent(source))
     literals: set[str] = set()
 
     for node in ast.walk(tree):
@@ -4864,6 +5308,19 @@ def _derive_cron_status_vocabulary(match_mod) -> set[str]:
                     and isinstance(value.value, str)
                 ):
                     literals.add(value.value)
+
+    return literals
+
+
+def _derive_cron_status_vocabulary(match_mod) -> set[str]:
+    """Derive the FULL set of status values cron_recompute() can return —
+    from the module's KILL_SWITCH_* constants and the string literals
+    actually present in cron_recompute's own source, never a hand-typed
+    list. A future status added in code with no matching doc line fails
+    test_runbook_status_vocabulary_covers_every_router_status below rather
+    than drifting silently.
+    """
+    literals = _extract_status_literals(inspect.getsource(match_mod.cron_recompute))
 
     # The kill-switch statuses never appear as string LITERALS in
     # cron_recompute's own source — they flow through the
@@ -4903,26 +5360,76 @@ class TestRunbookStatusVocabulary:
 
         derived = _derive_cron_status_vocabulary(match_mod)
         assert derived, "derivation returned nothing — broken extractor, not a passing test"
-
-        missing = {status for status in derived if status not in bullet}
-        assert not missing, (
-            f"cron_recompute can return {sorted(missing)} but the runbook's "
-            "Metrics bullet does not mention it"
+        # IN-01 anti-vacuity floor on the DERIVATION, not just the doc. The
+        # vocabulary is ok / degraded / total_failure / no_allocators /
+        # empty_universe / partial + the two KILL_SWITCH_* constants. A walk
+        # that silently stopped seeing one shape (say, the `{"status": ...}`
+        # dict returns) would still satisfy `assert derived` on a single
+        # element while measuring almost nothing.
+        assert len(derived) >= 8, (
+            f"derivation produced only {sorted(derived)} — the extractor has "
+            "stopped seeing one of cron_recompute's return shapes"
         )
 
-    def test_calibration_synthetic_extra_status_is_caught(self):
-        """Proves the assertion above can actually go RED — inject a status
-        the doc does NOT mention into the derived set and confirm the SAME
-        membership check catches it. Without this, the test above could be
-        vacuously green forever (e.g. if the extractor silently returned
-        the whole file)."""
+        # IN-01: match on the DELIMITED form. `status not in bullet` was a
+        # bare substring test over English prose, so `ok` — a substring of
+        # "looks", "broken", "ok" in any sentence — could never fail, and
+        # `partial`/`disabled` were nearly as cheap. The bullet backticks
+        # every value it documents, so the backticked form is both the
+        # honest check and the one the doc already satisfies.
+        missing = {status for status in derived if f"`{status}`" not in bullet}
+        assert not missing, (
+            f"cron_recompute can return {sorted(missing)} but the runbook's "
+            "Metrics bullet does not document it as a backticked value"
+        )
+
+    def test_calibration_derivation_sees_a_newly_added_status_literal(self):
+        """Proves the DERIVATION is non-vacuous — not just the membership
+        check.
+
+        The old calibration re-ran the `in` expression against a hand-made
+        set and never called the extractor at all, so it proved that
+        Python's `in` operator works and nothing about whether the AST walk
+        can see a status added to cron_recompute's source. This runs the
+        REAL extractor over a synthetic function carrying one literal in
+        each of the three shapes the walk claims to recognise, and then
+        confirms the membership check reddens on the one the doc lacks.
+        """
+        synthetic_source = '''
+def _synthetic_cron():
+    if a:
+        return _early_return("__early_return_shape__")
+    if b:
+        return {"status": "__dict_shape__", "processed": 0}
+    status_value = "__assign_shape__"
+    return {"status": status_value}
+'''
+        derived = _extract_status_literals(synthetic_source)
+        assert derived == {
+            "__early_return_shape__",
+            "__dict_shape__",
+            "__assign_shape__",
+        }, (
+            "the extractor cannot see a status literal added in one of the "
+            f"three shapes it claims to recognise — saw {sorted(derived)}"
+        )
+
         doc_text = _RUNBOOK_PATH.read_text()
         bullet = _extract_metrics_bullet(doc_text)
         assert len(bullet) > 200
-
-        synthetic = {"total_failure", "ok", "__synthetic_status_not_in_doc__"}
-        missing = {status for status in synthetic if status not in bullet}
-        assert missing == {"__synthetic_status_not_in_doc__"}, (
-            "calibration failed: the membership check did not catch an "
-            "undocumented synthetic status injected into the derived set"
+        missing = {status for status in derived if f"`{status}`" not in bullet}
+        assert missing == derived, (
+            "calibration failed: the membership check did not catch the "
+            "undocumented synthetic statuses the extractor derived"
         )
+
+    def test_calibration_delimited_match_rejects_a_bare_substring(self):
+        """The delimiting itself must bite. `ok` appears unbacktickd in
+        ordinary prose all over the runbook; a status named `ok_` must not
+        be satisfied by the `ok` that documents a different one."""
+        doc_text = _RUNBOOK_PATH.read_text()
+        bullet = _extract_metrics_bullet(doc_text)
+
+        assert "ok" in bullet, "precondition: the bare substring IS present"
+        assert "`ok_undocumented`" not in bullet
+        assert "ok_undocumented" not in bullet

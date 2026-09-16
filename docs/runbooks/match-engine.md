@@ -78,13 +78,38 @@ implementation plan at `docs/superpowers/plans/2026-04-07-perfect-match-engine.m
 Phase 164.5.1 criterion 9: `cron_recompute()` stops at a batch boundary (a
 count bound OR an elapsed-time bound, whichever comes first) rather than
 performing its whole unit of work inside one gateway-bounded request.
-- **Normal:** consecutive ticks returning `status="partial"` with an
+- **What the engine INTENDS:** consecutive ticks returning `status="partial"` with an
   ADVANCING `next_cursor` is the engine working through a large allocator
-  set in bounded slices — not a stall.
-- **The actual alarm signal:** a `next_cursor` that does NOT advance between
-  ticks, or `partial` persisting across a full day. Either means a tick is
-  failing to make progress on its slice, not merely taking several ticks to
-  finish the whole set.
+  set in bounded slices — not a stall. ⚠️ Read that as a statement about the
+  engine's design, NOT as something you can watch: see the next bullet.
+- **⛔ The alarm signal this section used to give was UNOBSERVABLE, and is replaced below.**
+  It read: *"a `next_cursor` that does NOT advance between ticks, or `partial` persisting
+  across a full day."* Nothing in production can see either. jobid 1 fires
+  `public.match_engine_cron_tick()` → `net.http_post(...)`, pg_net is fire-and-forget, and
+  `cron.job_run_details.return_message` carries nothing from the HTTP body — there is no
+  consumer of `status` or `next_cursor` anywhere in the repo. The response body is not an
+  instrument. And the wedge that actually occurs does not even produce the signal: it returns
+  a status this runbook documents as benign and emits no `next_cursor` at all, so an operator
+  watching for a frozen cursor would watch a field that is never sent.
+- **The observable signal — the cursor ROW is the instrument.** Run this, and run it twice a
+  tick apart, because one reading cannot distinguish a stalled pass from one that just ticked:
+
+  ```sql
+  SELECT value AS cursor, updated_at
+    FROM public.system_settings
+   WHERE key = 'match_engine_cron_cursor';
+  ```
+
+  - **Expected:** `updated_at` within one tick interval, and `value` either empty (a pass just
+    wrapped, so the next tick restarts from the beginning) or a UUID that DIFFERS from the
+    previous reading.
+  - **Alarm if:** `value` is a non-empty UUID and `updated_at` has not moved for more than TWO
+    tick intervals. The engine is not slicing — it is stuck part-way through a pass, and every
+    allocator ordered below that cursor is being starved indefinitely.
+  - **Also alarm if:** `value` is a non-empty UUID that is unchanged while `updated_at` keeps
+    moving. Ticks are firing and re-reading the same slice without progressing past it.
+  - A row that is ABSENT entirely is not an alarm: the next tick starts a fresh pass from the
+    beginning and writes the row again.
 - The cursor lives in `system_settings.key = 'match_engine_cron_cursor'`.
   It is ENGINE-INTERNAL BOOKKEEPING — an operator should not hand-edit this
   row except to deliberately restart a pass (setting `value` to the empty
@@ -186,14 +211,42 @@ production. **Pasting the query text is not evidence; only its recorded output i
 exact vacuity booked as `[164.7-P3C-PRESENCE-ORACLE]` — a verify leg that was satisfied once by the
 query's text rather than its answer. Do not repeat it here.
 
-### Step 0 — deploy Wave A first (Areas 1 and 2: kill switch, timeout, batching)
+### Step 0 — deploy Wave A first (Areas 1 and 2: kill switch, gateway-timeout retry seam, batching)
 
 The repointed job calls into `public.match_engine_cron_tick()`, which posts to the analytics
 service's `/api/match/cron-recompute` route — the same route Wave A's fail-closed kill switch, the
-`service_role` `statement_timeout`, and the batched `cron_recompute()` all harden. Repointing jobid
+gateway-timeout retry seam, and the batched `cron_recompute()` all harden. Repointing jobid
 1 before Wave A is live would repoint it at a route with the SAME gateway-ceiling and fail-open
-exposure this phase exists to close. Confirm Wave A (plans 02, 03, 05, 06) is merged and deployed
+exposure this phase exists to close. Confirm Wave A (plans **02, 05, 06**) is merged and deployed
 before proceeding — do not restate what those plans do; see their SUMMARYs.
+
+⛔ **A THIRD control this step used to name is GONE, and that is a DECISION, not a missed deploy.**
+Until 2026-09-16 the paragraph above also named the `service_role` `statement_timeout` and listed
+plan **03** in the Wave A set. That migration was **WITHDRAWN** at the plan-09 D4 gate; it is
+deleted from the branch and plan 03 now ships nothing. Two independently sufficient measured
+reasons, either one of which withdraws it on its own:
+
+- **A per-STATEMENT timeout cannot bound a per-REQUEST gateway 504.** `cron_recompute()` issues
+  many short statements inside one request. Every one of them can finish far under the cap while
+  the request as a whole still runs past the gateway's ceiling — which is the failure this control
+  was bought to prevent. Wrong instrument, not merely a wrong number.
+- **It would have LOOSENED the ceiling sevenfold.** Measured read-only on PROD,
+  `pg_db_role_setting` has **NO ROW** for `service_role`, while `authenticator` carries **8s**,
+  which PostgREST applies at login. So the real inherited ceiling is 8s, and the planned 45s/55s
+  would have raised it, not lowered it. Shipping it would have made this route weaker.
+
+The full record is `.planning/phases/164.5.1-cronrepoint-the-live-match-engine-cron-row-is-repointed-at-t/164.5.1-PROD-SESSION.md`
+and `TODOS.md`'s `[164.5.1-GATEWAY-CEILING-INVERSION]`; `analytics-service/services/db.py` and
+`analytics-service/routers/match.py` carry the same ⛔ block at the code sites. Per this runbook's
+own convention above — *"the losing convention is flagged, not left to disagree silently … this is
+an additive flag"* — the old wording is recorded here rather than quietly removed, so an operator
+can tell a WITHDRAWAL from a deploy that never landed.
+
+⚠️ **This step's oracle cannot make that distinction for you.** `git_sha` at or after Wave A's
+merge commit measures a DEPLOY SHA, not a control: it reads identically whether a named layer
+shipped, was withdrawn, or silently failed to merge. Every claim this step makes about a specific
+hardening layer therefore has to be true in THIS list — which is why the withdrawal is written into
+it rather than left to the reader to notice.
 
 - **Expected:** the Railway worker's `/health` (`docs/runbooks/railway-worker.md`) reports
   `git_sha` at or after Wave A's merge commit.

@@ -37,6 +37,7 @@ import {
   ARMS_FLOOR,
   DEFECT_KINDS,
   SELF_TEST_SCENARIOS,
+  main,
   selfTest,
 } from "../../scripts/prod-prober/run.mjs";
 import {
@@ -2818,5 +2819,63 @@ describe("[164.8.3-04] the -6 branch is load-bearing (criterion 6)", () => {
         "and the branch ABOVE the excision is equally untouched",
       ).toBe("mt5-no-ipc");
     });
+  });
+});
+
+describe("[164.5.1-REVIEW IN-03] a CLI flag that does not apply to the selected verb is REFUSED, never dropped", () => {
+  // ⛔ THE DEFECT. `--arm x --preflight-repoint` ran the gate and threw
+  // `onlyArm` away; `--capture-manifest --out p --manifest q` accepted and
+  // ignored `--manifest`. The operator reads an exit code believing they
+  // scoped an invocation that was never scoped — the same shape the
+  // capture/preflight mutual-exclusion guard already refuses.
+  //
+  // ⛔ EVERY CASE HERE RETURNS BEFORE ANY SEAM IS BUILT, so none of these
+  // calls can reach the network or a database. A case that ever did would
+  // show up as a hang or a credential error, never as a silent pass.
+  const cases: Array<{ argv: string[]; message: string }> = [
+    { argv: ["--arm", "pyapi06", "--preflight-repoint"], message: "--arm narrows the live prober run only" },
+    { argv: ["--arm", "pyapi06", "--capture-manifest", "--out", "/tmp/nope"], message: "--arm narrows the live prober run only" },
+    { argv: ["--capture-manifest", "--out", "/tmp/nope", "--manifest", "/tmp/nope"], message: "--manifest only applies to --preflight-repoint" },
+    { argv: ["--manifest", "/tmp/nope"], message: "--manifest only applies to --preflight-repoint" },
+    { argv: ["--out", "/tmp/nope"], message: "--out only applies to --capture-manifest" },
+    { argv: ["--preflight-repoint", "--out", "/tmp/nope"], message: "--out only applies to --capture-manifest" },
+  ];
+
+  for (const { argv, message } of cases) {
+    it(`refuses ${argv.join(" ")} with exit 3 and says why`, async () => {
+      const errors: string[] = [];
+      const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+        errors.push(args.map(String).join(" "));
+      });
+      try {
+        expect(await main(argv)).toBe(3);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(errors.join("\n")).toContain(message);
+      // Every refusal in this CLI carries the same sentence, so an operator
+      // never has to infer whether a rejected invocation left something behind.
+      expect(errors.join("\n")).toContain("Nothing was written.");
+    });
+  }
+
+  it("CALIBRATION: the guards do NOT fire on the applicable pairings — a guard that rejected everything would be indistinguishable here", async () => {
+    // Parsed-and-accepted, then refused for its OWN reason (a manifest path
+    // that does not exist / the two verbs together), which is a DIFFERENT
+    // message from the applicability guards above. That difference is the
+    // proof the flag reached its verb rather than being rejected as
+    // inapplicable.
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    });
+    try {
+      expect(await main(["--capture-manifest", "--preflight-repoint"])).toBe(3);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(errors.join("\n")).toContain("mutually exclusive");
+    expect(errors.join("\n")).not.toContain("only applies to");
+    expect(errors.join("\n")).not.toContain("narrows the live prober run only");
   });
 });
