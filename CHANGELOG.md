@@ -1,5 +1,103 @@
 # Changelog
 
+## [0.77.45.0] - 2026-09-16 — the hourly match-engine tick stops being a thing that can silently do nothing, and the kill switch stops being a thing an outage can flip
+
+Phase 164.5.1 CRONREPOINT, Wave A. The live `match_engine_cron` row still points at the
+superseded target; this release is everything that has to be deployed BEFORE that repoint is
+safe to perform. The repoint itself (plan 09) is a founder-run live PROD session and is
+deliberately NOT in this release — its own runbook Step 0 blocks it until this code is deployed.
+
+### Added
+- **A server-side cursor for the hourly recompute.** `system_settings.match_engine_cron_cursor`
+  plus a new `match_engine_cron_pass_started_at` sibling key. pg_cron sends a fixed,
+  parameterless request, so there is no channel for one tick to hand a position to the next —
+  the position has to live in the database. The allocator loop is now batched
+  (`CRON_BATCH_SIZE` ∈ [1,1000], `CRON_BATCH_BUDGET_S` ∈ [1.0,55.0], both clamped by
+  `_bounded_env`) and returns `partial` with a `next_cursor` instead of trying to finish inside
+  one 60 s gateway window.
+- **`preflightCronRepoint`** in `scripts/prod-prober/run.mjs` — reads the live `cron.job` row,
+  compares it against the committed manifest, and ABORTS on a mismatch. It writes nothing: the
+  gate asserts that from the module source and by a before/after sha256 of the fixture manifest
+  across every invocation leg.
+- **A CI gate over the committed cron manifest** (plan 07). The manifest must declare the
+  `normalization` and `schema_version` the comparison arm actually computes, pinned against the
+  arm's own exported constants. This is the detector for the realised 2026-09-11 incident where
+  an invalid oracle meant NO drift comparison ran for weeks. Fourth self-test scenario added;
+  `SELF_TEST_SCENARIOS` 81 → 82.
+- **`CURSOR_UNAVAILABLE`** as the 40th wizard error code, and the `match_engine_cron` go-live
+  section in `docs/runbooks/match-engine.md`.
+- Three ROADMAP-only backlog items finally written into `TODOS.md`, including the real
+  `FANOUT-GLOBAL-01` entry that until now existed only as prose in two places.
+
+### Changed
+- **The kill switch fails CLOSED.** `_engine_is_enabled` previously let a gateway 504 read as
+  "engine enabled". After `DB_READ_MAX_RETRIES` exhausted gateway timeouts it now stops the
+  engine, and `KILL_SWITCH_UNAVAILABLE` is a DISTINCT cron status from `KILL_SWITCH_DISABLED`
+  so a database outage can never be reported as the founder pressing the switch. The TTL cache
+  no longer serves a value produced by a failed poll.
+- **`_claim_priority` and `_reset` in `main_worker.py` route through the retry seam.** The
+  42883 legacy-RPC latch is PERMANENT once set, so a transient gateway timeout must not be able
+  to set it; `_is_gateway_timeout` and `_is_undefined_function_structured` are disjoint predicates.
+- A cursor read failure now returns `503 CURSOR_UNAVAILABLE` rather than falling back to
+  `cursor = None`, which would have silently restarted the pass from the beginning.
+- The watchdog's reclaim count is logged as an explicit LOWER BOUND, and `db.py`'s docstring is
+  rebound from the 45 s `statement_timeout` to the 60 s gateway window it actually describes.
+- Model roster completed across all 35 `gsd-*` agents (sonnet; `gsd-planner` opus).
+
+### Fixed
+- **The batching cursor had an absorbing state.** Found by the phase's own code review before
+  it shipped: with the cursor pinned at the maximum allocator id, an early return that never
+  wrote the cursor wedged the pass permanently. `_is_tail_of_set` now keeps the budget check
+  from short-circuiting the final allocator, and an empty allocator set with a non-null cursor
+  wraps instead of returning.
+- **The pass-duration instrument measured the wrong interval** — it read the last tick gap, not
+  the pass. Fixed with a separate `match_engine_cron_pass_started_at` key rather than the
+  obvious repair, which would have broken the sibling cursor instrument.
+- `compute_jobs.completed_at` references in the runbook's P3-C diagnostic pointed at a column
+  that does not exist — the gate returned 42703 instead of a measurement, in both copies and in
+  two later diagnostics. Repaired; P3-C then produced its first real answer.
+- `KILL_SWITCH_UNAVAILABLE`'s exemption reason in `wizardErrors.ts` was disposed on a false
+  claim — a regression this phase introduced and this phase closes.
+
+### Removed
+- **Criterion 7 and its artifacts.** `20260916120000_service_role_statement_timeout.sql` and
+  `service-role-statement-timeout-migration.test.ts` are deleted. The criterion asserted that
+  `service_role` inherits a 120 s `statement_timeout`; measurement against PROD showed no
+  `pg_db_role_setting` row at all, so it inherits 8 s from `authenticator`. The premise was
+  false, the migration was built on it, and it was never applied and never reached `main`.
+  There is consequently NO `supabase/` diff in this release and no apply-test or PROD apply gate.
+
+### Tests
+- Fail-closed disposition proven by injected failure under a neuter/RED/restore cycle, not by
+  argument. Retry narrowness and the 42883 latch each get their own test. Batching-cursor tests
+  folded into `TestCronResponseShape`. A test drives the real pass-start reader/writer over
+  partial → partial → wrap with a frozen clock. `test_match_router.py` grew ~1700 lines.
+
+### Notes
+- Two review rounds ran after the standard per-phase review; round 1 closed 17 findings and
+  round 2 closed a regression that round 1's own fix introduced. Gates at HEAD: pytest
+  5867 passed / 89 skipped, vitest 14823 passed / 2 failed (both pre-existing, both files 0 diff
+  on this branch), prod-prober self-test 82/82, plan-anchor verify OK on 24 claims,
+  planning-hygiene OK across 6448 files.
+- **Security verification ran for the first time on this phase.** `164.5.1-SECURITY.md` records
+  58 threats across the nine plan-time STRIDE registers: 49 in scope for this ship (42 mitigated
+  or accepted, 7 closed BY WITHDRAWAL — criterion 7's surface is gone, not deferred) and
+  `threats_open: 0`. Six accepted risks are persisted verbatim from their plan-time rationale.
+  Plan 09's nine threats are recorded as PENDING, not closed; `T-164.5.1-09-02` and `-09-07`
+  cannot be verified before the live session and the sign-off carries that as an open box.
+- ⛔ **This release ships with `verification.status: missing`, by explicit founder decision.**
+  The `ship:pre` gate admits only `passed`, and this phase cannot reach it before the act it
+  gates: its goal is a production state, the repoint is plan 09, and plan 09's runbook Step 0
+  requires this branch merged and deployed first. Every gate that measures the CODE stayed
+  binding and green, and the `ship:pre` SECURITY gate passes on its own evidence. There is no
+  `supabase/` diff, so no apply-test and no PROD apply gate were bypassed. Recorded in the
+  ROADMAP, the phase CONTEXT (D5) and `WINDOWS.md` entry 60, which closes when the phase
+  verifies.
+- `.planning/WINDOWS.md` gained entries 57–60 and its frontmatter counts were repaired to
+  48 open / 60 total, which had drifted from the entry list. Its rendered table was also
+  re-synced with the fenced JSON for rows 57–59 — `windows append` refused to run until it
+  was consistent, which is the guard working rather than failing.
+
 ## [0.77.44.0] - 2026-09-16 — the MT5 broker session gets something that NOTICES it has lapsed, instead of waiting hours for an unrelated event
 
 Phase 164.6.4 MT5KEEPALIVE. Recovery already took minutes; nothing TRIGGERED it, so the
