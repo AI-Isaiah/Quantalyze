@@ -109,7 +109,7 @@ configure_logging()
 
 import main_worker_healthz  # top-level module (not in services/); stdlib-only, no cycle
 from sentry_init import init_sentry
-from services.db import db_execute, get_supabase
+from services.db import db_execute, db_read_with_retry, get_supabase
 from services.encryption import validate_kek_on_startup
 from services.job_worker import DispatchOutcome, JobStatus, Priority, dispatch
 
@@ -743,7 +743,11 @@ async def dispatch_tick(worker_id: str) -> None:
             )
             _FALLBACK_CLAIM_RPC = False
         try:
-            claim_result = await db_execute(_claim_priority)
+            # [164.5.1-GATEWAY-CEILING-INVERSION]: the Supabase API gateway
+            # cuts off and answers 504 before Postgres reports anything, so a
+            # transient gateway timeout on this claim read is retried rather
+            # than costing the worker a whole tick.
+            claim_result = await db_read_with_retry(_claim_priority)
         except Exception as exc:  # noqa: BLE001
             if _is_undefined_function(exc):
                 # Only a STRUCTURED SQLSTATE 42883 latches; a message-only
@@ -764,6 +768,11 @@ async def dispatch_tick(worker_id: str) -> None:
                         "latched": structured,
                     },
                 )
+                # This fallback is the LAST resort of an already-failed tick
+                # (the priority RPC just raised); it deliberately stays on
+                # the fail-fast db_execute seam, not db_read_with_retry, so
+                # it does not spend a second retry budget on top of the one
+                # the priority claim already spent.
                 claim_result = await db_execute(_claim_legacy)
             else:
                 raise
@@ -1063,7 +1072,9 @@ async def watchdog_tick() -> None:
             },
         ).execute()
 
-    result = await db_execute(_reset)
+    # [164.5.1-GATEWAY-CEILING-INVERSION]: retry a transient Supabase
+    # gateway timeout on this watchdog read rather than losing a whole tick.
+    result = await db_read_with_retry(_reset)
     reset_count = result.data or 0
     if reset_count:
         logger.warning("Watchdog reclaimed %d stalled jobs", reset_count)
