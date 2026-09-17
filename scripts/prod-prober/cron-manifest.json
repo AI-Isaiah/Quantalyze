@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "normalization": "ws-collapse-v2",
-  "captured_at": "2026-09-11T14:41:44.056Z",
+  "captured_at": "2026-09-17T06:28:08.107Z",
   "database_marker": "⛔ PRODUCTION — real customer data. No seeds, no fixtures, no DELETE without a scoped id.",
   "jobs": [
     {
@@ -51,8 +51,8 @@
       "active": true,
       "database": "postgres",
       "username": "postgres",
-      "command_sha256": "1400dddd815b881b5426454b5271777e40f1f6c8825b7dfd75cae54fbc91ad71",
-      "command": "DO $body$\nDECLARE v_key text;\nBEGIN\nSELECT decrypted_secret INTO v_key\nFROM vault.decrypted_secrets WHERE name = 'analytics_service_key';\nIF v_key IS NULL OR v_key = '' THEN\nRAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header';\nEND IF;\nPERFORM net.http_post(\nurl := 'https://quantalyze-analytics-production.up.railway.app/api/match/cron-recompute',\nheaders := jsonb_build_object(\n'Content-Type', 'application/json',\n'X-Service-Key', v_key\n),\nbody := '{}'::jsonb,\ntimeout_milliseconds := 60000\n);\nEND\n$body$;"
+      "command_sha256": "0a0a072923148f23cab4d61f53fa607003074377426f4085a1be619cb0b1d663",
+      "command": "SELECT public.match_engine_cron_tick();"
     },
     {
       "jobid": 15,
