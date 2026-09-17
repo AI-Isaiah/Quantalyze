@@ -1515,6 +1515,44 @@ Plans:
 - `[164.8.3-CAPTURE-MANIFEST-ERREXIT]` — NOT 164.8.2 residue; admitted 2026-09-13 (ADMISSION 2 above). One step in `.github/workflows/prod-prober.yml` — the one whose `- name:` key is `Capture the cron manifest (read-only; artifact, never a commit)` — still carries the pre-`604d655f` status-capture shape that `-e` makes unreachable, and no gate can see it because the wiring test's branch scan filters on `$RUNNER_LOG`. ⛔ Cited BY SYMBOL, never by line number: `[164.7-CITATION-DRIFT-01]` is owned by this same phase.
 - `[WINDOWS-LEDGER-DRIFT]` — NOT 164.8.2 residue. Logged 2026-09-02 in Plan 164.4-00 and carried with **no owner, no date and no gate for eight days**. `.planning/WINDOWS.md` refuses every append while its frontmatter counts and its entries disagree. It fits here because a ledger that rejects writes because its own header is stale is a control disagreeing with the thing it describes.
 
+⛔ **SCOPE PRUNE 2026-09-17 (founder decision) — this phase keeps groups (a) and (b), and drops
+group (c) and the two items in (d).**
+
+**The rule applied** (founder, 2026-09-15): a deferral earns a phase ONLY when it pins
+DATA-INTEGRITY or USER-FACING behaviour; a structural predicate, a log line's wording, a comment's
+accuracy or an internal counter is fix-or-drop. *"Otherwise we will always find something."*
+
+**KEPT — (a) and (b) are not hygiene by any reading:**
+- (a) is credential disclosure into a WORLD-READABLE Actions log, plus
+  `[164.8.2-EVIDENCE-DOTENV-LEAK]`, which turns 16 SKIPPED live-DB suites into **real INSERTs
+  against shared TEST** — other people's CI database. That is data-integrity, not gate hygiene.
+- (b) publishes the `.sql` file the restore REFUSED over, on exactly the run whose restore was
+  refused.
+
+**DROPPED — (c) "gate-integrity leftovers", by the group's own description:**
+`[164.6-SOURCE-ANCHOR-ROT]` (≈30 `file:line` anchors in SOURCE COMMENTS rot; the deliverable is a
+gate over comment accuracy), and `[164.8.2-GATE-RESIDUE]`'s seven items (two assertions bound to
+text this repo does not control, a softening allowlist that is still a count, hand-copied marker
+regexes pinned to nothing, a computed-but-never-compared floor, a README describing files the
+denial path does not stage, a dead local, a misdirected message). Every one is a structural or
+prose predicate.
+⚠️ `[164.8.2-SENTINEL-GREP-NUL-BLIND]` is NOT dropped and needs no work here: its own entry
+records it as ALREADY HELD AS A CEILING — the `grep -a` rule's one dated exemption, which reds if
+the site is fixed without deleting the entry.
+
+**DROPPED — (d), both items:**
+- `[164.8.3-CAPTURE-MANIFEST-ERREXIT]` — its own text settles it: *"⛔ It is a TRAP, not a live
+  defect, and must not be planned as a bug fix… the observable outcome is identical today."*
+  Keep the WARNING in place (inserting a line between the call and the capture silently changes
+  the step), but a warning is prose, not a phase.
+- `[WINDOWS-LEDGER-DRIFT]` — `.planning/WINDOWS.md` refusing appends on a stale header is a
+  planning-ledger bookkeeping fault. Fix it when it next blocks a write; do not carry a phase for
+  it. It is the same item Phase 164.6 carries as criterion 14, now dropped there too.
+
+**DROPPED — Success Criterion 5**, the four `[164.8.4-PROSE-OVERCLAIM]` sentences: correcting
+prose to match what the code does is the definition of the fix-or-drop side. Criterion 6 (verify
+by MEASUREMENT, not by reading) stays as a METHOD for the surviving work.
+
 **Success Criteria**:
 
 1. The class-lint's file set is DERIVED from its own scope sentence, or the sentence is derived from the set — one of the two, so a fourth axis (depth, extension, location, symlink) cannot open without something going red. ⛔ A third hand-widening that closes only the depth axis does NOT satisfy this.
@@ -1856,6 +1894,44 @@ Plans:
 **Goal:** Close the gate-hygiene half that the 2026-09-05 re-partition removed from 164.1, each with a test that is observed to fail when its guard is neutered. (1) **OPS-08-F9**: `test_enqueue_internal_destrict.sql` gets its `ALL N ARMS EXECUTED` sentinel AND the two `ci.yml` integers (`SENTINEL_FLOOR`, `ARMS_FLOOR` — read the LIVE values off `ci.yml`; the `7→8` / `63→68` in the TODOS entry are 2026-08 figures) move in ONE diff with the per-file derivation entry `ci-anti-skip-gate.contract.test.ts` reads. (2) **OPS-08-F8**: the `sql-tests` loop stops exiting on first failure — every file runs, every red file is named, exit is non-zero once. (3) **OPS-08-TS**: nothing in `src/` retries a 40001 — `csv-finalize/route.ts:2044` is a COPY branch, not a retry, and `allocator/holdings/sync/route.ts:73-86` has no 40001 arm; add the retry at BOTH call sites. (4) **OPS-08-F2**: both pg_cron fan-out paths catch `WHEN OTHERS` and report success; record the failed target id and surface a non-zero failure count from the tick. (5) **Composite-stamp twin (161.1-D13), TS half**: Python honours the marker (`long_fetch.py:66`); the two TS enqueue sites have zero `retract`. (6) **PROC-02**: reviewers declare execution status and UNEXECUTED blocks — one agent-prompt field, the cheapest item in the corpus. (7) **PROC-03 residual**: the per-arm `RED-UNDER` convention SHIPPED in 164.4/164.4.1; what remains is discoverability — `scripts/mutation-runner/GRAMMAR.md` is referenced by nothing a newcomer reads. (8) **H-0001 residual**: shrink the `H_0001_UNCOVERED_ALLOWLIST` — it has SEVEN entries while both ledgers still say six; fix the count and the routes. Also carries WINDOWS 23 (the FALSE "Referrer-Policy does not strip" claim still at `gone/route.ts:93` and `route.test.ts:66` — a one-line correction pass). (10) **PROBER-CALIBRATION-01** — the calibration arm named `CALIBRATION: an UNGUARDED exit 0 on the probe path is still caught` (`src/__tests__/prod-prober-wiring.test.ts:292`, shipped in PR #748 / v0.77.15.0) does NOT demonstrate catching. It mutates the schedule guard to `if true; then`, then asserts only that the text changed and that the mutant no longer contains the guard string — it never re-runs the assertion it claims to calibrate (the `guardAt` / `exitZeroAt` ordering check at `:279-281`) against the mutant and observes it FAIL. ⭐ The arm would still pass with `:279-281` deleted outright, so it certifies nothing about that assertion's power. ⚠️ NOT vacuous in effect — removing the guard from the workflow IS caught, by the `toContain` at `:277` — but the arm's NAME promises a proof it does not perform, which is precisely the 'a test that cannot fail' shape this milestone exists to remove, sitting inside the prober that Phase 164.1 built to make silent failure loud. FOUND at the #748 merge gate 2026-09-06 by hand, not by a gate; booked here by founder instruction rather than into TODOS. DELIVERABLE: make the calibration EXERCISE the assertion — run the guard-position check against the mutant inside an `expect(...).toThrow()` (or the equivalent shape the file already uses for its other calibration arms, e.g. the phase-19-stability splice arm immediately below it), so the arm goes RED if `:279-281` is weakened or removed. (13) **PROGRESS-COUNT-UNDERIVED** — the `progress:` block in `STATE.md` and the `### v1.20 Progress` table in this file were BOTH wrong on 2026-09-12, in the same direction and for the same reason: every figure either was hand-set or came from a handler that counts `.planning/phases/**` ON LOCAL DISK, where the `-pr` filter has stripped four COMPLETE phases (164.2, 164.5, 164.8.2, 164.8.5 = 29 finished plans). MEASURED: the stored values read 31/15/141/137 against a true 33/19/163/160, the table said `0/? Queued NEXT` for a phase shipped in v0.77.15.0 (164.1) and `3/6 Queued 5th` for one that is 6/6 (164.8), and it carried NO ROW AT ALL for eight phases, three of them complete. ⭐ The correction shipped as prose with a stated method and no mechanism, which is the `[CHANGELOG-NO-MECHANISM]` shape this repo has a dated record of — a step that cannot fail did not fail, it was simply never run again. DELIVERABLE: `scripts/planning-progress.mjs`, printing the four integers by enumerating PLAN/SUMMARY paths across ALL REFS, dropping deletions, and EXEMPTING deletions made by the `-pr` filter commit (a filtered artifact is stranded, not withdrawn) — plus a test that the printed integers match the `progress:` block, so a stale ledger is a red check rather than a sentence nobody re-runs. ⚠️ Withdrawn plans must stay excluded from denominators and each one named: 162-10 (`3fa26831`), 164.4-12 (`9b83b064`), 164.5-08 (`7910f614`, lifted into Phase 164.5.2). ⛔ NOT in scope: changing what `gsd-tools query roadmap.analyze` does — it is upstream and `/gsd-update` overwrites it; this is a repo-owned reading that does not depend on it. ⛔ **SPLIT 2026-09-12 BY FOUNDER DECISION — items (9) MYPY-MAINPY-01, (11) MT5-GATEWAY-LOGIN-01 and (12) CI-DOCSPATH-01 MOVED OUT of this phase into THREE phases of their own — `164.6.1 MYPYSTRICT`, `164.6.2 MT5RELOGIN`, `164.6.3 CIDOCSPATH` — and their success criteria moved with them.** The founder was offered three scopings (split / keep all 13 and fix the criteria / narrow to the OPS-08 residue only), chose the split, and then chose ONE PHASE PER ITEM over a single combined GATEINFRA phase — they share nothing: different languages, different blast radii, and only the CI-path one can wedge branch protection. ⭐ The reason is KIND, not size: those three change the Python type gate, a production gateway's login path, and WHEN CI gates fire — the last being the riskiest change possible in a milestone about controls that cannot fire — while what remains here is lint rules, tests and prose corrections. Folding them together would have given the riskiest items the lightest review posture, which is the same argument that kept Phase 164.5.1's production DDL out of this phase. ⚠️ Items are NOT renumbered: the original numbering is load-bearing in `TODOS.md` cross-references and in Phase 164.1's deferral records, so (9), (11) and (12) are absent by design rather than missing. (13) **PROGRESS-COUNT-UNDERIVED** stays here and now has a criterion of its own (criterion 11 below), which it did not have when it was routed in.
 
 **Success Criteria**:
+
+⛔ **SCOPE PRUNE 2026-09-17 (founder decision) — this phase is reduced to criteria 2, 3 and 4.**
+Criteria **1, 5, 7, 10, 11, 12, 13, 14, 15 and 17 are DROPPED**: fix-or-drop, never a phase.
+They are struck from this phase's scope but their text is kept below as the record of what was
+examined and why it was let go — deleting it would leave the next reader re-deriving the same
+call.
+
+**The rule applied** (founder, 2026-09-15, scoping the anti-vacuity and deferral rules): a gate
+or deferral earns a phase ONLY when it pins DATA-INTEGRITY or USER-FACING behaviour. A structural
+or AST predicate, a log line's wording, a comment's accuracy, an internal counter nothing reads,
+a refactor-detection fence — those are fix-or-drop. *"Otherwise we will always find something."*
+
+**What survives, and why each one is not hygiene:**
+- **(2) OPS-08-TS** — nothing in `src/` retries a `40001`. A serialization failure reaches the
+  USER as an error today, at `csv-finalize` and `allocator/holdings/sync`.
+- **(3) OPS-08-F2** — both pg_cron fan-out paths catch `WHEN OTHERS` and **report success**. That
+  is a silent production failure, and it is the same class that produced Phase 164.5.1.1: a green
+  cron row over a job that did nothing.
+- **(4) Composite-stamp twin, TS half** — the two TS enqueue sites carry zero `retract`, so a
+  marker Python honours is not honoured on the TS path.
+
+**What was dropped, by criterion:** 1 (sentinel + two `ci.yml` integers + a first-failure-exit
+test loop), 5 (a reviewer-prompt field, `GRAMMAR.md` discoverability, an allowlist count of seven
+against two ledgers saying six), 7 (`PROBER-CALIBRATION-01` — its own entry records
+*"NOT vacuous in effect — removing the guard IS caught"*; the defect is that the arm's NAME
+promises a proof it does not perform), 10 (`plan-anchor-verify` reading a shipped plan as
+pending), 11 (`PROGRESS-COUNT-UNDERIVED` — now also filed upstream as
+`Werbelow/get-shit-done#5`, since the recompute is gsd-core's, not this repo's), 12 (a durable
+sink for the MT5 capability verdict — observability), 13 (`PHASEDIR-ORPHAN-GITKEEP`), 14
+(`WINDOWS-LEDGER-COUNT-DRIFT`), 15 (two planning-subject assertions), 17
+(`164.6.2-KILLSWITCH-COMMENT`).
+
+⚠️ **ONE dropped item is a judgement call and is named rather than buried: criterion 16,
+`[SERVICEKEY-MISMATCH-UNATTRIBUTED]`** — a rejected `X-Service-Key` naming WHO presented it. It
+is security ATTRIBUTION, not secret DISCLOSURE, so the scoped rule puts it on the fix-or-drop
+side; but it is the one dropped item whose absence would be felt during an incident. Re-admit it
+on the merits if that matters more than the line.
+
 
 1. OPS-08-F9 + F8: the sentinel is present, both integers moved in the same commit and the contract test passes; `sql-tests` runs every file and names every red one in a single run — proven with two deliberately red fixtures in one invocation.
 2. OPS-08-TS: both TS call sites retry on 40001, each with a test that fails when that site's retry is removed. A test that passes with the retry gone at either site does not count.
