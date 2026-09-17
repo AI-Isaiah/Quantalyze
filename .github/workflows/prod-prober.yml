@@ -59,9 +59,28 @@ name: prod-prober (four arms, hourly)
 
 on:
   schedule:
-    # Hourly. PROD cron jobid 1 is hourly, so a 401 is caught within one tick.
-    # A 6-hourly cadence would leave a 6h blind window on the exact defect that
-    # ran 401 for seven days behind a green cron history.
+    # Requested hourly. PROD cron jobid 1 is hourly, so the INTENT is that a 401
+    # is caught within one tick.
+    #
+    # ⛔ THAT INTENT IS NOT DELIVERED, and this comment used to claim it was.
+    # MEASURED 2026-09-18 over 273.4 h, twice independently: GitHub ran this
+    # workflow 75 times against 273 expected hourly ticks — 27 % delivery,
+    # median gap 3.28 h, MAX gap 7.13 h, two gaps over six hours. GitHub treats
+    # scheduled workflows as best-effort and drops them under load.
+    #
+    # The sentence this comment used to carry — that a 6-hourly cadence "would
+    # leave a 6h blind window on the exact defect that ran 401 for seven days
+    # behind a green cron history" — is still true, and is now an indictment of
+    # the delivered cadence rather than an argument against an alternative one:
+    # the measured worst case is 7.13 h, WORSE than the option it rejected.
+    #
+    # ⚠️ Do NOT "fix" this by shortening the interval. Under the same throttling
+    # */15 buys more attempts, not a bounded gap — a louder claim, not a
+    # measured one. The gap needs a CEILING that fails loud when crossed, and
+    # the observer cannot live here: if GitHub drops this run it drops the
+    # watchdog run too. It belongs on PROD's own pg_cron.
+    #
+    # Owner: Phase 164.1.1 PROBERCADENCE / TODOS [PROBER-CADENCE-UNDELIVERED-01].
     - cron: "0 * * * *"
   workflow_dispatch:
     inputs:

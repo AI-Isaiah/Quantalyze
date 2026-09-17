@@ -3544,6 +3544,41 @@ and any widening must say what it does to the approval-gate snapshot.
 ⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
 (founder rule 2026-09-08).
 
+### PROBER-CADENCE-UNDELIVERED-01 — the prod-prober declares hourly and delivers 27 %, so its blind window is WORSE than the one it was designed to avoid (booked 2026-09-18)
+
+- [ ] **`[PROBER-CADENCE-UNDELIVERED-01]` The prober is not broken — it is LATE, and nothing
+      measures its lateness.**
+      ⛔ **MEASURED 2026-09-18 over a 273.4 h window, twice independently** (Phase 164.1's
+      verifier and the orchestrator, identical figures). `.github/workflows/prod-prober.yml:65`
+      declares `cron: "0 * * * *"`. GitHub delivered **75 of 273 expected runs = 27 %**, median
+      gap **3.28 h**, **MAX gap 7.13 h**, **two** gaps over six hours. GitHub treats scheduled
+      workflows as best-effort and drops them under load.
+      ⭐ **What makes this a defect rather than a grumble** is the workflow's own header comment,
+      three lines above that cron, written by Phase 164.1 to justify choosing hourly:
+      *"a 401 is caught within one tick. A 6-hourly cadence would leave a 6h blind window on the
+      exact defect that ran 401 for seven days behind a green cron history."* The delivered worst
+      case is **7.13 h**. The phase is running the cadence it explicitly ruled out as
+      unacceptable, and worse — and nothing in the repo noticed, because nothing looks.
+      ⚠️ **Scope, stated so nobody over-reads it:** Phase 164.1's five success criteria are ALL
+      independently verified, both PYAPI-06 guards are calibration-tested (neutered, observed RED,
+      restored byte-identically), and the instrument has already caught two real production
+      defects — an MT5 `-6` auth failure and a real cron 500 (GitHub issue #773). This entry is
+      about WHEN it looks, never about WHETHER it can see.
+      ⛔ **A GitHub-hosted watchdog cannot close this by construction:** if GitHub drops the
+      prober run it drops the watchdog run too, so the observer would share the failure mode of
+      the observed. It must live where a scheduler that actually fires does — PROD's own
+      `pg_cron`, hourly and reliable, and itself the thing the prober exists to watch.
+      ⚠️ **Do NOT shorten the cron to "fix" it.** Under the same throttling `*/15` buys more
+      attempts, not a bounded gap — a louder claim rather than a measured one.
+      **Accepted as a named residual risk by founder decision 2026-09-18**, which is why Phase
+      164.1 reads `passed` rather than blocked: the detection gap is real, but it is now visible,
+      owned and dated instead of hiding behind a comment that claimed the opposite.
+      ✅ **Owner / destination: Phase 164.1.1 PROBERCADENCE**, inserted 2026-09-18 via
+      `/gsd-phase --insert`, with the ceiling, the PROD-side observer and the
+      prove-the-alarm-fires requirement as its success criteria. The false claim has already been
+      corrected at its own site (that header comment), not only in planning prose.
+
+
 ### FANOUT-FAILBRANCH-UNEXERCISED-01 / 164.5.1-TODOS-DISPOSITION-OWED — the two items Phase 164.5.1 leaves open (booked 2026-09-17)
 
 Both come out of Phase 164.5.1's verification and its plan-09 security re-audit. Both existed
