@@ -1863,7 +1863,27 @@ export const FILES_FLOOR = 46;
 //                scripts/ src/` is EMPTY — so the corpus and this runner are
 //                byte-identical across the move and the 392 is one measurement,
 //                not two that happen to agree.
-export const ARMS_FLOOR = 392;
+//   ⚠️ CURRENCY 2026-09-17 (phase 164.5.1.1 FANOUTCOHORT, plan 01): 392 -> 393.
+//                ONE new arm — arm P in test_ledger_refresh_fanout.sql, which
+//                proves that a stale, otherwise-eligible strategy carrying the
+//                owner-only terminal lifecycle status IS enqueued by the
+//                single-key ledger fan-out. It lands in a file this corpus
+//                already annotates, so FILES_FLOOR does NOT move and
+//                `coverage: files 46/73` is unchanged.
+//                MEASURED on a clean-tree full-corpus lane run at this plan's
+//                final SQL bytes, and READ OFF THE RUNNER'S OWN OUTPUT rather
+//                than derived: `arms: 393/393/0`, `biting: 393`,
+//                `lane-invocations: 393` (the two independent tallies AGREE),
+//                `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`,
+//                `pending: 0`, `✅ No defects`, exit 0.
+//                ⛔ NOT DERIVED BY GREP, and the difference is not academic: a
+//                naive `grep -c "RED-UNDER-M:" supabase/tests/*.sql` sums to
+//                404 at these bytes while the runner's biting count is 393.
+//                They are different questions — the grep counts annotation
+//                LINES anywhere in the corpus, including the unreachable class
+//                and this file's own prose; `biting` counts arms that EXECUTED
+//                and reddened THEMSELVES first. Read the runner.
+export const ARMS_FLOOR = 393;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
