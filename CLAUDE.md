@@ -243,6 +243,63 @@ global workflow file — `/gsd-update` overwrites `~/.claude/gsd-core/workflows/
 already eaten one edit to it. The durable backstop is a repo-owned gate that fails a PR touching
 non-planning paths without moving `VERSION`; until that exists, this section is the rule.
 
+## CI gate integrity — two traps that both cost this repo a session (measured 2026-09-17)
+
+Both were already known and written down OUTSIDE the repo. Both recurred anyway. That is the
+argument for this section existing here: a rule that lives only in a model's memory or a global
+workflow file is not a gate, and `/gsd-update` overwrites the global file.
+
+### 1. The skip trailer suppresses CI even inside a sentence DENYING it, and it survives a squash
+
+GitHub honours these tokens **anywhere** in a commit message — subject, body, a quotation, a
+sentence explaining that you are not using them:
+
+```
+[skip ci]   [ci skip]   [no ci]   [skip actions]   [actions skip]   skip-checks:true
+```
+
+⛔ **Never write one in a commit message or a PR body, not even to deny it.** Say "the skip
+trailer" in prose. MEASURED 2026-09-17: a ship-note commit whose message read *"No [token]
+trailer: the token wedges a PR…"* produced **zero** workflow runs for its SHA.
+
+⛔ **The board does not say "absent", it says "clean".** With CI suppressed, the PR showed its two
+Vercel checks and nothing else. Two green checks read as a healthy board. Do not count "no red";
+**count the checks and bind them to the head SHA**:
+
+```bash
+gh api "repos/AI-Isaiah/Quantalyze/actions/runs?head_sha=<sha>" -q '.workflow_runs | length'
+```
+
+⛔ **Pushing a token-free commit on top repairs the PR BRANCH ONLY.** A squash merge concatenates
+**every** branch commit message into the merge commit body, so the offending text rides into
+`main`. MEASURED: it landed at line 1143 of merge commit `5b6b7886` and `main` got zero runs.
+The fix is to not write the token at all; once it is in a branch commit, the squash body carries it.
+
+⚠️ **Railway deploys anyway.** "No CI at all" is not "CI red", so the skip-if-red guard never
+engages. The 2026-09-17 deploy was safe only because `tree(5b6b7886) == tree(4c93a23c)` — the
+merge carried the exact tree that had passed 27 green checks. That was a measurement taken after
+the fact, not a control.
+
+### 2. `workflow_dispatch` on `main` scans a DIFFERENT scope than a push, and goes red on history
+
+⛔ **There is no working way to re-trigger a lost push-to-`main` gate set today.** `gh workflow run
+CI --ref main` carries no commit range, so `gitleaks-action` walks the **full history** at
+`fetch-depth: 0`, while a genuine push scans only the pushed squash commit. Measured side by side:
+
+```bash
+gitleaks git . --config .gitleaks.toml --log-opts=de66d1b0..5b6b7886   # 1 commit   → no leaks found
+gitleaks git . --config .gitleaks.toml                                  # 4491 commits → 37 leaks
+```
+
+The 37 are pre-existing credential-**shaped** fixture literals quoted in CHANGELOG prose, all from
+2026-09-11 (Phase 164.8.5). They are latent and would surface in any future full-scope scan.
+Booked as `.planning/WINDOWS.md` entry **61**, which owns both halves.
+
+⛔ **Do not read that red as a verdict on the SHA.** Re-measure a specific commit with the RANGE
+form above. And per the standing gitleaks rule: never quote a credential-shaped fixture literal
+verbatim in CHANGELOG prose — the push-to-`main` scan sees one squash commit whose diff includes
+`CHANGELOG.md`, which the branch-scoped allowlist does not cover.
+
 ## Design System
 Always read DESIGN.md before making any visual or UI decisions.
 All font choices, colors, spacing, and aesthetic direction are defined there.
