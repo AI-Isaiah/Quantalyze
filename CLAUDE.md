@@ -148,11 +148,32 @@ body diff) is a step in `migration-drift-check.yml` on migration PRs, and
 **VAC-08** (repo-vs-TEST ledger + body drift) runs in `sql-tests`. Both exit 1
 when their credential is absent — neither ever skips.
 
-### Current reading — 2026-09-07, Phase 164.7 (a DATED reading, not a constant)
+### Current reading — ⛔ SUPERSEDED. The block below is the 2026-09-07 reading and it is STALE.
+
+⛔ **CORRECTED 2026-09-17.** The shipped constants, re-read BY SYMBOL from
+`scripts/mutation-runner/run.mjs` (`grep -nE '^export const (FILES_FLOOR|ARMS_FLOOR|WAIVED_CEILING)'`):
+
+| constant | shipped value | line |
+|---|---|---|
+| `FILES_FLOOR` | **46** | `:877` |
+| `ARMS_FLOOR` | **392** | `:1866` |
+| `WAIVED_CEILING` | **0** | `:1980` |
+
+**`ARMS_FLOOR` moved 384 → 392 and this file went on saying 384 for six days.** That is the
+SECOND instance of the exact divergence the boxed rule below already warns about — the first is
+recorded in `docs/sql-gate-lineage.md` as prose-said-380 / shipped-384. A rule that says "read it
+by symbol" did not stop the prose from drifting again, because nothing re-reads the prose. Treat
+that as the finding, not the number.
+
+⚠️ **NO current arm tally is stated here, deliberately.** A floor of 392 implies the corpus holds
+at least 392 biting arms, but the tally, the `lane-blocked` class and the `unreachable:` count are
+RUN OUTPUTS — inventing them from the floor would be exactly the fabrication this section exists
+to prevent. Run `node scripts/mutation-runner/run.mjs` and read them off it.
 
 ⛔ **Regenerate, do not trust:** `node scripts/mutation-runner/run.mjs` prints every figure
 below. If it disagrees with this block, the RUN is right and this block is stale.
 
+**📜 The 2026-09-07 reading, kept as LINEAGE and superseded as of 2026-09-11:**
 `coverage: files 46/73` · `arms: 384/384/0` · `biting: 384` · `lane-invocations: 384` (the two
 independent tallies AGREE) · `lane-blocked: 0 file(s)` · `lane-probe: pg_cron AVAILABLE` ·
 `pending: 0` · `per-arm lane time: mean 1.1s` · `✅ No defects` · exit 0.
