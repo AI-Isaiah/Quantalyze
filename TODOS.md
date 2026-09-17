@@ -3544,6 +3544,35 @@ and any widening must say what it does to the approval-gate snapshot.
 ⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
 (founder rule 2026-09-08).
 
+### VERIFICATION-STALE-OWED-01 — two phases verified code that has since moved, and their verdicts are honestly out of date (booked 2026-09-18)
+
+- [ ] **`[VERIFICATION-STALE-OWED-01]` Phases 164.8.3 and 164.6.3 read `stale`, and that is the
+      staleness mechanism WORKING. They owe re-verification, not a re-fingerprint.**
+      ⛔ **Deliberately left red.** `query verification fingerprint` hashes whatever is on disk
+      right now, so recomputing a digest ALWAYS makes it pass — it is an assertion that the verdict
+      still holds, never a repair. Clearing these two that way would switch off a gate that is
+      correctly firing. See the `covered_files` section in `CLAUDE.md`.
+      **MEASURED 2026-09-18** by diffing each verification's `covered_files` between the commit
+      that landed it and HEAD:
+      - **164.8.3** (landed `5dead88a`) — `scripts/prod-prober/run.mjs` and
+        `src/__tests__/prod-prober-wiring.test.ts` both changed on 2026-09-17. Real code it
+        verified has moved. (`TODOS.md` also changed, but that half is the false-positive class
+        now fixed — it is not why this one is stale.)
+      - **164.6.3** (landed `e7fd2a04`) — `.github/workflows/ci.yml` changed. That is its ONLY
+        drift, and it is genuine.
+      ⚠️ **Consequence, stated plainly:** `progress.completed_phases` reads 19 while 22 phases
+      carry `status: passed`. The three-phase difference is these two plus whatever else falls out
+      of date — and the LOWER number is the more honest one, because it counts only verifications
+      still valid against current file contents.
+      ⚠️ **Scope note:** only FOUR verifications carry `covered_files`/`covered_digest` at all
+      (164.1, 164.5.1, 164.8.3, 164.6.3). Every other phase is never staleness-checked and reads
+      `passed` unconditionally, which flatters the count in the opposite direction. Widening the
+      mechanism is a separate decision and is NOT proposed here.
+      **Trigger:** the next time either phase's area is touched, or a deliberate re-verification
+      pass. **Owner:** unrouted — ⛔ do not let this sit as a bare TODOS line; give it a phase via
+      `/gsd-phase --edit` when one of the two areas is next planned.
+
+
 ### PROBER-CADENCE-UNDELIVERED-01 — the prod-prober declares hourly and delivers 27 %, so its blind window is WORSE than the one it was designed to avoid (booked 2026-09-18)
 
 - [ ] **`[PROBER-CADENCE-UNDELIVERED-01]` The prober is not broken — it is LATE, and nothing

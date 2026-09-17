@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.77.50.0] - 2026-09-18 — a verification stops going stale because an unrelated backlog entry moved
+
+### Fixed
+- **`TODOS.md` removed from `covered_files`** in `164.1-VERIFICATION.md` and
+  `164.5.1-VERIFICATION.md`, and both digests recomputed. A `covered_digest` spans every covered
+  file, so a 9000-line shared backlog ledger sitting in that set means ANY unrelated entry demotes
+  the phase out of `progress.completed_phases`. Phase 164.5.1 went `stale` twice in one session —
+  once minutes after being completed — purely because a different phase's entry was added.
+  Proven fixed by editing `TODOS.md` again in this very commit: both stay `passed`.
+
+### Added
+- `CLAUDE.md` gains a `covered_files` section: repo-global ledgers (`TODOS.md`, `CHANGELOG.md`,
+  `VERSION`, `package.json`) never belong in it. It lives in the repo because the global
+  `gsd-verifier.md` that produced the rule is overwritten by `/gsd-update`.
+- `TODOS.md` — **`[VERIFICATION-STALE-OWED-01]`** for the two phases left deliberately red.
+
+### Notes
+- ⛔ **Deliberately NOT fixed: 164.8.3 and 164.6.3 stay `stale`, and that is the mechanism
+  working.** Measured by diffing each verification's `covered_files` between the commit that landed
+  it and HEAD: 164.8.3's `scripts/prod-prober/run.mjs` and `src/__tests__/prod-prober-wiring.test.ts`
+  changed on 2026-09-17; 164.6.3's `.github/workflows/ci.yml` changed. Real code they verified has
+  moved, so they owe re-verification.
+- ⛔ **A recomputed digest ALWAYS passes.** `query verification fingerprint` hashes what is on disk
+  now, so re-fingerprinting is an assertion that the verdict still holds, never a repair. Clearing
+  those two that way would have switched off a gate that is correctly firing — which is why only
+  the two verifications validated in this same session were re-fingerprinted.
+- ⚠️ **Scope, so the count is not over-read:** only FOUR verifications carry
+  `covered_files`/`covered_digest` at all. Every other phase is never staleness-checked and reads
+  `passed` unconditionally. Widening that is a separate decision and is not proposed here.
+- ⚠️ Grepping the string `TODOS.md` inside a verification over-counts: 163, 164.3 and 164.8.6 name
+  it in prose only and carry no `covered_files` at all.
+
 ## [0.77.49.0] - 2026-09-18 — the prober declares hourly and delivers 27%, and the comment that claimed otherwise is corrected where it stands
 
 Phase 164.1 PROD-OBSERVABILITY verifies `passed`. All five success criteria hold on independent

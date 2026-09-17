@@ -225,6 +225,46 @@ answered by `[REDUNDER-SUBSET-SPLIT]`, never by raising again (`ci.yml` carries 
 superseded CURRENCY paragraph — now lives in `docs/sql-gate-lineage.md`.** It is history; nothing
 in it is a live constant.
 
+## `covered_files` must not carry a repo-global ledger (measured 2026-09-18)
+
+A `*-VERIFICATION.md` frontmatter carries `covered_files` plus one `covered_digest` over all of
+them. `isPhaseComplete` reads `verification.status`, and that status is **`stale`** whenever the
+digest no longer matches the files' CURRENT content — so ANY covered file changing demotes the
+phase out of `progress.completed_phases`.
+
+⛔ **Therefore `TODOS.md`, `CHANGELOG.md`, `VERSION` and `package.json` NEVER belong in
+`covered_files`.** They are repo-global ledgers that every phase touches. Covering one makes an
+unrelated backlog edit invalidate every verification that lists it — a guaranteed, recurring false
+positive that says nothing about whether the phase's verdict still holds.
+
+**MEASURED 2026-09-18:** only **four** `*-VERIFICATION.md` files carry `covered_files` +
+`covered_digest` at all (164.1, 164.5.1, 164.8.3, 164.6.3) — the mechanism is young, and a
+verification WITHOUT the field is never checked for staleness and reads `passed` unconditionally.
+`TODOS.md` sat in the `covered_files` of **three of those four**. ⚠️ Grepping for the STRING
+`TODOS.md` in a verification over-counts badly: 163, 164.3 and 164.8.6 merely name it in prose. Phase 164.5.1 went `stale` TWICE in one session — once minutes after
+being completed — purely because a different phase's entry was added to `TODOS.md`. Its verdict
+was never in question.
+
+⚠️ **This is NOT a reason to strip source files.** If `analytics-service/routers/match.py` changes,
+the verification of a phase that verified it SHOULD go stale — that is the mechanism working.
+Measured the same day: 164.8.3 and 164.6.3 were stale for exactly that honest reason
+(`scripts/prod-prober/run.mjs`, `src/__tests__/prod-prober-wiring.test.ts`, `.github/workflows/ci.yml`),
+and were deliberately left stale rather than cleared.
+
+⛔ **A recomputed digest ALWAYS passes.** `query verification fingerprint` hashes whatever is on
+disk right now, so re-fingerprinting is not a repair — it is an assertion that the verdict still
+holds. Only re-fingerprint a verification whose validity you have just established yourself.
+Re-fingerprinting to clear a red is how a working gate gets silently switched off.
+
+⚠️ **The verb needs a `--` separator.** `query verification fingerprint -- <paths...>`. Without it
+the parser consumes the first path as a subcommand argument and returns a digest over N-1 files —
+green, and wrong. Measured 2026-09-17 on a 38-file set that silently hashed 37.
+
+⚠️ The global `gsd-verifier.md` names `covered_files` as "every phase PLAN/SUMMARY, mapped
+requirement, changed impl file", and in THIS repo requirements are TODOS entries — which is how
+`TODOS.md` got in. That file is global and `/gsd-update` overwrites it, which is why this rule
+lives here instead.
+
 ## CHANGELOG discipline (founder instruction, 2026-09-09)
 
 ⛔ **EVERY ship writes a CHANGELOG entry. No exceptions, and this OVERRIDES the three-sentence
