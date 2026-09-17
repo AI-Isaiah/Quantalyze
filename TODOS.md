@@ -3544,6 +3544,70 @@ and any widening must say what it does to the approval-gate snapshot.
 ⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
 (founder rule 2026-09-08).
 
+### FANOUT-FAILBRANCH-UNEXERCISED-01 / 164.5.1-TODOS-DISPOSITION-OWED — the two items Phase 164.5.1 leaves open (booked 2026-09-17)
+
+Both come out of Phase 164.5.1's verification and its plan-09 security re-audit. Both existed
+ONLY as prose inside `.planning/` until this entry, which is exactly the `FANOUT-GLOBAL-01`
+failure mode this milestone already records: an item with no `TODOS.md` id has no owner, no
+trigger and no phase.
+
+- [ ] **`[FANOUT-FAILBRANCH-UNEXERCISED-01]` The ledger fan-out's all-candidates-failed branch
+      has still never run in PRODUCTION. It is gated, not exercised — and those are not the
+      same claim.**
+      Threat `T-164.5.1-09-07` (DoS, `medium`) in `164.5.1-SECURITY.md`. Its mitigation plan
+      said the branch "becomes reachable AT activation and is exercised DELIBERATELY with the
+      result recorded". ⛔ **The live exercise did NOT happen**, and the reason is worth keeping:
+      at activation the candidate set was EMPTY for an unrelated reason — the cohort mismatch
+      booked as `FANOUT-COHORT-PRIVATE-01` above, every PROD strategy carrying `status='private'`.
+      So there was nothing to fail.
+      **What exists instead, and it is a disclosed SUBSTITUTION, not compliance:** "arm R" in
+      `supabase/tests/test_ledger_refresh_fanout.sql` — a permanent, `RED-UNDER-M`
+      mutation-calibrated gate that poisons every candidate, asserts zero enqueued, asserts a
+      **ZERO DELTA over `pg_locks`** for the backend, and asserts the next tick still enqueues.
+      ⭐ The `pg_locks` delta is the load-bearing part: `pg_try_advisory_lock` is SESSION-level and
+      RE-ENTRANT, so re-taking the lock in the same session proves NOTHING about whether it
+      leaked. Merged `9c6e53ce` (PR #810), 27 checks green.
+      ⚖️ **A standing regression gate is the STRONGER control** — it runs on every corpus run,
+      forever, where a one-off live exercise runs once. But it is not what the plan's text
+      promised, and `164.5.1.1-PROD-SESSION.md` § B says so itself: *"unblocked, NOT yet
+      exercised — do not record it as met"*. This entry exists so that sentence does not quietly
+      become "met" by age.
+      **Trigger:** a genuine candidate failure occurring naturally on PROD, OR a deliberate
+      constructed-candidate exercise once the cohort is widened.
+      **Owner / destination: Phase 164.5.1.2 FANOUTSIBLINGS** — it is the phase that decides the
+      cohort question, and a widened cohort is the precondition for a real candidate to fail.
+      ⛔ It does NOT block: `medium` is below `workflow.security_block_on` (`high`), so
+      `threats_open` stays 0 and this never gated the ship.
+
+- [ ] **`[164.5.1-TODOS-DISPOSITION-OWED]` Six entries this phase substantively resolved are
+      still unchecked here, and a SUMMARY claims otherwise.**
+      `164.5.1-09-SUMMARY.md` lists `TODOS.md` under "Files Created/Modified" and states
+      `[VAULTTICK-EMPTYKEY-01]` and `[CRON-DRIFT-01]`'s live-row half were "dispositioned from
+      the recorded outputs". **MEASURED and FALSE:** `git show <commit> -- TODOS.md` on all three
+      plan-09 task commits (`2ca23014`, `f429067d`, `2ffb0b6c`) AND on the squash-merge
+      (`d6607a88`) returns an EMPTY diff in every case. Found independently three times — by
+      `gsd-verifier`, by `gsd-security-auditor`, and by the orchestrator re-running it rather
+      than accepting either.
+      **The six, all still `- [ ]` at HEAD with contradicting prose** (`VAULTTICK-EMPTYKEY-01`
+      still reads "STILL OPEN 2026-09-12"): `CRON-DRIFT-01` (live-row half only — the DETECT half
+      is Phase 164.1's), `VAULTTICK-EMPTYKEY-01`, `164.7-ACTIVATION-DEFERRED`,
+      `164.7-VAULT-ABSENT-RULE`, `164.8.5-MANIFEST-SIDE-LOOP-DEAD`,
+      `164.5.1-GATEWAY-CEILING-INVERSION`.
+      ⭐ **The evidence to close all six already exists** in `164.5.1-PROD-SESSION.md` — this is
+      transcription, not investigation.
+      ⛔ **Classified non-blocking, and the reasoning is stated rather than assumed.** It shares
+      `T-164.5.1-09-04`'s Repudiation *shape* — a claimed act with no supporting evidence — but
+      neither its mechanism nor its artifact: the production evidentiary trail in
+      `164.5.1-PROD-SESSION.md` is genuinely OUTPUT-based throughout and is untouched by this.
+      Backlog bookkeeping is neither data-integrity nor user-facing, which is the class this repo
+      scopes below the blocking threshold.
+      ⚠️ **Why it was not just done inline:** `TODOS.md` is a NON-PLANNING path, so any commit
+      touching it pulls a VERSION bump and a CHANGELOG entry with it. That coupling is why the
+      disposition was deferred once already; it deserves its own commit rather than a fold-in.
+      **Trigger:** the next deliberate `TODOS.md` pass. **Owner: Phase 164.1**, the next phase in
+      the agreed order and itself the owner of `CRON-DRIFT-01`'s DETECT half.
+
+
 ### CRON-DRIFT-01 / CRON-OBS-01 — a PROD cron job 401'd hourly for 7 DAYS behind a green cron history (booked 2026-09-01)
 
 **Measured 2026-09-01, live in PROD.** Sentry `QUANTALYZE-18` (169 events, escalating, first seen

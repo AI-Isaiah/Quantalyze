@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.77.48.0] - 2026-09-17 — Phase 164.5.1 closes, and the two things it leaves open get an id instead of a paragraph
+
+### Added
+- `.planning/phases/164.5.1-*/164.5.1-VERIFICATION.md` — `status: passed`, 10/10 roadmap truths.
+  Criterion 7 is N/A because its migration was genuinely withdrawn at the D4 gate, confirmed not
+  merged and not an ancestor of HEAD rather than assumed. Nothing was taken from a SUMMARY: the
+  kill switch's fail-closed path and distinct status were re-derived at `match.py:317-373`, CR-01's
+  absorbing-cursor blocker re-confirmed fixed at `match.py:2582-2583`, both pairs of named tests
+  re-run, `prod-prober --self-test` re-run (82/82), a FRESH scheduled prober run pulled
+  (`35255709774`: 15 PROD jobs vs 15 manifest jobs, 0 differing), and the full vitest suite run
+  once (854 files, 14824 passed, 1 failed — the pre-existing `lint-sql-gates` timeout class).
+- `TODOS.md` — **`[FANOUT-FAILBRANCH-UNEXERCISED-01]`** and **`[164.5.1-TODOS-DISPOSITION-OWED]`**,
+  the two items Phase 164.5.1 leaves open. Both existed only as prose inside `.planning/` until
+  now, which is the `FANOUT-GLOBAL-01` failure mode this milestone already records: an item with no
+  `TODOS.md` id has no owner, no trigger and no phase. Each now carries all three.
+
+### Security
+- `164.5.1-SECURITY.md` — the re-audit its own sign-off demanded. The verdict had been scoped to
+  Wave A with an unchecked box reading "re-audit REQUIRED when the live session executes"; plan 09
+  has since executed, so its nine threats were audited and the single `pending` row is replaced by
+  nine real ones. **8 closed, 1 open, `threats_open: 0`.** Wave A's 49 were not re-opened.
+- **Two disclosed substitutions, named rather than smoothed over.** `T-164.5.1-09-07` stays OPEN at
+  `medium`: the live exercise of the fan-out's all-candidates-failed branch did not happen, because
+  at activation the candidate set was empty for an unrelated reason (the `FANOUT-COHORT-PRIVATE-01`
+  cohort mismatch). It is mitigated instead by the permanent mutation-calibrated gate "arm R",
+  whose zero-delta `pg_locks` assertion is the load-bearing part — `pg_try_advisory_lock` is
+  session-level and re-entrant, so re-taking the lock in the same session proves nothing.
+  `T-164.5.1-09-02`: `preflightCronRepoint` itself was not run, its database password existing only
+  as an Actions secret; a prober probe dispatch using the same `compareManifest` carried the same
+  information without the verb's own 3/1/0 exit partition.
+
+### Notes
+- **A SUMMARY claimed a bookkeeping act that did not happen.** `164.5.1-09-SUMMARY.md` lists
+  `TODOS.md` under "Files Created/Modified"; `git show -- TODOS.md` on all three plan-09 task
+  commits and on the squash-merge returns an EMPTY diff in every case. Found independently three
+  times — by `gsd-verifier`, by `gsd-security-auditor`, and by the orchestrator re-running it
+  rather than accepting either. Non-blocking: it shares `T-164.5.1-09-04`'s Repudiation shape but
+  neither its mechanism nor its artifact, and the production trail in `164.5.1-PROD-SESSION.md` is
+  output-based throughout and untouched. Now tracked as `[164.5.1-TODOS-DISPOSITION-OWED]`, with
+  the six entries named and Phase 164.1 as owner.
+- `.planning/WINDOWS.md` entry **60** closes on this verification, per its own stated condition.
+
 ## [0.77.47.0] - 2026-09-17 — the fan-out's all-candidates-failed branch gets a gate, and the advisory lock it must release was ungated until now
 
 ### Added
