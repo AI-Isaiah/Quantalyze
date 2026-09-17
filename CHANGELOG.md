@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.77.49.0] - 2026-09-18 — the prober declares hourly and delivers 27%, and the comment that claimed otherwise is corrected where it stands
+
+Phase 164.1 PROD-OBSERVABILITY verifies `passed`. All five success criteria hold on independent
+re-measurement, and one finding outside them was neither buried nor inflated.
+
+### Fixed
+- `.github/workflows/prod-prober.yml` — the header comment above the `schedule:` cron no longer
+  claims a 401 is "caught within one tick". It states the measured delivery rate, the date, and
+  that the delivered worst case is WORSE than the alternative the same comment rejects by name.
+  The false claim is corrected at the site that makes it, not only in planning prose.
+
+### Added
+- `TODOS.md` — **`[PROBER-CADENCE-UNDELIVERED-01]`**, the cadence gap as a named, dated, owned
+  residual risk.
+- **Phase 164.1.1 PROBERCADENCE**, inserted after 164.1 via `/gsd-phase --insert`: a PROD-side
+  observer, a MEASURED ceiling rather than a tidy one, and a prove-the-alarm-fires criterion.
+- `164.1-VERIFICATION.md` — `status: passed`, 5/5, with the founder decision recorded in full.
+
+### Notes
+- **The measurement.** `.github/workflows/prod-prober.yml:65` declares `cron: "0 * * * *"`. Over a
+  273.4 h window GitHub delivered **75 of 273 expected runs — 27 %** (median gap 3.28 h, max gap
+  **7.13 h**, two gaps over six hours), measured twice independently with identical figures. The
+  workflow's own comment rejects a 6-hourly cadence by name as leaving *"a 6h blind window on the
+  exact defect that ran 401 for seven days behind a green cron history"* — so the delivered
+  cadence is worse than the one the phase ruled out, and nothing noticed, because nothing looked.
+- **The prober is not broken; it is late.** Both PYAPI-06 guards were re-proven by neutering them,
+  observing RED, and restoring byte-identically rather than by trusting a SUMMARY. The instrument
+  has already caught two real production defects — an MT5 `-6` auth failure, and a cron 500 still
+  open as issue #773.
+- ⛔ **Why this is a phase and not a one-line fix.** A GitHub-hosted watchdog cannot close it by
+  construction: a dropped prober run drops the watchdog run with it. The observer must live on
+  PROD's own `pg_cron`. And shortening the cron does not help — under the same throttling `*/15`
+  buys more attempts, not a bounded gap.
+- ⚠️ **Not claimed:** the detection gap is unchanged. Production can still go broken for ~7 h
+  before this prober notices. That risk is accepted, dated and owned — not closed.
+- `state.add-roadmap-evolution` ran CLEAN for the first time on record: 11 diff lines, **zero**
+  injected blank lines, every change correct (`total_phases` 42 → 43 for the insertion). The
+  clobber this repo reverted fourteen times is gone, which is what PR #811 predicted.
+
 ## [0.77.48.0] - 2026-09-17 — Phase 164.5.1 closes, and the two things it leaves open get an id instead of a paragraph
 
 ### Added

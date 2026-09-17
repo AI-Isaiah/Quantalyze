@@ -957,7 +957,7 @@ that exact sentence was refuted three times here.
 
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries PYAPI-06, CRON-OBS-01, CRON-DRIFT-01, MT5-WEDGE-OBS-01 — read each entry before planning, do not re-derive
 **Depends on:** Phase 164, and now **Phase 164.3** (see DEDUP below — 164.3 builds the substrate this phase's gate work is tested on)
-**Plans:** 6/6 plans executed
+**Plans:** 6/6 plans complete
 
 ⛔ **DEDUP 2026-08-28 — five carry-overs LEFT this phase, three MOVED to 164.2, one DECIDED inline.**
 Founder-approved. Before this, ten items were listed here and five of them were ALSO claimed by
@@ -1129,6 +1129,43 @@ Plans:
 - [x] 164.1-04-PLAN.md — MT5-WEDGE-OBS-01 arm: railway ssh seam, committed read-only probe, -10004 ≠ -10005 with distinct remedies, floor met at 4/4, --self-test 42/42 (wave 3)
 - [x] 164.1-05-PLAN.md — prod-prober.yml (hourly, own workflow, hard-fail credentials, self-test-then-live, pinned Railway CLI, dedup'd issue, capture-manifest mode) + vitest wiring pin (wave 4)
 - [x] 164.1-06-PLAN.md — SHA-bound dispatches: capture + commit the PROD cron manifest, live four-arm read, D-20/D-18 measurements, TODOS closure, criterion-5 ledger, founder posture decision (wave 5, checkpoints)
+
+### Phase 164.1.1: PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it (INSERTED)
+
+**Goal:** Give the prod-prober a detection latency that is MEASURED and ENFORCED, rather than declared and silently not delivered.
+
+⭐ **The prober is not broken. It is LATE, and nothing measures its lateness.** Phase 164.1's five success criteria are all independently verified, its two PYAPI-06 guards are calibration-tested (neutered, observed RED, restored byte-identically), and the instrument has already caught two real production defects — an MT5 `-6` auth failure and a real cron 500 (GitHub issue #773). What follows is about WHEN it looks, never about WHETHER it can see.
+
+⛔ **MEASURED 2026-09-18, twice independently (verifier and orchestrator, identical figures).** `.github/workflows/prod-prober.yml:65` declares `cron: "0 * * * *"`. Over a 273.4 h window GitHub delivered **75 of 273 expected runs — 27 %**:
+
+| | value |
+|---|---|
+| delivery | 75 / 273 = **27 %** |
+| median gap | **3.28 h** |
+| max gap | **7.13 h** |
+| gaps over 6 h | **2** |
+
+⭐ **The number that makes this a defect and not a grumble** is in the workflow's own header comment, three lines above that cron, written by Phase 164.1 to justify choosing hourly: *"a 401 is caught within one tick. A 6-hourly cadence would leave a 6h blind window on the exact defect that ran 401 for seven days behind a green cron history."* The delivered worst case is **7.13 h** — the phase is running the cadence it explicitly ruled out as unacceptable, and worse. Nothing in the repo noticed, because nothing looks.
+
+⛔ **A GitHub-hosted watchdog cannot close this, BY CONSTRUCTION.** If GitHub drops the prober run it drops the watchdog run too; the observer would share the failure mode of the observed. The observer must live where a scheduler that actually fires does — **PROD's own `pg_cron`**, which is hourly, reliable, and is the very thing the prober exists to watch.
+
+⚠️ **Do not "fix" this by shortening the cron.** `*/15 * * * *` under the same throttling yields more attempts, not a bounded gap, and it buys a louder claim rather than a measured one. The deliverable is a CEILING that fails loud when crossed, not a hopeful interval.
+
+**Success Criteria**:
+
+1. PROD records last-prober-contact on every arm run, and the record is written by the PROBER itself — not inferred from GitHub's API, which is the surface that already lies about cadence.
+2. A PROD-side check fails loud when the contact gap exceeds a stated ceiling. The ceiling is a MEASURED number with its sample and date written beside it, never a round one chosen because it looks tidy.
+3. The alarm is proven to fire: observed RED with a stale/absent contact row and GREEN with a fresh one. ⛔ A staleness gate that has never been seen red is exactly the vacuity class this milestone ranks above ordinary correctness.
+4. `.github/workflows/prod-prober.yml`'s header comment stops claiming "within one tick". It states the measured delivery rate, the date, and points at this phase — the false claim is corrected at the site that makes it, not only in planning prose.
+5. The alarm's own reachability is stated honestly: name what happens if PROD `pg_cron` itself stops, and either cover it or record it as an accepted, named residual. ⛔ Do not leave an unexamined turtle at the bottom.
+
+**Requirements**: TODOS entry `[PROBER-CADENCE-UNDELIVERED-01]` — this phase is its named owner.
+**Depends on:** Phase 164.1 (the prober it observes), Phase 164.7 (the settled Vault-backed `cron.job` mechanism any new PROD cron row must consume rather than invent a second answer to)
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.1.1 to break down)
 
 ### Phase 164.2: CURATED-COPY — the curated failure sentence must reach the user (INSERTED)
 
@@ -2470,7 +2507,7 @@ The three without one are named in their rows; none is unfinished work.
 | 162. HONEST visible truth | 9/9 | Complete — plan 10 WITHDRAWN in `3fa26831` ("its premise was false, credentials ARE trimmed"), so the denominator is 9, not 10 | v0.74.0.0 |
 | 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
 | 164. SHARE revocable links | 7/7 | Complete | v0.76.0.0 |
-| 164.1 PROD-OBSERVABILITY (one prober: PYAPI-06, CRON-OBS-01, CRON-DRIFT-01, MT5-WEDGE-OBS-01) | 6/6 | Complete — PR #746 `42868a9b` + PR #748 `d679f638`. ⚠️ No `164.1-VERIFICATION.md` was ever written. Row said `0/? Queued NEXT` until 2026-09-12 | v0.77.15.0 |
+| 164.1 PROD-OBSERVABILITY (one prober: PYAPI-06, CRON-OBS-01, CRON-DRIFT-01, MT5-WEDGE-OBS-01) | 6/6 | Complete — PR #746 `42868a9b` + PR #748 `d679f638`; VERIFIED 2026-09-18, `passed` 5/5. ⚠️ The cadence residual is NOT closed: booked `[PROBER-CADENCE-UNDELIVERED-01]`, owner Phase 164.1.1 | v0.77.15.0 · 2026-09-18 |
 | 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC both bucketers, HONEST-08-RESIDUAL, 161-ERRPREFIX) | 10/10 | Complete — PR #749 merged `05994f1d`, main CI green, PROD verified by effect. All 21 artifacts stripped from main by `22a5fe96` | v0.77.16.0 |
 | 164.2.1 SESSIONID-FENCE | 2/2 | Complete | v0.77.17.0 |
 | 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8 routed on, H-0001 routed on) | 9/10 | Complete — plan 07 (VAC-07) DEFERRED to 164.5 by founder decision 2026-08-29, stays unchecked | v0.77.0.0 |

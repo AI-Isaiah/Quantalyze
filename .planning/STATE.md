@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 159
 current_phase_name: RANK — Public-ranking integrity
 status: planning
-stopped_at: Phase 164.5.1 complete, ready to plan Phase 159
-last_updated: "2026-09-17T21:40:35.607Z"
-last_activity: 2026-09-17
-last_activity_desc: Phase 164.5.1 complete, transitioned to Phase 159
-state_head: f32b89e4048dd6d9d3387ecb69ce80b717e10234
+stopped_at: Phase 164.1 complete, ready to plan Phase 159
+last_updated: "2026-09-17T22:11:56.333Z"
+last_activity: 2026-09-18
+last_activity_desc: Phase 164.1 complete, transitioned to Phase 159
+state_head: 20fa2463daf35e4210fb5fdc57389bbf2e4d561d
 progress:
-  total_phases: 42
+  total_phases: 43
   completed_phases: 19
   total_plans: 195
   completed_plans: 188
-  percent: 45
+  percent: 44
 ---
 
 ## ⭐ STATE lineage
@@ -337,7 +337,7 @@ Status: Ready to plan
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-17 — Phase 164.5.1 complete, transitioned to Phase 159
+Last activity: 2026-09-18 — Phase 164.1 complete, transitioned to Phase 159
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -795,7 +795,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [█████░░░░░] 45%
+Progress: [████░░░░░░] 44%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1100,6 +1100,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.6.4 edited: edited fields: success_criteria (+1) — [164.6.2-RAISE-LAST-SHAPE-ONLY] ROUTED IN from 164.6.2 criterion 9 (founder 2026-09-15): _raise_last is SHARED by login() and initialize_with_credentials(), so a keepalive multiplies how often the shape-only scrub can fire ✅ CLOSED 2026-09-15 by `4f1963fd` (Phase 164.6.4 plan 01): the shared site is parameterised and redacts BY VALUE
 - Phase 164.6.2 edited: edited fields: success_criteria (criteria 9 and 11) — [164.6.2-RAISE-LAST-SHAPE-ONLY] MOVED OUT to Phase 164.6.4; plan 06 (question THREE R2) is now the ONLY item holding this phase open ✅ and the moved item is CLOSED in 164.6.4 by `4f1963fd` (2026-09-15)
 - Phase 164.5.1.1 inserted after Phase 164.5.1: FANOUTCOHORT — the fan-out selected ZERO candidates on its first live tick because every PROD strategy is status='private'; blocks 164.5.1's verification (URGENT)
+- Phase 164.1.1 inserted: PROBERCADENCE inserted after 164.1: the prober declares hourly and delivers 27% (75/273 over 273.4h), median gap 3.28h, max 7.13h — worse than the 6h window its own workflow comment rejects by name. Owner of TODOS [PROBER-CADENCE-UNDELIVERED-01].
 
 ### Decisions
 
@@ -2111,7 +2112,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-09-16T19:51:21Z
-**Stopped At:** Phase 164.5.1 complete, ready to plan Phase 159
+**Stopped At:** Phase 164.1 complete, ready to plan Phase 159
 **Resume File:** None
 
 **Last Date:** 2026-09-16T19:20:00Z
