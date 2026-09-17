@@ -2,12 +2,12 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260911130000_ledger_fanout_grantees_and_dormancy.sql
+-- source migration: 20260917120000_ledger_fanout_admit_private.sql
 -- --------------------------------------------------------------------------
--- STEP 1: the single-key fan-out
+-- STEP 1: the single-key fan-out, re-based with one edit
 -- --------------------------------------------------------------------------
 -- Re-based on supabase/schema/functions/enqueue_ledger_refresh_for_strategies.sql
--- (source migration 20260907130000). The four edits enumerated in the RE-BASE
+-- (source migration 20260911130000). The ONE edit enumerated in the RE-BASE
 -- DISCIPLINE section above and nothing else; every other line of the body is
 -- that snapshot's, byte for byte.
 CREATE OR REPLACE FUNCTION public.enqueue_ledger_refresh_for_strategies()
@@ -145,8 +145,11 @@ BEGIN
     -- ⭐ AND THE DETECTOR IS BACK, at the apply rather than in the gate. The
     -- NULL-safe form is what made the deletion invisible to the GATES too — the
     -- row now writes under it, so arm M1 no longer reddens (see the A/B below,
-    -- which measures exactly that). Check 7b holds needle (5) over the
-    -- row-count read itself and REFUSES THE APPLY when the line is gone, which
+    -- which measures exactly that). Check 7b holds a needle over the
+    -- `GET DIAGNOSTICS` read ITSELF — named by its SHAPE, never by a needle
+    -- number, because the numbering is local to whichever migration last
+    -- re-based this body and a number that travels is a claim that rots —
+    -- and REFUSES THE APPLY when the line is gone, which
     -- is the one layer the deletion cannot route around. The trade the M-3 fix
     -- made is therefore paid back rather than merely recorded.
     --
@@ -285,13 +288,38 @@ BEGIN
           -- excluded HERE, nowhere else. Deleting it admits every composite.
           -- See the "D-01" section of this file's header. Do not tidy it away.
           AND lrs.is_composite = FALSE
-          -- Lifecycle: mirrors ALLOWED_STRATEGY_STATUSES (routers/cron.py:148)
-          -- MINUS 'draft'. A draft strategy has no factsheet to refresh, so the
-          -- narrower pair is correct here; it is the same pair
-          -- enqueue_poll_positions_for_all_strategies already uses
-          -- (20260412094449:233-245), so the two recurring strategy fan-outs
-          -- agree on what "live enough to re-run" means.
-          AND s.status IN ('published', 'pending_review')
+          -- Lifecycle. ⭐ WIDENED 2026-09-17 (Phase 164.5.1.1, TODOS
+          -- FANOUT-COHORT-PRIVATE-01) from a two-value set to a three-value one,
+          -- on a MEASUREMENT and not on a preference. On the FIRST tick after
+          -- Phase 164.5.1 activated this fan-out — pg_cron runid 11159, jobid
+          -- 40, 2026-09-17 08:25Z, reported `succeeded` — the job ran, was NOT
+          -- dormant, reached candidate selection and selected ZERO strategies
+          -- while the staleness view held six. Every production strategy
+          -- carries the owner-only terminal status that
+          -- 20260716130000_strategies_status_private.sql introduced (CONTRIB-02,
+          -- Phase 110) and this conjunct never learned about it. The 20-hour
+          -- attempt cooldown and the in-flight guard both counted 0 for all six,
+          -- so nothing else excluded anything: this set was the single binding
+          -- conjunct.
+          --
+          -- ⛔ TWO VALUES STAY EXCLUDED ON PURPOSE, and the set is deliberately
+          -- NOT a mirror of ALLOWED_STRATEGY_STATUSES (routers/cron.py:148): a
+          -- draft strategy has no factsheet to refresh, and an archived one is
+          -- not a refresh candidate. Mirroring that constant would drag the
+          -- first of those in.
+          --
+          -- ⚠️ THE SENTENCE THIS REPLACES IS RETIRED, NOT CARRIED. Until this
+          -- edit the comment here said the set was the same pair
+          -- enqueue_poll_positions_for_all_strategies uses
+          -- (20260412094449:233-245), so that "the two recurring strategy
+          -- fan-outs agree on what live enough to re-run means". That stopped
+          -- being true at this line. The sibling fan-out is NOT widened in this
+          -- phase, deliberately: it enqueues a different job kind, so widening
+          -- it would arm a SECOND, UNMEASURED production behaviour in the same
+          -- migration. It is booked and measured separately. Leaving the old
+          -- sentence would report the two fan-outs as agreeing when they no
+          -- longer do.
+          AND s.status IN ('published', 'pending_review', 'private')
           -- Key eligibility — the role-agnostic eligible-key predicate, written
           -- NULL-TOLERANTLY on purpose (header: "Why the api_keys join is LEFT").
           -- These two are already NULL-true.

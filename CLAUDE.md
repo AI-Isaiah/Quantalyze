@@ -148,11 +148,43 @@ body diff) is a step in `migration-drift-check.yml` on migration PRs, and
 **VAC-08** (repo-vs-TEST ledger + body drift) runs in `sql-tests`. Both exit 1
 when their credential is absent — neither ever skips.
 
-### Current reading — 2026-09-07, Phase 164.7 (a DATED reading, not a constant)
+### Current reading — ⛔ SUPERSEDED. The block below is the 2026-09-07 reading and it is STALE.
+
+⛔ **THE NUMBERS ARE NOT WRITTEN HERE ANY MORE, AND THAT IS THE FIX.** Run this:
+
+```bash
+grep -nE '^export const (FILES_FLOOR|ARMS_FLOOR|WAIVED_CEILING)' scripts/mutation-runner/run.mjs
+```
+
+**Why the table that stood here was deleted rather than corrected a fourth time.** This section
+carried a `constant | shipped value | line` table, and it went stale FOUR times:
+
+| when | prose said | shipped was |
+|---|---|---|
+| (recorded in `docs/sql-gate-lineage.md`) | 380 | 384 |
+| 2026-09-11 → 2026-09-17, six days | 384 | 392 |
+| corrected 2026-09-17 morning | 392 | 392 ✅ |
+| **same day, hours later** | 392 @ `:1866` | **394 @ `:1909`** |
+
+The fourth one is the argument. The table was written by someone who had just finished writing
+the boxed rule two paragraphs below — *"Read `FILES_FLOOR`, `ARMS_FLOOR` and `WAIVED_CEILING` by
+SYMBOL … never from a number restated in this file"* — and it was stale again within hours,
+because a phase moved the floor and prose does not move with a floor. A restated constant beside
+a rule forbidding restated constants is not a documentation slip; it is the defect the rule
+describes, sitting inside the rule. The line numbers rot faster still: `:1866` and `:1980` were
+both wrong by the next commit, which is the `[164.7-CITATION-DRIFT-01]` class this file already
+records elsewhere and answers the same way — cite by symbol, do not re-number prose that will
+drift again.
+
+⚠️ **NO arm tally, and now no floor either, is stated here.** A floor implies the corpus holds
+at least 392 biting arms, but the tally, the `lane-blocked` class and the `unreachable:` count are
+RUN OUTPUTS — inventing them from the floor would be exactly the fabrication this section exists
+to prevent. Run `node scripts/mutation-runner/run.mjs` and read them off it.
 
 ⛔ **Regenerate, do not trust:** `node scripts/mutation-runner/run.mjs` prints every figure
 below. If it disagrees with this block, the RUN is right and this block is stale.
 
+**📜 The 2026-09-07 reading, kept as LINEAGE and superseded as of 2026-09-11:**
 `coverage: files 46/73` · `arms: 384/384/0` · `biting: 384` · `lane-invocations: 384` (the two
 independent tallies AGREE) · `lane-blocked: 0 file(s)` · `lane-probe: pg_cron AVAILABLE` ·
 `pending: 0` · `per-arm lane time: mean 1.1s` · `✅ No defects` · exit 0.

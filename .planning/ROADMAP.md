@@ -132,18 +132,18 @@ Plans:
 **Wave 1**
 
 - [ ] 159-01-PLAN.md — C-M1 PROD census artifact `159-CENSUS.md` (checkpoint: ORCHESTRATOR runs the read-only SQL against PROD and commits results — the D-01 gate) (RANK-01) [Wave 1]
-- [ ] 159-05-PLAN.md — quantstats price-guess closed across `compute_all_metrics`: kwarg arm + P114 inline mirror for headline sharpe/sortino, benign-parity oracles, golden adjudication (RANK-05) [Wave 1]
-- [ ] 159-06-PLAN.md — FILL-arm CAS `.is("category_id", null)` + observed row count + honest `raced` refusal on the real POST harness (RANK-07) [Wave 1]
-- [ ] 159-07-PLAN.md — Re-mint fingerprint includes classification (both call sites + both dep arrays) + `withPublishedOrOwner` strict-UUID fail-closed validation (RANK-08, RANK-09) [Wave 1]
+- [x] 159-05-PLAN.md — quantstats price-guess closed across `compute_all_metrics`: kwarg arm + P114 inline mirror for headline sharpe/sortino, benign-parity oracles, golden adjudication (RANK-05) [Wave 1]
+- [x] 159-06-PLAN.md — FILL-arm CAS `.is("category_id", null)` + observed row count + honest `raced` refusal on the real POST harness (RANK-07) [Wave 1]
+- [x] 159-07-PLAN.md — Re-mint fingerprint includes classification (both call sites + both dep arrays) + `withPublishedOrOwner` strict-UUID fail-closed validation (RANK-08, RANK-09) [Wave 1]
 
 **Wave 2** *(blocked on the 159-01 census — D-01 hard ordering)*
 
-- [ ] 159-02-PLAN.md — Percentile gate: `PERCENTILE_GATE_COLUMN` + one shared helper for BOTH TS callers, `get_verified_cohort_rank` lockstep re-base migration, first CI SQL gate for the RPC (RANK-01) [Wave 2]
+- [x] 159-02-PLAN.md — Percentile gate: `PERCENTILE_GATE_COLUMN` + one shared helper for BOTH TS callers, `get_verified_cohort_rank` lockstep re-base migration, first CI SQL gate for the RPC (RANK-01) [Wave 2]
 
 **Wave 3** *(blocked on 159-02 — file overlap on queries.ts / closed-sets.ts)*
 
-- [ ] 159-03-PLAN.md — Splat-class closure: three explicit projections + owner exemption comment + repo-wide class inventory (RANK-02) [Wave 3]
-- [ ] 159-04-PLAN.md — `blendPeriodsPerYear` unknown-leg-as-crypto for RISK + production call-site wiring pin (RANK-06) [Wave 3]
+- [x] 159-03-PLAN.md — Splat-class closure: three explicit projections + owner exemption comment + repo-wide class inventory (RANK-02) [Wave 3]
+- [x] 159-04-PLAN.md — `blendPeriodsPerYear` unknown-leg-as-crypto for RISK + production call-site wiring pin (RANK-06) [Wave 3]
 
 **Research note:** fix locations and predicates read directly from source — skip a research phase; only the cheap C-M1 census remains. `StrategyTable`'s ungated KPI cells are OUT of scope, logged (C-D2).
 
@@ -164,24 +164,24 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 160-01-PLAN.md — B-M1 PROD census artifact `160-CENSUS.md` (checkpoint: ORCHESTRATOR runs the read-only SQL against PROD, fills the mechanical B-D1 decision, commits) (RANK-03, RANK-04) [Wave 1]
+- [x] 160-01-PLAN.md — B-M1 PROD census artifact `160-CENSUS.md` (checkpoint: ORCHESTRATOR runs the read-only SQL against PROD, fills the mechanical B-D1 decision, commits) (RANK-03, RANK-04) [Wave 1]
 
 **Wave 2** *(blocked on the 160-01 census — it gates everything downstream)*
 
-- [ ] 160-02-PLAN.md — TRACER: `validate-and-encrypt` persist arm (admin INSERT stamps exchange + attested_venue from `exchangeNormalized`, returns `{ api_key_id }`, strict `persist: true` skew discriminator) + ApiKeyManager conversion end-to-end (RANK-03) [Wave 2]
-- [ ] 160-04-PLAN.md — RANK-04 stamp swap + `skipAssetClassWrite` null-attestation extension in ONE change + B-D2 economics oracles observed RED under neuters; create-with-key confirmed unchanged (RANK-04) [Wave 2]
+- [x] 160-02-PLAN.md — TRACER: `validate-and-encrypt` persist arm (admin INSERT stamps exchange + attested_venue from `exchangeNormalized`, returns `{ api_key_id }`, strict `persist: true` skew discriminator) + ApiKeyManager conversion end-to-end (RANK-03) [Wave 2]
+- [x] 160-04-PLAN.md — RANK-04 stamp swap + `skipAssetClassWrite` null-attestation extension in ONE change + B-D2 economics oracles observed RED under neuters; create-with-key confirmed unchanged (RANK-04) [Wave 2]
 
 **Wave 3** *(blocked on 160-02 — the persist contract)*
 
-- [ ] 160-03-PLAN.md — StrategyForm + AllocatorExchangeManager conversions (the THIRD insert site) + state-adaptive SQL gate `test_api_keys_insert_not_client_writable.sql` (A1 retention positive armable now) (RANK-03) [Wave 3]
+- [x] 160-03-PLAN.md — StrategyForm + AllocatorExchangeManager conversions (the THIRD insert site) + state-adaptive SQL gate `test_api_keys_insert_not_client_writable.sql` (A1 retention positive armable now) (RANK-03) [Wave 3]
 
 **Wave 4** *(PR-2 — the second landing; blocked on PR-1 merged + deployed + soaked)*
 
-- [ ] 160-05-PLAN.md — Soak checkpoint (prod smoke of wizard + all three converted surfaces, census re-measure addendum) → blocking-human go/no-go → census-guarded `REVOKE INSERT` migration + whole-repo write-surface re-grep + legacy ciphertext arm retired (RANK-03) [Wave 4]
+- [x] 160-05-PLAN.md — Soak checkpoint (prod smoke of wizard + all three converted surfaces, census re-measure addendum) → blocking-human go/no-go → census-guarded `REVOKE INSERT` migration + whole-repo write-surface re-grep + legacy ciphertext arm retired (RANK-03) [Wave 4]
 
 **Wave 5**
 
-- [ ] 160-06-PLAN.md — Golden-parity re-annualization for census-identified strategies (`160-PARITY.md`; RISK ×≈1.203 / RETURN unmoved adjudication) or the recorded no-op (RANK-04) [Wave 5]
+- [x] 160-06-PLAN.md — Golden-parity re-annualization for census-identified strategies (`160-PARITY.md`; RISK ×≈1.203 / RETURN unmoved adjudication) or the recorded no-op (RANK-04) [Wave 5]
 
 **Wave 6** *(gap closure, 2026-08-23 — from 160-VERIFICATION.md; the STALE_CLIENT retirement itself already landed at `2fe28b89`)*
 
@@ -322,7 +322,7 @@ Plans:
 - [x] 161.1-02-PLAN.md — LEDGER-01/-02/-04: the dormant, staleness-gated, bounded single-key fan-out on the chain tail + matched-pair SQL gate + venue-drift/no-schedule static gates (wave 2)
 - [x] 161.1-03-PLAN.md — LEDGER-02: the founder go-live runbook (two ordered LIVE ops, two rollback levels incl. detect/repair/verify remediation for rows a failed tick downgraded) + TODOS filings (wave 3)
 - [x] 161.1-05-PLAN.md — LEDGER-02/-04: the static drift / dormancy / bound gates, sliced out of plan 02 (wave 3)
-- [ ] 161.1-04-PLAN.md — LEDGER-01: the composite arm on `stitch_composite` so deribit has real coverage — CONDITIONAL on D-01 (wave 4)
+- [x] 161.1-04-PLAN.md — LEDGER-01: the composite arm on `stitch_composite` so deribit has real coverage — CONDITIONAL on D-01 (wave 4)
 
 ### Phase 162: HONEST — What the user sees is true
 
@@ -544,13 +544,13 @@ correctness are different properties. Booked as 164.5 criterion 8.
 
 Plans:
 
-- [ ] 164.7-01-PLAN.md — Criterion-1 gate: `scripts/lint-app-guc.mjs` (hermetic, raw-text, exact-count lineage header + script-side allowlist), red/green fixtures, vitest pin, two steps in `sql-gate-lint`; corpus reads 12 findings / 5 files by design until plan 05 (wave 1)
-- [ ] 164.7-02-PLAN.md — `20260907120000`: `system_settings` (D-03) + `match_engine_cron_tick()` reading Vault + the table (D-02 as DRIFT-02), schedules nothing; vault stand-in fixture 32; 7-arm gate; types block (wave 1)
-- [ ] 164.7-03-PLAN.md — `20260907130000`: both ledger fan-outs re-based with Lock B as a fail-CLOSED `system_flags` read (D-01/C-03), seed FALSE; fixture 31; snapshots regenerated; pytest gates re-anchored (wave 1)
-- [ ] 164.7-04-PLAN.md — Re-point all 28 edit-kind twins at the superseding migration, table activation, arms A/K/L (missing row / FALSE / raising read ⇒ 0) in both ledger gates, 17/17 RED each (wave 2)
-- [ ] 164.7-05-PLAN.md — Floors separated both directions and pinned (46 files); five dated lineage headers + allowlist → gate 0 findings (D-04/D-05); ledger + match-engine runbooks corrected (two live ops, manifest re-capture, OQ-3 closed, #747 note); CLAUDE.md/TODOS currency (wave 3)
-- [ ] 164.7-06-PLAN.md — Three reviewers before the PR (D-07); ship checkpoint; VAC-04 output READ and branch named by line, ack EARNED via `--diff-bodies` (D-08); dry-run + expected `sql-tests`/VAC-08 reds read; WINDOWS 25 dispositioned (wave 4, checkpoint)
-- [ ] 164.7-07-PLAN.md — PROD activation as a founder `checkpoint:decision` (D-06): measured pre-flight, two live ops + view-based observation + kill-switch proof + manifest re-capture, or DEFER with the blocker named; closes the 161.1 ACTIVATION item (wave 5, checkpoint)
+- [x] 164.7-01-PLAN.md — Criterion-1 gate: `scripts/lint-app-guc.mjs` (hermetic, raw-text, exact-count lineage header + script-side allowlist), red/green fixtures, vitest pin, two steps in `sql-gate-lint`; corpus reads 12 findings / 5 files by design until plan 05 (wave 1)
+- [x] 164.7-02-PLAN.md — `20260907120000`: `system_settings` (D-03) + `match_engine_cron_tick()` reading Vault + the table (D-02 as DRIFT-02), schedules nothing; vault stand-in fixture 32; 7-arm gate; types block (wave 1)
+- [x] 164.7-03-PLAN.md — `20260907130000`: both ledger fan-outs re-based with Lock B as a fail-CLOSED `system_flags` read (D-01/C-03), seed FALSE; fixture 31; snapshots regenerated; pytest gates re-anchored (wave 1)
+- [x] 164.7-04-PLAN.md — Re-point all 28 edit-kind twins at the superseding migration, table activation, arms A/K/L (missing row / FALSE / raising read ⇒ 0) in both ledger gates, 17/17 RED each (wave 2)
+- [x] 164.7-05-PLAN.md — Floors separated both directions and pinned (46 files); five dated lineage headers + allowlist → gate 0 findings (D-04/D-05); ledger + match-engine runbooks corrected (two live ops, manifest re-capture, OQ-3 closed, #747 note); CLAUDE.md/TODOS currency (wave 3)
+- [x] 164.7-06-PLAN.md — Three reviewers before the PR (D-07); ship checkpoint; VAC-04 output READ and branch named by line, ack EARNED via `--diff-bodies` (D-08); dry-run + expected `sql-tests`/VAC-08 reds read; WINDOWS 25 dispositioned (wave 4, checkpoint)
+- [x] 164.7-07-PLAN.md — PROD activation as a founder `checkpoint:decision` (D-06): measured pre-flight, two live ops + view-based observation + kill-switch proof + manifest re-capture, or DEFER with the blocker named; closes the 161.1 ACTIVATION item (wave 5, checkpoint)
 
 ### Phase 164.3: VACUITY — a control that cannot fail must be caught by machine, not by red team (INSERTED)
 
@@ -1405,7 +1405,7 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 - [x] 164.8-03-PLAN.md — `test-restore-from-baseline.yml`: dispatch-only, ref-guarded, `mode=preflight|restore` + `confirm` token, `environment: Test`, backup artifact BEFORE the script, whole-act mutex, CLI post-verify; line-exact wiring pins
 - [x] 164.8-04-PLAN.md — WAVE 1 EXECUTION, the one-way door: founder merges the wave 1-3 PR → preflight → **activity gate** (mutex-first probe; `idle in transaction` counts as active; non-zero aborts to the founder — founder delegation 2026-09-08 superseding CONTEXT safety rule 4) → restore → SHA-bound readings → `vac08-ledger-baseline.txt` emptied BESIDE AN AIM with `ENTRY_COUNT` 31 → 0 in the same commit
 - [x] 164.8-05-PLAN.md — WAVE 2 PIPELINE: `apply-test` (`environment: Test`, mutex, marker, `db push --include-all --db-url`) + `apply-test-verdict` (`if: always()`, skipped = fault) gate PROD `apply`; pins; SHA-bound dispatch proof
-- [ ] 164.8-06-PLAN.md — WAVE 3 CLOSURE: record the verdicts and the SHA-bound readings, TODOS closures with run ids (incl. the `TEST-NOT-APPLICABLE` pragma verdict), first SHA-bound VAC-08 `0 absent` reading, CLAUDE.md + mutex runbook currency
+- [x] 164.8-06-PLAN.md — WAVE 3 CLOSURE: record the verdicts and the SHA-bound readings, TODOS closures with run ids (incl. the `TEST-NOT-APPLICABLE` pragma verdict), first SHA-bound VAC-08 `0 absent` reading, CLAUDE.md + mutex runbook currency
   ⛔ **CORRECTED 2026-09-09.** This bullet read "the `TEST-NOT-APPLICABLE` pragma recorded as DEAD SCOPE by measurement" — the verdict the plan-checker's B4 finding REVERSED on 2026-09-08, before plan 06 ran. The shipped verdict is two-part: unnecessary for `20260908120000` (narrow, evidenced), general case OPEN and routed to Phase 164.9 as `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`. A ROADMAP bullet still carrying the superseded half would send the next reader to close a hole that is open.
 
 ### Phase 164.8.6: VAULTTICKFIX — the forward migration Phase 164.7 earned: the verification check that cannot fail is re-run correctly, the Vault read becomes single-row-safe, the whitespace-key guard learns btrim, and the SECURITY DEFINER grant set is asserted whole instead of two names deep (INSERTED)
@@ -1429,14 +1429,14 @@ Plans:
 
 ⛔ **TWO migration files, not one — measured (RESEARCH §Q4), and it contradicts this phase's own goal sentence.** The tick gate's lane lacks the ledger stack and the fan-out lanes lack the vault stand-in, so a single file cannot apply on either lane. One PR, two files: "one shipped repair" is satisfied, "one forward migration" is not, and that is recorded here rather than silently satisfied. Waves 1-4 are the SQL wave (one PR); waves 5-6 are the JS wave (a second PR, opened after the first lands — founder decision, thematic mismatch recorded above).
 
-- [ ] 164.8.6-01-PLAN.md — WAVE 1 TRACER: `20260911120000_vault_tick_hardening.sql` (count+max Vault read, `IF v_cnt > 1 THEN`, `btrim`, four-role REVOKE, variable-bound needles, aclexplode whole set) + the tick gate re-pointed (V1/U1/C1/C2/C3) with arms V2 (mirror twin) and G1; narrowed lane run clean
-- [ ] 164.8.6-02-PLAN.md — WAVE 1: lane fixture `33-fixture-cron-runs.sql` + `20260911130000_ledger_fanout_grantees_and_dormancy.sql` (both fan-outs re-based with the `cron_runs` dormancy instrument for causes 1 and 3, four-role REVOKEs, catalogue-only verify)
-- [ ] 164.8.6-03-PLAN.md — WAVE 2: both ledger gates — 14 + 12 body-editing twins re-pointed, arms S1/M1/M2 per gate, rosters 15; narrowed lane runs clean
-- [ ] 164.8.6-04-PLAN.md — WAVE 2: the check-6 FALSIFIER (three neuters RED on scratch copies, source proven intact), the `20260907130000` ack-block reconciliation (comment-only, line-count-neutral, bundled — criterion 5's reading applied), snapshots regenerated and three VAC-04 acks EARNED from origin/main
-- [ ] 164.8.6-05-PLAN.md — WAVE 3: `ARMS_FLOOR` separated both ways on full-corpus lane runs and pinned with a dated derivation + `164.8.6-05-FLOORS.log`; every quick gate green at a named sha; the three reviewers BEFORE any PR exists (criterion 6)
-- [ ] 164.8.6-06-PLAN.md — WAVE 4: release commit v0.77.34.0 (VERSION/package.json/CHANGELOG via the commit checklist) → checkpoint:decision (the one-way door: merge auto-applies to PROD) → open the SQL PR
-- [ ] 164.8.6-07-PLAN.md — WAVE 5 (JS): hoist `compareManifest`'s manifest-side hygiene loop above every early return + three one-lever vitest cases with a cp-swapped RED control (164.8.5-MANIFEST-SIDE-LOOP-DEAD, ordering half; re-animated earlier by PR #776)
-- [ ] 164.8.6-08-PLAN.md — WAVE 6 (JS): `tokenMeasure` whole-token measure, red rows for hygiene shapes 2/3/4 with green/bypass corpora intact, `[164.8.6-08]` describe, release commit v0.77.34.1 and the JS PR after the SQL PR lands (164.8.5-HYGIENE-RESIDUALS)
+- [x] 164.8.6-01-PLAN.md — WAVE 1 TRACER: `20260911120000_vault_tick_hardening.sql` (count+max Vault read, `IF v_cnt > 1 THEN`, `btrim`, four-role REVOKE, variable-bound needles, aclexplode whole set) + the tick gate re-pointed (V1/U1/C1/C2/C3) with arms V2 (mirror twin) and G1; narrowed lane run clean
+- [x] 164.8.6-02-PLAN.md — WAVE 1: lane fixture `33-fixture-cron-runs.sql` + `20260911130000_ledger_fanout_grantees_and_dormancy.sql` (both fan-outs re-based with the `cron_runs` dormancy instrument for causes 1 and 3, four-role REVOKEs, catalogue-only verify)
+- [x] 164.8.6-03-PLAN.md — WAVE 2: both ledger gates — 14 + 12 body-editing twins re-pointed, arms S1/M1/M2 per gate, rosters 15; narrowed lane runs clean
+- [x] 164.8.6-04-PLAN.md — WAVE 2: the check-6 FALSIFIER (three neuters RED on scratch copies, source proven intact), the `20260907130000` ack-block reconciliation (comment-only, line-count-neutral, bundled — criterion 5's reading applied), snapshots regenerated and three VAC-04 acks EARNED from origin/main
+- [x] 164.8.6-05-PLAN.md — WAVE 3: `ARMS_FLOOR` separated both ways on full-corpus lane runs and pinned with a dated derivation + `164.8.6-05-FLOORS.log`; every quick gate green at a named sha; the three reviewers BEFORE any PR exists (criterion 6)
+- [x] 164.8.6-06-PLAN.md — WAVE 4: release commit v0.77.34.0 (VERSION/package.json/CHANGELOG via the commit checklist) → checkpoint:decision (the one-way door: merge auto-applies to PROD) → open the SQL PR
+- [x] 164.8.6-07-PLAN.md — WAVE 5 (JS): hoist `compareManifest`'s manifest-side hygiene loop above every early return + three one-lever vitest cases with a cp-swapped RED control (164.8.5-MANIFEST-SIDE-LOOP-DEAD, ordering half; re-animated earlier by PR #776)
+- [x] 164.8.6-08-PLAN.md — WAVE 6 (JS): `tokenMeasure` whole-token measure, red rows for hygiene shapes 2/3/4 with green/bypass corpora intact, `[164.8.6-08]` describe, release commit v0.77.34.1 and the JS PR after the SQL PR lands (164.8.5-HYGIENE-RESIDUALS)
 
 ### Phase 164.8.5: PROBERPARSE — the prod-prober hygiene rules stop being dodgeable and its parser stops dropping rows silently: the ||-split service key and the dollar-quoted literal both go RED, an unreadable oracle no longer disables the live credential scan, a malformed cron.job record becomes a measure-fail instead of a continue, and the app-GUC linter successor check stops accepting any readable file (INSERTED)
 
@@ -1514,6 +1514,44 @@ Plans:
 
 - `[164.8.3-CAPTURE-MANIFEST-ERREXIT]` — NOT 164.8.2 residue; admitted 2026-09-13 (ADMISSION 2 above). One step in `.github/workflows/prod-prober.yml` — the one whose `- name:` key is `Capture the cron manifest (read-only; artifact, never a commit)` — still carries the pre-`604d655f` status-capture shape that `-e` makes unreachable, and no gate can see it because the wiring test's branch scan filters on `$RUNNER_LOG`. ⛔ Cited BY SYMBOL, never by line number: `[164.7-CITATION-DRIFT-01]` is owned by this same phase.
 - `[WINDOWS-LEDGER-DRIFT]` — NOT 164.8.2 residue. Logged 2026-09-02 in Plan 164.4-00 and carried with **no owner, no date and no gate for eight days**. `.planning/WINDOWS.md` refuses every append while its frontmatter counts and its entries disagree. It fits here because a ledger that rejects writes because its own header is stale is a control disagreeing with the thing it describes.
+
+⛔ **SCOPE PRUNE 2026-09-17 (founder decision) — this phase keeps groups (a) and (b), and drops
+group (c) and the two items in (d).**
+
+**The rule applied** (founder, 2026-09-15): a deferral earns a phase ONLY when it pins
+DATA-INTEGRITY or USER-FACING behaviour; a structural predicate, a log line's wording, a comment's
+accuracy or an internal counter is fix-or-drop. *"Otherwise we will always find something."*
+
+**KEPT — (a) and (b) are not hygiene by any reading:**
+- (a) is credential disclosure into a WORLD-READABLE Actions log, plus
+  `[164.8.2-EVIDENCE-DOTENV-LEAK]`, which turns 16 SKIPPED live-DB suites into **real INSERTs
+  against shared TEST** — other people's CI database. That is data-integrity, not gate hygiene.
+- (b) publishes the `.sql` file the restore REFUSED over, on exactly the run whose restore was
+  refused.
+
+**DROPPED — (c) "gate-integrity leftovers", by the group's own description:**
+`[164.6-SOURCE-ANCHOR-ROT]` (≈30 `file:line` anchors in SOURCE COMMENTS rot; the deliverable is a
+gate over comment accuracy), and `[164.8.2-GATE-RESIDUE]`'s seven items (two assertions bound to
+text this repo does not control, a softening allowlist that is still a count, hand-copied marker
+regexes pinned to nothing, a computed-but-never-compared floor, a README describing files the
+denial path does not stage, a dead local, a misdirected message). Every one is a structural or
+prose predicate.
+⚠️ `[164.8.2-SENTINEL-GREP-NUL-BLIND]` is NOT dropped and needs no work here: its own entry
+records it as ALREADY HELD AS A CEILING — the `grep -a` rule's one dated exemption, which reds if
+the site is fixed without deleting the entry.
+
+**DROPPED — (d), both items:**
+- `[164.8.3-CAPTURE-MANIFEST-ERREXIT]` — its own text settles it: *"⛔ It is a TRAP, not a live
+  defect, and must not be planned as a bug fix… the observable outcome is identical today."*
+  Keep the WARNING in place (inserting a line between the call and the capture silently changes
+  the step), but a warning is prose, not a phase.
+- `[WINDOWS-LEDGER-DRIFT]` — `.planning/WINDOWS.md` refusing appends on a stale header is a
+  planning-ledger bookkeeping fault. Fix it when it next blocks a write; do not carry a phase for
+  it. It is the same item Phase 164.6 carries as criterion 14, now dropped there too.
+
+**DROPPED — Success Criterion 5**, the four `[164.8.4-PROSE-OVERCLAIM]` sentences: correcting
+prose to match what the code does is the definition of the fix-or-drop side. Criterion 6 (verify
+by MEASUREMENT, not by reading) stays as a METHOD for the surviving work.
 
 **Success Criteria**:
 
@@ -1652,11 +1690,11 @@ Plans:
 
 Plans:
 
-- [ ] 164.8.2-01-PLAN.md — WR-03 arms ratchet then WR-02 `FRONTIER_EXEMPT_CEILING` in `scripts/test-ledger-drift-check.sh`, with vitest second layer + SC-9 registration (wave 1)
-- [ ] 164.8.2-02-PLAN.md — WR-04 `grep -a` on both C-0331 sites of `supabase-migrate.yml` with an executed NUL-fixture arm; IN-03, IN-04 (wave 1)
-- [ ] 164.8.2-03-PLAN.md — WR-05 artifact narrowing by an enumerated staging step (founder-amended set), four truthful comments, WR-04's two post-verify greps, IN-07 (wave 1)
-- [ ] 164.8.2-04-PLAN.md — WR-06 nine-token scan across the TRIPLET with an exact-set `2>/dev/null` allowlist (wave 2, after 02 and 03)
-- [ ] 164.8.2-05-PLAN.md — IN-06 MEASURE_FAIL wrap with a sourced-copy falsifier; IN-01, IN-02, IN-05 record corrections pinned by derivation (wave 2, after 03)
+- [x] 164.8.2-01-PLAN.md — WR-03 arms ratchet then WR-02 `FRONTIER_EXEMPT_CEILING` in `scripts/test-ledger-drift-check.sh`, with vitest second layer + SC-9 registration (wave 1)
+- [x] 164.8.2-02-PLAN.md — WR-04 `grep -a` on both C-0331 sites of `supabase-migrate.yml` with an executed NUL-fixture arm; IN-03, IN-04 (wave 1)
+- [x] 164.8.2-03-PLAN.md — WR-05 artifact narrowing by an enumerated staging step (founder-amended set), four truthful comments, WR-04's two post-verify greps, IN-07 (wave 1)
+- [x] 164.8.2-04-PLAN.md — WR-06 nine-token scan across the TRIPLET with an exact-set `2>/dev/null` allowlist (wave 2, after 02 and 03)
+- [x] 164.8.2-05-PLAN.md — IN-06 MEASURE_FAIL wrap with a sourced-copy falsifier; IN-01, IN-02, IN-05 record corrections pinned by derivation (wave 2, after 03)
 
 ### Phase 164.5.1: CRONREPOINT — the live `match_engine_cron` row is repointed at the mechanism the repo actually describes, and the migration-vs-runbook rule is settled first (INSERTED)
 
@@ -1760,7 +1798,7 @@ Plans:
 - [x] 164.5.1-06-PLAN.md — wave 2 · criterion 9: `cron_recompute()` batched with a `system_settings`-persisted cursor (the FIRST Python consumer of that table), returning `status="partial"` + `next_cursor`, with the status vocabulary documented and gated
 - [x] 164.5.1-07-PLAN.md — wave 2 · the `T-OPEN-04` / `T-OPEN-03` / `[164.8.5-MANIFEST-SIDE-LOOP-DEAD]` RESIDUAL (the GATE, not the data): a CI contract test pinning the committed manifest's `normalization` to the arm's exported constant, plus a fourth broken-oracle self-test scenario
 - [x] 164.5.1-08-PLAN.md — wave 3 · criteria 1 and 4: repair P3-C (`completed_at` → `updated_at`, both copies plus the two later diagnostics — it aborts 42703 today), then write the `docs/runbooks/match-engine.md` go-live section with the D1/D2/D3 transcription, D2's window verbatim, and a DEFER branch
-- [ ] 164.5.1-09-PLAN.md — wave 4 · **NOT autonomous** · criteria 2, 5 and 7's read-back: the D4 three-reviewer `checkpoint:decision`, the founder's live PROD session recording every OUTPUT, then ONE manifest re-capture and the backlog dispositions
+- [x] 164.5.1-09-PLAN.md — wave 4 · **NOT autonomous** · criteria 2, 5 and 7's read-back: the D4 three-reviewer `checkpoint:decision`, the founder's live PROD session recording every OUTPUT, then ONE manifest re-capture and the backlog dispositions
 
 ### Phase 164.5.1.1: FANOUTCOHORT — the ledger-refresh fan-out admits the `private` status, so it stops enqueuing nothing for every strategy that exists (INSERTED)
 
@@ -1770,13 +1808,66 @@ Plans:
 ⭐ **FOUNDER DECISION 2026-09-17: admit `private`.** One forward migration widening the eligibility set, behind the three reviewers (`migration-reviewer` + `rls-policy-auditor` + `silent-failure-hunter`) BEFORE any apply, then merge -> `apply-test` -> the PROD `apply` behind the `Production` environment's human reviewer gate.
 **Projected, stated BEFORE it is built so it can be checked afterwards:** 4 of the 5 mt5 strategies become candidates (`87bb2086…` stays excluded on `ak.disconnected_at IS NOT NULL`, which is the exclusion working); the per-venue cap `venue_rank <= 2` still admits only 2 per tick; the 20-hour cooldown still bounds the backlog at the cohort size; and the deribit composite `081f2912…` at 141 days stays excluded by D-01 by design and ⛔ must NOT be reported as fixed by this phase.
 **Also in scope:** whether `ALLOWED_STRATEGY_STATUSES` and the April sibling fan-out carry the same gap, and whether a gate should pin the view's cohort and the fan-out's cohort to each other so a future status can never again be surfaced as stale by one and refused by the other.
-**Requirements**: TBD
+⛔ **MEASURED AT PLANNING TIME 2026-09-17, and it narrows one sentence above.** `s.status IN ('published', 'pending_review')` appears **TWICE** in `20260911130000` — at `:611` in `enqueue_ledger_refresh_for_strategies` and at `:1059` in `enqueue_ledger_composite_refresh`. This phase's own `164.5.1.1-RESEARCH.md` and `164.5.1.1-PATTERNS.md` both assert the composite function "has no status conjunct at all", and all three of RESEARCH/PATTERNS/VALIDATION therefore instruct that `supabase/tests/test_ledger_refresh_composite_arm.sql`'s foreign-candidate precondition be widened in lockstep. **That instruction is refused by the plans and the refusal is recorded here rather than only in a plan:** that precondition mirrors the conjunct of the function it guards, that conjunct is NOT widened here, and widening the guard alone would make it abort on a foreign candidate the guarded function would itself refuse — a false abort, not a tighter gate. `164.5.1.1-01-PLAN.md` carries the full finding; `164.5.1.1-03-PLAN.md` annotates the composite gate and books the composite function's own `private` blindness as a separate, measured deferral with a named destination phase. The "one site" framing above stays TRUE of the function being widened and is now explicit about which function that is. Canonical-snapshot count, for the record: **three** bodies under `supabase/schema/functions/` carry that literal — the two above plus `enqueue_poll_positions_for_all_strategies` (the April sibling, scoped out by decision).
+**Requirements**: TBD — no REQUIREMENTS.md ids are declared for this phase. The binding obligation set is `164.5.1.1-CONTEXT.md`'s `<decisions>` block, labelled `CTX-01`..`CTX-12` in the plans, plus TODOS entry `FANOUT-COHORT-PRIVATE-01` and `T-164.5.1-09-07`, which this phase unblocks. ⛔ The plans deliberately do NOT number these `D-01`..`D-12`: `D-01` in this codebase already means the composite/membership deferral, and reusing it would collide with the very exclusion CTX-10 locks.
 **Depends on:** Phase 164.5.1 — and it BLOCKS that phase's closure: `T-164.5.1-09-07` (the fan-out's all-candidates-failed branch) cannot be exercised while the candidate set is empty for an unrelated reason, so `164.5.1-VERIFICATION.md` cannot report `passed` and `WINDOWS.md` entry 60 cannot close until this lands. ⚠️ Placed AHEAD of 164.5.2 BRIDGELOCK, 164.5.3 MT5CREDS and 164.5.4 MT5RECON-GAP deliberately: this is a SQL migration on a venue-agnostic conjunct, not MT5 work — the five mt5 rows are what PROD happens to hold, and the deribit composite carries the same `private` status.
+**Plans:** 4 plans
+
+Plans:
+
+**Wave 1** — no dependencies; the tracer.
+
+- [x] 164.5.1.1-01-PLAN.md — wave 1, tracer. The forward migration widening the single-key fan-out's lifecycle conjunct, re-based on the committed snapshot with the VAC-04 body acknowledgement earned rather than pasted; the regenerated canonical snapshot; the `private`-admits `RED-UNDER` arm with its apply list re-pointed at the new migration; `ARMS_FLOOR` raised to the corpus's own printed count; the arm neuter-verified.
+
+**Wave 2** *(blocked on Wave 1)* — shares `test_ledger_refresh_fanout.sql` and `scripts/mutation-runner/run.mjs` with plan 01, and its arm must come SECOND or plan 01's twin reports a wrong first failure.
+
+- [ ] 164.5.1.1-02-PLAN.md — wave 2. The cohort-agreement arm, deriving the status domain from `pg_get_constraintdef` and the admitted set from a comment-stripped `pg_get_functiondef` so neither can rot the way the literal being repaired did; the real status-domain migration added to the lane's apply list so the class neuter can ride a mutable file; neuter-verified against a genuinely NEW sixth status.
+
+**Wave 3** *(blocked on Wave 2)* — ⚠️ NOT forced by a `files_modified` overlap (02 ∩ 03 = ∅). It is forced one level down: plans 01 and 02 both assert `git diff --quiet -- supabase/tests/test_ledger_refresh_composite_arm.sql`, and plan 03 edits exactly that file, so running them together false-fails plan 02's verify. Re-slicing this phase by file disjointness alone would dissolve a real constraint.
+
+- [ ] 164.5.1.1-03-PLAN.md — wave 3. Enumerate every production site of the literal and every reader of `ALLOWED_STRATEGY_STATUSES` without changing either; annotate — never widen — the composite gate's precondition; book the three sibling-cohort findings with an owner, a trigger and a destination phase.
+
+**Wave 4** *(blocked on Waves 1-3)* — `autonomous: false`; carries the one-way door (the PROD apply) behind a blocking-human checkpoint.
+
+- [ ] 164.5.1.1-04-PLAN.md — wave 4, checkpoints (`autonomous: false`). Three reviewers before any apply is requested; the ship and the apply via `apply-test` then the PROD `apply` behind the human reviewer; then the NATURAL `25 * * * *` tick measured against the BEFORE census, and `T-164.5.1-09-07` exercised by plan 08's already-recorded mechanism.
+
+**Cross-cutting constraints** — locked decisions cited by two or more plans, so a change to any one of them reaches more than the plan that names it first:
+
+- **CTX-10** (plans 01, 03, 04) — the deribit composite `081f2912…` at 141 days stays excluded by D-01 and ⛔ must NOT be reported as fixed by this phase. Guarded by an automated polarity-aware check in plan 04 task 3.
+- **CTX-07 / CTX-08** (plans 01, 02) — both new arms are neuter-verified, and `ARMS_FLOOR` is read from the runner's own printed count, never from a raw `grep -c` (403 ≠ 392) and never cleared by a waiver (`WAIVED_CEILING` is 0).
+- **CTX-03 / CTX-04** (plans 01, 03) — the sibling April fan-out and `ALLOWED_STRATEGY_STATUSES` are MEASURED, not changed, by this phase.
+- **CTX-06** (plans 01, 02) — the cohort-agreement arm derives both sets from the catalogue, so neither can rot the way the literal being repaired did.
+- **CTX-09 / CTX-11 / CTX-12** (plans 01, 04) — the natural `25 * * * *` tick is the oracle, the composite and disconnected-key exclusions stay out of scope by name, and `T-164.5.1-09-07` is exercised here.
+
+### Phase 164.5.1.2: FANOUTSIBLINGS — the same lifecycle literal in two more production predicates and in the trade-sync constant: measure each, then decide (INSERTED)
+
+**Goal:** Phase 164.5.1.1 widened ONE lifecycle predicate because there was a PROD measurement for exactly one predicate. This phase asks, for each of the three sites it deliberately left alone, whether leaving it alone is still right — and answers each with its own evidence. ⛔ **It does NOT pre-commit to a widening.** Two of the three may be correct as they stand, and one of them interacts with a founder-locked exclusion that widening would reverse as a side effect.
+
+⛔ **MEASURED 2026-09-17 by Phase 164.5.1.1 plan 03, from the canonical bodies under `supabase/schema/functions/` (the replayed current definitions — a migration-by-migration search answers a different question and can be fooled by a later redefinition). THREE bodies carry the two-value lifecycle literal; this phase inherits the two that were not widened:**
+
+- **`enqueue_ledger_composite_refresh`** (`supabase/schema/functions/enqueue_ledger_composite_refresh.sql:266`) — **NOT SCHEDULED, and not called by anything.** Zero matching rows in the captured production cron manifest (`scripts/prod-prober/cron-manifest.json`, captured `2026-09-17T08:05:56Z` against the PROD marker), no caller in `analytics-service/` or `src/`, and `20260825140000_ledger_refresh_composite_arm.sql` applied it DORMANT in its own `RAISE NOTICE` (*"no schedule registered"*). **What a user observes today:** nothing this conjunct does is observable, because the function never runs — so widening it alone would change nothing at all. ⛔ **The 141-day composite factsheet is NOT fixed by Phase 164.5.1.1 and must never be reported as such (CTX-10).** It is excluded from the SINGLE-KEY fan-out by that function's `is_composite` conjunct (D-01, by name and by design) and from the composite fan-out by the absence of any schedule. Reversing D-01 is a separate decision with its own evidence, and this phase is where it is taken — or refused.
+- **`enqueue_poll_positions_for_all_strategies`** (`supabase/schema/functions/enqueue_poll_positions_for_all_strategies.sql:44`) — **LIVE, but not via pg_cron.** ⛔ Its absence from the cron manifest does NOT mean dormant, and reading the manifest alone gets this exactly backwards: the Railway worker's `daily_enqueue_tick` (`analytics-service/main_worker.py:1110-1121`) calls it once per UTC day under `pg_try_advisory_lock('daily_position_polling')`. **What a user observes today:** every production strategy carries the owner-only terminal status, so the daily loop's candidate set should be empty and no `poll_positions` job should be created for any of them — the SAME class of defect as the measured ledger one, on a different job kind. ⚠️ Stated as an INFERENCE from two measurements (the predicate, and that the loop runs), NOT as a production reading: counting `poll_positions` rows needs PROD and belongs to a session, not to a grep.
+  ⭐ **AND IT CARRIES A SECOND EXCLUSION THAT HIDES BEHIND THE FIRST.** The same `WHERE` also requires `EXISTS (a sync_trades job done in the last 30 days)`. `sync_trades` is issued only by `/cron-sync`, whose own `ALLOWED_STRATEGY_STATUSES` filter ALSO omits the owner-only status. An owner-only strategy therefore fails BOTH conjuncts, and **widening the lifecycle one ALONE would change nothing observable.** This is the measured reason this phase must decide rather than widen, and it is invisible to anyone who reads only the literal.
+- **`ALLOWED_STRATEGY_STATUSES`** (`analytics-service/routers/cron.py:148` = `{draft, pending_review, published}`) — ONE declaration, ONE reader (`:658`). A strategy failing the filter is dropped from `strategy_ids`, so `/cron-sync` issues it no `sync_trades` RPC, stores it no trades, and enqueues it no `derive_broker_dailies` re-entry from that path. ⚠️ **And the cursor still advances:** with every strategy on a key filtered out, `any_trades_to_store` is False, so `should_advance_cursor` is True and `last_sync_at` is bumped on a tick that stored nothing — the `last_sync_at` LIES class, on a new path.
+- ⛔ **A CORRECTION THIS PHASE MUST INHERIT, because the phase that produced the finding also disproved half of it.** `164.5.1.1-RESEARCH.md` frames the constant's gap as starving the ledger refresh of trade data. **That premise is FALSE, measured:** `run_derive_broker_dailies_job` (`analytics-service/services/job_worker.py:2624`) runs its OWN venue crawl (realized-PnL ledger + funding + equity) and, over its WHOLE body (`:2624-5956`, bounded to the next top-level statement — ⚠️ a partial line range is exactly the error that produced RESEARCH.md's wrong composite claim, and it was nearly repeated here), touches three tables through PostgREST — `strategy_analytics`, `csv_daily_returns`, `allocator_equity_derived` — and issues one RPC, `enqueue_compute_job`. **`trades` appears ZERO times.** The constant's gap costs the `trades` table and the daily recompute re-entry; it does **not** starve the ledger refresh. Do not re-derive the original framing from RESEARCH.md.
+
+**The one open question that cannot be settled from code, and is NOT this phase's to answer first:** whether an owner-only strategy shares an `api_key` with a sibling strategy whose status IS in the set — in which case `/cron-sync` still syncs the key and trades still arrive via the sibling row, and the constant's gap is narrower than it looks. That needs a production read and is handed to Phase 164.5.1.1 plan 04's PROD session, where a read is already happening.
+
+**Success Criteria** (each is a DECISION with evidence, not a change):
+
+1. For each of the three sites, a recorded verdict — widen, leave, or retire — with the measurement that justifies it. A verdict of "leave" is a valid outcome and must be recorded as explicitly as a change.
+2. If the poll-positions conjunct is widened, the `sync_trades`-in-30-days conjunct is addressed in the SAME decision or the widening is refused as inert. ⛔ Shipping one without the other is a change that cannot be observed.
+3. If the composite conjunct is widened, D-01/CTX-10 is reversed DELIBERATELY, in its own recorded decision with its own evidence — never as a side effect — and the absent schedule is dispositioned in the same breath.
+4. Any change to `ALLOWED_STRATEGY_STATUSES` names what it does to the `last_sync_at` advance, since that is the path a widening newly exposes.
+5. ⛔ Any SQL change follows this repo's apply path: three reviewers (`migration-reviewer`, `rls-policy-auditor`, `silent-failure-hunter`) BEFORE any apply, then merge → `apply-test` → the PROD `apply` behind the `Production` environment's human reviewer gate.
+
+**Requirements**: `TODOS.md` entries `FANOUT-COHORT-SIBLING-COMPOSITE-01`, `FANOUT-COHORT-SIBLING-POLL-01`, `FANOUT-COHORT-SYNC-CONSTANT-01` — all three booked 2026-09-17 by Phase 164.5.1.1 plan 03 with their measurements.
+**Depends on:** Phase 164.5.1.1 FANOUTCOHORT — its plan 04 PROD session answers the shared-key question above, and its migration is the precedent any widening here re-bases on.
 **Plans:** 0 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.5.1.1 to break down)
+- [ ] TBD (run /gsd-plan-phase 164.5.1.2 to break down)
 
 ### Phase 164.5.2: BRIDGELOCK — the per-strategy advisory lock 161.1-D1 asked for, in its own phase as DEC-4 required (INSERTED)
 
@@ -1833,6 +1924,44 @@ Plans:
 **Goal:** Close the gate-hygiene half that the 2026-09-05 re-partition removed from 164.1, each with a test that is observed to fail when its guard is neutered. (1) **OPS-08-F9**: `test_enqueue_internal_destrict.sql` gets its `ALL N ARMS EXECUTED` sentinel AND the two `ci.yml` integers (`SENTINEL_FLOOR`, `ARMS_FLOOR` — read the LIVE values off `ci.yml`; the `7→8` / `63→68` in the TODOS entry are 2026-08 figures) move in ONE diff with the per-file derivation entry `ci-anti-skip-gate.contract.test.ts` reads. (2) **OPS-08-F8**: the `sql-tests` loop stops exiting on first failure — every file runs, every red file is named, exit is non-zero once. (3) **OPS-08-TS**: nothing in `src/` retries a 40001 — `csv-finalize/route.ts:2044` is a COPY branch, not a retry, and `allocator/holdings/sync/route.ts:73-86` has no 40001 arm; add the retry at BOTH call sites. (4) **OPS-08-F2**: both pg_cron fan-out paths catch `WHEN OTHERS` and report success; record the failed target id and surface a non-zero failure count from the tick. (5) **Composite-stamp twin (161.1-D13), TS half**: Python honours the marker (`long_fetch.py:66`); the two TS enqueue sites have zero `retract`. (6) **PROC-02**: reviewers declare execution status and UNEXECUTED blocks — one agent-prompt field, the cheapest item in the corpus. (7) **PROC-03 residual**: the per-arm `RED-UNDER` convention SHIPPED in 164.4/164.4.1; what remains is discoverability — `scripts/mutation-runner/GRAMMAR.md` is referenced by nothing a newcomer reads. (8) **H-0001 residual**: shrink the `H_0001_UNCOVERED_ALLOWLIST` — it has SEVEN entries while both ledgers still say six; fix the count and the routes. Also carries WINDOWS 23 (the FALSE "Referrer-Policy does not strip" claim still at `gone/route.ts:93` and `route.test.ts:66` — a one-line correction pass). (10) **PROBER-CALIBRATION-01** — the calibration arm named `CALIBRATION: an UNGUARDED exit 0 on the probe path is still caught` (`src/__tests__/prod-prober-wiring.test.ts:292`, shipped in PR #748 / v0.77.15.0) does NOT demonstrate catching. It mutates the schedule guard to `if true; then`, then asserts only that the text changed and that the mutant no longer contains the guard string — it never re-runs the assertion it claims to calibrate (the `guardAt` / `exitZeroAt` ordering check at `:279-281`) against the mutant and observes it FAIL. ⭐ The arm would still pass with `:279-281` deleted outright, so it certifies nothing about that assertion's power. ⚠️ NOT vacuous in effect — removing the guard from the workflow IS caught, by the `toContain` at `:277` — but the arm's NAME promises a proof it does not perform, which is precisely the 'a test that cannot fail' shape this milestone exists to remove, sitting inside the prober that Phase 164.1 built to make silent failure loud. FOUND at the #748 merge gate 2026-09-06 by hand, not by a gate; booked here by founder instruction rather than into TODOS. DELIVERABLE: make the calibration EXERCISE the assertion — run the guard-position check against the mutant inside an `expect(...).toThrow()` (or the equivalent shape the file already uses for its other calibration arms, e.g. the phase-19-stability splice arm immediately below it), so the arm goes RED if `:279-281` is weakened or removed. (13) **PROGRESS-COUNT-UNDERIVED** — the `progress:` block in `STATE.md` and the `### v1.20 Progress` table in this file were BOTH wrong on 2026-09-12, in the same direction and for the same reason: every figure either was hand-set or came from a handler that counts `.planning/phases/**` ON LOCAL DISK, where the `-pr` filter has stripped four COMPLETE phases (164.2, 164.5, 164.8.2, 164.8.5 = 29 finished plans). MEASURED: the stored values read 31/15/141/137 against a true 33/19/163/160, the table said `0/? Queued NEXT` for a phase shipped in v0.77.15.0 (164.1) and `3/6 Queued 5th` for one that is 6/6 (164.8), and it carried NO ROW AT ALL for eight phases, three of them complete. ⭐ The correction shipped as prose with a stated method and no mechanism, which is the `[CHANGELOG-NO-MECHANISM]` shape this repo has a dated record of — a step that cannot fail did not fail, it was simply never run again. DELIVERABLE: `scripts/planning-progress.mjs`, printing the four integers by enumerating PLAN/SUMMARY paths across ALL REFS, dropping deletions, and EXEMPTING deletions made by the `-pr` filter commit (a filtered artifact is stranded, not withdrawn) — plus a test that the printed integers match the `progress:` block, so a stale ledger is a red check rather than a sentence nobody re-runs. ⚠️ Withdrawn plans must stay excluded from denominators and each one named: 162-10 (`3fa26831`), 164.4-12 (`9b83b064`), 164.5-08 (`7910f614`, lifted into Phase 164.5.2). ⛔ NOT in scope: changing what `gsd-tools query roadmap.analyze` does — it is upstream and `/gsd-update` overwrites it; this is a repo-owned reading that does not depend on it. ⛔ **SPLIT 2026-09-12 BY FOUNDER DECISION — items (9) MYPY-MAINPY-01, (11) MT5-GATEWAY-LOGIN-01 and (12) CI-DOCSPATH-01 MOVED OUT of this phase into THREE phases of their own — `164.6.1 MYPYSTRICT`, `164.6.2 MT5RELOGIN`, `164.6.3 CIDOCSPATH` — and their success criteria moved with them.** The founder was offered three scopings (split / keep all 13 and fix the criteria / narrow to the OPS-08 residue only), chose the split, and then chose ONE PHASE PER ITEM over a single combined GATEINFRA phase — they share nothing: different languages, different blast radii, and only the CI-path one can wedge branch protection. ⭐ The reason is KIND, not size: those three change the Python type gate, a production gateway's login path, and WHEN CI gates fire — the last being the riskiest change possible in a milestone about controls that cannot fire — while what remains here is lint rules, tests and prose corrections. Folding them together would have given the riskiest items the lightest review posture, which is the same argument that kept Phase 164.5.1's production DDL out of this phase. ⚠️ Items are NOT renumbered: the original numbering is load-bearing in `TODOS.md` cross-references and in Phase 164.1's deferral records, so (9), (11) and (12) are absent by design rather than missing. (13) **PROGRESS-COUNT-UNDERIVED** stays here and now has a criterion of its own (criterion 11 below), which it did not have when it was routed in.
 
 **Success Criteria**:
+
+⛔ **SCOPE PRUNE 2026-09-17 (founder decision) — this phase is reduced to criteria 2, 3 and 4.**
+Criteria **1, 5, 7, 10, 11, 12, 13, 14, 15 and 17 are DROPPED**: fix-or-drop, never a phase.
+They are struck from this phase's scope but their text is kept below as the record of what was
+examined and why it was let go — deleting it would leave the next reader re-deriving the same
+call.
+
+**The rule applied** (founder, 2026-09-15, scoping the anti-vacuity and deferral rules): a gate
+or deferral earns a phase ONLY when it pins DATA-INTEGRITY or USER-FACING behaviour. A structural
+or AST predicate, a log line's wording, a comment's accuracy, an internal counter nothing reads,
+a refactor-detection fence — those are fix-or-drop. *"Otherwise we will always find something."*
+
+**What survives, and why each one is not hygiene:**
+- **(2) OPS-08-TS** — nothing in `src/` retries a `40001`. A serialization failure reaches the
+  USER as an error today, at `csv-finalize` and `allocator/holdings/sync`.
+- **(3) OPS-08-F2** — both pg_cron fan-out paths catch `WHEN OTHERS` and **report success**. That
+  is a silent production failure, and it is the same class that produced Phase 164.5.1.1: a green
+  cron row over a job that did nothing.
+- **(4) Composite-stamp twin, TS half** — the two TS enqueue sites carry zero `retract`, so a
+  marker Python honours is not honoured on the TS path.
+
+**What was dropped, by criterion:** 1 (sentinel + two `ci.yml` integers + a first-failure-exit
+test loop), 5 (a reviewer-prompt field, `GRAMMAR.md` discoverability, an allowlist count of seven
+against two ledgers saying six), 7 (`PROBER-CALIBRATION-01` — its own entry records
+*"NOT vacuous in effect — removing the guard IS caught"*; the defect is that the arm's NAME
+promises a proof it does not perform), 10 (`plan-anchor-verify` reading a shipped plan as
+pending), 11 (`PROGRESS-COUNT-UNDERIVED` — now also filed upstream as
+`Werbelow/get-shit-done#5`, since the recompute is gsd-core's, not this repo's), 12 (a durable
+sink for the MT5 capability verdict — observability), 13 (`PHASEDIR-ORPHAN-GITKEEP`), 14
+(`WINDOWS-LEDGER-COUNT-DRIFT`), 15 (two planning-subject assertions), 17
+(`164.6.2-KILLSWITCH-COMMENT`).
+
+⚠️ **ONE dropped item is a judgement call and is named rather than buried: criterion 16,
+`[SERVICEKEY-MISMATCH-UNATTRIBUTED]`** — a rejected `X-Service-Key` naming WHO presented it. It
+is security ATTRIBUTION, not secret DISCLOSURE, so the scoped rule puts it on the fix-or-drop
+side; but it is the one dropped item whose absence would be felt during an incident. Re-admit it
+on the merits if that matters more than the line.
+
 
 1. OPS-08-F9 + F8: the sentinel is present, both integers moved in the same commit and the contract test passes; `sql-tests` runs every file and names every red one in a single run — proven with two deliberately red fixtures in one invocation.
 2. OPS-08-TS: both TS call sites retry on 40001, each with a test that fails when that site's retry is removed. A test that passes with the retry gone at either site does not count.

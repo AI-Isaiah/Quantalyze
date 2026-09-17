@@ -425,6 +425,52 @@ BEGIN
   -- therefore invisible here, so a non-zero count means the test project carries
   -- COMMITTED ledger-backed composites that are stale and live — a standing
   -- property of the project that a human should look at.
+  --
+  -- ---- ⛔ 2026-09-17 (Phase 164.5.1.1 FANOUTCOHORT): THIS LITERAL DOES NOT MOVE ----
+  -- The lifecycle set spelled in the WHERE clause below is NOT this file's own
+  -- opinion about which strategies matter. It MIRRORS the lifecycle conjunct of
+  -- enqueue_ledger_composite_refresh(), the function this file guards, so that
+  -- "a foreign candidate" here means exactly "a committed row that function would
+  -- enqueue". The mirroring is the whole basis on which this precondition is
+  -- allowed to abort the file.
+  --
+  -- Phase 164.5.1.1 widened the SINGLE-KEY fan-out's lifecycle conjunct
+  -- (enqueue_ledger_refresh_for_strategies, forward migration 20260917120000) to
+  -- admit the owner-only terminal status, because there was a PROD MEASUREMENT for
+  -- that one predicate: its first live tick selected zero strategies. It
+  -- deliberately did NOT widen the COMPOSITE function's conjunct — there is a
+  -- measurement for one predicate and a suspicion for the other — and it therefore
+  -- must not widen this precondition either. The two move TOGETHER or NOT AT ALL.
+  --
+  -- ⛔ Widening the guard ALONE does not make it stricter; it makes it WRONG. It
+  -- would abort this whole file on a committed row the guarded function would
+  -- itself refuse to enqueue, so that row could never have competed for the global
+  -- burst cap arm H measures. That is a FALSE ABORT on a SHARED test project,
+  -- surfacing as a precondition failure in a file that has nothing to do with the
+  -- cause — the same "surfaces somewhere else entirely" hazard the D-05 paragraph
+  -- four screens up refuses to create on a neighbouring table.
+  --
+  -- ⚠️ This phase's own RESEARCH.md, PATTERNS.md and VALIDATION.md each instruct the
+  -- OPPOSITE — widen this literal in lockstep — on the premise that the composite
+  -- function "has no status conjunct at all". MEASURED 2026-09-17 against the
+  -- canonical body, supabase/schema/functions/enqueue_ledger_composite_refresh.sql:
+  -- it HAS one. The premise is false, so the instruction built on it is refused.
+  -- Do not re-derive that instruction from those three documents.
+  --
+  -- ⛔ AND THIS PHASE DID NOT FIX THE OLDEST STALE COMPOSITE. The 141-day composite
+  -- factsheet in the 2026-09-17 census is untouched here, on purpose. It is excluded
+  -- from the SINGLE-KEY fan-out by that function's is-composite conjunct (D-01, by
+  -- name and by design), and the composite fan-out that would otherwise claim it has
+  -- NO registered schedule at all — zero matching rows in the captured production
+  -- cron manifest (scripts/prod-prober/cron-manifest.json), no caller in the worker,
+  -- and migration 20260825140000 says so in its own apply NOTICE. So widening this
+  -- conjunct would today change NOTHING observable, and reversing the D-01 exclusion
+  -- is a separate decision that needs its own evidence.
+  --
+  -- ✅ Destination for that decision, and for any future move of this literal:
+  -- Phase 164.5.1.2 FANOUTSIBLINGS, booked with its measurement in TODOS.md as
+  -- FANOUT-COHORT-SIBLING-COMPOSITE-01. Decide it there; do not decide it here.
+  -- ---------------------------------------------------------------------------
   SELECT count(*) INTO v_foreign
     FROM public.ledger_refresh_staleness lrs
     JOIN public.strategies s ON s.id = lrs.strategy_id

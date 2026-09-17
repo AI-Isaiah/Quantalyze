@@ -837,8 +837,33 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // `biting: 392`, `lane-invocations: 392` (the two independent tallies
     // AGREE), `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`,
     // exit 0. RECORD: 164.8.6-05-SUMMARY.md beside 164.8.6-05-FLOORS.log.
-    expect(armsSeen).toBe(392);
-    expect(stepsSeen).toBe(411);
+    // ⚠️ CURRENCY 2026-09-17 (phase 164.5.1.1 FANOUTCOHORT, plans 01 + 02):
+    // arms 392 -> 394 and file steps 411 -> 413. TWO new arms, both `edit`-kind
+    // twins in test_ledger_refresh_fanout.sql, so arms and steps moved by the
+    // SAME two this time — unlike the 2026-09-11 move above, where three of the
+    // eight were `sql` steps carrying no file edit. Do not read that agreement
+    // as a rule; they remain different derivations.
+    //   * P — reverts the widened lifecycle conjunct
+    //     ('published','pending_review','private') back to the narrow pair in
+    //     20260917120000_ledger_fanout_admit_private.sql, against a fixture at
+    //     status = 'private'. It proves the cohort this phase repaired.
+    //   * Q — the cohort-agreement arm. Its twin adds a SIXTH status to
+    //     20260716130000_strategies_status_private.sql's CHECK list, so what it
+    //     proves is that a FUTURE status is caught, not merely the one this
+    //     phase happened to add.
+    // ⚠️ WHAT DID NOT MOVE, AND COULD HAVE: plan 01 re-pointed all 16 pre-existing
+    // edit-kind twins in test_ledger_refresh_fanout.sql onto the superseding
+    // migration 20260917120000 IN THE SAME COMMIT as the apply-list entry. Split
+    // from it, every one of the 16 would have mutated text that
+    // `CREATE OR REPLACE` overwrites before the first assertion — applying
+    // cleanly, reporting `no-red`, and unabsorbable since WAIVED_CEILING is 0.
+    // WAIVED_CEILING stays 0; waivers stay 0. FILES_FLOOR stays 46.
+    // ⛔ RUN, not reasoned about. Corroborated by three clean-tree full-corpus
+    // lane runs by the orchestrator — `arms: 394/394/0`, `biting: 394`,
+    // `lane-invocations: 394` (the two independent tallies AGREE),
+    // `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, exit 0.
+    expect(armsSeen).toBe(394);
+    expect(stepsSeen).toBe(413);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -846,7 +871,7 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     //   inside `npm run test:coverage` — THIS test alone took 6330 ms and FAILED
     //     with `Test timed out in 5000ms`, vitest's default budget
     // The assertion did not change and nothing is being relaxed: this walk does
-    // real work proportional to the corpus (392 arms x 411 file steps, each
+    // real work proportional to the corpus (394 arms x 413 file steps, each
     // read, applied and identity-compared), so its cost grows with every arm
     // this repo adds while the default budget stays 5 s. A green file-scoped run
     // beside a red full-suite run is the exact shape VALIDATION.md warns about
@@ -1644,7 +1669,16 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // they are, measured `waivers=0`) and each has gone stale on its own.
     // MEASURED at this commit over scanCorpus: `arms=392 waivers=0
     // fileSteps=411 sqlSteps=116 totalSteps=527 needles=411`.
-    expect(needles.length).toBe(411);
+    // ⚠️ CURRENCY 2026-09-17 (phase 164.5.1.1 FANOUTCOHORT, plans 01 + 02):
+    // needles 411 -> 413. The SAME two edit-kind twins that moved `armsSeen`
+    // and `stepsSeen` (P and Q in test_ledger_refresh_fanout.sql) each carry one
+    // `find` needle, so this derivation moved by two as well. ⛔ That agreement
+    // is a coincidence of this phase's shape — two arms, both edit-kind, one
+    // needle each — and NOT a rule: this pin ranges over waivers where the
+    // others do not, and the 2026-09-11 move above is the recorded case where
+    // the three derivations moved by eight, five and five. Keep running it
+    // separately.
+    expect(needles.length).toBe(413);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

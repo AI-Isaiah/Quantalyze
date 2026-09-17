@@ -3391,6 +3391,159 @@ candidate set is empty for an unrelated reason, so `164.5.1-VERIFICATION.md` can
 Founder decision 2026-09-17: admit `private`, as one forward migration behind the three reviewers.
 Owner: **Phase 164.5.1.1 FANOUTCOHORT.**
 
+⭐ **LEDGER ARM HALF-CLOSED 2026-09-17 by Phase 164.5.1.1 FANOUTCOHORT (plans 01-03).** Shipped:
+the forward migration `20260917120000_ledger_fanout_admit_private.sql` (one executable edit — the
+single-key fan-out's lifecycle conjunct gains the owner-only terminal status — plus the
+regenerated canonical snapshot); **two** new `test_ledger_refresh_fanout.sql` gate arms, both
+neuter-verified with the mutation confirmed APPLIED before its red was accepted — arm **P**, the
+first arm in this corpus ever to promote a fixture to that status and prove it IS enqueued, and
+arm **Q**, which derives the lifecycle DOMAIN from `pg_get_constraintdef` and the ADMITTED set
+from a comment-stripped `pg_get_functiondef` so the pair cannot silently diverge again; and
+`ARMS_FLOOR` raised **392 → 394** with the three coupled pins in
+`src/__tests__/mutation-runner-floors.test.ts`, read off the runner's own printed biting count.
+
+⛔ **THE ENTRY IS NOT CLOSED, and the BLOCKS clause above is NOT lifted.** Nothing has been applied
+to any database: the migration is written and unapplied, and the apply path is merge →
+`apply-test` → the PROD `apply` behind the `Production` environment's human reviewer gate. The
+block on `T-164.5.1-09-07` lifts only when the fan-out's NATURAL `25 * * * *` tick is measured
+selecting a non-empty candidate set against the BEFORE census.
+**Owner of that half: Phase 164.5.1.1 plan 04** — `autonomous: false`, the one-way door behind a
+blocking-human checkpoint.
+⛔ And it did NOT fix the 141-day composite — see `FANOUT-COHORT-SIBLING-COMPOSITE-01` immediately
+below, which carries the measurement and the destination for that decision.
+
+### FANOUT-COHORT-SIBLING-COMPOSITE-01 — the composite fan-out carries the SAME lifecycle literal, and has no schedule at all (booked 2026-09-17)
+
+**Measured 2026-09-17** by Phase 164.5.1.1 plan 03, from the canonical bodies under
+`supabase/schema/functions/` — the replayed current definitions, which is the right place to ask
+this question, because a migration-by-migration search answers a different one and can be fooled by
+a later redefinition. `enqueue_ledger_composite_refresh` carries the two-value lifecycle conjunct at
+`supabase/schema/functions/enqueue_ledger_composite_refresh.sql:266`, identical to the one
+Phase 164.5.1.1 widened in the single-key fan-out and left alone here.
+
+⛔ **THREE OF THAT PHASE'S OWN RESEARCH ARTIFACTS SAY OTHERWISE AND ARE WRONG.**
+`164.5.1.1-RESEARCH.md` and `164.5.1.1-PATTERNS.md` both assert the composite function "has no
+status conjunct at all", and all three of RESEARCH / PATTERNS / VALIDATION then instruct that
+`supabase/tests/test_ledger_refresh_composite_arm.sql`'s foreign-candidate precondition be widened
+in lockstep. The premise is false — the researcher read a partial line range — so the instruction is
+refused, and the refusal is now written into the gate file itself beside the literal it protects.
+**Widening that guard ALONE would be a false abort, not a tighter gate:** it would abort the file on
+a committed row the guarded function would itself refuse to enqueue, on a SHARED test project,
+surfacing in a file that has nothing to do with the cause. ⛔ Do not re-derive that instruction from
+those three documents.
+
+**What a user observes today: NOTHING, and that is the finding.** The function is not scheduled and
+is not called. Zero matching rows in the captured production cron manifest
+(`scripts/prod-prober/cron-manifest.json`, captured `2026-09-17T08:05:56Z` against the PROD
+database marker), no caller anywhere in `analytics-service/` or `src/`, and
+`20260825140000_ledger_refresh_composite_arm.sql` applied it DORMANT in its own `RAISE NOTICE`
+(*"no schedule registered"*). So widening this conjunct on its own would change nothing observable,
+and the absent schedule is the larger question.
+
+⛔ **THE 141-DAY COMPOSITE IS NOT FIXED BY PHASE 164.5.1.1, AND MUST NEVER BE REPORTED AS SUCH**
+(CTX-10, founder-locked). The oldest factsheet in the 2026-09-17 census is excluded from the
+SINGLE-KEY fan-out by that function's `is_composite` conjunct — D-01, by name and by design — and
+from the composite fan-out by the absence of any schedule. **Reversing D-01 is a separate decision
+with its own evidence, and it must be taken deliberately rather than arrive as a side effect of a
+literal edit.** That is precisely the class of silent side effect Phase 164.5.1.1 existed to clean up.
+
+**TRIGGER — the condition that says this entry has come due:** anyone proposes to widen the
+composite conjunct, to register a schedule for the composite fan-out, or to "complete" the widening
+in `test_ledger_refresh_composite_arm.sql`. Any one of the three pulls in the other two and pulls in
+D-01; none of them is a one-line change.
+✅ **Destination: Phase 164.5.1.2 FANOUTSIBLINGS** — inserted into the ROADMAP 2026-09-17 directly
+after 164.5.1.1, with this measurement in its goal. Owner: that phase.
+⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
+(founder rule 2026-09-08).
+
+### FANOUT-COHORT-SIBLING-POLL-01 — the April poll-positions fan-out carries the same literal, IS live, and is excluded twice over (booked 2026-09-17)
+
+**Measured 2026-09-17** by Phase 164.5.1.1 plan 03. `enqueue_poll_positions_for_all_strategies`
+carries the same two-value lifecycle conjunct at
+`supabase/schema/functions/enqueue_poll_positions_for_all_strategies.sql:44` (source migration
+`20260412094449_compute_jobs_admin_and_defer.sql`). It enqueues `poll_positions`, a different job
+kind from the ledger refresh — which is exactly why Phase 164.5.1.1 refused to widen it in the same
+migration (CTX-03): there is a PROD measurement for the ledger fan-out and only a suspicion here,
+and widening both together would arm a SECOND, UNMEASURED production behaviour behind one apply.
+
+⛔ **ITS ABSENCE FROM THE CRON MANIFEST DOES NOT MEAN DORMANT — reading the manifest alone gets this
+exactly backwards.** It has no pg_cron row, and it runs anyway: the Railway worker's
+`daily_enqueue_tick` (`analytics-service/main_worker.py:1110-1121`) calls the RPC once per UTC day
+under `pg_try_advisory_lock('daily_position_polling')`. The conjunct is LIVE.
+
+**What a user observes today:** every production strategy carries the owner-only terminal status, so
+the daily loop's candidate set should be empty and no `poll_positions` job should be created for any
+production strategy — the same class of defect as the measured ledger one, on a different job kind.
+⚠️ **Stated as an INFERENCE from two measurements** (the predicate, and that the loop runs), NOT as a
+production reading. Counting `poll_positions` rows in `compute_jobs` needs PROD and belongs to a
+session, not to a grep. Do not promote this sentence to a measurement without taking that reading.
+
+⭐ **AND IT CARRIES A SECOND EXCLUSION THAT HIDES BEHIND THE FIRST — this is the part a reader of the
+literal alone will miss.** The same `WHERE` also requires `EXISTS (a sync_trades job done in the last
+30 days)`. `sync_trades` is issued only by `/cron-sync`, whose own `ALLOWED_STRATEGY_STATUSES` filter
+ALSO omits the owner-only status (see `FANOUT-COHORT-SYNC-CONSTANT-01` below). An owner-only strategy
+therefore fails BOTH conjuncts, so **widening the lifecycle one ALONE would change nothing
+observable** — a change that ships, passes review, and does not move the thing it was written to move.
+
+**TRIGGER:** anyone proposes to widen this conjunct, or a phase proposes to widen
+`ALLOWED_STRATEGY_STATUSES` (which changes the second conjunct's answer and makes the first one
+binding for the first time). Either one alone is inert; the pair is a real behaviour change and
+needs the measurement first.
+✅ **Destination: Phase 164.5.1.2 FANOUTSIBLINGS** — inserted into the ROADMAP 2026-09-17, with this
+measurement and the two-conjunct coupling in its goal and its success criteria. Owner: that phase.
+⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
+(founder rule 2026-09-08).
+
+### FANOUT-COHORT-SYNC-CONSTANT-01 — the trade-sync constant never learned the owner-only status, and the cursor advances anyway (booked 2026-09-17)
+
+**Measured 2026-09-17** by Phase 164.5.1.1 plan 03, which MEASURED this constant and deliberately did
+not change it (CTX-04 — measure who reads it and what each reader does, then decide).
+`ALLOWED_STRATEGY_STATUSES` (`analytics-service/routers/cron.py:148`) is
+`{draft, pending_review, published}`. **ONE declaration, ONE reader:** `cron.py:658`, inside the
+`/cron-sync` handler, where it filters the embedded `strategies` rows down to `strategy_ids`. The
+constant's own three-line comment states the harm it exists to prevent — syncing into an archived or
+deleted strategy can overwrite its submission snapshot and flip its approval-gate verdict between
+Submit and Approve — so it is a real guard, not an oversight; it simply never learned about a status
+that shipped in July 2026.
+
+**What a strategy that fails the filter gets:** dropped from `strategy_ids`, therefore no
+`sync_trades` RPC, therefore no rows in `trades`, therefore no `derive_broker_dailies` re-entry from
+this path (`recompute_strategy_ids` is built from strategies that actually stored trades).
+⚠️ **AND THE CURSOR STILL ADVANCES.** With every strategy on a key filtered out,
+`any_trades_to_store` is False, so `should_advance_cursor` is True and `last_sync_at` is bumped on a
+tick that stored nothing — a new instance of the `last_sync_at` LIES class, on a path where the
+"nothing to store" and "nothing eligible to store into" cases are indistinguishable downstream.
+
+⛔ **A CORRECTION, and it narrows this entry rather than widening it.** `164.5.1.1-RESEARCH.md`
+frames this gap as starving the LEDGER REFRESH of trade data — "a newly-admitted strategy may be
+refreshed against trade data that cron never synced". **That premise is FALSE, measured:**
+`run_derive_broker_dailies_job` (`analytics-service/services/job_worker.py:2624`) runs its OWN venue
+crawl (realized-PnL ledger, funding, equity) and, measured over its WHOLE body — `:2624-5956`,
+bounded to the next TOP-LEVEL statement, because ⚠️ a partial line range is precisely the error
+that produced RESEARCH.md's wrong claim about the composite conjunct and it was nearly repeated
+here — touches THREE tables through PostgREST (`strategy_analytics`, `csv_daily_returns`,
+`allocator_equity_derived`) and issues ONE RPC (`enqueue_compute_job`). **`trades` appears ZERO
+times.** It is a chain tail POSITIONALLY (`JOB_CHAIN_FOLLOW_ON`), not a consumer of the chain
+head's output. So the gap costs the `trades`
+table and the daily recompute re-entry, and does NOT block what Phase 164.5.1.1 just shipped. Do not
+re-derive the original framing from RESEARCH.md.
+
+**The one question that cannot be settled from code:** whether an owner-only strategy shares an
+`api_key` with a sibling strategy whose status IS in the set — in which case `/cron-sync` still syncs
+the key and trades still arrive via the sibling row, and this gap is narrower than it looks. Needs a
+production read; handed to Phase 164.5.1.1 plan 04's PROD session, where a read is already happening.
+
+**TRIGGER:** the production read above comes back showing owner-only strategies with NO in-set
+sibling on the same key; or any surface that reads `trades` (not `csv_daily_returns`) is asked to
+show data for an owner-only strategy; or the poll-positions conjunct in
+`FANOUT-COHORT-SIBLING-POLL-01` is proposed for widening, which makes this constant binding.
+✅ **Destination: Phase 164.5.1.2 FANOUTSIBLINGS** — inserted into the ROADMAP 2026-09-17, with the
+readers, the cursor-advance consequence and the correction above carried into its goal. Owner: that
+phase. ⛔ It decides; it does not pre-commit to widening the set — the guard's stated harm is real
+and any widening must say what it does to the approval-gate snapshot.
+⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
+(founder rule 2026-09-08).
+
 ### CRON-DRIFT-01 / CRON-OBS-01 — a PROD cron job 401'd hourly for 7 DAYS behind a green cron history (booked 2026-09-01)
 
 **Measured 2026-09-01, live in PROD.** Sentry `QUANTALYZE-18` (169 events, escalating, first seen

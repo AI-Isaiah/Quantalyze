@@ -103,8 +103,15 @@ _STALENESS_VIEW_MIGRATION_NAME: Final[str] = (
 # instrument), so it is the LIVE definition and the pointers must name it or
 # every body-shape gate below would guard a superseded body. It keeps the
 # $fanout$ / $composite$ / $verify$ tags for exactly that reason.
+# ⛔ MOVED AGAIN 2026-09-17 (Phase 164.5.1.1 FANOUTCOHORT), in the SAME COMMIT as
+# the migration that superseded the fan-out body. 20260917120000 re-defines the
+# FAN-OUT ONLY -- it widens the lifecycle conjunct to admit `private` -- so the
+# two pointers DIVERGE here for the first time: the composite one below stays at
+# 20260911130000, which is still the live definition of that function. The new
+# file carries the $fanout$ and $verify$ tags and deliberately NOT $composite$,
+# which is what makes the divergence checkable rather than a matter of trust.
 _FANOUT_MIGRATION_NAME: Final[str] = (
-    "20260911130000_ledger_fanout_grantees_and_dormancy.sql"
+    "20260917120000_ledger_fanout_admit_private.sql"
 )
 _COMPOSITE_MIGRATION_NAME: Final[str] = (
     "20260911130000_ledger_fanout_grantees_and_dormancy.sql"
@@ -116,6 +123,9 @@ _COMPOSITE_MIGRATION_NAME: Final[str] = (
 # a silent further definition is still a distinguishable failure.
 _FANOUT_SUPERSEDED_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
     "20260907130000_ledger_refresh_switch_to_system_flags.sql",
+    # Live until 2026-09-17, superseded by 20260917120000. Enumerated, never
+    # dropped: the applied file is the record of what ran on PROD.
+    "20260911130000_ledger_fanout_grantees_and_dormancy.sql",
 })
 _COMPOSITE_SUPERSEDED_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
     "20260907130000_ledger_refresh_switch_to_system_flags.sql",
@@ -256,6 +266,20 @@ _PHASE_MIGRATION_WINDOW_2_END: Final[str] = "20260907130001"
 _PHASE_MIGRATION_WINDOW_3_START: Final[str] = "20260911130000"
 _PHASE_MIGRATION_WINDOW_3_END: Final[str] = "20260911130001"
 
+# ⛔ A FOURTH DISJOINT RANGE, added in the SAME COMMIT as 20260917120000 (Phase
+# 164.5.1.1 FANOUTCOHORT) — never by widening range 3, which would swallow every
+# migration stamped between 20260911130001 and 20260917120000 into a raw
+# comments-included scan they were never reviewed against. Half-open and one
+# second wide, like its three siblings.
+#
+# ⚠️ What this range ARMS, and it was measured before it was added: everything
+# inside it is scanned RAW by floor 4, comments included. MEASURED 2026-09-17 on
+# 20260917120000 — 0 occurrences of the schedule verb, 0 of the unschedule verb,
+# 0 of a `PERFORM` on the fan-out. The range was written after that reading, not
+# before it.
+_PHASE_MIGRATION_WINDOW_4_START: Final[str] = "20260917120000"
+_PHASE_MIGRATION_WINDOW_4_END: Final[str] = "20260917120001"
+
 # ⛔ THE FLOOR IS A SET, NOT A COUNT. `len(paths) >= 4` is satisfiable by any
 # four files that happen to land in the window; this names the exact migrations
 # that MUST be inside the scan, so the check fails loudly when a pointer goes
@@ -269,6 +293,14 @@ _PHASE_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
     # so that a redating (or a silently dropped second range) fails floor 1 by
     # name instead of shrinking the scan quietly.
     _FANOUT_MIGRATION_NAME,
+    # ⛔ And the SUPERSEDED definitions BY NAME too, 2026-09-17. Until now this
+    # set named only the live body, so moving _FANOUT_MIGRATION_NAME forward
+    # silently un-pinned the file it used to point at: window 3 still covered
+    # 20260911130000, but nothing named it any more, and a redating out of that
+    # window would have gone quiet — which is the exact failure mode the
+    # set-not-a-count comment above exists to prevent. Naming every generation
+    # makes the floor survive the next pointer move without an edit.
+    *_FANOUT_SUPERSEDED_MIGRATION_NAMES,
 })
 
 # ⛔ THE ESCAPE CHECK'S TOKENS. A window is still a selection, so something has
@@ -473,6 +505,7 @@ _PHASE_MIGRATION_WINDOWS: Final[tuple[tuple[str, str], ...]] = (
     (_PHASE_MIGRATION_WINDOW_START, _PHASE_MIGRATION_WINDOW_END),
     (_PHASE_MIGRATION_WINDOW_2_START, _PHASE_MIGRATION_WINDOW_2_END),
     (_PHASE_MIGRATION_WINDOW_3_START, _PHASE_MIGRATION_WINDOW_3_END),
+    (_PHASE_MIGRATION_WINDOW_4_START, _PHASE_MIGRATION_WINDOW_4_END),
 )
 
 
