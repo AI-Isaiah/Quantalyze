@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.77.45.3] - 2026-09-17 — the ledger refresh is live, the oracle agrees again, and plan 09 finally has a SUMMARY
+
+Phase 164.5.1 plan 09's tail: the second half of the production session, plus the two artifacts
+whose absence was the only reason the phase could not be called closed.
+
+### Changed
+- **The 161.1 ledger refresh is ACTIVE in production.** `ledger_refresh_enabled = true`, and
+  `ledger_refresh_fanout` is registered as jobid 40 on `25 * * * *`. Step 3's DEFER — pre-written
+  by plan 08 as a legitimate outcome and genuinely taken earlier in the session — was **lifted on a
+  later measurement, not backdated over the defer**; both states stand in the execution record in
+  the order they happened. Preconditions were read before the write, so the session could not
+  register a job that would fire into a dormant system.
+- **`scripts/prod-prober/cron-manifest.json` re-captured a second time**, by
+  `prod-prober.yml`'s `capture-manifest` mode (run `35197830300`, `captured_at`
+  `2026-09-17T08:05:56Z`, `database_marker` reading PRODUCTION) — never hand-edited, per D3.
+  Reviewed job by job: 14 → 15 jobs, exactly ONE addition and no other change. jobid 40,
+  `SELECT public.enqueue_ledger_refresh_for_strategies();`, `command_sha256` `c0d4cda3…`. No
+  existing job's sha moved and none disappeared.
+
+### Added
+- **`164.5.1-09-SUMMARY.md`** — plans 01-08 each had one, plan 09 did not, which is precisely why
+  the phase read as open while all of its work was done.
+
+### Notes
+- **`cron-drift` has been correctly RED since the registration, and this release is what clears
+  it.** The committed oracle said 14 jobs while production said 15, so the arm reported jobid 40
+  as a defect — the oracle doing its job. The zero-defect reading for criterion 2 must be taken
+  from a prober run on `main` **after** this lands, and is deliberately not claimed here.
+- **Two items stay open, both production readings rather than code.** (1) The staleness oracle has
+  not moved yet: re-read at 08:05Z it is byte-identical to the P4 BEFORE census — 6 strategies,
+  `min 23 / avg 52.50 / max 141` days — which is correct, because the fan-out runs on `25 * * * *`
+  and no tick had fired since activation. ⛔ Success is `days_since_last_return` going DOWN, never
+  a green job. (2) `T-164.5.1-09-07`, the fan-out's all-candidates-failed branch, became reachable
+  at activation and has still never been deliberately exercised.
+- **`WINDOWS.md` entry 60 stays `open`** by its own definition until `164.5.1-VERIFICATION.md`
+  reports `passed`, and the verifier runs after those two readings, not before. `/gsd-secure-phase`
+  likewise needs a re-run: `164.5.1-SECURITY.md` scopes `T-164.5.1-09-02` and `-09-07` OUT of the
+  Wave A verdict and marks them PENDING.
+- **`MT5_PASSWORD` correctness remains UNPROVEN.** It is set on the right service, but the relogin
+  heal has exactly one caller (`main.lifespan`'s boot task) and fires only on `-6`, and the
+  terminal had already been re-authorized by hand before the deploy landed.
+
 ## [0.77.45.2] - 2026-09-17 — the live match_engine_cron row now runs the mechanism the repo describes, and the committed oracle says so
 
 Phase 164.5.1 plan 09, the founder-run production session. Wave A shipped in 0.77.45.0; this is the
