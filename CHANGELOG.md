@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.77.45.4] - 2026-09-17 — the fan-out's first live tick enqueued nothing, and the reason is a cohort both halves of the system disagree about
+
+Phase 164.5.1's own measurement of what it activated. The activation works; what it acts on does
+not exist.
+
+### Notes
+- **The first fan-out tick after activation selected ZERO strategies.** Measured on PROD
+  (`cron.job_run_details` runid `11159`, jobid 40, `08:25:00.371Z`): the job ran, was **not**
+  dormant (`ledger_refresh_enabled = true`, and zero `cron_runs` rows carrying the dormant
+  branch's own `cron_name`), ran through to candidate selection and enqueued nothing.
+  `ledger_refresh_staleness` is byte-identical to the BEFORE census — 6 strategies,
+  `min 23 / avg 52.50 / max 141` days.
+- **The cause is one conjunct.** `cooldown_jobs = 0` and `inflight = 0` for all six strategies, so
+  neither the 20-hour attempt cooldown nor the in-flight guard excludes anything. The binding
+  conjunct is `s.status IN ('published','pending_review')`, and every production strategy carries
+  `status = 'private'` — the owner-only terminal status for allocator-contributed strategies
+  (CONTRIB-02, Phase 110). `ledger_refresh_staleness` does not filter on `status`, so the view and
+  the fan-out disagree about the cohort totally: 6 stale rows, 0 eligible. The string `private`
+  appears **0 times** in both migrations — the case was never considered, not considered and
+  rejected.
+
+### Root cause
+- The fan-out mirrors `ALLOWED_STRATEGY_STATUSES` (`analytics-service/routers/cron.py:148` =
+  `{draft, pending_review, published}`) minus `draft`. That set was never widened when `private`
+  shipped in July 2026, and the sibling April fan-out carries the same pair.
+
+### Fixed
+- **Two readings taken earlier in this same session are corrected in place rather than replaced.**
+  (1) `return_message: "1 row"` on a cron row is NOT "one job enqueued" — the function returns an
+  INTEGER and `SELECT f()` always returns one row. `TODOS.md`'s own `CRON-DRIFT-01` entry already
+  records this exact misreading from 2026-09-01, where `succeeded / '1 row'` sat on top of six
+  consecutive 401s; this is the second instance of one class, five weeks apart. (2) The
+  hypothesis that a `failed_retry` backlog from the MT5 outage was blocking the fan-out is
+  **falsified** by the per-strategy measurement.
+
+### Added
+- **Phase 164.5.1.1 FANOUTCOHORT**, inserted directly after 164.5.1 and deliberately ahead of
+  164.5.2 BRIDGELOCK, 164.5.3 MT5CREDS and 164.5.4 MT5RECON-GAP: it is a SQL migration on a
+  venue-agnostic conjunct, not MT5 work, and it **blocks 164.5.1's own verification** —
+  `T-164.5.1-09-07` cannot be exercised while the candidate set is empty for an unrelated reason,
+  so `WINDOWS.md` entry 60 cannot close until it lands. Booked as
+  `[FANOUT-COHORT-PRIVATE-01]` in `TODOS.md`.
+- Founder decision 2026-09-17: admit `private`, as one forward migration behind the three
+  reviewers, then `apply-test`, then the PROD apply behind its human reviewer gate. ⛔ The deribit
+  composite at 141 days stays excluded by D-01 by design and must not be reported as fixed by it.
+
 ## [0.77.45.3] - 2026-09-17 — the ledger refresh is live, the oracle agrees again, and plan 09 finally has a SUMMARY
 
 Phase 164.5.1 plan 09's tail: the second half of the production session, plus the two artifacts
