@@ -150,22 +150,33 @@ when their credential is absent — neither ever skips.
 
 ### Current reading — ⛔ SUPERSEDED. The block below is the 2026-09-07 reading and it is STALE.
 
-⛔ **CORRECTED 2026-09-17.** The shipped constants, re-read BY SYMBOL from
-`scripts/mutation-runner/run.mjs` (`grep -nE '^export const (FILES_FLOOR|ARMS_FLOOR|WAIVED_CEILING)'`):
+⛔ **THE NUMBERS ARE NOT WRITTEN HERE ANY MORE, AND THAT IS THE FIX.** Run this:
 
-| constant | shipped value | line |
+```bash
+grep -nE '^export const (FILES_FLOOR|ARMS_FLOOR|WAIVED_CEILING)' scripts/mutation-runner/run.mjs
+```
+
+**Why the table that stood here was deleted rather than corrected a fourth time.** This section
+carried a `constant | shipped value | line` table, and it went stale FOUR times:
+
+| when | prose said | shipped was |
 |---|---|---|
-| `FILES_FLOOR` | **46** | `:877` |
-| `ARMS_FLOOR` | **392** | `:1866` |
-| `WAIVED_CEILING` | **0** | `:1980` |
+| (recorded in `docs/sql-gate-lineage.md`) | 380 | 384 |
+| 2026-09-11 → 2026-09-17, six days | 384 | 392 |
+| corrected 2026-09-17 morning | 392 | 392 ✅ |
+| **same day, hours later** | 392 @ `:1866` | **394 @ `:1909`** |
 
-**`ARMS_FLOOR` moved 384 → 392 and this file went on saying 384 for six days.** That is the
-SECOND instance of the exact divergence the boxed rule below already warns about — the first is
-recorded in `docs/sql-gate-lineage.md` as prose-said-380 / shipped-384. A rule that says "read it
-by symbol" did not stop the prose from drifting again, because nothing re-reads the prose. Treat
-that as the finding, not the number.
+The fourth one is the argument. The table was written by someone who had just finished writing
+the boxed rule two paragraphs below — *"Read `FILES_FLOOR`, `ARMS_FLOOR` and `WAIVED_CEILING` by
+SYMBOL … never from a number restated in this file"* — and it was stale again within hours,
+because a phase moved the floor and prose does not move with a floor. A restated constant beside
+a rule forbidding restated constants is not a documentation slip; it is the defect the rule
+describes, sitting inside the rule. The line numbers rot faster still: `:1866` and `:1980` were
+both wrong by the next commit, which is the `[164.7-CITATION-DRIFT-01]` class this file already
+records elsewhere and answers the same way — cite by symbol, do not re-number prose that will
+drift again.
 
-⚠️ **NO current arm tally is stated here, deliberately.** A floor of 392 implies the corpus holds
+⚠️ **NO arm tally, and now no floor either, is stated here.** A floor implies the corpus holds
 at least 392 biting arms, but the tally, the `lane-blocked` class and the `unreachable:` count are
 RUN OUTPUTS — inventing them from the floor would be exactly the fabrication this section exists
 to prevent. Run `node scripts/mutation-runner/run.mjs` and read them off it.
