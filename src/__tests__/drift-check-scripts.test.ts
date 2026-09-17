@@ -4525,10 +4525,18 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=10 and ARMS_FLOOR=203 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=10 and ARMS_FLOOR=206 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
+    //
+    // ⚠️ RAISED 2026-09-17 (164.5.1, arm R): ARMS_FLOOR 203 -> 206, SENTINEL_FLOOR
+    // unchanged at 10 because no FILE was added. This pin catches reductions, and
+    // a raise carrying its reason is exactly what it is meant to allow through.
+    // ⛔ This is the FOURTH place that number lives: ci.yml's derivation table,
+    // ci.yml's ARMS_FLOOR (their sum), the gate file's own `ALL N ARMS EXECUTED`
+    // sentinel — whose value the anti-skip gate reads with `... | head -1`, so the
+    // first PROSE mention in the file wins — and here. Moving one moves all four.
     //
     // MOVED 2026-09-06 (Phase 164.2 plan 10), 8/166 -> 9/180. Phase 164.2 plan
     // 07's commit 39cc7ae4 added supabase/tests/test_sync_status_curated_
@@ -4583,7 +4591,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=203", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=206", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

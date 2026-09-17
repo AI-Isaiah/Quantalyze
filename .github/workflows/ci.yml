@@ -3539,11 +3539,19 @@ jobs:
           # sql-tests made sql-tests look like a mutation-runner job. The arm is
           # right to be blunt — it exists so a new job cannot run these scripts
           # unpinned — so the comment yields, not the test.
+          # ⚠️ Re-measured 2026-09-17 (164.5.1, arm R): the fan-out file goes
+          # 15 -> 18. Its own closing sentinel had been stuck at 15 and did not
+          # list arms P or Q although both run, so this table AGREED WITH A STALE
+          # NUMBER — consistent, and wrong on both sides. ⛔ This count and that
+          # roster are cross-checked by ci-anti-skip-gate.contract.test.ts, which
+          # reads the rows below AS A CONTIGUOUS, EQUALLY-INDENTED BLOCK: prose
+          # inserted between them — or at a different indent — makes the table
+          # read as GONE. Keep prose above this line.
           #   test_analytics_service_settings_and_vault_tick.sql 13
           #   test_create_wizard_strategy_for_key.sql         9
           #   test_get_verified_cohort_rank_gate.sql          6
           #   test_ledger_refresh_composite_arm.sql          15
-          #   test_ledger_refresh_fanout.sql                 15
+          #   test_ledger_refresh_fanout.sql                 18
           #   test_ledger_refresh_staleness.sql               8
           #   test_retention_crons_safe.sql                   4
           # Re-measured 2026-08-27 (164-06): test_strategy_shares_rls.sql goes
@@ -3613,7 +3621,7 @@ jobs:
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
           SENTINEL_FLOOR=10  # files declaring a sentinel
-          ARMS_FLOOR=203     # 13 + 9 + 6 + 15 + 15 + 8 + 4 + 103 + 7 + 23
+          ARMS_FLOOR=206     # 13 + 9 + 6 + 15 + 18 + 8 + 4 + 103 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
