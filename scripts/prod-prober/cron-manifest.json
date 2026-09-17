@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "normalization": "ws-collapse-v2",
-  "captured_at": "2026-09-17T06:28:08.107Z",
+  "captured_at": "2026-09-17T08:05:56.340Z",
   "database_marker": "⛔ PRODUCTION — real customer data. No seeds, no fixtures, no DELETE without a scoped id.",
   "jobs": [
     {
@@ -43,6 +43,16 @@
       "username": "postgres",
       "command_sha256": "4aa649d3e652f1989dabcbb1fed1561d24e21feca812241ba878d3a560b410f0",
       "command": "SELECT public.compute_bridge_outcome_deltas();"
+    },
+    {
+      "jobid": 40,
+      "jobname": "ledger_refresh_fanout",
+      "schedule": "25 * * * *",
+      "active": true,
+      "database": "postgres",
+      "username": "postgres",
+      "command_sha256": "c0d4cda37a461991237027c092766f6e38547ef3d6b07f795f35c13fb26b1e24",
+      "command": "SELECT public.enqueue_ledger_refresh_for_strategies();"
     },
     {
       "jobid": 1,
