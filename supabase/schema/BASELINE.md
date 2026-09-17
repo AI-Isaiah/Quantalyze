@@ -48,10 +48,10 @@ SP-M03 records what happens when they drift apart.
 
 | | |
 |---|---|
-| Taken | 2026-09-12 |
+| Taken | 2026-09-17 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
 | Supabase CLI | 2.84.2 (CI pins 2.98.2 — see the caveat below) |
-| sha256 | `a00b3cc5ac6346130b4cd522c7e081fd42d306ccb59dbadcb2a130e5b67a36c1` |
+| sha256 | `4335f5242fd561cb7e40867da3f6bcdbb44860d24d7ed86b4eca601f4a7490c1` |
 | Shape | 62 tables, 154 policies, 122 function statements (120 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
@@ -59,6 +59,42 @@ Secret-scanned before commit with the exact pattern recorded in
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-09-17 — the Phase 164.5.1.1 apply, one function body, nothing else
+
+⛔ **A SEPARATE REVIEWED ACT, taken AFTER the apply and not before it.** Taking it before would
+have recorded a production that did not yet exist. The apply is run **`35247369125`**
+(`apply-test` success → founder-approved `Production` gate → `apply` success); the dump followed
+it. The prior capture (2026-09-12, sha256 `a00b3cc5…`) moves to `4335f524…`.
+
+**Why it was taken at all:** `sql-gate-lint` had been RED on `main` since the Phase 164.5.1.1
+migration applied — the committed baseline still described PROD's pre-apply body for
+`enqueue_ledger_refresh_for_strategies`. That is the intended sequence in this repo, not a
+failure: gates carrying applied-ness probes are red on a migration PR by construction
+(`[164.8-PUSH-RACE-VAC08]`), and the baseline regeneration is what clears them. Precedent: PR #778
+merged red, PR #782 cleared it.
+
+**MEASURED, not assumed:**
+
+| | |
+|---|---|
+| shape | **UNCHANGED** — 62 tables, 154 policies, 122 function statements, 126 indexes |
+| data statements | **0** |
+| diff | 37 added / 9 removed, read hunk by hunk |
+| hunk attribution | BOTH hunks belong to `20260917120000_ledger_fanout_admit_private.sql` — the widened lifecycle conjunct with its comment, and the check-7b comment that the same migration restored. Nothing else moved. |
+| baseline-content-drift | `MATCH 118, DRIFT 4, findings 1` → **`MATCH 119, DRIFT 3, findings 0`**, exit 0 |
+| secret scan | **0 hits** across all five classes, `grep -a` |
+
+⛔ **`CONTENT_DRIFT_ALLOWLIST` NOT edited — it neither grew nor shrank.** Still exactly three rows
+(`check_fan_in_ready/1`, `reject_sentinel_writes/0`, `retention_delete_guard/0`), the permanent
+DRIFT-04/06 family whose own `clearedBy` says a regeneration will never clear them — and it did
+not. The row this apply would have needed was never added: the drift cleared itself, which is the
+only legitimate way. The list may only shrink.
+
+⚠️ **What this regeneration could have absorbed silently, checked rather than trusted:** a `db
+dump` captures whatever PROD holds, so an unrelated table, policy or body that drifted underneath
+us would ride along unnoticed. The shape row above is that check — every count is identical to the
+2026-09-12 capture, and the only textual movement is the two attributed hunks.
 
 ### Regenerated 2026-09-12 — the Phase 164.8.6 apply, and NOTHING else came with it
 
