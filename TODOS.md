@@ -3518,9 +3518,13 @@ tick that stored nothing — a new instance of the `last_sync_at` LIES class, on
 frames this gap as starving the LEDGER REFRESH of trade data — "a newly-admitted strategy may be
 refreshed against trade data that cron never synced". **That premise is FALSE, measured:**
 `run_derive_broker_dailies_job` (`analytics-service/services/job_worker.py:2624`) runs its OWN venue
-crawl (realized-PnL ledger, funding, equity) and touches exactly ONE table through PostgREST —
-`strategy_analytics`. It never reads `trades`. It is a chain tail POSITIONALLY
-(`JOB_CHAIN_FOLLOW_ON`), not a consumer of the chain head's output. So the gap costs the `trades`
+crawl (realized-PnL ledger, funding, equity) and, measured over its WHOLE body — `:2624-5956`,
+bounded to the next TOP-LEVEL statement, because ⚠️ a partial line range is precisely the error
+that produced RESEARCH.md's wrong claim about the composite conjunct and it was nearly repeated
+here — touches THREE tables through PostgREST (`strategy_analytics`, `csv_daily_returns`,
+`allocator_equity_derived`) and issues ONE RPC (`enqueue_compute_job`). **`trades` appears ZERO
+times.** It is a chain tail POSITIONALLY (`JOB_CHAIN_FOLLOW_ON`), not a consumer of the chain
+head's output. So the gap costs the `trades`
 table and the daily recompute re-entry, and does NOT block what Phase 164.5.1.1 just shipped. Do not
 re-derive the original framing from RESEARCH.md.
 
