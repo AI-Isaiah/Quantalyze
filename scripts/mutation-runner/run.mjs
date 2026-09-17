@@ -1883,7 +1883,30 @@ export const FILES_FLOOR = 46;
 //                LINES anywhere in the corpus, including the unreachable class
 //                and this file's own prose; `biting` counts arms that EXECUTED
 //                and reddened THEMSELVES first. Read the runner.
-export const ARMS_FLOOR = 393;
+//   ⚠️ CURRENCY 2026-09-17 (phase 164.5.1.1 FANOUTCOHORT, plan 02): 393 -> 394.
+//                ONE new arm — arm Q in test_ledger_refresh_fanout.sql, the
+//                COHORT-AGREEMENT arm: it derives the lifecycle DOMAIN from
+//                `pg_get_constraintdef('strategies_status_check')` and the
+//                ADMITTED set from a comment-stripped `pg_get_functiondef` of
+//                the deployed fan-out, and refuses any status the catalogue
+//                admits that the fan-out does not name and that is not one of
+//                the two deliberate exclusions. It lands in the same
+//                already-annotated file as arm P, so FILES_FLOOR does NOT move
+//                and `coverage: files 46/73` is unchanged.
+//                MEASURED on a full-corpus lane run at this plan's final SQL
+//                bytes, and READ OFF THE RUNNER'S OWN OUTPUT rather than
+//                derived: `arms: 394/394/0`, `biting: 394`,
+//                `lane-invocations: 394` (the two independent tallies AGREE),
+//                `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`,
+//                `pending: 0`, `✅ No defects`, exit 0, and the per-file row
+//                `test_ledger_refresh_fanout.sql: sections 22 / judged 22 /
+//                annotated 22 / waived 0 / biting 22`.
+//                ⛔ THE GREP GAP WIDENED AGAIN, which is the point of saying so
+//                every time: the naive `grep -c "RED-UNDER-M:"` sum is 405 at
+//                these bytes against a biting count of 394. It has never once
+//                equalled the biting count and must never be used to derive
+//                this constant.
+export const ARMS_FLOOR = 394;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

@@ -239,6 +239,37 @@
 --     mutate text that is overwritten before the first assertion runs — TRAP E /
 --     C-02 a third time. No fixture was added: the new migration reads no table
 --     this list does not already provide.
+-- ⭐ PHASE 164.5.1.1 plan 02 added ONE MORE, and it is the only entry in this
+--   list that exists to make a CATALOGUE READ possible rather than to define a
+--   body an arm calls:
+--   * `20260716130000_strategies_status_private.sql` sits between
+--     `20260710130000_stitch_composite_kind.sql` and
+--     `20260825120000_ledger_refresh_staleness_view.sql` — chronological
+--     position in the migration chain, AFTER 01-fixture-core.sql creates
+--     `strategies` and well BEFORE the last entry, which must stay last. It
+--     only ALTERs; it creates no table, so it is safe anywhere after the core
+--     fixture.
+--     WHY IT IS HERE: arm Q below reads
+--     `pg_get_constraintdef('strategies_status_check')` to learn the lifecycle
+--     DOMAIN from the catalogue instead of from a hand-written list. The core
+--     fixture declares `strategies.status` as a bare nullable TEXT with NO
+--     constraint, so without this entry that read returns NULL on every lane
+--     and the arm could only ever report COULD NOT MEASURE.
+--     ⛔ AND WHY THE STAND-IN FIXTURE WAS NOT USED INSTEAD.
+--     `scripts/pg-lane/fixtures/30-fixture-strategies-status-default.sql`
+--     carries the same constraint and is used by another gate, but GRAMMAR
+--     rule 4 refuses any twin whose `file` is under `scripts/pg-lane/fixtures/`
+--     — and arm Q's twin must mutate exactly this constraint, because the only
+--     mutation that proves the arm catches a FUTURE status is the ARRIVAL of a
+--     sixth one. A stand-in cannot carry that twin; the real migration can.
+--     Its pre-flight `DO` block reads `strategies` rows, which on a lane is a
+--     no-op: the table is empty at apply time.
+--     ⚠️ The entry puts a live CHECK on `strategies.status` for EVERY arm in
+--     this file. Every fixture here inserts an explicit status and every value
+--     used is inside the domain (`draft`, `published`, `private`), which is a
+--     prediction the full-corpus run MEASURED. If an arm ever reddens with a
+--     check violation, the cause is a fixture writing an out-of-domain status
+--     and the fix is the FIXTURE — never a weakening of the constraint.
 -- Proven on the 13-entry list this file carried through Phase 164.7 (LINEAGE,
 -- not a live reading): the completion notice below printed with its full roster
 -- A-L, and the runner reported `per-arm lane time: mean 1.1s` over three
@@ -259,7 +290,7 @@
 -- ⚠️ The sentinel string itself is deliberately NOT repeated in this header:
 -- this file's own verify pins it to exactly ONE occurrence, so that the roster
 -- can only be edited where it is RAISED.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","scripts/pg-lane/fixtures/31-fixture-system-flags.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","scripts/pg-lane/fixtures/33-fixture-cron-runs.sql","supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","supabase/migrations/20260917120000_ledger_fanout_admit_private.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260716130000_strategies_status_private.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","scripts/pg-lane/fixtures/31-fixture-system-flags.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","scripts/pg-lane/fixtures/33-fixture-cron-runs.sql","supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","supabase/migrations/20260917120000_ledger_fanout_admit_private.sql"]}
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
@@ -321,6 +352,20 @@ DECLARE
                          --         inside that block and asserted after it.
   v_grantees   TEXT;     -- arm S1: the WHOLE EXECUTE grantee set, comma-joined
   v_owner_name TEXT;     -- arm S1: … and the owner name it must equal exactly
+  -- ⛔ Arm Q (Phase 164.5.1.1 plan 02) adds five more under the SAME rule as
+  --    arm J's three above: a missing DECLARE is a 42601 that stops the WHOLE
+  --    block compiling, so every arm would vanish together and the file would
+  --    exit on a message naming no arm.
+  v_domain_def TEXT;     -- arm Q: pg_get_constraintdef of strategies_status_check
+  v_fanout_def TEXT;     -- arm Q: the comment-stripped body, read for ITS OWN
+                         --        raise. It is deliberately not arm 0's v_body:
+                         --        arm Q's COULD-NOT-MEASURE diagnostics must be
+                         --        raised by arm Q, and an arm that borrows
+                         --        another arm's variable inherits that arm's
+                         --        silence when the read is the thing that broke.
+  v_admitted   TEXT;     -- arm Q: the parenthesised lifecycle list, extracted
+  v_status     TEXT;     -- arm Q: loop variable over the catalogue's domain
+  v_checked    INTEGER;  -- arm Q: how many statuses the loop actually asserted
 BEGIN
   -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
   -- RED-UNDER: DROP the function on the live lane after the migrations have
@@ -1032,6 +1077,125 @@ BEGIN
   END IF;
 
   UPDATE strategies SET status = 'draft' WHERE id = s_p;
+
+  -- ======================================================================
+  -- ARM Q — COHORT AGREEMENT. THE STALENESS VIEW AND THE FAN-OUT MAY NOT
+  -- DISAGREE ABOUT WHICH LIFECYCLE STATUSES ARE IN PLAY
+  -- (Phase 164.5.1.1 plan 02 / CTX-06 / TODOS [FANOUT-COHORT-PRIVATE-01]).
+  --
+  -- ⭐ THE ONLY ARM IN THIS FILE THAT MEASURES A CLASS RATHER THAN AN INSTANCE,
+  -- and the class is the defect this phase actually repairs. The owner-only
+  -- terminal status shipped in July 2026, the fan-out shipped in September
+  -- 2026, and NOTHING EVER COMPARED THE TWO. `ledger_refresh_staleness` carries
+  -- no lifecycle predicate at all — MEASURED in 20260825120000, whose
+  -- `strategy_venue` CTE selects FROM public.strategies with no WHERE — so it
+  -- surfaces a strategy of ANY status as stale. The fan-out carries a
+  -- hand-written literal, so it admits only what somebody remembered. Six stale
+  -- rows, zero eligible. Arm P above holds the INSTANCE in place; this arm is
+  -- what makes a SIXTH status impossible to ship silently.
+  --
+  -- ⛔ BOTH SETS COME FROM THE CATALOGUE AND NEITHER IS WRITTEN DOWN HERE. The
+  -- domain comes from `pg_get_constraintdef('strategies_status_check')`; the
+  -- admitted set from a comment-stripped `pg_get_functiondef` of the deployed
+  -- fan-out. A hand-written list inside this arm would reproduce, INSIDE THE
+  -- CONTROL, the exact defect the control exists to catch, and it would rot on
+  -- precisely the day nobody remembers this arm is here. The ONLY statuses
+  -- spelled out below are the two DELIBERATE EXCLUSIONS from CONTEXT.md —
+  -- `draft` (a draft strategy has no factsheet to refresh) and `archived` (not
+  -- a refresh candidate) — and they are skipped BY NAME, as exclusions, so that
+  -- adding a third one has to be written down here where it is read.
+  --
+  -- ⛔ THE SEARCH IS SCOPED TO THE EXTRACTED CONJUNCT LIST, NEVER TO THE WHOLE
+  -- BODY. A status name occurs in the body for reasons that have nothing to do
+  -- with eligibility — the in-flight guard's `cj2.status IN (…)` set is four
+  -- job statuses, and a comment could name any lifecycle value at all. Matching
+  -- the whole body would pass for the wrong reason and could never fail.
+  --
+  -- ⛔ COULD NOT MEASURE IS NOT MEASURED ZERO, and this arm raises rather than
+  -- passes in BOTH unmeasurable states: a NULL constraint definition (the
+  -- domain migration has fallen out of the apply list) and a lifecycle conjunct
+  -- it cannot locate (the predicate was re-spelled). A third guard counts the
+  -- statuses the loop actually asserted, because an empty scan and a clean scan
+  -- are identical to every numeric test — which is exactly how a broken gate
+  -- passes behind a green board.
+  --
+  -- ⭐ PLACEMENT IS LOAD-BEARING AND IT IS NOT TIDINESS. This arm MUST stay
+  -- AFTER arm P. Arm P's twin reverts the widening, which would redden BOTH
+  -- arms — this one included, because the reverted body no longer admits a
+  -- status the CHECK constraint still does. The runner attributes a mutation to
+  -- the FIRST `TEST FAILED (…)` in the lane's output, so with this arm placed
+  -- first, arm P's own twin would be scored against the name `Q` and the runner
+  -- would report a wrong-first-failure for P. Placed after, P fails first under
+  -- P's twin (correct) and this arm reddens alone under its own, whose mutation
+  -- touches no function body at all. ⛔ Moving either arm past the other is a
+  -- REAL CHANGE with a measurable consequence, not a reorder.
+  -- ======================================================================
+  -- RED-UNDER: the mutation that must redden this arm is the ARRIVAL OF A NEW
+  --            STATUS, not the removal of the one this phase added — that
+  --            latter one is arm P's, and it reddens arm P first by
+  --            construction. So the twin adds a SIXTH value to the
+  --            `ADD CONSTRAINT` literal list in 20260716130000 and touches the
+  --            fan-out not at all: the catalogue then admits a status the
+  --            deployed body does not name and is not one of the two
+  --            exclusions, which is the class state itself. That is the only
+  --            mutation that proves this arm catches a FUTURE status rather
+  --            than the present one.
+  --
+  -- ⛔ THE NEEDLE IS THE `ADD CONSTRAINT` FORM AND NOT THE PRE-FLIGHT FORM.
+  --    20260716130000 carries its five-value list TWICE — once in the
+  --    pre-flight `WHERE status NOT IN (…)` guard and once in the
+  --    `ADD CONSTRAINT … CHECK (status IN (…))`. Measured at these bytes: the
+  --    bare parenthesised list occurs 2 times, the `CHECK (status IN (…));`
+  --    form exactly 1. An ambiguous needle is an `occurrence-mismatch`
+  --    MEASURE_FAIL, which means the arm was never tested at all — GRAMMAR
+  --    rule 2.
+  -- ⛔ AND THE MUTATION DOES NOT ABORT THAT MIGRATION'S OWN APPLY, which is
+  --    why it is observable: 20260716130000's self-verifying DO block asserts
+  --    that each of the five values is PRESENT in the constraint definition,
+  --    and adding a sixth preserves all five. The same DISJOINTNESS reasoning
+  --    arm P's block states one migration over.
+  -- RED-UNDER-M: {"arm":"Q","apply":[{"kind":"edit","file":"supabase/migrations/20260716130000_strategies_status_private.sql","find":"CHECK (status IN ('draft', 'pending_review', 'published', 'archived', 'private'));","replace":"CHECK (status IN ('draft', 'pending_review', 'published', 'archived', 'private', 'quarantined'));","occurrences":1}]}
+  SELECT pg_get_constraintdef(c.oid)
+    INTO v_domain_def
+    FROM pg_constraint c
+   WHERE c.conname = 'strategies_status_check'
+     AND c.conrelid = 'public.strategies'::regclass;
+  IF v_domain_def IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (Q): COULD NOT MEASURE — public.strategies carries no constraint named strategies_status_check on this database, so the lifecycle DOMAIN this arm compares the fan-out against does not exist and the comparison was never performed. This is NOT the same answer as "the sets agree": an absent domain and an empty disagreement are indistinguishable to every numeric test, which is how a gate that asserts nothing passes behind a green board. The likely cause is supabase/migrations/20260716130000_strategies_status_private.sql having fallen out of this file''s RED-UNDER-SETUP apply list — the pg-lane core fixture declares strategies.status as a bare TEXT with no constraint, so that entry is the only thing that puts the real domain on a lane.';
+  END IF;
+
+  SELECT regexp_replace(pg_get_functiondef(p.oid), '--[^\n]*', '', 'g')
+    INTO v_fanout_def
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public'
+     AND p.proname = 'enqueue_ledger_refresh_for_strategies'
+     AND p.pronargs = 0;
+
+  v_admitted := substring(v_fanout_def FROM 's\.status\s+IN\s+\(([^)]*)\)');
+  IF v_admitted IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (Q): COULD NOT MEASURE — the comment-stripped body of public.enqueue_ledger_refresh_for_strategies carries no `s.status IN (…)` conjunct that this arm can locate, so the ADMITTED set could not be extracted and the cohort comparison was never performed. A re-spelled eligibility predicate must break this arm LOUDLY rather than silently widen it to "anything goes": with no extraction, every status would trivially appear in nothing and the loop below would report agreement it never measured. If the predicate was deliberately re-spelled, re-point this extraction at the new spelling in the same commit — do NOT relax it to a whole-body search, which matches a status name occurring in any other predicate or in prose and therefore passes for the wrong reason.';
+  END IF;
+
+  v_checked := 0;
+  FOR v_status IN
+    SELECT DISTINCT t.parts[1]
+      FROM regexp_matches(v_domain_def, '''([a-z_]+)''', 'g') AS t(parts)
+  LOOP
+    -- The two DELIBERATE EXCLUSIONS (CONTEXT.md, CTX-06). They are the only
+    -- lifecycle values this arm spells, and they are spelled as exclusions.
+    IF v_status IN ('draft', 'archived') THEN
+      CONTINUE;
+    END IF;
+    v_checked := v_checked + 1;
+    IF position('''' || v_status || '''' IN v_admitted) = 0 THEN
+      RAISE EXCEPTION 'TEST FAILED (Q): the lifecycle status % is admitted by public.strategies'' own CHECK constraint, so a live strategy can carry it; public.ledger_refresh_staleness applies NO lifecycle predicate, so it will surface such a strategy as stale; the deployed body of enqueue_ledger_refresh_for_strategies admits only [%], which does not name it; and it is not one of the two deliberate exclusions (draft has no factsheet to refresh, archived is not a refresh candidate). The view and the fan-out therefore DISAGREE ABOUT THE COHORT, and a production tick will enqueue nothing for every strategy carrying that status while the staleness census keeps reporting them stale — silently, with a succeeded cron row and a "1 row" return message. That is TODOS [FANOUT-COHORT-PRIVATE-01] exactly, which was measured on PROD as 6 stale rows and 0 eligible. Either admit the status in the fan-out''s conjunct, or add it to this arm''s named exclusions with the reason written down.', v_status, v_admitted;
+    END IF;
+  END LOOP;
+
+  IF v_checked = 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Q): COULD NOT MEASURE — zero lifecycle statuses were extracted from the constraint definition [%], so the loop above asserted NOTHING and its silence is not evidence. An empty scan and a clean scan are identical to every numeric test. The constraint exists but this arm could not read quoted literals out of it, which means the rendering of pg_get_constraintdef changed shape (an enum-backed domain, or a CHECK re-expressed without quoted literals) and the extraction must be re-pointed at the new shape.', v_domain_def;
+  END IF;
 
   -- ======================================================================
   -- ARM C — NEGATIVE CONTROL. A FRESH single-key strategy is not enqueued.

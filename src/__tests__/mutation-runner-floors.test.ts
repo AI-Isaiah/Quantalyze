@@ -529,8 +529,22 @@ describe("corpus re-derivation", () => {
     // independent tallies AGREE), `lane-blocked: 0 file(s)`, `lane-probe:
     // pg_cron AVAILABLE`, `pending: 0`, `✅ No defects`, exit 0. WAIVED_CEILING
     // stays 0; waivers stay 0. RECORD: 164.5.1.1-01-SUMMARY.md.
+    // ⚠️ CURRENCY 2026-09-17 (phase 164.5.1.1 FANOUTCOHORT, plan 02): 393 -> 394.
+    // ONE new arm carrying its own prose anchor — arm Q in the SAME file, the
+    // cohort-agreement arm, which refuses any lifecycle status the catalogue
+    // admits that the deployed fan-out does not name. Same file, so the corpus
+    // stays at 73 files of which 46 are annotated and FILES_FLOOR does not
+    // move. ⛔ THIS PIN IS STILL NOT `ARMS_FLOOR` — it counts PROSE ANCHORS, so
+    // neither the runner's own floor nor the ratchet below can report it going
+    // stale. It is moved here in the same commit as the floor, from the same
+    // measurement, for the third time. MEASURED on a full-corpus lane run at
+    // this plan's final SQL bytes: `arms: 394/394/0`, `biting: 394`,
+    // `lane-invocations: 394` (the two independent tallies AGREE),
+    // `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, `pending: 0`,
+    // `✅ No defects`, exit 0. WAIVED_CEILING stays 0; waivers stay 0.
+    // RECORD: 164.5.1.1-02-SUMMARY.md.
     const totalAnchored = annotated.reduce((n, f) => n + f.prose, 0);
-    expect(totalAnchored).toBe(393);
+    expect(totalAnchored).toBe(394);
   });
 });
 
@@ -1558,9 +1572,20 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // arm passes on a log it never mutated. The `.not.toBe(GREEN_LOG)`
     // assertions beside them are the calibration that catches it — they were
     // re-run in both directions when this fixture moved.
-    "arms: 393/393/0   (executed/annotated/waived)",
-    "biting: 393   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
-    "lane-invocations: 393   (arm lanes actually spawned — tallied inside runLane, independent of the 393 the verdict loop counted; plus 46 baseline / 46 restore leg(s))",
+    // ⚠️ CURRENCY 2026-09-17 (phase 164.5.1.1 FANOUTCOHORT, plan 02): 393 -> 394,
+    // and ONE row moved rather than any row being added — the phase's second new
+    // arm (Q, cohort agreement) lands in test_ledger_refresh_fanout.sql beside
+    // arm P, 21 -> 22. FILES_FLOOR does not move and `coverage: files 46/73`
+    // above is unchanged. The moved row and the three aggregate lines are copied
+    // from the measured run's own output, not re-typed. ⛔ THE HAZARD IS STILL
+    // THE SUBSTITUTION, not the number: every `.replace()` in the RED arms below
+    // keys on these exact bytes, and a pattern that no longer matches returns
+    // the GREEN log UNCHANGED so the RED arm passes on a log it never mutated.
+    // The `.not.toBe(GREEN_LOG)` assertions beside them are the calibration;
+    // they were re-run in both directions when this fixture moved.
+    "arms: 394/394/0   (executed/annotated/waived)",
+    "biting: 394   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "lane-invocations: 394   (arm lanes actually spawned — tallied inside runLane, independent of the 394 the verdict loop counted; plus 46 baseline / 46 restore leg(s))",
     // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
     // rows are the real, measured shape at plan 164.4.1-05, which annotated
     // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
@@ -1608,7 +1633,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_get_verified_cohort_rank_gate.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_guard_wizard_draft_updates_auth_uid.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
     "  file test_ledger_refresh_composite_arm.sql: sections 20 / judged 20 / annotated 20 / waived 0 / biting 20",
-    "  file test_ledger_refresh_fanout.sql: sections 21 / judged 21 / annotated 21 / waived 0 / biting 21",
+    "  file test_ledger_refresh_fanout.sql: sections 22 / judged 22 / annotated 22 / waived 0 / biting 22",
     "  file test_ledger_refresh_staleness.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
     "  file test_metrics_by_basis_write.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
     "  file test_profiles_privileged_columns_locked.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
@@ -1646,7 +1671,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_wizard_composite_fence.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_wizard_composite_members.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
     "  file test_wizard_session_idempotency.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
-    "per-arm lane time: mean 1.1s over 393 arm run(s)",
+    "per-arm lane time: mean 1.1s over 394 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -1656,7 +1681,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     const r = runCountRecheck(GREEN_LOG);
     expect(r.status, r.out).toBe(0);
     expect(r.out).toContain("the runner's two tallies agree");
-    expect(r.out).toContain("393 arm lane(s) spawned");
+    expect(r.out).toContain("394 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -1858,8 +1883,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(short, "the mutation must actually change the log").not.toBe(GREEN_LOG);
     const r = runCountRecheck(short);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("rows sum to 392 biting arm(s) but the aggregate");
-    expect(r.out).toContain("reports 393");
+    expect(r.out).toContain("rows sum to 393 biting arm(s) but the aggregate");
+    expect(r.out).toContain("reports 394");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -1874,24 +1899,24 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
   });
 
   it("RED: the parse-only shape — 361 executed claimed, 0 lanes counted — fails naming all three numbers", () => {
-    const severed = GREEN_LOG.replace(/^lane-invocations: 393 /m, "lane-invocations: 0 ");
+    const severed = GREEN_LOG.replace(/^lane-invocations: 394 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
     expect(r.out).toContain("GATE failing, not the corpus");
-    expect(r.out).toContain("executed=393 lane-invocations=0 biting=393");
+    expect(r.out).toContain("executed=394 lane-invocations=0 biting=394");
     expect(r.out).not.toContain("two tallies agree");
   });
 
   it("RED: a single unaccounted lane also fails — the relation is exact", () => {
-    const extra = GREEN_LOG.replace(/^lane-invocations: 393 /m, "lane-invocations: 394 ");
+    const extra = GREEN_LOG.replace(/^lane-invocations: 394 /m, "lane-invocations: 395 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("executed=393 lane-invocations=394 biting=393");
+    expect(r.out).toContain("executed=394 lane-invocations=395 biting=394");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 393 /m, "lane-invocations: abc ");
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 394 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -1910,7 +1935,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // longer matches returns the GREEN log unchanged, and the RED arm then
     // passes on a log it never mutated. The `.not.toBe(GREEN_LOG)` assertions
     // beside each one exist for exactly that, and they are what caught this.
-    const waived = GREEN_LOG.replace(/^arms: 393\/393\/0 /m, `arms: 393/393/${WAIVED_CEILING + 1} `);
+    const waived = GREEN_LOG.replace(/^arms: 394\/394\/0 /m, `arms: 394/394/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -1924,14 +1949,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // Calibration for the extract-and-run harness itself: if the extraction
     // returned an empty or truncated block, these established arms would not
     // fire either, and the GREEN arm above would be passing on nothing.
-    const zero = GREEN_LOG.replace(/^arms: 393\/393\/0 /m, "arms: 0/393/0 ");
+    const zero = GREEN_LOG.replace(/^arms: 394\/394\/0 /m, "arms: 0/394/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
-    const spliced = GREEN_LOG.replace(/^biting: 393 /m, "biting: 394 ");
+    const spliced = GREEN_LOG.replace(/^biting: 394 /m, "biting: 395 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
-    expect(s.out).toContain("biting (394) exceeds executed (393)");
+    expect(s.out).toContain("biting (395) exceeds executed (394)");
   });
 });
 
