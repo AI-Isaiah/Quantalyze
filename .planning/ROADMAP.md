@@ -1777,10 +1777,29 @@ Plans:
 
 Plans:
 
+**Wave 1** — no dependencies; the tracer.
+
 - [ ] 164.5.1.1-01-PLAN.md — wave 1, tracer. The forward migration widening the single-key fan-out's lifecycle conjunct, re-based on the committed snapshot with the VAC-04 body acknowledgement earned rather than pasted; the regenerated canonical snapshot; the `private`-admits `RED-UNDER` arm with its apply list re-pointed at the new migration; `ARMS_FLOOR` raised to the corpus's own printed count; the arm neuter-verified.
+
+**Wave 2** *(blocked on Wave 1)* — shares `test_ledger_refresh_fanout.sql` and `scripts/mutation-runner/run.mjs` with plan 01, and its arm must come SECOND or plan 01's twin reports a wrong first failure.
+
 - [ ] 164.5.1.1-02-PLAN.md — wave 2. The cohort-agreement arm, deriving the status domain from `pg_get_constraintdef` and the admitted set from a comment-stripped `pg_get_functiondef` so neither can rot the way the literal being repaired did; the real status-domain migration added to the lane's apply list so the class neuter can ride a mutable file; neuter-verified against a genuinely NEW sixth status.
+
+**Wave 3** *(blocked on Wave 2)* — ⚠️ NOT forced by a `files_modified` overlap (02 ∩ 03 = ∅). It is forced one level down: plans 01 and 02 both assert `git diff --quiet -- supabase/tests/test_ledger_refresh_composite_arm.sql`, and plan 03 edits exactly that file, so running them together false-fails plan 02's verify. Re-slicing this phase by file disjointness alone would dissolve a real constraint.
+
 - [ ] 164.5.1.1-03-PLAN.md — wave 3. Enumerate every production site of the literal and every reader of `ALLOWED_STRATEGY_STATUSES` without changing either; annotate — never widen — the composite gate's precondition; book the three sibling-cohort findings with an owner, a trigger and a destination phase.
+
+**Wave 4** *(blocked on Waves 1-3)* — `autonomous: false`; carries the one-way door (the PROD apply) behind a blocking-human checkpoint.
+
 - [ ] 164.5.1.1-04-PLAN.md — wave 4, checkpoints (`autonomous: false`). Three reviewers before any apply is requested; the ship and the apply via `apply-test` then the PROD `apply` behind the human reviewer; then the NATURAL `25 * * * *` tick measured against the BEFORE census, and `T-164.5.1-09-07` exercised by plan 08's already-recorded mechanism.
+
+**Cross-cutting constraints** — locked decisions cited by two or more plans, so a change to any one of them reaches more than the plan that names it first:
+
+- **CTX-10** (plans 01, 03, 04) — the deribit composite `081f2912…` at 141 days stays excluded by D-01 and ⛔ must NOT be reported as fixed by this phase. Guarded by an automated polarity-aware check in plan 04 task 3.
+- **CTX-07 / CTX-08** (plans 01, 02) — both new arms are neuter-verified, and `ARMS_FLOOR` is read from the runner's own printed count, never from a raw `grep -c` (403 ≠ 392) and never cleared by a waiver (`WAIVED_CEILING` is 0).
+- **CTX-03 / CTX-04** (plans 01, 03) — the sibling April fan-out and `ALLOWED_STRATEGY_STATUSES` are MEASURED, not changed, by this phase.
+- **CTX-06** (plans 01, 02) — the cohort-agreement arm derives both sets from the catalogue, so neither can rot the way the literal being repaired did.
+- **CTX-09 / CTX-11 / CTX-12** (plans 01, 04) — the natural `25 * * * *` tick is the oracle, the composite and disconnected-key exclusions stay out of scope by name, and `T-164.5.1-09-07` is exercised here.
 
 ### Phase 164.5.2: BRIDGELOCK — the per-strategy advisory lock 161.1-D1 asked for, in its own phase as DEC-4 required (INSERTED)
 
