@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 159
-current_phase_name: RANK — Public-ranking integrity
-status: "Phase 164.5.1 CRONREPOINT plan 08 (wave 3, Wave B go-live runbook + P3-C repair) COMPLETE — see stopped_at"
+current_phase: 164.5.1.1
+current_phase_name: FANOUTCOHORT
+status: "Phase 164.5.1.1 FANOUTCOHORT PLANNED — 4 plans, 4 waves, ready to execute. Plan-checker PASSED at round 3 (0 blockers, 0 warnings)."
 stopped_at: "Completed 164.5.1-08-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 08 of 9, wave 3 — sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`, depends_on 164.5.1-01/04/06). `compute_jobs.completed_at` (does not exist — table carries claimed_at/created_at/updated_at/next_attempt_at, measured PROD 2026-09-12 ERROR 42703, re-read from supabase/schema/baseline.sql) repointed to `updated_at` in BOTH P3-C copies (docs/runbooks/ledger-refresh-go-live.md, 164.7-ACTIVATION-PREFLIGHT.md) AND the two later diagnostics sharing the defect ('Watching it' duration expression, now a stated completion-latency proxy; 'Rollback, part 2 — Detect' LATERAL query) — both P3-C SQL bodies verified byte-identical. `TODOS.md`'s `[PREFLIGHT-P3C-UNRUNNABLE]` closed with the repaired-site list. `docs/runbooks/match-engine.md` gained a 'Go-live: repoint match_engine_cron + ledger-refresh activation (Phase 164.5.1 Wave B)' section: P0 marker (output must be recorded, pasting the query is not evidence), Step 0 (Wave A must deploy first), Step 1 (preflightCronRepoint, any non-zero exit aborts the session), Step 2 (the cron.schedule UPSERT repointing jobid 1, boxed never-in-a-migration rule), Step 2b ([VAULTTICK-EMPTYKEY-01] post-repoint check, btrim residual stated honestly), Step 3 (P3-C and the ledger-refresh flag/fan-out registered by reference, plus the deliberate exercise of the fan-out's unreachable-while-dormant all-candidates-failed branch via a mandated manual first invocation + code-read safety confirmation, since fabricating a live failure was rejected as an invented-failure-state), Step 3-DEFER (a legitimate stopping point), Step 4 (exactly one manifest re-capture). D1/D2/D3 transcribed at the section head with their measurements (D2's window named verbatim: 'from a rebuild until the registration step is run, the hourly recompute does not fire, and cron_runs says why'); Phase 164.5's old criterion 7 flagged superseded by D1 in both the runbook and TODOS.md's [CRON-DRIFT-01], additively. Three commits (`ba75e39f`, `385bd756`, `4744a652`), plus the SUMMARY commit (`7d6f29d4`), NOT pushed. Full-suite `npx vitest run` surfaces 2 PRE-EXISTING, unrelated failures in `src/__tests__/verify-plan-anchors.test.ts` (both reference `164.3-07-PLAN.md`'s deferral text, flagged in advance by this plan's own guardrails), NOT fixed here per scope boundary. `164.7-ACTIVATION-DEFERRED`, `CRON-DRIFT-01` and `VAULTTICK-EMPTYKEY-01` all stay BLOCKED (shared-ID gate, plan 09 also declares them) — `requirements.ready-ids` returned 0/3 ready. See `.planning/phases/164.5.1-cronrepoint-the-live-match-engine-cron-row-is-repointed-at-t/164.5.1-08-SUMMARY.md`."
-last_updated: "2026-09-16T19:51:21Z"
-last_activity: 2026-09-16
-last_activity_desc: "Phase 164.5.1 CRONREPOINT plan 08 (Wave B go-live runbook + P3-C repair) executed — repointed the dead compute_jobs.completed_at column reference to updated_at across both P3-C copies and two sibling diagnostics sharing the defect, then wrote docs/runbooks/match-engine.md's Wave B go-live section covering the match_engine_cron repoint and the ledger-refresh activation in one ordered procedure, with D1/D2/D3 transcribed and the old Phase 164.5 criterion 7 convention flagged superseded. 3/3 tasks, 3 commits (plus this docs commit), all task-level <verify> commands green, check-planning-hygiene 42/42. 2 pre-existing unrelated full-suite failures documented, not fixed. No local push performed. NOT SHIPPED — commits on `feat/v1.20-phase-164.5.1-cronrepoint`, not yet pushed."
-state_head: 4744a652b4d41feef16b4262c348c0c68a3685f9
+last_updated: "2026-09-17T12:45:00Z"
+last_activity: 2026-09-17
+last_activity_desc: "Phase 164.5.1.1 FANOUTCOHORT planned: 4 plans over 4 waves, one plan per wave, every depends_on strictly lower. Plan-checker round 1 found 1 blocker — plan 04's CTX-10 guard was polarity-blind and scanned its own source, so it matched the negations the phase is REQUIRED to write (9 hits at HEAD, orchestrator-verified) and could never return 0, sitting after the PROD apply. Revision f800bc29 replaced it with a six-named-artifact, polarity-aware, fail-loud form; round 2 cleared the blocker but the fix itself flipped plan 04 from valid=true to valid=false on verify.plan-structure (R1 fired on a scan-target count sharing a shell segment with grep -c). Fix 61497458 (-eq 6 -> -ge 6) restored valid=true; the guard was re-calibrated in both polarities AFTER the edit using the command extracted programmatically from the edited file. Round 3: VERIFICATION PASSED, 0 blockers, 0 warnings. ⚠️ Decision-coverage gate OVERRIDDEN: it returned passed=false with reason=could-not-parse, total=0, uncovered=[] — a PARSE failure, not a dropped decision. It requires D-NN bullets; CONTEXT.md uses CTX-NN deliberately because D-01 already denotes the composite/membership deferral in this codebase. Coverage measured by hand instead: 12 of 12 trackable decisions cited in at least one plan (CTX-01..CTX-12). Founder approved proceeding with this override recorded. NOT executed, NOT shipped."
+state_head: 61497458
 
 # ⭐ progress: RE-DERIVED 2026-09-12 at `733a55f5` from ALL REFS — see the method block
 # immediately above the `progress:` keys below. This supersedes the HAND-SET note that stood
@@ -325,7 +325,7 @@ state_head: 4744a652b4d41feef16b4262c348c0c68a3685f9
 progress:
   total_phases: 38
   completed_phases: 20
-  total_plans: 171
+  total_plans: 175
   completed_plans: 166
   percent: 54
 ---
