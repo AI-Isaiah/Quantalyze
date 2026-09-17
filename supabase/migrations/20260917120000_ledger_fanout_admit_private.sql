@@ -43,8 +43,11 @@
 -- SCOPE BOUNDARY — the site this file deliberately does NOT touch
 -- ══════════════════════════════════════════════════════════════════════════
 -- ⛔ THE IDENTICAL LIFECYCLE LITERAL EXISTS A SECOND TIME in
--- 20260911130000_ledger_fanout_grantees_and_dormancy.sql, inside
--- enqueue_ledger_composite_refresh() (its STEP 2). MEASURED 2026-09-17 with
+-- 20260911130000_ledger_fanout_grantees_and_dormancy.sql, inside the composite
+-- arm's enqueue function (its STEP 2 -- that file defines it, and gate 10c in
+-- analytics-service/tests/test_ledger_refresh_gates.py asserts that ONLY the
+-- files DEFINING that function may spell its name, which is why this block
+-- points at it by file and step rather than by identifier). MEASURED 2026-09-17 with
 -- `grep -n` over that file: the two-value form appears at TWO line numbers, one
 -- per function body. It is left alone here, on purpose, and this block is what
 -- stops a future reader "completing" the change:
