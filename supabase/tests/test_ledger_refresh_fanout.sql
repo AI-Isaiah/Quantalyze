@@ -1180,7 +1180,7 @@ BEGIN
   v_checked := 0;
   FOR v_status IN
     SELECT DISTINCT t.parts[1]
-      FROM regexp_matches(v_domain_def, '''([a-z_]+)''', 'g') AS t(parts)
+      FROM regexp_matches(v_domain_def, '''([^'']+)''', 'g') AS t(parts)
   LOOP
     -- The two DELIBERATE EXCLUSIONS (CONTEXT.md, CTX-06). They are the only
     -- lifecycle values this arm spells, and they are spelled as exclusions.

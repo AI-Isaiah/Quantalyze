@@ -355,8 +355,11 @@ BEGIN
     -- ⭐ AND THE DETECTOR IS BACK, at the apply rather than in the gate. The
     -- NULL-safe form is what made the deletion invisible to the GATES too — the
     -- row now writes under it, so arm M1 no longer reddens (see the A/B below,
-    -- which measures exactly that). Check 7b holds needle (5) over the
-    -- row-count read itself and REFUSES THE APPLY when the line is gone, which
+    -- which measures exactly that). Check 7b holds a needle over the
+    -- `GET DIAGNOSTICS` read ITSELF — named by its SHAPE, never by a needle
+    -- number, because the numbering is local to whichever migration last
+    -- re-based this body and a number that travels is a claim that rots —
+    -- and REFUSES THE APPLY when the line is gone, which
     -- is the one layer the deletion cannot route around. The trade the M-3 fix
     -- made is therefore paid back rather than merely recorded.
     --
@@ -790,6 +793,27 @@ DECLARE
   --     hit here means the set was widened past its decision.
   v_draft_needle TEXT := '''draft''';
   v_arch_needle  TEXT := '''archived''';
+  -- (7) the row-count read that DECIDES between the two invisible causes.
+  --     ⛔ CARRIED FORWARD FROM 20260911130000's check 7b, and re-adding it is
+  --     NOT optional: this file's own function body (see the ⭐ paragraph in the
+  --     dormancy branch) tells the next reader that the apply-time block refuses
+  --     when this line is gone. A re-base that drops the check while shipping
+  --     that sentence puts a FALSE claim live on PROD — the shape this phase
+  --     exists to delete, one layer down. ⛔ CONCATENATED for the same reason as
+  --     (1) and (3). Safe by measurement: NO `RED-UNDER-M` twin in either ledger
+  --     gate mutates `GET DIAGNOSTICS`, so this needle cannot abort a lane the
+  --     way a needle on the widened set would.
+  v_diag_needle  TEXT := 'GET ' || 'DIAGNOSTICS v_found';
+  -- (8) the RETIRED app-namespace database setting, asserted ABSENT. ⛔ ALSO
+  --     CARRIED FORWARD FROM 20260911130000 (its check 8) and also dropped by
+  --     this file's re-base. The reason it must exist: an operator on this
+  --     platform is refused 42501 when setting an `app.*` database setting, so
+  --     a body that reads it can NEVER see TRUE — the function would be
+  --     PERMANENTLY DORMANT FOR THE WRONG REASON, and every dormancy row it
+  --     wrote would name a cause that is not the cause. Check 5 asserts the
+  --     system_flags read is PRESENT; a body carrying BOTH reads passes check 5
+  --     and fails nothing else. ⛔ CONCATENATED for the same reason as (1).
+  v_guc_needle   TEXT := 'current_' || 'setting(''app.' || 'ledger_refresh_enabled''';
 BEGIN
   -- 1. the function landed, it resolves to EXACTLY ONE function, and it takes
   --    ZERO arguments.
@@ -912,6 +936,36 @@ BEGIN
   -- 7. and a dormant tick whose cause is INVISIBLE still leaves a counted trace.
   IF position(v_instr_needle IN v_def) = 0 THEN
     RAISE EXCEPTION 'Migration 20260917120000: public.% no longer writes the dormancy instrument row (looked for "%") — a read that RAISED and a flag row that is absent or invisible to the definer would again reach no counted row, and the second of those is a live platform reporting itself dormant with nothing to read', v_fn, v_instr_needle;
+  END IF;
+
+  -- 7b. and the count that DECIDES between the two invisible causes is still
+  --     TAKEN. ⛔ CHECK 7 IS NOT ENOUGH, and that is MEASURED rather than
+  --     argued: with the NULL-safe `v_enabled IS DISTINCT FROM TRUE` cause
+  --     branch, deleting the row-count read leaves EVERY GATE ARM GREEN — the
+  --     instrument still writes its row, so arm M1 does not redden and the
+  --     corpus exits 0 (the A/B recorded at 20260911130000:465-478 measures
+  --     exactly that). This check is therefore the ONLY layer that sees the
+  --     deletion, and the one it cannot route around, because it runs at APPLY
+  --     rather than in a gate the deletion has already neutralised.
+  --
+  --     ⛔ RESTORED 2026-09-17, after a pre-apply review found it dropped by
+  --     this file's re-base while the function body it ships still told the
+  --     reader it existed. A guard removed under prose that claims it is
+  --     present is worse than one that was never there: the next reader stops
+  --     looking.
+  IF position(v_diag_needle IN v_def) = 0 THEN
+    RAISE EXCEPTION 'Migration 20260917120000: public.% no longer takes the row count of the activation read (looked for "%"). v_found then stays NULL on a read that did NOT raise, the NULL-safe cause branch files an UNMEASURED read as flag_row_invisible_or_absent, and the two invisible causes stop being distinguishable — the instrument still writes its row, so every gate stays GREEN and nothing below this line notices', v_fn, v_diag_needle;
+  END IF;
+
+  -- 7c. and the RETIRED app-namespace setting has NOT come back. An `app.*`
+  --     database setting cannot be set by an operator on this platform (42501),
+  --     so a body that reads it is permanently dormant for a reason no dormancy
+  --     row would name. Asserted ABSENT over the comment-stripped text, so a
+  --     paragraph describing the retirement does not trip it.
+  --
+  --     ⛔ RESTORED 2026-09-17 with 7b, same re-base, same review.
+  IF position(v_guc_needle IN v_def) <> 0 THEN
+    RAISE EXCEPTION 'Migration 20260917120000: public.% still reads the RETIRED app-namespace database setting (found "%"). An operator on this platform is refused 42501 setting it, so that read can never be TRUE and the function would be permanently dormant for a reason no cron_runs cause names', v_fn, v_guc_needle;
   END IF;
 
   -- 8. THE LIFECYCLE CONJUNCT IS STILL THERE, bound to the column. See needle

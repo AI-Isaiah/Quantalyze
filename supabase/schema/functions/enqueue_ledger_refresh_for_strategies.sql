@@ -145,8 +145,11 @@ BEGIN
     -- ⭐ AND THE DETECTOR IS BACK, at the apply rather than in the gate. The
     -- NULL-safe form is what made the deletion invisible to the GATES too — the
     -- row now writes under it, so arm M1 no longer reddens (see the A/B below,
-    -- which measures exactly that). Check 7b holds needle (5) over the
-    -- row-count read itself and REFUSES THE APPLY when the line is gone, which
+    -- which measures exactly that). Check 7b holds a needle over the
+    -- `GET DIAGNOSTICS` read ITSELF — named by its SHAPE, never by a needle
+    -- number, because the numbering is local to whichever migration last
+    -- re-based this body and a number that travels is a claim that rots —
+    -- and REFUSES THE APPLY when the line is gone, which
     -- is the one layer the deletion cannot route around. The trade the M-3 fix
     -- made is therefore paid back rather than merely recorded.
     --
