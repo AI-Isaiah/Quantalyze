@@ -132,18 +132,18 @@ Plans:
 **Wave 1**
 
 - [ ] 159-01-PLAN.md — C-M1 PROD census artifact `159-CENSUS.md` (checkpoint: ORCHESTRATOR runs the read-only SQL against PROD and commits results — the D-01 gate) (RANK-01) [Wave 1]
-- [ ] 159-05-PLAN.md — quantstats price-guess closed across `compute_all_metrics`: kwarg arm + P114 inline mirror for headline sharpe/sortino, benign-parity oracles, golden adjudication (RANK-05) [Wave 1]
-- [ ] 159-06-PLAN.md — FILL-arm CAS `.is("category_id", null)` + observed row count + honest `raced` refusal on the real POST harness (RANK-07) [Wave 1]
-- [ ] 159-07-PLAN.md — Re-mint fingerprint includes classification (both call sites + both dep arrays) + `withPublishedOrOwner` strict-UUID fail-closed validation (RANK-08, RANK-09) [Wave 1]
+- [x] 159-05-PLAN.md — quantstats price-guess closed across `compute_all_metrics`: kwarg arm + P114 inline mirror for headline sharpe/sortino, benign-parity oracles, golden adjudication (RANK-05) [Wave 1]
+- [x] 159-06-PLAN.md — FILL-arm CAS `.is("category_id", null)` + observed row count + honest `raced` refusal on the real POST harness (RANK-07) [Wave 1]
+- [x] 159-07-PLAN.md — Re-mint fingerprint includes classification (both call sites + both dep arrays) + `withPublishedOrOwner` strict-UUID fail-closed validation (RANK-08, RANK-09) [Wave 1]
 
 **Wave 2** *(blocked on the 159-01 census — D-01 hard ordering)*
 
-- [ ] 159-02-PLAN.md — Percentile gate: `PERCENTILE_GATE_COLUMN` + one shared helper for BOTH TS callers, `get_verified_cohort_rank` lockstep re-base migration, first CI SQL gate for the RPC (RANK-01) [Wave 2]
+- [x] 159-02-PLAN.md — Percentile gate: `PERCENTILE_GATE_COLUMN` + one shared helper for BOTH TS callers, `get_verified_cohort_rank` lockstep re-base migration, first CI SQL gate for the RPC (RANK-01) [Wave 2]
 
 **Wave 3** *(blocked on 159-02 — file overlap on queries.ts / closed-sets.ts)*
 
-- [ ] 159-03-PLAN.md — Splat-class closure: three explicit projections + owner exemption comment + repo-wide class inventory (RANK-02) [Wave 3]
-- [ ] 159-04-PLAN.md — `blendPeriodsPerYear` unknown-leg-as-crypto for RISK + production call-site wiring pin (RANK-06) [Wave 3]
+- [x] 159-03-PLAN.md — Splat-class closure: three explicit projections + owner exemption comment + repo-wide class inventory (RANK-02) [Wave 3]
+- [x] 159-04-PLAN.md — `blendPeriodsPerYear` unknown-leg-as-crypto for RISK + production call-site wiring pin (RANK-06) [Wave 3]
 
 **Research note:** fix locations and predicates read directly from source — skip a research phase; only the cheap C-M1 census remains. `StrategyTable`'s ungated KPI cells are OUT of scope, logged (C-D2).
 
@@ -164,24 +164,24 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 160-01-PLAN.md — B-M1 PROD census artifact `160-CENSUS.md` (checkpoint: ORCHESTRATOR runs the read-only SQL against PROD, fills the mechanical B-D1 decision, commits) (RANK-03, RANK-04) [Wave 1]
+- [x] 160-01-PLAN.md — B-M1 PROD census artifact `160-CENSUS.md` (checkpoint: ORCHESTRATOR runs the read-only SQL against PROD, fills the mechanical B-D1 decision, commits) (RANK-03, RANK-04) [Wave 1]
 
 **Wave 2** *(blocked on the 160-01 census — it gates everything downstream)*
 
-- [ ] 160-02-PLAN.md — TRACER: `validate-and-encrypt` persist arm (admin INSERT stamps exchange + attested_venue from `exchangeNormalized`, returns `{ api_key_id }`, strict `persist: true` skew discriminator) + ApiKeyManager conversion end-to-end (RANK-03) [Wave 2]
-- [ ] 160-04-PLAN.md — RANK-04 stamp swap + `skipAssetClassWrite` null-attestation extension in ONE change + B-D2 economics oracles observed RED under neuters; create-with-key confirmed unchanged (RANK-04) [Wave 2]
+- [x] 160-02-PLAN.md — TRACER: `validate-and-encrypt` persist arm (admin INSERT stamps exchange + attested_venue from `exchangeNormalized`, returns `{ api_key_id }`, strict `persist: true` skew discriminator) + ApiKeyManager conversion end-to-end (RANK-03) [Wave 2]
+- [x] 160-04-PLAN.md — RANK-04 stamp swap + `skipAssetClassWrite` null-attestation extension in ONE change + B-D2 economics oracles observed RED under neuters; create-with-key confirmed unchanged (RANK-04) [Wave 2]
 
 **Wave 3** *(blocked on 160-02 — the persist contract)*
 
-- [ ] 160-03-PLAN.md — StrategyForm + AllocatorExchangeManager conversions (the THIRD insert site) + state-adaptive SQL gate `test_api_keys_insert_not_client_writable.sql` (A1 retention positive armable now) (RANK-03) [Wave 3]
+- [x] 160-03-PLAN.md — StrategyForm + AllocatorExchangeManager conversions (the THIRD insert site) + state-adaptive SQL gate `test_api_keys_insert_not_client_writable.sql` (A1 retention positive armable now) (RANK-03) [Wave 3]
 
 **Wave 4** *(PR-2 — the second landing; blocked on PR-1 merged + deployed + soaked)*
 
-- [ ] 160-05-PLAN.md — Soak checkpoint (prod smoke of wizard + all three converted surfaces, census re-measure addendum) → blocking-human go/no-go → census-guarded `REVOKE INSERT` migration + whole-repo write-surface re-grep + legacy ciphertext arm retired (RANK-03) [Wave 4]
+- [x] 160-05-PLAN.md — Soak checkpoint (prod smoke of wizard + all three converted surfaces, census re-measure addendum) → blocking-human go/no-go → census-guarded `REVOKE INSERT` migration + whole-repo write-surface re-grep + legacy ciphertext arm retired (RANK-03) [Wave 4]
 
 **Wave 5**
 
-- [ ] 160-06-PLAN.md — Golden-parity re-annualization for census-identified strategies (`160-PARITY.md`; RISK ×≈1.203 / RETURN unmoved adjudication) or the recorded no-op (RANK-04) [Wave 5]
+- [x] 160-06-PLAN.md — Golden-parity re-annualization for census-identified strategies (`160-PARITY.md`; RISK ×≈1.203 / RETURN unmoved adjudication) or the recorded no-op (RANK-04) [Wave 5]
 
 **Wave 6** *(gap closure, 2026-08-23 — from 160-VERIFICATION.md; the STALE_CLIENT retirement itself already landed at `2fe28b89`)*
 
@@ -322,7 +322,7 @@ Plans:
 - [x] 161.1-02-PLAN.md — LEDGER-01/-02/-04: the dormant, staleness-gated, bounded single-key fan-out on the chain tail + matched-pair SQL gate + venue-drift/no-schedule static gates (wave 2)
 - [x] 161.1-03-PLAN.md — LEDGER-02: the founder go-live runbook (two ordered LIVE ops, two rollback levels incl. detect/repair/verify remediation for rows a failed tick downgraded) + TODOS filings (wave 3)
 - [x] 161.1-05-PLAN.md — LEDGER-02/-04: the static drift / dormancy / bound gates, sliced out of plan 02 (wave 3)
-- [ ] 161.1-04-PLAN.md — LEDGER-01: the composite arm on `stitch_composite` so deribit has real coverage — CONDITIONAL on D-01 (wave 4)
+- [x] 161.1-04-PLAN.md — LEDGER-01: the composite arm on `stitch_composite` so deribit has real coverage — CONDITIONAL on D-01 (wave 4)
 
 ### Phase 162: HONEST — What the user sees is true
 
@@ -544,13 +544,13 @@ correctness are different properties. Booked as 164.5 criterion 8.
 
 Plans:
 
-- [ ] 164.7-01-PLAN.md — Criterion-1 gate: `scripts/lint-app-guc.mjs` (hermetic, raw-text, exact-count lineage header + script-side allowlist), red/green fixtures, vitest pin, two steps in `sql-gate-lint`; corpus reads 12 findings / 5 files by design until plan 05 (wave 1)
-- [ ] 164.7-02-PLAN.md — `20260907120000`: `system_settings` (D-03) + `match_engine_cron_tick()` reading Vault + the table (D-02 as DRIFT-02), schedules nothing; vault stand-in fixture 32; 7-arm gate; types block (wave 1)
-- [ ] 164.7-03-PLAN.md — `20260907130000`: both ledger fan-outs re-based with Lock B as a fail-CLOSED `system_flags` read (D-01/C-03), seed FALSE; fixture 31; snapshots regenerated; pytest gates re-anchored (wave 1)
-- [ ] 164.7-04-PLAN.md — Re-point all 28 edit-kind twins at the superseding migration, table activation, arms A/K/L (missing row / FALSE / raising read ⇒ 0) in both ledger gates, 17/17 RED each (wave 2)
-- [ ] 164.7-05-PLAN.md — Floors separated both directions and pinned (46 files); five dated lineage headers + allowlist → gate 0 findings (D-04/D-05); ledger + match-engine runbooks corrected (two live ops, manifest re-capture, OQ-3 closed, #747 note); CLAUDE.md/TODOS currency (wave 3)
-- [ ] 164.7-06-PLAN.md — Three reviewers before the PR (D-07); ship checkpoint; VAC-04 output READ and branch named by line, ack EARNED via `--diff-bodies` (D-08); dry-run + expected `sql-tests`/VAC-08 reds read; WINDOWS 25 dispositioned (wave 4, checkpoint)
-- [ ] 164.7-07-PLAN.md — PROD activation as a founder `checkpoint:decision` (D-06): measured pre-flight, two live ops + view-based observation + kill-switch proof + manifest re-capture, or DEFER with the blocker named; closes the 161.1 ACTIVATION item (wave 5, checkpoint)
+- [x] 164.7-01-PLAN.md — Criterion-1 gate: `scripts/lint-app-guc.mjs` (hermetic, raw-text, exact-count lineage header + script-side allowlist), red/green fixtures, vitest pin, two steps in `sql-gate-lint`; corpus reads 12 findings / 5 files by design until plan 05 (wave 1)
+- [x] 164.7-02-PLAN.md — `20260907120000`: `system_settings` (D-03) + `match_engine_cron_tick()` reading Vault + the table (D-02 as DRIFT-02), schedules nothing; vault stand-in fixture 32; 7-arm gate; types block (wave 1)
+- [x] 164.7-03-PLAN.md — `20260907130000`: both ledger fan-outs re-based with Lock B as a fail-CLOSED `system_flags` read (D-01/C-03), seed FALSE; fixture 31; snapshots regenerated; pytest gates re-anchored (wave 1)
+- [x] 164.7-04-PLAN.md — Re-point all 28 edit-kind twins at the superseding migration, table activation, arms A/K/L (missing row / FALSE / raising read ⇒ 0) in both ledger gates, 17/17 RED each (wave 2)
+- [x] 164.7-05-PLAN.md — Floors separated both directions and pinned (46 files); five dated lineage headers + allowlist → gate 0 findings (D-04/D-05); ledger + match-engine runbooks corrected (two live ops, manifest re-capture, OQ-3 closed, #747 note); CLAUDE.md/TODOS currency (wave 3)
+- [x] 164.7-06-PLAN.md — Three reviewers before the PR (D-07); ship checkpoint; VAC-04 output READ and branch named by line, ack EARNED via `--diff-bodies` (D-08); dry-run + expected `sql-tests`/VAC-08 reds read; WINDOWS 25 dispositioned (wave 4, checkpoint)
+- [x] 164.7-07-PLAN.md — PROD activation as a founder `checkpoint:decision` (D-06): measured pre-flight, two live ops + view-based observation + kill-switch proof + manifest re-capture, or DEFER with the blocker named; closes the 161.1 ACTIVATION item (wave 5, checkpoint)
 
 ### Phase 164.3: VACUITY — a control that cannot fail must be caught by machine, not by red team (INSERTED)
 
@@ -1405,7 +1405,7 @@ the count but not the list: every entry from 02 down named the plan one slot BEL
 - [x] 164.8-03-PLAN.md — `test-restore-from-baseline.yml`: dispatch-only, ref-guarded, `mode=preflight|restore` + `confirm` token, `environment: Test`, backup artifact BEFORE the script, whole-act mutex, CLI post-verify; line-exact wiring pins
 - [x] 164.8-04-PLAN.md — WAVE 1 EXECUTION, the one-way door: founder merges the wave 1-3 PR → preflight → **activity gate** (mutex-first probe; `idle in transaction` counts as active; non-zero aborts to the founder — founder delegation 2026-09-08 superseding CONTEXT safety rule 4) → restore → SHA-bound readings → `vac08-ledger-baseline.txt` emptied BESIDE AN AIM with `ENTRY_COUNT` 31 → 0 in the same commit
 - [x] 164.8-05-PLAN.md — WAVE 2 PIPELINE: `apply-test` (`environment: Test`, mutex, marker, `db push --include-all --db-url`) + `apply-test-verdict` (`if: always()`, skipped = fault) gate PROD `apply`; pins; SHA-bound dispatch proof
-- [ ] 164.8-06-PLAN.md — WAVE 3 CLOSURE: record the verdicts and the SHA-bound readings, TODOS closures with run ids (incl. the `TEST-NOT-APPLICABLE` pragma verdict), first SHA-bound VAC-08 `0 absent` reading, CLAUDE.md + mutex runbook currency
+- [x] 164.8-06-PLAN.md — WAVE 3 CLOSURE: record the verdicts and the SHA-bound readings, TODOS closures with run ids (incl. the `TEST-NOT-APPLICABLE` pragma verdict), first SHA-bound VAC-08 `0 absent` reading, CLAUDE.md + mutex runbook currency
   ⛔ **CORRECTED 2026-09-09.** This bullet read "the `TEST-NOT-APPLICABLE` pragma recorded as DEAD SCOPE by measurement" — the verdict the plan-checker's B4 finding REVERSED on 2026-09-08, before plan 06 ran. The shipped verdict is two-part: unnecessary for `20260908120000` (narrow, evidenced), general case OPEN and routed to Phase 164.9 as `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`. A ROADMAP bullet still carrying the superseded half would send the next reader to close a hole that is open.
 
 ### Phase 164.8.6: VAULTTICKFIX — the forward migration Phase 164.7 earned: the verification check that cannot fail is re-run correctly, the Vault read becomes single-row-safe, the whitespace-key guard learns btrim, and the SECURITY DEFINER grant set is asserted whole instead of two names deep (INSERTED)
@@ -1429,14 +1429,14 @@ Plans:
 
 ⛔ **TWO migration files, not one — measured (RESEARCH §Q4), and it contradicts this phase's own goal sentence.** The tick gate's lane lacks the ledger stack and the fan-out lanes lack the vault stand-in, so a single file cannot apply on either lane. One PR, two files: "one shipped repair" is satisfied, "one forward migration" is not, and that is recorded here rather than silently satisfied. Waves 1-4 are the SQL wave (one PR); waves 5-6 are the JS wave (a second PR, opened after the first lands — founder decision, thematic mismatch recorded above).
 
-- [ ] 164.8.6-01-PLAN.md — WAVE 1 TRACER: `20260911120000_vault_tick_hardening.sql` (count+max Vault read, `IF v_cnt > 1 THEN`, `btrim`, four-role REVOKE, variable-bound needles, aclexplode whole set) + the tick gate re-pointed (V1/U1/C1/C2/C3) with arms V2 (mirror twin) and G1; narrowed lane run clean
-- [ ] 164.8.6-02-PLAN.md — WAVE 1: lane fixture `33-fixture-cron-runs.sql` + `20260911130000_ledger_fanout_grantees_and_dormancy.sql` (both fan-outs re-based with the `cron_runs` dormancy instrument for causes 1 and 3, four-role REVOKEs, catalogue-only verify)
-- [ ] 164.8.6-03-PLAN.md — WAVE 2: both ledger gates — 14 + 12 body-editing twins re-pointed, arms S1/M1/M2 per gate, rosters 15; narrowed lane runs clean
-- [ ] 164.8.6-04-PLAN.md — WAVE 2: the check-6 FALSIFIER (three neuters RED on scratch copies, source proven intact), the `20260907130000` ack-block reconciliation (comment-only, line-count-neutral, bundled — criterion 5's reading applied), snapshots regenerated and three VAC-04 acks EARNED from origin/main
-- [ ] 164.8.6-05-PLAN.md — WAVE 3: `ARMS_FLOOR` separated both ways on full-corpus lane runs and pinned with a dated derivation + `164.8.6-05-FLOORS.log`; every quick gate green at a named sha; the three reviewers BEFORE any PR exists (criterion 6)
-- [ ] 164.8.6-06-PLAN.md — WAVE 4: release commit v0.77.34.0 (VERSION/package.json/CHANGELOG via the commit checklist) → checkpoint:decision (the one-way door: merge auto-applies to PROD) → open the SQL PR
-- [ ] 164.8.6-07-PLAN.md — WAVE 5 (JS): hoist `compareManifest`'s manifest-side hygiene loop above every early return + three one-lever vitest cases with a cp-swapped RED control (164.8.5-MANIFEST-SIDE-LOOP-DEAD, ordering half; re-animated earlier by PR #776)
-- [ ] 164.8.6-08-PLAN.md — WAVE 6 (JS): `tokenMeasure` whole-token measure, red rows for hygiene shapes 2/3/4 with green/bypass corpora intact, `[164.8.6-08]` describe, release commit v0.77.34.1 and the JS PR after the SQL PR lands (164.8.5-HYGIENE-RESIDUALS)
+- [x] 164.8.6-01-PLAN.md — WAVE 1 TRACER: `20260911120000_vault_tick_hardening.sql` (count+max Vault read, `IF v_cnt > 1 THEN`, `btrim`, four-role REVOKE, variable-bound needles, aclexplode whole set) + the tick gate re-pointed (V1/U1/C1/C2/C3) with arms V2 (mirror twin) and G1; narrowed lane run clean
+- [x] 164.8.6-02-PLAN.md — WAVE 1: lane fixture `33-fixture-cron-runs.sql` + `20260911130000_ledger_fanout_grantees_and_dormancy.sql` (both fan-outs re-based with the `cron_runs` dormancy instrument for causes 1 and 3, four-role REVOKEs, catalogue-only verify)
+- [x] 164.8.6-03-PLAN.md — WAVE 2: both ledger gates — 14 + 12 body-editing twins re-pointed, arms S1/M1/M2 per gate, rosters 15; narrowed lane runs clean
+- [x] 164.8.6-04-PLAN.md — WAVE 2: the check-6 FALSIFIER (three neuters RED on scratch copies, source proven intact), the `20260907130000` ack-block reconciliation (comment-only, line-count-neutral, bundled — criterion 5's reading applied), snapshots regenerated and three VAC-04 acks EARNED from origin/main
+- [x] 164.8.6-05-PLAN.md — WAVE 3: `ARMS_FLOOR` separated both ways on full-corpus lane runs and pinned with a dated derivation + `164.8.6-05-FLOORS.log`; every quick gate green at a named sha; the three reviewers BEFORE any PR exists (criterion 6)
+- [x] 164.8.6-06-PLAN.md — WAVE 4: release commit v0.77.34.0 (VERSION/package.json/CHANGELOG via the commit checklist) → checkpoint:decision (the one-way door: merge auto-applies to PROD) → open the SQL PR
+- [x] 164.8.6-07-PLAN.md — WAVE 5 (JS): hoist `compareManifest`'s manifest-side hygiene loop above every early return + three one-lever vitest cases with a cp-swapped RED control (164.8.5-MANIFEST-SIDE-LOOP-DEAD, ordering half; re-animated earlier by PR #776)
+- [x] 164.8.6-08-PLAN.md — WAVE 6 (JS): `tokenMeasure` whole-token measure, red rows for hygiene shapes 2/3/4 with green/bypass corpora intact, `[164.8.6-08]` describe, release commit v0.77.34.1 and the JS PR after the SQL PR lands (164.8.5-HYGIENE-RESIDUALS)
 
 ### Phase 164.8.5: PROBERPARSE — the prod-prober hygiene rules stop being dodgeable and its parser stops dropping rows silently: the ||-split service key and the dollar-quoted literal both go RED, an unreadable oracle no longer disables the live credential scan, a malformed cron.job record becomes a measure-fail instead of a continue, and the app-GUC linter successor check stops accepting any readable file (INSERTED)
 
@@ -1690,11 +1690,11 @@ Plans:
 
 Plans:
 
-- [ ] 164.8.2-01-PLAN.md — WR-03 arms ratchet then WR-02 `FRONTIER_EXEMPT_CEILING` in `scripts/test-ledger-drift-check.sh`, with vitest second layer + SC-9 registration (wave 1)
-- [ ] 164.8.2-02-PLAN.md — WR-04 `grep -a` on both C-0331 sites of `supabase-migrate.yml` with an executed NUL-fixture arm; IN-03, IN-04 (wave 1)
-- [ ] 164.8.2-03-PLAN.md — WR-05 artifact narrowing by an enumerated staging step (founder-amended set), four truthful comments, WR-04's two post-verify greps, IN-07 (wave 1)
-- [ ] 164.8.2-04-PLAN.md — WR-06 nine-token scan across the TRIPLET with an exact-set `2>/dev/null` allowlist (wave 2, after 02 and 03)
-- [ ] 164.8.2-05-PLAN.md — IN-06 MEASURE_FAIL wrap with a sourced-copy falsifier; IN-01, IN-02, IN-05 record corrections pinned by derivation (wave 2, after 03)
+- [x] 164.8.2-01-PLAN.md — WR-03 arms ratchet then WR-02 `FRONTIER_EXEMPT_CEILING` in `scripts/test-ledger-drift-check.sh`, with vitest second layer + SC-9 registration (wave 1)
+- [x] 164.8.2-02-PLAN.md — WR-04 `grep -a` on both C-0331 sites of `supabase-migrate.yml` with an executed NUL-fixture arm; IN-03, IN-04 (wave 1)
+- [x] 164.8.2-03-PLAN.md — WR-05 artifact narrowing by an enumerated staging step (founder-amended set), four truthful comments, WR-04's two post-verify greps, IN-07 (wave 1)
+- [x] 164.8.2-04-PLAN.md — WR-06 nine-token scan across the TRIPLET with an exact-set `2>/dev/null` allowlist (wave 2, after 02 and 03)
+- [x] 164.8.2-05-PLAN.md — IN-06 MEASURE_FAIL wrap with a sourced-copy falsifier; IN-01, IN-02, IN-05 record corrections pinned by derivation (wave 2, after 03)
 
 ### Phase 164.5.1: CRONREPOINT — the live `match_engine_cron` row is repointed at the mechanism the repo actually describes, and the migration-vs-runbook rule is settled first (INSERTED)
 
@@ -1798,7 +1798,7 @@ Plans:
 - [x] 164.5.1-06-PLAN.md — wave 2 · criterion 9: `cron_recompute()` batched with a `system_settings`-persisted cursor (the FIRST Python consumer of that table), returning `status="partial"` + `next_cursor`, with the status vocabulary documented and gated
 - [x] 164.5.1-07-PLAN.md — wave 2 · the `T-OPEN-04` / `T-OPEN-03` / `[164.8.5-MANIFEST-SIDE-LOOP-DEAD]` RESIDUAL (the GATE, not the data): a CI contract test pinning the committed manifest's `normalization` to the arm's exported constant, plus a fourth broken-oracle self-test scenario
 - [x] 164.5.1-08-PLAN.md — wave 3 · criteria 1 and 4: repair P3-C (`completed_at` → `updated_at`, both copies plus the two later diagnostics — it aborts 42703 today), then write the `docs/runbooks/match-engine.md` go-live section with the D1/D2/D3 transcription, D2's window verbatim, and a DEFER branch
-- [ ] 164.5.1-09-PLAN.md — wave 4 · **NOT autonomous** · criteria 2, 5 and 7's read-back: the D4 three-reviewer `checkpoint:decision`, the founder's live PROD session recording every OUTPUT, then ONE manifest re-capture and the backlog dispositions
+- [x] 164.5.1-09-PLAN.md — wave 4 · **NOT autonomous** · criteria 2, 5 and 7's read-back: the D4 three-reviewer `checkpoint:decision`, the founder's live PROD session recording every OUTPUT, then ONE manifest re-capture and the backlog dispositions
 
 ### Phase 164.5.1.1: FANOUTCOHORT — the ledger-refresh fan-out admits the `private` status, so it stops enqueuing nothing for every strategy that exists (INSERTED)
 
@@ -1817,7 +1817,7 @@ Plans:
 
 **Wave 1** — no dependencies; the tracer.
 
-- [ ] 164.5.1.1-01-PLAN.md — wave 1, tracer. The forward migration widening the single-key fan-out's lifecycle conjunct, re-based on the committed snapshot with the VAC-04 body acknowledgement earned rather than pasted; the regenerated canonical snapshot; the `private`-admits `RED-UNDER` arm with its apply list re-pointed at the new migration; `ARMS_FLOOR` raised to the corpus's own printed count; the arm neuter-verified.
+- [x] 164.5.1.1-01-PLAN.md — wave 1, tracer. The forward migration widening the single-key fan-out's lifecycle conjunct, re-based on the committed snapshot with the VAC-04 body acknowledgement earned rather than pasted; the regenerated canonical snapshot; the `private`-admits `RED-UNDER` arm with its apply list re-pointed at the new migration; `ARMS_FLOOR` raised to the corpus's own printed count; the arm neuter-verified.
 
 **Wave 2** *(blocked on Wave 1)* — shares `test_ledger_refresh_fanout.sql` and `scripts/mutation-runner/run.mjs` with plan 01, and its arm must come SECOND or plan 01's twin reports a wrong first failure.
 
