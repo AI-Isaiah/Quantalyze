@@ -36,6 +36,35 @@ live act it existed to make safe.
   only as a CI secret, so a full four-arm prober dispatch answered the drift question with the same
   `compareManifest` the verb calls. Recorded as a deviation with its limits named.
 
+## [0.77.45.1] - 2026-09-17 — the two CI-gate traps that suppressed this repo's own pipelines get written down where /gsd-update cannot erase them
+
+Both traps were already known and recorded outside the repo. Both recurred anyway during the
+v0.77.45.0 landing. A rule that lives only in a model's memory or in a global workflow file is
+not a gate.
+
+### Added
+- **`CLAUDE.md` § CI gate integrity** — the durable home for both findings, alongside the
+  existing CHANGELOG-discipline section that exists for the same reason.
+  - The skip trailer is honoured **anywhere** in a commit message, including inside a sentence
+    stating it is not being used, and it **survives a squash merge**: GitHub concatenates every
+    branch commit message into the merge body, so a token written on the branch reaches `main`.
+    Pushing a token-free commit repairs the PR branch only.
+  - A suppressed board reads as **clean**, not absent — it still shows the two Vercel checks.
+    The section gives the `actions/runs?head_sha=` count as the check that cannot be fooled.
+  - Railway deploys regardless, because "no CI" is not "CI red".
+  - `workflow_dispatch` on `main` scans a **different scope** than a push: no commit range means
+    gitleaks walks full history. There is consequently no working way to re-trigger a lost
+    push-to-`main` gate set today, and the section says so rather than offering a remedy that
+    produces a false red.
+
+### Notes
+- The v0.77.45.0 deploy was verified clean by measurement rather than assumption: the merge
+  commit's own scope scans with no findings, and its tree is byte-identical to the tree that
+  passed 27 green checks on the pull request.
+- 37 pre-existing full-history findings are latent — credential-**shaped** fixture literals
+  quoted in CHANGELOG prose, all dating from 2026-09-11. They surface only in a full-scope scan.
+  Booked as `.planning/WINDOWS.md` entry 61, which owns both halves of this class.
+
 ## [0.77.45.0] - 2026-09-16 — the hourly match-engine tick stops being a thing that can silently do nothing, and the kill switch stops being a thing an outage can flip
 
 Phase 164.5.1 CRONREPOINT, Wave A. The live `match_engine_cron` row still points at the
