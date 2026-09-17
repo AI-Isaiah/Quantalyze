@@ -1,21 +1,21 @@
 ---
-gsd_state_version: 1.0
+gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.5.1
-current_phase_name: CRONREPOINT
-status: "Phase 164.5.1 CRONREPOINT — all 9 plans summarized, no VERIFICATION.md; resuming at the phase gates per execute-phase.md condition 3 (#2868). PR #810 (arm R, T-164.5.1-09-07) merged as 9c6e53ce."
-stopped_at: "Completed 164.5.1-08-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 08 of 9, wave 3 — sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`, depends_on 164.5.1-01/04/06). `compute_jobs.completed_at` (does not exist — table carries claimed_at/created_at/updated_at/next_attempt_at, measured PROD 2026-09-12 ERROR 42703, re-read from supabase/schema/baseline.sql) repointed to `updated_at` in BOTH P3-C copies (docs/runbooks/ledger-refresh-go-live.md, 164.7-ACTIVATION-PREFLIGHT.md) AND the two later diagnostics sharing the defect ('Watching it' duration expression, now a stated completion-latency proxy; 'Rollback, part 2 — Detect' LATERAL query) — both P3-C SQL bodies verified byte-identical. `TODOS.md`'s `[PREFLIGHT-P3C-UNRUNNABLE]` closed with the repaired-site list. `docs/runbooks/match-engine.md` gained a 'Go-live: repoint match_engine_cron + ledger-refresh activation (Phase 164.5.1 Wave B)' section: P0 marker (output must be recorded, pasting the query is not evidence), Step 0 (Wave A must deploy first), Step 1 (preflightCronRepoint, any non-zero exit aborts the session), Step 2 (the cron.schedule UPSERT repointing jobid 1, boxed never-in-a-migration rule), Step 2b ([VAULTTICK-EMPTYKEY-01] post-repoint check, btrim residual stated honestly), Step 3 (P3-C and the ledger-refresh flag/fan-out registered by reference, plus the deliberate exercise of the fan-out's unreachable-while-dormant all-candidates-failed branch via a mandated manual first invocation + code-read safety confirmation, since fabricating a live failure was rejected as an invented-failure-state), Step 3-DEFER (a legitimate stopping point), Step 4 (exactly one manifest re-capture). D1/D2/D3 transcribed at the section head with their measurements (D2's window named verbatim: 'from a rebuild until the registration step is run, the hourly recompute does not fire, and cron_runs says why'); Phase 164.5's old criterion 7 flagged superseded by D1 in both the runbook and TODOS.md's [CRON-DRIFT-01], additively. Three commits (`ba75e39f`, `385bd756`, `4744a652`), plus the SUMMARY commit (`7d6f29d4`), NOT pushed. Full-suite `npx vitest run` surfaces 2 PRE-EXISTING, unrelated failures in `src/__tests__/verify-plan-anchors.test.ts` (both reference `164.3-07-PLAN.md`'s deferral text, flagged in advance by this plan's own guardrails), NOT fixed here per scope boundary. `164.7-ACTIVATION-DEFERRED`, `CRON-DRIFT-01` and `VAULTTICK-EMPTYKEY-01` all stay BLOCKED (shared-ID gate, plan 09 also declares them) — `requirements.ready-ids` returned 0/3 ready. See `.planning/phases/164.5.1-cronrepoint-the-live-match-engine-cron-row-is-repointed-at-t/164.5.1-08-SUMMARY.md`."
-last_updated: "2026-09-17T20:52:02Z"
+current_phase: 159
+current_phase_name: RANK — Public-ranking integrity
+status: planning
+stopped_at: Phase 164.5.1 complete, ready to plan Phase 159
+last_updated: "2026-09-17T21:40:35.607Z"
 last_activity: 2026-09-17
-last_activity_desc: "Phase 164.5.1 execution resumed at the phase gates: 9/9 plans summarized, verification status missing. PR #810 merged (arm R + the four-place arm count); CI and Contracts green and SHA-bound at 1bbff25e before the squash."
-state_head: 9c6e53ce
+last_activity_desc: Phase 164.5.1 complete, transitioned to Phase 159
+state_head: f32b89e4048dd6d9d3387ecb69ce80b717e10234
 progress:
-  total_phases: 38
-  completed_phases: 20
-  total_plans: 175
-  completed_plans: 166
-  percent: 54
+  total_phases: 42
+  completed_phases: 19
+  total_plans: 195
+  completed_plans: 188
+  percent: 45
 ---
 
 ## ⭐ STATE lineage
@@ -23,7 +23,6 @@ progress:
 Census-Methode, Clobber-Protokoll und historische Notizen stehen in
 [`STATE-LINEAGE.md`](STATE-LINEAGE.md). ⛔ Nicht hierher zurückholen — jeder
 STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 2026-09-17).
-
 
 # Project State — Quantalyze
 
@@ -177,7 +176,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 below it in this section, including the 2026-09-06 `Phase: 164.2 (CURATED-COPY)` pointer
 that reconciled the block before it. Nothing below is deleted — it is lineage.**
 
-Phase: **164.8.1 (REFDATA) — COMPLETE**, 4 of 4 plans.
+Phase: 159 of 4 (RANK — Public-ranking integrity)
 Branch: `phase-164.8-05-test-first-migrate` (carries Phase 164.8 plan 05 AND 164.8.1's
 close-out; 12 commits ahead of `origin/main`, NOT yet pushed).
 Version: `0.77.30.0` (VERSION and package.json byte-equal), one unified CHANGELOG entry
@@ -193,6 +192,7 @@ substituting SQL comment prose inside the unquoted `TXN_*` heredocs while assemb
 destructive restore. All closed and each falsified by neutering.
 
 ⛔ **NEXT, and both are gates, not suggestions:**
+
 1. **Phase 164.8 plan 05 Task 3** is halted at a human checkpoint — merge the PR, then
    dispatch `supabase-migrate.yml` on `main`, selecting the run by `headSha == MERGE_SHA`.
    The TEST-first apply's version-set comparison assumes a `supabase db push` output shape
@@ -205,9 +205,8 @@ Routed OUT of 164.8.1 to Phase 164.9 (all three carry ROUTED HERE blocks in the 
 `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]`, `[164.8.1-TEST-ANALYTICS-URL-PROD]`,
 `[164.8-PUSH-RACE-VAC08]`.
 
-
 Phase: 164.2 (CURATED-COPY) — IN PROGRESS, planning not started
-Plan: none authored yet — `/gsd-plan-phase 164.2` has not run, so the plan count is UNKNOWN
+Plan: Not started
 ⛔ 2026-09-06: this line deliberately carries NO `N of M` pair. Written as `0 of 0` it parsed, and
 `state.advance-plan` then answered `reason: last_plan` / `status: ready_for_verification` — an
 unplanned phase reported as ready to verify (measured in a sandbox copy). With no numeric pair the
@@ -322,7 +321,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Phase 164.5.1 CRONREPOINT Wave A SHIPPED — PR #802 (v0.77.45.0). ⛔ The phase is NOT verified and that is an explicit founder override, not a green gate: `ship:pre` admits only `passed`, and this phase's goal is a PRODUCTION state, so it cannot reach `passed` before plan 09 — the live `cron.job` repoint — which its own runbook Step 0 blocks until this branch is merged AND deployed. Recorded in the ROADMAP, phase CONTEXT D5, and WINDOWS.md entry 60. Security is NOT overridden: `164.5.1-SECURITY.md` carries `threats_open: 0` for Wave A. Next, IN ORDER: (1) merge + wait for Railway, and confirm `/health` reports `git_sha` at or after the merge commit — a stale sha aborts, per runbook Step 0; (2) plan 09's live session, pre-flight first; (3) re-run `/gsd-secure-phase 164.5.1` — plan 09's T-164.5.1-09-02 and -09-07 are PENDING, not covered by the Wave A verdict.
+Status: Ready to plan
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -338,7 +337,7 @@ Status: Phase 164.5.1 CRONREPOINT Wave A SHIPPED — PR #802 (v0.77.45.0). ⛔ T
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-17 — Phase 164.5.1 Wave A shipped as PR #802: criterion 7 withdrawn on two measured grounds (no `supabase/` diff remains), two review-fix rounds closed 17 findings plus a regression round 1 introduced, first-ever SECURITY.md for the phase (49 threats closed, `threats_open: 0`), WINDOWS.md repaired and re-synced (48 open / 60 total)
+Last activity: 2026-09-17 — Phase 164.5.1 complete, transitioned to Phase 159
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -796,7 +795,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [████░░░░░░] 42%
+Progress: [█████░░░░░] 45%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1004,6 +1003,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Accumulated Context
 
 ### Roadmap Evolution
+
 - Phase 164.5.3 inserted after Phase 164.5: MT5CREDS — MT5 account number on the key card + a credential-update path (URGENT)
 - Phase 164.5.4 inserted after Phase 164.5: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently (URGENT)
 
@@ -2111,7 +2111,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-09-16T19:51:21Z
-**Stopped At:** Completed 164.5.1-08-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 08 of 9, wave 3 — sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`, depends_on 164.5.1-01/04/06). `compute_jobs.completed_at` (does not exist — measured PROD 2026-09-12 ERROR 42703, re-read from `supabase/schema/baseline.sql`: the table carries `claimed_at`/`created_at`/`updated_at`/`next_attempt_at`) repointed to `updated_at` in both P3-C copies (`docs/runbooks/ledger-refresh-go-live.md`, `164.7-ACTIVATION-PREFLIGHT.md`) and the two later diagnostics sharing the defect (the "Watching it" duration expression, now a stated completion-latency proxy; the "Rollback, part 2 — Detect" LATERAL query) — both P3-C SQL bodies verified byte-identical. `TODOS.md`'s `[PREFLIGHT-P3C-UNRUNNABLE]` closed with the repaired-site list. `docs/runbooks/match-engine.md` gained a "Go-live: repoint `match_engine_cron` + ledger-refresh activation (Phase 164.5.1 Wave B)" section: P0 database marker (output must be recorded, pasting the query is not evidence — `[164.7-P3C-PRESENCE-ORACLE]`), Step 0 (Wave A must deploy first), Step 1 (`preflightCronRepoint`, any non-zero exit aborts the session), Step 2 (the `cron.schedule` UPSERT repointing jobid 1, boxed never-in-a-migration rule cross-referencing both in-tree precedents), Step 2b (`[VAULTTICK-EMPTYKEY-01]` post-repoint check, `btrim` residual stated honestly), Step 3 (P3-C and the ledger-refresh flag/fan-out registered by reference rather than a third copy, plus the deliberate exercise of the fan-out's unreachable-while-dormant all-candidates-failed branch via a mandated manual first invocation + code-read safety confirmation — fabricating a live PROD failure was considered and rejected as an invented-failure-state), Step 3-DEFER (a legitimate stopping point, not a failure), Step 4 (exactly one manifest re-capture, with the manifest-side hygiene-loop re-animation warning and the public-repo no-secrets reminder). A decisions block transcribes D1 (registration lives in the runbook, never a migration), D2 (a rebuild produces no `match_engine_cron` job plus one `cron_runs` row reading `error = 'GUC unset at migration 015'`, because the two `app.*` GUCs return `42501` — measured PROD 2026-09-05 — with D2's window named verbatim: "from a rebuild until the registration step is run, the hourly recompute does not fire, and `cron_runs` says why"), and D3 (the re-capture is a script), all settled 2026-09-09. Phase 164.5's old criterion 7 (`"Write ONE forward migration re-scheduling match_engine_cron..."`) flagged superseded by D1 in one sentence in the runbook and a matching `TODOS.md` `[CRON-DRIFT-01]` line, additively — old wording preserved as lineage. One-line cross-reference added from the `1a-bis` bullet (plan 01's redirect, left byte-identical) down to the new section. Three commits (`ba75e39f`, `385bd756`, `4744a652`), plus the SUMMARY commit (`7d6f29d4`), NOT pushed. Full-suite `npx vitest run` surfaces 2 PRE-EXISTING, unrelated failures in `src/__tests__/verify-plan-anchors.test.ts` (both reference `164.3-07-PLAN.md`'s deferral text, flagged in advance by this plan's own guardrails) — not fixed here per scope boundary. `164.7-ACTIVATION-DEFERRED`, `CRON-DRIFT-01` and `VAULTTICK-EMPTYKEY-01` all stay BLOCKED (shared-ID gate — plan 09 also declares them); `requirements.ready-ids` returned 0/3 ready, so `requirements-completed: []`. Next: plan 09 (not autonomous, wave 4 — the D4 three-reviewer checkpoint:decision, the founder's live PROD session, then the manifest re-capture and backlog dispositions).
+**Stopped At:** Phase 164.5.1 complete, ready to plan Phase 159
 **Resume File:** None
 
 **Last Date:** 2026-09-16T19:20:00Z

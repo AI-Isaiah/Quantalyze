@@ -13,6 +13,34 @@
 
 Inhalt byte-identisch übernommen, nur verschoben.
 
+---
+
+## ⛔ SUPERSEDED 2026-09-17 — the hand-set `progress:` block below is LINEAGE, not a live value
+
+On 2026-09-17 `phase.complete 164.5.1` recomputed `progress:` from 38/20/175/166/54 to
+**42/19/195/188/45, and the recomputation was KEPT** — the first time in this file's history that a
+handler write was not reverted. It was kept because it was re-measured and found to be RIGHT:
+
+- `total_phases` **42** — the v1.20 ROADMAP section really carries 42 `### Phase` rows
+  (158…168, 165). The hand-set 38 had missed four insertions.
+- `total_plans` **195** / `completed_plans` **188** — the hand-set 175/166 was a delta chain last
+  rolled forward 2026-09-13 and had fallen 20 and 22 behind.
+- `completed_phases` **19** — driven by ONE rule, read from `gsd-core/bin/lib/verification.cjs`
+  (`isPhaseComplete`): *"`complete` is exactly `verification.status === 'passed'`"*. It never reads
+  plan counts and never reads the ROADMAP checkbox. The phases short of it are real work, not a
+  counting artefact: `164.1`, `164.8.2` and `164.5.1.1` have no `*-VERIFICATION.md` at all, and
+  `161`, `162`, `164.5`, `164.6.2` sit at `human_needed`.
+
+⛔ **The block's founding premise is also FALSE and was re-measured.** It exists to defend against
+an under-count caused by the `-pr` filter stripping `.planning/phases/**` from main. 27 of that
+filter's 28 deleted files are BACK, and all four phases it cites (164.2, 164.5, 164.8.2, 164.8.5)
+are fully present on disk.
+
+⛔ **Do NOT restore the hand-set numbers.** Every closed phase now raises `completed_phases` by
+one automatically — observed twice on 2026-09-17 (restoring `164.8.1-VERIFICATION.md` moved it
+17 → 18; the verifier writing `164.5.1-VERIFICATION.md` moved it 18 → 19). Everything below this
+line is kept for the record of how the numbers were maintained by hand until now.
+
 ```
 # ⭐ progress: RE-DERIVED 2026-09-12 at `733a55f5` from ALL REFS — see the method block
 # immediately above the `progress:` keys below. This supersedes the HAND-SET note that stood
