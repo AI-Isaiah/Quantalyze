@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.77.45.2] - 2026-09-17 — the live match_engine_cron row now runs the mechanism the repo describes, and the committed oracle says so
+
+Phase 164.5.1 plan 09, the founder-run production session. Wave A shipped in 0.77.45.0; this is the
+live act it existed to make safe.
+
+### Changed
+- **PROD `cron.job` jobid 1 was repointed** to `SELECT public.match_engine_cron_tick();` — the
+  hourly recompute now reaches the callable that reads its key from Vault and posts to the route
+  Wave A hardened. `cron.schedule` UPSERTs on `(jobname, username)`, so the jobid, the `0 * * * *`
+  schedule and `active` are all unchanged; that was read back independently, not taken from the
+  editor's own screen.
+- **`scripts/prod-prober/cron-manifest.json` re-captured once**, by the capture tool rather than by
+  hand, and reviewed before commit: 14 jobs before and after, none added, none removed, and exactly
+  ONE moved — jobid 1, `command` 546 → 39 characters and its sha256 with it. No other job moved,
+  which is the documented abort condition.
+
+### Fixed
+- **`[VAULTTICK-EMPTYKEY-01]` is closed by a production reading.** Before the repoint, jobid 1's
+  command contained no `btrim` call at all, so the empty-key guard shipped in the callable's body
+  was live in the repo and unreached in production. It is reached now.
+  ⚠️ Its real residual is recorded rather than quietly widened: `btrim()` with no character argument
+  trims spaces only, so a secret of pure tabs or newlines still passes and still yields a 401.
+
+### Notes
+- **The activation half DEFERRED, and the reason is worth keeping.** P3-C ran fresh and passed its
+  own bar — both job kinds present, newest 1.2 h and 10.2 h, inside the documented one-day limit.
+  It was deferred anyway because the four-arm prober measured `mt5-not-authorized -6` twice this
+  morning: the terminal lapsed overnight and is still lapsed. P3-C passes only by admitting a
+  ten-hour-old success through a twenty-four-hour bar, which is the inference a direct reading
+  exists to replace. `164.7-ACTIVATION-DEFERRED` stays open and Phase 161.1 stays shipped-and-blocked.
+- That overnight lapse is a live instance of the pattern Phase 164.6.4 MT5KEEPALIVE was built for,
+  observed hours after it shipped.
+- The session's Step 1 was SUBSTITUTED rather than skipped: the preflight verb's password exists
+  only as a CI secret, so a full four-arm prober dispatch answered the drift question with the same
+  `compareManifest` the verb calls. Recorded as a deviation with its limits named.
+
 ## [0.77.45.1] - 2026-09-17 — the two CI-gate traps that suppressed this repo's own pipelines get written down where /gsd-update cannot erase them
 
 Both traps were already known and recorded outside the repo. Both recurred anyway during the
