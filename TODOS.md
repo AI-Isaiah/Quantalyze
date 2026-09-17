@@ -3357,6 +3357,40 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       three (founder rule 2026-09-08).
 
 
+### FANOUT-COHORT-PRIVATE-01 — the ledger-refresh fan-out enqueues NOTHING because every PROD strategy is `private` (booked 2026-09-17)
+
+**Measured 2026-09-17 on PROD, on the FIRST tick after Phase 164.5.1 activated the fan-out.**
+`cron.job_run_details` runid `11159`, jobid 40, `08:25:00.371Z`, `succeeded`. The job ran, was NOT
+dormant, ran to candidate selection and selected **ZERO** strategies: no `derive_broker_dailies`
+row in `compute_jobs`, and `ledger_refresh_staleness` byte-identical to the BEFORE census (6
+strategies, `min 23 / avg 52.50 / max 141` days).
+
+⚠️ **`return_message: "1 row"` is not "one job enqueued"** — the function returns an INTEGER and
+`SELECT f()` always returns one row. This is the SAME reading error as CRON-DRIFT-01 below, whose
+own record already says `succeeded / '1 row'` while six consecutive ticks were 401ing. Second
+instance of one class, five weeks apart.
+
+**Cause, per strategy:** `cooldown_jobs = 0` and `inflight = 0` for all six — neither the 20-hour
+attempt cooldown nor the in-flight guard excludes anything. The single binding conjunct is
+`s.status IN ('published','pending_review')` in `enqueue_ledger_refresh_for_strategies()`
+(`supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql`), and every
+production strategy carries `status = 'private'` — an owner-only terminal status added by
+`20260716130000_strategies_status_private.sql` (CONTRIB-02, Phase 110) for allocator-contributed
+strategies, which are real live strategies with real keys and real ledgers.
+`ledger_refresh_staleness` does not filter on `status`, so **the view and the fan-out disagree
+about the cohort totally: 6 stale rows, 0 eligible.** The string `private` appears **0 times** in
+both migrations — never considered, not considered and rejected. The pair mirrors
+`ALLOWED_STRATEGY_STATUSES` (`analytics-service/routers/cron.py:148` =
+`{draft, pending_review, published}`), never widened when `private` shipped in July 2026; the
+sibling fan-out `20260412094449:239` carries the same pair.
+
+⛔ **BLOCKS `T-164.5.1-09-07`** — the all-candidates-failed branch cannot be exercised while the
+candidate set is empty for an unrelated reason, so `164.5.1-VERIFICATION.md` cannot report
+`passed` and `WINDOWS.md` entry 60 cannot close.
+
+Founder decision 2026-09-17: admit `private`, as one forward migration behind the three reviewers.
+Owner: **Phase 164.5.1.1 FANOUTCOHORT.**
+
 ### CRON-DRIFT-01 / CRON-OBS-01 — a PROD cron job 401'd hourly for 7 DAYS behind a green cron history (booked 2026-09-01)
 
 **Measured 2026-09-01, live in PROD.** Sentry `QUANTALYZE-18` (169 events, escalating, first seen
