@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.77.46.1] - 2026-09-17 — the PROD baseline regenerated after the FANOUTCOHORT apply, which is what clears `sql-gate-lint` on `main`
+
+### Fixed
+
+- **`sql-gate-lint` had been RED on `main` since the Phase 164.5.1.1 migration applied**, because `supabase/schema/baseline.sql` is a PROD dump and still described the pre-apply body of `enqueue_ledger_refresh_for_strategies`. Regenerated read-only with `supabase db dump --linked` **after** run `35247369125`'s PROD apply — taking it before would have recorded a production that did not yet exist. `supabase/schema/BASELINE.md`'s sha256 moves `a00b3cc5…` → `4335f524…`.
+- ⚠️ This red was NOT cosmetic. `sql-gate-lint` red makes the `frontend` aggregator red, which makes **main CI** red, and Railway skips its deploy on red main CI. The regeneration is what reopens the deploy path.
+
+### Notes
+
+- **This is the documented sequence, not a failure.** Gates carrying applied-ness probes are red on a migration PR by construction (`[164.8-PUSH-RACE-VAC08]`); merge and apply clear two of them and the baseline regeneration clears the third. Precedent, SHA-bound: PR #778 merged with `sql-gate-lint: failure`, PR #782 cleared it after the apply. Measured here: on `main` after the apply, `sql-tests` and `sql-mutation` were already green again and only `sql-gate-lint` + `frontend` remained.
+- ⛔ **`CONTENT_DRIFT_ALLOWLIST` was NOT edited — it neither grew nor shrank.** Still exactly three rows, the permanent DRIFT-04/06 family. The row this apply would have needed was never added: the drift cleared itself by regeneration, which is the only legitimate way. The list may only shrink.
+
+### Tests
+
+- `baseline-content-drift`: `MATCH 118, DRIFT 4, findings 1` → **`MATCH 119, DRIFT 3, findings 0`**, exit 0.
+- Shape UNCHANGED against the 2026-09-12 capture — 62 tables, 154 policies, 122 function statements, 126 indexes, **0 data statements**. That count IS the check on what a `db dump` could otherwise have absorbed silently: an unrelated table, policy or body drifting underneath us would ride along unnoticed.
+- Diff read **hunk by hunk**, 37 added / 9 removed: both hunks belong to `20260917120000_ledger_fanout_admit_private.sql` — the widened lifecycle conjunct with its comment, and the check-7b comment the same migration restored. Nothing else moved.
+- Secret scan before commit: **0 hits** across all five classes (DSN, `\connect`, `ALTER DATABASE`, JWT, project ref), run with `grep -a` because this repository contains a measured NUL-bearing file that plain `grep` reports as clean.
+
+### Added
+
+- `.planning/` §§ A and B of the Phase 164.5.1.1 PROD session: the apply chain bound to run ids, PROD read back directly rather than inferred from a green board, and the natural `25 * * * *` tick measured against the BEFORE census. ⚠️ That tick again reported `return_message: "1 row"` — identical to the three pre-apply ticks that enqueued nothing — while `compute_jobs` gained **two** `derive_broker_dailies` rows and the census moved 6 → 4 stale. The row count is not the return value; the job table is the verdict.
+
 ## [0.77.46.0] - 2026-09-17 — the fan-out admits the cohort that actually exists, and a pre-apply review caught a guard shipping under prose that claimed it
 
 ### Added
