@@ -1906,7 +1906,7 @@ export const FILES_FLOOR = 46;
 //                these bytes against a biting count of 394. It has never once
 //                equalled the biting count and must never be used to derive
 //                this constant.
-export const ARMS_FLOOR = 394;
+export const ARMS_FLOOR = 395;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

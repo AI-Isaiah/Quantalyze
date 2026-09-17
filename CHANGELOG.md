@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.77.47.0] - 2026-09-17 — the fan-out's all-candidates-failed branch gets a gate, and the advisory lock it must release was ungated until now
+
+### Added
+
+- **Arm R in `supabase/tests/test_ledger_refresh_fanout.sql`** — closes `T-164.5.1-09-07` (Phase 164.5.1 threat model, Denial of Service), the last blocker on that phase's verification. The threat is not "a candidate fails"; it is that **one poisoned row wedges every future tick**. The fan-out takes a session-level advisory lock and refuses to run without it, so a failure escaping the per-candidate handler leaves the lock held and every later tick takes the already-running exit — ledger refreshes stop silently while cron keeps reporting `succeeded`, the same shape as the defect `0.77.46.0` repaired.
+- The arm poisons every candidate, asserts the fan-out reports **0 enqueued** and lands no rows, asserts the advisory-lock delta over `pg_locks` is **zero**, and then asserts the NEXT tick still enqueues — the books balancing and the mechanism still working are two different claims.
+
+### Tests
+
+- ⛔ **MEASURED before writing it: no gate in the whole corpus referenced `advisory_unlock`, and none carried the handler's warning text.** The branch was entirely ungated. The threat model asked for it to be "exercised DELIBERATELY with the result recorded"; a one-off exercise satisfies that sentence once, an arm satisfies it every run.
+- ⚠️ **The first version of this arm was REJECTED BY THE RUNNER, and that rejection is the reason to trust the second.** It reported `NO-IDENTITY` / `wrong-first-failure`: under its own twin the arm went red carrying the *poison trigger's* message rather than a `TEST FAILED (R)`, so `biting` stayed at 394 and the floor check fired. A gate that goes red for someone else's reason has not measured itself — the mirror image of the usual vacuity, and the runner distinguishes the two. Both fan-out calls are now wrapped so any escape carries the arm's own identity, and the comment beside them records why the naive form is not there.
+- ⚠️ **The obvious lock assertion would have measured nothing, and the arm says so in place.** `IF NOT pg_try_advisory_lock(...) THEN fail` always succeeds: advisory locks are per session and re-entrant, so the same backend re-acquires a lock it already holds. The assertion is a **delta over `pg_locks`** for this backend instead.
+- Corpus re-run by the orchestrator after the fix: `arms: 395/395/0`, `biting: 395`, `lane-invocations: 395` (two independent tallies agreeing), `file test_ledger_refresh_fanout.sql: sections 23 / judged 23 / annotated 23 / waived 0 / biting 23`, `coverage: files 46/73`, `lane-blocked: 0`, **exit 0**.
+
+### Changed
+
+- `ARMS_FLOOR` 394 → 395, with its coupled pins. ⚠️ **The ratchet had more couplings than the pin list suggests:** beside eleven numeric pins across three test files, **nine regex literals** inside the deliberately-off sentinel tests still carried `394`. Those regexes mutate the green log to prove the runner catches a mismatch; changing only the constant leaves nine tests that no longer measure anything. That, not the arm, was the work.
+
+### Fixed
+
+- The gate's closing `RAISE NOTICE` had been stuck at `ALL 15 ARMS EXECUTED` and did not list arms P or Q although both run. Now `ALL 18 ARMS`. Log wording is fix-or-drop rather than a blocker, but it was wrong in a file whose whole purpose is counting arms.
+
 ## [0.77.46.1] - 2026-09-17 — the PROD baseline regenerated after the FANOUTCOHORT apply, which is what clears `sql-gate-lint` on `main`
 
 ### Fixed
