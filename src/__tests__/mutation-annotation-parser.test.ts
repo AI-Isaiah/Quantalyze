@@ -862,8 +862,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // lane runs by the orchestrator — `arms: 394/394/0`, `biting: 394`,
     // `lane-invocations: 394` (the two independent tallies AGREE),
     // `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, exit 0.
-    expect(armsSeen).toBe(394);
-    expect(stepsSeen).toBe(413);
+    expect(armsSeen).toBe(395);
+    expect(stepsSeen).toBe(414);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1678,7 +1678,7 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // others do not, and the 2026-09-11 move above is the recorded case where
     // the three derivations moved by eight, five and five. Keep running it
     // separately.
-    expect(needles.length).toBe(413);
+    expect(needles.length).toBe(414);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

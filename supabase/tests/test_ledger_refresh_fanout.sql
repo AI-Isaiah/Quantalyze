@@ -312,6 +312,8 @@ DECLARE
   s_d          UUID;  -- arm D: stale COMPOSITE
   s_f          UUID;  -- arm F: stale, but attempted 2 h ago
   s_p          UUID;  -- arm P: stale, eligible, OWNER-ONLY TERMINAL lifecycle
+  s_r1         UUID;  -- arm R: stale, eligible, DELIBERATELY POISONED
+  s_r2         UUID;  -- arm R: the second poisoned candidate
   s_h_inact    UUID;
   s_h_revoked  UUID;
   s_h_disc     UUID;
@@ -321,6 +323,8 @@ DECLARE
   v_ret        INTEGER;
   v_cnt        INTEGER;
   v_cnt2       INTEGER;
+  v_locks_pre  INTEGER;  -- arm R: advisory locks this backend holds BEFORE the tick
+  v_locks_post INTEGER;  -- arm R: ...and after it. The DELTA is the assertion.
   v_strat      UUID;
   v_port       UUID;
   v_alloc      UUID;
@@ -560,6 +564,11 @@ BEGIN
   -- the owner-only terminal status rather than to the published one, which is
   -- the whole point of that arm.
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf P',  'draft') RETURNING id INTO s_p;
+  -- Arm R's two fixtures. Named `lrf R%` ON PURPOSE: the poison trigger below
+  -- selects by NAME, because a trigger function cannot see this block's
+  -- PL/pgSQL variables. Seeded PARKED like every other fixture.
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf R1', 'draft') RETURNING id INTO s_r1;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf R2', 'draft') RETURNING id INTO s_r2;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_inactive, 'lrf H1', 'draft') RETURNING id INTO s_h_inact;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_revoked,  'lrf H2', 'draft') RETURNING id INTO s_h_revoked;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_disc,     'lrf H3', 'draft') RETURNING id INTO s_h_disc;
@@ -627,6 +636,14 @@ BEGIN
   INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
   VALUES (s_p, 'complete_with_warnings', now(),
           jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 30, 'YYYY-MM-DD'), 'value', 0.002)));
+
+  -- Arm R's fixtures, stale on the same footing as arm P's.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  VALUES (s_r1, 'complete_with_warnings', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 29, 'YYYY-MM-DD'), 'value', 0.002)));
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  VALUES (s_r2, 'complete_with_warnings', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 28, 'YYYY-MM-DD'), 'value', 0.002)));
 
   -- Arm C's negative control: genuinely fresh, so is_stale is FALSE.
   INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
@@ -1651,7 +1668,111 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (S1): EXECUTE on enqueue_ledger_refresh_for_strategies is held by [%], expected exactly the owner [%]. This is a cross-tenant SECURITY DEFINER enqueue path that fans work out for every tenant; it must be callable by the scheduler alone, and the scheduler IS the owner. service_role''s grant survived Phase 164.7 precisely because only anon and authenticated were ever probed — arm I is that subset probe, and this arm is what makes the set complete', v_grantees, v_owner_name;
   END IF;
 
-  RAISE NOTICE 'ALL 15 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, S1) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, and every one of those claims is falsifiable.';
+  -- ======================================================================
+  -- ARM R — THE ALL-CANDIDATES-FAILED BRANCH, AND THE LOCK IT MUST RELEASE
+  -- (Phase 164.5.1 threat model, T-164.5.1-09-07, Denial of Service).
+  --
+  -- ⛔ THE THREAT IS NOT "a candidate fails". It is that ONE POISONED ROW
+  -- WEDGES EVERY FUTURE TICK. The fan-out takes a SESSION-level advisory lock
+  -- (`pg_try_advisory_lock(hashtext('ledger_refresh_fanout'))`) and refuses to
+  -- run when it cannot get it. If a failing candidate escapes the per-candidate
+  -- handler, the lock is never released on that path and the NEXT tick — and
+  -- every tick after it — takes the "already running" exit and does nothing.
+  -- Ledger refreshes would stop silently while the cron row kept reporting
+  -- `succeeded`. That is the same shape as the defect Phase 164.5.1.1 repaired.
+  --
+  -- ⚠️ THE OBVIOUS ASSERTION IS WRONG HERE, and this comment exists so the next
+  -- reader does not "simplify" it back. Checking the lock by TAKING it —
+  -- `IF NOT pg_try_advisory_lock(...) THEN fail` — MEASURES NOTHING: advisory
+  -- locks are per SESSION and RE-ENTRANT, so this same backend re-acquires a
+  -- lock it is already holding and the call succeeds either way. The assertion
+  -- is therefore a DELTA over `pg_locks` for THIS backend: however many
+  -- advisory locks were held before the tick, exactly that many after it.
+  --
+  -- ⚠️ The threat model says this branch is "exercised DELIBERATELY with the
+  -- result recorded, rather than assumed to work". A one-off exercise satisfies
+  -- that sentence once; an arm satisfies it every run. Measured 2026-09-17
+  -- before writing this: NO gate in the whole corpus referenced
+  -- `advisory_unlock`, and none carried the handler's warning text — the branch
+  -- was entirely ungated.
+  -- ======================================================================
+  -- RED-UNDER: make the per-candidate handler RE-RAISE instead of continuing.
+  --            The first poisoned candidate then propagates out of the loop,
+  --            the outer handler unlocks and re-raises, and the fan-out aborts
+  --            instead of returning 0 — so the `v_ret` read below fails in the
+  --            lane. That mutation is EXACTLY the regression this arm exists to
+  --            catch: it is the difference between "one bad row is skipped" and
+  --            "one bad row kills the tick".
+  --
+  -- ⛔ DISJOINTNESS, checked rather than assumed: 20260917120000's apply-time
+  --    `DO $verify$` block holds eight needles (system_flags, the NULL-safe
+  --    flag read, the cron_runs instrument, the lifecycle set, 'draft',
+  --    'archived', the GET DIAGNOSTICS read and the retired app-namespace GUC).
+  --    NONE of them matches the handler text mutated here, so the twin cannot
+  --    abort the apply before the arms run and report a `no-red` that measured
+  --    nothing — the trap GRAMMAR.md rule 2 records.
+  -- RED-UNDER-M: {"arm":"R","apply":[{"kind":"edit","file":"supabase/migrations/20260917120000_ledger_fanout_admit_private.sql","find":"RAISE WARNING 'enqueue_ledger_refresh_for_strategies: one candidate failed to enqueue (SQLSTATE %); continuing', SQLSTATE;","replace":"RAISE EXCEPTION 'enqueue_ledger_refresh_for_strategies: one candidate failed to enqueue (SQLSTATE %); continuing', SQLSTATE;","occurrences":1}]}
+  CREATE FUNCTION pg_temp.lrf_poison() RETURNS TRIGGER LANGUAGE plpgsql AS $poison$
+  BEGIN
+    IF EXISTS (SELECT 1 FROM strategies WHERE id = NEW.strategy_id AND name LIKE 'lrf R%') THEN
+      RAISE EXCEPTION 'arm R: poisoned candidate refuses to enqueue';
+    END IF;
+    RETURN NEW;
+  END $poison$;
+  CREATE TRIGGER lrf_poison_trg BEFORE INSERT ON compute_jobs
+    FOR EACH ROW EXECUTE FUNCTION pg_temp.lrf_poison();
+
+  SELECT count(*) INTO v_locks_pre FROM pg_locks
+   WHERE locktype = 'advisory' AND pid = pg_backend_pid();
+
+  UPDATE strategies SET status = 'published' WHERE id IN (s_r1, s_r2);
+
+  -- ⛔ THE CALL IS WRAPPED, AND THE WRAPPER IS THE ARM'S IDENTITY.
+  -- MEASURED 2026-09-17: the naive form — a bare call followed by an IF — made
+  -- this arm report `NO-IDENTITY` / `wrong-first-failure` under its own twin.
+  -- With the per-candidate handler re-raising, the POISON TRIGGER'S message is
+  -- what escapes, the lane goes red carrying a string this file never wrote,
+  -- and the runner rightly refuses to count the arm as biting. A gate that goes
+  -- red for someone else's reason has not measured itself. Converting any
+  -- escape into this arm's own TEST FAILED (R) is what makes the red
+  -- ATTRIBUTABLE — which is the property `biting` actually counts.
+  BEGIN
+    v_ret := public.enqueue_ledger_refresh_for_strategies();
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (R): a poisoned candidate propagated OUT of the fan-out (SQLSTATE %) instead of being skipped. The per-candidate handler is the whole mitigation for T-164.5.1-09-07: one bad row must not kill the tick, because a tick that dies here leaves every later tick facing a lock it never released.', SQLSTATE;
+  END;
+  IF v_ret <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (R): every candidate this tick was poisoned, so the fan-out must report 0 enqueued; it reported %. Either the poison trigger did not fire or a candidate was counted that never landed a row.', v_ret;
+  END IF;
+
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id IN (s_r1, s_r2) AND kind = 'derive_broker_dailies';
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (R): the poisoned candidates landed % derive_broker_dailies row(s), expected 0 — the counter and the table disagree, which is the class where a green tick hides an empty one.', v_cnt;
+  END IF;
+
+  SELECT count(*) INTO v_locks_post FROM pg_locks
+   WHERE locktype = 'advisory' AND pid = pg_backend_pid();
+  IF v_locks_post <> v_locks_pre THEN
+    RAISE EXCEPTION 'TEST FAILED (R): the fan-out held % advisory lock(s) before the all-candidates-failed tick and % after it. The lock LEAKED: the next tick takes the already-running exit and every tick after it does nothing, while cron keeps reporting succeeded.', v_locks_pre, v_locks_post;
+  END IF;
+
+  DROP TRIGGER lrf_poison_trg ON compute_jobs;
+
+  -- THE WEDGE CHECK. The delta above says the books balance; this says the
+  -- mechanism actually still works. A later tick must enqueue again.
+  BEGIN
+    v_ret := public.enqueue_ledger_refresh_for_strategies();
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (R): the tick AFTER the all-candidates-failed one raised (SQLSTATE %) instead of running. Same identity rule as the wrapper above.', SQLSTATE;
+  END;
+  IF v_ret < 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (R): after a tick in which every candidate failed, the NEXT tick enqueued % job(s) — the fan-out is wedged, which is precisely the denial of service T-164.5.1-09-07 names.', v_ret;
+  END IF;
+
+  UPDATE strategies SET status = 'draft' WHERE id IN (s_r1, s_r2);
+
+  RAISE NOTICE 'ALL 18 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, P, Q, R, S1) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, and every one of those claims is falsifiable.';
 END $$;
 
 ROLLBACK;
