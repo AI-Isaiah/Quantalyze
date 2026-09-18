@@ -301,8 +301,16 @@ place; nothing here reads them destructively.
 
 ## What this runbook deliberately does not cover
 
-- **PROD `pg_cron` itself stopping.** `[PLACEHOLDER — filled in by this plan's task 3 with the
-  residual id TODOS.md records]`
+- **PROD `pg_cron` itself stopping.** Booked as `[PGCRON-LIVENESS-UNWATCHED-01]` in `TODOS.md`
+  (Phase 164.1.1, booked 2026-09-18): nothing in this repository periodically checks `pg_cron`'s
+  own liveness independently of any specific job's body, so if it stops, this observer stops
+  silently with it — accepted as a named residual on narrowness and a rejected alternative (a
+  fifth prober arm would share GitHub Actions' own unreliability). See that entry for the full
+  disposition.
+  ⚠️ **A MANUAL reading exists, and it is not monitoring.** A human can run
+  `SELECT public.latest_cron_success('prod_prober_cadence_check');` by hand and see its silence
+  if `pg_cron` itself stops calling this observer. That is a query somebody has to decide to run
+  — never coverage, never a mitigation.
 - **Shortening the prober's own GitHub Actions schedule to "fix" cadence.** Under the same GitHub
   throttling, a tighter cron buys more attempts, not a bounded gap — a louder claim rather than a
   measured one. This is the premise the whole phase's ceiling derivation (CTX-04) rests on;
