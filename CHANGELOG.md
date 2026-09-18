@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.77.53.0] - 2026-09-18 — the cadence observer is registered on PROD and its first tick is on the record
+
+Phase 164.1.1 (PROBERCADENCE), plan 06: the founder-gated live session that moves the observer
+from "shipped" to "running". Everything the requirement needed was already in the repo after plans
+01-05 — the observer function, its anti-vacuity arms, the guarded alert route, the runbook. None of
+it observed anything, because nothing had registered it with a scheduler. That is what this does.
+
+### Added
+
+- **PROD `pg_cron` job `prod_prober_cadence_check`, jobid 41, `20 * * * *`, active.** Registered by
+  `SELECT cron.schedule('prod_prober_cadence_check', '20 * * * *', $$SELECT public.prod_prober_cadence_check();$$);`
+  and read back as `41 | prod_prober_cadence_check | 20 * * * * | active=true | postgres | postgres`.
+  `[PROBER-CADENCE-UNDELIVERED-01]` argued the observer must live where a scheduler that actually
+  fires lives — a GitHub-hosted watchdog would share the failure mode of the thing it watches. PROD's
+  own `pg_cron` is that place, and this is the commit where it starts.
+
+### Changed
+
+- **`scripts/prod-prober/cron-manifest.json` — 15 → 16 jobs**, re-captured in the SAME session as the
+  registration and diff-verified programmatically rather than by eye: added `prod_prober_cadence_check`,
+  changed none, removed none. `node scripts/prod-prober/run.mjs --preflight-repoint` was then re-run
+  AFTER the manifest commit and printed `PROD cron.job matches the committed manifest (16 row(s))` —
+  the gate that refuses a drifted manifest passing on the committed one, rather than an assertion that
+  it would.
+
+### Notes
+
+- **`[PROBER-CADENCE-UNDELIVERED-01]` is CLOSED**, with the date, jobid 41 and a pointer to the
+  auditable session record `164.1.1-PROD-SESSION.md`, which carries the database-marker answer, all
+  five blocking pre-flights, both live ops, the tick and the post-commit pre-flight re-run.
+- **Phase 164.1.1's verification moves `human_needed` → `passed`.** Its single human-verification item
+  now carries a `result:` block naming what was actually executed. `covered_files` gains the session
+  record and `covered_digest` is recomputed over all 32 files — a re-fingerprint of a verdict this
+  session established, not one taken to clear a red.
+- **The first tick did NOT alarm, and that is the correct outcome.** At 2026-09-18 18:20:00Z
+  `cron.job_run_details` runid 11441 `succeeded`, and the observer wrote its own `public.cron_runs`
+  row: `status = ok`, `error = null`, `metadata = {ceiling: 10:25:00, gap_minutes: 89,
+  contact_cron_name: prod_prober}`. A real measured gap of 89 minutes sits under the measured ceiling,
+  so the healthy branch is the one the data selects. The alarm path stays proven where it was proven —
+  arms O1/A1/N1/U1/V1 and the matched pair G1/S1 all observed RED on a disposable pg-lane, plus the
+  calibrated suite around `POST /api/prober-cadence-alert`. This tick is evidence the job runs and
+  measures; it is not evidence the alarm fires, and it is not recorded as such.
+- **No migration.** `supabase/migrations/**` is untouched, so merging this does not start `apply-test`
+  or the `Production` environment's human-reviewer gate.
+
 ## [0.77.52.0] - 2026-09-18 — a CI gate that cannot pass where it runs stops running there, and the exclusion cannot grow in silence
 
 Phase 164.1.1.1 (LANEONLYGATES), the urgent phase inserted to clear the red v0.77.51.0 shipped

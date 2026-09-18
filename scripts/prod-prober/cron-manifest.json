@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "normalization": "ws-collapse-v2",
-  "captured_at": "2026-09-17T08:05:56.340Z",
+  "captured_at": "2026-09-18T18:02:50.335Z",
   "database_marker": "⛔ PRODUCTION — real customer data. No seeds, no fixtures, no DELETE without a scoped id.",
   "jobs": [
     {
@@ -73,6 +73,16 @@
       "username": "postgres",
       "command_sha256": "4cf2af7a13b2edaced52f76cb3b13d8ee436f619ee59bc26d93a9daa57ce0935",
       "command": "SELECT enqueue_poll_allocator_positions_for_all_keys();"
+    },
+    {
+      "jobid": 41,
+      "jobname": "prod_prober_cadence_check",
+      "schedule": "20 * * * *",
+      "active": true,
+      "database": "postgres",
+      "username": "postgres",
+      "command_sha256": "fd2e08214929d2fefc3d153215d6d3c0c31a4bb832cdd4e59a33772318159349",
+      "command": "SELECT public.prod_prober_cadence_check();"
     },
     {
       "jobid": 30,

@@ -3585,8 +3585,15 @@ and any widening must say what it does to the approval-gate snapshot.
 
 ### PROBER-CADENCE-UNDELIVERED-01 — the prod-prober declares hourly and delivers 27 %, so its blind window is WORSE than the one it was designed to avoid (booked 2026-09-18)
 
-- [ ] **`[PROBER-CADENCE-UNDELIVERED-01]` The prober is not broken — it is LATE, and nothing
-      measures its lateness.**
+- [x] **`[PROBER-CADENCE-UNDELIVERED-01]` The prober is not broken — it is LATE, and nothing
+      measures its lateness.** ✅ **CLOSED 2026-09-18 by Phase 164.1.1 PROBERCADENCE, plan 06.**
+      The PROD-side observer is registered and firing: `cron.schedule('prod_prober_cadence_check',
+      '20 * * * *', …)` returned **jobid 41**, the committed `cron-manifest.json` was re-captured
+      in the SAME session (15 → 16 jobs, added 1 / changed 0 / removed 0), and the first tick at
+      18:20:00Z wrote its own `public.cron_runs` row with `status = ok`, a measured
+      `gap_minutes = 89` against the `10:25:00` ceiling. The full auditable record — marker query,
+      five pre-flights, both live ops, the tick, and the post-commit pre-flight re-run — is
+      `.planning/phases/164.1.1-probercadence-the-prober-s-detection-latency-is-measured-and/164.1.1-PROD-SESSION.md`.
       ⛔ **MEASURED 2026-09-18 over a 273.4 h window, twice independently** (Phase 164.1's
       verifier and the orchestrator, identical figures). `.github/workflows/prod-prober.yml:65`
       declares `cron: "0 * * * *"`. GitHub delivered **75 of 273 expected runs = 27 %**, median
