@@ -268,13 +268,31 @@ $latest_cron_success_comment$;
 -- --------------------------------------------------------------------------
 -- STEP 3: grants
 -- --------------------------------------------------------------------------
--- Matching the posture 20260409133655_function_execute_hardening.sql
--- established for this family: PUBLIC/anon/authenticated revoked, service_role
--- (the scheduler's role, per scripts/prod-prober/cron-manifest.json — every job
--- runs as postgres, and this migration keeps the posture consistent with the
--- existing family) granted EXECUTE explicitly.
-REVOKE ALL ON FUNCTION public.prod_prober_cadence_check() FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.prod_prober_cadence_check() TO service_role;
+-- Matching 20260911120000_vault_tick_hardening.sql's STEP 2 (check 6) in
+-- shape — NOT 20260409133655_function_execute_hardening.sql, which governs
+-- send_intro_with_decision, sync_trades and latest_cron_success, a different
+-- family from the cron-tick one this function belongs to.
+--
+-- NO GRANT follows the REVOKE. The scheduler runs as `postgres` — MEASURED,
+-- all 15 rows of scripts/prod-prober/cron-manifest.json carry
+-- `username: postgres` — and `postgres` is this function's OWNER, so the
+-- owner needs no grant; EXECUTE reaches it through owner privilege, not the
+-- ACL.
+--
+-- ⛔ service_role IS REVOKEd here, explicitly, alongside PUBLIC, anon and
+-- authenticated — because Supabase's default ACL auto-grants EXECUTE to
+-- service_role on every new public function, and leaving that default in
+-- place is the exact defect [164.7-WR02-SERVICE-ROLE-EXECUTE] already found
+-- and fixed once for the sibling match_engine_cron_tick() (RESOLVED
+-- 2026-09-12, applied to PROD — that entry records the original text had
+-- this backwards, "service_role was to be GRANTED explicitly", and that it
+-- was corrected during the phase). This function reads a live service key
+-- out of vault.decrypted_secrets as its DEFINER; a GRANT here would let any
+-- service_role holder (every Next.js createAdminClient() route, the Python
+-- analytics-service) invoke it on demand, write arbitrary cron_runs rows
+-- under cron_name='prod_prober_cadence_check' to mask or spam the monitoring
+-- signal, and force a live secret-bearing net.http_post.
+REVOKE ALL ON FUNCTION public.prod_prober_cadence_check() FROM PUBLIC, anon, authenticated, service_role;
 
 -- --------------------------------------------------------------------------
 -- STEP 4: self-verifying DO block
@@ -290,6 +308,7 @@ DECLARE
   v_config  TEXT[];
   v_srchpath TEXT;
   v_grantees TEXT;
+  v_owner    TEXT;
 BEGIN
   SELECT TRUE, p.prosecdef, p.proconfig
     INTO v_exists, v_secdef, v_config
@@ -312,9 +331,30 @@ BEGIN
     RAISE EXCEPTION 'Migration 20260918120000: prod_prober_cadence_check does not pin search_path at all — on a SECURITY DEFINER function that is a privilege-escalation route';
   END IF;
 
-  SELECT string_agg(grantee_name, ',' ORDER BY grantee_name) INTO v_grantees
+  -- 4. THE WHOLE EXECUTE GRANTEE SET IS EXACTLY THE OWNER — matching
+  --    20260911120000_vault_tick_hardening.sql's check 6 in shape.
+  --
+  --    ⭐ THE SET, not a subset. The check this replaces probed only
+  --    PUBLIC/anon/authenticated and passed with service_role still holding
+  --    EXECUTE — the exact shape of defect [164.7-WR02-SERVICE-ROLE-EXECUTE],
+  --    already found and fixed once for the sibling match_engine_cron_tick()
+  --    and reproduced here until now. aclexplode over proacl enumerates the
+  --    actual grantees instead of interrogating a guessed list, so a grantee
+  --    nobody thought of is a FAILURE rather than a silence.
+  --
+  --    ⚠️ COMPARED TO THE OWNER'S NAME, NEVER TO THE LITERAL 'postgres' — the
+  --    pg-lane boots as whatever role scripts/pg-lane/run.sh created.
+  --
+  --    ⚠️ COALESCE(proacl, acldefault(…)) makes a NULL acl explicit: a
+  --    function whose privileges were never touched carries NULL proacl,
+  --    whose MEANING is the default ACL — and the default ACL for a function
+  --    grants EXECUTE to PUBLIC. Reading NULL as "no grantees" would report
+  --    the widest possible state as the tightest.
+  SELECT g.owner_name, string_agg(g.grantee_name, ',' ORDER BY g.grantee_name)
+    INTO v_owner, v_grantees
     FROM (
-      SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee_name
+      SELECT pg_get_userbyid(p.proowner) AS owner_name,
+             CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee_name
         FROM pg_proc p
         JOIN pg_namespace n ON n.oid = p.pronamespace
         CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
@@ -322,12 +362,15 @@ BEGIN
          AND p.proname = 'prod_prober_cadence_check'
          AND p.pronargs = 0
          AND a.privilege_type = 'EXECUTE'
-         AND (CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END) IN ('PUBLIC', 'anon', 'authenticated')
-    ) g;
-  IF v_grantees IS NOT NULL THEN
-    RAISE EXCEPTION 'Migration 20260918120000: prod_prober_cadence_check carries EXECUTE for [%] — expected none of PUBLIC/anon/authenticated. This function reads a live service key out of the vault as its DEFINER and posts it in an outbound header', v_grantees;
+    ) g
+   GROUP BY g.owner_name;
+  IF v_grantees IS NULL THEN
+    RAISE EXCEPTION 'Migration 20260918120000: could not read the EXECUTE grantee set of public.prod_prober_cadence_check — the function is missing, or it carries no EXECUTE aclitem at all, and an empty answer here is indistinguishable from a locked-down one unless it is refused';
+  END IF;
+  IF v_grantees IS DISTINCT FROM v_owner THEN
+    RAISE EXCEPTION 'Migration 20260918120000: EXECUTE on public.prod_prober_cadence_check is held by [%], expected exactly the owner [%]. This function reads a live service key out of the vault as its DEFINER and posts it in an outbound header — a grantee beyond the owner (the scheduler, which runs as postgres and IS the owner) can invoke it on demand to mask/spam the monitoring signal or force a live secret-bearing net.http_post', v_grantees, v_owner;
   END IF;
 
-  RAISE NOTICE 'Migration 20260918120000: prod_prober_cadence_check() verified — SECURITY DEFINER, search_path pinned, no anon/authenticated/PUBLIC EXECUTE';
+  RAISE NOTICE 'Migration 20260918120000: prod_prober_cadence_check() verified — SECURITY DEFINER, search_path pinned, EXECUTE held by the owner alone';
 END
 $verify$;
