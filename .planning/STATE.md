@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.1.1
-current_phase_name: PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it (INSERTED)
+current_phase: 164.1.1.1
+current_phase_name: LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only fixture (INSERTED)
 status: executing
-stopped_at: Completed 164.1.1-04-PLAN.md
-last_updated: "2026-09-18T13:53:41.238Z"
+stopped_at: Completed 164.1.1.1-01-PLAN.md
+last_updated: "2026-09-18T17:14:00.000Z"
 last_activity: 2026-09-18
-last_activity_desc: Phase 164.1.1 plan 04 executed — the guarded escalation route shipped and calibrated (all four load-bearing behaviours neutered, observed RED, restored)
-state_head: eeeee3208cd73edc388b86a717321b0fbe83ef61
+last_activity_desc: Phase 164.1.1.1 plan 01 executed — LANE-ONLY exclusion marker + ci.yml mechanism, measured via a stub-psql invocation log, neither anti-skip floor moved, all three new properties calibrated RED then restored
+state_head: 346e0850ffc9a901fab7a8fd1d1b7e5e9d93f543
 progress:
   total_phases: 45
   completed_phases: 20
@@ -172,9 +172,35 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-⭐ **RECONCILED 2026-09-18 (plan 05). THIS block is the current position and SUPERSEDES the
-plan-04 block immediately below, which is retained as lineage. This update ADDS plan 05's
-completion.**
+⭐ **RECONCILED 2026-09-18 (164.1.1.1 plan 01). THIS block is the current position and
+SUPERSEDES the 164.1.1-plan-05 block immediately below (retained as lineage). Phase 164.1.1.1
+is the URGENT inserted phase named in Roadmap Evolution — LANEONLYGATES — a SIBLING of 164.1.1,
+not a continuation of it; the block below covers 164.1.1's own history.**
+
+Phase: 164.1.1.1 (LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only
+fixture) — EXECUTING
+Plan: 1 of 2 DONE (`164.1.1.1-01-SUMMARY.md`, commits `1bd4e681` (feat, the LANE-ONLY marker +
+ci.yml exclusion mechanism), `6c3fce03` (test, invocation log + defect-injection pair + static-
+accounting scenario), `346e0850` (docs, calibration log + deferred items) on branch
+`chore/164.1.1.1-laneonlygates`). `supabase/tests/test_prod_prober_cadence.sql` no longer
+executes against shared TEST — it declares itself LANE-ONLY via one structured comment line
+naming `net._lane_posts`, the fixture, and `sql-mutation` as the owning job — while
+`SENTINEL_FLOOR` (11), `ARMS_FLOOR` (213) and ci.yml's per-file derivation table stay
+byte-unchanged, proven by `mutation-runner --parse-only` and a whitespace-blind `git diff -w`.
+The exclusion is measured, not inspected: `ci-anti-skip-gate.contract.test.ts` gained a real
+stub-psql invocation log and a defect-injection calibration pair (21/21 passing), and all three
+new properties were individually neutered, observed RED for the predicted reason, and restored
+byte-identically (`shasum -a 256` equal pre/post every cycle — see the SUMMARY's Calibration
+Log). Two pre-existing, out-of-scope `npm test` failures (`check-planning-hygiene.test.ts`,
+`verify-plan-anchors.test.ts`, both against this phase's own PLAN.md content authored before
+this execution session) logged to `deferred-items.md` rather than fixed. Next: Plan 02 — the
+cross-check pinning the excluded SET as sites (not a count) per the threat register's
+T-164.1.1.1-01 mitigation.
+
+⭐ **RECONCILED 2026-09-18 (plan 05). THIS block was the current position for Phase 164.1.1
+(PROBERCADENCE) from plan 05's close until the block above (a different, sibling phase,
+164.1.1.1) superseded it as the CURRENT position. Retained as lineage — 164.1.1 plan 06 is
+still the next plan for THAT phase.**
 
 Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a
 scheduler that cannot silently drop it (INSERTED)) — EXECUTING
@@ -1098,6 +1124,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.1.1 P01 | 87 min | 3 tasks | 4 created, 8 modified |
 | Phase 164.1.1 P04 | ~55 min | 2 tasks | 3 modified |
 | Phase 164.1.1 P05 | ~50 min | 3 tasks | 1 created, 2 modified |
+| Phase 164.1.1.1 P01 | ~50 min | 3 tasks | 1 created, 3 modified |
 
 ## Accumulated Context
 
@@ -1517,6 +1544,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.1.1]: Phase 164.1.1 plan 02: expansion arm ordering (G1,S1,O1,A1,U1,V1,N1) is load-bearing — arms mutating shared staleness logic (G1/S1) must run before arms depending on it, and arms sensitive to same-transaction now() pollution (N1) must run after every self-observability-row-producing arm. — Discovered via mutation-runner cross-arm interaction bugs; documented in the gate file's own header for future arms in this family.
 - [Phase 164.1.1]: 164.1.1-04: escalation window set to 3600s (Claude's discretion, unspecified by CONTEXT.md) — Bounds Sentry noise to one capture/hour of sustained staleness regardless of future cron.schedule() cadence; the structured log still fires on every occurrence.
 - [Phase 164.1.1]: 164.1.1-04 MEASURED: `state.add-decision` ALSO clobbers STATE.md's hand-set `progress:` block the same way `state.record-metric`/`state.record-session` do (see the line above from plan 02.1) — `completed_phases` 20→18, `percent` 45→41, plus two stray blank-line insertions at ~L205-208. Confirms the prior finding generalises to a third handler; treat every `state.*` write as suspect and diff before trusting it.
+- [Phase 164.1.1.1]: 164.1.1.1-01: No-floor-move LANE-ONLY exclusion — skip execution plus the three "$out"-derived checks only; the static accounting (sentinel declaration, roster-vs-count coherence, n_arms<=RAISE-sites) stays outside the branch and runs for every file including the excluded one, so SENTINEL_FLOOR (11) and ARMS_FLOOR (213) never move.
+- [Phase 164.1.1.1]: 164.1.1.1-01 MEASURED (re-confirms the pattern above, a fourth time): `state.add-decision` and `state.update-progress` both clobber the `progress:` block downward again this session (`completed_phases` 20→18, `total_plans` 201→203, `percent` 44→40, plus stray blank-line insertions at ~L252-255). Reverted both calls; kept only the decision text, applied by hand.
+- [Phase 164.1.1.1]: 164.1.1.1-01: the static-accounting contract-test scenario counts occurrences of "completion sentinel OK: ALL 7 ARMS EXECUTED" rather than bare presence/absence, because test_sync_status_curated_sentence_survives.sql independently declares the identical "ALL 7 ARMS EXECUTED" text and a presence check could not distinguish the excluded file's line from that other file's.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -2220,6 +2250,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
+
+**Last Date:** 2026-09-18T17:12:00.000Z
+**Stopped At:** Completed 164.1.1.1-01-PLAN.md (Phase 164.1.1.1 LANEONLYGATES, plan 01 of 2, wave 1 — sequential on the main working tree, isolation `none`, branch `chore/164.1.1.1-laneonlygates`). `supabase/tests/test_prod_prober_cadence.sql` gained one `-- LANE-ONLY: {json}` header line naming `net._lane_posts`, fixture 34, and `sql-mutation` as the owning job — no executable change. `ci.yml`'s "Run SQL self-tests" step reads that marker pre-execution via `lane_only_marker()`, censuses and prints every exclusion (`::notice::` per file) before the loop, and skips only the `psql` invocation plus the three `"$out"`-derived checks inside the loop for a marked file — the whole static-analysis half (sentinel declaration, roster-vs-count coherence, `n_arms` <= RAISE-EXCEPTION-sites) keeps running for every file including the excluded one, so `SENTINEL_FLOOR` (11), `ARMS_FLOOR` (213) and the per-file derivation table stay byte-unchanged (confirmed via `mutation-runner --parse-only` and a whitespace-blind `git diff -w`). The closing summary now reports executed/found, excluded count, and sentinels verified-this-run vs. declared, plus a fifth standing limit. `ci-anti-skip-gate.contract.test.ts` gained `STUB_INVOCATION_LOG`/`STUB_FAIL_BASENAME` and three new scenarios (a real stub-psql invocation log proving the file is never executed, a defect-injection calibration pair reproducing the shipped `relation "net._lane_posts" does not exist` failure, and a static-accounting scenario) plus one honest rename — 21/21 passing. All three new properties individually neutered, observed RED for the predicted reason, and restored byte-identically (`shasum -a 256` equal pre/post every cycle). Three commits (`1bd4e681` feat, `6c3fce03` test, `346e0850` docs), NOT pushed. Collateral check: the five named suites + contract test show only the pre-existing, box-local `Test timed out in 5000ms` in `lint-sql-gates.test.ts` (carved out by the plan's own `<fails_when>`); a full `npm test` surfaced two further pre-existing, out-of-scope failures (`check-planning-hygiene.test.ts`, `verify-plan-anchors.test.ts`, both against this phase's own PLAN.md content authored before this execution session) logged to `deferred-items.md` rather than fixed. Next: plan 02 — the cross-check pinning the excluded SET as sites (not a count) per threat-register item T-164.1.1.1-01.
+**Resume File:** None
 
 **Last Date:** 2026-09-18T10:06:01.000Z
 **Stopped At:** Completed 164.1.1-05-PLAN.md
