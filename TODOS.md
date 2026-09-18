@@ -3741,6 +3741,17 @@ and any widening must say what it does to the approval-gate snapshot.
       ⚠️ Same family as `[164.8-PUSH-RACE-VAC08]`: on a PR that ADDS a migration, gates carrying
       applied-ness probes are RED until merge, by construction, because apply-on-merge was chosen
       over apply-on-PR.
+      ⛔ **THIS IS ON THE CRITICAL PATH FOR THE DEPLOY, NOT JUST HYGIENE — and that is the half
+      that is easy to miss.** `sql-gate-lint` is BLOCKING in the `frontend` aggregator (Phase
+      164.3 / VAC-03, wired into BOTH `needs:` and the result loop), and `ci.yml:2205` states the
+      consequence in its own words: *"Railway waits on main CI and SKIPS the analytics-service
+      deploy when it is red."* So after PR #815 merges, main CI stays red on this one finding, and
+      **`POST /api/prober-cadence-alert` — the alarm's last hop, added by this very phase — does
+      not deploy** until the regeneration lands.
+      **Required ordering, therefore:** merge #815 → migration applies to PROD → regenerate
+      `baseline.sql` from PROD → main CI green → Railway deploys the route → **only then** run
+      Plan 06's live `cron.schedule(...)`. Registering the cron before the route is deployed would
+      point the observer at an endpoint that does not exist yet.
 
 ### VAULTTICK-MANIFEST-COUNT-STALE-01 — an APPLIED migration's comment cites a census that has since moved (booked 2026-09-18)
 
