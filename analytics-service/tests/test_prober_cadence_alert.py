@@ -23,9 +23,17 @@ from fastapi.testclient import TestClient
 
 from routers import cron as cron_mod
 
-# A plausible-looking, entirely fake service key — never a real credential.
-# Used ONLY to prove it never lands in a log record or an escalation call.
-_CANARY_SERVICE_KEY = "X9vQ2mNb7RtL4kZp1YcW6HsD3Jf8Ug5A"
+# An obviously-fake canary, used ONLY to prove the key never lands in a log
+# record or an escalation call.
+#
+# ⛔ Do NOT make this "look like a real key" again. It was a 32-char
+# high-entropy string until 2026-09-18, and gitleaks' `generic-api-key`
+# rule flagged it (entropy 5.0) in the secret-scan job — correctly, since
+# this repo is public and a scanner cannot tell a fixture from a live
+# credential. The assertion below only needs a value that is UNIQUE and
+# would be visible if it leaked; its entropy is irrelevant to what is
+# being tested. Keep it unmistakably synthetic.
+_CANARY_SERVICE_KEY = "CANARY-not-a-real-key-prober-cadence-leak-probe"
 
 
 class _FakeClock:
