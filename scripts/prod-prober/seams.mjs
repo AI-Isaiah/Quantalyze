@@ -178,7 +178,21 @@ export function realSqlRunner(env) {
     const fieldSep = typeof opts.fieldSep === "string" ? opts.fieldSep : "\t";
     const recordSep = typeof opts.recordSep === "string" ? opts.recordSep : null;
 
-    const argv = [url, "-v", "ON_ERROR_STOP=1", "-At", "-F", fieldSep];
+    // ⛔ `-q` IS LOAD-BEARING, and it is not cosmetic quieting.
+    // Without it psql writes the COMMAND TAG of a non-SELECT statement to
+    // STDOUT — `INSERT 0 1` on its own line, right after the RETURNING row —
+    // and `-At` does NOT suppress it. `recordProberContact` counts non-empty
+    // stdout lines to tell a one-row INSERT from a silent zero-row one, so the
+    // tag read as a SECOND returned row and every hourly run reported a false
+    // `measure-fail` while the row was in fact written correctly.
+    // MEASURED 2026-09-18 against PROD, psql 18.6:
+    //   without -q:  "1\nINSERT 0 1\n"  -> countReturnedRows = 2  (false defect)
+    //   with    -q:  "1\n"               -> countReturnedRows = 1  (correct)
+    // First observed in the wild at 16:50Z on 2026-09-18 (issue #773); the
+    // 12:30Z run of the same day was clean, so the runner's psql moved under us.
+    // `-q` suppresses only informational output — query RESULT rows are
+    // untouched, which the SELECT arms depend on and `--self-test` pins.
+    const argv = [url, "-v", "ON_ERROR_STOP=1", "-At", "-q", "-F", fieldSep];
     if (recordSep !== null) argv.push("-R", recordSep);
     argv.push("-X", "-c", query);
 
