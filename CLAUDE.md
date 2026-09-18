@@ -225,45 +225,62 @@ answered by `[REDUNDER-SUBSET-SPLIT]`, never by raising again (`ci.yml` carries 
 superseded CURRENCY paragraph — now lives in `docs/sql-gate-lineage.md`.** It is history; nothing
 in it is a live constant.
 
-## `covered_files` must not carry a repo-global ledger (measured 2026-09-18)
+## Completion is HISTORICAL; drift is a SEPARATE signal (founder decision 2026-09-18)
 
-A `*-VERIFICATION.md` frontmatter carries `covered_files` plus one `covered_digest` over all of
-them. `isPhaseComplete` reads `verification.status`, and that status is **`stale`** whenever the
-digest no longer matches the files' CURRENT content — so ANY covered file changing demotes the
-phase out of `progress.completed_phases`.
+⛔ **`covered_digest` is BANNED in this repo, and so is `covered_files`.** A verification that
+passed STAYS passed. Use `verified_at_sha` + `drift_subjects`, and read drift from
+`node scripts/verification-drift-report.mjs`.
 
-⛔ **Therefore `TODOS.md`, `CHANGELOG.md`, `VERSION` and `package.json` NEVER belong in
-`covered_files`.** They are repo-global ledgers that every phase touches. Covering one makes an
-unrelated backlog edit invalidate every verification that lists it — a guaranteed, recurring false
-positive that says nothing about whether the phase's verdict still holds.
+**THE DEFECT THIS REPLACES, measured before the decision.** GSD demotes a `passed` verification
+to `stale` the moment ANY file in `covered_files` changes. Measured 2026-09-18 across all 28
+verifications in this repo:
 
-**MEASURED 2026-09-18:** only **four** `*-VERIFICATION.md` files carry `covered_files` +
-`covered_digest` at all (164.1, 164.5.1, 164.8.3, 164.6.3) — the mechanism is young, and a
-verification WITHOUT the field is never checked for staleness and reads `passed` unconditionally.
-`TODOS.md` sat in the `covered_files` of **three of those four**. ⚠️ Grepping for the STRING
-`TODOS.md` in a verification over-counts badly: 163, 164.3 and 164.8.6 merely name it in prose. Phase 164.5.1 went `stale` TWICE in one session — once minutes after
-being completed — purely because a different phase's entry was added to `TODOS.md`. Its verdict
-was never in question.
+| | count | behaviour |
+|---|---|---|
+| carried a `covered_digest` | **7** | **5 were stale** |
+| carried none | **21** | read `passed` unconditionally, forever |
 
-⚠️ **This is NOT a reason to strip source files.** If `analytics-service/routers/match.py` changes,
-the verification of a phase that verified it SHOULD go stale — that is the mechanism working.
-Measured the same day: 164.8.3 and 164.6.3 were stale for exactly that honest reason
-(`scripts/prod-prober/run.mjs`, `src/__tests__/prod-prober-wiring.test.ts`, `.github/workflows/ci.yml`),
-and were deliberately left stale rather than cleared.
+The rule was backwards. Listing the files your verdict rested on is what got the verdict revoked;
+listing nothing bought permanent trust. And in a repo whose phases deliberately layer on the same
+prober, CI and migration files, that is structural: Phase 164.1.1 was `passed` and went `stale`
+two hours later because a bug fix touched two files it had listed, with nothing about its verdict
+in question. ⛔ **A milestone could never close, because the more carefully a phase was verified
+the less likely it was to count as done.** Founder call: completion is a historical fact about a
+verdict validly issued; drift is a prompt to re-decide, not a demotion. Recomputed immediately
+after: 20/45 → **24/45**.
 
-⛔ **A recomputed digest ALWAYS passes.** `query verification fingerprint` hashes whatever is on
-disk right now, so re-fingerprinting is not a repair — it is an assertion that the verdict still
-holds. Only re-fingerprint a verification whose validity you have just established yourself.
-Re-fingerprinting to clear a red is how a working gate gets silently switched off.
+**THE MECHANISM.** `readVerificationStatus` opts a report into the fingerprint check by seeing
+`covered_files` OR `covered_digest` in frontmatter. Declaring NEITHER falls back to the narrow
+legacy check — is one of this phase's OWN SUMMARYs newer than its VERIFICATION — which is the
+right trigger: the phase's own artifacts moving means re-verify; shared source moving does not.
+So the fix is repo-owned and survives `/gsd-update`, rather than being a patch to a global file
+that gets wiped.
 
-⚠️ **The verb needs a `--` separator.** `query verification fingerprint -- <paths...>`. Without it
-the parser consumes the first path as a subcommand argument and returns a digest over N-1 files —
-green, and wrong. Measured 2026-09-17 on a 38-file set that silently hashed 37.
+```yaml
+status: passed                  # never demoted by drift
+verified_at_sha: <full sha>     # the commit the verdict was issued at
+drift_subjects:                 # what the verdict rested on; NOT a gate
+  - scripts/prod-prober/run.mjs
+```
 
-⚠️ The global `gsd-verifier.md` names `covered_files` as "every phase PLAN/SUMMARY, mapped
-requirement, changed impl file", and in THIS repo requirements are TODOS entries — which is how
-`TODOS.md` got in. That file is global and `/gsd-update` overwrites it, which is why this rule
-lives here instead.
+⚠️ **The global `gsd-verifier.md` still writes `covered_files` + `covered_digest`, and
+`/gsd-update` overwrites that file.** After ANY verifier run, convert the pair: drop
+`covered_digest`, rename `covered_files` → `drift_subjects`, add `verified_at_sha`. This is why
+the rule lives here and not only in the workflow.
+
+⛔ **`scripts/verification-drift-report.mjs` ALWAYS EXITS 0 and must never gate a merge.**
+Anything that makes drift blocking re-creates the exact defect this section exists to remove.
+
+⛔ **`TODOS.md`, `CHANGELOG.md`, `VERSION` and `package.json` NEVER belong in `drift_subjects`**
+(the rule that used to say `covered_files`, and it still holds). They are repo-global ledgers that
+every phase touches, so covering one makes an unrelated backlog edit report drift that says
+nothing about the phase. MEASURED 2026-09-18: 164.8.3 carried `TODOS.md`; stripped.
+⚠️ Grepping for the STRING `TODOS.md` in a verification over-counts badly — 163, 164.3 and
+164.8.6 merely name it in prose.
+
+⚠️ **This is NOT a reason to strip real source files from `drift_subjects`.** If
+`analytics-service/routers/match.py` changes, a phase that verified it SHOULD show drift — that is
+the signal doing its job. What changed is the CONSEQUENCE: a report, not a revoked verdict.
 
 ## CHANGELOG discipline (founder instruction, 2026-09-09)
 
