@@ -27,7 +27,7 @@ import { join } from "node:path";
  * ⛔ It is deliberately NOT a set of grep assertions over the YAML. A grep pin
  * goes green the moment someone keeps the strings and guts the logic — the
  * defanging case, which is the likelier one. So this test EXTRACTS the step's
- * shell script out of ci.yml and RUNS it against the real 67-file corpus with a
+ * shell script out of ci.yml and RUNS it against the real corpus with a
  * stub `psql` on PATH, and asserts on exit codes. Deleting the step makes
  * extraction throw; weakening any branch makes a scenario stop failing.
  *
@@ -79,6 +79,13 @@ for a in "$@"; do
   if [ "$prev" = "-c" ]; then c="$c$a"; fi
   prev="$a"
 done
+# STUB_INVOCATION_LOG — the artifact that turns "was this file executed?"
+# from an inference into a measurement. Only -f invocations are logged (the
+# mutex/census/probe calls use -c and leave $f empty), so this is exactly
+# the set of files the gate actually handed to psql.
+if [ -n "$f" ] && [ -n "\${STUB_INVOCATION_LOG:-}" ]; then
+  basename "$f" >> "\${STUB_INVOCATION_LOG}"
+fi
 if [ -n "$c" ]; then
   case "$c" in
     *ANTISKIP*)
@@ -91,6 +98,12 @@ b="$(basename "$f")"
 # One arbitrary extra output line, for a scenario that needs a NOTICE the
 # corpus file does not itself dictate (the runtime-composed partial label).
 if [ -n "\${STUB_EXTRA:-}" ]; then echo "\${STUB_EXTRA}"; fi
+# STUB_FAIL_BASENAME — reproduces the shipped defect (CI run 35347643700)
+# verbatim: relation "net._lane_posts" does not exist, psql exit 3.
+if [ "\${STUB_FAIL_BASENAME:-}" = "$b" ]; then
+  echo 'psql:'"$f"':645: ERROR:  relation "net._lane_posts" does not exist'
+  exit 3
+fi
 if [ "\${STUB_SKIP_BASENAME:-}" = "$b" ]; then
   m="$(grep -aoE "RAISE NOTICE 'SKIP: [^'%]{0,60}" "$f" | sed "s/^.*RAISE NOTICE '//" | head -1)"
   echo "psql:$f:1: \${STUB_LABEL:-NOTICE}:  \${m}"
@@ -189,10 +202,86 @@ function armBodies(n: number): string {
 }
 
 describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
-  it("passes a run where every file executes and prints its sentinel", () => {
+  it("passes a run where every NON-EXCLUDED file executes and prints its sentinel", () => {
+    // Renamed from "...every file executes...", which became false the
+    // moment a file was excluded. The exclusion has to be REPORTED, or this
+    // title would be quietly false again.
     const { code, out } = runGate();
     expect(out).toContain("SQL self-tests passed");
     expect(code).toBe(0);
+    expect(out).toMatch(/\d+ excluded \(LANE-ONLY/);
+  }, 90_000);
+
+  /**
+   * 164.1.1.1-01 — the LANE-ONLY exclusion for test_prod_prober_cadence.sql.
+   * Three properties: the file is never handed to psql (measured, not
+   * inferred), the exclusion cannot be silent, and the static accounting
+   * (SENTINEL_FLOOR/ARMS_FLOOR) still counts the file it excludes from
+   * execution.
+   */
+  it("never hands the excluded file to psql, proven by an invocation log over the real corpus", () => {
+    const target = "test_prod_prober_cadence.sql";
+    const logDir = mkdtempSync(join(tmpdir(), "antiskip-invlog-"));
+    const logPath = join(logDir, "invocation.log");
+    try {
+      const { code, out } = runGate({ STUB_INVOCATION_LOG: logPath });
+      expect(code).toBe(0);
+      const logged = readFileSync(logPath, "utf8").split("\n").filter(Boolean);
+      // Guard the guard: an EMPTY or missing log must not pass as "the file
+      // was excluded" — it is the LENGTH assertion that has to be able to
+      // fail, not merely the absence check below.
+      expect(logged.length).toBeGreaterThan(70);
+      expect(logged).not.toContain(target);
+      expect(out).toContain(`::notice file=supabase/tests/${target}::`);
+      expect(out).toContain("not executed against shared TEST");
+      expect(out).toMatch(/\d+ excluded \(LANE-ONLY/);
+    } finally {
+      rmSync(logDir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("propagates the shipped net._lane_posts defect through a NON-excluded file, and never through the excluded one (calibration pair)", () => {
+    // Arm 1: proves the injection is real. Without this, arm 2's exit 0
+    // would prove nothing — a stub that simply never fires also exits 0.
+    const control = "test_retention_crons_safe.sql";
+    const armed = runGate({ STUB_FAIL_BASENAME: control });
+    expect(armed.code).not.toBe(0);
+    expect(armed.out).toContain(`::error file=supabase/tests/${control}::`);
+    expect(armed.out).toContain('relation "net._lane_posts" does not exist');
+
+    // Arm 2: the SAME injection aimed at the excluded file never reaches
+    // psql, because the file is never handed to it.
+    const excluded = "test_prod_prober_cadence.sql";
+    const spared = runGate({ STUB_FAIL_BASENAME: excluded });
+    expect(spared.code).toBe(0);
+    expect(spared.out).not.toContain('relation "net._lane_posts" does not exist');
+  }, 90_000);
+
+  it("keeps the excluded file inside the static accounting — declared totals still reach the step's own floors", () => {
+    const { code, out } = runGate();
+    expect(code).toBe(0);
+    // ⛔ Read out of SCRIPT, never restated as a literal here — the repo
+    // already holds four mirrors of these two integers.
+    const sentinelFloor = Number(/SENTINEL_FLOOR=(\d+)/.exec(SCRIPT)![1]);
+    const armsFloor = Number(/ARMS_FLOOR=(\d+)/.exec(SCRIPT)![1]);
+    const summary = /(\d+) of (\d+) completion sentinel\(s\) verified against THIS run, covering (\d+) declared arms/.exec(
+      out,
+    );
+    expect(summary, "closing summary line shape changed").not.toBeNull();
+    const [, verified, declared, arms] = summary!;
+    expect(Number(declared)).toBe(sentinelFloor);
+    expect(Number(arms)).toBe(armsFloor);
+    expect(Number(verified)).toBe(sentinelFloor - 1);
+    // Guard the guard: proves the excluded file's OWN sentinel was skipped
+    // this run — not merely that the totals still add up. A different file,
+    // test_sync_status_curated_sentence_survives.sql, shares the SAME "ALL 7
+    // ARMS EXECUTED" text, so this counts occurrences rather than asserting
+    // bare presence/absence, which could not tell the two apart.
+    const okCount = (out.match(/completion sentinel OK: ALL 7 ARMS EXECUTED/g) ?? []).length;
+    expect(okCount).toBe(1);
+    expect(out).toContain(
+      "completion sentinel DECLARED but not checked against a run — LANE-ONLY",
+    );
   }, 90_000);
 
   it("FAILS when a file prints a whole-file SKIP marker and exits 0, naming the file", () => {
@@ -471,5 +560,315 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
 
   it("does not re-introduce the empty-corpus 'exit 0' anywhere in the step", () => {
     expect(SCRIPT).not.toMatch(/^\s*exit 0\s*$/m);
+  });
+});
+
+/**
+ * 164.1.1.1-02 — the LANE-ONLY exclusion register.
+ *
+ * Plan 01 gave `sql-tests` a mechanism to exclude a file whose assertion body
+ * queries an object that only exists on the throwaway pg-lane. That mechanism
+ * is a marker anybody can paste into a comment — without this register it is
+ * an exemption a file can self-grant, the same defect class the F10 gate above
+ * exists to remove one level up.
+ *
+ * ⛔ SITES, NOT A COUNT, and the distinction is load-bearing for the exact
+ * reason it is in the B3 register (`src/__tests__/drift-check-scripts.test.ts`,
+ * "softening sites in scripts/test-ledger-drift-check.sh's check()"): a tally
+ * is blind to a ONE-FOR-ONE SWAP — retire a legitimate LANE-ONLY exclusion and
+ * grant an illegitimate one to a different gate in the same diff, and
+ * `derived.length` never moves. This register is deliberately NOT a copy of
+ * that one: B3 governs softening tokens inside one bash script; this one
+ * governs which SQL gate files may skip execution inside a DIFFERENT corpus
+ * (`supabase/tests/*.sql`) via a DIFFERENT marker (`-- LANE-ONLY:` vs B3's
+ * softening tokens). Same mechanism, different corpus — copying B3's entries
+ * would pin nothing here; copying its shape is the point.
+ */
+const LANE_ONLY_ANCHOR = "-- LANE-ONLY:";
+
+/** The set of files, declared object and declared fixture the corpus carries today. */
+const LANE_ONLY_SITES: readonly { file: string; object: string; fixture: string; why: string }[] = [
+  {
+    file: "test_prod_prober_cadence.sql",
+    object: "net._lane_posts",
+    fixture: "scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql",
+    why:
+      "net._lane_posts exists only inside the throwaway pg-lane cluster — fixture 34's own header " +
+      'marks it "NEVER APPLIED TO TEST OR PROD" — while shared TEST carries the REAL pg_net. A ' +
+      "version of this gate made to run there would issue genuine outbound HTTP from shared CI " +
+      "infrastructure on every run: accommodation is unsafe, not merely inconvenient.",
+  },
+];
+
+/**
+ * Re-derive the LANE-ONLY set from a corpus directory, keyed on the SAME
+ * `^-- LANE-ONLY:` anchor ci.yml's `lane_only_marker()` predicate reads
+ * (the `lane_only_marker()` helper in ci.yml, `grep -a -m1 '^-- LANE-ONLY:' "$1"` —
+ * cited by SYMBOL: a line number here rots on the next edit). Only presence of the
+ * prefix decides whether a file carries a marker — matching ci.yml's own
+ * `grep` behaviour — so a malformed JSON payload is still DETECTED as a
+ * marker and fails loudly rather than being silently treated as "no marker
+ * here, skip".
+ */
+function deriveLaneOnlySites(dir: string): { file: string; object: string; fixture: string }[] {
+  const out: { file: string; object: string; fixture: string }[] = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.startsWith("test_") || !name.endsWith(".sql")) continue;
+    const src = readFileSync(join(dir, name), "utf8");
+    const line = src.split("\n").find((l) => l.startsWith(LANE_ONLY_ANCHOR));
+    if (!line) continue;
+    const raw = line.slice(LANE_ONLY_ANCHOR.length).trim();
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(raw);
+    } catch (e) {
+      throw new Error(
+        `${name} carries a ${LANE_ONLY_ANCHOR} marker whose JSON does not parse ` +
+          `(${(e as Error).message}). A derivation that swallowed this would silently drop the ` +
+          `file from the register instead of pinning nothing loudly — never let this fall through ` +
+          `to an empty result.`,
+      );
+    }
+    // ⚠️ An EMPTY string is rejected as hard as a missing key, and that is not
+    // pedantry: `"anything".includes("")` is always true in JS, so an
+    // `"object": ""` marker would satisfy the FORWARD cross-check below
+    // trivially — the check would report a pass having measured nothing. The
+    // SITES pin catches it today only because "" does not equal a pinned
+    // object name; this guard keeps it caught if that pin is ever weakened.
+    const { object, fixture } = payload;
+    if (
+      typeof object !== "string" ||
+      object.trim() === "" ||
+      typeof fixture !== "string" ||
+      fixture.trim() === ""
+    ) {
+      throw new Error(
+        `${name}'s ${LANE_ONLY_ANCHOR} marker is missing, empty, or non-string in a required ` +
+          `"object" or "fixture" key (parsed: ${JSON.stringify(payload)}). Both must be ` +
+          `NON-EMPTY for the forward/reverse cross-checks below to mean anything: an empty ` +
+          `object satisfies a substring check against any file at all.`,
+      );
+    }
+    out.push({ file: name, object, fixture });
+  }
+  return out.sort((a, b) => a.file.localeCompare(b.file));
+}
+
+/**
+ * Drop SQL commentary so the cross-checks below read the file's ASSERTION BODY,
+ * never its prose. Both comment forms are removed: `--` line comments AND
+ * block comments, which do occur elsewhere in this corpus. Stripping only `--`
+ * would let a future `/* ... net._lane_posts ... *\/` mention satisfy the
+ * FORWARD check without the file ever querying the object.
+ */
+function stripSqlComments(text: string): string {
+  // ⛔ ORDER IS LOAD-BEARING: line comments FIRST, block comments second.
+  // MEASURED 2026-09-18 on the real corpus with the other order: this file's
+  // own prose routinely names globs like `supabase/tests/*.sql`, whose `s/*`
+  // is an incidental, unpaired `/*`. A non-greedy `/\*[\s\S]*?\*\//` then
+  // spans from that false open to the next incidental `*/` anywhere downstream
+  // (a cron literal like '*/15 * * * *' will do) and deletes everything
+  // between — 21,070 bytes of real assertion body out of
+  // test_ledger_refresh_fanout.sql and 16,065 out of
+  // test_ledger_refresh_composite_arm.sql, with the suite still at 27/27.
+  // That direction is the dangerous one: it SHRINKS what the REVERSE check can
+  // see, so a file querying a declared lane-only object without a marker stops
+  // being flagged — the excluded class growing unseen, which is the single
+  // failure this phase exists to prevent.
+  // Stripping `--` lines first removes the false opens before they can match.
+  const withoutLines = text
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("--"))
+    .join("\n");
+  return withoutLines.replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
+describe("stripSqlComments does not eat the assertion body it is meant to expose", () => {
+  // REGRESSION PIN. Introduced 2026-09-18 after a review round's own fix
+  // created this defect: block comments were stripped BEFORE line comments, so
+  // an incidental `/*` inside `--` prose opened a match that ran to the next
+  // incidental `*/` and deleted the real SQL in between. It was invisible —
+  // the suite stayed at 27/27, because the one declared object did not happen
+  // to sit inside a swallowed span.
+  it("keeps real SQL that sits between two incidental, unrelated `/*`-shaped substrings", () => {
+    const file = [
+      "-- Scope note: this gate scans supabase/tests/*.sql and supabase/migrations/**",
+      "DO $$ BEGIN",
+      "  PERFORM 1 FROM net._lane_posts;",
+      "END $$;",
+      "-- Cadence note: the job runs on '*/15 * * * *' in the lane fixture.",
+    ].join("\n");
+
+    const stripped = stripSqlComments(file);
+
+    expect(
+      stripped,
+      "stripSqlComments deleted real, non-comment SQL that sat between two " +
+        "incidental `/*`/`*/`-shaped substrings inside `--` prose. Strip line " +
+        "comments FIRST: with the other order the REVERSE cross-check stops " +
+        "seeing files it must see, and an unmarked lane-only gate lands unflagged.",
+    ).toContain("net._lane_posts");
+    expect(stripped).toContain("DO $$ BEGIN");
+  });
+
+  it("removes a genuine block comment, so the hardening it was added for still holds", () => {
+    const file = ["SELECT 1;", "/* net._lane_posts mentioned only in prose */", "SELECT 2;"].join(
+      "\n",
+    );
+    const stripped = stripSqlComments(file);
+    expect(stripped).not.toContain("net._lane_posts");
+    expect(stripped).toContain("SELECT 1;");
+    expect(stripped).toContain("SELECT 2;");
+  });
+
+  it("never shrinks any real corpus file's body (the defect, measured where it happened)", () => {
+    const testsDir = join(ROOT, "supabase/tests");
+    const damaged: string[] = [];
+    for (const name of readdirSync(testsDir)) {
+      if (!name.startsWith("test_") || !name.endsWith(".sql")) continue;
+      const src = readFileSync(join(testsDir, name), "utf8");
+      const lineOnly = src
+        .split("\n")
+        .filter((l) => !l.trim().startsWith("--"))
+        .join("\n");
+      // Whatever stripSqlComments removes beyond the `--` lines must be a
+      // GENUINE block comment. In this corpus there are none, so any loss at
+      // all is over-stripping. If a real block comment is ever added, this
+      // expectation is the right place to record that decision explicitly.
+      const lost = lineOnly.length - stripSqlComments(src).length;
+      if (lost > 0) damaged.push(`${name} (-${lost} bytes)`);
+    }
+    expect(
+      damaged,
+      "stripSqlComments removed text beyond the `--` lines in these corpus files. " +
+        "Either block-comment stripping is over-matching again (check the ordering), " +
+        "or a genuine block comment was added and this pin needs an explicit decision.",
+    ).toEqual([]);
+  });
+});
+
+
+describe("LANE-ONLY exclusion register — pinned as SITES, not a count", () => {
+  const testsDir = join(ROOT, "supabase/tests");
+
+  it("derives exactly the pinned LANE-ONLY set from the corpus, triple by triple", () => {
+    const derived = deriveLaneOnlySites(testsDir);
+    const pinned = LANE_ONLY_SITES.map(({ file, object, fixture }) => ({ file, object, fixture }));
+    expect(
+      derived,
+      "the corpus's marker-bearing files no longer match LANE_ONLY_SITES. A new lane-only gate " +
+        "must be added to this register in the SAME diff that adds its marker; a marker that MOVED " +
+        "from one pinned file to another — the count unchanged — is a swap that must be argued " +
+        "here, not absorbed silently.",
+    ).toEqual(pinned);
+  });
+
+  it("fails loudly, naming the file, on a marker whose JSON does not parse", () => {
+    const dir = makeSentinelCorpus(
+      "test_bad_json.sql",
+      "-- LANE-ONLY: {not valid json\nDO $$ BEGIN NULL; END $$;\n",
+    );
+    try {
+      expect(() => deriveLaneOnlySites(join(dir, "supabase/tests"))).toThrow(/test_bad_json\.sql/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails loudly, naming the file, on a marker missing object or fixture", () => {
+    const dir = makeSentinelCorpus(
+      "test_missing_keys.sql",
+      '-- LANE-ONLY: {"job":"sql-mutation","reason":"no object or fixture here"}\n' +
+        "DO $$ BEGIN NULL; END $$;\n",
+    );
+    try {
+      expect(() => deriveLaneOnlySites(join(dir, "supabase/tests"))).toThrow(/test_missing_keys\.sql/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * FORWARD — a marker cannot be pasted onto a gate it does not describe. The
+   * comment-stripping is load-bearing and measured:
+   * `test_prod_prober_cadence.sql` names `net._lane_posts` in a header comment
+   * (line ~127, "net._lane_posts stays EMPTY") as well as in fourteen real
+   * assertion-body positions. A check that counted the comment would be
+   * satisfied by prose alone — exactly the "a gate any comment satisfies"
+   * shape `lint-app-guc.mjs` already rejects once in this repo.
+   */
+  it("FORWARD — every marker's declared object appears in that file's own comment-stripped text", () => {
+    const derived = deriveLaneOnlySites(testsDir);
+    for (const { file, object } of derived) {
+      const raw = readFileSync(join(testsDir, file), "utf8");
+      const stripped = stripSqlComments(raw);
+      expect(
+        stripped.includes(object),
+        `${file}'s ${LANE_ONLY_ANCHOR} marker declares "${object}", but that string does not ` +
+          "appear anywhere in the file's own non-comment text. A marker pasted onto a gate that " +
+          "never queries the object it names would silence that gate for no reason connected to it.",
+      ).toBe(true);
+    }
+  });
+
+  /**
+   * REVERSE — a lane-only gate cannot land unmarked. The SET pin above notices
+   * a marker APPEARING; this notices a gate that queries a declared lane-only
+   * object and never grew a marker at all — a red that would be
+   * indistinguishable from an ordinary broken test, with nobody having decided
+   * the excluded class had grown.
+   */
+  it("REVERSE — every corpus file referencing a declared LANE-ONLY object carries a marker of its own", () => {
+    const derived = deriveLaneOnlySites(testsDir);
+    const declaredObjects = derived.map((d) => d.object);
+    const markedFiles = new Set(derived.map((d) => d.file));
+    const offenders: string[] = [];
+    for (const name of readdirSync(testsDir)) {
+      if (!name.startsWith("test_") || !name.endsWith(".sql")) continue;
+      if (markedFiles.has(name)) continue;
+      const raw = readFileSync(join(testsDir, name), "utf8");
+      const stripped = stripSqlComments(raw);
+      for (const obj of declaredObjects) {
+        if (stripped.includes(obj)) {
+          offenders.push(`${name} references "${obj}" but carries no ${LANE_ONLY_ANCHOR} marker`);
+        }
+      }
+    }
+    expect(
+      offenders,
+      "a corpus file references a declared LANE-ONLY object without declaring itself LANE-ONLY. " +
+        "Its red under sql-tests on shared TEST would be indistinguishable from an ordinary broken " +
+        "test — nobody decided this class had grown.",
+    ).toEqual([]);
+  });
+
+  /**
+   * The vault near-miss. `test_analytics_service_settings_and_vault_tick.sql`
+   * names `scripts/pg-lane/fixtures/32-fixture-vault-stand-in.sql` in its own
+   * RED-UNDER-SETUP apply list exactly as the prober file names fixture 34 —
+   * so "references any pg-lane fixture" is a detector that would sweep it in.
+   * It legitimately runs on BOTH sides (a stand-in TABLE on the lane, the real
+   * supabase_vault VIEW on shared TEST) and MEASURES the difference. This is
+   * the arm that fires if the detector is ever widened to fixture paths.
+   *
+   * NOT checked here, by decision rather than oversight: a cross-check that a
+   * marker's named FIXTURE also appears in the same file's RED-UNDER-SETUP
+   * apply list is DEFERRED by 164.1.1.1-CONTEXT.md; a fixture-path-based
+   * detector is FORBIDDEN by this guard.
+   */
+  it("keeps the vault near-miss OUT of the derived set", () => {
+    const vaultFile = "test_analytics_service_settings_and_vault_tick.sql";
+    expect(
+      readdirSync(testsDir).includes(vaultFile),
+      `${vaultFile} is missing from the corpus entirely — the "absent from the derived set" ` +
+        "assertion below would pass for the wrong reason if this file did not exist.",
+    ).toBe(true);
+    const derived = deriveLaneOnlySites(testsDir);
+    expect(
+      derived.map((d) => d.file),
+      `${vaultFile} legitimately runs on BOTH the lane and shared TEST and must never carry a ` +
+        `${LANE_ONLY_ANCHOR} marker — widening the detector to "references any pg-lane fixture" ` +
+        "would sweep it in and this assertion is what catches that.",
+    ).not.toContain(vaultFile);
   });
 });

@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.1.1
-current_phase_name: PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it (INSERTED)
+current_phase: 164.1.1.1
+current_phase_name: LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only fixture (INSERTED)
 status: executing
-stopped_at: Completed 164.1.1-04-PLAN.md
-last_updated: "2026-09-18T09:50:25.709Z"
+stopped_at: Completed 164.1.1.1-02-PLAN.md
+last_updated: "2026-09-18T18:52:00.000Z"
 last_activity: 2026-09-18
-last_activity_desc: Phase 164.1.1 plan 04 executed — the guarded escalation route shipped and calibrated (all four load-bearing behaviours neutered, observed RED, restored)
-state_head: 06ccd70358a369492e38274cb7e5932f762f1731
+last_activity_desc: Phase 164.1.1.1 plan 02 executed (final plan, 2/2) — LANE-ONLY exclusion pinned as SITES-not-a-count with forward/reverse object binding and a vault near-miss guard, calibrated across four mutations including a count-unchanged one-for-one swap
+state_head: 899a50cac407ab1e1d287fe9c95fb2ba6dad8030
 progress:
-  total_phases: 44
+  total_phases: 45
   completed_phases: 20
   total_plans: 201
-  completed_plans: 192
-  percent: 45
+  completed_plans: 193
+  percent: 44
 ---
 
 ## ⭐ STATE lineage
@@ -172,9 +172,67 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-⭐ **RECONCILED 2026-09-18 (plan 05). THIS block is the current position and SUPERSEDES the
-plan-04 block immediately below, which is retained as lineage. This update ADDS plan 05's
-completion.**
+⭐ **RECONCILED 2026-09-18 (164.1.1.1 plan 02, FINAL PLAN OF THE PHASE). THIS block is the
+current position and SUPERSEDES the 164.1.1.1-plan-01 block immediately below (retained as
+lineage). Phase 164.1.1.1 (LANEONLYGATES) is now 2/2 plans DONE; ROADMAP.md's Plans line and
+both checkboxes updated to match. Not yet marked `completed_phases` in the frontmatter above —
+no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
+is decided by verification status, never by plan counts.**
+
+Phase: 164.1.1.1 (LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only
+fixture) — EXECUTING (2/2 plans done, verification not yet run)
+Plan: 2 of 2 DONE (`164.1.1.1-02-SUMMARY.md`, commits `0d9d2408` (test, `LANE_ONLY_SITES`
+register pinned as SITES-not-a-count, re-derived from the corpus with a named failure mode on a
+malformed or key-less marker) and `11f46389` (test, FORWARD/REVERSE object-binding cross-checks
+plus the vault near-miss guard) on branch `chore/164.1.1.1-laneonlygates`). Task 3 (four
+neuter/observe-RED/restore calibrations, including the one-for-one swap M1b where the marker
+moved between two files with the corpus-wide count unchanged at one — the SET pin reddened
+anyway) produced no net code change; both mutated SQL files restored byte-identical
+(`shasum -a 256` equal pre/post every cycle — see the SUMMARY's Calibration Log). Evidence
+regenerated fresh, not restated: `mutation-runner --parse-only` —
+`test_prod_prober_cadence.sql: 7 prose / 7 twin(s) / 0 waiver(s)`, `coverage: files 47/74`,
+`arms: 0/402/0`, exit 0. Collateral suites + a full serial `npm test` (15,117 tests): the only
+failure both times is the pre-existing, box-local `Test timed out in 5000ms` inside
+`lint-sql-gates.test.ts`'s EXECUTION ORACLE block (carved out by this plan's own `<fails_when>`,
+already shown green on CI). The two deferred items plan 01 logged
+(`check-planning-hygiene.test.ts`, `verify-plan-anchors.test.ts`) were already resolved by an
+intervening commit (`d693e3c7`) before this plan began — no new deferred items this session.
+This closes T-164.1.1.1-01 (plan 01's own threat register entry) and T-164.1.1.1-05 through -08
+(this plan's threat register) as mitigated-and-calibrated. Next: Phase 164.1.1 plan 06 — the
+founder-gated live PROD session that closes `[PROBER-CADENCE-UNDELIVERED-01]` — is now unblocked
+on the CI side (`sql-tests` no longer reds on `test_prod_prober_cadence.sql`); the requirement's
+TODOS.md checkbox stays open until plan 06 itself executes.
+
+⭐ **RECONCILED 2026-09-18 (164.1.1.1 plan 01). THIS block was the current position from plan
+01's close until the block above (plan 02, the final plan of the phase) superseded it. Retained
+as lineage. Phase 164.1.1.1 is the URGENT inserted phase named in Roadmap Evolution —
+LANEONLYGATES — a SIBLING of 164.1.1, not a continuation of it; the block below (164.1.1-plan-05)
+covers 164.1.1's own history.**
+
+Phase: 164.1.1.1 (LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only
+fixture) — EXECUTING
+Plan: 1 of 2 DONE (`164.1.1.1-01-SUMMARY.md`, commits `1bd4e681` (feat, the LANE-ONLY marker +
+ci.yml exclusion mechanism), `6c3fce03` (test, invocation log + defect-injection pair + static-
+accounting scenario), `346e0850` (docs, calibration log + deferred items) on branch
+`chore/164.1.1.1-laneonlygates`). `supabase/tests/test_prod_prober_cadence.sql` no longer
+executes against shared TEST — it declares itself LANE-ONLY via one structured comment line
+naming `net._lane_posts`, the fixture, and `sql-mutation` as the owning job — while
+`SENTINEL_FLOOR` (11), `ARMS_FLOOR` (213) and ci.yml's per-file derivation table stay
+byte-unchanged, proven by `mutation-runner --parse-only` and a whitespace-blind `git diff -w`.
+The exclusion is measured, not inspected: `ci-anti-skip-gate.contract.test.ts` gained a real
+stub-psql invocation log and a defect-injection calibration pair (21/21 passing), and all three
+new properties were individually neutered, observed RED for the predicted reason, and restored
+byte-identically (`shasum -a 256` equal pre/post every cycle — see the SUMMARY's Calibration
+Log). Two pre-existing, out-of-scope `npm test` failures (`check-planning-hygiene.test.ts`,
+`verify-plan-anchors.test.ts`, both against this phase's own PLAN.md content authored before
+this execution session) logged to `deferred-items.md` rather than fixed. Next: Plan 02 — the
+cross-check pinning the excluded SET as sites (not a count) per the threat register's
+T-164.1.1.1-01 mitigation.
+
+⭐ **RECONCILED 2026-09-18 (plan 05). THIS block was the current position for Phase 164.1.1
+(PROBERCADENCE) from plan 05's close until the block above (a different, sibling phase,
+164.1.1.1) superseded it as the CURRENT position. Retained as lineage — 164.1.1 plan 06 is
+still the next plan for THAT phase.**
 
 Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a
 scheduler that cannot silently drop it (INSERTED)) — EXECUTING
@@ -417,7 +475,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 164.1.1
+Status: Phase 164.1.1.1 shipped — PR #817
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -891,7 +949,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [████░░░░░░] 45%
+Progress: [████░░░░░░] 44%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1098,6 +1156,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.1.1 P01 | 87 min | 3 tasks | 4 created, 8 modified |
 | Phase 164.1.1 P04 | ~55 min | 2 tasks | 3 modified |
 | Phase 164.1.1 P05 | ~50 min | 3 tasks | 1 created, 2 modified |
+| Phase 164.1.1.1 P01 | ~50 min | 3 tasks | 1 created, 3 modified |
 
 ## Accumulated Context
 
@@ -1201,6 +1260,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.5.1.1 inserted after Phase 164.5.1: FANOUTCOHORT — the fan-out selected ZERO candidates on its first live tick because every PROD strategy is status='private'; blocks 164.5.1's verification (URGENT)
 - Phase 164.1.1 inserted: PROBERCADENCE inserted after 164.1: the prober declares hourly and delivers 27% (75/273 over 273.4h), median gap 3.28h, max 7.13h — worse than the 6h window its own workflow comment rejects by name. Owner of TODOS [PROBER-CADENCE-UNDELIVERED-01].
 - Phase 164.4.2 inserted after Phase 164.4: Owner phase for TODOS [REDUNDER-SUBSET-SPLIT], unowned since 2026-09-05. sql-mutation timeout-minutes has taken its ONE allowed raise; 20 is a declared CEILING and the next escalation is a subset split, never a third value. Inserted 2026-09-18 while Phase 164.1.1 was mid-execution — the STATE current-phase pointer was deliberately NOT repointed.
+- Phase 164.1.1.1 inserted after Phase 164.1.1: LANEONLYGATES — sql-tests runs a pg-lane-only gate against shared TEST and is permanently red, blocking the analytics-service deploy (URGENT)
 
 ### Decisions
 
@@ -1516,6 +1576,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.1.1]: Phase 164.1.1 plan 02: expansion arm ordering (G1,S1,O1,A1,U1,V1,N1) is load-bearing — arms mutating shared staleness logic (G1/S1) must run before arms depending on it, and arms sensitive to same-transaction now() pollution (N1) must run after every self-observability-row-producing arm. — Discovered via mutation-runner cross-arm interaction bugs; documented in the gate file's own header for future arms in this family.
 - [Phase 164.1.1]: 164.1.1-04: escalation window set to 3600s (Claude's discretion, unspecified by CONTEXT.md) — Bounds Sentry noise to one capture/hour of sustained staleness regardless of future cron.schedule() cadence; the structured log still fires on every occurrence.
 - [Phase 164.1.1]: 164.1.1-04 MEASURED: `state.add-decision` ALSO clobbers STATE.md's hand-set `progress:` block the same way `state.record-metric`/`state.record-session` do (see the line above from plan 02.1) — `completed_phases` 20→18, `percent` 45→41, plus two stray blank-line insertions at ~L205-208. Confirms the prior finding generalises to a third handler; treat every `state.*` write as suspect and diff before trusting it.
+- [Phase 164.1.1.1]: 164.1.1.1-01: No-floor-move LANE-ONLY exclusion — skip execution plus the three "$out"-derived checks only; the static accounting (sentinel declaration, roster-vs-count coherence, n_arms<=RAISE-sites) stays outside the branch and runs for every file including the excluded one, so SENTINEL_FLOOR (11) and ARMS_FLOOR (213) never move.
+- [Phase 164.1.1.1]: 164.1.1.1-01 MEASURED (re-confirms the pattern above, a fourth time): `state.add-decision` and `state.update-progress` both clobber the `progress:` block downward again this session (`completed_phases` 20→18, `total_plans` 201→203, `percent` 44→40, plus stray blank-line insertions at ~L252-255). Reverted both calls; kept only the decision text, applied by hand.
+- [Phase 164.1.1.1]: 164.1.1.1-01: the static-accounting contract-test scenario counts occurrences of "completion sentinel OK: ALL 7 ARMS EXECUTED" rather than bare presence/absence, because test_sync_status_curated_sentence_survives.sql independently declares the identical "ALL 7 ARMS EXECUTED" text and a presence check could not distinguish the excluded file's line from that other file's.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -2219,6 +2282,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
+
+**Last Date:** 2026-09-18T17:12:00.000Z
+**Stopped At:** Completed 164.1.1.1-01-PLAN.md (Phase 164.1.1.1 LANEONLYGATES, plan 01 of 2, wave 1 — sequential on the main working tree, isolation `none`, branch `chore/164.1.1.1-laneonlygates`). `supabase/tests/test_prod_prober_cadence.sql` gained one `-- LANE-ONLY: {json}` header line naming `net._lane_posts`, fixture 34, and `sql-mutation` as the owning job — no executable change. `ci.yml`'s "Run SQL self-tests" step reads that marker pre-execution via `lane_only_marker()`, censuses and prints every exclusion (`::notice::` per file) before the loop, and skips only the `psql` invocation plus the three `"$out"`-derived checks inside the loop for a marked file — the whole static-analysis half (sentinel declaration, roster-vs-count coherence, `n_arms` <= RAISE-EXCEPTION-sites) keeps running for every file including the excluded one, so `SENTINEL_FLOOR` (11), `ARMS_FLOOR` (213) and the per-file derivation table stay byte-unchanged (confirmed via `mutation-runner --parse-only` and a whitespace-blind `git diff -w`). The closing summary now reports executed/found, excluded count, and sentinels verified-this-run vs. declared, plus a fifth standing limit. `ci-anti-skip-gate.contract.test.ts` gained `STUB_INVOCATION_LOG`/`STUB_FAIL_BASENAME` and three new scenarios (a real stub-psql invocation log proving the file is never executed, a defect-injection calibration pair reproducing the shipped `relation "net._lane_posts" does not exist` failure, and a static-accounting scenario) plus one honest rename — 21/21 passing. All three new properties individually neutered, observed RED for the predicted reason, and restored byte-identically (`shasum -a 256` equal pre/post every cycle). Three commits (`1bd4e681` feat, `6c3fce03` test, `346e0850` docs), NOT pushed. Collateral check: the five named suites + contract test show only the pre-existing, box-local `Test timed out in 5000ms` in `lint-sql-gates.test.ts` (carved out by the plan's own `<fails_when>`); a full `npm test` surfaced two further pre-existing, out-of-scope failures (`check-planning-hygiene.test.ts`, `verify-plan-anchors.test.ts`, both against this phase's own PLAN.md content authored before this execution session) logged to `deferred-items.md` rather than fixed. Next: plan 02 — the cross-check pinning the excluded SET as sites (not a count) per threat-register item T-164.1.1.1-01.
+**Resume File:** None
 
 **Last Date:** 2026-09-18T10:06:01.000Z
 **Stopped At:** Completed 164.1.1-05-PLAN.md

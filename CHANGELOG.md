@@ -1,5 +1,82 @@
 # Changelog
 
+## [0.77.52.0] - 2026-09-18 — a CI gate that cannot pass where it runs stops running there, and the exclusion cannot grow in silence
+
+Phase 164.1.1.1 (LANEONLYGATES), the urgent phase inserted to clear the red v0.77.51.0 shipped
+with. `sql-tests` globs every `supabase/tests/test_*.sql` and runs it against shared TEST. One of
+those gates queries `net._lane_posts`, a pg-net stand-in that exists only inside the throwaway
+pg-lane cluster and whose own fixture header says it is never applied to TEST or PROD. So that
+gate could not pass on shared TEST — not "was failing", *could not pass* — and it is blocking in
+the `frontend` aggregator.
+
+⚠️ The lazy fix was forbidden by safety, not by taste. Shared TEST carries the REAL `pg_net`, so a
+version of this gate that "worked" there would fire genuine outbound HTTP from shared CI on every
+run. The gate had to be EXCLUDED from that lane, never accommodated into it.
+
+### Added
+
+- A machine-readable `-- LANE-ONLY: {json}` header marker in
+  `supabase/tests/test_prod_prober_cadence.sql`, naming the object the file requires and the
+  fixture that creates it.
+- `ci.yml`'s "Run SQL self-tests" step honours that marker as a FILE-LEVEL exclusion: the file is
+  never handed to `psql`, and neither of the two checks that read the shared, per-iteration
+  `$out` log runs for it. It is NOT an in-file skip — WR-03's "A PRINTED SKIP IS NOT A PASS" fails
+  a whole-file `RAISE NOTICE 'SKIP:'` bail-out by design, and that distinction is argued in the
+  step's own comments rather than assumed.
+- Every exclusion is PRINTED on every run: a pre-loop census emits one `::notice::` per excluded
+  file, and the closing summary now reports `executed` of total plus the excluded count. A silent
+  exclusion is the same defect class as a gate reporting PASS having measured nothing.
+
+### Tests
+
+- `LANE_ONLY_SITES` pins the excluded set as SITES, not a count, re-derived from the corpus — so a
+  one-for-one swap, where the count never changes, still reddens. That arm was calibrated, not
+  assumed: moving the marker between two files with the corpus-wide count unchanged at one was
+  observed failing.
+- FORWARD and REVERSE object-binding cross-checks, plus a guard keeping the vault near-miss out.
+  `vault.decrypted_secrets` exists on BOTH sides — stand-in table on the lane, real view on TEST —
+  so `test_analytics_service_settings_and_vault_tick.sql` is explicitly not this class and a
+  fixture-path-keyed detector would have silently disabled a working gate.
+- A stub-`psql` invocation log turns "was this file executed?" from an inference into a
+  measurement, alongside a defect-injection pair reproducing the shipped failure verbatim.
+- Three regression pins on `stripSqlComments`, calibrated by reverting the defect and observing RED.
+
+### Fixed
+
+- **A defect introduced by this phase's own first review round.** The round-1 hardening stripped
+  `/* */` blocks before `--` lines. This corpus's prose names globs like `supabase/tests/*.sql`,
+  whose `s/*` is an incidental unpaired `/*`; the non-greedy match then ran to the next incidental
+  `*/` — a cron literal suffices — and deleted everything between: 21,070 bytes of real assertion
+  body out of `test_ledger_refresh_fanout.sql` and 16,065 out of
+  `test_ledger_refresh_composite_arm.sql`, with the suite green at 27/27 throughout. The dangerous
+  direction is that it SHRINKS what the REVERSE check can see, so an unmarked file querying a
+  declared lane-only object stops being flagged. Stripping line comments first: zero files lose a
+  byte.
+- An empty-string `object` in a marker satisfied the FORWARD cross-check trivially, since
+  `"anything".includes("")` is always true. Empty and whitespace-only are now rejected as hard as
+  a missing key.
+- Absolute home paths removed from two PLAN.md verify blocks. This repository is PUBLIC and
+  `.planning/` is TRACKED; `check-planning-hygiene` is a blocking gate and was red.
+
+### Notes
+
+- **The floors did NOT move, by design.** `SENTINEL_FLOOR=11`, `ARMS_FLOOR=213` and the 11-row
+  derivation table are byte-identical to the previous release, and both `files=(...)` globs stay
+  bare — the exclusion never prunes the array. The static arm accounting is read from the file on
+  disk and sits OUTSIDE the execution branch, so an excluded file's 7 arms are still counted. The
+  phase's own research initially claimed the floors had to move; that was corrected before planning.
+- **Exclusion from one lane is not a loss of coverage.** `sql-mutation` job `105624583310` reports
+  `test_prod_prober_cadence.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7`, in a
+  run whose two independent tallies agree (`arms: 402/402/0`, `lane-invocations: 402`).
+- Two review rounds, `gsd-code-reviewer` and `silent-failure-hunter` in parallel each round. Two
+  items stay OPEN and dated rather than quietly closed: the marker is a self-granted exemption —
+  nothing proves the named object is truly absent from TEST/PROD (deferral locked in CONTEXT.md,
+  the full fix being a cross-check against the file's `RED-UNDER-SETUP` apply list) — and a
+  `-- LANE-ONLY: null` marker throws an unnamed but loud `TypeError` rather than the guard's
+  named-file error.
+- Verification is `human_needed` on exactly one item, and it is the honest one: until this lands,
+  the real `sql-tests` job has never run against shared TEST.
+
 ## [0.77.51.1] - 2026-09-18 — the committed baseline catches up with the production it describes
 
 Follow-up to v0.77.51.0, and the act that clears the red that release shipped with. Same shape as
