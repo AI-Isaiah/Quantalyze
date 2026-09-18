@@ -3677,6 +3677,44 @@ and any widening must say what it does to the approval-gate snapshot.
   refused claim went on standing in the others).
 
 
+### PROBER-ALERT-DELIVERY-UNVERIFIED-01 — nothing automated watches whether the new alarm's own POST was delivered (booked 2026-09-18)
+
+- **`[PROBER-ALERT-DELIVERY-UNVERIFIED-01]` `public.prod_prober_cadence_check()`'s own
+  `net.http_post` to `POST /api/prober-cadence-alert` is not watched by anything automated — the
+  same shape as `[PGCRON-LIVENESS-UNWATCHED-01]` above, one level down.**
+  ⛔ **MEASURED 2026-09-18** (164.1.1 code review, converged by two independent reviewers).
+  `scripts/prod-prober/arms/cron-obs.mjs:104` — the ONLY automated reader of `net._http_response`
+  in this repository — hardcodes `WHERE jobname = 'match_engine_cron'`. It will never fire for
+  `prod_prober_cadence_check`, registered or not.
+  **The consequence, stated exactly.** The function itself never checks its own post's response —
+  deliberately, per its own comment ("a raise here rolls back the observer row written in step 4,
+  so a tick that could not deliver leaves NO row"). If `analytics_service_key` goes stale the same
+  way it did historically (the CRON-DRIFT-01 shape — a stale key producing silent 401s behind a
+  green history), the new cadence alarm can enqueue a 401 that nothing polls for, while
+  `cron_runs`, `cron.job_run_details` and CI all read green.
+  ⭐ **DISPOSITION: ACCEPTED as a named residual**, on one ground: **the alternative considered and
+  rejected.** Extending `cron-obs.mjs`'s `CRON_OBS_SQL` (or adding a sibling arm) to also watch
+  `jobname = 'prod_prober_cadence_check'` was considered and NOT taken here. `net._http_response`
+  carries no `jobid` — the arm's own fixture
+  `scripts/prod-prober/fixtures/cron-obs/ambiguous-window.json` documents that its join is
+  time-only and cannot attribute a response when two land in the same window. Doing this correctly
+  (a real per-job attribution mechanism) is phase-sized work, not a review fix.
+  **The MANUAL path, marked manual in this same sentence and never elsewhere as coverage.** An
+  operator can run the `net._http_response` query in
+  `docs/runbooks/prod-prober-cadence-go-live.md` § "First tick — what to expect" by hand. ⛔ That
+  is a query a human must decide to run. It is NOT coverage, NOT monitoring, and NOT a
+  mitigation — it is the exact property ("nobody looks") this phase's whole subject is about, one
+  level down.
+  **Trigger:** the next time `cron-obs`'s time-only attribution gap is closed for
+  `match_engine_cron` (making a per-job extension cheap to add here too), or an incident on this
+  specific alarm's delivery. **Owner:** UNROUTED, deliberately — same reasoning as
+  `[PGCRON-LIVENESS-UNWATCHED-01]`: this entry states the choice, it does not commit anyone to
+  closing the gap. ⛔ Do not let this sit as a bare TODOS line with no trigger: give it a phase via
+  `/gsd-phase --insert` when the trigger above fires.
+  **Reachable from:** this entry, and `docs/runbooks/prod-prober-cadence-go-live.md` § "What this
+  runbook deliberately does not cover".
+
+
 ### FANOUT-FAILBRANCH-UNEXERCISED-01 / 164.5.1-TODOS-DISPOSITION-OWED — the two items Phase 164.5.1 leaves open (booked 2026-09-17)
 
 Both come out of Phase 164.5.1's verification and its plan-09 security re-audit. Both existed

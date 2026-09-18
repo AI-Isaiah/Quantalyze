@@ -1226,8 +1226,14 @@ async def prober_cadence_alert(alert: ProberCadenceAlert) -> dict[str, Any]:
     structured log line is already written by the time this returns,
     regardless of what happens next. An operator can see whether the
     database's OWN post succeeded via ``net._http_response`` on the PROD
-    side — never via ``cron.job_run_details.status``, which is the
-    distinction the ``cron-obs`` prober arm exists to make.
+    side — never via ``cron.job_run_details.status``. That is the kind of
+    distinction the ``cron-obs`` prober arm exists to make FOR THE JOB IT
+    WATCHES — but ``cron-obs`` is hardcoded to
+    ``jobname = 'match_engine_cron'`` (``scripts/prod-prober/arms/cron-obs.mjs``)
+    and does NOT watch this function's own posts. Today the
+    ``net._http_response`` check is a MANUAL query an operator must run by
+    hand, not an automated one — see ``TODOS.md``
+    ``[PROBER-ALERT-DELIVERY-UNVERIFIED-01]``.
     """
     _escalate_prober_cadence_gap(alert)
     return {"acknowledged": True}

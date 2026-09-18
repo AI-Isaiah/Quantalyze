@@ -261,7 +261,10 @@ SELECT d.start_time, d.status, d.return_message
 ⚠️ **Standing caution.** `cron.job_run_details.status` proves the job was INVOKED, never that an
 async `net.http_post` delivered. This project has a dated record of seven days of 401s hiding
 behind a green cron history. The delivery question is answered on the `net._http_response` side —
-the distinction the prober's own `cron-obs` arm exists to make.
+the same kind of distinction the prober's own `cron-obs` arm exists to make FOR THE JOB IT WATCHES
+(`match_engine_cron`, hardcoded — `scripts/prod-prober/arms/cron-obs.mjs`). ⛔ **`cron-obs` does
+NOT watch this function's own posts — nothing automated does.** The `net._http_response` query
+above is a MANUAL check today, booked as `[PROBER-ALERT-DELIVERY-UNVERIFIED-01]` in `TODOS.md`.
 
 ## Watching it
 
@@ -315,3 +318,13 @@ place; nothing here reads them destructively.
   throttling, a tighter cron buys more attempts, not a bounded gap — a louder claim rather than a
   measured one. This is the premise the whole phase's ceiling derivation (CTX-04) rests on;
   shortening the cron does not change GitHub's delivery rate, it only asks for more of it.
+- **Automated delivery verification for this function's own outbound post.** Booked as
+  `[PROBER-ALERT-DELIVERY-UNVERIFIED-01]` in `TODOS.md` (Phase 164.1.1, booked 2026-09-18):
+  `cron-obs` (the prober's automated `net._http_response` reader) is hardcoded to
+  `jobname = 'match_engine_cron'` and does not watch this job. Extending it was considered and
+  rejected here — `net._http_response` carries no `jobid`, and the arm's own fixture
+  (`scripts/prod-prober/fixtures/cron-obs/ambiguous-window.json`) documents that its join is
+  time-only and cannot attribute a response when two land in the same window. See that entry for
+  the full disposition.
+  ⚠️ **A MANUAL reading exists, and it is not monitoring.** The `net._http_response` query in
+  "First tick — what to expect" above is something a human must decide to run.
