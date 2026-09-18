@@ -3074,7 +3074,11 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       **FIX SHAPE:** derive it (channels the script can WRITE ⇔ channels the step stages), not a
       second hand-maintained list.
 
-- [ ] **`[164.8.2-SENTINEL-GREP-NUL-BLIND]` the ancestry sentinel is read with a NUL-blind `grep -q`,
+- [x] **✅ CLOSED 2026-09-18 BY ITS OWN SELF-EXPIRY — exactly as designed. The site gained `-a`,
+      the `-a` rule's ceiling arm went RED with `STALE EXEMPTION (matched 0 bare grep(s))`, and the
+      dated entry was DELETED rather than waived. `BARE_GREP_EXEMPTIONS` is now EMPTY and the rule
+      is unconditional workflow-wide instead of post-verify-scoped.**
+      `[164.8.2-SENTINEL-GREP-NUL-BLIND]` the ancestry sentinel is read with a NUL-blind `grep -q`,
       and the check is NEGATIVE, so it FAILS OPEN (booked 2026-09-10; routed to Phase 164.8.4).**
       `.github/workflows/test-restore-from-baseline.yml:453` uses `grep -q` where the file's own
       comment calls `-a` "mandatory repo-wide".
@@ -3114,7 +3118,16 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       7. **A dead local** (`body3`, shellcheck SC2034) in `restore-test-from-baseline.sh`, and a
          reused failure message naming the wrong subject in the self-test step.
 
-- [ ] **`[164.8.2-REFUSAL-STILL-PUBLISHES]` the published-`.sql` credential scan refuses without
+- [x] **✅ CLOSED 2026-09-18 (Phase 164.8.2 round-2, WR2-03 + review C1) — the staging step now
+      DEFAULT-DENIES: the four script `.sql` files are staged only when
+      `refuse_credential_in_published_sql` wrote `credential-scan.ok`, and `ledger.csv` /
+      `schema-before.sql` only when the backup scan wrote `backup-scan.ok`. The entry's framing as
+      a binary (withhold the file vs lose the reversal recipe) was the wrong frame, and the entry
+      itself said so: the third option costs neither side, because the scan sits between
+      `build_transaction` and `run_transaction`, so every path the gate denies is a path on which
+      the transaction NEVER RAN and no reversal is owed. Verified twice — by the orchestrator
+      (neutering `backup_ok=0` → `1` reds the named arm) and by `/gsd-secure-phase`'s auditor.**
+      `[164.8.2-REFUSAL-STILL-PUBLISHES]` the published-`.sql` credential scan refuses without
       withholding, so the flagged file is staged and published anyway (booked 2026-09-10, Phase
       164.8.2 maintainability audit; routed to Phase 164.8.4 — founder decision, real cost both ways).**
       **MECHANISM.** `refuse_credential_in_published_sql` aborts the restore BEFORE the transaction,
@@ -8855,3 +8868,43 @@ a redundant one is the wrong trade.
   **Remedy shape (NOT taken here).** Exactly what `604d655f` did for the two `$RUNNER_LOG` branches: a `status=0` initialiser above the call, and `|| status=$?` appended to the call ON THE SAME LINE, so the invocation becomes part of a TESTED compound — the one condition `-e` exempts. Then widen the wiring test's branch scan past its `$RUNNER_LOG` filter so a pin can actually cover this step, and move the criterion-8 count from 2 to 3 in the same edit. ⛔ Do not widen the count alone: a count that rises without a scan that reaches the new site is a gate claiming coverage it does not have, which is this milestone's own named defect class.
   **Destination: Phase 164.8.4 GATERESIDUE — as a NOMINATION, not a silent insertion**, because that phase's goal carries an explicit *"⚠️ **NOT A PRECEDENT.** A second outside item may be admitted only by the same explicit decision, recorded the same way"* fence, and its one widening (`[164.8.5-HYGIENE-RESIDUALS]`, founder decision 2026-09-12) was admitted on the merits and recorded in the ROADMAP entry itself; ✅ **THAT DECISION WAS TAKEN 2026-09-13 (founder): ADMITTED to Phase 164.8.4 as ADMISSION 2**, entered through `/gsd-phase --edit 164.8.4` and recorded in that entry's goal, its merits block, its group (d), success criterion 9 and its Requirements list — the same way ADMISSION 1 was. ⛔ The fence there is re-armed, not removed: a THIRD outside item still needs its own explicit decision. ⛔ **Read criterion 9 before planning** — it names the forbidden half-fix (widening the criterion-8 count without widening the branch scan past its `$RUNNER_LOG` filter). It fits 164.8.4 on subject — "a control narrower than the sentence beside it" is that phase's stated defect class and is exactly what the `$RUNNER_LOG` filter is here. ⛔ `.planning/ROADMAP.md` was NOT hand-edited to route it: roadmap phase CRUD goes through `/gsd-phase --edit`.
   **Found by:** Phase 164.8.3 RESEARCH, whose verdict was *"Dead code, not a defect — book it, do not fix it here."* ⛔ `.github/workflows/prod-prober.yml` is byte-unchanged by that phase; fixing it there would have been scope the phase's own fence excludes.
+
+- [ ] **`[164.8.2-R3-META-WINDOW-UNFALSIFIED]` the tightened `findThresholdSites()` justification
+      window has NO fixture that can tell it from the old one (booked 2026-09-18, Phase 164.8.2
+      round-3 review WR-01; fix-or-drop — structural predicate, not data-integrity).**
+      **MEASURED.** Reverting the adjacent-comment-block walk in `src/__tests__/gate-family-meta.test.ts`
+      back to `lines.slice(Math.max(0, idx - JUSTIFICATION_WINDOW), idx + 1)` leaves the suite GREEN
+      (21/21). Both existing fixtures put their measurement DIRECTLY above the site, so neither
+      distinguishes the two windows. The tightening is real — it reddened a live site the day it
+      landed — but nothing in the corpus holds it in place, so a future revert is invisible.
+      **Remedy shape.** One fixture whose measurement sits inside an UNRELATED comment block
+      separated from the site by a line of CODE: green under the old window, red under the new.
+      ⛔ Do not close this by asserting the walk's source text; that pins the implementation, not
+      the behaviour, and is satisfied by a comment.
+      ⚠️ **Related, same review (WR-04):** the walk traverses BLANK lines, so an unrelated comment
+      block separated from the site only by blanks still justifies it. Narrower than intended but
+      strictly tighter than the 80-line window it replaced. Close both in one edit or neither.
+
+- [ ] **`[164.8.2-R3-SCAN-COUNTER-RESIDUE]` three Info-level residues in the backup step's secret
+      scan (booked 2026-09-18, Phase 164.8.2 round-3 review; fix-or-drop — none is a wrong verdict,
+      only a wrong number or a latent shell hazard).**
+      `hits` DOUBLE-COUNTS a file that could not be withheld (once for the finding, once for the
+      failed withhold), so the "flagged N finding(s)" tally over-reports on that path; `withhold()`'s
+      `[ -e ]` post-check arm is effectively unreachable and carries no calibration; and `${seen}`
+      is unquoted in the `printf` that builds `scanned_set`, which is glob- and IFS-sensitive
+      latency rather than a live defect (both names are fixed literals today).
+      ⚠️ The verdict is correct on every one of these paths — the run refuses and nothing is
+      staged. Only the count and the robustness are at issue, which is why none blocked.
+
+⭐ **NOT BOOKED — FIXED IN BRANCH `chore/164.8.2-verification` 2026-09-18.** Three round-3 warnings
+were briefly entered here and then removed rather than deferred, on the founder's standing rule
+that a FALSE OR MISLEADING SENTENCE THIS SESSION AUTHORED is fixed, not booked — booking is for
+work that needs new mechanism. For the record, since they never reached `main`:
+`[164.8.2-R3-DENY-MESSAGE-CONTRADICTION]` (WR-02) — the two staging denials contradicted each other
+("IS staged" vs "are NOT staged") on every abort before the backup scan; both verdicts are now read
+before either is narrated and the sibling's fate is DERIVED from the sibling's flag.
+`[164.8.2-R3-VERDICT-WRITE-UNGUARDED]` (WR-03) — the backup verdict write had no failure check while
+its twin carried `|| fail`; a failed write aborted silently and the operator read the OPPOSITE
+diagnosis. Now checked, with a message saying the scan CLEARED and the denial is not a finding.
+`[164.8.2-R3-UNREADABLE-FILE-MISREPORTED]` (WR-05) — an unreadable file was reported as a call
+"aimed twice at the same file"; unreadable is now its own tracked category with its own sentence.

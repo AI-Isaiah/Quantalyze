@@ -109,7 +109,35 @@ function jobBlock(text: string, job: string): string {
   const start = text.indexOf(head);
   if (start < 0) return "";
   const after = text.slice(start + head.length);
-  const next = after.match(/\n {2}[A-Za-z_][\w-]*:\n/);
+  /**
+   * ⛔ BOTH HALVES, BOTH FILES (Phase 164.8.2 round-2 review, 2026-09-18). This regex
+   * used to be `/\n {2}[A-Za-z_][\w-]*:\n/` — the PRE-FIX form. WR-05 widened it in
+   * `critical-regressions.test.ts` and nowhere else, which is verbatim the half-class
+   * fix this phase's own standard forbids ("IN-03 fixed one copy of one half, which is
+   * how this became a half-class fix. Both halves, both files, throw now.").
+   * MEASURED: give a successor job key a trailing comment — valid YAML — and the bare
+   * form stops matching, the slice falls through to EOF, and `jobBlock` silently
+   * returns the following jobs as part of this one. `[^\S\n]*` admits trailing
+   * horizontal whitespace and `(#[^\n]*)?` a trailing comment.
+   */
+  const NEXT_JOB_RE = /\n {2}[A-Za-z_][\w-]*:[^\S\n]*(#[^\n]*)?\n/;
+  /** Deliberately weaker: ANY 2-space key. The gap between the two is what throws. */
+  const ANY_JOB_KEY_RE = /\n {2}[A-Za-z_][\w-]*:/;
+  const next = after.match(NEXT_JOB_RE);
+  const loose = after.match(ANY_JOB_KEY_RE);
+  // An unrecognised successor is indistinguishable, in the return value, from this job
+  // genuinely being the last one: both give a slice running past a boundary nobody
+  // chose. Fall back ONLY for the second. Compare POSITIONS — "is there a bound?" is
+  // the wrong question; "is the FIRST key after this job the one we bounded on?" is the
+  // right one. The failure mode of the old code was a PASS.
+  if (loose && (!next || (loose.index ?? 0) < (next.index ?? 0))) {
+    throw new Error(
+      `jobBlock(${job}): a top-level key FOLLOWS it ` +
+        `(${JSON.stringify(after.slice(loose.index ?? 0, (loose.index ?? 0) + 60))}) ` +
+        "but NEXT_JOB_RE did not match it, so this slice would silently run past it — " +
+        "the unbounded shape IN-04 was raised to remove. Widen NEXT_JOB_RE.",
+    );
+  }
   return head + (next ? after.slice(0, next.index) : after);
 }
 
@@ -1643,16 +1671,48 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
         // block existed; here EVERY fixture must go green, which is what makes the
         // assertions above evidence rather than decoration.
         const NULL_IF = 'if [ -z "${marker}" ]; then';
+        // ⭐ RE-ANCHORED 2026-09-18 (F-R2-02). Both predicates were bare `if grep …`,
+        // which is FAIL-OPEN: grep exits >1 when it cannot evaluate, and a bare `if`
+        // reads that as "no match" — so an unevaluated PROD refusal PASSED. They are
+        // now rc-bounded and carry `-a`. The branch each fixture must gut is the
+        // VERDICT `if`, not the `grep` line, so gutting leaves the rc capture intact.
+        // ⛔ EACH ANCHOR CARRIES ITS OWN ERROR LINE. After F-R2-02 the step holds FOUR
+        // `if [ "${rc}" … ]` branches (two rc-bound MEASURE_FAILs and two verdicts) plus
+        // the psql-failure branch, so a bare `if [ "${rc}" -ne 0 ]; then` anchor matches
+        // the FIRST one — the psql check — and guts the wrong branch while the real
+        // refusals stand. Measured 2026-09-18: that mis-gut read as "the step STILL
+        // refused", which looks like a live control and is actually a bad anchor.
         const WHOLE_WORD_IF =
-          "if ! printf '%s' \"${marker}\" | grep -Eiq '(^|[^[:alnum:]_])test([^[:alnum:]_]|$)'; then";
-        const PROD_IF = "if printf '%s' \"${marker}\" | grep -Eiq 'prod'; then";
+          'if [ "${rc}" -ne 0 ]; then\n  echo "::error::the database identity marker does not name TEST';
+        const PROD_IF =
+          'if [ "${rc}" -eq 0 ]; then\n  echo "::error::the database identity marker names PRODUCTION';
+        // The two rc-bound MEASURE_FAILs refuse an UNEVALUATED predicate. They are
+        // refusal branches too, so a calibration that leaves them armed cannot reach
+        // the pass path either.
+        const TEST_MEASURE_FAIL =
+          'if [ "${rc}" -gt 1 ]; then\n  echo "::error::MEASURE_FAIL: the TEST-marker';
+        const PROD_MEASURE_FAIL =
+          'if [ "${rc}" -gt 1 ]; then\n  echo "::error::MEASURE_FAIL: the PROD-refusal';
+        // ⛔ REPLACE THE `if` LINE ONLY, KEEPING THE REST OF THE ANCHOR. Each anchor
+        // spans two lines (the `if` plus the head of its error line) so it is unique;
+        // substituting the WHOLE anchor with `if false; then` would delete the head of
+        // that echo and leave its tail as a stray shell word — a syntax error, which
+        // exits 2 and reads as "the branch still refused" rather than as a broken mutant.
+        const gutBranch = (branch: string): string =>
+          branch.replace(/^if \[[^\]]*\]; then/, "if false; then");
         let gutted = script;
-        for (const branch of [NULL_IF, WHOLE_WORD_IF, PROD_IF]) {
+        for (const branch of [
+          NULL_IF,
+          WHOLE_WORD_IF,
+          PROD_IF,
+          TEST_MEASURE_FAIL,
+          PROD_MEASURE_FAIL,
+        ]) {
           expect(
             gutted,
             `CALIBRATION: the branch \`${branch}\` was not found in the extracted script`,
           ).toContain(branch);
-          gutted = gutted.replace(branch, "if false; then");
+          gutted = gutted.replace(branch, gutBranch(branch));
         }
         for (const [label, mode, text] of [
           ["a NULL marker", "null", ""],
@@ -1673,7 +1733,7 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
         // And each branch on its own, so a single deletion cannot hide behind a sibling.
         expect(
           runMarker(
-            script.replace(PROD_IF, "if false; then"),
+            script.replace(PROD_IF, gutBranch(PROD_IF)),
             "text",
             MARKER_PROD,
           ).status,
@@ -1681,14 +1741,14 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
         ).toBe(0);
         expect(
           runMarker(
-            script.replace(WHOLE_WORD_IF, "if false; then"),
+            script.replace(WHOLE_WORD_IF, gutBranch(WHOLE_WORD_IF)),
             "text",
             MARKER_NOT_WHOLE_WORD,
           ).status,
           "CALIBRATION: the not-a-whole-word refusal is not produced by its own branch",
         ).toBe(0);
         const noNull = runMarker(
-          script.replace(NULL_IF, "if false; then"),
+          script.replace(NULL_IF, gutBranch(NULL_IF)),
           "null",
         );
         expect(
@@ -1714,7 +1774,7 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       ).toBe(there);
       calibrate(
         "the marker byte-identity pin bites on a one-token drift",
-        (s) => s.replace("grep -Eiq 'prod'", "grep -Eiq 'prodx'"),
+        (s) => s.replace("grep -aEiq 'prod'", "grep -aEiq 'prodx'"),
         (t) => extractRunScript(t, MARKER_STEP).trimEnd() === there,
       );
     });

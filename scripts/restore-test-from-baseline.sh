@@ -1597,22 +1597,32 @@ TXN_ASSERT
 # FILE and stops. Same discipline as the identity marker, whose text is withheld
 # even when it is the reason for the refusal.
 #
-# ⛔ AND IT REFUSES THE RUN WITHOUT WITHHOLDING THE FILE — SAY SO, DO NOT IMPLY
-# OTHERWISE. Named 2026-09-10 by the comment audit. The workflow's sibling scan
-# over `ledger.csv` / `schema-before.sql` does `rm -f "${f}"` before it exits, and
-# its message says the file "has been WITHHELD from the artifact". This one does
-# not, and cannot be read as if it did: the calling workflow's `Stage the public
-# artifact` step is `if: always()` and copies all four of these files whenever they
-# exist, so on a hit the flagged file is still staged and still published to a
-# world-readable artifact for 90 days. What this function protects is the
-# DATABASE — it refuses before the transaction — plus every FUTURE run, because a
-# red board is what gets the shape removed. It does not protect THIS run's
-# artifact.
-# ⚠️ The asymmetry is a decision, not an oversight, and it is not taken here:
-# `rm -f`-ing these four would destroy the reversal recipe (T-164.8-21) on exactly
-# the run whose restore was refused. Whoever closes it has to choose which of the
-# two losses to take. The artifact's own README carries the same sentence, in the
-# artifact, where whoever downloads it will read it.
+# ⛔ IT DOES NOT `rm -f` THE FLAGGED FILE, AND IT NO LONGER HAS TO — CORRECTED
+# 2026-09-18 (Phase 164.8.2, review WR2-03). The paragraph here said, truthfully
+# until this correction, that the calling workflow's `Stage the public artifact`
+# step is `if: always()` and copies all four of these files whenever they exist, so
+# a flagged file was still published for 90 days; and it recorded the asymmetry as a
+# decision not taken, because `rm -f` would destroy the reversal recipe (T-164.8-21)
+# on exactly the run whose restore was refused. WR2-03 showed the gap was WIDER than
+# that: this scan runs at ONE point, and EVERY abort between `build_transaction`
+# writing these files and this function running published all four UNSCANNED, while
+# this function's own `scanned 4 of 4` sentence and the artifact README both read as
+# if they had been scanned.
+# ⭐ THE ANSWER IS AT THE STAGING BOUNDARY, NOT HERE, AND IT COSTS NO RECIPE. This
+# function writes `credential-scan.ok` into `RESTORE_OUT_DIR` on — and only on — the
+# path where every class cleared every file, and the workflow's staging step stages
+# the four `.sql` files ONLY when that verdict file is present and carries the
+# sentence below (default-DENY, the shape its `REDACT_OUTCOME` guard already uses).
+# So a hit, and every abort before this point, now withholds all four.
+# ⚠️ WHY THAT DOES NOT COST THE REVERSAL RECIPE, which is what stopped the earlier
+# `rm -f` proposal: this function is called AFTER `build_transaction` and BEFORE
+# `run_transaction`, so on every path it withholds, the transaction has not run and
+# the database is untouched. There is nothing to reverse. The recipe is withheld
+# exactly and only when it is not needed — which is why the choice between the "two
+# losses" turned out not to be a choice at all.
+# ⛔ THE VERDICT FILE IS NOT STAGED and must not be added to the workflow's
+# allowlist: it is this control's input, and a control whose input ships beside its
+# subject invites the next reader to treat the two as one artifact.
 #
 # ⭐ IT IS NOW NAMED `refuse_*`, AND THAT WAS EARNED RATHER THAN RENAMED INTO. It
 # shipped as `assert_public_sql_dsn_free` on 2026-09-10, and its own comment said
@@ -1702,7 +1712,20 @@ refuse_credential_in_published_sql() {
   # in the source is a control weaker than the sentence beside it: the clean line has
   # to say which pairs were NOT measured, or a reader of a green log is told six
   # classes cleared four files when one of the twenty-four cells was never read.
-  note "public .sql files carry no credential shape in any of the ${#classes[@]} classes the artifact README names (scanned ${scanned} of ${#staged[@]}: ${seen}; scoped out by measurement: ${scoped_out[*]})"
+  local verdict="public .sql files carry no credential shape in any of the ${#classes[@]} classes the artifact README names (scanned ${scanned} of ${#staged[@]}: ${seen}; scoped out by measurement: ${scoped_out[*]})"
+  note "$verdict"
+  # ⛔ THE VERDICT AS A FILE, BECAUSE THE BOUNDARY THAT NEEDS IT IS NOT THIS SHELL
+  # (Phase 164.8.2, review WR2-03). The workflow's `Stage the public artifact` step
+  # is `if: always()`: it runs on every abort, including the ones that happen after
+  # `build_transaction` has written these four files and before this function is
+  # reached. It stages them ONLY when this file exists and carries this sentence.
+  # A file rather than a log line on purpose — stdout of this script is a public
+  # Actions log with no structure, and a control keyed on prose in a log can be
+  # satisfied by prose. This is written at the single point where the scan has
+  # actually cleared every class over every file, and nowhere else.
+  # ⛔ It is NOT in the workflow's staging allowlist and must not be added to it.
+  printf '%s\n' "$verdict" > "$RESTORE_OUT_DIR/credential-scan.ok" \
+    || fail "MEASURE_FAIL: the scan CLEARED all ${#staged[@]} published .sql files but its verdict could not be written to ${RESTORE_OUT_DIR}/credential-scan.ok (the workflow stages those files only on that file's say-so). Refusing rather than continuing: a run whose verdict cannot be recorded would publish nothing and read as though the scan had failed, which is the opposite diagnosis."
 }
 
 run_transaction() {

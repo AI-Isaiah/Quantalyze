@@ -722,16 +722,42 @@ jobs:
             echo "::error::the database identity marker is NULL. A NULL marker means the COMMENT ON DATABASE was LOST, not that this is TEST. Re-set it before any write (CLAUDE.md)."
             exit 1
           fi
-          if ! printf '%s' "${marker}" | grep -Eiq '(^|[^[:alnum:]_])test([^[:alnum:]_]|$)'; then
+          # ⛔ BOTH PREDICATES ARE rc-BOUNDED, AND THE SECOND ONE IS WHY (Phase 164.8.2,
+          # silent-failure finding F-R2-02). `grep` exits 0 on a match, 1 on no match and
+          # >1 when it COULD NOT DECIDE — a rejected ERE, a substituted binary, a
+          # transient resource failure. Written as a bare `if grep …`, an undecided PROD
+          # check is indistinguishable, in the branch taken, from a marker that does not
+          # name prod: a PRODUCTION marker would pass the PROD refusal and this step would
+          # print "OK — the marker names TEST and not PROD." over a measurement it never
+          # took. The TEST check was fail-CLOSED only by accident of its leading `!`.
+          # Every other measurement this phase touched got a `-le 1` bound for exactly
+          # this reason; this step — the one standing between this workflow and a
+          # DROP SCHEMA on the wrong database — did not, until now. An unreadable answer
+          # is never a clean one.
+          # `-a` is mandatory repo-wide even here, where the input is a pipe and cannot
+          # hold a NUL: the rule is not conditional on the reader's argument about why
+          # this site is safe, which is how the ancestry probe's bare grep shipped.
+          rc=0
+          printf '%s' "${marker}" | grep -aEiq '(^|[^[:alnum:]_])test([^[:alnum:]_]|$)' || rc=$?
+          if [ "${rc}" -gt 1 ]; then
+            echo "::error::MEASURE_FAIL: the TEST-marker predicate could not be evaluated (grep exited ${rc}). An identity check that did not run is not an identity check that passed. Refusing before any read of this database."
+            exit 1
+          fi
+          if [ "${rc}" -ne 0 ]; then
             echo "::error::the database identity marker does not name TEST as a whole word. Refusing. The marker text is withheld: this log is public."
             exit 1
           fi
-          if printf '%s' "${marker}" | grep -Eiq 'prod'; then
+          rc=0
+          printf '%s' "${marker}" | grep -aEiq 'prod' || rc=$?
+          if [ "${rc}" -gt 1 ]; then
+            echo "::error::MEASURE_FAIL: the PROD-refusal predicate could not be evaluated (grep exited ${rc}). This is the refusal that stands between this workflow and a DROP SCHEMA on production, and it FAILS CLOSED: an unevaluated refusal is treated as a refusal. The marker text is withheld: this log is public."
+            exit 1
+          fi
+          if [ "${rc}" -eq 0 ]; then
             echo "::error::the database identity marker names PRODUCTION. Refusing, loudly. The marker text is withheld: this log is public."
             exit 1
           fi
           echo "which_database: OK — the marker names TEST and not PROD."
-
 
       # Command-fidelity twin of the PROD `plan` job's dry-run: the exact
       # `db push --include-all` command and flags the push step below runs, minus

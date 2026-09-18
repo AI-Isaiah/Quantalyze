@@ -444,6 +444,14 @@ check() {
       ;;
   esac
   matched=$(( ${#repo_names[@]} - missing_count ))
+  # MEASURED 2026-08-29 (full derivation under "ABSURDITY FLOOR" above, which the
+  # intervening read-and-validate block separates from this line): the real defect
+  # scored matched=9 of 262 and FIRES; ordinary drift of 30 un-applied migrations
+  # scores matched=232 of 262 and stays SILENT. Separation is wide and deliberately
+  # untuned, and the 50 is compared against the REPO total, never the ledger's.
+  # ⛔ This pointer is here because the evidence must sit BESIDE the threshold: the
+  # meta-gate's justification window is the adjacent comment block, so a derivation
+  # 60 lines up behind code reads as an UNJUSTIFIED floor (measured 2026-09-18).
   if [ "$ledger_rows" -ge 50 ] && [ $(( matched * 2 )) -lt "${#repo_names[@]}" ]; then
     echo "::error::${GATE}: MEASURE_FAIL — this is the GATE failing, not the database."
     echo "::error::The TEST ledger holds ${ledger_rows} rows, but only ${matched} of ${#repo_names[@]} repo"
@@ -550,7 +558,17 @@ check() {
   local frontier_tip="" ts
   for nm in "${repo_names[@]}"; do
     # Present == not on the measured-missing list.
-    if grep -aqFx -e "$nm" "$missing_file"; then continue; fi
+    #
+    # ⛔ F-R2-05 (Phase 164.8.2 round 2) — SP-M01's BOUND, ON THE SITE THAT SETS
+    # THE TIP. `if grep …; then continue; fi` cannot tell rc 1 (not on the list —
+    # genuinely present) from rc >= 2 (could not read the list), and it treats
+    # BOTH as present. That direction WIDENS: a name wrongly read as present can
+    # RAISE `frontier_tip`, a higher tip EXEMPTS more measured-missing migrations
+    # from NEW drift, and every name that stops being NEW drift stops reddening
+    # the gate. An unreadable list is not a list this migration is absent from.
+    set +e; grep -aqFx -e "$nm" "$missing_file"; grep_rc=$?; set -e
+    [ "$grep_rc" -le 1 ] || fail "MEASURE_FAIL: could not test whether '${nm}' is on the measured-missing list (grep exited ${grep_rc} on ${missing_file}). An unreadable list is not a list this migration is absent from, and reading it as PRESENT RAISES the frontier tip and widens the exemption."
+    if [ "$grep_rc" -eq 0 ]; then continue; fi
     ts="${nm%%_*}"
     case "$ts" in ""|*[!0-9]*) continue ;; esac
     [ "${#ts}" -le 18 ] || continue   # keep the arithmetic below inside int64
@@ -686,8 +704,30 @@ check() {
   fi
 
   # Advisory only — squashes and CLI-era rows make this direction noisy.
-  local extra_file="${tmp}/extra.txt"
-  if run_ledger_query extra "$names_csv" > "$extra_file" 2>/dev/null; then
+  #
+  # ⛔ F-R2-04 (Phase 164.8.2 round 2) — THE QUERY NARRATES ITS OWN
+  # UNREADABILITY, exactly like the grep three lines below it. `if
+  # run_ledger_query … 2>/dev/null; then` swallowed the status AND the channel,
+  # so a DEAD advisory query and a CLEAN one both printed nothing at all — not
+  # even the warning this block's own sentence promises for the strictly
+  # narrower grep case. A reader diffing two runs' logs could not tell them
+  # apart. The rc is now captured and said out loud; the direction stays
+  # advisory, so the run continues either way.
+  #
+  # ⚠️ THE STDERR STAYS SUPPRESSED ON PURPOSE — psql's connect/auth stderr names
+  # the host, the port and the DB user and this job's log is PUBLIC (see
+  # NON-NEGOTIABLES at the top). The diagnosis handed to the reader is the EXIT
+  # CODE, which is what separates "psql spoke and refused" from "psql is not
+  # there"; what it must never do again is discard the status and then say
+  # nothing.
+  local extra_file="${tmp}/extra.txt" extra_q_rc=0
+  set +e
+  run_ledger_query extra "$names_csv" > "$extra_file" 2>/dev/null
+  extra_q_rc=$?
+  set -e
+  if [ "$extra_q_rc" -ne 0 ]; then
+    echo "::warning::${GATE}: the ADVISORY extra-ledger query exited ${extra_q_rc} (stderr WITHHELD — it can carry a DSN, host or username). This direction is advisory, so the run continues — but this run printed no advisory line because it could not read, not because there was nothing."
+  else
     # Same shape as SP-M01, one line down. This direction is ADVISORY by
     # design (squashes and CLI-era rows make it noisy), so an uncountable
     # result is surfaced as a warning rather than failing the gate — but it is

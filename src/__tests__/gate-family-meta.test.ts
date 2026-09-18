@@ -512,18 +512,42 @@ const DIAGNOSTIC_GREEN_FIXTURE = [
  * The threshold-bearing members of the family. INCLUSION RULE: every file in
  * this family that declares a numeric FLOOR/MIN threshold or compares against
  * a literal inside an absurdity block — the two shell gates, the mutation
- * runner, the two vitest gates that carry non-vacuity floors — and THIS FILE,
+ * runner, the vitest gates that carry non-vacuity floors — and THIS FILE,
  * whose own NEEDLE_MIN_LENGTH and EMISSION_FLOOR are thresholds the rule must
  * not exempt (a meta-arm that skips itself is the D primitive it audits for).
  * A new threshold anywhere in these files must carry its measurement AND be
  * registered in KNOWN_THRESHOLD_SITES below.
+ *
+ * ⚠️ CURRENCY 2026-09-18 (Phase 164.8.2, round-2 finding F-R2-03): THREE files
+ * joined the list, and the reason is the gap itself. The fix rounds of this very
+ * phase introduced two floors — `RUN_BLOCK_FLOOR` in
+ * src/__tests__/test-restore-workflow-wiring.test.ts and `SEAM_FLOOR` in
+ * src/__tests__/restore-test-from-baseline.test.ts — that this scan WOULD have
+ * matched (both are name-class JS constants) but never saw, because the scan only
+ * looks where it is pointed. A control that only covers the files someone
+ * remembered to list is the shape this whole arm exists to refuse.
+ *   • src/__tests__/test-restore-workflow-wiring.test.ts — `RUN_BLOCK_FLOOR`, the
+ *     SOLE anti-vacuity guard for `errexitOffenders()`.
+ *   • src/__tests__/restore-test-from-baseline.test.ts — `SEAM_FLOOR`, the
+ *     anti-narrowing ratchet for the WR-04 env-seam derivation.
+ *   • scripts/restore-test-from-baseline.sh — the TWIN of the already-listed
+ *     scripts/test-ledger-drift-check.sh, which this phase treats as twins
+ *     everywhere else. It carries ZERO threshold sites today (MEASURED 2026-09-18
+ *     by running this scan over it: 0 sites), so it adds nothing to the tally; it
+ *     is listed so a floor added to it LATER is caught on the commit that adds it
+ *     rather than on the commit that remembers this list. It is deliberately NOT
+ *     in FAMILY_SHELL_GATES: that membership drives the diagnostic-first arm and
+ *     its EMISSION_FLOOR, which is a separate decision from threshold coverage.
  */
 export const THRESHOLD_BEARING_FILES: readonly string[] = [
   ...FAMILY_SHELL_GATES,
+  "scripts/restore-test-from-baseline.sh",
   "scripts/mutation-runner/run.mjs",
   "src/__tests__/lint-sql-gates.test.ts",
   "src/__tests__/self-referential-oracle.test.ts",
   "src/__tests__/gate-family-meta.test.ts",
+  "src/__tests__/test-restore-workflow-wiring.test.ts",
+  "src/__tests__/restore-test-from-baseline.test.ts",
 ];
 
 export type ThresholdSite = {
@@ -602,7 +626,35 @@ export function findThresholdSites(file: string, src: string): ThresholdSite[] {
     else if (shCmp !== null) label = `${shCmp[1]} -${shCmp[2]} ${shCmp[3]}`;
     if (label === null) return;
 
-    const window = lines.slice(Math.max(0, idx - JUSTIFICATION_WINDOW), idx + 1).join("\n");
+    // ⛔ THE WINDOW IS THE CONTIGUOUS COMMENT BLOCK IMMEDIATELY ABOVE THE SITE, NOT
+    // THE PRECEDING N LINES (measured 2026-09-18, review of F-R2-03). A raw
+    // `slice(idx - 80, idx)` is satisfied by ANY occurrence of "measured" plus ANY
+    // date in those 80 lines, including prose about a DIFFERENT constant — so in a
+    // comment-dense file the rule passes without the site being justified at all.
+    // MEASURED on this repo: `RUN_BLOCK_FLOOR` in test-restore-workflow-wiring.test.ts
+    // carried THREE tokens in its window; with BOTH of its own justifications
+    // neutralised the gate stayed GREEN on an unrelated "MEASURED" 69 lines above.
+    // Walking up through comment and blank lines until the first line of CODE binds
+    // the evidence to the site it is evidence FOR.
+    // ⛔ CORRECTED 2026-09-18 — AN EARLIER DRAFT OF THIS COMMENT CLAIMED "every site then
+    // justified stayed justified, so this cost no coverage". THAT WAS FALSE, and a review
+    // measured it: the tightening reddened `ledger_rows -ge 50` in
+    // scripts/test-ledger-drift-check.sh, whose derivation sat ~60 lines up BEHIND CODE.
+    // It was re-greened by MOVING a justification beside that site IN THE SAME COMMIT —
+    // so the honest statement is that the tightening cost one site and that site was paid
+    // for, not that it cost nothing. A comment claiming a control is free, beside a
+    // control that was not, is the defect this phase exists to remove.
+    // ⚠️ `JUSTIFICATION_WINDOW` still CAPS the walk — a block longer than it does not
+    // buy a wider search, it just stops there.
+    let blockStart = idx;
+    while (
+      blockStart > 0 &&
+      idx - blockStart < JUSTIFICATION_WINDOW &&
+      /^\s*(?:\*|\/\*|\/\/|#|$)/.test(lines[blockStart - 1])
+    ) {
+      blockStart -= 1;
+    }
+    const window = lines.slice(blockStart, idx + 1).join("\n");
     const tok = MEASUREMENT_TOKEN.exec(window);
     const date = DATE_STAMP.exec(window);
     const justified = tok !== null && date !== null;
@@ -612,8 +664,8 @@ export function findThresholdSites(file: string, src: string): ThresholdSite[] {
       label,
       justified,
       evidence: justified
-        ? `"${(tok as RegExpExecArray)[0]}" + ${(date as RegExpExecArray)[0]} within ${JUSTIFICATION_WINDOW} lines`
-        : `missing ${tok === null ? "measurement token" : ""}${tok === null && date === null ? " and " : ""}${date === null ? "date stamp" : ""} within ${JUSTIFICATION_WINDOW} lines`,
+        ? `"${(tok as RegExpExecArray)[0]}" + ${(date as RegExpExecArray)[0]} within the adjacent comment block (walk capped at ${JUSTIFICATION_WINDOW} lines)`
+        : `missing ${tok === null ? "measurement token" : ""}${tok === null && date === null ? " and " : ""}${date === null ? "date stamp" : ""} within the adjacent comment block (walk capped at ${JUSTIFICATION_WINDOW} lines)`,
     });
   });
   return sites;
@@ -921,6 +973,17 @@ export const KNOWN_THRESHOLD_SITES: readonly string[] = [
   "src/__tests__/self-referential-oracle.test.ts :: CORPUS_FLOOR=100", //    SRO corpus-walk floor: MEASURED + 2026-09-01
   "src/__tests__/gate-family-meta.test.ts :: NEEDLE_MIN_LENGTH=16", //      registry needle floor: MEASURED + 2026-09-02
   "src/__tests__/gate-family-meta.test.ts :: EMISSION_FLOOR=40", //         emission-walk floor: MEASURED + 2026-09-02
+  // ⚠️ CURRENCY 2026-09-18 (Phase 164.8.2, round-2 finding F-R2-03). The two rows below
+  // are the floors THIS PHASE'S OWN FIX ROUNDS introduced outside this registry — the
+  // exact "a threshold nobody registered is a threshold nobody reviewed" shape, produced
+  // by the file that states it. RE-DERIVED by running this arm's scan over the widened
+  // THRESHOLD_BEARING_FILES: **12 threshold site(s) over 9 file(s), all 12 justified**
+  // (10 over 6 before; +2 sites from the two vitest files, +0 from
+  // scripts/restore-test-from-baseline.sh, which carries none today and is listed for
+  // the future). ⛔ Re-derive both integers by running the arm with this list EMPTY —
+  // never by arithmetic on this prose, which has gone stale in this repo before.
+  "src/__tests__/test-restore-workflow-wiring.test.ts :: RUN_BLOCK_FLOOR=16", // errexit-scan anti-vacuity floor: MEASURED + 2026-09-18 (16 `run: |` blocks re-measured at HEAD after the round-2 restructure of the workflow, by raising the constant to 999 and reading the arm's own "only 16 …" text; separated upward at 999, green at 16. Floor sits AT the measurement deliberately: the count is re-derived from the file on disk and the comparison is `>=`, so growth cannot red it and a silently-narrowing parser can)
+  "src/__tests__/restore-test-from-baseline.test.ts :: SEAM_FLOOR=16", //     WR-04 seam-derivation ratchet: MEASURED + 2026-09-18 (`envSeams(SRC)` derives exactly 16 seams, all named in the constant's own comment; separated upward at 999, green at 16. Same equal-floor reasoning as the row above — this one reds precisely when the derivation covers LESS of the operator contract, which is the WR-04 defect)
 ];
 
 describe("164.3.1-12 — META-ARM bare-measurement audit over the family's thresholds (SC-9)", () => {
@@ -939,7 +1002,7 @@ describe("164.3.1-12 — META-ARM bare-measurement audit over the family's thres
     const bare = sites.filter((s) => !s.justified);
     expect(
       bare.map((s) => `${s.file} :: ${s.label} (line ${s.line}) — ${s.evidence}`),
-      `a threshold in this family has NO measurement beside it. Record the measurement — the command, the date, the sample size and coverage, and both separation directions — within ${JUSTIFICATION_WINDOW} lines above the value (D-10/SC-9). Do not widen the window`,
+      `a threshold in this family has NO measurement beside it. Record the measurement — the command, the date, the sample size and coverage, and both separation directions — in the comment block IMMEDIATELY above the value — not merely within ${JUSTIFICATION_WINDOW} lines of it (D-10/SC-9). Do not widen the window back to a raw line count`,
     ).toEqual([]);
 
     const known = new Set(KNOWN_THRESHOLD_SITES);
