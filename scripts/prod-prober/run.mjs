@@ -336,8 +336,16 @@ export const CONTACT_INSERT_SQL =
 const CONTACT_INSERT_SQL_OK = CONTACT_INSERT_SQL.replace("{{STATUS}}", "ok");
 const CONTACT_INSERT_SQL_ERROR = CONTACT_INSERT_SQL.replace("{{STATUS}}", "error");
 
-/** How many non-empty lines `psql -At … RETURNING 1` printed — its own row count. */
-function countReturnedRows(stdout) {
+/**
+ * How many non-empty lines `psql -At -q … RETURNING 1` printed — its own row count.
+ *
+ * ⛔ Deliberately DUMB: every non-empty line is a row, so a zero-row INSERT
+ * stays visible as a defect. That dumbness is only safe because the sql seam
+ * passes `-q`; without it psql adds its COMMAND TAG (`INSERT 0 1`) as a second
+ * line and a correctly written row counts as two. Exported so
+ * `src/__tests__/prod-prober-wiring.test.ts` can pin both shapes.
+ */
+export function countReturnedRows(stdout) {
   return String(stdout || "")
     .split("\n")
     .filter((line) => line.trim().length > 0).length;

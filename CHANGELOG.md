@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.77.53.1] - 2026-09-18 — the prober stopped counting psql's command tag as a returned row
+
+### Fixed
+
+- **`scripts/prod-prober/seams.mjs` now passes `-q` to psql.** `recordProberContact` tells a
+  written row from a silently-dropped one by counting non-empty stdout lines from
+  `... RETURNING 1`. psql writes the COMMAND TAG of a non-SELECT statement to stdout as well, and
+  `-At` does **not** suppress it — so a correctly written row came back as `1\nINSERT 0 1\n` and
+  counted as **two**. Every hourly run reported a false `measure-fail`:
+  *"the prober's own cadence row landed 2 row(s), not exactly 1"*.
+
+### Root cause
+
+- Not the contact write, and not a database change: the row was being written correctly the whole
+  time. The counter is deliberately dumb — any non-empty line is a row, so a zero-row INSERT stays
+  a visible defect — and that dumbness is only safe if psql prints nothing but result rows. `-q`
+  restores that precondition and leaves SELECT output untouched, which the four arms depend on.
+- Measured against PROD on psql 18.6: without `-q` → 2 lines; with `-q` → 1 line. First seen in the
+  wild at 2026-09-18T16:50Z (issue #773); the 12:30Z run the same day was clean, so the runner's
+  psql moved underneath the gate. Nothing in this repository changed to cause it.
+
+### Notes
+
+- **It hid behind the POSTURE LINE.** On the scheduled path the probe step exits 0 by design so a
+  red prober cannot block the deploy that would fix it — so the run still concluded `success` and
+  the defect only surfaced in the auto-filed issue. It became visible here because a manual
+  dispatch exits with the script's real status.
+- ⚠️ That dispatch also attached a red `prod-prober` check to merge commit `b8e37528`. Railway's
+  wait-for-CI reads the whole check-suite on a commit, so this release doubles as the clean SHA.
+
+### Tests
+
+- Three pins in `src/__tests__/prod-prober-wiring.test.ts`, calibrated by removing `-q` and
+  observing RED (2 failed / 103 passed), then restoring byte-identically: the argv literal carries
+  both `-At` and `-q`; the same predicate flips on a mutated copy; and `countReturnedRows` is
+  pinned on BOTH shapes (`"1\n"` → 1, `"1\nINSERT 0 1\n"` → 2) so the reason for the flag sits
+  next to the flag. `countReturnedRows` is exported for that third pin.
+- `node scripts/prod-prober/run.mjs --self-test` → 83/83 scenarios. Typecheck and lint clean.
+
 ## [0.77.53.0] - 2026-09-18 — the cadence observer is registered on PROD and its first tick is on the record
 
 Phase 164.1.1 (PROBERCADENCE), plan 06: the founder-gated live session that moves the observer

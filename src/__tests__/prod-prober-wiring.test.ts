@@ -37,6 +37,7 @@ import {
   ARMS_FLOOR,
   DEFECT_KINDS,
   SELF_TEST_SCENARIOS,
+  countReturnedRows,
   main,
   selfTest,
 } from "../../scripts/prod-prober/run.mjs";
@@ -2947,5 +2948,45 @@ describe("[164.5.1-REVIEW IN-03] a CLI flag that does not apply to the selected 
     expect(errors.join("\n")).toContain("mutually exclusive");
     expect(errors.join("\n")).not.toContain("only applies to");
     expect(errors.join("\n")).not.toContain("narrows the live prober run only");
+  });
+});
+
+describe("[164.1-fix] psql must not print its command tag into the row count", () => {
+  // ⛔ THE DEFECT THIS PINS, measured in production on 2026-09-18.
+  // `recordProberContact` tells a written row from a silently-dropped one by
+  // COUNTING non-empty stdout lines from `... RETURNING 1`. psql writes the
+  // COMMAND TAG of a non-SELECT to stdout too — `INSERT 0 1` — and `-At` does
+  // NOT suppress it. So a correctly written row counted as TWO, and the prober
+  // reported a false `measure-fail` on every hourly run (issue #773, first at
+  // 2026-09-18T16:50Z; the 12:30Z run the same day was clean). `-q` is what
+  // suppresses the tag while leaving RESULT rows untouched.
+  const sqlRunnerArgv = (text: string): string[] => {
+    const m = text.match(/const argv = \[url,([\s\S]*?)\];/);
+    if (!m) return [];
+    return [...m[1].matchAll(/"([^"]*)"/g)].map((x) => x[1]);
+  };
+
+  it("the real sql runner passes -q, so a command tag can never be counted as a returned row", () => {
+    const argv = sqlRunnerArgv(readFileSync(SEAMS_PATH, "utf8"));
+    expect(argv.length, "the argv array literal must be found at all").toBeGreaterThan(0);
+    expect(argv).toContain("-At");
+    expect(argv).toContain("-q");
+  });
+
+  it("CALIBRATION: the same predicate FAILS on a copy with -q removed", () => {
+    const text = readFileSync(SEAMS_PATH, "utf8");
+    const without = text.replace('"-At", "-q",', '"-At",');
+    expect(without, "the mutation must actually change the text").not.toBe(text);
+    const argv = sqlRunnerArgv(without);
+    expect(argv).toContain("-At");
+    expect(argv).not.toContain("-q");
+  });
+
+  it("countReturnedRows treats a psql command tag as a row — which is WHY -q is required", () => {
+    // The counter is deliberately left dumb (any non-empty line is a row) so a
+    // zero-row INSERT is still a defect. This asserts the exact shape psql 18
+    // emits without -q, so the reason for the flag is pinned next to the flag.
+    expect(countReturnedRows("1\n")).toBe(1);
+    expect(countReturnedRows("1\nINSERT 0 1\n")).toBe(2);
   });
 });
