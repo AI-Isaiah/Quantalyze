@@ -5,7 +5,9 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+import sentry_sdk
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from services.db import get_supabase, rows
 from services.encryption import decrypt_credentials, get_kek
@@ -1095,3 +1097,137 @@ async def cron_sync() -> dict[str, Any]:
         "results": capped_results,
         "portfolio_recomputes": portfolio_recomputes,
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /prober-cadence-alert — PROBER-CADENCE-UNDELIVERED-01 (Phase 164.1.1)
+# ---------------------------------------------------------------------------
+#
+# The far end of the alarm `public.prod_prober_cadence_check()` posts when the
+# prod-prober's last contact (a cron_runs row, cron_name='prod_prober')
+# exceeds the measured ~10h25m ceiling — see supabase/migrations/
+# 20260918120000_prod_prober_cadence.sql for the derivation. Landing this
+# route on the existing `/api` prefix, rather than under `/internal`, is a
+# DECISION, not an oversight: `/internal/*` is gated by INTERNAL_API_TOKEN, a
+# credential the PROD function does not hold and would need a new Vault
+# secret and a founder act to obtain, whereas `/api/*` is already guarded by
+# the SERVICE_KEY middleware (main.verify_service_key) that carries
+# match_engine_cron_tick()'s posts today. Zero new credentials, no carve-out.
+#
+# Terminal-channel decision (164.1.1-03 checkpoint, founder-measured
+# 2026-09-18): SENTRY_DSN IS SET on Railway -> analytics-service ->
+# production -> Variables (outcome a-sentry-already-set). The escalation
+# below is therefore a rate-limited sentry_sdk capture plus a structured log
+# on every occurrence, cloned from `_alert_kek_unavailable`
+# (routers/internal.py). Only the variable's PRESENCE was confirmed, ever —
+# never its value — and nothing in this module may claim more.
+#
+# ⚠️ CAVEAT THAT MUST STAY ATTACHED: delivery still depends on that Railway
+# environment variable staying set, outside this repository's control. If it
+# is ever unset, this escalation silently degrades to a log-only signal —
+# nothing here would detect that regression. Never round this up into a
+# permanent guarantee that the alarm reaches a human.
+
+
+class ProberCadenceAlert(BaseModel):
+    """The body `prod_prober_cadence_check()` posts. A frozen contract with
+    the SQL function above — a field rename here needs a matching migration.
+    """
+
+    cron_name: str
+    # Nullable, NOT optional: the SQL function sends NULL when the prober has
+    # NEVER made contact (no cron_runs row exists at all) — the loudest
+    # possible stale signal, and it must be ACCEPTED, not refused as
+    # malformed. The key itself stays REQUIRED (no default): a body that
+    # omits `gap_minutes` entirely is a producer contract violation, not the
+    # never-contacted case, and gets the same 4xx as any other missing field.
+    gap_minutes: int | None
+    ceiling: str
+    detected_at: datetime
+
+
+# Bounds how often a SUSTAINED cadence alarm re-escalates to Sentry while the
+# gap stays open. The structured log below fires on EVERY occurrence
+# regardless of this window — only the Sentry capture is bounded, the shape
+# `_alert_kek_unavailable` (routers/internal.py) already established in this
+# service: an unbounded capture becomes a flood that gets muted, which is
+# indistinguishable from having no signal at all.
+_PROBER_CADENCE_ALERT_WINDOW_S = 3600.0
+_last_prober_cadence_alert_at: float | None = None
+
+
+def _reset_prober_cadence_alert() -> None:
+    """Test-only helper to clear the escalation window between cases."""
+    global _last_prober_cadence_alert_at
+    _last_prober_cadence_alert_at = None
+
+
+def _escalate_prober_cadence_gap(alert: ProberCadenceAlert) -> None:
+    """Log every occurrence; escalate to Sentry at most once per window.
+
+    Shape cloned from ``_alert_kek_unavailable`` (routers/internal.py):
+    ``logger.error`` BEFORE any window check — the RATE of these lines is
+    itself the operator's evidence, unconditional on whether the Sentry
+    capture actually fires — then ``set_tag`` before ``capture_message`` so
+    events are greppable per-cause, with the whole capture wrapped in a bare
+    ``try/except: pass``. A Sentry transport failure (DSN misconfigured,
+    network down before the SDK connected) must never mask or crash the path
+    it is reporting on; here that path is an async ``net.http_post`` on the
+    database side that nothing downstream would otherwise notice failing.
+
+    Neither the log line nor the capture may carry any credential, header
+    value, or the request's own ``X-Service-Key`` — the alert body carries
+    only a cron name, an integer (or null), an interval rendered as text and
+    a timestamp, and nothing else may be echoed.
+    """
+    global _last_prober_cadence_alert_at
+    gap_display = "never" if alert.gap_minutes is None else str(alert.gap_minutes)
+    logger.error(
+        "prober_cadence_alert: cron_name=%s gap_minutes=%s ceiling=%s — "
+        "prod-prober contact exceeded the measured cadence ceiling",
+        alert.cron_name,
+        gap_display,
+        alert.ceiling,
+    )
+    now = time.monotonic()
+    if (
+        _last_prober_cadence_alert_at is not None
+        and (now - _last_prober_cadence_alert_at) < _PROBER_CADENCE_ALERT_WINDOW_S
+    ):
+        return
+    _last_prober_cadence_alert_at = now
+    try:
+        sentry_sdk.set_tag("prober_cadence_alert", alert.cron_name)
+        sentry_sdk.capture_message(
+            f"prod-prober cadence alarm: {alert.cron_name} last contact "
+            f"{gap_display} min ago (ceiling {alert.ceiling})",
+            level="error",
+        )
+    except Exception:
+        pass  # never mask the path this is reporting on
+
+
+@router.post("/prober-cadence-alert")
+async def prober_cadence_alert(alert: ProberCadenceAlert) -> dict[str, Any]:
+    """Receive the alert ``prod_prober_cadence_check()`` posts when the
+    prod-prober's cron_runs contact goes stale, log the measurement, and
+    escalate (rate-limited) per the 164.1.1-03 checkpoint outcome.
+
+    Body validation is entirely pydantic's: ``ProberCadenceAlert`` requires
+    ``cron_name``/``ceiling``/``detected_at`` and requires-but-nullable
+    ``gap_minutes``, so a missing or wrongly-typed field never reaches this
+    body at all — FastAPI answers 4xx before ``_escalate_prober_cadence_gap``
+    ever runs, and nothing is logged for a rejected body.
+
+    Always answers 200. ``net.http_post`` on the database side is
+    fire-and-forget — no status code from this route reaches anyone — so a
+    non-2xx here would add a SECOND silent failure on top of whatever the
+    escalation could not deliver, rather than surfacing the first. The
+    structured log line is already written by the time this returns,
+    regardless of what happens next. An operator can see whether the
+    database's OWN post succeeded via ``net._http_response`` on the PROD
+    side — never via ``cron.job_run_details.status``, which is the
+    distinction the ``cron-obs`` prober arm exists to make.
+    """
+    _escalate_prober_cadence_gap(alert)
+    return {"acknowledged": True}
