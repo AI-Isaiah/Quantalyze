@@ -3715,6 +3715,36 @@ and any widening must say what it does to the approval-gate snapshot.
   runbook deliberately does not cover".
 
 
+### VAULTTICK-MANIFEST-COUNT-STALE-01 — an APPLIED migration's comment cites a census that has since moved (booked 2026-09-18)
+
+- [ ] **`[VAULTTICK-MANIFEST-COUNT-STALE-01]` `supabase/migrations/20260911120000_vault_tick_hardening.sql:352`
+  reads "MEASURED, all 14 rows of `scripts/prod-prober/cron-manifest.json`". The manifest now
+  holds 15 rows. The file is APPLIED and therefore byte-frozen, so the drift cannot be corrected
+  where it stands.**
+  ⛔ **MEASURED 2026-09-18** during Phase 164.1.1's migration-review gate, and found by the fixer
+  rather than by any gate — it flagged the line and correctly declined to edit it.
+  ⭐ **The CONCLUSION is unaffected and still true: every row is `username: postgres`** (15/15,
+  re-measured 2026-09-18). Only the COUNT drifted. This is a stale census figure, not a false
+  claim about behaviour, and nothing depends on the number — the argument the comment makes
+  ("the scheduler runs as postgres, so the owner needs no GRANT") holds at any row count.
+  **Why it is booked at all.** Phase 164.1.1's new migration cites the same manifest and says
+  **15**, deliberately. So two migrations in the tree now state different counts for the same
+  file, and a future reader comparing them has no way to tell which is stale without going to
+  the manifest. That is the `[164.7-CITATION-DRIFT-01]` class exactly, whose recorded remedy is
+  to cite by symbol rather than re-number prose that will drift again.
+  ⭐ **DISPOSITION: ACCEPTED as a named residual**, on the alternative considered and rejected.
+  A forward migration whose entire payload is a `COMMENT` correction would add an applied,
+  permanent file to the ledger to fix a number nothing reads — disproportionate, and it would
+  drift again at row 16. ⛔ Editing the applied file is not an option: applied migrations stay
+  BYTE-IDENTICAL, which is the rule that makes the whole ledger usable as evidence.
+  **The MANUAL path, marked manual in this same sentence and never elsewhere as coverage:** a
+  reader who needs the live figure runs
+  `node -e 'console.log(require("./scripts/prod-prober/cron-manifest.json").length)'` against the
+  manifest, which is the source of truth both comments are quoting.
+  **Trigger:** if a future phase writes a forward migration touching `match_engine_cron_tick()`'s
+  ACL for an independent reason, correct the count in that same act. Do not raise one for this.
+  **Owner:** UNROUTED. **Reachable from:** this entry only — the applied file cannot point at it.
+
 ### FANOUT-FAILBRANCH-UNEXERCISED-01 / 164.5.1-TODOS-DISPOSITION-OWED — the two items Phase 164.5.1 leaves open (booked 2026-09-17)
 
 Both come out of Phase 164.5.1's verification and its plan-09 security re-audit. Both existed
