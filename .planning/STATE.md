@@ -6,16 +6,16 @@ current_phase: 164.1.1
 current_phase_name: PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it (INSERTED)
 status: executing
 stopped_at: Completed 164.1.1-04-PLAN.md
-last_updated: "2026-09-18T09:50:25.709Z"
+last_updated: "2026-09-18T13:53:41.238Z"
 last_activity: 2026-09-18
 last_activity_desc: Phase 164.1.1 plan 04 executed — the guarded escalation route shipped and calibrated (all four load-bearing behaviours neutered, observed RED, restored)
-state_head: 06ccd70358a369492e38274cb7e5932f762f1731
+state_head: eeeee3208cd73edc388b86a717321b0fbe83ef61
 progress:
-  total_phases: 44
+  total_phases: 45
   completed_phases: 20
   total_plans: 201
   completed_plans: 192
-  percent: 45
+  percent: 44
 ---
 
 ## ⭐ STATE lineage
@@ -891,7 +891,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [████░░░░░░] 45%
+Progress: [████░░░░░░] 44%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1201,6 +1201,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.5.1.1 inserted after Phase 164.5.1: FANOUTCOHORT — the fan-out selected ZERO candidates on its first live tick because every PROD strategy is status='private'; blocks 164.5.1's verification (URGENT)
 - Phase 164.1.1 inserted: PROBERCADENCE inserted after 164.1: the prober declares hourly and delivers 27% (75/273 over 273.4h), median gap 3.28h, max 7.13h — worse than the 6h window its own workflow comment rejects by name. Owner of TODOS [PROBER-CADENCE-UNDELIVERED-01].
 - Phase 164.4.2 inserted after Phase 164.4: Owner phase for TODOS [REDUNDER-SUBSET-SPLIT], unowned since 2026-09-05. sql-mutation timeout-minutes has taken its ONE allowed raise; 20 is a declared CEILING and the next escalation is a subset split, never a third value. Inserted 2026-09-18 while Phase 164.1.1 was mid-execution — the STATE current-phase pointer was deliberately NOT repointed.
+- Phase 164.1.1.1 inserted after Phase 164.1.1: LANEONLYGATES — sql-tests runs a pg-lane-only gate against shared TEST and is permanently red, blocking the analytics-service deploy (URGENT)
 
 ### Decisions
 
