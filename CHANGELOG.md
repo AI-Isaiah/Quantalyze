@@ -1,5 +1,63 @@
 # Changelog
 
+## [0.78.0.0] - 2026-09-18 — completion becomes a historical fact, and drift becomes a report
+
+A MINOR bump, not a patch: this changes how the project decides a phase is done.
+
+### Changed
+
+- **`covered_digest` is gone, and `covered_files` with it.** A verification that passed now STAYS
+  passed. Each verdict records `verified_at_sha` (the commit it was issued at) and
+  `drift_subjects` (what it rested on). Neither field opts a report into GSD's fingerprint check,
+  so nothing demotes a verdict behind your back.
+
+### Root cause
+
+- GSD demoted a `passed` verification to `stale` the moment ANY covered file changed. Measured
+  across all 28 verifications before the change: **7 carried a digest and 5 of those were stale**,
+  while the **21 carrying none read `passed` unconditionally, forever**. The rule was backwards —
+  listing the files your verdict rested on is what got the verdict revoked, and listing nothing
+  bought permanent trust. In a repo whose phases deliberately layer on the same prober, CI and
+  migration files this is structural: Phase 164.1.1 was `passed` and went `stale` two hours later
+  because a bug fix touched two files it had listed, with nothing about its verdict in question.
+  A milestone could never close, because the more carefully a phase was verified the less likely
+  it was to count as done. Founder decision 2026-09-18.
+
+### Added
+
+- **`scripts/verification-drift-report.mjs`** — says which verdicts predate changes to their own
+  subjects. ⛔ It ALWAYS exits 0 and must never gate a merge; the file says why at the top.
+
+### Fixed
+
+- Phase 164.1's verification re-established and re-fingerprinted (self-test 83/83 at HEAD), and
+  its UAT test 8 moved `blocked → pass` on measurement: the scheduled prober path has now fired
+  **80** times, with **43 runs and 0 failures** since PR #774 fixed the step dying on the shell's
+  `-e`. Test 9 stays blocked, but with a measurement replacing an assumption — all 66
+  `-10004`/`-10005` mentions across the prober issues are the remedy sentence saying the code is
+  *neither*; production has only ever shown `-6`.
+- `TODOS.md` stripped from 164.8.3's subjects, per the repo-global-ledger rule it was violating.
+
+### Notes
+
+- **164.5 drops from four open human-verification items to one.** Two were stale rather than hard
+  (the CR-01/CR-02 guards are present on `main`: 9 `COMPARED_FLOOR`, 3 `--self-test`; the VAC-08
+  ledger reads `0 absent, 0 baselined, 0 NEW drift` off the credentialed CI run the item itself
+  points to). The third was re-run: `run.sh up` exit 0 with its baseline-loaded line, and the
+  VAC-07 spec 2 passed / 0 skipped — against a baseline that has since hashed to `d8dd1786…`,
+  neither the value the criteria were measured against nor what `5c8d0fef` left. The one that
+  remains is the founder-only DRIFT-04 production DDL.
+- **164.6.2's premise has expired.** Its item waits for an MT5 `-6` to restart the analytics
+  service against, on a recorded cadence of "at least once daily". The last lapse was
+  2026-09-17T05:53Z — **37+ hours** — after a prior rate of up to five a day, and the boot heal's
+  only production verdict is still `already_authorized`. Recorded rather than waited on.
+- **162(c) is reachable again.** Its 2026-08-28 reading said "blocked on a working display — do
+  not re-attempt from this session". Re-tested in a real browser: 1633x865, pages paint. Sampling
+  50 times at 40ms across a drawer-add, the absence note appeared in 0 samples while a new
+  em-dash cell appeared — the predicted behaviour. Left NOT passed on purpose: no leg reached
+  settled-both-null, so the note was never shown able to render, and an uncalibrated "it did not
+  flash" is weak evidence by this repo's own rule.
+
 ## [0.77.53.1] - 2026-09-18 — the prober stopped counting psql's command tag as a returned row
 
 ### Fixed
