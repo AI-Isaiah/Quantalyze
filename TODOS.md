@@ -3616,6 +3616,65 @@ and any widening must say what it does to the approval-gate snapshot.
       `/gsd-phase --insert`, with the ceiling, the PROD-side observer and the
       prove-the-alarm-fires requirement as its success criteria. The false claim has already been
       corrected at its own site (that header comment), not only in planning prose.
+      **Progress note, dated 2026-09-18 (after plan 05) — NOT a closure.** Shipped so far: the
+      PROD-side observer `public.prod_prober_cadence_check()` with the measured ceiling
+      `c_contact_ceiling` (plan 01); the anti-vacuity expansion arms O1/A1/N1/U1/V1 alongside the
+      matched pair G1/S1 — all seven proven RED on a disposable pg-lane, `ARMS_FLOOR` raised to
+      402 (plan 02); the terminal-channel checkpoint answered — `a-sentry-already-set`, `SENTRY_DSN`
+      confirmed set on Railway analytics-service production (plan 03); the guarded route
+      `POST /api/prober-cadence-alert` with rate-limited Sentry escalation and a calibrated test
+      suite (plan 04); and the go-live runbook plus criterion 5's disposed residual (plan 05, see
+      `[PGCRON-LIVENESS-UNWATCHED-01]` below). **What remains: the live registration itself** —
+      `cron.schedule('prod_prober_cadence_check', …)` against PROD and the same-session manifest
+      re-capture, owned by plan 06. ⛔ This checkbox stays unticked until that happens: the entry's
+      own text says the observer must live where a scheduler that actually fires does, and until
+      the job is registered on PROD, nothing observes anything.
+
+
+### PGCRON-LIVENESS-UNWATCHED-01 — criterion 5's turtle: nothing watches PROD `pg_cron` itself (booked 2026-09-18)
+
+- **`[PGCRON-LIVENESS-UNWATCHED-01]` Nothing in this repository periodically checks whether PROD's
+  `pg_cron` itself is still executing jobs, independently of any specific job's own body.**
+  ⛔ **MEASURED 2026-09-18** (`164.1.1-RESEARCH.md`). `cron.job_run_details` is referenced as
+  operator-visible in several migrations, and one comment states plainly that it is rarely
+  scraped by hand. No SQL, Python or TypeScript anywhere in this repository periodically checks
+  `pg_cron`'s own liveness independently of a specific job's body — every existing gate (the
+  prober's four arms, this phase's own observer, every SQL mutation gate over `cron_runs`) asks
+  "did THIS job run", never "is the SCHEDULER itself still alive".
+  **The consequence, stated exactly, without softening and without inflating.** If PROD Postgres
+  or the `pg_cron` extension itself stops, `public.prod_prober_cadence_check()` (this phase's own
+  observer, Phase 164.1.1 plan 01) stops with it — and it is then silent for the SAME reason the
+  thing it observes (the prod-prober) would be. That is the turtle one level down, and Phase
+  164.1.1 does not close it.
+  ⭐ **DISPOSITION: ACCEPTED as a named residual**, on two grounds.
+  1. **Narrowness.** A total Postgres outage is a whole-application incident with many louder
+     symptoms than a missing alert — every read path, every write path and every other cron job
+     stops at the same instant. What is genuinely uncovered by this phase is the narrower case:
+     `pg_cron` degrading silently while the rest of Postgres keeps serving.
+  2. **The alternative considered and rejected.** A fifth prober arm reading the observer's own
+     recency was considered. Rejected because the prober shares GitHub Actions' own unreliability
+     — the exact 27% delivery rate that is this phase's entire premise — so a GitHub-hosted
+     watchdog cannot close a gap in a scheduler that GitHub itself might have dropped the
+     watchdog's own run for. `164.1.1-CONTEXT.md` (CTX-02) already rejected exactly this shape for
+     the prober's own contact-write design, for the same reason. This is a considered-and-rejected
+     option, not an unexamined one.
+  **The MANUAL path, marked manual in this same sentence and never elsewhere as coverage.** The
+  observer writes one `public.cron_runs` row per tick under `cron_name = 'prod_prober_cadence_check'`
+  (D-06), so a human running `SELECT public.latest_cron_success('prod_prober_cadence_check');` —
+  the same admin point query the runbook's own pre-flight checklist already uses — sees its
+  silence if `pg_cron` itself stops calling it. ⛔ That is a query a human must decide to run. It
+  is NOT coverage, NOT monitoring, and NOT a mitigation — it is the exact property ("nobody
+  looks") this phase's whole subject is about, one level down.
+  **Trigger:** the next time PROD `pg_cron`'s own liveness becomes an active concern — an
+  incident, or a deliberate proposal to instrument scheduler-level liveness. **Owner:**
+  UNROUTED, deliberately — criterion 5 asks that this choice be STATED, not that the gap be
+  closed. Inventing a destination phase here would record a commitment nobody made. ⛔ Do not let
+  this sit as a bare TODOS line with no trigger: give it a phase via `/gsd-phase --insert` when
+  the trigger above fires.
+  **Reachable from:** this entry, and `docs/runbooks/prod-prober-cadence-go-live.md` § "What this
+  runbook deliberately does not cover" — a residual named in only one place is the same defect
+  this repository has a measured incident of (a scope amendment touching one file while the
+  refused claim went on standing in the others).
 
 
 ### FANOUT-FAILBRANCH-UNEXERCISED-01 / 164.5.1-TODOS-DISPOSITION-OWED — the two items Phase 164.5.1 leaves open (booked 2026-09-17)
