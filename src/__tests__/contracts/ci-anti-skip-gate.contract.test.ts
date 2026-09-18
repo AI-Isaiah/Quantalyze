@@ -562,3 +562,129 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
     expect(SCRIPT).not.toMatch(/^\s*exit 0\s*$/m);
   });
 });
+
+/**
+ * 164.1.1.1-02 — the LANE-ONLY exclusion register.
+ *
+ * Plan 01 gave `sql-tests` a mechanism to exclude a file whose assertion body
+ * queries an object that only exists on the throwaway pg-lane. That mechanism
+ * is a marker anybody can paste into a comment — without this register it is
+ * an exemption a file can self-grant, the same defect class the F10 gate above
+ * exists to remove one level up.
+ *
+ * ⛔ SITES, NOT A COUNT, and the distinction is load-bearing for the exact
+ * reason it is in the B3 register (`src/__tests__/drift-check-scripts.test.ts`,
+ * "softening sites in scripts/test-ledger-drift-check.sh's check()"): a tally
+ * is blind to a ONE-FOR-ONE SWAP — retire a legitimate LANE-ONLY exclusion and
+ * grant an illegitimate one to a different gate in the same diff, and
+ * `derived.length` never moves. This register is deliberately NOT a copy of
+ * that one: B3 governs softening tokens inside one bash script; this one
+ * governs which SQL gate files may skip execution inside a DIFFERENT corpus
+ * (`supabase/tests/*.sql`) via a DIFFERENT marker (`-- LANE-ONLY:` vs B3's
+ * softening tokens). Same mechanism, different corpus — copying B3's entries
+ * would pin nothing here; copying its shape is the point.
+ */
+const LANE_ONLY_ANCHOR = "-- LANE-ONLY:";
+
+/** The set of files, declared object and declared fixture the corpus carries today. */
+const LANE_ONLY_SITES: readonly { file: string; object: string; fixture: string; why: string }[] = [
+  {
+    file: "test_prod_prober_cadence.sql",
+    object: "net._lane_posts",
+    fixture: "scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql",
+    why:
+      "net._lane_posts exists only inside the throwaway pg-lane cluster — fixture 34's own header " +
+      'marks it "NEVER APPLIED TO TEST OR PROD" — while shared TEST carries the REAL pg_net. A ' +
+      "version of this gate made to run there would issue genuine outbound HTTP from shared CI " +
+      "infrastructure on every run: accommodation is unsafe, not merely inconvenient.",
+  },
+];
+
+/**
+ * Re-derive the LANE-ONLY set from a corpus directory, keyed on the SAME
+ * `^-- LANE-ONLY:` anchor ci.yml's `lane_only_marker()` predicate reads
+ * (`ci.yml:3218`, `grep -a -m1 '^-- LANE-ONLY:' "$1"`). Only presence of the
+ * prefix decides whether a file carries a marker — matching ci.yml's own
+ * `grep` behaviour — so a malformed JSON payload is still DETECTED as a
+ * marker and fails loudly rather than being silently treated as "no marker
+ * here, skip".
+ */
+function deriveLaneOnlySites(dir: string): { file: string; object: string; fixture: string }[] {
+  const out: { file: string; object: string; fixture: string }[] = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.startsWith("test_") || !name.endsWith(".sql")) continue;
+    const src = readFileSync(join(dir, name), "utf8");
+    const line = src.split("\n").find((l) => l.startsWith(LANE_ONLY_ANCHOR));
+    if (!line) continue;
+    const raw = line.slice(LANE_ONLY_ANCHOR.length).trim();
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(raw);
+    } catch (e) {
+      throw new Error(
+        `${name} carries a ${LANE_ONLY_ANCHOR} marker whose JSON does not parse ` +
+          `(${(e as Error).message}). A derivation that swallowed this would silently drop the ` +
+          `file from the register instead of pinning nothing loudly — never let this fall through ` +
+          `to an empty result.`,
+      );
+    }
+    if (typeof payload.object !== "string" || typeof payload.fixture !== "string") {
+      throw new Error(
+        `${name}'s ${LANE_ONLY_ANCHOR} marker is missing a required "object" or "fixture" key ` +
+          `(parsed: ${JSON.stringify(payload)}). Both are required for the forward/reverse ` +
+          `cross-checks below to mean anything.`,
+      );
+    }
+    out.push({ file: name, object: payload.object, fixture: payload.fixture });
+  }
+  return out.sort((a, b) => a.file.localeCompare(b.file));
+}
+
+/** Drop every line whose first non-whitespace characters are a SQL line comment. */
+function stripSqlLineComments(text: string): string {
+  return text
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("--"))
+    .join("\n");
+}
+
+describe("LANE-ONLY exclusion register — pinned as SITES, not a count", () => {
+  const testsDir = join(ROOT, "supabase/tests");
+
+  it("derives exactly the pinned LANE-ONLY set from the corpus, triple by triple", () => {
+    const derived = deriveLaneOnlySites(testsDir);
+    const pinned = LANE_ONLY_SITES.map(({ file, object, fixture }) => ({ file, object, fixture }));
+    expect(
+      derived,
+      "the corpus's marker-bearing files no longer match LANE_ONLY_SITES. A new lane-only gate " +
+        "must be added to this register in the SAME diff that adds its marker; a marker that MOVED " +
+        "from one pinned file to another — the count unchanged — is a swap that must be argued " +
+        "here, not absorbed silently.",
+    ).toEqual(pinned);
+  });
+
+  it("fails loudly, naming the file, on a marker whose JSON does not parse", () => {
+    const dir = makeSentinelCorpus(
+      "test_bad_json.sql",
+      "-- LANE-ONLY: {not valid json\nDO $$ BEGIN NULL; END $$;\n",
+    );
+    try {
+      expect(() => deriveLaneOnlySites(join(dir, "supabase/tests"))).toThrow(/test_bad_json\.sql/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails loudly, naming the file, on a marker missing object or fixture", () => {
+    const dir = makeSentinelCorpus(
+      "test_missing_keys.sql",
+      '-- LANE-ONLY: {"job":"sql-mutation","reason":"no object or fixture here"}\n' +
+        "DO $$ BEGIN NULL; END $$;\n",
+    );
+    try {
+      expect(() => deriveLaneOnlySites(join(dir, "supabase/tests"))).toThrow(/test_missing_keys\.sql/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
