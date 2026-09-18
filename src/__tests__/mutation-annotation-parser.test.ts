@@ -875,8 +875,19 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // MEASURED via `node scripts/mutation-runner/run.mjs --file
     // supabase/tests/test_prod_prober_cadence.sql`: both arms RED (identity
     // ok), biting 2/2.
-    expect(armsSeen).toBe(397);
-    expect(stepsSeen).toBe(416);
+    // ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 02): arms
+    // 397 -> 402 and file steps 416 -> 421. FIVE new arms in the SAME file
+    // plan 01 added — O1, A1, N1, U1, V1 — each a single `edit` step against
+    // 20260918120000_prod_prober_cadence.sql, no layering and no `sql` step,
+    // so arms and steps moved by the SAME five. This lands in an
+    // ALREADY-annotated file, unlike plan 01's entry above, so FILES_FLOOR
+    // does not move. MEASURED via `node scripts/mutation-runner/run.mjs
+    // --file supabase/tests/test_prod_prober_cadence.sql`: all seven arms RED
+    // (identity ok), biting 7/7 — and corroborated by two clean-tree
+    // full-corpus lane runs: `arms: 402/402/0`, `biting: 402`,
+    // `lane-invocations: 402` (the two independent tallies AGREE), exit 0.
+    expect(armsSeen).toBe(402);
+    expect(stepsSeen).toBe(421);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1697,7 +1708,13 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // carry one `find` needle, so this derivation moved by two as well — the
     // same coincidence-not-rule the 2026-09-17 note above names. Keep running
     // it separately.
-    expect(needles.length).toBe(416);
+    // ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 02): needles
+    // 416 -> 421. The SAME five edit-kind twins (O1, A1, N1, U1, V1 in the same
+    // file) that moved `armsSeen` and `stepsSeen` each carry exactly one
+    // `find` needle, so this derivation moved by five as well — again a
+    // coincidence of this plan's shape (five arms, all edit-kind, one needle
+    // each), not a rule. Keep running it separately.
+    expect(needles.length).toBe(421);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

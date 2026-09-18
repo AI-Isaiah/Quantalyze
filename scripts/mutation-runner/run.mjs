@@ -1949,7 +1949,34 @@ export const FILES_FLOOR = 47;
 //                i.e. this constant's PRE-EDIT value) gives the same message
 //                naming 395 and FAILS; ARMS_FLOOR=397 PASSES. WAIVED_CEILING
 //                stays 0 (0 waivers, corpus-wide).
-export const ARMS_FLOOR = 397;
+// ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 02): 397 -> 402.
+//                FIVE new arms in the SAME file plan 01 added,
+//                supabase/tests/test_prod_prober_cadence.sql — O1 (the
+//                observer's own self-observability row, both branches), A1 (an
+//                ABSENT prod_prober contact read as stale, never healthy), N1
+//                (the contact read narrowed to ONE producer, never a second
+//                real one), U1 (the destination's second layer, the CHECK
+//                constraint dropped inside the arm's own transaction) and V1
+//                (a missing Vault key producing a refusal, never a
+//                null-valued header). FILES_FLOOR does NOT move — no new file,
+//                `coverage: files 47/74` unchanged from plan 01.
+//                MEASURED on a clean-tree full-corpus lane run, READ OFF THE
+//                RUNNER'S OWN OUTPUT: `coverage: files 47/74`,
+//                `arms: 402/402/0`, `biting: 402`, `lane-invocations: 402`
+//                (the two independent tallies AGREE), `lane-blocked: 0
+//                file(s)`, `lane-probe: pg_cron AVAILABLE`, `pending: 0`,
+//                `✅ No defects`, exit 0, mean 2.0s/arm, and the per-file row
+//                `test_prod_prober_cadence.sql: sections 7 / judged 7 /
+//                annotated 7 / waived 0 / biting 7`.
+//                SEPARATED in both directions on TWO REAL full-corpus lane
+//                runs (not the fast vitest re-derivation this time — the plan
+//                asked for the runner's own message by name): ARMS_FLOOR=403
+//                gives `ARMS_FLOOR regression: 402 biting arm(s) < floor 403`
+//                and exit 1 with EXACTLY that one defect; ARMS_FLOOR=402 (this
+//                value) gives `✅ No defects` and exit 0, with
+//                arms/biting/lane-invocations all reading 402. WAIVED_CEILING
+//                stays 0 (0 waivers, corpus-wide).
+export const ARMS_FLOOR = 402;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

@@ -1556,6 +1556,23 @@ jobs:
     # not acted on, because the rule fires on a MEASURED ubuntu run, not a
     # local projection; the next PR touching this job should capture the
     # ubuntu wall clock and re-apply the rule against it.
+    # ⚖️ RULE RE-APPLIED 2026-09-18 (phase 164.1.1 PROBERCADENCE, plan 02) — NO
+    # CHANGE, reading recorded rather than the decision restated. The corpus
+    # stays at 47 files (FILES_FLOOR unmoved) / grows to 402 arms = **496 legs**
+    # (402 + 47 baseline + 47 restore) — five new biting arms (O1, A1, N1, U1,
+    # V1) in the SAME file plan 01 added, test_prod_prober_cadence.sql. Local
+    # macOS wall clock, `nohup node scripts/mutation-runner/run.mjs` over the
+    # full corpus at this plan's final SQL bytes: **~1020 s (~17.0 min)** at
+    # `per-arm lane time: mean 2.0s over 402 arm run(s)`.
+    # ⛔ Not an ubuntu number, and this rule reads MEASURED UBUNTU runs — no
+    # SHA-bound ubuntu run of a 47-file/402-arm corpus exists yet. The rule's
+    # one permitted raise was already taken above and 20 is the CEILING, so
+    # there is nothing to raise here either. ⚠️ The local reading is now CLOSER
+    # to the ceiling than the plan-01 reading (~17.0 of 20 min, was ~16.25) —
+    # flagged again, not acted on, for the same reason: the rule fires on a
+    # MEASURED ubuntu run, not a local projection. If the NEXT arms move pushes
+    # a measured ubuntu run over 20, the recorded answer is
+    # [REDUNDER-SUBSET-SPLIT], never a third raise.
     # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
     # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
     # ⚠️ CORRECTION to the two paragraphs above, which say this job has "no `if:`" and
