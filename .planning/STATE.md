@@ -6,16 +6,16 @@ current_phase: 164.1.1
 current_phase_name: PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it (INSERTED)
 status: executing
 stopped_at: Completed 164.1.1-02-PLAN.md (five expansion arms + ARMS_FLOOR 397->402)
-last_updated: "2026-09-18T09:08:43.124Z"
+last_updated: "2026-09-18T09:13:23.520Z"
 last_activity: 2026-09-18
 last_activity_desc: Phase 164.1.1 plan 02 executed — five anti-vacuity expansion arms proven RED, ARMS_FLOOR raised with every sibling pin moved
-state_head: 6088811d94f11b6f9551ba1975f1c2438462d853
+state_head: 76146a08a2a91ead9773e3acb26201d7dcdcd9bc
 progress:
-  total_phases: 43
+  total_phases: 44
   completed_phases: 20
   total_plans: 201
-  completed_plans: 190
-  percent: 47
+  completed_plans: 191
+  percent: 45
 ---
 
 ## ⭐ STATE lineage
@@ -848,7 +848,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [█████░░░░░] 47%
+Progress: [████░░░░░░] 45%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1155,6 +1155,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.6.2 edited: edited fields: success_criteria (criteria 9 and 11) — [164.6.2-RAISE-LAST-SHAPE-ONLY] MOVED OUT to Phase 164.6.4; plan 06 (question THREE R2) is now the ONLY item holding this phase open ✅ and the moved item is CLOSED in 164.6.4 by `4f1963fd` (2026-09-15)
 - Phase 164.5.1.1 inserted after Phase 164.5.1: FANOUTCOHORT — the fan-out selected ZERO candidates on its first live tick because every PROD strategy is status='private'; blocks 164.5.1's verification (URGENT)
 - Phase 164.1.1 inserted: PROBERCADENCE inserted after 164.1: the prober declares hourly and delivers 27% (75/273 over 273.4h), median gap 3.28h, max 7.13h — worse than the 6h window its own workflow comment rejects by name. Owner of TODOS [PROBER-CADENCE-UNDELIVERED-01].
+- Phase 164.4.2 inserted after Phase 164.4: Owner phase for TODOS [REDUNDER-SUBSET-SPLIT], unowned since 2026-09-05. sql-mutation timeout-minutes has taken its ONE allowed raise; 20 is a declared CEILING and the next escalation is a subset split, never a third value. Inserted 2026-09-18 while Phase 164.1.1 was mid-execution — the STATE current-phase pointer was deliberately NOT repointed.
 
 ### Decisions
 

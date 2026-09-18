@@ -2632,6 +2632,16 @@ true for 146 and half of 142–145, and **false for 141**.
       OWED: a runner subset mode (`--changed` against a base ref) plus the ci.yml wiring and a
       scheduled full-corpus job. Not started; this entry exists so the ceiling is not discovered
       by a red build.
+      ⭐ **OWNER: Phase 164.4.2 SUBSETSPLIT, routed 2026-09-18 by founder decision.** Unowned from
+      2026-09-05 until then — the entry named the phase that BOOKED it (164.4.1), never one that
+      would fix it. Considered and rejected as homes: Phase 164.6 GATE-HYGIENE, whose criterion 1
+      (the two `ci.yml` integers) the founder DROPPED on 2026-09-17 as fix-or-drop, so routing here
+      would reverse that call; and Phase 164.11 DEPLOYGATE, which gates a Railway DEPLOY on
+      check-suite health — a different mechanism, and folding it in would give the riskier item the
+      lighter review posture.
+      ⚠️ **The trend moved again during Phase 164.1.1**, both readings recorded in `ci.yml`'s own
+      dated block: plan 01 measured 491 legs / ~975 s and plan 02 measured 496 legs / ~1020 s on
+      local macOS, each flagged as closer to the 20-minute ceiling than any prior reading.
 
 - [ ] **`[REDUNDER-GATESELF-UNBOUNDED]` The "mutate the gate's own setup" twin class has NO ceiling, while waivers have `WAIVED_CEILING = 0` — and Phase 164.4.1 more than doubled it (booked 2026-09-05, Phase 164.4.1 code review IN-03).**
       ⛔ **BOOKED, NOT FIXED — deliberately, and the reason is the point.** Introducing a ceiling is
