@@ -3707,7 +3707,7 @@ and any widening must say what it does to the approval-gate snapshot.
   level down.
   **Trigger:** the next time `cron-obs`'s time-only attribution gap is closed for
   `match_engine_cron` (making a per-job extension cheap to add here too), or an incident on this
-  specific alarm's delivery. **Owner:** UNROUTED, deliberately — same reasoning as
+  specific alarm's delivery. ⭐ **FOUNDER DECISION 2026-09-18: stays UNROUTED.** Offered a phase at the 164.1.1 review gate — the orchestrator recommended routing it, on the ground that this is the phase's own defect class one layer down and that an unrouted entry reliably goes undone (`[REDUNDER-SUBSET-SPLIT]` sat unowned 13 days). The founder chose unrouted. Recorded so a later reader sees a decision, not an oversight. **Owner:** UNROUTED, deliberately — same reasoning as
   `[PGCRON-LIVENESS-UNWATCHED-01]`: this entry states the choice, it does not commit anyone to
   closing the gap. ⛔ Do not let this sit as a bare TODOS line with no trigger: give it a phase via
   `/gsd-phase --insert` when the trigger above fires.
