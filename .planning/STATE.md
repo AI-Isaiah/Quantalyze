@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 159
-current_phase_name: RANK — Public-ranking integrity
-status: planning
+current_phase: 164.1.1
+current_phase_name: PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it (INSERTED)
+status: executing
 stopped_at: Phase 164.1 complete, ready to plan Phase 159
-last_updated: "2026-09-17T22:11:56.333Z"
+last_updated: "2026-09-18T05:26:32.128Z"
 last_activity: 2026-09-18
-last_activity_desc: Phase 164.1 complete, transitioned to Phase 159
-state_head: 20fa2463daf35e4210fb5fdc57389bbf2e4d561d
+last_activity_desc: Phase 164.1.1 execution started
+state_head: 5c01dfd97bed7aaabe3db5cf8ae15a0a81aeadbd
 progress:
   total_phases: 43
-  completed_phases: 19
-  total_plans: 195
+  completed_phases: 20
+  total_plans: 201
   completed_plans: 188
-  percent: 44
+  percent: 47
 ---
 
 ## ⭐ STATE lineage
@@ -172,11 +172,28 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-⭐ **RECONCILED 2026-09-09. THIS block is the current position and SUPERSEDES everything
-below it in this section, including the 2026-09-06 `Phase: 164.2 (CURATED-COPY)` pointer
+⭐ **RECONCILED 2026-09-18. THIS block is the current position and SUPERSEDES everything
+below it in this section, including the 2026-09-09 block that reconciled the one before it.
+Nothing below is deleted — it is lineage.**
+
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it (INSERTED)) — EXECUTING
+Plan: 1 of 6 DONE (`164.1.1-01-SUMMARY.md`, commits `d1d6ca63`/`2e03771b`/`16e962ad` on branch
+`feat/164.1.1-probercadence`). Next is Plan 02. Plan 01 shipped `public.prod_prober_cadence_check()`
+(forward migration, no `cron.schedule(...)`), the prober's own unconditional contact write, a
+two-arm matched-pair SQL gate proven RED on a disposable pg-lane, and both mutation floors moved
+from a measured full-corpus run (`FILES_FLOOR` 46→47, `ARMS_FLOOR` 395→397) with every sibling pin
+(`gate-family-meta.test.ts`, `mutation-runner-floors.test.ts`, `mutation-annotation-parser.test.ts`,
+a new dated `ci.yml` leg-count entry) moved in the same commit as Task 3. Full verification passed:
+`dump-sql-functions --self-test/--check`, `prod-prober --self-test` (83/83), full-corpus
+`mutation-runner` (`✅ No defects`, `files 47/74`, `arms 397/397/0`), `lint-sql-gates` (0 findings),
+and all four sibling vitest files (310/310). No older migration file changed; nothing ran
+`supabase db push`/`db reset`/`--project-ref`/`--db-url`.
+
+⭐ **RECONCILED 2026-09-09. THIS block was the current position from 2026-09-09 until the block
+above superseded it on 2026-09-18, including the 2026-09-06 `Phase: 164.2 (CURATED-COPY)` pointer
 that reconciled the block before it. Nothing below is deleted — it is lineage.**
 
-Phase: 159 of 4 (RANK — Public-ranking integrity)
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it (INSERTED)) — EXECUTING
 Branch: `phase-164.8-05-test-first-migrate` (carries Phase 164.8 plan 05 AND 164.8.1's
 close-out; 12 commits ahead of `origin/main`, NOT yet pushed).
 Version: `0.77.30.0` (VERSION and package.json byte-equal), one unified CHANGELOG entry
@@ -206,7 +223,7 @@ Routed OUT of 164.8.1 to Phase 164.9 (all three carry ROUTED HERE blocks in the 
 `[164.8-PUSH-RACE-VAC08]`.
 
 Phase: 164.2 (CURATED-COPY) — IN PROGRESS, planning not started
-Plan: Not started
+Plan: 1 of 6
 ⛔ 2026-09-06: this line deliberately carries NO `N of M` pair. Written as `0 of 0` it parsed, and
 `state.advance-plan` then answered `reason: last_plan` / `status: ready_for_verification` — an
 unplanned phase reported as ready to verify (measured in a sandbox copy). With no numeric pair the
@@ -321,7 +338,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Ready to plan
+Status: Executing Phase 164.1.1
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -337,7 +354,7 @@ Status: Ready to plan
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-18 — Phase 164.1 complete, transitioned to Phase 159
+Last activity: 2026-09-18 — Phase 164.1.1 execution started
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -795,7 +812,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [████░░░░░░] 44%
+Progress: [█████░░░░░] 47%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -999,6 +1016,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.5.1 P05 | ~25min | 2 tasks | 2 files |
 | Phase 164.5.1 P07 | ~50min | 2 tasks | 3 files |
 | Phase 164.5.1 P08 | ~35min | 3 tasks | 4 files |
+| Phase 164.1.1 P01 | 87 min | 3 tasks | 4 created, 8 modified |
 
 ## Accumulated Context
 
@@ -2110,6 +2128,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
+
+**Last Date:** 2026-09-18T06:33:31Z
+**Stopped At:** Completed 164.1.1-01-PLAN.md (Phase 164.1.1 PROBERCADENCE, plan 01 of 6, wave 1 — the phase's tracer, sequential on the main working tree, isolation `none`, branch `feat/164.1.1-probercadence`). Shipped the forward migration `supabase/migrations/20260918120000_prod_prober_cadence.sql` (`public.prod_prober_cadence_check()`, SECURITY DEFINER, pinned search_path, service-role-only EXECUTE, a measured-and-dated 10h25m ceiling constant, an absent-contact-row-is-stale guard, an unconditional self-observability row, and a stale-only `net.http_post` reusing `match_engine_cron_tick()`'s destination and Vault key — zero `cron.schedule(...)`), the prober's own unconditional contact write (`recordProberContact`, gated `arms === ARMS` so isolated self-test scenarios and a credential-blocked-all-4-arms run are both unaffected), a lane-only `net.http_post` recording stand-in (fixture 34), and a two-arm matched-pair SQL gate (`test_prod_prober_cadence.sql`, arms G1/S1 — renamed from the plan's bare G/S after `sectionOfIdentity()`'s digit-suffix rule left a bare SETUP raise un-twinned) proven RED on a disposable pg-lane. Both mutation floors moved from a measured full-corpus run (`FILES_FLOOR` 46→47, `ARMS_FLOOR` 395→397) with every sibling pin (`gate-family-meta.test.ts`, `mutation-runner-floors.test.ts`, `mutation-annotation-parser.test.ts`, a new dated `ci.yml` leg-count entry — 491 legs, ~975s local macOS, 20-minute ceiling still clear but flagged as closer than the prior reading) moved in the same Task 3 commit. Three commits (`d1d6ca63`, `2e03771b`, `16e962ad`), NOT pushed. Full plan-level verification green: `dump-sql-functions --self-test/--check`, `prod-prober --self-test` 83/83, full-corpus `mutation-runner` `✅ No defects` (`files 47/74`, `arms 397/397/0`, `biting 397`), `lint-sql-gates --self-test` + full corpus (0 findings), all four sibling vitest files 310/310, zero lines changed in any migration older than this plan's own, and nothing ran `supabase db push`/`db reset`/`--project-ref`/`--db-url`. Next: plan 02 (the observer's own error-row self-observability arm).
+**Resume File:** None
 
 **Last Date:** 2026-09-16T19:51:21Z
 **Stopped At:** Phase 164.1 complete, ready to plan Phase 159
