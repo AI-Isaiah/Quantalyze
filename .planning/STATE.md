@@ -6,10 +6,10 @@ current_phase: 164.1.1.1
 current_phase_name: LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only fixture (INSERTED)
 status: executing
 stopped_at: Completed 164.1.1.1-02-PLAN.md
-last_updated: "2026-09-18T17:56:00.000Z"
+last_updated: "2026-09-18T18:52:00.000Z"
 last_activity: 2026-09-18
 last_activity_desc: Phase 164.1.1.1 plan 02 executed (final plan, 2/2) — LANE-ONLY exclusion pinned as SITES-not-a-count with forward/reverse object binding and a vault near-miss guard, calibrated across four mutations including a count-unchanged one-for-one swap
-state_head: 11f46389599daa0b873c7eaefb283be470e962e6
+state_head: 899a50cac407ab1e1d287fe9c95fb2ba6dad8030
 progress:
   total_phases: 45
   completed_phases: 20
@@ -475,7 +475,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 164.1.1
+Status: Phase 164.1.1.1 shipped — PR #817
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
