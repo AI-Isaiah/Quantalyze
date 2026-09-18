@@ -27,7 +27,7 @@ import { join } from "node:path";
  * ⛔ It is deliberately NOT a set of grep assertions over the YAML. A grep pin
  * goes green the moment someone keeps the strings and guts the logic — the
  * defanging case, which is the likelier one. So this test EXTRACTS the step's
- * shell script out of ci.yml and RUNS it against the real 67-file corpus with a
+ * shell script out of ci.yml and RUNS it against the real corpus with a
  * stub `psql` on PATH, and asserts on exit codes. Deleting the step makes
  * extraction throw; weakening any branch makes a scenario stop failing.
  *
@@ -603,7 +603,8 @@ const LANE_ONLY_SITES: readonly { file: string; object: string; fixture: string;
 /**
  * Re-derive the LANE-ONLY set from a corpus directory, keyed on the SAME
  * `^-- LANE-ONLY:` anchor ci.yml's `lane_only_marker()` predicate reads
- * (`ci.yml:3218`, `grep -a -m1 '^-- LANE-ONLY:' "$1"`). Only presence of the
+ * (the `lane_only_marker()` helper in ci.yml, `grep -a -m1 '^-- LANE-ONLY:' "$1"` —
+ * cited by SYMBOL: a line number here rots on the next edit). Only presence of the
  * prefix decides whether a file carries a marker — matching ci.yml's own
  * `grep` behaviour — so a malformed JSON payload is still DETECTED as a
  * marker and fails loudly rather than being silently treated as "no marker
@@ -628,21 +629,41 @@ function deriveLaneOnlySites(dir: string): { file: string; object: string; fixtu
           `to an empty result.`,
       );
     }
-    if (typeof payload.object !== "string" || typeof payload.fixture !== "string") {
+    // ⚠️ An EMPTY string is rejected as hard as a missing key, and that is not
+    // pedantry: `"anything".includes("")` is always true in JS, so an
+    // `"object": ""` marker would satisfy the FORWARD cross-check below
+    // trivially — the check would report a pass having measured nothing. The
+    // SITES pin catches it today only because "" does not equal a pinned
+    // object name; this guard keeps it caught if that pin is ever weakened.
+    const { object, fixture } = payload;
+    if (
+      typeof object !== "string" ||
+      object.trim() === "" ||
+      typeof fixture !== "string" ||
+      fixture.trim() === ""
+    ) {
       throw new Error(
-        `${name}'s ${LANE_ONLY_ANCHOR} marker is missing a required "object" or "fixture" key ` +
-          `(parsed: ${JSON.stringify(payload)}). Both are required for the forward/reverse ` +
-          `cross-checks below to mean anything.`,
+        `${name}'s ${LANE_ONLY_ANCHOR} marker is missing, empty, or non-string in a required ` +
+          `"object" or "fixture" key (parsed: ${JSON.stringify(payload)}). Both must be ` +
+          `NON-EMPTY for the forward/reverse cross-checks below to mean anything: an empty ` +
+          `object satisfies a substring check against any file at all.`,
       );
     }
-    out.push({ file: name, object: payload.object, fixture: payload.fixture });
+    out.push({ file: name, object, fixture });
   }
   return out.sort((a, b) => a.file.localeCompare(b.file));
 }
 
-/** Drop every line whose first non-whitespace characters are a SQL line comment. */
-function stripSqlLineComments(text: string): string {
-  return text
+/**
+ * Drop SQL commentary so the cross-checks below read the file's ASSERTION BODY,
+ * never its prose. Both comment forms are removed: `--` line comments AND
+ * block comments, which do occur elsewhere in this corpus. Stripping only `--`
+ * would let a future `/* ... net._lane_posts ... *\/` mention satisfy the
+ * FORWARD check without the file ever querying the object.
+ */
+function stripSqlComments(text: string): string {
+  const withoutBlocks = text.replace(/\/\*[\s\S]*?\*\//g, "");
+  return withoutBlocks
     .split("\n")
     .filter((l) => !l.trim().startsWith("--"))
     .join("\n");
@@ -701,7 +722,7 @@ describe("LANE-ONLY exclusion register — pinned as SITES, not a count", () => 
     const derived = deriveLaneOnlySites(testsDir);
     for (const { file, object } of derived) {
       const raw = readFileSync(join(testsDir, file), "utf8");
-      const stripped = stripSqlLineComments(raw);
+      const stripped = stripSqlComments(raw);
       expect(
         stripped.includes(object),
         `${file}'s ${LANE_ONLY_ANCHOR} marker declares "${object}", but that string does not ` +
@@ -727,7 +748,7 @@ describe("LANE-ONLY exclusion register — pinned as SITES, not a count", () => 
       if (!name.startsWith("test_") || !name.endsWith(".sql")) continue;
       if (markedFiles.has(name)) continue;
       const raw = readFileSync(join(testsDir, name), "utf8");
-      const stripped = stripSqlLineComments(raw);
+      const stripped = stripSqlComments(raw);
       for (const obj of declaredObjects) {
         if (stripped.includes(obj)) {
           offenders.push(`${name} references "${obj}" but carries no ${LANE_ONLY_ANCHOR} marker`);

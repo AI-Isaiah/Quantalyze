@@ -3244,7 +3244,8 @@ jobs:
             lm="$(lane_only_marker "$f")"
             if [ -n "$lm" ]; then
               lane_only_count=$((lane_only_count + 1))
-              echo "::notice file=$f::LANE-ONLY — not executed against shared TEST. ${lm#-- LANE-ONLY: }"
+              lm_text="${lm#-- LANE-ONLY:}"; lm_text="${lm_text# }"
+              echo "::notice file=$f::LANE-ONLY — not executed against shared TEST. ${lm_text}"
             fi
           done
           if [ "$lane_only_count" -eq 0 ]; then
@@ -3408,7 +3409,8 @@ jobs:
             if [ -n "$lane_marker" ]; then
               echo ""
               echo "=== Skipping (LANE-ONLY): $f ==="
-              echo "  ↳ ${lane_marker#-- LANE-ONLY: }"
+              lane_text="${lane_marker#-- LANE-ONLY:}"; lane_text="${lane_text# }"
+              echo "  ↳ ${lane_text}"
             else
               executed=$((executed + 1))
               echo ""
