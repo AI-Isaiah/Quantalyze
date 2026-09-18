@@ -1185,12 +1185,15 @@ def _escalate_prober_cadence_gap(alert: ProberCadenceAlert) -> None:
     a timestamp, and nothing else may be echoed.
     """
     gap_display = "never" if alert.gap_minutes is None else str(alert.gap_minutes)
+    detected_display = alert.detected_at.isoformat()
     logger.error(
-        "prober_cadence_alert: cron_name=%s gap_minutes=%s ceiling=%s — "
-        "prod-prober contact exceeded the measured cadence ceiling",
+        "prober_cadence_alert: cron_name=%s gap_minutes=%s ceiling=%s "
+        "detected_at=%s — prod-prober contact exceeded the measured cadence "
+        "ceiling",
         alert.cron_name,
         gap_display,
         alert.ceiling,
+        detected_display,
     )
     now = time.monotonic()
     last_at = _last_prober_cadence_alert_at.get(alert.cron_name)
@@ -1201,7 +1204,8 @@ def _escalate_prober_cadence_gap(alert: ProberCadenceAlert) -> None:
         sentry_sdk.set_tag("prober_cadence_alert", alert.cron_name)
         sentry_sdk.capture_message(
             f"prod-prober cadence alarm: {alert.cron_name} last contact "
-            f"{gap_display} min ago (ceiling {alert.ceiling})",
+            f"{gap_display} min ago (ceiling {alert.ceiling}, detected "
+            f"{detected_display})",
             level="error",
         )
     except Exception:

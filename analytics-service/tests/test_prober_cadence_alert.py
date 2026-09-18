@@ -106,6 +106,31 @@ def test_accepted_body_returns_200_and_logs_the_measurement(client, caplog):
     )
     assert "625" in records[0].message
     assert "10:25:00" in records[0].message
+    assert "2026-09-18T12:00:00" in records[0].message, (
+        "IN-01: detected_at must surface in the log line; got "
+        + records[0].message
+    )
+
+
+def test_escalation_message_carries_detected_at(client, monkeypatch, caplog):
+    """IN-01: `detected_at` is a required field on the wire but was dropped
+    before ever reaching the Sentry message — assert it surfaces there too.
+    """
+    spy = MagicMock()
+    monkeypatch.setattr(cron_mod, "sentry_sdk", spy)
+    cron_mod._reset_prober_cadence_alert()
+
+    with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+        resp = client.post(
+            "/api/prober-cadence-alert",
+            json=_body(detected_at="2026-09-18T12:00:00Z"),
+        )
+
+    assert resp.status_code == 200
+    message = spy.capture_message.call_args.args[0]
+    assert "2026-09-18T12:00:00" in message, (
+        "the Sentry escalation must surface detected_at; got " + message
+    )
 
 
 def test_null_gap_minutes_is_accepted_and_logged_as_never(client, caplog):
