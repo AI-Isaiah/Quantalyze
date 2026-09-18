@@ -1161,11 +1161,35 @@ Plans:
 
 **Requirements**: TODOS entry `[PROBER-CADENCE-UNDELIVERED-01]` — this phase is its named owner.
 **Depends on:** Phase 164.1 (the prober it observes), Phase 164.7 (the settled Vault-backed `cron.job` mechanism any new PROD cron row must consume rather than invent a second answer to)
-**Plans:** 0 plans
+**Plans:** 6 plans
+
+⛔ **Criterion 4 is ALREADY MET** by commit `126517a8`, which corrected the workflow header at its own
+site. Plan 03 pins it with a calibrated test and does NOT re-edit it — re-deriving the figures would
+risk stomping correct language with a restatement that drifts.
+
+⚠️ **Two findings the research surfaced that the plans dispose of explicitly, per criterion 5's
+spirit.** (1) The stale-alert sentence on `public.cron_runs` describes an automated alert nothing
+implements: `latest_cron_success()` has ZERO programmatic callers and one real MANUAL reader. Plan 01
+keeps the function and corrects the claim at its own site, so the schema carries one automated monitor
+and one documented admin point query rather than two unexplained answers. (2) Nothing in this
+repository watches PROD `pg_cron`'s own liveness, so the observer shares one level up the failure mode
+it guards. Plan 05 books that as an ACCEPTED, NAMED residual (`[PGCRON-LIVENESS-UNWATCHED-01]`),
+reachable from both TODOS.md and the runbook.
+
+⛔ **The live `cron.schedule(...)` is a runbook-driven, founder-gated op, never a migration** — this
+repo's settled convention (Phase 164.5.1's PROD session is the precedent). The
+`scripts/prod-prober/cron-manifest.json` re-capture is a STEP OF THAT SAME SESSION: a job registered
+without the manifest moving makes the prober's own `cron-drift` arm correctly report a fresh
+regression this phase caused.
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.1.1 to break down)
+- [ ] 164.1.1-01-PLAN.md — TRACER: one prober run's contact reaches a PROD-side ceiling verdict end to end. The forward migration creating `public.prod_prober_cadence_check()` with the derived ceiling and the corrected table comment, the prober's unconditional contact write, a lane `net` stand-in so the alarm's post is OBSERVED rather than inferred, the matched pair (stale ⇒ posts / fresh ⇒ silent), and both mutation floors moved from a measured run. (wave 1)
+- [ ] 164.1.1-02-PLAN.md — The five arms a green pair can hide: an ABSENT contact row read as healthy, a fresh row under another `cron_name` masking the prober's silence, the observer's own liveness row, the second destination layer, and a post built over a NULL key. `ARMS_FLOOR` re-measured. (wave 2)
+- [ ] 164.1.1-03-PLAN.md — CHECKPOINT: is `SENTRY_DSN` set on the Railway analytics-service? The alarm's last hop is decided by measurement, not inference. Plus the calibrated criterion-4 pin. (wave 1, `autonomous: false`)
+- [ ] 164.1.1-04-PLAN.md — The alarm's far end: one guarded `/api` route in analytics-service implementing the escalation the checkpoint recorded, with every load-bearing behaviour observed RED under a neuter. (wave 2)
+- [ ] 164.1.1-05-PLAN.md — `docs/runbooks/prod-prober-cadence-go-live.md` (blast radius, blocking pre-flight, the statement, the same-session manifest re-capture, rollback) and criterion 5's named residual. (wave 3)
+- [ ] 164.1.1-06-PLAN.md — The live PROD session behind a decision checkpoint: register, re-capture the manifest in the same act, observe the first tick, record it auditably, close `[PROBER-CADENCE-UNDELIVERED-01]`. (wave 4, `autonomous: false`)
 
 ### Phase 164.2: CURATED-COPY — the curated failure sentence must reach the user (INSERTED)
 
