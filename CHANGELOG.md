@@ -57,6 +57,23 @@ A MINOR bump, not a patch: this changes how the project decides a phase is done.
   em-dash cell appeared — the predicted behaviour. Left NOT passed on purpose: no leg reached
   settled-both-null, so the note was never shown able to render, and an uncalibrated "it did not
   flash" is weak evidence by this repo's own rule.
+- **Three phases closed on founder rulings, and all three were waiting on something stale or
+  unreachable rather than on work.** **162 → passed**: its last two legs need an orphaned key on a
+  signable account and a settled-both-null leg inside the coverage window, and this account's data
+  has neither — founder: *"if you can't reach it, then this is obviously not a matter anymore"*.
+  **164.6.2's boot-heal item → closed**: the MT5 `-6` it waits for has not recurred since
+  2026-09-17T05:53Z against a recorded at-least-daily cadence; an item waiting on a production
+  fault cannot stay open once the fault stops. ⚠️ Said plainly: the heal is NOT proven to work —
+  it is released from waiting, not validated, and criterion 11 still holds the phase for plan 06.
+  **164.5 → passed**: the DRIFT-04 production DDL the founder asked to run had already been
+  applied on 2026-09-08. Measured on PROD behind the marker query, SELECTs only —
+  `drift04_in_ledger = 1`, `fn_still_present = 0`, the function absent from `baseline.sql`, and
+  the `NAME_SET_RATCHET` row deleted. All four of 164.5's items turned out to be dated claims
+  outliving their facts.
+- **`TODOS [DRIFT-04]` closed.** Its title — "exists in PROD under no migration" — had been false
+  for ten days while the entry still read as an open governance risk on a credential-bearing
+  SECURITY DEFINER surface.
+- **`completed_phases` 20/45 → 26/45 (44% → 58%)** across this release.
 
 ## [0.77.53.1] - 2026-09-18 — the prober stopped counting psql's command tag as a returned row
 
