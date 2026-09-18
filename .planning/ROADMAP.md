@@ -1569,7 +1569,7 @@ Plans:
 
 ### Phase 164.8.4: GATERESIDUE — every deferral Phase 164.8.2's four review rounds produced: the shared-TEST credential channels that still reach a public log, the artifact that publishes the file it refuses over, and the gate-integrity leftovers each below the bar that blocked the ship (INSERTED)
 
-**Goal:** Discharge every deferral Phase 164.8.2 produced, and — by founder decision 2026-09-12 — Phase 164.8.6's `[164.8.5-HYGIENE-RESIDUALS]` and — by founder decision 2026-09-13 — Phase 164.8.3's `[164.8.3-CAPTURE-MANIFEST-ERREXIT]`, both of which are the same defect class. Nothing else. Four review rounds over that phase's own fixes found ten items that were each, individually, below the bar that would have blocked the ship — and the reason they are one phase rather than ten TODOS lines is that **eight of them are the same defect**: a control narrower than the sentence beside it. 164.8.2 proved three times over that fixing the instance a reviewer named, rather than the class, produces a half-class that the next round finds again.
+**Goal:** Discharge every deferral Phase 164.8.2 produced, and — by founder decision 2026-09-12 — Phase 164.8.6's `[164.8.5-HYGIENE-RESIDUALS]` and — by founder decision 2026-09-13 — Phase 164.8.3's `[164.8.3-CAPTURE-MANIFEST-ERREXIT]`, both of which are the same defect class. Nothing else. Four review rounds over that phase's own fixes found ten items that were each, individually, below the bar that would have blocked the ship (⭐ **2026-09-18: FOUR of those ten are now CLOSED** — two by the 2026-09-17 SCOPE PRUNE and two by branch `chore/164.8.2-verification`; the live scope is group (a)'s three credential-channel items plus group (b)'s ONE) — and the reason they are one phase rather than ten TODOS lines is that **eight of them are the same defect**: a control narrower than the sentence beside it. 164.8.2 proved three times over that fixing the instance a reviewer named, rather than the class, produces a half-class that the next round finds again.
 
 ⭐ **THE FENCE HAS BEEN WIDENED TWICE, DELIBERATELY — THIS IS THE RECORD.** The goal read *"and nothing else"* and that phrasing was meant. It now admits exactly TWO further items, each on the merits and never as a convenient parking space.
 
@@ -1601,8 +1601,11 @@ Plans:
 
 **(b) The artifact publishes what it refuses over** — a founder decision with a real cost on both sides, not a patch.
 
-- `[164.8.2-REFUSAL-STILL-PUBLISHES]` — the published-`.sql` scan aborts the restore before the transaction but never `rm -f`s the offending file, and the staging step is `if: always()`. Its sibling scan DOES `rm -f`. Withholding it means deleting part of the reversal recipe (`T-164.8-21`) on exactly the run whose restore was refused.
-- `[164.8.2-CHANNEL-ALLOWLIST-STALE]` — replacing a glob with an enumerated list was the right direction and bought a new failure mode: a channel added later is silently ABSENT. Fix by DERIVATION (channels the script can write ⇔ channels the step stages), not a second hand-maintained list.
+- ✅ **`[164.8.2-REFUSAL-STILL-PUBLISHES]` — CLOSED 2026-09-18 on branch `chore/164.8.2-verification`. NOT work for this phase any more.** The artifact-staging step is now DEFAULT-DENY: the four script `.sql` files stage only when `refuse_credential_in_published_sql` wrote `credential-scan.ok`, and `ledger.csv`/`schema-before.sql` only when the backup scan wrote `backup-scan.ok`. Six files, one rule.
+  ⛔ **The entry framed this as a binary and the binary was false** — withhold the file vs lose the reversal recipe (`T-164.8-21`). The third option costs neither side: the scan sits between `build_transaction` and `run_transaction`, so every path the gate denies is a path on which the transaction NEVER RAN, the database is untouched, and no reversal is owed. The file is not deleted; it is simply not published.
+  **Verified three times independently** — the orchestrator (neutering `backup_ok=0` to `1` reds a named arm), `/gsd-secure-phase`'s auditor (SECURED, 24/24), and the phase re-verification (`passed`, 6/6).
+- `[164.8.2-CHANNEL-ALLOWLIST-STALE]` — **the ONE item group (b) still owns.** Replacing a glob with an enumerated list was the right direction and bought a new failure mode: a channel added later is silently ABSENT. Fix by DERIVATION (channels the script can write ⇔ channels the step stages), not a second hand-maintained list.
+  ⚠️ **Measured CLEAN 2026-09-18 by `/gsd-secure-phase`'s auditor — 6 writer names = 6 staged names — and that changes nothing.** It is clean by coincidence of what the two lists happen to hold today, not by construction, which is precisely what the entry says. A hand-maintained list that agrees with its source right now is the state this defect always passes through on its way to disagreeing.
 
 **(c) Gate-integrity leftovers** — controls narrower than their own claims.
 
@@ -1637,9 +1640,14 @@ text this repo does not control, a softening allowlist that is still a count, ha
 regexes pinned to nothing, a computed-but-never-compared floor, a README describing files the
 denial path does not stage, a dead local, a misdirected message). Every one is a structural or
 prose predicate.
-⚠️ `[164.8.2-SENTINEL-GREP-NUL-BLIND]` is NOT dropped and needs no work here: its own entry
-records it as ALREADY HELD AS A CEILING — the `grep -a` rule's one dated exemption, which reds if
-the site is fixed without deleting the entry.
+✅ **`[164.8.2-SENTINEL-GREP-NUL-BLIND]` — CLOSED 2026-09-18 BY ITS OWN SELF-EXPIRY, which is the
+outcome the ceiling was built for and is no longer a live carve-out.** The paragraph here used to
+read "NOT dropped and needs no work here", holding it as the `grep -a` rule's one dated exemption
+that would red if the site were fixed without deleting the entry. The site gained `-a`; the ceiling
+arm went RED with `STALE EXEMPTION (matched 0 bare grep(s))`; the entry was DELETED rather than
+waived. `BARE_GREP_EXEMPTIONS` is now EMPTY and the `-a` rule is unconditional workflow-wide
+instead of post-verify-scoped. An exemption that expired exactly as designed is the mechanism
+working, not a deferral.
 
 **DROPPED — (d), both items:**
 

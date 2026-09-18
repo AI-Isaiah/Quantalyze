@@ -2436,6 +2436,8 @@ function writeStubLedger(
   ledgerRows: string | null = DEFAULT_STUB_LEDGER_ROWS,
   /** Non-zero => the `ledger_rows` direction FAILS, with stderr, like a real psql would. */
   ledgerRowsRc = 0,
+  /** Non-zero => the ADVISORY `extra` direction FAILS, with stderr, like a real psql would. */
+  extraRc = 0,
 ): string {
   const p = join(dir, "stub-ledger.sh");
   writeFileSync(
@@ -2455,8 +2457,12 @@ function writeStubLedger(
       "  true",
       ...missing.map((m) => `  echo "${m}"`),
       "else",
-      "  true",
-      ...advisory.map((m) => `  echo "${m}"`),
+      ...(extraRc !== 0
+        ? [
+            '  echo "psql: error: connection to server at \\"db.example\\" failed" >&2',
+            `  exit ${extraRc}`,
+          ]
+        : ["  true", ...advisory.map((m) => `  echo "${m}"`)]),
       "fi",
       "exit 0",
     ].join("\n"),
@@ -2475,6 +2481,8 @@ function scaffoldLedgerCase(
     ledgerRows?: string | null;
     /** Non-zero => the `ledger_rows` query itself fails. */
     ledgerRowsRc?: number;
+    /** Non-zero => the ADVISORY `extra` query itself fails (F-R2-04). */
+    extraRc?: number;
   },
 ): Record<string, string> {
   mkdirSync(join(dir, "snapshot"), { recursive: true });
@@ -2508,6 +2516,7 @@ function scaffoldLedgerCase(
       [],
       opts.ledgerRows === undefined ? DEFAULT_STUB_LEDGER_ROWS : opts.ledgerRows,
       opts.ledgerRowsRc ?? 0,
+      opts.extraRc ?? 0,
     )}`,
     BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
     MIGRATIONS_DIR: join(dir, "migrations"),
@@ -2576,6 +2585,72 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
         expect(status).toBe(1);
         expect(out).toContain("may only shrink");
         expect(out).toContain("20260829120000_demo");
+      });
+    });
+  });
+
+  // ── ROUND-2 SILENT FAILURES (Phase 164.8.2) ────────────────────────────────
+  // Two adjacent measurements in `check()` used to disagree about what an
+  // unreadable result means. Both arms below are RUNTIME: they break exactly
+  // one read and watch the gate say so.
+  describe("F-R2-04 — the ADVISORY extra-ledger query narrates its own unreadability", () => {
+    it("RED: a failed advisory query names its exit code; the run continues because the direction is advisory", () => {
+      withTempDir((dir) => {
+        // Before the fix this produced NO OUTPUT AT ALL: the `if` swallowed the
+        // status and `2>/dev/null` swallowed the channel, so a DEAD advisory
+        // query and a CLEAN one were byte-identical in the log — while the grep
+        // three lines below it already warned in exactly this situation.
+        const env = scaffoldLedgerCase(dir, { missing: [], extraRc: 3 });
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(status, out).toBe(0);
+        expect(out).toContain("the ADVISORY extra-ledger query exited 3");
+        expect(out).toContain("because it could not read, not because there was nothing");
+        // The CHANNEL stays suppressed: psql's stderr names a host and this
+        // job's log is PUBLIC. The exit code is the diagnosis, not the text.
+        expect(out).not.toContain("db.example");
+      });
+    });
+
+    it("CONTROL: a clean advisory query says nothing — the warning is not printed unconditionally", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: [] });
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(status, out).toBe(0);
+        expect(out).not.toContain("ADVISORY extra-ledger query exited");
+      });
+    });
+  });
+
+  describe("F-R2-05 — an unreadable measured-missing list never reads as PRESENT", () => {
+    it("RED: grep rc >= 2 at the frontier-tip loop is a MEASURE_FAIL, not a present migration", () => {
+      withTempDir((dir) => {
+        // `-aqFx` is the frontier-tip presence test and NOTHING else in this
+        // gate (the shim delegates every other grep call to the real binary),
+        // so this breaks one read. Unbounded, rc 2 read as "present", which
+        // RAISES the tip and WIDENS the exemption window — toward `0 NEW
+        // drift` and a clean board.
+        const env = scaffoldLedgerCase(dir, { missing: [] });
+        const PATH = withPathShim(dir, "grep", [
+          'for a in "$@"; do if [ "$a" = "-aqFx" ]; then exit 2; fi; done',
+        ]);
+        const { status, out } = run(LEDGER_GATE, { ...env, PATH });
+        expect(status, out).toBe(1);
+        expect(out).toContain("MEASURE_FAIL: could not test whether");
+        expect(out).toContain("20260829120000_demo");
+        expect(out).toContain("widens the exemption");
+      });
+    });
+
+    it("CONTROL: the same case with a delegating shim is GREEN — the shim itself is not the failure", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: [] });
+        // Same shim shape, broken on a flag the gate never passes.
+        const PATH = withPathShim(dir, "grep", [
+          'for a in "$@"; do if [ "$a" = "--never-passed" ]; then exit 2; fi; done',
+        ]);
+        const { status, out } = run(LEDGER_GATE, { ...env, PATH });
+        expect(status, out).toBe(0);
+        expect(out).not.toContain("MEASURE_FAIL");
       });
     });
   });
@@ -4702,7 +4777,7 @@ describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()
       site: "sed 's/^/::error::  /' || true",
       why: "the shape DIAGNOSTIC re-emitted on the absurdity floor's own failure path. The `exit 1` is on the next line and does not depend on it; a shape probe that cannot run must not convert a decided RED into a shell error that hides the verdict.",
     },
-    // ── `set +e` — EIGHT sites, every one the SP-M01 BOUND, not a softening ───
+    // ── `set +e` — 10 sites, every one the SP-M01 BOUND, not a softening ───
     {
       token: "set +e",
       site: `missing_count="$(grep -ac '[^[:space:]]' "$missing_file")"`,
@@ -4743,6 +4818,16 @@ describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()
       site: `extra_count="$(grep -ac '[^[:space:]]' "$extra_file")"`,
       why: "F5. Bounds the ADVISORY extra-ledger count. This direction warns rather than failing, but it is still never allowed to read as 'counted zero, nothing to report'.",
     },
+    {
+      token: "set +e",
+      site: 'run_ledger_query extra "$names_csv" > "$extra_file"',
+      why: "F-R2-04. Bounds the ADVISORY extra-ledger QUERY itself. The `if run_ledger_query …; then` it replaces swallowed the status and the channel together, so a dead query and a clean one both printed nothing — not even the warning the grep three lines below it already prints.",
+    },
+    {
+      token: "set +e",
+      site: 'grep -aqFx -e "$nm" "$missing_file"',
+      why: "F-R2-05. Bounds the frontier-TIP presence test. Unbounded, rc >= 2 read as 'present', which RAISES the tip, widens the exemption window and removes findings — the softening direction.",
+    },
     // ── `2>/dev/null` — FOUR sites: three psql channels that can name a host, ─
     // ── and one `wc` whose suppression is what keeps a DIAGNOSIS from blanking ─
     {
@@ -4763,7 +4848,7 @@ describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()
     {
       token: "2>/dev/null",
       site: '> "$extra_file" 2>/dev/null',
-      why: "the ADVISORY extra-ledger direction. Its rc is consumed by the `if` that wraps it, so the suppressed channel is redaction and never evidence.",
+      why: "the ADVISORY extra-ledger direction. Its rc is captured into `extra_q_rc` on the next line and narrated (F-R2-04), so the suppressed channel is redaction — psql's stderr can carry a DSN, host or username and this job's log is PUBLIC — and never evidence.",
     },
     // ── `>/dev/null 2>&1` — TWO sites, both `command -v … || fail` ────────────
     {
@@ -4776,7 +4861,7 @@ describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()
       site: "command -v psql >/dev/null 2>&1",
       why: "the same probe for psql, with the same `|| fail` on the same line.",
     },
-    // ── `::warning` — TWO sites, both DECLARED-advisory, neither a verdict ────
+    // ── `::warning` — 3 sites, all DECLARED-advisory, none a verdict ────
     {
       token: "::warning",
       site: "no ledger baseline at",
@@ -4786,6 +4871,11 @@ describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()
       token: "::warning",
       site: "could not count the advisory extra-ledger rows",
       why: "the extra direction is ADVISORY BY DESIGN (squashes and CLI-era rows make it noisy), so an uncountable result warns rather than failing — and the warning says outright that it reported nothing because it could not read.",
+    },
+    {
+      token: "::warning",
+      site: "the ADVISORY extra-ledger query exited",
+      why: "F-R2-04. The same advisory direction one layer OUT: the query itself, whose failure used to print nothing at all. It warns rather than failing because the direction is advisory, and it distinguishes 'there were no extra rows' from 'the query could not run' by naming the exit code.",
     },
   ];
 
@@ -4995,8 +5085,8 @@ describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()
 
   it("a SECOND suppression on an allowlisted line does not ride in on the first's reason", () => {
     const doubled = SRC.replace(
-      '> "$extra_file" 2>/dev/null; then',
-      '> "$extra_file" 2>/dev/null 2>/dev/null; then',
+      '> "$extra_file" 2>/dev/null\n',
+      '> "$extra_file" 2>/dev/null 2>/dev/null\n',
     );
     expect(doubled, "the double-suppression mutation changed nothing").not.toBe(SRC);
     expect(

@@ -446,12 +446,43 @@ jobs:
               # that is no longer a readable regular file — means the redirection failed
               # and git was never invoked. An unwritten channel is an unanswered question,
               # never a negative answer.
+              # ⛔ THE SENTINEL WRITE'S OWN rc IS LOAD-BEARING, NOT DECORATION. It was
+              # captured here and then used ONLY inside the message of a branch that had
+              # already fired — so the case it names could not select that branch. If the
+              # WRITE fails (channel pre-existing read-only, ENOSPC), no sentinel is in
+              # the file, the grep below correctly finds none, and the redirect on the
+              # git line fails the same way — bash returns 1 WITHOUT RUNNING git, which is
+              # indistinguishable from `--is-ancestor` answering "no". The step then
+              # printed `VERDICT: ancestor(<sha> is not an ancestor of this checkout HEAD)`:
+              # verbatim the FALSE STATEMENT ABOUT PROD'S APPLY that the F4 comment above
+              # says this probe exists to delete. Found by the Phase 164.8.2 round-2
+              # review, 2026-09-18. An unwritten sentinel is an unanswered question.
               sentinel_rc=0
               printf 'ANCESTRY-PROBE-SENTINEL\n' > "${ancestry_err}" || sentinel_rc=$?
               ancestry_rc=0
               git merge-base --is-ancestor "${APPLY_HEAD_SHA}" HEAD 2>"${ancestry_err}" || ancestry_rc=$?
-              if [ ! -f "${ancestry_err}" ] || [ ! -r "${ancestry_err}" ] || grep -q 'ANCESTRY-PROBE-SENTINEL' "${ancestry_err}"; then
-                failed="${failed} ancestor(MEASURE_FAIL: the stderr channel ${ancestry_err} (RUNNER_TEMP='${RUNNER_TEMP}', pre-probe sentinel write exited ${sentinel_rc}) is missing, unreadable, or STILL HOLDS THE PRE-PROBE SENTINEL, so the redirection FAILED and git was NEVER INVOKED. rc=${ancestry_rc} is bash's, not --is-ancestor's — this is not a 'no'.)"
+              # ⛔ `-a` IS MANDATORY REPO-WIDE and the rc is BOUNDED: rc 0 = the sentinel
+              # SURVIVED (git's redirect never truncated it, so git never ran), rc 1 = it
+              # was truncated as expected, rc >1 = the channel could not be READ, which is
+              # an unanswered question and never a clean one. Collapsing >1 into "not
+              # found" is how this scan would pass vacuously.
+              sentinel_grep_rc=0
+              grep -aq 'ANCESTRY-PROBE-SENTINEL' "${ancestry_err}" || sentinel_grep_rc=$?
+              # The three ways the sentinel discriminator can be UNARMED or UNREADABLE,
+              # collapsed into ONE clause so the guard below keeps its single-line shape —
+              # `src/__tests__/test-restore-workflow-wiring.test.ts` strips exactly that
+              # line to calibrate these arms, and a guard that cannot be stripped cannot
+              # be proven to bite.
+              sentinel_fault=""
+              if [ "${sentinel_rc}" -ne 0 ]; then
+                sentinel_fault="the PRE-PROBE SENTINEL WRITE ITSELF failed (exited ${sentinel_rc}), so the discriminator was never armed and proves nothing"
+              elif [ "${sentinel_grep_rc}" -gt 1 ]; then
+                sentinel_fault="the sentinel channel could not be READ (grep exited ${sentinel_grep_rc}); an unreadable channel is an unanswered question"
+              elif [ "${sentinel_grep_rc}" -eq 0 ]; then
+                sentinel_fault="the channel STILL HOLDS THE PRE-PROBE SENTINEL, so the redirection FAILED and git was NEVER INVOKED"
+              fi
+              if [ ! -f "${ancestry_err}" ] || [ ! -r "${ancestry_err}" ] || [ -n "${sentinel_fault}" ]; then
+                failed="${failed} ancestor(MEASURE_FAIL: ${sentinel_fault:-the stderr channel ${ancestry_err} is missing or unreadable} (RUNNER_TEMP='${RUNNER_TEMP}', pre-probe sentinel write exited ${sentinel_rc}). rc=${ancestry_rc} is bash's, not --is-ancestor's — this is not a 'no'.)"
               elif [ "${ancestry_rc}" -gt 1 ]; then
                 failed="${failed} ancestor(MEASURE_FAIL: git exited ${ancestry_rc}, so the ancestry question was NOT answered — this is not a 'no'. git said: $(tr '\n' ' ' < "${ancestry_err}"))"
               elif [ "${ancestry_rc}" -eq 1 ]; then
@@ -988,11 +1019,38 @@ jobs:
             echo "::error::the database identity marker is NULL. A NULL marker means the COMMENT ON DATABASE was LOST, not that this is TEST. Re-set it before any write (CLAUDE.md)."
             exit 1
           fi
-          if ! printf '%s' "${marker}" | grep -Eiq '(^|[^[:alnum:]_])test([^[:alnum:]_]|$)'; then
+          # ⛔ BOTH PREDICATES ARE rc-BOUNDED, AND THE SECOND ONE IS WHY (Phase 164.8.2,
+          # silent-failure finding F-R2-02). `grep` exits 0 on a match, 1 on no match and
+          # >1 when it COULD NOT DECIDE — a rejected ERE, a substituted binary, a
+          # transient resource failure. Written as a bare `if grep …`, an undecided PROD
+          # check is indistinguishable, in the branch taken, from a marker that does not
+          # name prod: a PRODUCTION marker would pass the PROD refusal and this step would
+          # print "OK — the marker names TEST and not PROD." over a measurement it never
+          # took. The TEST check was fail-CLOSED only by accident of its leading `!`.
+          # Every other measurement this phase touched got a `-le 1` bound for exactly
+          # this reason; this step — the one standing between this workflow and a
+          # DROP SCHEMA on the wrong database — did not, until now. An unreadable answer
+          # is never a clean one.
+          # `-a` is mandatory repo-wide even here, where the input is a pipe and cannot
+          # hold a NUL: the rule is not conditional on the reader's argument about why
+          # this site is safe, which is how the ancestry probe's bare grep shipped.
+          rc=0
+          printf '%s' "${marker}" | grep -aEiq '(^|[^[:alnum:]_])test([^[:alnum:]_]|$)' || rc=$?
+          if [ "${rc}" -gt 1 ]; then
+            echo "::error::MEASURE_FAIL: the TEST-marker predicate could not be evaluated (grep exited ${rc}). An identity check that did not run is not an identity check that passed. Refusing before any read of this database."
+            exit 1
+          fi
+          if [ "${rc}" -ne 0 ]; then
             echo "::error::the database identity marker does not name TEST as a whole word. Refusing. The marker text is withheld: this log is public."
             exit 1
           fi
-          if printf '%s' "${marker}" | grep -Eiq 'prod'; then
+          rc=0
+          printf '%s' "${marker}" | grep -aEiq 'prod' || rc=$?
+          if [ "${rc}" -gt 1 ]; then
+            echo "::error::MEASURE_FAIL: the PROD-refusal predicate could not be evaluated (grep exited ${rc}). This is the refusal that stands between this workflow and a DROP SCHEMA on production, and it FAILS CLOSED: an unevaluated refusal is treated as a refusal. The marker text is withheld: this log is public."
+            exit 1
+          fi
+          if [ "${rc}" -eq 0 ]; then
             echo "::error::the database identity marker names PRODUCTION. Refusing, loudly. The marker text is withheld: this log is public."
             exit 1
           fi
@@ -1208,69 +1266,12 @@ jobs:
             exit 1
           fi
 
-          # (b2) SECRET SCAN, BEFORE EITHER FILE CAN REACH THE ARTIFACT.
-          # This runs in the BACKUP step, which precedes the destructive script in both
-          # modes, so a hit refuses BEFORE any write — the safe direction. It cannot live
-          # in the redaction step: that one is `if: always()` and by then the drop has
-          # happened.
-          # `supabase/schema/baseline.sql` is committed only after the scan recorded in
-          # `scripts/local-stack/REPLAY-SPIKE.md`. ⚠️ CORRECTED 2026-09-10: this comment
-          # called it "the five-class scan" and then listed SIX names, which is the
-          # SP-M03 shape (a claim that does not match its own command) inside the fix for
-          # SP-M03. The COMMAND is six alternations — DSN / supabase host / project ref /
-          # \connect / ALTER DATABASE / JWT — and it is the authority; `BASELINE.md` says
-          # "five classes" because its prose folds the DSN scheme and the supabase host
-          # into one "DSN". Re-derive the class count rather than trusting either
-          # sentence — the enumerated, name-per-class copy of the same set is the
-          # `classes=(…)` array in `scripts/restore-test-from-baseline.sh`, and it prints
-          # its own length on every green run:
-          #   sed -n "/local -a classes=(/,/^  )$/p" scripts/restore-test-from-baseline.sh | grep -c "^    '"
-          # These two files are published
-          # the same way and reviewed by nobody first — `schema-before.sql` is an
-          # unreviewed `supabase db dump` of a live hosted database, and `ledger.csv`
-          # carries the `statements` column, the verbatim SQL of every row applied to
-          # TEST INCLUDING hand-applied rows that exist in no committed migration — so
-          # they receive that same scan here.
-          #
-          # ⚠️ ONE CLASS IS SCOPED OUT OF THE LEDGER SCAN, BY MEASUREMENT, NOT BY TASTE.
-          # `ALTER DATABASE` belongs in the DUMP pattern because a schema dump has no
-          # legitimate reason to carry one. Migration SOURCE does. RE-DERIVE rather than
-          # trust the numbers below — these two commands print them:
-          #   cat supabase/migrations/*.sql | grep -acE 'ALTER DATABASE'
-          #   grep -clE 'ALTER DATABASE' supabase/migrations/*.sql | wc -l
-          # Measured 2026-09-10 at HEAD: 6 lines across THREE files (the count said FOUR
-          # files from 2026-09-08 until review F3 re-ran it), and every one is
-          # documentation — five `--` comments and one RAISE NOTICE string, all naming
-          # the GUC-setting recipe.
-          # Applying that class to ledger.csv would be RED ON EVERY RUN, and a gate that
-          # has to be waived to pass is not a gate. The residual risk is NAMED rather than
-          # hidden: a hand-applied TEST row of the shape
-          # `ALTER DATABASE postgres SET app.<x> = '<real value>'` is not caught here.
-          # README.txt says so, in the artifact, where whoever shares it will read it.
-          ledger_re='postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase|\\connect|eyJ[A-Za-z0-9_-]{10,}'
-          schema_re="${ledger_re}|ALTER DATABASE"
-          # `grep -a` is NOT optional: this repository contains a measured NUL-bearing
-          # file, and grep reports such a file as CLEAN (exit 1) without it. A grep exit
-          # ABOVE 1 is an unreadable file, not a clean one, and is failed separately —
-          # collapsing the two is how a scan passes vacuously.
-          scan_for_secrets() {
-            f="$1"; re="$2"; classes="$3"; rc=0; n=""
-            n="$(grep -acE "${re}" "${f}")" || rc=$?
-            if [ "${rc}" -gt 1 ]; then
-              rm -f "${f}"
-              echo "::error::the secret scan could not READ $(basename "${f}") (grep exited ${rc}). That is an unreadable file, NOT a clean one. The file has been withheld from the artifact and this run stops before any write."
-              exit 1
-            fi
-            if [ "${n}" != "0" ]; then
-              rm -f "${f}"
-              echo "::error::the secret scan matched ${n} line(s) in $(basename "${f}") — one of: ${classes}. The file has been WITHHELD from the world-readable artifact and this run stops BEFORE any write. The matching text is deliberately not printed: this log is public. Reproduce locally against a backup you take by hand."
-              exit 1
-            fi
-            echo "secret scan: $(basename "${f}") clean — 0 lines matched (${classes})."
-          }
-          scan_for_secrets "${outdir}/ledger.csv" "${ledger_re}" "DSN, supabase host, project ref, \\connect, JWT"
-          scan_for_secrets "${outdir}/schema-before.sql" "${schema_re}" "DSN, supabase host, project ref, \\connect, JWT, ALTER DATABASE"
-
+          # ⚠️ THE README IS WRITTEN BEFORE THE SCAN, ON PURPOSE (review L2, 2026-09-18).
+          # It used to be written after, so a run the scan FLAGGED shipped an artifact
+          # with its two backup files withheld and nothing in it explaining why — the
+          # safe direction, and a reader left with an unexplained short artifact. It is a
+          # static heredoc that reads no database and no scan result, so nothing is lost
+          # by writing it first and the flagged run now carries its own explanation.
           # (c) A self-describing README, so the artifact carries its own reversal
           # recipe and its own honesty about what it cannot reverse.
           cat > "${outdir}/README.txt" <<'BACKUP_README'
@@ -1337,19 +1338,37 @@ jobs:
             with two different consequences, and the difference matters to you:
               ledger.csv and schema-before.sql, in this workflow's BACKUP step. A hit
                 WITHHOLDS the file (rm -f) and fails the run before any write, so the
-                offending file does not reach this artifact.
+                offending file does not reach this artifact. ⛔ SCOPED 2026-09-18 (review
+                C1): that is true of a run that REACHED the scan, and only there. The
+                \copy that writes ledger.csv runs under a timeout, and `supabase db dump`
+                can fail mid-file; either leaves a PARTIAL backup of a live hosted
+                database on disk and stops the run BEFORE the scan. The staging step is
+                `if: always()`, so until this correction those partial, unscanned files
+                shipped here anyway. They are now staged only when the backup step left
+                its verdict behind — so, exactly as for the four .sql files above, their
+                PRESENCE in this artifact is what tells you they were scanned. An artifact
+                holding only this README and the diagnostic channels is that rule firing.
               census.sql, survivors.sql, restore.sql and refdata.sql, in the restore
                 script's refuse_credential_in_published_sql. A hit REFUSES THE RUN before
-                the transaction — the database is untouched — but it does NOT withhold
-                the file. ⛔ CORRECTED 2026-09-10: this README used to say only "refusal
-                is not masking", which understated it. The staging step below is
-                `if: always()`, so on a hit the flagged file is STILL COPIED and STILL
-                PUBLISHED here. If you are reading a run whose restore step failed with
-                "a credential shape appears in …", treat that file as disclosed and read
-                it before quoting this artifact anywhere. Closing the gap means teaching
-                the scanner to rm -f the way the backup step's does, which costs the
-                reversal recipe on exactly the run that needs it — a decision, not an
-                oversight, and not one taken here.
+                the transaction — the database is untouched — and, since 2026-09-18, the
+                flagged file does NOT reach this artifact. ⛔ THE GUARANTEE IS SCOPED, AND
+                THE SCOPE IS THE POINT: that scan runs at ONE point in the restore script,
+                so what these four files' PRESENCE here means is "the scan ran and cleared
+                them", not "they were scanned". The staging step stages them only when the
+                script left its verdict file behind; a run that aborted before the scan, or
+                whose scan found a shape, stages NONE of the four and says so with an
+                ::error:: naming them UNSCANNED. If you are reading an artifact that has
+                ledger.csv and schema-before.sql but none of the four .sql files, that is
+                this rule firing, not a truncated upload — and no reversal recipe is
+                missing, because the transaction had not run.
+                ⛔ CORRECTED 2026-09-18 (review WR2-03). Until then this paragraph said the
+                flagged file was STILL COPIED and STILL PUBLISHED here, and that closing the
+                gap would cost the reversal recipe on the run that needs it. The first half
+                was true and understated the gap — every abort BETWEEN the four files being
+                written and the scan published them unscanned too, while the sentence below
+                about `scanned 4 of 4` read as though they had not been. The second half was
+                simply wrong: the scan runs before the transaction, so every run it withholds
+                is a run with nothing to reverse.
             Two paragraphs of this section said "TWO FILES OF THESE THIRTEEN, AND THAT IS
             ALL" until 2026-09-10, which was true before the script gained its own scan
             and false after it. Kept as the record of what changed.
@@ -1370,9 +1389,15 @@ jobs:
                 schema-before.sql gets, before the transaction runs; a hit REFUSES the run
                 and names the file and the class without printing the match, and a tally
                 short of `scanned 4 of 4` is its own MEASURE_FAIL rather than a clean
-                verdict over files it never opened. They are still redacted by NOTHING —
-                refusal is not masking, so a hit costs the run, it does not sanitise the
-                file. survivors.sql
+                verdict over files it never opened — ⚠️ ON A RUN THAT REACHED THE SCAN,
+                and only there. Corrected 2026-09-18 (review WR2-03): that sentence stood
+                alone here and read as a property of these four files, when it is a
+                property of one function call sitting between build_transaction and the
+                transaction. It is now load-bearing in the other direction instead — the
+                staging step stages these four ONLY if that scan wrote its verdict, so
+                their PRESENCE in this artifact is the tally. They are still redacted by
+                NOTHING — redaction is not scanning, and a hit costs the run and withholds
+                the file rather than sanitising it. survivors.sql
                 and restore.sql deliberately carry pg_get_triggerdef(...) and
                 reconstructed CREATE POLICY ... USING (<qual>) for objects on live shared
                 TEST. That is the reversal recipe, and it is here on purpose (threat
@@ -1422,6 +1447,173 @@ jobs:
             copy, and this artifact expires after 90 days (retention-days, below). After
             that the record is unrecoverable by any means.
           BACKUP_README
+
+          # (b2) SECRET SCAN, BEFORE EITHER FILE CAN REACH THE ARTIFACT.
+          # This runs in the BACKUP step, which precedes the destructive script in both
+          # modes, so a hit refuses BEFORE any write — the safe direction. It cannot live
+          # in the redaction step: that one is `if: always()` and by then the drop has
+          # happened.
+          # `supabase/schema/baseline.sql` is committed only after the scan recorded in
+          # `scripts/local-stack/REPLAY-SPIKE.md`. ⚠️ CORRECTED 2026-09-10: this comment
+          # called it "the five-class scan" and then listed SIX names, which is the
+          # SP-M03 shape (a claim that does not match its own command) inside the fix for
+          # SP-M03. The COMMAND is six alternations — DSN / supabase host / project ref /
+          # \connect / ALTER DATABASE / JWT — and it is the authority; `BASELINE.md` says
+          # "five classes" because its prose folds the DSN scheme and the supabase host
+          # into one "DSN". Re-derive the class count rather than trusting either
+          # sentence — the enumerated, name-per-class copy of the same set is the
+          # `classes=(…)` array in `scripts/restore-test-from-baseline.sh`, and it prints
+          # its own length on every green run:
+          #   sed -n "/local -a classes=(/,/^  )$/p" scripts/restore-test-from-baseline.sh | grep -c "^    '"
+          # These two files are published
+          # the same way and reviewed by nobody first — `schema-before.sql` is an
+          # unreviewed `supabase db dump` of a live hosted database, and `ledger.csv`
+          # carries the `statements` column, the verbatim SQL of every row applied to
+          # TEST INCLUDING hand-applied rows that exist in no committed migration — so
+          # they receive that same scan here.
+          #
+          # ⚠️ ONE CLASS IS SCOPED OUT OF THE LEDGER SCAN, BY MEASUREMENT, NOT BY TASTE.
+          # `ALTER DATABASE` belongs in the DUMP pattern because a schema dump has no
+          # legitimate reason to carry one. Migration SOURCE does. RE-DERIVE rather than
+          # trust the numbers below — these two commands print them:
+          #   cat supabase/migrations/*.sql | grep -acE 'ALTER DATABASE'
+          #   grep -clE 'ALTER DATABASE' supabase/migrations/*.sql | wc -l
+          # Measured 2026-09-10 at HEAD: 6 lines across THREE files (the count said FOUR
+          # files from 2026-09-08 until review F3 re-ran it), and every one is
+          # documentation — five `--` comments and one RAISE NOTICE string, all naming
+          # the GUC-setting recipe.
+          # Applying that class to ledger.csv would be RED ON EVERY RUN, and a gate that
+          # has to be waived to pass is not a gate. The residual risk is NAMED rather than
+          # hidden: a hand-applied TEST row of the shape
+          # `ALTER DATABASE postgres SET app.<x> = '<real value>'` is not caught here.
+          # README.txt says so, in the artifact, where whoever shares it will read it.
+          ledger_re='postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase|\\connect|eyJ[A-Za-z0-9_-]{10,}'
+          schema_re="${ledger_re}|ALTER DATABASE"
+          # `grep -a` is NOT optional: this repository contains a measured NUL-bearing
+          # file, and grep reports such a file as CLEAN (exit 1) without it. A grep exit
+          # ABOVE 1 is an unreadable file, not a clean one, and is failed separately —
+          # collapsing the two is how a scan passes vacuously.
+          # ⛔ ACCUMULATE-THEN-FAIL, NEVER EXIT INSIDE THE LOOP. This function used to
+          # `exit 1` on the first hit, which ends the STEP — so a hit in `ledger.csv`
+          # (the first call) meant `schema-before.sql` was NEVER SCANNED. It was not
+          # withheld either: `rm -f` removes only the OFFENDING file, the staging step
+          # below is `if: always()` and copies `schema-before.sql` BY NAME, so an
+          # unscanned `supabase db dump` of a live hosted database shipped into a
+          # 90-day world-readable artifact on a PUBLIC repo — while README.txt in that
+          # same artifact told the reader every file "was scanned before this run was
+          # allowed to proceed to any write". Found by the Phase 164.8.2 round-2
+          # silent-failure hunt, 2026-09-18.
+          # The twin in `scripts/restore-test-from-baseline.sh`
+          # (`refuse_credential_in_published_sql`) already did this correctly —
+          # accumulate across all four files, fail once at the end, and floor the
+          # count. This is that shape, and the two are now the same shape.
+          # ⛔ `rm -f` IS CHECKED, AND A FILE THAT SURVIVES IT IS ITS OWN FINDING
+          # (review I1, 2026-09-18). An unchecked `rm -f` under `set -e` aborts the STEP
+          # at that line — before `hits` is incremented and before the `::error::` that
+          # names the file. The step goes red with NO annotation, the offending file is
+          # still on disk, and the `if: always()` staging step below publishes it: the
+          # exact disclosure this function exists to prevent, reached through the
+          # function's own failure. The idiom is `withhold_channels()`'s, in this same
+          # file: report the failure by name, count it, never let it abort. The `[ -e ]`
+          # post-check is the second half — `rm -f` exits 0 on a file it did not have to
+          # remove, so success is not evidence of absence.
+          # ⛔ ACCUMULATE BASENAMES, NOT A COUNT (review L1). `scanned` was incremented at
+          # function ENTRY, so it counted ATTEMPTS: `scan_for_secrets ledger.csv` twice
+          # gave `scanned=2`, both clean, floor satisfied, and `schema-before.sql` never
+          # opened and still staged. The tally now records WHICH files were READ and the
+          # floor compares the sorted set with the expected names, so it pins identity
+          # rather than arity.
+          hits=0
+          seen=""
+          # ⛔ UNREADABLE IS ITS OWN CATEGORY (review WR-05, 2026-09-18). A file whose grep
+          # exits >1 was never OPENED, so it must not enter `seen` — but without a second
+          # list the identity floor below then reports a SET MISMATCH, whose message says a
+          # call was "aimed twice at the same file". That is the wrong diagnosis for an
+          # unreadable file, and it is the loudest line the operator gets. The refusal was
+          # always correct; only the sentence was wrong.
+          unreadable=""
+          withhold() {
+            # $1 = path. Returns 0 when the file is gone, 1 when it is not — and says
+            # which, by name, either way.
+            if ! rm -f "$1"; then
+              echo "::error::the secret scan flagged $(basename "$1") and COULD NOT WITHHOLD IT (rm -f failed). The file is still in the backup directory and the staging step below is \`if: always()\`. Treat it as DISCLOSED."
+              return 1
+            fi
+            if [ -e "$1" ]; then
+              echo "::error::the secret scan flagged $(basename "$1"), \`rm -f\` reported success, and the file IS STILL THERE. \`rm -f\` exits 0 on a file it never had to remove, so its status is not evidence of absence. Treat the file as DISCLOSED."
+              return 1
+            fi
+            return 0
+          }
+          scan_for_secrets() {
+            f="$1"; re="$2"; classes="$3"; rc=0; n=""
+            n="$(grep -acE "${re}" "${f}")" || rc=$?
+            if [ "${rc}" -gt 1 ]; then
+              hits=$((hits + 1))
+              unreadable="${unreadable}${unreadable:+ }$(basename "${f}")"
+              withhold "${f}" || hits=$((hits + 1))
+              echo "::error::the secret scan could not READ $(basename "${f}") (grep exited ${rc}). That is an unreadable file, NOT a clean one. The file has been withheld from the artifact and this run stops before any write."
+              return 0
+            fi
+            # READ, not merely attempted — recorded here, after the open succeeded and
+            # before any verdict, so a flagged file still counts as one this scan opened.
+            seen="${seen}${seen:+ }$(basename "${f}")"
+            if [ "${n}" != "0" ]; then
+              hits=$((hits + 1))
+              withhold "${f}" || hits=$((hits + 1))
+              echo "::error::the secret scan matched ${n} line(s) in $(basename "${f}") — one of: ${classes}. The file has been WITHHELD from the world-readable artifact and this run stops BEFORE any write. The matching text is deliberately not printed: this log is public. Reproduce locally against a backup you take by hand."
+              return 0
+            fi
+            echo "secret scan: $(basename "${f}") clean — 0 lines matched (${classes})."
+          }
+          scan_for_secrets "${outdir}/ledger.csv" "${ledger_re}" "DSN, supabase host, project ref, \\connect, JWT"
+          scan_for_secrets "${outdir}/schema-before.sql" "${schema_re}" "DSN, supabase host, project ref, \\connect, JWT, ALTER DATABASE"
+          # ⛔ THE FLOOR IS THE ANTI-VACUITY HALF, AND IT PINS IDENTITY (review L1). A set
+          # that is not exactly these two names means a call was added, removed, skipped
+          # or aimed twice at the same file — a MEASURE_FAIL, not a clean verdict over a
+          # file it never opened.
+          SECRET_SCAN_EXPECTED="ledger.csv schema-before.sql"
+          scanned_set="$(printf '%s\n' ${seen} | sort | tr '\n' ' ' | sed -E 's/ +$//')"
+          if [ "${scanned_set}" != "${SECRET_SCAN_EXPECTED}" ]; then
+            if [ -n "${unreadable}" ]; then
+              echo "::error::MEASURE_FAIL — the secret scan could not READ '${unreadable}', so the set it opened was '${scanned_set}' rather than '${SECRET_SCAN_EXPECTED}'. This is an UNREADABLE file, not a miscounted or repeated call: each one is named in its own error above and has been withheld. The artifact is NOT published on an unverified scan."
+            else
+              echo "::error::MEASURE_FAIL — the secret scan READ '${scanned_set}', expected '${SECRET_SCAN_EXPECTED}'. No file was unreadable, so a call was added, removed, skipped or aimed twice at the same file. A count would have been satisfied by scanning one file twice; this is the set it actually opened. The artifact is NOT published on an unverified scan."
+            fi
+            exit 1
+          fi
+          if [ "${hits}" -ne 0 ]; then
+            echo "::error::the secret scan flagged ${hits} finding(s) across '${scanned_set}'; every flagged file was withheld unless an error above says otherwise, and this run stops BEFORE any write. Each finding is named in its own error above."
+            exit 1
+          fi
+          echo "secret scan: read '${scanned_set}', 0 flagged."
+          # ⛔ THE VERDICT AS A FILE (review C1, 2026-09-18). `ledger.csv` and
+          # `schema-before.sql` were staged BY NAME, unconditionally, while only the
+          # script's four `.sql` files were gated on a verdict — and that asymmetry WAS
+          # the finding. `\copy … TO ledger.csv` runs under `timeout 120`; a timeout or a
+          # mid-stream connection drop leaves a PARTIAL ledger holding real `statements`
+          # rows and `exit 1`s BEFORE this scan runs. Same for a failed `supabase db dump`.
+          # Redact, Stage and Upload are all `if: always()`, so that unscanned partial
+          # backup of a live hosted database shipped to a 90-day world-readable artifact
+          # on a PUBLIC repo — while README.txt in it said every file here "was scanned".
+          # This file is written ONLY on the all-clear path, and the staging step stages
+          # those two names ONLY when it is present and carries this sentence. Same
+          # mechanism, same sentence, as the restore script's `credential-scan.ok`: six
+          # files, one rule.
+          # ⛔ It is NOT in the staging allowlist and must not be added to it.
+          # ⛔ THE WRITE IS CHECKED (review WR-03, 2026-09-18). Its twin in
+          # `scripts/restore-test-from-baseline.sh` carries `|| fail`; this one carried
+          # nothing, so a failed write aborted the step silently under `-e` and the
+          # operator then read the staging step's "did not reach its secret scan" —
+          # the OPPOSITE diagnosis, on a run where the scan ran and CLEARED. It fails
+          # in the safe direction (nothing is staged), which is why it is a warning and
+          # not a blocker; it is fixed because a half-class is how this phase's defects
+          # keep coming back.
+          if ! printf '%s\n' "the backup files carry no credential shape in any scanned class (read: ${scanned_set})" > "${outdir}/backup-scan.ok"; then
+            echo "::error::MEASURE_FAIL: the backup secret scan CLEARED, but its verdict file ${outdir}/backup-scan.ok could not be written. The scan's result is therefore unrecorded and the staging step below will deny both backup files. This is NOT the scan failing — do not read the denial as a credential finding."
+            exit 1
+          fi
+
 
           # Counts and byte sizes ONLY. Never a row, never a name from the ledger.
           # The row count is asked of the DATABASE, not derived from `wc -l`: the
@@ -1651,17 +1843,21 @@ jobs:
       #   - `ledger.csv` and `schema-before.sql` are left byte-exact here (a substitution
       #     would corrupt the very bytes the reversal recipe replays) and they ARE
       #     secret-scanned — in the BACKUP step, at the point they are written.
-      #   - The script-written files are scanned by NOTHING and redacted by NOTHING. The
-      #     backup step's scan runs BEFORE the script exists to write them. There are
-      #     FIVE `.sql` files in this directory, not two: `schema-before.sql` plus the
+      #   - The script-written files are redacted by NOTHING, and this step's scan never
+      #     reads them: the backup step runs BEFORE the script exists to write them. There
+      #     are FIVE `.sql` files in this directory, not two: `schema-before.sql` plus the
       #     script's `census.sql`, `survivors.sql`, `restore.sql` and `refdata.sql`, and
-      #     only the first is scanned.
+      #     only the first is scanned HERE. ⚠️ CORRECTED 2026-09-18: this bullet said the
+      #     four were "scanned by NOTHING", which stopped being true when the restore
+      #     script gained `refuse_credential_in_published_sql` — it scans all four itself,
+      #     once, immediately before the transaction.
       #   - What keeps the unscanned ones out of the world-readable artifact is the
       #     `Stage the public artifact (enumerated allowlist; default-out)` step below,
-      #     which copies an enumerated list into a separate directory. It ADMITS the four
-      #     script `.sql` files above (`restore.sql` embeds `survivors.sql` by `cat`, so
-      #     that DDL is staged twice — stated, not glossed) and EXCLUDES the census text
-      #     files and `survivors.keys`.
+      #     which copies an enumerated list into a separate directory. It admits the four
+      #     script `.sql` files above ONLY on a run whose credential scan wrote its verdict
+      #     (review WR2-03; `restore.sql` embeds `survivors.sql` by `cat`, so that DDL is
+      #     staged twice — stated, not glossed) and EXCLUDES the census text files and
+      #     `survivors.keys`.
       # So a failed redaction costs the run's diagnostics, never its reversal recipe —
       # and a failed STAGING costs the artifact entirely, which is the safe direction.
       - name: Redact connection metadata from the backup directory (public artifact)
@@ -1738,7 +1934,7 @@ jobs:
       # time — which is what the `*.sql` sentence further down already warned about.
       # Before this step the upload pointed at `${RUNNER_TEMP}/test-backup` whole, so
       # every file the restore script happened to write was published on a PUBLIC repo
-      # for 90 days — in by default. Ten of the eighteen names that reach that
+      # for 90 days — in by default. Ten of the twenty names that reach that
       # directory passed through NEITHER the backup step's secret scan (which runs
       # before the script writes anything) NOR the redaction above (`*.err/*.log/*.out`
       # only). Copying an ENUMERATED list into a fresh directory inverts that: a file
@@ -1814,7 +2010,66 @@ jobs:
             # scans for are banned here and would defeat exactly that — deliberately NOT
             # spelled out, because a comment quoting a banned token is itself a hit (the
             # class recorded in Phase 164.8: a widened matcher read its own example).
+            # ⛔ DEFAULT-DENY ON THE FOUR SCRIPT-WRITTEN `.sql` FILES (Phase 164.8.2,
+            # review WR2-03). `refuse_credential_in_published_sql` runs at ONE point in
+            # the restore script — after `build_transaction` has written census.sql,
+            # survivors.sql, restore.sql and refdata.sql, and before the transaction.
+            # This step is `if: always()`, so until 2026-09-18 EVERY abort in between
+            # (the survivor-count MEASURE_FAIL, the publication-row refusal,
+            # derive_expected_shape, build_transaction's own refdata refusal — and a
+            # credential HIT itself) published all four to a world-readable 90-day
+            # artifact UNSCANNED, while the script's `scanned 4 of 4` sentence and the
+            # README shipped inside the artifact both read as though they had been
+            # scanned. A control weaker than the sentence beside it.
+            # The scan writes `credential-scan.ok` on, and only on, the path where every
+            # class cleared every file; anything else stages none of the four. Same shape
+            # as the REDACT_OUTCOME guard below: the verdict is READ, never assumed.
+            # ⚠️ This does NOT cost the reversal recipe (T-164.8-21), which is what
+            # blocked the `rm -f` proposal the script's own comment records: every path
+            # this denies is a path on which the transaction never ran, so the database
+            # is untouched and there is nothing to reverse.
+            # ⛔ `credential-scan.ok` is this guard's INPUT and is not in the allowlist
+            # below — do not "complete" the list by adding it.
+            scan_ok=0
+            if [ -f "${outdir}/credential-scan.ok" ] \
+               && grep -aq 'carry no credential shape' "${outdir}/credential-scan.ok"; then
+              scan_ok=1
+            fi
+            # ⛔ THE SAME RULE FOR THE BACKUP'S OWN TWO FILES (review C1, 2026-09-18).
+            # They were copied BY NAME, unconditionally, while only the four script
+            # `.sql` files were gated — and the asymmetry WAS the finding. `\copy` runs
+            # under `timeout 120`: a timeout or a mid-stream drop leaves a PARTIAL
+            # `ledger.csv` holding real `statements` rows and exits 1 BEFORE the backup
+            # step's own scan runs, and a failed `supabase db dump` leaves a partial dump
+            # of a live hosted database the same way. Six files, one mechanism.
+            backup_ok=0
+            if [ -f "${outdir}/backup-scan.ok" ] \
+               && grep -aq 'carry no credential shape' "${outdir}/backup-scan.ok"; then
+              backup_ok=1
+            fi
+            # ⛔ BOTH VERDICTS ARE READ BEFORE EITHER IS NARRATED (review WR-02, 2026-09-18).
+            # These two messages used to be emitted inside their own `else` arms, and the
+            # first one asserted "The backup (ledger.csv, schema-before.sql) IS staged" —
+            # which is FALSE on every abort before the backup scan, because that path
+            # denies BOTH. Two denials that contradict each other are worse than one that
+            # is silent: whoever reads the log cannot tell which sentence to believe. The
+            # sibling's fate is now DERIVED from the sibling's flag, never asserted.
+            if [ "${backup_ok}" -eq 1 ]; then
+              backup_fate="The backup (ledger.csv, schema-before.sql) cleared its own scan and IS staged."
+            else
+              backup_fate="The backup (ledger.csv, schema-before.sql) is ALSO denied — see the line below."
+            fi
+            if [ "${scan_ok}" -ne 1 ]; then
+              echo "::error::the restore script did not reach refuse_credential_in_published_sql, or that scan did not clear (no ${outdir}/credential-scan.ok carrying its verdict). census.sql, survivors.sql, restore.sql and refdata.sql are therefore UNSCANNED and are NOT staged into this world-readable artifact. The transaction had not run at that point, so nothing was written to the database and no reversal recipe is owed. ${backup_fate}"
+            fi
+            if [ "${backup_ok}" -ne 1 ]; then
+              echo "::error::the backup step did not reach its secret scan, or that scan did not clear (no ${outdir}/backup-scan.ok carrying its verdict). ledger.csv and schema-before.sql are therefore UNSCANNED and are NOT staged into this world-readable artifact: a \`\copy\` killed by its timeout leaves a PARTIAL ledger carrying real \`statements\` rows, and a failed \`supabase db dump\` leaves a partial dump of a live hosted database. README.txt IS staged and explains what the artifact holds."
+            fi
             for f in ledger.csv schema-before.sql README.txt census.sql survivors.sql restore.sql refdata.sql; do
+              case "${f}" in
+                census.sql|survivors.sql|restore.sql|refdata.sql) [ "${scan_ok}" -eq 1 ] || continue ;;
+                ledger.csv|schema-before.sql) [ "${backup_ok}" -eq 1 ] || continue ;;
+              esac
               if [ -f "${outdir}/${f}" ]; then
                 cp -p "${outdir}/${f}" "${stage}/"
               fi

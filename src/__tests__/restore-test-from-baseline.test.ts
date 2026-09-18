@@ -1382,6 +1382,23 @@ describe("restore-test-from-baseline.sh — IN-01/IN-02/IN-05: the narrative is 
     // derivation that silently covered LESS of the contract than its title claimed,
     // and a narrowing regex would shrink this number rather than turn anything red.
     // Raise it when the seam count climbs; never lower it to make a run pass.
+    //
+    // MEASURED 2026-09-18 at HEAD on chore/164.8.2-verification, by raising this
+    // constant to 999 and reading the arm's own failure text: `envSeams(SRC)` derives
+    // EXACTLY 16 seams — BASELINE_DOC, BASELINE_FILE, FRESHNESS_TS_CMD, MIGRATIONS_DIR,
+    // NORMALIZER, PGBIN, REFDATA_ALLOWLIST, REFDATA_EXTRACTOR, REFDATA_KIND_CHECK,
+    // REFDATA_KIND_REGISTRY, REFDATA_KIND_REGISTRY_COL, RESTORE_DB_URL,
+    // RESTORE_EXPECT_MARKER_RE, RESTORE_OUT_DIR, RESTORE_REFUSE_MARKER_RE,
+    // RESTORE_REQUIRE_MUTEX. SEPARATED upward: at 999 the arm reds with "the seam
+    // derivation found 16 seams (…) but the floor is 999"; restored to 16 it is green.
+    // ⛔ WHY THE FLOOR SITS **AT** THE MEASUREMENT AND THAT IS A RATCHET, NOT A TRAP.
+    // The seam set is DERIVED from the script on disk, so it is re-derivable on every
+    // run — unlike a bound whose reality lives in a shared ledger. An equal floor with a
+    // `>=` comparison cannot red on legitimate GROWTH (a new seam only raises 16), and
+    // reds the instant the derivation covers one seam LESS, which IS the WR-04 defect.
+    // Registered as a threshold site in src/__tests__/gate-family-meta.test.ts
+    // (KNOWN_THRESHOLD_SITES) on 2026-09-18 — round-2 finding F-R2-03 — so moving this
+    // number is a reviewed diff and not a one-line edit against a green board.
     const SEAM_FLOOR = 16;
 
     const seams = envSeams(SRC);

@@ -122,7 +122,35 @@ function jobBlock(text: string, job: string): string {
   const start = text.indexOf(head);
   if (start < 0) return "";
   const after = text.slice(start + head.length);
-  const next = after.match(/\n {2}[A-Za-z_][\w-]*:\n/);
+  /**
+   * ⛔ BOTH HALVES, BOTH FILES (Phase 164.8.2 round-2 review, 2026-09-18). This regex
+   * used to be `/\n {2}[A-Za-z_][\w-]*:\n/` — the PRE-FIX form. WR-05 widened it in
+   * `critical-regressions.test.ts` and nowhere else, which is verbatim the half-class
+   * fix this phase's own standard forbids ("IN-03 fixed one copy of one half, which is
+   * how this became a half-class fix. Both halves, both files, throw now.").
+   * MEASURED: give a successor job key a trailing comment — valid YAML — and the bare
+   * form stops matching, the slice falls through to EOF, and `jobBlock` silently
+   * returns the following jobs as part of this one. `[^\S\n]*` admits trailing
+   * horizontal whitespace and `(#[^\n]*)?` a trailing comment.
+   */
+  const NEXT_JOB_RE = /\n {2}[A-Za-z_][\w-]*:[^\S\n]*(#[^\n]*)?\n/;
+  /** Deliberately weaker: ANY 2-space key. The gap between the two is what throws. */
+  const ANY_JOB_KEY_RE = /\n {2}[A-Za-z_][\w-]*:/;
+  const next = after.match(NEXT_JOB_RE);
+  const loose = after.match(ANY_JOB_KEY_RE);
+  // An unrecognised successor is indistinguishable, in the return value, from this job
+  // genuinely being the last one: both give a slice running past a boundary nobody
+  // chose. Fall back ONLY for the second. Compare POSITIONS — "is there a bound?" is
+  // the wrong question; "is the FIRST key after this job the one we bounded on?" is the
+  // right one. The failure mode of the old code was a PASS.
+  if (loose && (!next || (loose.index ?? 0) < (next.index ?? 0))) {
+    throw new Error(
+      `jobBlock(${job}): a top-level key FOLLOWS it ` +
+        `(${JSON.stringify(after.slice(loose.index ?? 0, (loose.index ?? 0) + 60))}) ` +
+        "but NEXT_JOB_RE did not match it, so this slice would silently run past it — " +
+        "the unbounded shape IN-04 was raised to remove. Widen NEXT_JOB_RE.",
+    );
+  }
   return head + (next ? after.slice(0, next.index) : after);
 }
 
@@ -597,6 +625,22 @@ const NO_ERREXIT_SITES: readonly string[] = [
  * shape it does not know — a step added as `run: >-` would be dropped silently while the
  * count stayed at 16. That direction is closed by making the collector throw (review A4),
  * not by any number here.
+ *
+ * ⚠️ RE-MEASURED 2026-09-18 at HEAD on chore/164.8.2-verification, AFTER the round-2 fix
+ * pass restructured .github/workflows/test-restore-from-baseline.yml. Method: raise this
+ * constant to 999 and read the arm's own failure text — "only 16 `run: |` block(s) were
+ * parsed out of the scannable restore block (floor 999 …)". The live count is STILL 16,
+ * so the 2026-09-10 number above is re-confirmed rather than re-dated on trust.
+ * SEPARATED upward at 999 (red, exit 1) and green when restored to 16.
+ * ⛔ WHY THE FLOOR SITS **AT** THE MEASUREMENT AND THAT IS A RATCHET, NOT A TRAP. The
+ * block count is re-derived from the workflow on disk on every run, and the comparison is
+ * `>=`: a step ADDED later only raises the live count and cannot red this, while a parser
+ * that silently starts returning fewer of the shapes it knows reds immediately. That is
+ * the whole job of the number.
+ * ⛔ Registered as a threshold site in src/__tests__/gate-family-meta.test.ts
+ * (KNOWN_THRESHOLD_SITES) on 2026-09-18 — round-2 finding F-R2-03. Until then this floor,
+ * the SOLE anti-vacuity guard for `errexitOffenders()`, sat outside the repo's own
+ * threshold registry: lowering it was a one-line edit against a green board.
  */
 const RUN_BLOCK_FLOOR = 16;
 
@@ -1284,7 +1328,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
   //
   // ⛔ THE DEFECT. Until 164.8.2 the upload's `path:` was the backup DIRECTORY, so
   // whatever the script happened to write was published on a PUBLIC repo for 90
-  // days. Ten of the eighteen names that reach that directory pass through NEITHER
+  // days. Ten of the twenty names that reach that directory pass through NEITHER
   // the backup step's secret scan (it runs BEFORE the script writes anything) NOR
   // the redaction above (`*.err/*.log/*.out` only) — `pre-census.txt` and the two
   // rollback views carry a reconstructed `CREATE POLICY … USING (<qual>)` and
@@ -1293,7 +1337,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
   // ⭐ AND THE ARM IS EXECUTED, NOT GREPPED, for the reason the file's header gives:
   // a string pin over the YAML goes green the moment someone keeps the step and
   // guts its copy loop. The step's shell is lifted out and RUN over a fixture
-  // directory seeded with all eighteen REAL names (CONTEXT: "a falsifier must
+  // directory seeded with all twenty REAL names (CONTEXT: "a falsifier must"
   // reproduce the real shape" — the redaction twin above deliberately uses
   // `schema.sql`, a name this workflow never writes; that fixture is left alone as
   // out of scope, this one uses the measured names).
@@ -1314,8 +1358,19 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     // If the script gains a file, this list goes stale — and the point of the
     // allowlist is that a stale list here is SAFE: an unknown name is not staged.
     const REAL_NAMES = [
+      // ⛔ THE BACKUP SCAN'S VERDICT FILE (Phase 164.8.2, review C1), written by the
+      // backup step on — and only on — the path where both backup files were read and
+      // cleared. Same role, same rule, as `credential-scan.ok` below: an INPUT to this
+      // step, in neither allowlist, and therefore required to stay OUT of the artifact.
+      "backup-scan.ok",
       "census.err",
       "census.sql",
+      // ⛔ THE CREDENTIAL SCAN'S VERDICT FILE (Phase 164.8.2, review WR2-03), written
+      // by `refuse_credential_in_published_sql` on — and only on — the path where every
+      // class cleared every published `.sql` file. It is this step's INPUT, so it is in
+      // this fixture but in NEITHER allowlist: `expectedStaged` therefore requires it to
+      // stay OUT of the artifact, which is the rule it has to obey like any other name.
+      "credential-scan.ok",
       "dump.log",
       "ledger.csv",
       "ledger.err",
@@ -1348,6 +1403,12 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
      * same DDL marker so its presence is measurable and not merely a name in a list.
      */
     const UNEXPECTED_CHANNEL = "future-census.out";
+    /**
+     * The substring the staging step greps `credential-scan.ok` for. Restated here
+     * deliberately: the workflow and the restore script are two files that have to
+     * agree on it, and `restore-test-from-baseline.test.ts` pins the script's side.
+     */
+    const SCAN_VERDICT = "carry no credential shape";
     /** The DDL shape the finding is actually about, seeded so its absence is measurable. */
     const POLICY_MARKER = "CREATE POLICY p ON t USING (owner = current_user)";
     const DDL_BEARING = [
@@ -1424,7 +1485,14 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       mkdirSync(outdir, { recursive: true });
       for (const f of seed) {
         const extra = DDL_BEARING.includes(f) ? `${POLICY_MARKER}\n` : "";
-        writeFileSync(join(outdir, f), `MARKER-${f}\n${extra}`);
+        // The verdict file is only a verdict if it CARRIES the verdict — seeding it
+        // with `MARKER-…` like every other fixture would make every arm below measure
+        // the deny path while claiming to measure the clear path.
+        const verdict =
+          f === "credential-scan.ok" || f === "backup-scan.ok"
+            ? `the files ${SCAN_VERDICT} …\n`
+            : "";
+        writeFileSync(join(outdir, f), `MARKER-${f}\n${extra}${verdict}`);
       }
       const scriptFile = join(runnerTemp, "stage.sh");
       writeFileSync(scriptFile, script);
@@ -1535,7 +1603,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       ).toBe(false);
     });
 
-    it("EXECUTED — the staged set is exactly the allowlist over all 18 REAL names", () => {
+    it("EXECUTED — the staged set is exactly the allowlist over all 20 REAL names", () => {
       const script = extractRunScript(WF, STAGE);
       const seed = [...REAL_NAMES, UNEXPECTED, UNEXPECTED_CHANNEL];
       const r = runStage(script, seed);
@@ -1568,7 +1636,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         r.staged.includes("survivors.sql"),
         "`survivors.sql` is NOT staged. It is the DDL that re-creates the non-public objects depending on `public`; without it an aborted restore is not reversible. Dropping it was considered and REJECTED (CONTEXT Area 2, AMENDED 2026-09-09) — do not 'complete' the narrowing this way.",
       ).toBe(true);
-      // The count is derived, never restated: 18 real + 1 future, minus the five
+      // The count is derived, never restated: 20 real + 2 future, minus the seven
       // withheld and the future one.
       expect(r.output).toContain(`staged ${r.staged.length} file(s) from`);
 
@@ -1578,6 +1646,15 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // reported by a fixture that never contained it.
       const OLD_SHAPE_ANCHOR =
         "  for f in ledger.csv schema-before.sql README.txt census.sql survivors.sql restore.sql refdata.sql; do\n" +
+        // Re-anchored 2026-09-18 (reviews WR2-03 and C1): the loop gained a per-file
+        // default-DENY — the four script-written `.sql` files on the restore script's
+        // scan verdict, `ledger.csv` and `schema-before.sql` on the backup step's. The
+        // anchor carries both arms verbatim so the mutation below still replaces the
+        // WHOLE copy loop.
+        '    case "${f}" in\n' +
+        '      census.sql|survivors.sql|restore.sql|refdata.sql) [ "${scan_ok}" -eq 1 ] || continue ;;\n' +
+        '      ledger.csv|schema-before.sql) [ "${backup_ok}" -eq 1 ] || continue ;;\n' +
+        "    esac\n" +
         '    if [ -f "${outdir}/${f}" ]; then\n' +
         '      cp -p "${outdir}/${f}" "${stage}/"\n' +
         "    fi\n" +
@@ -1718,6 +1795,416 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         (s) => s.replace("\n        id: redact\n", "\n"),
         (t) => stepHead(t, REDACT).includes("\n        id: redact\n"),
       );
+    });
+
+    /**
+     * WR2-03 — the four script-written `.sql` files are staged ONLY on a run whose
+     * credential scan reached its verdict.
+     *
+     * ⛔ THE DEFECT, MEASURED. `refuse_credential_in_published_sql` runs at ONE point
+     * in the restore script: after `build_transaction` has written `census.sql`,
+     * `survivors.sql`, `restore.sql` and `refdata.sql`, and before the transaction.
+     * This step is `if: always()`. Every abort in between — the survivor-count
+     * MEASURE_FAIL, `refuse_publication_row_without_table`, `derive_expected_shape`,
+     * `build_transaction`'s own refdata refusal — and a credential HIT itself,
+     * published all four to a world-readable 90-day artifact UNSCANNED, while the
+     * script's `scanned 4 of 4` sentence and the README shipped INSIDE the artifact
+     * both read as though they had been scanned. A control weaker than the sentence
+     * beside it, which is the defect this whole phase exists to remove.
+     *
+     * ⭐ AND IT COSTS NO REVERSAL RECIPE (T-164.8-21), which is what blocked the
+     * `rm -f` answer the script's own comment records: every path this denies is a
+     * path on which the transaction had not run, so the database is untouched and
+     * there is nothing to undo. The BACKUP half — `ledger.csv`, `schema-before.sql`,
+     * `README.txt` — is staged either way and is asserted here, because a deny that
+     * quietly took the backup with it would be a worse defect than the one fixed.
+     */
+    it("EXECUTED — WR2-03: no verdict file means the four script `.sql` files are NOT staged", () => {
+      const script = extractRunScript(WF, STAGE);
+      // The real shape of an abort before the scan: every file `build_transaction`
+      // writes is on disk, and the verdict file is the one thing missing.
+      const seed = REAL_NAMES.filter((f) => f !== "credential-scan.ok");
+      const r = runStage(script, seed);
+
+      expect(
+        r.status,
+        `the staging step FAILED on an aborted-restore fixture (exit ${r.status}). That run is already red for its own reason; a second red here sends the next reader to the artifact plumbing.\n${r.output}`,
+      ).toBe(0);
+      for (const f of [
+        "census.sql",
+        "survivors.sql",
+        "restore.sql",
+        "refdata.sql",
+      ]) {
+        expect(
+          r.staged.includes(f),
+          `\`${f}\` reached the world-readable artifact on a run that never reached refuse_credential_in_published_sql. It is UNSCANNED: nothing read it for a DSN, a supabase host, a project ref, a \\connect, a JWT or an ALTER DATABASE, and the artifact README tells its reader the opposite.`,
+        ).toBe(false);
+      }
+      for (const f of ["ledger.csv", "schema-before.sql", "README.txt"]) {
+        expect(
+          r.staged.includes(f),
+          `\`${f}\` was withheld too. The deny is scoped to the four files the script writes and the scan covers; the backup is scanned in the backup step and has its own claim on being here — taking it with them turns a scoped deny into a lost backup.`,
+        ).toBe(true);
+      }
+      expect(
+        r.output,
+        "the four files were withheld SILENTLY — an operator reading a short artifact cannot tell a scoped deny from a truncated upload",
+      ).toContain("UNSCANNED");
+      expect(r.output).toContain("::error::");
+
+      // ⭐ CALIBRATION — THE OBSERVED RED. Force the guard open, leaving the
+      // unconditional loop that shipped, and the same fixture publishes all four.
+      // Without this twin, "the four are absent" could be reported by a fixture that
+      // never contained them.
+      const GUARD_ANCHOR = "  scan_ok=0\n";
+      expect(
+        script.includes(GUARD_ANCHOR),
+        "the staging step's scan-verdict guard is no longer the form this calibration forces open — re-anchor the mutation rather than deleting the twin",
+      ).toBe(true);
+      const neutered = script.replace(GUARD_ANCHOR, "  scan_ok=1\n");
+      expect(neutered, "CALIBRATION: the mutation changed nothing").not.toBe(
+        script,
+      );
+      const leaked = runStage(neutered, seed);
+      for (const f of [
+        "census.sql",
+        "survivors.sql",
+        "restore.sql",
+        "refdata.sql",
+      ]) {
+        expect(
+          leaked.staged.includes(f),
+          `CALIBRATION: \`${f}\` did not reach the artifact even with the guard forced open — the fixture is not reproducing the pre-fix publication, so the arm above is not evidence`,
+        ).toBe(true);
+      }
+
+      // ⛔ AND THE VERDICT IS READ, NOT MERELY COUNTED AS PRESENT. A guard keyed on
+      // existence alone would be satisfied by `touch`, and an aborted script that had
+      // created the file for any other reason would re-open the whole gap. Run the
+      // step with the file PRESENT (the full fixture) but the grep looking for a
+      // sentence it does not carry: the four must still be denied.
+      expect(
+        script.includes(`grep -aq '${SCAN_VERDICT}'`),
+        "the staging step no longer greps the verdict file for the scan's own sentence — re-anchor this arm rather than dropping it; a guard that only tests for the file's EXISTENCE is satisfied by `touch`",
+      ).toBe(true);
+      const contentBlind = script.replace(
+        `grep -aq '${SCAN_VERDICT}'`,
+        "grep -aq 'NOT-THE-VERDICT-SENTENCE'",
+      );
+      const present = runStage(contentBlind, [...REAL_NAMES]);
+      for (const f of [
+        "census.sql",
+        "survivors.sql",
+        "restore.sql",
+        "refdata.sql",
+      ]) {
+        expect(
+          present.staged.includes(f),
+          `\`${f}\` was staged on a verdict file that does NOT carry the scan's sentence — the guard is testing for the file's existence, not for its verdict`,
+        ).toBe(false);
+      }
+    });
+
+    /**
+     * C1 — `ledger.csv` and `schema-before.sql` obey the SAME verdict rule.
+     *
+     * ⛔ THE DEFECT, AND IT IS THE ASYMMETRY ITSELF. WR2-03's fix gated the four
+     * script-written `.sql` files on the restore script's scan verdict and left these
+     * two copied BY NAME, unconditionally. `\copy … TO 'ledger.csv'` runs under
+     * `timeout 120`: a timeout or a mid-stream connection drop leaves a PARTIALLY
+     * WRITTEN ledger holding real `statements` rows — the verbatim SQL of everything
+     * ever applied to TEST, hand-applied rows included — and the step `exit 1`s BEFORE
+     * `scan_for_secrets` runs. A failed `supabase db dump` does the same with a partial
+     * dump of a live hosted database. Redact, Stage and Upload are all `if: always()`,
+     * so that unscanned partial backup shipped to a 90-day world-readable artifact on a
+     * PUBLIC repo, while README.txt inside it said every file here was scanned.
+     */
+    /**
+     * The backup step's SECRET SCAN, lifted out and EXECUTED (review I2).
+     *
+     * ⛔ THE GAP THIS CLOSES. Nothing pinned `scan_for_secrets` beyond parsing the
+     * FILENAMES at its call sites to cross-check the README. The accumulate-then-fail
+     * shape, the two `return 0`s, `hits`, the read-set and its floor were covered by
+     * NOTHING — so re-introducing `exit 1` inside the function, which is the exact
+     * original defect (a hit in `ledger.csv` ended the step and `schema-before.sql` was
+     * never scanned, yet still staged by the `if: always()` step below), left the whole
+     * suite green. This runs the real block over a fixture directory instead.
+     *
+     * ⚠️ The seeded "credential" is a DSN SHAPE assembled from `SCHEME`, never a
+     * contiguous literal: a literal here would trip the pre-push secret scanner on
+     * shape, and disarming that for a fixture disarms it for real credentials.
+     */
+    describe("I1/I2/L1 — the backup step's secret scan, EXECUTED", () => {
+      /** The scan block only: from the class patterns to the verdict file it writes. */
+      function scanBlock(text: string): string {
+        const body = extractRunScript(text, BACKUP);
+        const from = body.indexOf("ledger_re='");
+        // ⛔ SLICE TO THE END OF THE VERDICT WRITE'S `fi`, NOT TO THE `printf` LINE
+        // (re-anchored 2026-09-18, review WR-03). The write used to be a bare `printf`
+        // and one line was the whole statement; it is now guarded by `if ! printf …;
+        // then … fi`, so cutting at the `printf` line ends the slice INSIDE an open `if`
+        // and every arm here dies of `unexpected end of file` instead of measuring. That
+        // failure was loud, which is the only reason this is a re-anchor and not a
+        // silently empty harness.
+        const endMark =
+          "printf '%s\\n' \"the backup files carry no credential shape";
+        const to = body.indexOf(endMark, from);
+        expect(
+          from >= 0 && to > from,
+          "the backup step's secret-scan block could not be sliced — re-anchor this harness rather than dropping it; every arm below would otherwise run over an empty script",
+        ).toBe(true);
+        const guardOpen = body.lastIndexOf("if ! printf", to);
+        let end: number;
+        if (guardOpen >= 0 && guardOpen > from) {
+          // The body is DEDENTED by extractRunScript, so match the closing `fi` by its
+          // own line rather than by a hard-coded indent that the dedent has removed.
+          const fiRe = /\n[ \t]*fi[ \t]*(?=\n)/;
+          const m = fiRe.exec(body.slice(to));
+          expect(
+            m !== null,
+            "the verdict write is wrapped in an `if` whose closing `fi` could not be found — re-anchor this slice; a block cut mid-`if` runs as a syntax error and measures nothing",
+          ).toBe(true);
+          end = to + (m as RegExpExecArray).index + (m as RegExpExecArray)[0].length;
+        } else {
+          end = body.indexOf("\n", to);
+        }
+        return body.slice(from, end + 1);
+      }
+
+      const DSN_SHAPE = `${SCHEME}EXAMPLE_USER:EXAMPLE_PASSWORD@example.invalid:5432/postgres`;
+      /** A non-writable directory is no barrier to root, so that fixture states it. */
+      const NOT_ROOT =
+        typeof process.getuid === "function" && process.getuid() !== 0;
+
+      function runScan(
+        block: string,
+        seed: Record<string, string>,
+        opts: { readonlyDir?: boolean } = {},
+      ): {
+        code: number | null;
+        out: string;
+        left: string[];
+        verdict: string | null;
+      } {
+        const dir = mkdtempSync(join(tmpdir(), "backupscan-"));
+        const outdir = join(dir, "test-backup");
+        mkdirSync(outdir, { recursive: true });
+        for (const [name, body] of Object.entries(seed))
+          writeFileSync(join(outdir, name), body);
+        const f = join(dir, "scan.sh");
+        writeFileSync(
+          f,
+          `set -euo pipefail\noutdir=${JSON.stringify(outdir)}\n${block}`,
+        );
+        if (opts.readonlyDir) chmodSync(outdir, 0o555);
+        const r = spawnSync("bash", ["-e", f], { encoding: "utf8" });
+        if (opts.readonlyDir) chmodSync(outdir, 0o755);
+        const left = readdirSync(outdir).sort();
+        let verdict: string | null = null;
+        try {
+          verdict = readFileSync(join(outdir, "backup-scan.ok"), "utf8");
+        } catch {
+          verdict = null;
+        }
+        rmSync(dir, { recursive: true, force: true });
+        return {
+          code: r.status,
+          out: `${r.stdout ?? ""}${r.stderr ?? ""}`,
+          left,
+          verdict,
+        };
+      }
+
+      const CLEAN = {
+        "ledger.csv": "version,name,statements\n1,init,SELECT 1;\n",
+        "schema-before.sql": "CREATE TABLE t (id int);\n",
+      };
+      const DIRTY = {
+        "ledger.csv": `version,name,statements\n1,init,-- ${DSN_SHAPE}\n`,
+        "schema-before.sql": `-- ${DSN_SHAPE}\nCREATE TABLE t (id int);\n`,
+      };
+
+      it("EXECUTED — a clean pair is read, reported by NAME, and leaves the verdict file", () => {
+        const r = runScan(scanBlock(WF), CLEAN);
+        expect(r.code, `a clean pair failed the scan.\n${r.out}`).toBe(0);
+        expect(r.out).toContain(
+          "read 'ledger.csv schema-before.sql', 0 flagged",
+        );
+        expect(
+          r.verdict,
+          "the all-clear path did not write `backup-scan.ok`. The staging step stages ledger.csv and schema-before.sql ONLY on that file, so a clean backup would be withheld from its own artifact.",
+        ).not.toBeNull();
+        expect(r.verdict ?? "").toContain(SCAN_VERDICT);
+      });
+
+      it("EXECUTED — I2: BOTH files are scanned and BOTH are withheld; the first hit does not end the step", () => {
+        const r = runScan(scanBlock(WF), DIRTY);
+        expect(r.code, `a matching pair did not fail the run.\n${r.out}`).toBe(
+          1,
+        );
+        for (const f of ["ledger.csv", "schema-before.sql"]) {
+          expect(
+            r.out.includes(f),
+            `\`${f}\` was not named in an \`::error::\`. An operator reading a red run must be told WHICH file was flagged; the matching text itself is never printed.`,
+          ).toBe(true);
+          expect(
+            r.left.includes(f),
+            `\`${f}\` survived the scan that flagged it. The staging step below is \`if: always()\` and would publish it.`,
+          ).toBe(false);
+        }
+        expect(
+          r.verdict,
+          "the verdict file was written on a FLAGGED run — the staging gate would then publish a backup this scan refused",
+        ).toBeNull();
+        expect(
+          r.out,
+          "the run did not report the FLAGGED tally, only the per-file errors",
+        ).toContain("flagged");
+
+        // ⭐ CALIBRATION — THE OBSERVED RED, and it is the ORIGINAL defect verbatim.
+        // Put `exit 1` back inside the function and the first hit ends the STEP:
+        // `schema-before.sql` is never scanned and is still on disk for the
+        // `if: always()` staging step to publish.
+        const HIT_ECHO = "::error::the secret scan matched ${n} line(s) in";
+        const block = scanBlock(WF);
+        const lines = block.split("\n");
+        const echoAt = lines.findIndex((l) => l.includes(HIT_ECHO));
+        expect(
+          echoAt,
+          "the hit branch's `::error::` is gone — re-anchor this calibration rather than dropping the twin",
+        ).toBeGreaterThan(-1);
+        const returnAt = lines.findIndex(
+          (l, i) => i > echoAt && l.trim() === "return 0",
+        );
+        expect(
+          returnAt,
+          "no `return 0` follows the hit branch's error — the accumulate-then-fail shape this arm gates is gone",
+        ).toBeGreaterThan(echoAt);
+        const regressed = lines
+          .map((l, i) => (i === returnAt ? l.replace("return 0", "exit 1") : l))
+          .join("\n");
+        expect(regressed, "CALIBRATION: the mutation changed nothing").not.toBe(
+          block,
+        );
+        const old = runScan(regressed, DIRTY);
+        expect(
+          old.left.includes("schema-before.sql"),
+          "CALIBRATION: the pre-fix `exit 1` did NOT leave schema-before.sql behind, so this arm is not reproducing the defect it claims to gate",
+        ).toBe(true);
+        expect(
+          old.out.includes("schema-before.sql"),
+          "CALIBRATION: the pre-fix shape still named the second file, so the first-hit-ends-the-step defect is not what the fixture exercises",
+        ).toBe(false);
+      });
+
+      it("EXECUTED — L1: the floor pins WHICH files were read, not how many calls were made", () => {
+        // Aim the second call at the FIRST file: a count-based floor reads 2 and passes
+        // while `schema-before.sql` is never opened — and is still staged.
+        const block = scanBlock(WF).replace(
+          'scan_for_secrets "${outdir}/schema-before.sql"',
+          'scan_for_secrets "${outdir}/ledger.csv"',
+        );
+        expect(block, "CALIBRATION: the mutation changed nothing").not.toBe(
+          scanBlock(WF),
+        );
+        const r = runScan(block, CLEAN);
+        expect(
+          r.code,
+          `scanning the same file twice satisfied the floor.\n${r.out}`,
+        ).toBe(1);
+        expect(r.out).toContain("MEASURE_FAIL");
+        expect(
+          r.verdict,
+          "a scan that never opened schema-before.sql still wrote the all-clear verdict",
+        ).toBeNull();
+      });
+
+      it.skipIf(!NOT_ROOT)(
+        "EXECUTED — I1: a file the scan cannot WITHHOLD is its own finding, not a silent abort",
+        () => {
+          // `rm -f` fails when the containing directory is not writable. Under `set -e`
+          // an unchecked failure would abort the step HERE — before `hits` and before
+          // the `::error::` naming the file — leaving the file on disk for the
+          // `if: always()` staging step, with no annotation anywhere.
+          const r = runScan(scanBlock(WF), DIRTY, { readonlyDir: true });
+          expect(
+            r.code,
+            `the unwithholdable file left the run green.\n${r.out}`,
+          ).toBe(1);
+          expect(
+            r.out,
+            "the file could not be removed and nothing said so — an operator would read the red as an ordinary flagged run and never learn the file is still there",
+          ).toContain("COULD NOT WITHHOLD");
+          for (const f of ["ledger.csv", "schema-before.sql"]) {
+            expect(
+              r.out.includes(f),
+              `\`${f}\` was not named while it was still on disk`,
+            ).toBe(true);
+          }
+          expect(r.verdict, "the verdict file was written anyway").toBeNull();
+        },
+      );
+    });
+
+    it("EXECUTED — C1: no backup verdict means ledger.csv and schema-before.sql are NOT staged", () => {
+      const script = extractRunScript(WF, STAGE);
+      // An abort between the backup files being written and the backup step's scan:
+      // everything on disk, the backup verdict the one thing missing.
+      const seed = REAL_NAMES.filter((f) => f !== "backup-scan.ok");
+      const r = runStage(script, seed);
+
+      expect(
+        r.status,
+        `the staging step FAILED on an aborted-backup fixture (exit ${r.status}). That run is already red for its own reason.\n${r.output}`,
+      ).toBe(0);
+      for (const f of ["ledger.csv", "schema-before.sql"]) {
+        expect(
+          r.staged.includes(f),
+          `\`${f}\` reached the world-readable artifact on a run that never reached the backup step's secret scan. Nothing read it for a DSN, a supabase host, a project ref, a \\connect, a JWT or an ALTER DATABASE — and a ledger truncated by its own timeout still carries whole \`statements\` rows.`,
+        ).toBe(false);
+      }
+      expect(
+        r.staged.includes("README.txt"),
+        "README.txt was withheld too, so the artifact is short and silent about why. It is a static heredoc that reads nothing and is written BEFORE the scan (review L2) precisely so a withheld run still explains itself.",
+      ).toBe(true);
+      expect(r.output, "the two backup files were withheld SILENTLY").toContain(
+        "UNSCANNED",
+      );
+
+      // ⭐ CALIBRATION — THE OBSERVED RED. Force the backup verdict open and the same
+      // fixture publishes both files again.
+      const GUARD_ANCHOR = "  backup_ok=0\n";
+      expect(
+        script.includes(GUARD_ANCHOR),
+        "the staging step's backup-verdict guard is no longer the form this calibration forces open — re-anchor the mutation rather than deleting the twin",
+      ).toBe(true);
+      const leaked = runStage(
+        script.replace(GUARD_ANCHOR, "  backup_ok=1\n"),
+        seed,
+      );
+      for (const f of ["ledger.csv", "schema-before.sql"]) {
+        expect(
+          leaked.staged.includes(f),
+          `CALIBRATION: \`${f}\` did not reach the artifact even with the guard forced open — the fixture is not reproducing the pre-fix publication`,
+        ).toBe(true);
+      }
+
+      // ⛔ THE TWO VERDICTS ARE INDEPENDENT. A run whose restore script cleared its four
+      // files says nothing about a backup that never got scanned, and vice versa — one
+      // verdict standing in for both would re-open half the finding.
+      const onlyBackup = runStage(
+        script,
+        REAL_NAMES.filter((f) => f !== "credential-scan.ok"),
+      );
+      expect(
+        onlyBackup.staged.includes("ledger.csv"),
+        "the backup verdict was ignored because the restore script's verdict was missing — the two gates have been collapsed into one",
+      ).toBe(true);
+      expect(
+        onlyBackup.staged.includes("restore.sql"),
+        "the script's four `.sql` files were staged on the BACKUP step's verdict — the two gates have been collapsed into one",
+      ).toBe(false);
     });
 
     it("EXECUTED — a FAILED redaction stages NO channel, and still stages the reversal recipe", () => {
@@ -2336,7 +2823,241 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     });
   });
 
+  /**
+   * WR2-03 / C1 — every verdict the staging step READS has a WRITER that EMITS it.
+   *
+   * ⛔ THE FAILURE THIS IS FOR, AND IT IS THE DANGEROUS DIRECTION. The staging step
+   * default-DENIES: no verdict file, no staged files. So deleting the WRITE — the
+   * `printf … > credential-scan.ok` in the restore script, or the one in this
+   * workflow's backup step — does not redden anything. It turns the gate into a
+   * PERMANENT, SILENT deny: every future run publishes an artifact with no backup and
+   * no reversal recipe, on a GREEN board, with nothing anywhere saying so. That is the
+   * same shape as the empty-`REDACT_OUTCOME` case two hundred lines above, and it is
+   * answered the same way: the two halves are pinned to each other, by SENTENCE, and
+   * the sentence is parsed out of the reader rather than restated here.
+   */
+  describe("WR2-03/C1 — the verdict files the staging step reads are actually WRITTEN", () => {
+    const STAGE_STEP =
+      "Stage the public artifact (enumerated allowlist; default-out)";
+    const BACKUP_STEP =
+      "Back up TEST before any write (schema + ledger; NOT data)";
+
+    /** `<verdict file>` → the sentence the staging step greps it for. */
+    function verdictGates(text: string): Record<string, string> {
+      const body = stepBody(text, STAGE_STEP);
+      const out: Record<string, string> = {};
+      for (const m of body.matchAll(
+        /grep -aq '([^']+)' "\$\{outdir\}\/([A-Za-z0-9_.-]+)"/g,
+      ))
+        out[m[2]] = m[1];
+      return out;
+    }
+
+    it("each verdict file is emitted by its own scan, on the all-clear path", () => {
+      const gates = verdictGates(WF);
+      expect(
+        Object.keys(gates).sort(),
+        "the staging step no longer reads exactly the two scan verdicts. `credential-scan.ok` is the restore script's four published `.sql` files (WR2-03); `backup-scan.ok` is this workflow's own `ledger.csv` and `schema-before.sql` (C1). Six files, one mechanism — if a gate was removed, those files are back to being staged unscanned.",
+      ).toEqual(["backup-scan.ok", "credential-scan.ok"]);
+
+      // The restore script's side.
+      const scriptWrite = `> "$RESTORE_OUT_DIR/credential-scan.ok"`;
+      expect(
+        SCRIPT.includes(scriptWrite),
+        `${SCRIPT_PATH} no longer writes \`credential-scan.ok\`, while the staging step still gates on it. That is not a red board — it is a PERMANENT SILENT DENY: every run from now on publishes an artifact with none of census.sql, survivors.sql, restore.sql or refdata.sql, and nothing says why.`,
+      ).toBe(true);
+      expect(
+        SCRIPT.includes(
+          `verdict="public .sql files ${gates["credential-scan.ok"]}`,
+        ),
+        `the sentence ${SCRIPT_PATH} writes into \`credential-scan.ok\` is not the one the staging step greps for (${JSON.stringify(gates["credential-scan.ok"])}). Either half can be reworded; they cannot be reworded separately.`,
+      ).toBe(true);
+      // ⛔ ON THE ALL-CLEAR PATH ONLY: after the `scanned N of N` floor, so a scan that
+      // could not find every file cannot leave a verdict behind.
+      const floorAt = SCRIPT.indexOf(
+        "published .sql file(s) under ${RESTORE_OUT_DIR}",
+      );
+      expect(floorAt, "the scan's positive floor is gone").toBeGreaterThan(-1);
+      expect(
+        SCRIPT.indexOf(scriptWrite),
+        "the verdict is written BEFORE the scan's own positive floor, so a scan that opened fewer files than it claims would still clear the staging gate",
+      ).toBeGreaterThan(floorAt);
+
+      // This workflow's own side.
+      const backupBody = stepBody(WF, BACKUP_STEP);
+      const backupWrite = `> "\${outdir}/backup-scan.ok"`;
+      expect(
+        backupBody.includes(backupWrite),
+        "the backup step no longer writes `backup-scan.ok`, while the staging step still gates on it — a permanent silent deny of ledger.csv and schema-before.sql, on a green board",
+      ).toBe(true);
+      expect(
+        backupBody.includes(`"the backup files ${gates["backup-scan.ok"]}`),
+        `the sentence the backup step writes is not the one the staging step greps for (${JSON.stringify(gates["backup-scan.ok"])})`,
+      ).toBe(true);
+      const hitsAt = backupBody.indexOf('if [ "${hits}" -ne 0 ]; then');
+      expect(
+        hitsAt,
+        "the backup scan's flagged-count check is gone",
+      ).toBeGreaterThan(-1);
+      expect(
+        backupBody.indexOf(backupWrite),
+        "the backup verdict is written BEFORE the flagged-count check, so a run with a hit would still clear the staging gate",
+      ).toBeGreaterThan(hitsAt);
+
+      // CALIBRATION — both directions, since each half can rot on its own.
+      calibrate(
+        "the sentence agreement bites when the READER is reworded",
+        (t) =>
+          t.replace(
+            `grep -aq '${gates["credential-scan.ok"]}' "\${outdir}/credential-scan.ok"`,
+            `grep -aq 'REWORDED VERDICT' "\${outdir}/credential-scan.ok"`,
+          ),
+        (t) =>
+          SCRIPT.includes(
+            `verdict="public .sql files ${verdictGates(t)["credential-scan.ok"]}`,
+          ),
+      );
+      const withoutWrite = SCRIPT.replace(scriptWrite, "> /dev/null");
+      expect(
+        withoutWrite,
+        "CALIBRATION: the write could not be removed, so the pin above is not evidence",
+      ).not.toBe(SCRIPT);
+      expect(
+        withoutWrite.includes(scriptWrite),
+        "CALIBRATION: the script still writes the verdict after the mutation — the pin would pass over a deleted writer",
+      ).toBe(false);
+    });
+  });
+
   describe("B4 — the workflow's marker gate is coupled to the script's constants", () => {
+    /**
+     * F-R2-02 — an UNDECIDABLE marker predicate REFUSES; it is never read as "no match".
+     *
+     * ⛔ THE DEFECT. Both predicates were bare `if … | grep -Eiq …`. `grep` exits 0 on a
+     * match, 1 on no match and ABOVE 1 when it could not decide — a rejected ERE, a
+     * substituted binary, a transient resource failure. The TEST check was fail-CLOSED
+     * only by accident of its leading `!`. The PROD check was fail-OPEN: an undecided
+     * answer is indistinguishable, in the branch taken, from "the marker does not name
+     * prod", so a PRODUCTION marker would pass the PROD refusal and this step would
+     * print "OK — the marker names TEST and not PROD" over a measurement it never took.
+     * This step is the gate standing between this workflow and a `DROP SCHEMA public
+     * CASCADE` on the wrong database, and the run cannot be undone.
+     */
+    it("EXECUTED — F-R2-02: an undecidable predicate REFUSES, and an undecided PROD check never passes", () => {
+      const body = extractRunScript(WF, "Which database am I on");
+      /**
+       * Run the step with a stubbed `psql` (the marker text is the subject, libpq is
+       * not) and an optional stubbed `grep` that reports an UNDECIDABLE status.
+       */
+      const runMarker = (
+        marker: string,
+        grepStub: string | null,
+        script = body,
+      ): { code: number | null; out: string } => {
+        const dir = mkdtempSync(join(tmpdir(), "marker-"));
+        const bin = join(dir, "bin");
+        const runnerTemp = join(dir, "tmp");
+        for (const d of [bin, runnerTemp]) mkdirSync(d, { recursive: true });
+        writeFileSync(
+          join(bin, "psql"),
+          `#!/bin/bash\nprintf '%s\\n' ${JSON.stringify(marker)}\nexit 0\n`,
+        );
+        chmodSync(join(bin, "psql"), 0o755);
+        if (grepStub !== null) {
+          writeFileSync(join(bin, "grep"), grepStub);
+          chmodSync(join(bin, "grep"), 0o755);
+        }
+        const f = join(dir, "marker.sh");
+        writeFileSync(f, script);
+        const r = spawnSync("bash", ["-e", f], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH ?? ""}`,
+            RUNNER_TEMP: runnerTemp,
+            // SCHEME: a contiguous DSN literal would trip the pre-push secret scanner.
+            TEST_DB_SESSION_URL: `${SCHEME}EXAMPLE_USER:EXAMPLE_PASSWORD@example.invalid:5432/postgres`,
+          },
+        });
+        rmSync(dir, { recursive: true, force: true });
+        return { code: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+      };
+
+      /** Undecidable on the PROD pattern only; the TEST pattern still answers. */
+      const GREP_BREAKS_ON_PROD =
+        '#!/bin/bash\nfor a in "$@"; do case "$a" in *prod*) exit 2 ;; esac; done\nexit 0\n';
+      /** Undecidable on everything. */
+      const GREP_ALWAYS_BROKEN = "#!/bin/bash\nexit 2\n";
+
+      // Baselines, so the arms below are not reported by a fixture that refuses anyway.
+      const ok = runMarker("quantalyze shared test database", null);
+      expect(ok.code, `a TEST marker was refused.\n${ok.out}`).toBe(0);
+      expect(ok.out).toContain("OK — the marker names TEST and not PROD");
+      // Whole-word `test` AND the prod token: the TEST predicate must pass so the arm
+      // reaches the PROD refusal, which is the one under test.
+      const prod = runMarker("quantalyze test clone of prod", null);
+      expect(prod.code, `a PROD marker was admitted.\n${prod.out}`).toBe(1);
+      expect(prod.out).toContain("names PRODUCTION");
+
+      // The finding itself: the PROD refusal cannot be evaluated.
+      const undecided = runMarker(
+        "quantalyze test database",
+        GREP_BREAKS_ON_PROD,
+      );
+      expect(
+        undecided.code,
+        `an UNEVALUATED PROD refusal let the step pass. The next steps take a schema dump of, and then DROP SCHEMA public CASCADE on, a database whose identity was never established.\n${undecided.out}`,
+      ).toBe(1);
+      expect(undecided.out).toContain(
+        "PROD-refusal predicate could not be evaluated",
+      );
+      expect(
+        undecided.out.includes("OK — the marker names TEST and not PROD"),
+        "the step printed its clean verdict over a measurement it never took",
+      ).toBe(false);
+
+      // The TEST predicate is bounded explicitly rather than by the accident of its `!`.
+      const blind = runMarker("quantalyze test database", GREP_ALWAYS_BROKEN);
+      expect(
+        blind.code,
+        `an unevaluable TEST check passed.\n${blind.out}`,
+      ).toBe(1);
+      expect(blind.out).toContain(
+        "TEST-marker predicate could not be evaluated",
+      );
+      expect(
+        blind.out.includes("does not name TEST as a whole word"),
+        "an UNREADABLE answer was reported as a marker that does not name TEST. Those are opposite diagnoses: one is a wrong database, the other is a broken measurement.",
+      ).toBe(false);
+
+      // ⭐ CALIBRATION — THE OBSERVED RED. Delete the PROD bound, leaving the bare
+      // predicate that shipped, and the same fixture passes: a PRODUCTION marker would
+      // reach the drop through a grep that never answered.
+      const PROD_BOUND =
+        /if \[ "\$\{rc\}" -gt 1 \]; then\n\s*echo "::error::MEASURE_FAIL: the PROD-refusal predicate[^\n]*\n\s*exit 1\n\s*fi\n/;
+      expect(
+        PROD_BOUND.test(body),
+        "the PROD-refusal rc bound is no longer the form this calibration removes — re-anchor it rather than dropping the twin",
+      ).toBe(true);
+      const unbounded = body.replace(PROD_BOUND, "");
+      expect(unbounded, "CALIBRATION: the mutation changed nothing").not.toBe(
+        body,
+      );
+      const fail_open = runMarker(
+        "quantalyze test database",
+        GREP_BREAKS_ON_PROD,
+        unbounded,
+      );
+      expect(
+        fail_open.code,
+        "CALIBRATION: the unbounded predicate refused anyway, so this arm is not measuring the fail-OPEN direction",
+      ).toBe(0);
+      expect(
+        fail_open.out,
+        "CALIBRATION: the pre-fix shape did not print the clean verdict, so the fixture is not reproducing the silent pass",
+      ).toContain("OK — the marker names TEST and not PROD");
+    });
+
     it("both hard-coded regexes still equal the script's RESTORE_*_MARKER_RE defaults", () => {
       // ⛔ THE FAILURE DIRECTION. The workflow hard-codes COPIES of two script
       // defaults, and this step is the EARLIER and CHEAPER of the two gates: it
@@ -2363,12 +3084,12 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       const marker = stepBody(WF, "Which database am I on");
       expect(marker, "the `Which database am I on` step is gone").not.toBe("");
       const greps = liveLines(marker)
-        .map((l) => l.match(/grep -Eiq '([^']*)'/))
+        .map((l) => l.match(/grep -aEiq '([^']*)'/))
         .filter((m): m is RegExpMatchArray => m !== null)
         .map((m) => m[1]);
       expect(
         greps,
-        "the marker step's two `grep -Eiq '…'` tests are no longer exactly the script's expect-then-refuse defaults, in that order. Whichever side was tightened, tighten the other: this step runs BEFORE the backup, so a workflow regex looser than the script's admits a database the script would refuse.",
+        "the marker step's two `grep -aEiq '…'` tests are no longer exactly the script's expect-then-refuse defaults, in that order. Whichever side was tightened, tighten the other: this step runs BEFORE the backup, so a workflow regex looser than the script's admits a database the script would refuse.",
       ).toEqual([expectRe, refuseRe]);
 
       // CALIBRATION — tighten the SCRIPT's default only, exactly the one-sided edit
@@ -3402,7 +4123,7 @@ exit 64
   const PROBE_LINE =
     '    git merge-base --is-ancestor "${APPLY_HEAD_SHA}" HEAD 2>"${ancestry_err}" || ancestry_rc=$?\n';
   const SENTINEL_GUARD =
-    '    if [ ! -f "${ancestry_err}" ] || [ ! -r "${ancestry_err}" ] || grep -q \'ANCESTRY-PROBE-SENTINEL\' "${ancestry_err}"; then\n';
+    '    if [ ! -f "${ancestry_err}" ] || [ ! -r "${ancestry_err}" ] || [ -n "${sentinel_fault}" ]; then\n';
   /** The same guard with ONLY its sentinel clause removed — the `-f`/`-r` clauses stay. */
   const GUARD_WITHOUT_SENTINEL_CLAUSE =
     '    if [ ! -f "${ancestry_err}" ] || [ ! -r "${ancestry_err}" ]; then\n';
@@ -4528,22 +5249,21 @@ describe("WR-04 — the `-a` rule is workflow-wide, not post-verify-wide", () =>
   }
 
   /**
-   * ⚠️ ONE EXEMPTION, DATED, AND A CEILING RATHER THAN A SET — the
-   * `ALLOWED_SITES` idiom above, for the same reason: an allowlist that only has to
-   * be a superset can rot silently. This entry must match EXACTLY ONE live bare
-   * grep; if the workflow gains `-a` there, this test goes RED telling you to
-   * DELETE the entry, so the exemption cannot outlive the defect.
+   * ⭐ EMPTY BY MEASUREMENT, 2026-09-18 — and the emptiness is the point. This list
+   * held ONE dated entry, `grep -q 'ANCESTRY-PROBE-SENTINEL'`, exempted because this
+   * test file did not own the workflow. Phase 164.8.2's round-2 fix gave that site
+   * its `-a`, and the ceiling arm below did exactly what it was built to do: it went
+   * RED with `STALE EXEMPTION` and the entry was DELETED rather than left standing
+   * over a defect that no longer exists.
    *
-   * ⛔ WHY IT IS EXEMPT AND NOT FIXED: this test file does not own
-   * `.github/workflows/test-restore-from-baseline.yml`. The fix is one character,
-   * and it matters — the check is NEGATIVE in effect ("the sentinel is GONE,
-   * therefore git ran and truncated the channel"), so a NUL-blind grep reporting a
-   * NUL-bearing stderr as clean makes the guard conclude git ran when it may not
-   * have. Booked as a follow-up on the workflow, not waived.
+   * ⛔ THE SHAPE STAYS, EMPTY. An allowlist that only has to be a superset rots
+   * silently, so every entry must match EXACTLY ONE live bare grep; a future
+   * exemption re-enters here under that same rule and expires the same way. Do not
+   * delete the mechanism because it currently has nothing to allow — the rule that
+   * bites is `unexemptedBareGreps` returning "" for the WHOLE workflow, which is now
+   * an UNCONDITIONAL requirement rather than one with a carve-out.
    */
-  const BARE_GREP_EXEMPTIONS: readonly string[] = [
-    "grep -q 'ANCESTRY-PROBE-SENTINEL'",
-  ];
+  const BARE_GREP_EXEMPTIONS: readonly string[] = [];
 
   function unexemptedBareGreps(text: string): string[] {
     const bare = bareGreps(text);
@@ -4561,7 +5281,7 @@ describe("WR-04 — the `-a` rule is workflow-wide, not post-verify-wide", () =>
     return offenders;
   }
 
-  it("every file-reading grep in the workflow carries `-a`, bar one dated exemption", () => {
+  it("every file-reading grep in the workflow carries `-a` — no exemptions remain", () => {
     const invocations = grepInvocations(
       WF.replace(ACQUIRE_RE, "").replace(RELEASE_RE, ""),
     );
@@ -4599,19 +5319,26 @@ describe("WR-04 — the `-a` rule is workflow-wide, not post-verify-wide", () =>
       "CALIBRATION: a bare grep OUTSIDE the post-verify step went unreported — the rule is still post-verify-wide",
     ).toContain("BARE GREP");
 
-    // (b) The exemption is a ceiling: fixing the exempted site must go RED, so the
-    //     entry is deleted rather than left standing over nothing.
-    const fixed = WF.replace(
-      "grep -q 'ANCESTRY-PROBE-SENTINEL'",
-      "grep -aq 'ANCESTRY-PROBE-SENTINEL'",
-    );
+    // (b) The ceiling mechanism still bites, even with the list empty. A SYNTHETIC
+    //     entry over a site that now carries `-a` must be reported STALE — this is the
+    //     arm that caught the real entry when the workflow was fixed, and keeping it
+    //     alive against a synthetic subject is what stops the emptied list from
+    //     becoming a mechanism nobody would notice breaking.
     expect(
-      fixed,
-      "CALIBRATION: the exempted site could not be fixed in the mutant",
-    ).not.toBe(WF);
+      WF,
+      "the sentinel grep no longer carries `-a` — the exemption was deleted on the premise that it does; re-open the entry rather than dropping this arm",
+    ).toContain("grep -aq 'ANCESTRY-PROBE-SENTINEL'");
+    const staleReport = (() => {
+      const bare = bareGreps(WF);
+      const probe = "grep -aq 'ANCESTRY-PROBE-SENTINEL'";
+      const n = bare.filter((l) => l.includes(probe)).length;
+      return n !== 1
+        ? `STALE EXEMPTION (matched ${n} bare grep(s), want exactly 1) — if it gained \`-a\`, DELETE the entry: ${probe}`
+        : "";
+    })();
     expect(
-      unexemptedBareGreps(fixed).join("\n"),
-      "CALIBRATION: the exemption survived its own site being fixed — an allowlist that never expires is a waiver",
+      staleReport,
+      "CALIBRATION: a synthetic exemption over an ALREADY-FIXED site was not reported stale — the expiry mechanism has stopped working and a future entry could outlive its defect unseen",
     ).toContain("STALE EXEMPTION");
 
     // (c) The out-of-scope classifications are DELIBERATE, and each is proved to be
@@ -4622,7 +5349,7 @@ describe("WR-04 — the `-a` rule is workflow-wide, not post-verify-wide", () =>
     ).toBe(false);
     expect(
       grepInvocations(WF).some(
-        (g) => g.stdin && g.line.includes("grep -Eiq 'prod'"),
+        (g) => g.stdin && g.line.includes("grep -aEiq 'prod'"),
       ),
       "the marker gate's piped grep was not classified as stdin-fed — the scanner's pipe detection is not doing what its comment says",
     ).toBe(true);
@@ -5283,9 +6010,7 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
         .map((l, j) => ({ l, j }))
         .filter(
           ({ l, j }) =>
-            l.trim() !== "" &&
-            stripped[j].trim() === "" &&
-            !commentish.test(l),
+            l.trim() !== "" && stripped[j].trim() === "" && !commentish.test(l),
         )
         .map(({ l, j }) => `line ${j + 1}: ${l.trim()}`);
       expect(
