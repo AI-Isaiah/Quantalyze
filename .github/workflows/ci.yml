@@ -1540,6 +1540,39 @@ jobs:
     # rule's one permitted raise was already taken above, and 20 is the CEILING,
     # so there is nothing to raise: a future crossing is answered by
     # [REDUNDER-SUBSET-SPLIT], not by a third value.
+    #
+    # ⚖️ RULE RE-APPLIED 2026-09-18 (phase 164.1.1 PROBERCADENCE, plan 01) — NO
+    # CHANGE, reading recorded rather than the decision restated. The corpus
+    # grew to 47 files / 397 arms = **491 legs** (397 + 47 baseline + 47
+    # restore) — one new annotated file, test_prod_prober_cadence.sql, two new
+    # biting arms (G1, S1). Local macOS wall clock, `nohup node
+    # scripts/mutation-runner/run.mjs` over the full corpus: **~975 s (~16.25
+    # min)** at `per-arm lane time: mean 2.0s over 397 arm run(s)`.
+    # ⛔ Not an ubuntu number, and this rule reads MEASURED UBUNTU runs — no
+    # SHA-bound ubuntu run of a 47-file corpus exists yet. The rule's one
+    # permitted raise was already taken above and 20 is the CEILING, so there
+    # is nothing to raise here either. ⚠️ Unlike the 164.7 reading, this local
+    # figure is not comfortably below the ceiling (~16.25 of 20 min) — flagged,
+    # not acted on, because the rule fires on a MEASURED ubuntu run, not a
+    # local projection; the next PR touching this job should capture the
+    # ubuntu wall clock and re-apply the rule against it.
+    # ⚖️ RULE RE-APPLIED 2026-09-18 (phase 164.1.1 PROBERCADENCE, plan 02) — NO
+    # CHANGE, reading recorded rather than the decision restated. The corpus
+    # stays at 47 files (FILES_FLOOR unmoved) / grows to 402 arms = **496 legs**
+    # (402 + 47 baseline + 47 restore) — five new biting arms (O1, A1, N1, U1,
+    # V1) in the SAME file plan 01 added, test_prod_prober_cadence.sql. Local
+    # macOS wall clock, `nohup node scripts/mutation-runner/run.mjs` over the
+    # full corpus at this plan's final SQL bytes: **~1020 s (~17.0 min)** at
+    # `per-arm lane time: mean 2.0s over 402 arm run(s)`.
+    # ⛔ Not an ubuntu number, and this rule reads MEASURED UBUNTU runs — no
+    # SHA-bound ubuntu run of a 47-file/402-arm corpus exists yet. The rule's
+    # one permitted raise was already taken above and 20 is the CEILING, so
+    # there is nothing to raise here either. ⚠️ The local reading is now CLOSER
+    # to the ceiling than the plan-01 reading (~17.0 of 20 min, was ~16.25) —
+    # flagged again, not acted on, for the same reason: the rule fires on a
+    # MEASURED ubuntu run, not a local projection. If the NEXT arms move pushes
+    # a measured ubuntu run over 20, the recorded answer is
+    # [REDUNDER-SUBSET-SPLIT], never a third raise.
     # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
     # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
     # ⚠️ CORRECTION to the two paragraphs above, which say this job has "no `if:`" and
@@ -3553,6 +3586,7 @@ jobs:
           #   test_ledger_refresh_composite_arm.sql          15
           #   test_ledger_refresh_fanout.sql                 18
           #   test_ledger_refresh_staleness.sql               8
+          #   test_prod_prober_cadence.sql                    7
           #   test_retention_crons_safe.sql                   4
           # Re-measured 2026-08-27 (164-06): test_strategy_shares_rls.sql goes
           # 101 -> 106 for the five N1 arms (the bounded-increment rule, its
@@ -3616,12 +3650,18 @@ jobs:
           #       curated computation_error sentence back (criterion 1). Its
           #       applied-ness gate `0` is deliberately NOT in the roster, the
           #       same convention the sibling file's 0a/0b/0c follow.
+          # Re-measured 2026-09-18 (phase 164.1.1 plan 01), ONE move:
+          #   test_prod_prober_cadence.sql, NEW, 7 arms (G1,S1,O1,A1,U1,V1,N1) —
+          #   the matched RED-then-GREEN pair for public.prod_prober_cadence_check().
+          #   A new sentinel-bearing file changes the FILE SET, which is the one
+          #   thing the contract test asserts that no floor can see: both floors
+          #   move UP here, so neither would have gone red on its own.
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=10  # files declaring a sentinel
-          ARMS_FLOOR=206     # 13 + 9 + 6 + 15 + 18 + 8 + 4 + 103 + 7 + 23
+          SENTINEL_FLOOR=11  # files declaring a sentinel
+          ARMS_FLOOR=213     # 13 + 9 + 6 + 15 + 18 + 8 + 7 + 4 + 103 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

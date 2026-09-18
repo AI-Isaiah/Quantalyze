@@ -2632,6 +2632,16 @@ true for 146 and half of 142–145, and **false for 141**.
       OWED: a runner subset mode (`--changed` against a base ref) plus the ci.yml wiring and a
       scheduled full-corpus job. Not started; this entry exists so the ceiling is not discovered
       by a red build.
+      ⭐ **OWNER: Phase 164.4.2 SUBSETSPLIT, routed 2026-09-18 by founder decision.** Unowned from
+      2026-09-05 until then — the entry named the phase that BOOKED it (164.4.1), never one that
+      would fix it. Considered and rejected as homes: Phase 164.6 GATE-HYGIENE, whose criterion 1
+      (the two `ci.yml` integers) the founder DROPPED on 2026-09-17 as fix-or-drop, so routing here
+      would reverse that call; and Phase 164.11 DEPLOYGATE, which gates a Railway DEPLOY on
+      check-suite health — a different mechanism, and folding it in would give the riskier item the
+      lighter review posture.
+      ⚠️ **The trend moved again during Phase 164.1.1**, both readings recorded in `ci.yml`'s own
+      dated block: plan 01 measured 491 legs / ~975 s and plan 02 measured 496 legs / ~1020 s on
+      local macOS, each flagged as closer to the 20-minute ceiling than any prior reading.
 
 - [ ] **`[REDUNDER-GATESELF-UNBOUNDED]` The "mutate the gate's own setup" twin class has NO ceiling, while waivers have `WAIVED_CEILING = 0` — and Phase 164.4.1 more than doubled it (booked 2026-09-05, Phase 164.4.1 code review IN-03).**
       ⛔ **BOOKED, NOT FIXED — deliberately, and the reason is the point.** Introducing a ceiling is
@@ -3606,7 +3616,172 @@ and any widening must say what it does to the approval-gate snapshot.
       `/gsd-phase --insert`, with the ceiling, the PROD-side observer and the
       prove-the-alarm-fires requirement as its success criteria. The false claim has already been
       corrected at its own site (that header comment), not only in planning prose.
+      **Progress note, dated 2026-09-18 (after plan 05) — NOT a closure.** Shipped so far: the
+      PROD-side observer `public.prod_prober_cadence_check()` with the measured ceiling
+      `c_contact_ceiling` (plan 01); the anti-vacuity expansion arms O1/A1/N1/U1/V1 alongside the
+      matched pair G1/S1 — all seven proven RED on a disposable pg-lane, `ARMS_FLOOR` raised to
+      402 (plan 02); the terminal-channel checkpoint answered — `a-sentry-already-set`, `SENTRY_DSN`
+      confirmed set on Railway analytics-service production (plan 03); the guarded route
+      `POST /api/prober-cadence-alert` with rate-limited Sentry escalation and a calibrated test
+      suite (plan 04); and the go-live runbook plus criterion 5's disposed residual (plan 05, see
+      `[PGCRON-LIVENESS-UNWATCHED-01]` below). **What remains: the live registration itself** —
+      `cron.schedule('prod_prober_cadence_check', …)` against PROD and the same-session manifest
+      re-capture, owned by plan 06. ⛔ This checkbox stays unticked until that happens: the entry's
+      own text says the observer must live where a scheduler that actually fires does, and until
+      the job is registered on PROD, nothing observes anything.
 
+
+### PGCRON-LIVENESS-UNWATCHED-01 — criterion 5's turtle: nothing watches PROD `pg_cron` itself (booked 2026-09-18)
+
+- **`[PGCRON-LIVENESS-UNWATCHED-01]` Nothing in this repository periodically checks whether PROD's
+  `pg_cron` itself is still executing jobs, independently of any specific job's own body.**
+  ⛔ **MEASURED 2026-09-18** (`164.1.1-RESEARCH.md`). `cron.job_run_details` is referenced as
+  operator-visible in several migrations, and one comment states plainly that it is rarely
+  scraped by hand. No SQL, Python or TypeScript anywhere in this repository periodically checks
+  `pg_cron`'s own liveness independently of a specific job's body — every existing gate (the
+  prober's four arms, this phase's own observer, every SQL mutation gate over `cron_runs`) asks
+  "did THIS job run", never "is the SCHEDULER itself still alive".
+  **The consequence, stated exactly, without softening and without inflating.** If PROD Postgres
+  or the `pg_cron` extension itself stops, `public.prod_prober_cadence_check()` (this phase's own
+  observer, Phase 164.1.1 plan 01) stops with it — and it is then silent for the SAME reason the
+  thing it observes (the prod-prober) would be. That is the turtle one level down, and Phase
+  164.1.1 does not close it.
+  ⭐ **DISPOSITION: ACCEPTED as a named residual**, on two grounds.
+  1. **Narrowness.** A total Postgres outage is a whole-application incident with many louder
+     symptoms than a missing alert — every read path, every write path and every other cron job
+     stops at the same instant. What is genuinely uncovered by this phase is the narrower case:
+     `pg_cron` degrading silently while the rest of Postgres keeps serving.
+  2. **The alternative considered and rejected.** A fifth prober arm reading the observer's own
+     recency was considered. Rejected because the prober shares GitHub Actions' own unreliability
+     — the exact 27% delivery rate that is this phase's entire premise — so a GitHub-hosted
+     watchdog cannot close a gap in a scheduler that GitHub itself might have dropped the
+     watchdog's own run for. `164.1.1-CONTEXT.md` (CTX-02) already rejected exactly this shape for
+     the prober's own contact-write design, for the same reason. This is a considered-and-rejected
+     option, not an unexamined one.
+  **The MANUAL path, marked manual in this same sentence and never elsewhere as coverage.** The
+  observer writes one `public.cron_runs` row per tick under `cron_name = 'prod_prober_cadence_check'`
+  (D-06), so a human running `SELECT public.latest_cron_success('prod_prober_cadence_check');` —
+  the same admin point query the runbook's own pre-flight checklist already uses — sees its
+  silence if `pg_cron` itself stops calling it. ⛔ That is a query a human must decide to run. It
+  is NOT coverage, NOT monitoring, and NOT a mitigation — it is the exact property ("nobody
+  looks") this phase's whole subject is about, one level down.
+  **Trigger:** the next time PROD `pg_cron`'s own liveness becomes an active concern — an
+  incident, or a deliberate proposal to instrument scheduler-level liveness. **Owner:**
+  UNROUTED, deliberately — criterion 5 asks that this choice be STATED, not that the gap be
+  closed. Inventing a destination phase here would record a commitment nobody made. ⛔ Do not let
+  this sit as a bare TODOS line with no trigger: give it a phase via `/gsd-phase --insert` when
+  the trigger above fires.
+  **Reachable from:** this entry, and `docs/runbooks/prod-prober-cadence-go-live.md` § "What this
+  runbook deliberately does not cover" — a residual named in only one place is the same defect
+  this repository has a measured incident of (a scope amendment touching one file while the
+  refused claim went on standing in the others).
+
+
+### PROBER-ALERT-DELIVERY-UNVERIFIED-01 — nothing automated watches whether the new alarm's own POST was delivered (booked 2026-09-18)
+
+- **`[PROBER-ALERT-DELIVERY-UNVERIFIED-01]` `public.prod_prober_cadence_check()`'s own
+  `net.http_post` to `POST /api/prober-cadence-alert` is not watched by anything automated — the
+  same shape as `[PGCRON-LIVENESS-UNWATCHED-01]` above, one level down.**
+  ⛔ **MEASURED 2026-09-18** (164.1.1 code review, converged by two independent reviewers).
+  `scripts/prod-prober/arms/cron-obs.mjs:104` — the ONLY automated reader of `net._http_response`
+  in this repository — hardcodes `WHERE jobname = 'match_engine_cron'`. It will never fire for
+  `prod_prober_cadence_check`, registered or not.
+  **The consequence, stated exactly.** The function itself never checks its own post's response —
+  deliberately, per its own comment ("a raise here rolls back the observer row written in step 4,
+  so a tick that could not deliver leaves NO row"). If `analytics_service_key` goes stale the same
+  way it did historically (the CRON-DRIFT-01 shape — a stale key producing silent 401s behind a
+  green history), the new cadence alarm can enqueue a 401 that nothing polls for, while
+  `cron_runs`, `cron.job_run_details` and CI all read green.
+  ⭐ **DISPOSITION: ACCEPTED as a named residual**, on one ground: **the alternative considered and
+  rejected.** Extending `cron-obs.mjs`'s `CRON_OBS_SQL` (or adding a sibling arm) to also watch
+  `jobname = 'prod_prober_cadence_check'` was considered and NOT taken here. `net._http_response`
+  carries no `jobid` — the arm's own fixture
+  `scripts/prod-prober/fixtures/cron-obs/ambiguous-window.json` documents that its join is
+  time-only and cannot attribute a response when two land in the same window. Doing this correctly
+  (a real per-job attribution mechanism) is phase-sized work, not a review fix.
+  **The MANUAL path, marked manual in this same sentence and never elsewhere as coverage.** An
+  operator can run the `net._http_response` query in
+  `docs/runbooks/prod-prober-cadence-go-live.md` § "First tick — what to expect" by hand. ⛔ That
+  is a query a human must decide to run. It is NOT coverage, NOT monitoring, and NOT a
+  mitigation — it is the exact property ("nobody looks") this phase's whole subject is about, one
+  level down.
+  **Trigger:** the next time `cron-obs`'s time-only attribution gap is closed for
+  `match_engine_cron` (making a per-job extension cheap to add here too), or an incident on this
+  specific alarm's delivery. ⭐ **FOUNDER DECISION 2026-09-18: stays UNROUTED.** Offered a phase at the 164.1.1 review gate — the orchestrator recommended routing it, on the ground that this is the phase's own defect class one layer down and that an unrouted entry reliably goes undone (`[REDUNDER-SUBSET-SPLIT]` sat unowned 13 days). The founder chose unrouted. Recorded so a later reader sees a decision, not an oversight. **Owner:** UNROUTED, deliberately — same reasoning as
+  `[PGCRON-LIVENESS-UNWATCHED-01]`: this entry states the choice, it does not commit anyone to
+  closing the gap. ⛔ Do not let this sit as a bare TODOS line with no trigger: give it a phase via
+  `/gsd-phase --insert` when the trigger above fires.
+  **Reachable from:** this entry, and `docs/runbooks/prod-prober-cadence-go-live.md` § "What this
+  runbook deliberately does not cover".
+
+
+### BASELINE-REGEN-164.1.1 — `baseline.sql` owes a regeneration once `prod_prober_cadence_check` applies (booked 2026-09-18)
+
+- [ ] **`[BASELINE-REGEN-164.1.1]` `scripts/baseline-content-drift-check.mjs` reports
+      `SNAPSHOT_MISSING prod_prober_cadence_check/0` and will keep reporting it until
+      `supabase/schema/baseline.sql` is regenerated from PROD after PR #815 applies.**
+      ⭐ **This is the DOCUMENTED, EXPECTED state for a PR that adds a function-creating
+      migration, not a new defect.** The precedent is written into this file already, in the
+      `computation_error_source` entry: *"the baseline is a generated snapshot of APPLIED PROD
+      schema, and the migration has not merged, so regenerating it now would encode a
+      not-yet-true state."* Regenerating on the branch would assert that PROD runs a function
+      PROD has never seen.
+      **Measured at HEAD 2026-09-18:** `functions compared 123 — MATCH 119, DRIFT 3,
+      SNAPSHOT_MISSING 1`. The 3 DRIFT rows are `[DRIFT-06]`'s allowlisted trio and are
+      unrelated; the 1 SNAPSHOT_MISSING is this.
+      ⛔ **DO NOT clear this by adding a `CONTENT_DRIFT_ALLOWLIST` row.** The list may only
+      shrink, and this is not a PROD-vs-repo divergence to be pinned — it is a temporal gap that
+      closes by itself on the next regeneration. Adding a row would convert a self-closing gap
+      into a permanent exception.
+      **The act that clears it:** a baseline regeneration from PROD taken AFTER the apply, which
+      also moves the sha256 in `supabase/schema/BASELINE.md` — the same follow-up release shape as
+      `29f852f7` (v0.77.46.1, after the 164.5.1.1 apply) and `88f395cd` (v0.77.34.2, after the
+      164.8.6 apply). It also clears the `NAME_SET_RATCHET` row this phase added to
+      `scripts/dump-sql-functions.ts`, which carries the identical clearing condition.
+      ⚠️ Same family as `[164.8-PUSH-RACE-VAC08]`: on a PR that ADDS a migration, gates carrying
+      applied-ness probes are RED until merge, by construction, because apply-on-merge was chosen
+      over apply-on-PR.
+      ⛔ **THIS IS ON THE CRITICAL PATH FOR THE DEPLOY, NOT JUST HYGIENE — and that is the half
+      that is easy to miss.** `sql-gate-lint` is BLOCKING in the `frontend` aggregator (Phase
+      164.3 / VAC-03, wired into BOTH `needs:` and the result loop), and `ci.yml:2205` states the
+      consequence in its own words: *"Railway waits on main CI and SKIPS the analytics-service
+      deploy when it is red."* So after PR #815 merges, main CI stays red on this one finding, and
+      **`POST /api/prober-cadence-alert` — the alarm's last hop, added by this very phase — does
+      not deploy** until the regeneration lands.
+      **Required ordering, therefore:** merge #815 → migration applies to PROD → regenerate
+      `baseline.sql` from PROD → main CI green → Railway deploys the route → **only then** run
+      Plan 06's live `cron.schedule(...)`. Registering the cron before the route is deployed would
+      point the observer at an endpoint that does not exist yet.
+
+### VAULTTICK-MANIFEST-COUNT-STALE-01 — an APPLIED migration's comment cites a census that has since moved (booked 2026-09-18)
+
+- [ ] **`[VAULTTICK-MANIFEST-COUNT-STALE-01]` `supabase/migrations/20260911120000_vault_tick_hardening.sql:352`
+  reads "MEASURED, all 14 rows of `scripts/prod-prober/cron-manifest.json`". The manifest now
+  holds 15 rows. The file is APPLIED and therefore byte-frozen, so the drift cannot be corrected
+  where it stands.**
+  ⛔ **MEASURED 2026-09-18** during Phase 164.1.1's migration-review gate, and found by the fixer
+  rather than by any gate — it flagged the line and correctly declined to edit it.
+  ⭐ **The CONCLUSION is unaffected and still true: every row is `username: postgres`** (15/15,
+  re-measured 2026-09-18). Only the COUNT drifted. This is a stale census figure, not a false
+  claim about behaviour, and nothing depends on the number — the argument the comment makes
+  ("the scheduler runs as postgres, so the owner needs no GRANT") holds at any row count.
+  **Why it is booked at all.** Phase 164.1.1's new migration cites the same manifest and says
+  **15**, deliberately. So two migrations in the tree now state different counts for the same
+  file, and a future reader comparing them has no way to tell which is stale without going to
+  the manifest. That is the `[164.7-CITATION-DRIFT-01]` class exactly, whose recorded remedy is
+  to cite by symbol rather than re-number prose that will drift again.
+  ⭐ **DISPOSITION: ACCEPTED as a named residual**, on the alternative considered and rejected.
+  A forward migration whose entire payload is a `COMMENT` correction would add an applied,
+  permanent file to the ledger to fix a number nothing reads — disproportionate, and it would
+  drift again at row 16. ⛔ Editing the applied file is not an option: applied migrations stay
+  BYTE-IDENTICAL, which is the rule that makes the whole ledger usable as evidence.
+  **The MANUAL path, marked manual in this same sentence and never elsewhere as coverage:** a
+  reader who needs the live figure runs
+  `node -e 'console.log(require("./scripts/prod-prober/cron-manifest.json").length)'` against the
+  manifest, which is the source of truth both comments are quoting.
+  **Trigger:** if a future phase writes a forward migration touching `match_engine_cron_tick()`'s
+  ACL for an independent reason, correct the count in that same act. Do not raise one for this.
+  **Owner:** UNROUTED. **Reachable from:** this entry only — the applied file cannot point at it.
 
 ### FANOUT-FAILBRANCH-UNEXERCISED-01 / 164.5.1-TODOS-DISPOSITION-OWED — the two items Phase 164.5.1 leaves open (booked 2026-09-17)
 

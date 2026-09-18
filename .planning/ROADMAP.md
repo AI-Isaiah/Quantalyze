@@ -845,6 +845,17 @@ Plans:
 - [x] 164.4-10-PLAN.md — Batch 7: the last four non-mixed files (8); FILES_FLOOR → **32**, ARMS_FLOOR → **247** (MEASURED 2026-09-04, exit 0, `arms: 247/247/0`, 0 waivers); `pending:` names **8** files — the 7 mixed ones plus test_compute_jobs_error_kind_copy_parity.sql, deferred to Phase 164.4.1. ⚠️ The 33 / ≈250 / 7 this row used to project came from an assumed six-file wave 10 that landed five. ✅ LANDED PR #742 → `75e58cb1` (v0.77.11.0), **23/23 SHA-bound green** at head `4591b17d`, `sql-mutation` run 33882082307 **464 s** on ubuntu. ⏱️ That wall clock confirms the LEGS model and not the arms model: 247 arms but 311 legs (247 + 32 baseline + 32 restore), so ≈334 s of lane time at ≈1.07 s/leg plus ≈130 s job overhead. Projected phase end — 262 arms / 340 legs ≈ **470 s ≈ 7.8 min**, inside `timeout-minutes: 15`. Plan 11 owes ci.yml the corrected formula (legs, not arms).
 - [x] 164.4-11-PLAN.md — Batch 8: the seven ⚠️ mixed files (15), waivers only via founder checkpoint; end state FILES_FLOOR **39**, ARMS_FLOOR **262** (MEASURED 2026-09-04, exit 0, `coverage: files 39/71`, `arms: 262/262/0`, `biting: 262`, tallies agree, **0 waivers** — cumulative 0 across all eight arms moves), `pending: 1` naming exactly test_compute_jobs_error_kind_copy_parity.sql, 27 non-idiom + 4 lane-blocked files printed by name, final prose sweep done. ⚠️ 39 / 262 / 1, NOT the 40 / ≈265 / 0 of SCOPE AMENDMENT #2 — that predates plan 09's founder-decided pg_cron deferral, and the amendment is now corrected in ROADMAP+STATE. ci.yml's timeout projection re-derived on a LEGS model (arms + 2 × files); `timeout-minutes` stays 15. ✅ LANDED PR #743 → `3ed6919e` (v0.77.12.0), **24/24 SHA-bound green** at head `e0d05068` (`frontend`, `secret-scan`, `sql-mutation`, `sql-gate-lint`, `plan-anchor-verify` all success). Merged 2026-09-04T19:50:39Z via `/land-and-deploy`.
 
+### Phase 164.4.2: SUBSETSPLIT — `sql-mutation` runs only the CHANGED gate files on a PR, with a scheduled full-corpus run that still enforces the floors, because `timeout-minutes` has taken its ONE allowed raise and 20 is a declared CEILING. Owner of TODOS `[REDUNDER-SUBSET-SPLIT]`, booked 2026-09-05 by Phase 164.4.1 and unowned since. NOT hygiene: when `sql-mutation` times out the job dies and EVERY SQL gate stops being enforced — those gates pin RLS, tenant isolation and ledger correctness, so the failure mode is the controls silently stop firing, which is this milestone whole subject. MEASURED TREND moving the wrong way: run 33961609382 @ 1aa8bb70 = 363 arms / 451 legs / 567 s (9.45 min); run 33973362161 @ ab0d5644 = 361 arms / 449 legs / 646 s (10.8 min) — FEWER legs, SLOWER run, ~80 s of pure runner variance. Phase 164.1.1 then added arms twice more: plan 01 measured 491 legs / ~975 s and plan 02 measured 496 legs / ~1020 s locally, both flagged in ci.yml as closer to the ceiling than any prior reading. SCOPE: (1) a runner subset mode (--changed against a base ref) in scripts/mutation-runner/run.mjs; (2) the .github/workflows/ci.yml wiring that selects it on PRs; (3) a scheduled full-corpus job that still enforces FILES_FLOOR/ARMS_FLOOR, since the subset cannot. LOCKED (164.4-CONTEXT.md): 20 minutes is the CEILING — if a MEASURED ubuntu run reaches it, the answer is this phase, NEVER a third timeout-minutes value. The split MUST BE PRINTED on every run, never silent: a subset that does not say it is a subset is the same defect class as a gate reporting PASS having measured nothing. (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 164.4
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.4.2 to break down)
+
 ### Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral (INSERTED)
 
 **Goal:** The pg-lane can host pg_cron, so the `[REDUNDER-PGCRON]` deferral is RETIRED
@@ -1161,11 +1172,37 @@ Plans:
 
 **Requirements**: TODOS entry `[PROBER-CADENCE-UNDELIVERED-01]` — this phase is its named owner.
 **Depends on:** Phase 164.1 (the prober it observes), Phase 164.7 (the settled Vault-backed `cron.job` mechanism any new PROD cron row must consume rather than invent a second answer to)
-**Plans:** 0 plans
+**Plans:** 4/6 plans executed
+
+⛔ **Criterion 4 is ALREADY MET** by commit `126517a8`, which corrected the workflow header at its own
+site. Plan 03 pins it with a calibrated test and does NOT re-edit it — re-deriving the figures would
+risk stomping correct language with a restatement that drifts.
+
+⚠️ **Two findings the research surfaced that the plans dispose of explicitly, per criterion 5's
+spirit.** (1) The stale-alert sentence on `public.cron_runs` describes an automated alert nothing
+implements: `latest_cron_success()` has ZERO programmatic callers and one real MANUAL reader. Plan 01
+keeps the function and corrects the claim at its own site, so the schema carries one automated monitor
+and one documented admin point query rather than two unexplained answers. (2) Nothing in this
+repository watches PROD `pg_cron`'s own liveness, so the observer shares one level up the failure mode
+it guards. Plan 05 books that as an ACCEPTED, NAMED residual (`[PGCRON-LIVENESS-UNWATCHED-01]`),
+reachable from both TODOS.md and the runbook.
+
+⛔ **The live `cron.schedule(...)` is a runbook-driven, founder-gated op, never a migration** — this
+repo's settled convention (Phase 164.5.1's PROD session is the precedent). The
+`scripts/prod-prober/cron-manifest.json` re-capture is a STEP OF THAT SAME SESSION: a job registered
+without the manifest moving makes the prober's own `cron-drift` arm correctly report a fresh
+regression this phase caused.
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.1.1 to break down)
+- [x] 164.1.1-01-PLAN.md — TRACER: one prober run's contact reaches a PROD-side ceiling verdict end to end. The forward migration creating `public.prod_prober_cadence_check()` with the derived ceiling and the corrected table comment, the prober's unconditional contact write, a lane `net` stand-in so the alarm's post is OBSERVED rather than inferred, the matched pair (stale ⇒ posts / fresh ⇒ silent), and both mutation floors moved from a measured run. (wave 1)
+- [x] 164.1.1-02-PLAN.md — The five arms a green pair can hide: an ABSENT contact row read as healthy, a fresh row under another `cron_name` masking the prober's silence, the observer's own liveness row, the second destination layer, and a post built over a NULL key. `ARMS_FLOOR` re-measured. (wave 2)
+- [x] 164.1.1-03-PLAN.md — CHECKPOINT: is `SENTRY_DSN` set on the Railway analytics-service? The alarm's last hop is decided by measurement, not inference. Plus the calibrated criterion-4 pin. (wave 1, `autonomous: false`) — DONE 2026-09-18: `SENTRY_DSN` IS set (option `a-sentry-already-set`, founder-measured), criterion 4 pinned with an observed-RED calibration twin, `.github/workflows/prod-prober.yml` byte-unchanged. Commits `9a1b0a8b`/`3ce0d461`.
+- [x] 164.1.1-04-PLAN.md — The alarm's far end: one guarded `/api` route in analytics-service implementing the escalation the checkpoint recorded, with every load-bearing behaviour observed RED under a neuter. (wave 2)
+- [x] 164.1.1-05-PLAN.md — `docs/runbooks/prod-prober-cadence-go-live.md` (blast radius, blocking pre-flight, the statement, the same-session manifest re-capture, rollback) and criterion 5's named residual. (wave 3)
+- **SHIPPED 5/6 as v0.77.51.0 (2026-09-18).** Two workflow deviations taken and recorded in `164.1.1-CONTEXT.md` `<deviations>`: **D-SHIP-01** the ship-note omits the CI skip trailer `ship.md`'s `track_shipping` step would have written (CLAUDE.md forbids it; a squash carries it into `main`), and **D-SHIP-02** the `verification.status` gate was WAIVED, not satisfied — VERIFICATION.md needs Plan 06, Plan 06 needs this migration applied, and the migration applies on merge. VERIFICATION.md is owed the moment Plan 06 executes.
+- ⛔ **PLAN 06 IS BLOCKED ON A BASELINE REGENERATION, not just on the merge.** `sql-gate-lint` is blocking in the `frontend` aggregator and `baseline-content-drift` reports `SNAPSHOT_MISSING prod_prober_cadence_check` until `baseline.sql` is regenerated from PROD after the apply. Main CI therefore stays red, and `ci.yml:2205` records what that costs: Railway SKIPS the analytics-service deploy when main CI is red — so the alarm's last hop route does not reach PROD. Required order: merge → migration applies → regenerate baseline → main green → route deploys → THEN plan 06. Booked as `[BASELINE-REGEN-164.1.1]`.
+- [ ] 164.1.1-06-PLAN.md — The live PROD session behind a decision checkpoint: register, re-capture the manifest in the same act, observe the first tick, record it auditably, close `[PROBER-CADENCE-UNDELIVERED-01]`. (wave 4, `autonomous: false`)
 
 ### Phase 164.2: CURATED-COPY — the curated failure sentence must reach the user (INSERTED)
 

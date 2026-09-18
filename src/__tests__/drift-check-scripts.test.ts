@@ -4525,7 +4525,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=10 and ARMS_FLOOR=206 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=11 and ARMS_FLOOR=213 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -4578,9 +4578,24 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // file-scoped run of the contract test that prompted the ci.yml edit passed
     // while this one still said 195. Two separate mirrors of the same two
     // integers, and only running everything shows both.
+    //
+    // MOVED 2026-09-18 (Phase 164.1.1 plan 01), 10/206 -> 11/213. BOTH move, and
+    // that combination is the one this pair is designed to tell apart: a new FILE
+    // joined the sentinel-bearing set — supabase/tests/test_prod_prober_cadence.sql
+    // with 7 arms (G1,S1,O1,A1,U1,V1,N1) — so the file count moves AND the arm sum
+    // follows it. Contrast 164.8.6 above, where arms grew inside existing files and
+    // SENTINEL_FLOOR correctly did not move.
+    // ⚠️ THE WARNING DIRECTLY ABOVE PREDICTED THIS EXACT MISS, AND IT HAPPENED
+    // AGAIN ANYWAY. The ci.yml edit was prompted by ci-anti-skip-gate.contract
+    // .test.ts going red; that contract test was run file-scoped, then the whole
+    // contracts/ directory was run — both green — and this mirror, which lives in
+    // src/__tests__/ and not in contracts/, stayed at 10/206 until the FULL suite
+    // ran in CI. A directory-scoped run is not a full run. The fourth-place rule
+    // below is the durable answer; re-reading it before editing ci.yml is cheaper
+    // than another CI round trip.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=10", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=11", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -4591,7 +4606,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=206", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=213", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

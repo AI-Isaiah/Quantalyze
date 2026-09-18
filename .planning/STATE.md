@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 159
-current_phase_name: RANK — Public-ranking integrity
-status: planning
-stopped_at: Phase 164.1 complete, ready to plan Phase 159
-last_updated: "2026-09-17T22:11:56.333Z"
+current_phase: 164.1.1
+current_phase_name: PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it (INSERTED)
+status: executing
+stopped_at: Completed 164.1.1-04-PLAN.md
+last_updated: "2026-09-18T09:50:25.709Z"
 last_activity: 2026-09-18
-last_activity_desc: Phase 164.1 complete, transitioned to Phase 159
-state_head: 20fa2463daf35e4210fb5fdc57389bbf2e4d561d
+last_activity_desc: Phase 164.1.1 plan 04 executed — the guarded escalation route shipped and calibrated (all four load-bearing behaviours neutered, observed RED, restored)
+state_head: 06ccd70358a369492e38274cb7e5932f762f1731
 progress:
-  total_phases: 43
-  completed_phases: 19
-  total_plans: 195
-  completed_plans: 188
-  percent: 44
+  total_phases: 44
+  completed_phases: 20
+  total_plans: 201
+  completed_plans: 192
+  percent: 45
 ---
 
 ## ⭐ STATE lineage
@@ -172,11 +172,107 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-⭐ **RECONCILED 2026-09-09. THIS block is the current position and SUPERSEDES everything
-below it in this section, including the 2026-09-06 `Phase: 164.2 (CURATED-COPY)` pointer
+⭐ **RECONCILED 2026-09-18 (plan 05). THIS block is the current position and SUPERSEDES the
+plan-04 block immediately below, which is retained as lineage. This update ADDS plan 05's
+completion.**
+
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a
+scheduler that cannot silently drop it (INSERTED)) — EXECUTING
+Plan 05 DONE (`164.1.1-05-SUMMARY.md`, commits `7ae2fe98` (docs, the go-live runbook), `988463eb`
+(docs, `TODOS.md[PGCRON-LIVENESS-UNWATCHED-01]` + the plan-05 progress note) and `33144af6`
+(docs, the runbook's placeholder replaced so the residual is reachable from both surfaces) on
+branch `feat/164.1.1-probercadence`). Ships `docs/runbooks/prod-prober-cadence-go-live.md` —
+blast radius before the pre-flight, five blocking pre-flight checks, the exact
+`cron.schedule('prod_prober_cadence_check', '20 * * * *', …)` statement (never a migration), the
+manifest re-capture as step 2 of the SAME session, first-tick expectations, watching it (routed
+through plan 03's `a-sentry-already-set` checkpoint outcome), and a two-part rollback. Criterion
+5's turtle is named, measured and disposed: `TODOS.md[PGCRON-LIVENESS-UNWATCHED-01]` — ACCEPTED
+as a named residual (narrowness + the rejected fifth-prober-arm alternative), the manual
+`latest_cron_success()` reading marked manual and never coverage, left UNROUTED by design.
+`[PROBER-CADENCE-UNDELIVERED-01]` carries a dated progress note and its checkbox stays open —
+this plan wrote the runbook, it did not execute it; nothing touched PROD, a migration, or
+`scripts/prod-prober/cron-manifest.json`. Next: Plan 06 — the founder-run live session that
+executes this runbook and closes `[PROBER-CADENCE-UNDELIVERED-01]`.
+
+⭐ **RECONCILED 2026-09-18 (plan 04). THIS block was the current position from plan 04's close
+until the block above superseded it. This update ADDS plan 04's completion.**
+
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a
+scheduler that cannot silently drop it (INSERTED)) — EXECUTING
+Plan 04 DONE (`164.1.1-04-SUMMARY.md`, commits `524b300f` (feat, the guarded
+`POST /api/prober-cadence-alert` route) and `06ccd703` (test, calibrated suite + a
+Rule 2 quarantine-roster fix in `test_limiter_route_coverage.py`) on branch
+`feat/164.1.1-probercadence`). Implements the 164.1.1-03 checkpoint's recorded outcome
+(`a-sentry-already-set` — `SENTRY_DSN` confirmed set on Railway analytics-service production,
+presence only, founder-measured 2026-09-18): a rate-limited `sentry_sdk` escalation (one per
+hour) plus an unconditional structured log on every occurrence, guarded by the existing
+`SERVICE_KEY` middleware, zero new credential. All four load-bearing behaviours (unconditional
+log, escalation window, escalation-failure containment, body validation) were manually
+neutered, observed RED by name, and restored byte-identical (`cmp`) — see the plan's SUMMARY
+calibration log. Full analytics-service suite green (5877 passed, 0 failed); CI-scoped strict
+mypy (`services/ routers/ models/`) clean. Standing caveat, NOT resolved by this plan: delivery
+still depends on a Railway environment variable outside this repository's control. Next:
+whichever of Plans 05/06 the orchestrator dispatches — see their own PLAN files for current
+status.
+
+⭐ **RECONCILED 2026-09-18 (plan 02). THIS block was the current position from plan 02's close
+until the block above superseded it. This update ADDS plan 02's completion — it does not
+assert anything about plan 04's status, tracked separately in its own PLAN/SUMMARY files at
+the time this block was written; the block above now resolves that.**
+
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a
+scheduler that cannot silently drop it (INSERTED)) — EXECUTING
+Plan 02 DONE (`164.1.1-02-SUMMARY.md`, commits `165173b0` (test, five expansion arms
+O1/A1/N1/U1/V1 in `test_prod_prober_cadence.sql`) and `6088811d` (test, `ARMS_FLOOR` 397→402
++ every sibling pin) on branch `feat/164.1.1-probercadence`). All seven arms of
+`test_prod_prober_cadence.sql` now proven RED on a real pg-lane; full-corpus mutation run
+confirms `arms 402/402/0`, `biting 402`, `✅ No defects`, `FILES_FLOOR` unmoved at 47,
+`WAIVED_CEILING` still 0. No migration file touched. Plans 04/05/06 (the escalation route, the
+live `cron.schedule` op) can build on the now-fully-hardened observer function without
+re-deriving its edge-case behaviour. Next: whichever of the remaining plans the orchestrator
+dispatches — see their own PLAN/SUMMARY files for current status.
+
+⭐ **RECONCILED 2026-09-18 (plan 03). THIS block was the current position from plan 03's close
+until the block above superseded it. THIS update only ADDS plan 03's completion — it does not
+assert anything about plan 02's status, which was tracked separately in its own PLAN/SUMMARY
+files at the time this block was written; the block above now resolves that.**
+
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a
+scheduler that cannot silently drop it (INSERTED)) — EXECUTING
+Plan 03 DONE (`164.1.1-03-SUMMARY.md`, commits `9a1b0a8b` (test, criterion-4 pin +
+calibration twin, `.github/workflows/prod-prober.yml` byte-unchanged) and `3ce0d461` (docs,
+plan close-out) on branch `feat/164.1.1-probercadence`). Plan 03's checkpoint (Task 1,
+`gate="blocking-human"`) was answered before this executor ran: `SENTRY_DSN` IS set on Railway
+→ analytics-service → production → Variables, option `a-sentry-already-set`, founder-measured
+2026-09-18 — presence only, no value recorded anywhere. Standing caveat: delivery still
+depends on a variable outside this repository, so a later unset would silently re-open the gap;
+neither this line nor any future plan may claim the alarm permanently reaches a human without
+that caveat attached. Plan 04 (the escalation route) is now unblocked to implement against
+this answer. Next: whichever of Plan 02 / Plan 04 the orchestrator dispatches next — see their
+own PLAN/SUMMARY files for current status.
+
+⭐ **RECONCILED 2026-09-18 (plan 01). THIS block was the current position from plan 01's close
+until the block above superseded it, including the 2026-09-09 block that reconciled the one
+before it. Nothing below is deleted — it is lineage.**
+
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it (INSERTED)) — EXECUTING
+Plan: 1 of 6 DONE (`164.1.1-01-SUMMARY.md`, commits `d1d6ca63`/`2e03771b`/`16e962ad` on branch
+`feat/164.1.1-probercadence`). Next is Plan 02. Plan 01 shipped `public.prod_prober_cadence_check()`
+(forward migration, no `cron.schedule(...)`), the prober's own unconditional contact write, a
+two-arm matched-pair SQL gate proven RED on a disposable pg-lane, and both mutation floors moved
+from a measured full-corpus run (`FILES_FLOOR` 46→47, `ARMS_FLOOR` 395→397) with every sibling pin
+(`gate-family-meta.test.ts`, `mutation-runner-floors.test.ts`, `mutation-annotation-parser.test.ts`,
+a new dated `ci.yml` leg-count entry) moved in the same commit as Task 3. Full verification passed:
+`dump-sql-functions --self-test/--check`, `prod-prober --self-test` (83/83), full-corpus
+`mutation-runner` (`✅ No defects`, `files 47/74`, `arms 397/397/0`), `lint-sql-gates` (0 findings),
+and all four sibling vitest files (310/310). No older migration file changed; nothing ran
+`supabase db push`/`db reset`/`--project-ref`/`--db-url`.
+
+⭐ **RECONCILED 2026-09-09. THIS block was the current position from 2026-09-09 until the block
+above superseded it on 2026-09-18, including the 2026-09-06 `Phase: 164.2 (CURATED-COPY)` pointer
 that reconciled the block before it. Nothing below is deleted — it is lineage.**
 
-Phase: 159 of 4 (RANK — Public-ranking integrity)
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it (INSERTED)) — EXECUTING
 Branch: `phase-164.8-05-test-first-migrate` (carries Phase 164.8 plan 05 AND 164.8.1's
 close-out; 12 commits ahead of `origin/main`, NOT yet pushed).
 Version: `0.77.30.0` (VERSION and package.json byte-equal), one unified CHANGELOG entry
@@ -206,7 +302,7 @@ Routed OUT of 164.8.1 to Phase 164.9 (all three carry ROUTED HERE blocks in the 
 `[164.8-PUSH-RACE-VAC08]`.
 
 Phase: 164.2 (CURATED-COPY) — IN PROGRESS, planning not started
-Plan: Not started
+Plan: 1 of 6
 ⛔ 2026-09-06: this line deliberately carries NO `N of M` pair. Written as `0 of 0` it parsed, and
 `state.advance-plan` then answered `reason: last_plan` / `status: ready_for_verification` — an
 unplanned phase reported as ready to verify (measured in a sandbox copy). With no numeric pair the
@@ -321,7 +417,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Ready to plan
+Status: Executing Phase 164.1.1
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -337,7 +433,7 @@ Status: Ready to plan
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-18 — Phase 164.1 complete, transitioned to Phase 159
+Last activity: 2026-09-18 — Phase 164.1.1 execution started
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -795,7 +891,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [████░░░░░░] 44%
+Progress: [████░░░░░░] 45%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -999,6 +1095,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.5.1 P05 | ~25min | 2 tasks | 2 files |
 | Phase 164.5.1 P07 | ~50min | 2 tasks | 3 files |
 | Phase 164.5.1 P08 | ~35min | 3 tasks | 4 files |
+| Phase 164.1.1 P01 | 87 min | 3 tasks | 4 created, 8 modified |
+| Phase 164.1.1 P04 | ~55 min | 2 tasks | 3 modified |
+| Phase 164.1.1 P05 | ~50 min | 3 tasks | 1 created, 2 modified |
 
 ## Accumulated Context
 
@@ -1101,6 +1200,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.6.2 edited: edited fields: success_criteria (criteria 9 and 11) — [164.6.2-RAISE-LAST-SHAPE-ONLY] MOVED OUT to Phase 164.6.4; plan 06 (question THREE R2) is now the ONLY item holding this phase open ✅ and the moved item is CLOSED in 164.6.4 by `4f1963fd` (2026-09-15)
 - Phase 164.5.1.1 inserted after Phase 164.5.1: FANOUTCOHORT — the fan-out selected ZERO candidates on its first live tick because every PROD strategy is status='private'; blocks 164.5.1's verification (URGENT)
 - Phase 164.1.1 inserted: PROBERCADENCE inserted after 164.1: the prober declares hourly and delivers 27% (75/273 over 273.4h), median gap 3.28h, max 7.13h — worse than the 6h window its own workflow comment rejects by name. Owner of TODOS [PROBER-CADENCE-UNDELIVERED-01].
+- Phase 164.4.2 inserted after Phase 164.4: Owner phase for TODOS [REDUNDER-SUBSET-SPLIT], unowned since 2026-09-05. sql-mutation timeout-minutes has taken its ONE allowed raise; 20 is a declared CEILING and the next escalation is a subset split, never a third value. Inserted 2026-09-18 while Phase 164.1.1 was mid-execution — the STATE current-phase pointer was deliberately NOT repointed.
 
 ### Decisions
 
@@ -1111,6 +1211,12 @@ Load-bearing sequencing (real dependencies, do not reorder):
      every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
      The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
      FIRST match is used as the append target, and they are historical archives. -->
+
+*(execution-time, Phase 164.1.1 PROBERCADENCE — plan 05, the go-live runbook and the disposed residual, 2026-09-18)*
+
+- **D-164.1.1-05-A — the runbook's criterion-5 residual reference was written as a placeholder in task 1 and filled in by a separate, third commit (task 3), rather than folded into task 1.** This repository has a measured incident (T-164.1.1-23) of a scope amendment touching one file while the refused claim went on standing in the others; making the two-surface reachability (`TODOS.md` + the runbook) its own verified, committed act is the mitigation itself, not ceremony.
+- **D-164.1.1-05-B — a fifth prober arm reading the observer's own recency was considered and explicitly rejected as the fix for criterion 5, not merely left undone.** The prober shares GitHub Actions' own unreliability (the 27% delivery rate this whole phase's premise rests on), so a GitHub-hosted watchdog cannot close a gap in a scheduler GitHub itself might have dropped the watchdog's own run for — the same reasoning `164.1.1-CONTEXT.md` (CTX-02) already applied to the prober's own contact-write design.
+- **D-164.1.1-05-C — no literal `db push` / `db reset` / `--project-ref` / `--db-url` substring appears anywhere in the runbook, including inside its own prohibition sentences.** The plan's automated `<verify>` greps for those exact substrings; a warning that quotes the forbidden command verbatim would defeat its own gate. Phrased instead as "this checkout's linked CLI performs no write anywhere in this runbook."
 
 *(execution-time, Phase 164.5.1 CRONREPOINT — plan 08, Wave B go-live runbook + P3-C repair, 2026-09-16)*
 
@@ -1407,6 +1513,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.2]: 164.2.1-02: `--reporter=verbose` is MANDATORY for any "these pins stayed green" claim — the default reporter prints zero occurrences of a passing test's title, so a file-level pass count cannot name a pin, and a `tail` on the log cuts the SEAMRIM names that sit mid-file.
 - [Phase 164.2]: 164.2.1-02 DEVIATION (Rule 3): 8 pre-existing LOCAL-USERNAME violations in this phase's own PLAN/RESEARCH artifacts (from planning commit bedda506) reddened check-planning-hygiene and the full suite. Fixed at the cause with the repo's existing `<user>` placeholder convention. ⚠️ The scanner's needle is the LIVE `USER`, so it never fires on CI — a local-only gate that any phase skipping `npm test` will keep re-introducing.
 - [Phase 164.2]: 164.2.1-02 MEASURED: `state.record-metric` and `state.record-session` BOTH clobber STATE.md's hand-set `progress:` block, contradicting the banner plan 01 left saying they were safe. No `state.*` handler may be assumed safe; re-read and restore the five lines after every call.
+- [Phase 164.1.1]: Phase 164.1.1 plan 02: expansion arm ordering (G1,S1,O1,A1,U1,V1,N1) is load-bearing — arms mutating shared staleness logic (G1/S1) must run before arms depending on it, and arms sensitive to same-transaction now() pollution (N1) must run after every self-observability-row-producing arm. — Discovered via mutation-runner cross-arm interaction bugs; documented in the gate file's own header for future arms in this family.
+- [Phase 164.1.1]: 164.1.1-04: escalation window set to 3600s (Claude's discretion, unspecified by CONTEXT.md) — Bounds Sentry noise to one capture/hour of sustained staleness regardless of future cron.schedule() cadence; the structured log still fires on every occurrence.
+- [Phase 164.1.1]: 164.1.1-04 MEASURED: `state.add-decision` ALSO clobbers STATE.md's hand-set `progress:` block the same way `state.record-metric`/`state.record-session` do (see the line above from plan 02.1) — `completed_phases` 20→18, `percent` 45→41, plus two stray blank-line insertions at ~L205-208. Confirms the prior finding generalises to a third handler; treat every `state.*` write as suspect and diff before trusting it.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -2110,6 +2219,18 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
+
+**Last Date:** 2026-09-18T10:06:01.000Z
+**Stopped At:** Completed 164.1.1-05-PLAN.md
+**Resume File:** None
+
+**Last Date:** 2026-09-18T07:35:00Z
+**Stopped At:** Completed 164.1.1-03-PLAN.md (Phase 164.1.1 PROBERCADENCE, plan 03 of 6, wave 1 — sequential on the main working tree, branch `feat/164.1.1-probercadence`). Task 1's checkpoint (`gate="blocking-human"`, decide the alarm's terminal channel) was already answered by the founder before this executor ran: `SENTRY_DSN` IS set on Railway → analytics-service → production → Variables, option `a-sentry-already-set`, measured 2026-09-18 — recorded as presence only, no value written anywhere, with the outside-this-repo delivery caveat carried forward explicitly. Task 2 pinned criterion 4 (already corrected in `126517a8`, verify-only): added one `describe` block to `src/__tests__/prod-prober-wiring.test.ts` slicing the `.github/workflows/prod-prober.yml` schedule region by named anchor and asserting it states the measured delivery rate (27%), median gap (3.28h), max gap (7.13h), a date and a Phase 164.1.1 reference, with a calibration twin stripping those figures from a scratch copy and asserting each is reported missing BY NAME — manually neutered the predicate, observed the calibration test go RED with the exact expected diff, then restored and confirmed byte-identical via `cmp`. `.github/workflows/prod-prober.yml` stays byte-unchanged (`git diff` — 0 lines). Two commits (`9a1b0a8b` test, `3ce0d461` docs), NOT pushed. Full suite `npx vitest run src/__tests__/prod-prober-wiring.test.ts` → 102/102 green. Next: whichever of plan 02 / plan 04 the orchestrator dispatches — plan 04 is now unblocked to implement the Sentry escalation route against this checkpoint's answer.
+**Resume File:** None
+
+**Last Date:** 2026-09-18T06:33:31Z
+**Stopped At:** Completed 164.1.1-01-PLAN.md (Phase 164.1.1 PROBERCADENCE, plan 01 of 6, wave 1 — the phase's tracer, sequential on the main working tree, isolation `none`, branch `feat/164.1.1-probercadence`). Shipped the forward migration `supabase/migrations/20260918120000_prod_prober_cadence.sql` (`public.prod_prober_cadence_check()`, SECURITY DEFINER, pinned search_path, service-role-only EXECUTE, a measured-and-dated 10h25m ceiling constant, an absent-contact-row-is-stale guard, an unconditional self-observability row, and a stale-only `net.http_post` reusing `match_engine_cron_tick()`'s destination and Vault key — zero `cron.schedule(...)`), the prober's own unconditional contact write (`recordProberContact`, gated `arms === ARMS` so isolated self-test scenarios and a credential-blocked-all-4-arms run are both unaffected), a lane-only `net.http_post` recording stand-in (fixture 34), and a two-arm matched-pair SQL gate (`test_prod_prober_cadence.sql`, arms G1/S1 — renamed from the plan's bare G/S after `sectionOfIdentity()`'s digit-suffix rule left a bare SETUP raise un-twinned) proven RED on a disposable pg-lane. Both mutation floors moved from a measured full-corpus run (`FILES_FLOOR` 46→47, `ARMS_FLOOR` 395→397) with every sibling pin (`gate-family-meta.test.ts`, `mutation-runner-floors.test.ts`, `mutation-annotation-parser.test.ts`, a new dated `ci.yml` leg-count entry — 491 legs, ~975s local macOS, 20-minute ceiling still clear but flagged as closer than the prior reading) moved in the same Task 3 commit. Three commits (`d1d6ca63`, `2e03771b`, `16e962ad`), NOT pushed. Full plan-level verification green: `dump-sql-functions --self-test/--check`, `prod-prober --self-test` 83/83, full-corpus `mutation-runner` `✅ No defects` (`files 47/74`, `arms 397/397/0`, `biting 397`), `lint-sql-gates --self-test` + full corpus (0 findings), all four sibling vitest files 310/310, zero lines changed in any migration older than this plan's own, and nothing ran `supabase db push`/`db reset`/`--project-ref`/`--db-url`. Next: plan 02 (the observer's own error-row self-observability arm).
+**Resume File:** None
 
 **Last Date:** 2026-09-16T19:51:21Z
 **Stopped At:** Phase 164.1 complete, ready to plan Phase 159

@@ -338,6 +338,14 @@ NO_LIMITER_QUARANTINE: frozenset[str] = frozenset(
         # `routers/cron.py:595-596` — cron surface, service-key gated. Called on
         # a schedule by trusted infrastructure, not by users.
         "routers.cron.cron_sync",
+        # `routers/cron.py:1210-1211` — Phase 164.1.1 plan 04
+        # (PROBER-CADENCE-UNDELIVERED-01). Cron surface, gated by the SAME
+        # shared SERVICE_KEY as `routers.cron.cron_sync` above — no
+        # additional caller restriction is enforced. The EXPECTED caller is
+        # `public.prod_prober_cadence_check()`'s own `net.http_post`, but
+        # anything holding the shared key (e.g. the Next.js frontend's
+        # `ANALYTICS_SERVICE_KEY`) can call it too.
+        "routers.cron.prober_cadence_alert",
         # `routers/match.py:1921-1922` — cron surface, service-key gated. This
         # one is EXPLICITLY DECLARED unlimited in prose:
         # `services/rate_limit.py:113-114` — "POST /api/match/cron-recompute

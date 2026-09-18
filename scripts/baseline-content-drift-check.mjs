@@ -110,6 +110,15 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * `compared 2, findings 0, ok true`, exit 0 — clean, while a function had
  * silently left the corpus on BOTH sides at once.
  *
+ * MOVED 2026-09-18 (Phase 164.1.1 plan 01), 122 -> 123: an ADDITION, not a
+ * removal. `public.prod_prober_cadence_check()` enters the chain via forward
+ * migration 20260918120000, so the chain side gains one comparable function.
+ * ⚠️ It is compared but NOT matched — the committed baseline.sql predates the
+ * migration, so this same function is simultaneously the gate's one
+ * SNAPSHOT_MISSING finding until the post-apply regeneration
+ * (`[BASELINE-REGEN-164.1.1]`). Raising this floor records the function joining
+ * the corpus; it does NOT suppress that finding, and must not be used to.
+ *
  * MEASURED 2026-09-08 at this tree: 122. Same contract as `FILES_FLOOR` /
  * `ARMS_FLOOR` in scripts/mutation-runner/run.mjs — pinned AT the measured
  * value, so a drop is a hard failure and a legitimate removal is an EXPLICIT
@@ -117,7 +126,7 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * run green; a drop means either a real removal (say so, in the same commit) or
  * the parser blinding itself, which is the whole defect.
  */
-export const COMPARED_FLOOR = 122;
+export const COMPARED_FLOOR = 123;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

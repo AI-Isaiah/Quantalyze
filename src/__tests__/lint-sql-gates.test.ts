@@ -1064,7 +1064,7 @@ const DOCS_ONLY_TOLERANT_JOBS = [
 const NEVER_TOLERANT_JOBS = ["frontend-lint"] as const;
 
 describe("lint-sql-gates: the CI invocation (mode identity)", () => {
-  it("exits 0 over the real 72-file corpus with the allowlist applied", () => {
+  it("exits 0 over the real 74-file corpus with the allowlist applied", () => {
     const res = runCli([]);
     // ⚠️ CURRENCY 2026-09-06 (phase 164.2 plan 07): 71 -> 72. The corpus gained
     // test_sync_status_curated_sentence_survives.sql. The number is pinned
@@ -1075,7 +1075,13 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // count stays HARDCODED on purpose, per the note above — deriving it would
     // let a linter that stopped seeing files report "0 finding(s)" over a
     // shrinking corpus and read as clean.
-    expect(res.out).toMatch(/scanned 73 file/);
+    // MOVED 2026-09-18 (Phase 164.1.1), 73 -> 74: supabase/tests/
+    // test_prod_prober_cadence.sql joined the corpus.
+    // ⚠️ The TITLE of this test said "72-file" while this pin said 73 — it had
+    // been one stale since before this phase ([164.7-CITATION-DRIFT-01], the
+    // class this repo answers by correcting prose and assertion in the SAME
+    // edit). Both now read 74, which is what the linter prints.
+    expect(res.out).toMatch(/scanned 74 file/);
     expect(res.status, res.out).toBe(0);
   });
 

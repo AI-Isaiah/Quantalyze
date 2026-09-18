@@ -862,8 +862,32 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // lane runs by the orchestrator — `arms: 394/394/0`, `biting: 394`,
     // `lane-invocations: 394` (the two independent tallies AGREE),
     // `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, exit 0.
-    expect(armsSeen).toBe(395);
-    expect(stepsSeen).toBe(414);
+    // ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 01): arms
+    // 395 -> 397 and file steps 414 -> 416. ONE new annotated gate,
+    // supabase/tests/test_prod_prober_cadence.sql, with TWO twins — arm G1
+    // (invert the staleness comparison) and arm S1 (widen the ceiling), each a
+    // single `edit` step against 20260918120000_prod_prober_cadence.sql. No
+    // layering, no `sql` step, so arms and steps moved by the SAME two. This
+    // is a NEW FILE, unlike most prior CURRENCY entries above which only added
+    // arms to an existing one — FILES_FLOOR moves too (see the full-corpus
+    // MEASURED reading recorded beside scripts/mutation-runner/run.mjs's own
+    // FILES_FLOOR/ARMS_FLOOR constants, never restated as a number here).
+    // MEASURED via `node scripts/mutation-runner/run.mjs --file
+    // supabase/tests/test_prod_prober_cadence.sql`: both arms RED (identity
+    // ok), biting 2/2.
+    // ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 02): arms
+    // 397 -> 402 and file steps 416 -> 421. FIVE new arms in the SAME file
+    // plan 01 added — O1, A1, N1, U1, V1 — each a single `edit` step against
+    // 20260918120000_prod_prober_cadence.sql, no layering and no `sql` step,
+    // so arms and steps moved by the SAME five. This lands in an
+    // ALREADY-annotated file, unlike plan 01's entry above, so FILES_FLOOR
+    // does not move. MEASURED via `node scripts/mutation-runner/run.mjs
+    // --file supabase/tests/test_prod_prober_cadence.sql`: all seven arms RED
+    // (identity ok), biting 7/7 — and corroborated by two clean-tree
+    // full-corpus lane runs: `arms: 402/402/0`, `biting: 402`,
+    // `lane-invocations: 402` (the two independent tallies AGREE), exit 0.
+    expect(armsSeen).toBe(402);
+    expect(stepsSeen).toBe(421);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1678,7 +1702,19 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // others do not, and the 2026-09-11 move above is the recorded case where
     // the three derivations moved by eight, five and five. Keep running it
     // separately.
-    expect(needles.length).toBe(414);
+    // ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 01): needles
+    // 414 -> 416. The SAME two edit-kind twins (G1, S1 in
+    // test_prod_prober_cadence.sql) that moved `armsSeen` and `stepsSeen` each
+    // carry one `find` needle, so this derivation moved by two as well — the
+    // same coincidence-not-rule the 2026-09-17 note above names. Keep running
+    // it separately.
+    // ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 02): needles
+    // 416 -> 421. The SAME five edit-kind twins (O1, A1, N1, U1, V1 in the same
+    // file) that moved `armsSeen` and `stepsSeen` each carry exactly one
+    // `find` needle, so this derivation moved by five as well — again a
+    // coincidence of this plan's shape (five arms, all edit-kind, one needle
+    // each), not a rule. Keep running it separately.
+    expect(needles.length).toBe(421);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2215,7 +2251,11 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // pg_cron-deferred test_compute_jobs_error_kind_copy_parity.sql — the
     // singleton SCOPE AMENDMENT #2's 40 was written before — and
     // test_derive_allocator_keys_fanout.sql, the smallest lane-blocked file.
-    expect(corpus.filesTotal).toBe(73);
+    // ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 01): MEASURED
+    // `files 47/74`. The one added is supabase/tests/test_prod_prober_cadence.sql,
+    // a NEW file (unlike most prior moves, which added arms to an existing
+    // one) — the denominator moves with it, 73 -> 74.
+    expect(corpus.filesTotal).toBe(74);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2246,7 +2286,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // pg-lane gained scripts/pg-lane/fixtures/32-fixture-vault-stand-in.sql to
     // give it a provable RAISE path on a cluster with no supabase_vault. The
     // 164.2 paragraph above stays as the dated record of the 45-file corpus.
-    expect(corpus.filesAnnotated).toBe(46);
+    expect(corpus.filesAnnotated).toBe(47);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2278,6 +2318,11 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_ledger_refresh_fanout.sql",
       "test_ledger_refresh_staleness.sql",
       "test_metrics_by_basis_write.sql",
+      // ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 01): the
+      // FORTY-SEVENTH annotated file. Two arms (G1, S1) proving
+      // public.prod_prober_cadence_check() posts on a stale prod_prober
+      // contact and stays silent on a fresh one — see that file's own header.
+      "test_prod_prober_cadence.sql",
       "test_profiles_privileged_columns_locked.sql",
       "test_reconcile_dropped_enqueue_sweep.sql",
       "test_resync_retry_single_job.sql",
@@ -2660,7 +2705,12 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // annotated 46 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 73.
     // Both halves moved together again, and for the same reason as 164.2 plan
     // 07: one ADDED gate file, not a backfill. Neither half may be bumped alone.
-    expect(corpus.filesTotal).toBe(73);
+    // ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 01), read off
+    // `--parse-only`: annotated 47 + pending 0 + unreachable 27 + inert 0 +
+    // lane-blocked 0 = 74. One ADDED gate file
+    // (supabase/tests/test_prod_prober_cadence.sql), not a backfill — both
+    // halves move together again.
+    expect(corpus.filesTotal).toBe(74);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -2669,7 +2719,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // above (the selftest fixture PAIR, which must still classify exactly
     // `lane-blocked-gate.sql` and NOT its comment-only sibling), and the
     // set-for-set PARTITION check below is the second independent guard.
-    expect(corpus.annotatedFiles).toHaveLength(46);
+    expect(corpus.annotatedFiles).toHaveLength(47);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

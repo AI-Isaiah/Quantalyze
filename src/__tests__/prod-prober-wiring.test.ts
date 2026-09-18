@@ -1894,12 +1894,82 @@ describe("[164.1-05] kinds and floors", () => {
     // is no literal `k/50` in the source to count. Executing the self-test is
     // the only honest way to derive the number — and it is fixtures-only, no
     // network, under a tenth of a second.
-    expect(SELF_TEST_SCENARIOS).toBe(82);
+    expect(SELF_TEST_SCENARIOS).toBe(83);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);
     expect(numbers).toEqual(Array.from({ length: SELF_TEST_SCENARIOS }, (_, i) => i + 1));
     expect(new Set(denominators)).toEqual(new Set([SELF_TEST_SCENARIOS]));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CRITERION 4 (164.1.1-03) — the schedule header states the MEASURED delivery.
+//
+// ⛔ VERIFY-ONLY. Commit `126517a8` already corrected this header; this pin
+// does not re-derive or re-edit the figures, it only proves the correction
+// held and stays observable. `git diff -- .github/workflows/prod-prober.yml`
+// is asserted EMPTY at the plan level — nothing here may touch that file.
+//
+// The figures are read off the region itself, not restated from planning
+// prose (this repo's named recurring citation-drift defect class), and the
+// calibration twin mutates a SCRATCH COPY of the sliced region rather than
+// the workflow on disk.
+// ---------------------------------------------------------------------------
+describe("[164.1.1-03] criterion 4 — the schedule header states the measured delivery", () => {
+  /** The `on.schedule` region, sliced by the same named-anchor discipline every pin here uses. */
+  function scheduleRegionText(text: string): string {
+    return sliceBetweenAnchors(text, "\n  schedule:\n", "\n  workflow_dispatch:");
+  }
+
+  // Read off the file, not typed from a plan or a commit message — a restated
+  // number here would be the next instance of this repo's citation-drift class.
+  const CADENCE_DELIVERY_RATE = "27 % delivery";
+  const CADENCE_MEDIAN_GAP = "3.28 h";
+  const CADENCE_MAX_GAP = "7.13 h";
+  const CADENCE_DATE = "2026-09-18";
+  const CADENCE_PHASE_REF = "164.1.1";
+
+  const CADENCE_FIGURES: Record<string, string> = {
+    "measured delivery rate": CADENCE_DELIVERY_RATE,
+    "measured median gap": CADENCE_MEDIAN_GAP,
+    "measured max gap": CADENCE_MAX_GAP,
+    "a date": CADENCE_DATE,
+    "a reference to Phase 164.1.1": CADENCE_PHASE_REF,
+  };
+
+  /** Names of every figure ABSENT from `text`, diagnostic-first. */
+  function missingCadenceFigures(text: string): string[] {
+    return Object.entries(CADENCE_FIGURES)
+      .filter(([, needle]) => !text.includes(needle))
+      .map(([name]) => name);
+  }
+
+  it("the schedule region states the measured delivery rate, median gap, max gap, a date, and points at Phase 164.1.1", () => {
+    const region = scheduleRegionText(WORKFLOW_TEXT);
+    expect(region.length, "the schedule region must be findable").toBeGreaterThan(200);
+    const missing = missingCadenceFigures(region);
+    expect(
+      missing,
+      `schedule region DOES say:\n${region}\n\nmissing figures (by name): ${JSON.stringify(missing)}`,
+    ).toEqual([]);
+  });
+
+  it("CALIBRATION: a scratch copy of the schedule region with the figures stripped reports every missing figure BY NAME", () => {
+    const region = scheduleRegionText(WORKFLOW_TEXT);
+    const stripped = region
+      .split(CADENCE_DELIVERY_RATE).join("REDACTED")
+      .split(CADENCE_MEDIAN_GAP).join("REDACTED")
+      .split(CADENCE_MAX_GAP).join("REDACTED")
+      .split(CADENCE_DATE).join("REDACTED")
+      .split(CADENCE_PHASE_REF).join("REDACTED");
+    expect(stripped, "the strip must actually change the text").not.toBe(region);
+    expect(missingCadenceFigures(stripped).sort()).toEqual(
+      Object.keys(CADENCE_FIGURES).sort(),
+    );
+    // Control: the unstripped region still reports nothing missing — the
+    // calibration mutant is what flips, not the predicate itself.
+    expect(missingCadenceFigures(region)).toEqual([]);
   });
 });
 

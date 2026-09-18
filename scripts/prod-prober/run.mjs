@@ -148,7 +148,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 82;
+export const SELF_TEST_SCENARIOS = 83;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -288,6 +288,130 @@ function makeScrubber(arms, env) {
 }
 
 // ---------------------------------------------------------------------------
+// The prober's own contact write (Phase 164.1.1 plan 01, D-02/CTX-02)
+// ---------------------------------------------------------------------------
+//
+// A run that measures nothing else still records that it RAN. The contact
+// row is what `public.prod_prober_cadence_check()` reads — see
+// supabase/migrations/20260918120000_prod_prober_cadence.sql — and it is
+// written UNCONDITIONALLY: whether every arm was green, some arm was red, or
+// every arm was credential-blocked, this write still happens. A trigger on
+// the READ side would measure requests, not runs, and would report healthy
+// while GitHub silently drops the prober — the exact failure this phase
+// exists to close.
+//
+// This is a STEP, deliberately SEPARATE from the four registered arms
+// (RESEARCH Finding 5): the arms enforce a read-only SQL discipline of their
+// own (`cron-obs.mjs`'s own header: "THIS ARM THEREFORE NEVER SELECTS
+// cron.job_run_details.status"), and a write folded into one of them would
+// perturb that discipline and the self-test's own read-only-SQL scenario
+// (which ranges over SQL_ARM_MODULES, not this file — see that scenario's own
+// comment for why this constant does not need to be added there).
+
+/** The `cron_name` the contact row is written under — see D-01/D-02. */
+export const PROD_PROBER_CRON_NAME = "prod_prober";
+
+/**
+ * The single INSERT statement TEMPLATE the contact write issues. The literal
+ * placeholder `{{STATUS}}` is the ONLY thing that varies between the two
+ * shipped forms below (`CONTACT_INSERT_SQL_OK` / `CONTACT_INSERT_SQL_ERROR`),
+ * both derived from this template in the SAME edit — never two hand-typed
+ * statements — so a future column or table-name change cannot move one and
+ * leave the other behind.
+ *
+ * ⛔ NO PARAMETER INTERPOLATION of anything that came from the environment:
+ * this string (and both forms derived from it) is a compile-time constant.
+ * Columns are named explicitly; `started_at` and `completed_at` are both
+ * `now()`; `error` is always NULL (this row records that the prober RAN, not
+ * the run's own defects — those live in this run's own report); `metadata`
+ * carries only a name and an integer. `RETURNING 1` makes a zero-row INSERT
+ * distinguishable from a one-row INSERT via the returned row count — an
+ * INSERT that silently lands zero rows is itself a defect to surface.
+ */
+export const CONTACT_INSERT_SQL =
+  `INSERT INTO public.cron_runs (cron_name, started_at, completed_at, status, error, metadata) ` +
+  `VALUES ('${PROD_PROBER_CRON_NAME}', now(), now(), '{{STATUS}}', NULL, jsonb_build_object('schema_version', 1)) ` +
+  `RETURNING 1`;
+
+const CONTACT_INSERT_SQL_OK = CONTACT_INSERT_SQL.replace("{{STATUS}}", "ok");
+const CONTACT_INSERT_SQL_ERROR = CONTACT_INSERT_SQL.replace("{{STATUS}}", "error");
+
+/** How many non-empty lines `psql -At … RETURNING 1` printed — its own row count. */
+function countReturnedRows(stdout) {
+  return String(stdout || "")
+    .split("\n")
+    .filter((line) => line.trim().length > 0).length;
+}
+
+/**
+ * Write the prober's own contact row (D-02). Runs AFTER the four arms and
+ * AFTER the delta/seamInvocations/armsWithSeamActivity snapshot that feeds
+ * the absurdity floor — see the call site in `runProber` for why that
+ * ordering is load-bearing: a run in which every arm is credential-blocked
+ * must still write this row, and `absurdityViolations` would otherwise read
+ * that write as `armsExecuted === 0 && seamInvocations > 0` and report the
+ * instrument as broken when it is doing exactly what D-02 requires.
+ *
+ * @param {object} opts
+ * @param {object} opts.seams        from `createSeams`
+ * @param {(s:string)=>void} opts.log
+ * @param {Function} opts.addDefect  the SAME closure `runProber` uses — reuses
+ *        the `measure-fail` kind; a new kind would move
+ *        `EXPECTED_DEFECT_KINDS` in `src/__tests__/prod-prober-wiring.test.ts`
+ *        for no gain, since "the prober could not record its contact" is
+ *        precisely a failure to measure.
+ * @param {boolean} opts.hadDefects  whether this run had already produced a
+ *        defect (arms + absurdity) BEFORE this call — decides the status
+ *        literal ('ok' when false, 'error' when true).
+ * @returns {Promise<boolean>} true iff the row was confirmed written
+ */
+export async function recordProberContact({ seams, log, addDefect, hadDefects }) {
+  const out = typeof log === "function" ? log : () => {};
+  const before = seams.tally.sql;
+  const sql = hadDefects ? CONTACT_INSERT_SQL_ERROR : CONTACT_INSERT_SQL_OK;
+  const result = await seams.sql("record-contact", sql);
+  const madeCall = seams.tally.sql - before;
+
+  if (result.measureFail) {
+    addDefect(
+      "measure-fail",
+      "record-contact",
+      null,
+      `the prober's own cadence row could not be written (${result.measureFail}) — the next ` +
+        `prod_prober_cadence_check() tick will see a widening gap for a reason that is in this log`,
+    );
+    out(`contact: NOT RECORDED (psql could not run; sql seam call(s): ${madeCall})`);
+    return false;
+  }
+  if (result.status !== 0) {
+    addDefect(
+      "measure-fail",
+      "record-contact",
+      null,
+      `the prober's own cadence row could not be written (psql exited ${result.status}) — the next ` +
+        `prod_prober_cadence_check() tick will see a widening gap for a reason that is in this log`,
+    );
+    out(`contact: NOT RECORDED (psql exited ${result.status}; sql seam call(s): ${madeCall})`);
+    return false;
+  }
+  const rows = countReturnedRows(result.stdout);
+  if (rows !== 1) {
+    addDefect(
+      "measure-fail",
+      "record-contact",
+      null,
+      `the prober's own cadence row landed ${rows} row(s), not exactly 1 (RETURNING 1) — an INSERT ` +
+        `that silently lands zero rows is itself a defect to surface, and the next ` +
+        `prod_prober_cadence_check() tick will see a widening gap for a reason that is in this log`,
+    );
+    out(`contact: NOT RECORDED (${rows} row(s) returned, expected 1; sql seam call(s): ${madeCall})`);
+    return false;
+  }
+  out(`contact: recorded (sql seam call(s): ${madeCall})`);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // The absurdity floor: the prober's own counts must agree
 // ---------------------------------------------------------------------------
 
@@ -371,6 +495,16 @@ export function absurdityViolations({ armsExecuted, seamInvocations, armsWithSea
  *                                          default on purpose — the arm's own `FUNCTIONS_DIR`
  *                                          default then applies, so the live run can never be
  *                                          pointed somewhere else by omission here.
+ * @param {boolean} [opts.recordContact]    whether this invocation writes the prober's own
+ *                                          contact row (D-02). Defaults to `arms === ARMS` — the
+ *                                          SHIPPING registry, by reference — so the CLI's live run
+ *                                          and any self-test scenario that deliberately exercises
+ *                                          the FULL registry get it "for free", while the self-test
+ *                                          suite's many single-arm ISOLATION scenarios (which wire
+ *                                          only the one transport that arm needs, never a full
+ *                                          fetch+sql+ssh bundle) are unaffected by a step that is
+ *                                          not what they are testing. Narrowed diagnostics are
+ *                                          NEVER recorded regardless of this default — see below.
  * @param {(s:string)=>void} [opts.log]     the ONLY output channel; the self-test captures it
  */
 export async function runProber({
@@ -381,6 +515,7 @@ export async function runProber({
   onlyArm = null,
   manifestPath = MANIFEST_PATH,
   functionsDir = undefined,
+  recordContact = arms === ARMS,
   log = (s) => console.log(s),
 } = {}) {
   const narrowed = Boolean(onlyArm);
@@ -504,11 +639,44 @@ export async function runProber({
   }
 
   // -------------------------------------------------------------------------
+  // (5b) Record the prober's own contact (D-02/CTX-02) — deliberately AFTER
+  //      the delta/seamInvocations/armsWithSeamActivity snapshot above and
+  //      AFTER the absurdity check that reads it, so this write's own seam
+  //      call is invisible to both: a run in which every arm is
+  //      credential-blocked must still write this row, and counting it inside
+  //      the arm delta would turn a credential outage into a false
+  //      `armsExecuted === 0 && seamInvocations > 0` MEASURE_FAIL.
+  //
+  //      Skipped in a narrowed `--arm` diagnostic run: that run never exits 0
+  //      and is not a cadence observation, so recording it would put a fresh
+  //      contact row into PROD for a run that measured almost nothing. ALSO
+  //      skipped whenever `recordContact` reads false — see its own doc above
+  //      for why that is not a loophole in D-02: production and any full-
+  //      registry self-test scenario both default it to true.
+  // -------------------------------------------------------------------------
+  let contactLine;
+  if (narrowed || !recordContact) {
+    contactLine = narrowed
+      ? "contact: SKIPPED — narrowed --arm run is not a cadence observation"
+      : "contact: SKIPPED — recordContact=false (not a full-registry run)";
+  } else {
+    const hadDefectsBeforeContact = defects.length > 0;
+    const recorded = await recordProberContact({
+      seams,
+      log: out,
+      addDefect,
+      hadDefects: hadDefectsBeforeContact,
+    });
+    contactLine = recorded ? "contact: recorded" : "contact: NOT RECORDED";
+  }
+
+  // -------------------------------------------------------------------------
   // (6) + (7) The report. One shape, printed whether or not anything is wrong.
   // -------------------------------------------------------------------------
   out("");
   out(`arms: ${armsExecuted}/${arms.length}/${blocked.size}   (executed/registered/credential-blocked)`);
   out(`seam-invocations: ${seamInvocations}   (fetch ${delta.fetch} / sql ${delta.sql} / ssh ${delta.ssh})`);
+  out(contactLine);
   out("");
   if (defects.length === 0) {
     out(
@@ -770,6 +938,25 @@ function fixtureSql(data) {
         for (const row of spec.rows) lines.push([String(spec.jobCount), ...row].join(fieldSep));
       }
       return sqlOk(`${lines.join("\n")}\n`);
+    }
+
+    // The prober's own contact write (D-02) — see recordProberContact and
+    // CONTACT_INSERT_SQL above. Distinct substring from "cron.job" (a period,
+    // never present in "cron_runs") so the two branches cannot collide.
+    // `data.contact` is undefined by default in every EXISTING fixture bundle
+    // (allGreenSeams and its siblings), and the default here is SUCCESS — a
+    // full-registry green scenario stays green without every existing caller
+    // having to opt in.
+    if (q.includes("public.cron_runs")) {
+      const c = data.contact || {};
+      if (c.measureFail) {
+        return { status: null, stdout: "", stderr: "", timedOut: false, measureFail: c.measureFail };
+      }
+      if (typeof c.status === "number" && c.status !== 0) {
+        return { status: c.status, stdout: "", stderr: c.stderr || "", timedOut: false, measureFail: `psql exited ${c.status}` };
+      }
+      const rows = typeof c.rows === "number" ? c.rows : 1;
+      return sqlOk(rows <= 0 ? "" : Array(rows).fill("1").join("\n") + "\n");
     }
 
     if (q.includes("cron.job")) {
@@ -4795,6 +4982,166 @@ export async function selfTest() {
           noDefectOfKind(r.defects, ["cron-non-2xx", "cron-no-observation", "cron-transport-error"]),
           "and NO verdict is issued about that run — neither the foreign 500 nor the 200 is attributed to it",
         ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  scenario(
+    "the prober's own contact write (D-02): unconditional on green/red/all-blocked, invisible to the absurdity floor, and its OWN failure reddens the run",
+  );
+  // -------------------------------------------------------------------------
+  {
+    // A spy over fixtureSql that records every query string it saw, so this
+    // scenario can assert against CONTACT_INSERT_SQL — the SAME string the
+    // prober ships — rather than a retyped copy.
+    const spySqlRunner = (data) => {
+      const inner = fixtureSql(data);
+      const runner = (query, opts) => {
+        runner.seen.push(String(query));
+        return inner(query, opts);
+      };
+      runner.seen = [];
+      return runner;
+    };
+    const contactQueriesOf = (runner) => runner.seen.filter((q) => q.includes("INSERT INTO public.cron_runs"));
+
+    // ---- (a) GREEN: all four arms green -> exactly one contact write, ------
+    //          status 'ok', and the run still exits 0. ----------------------
+    {
+      const pyapi06 = loadFixture("pyapi06", "ok.json");
+      const cronObs = loadFixture("cron-obs", "ok.json");
+      const cronJob = loadFixture("cron-drift", "prod-ok.json");
+      const mt5 = loadFixtureText("mt5", "ok.txt");
+      const bad = [pyapi06, cronObs, cronJob, mt5].find((x) => !x.ok);
+      if (bad) {
+        pass = expect(false, bad.reason) && pass;
+      } else {
+        const sqlRunner = spySqlRunner({ cronObs: cronObs.data, ttl: cronObs.data.ttl, cronJobRows: cronJob.data });
+        const seams = createSeams({
+          fetchImpl: fixtureFetch(pyapi06.data, SELFTEST_ENV),
+          sqlRunner,
+          sshRunner: fixtureSsh({ stdout: mt5.data }),
+          clock: () => new Date(cronObs.data.now),
+        });
+        const lines = [];
+        const r = await runProber({
+          arms: ARMS,
+          env: { ...SELFTEST_ENV },
+          seams,
+          manifestPath: SELFTEST_MANIFEST_PATH,
+          log: (s) => lines.push(s),
+        });
+        const contactQueries = contactQueriesOf(sqlRunner);
+        pass =
+          expect(r.exitCode === 0, `an all-green four-arm run with a working contact write still exits 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
+          expect(r.defects.length === 0, `ZERO defects on the green run (got ${r.defects.length})`) &&
+          expect(contactQueries.length === 1, `exactly ONE contact write was issued (got ${contactQueries.length})`) &&
+          expect(
+            contactQueries[0] === CONTACT_INSERT_SQL.replace("{{STATUS}}", "ok"),
+            "and it carries the 'ok' status literal on a defect-free run — byte-identical to CONTACT_INSERT_SQL, the SAME string the prober ships",
+          ) &&
+          expect(lines.includes("contact: recorded"), "the report prints 'contact: recorded'") &&
+          pass;
+      }
+    }
+
+    // ---- (b) RED: a real arm defect -> the contact write STILL happens, ----
+    //          and its status literal flips to 'error'. -----------------------
+    {
+      const py = loadFixture("pyapi06", "absent-200.json");
+      const cronObs = loadFixture("cron-obs", "ok.json");
+      const cronJob = loadFixture("cron-drift", "prod-ok.json");
+      const mt5 = loadFixtureText("mt5", "ok.txt");
+      const bad = [py, cronObs, cronJob, mt5].find((x) => !x.ok);
+      if (bad) {
+        pass = expect(false, bad.reason) && pass;
+      } else {
+        const sqlRunner = spySqlRunner({ cronObs: cronObs.data, ttl: cronObs.data.ttl, cronJobRows: cronJob.data });
+        const seams = createSeams({
+          fetchImpl: fixtureFetch(py.data, SELFTEST_ENV),
+          sqlRunner,
+          sshRunner: fixtureSsh({ stdout: mt5.data }),
+          clock: () => new Date(cronObs.data.now),
+        });
+        const lines = [];
+        const r = await runProber({
+          arms: ARMS,
+          env: { ...SELFTEST_ENV },
+          seams,
+          manifestPath: SELFTEST_MANIFEST_PATH,
+          log: (s) => lines.push(s),
+        });
+        const contactQueries = contactQueriesOf(sqlRunner);
+        pass =
+          expect(r.exitCode === 1, `a run carrying a real arm defect still exits 1 (got ${r.exitCode})`) &&
+          expect(contactQueries.length === 1, `the contact write STILL happened on a red run (got ${contactQueries.length})`) &&
+          expect(
+            contactQueries[0] === CONTACT_INSERT_SQL.replace("{{STATUS}}", "error"),
+            "and it carries the 'error' status literal — the row records that the prober RAN, not that production is healthy",
+          ) &&
+          expect(lines.includes("contact: recorded"), "the report still prints 'contact: recorded'") &&
+          pass;
+      }
+    }
+
+    // ---- (c) THE CALIBRATION: every arm credential-blocked -> the contact --
+    //          write STILL happens, and — the regression this scenario -------
+    //          exists for — the run must NOT report absurdity. ---------------
+    {
+      const sqlRunner = spySqlRunner({});
+      const seams = createSeams({ sqlRunner });
+      const lines = [];
+      const r = await runProber({
+        arms: ARMS,
+        env: {}, // every required credential name absent -> every arm blocked
+        seams,
+        manifestPath: SELFTEST_MANIFEST_PATH,
+        log: (s) => lines.push(s),
+      });
+      const contactQueries = contactQueriesOf(sqlRunner);
+      pass =
+        expect(
+          r.armsExecuted === 0 && r.armsBlocked === 4,
+          `every arm is credential-blocked and none executed (executed ${r.armsExecuted}, blocked ${r.armsBlocked})`,
+        ) &&
+        expect(contactQueries.length === 1, `the contact write STILL happened with every arm blocked (got ${contactQueries.length})`) &&
+        expect(
+          noDefectOfKind(r.defects, ["absurdity"]),
+          "⛔ THE CALIBRATION: a credential outage must never read as the INSTRUMENT being broken — " +
+            "absurdityViolations fires on armsExecuted===0 && seamInvocations>0, so a contact write " +
+            "counted INSIDE the arm delta would turn this exact state into a false MEASURE_FAIL",
+        ) &&
+        pass;
+    }
+
+    // ---- (d) the contact write's OWN failure reddens the run, by name, ------
+    //          across all three measure-fail shapes it can take. -------------
+    for (const [label, contactCfg] of Object.entries({
+      "psql could not run": { measureFail: "psql not found on PATH" },
+      "psql exited non-zero": { status: 1, stderr: "permission denied for table cron_runs" },
+      "zero rows returned": { rows: 0 },
+    })) {
+      const sqlRunner = spySqlRunner({ contact: contactCfg });
+      const seams = createSeams({ sqlRunner });
+      const lines = [];
+      const r = await runProber({
+        arms: [],
+        env: {},
+        seams,
+        armsFloor: 0,
+        recordContact: true, // arms is [] here, deliberately, to isolate this leg
+        manifestPath: SELFTEST_MANIFEST_PATH,
+        log: (s) => lines.push(s),
+      });
+      const mf = r.defects.filter((d) => d.kind === "measure-fail" && d.arm === "record-contact");
+      pass =
+        expect(r.exitCode === 1, `a contact write that fails (${label}) makes the run exit 1 (got ${r.exitCode})`) &&
+        expect(
+          mf.length === 1,
+          `exactly one measure-fail defect names record-contact (${label}; got ${r.defects.map((d) => `${d.kind}/${d.arm}`).join(", ") || "none"})`,
+        ) &&
+        expect(lines.includes("contact: NOT RECORDED"), `the report says the contact was NOT recorded (${label})`) &&
         pass;
     }
   }
