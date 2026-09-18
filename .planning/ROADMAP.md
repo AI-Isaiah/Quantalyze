@@ -1216,12 +1216,12 @@ the whole static-analysis half of the anti-skip block keeps running for the excl
 
 **Requirements**: PROBER-CADENCE-UNDELIVERED-01 (this red is what keeps `POST /api/prober-cadence-alert`, shipped in #815, off production — `sql-tests` blocks the `frontend` aggregator and Railway skips the analytics-service deploy while main CI is red)
 **Depends on:** Phase 164.1.1
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans executed
 
 Plans:
 
 - [x] 164.1.1.1-01-PLAN.md — the `-- LANE-ONLY:` marker, the ci.yml exclusion (computed and printed before the loop, execution and every `"$out"`-derived check skipped inside it, static accounting untouched), an honest summary line, and a stub-psql invocation log that measures non-execution rather than inferring it (wave 1)
-- [ ] 164.1.1.1-02-PLAN.md — the SITES-not-a-count register, the forward and reverse object cross-checks, the vault near-miss guard, and four calibrations including the count-unchanged swap (wave 2)
+- [x] 164.1.1.1-02-PLAN.md — the SITES-not-a-count register, the forward and reverse object cross-checks, the vault near-miss guard, and four calibrations including the count-unchanged swap (wave 2)
 
 ### Phase 164.2: CURATED-COPY — the curated failure sentence must reach the user (INSERTED)
 

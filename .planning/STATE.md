@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.1.1.1
 current_phase_name: LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only fixture (INSERTED)
 status: executing
-stopped_at: Completed 164.1.1.1-01-PLAN.md
-last_updated: "2026-09-18T17:14:00.000Z"
+stopped_at: Completed 164.1.1.1-02-PLAN.md
+last_updated: "2026-09-18T17:56:00.000Z"
 last_activity: 2026-09-18
-last_activity_desc: Phase 164.1.1.1 plan 01 executed — LANE-ONLY exclusion marker + ci.yml mechanism, measured via a stub-psql invocation log, neither anti-skip floor moved, all three new properties calibrated RED then restored
-state_head: 346e0850ffc9a901fab7a8fd1d1b7e5e9d93f543
+last_activity_desc: Phase 164.1.1.1 plan 02 executed (final plan, 2/2) — LANE-ONLY exclusion pinned as SITES-not-a-count with forward/reverse object binding and a vault near-miss guard, calibrated across four mutations including a count-unchanged one-for-one swap
+state_head: 11f46389599daa0b873c7eaefb283be470e962e6
 progress:
   total_phases: 45
   completed_phases: 20
   total_plans: 201
-  completed_plans: 192
+  completed_plans: 193
   percent: 44
 ---
 
@@ -172,10 +172,42 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-⭐ **RECONCILED 2026-09-18 (164.1.1.1 plan 01). THIS block is the current position and
-SUPERSEDES the 164.1.1-plan-05 block immediately below (retained as lineage). Phase 164.1.1.1
-is the URGENT inserted phase named in Roadmap Evolution — LANEONLYGATES — a SIBLING of 164.1.1,
-not a continuation of it; the block below covers 164.1.1's own history.**
+⭐ **RECONCILED 2026-09-18 (164.1.1.1 plan 02, FINAL PLAN OF THE PHASE). THIS block is the
+current position and SUPERSEDES the 164.1.1.1-plan-01 block immediately below (retained as
+lineage). Phase 164.1.1.1 (LANEONLYGATES) is now 2/2 plans DONE; ROADMAP.md's Plans line and
+both checkboxes updated to match. Not yet marked `completed_phases` in the frontmatter above —
+no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
+is decided by verification status, never by plan counts.**
+
+Phase: 164.1.1.1 (LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only
+fixture) — EXECUTING (2/2 plans done, verification not yet run)
+Plan: 2 of 2 DONE (`164.1.1.1-02-SUMMARY.md`, commits `0d9d2408` (test, `LANE_ONLY_SITES`
+register pinned as SITES-not-a-count, re-derived from the corpus with a named failure mode on a
+malformed or key-less marker) and `11f46389` (test, FORWARD/REVERSE object-binding cross-checks
+plus the vault near-miss guard) on branch `chore/164.1.1.1-laneonlygates`). Task 3 (four
+neuter/observe-RED/restore calibrations, including the one-for-one swap M1b where the marker
+moved between two files with the corpus-wide count unchanged at one — the SET pin reddened
+anyway) produced no net code change; both mutated SQL files restored byte-identical
+(`shasum -a 256` equal pre/post every cycle — see the SUMMARY's Calibration Log). Evidence
+regenerated fresh, not restated: `mutation-runner --parse-only` —
+`test_prod_prober_cadence.sql: 7 prose / 7 twin(s) / 0 waiver(s)`, `coverage: files 47/74`,
+`arms: 0/402/0`, exit 0. Collateral suites + a full serial `npm test` (15,117 tests): the only
+failure both times is the pre-existing, box-local `Test timed out in 5000ms` inside
+`lint-sql-gates.test.ts`'s EXECUTION ORACLE block (carved out by this plan's own `<fails_when>`,
+already shown green on CI). The two deferred items plan 01 logged
+(`check-planning-hygiene.test.ts`, `verify-plan-anchors.test.ts`) were already resolved by an
+intervening commit (`d693e3c7`) before this plan began — no new deferred items this session.
+This closes T-164.1.1.1-01 (plan 01's own threat register entry) and T-164.1.1.1-05 through -08
+(this plan's threat register) as mitigated-and-calibrated. Next: Phase 164.1.1 plan 06 — the
+founder-gated live PROD session that closes `[PROBER-CADENCE-UNDELIVERED-01]` — is now unblocked
+on the CI side (`sql-tests` no longer reds on `test_prod_prober_cadence.sql`); the requirement's
+TODOS.md checkbox stays open until plan 06 itself executes.
+
+⭐ **RECONCILED 2026-09-18 (164.1.1.1 plan 01). THIS block was the current position from plan
+01's close until the block above (plan 02, the final plan of the phase) superseded it. Retained
+as lineage. Phase 164.1.1.1 is the URGENT inserted phase named in Roadmap Evolution —
+LANEONLYGATES — a SIBLING of 164.1.1, not a continuation of it; the block below (164.1.1-plan-05)
+covers 164.1.1's own history.**
 
 Phase: 164.1.1.1 (LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only
 fixture) — EXECUTING
