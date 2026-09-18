@@ -1540,6 +1540,22 @@ jobs:
     # rule's one permitted raise was already taken above, and 20 is the CEILING,
     # so there is nothing to raise: a future crossing is answered by
     # [REDUNDER-SUBSET-SPLIT], not by a third value.
+    #
+    # ⚖️ RULE RE-APPLIED 2026-09-18 (phase 164.1.1 PROBERCADENCE, plan 01) — NO
+    # CHANGE, reading recorded rather than the decision restated. The corpus
+    # grew to 47 files / 397 arms = **491 legs** (397 + 47 baseline + 47
+    # restore) — one new annotated file, test_prod_prober_cadence.sql, two new
+    # biting arms (G1, S1). Local macOS wall clock, `nohup node
+    # scripts/mutation-runner/run.mjs` over the full corpus: **~975 s (~16.25
+    # min)** at `per-arm lane time: mean 2.0s over 397 arm run(s)`.
+    # ⛔ Not an ubuntu number, and this rule reads MEASURED UBUNTU runs — no
+    # SHA-bound ubuntu run of a 47-file corpus exists yet. The rule's one
+    # permitted raise was already taken above and 20 is the CEILING, so there
+    # is nothing to raise here either. ⚠️ Unlike the 164.7 reading, this local
+    # figure is not comfortably below the ceiling (~16.25 of 20 min) — flagged,
+    # not acted on, because the rule fires on a MEASURED ubuntu run, not a
+    # local projection; the next PR touching this job should capture the
+    # ubuntu wall clock and re-apply the rule against it.
     # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
     # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
     # ⚠️ CORRECTION to the two paragraphs above, which say this job has "no `if:`" and

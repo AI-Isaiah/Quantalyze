@@ -874,7 +874,23 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 // The paired ARMS_FLOOR move (369 -> 380) is in the block below.
 //   RECORD       .planning/phases/164.7-appsettings-every-app-guc-reader-moves-
 //                to-a-mechanism-this-p/164.7-05-SUMMARY.md
-export const FILES_FLOOR = 46;
+// ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 01): 46 -> 47. ONE
+//                new annotated gate, supabase/tests/test_prod_prober_cadence.sql
+//                (two arms, G and S — see that file's own header). MEASURED on
+//                a clean-tree full-corpus lane run, READ OFF THE RUNNER'S OWN
+//                OUTPUT: `coverage: files 47/74`, `arms: 397/397/0`,
+//                `biting: 397`, `lane-invocations: 397` (the two independent
+//                tallies AGREE), `lane-blocked: 0 file(s)`, `lane-probe:
+//                pg_cron AVAILABLE`, `pending: 0`, `✅ No defects`, exit 0,
+//                mean 2.0s/arm over 397 arm run(s).
+//                SEPARATED in both directions on `src/__tests__/mutation-runner-floors.test.ts`'s
+//                fast re-derivation (no lane needed — that test statically
+//                re-scans the corpus): FILES_FLOOR=48 gives `REGRESSION: 47 of
+//                74 gate files are annotated, below the pinned floor of 48` and
+//                FAILS; FILES_FLOOR=46 (the stale-low direction) gives
+//                `RATCHET STALE: 47 of 74 gate files are now annotated but
+//                FILES_FLOOR is still 46` and FAILS; FILES_FLOOR=47 PASSES.
+export const FILES_FLOOR = 47;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -1906,7 +1922,34 @@ export const FILES_FLOOR = 46;
 //                these bytes against a biting count of 394. It has never once
 //                equalled the biting count and must never be used to derive
 //                this constant.
-export const ARMS_FLOOR = 395;
+//   ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 01): 395 -> 397.
+//                TWO new arms in a NEW file, supabase/tests/test_prod_prober_cadence.sql —
+//                arm G (invert the staleness comparison so a fresh contact
+//                reads as stale) and arm S (widen the ceiling so a stale
+//                contact reads as fresh), each a single `edit` step against
+//                20260918120000_prod_prober_cadence.sql. FILES_FLOOR moves
+//                too (46 -> 47, see that constant's own CURRENCY note), unlike
+//                most prior moves on this list which only added arms to an
+//                already-annotated file.
+//                MEASURED on a clean-tree full-corpus lane run, READ OFF THE
+//                RUNNER'S OWN OUTPUT: `coverage: files 47/74`,
+//                `arms: 397/397/0`, `biting: 397`, `lane-invocations: 397`
+//                (the two independent tallies AGREE), `lane-blocked: 0
+//                file(s)`, `lane-probe: pg_cron AVAILABLE`, `pending: 0`,
+//                `✅ No defects`, exit 0, mean 2.0s/arm, and the per-file row
+//                `test_prod_prober_cadence.sql: sections 3 / judged 2 /
+//                annotated 2 / waived 0 / biting 2` (section 3 is the SETUP
+//                block, correctly unjudged — SETUP guards are deliberately
+//                not separately twinned, per this file's own header).
+//                SEPARATED in both directions on
+//                `src/__tests__/mutation-runner-floors.test.ts`'s fast
+//                re-derivation (no lane needed): ARMS_FLOOR=398 gives `The
+//                corpus declares 397 twin(s) of which 0 are waivers … ARMS_FLOOR
+//                is 398` and FAILS; ARMS_FLOOR=395 (the stale-low direction,
+//                i.e. this constant's PRE-EDIT value) gives the same message
+//                naming 395 and FAILS; ARMS_FLOOR=397 PASSES. WAIVED_CEILING
+//                stays 0 (0 waivers, corpus-wide).
+export const ARMS_FLOOR = 397;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
