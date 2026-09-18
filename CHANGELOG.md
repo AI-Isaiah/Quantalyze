@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.77.51.1] - 2026-09-18 — the committed baseline catches up with the production it describes
+
+Follow-up to v0.77.51.0, and the act that clears the red that release shipped with. Same shape as
+v0.77.46.1 (after the 164.5.1.1 apply) and v0.77.34.2 (after the 164.8.6 apply).
+
+### Changed
+- **`supabase/schema/baseline.sql` regenerated from PROD**, read-only `supabase db dump --linked`,
+  taken AFTER the apply and never before it: run `35347643879` on merge commit `eec8a659`, all six
+  jobs green including the founder-approved `Production` gate. sha256 `4335f524…` → `d8dd1786…`,
+  recorded in `BASELINE.md` alongside a dated section stating what was measured. Shape moved
+  **122 → 123 function statements, 120 → 121 distinct names** — exactly one, `prod_prober_cadence_check`.
+  Tables (62), policies (154) and data statements (**0**) unchanged, as a schema-only dump must be.
+- **`NAME_SET_RATCHET` in `scripts/dump-sql-functions.ts` is empty again.** v0.77.51.0 added a
+  `snapshot-only` row for this function carrying its own clearing condition; the regeneration
+  satisfied it, the gate reported it `ratchet-stale` — *"present on BOTH sides; the disagreement is
+  gone"* — and the row was DELETED. The list may only shrink, and this is the shrink. `--check` now
+  reads *"SQL function snapshot is current (121 functions) … 0 ratcheted disagreement(s) carried."*
+
+### Fixed
+- **`sql-gate-lint` goes green on `main`.** `baseline-content-drift` went from
+  `compared 123 — MATCH 119, DRIFT 3, SNAPSHOT_MISSING 1`, findings 1, to
+  `MATCH 120, DRIFT 3, SNAPSHOT_MISSING 0`, **findings 0, exit 0**. Because that job is blocking in
+  the `frontend` aggregator and Railway skips the analytics-service deploy while main CI is red,
+  this is also what lets `POST /api/prober-cadence-alert` — the alarm's last hop, shipped in
+  v0.77.51.0 — actually reach production. Closes `[BASELINE-REGEN-164.1.1]`, booked and closed the
+  same day.
+
+### Notes
+- ⚠️ **`[DRIFT-06]`'s three allowlisted rows are untouched and were never expected to clear.**
+  `check_fan_in_ready/1`, `reject_sentinel_writes/0` and `retention_delete_guard/0` remain DRIFT:
+  PROD runs an earlier revision of those bodies than the chain renders, which no baseline
+  regeneration can fix. A regeneration that appeared to clear them would mean something else moved.
+- **Secret-scanned before commit**, all five classes from `BASELINE.md`'s own command (DSN,
+  supabase host, project ref, `\connect`, `ALTER DATABASE`, JWT): **0 matches**; gitleaks over the
+  file: no leaks. This repository is public and the dump is a production catalogue, so that scan is
+  a precondition of committing, not a formality.
+- **Plan 06 of Phase 164.1.1 is now unblocked** once this lands and the route deploys: it registers
+  the live `cron.schedule(...)`. Phase 164.1.1's own VERIFICATION.md is owed immediately after.
+
 ## [0.77.51.0] - 2026-09-18 — the prober's own detection latency becomes something PROD measures
 
 Phase 164.1.1, plans 01-05. Plan 06 (the live `cron.schedule(...)` registration) is deliberately

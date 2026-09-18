@@ -48,17 +48,51 @@ SP-M03 records what happens when they drift apart.
 
 | | |
 |---|---|
-| Taken | 2026-09-17 |
+| Taken | 2026-09-18 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
 | Supabase CLI | 2.84.2 (CI pins 2.98.2 — see the caveat below) |
-| sha256 | `4335f5242fd561cb7e40867da3f6bcdbb44860d24d7ed86b4eca601f4a7490c1` |
-| Shape | 62 tables, 154 policies, 122 function statements (120 distinct names), **0 data statements** |
+| sha256 | `d8dd17860efd45d170d56ab934ca3660ca17c531c80bbea975ac025f2a23c4a9` |
+| Shape | 62 tables, 154 policies, 123 function statements (121 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
 `scripts/local-stack/REPLAY-SPIKE.md`: no DSN, no `\connect`, no `ALTER DATABASE`, no JWT,
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-09-18 — the Phase 164.1.1 apply, one NEW function, nothing else
+
+⛔ **A SEPARATE REVIEWED ACT, TAKEN AFTER THE APPLY.** The apply is run **`35347643879`**
+(`apply-test` success → founder-approved `Production` gate → `apply` success, all six jobs green
+on merge commit `eec8a659`); the dump followed it. Taking it before would have recorded a
+production that did not yet exist. The prior capture (2026-09-17, sha256 `4335f524…`) moves to
+`d8dd1786…`.
+
+**Why it was taken:** `sql-gate-lint` was RED on `main` from the moment PR #815 merged — the
+committed baseline had no body at all for `public.prod_prober_cadence_check()`, which the phase's
+forward migration `20260918120000` creates. That is the intended sequence, not a failure: gates
+carrying applied-ness probes are red on a migration PR by construction
+(`[164.8-PUSH-RACE-VAC08]`), and this regeneration is what clears them. Precedent: PR #778 merged
+red and PR #782 cleared it; PR #815 merged red and this clears it.
+
+**MEASURED, not assumed:**
+
+| | |
+|---|---|
+| Function present in the new dump | yes — 6 occurrences of `prod_prober_cadence_check` |
+| Shape delta | 122 → **123** function statements, 120 → **121** distinct names. Exactly one. |
+| Tables / policies / data | 62 / 154 / **0** — all unchanged, as a schema-only dump must be |
+| `baseline-content-drift` before | `compared 123 — MATCH 119, DRIFT 3, SNAPSHOT_MISSING 1`, findings 1 |
+| `baseline-content-drift` after | `compared 123 — MATCH 120, DRIFT 3, SNAPSHOT_MISSING 0`, **findings 0, exit 0** |
+| `DRIFT-06` trio | still 3, untouched — this regeneration was never expected to clear them |
+| Secret scan (all five classes) | **0** matches; gitleaks over the file: no leaks |
+
+⭐ **A ratchet row was DELETED, not added.** Phase 164.1.1 had carried a `snapshot-only`
+`NAME_SET_RATCHET` row in `scripts/dump-sql-functions.ts` for this function, with its clearing
+condition written into the row. This regeneration satisfied it, the gate reported it
+`ratchet-stale` — *"present on BOTH sides; the disagreement is gone"* — and the row was removed.
+`--check` now reads *"SQL function snapshot is current (121 functions) … 0 ratcheted
+disagreement(s) carried."* The list may only shrink, and this is the shrink.
 
 ### Regenerated 2026-09-17 — the Phase 164.5.1.1 apply, one function body, nothing else
 

@@ -392,26 +392,16 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
-  {
-    name: "prod_prober_cadence_check",
-    side: "snapshot-only",
-    capturedAt: "2026-09-18",
-    clearedBy:
-      "a regeneration of supabase/schema/baseline.sql taken AFTER " +
-      "20260918120000_prod_prober_cadence.sql has applied to PROD (Phase " +
-      "164.1.1 plans 05/06 register the live cron.schedule(...) that puts the " +
-      "function on the hourly tick; the function itself lands in PROD's " +
-      "catalogue at merge, via apply-test then the Production reviewer gate, " +
-      "independent of that scheduling step).",
-    reason:
-      "Phase 164.1.1 plan 01 ships public.prod_prober_cadence_check() in a " +
-      "forward migration. supabase/schema/baseline.sql is a dated PROD dump " +
-      "(see supabase/schema/BASELINE.md) that predates this migration, so " +
-      "the function exists in the migration-replay snapshot and not yet in " +
-      "the baseline until the next refresh.",
-  },
-  // EMPTY (of any OTHER row), and that is a MEASURED state, not an unused
-  // feature.
+  // EMPTY, and that is a MEASURED state, not an unused feature.
+  //
+  // ⭐ It was briefly non-empty: Phase 164.1.1 added a `snapshot-only` row for
+  // `prod_prober_cadence_check` on 2026-09-18, because the function landed in a
+  // forward migration while supabase/schema/baseline.sql still predated it. That
+  // row carried its own clearing condition — a regeneration taken AFTER the apply —
+  // and that regeneration, the same day, satisfied it. The gate then reported the
+  // row `ratchet-stale` ("present on BOTH sides; the disagreement is gone") and it
+  // was DELETED rather than left to rot. The list shrinking is the only direction
+  // it moves.
   //
   // The single row this list ever held — `create_allocator_connected_strategy`,
   // side `baseline-only`, captured 2026-09-07 — was deleted on 2026-09-08 the
