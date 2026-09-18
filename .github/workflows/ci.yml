@@ -3183,6 +3183,40 @@ jobs:
             echo "::error::Format: postgresql://postgres.<project-ref>:<password>@<pooler-host>:6543/postgres"
             exit 1
           fi
+          # LANE-ONLY exclusion — a file whose assertion body queries an
+          # object that exists ONLY on the throwaway pg-lane
+          # (scripts/pg-lane/run.sh's cluster), never on shared TEST, declares
+          # that fact in a single `-- LANE-ONLY: {json}` header line (the same
+          # JSON-in-comment idiom `RED-UNDER-SETUP` already uses). This
+          # predicate reads that line straight out of the file's TEXT — never
+          # psql's runtime output — so the decision is made BEFORE `psql -f`
+          # is ever invoked. Defined ONCE, used in both the pre-loop census
+          # and the per-file loop below, so the printed set and the skipped
+          # set cannot drift apart.
+          #
+          # THE DISTINCTION FROM WR-03, ARGUED. A whole-file printed SKIP (the
+          # shape NET 1/NET 2 below exist to fail) is a file that CONNECTED,
+          # RAN, and then withheld its assertions while exiting 0 — it makes a
+          # claim about THIS lane that is false, and nothing distinguishes it
+          # from a genuine pass in the only channel the loop used to read,
+          # which is why WR-03 fails it. A LANE-ONLY exclusion is a decision
+          # the JOB takes BEFORE `psql -f` is ever invoked, written down here
+          # in the workflow, PRINTED on every run with its reason, over a file
+          # that makes NO claim about this lane because it was never handed to
+          # it — and whose coverage claim is made by a DIFFERENT job
+          # (sql-mutation, on the pg-lane) that can actually satisfy its
+          # preconditions. The difference is WHO DECIDES and WHETHER A CLAIM
+          # IS MADE, not the fact that execution is withheld either way. What
+          # stays armed regardless: both nets for every OTHER file, and for a
+          # lane-only file itself the WHOLE static-analysis half below —
+          # sentinel declaration, roster-vs-count coherence, and the n_arms <=
+          # RAISE-EXCEPTION-sites bound all keep reading straight from the
+          # file's own text whether or not it ran, so the cheapest neutering —
+          # delete an arm, edit the count down — is still caught here even for
+          # an excluded file.
+          lane_only_marker() {
+            grep -a -m1 '^-- LANE-ONLY:' "$1" || true
+          }
           echo "Discovering supabase/tests/test_*.sql files..."
           shopt -s nullglob
           files=(supabase/tests/test_*.sql)
@@ -3196,6 +3230,28 @@ jobs:
           fi
           echo "Found ${#files[@]} test file(s):"
           printf '  - %s\n' "${files[@]}"
+          # Census the LANE-ONLY set BEFORE the loop, from the SAME predicate
+          # the loop uses below, so the printed set and the skipped set cannot
+          # drift apart. ⛔ Nothing is removed from `files` here — the array
+          # stays whole and ${#files[@]} keeps reporting the real corpus size.
+          # ⚠️ A string counter, not a bash array: an empty-array expansion
+          # under `set -u` is not portable to the bash this step's own
+          # contract test spawns.
+          echo ""
+          echo "Checking for LANE-ONLY exclusions..."
+          lane_only_count=0
+          for f in "${files[@]}"; do
+            lm="$(lane_only_marker "$f")"
+            if [ -n "$lm" ]; then
+              lane_only_count=$((lane_only_count + 1))
+              echo "::notice file=$f::LANE-ONLY — not executed against shared TEST. ${lm#-- LANE-ONLY: }"
+            fi
+          done
+          if [ "$lane_only_count" -eq 0 ]; then
+            echo "  ↳ none excluded."
+          else
+            echo "  ↳ ${lane_only_count} file(s) excluded from execution (still counted in the static accounting below)."
+          fi
           # ON_ERROR_STOP=1 + the test files' RAISE EXCEPTION lines mean
           # a failed assertion exits non-zero and fails this step.
           #
@@ -3327,7 +3383,9 @@ jobs:
           export PGOPTIONS='-c client_min_messages=notice'
           bad=0
           sentinels_declared=0
+          sentinels_verified=0
           arms_declared=0
+          executed=0
           out="${RUNNER_TEMP}/sql-test-output.log"
           echo ""
           echo "Probing that server NOTICEs actually reach this log..."
@@ -3346,97 +3404,105 @@ jobs:
           fi
           echo "  ↳ NOTICE channel live."
           for f in "${files[@]}"; do
-            echo ""
-            echo "=== Running: $f ==="
-            status=0
-            # -X for parity with the mutex/census psql calls in this job: a
-            # ~/.psqlrc on a self-hosted runner could otherwise set
-            # client_min_messages or ECHO and change what this loop reads.
-            psql "$TEST_SUPABASE_DB_URL" -X -v ON_ERROR_STOP=1 -f "$f" > "$out" 2>&1 || status=$?
-            cat "$out"
-            if [ "$status" -ne 0 ]; then
-              echo "::error file=$f::psql exited $status — a RAISE EXCEPTION assertion failed, or the connection did. The captured output above is the whole story for this file."
-              exit "$status"
-            fi
-            # NET 1 (locale-proof): the whole-file markers this FILE defines.
-            skip_hits=""
-            markers="$(grep -aoE "RAISE NOTICE 'SKIP: [^'%]{0,60}" "$f" | sed "s/^.*RAISE NOTICE '//" | sort -u || true)"
-            if [ -n "$markers" ]; then
-              # F15 — `$markers` is unquoted ON PURPOSE: IFS=$'\n' is what splits
-              # it one marker per line. But an unquoted expansion also undergoes
-              # PATHNAME expansion, and this step runs under the `shopt -s
-              # nullglob` set above for the file glob. MEASURED in bash 5.3: a
-              # marker containing `*`, `?`, or a CLOSED `[...]` class matches no
-              # file and is then DELETED from the word list outright — the loop
-              # body never executes for it and nothing is printed to say a marker
-              # was dropped. NET 1 would be off for that file, leaving only NET
-              # 2, which F14(a) already records as locale-fragile; a skip on a
-              # localized server would then sail through both nets as a pass.
-              # (An UNTERMINATED `[` survives, because bash treats it literally —
-              # so today's behaviour depends on where a bracket happens to fall.
-              # That is a coin toss, not a policy.) `set -f` turns pathname
-              # expansion off for the split and back on straight after; it does
-              # NOT affect `case` pattern matching, which the sibling loop below
-              # relies on.
-              _oifs="$IFS"
-              IFS=$'\n'
-              set -f
-              for m in $markers; do
-                if grep -aF "$m" "$out" >/dev/null 2>&1; then
-                  skip_hits="${skip_hits}      ${m}"$'\n'
-                fi
-              done
-              set +f
-              IFS="$_oifs"
-            fi
-            # NET 2: label-anchored, for a skip message composed at runtime.
-            net2="$(grep -aE 'NOTICE: +SKIP:' "$out" || true)"
-            if [ -n "$skip_hits" ] || [ -n "$net2" ]; then
-              echo "::error file=$f::printed a whole-file SKIP notice and exited 0. THAT IS NOT A PASS: the file RETURNed before its assertions, so this run proves nothing about the object it guards — it is indistinguishable from a green run only because exit code was the sole thing read. Nothing applies migrations to the TEST project (this job has no apply step; supabase-migrate.yml targets PRODUCTION only), so the skip cannot re-arm itself on a later run. Fix the file the way supabase/tests/test_ledger_refresh_{staleness,fanout,composite_arm}.sql were fixed: RAISE EXCEPTION on the absent object instead of skipping."
-              echo "  ↳ $f printed:"
-              if [ -n "$skip_hits" ]; then
-                printf '%s' "$skip_hits"
+            lane_marker="$(lane_only_marker "$f")"
+            if [ -n "$lane_marker" ]; then
+              echo ""
+              echo "=== Skipping (LANE-ONLY): $f ==="
+              echo "  ↳ ${lane_marker#-- LANE-ONLY: }"
+            else
+              executed=$((executed + 1))
+              echo ""
+              echo "=== Running: $f ==="
+              status=0
+              # -X for parity with the mutex/census psql calls in this job: a
+              # ~/.psqlrc on a self-hosted runner could otherwise set
+              # client_min_messages or ECHO and change what this loop reads.
+              psql "$TEST_SUPABASE_DB_URL" -X -v ON_ERROR_STOP=1 -f "$f" > "$out" 2>&1 || status=$?
+              cat "$out"
+              if [ "$status" -ne 0 ]; then
+                echo "::error file=$f::psql exited $status — a RAISE EXCEPTION assertion failed, or the connection did. The captured output above is the whole story for this file."
+                exit "$status"
               fi
-              if [ -n "$net2" ]; then
-                printf '%s\n' "$net2" | sed 's/^/      /'
+              # NET 1 (locale-proof): the whole-file markers this FILE defines.
+              skip_hits=""
+              markers="$(grep -aoE "RAISE NOTICE 'SKIP: [^'%]{0,60}" "$f" | sed "s/^.*RAISE NOTICE '//" | sort -u || true)"
+              if [ -n "$markers" ]; then
+                # F15 — `$markers` is unquoted ON PURPOSE: IFS=$'\n' is what splits
+                # it one marker per line. But an unquoted expansion also undergoes
+                # PATHNAME expansion, and this step runs under the `shopt -s
+                # nullglob` set above for the file glob. MEASURED in bash 5.3: a
+                # marker containing `*`, `?`, or a CLOSED `[...]` class matches no
+                # file and is then DELETED from the word list outright — the loop
+                # body never executes for it and nothing is printed to say a marker
+                # was dropped. NET 1 would be off for that file, leaving only NET
+                # 2, which F14(a) already records as locale-fragile; a skip on a
+                # localized server would then sail through both nets as a pass.
+                # (An UNTERMINATED `[` survives, because bash treats it literally —
+                # so today's behaviour depends on where a bracket happens to fall.
+                # That is a coin toss, not a policy.) `set -f` turns pathname
+                # expansion off for the split and back on straight after; it does
+                # NOT affect `case` pattern matching, which the sibling loop below
+                # relies on.
+                _oifs="$IFS"
+                IFS=$'\n'
+                set -f
+                for m in $markers; do
+                  if grep -aF "$m" "$out" >/dev/null 2>&1; then
+                    skip_hits="${skip_hits}      ${m}"$'\n'
+                  fi
+                done
+                set +f
+                IFS="$_oifs"
               fi
-              bad=1
-            fi
-            # Narrow, self-policed partial skips — surfaced, never fatal (above).
-            partials="$(grep -aoE 'SKIP \([^)]*\)|SKIP Part [0-9]+|PASS WITH [0-9]+ SKIPS?' "$out" | sort -u | tr '\n' ' ' || true)"
-            if [ -n "$partials" ]; then
-              echo "::notice file=$f::ran with narrow partial skips — NOT a failure. Each names assertions it withheld: ${partials}"
-            fi
-            # F13 — of the partial skips this run PRINTED, which ones end their
-            # DO block? Derived from the source (a RETURN within 4 lines of the
-            # notice), so the claim is computed, not asserted.
-            blockterm="$(awk -v q="'" '/RAISE NOTICE/ && /SKIP/ { msg = substr($0, index($0, "SKIP")); n = index(msg, q); if (n > 0) msg = substr(msg, 1, n - 1); n = index(msg, "%"); if (n > 0) msg = substr(msg, 1, n - 1); msg = substr(msg, 1, 40); buf = ""; for (i = 0; i < 4; i++) { if ((getline nxt) > 0) buf = buf "\n" nxt } if (buf ~ /RETURN[ \t]*;/) print msg }' "$f" | sort -u || true)"
-            bt_hits=""
-            if [ -n "$blockterm" ]; then
-              # F15, same class as NET 1 above — without `set -f`, nullglob
-              # silently drops any label carrying a glob metacharacter and the
-              # UNPOLICED warning for it is never printed. Here that costs a
-              # warning rather than a failure, but a partial skip that goes
-              # unnamed is exactly the coverage this block exists to surface,
-              # and the awk truncation to 40 chars means WHICH labels vanish
-              # depends on where the cut lands. Fixed in both loops so the two
-              # cannot drift apart.
-              _oifs="$IFS"
-              IFS=$'\n'
-              set -f
-              for m in $blockterm; do
-                case "$m" in
-                  "SKIP:"*) continue ;;
-                esac
-                if grep -aF "$m" "$out" >/dev/null 2>&1; then
-                  bt_hits="${bt_hits} [${m}]"
+              # NET 2: label-anchored, for a skip message composed at runtime.
+              net2="$(grep -aE 'NOTICE: +SKIP:' "$out" || true)"
+              if [ -n "$skip_hits" ] || [ -n "$net2" ]; then
+                echo "::error file=$f::printed a whole-file SKIP notice and exited 0. THAT IS NOT A PASS: the file RETURNed before its assertions, so this run proves nothing about the object it guards — it is indistinguishable from a green run only because exit code was the sole thing read. Nothing applies migrations to the TEST project (this job has no apply step; supabase-migrate.yml targets PRODUCTION only), so the skip cannot re-arm itself on a later run. Fix the file the way supabase/tests/test_ledger_refresh_{staleness,fanout,composite_arm}.sql were fixed: RAISE EXCEPTION on the absent object instead of skipping."
+                echo "  ↳ $f printed:"
+                if [ -n "$skip_hits" ]; then
+                  printf '%s' "$skip_hits"
                 fi
-              done
-              set +f
-              IFS="$_oifs"
-            fi
-            if [ -n "$bt_hits" ]; then
-              echo "::warning file=$f::UNPOLICED partial skip(s):${bt_hits} — each of those notices is followed by RETURN in the source, so it ENDS ITS DO BLOCK: every later assertion in that block was withheld, not only the ones the label names, and nothing in the file or here verifies the skip was honest. Reported rather than failed because how much was withheld is not mechanically knowable from outside; the fix is a both-or-neither coherence assertion in the .sql file."
+                if [ -n "$net2" ]; then
+                  printf '%s\n' "$net2" | sed 's/^/      /'
+                fi
+                bad=1
+              fi
+              # Narrow, self-policed partial skips — surfaced, never fatal (above).
+              partials="$(grep -aoE 'SKIP \([^)]*\)|SKIP Part [0-9]+|PASS WITH [0-9]+ SKIPS?' "$out" | sort -u | tr '\n' ' ' || true)"
+              if [ -n "$partials" ]; then
+                echo "::notice file=$f::ran with narrow partial skips — NOT a failure. Each names assertions it withheld: ${partials}"
+              fi
+              # F13 — of the partial skips this run PRINTED, which ones end their
+              # DO block? Derived from the source (a RETURN within 4 lines of the
+              # notice), so the claim is computed, not asserted.
+              blockterm="$(awk -v q="'" '/RAISE NOTICE/ && /SKIP/ { msg = substr($0, index($0, "SKIP")); n = index(msg, q); if (n > 0) msg = substr(msg, 1, n - 1); n = index(msg, "%"); if (n > 0) msg = substr(msg, 1, n - 1); msg = substr(msg, 1, 40); buf = ""; for (i = 0; i < 4; i++) { if ((getline nxt) > 0) buf = buf "\n" nxt } if (buf ~ /RETURN[ \t]*;/) print msg }' "$f" | sort -u || true)"
+              bt_hits=""
+              if [ -n "$blockterm" ]; then
+                # F15, same class as NET 1 above — without `set -f`, nullglob
+                # silently drops any label carrying a glob metacharacter and the
+                # UNPOLICED warning for it is never printed. Here that costs a
+                # warning rather than a failure, but a partial skip that goes
+                # unnamed is exactly the coverage this block exists to surface,
+                # and the awk truncation to 40 chars means WHICH labels vanish
+                # depends on where the cut lands. Fixed in both loops so the two
+                # cannot drift apart.
+                _oifs="$IFS"
+                IFS=$'\n'
+                set -f
+                for m in $blockterm; do
+                  case "$m" in
+                    "SKIP:"*) continue ;;
+                  esac
+                  if grep -aF "$m" "$out" >/dev/null 2>&1; then
+                    bt_hits="${bt_hits} [${m}]"
+                  fi
+                done
+                set +f
+                IFS="$_oifs"
+              fi
+              if [ -n "$bt_hits" ]; then
+                echo "::warning file=$f::UNPOLICED partial skip(s):${bt_hits} — each of those notices is followed by RETURN in the source, so it ENDS ITS DO BLOCK: every later assertion in that block was withheld, not only the ones the label names, and nothing in the file or here verifies the skip was honest. Reported rather than failed because how much was withheld is not mechanically knowable from outside; the fix is a both-or-neither coherence assertion in the .sql file."
+              fi
             fi
             # 'ALL N ARMS EXECUTED' sentinel. Where a file DECLARES one in a
             # RAISE NOTICE, the run must PRINT it. Without this, an edit that
@@ -3512,7 +3578,21 @@ jobs:
                 echo "::error file=$f::declares ${n_arms} arms but contains only ${raises} non-comment RAISE EXCEPTION line(s). An arm with no way to raise cannot fail, so it is not an arm — and a file declaring more arms than it can fail inflates the corpus-wide floors below while proving nothing. Either these arms assert through something this check cannot see, in which case say so IN THIS WORKFLOW where it is visible, or the count is fiction."
                 bad=1
               fi
-              if grep -aF "$sentinel" "$out" >/dev/null 2>&1; then
+              # The ONE "$out"-derived check in this static-accounting block —
+              # everything else above reads "$f" only and runs for a
+              # LANE-ONLY file exactly as for any other. This one cannot: for
+              # a LANE-ONLY file "$out" holds either nothing or a previous
+              # iteration's captured log, and judging the sentinel against
+              # that would attribute another file's run to this one. Three
+              # arms: LANE-ONLY (declared, not checked this run — the
+              # coverage claim belongs to sql-mutation on the pg-lane),
+              # found (this run's own output, verified), or not-found
+              # (existing error — an arm was neutered, renumbered or
+              # short-circuited).
+              if [ -n "$lane_marker" ]; then
+                echo "  ↳ completion sentinel DECLARED but not checked against a run — LANE-ONLY; execution coverage for this file is owned by sql-mutation on the pg-lane."
+              elif grep -aF "$sentinel" "$out" >/dev/null 2>&1; then
+                sentinels_verified=$((sentinels_verified + 1))
                 echo "  ↳ completion sentinel OK: ${sentinel}"
               else
                 echo "::error file=$f::declares the completion sentinel '${sentinel}' but this run never printed it, yet psql exited 0. The file stopped short of its own end-of-arms notice, so an arm was neutered, renumbered or short-circuited and the missing coverage is silent. Restore the arm, or change the sentinel to the number of arms the file actually executes — do not delete the notice."
@@ -3721,8 +3801,8 @@ jobs:
             exit 1
           fi
           echo ""
-          echo "All ${#files[@]} SQL self-tests passed — no whole-file skips; ${sentinels_declared} completion sentinel(s) verified, covering ${arms_declared} declared arms."
-          echo "Standing limits of this gate, printed so this log does not overclaim: (1) a skip message composed at RUNTIME on a server whose lc_messages is not C would evade both skip nets — none exists in this corpus today; (2) partial skips reported UNPOLICED above are named, not failed, and the coverage they withhold is NOT verified by anything; (3) the arm counts summed above are DECLARED, not executed — an arm gutted in place still runs to the end and still prints its file's sentinel, so every number in this line is blind to it; (4) branch protection is OFF on this repo, so a failure here does not block a merge — it records what did not happen."
+          echo "${executed} of ${#files[@]} SQL self-tests passed — no whole-file skips; ${lane_only_count} excluded (LANE-ONLY, still counted in the static accounting above); ${sentinels_verified} of ${sentinels_declared} completion sentinel(s) verified against THIS run, covering ${arms_declared} declared arms."
+          echo "Standing limits of this gate, printed so this log does not overclaim: (1) a skip message composed at RUNTIME on a server whose lc_messages is not C would evade both skip nets — none exists in this corpus today; (2) partial skips reported UNPOLICED above are named, not failed, and the coverage they withhold is NOT verified by anything; (3) the arm counts summed above are DECLARED, not executed — an arm gutted in place still runs to the end and still prints its file's sentinel, so every number in this line is blind to it; (4) branch protection is OFF on this repo, so a failure here does not block a merge — it records what did not happen; (5) a LANE-ONLY file's arms are COUNTED here but not EXECUTED here — their execution and mutation coverage live in sql-mutation on the pg-lane, and nothing in THIS job would notice if that job stopped running them."
       # Best-effort EARLY release of the shared-test-db mutex (Phase 158 /
       # OPS-01), identical in all three DB-touching jobs. Job teardown drops the
       # psql session anyway; killing it here hands the lock to the next waiter a
