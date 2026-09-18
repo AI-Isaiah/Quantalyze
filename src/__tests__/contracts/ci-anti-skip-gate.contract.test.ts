@@ -79,6 +79,13 @@ for a in "$@"; do
   if [ "$prev" = "-c" ]; then c="$c$a"; fi
   prev="$a"
 done
+# STUB_INVOCATION_LOG — the artifact that turns "was this file executed?"
+# from an inference into a measurement. Only -f invocations are logged (the
+# mutex/census/probe calls use -c and leave $f empty), so this is exactly
+# the set of files the gate actually handed to psql.
+if [ -n "$f" ] && [ -n "\${STUB_INVOCATION_LOG:-}" ]; then
+  basename "$f" >> "\${STUB_INVOCATION_LOG}"
+fi
 if [ -n "$c" ]; then
   case "$c" in
     *ANTISKIP*)
@@ -91,6 +98,12 @@ b="$(basename "$f")"
 # One arbitrary extra output line, for a scenario that needs a NOTICE the
 # corpus file does not itself dictate (the runtime-composed partial label).
 if [ -n "\${STUB_EXTRA:-}" ]; then echo "\${STUB_EXTRA}"; fi
+# STUB_FAIL_BASENAME — reproduces the shipped defect (CI run 35347643700)
+# verbatim: relation "net._lane_posts" does not exist, psql exit 3.
+if [ "\${STUB_FAIL_BASENAME:-}" = "$b" ]; then
+  echo 'psql:'"$f"':645: ERROR:  relation "net._lane_posts" does not exist'
+  exit 3
+fi
 if [ "\${STUB_SKIP_BASENAME:-}" = "$b" ]; then
   m="$(grep -aoE "RAISE NOTICE 'SKIP: [^'%]{0,60}" "$f" | sed "s/^.*RAISE NOTICE '//" | head -1)"
   echo "psql:$f:1: \${STUB_LABEL:-NOTICE}:  \${m}"
@@ -189,10 +202,86 @@ function armBodies(n: number): string {
 }
 
 describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
-  it("passes a run where every file executes and prints its sentinel", () => {
+  it("passes a run where every NON-EXCLUDED file executes and prints its sentinel", () => {
+    // Renamed from "...every file executes...", which became false the
+    // moment a file was excluded. The exclusion has to be REPORTED, or this
+    // title would be quietly false again.
     const { code, out } = runGate();
     expect(out).toContain("SQL self-tests passed");
     expect(code).toBe(0);
+    expect(out).toMatch(/\d+ excluded \(LANE-ONLY/);
+  }, 90_000);
+
+  /**
+   * 164.1.1.1-01 — the LANE-ONLY exclusion for test_prod_prober_cadence.sql.
+   * Three properties: the file is never handed to psql (measured, not
+   * inferred), the exclusion cannot be silent, and the static accounting
+   * (SENTINEL_FLOOR/ARMS_FLOOR) still counts the file it excludes from
+   * execution.
+   */
+  it("never hands the excluded file to psql, proven by an invocation log over the real corpus", () => {
+    const target = "test_prod_prober_cadence.sql";
+    const logDir = mkdtempSync(join(tmpdir(), "antiskip-invlog-"));
+    const logPath = join(logDir, "invocation.log");
+    try {
+      const { code, out } = runGate({ STUB_INVOCATION_LOG: logPath });
+      expect(code).toBe(0);
+      const logged = readFileSync(logPath, "utf8").split("\n").filter(Boolean);
+      // Guard the guard: an EMPTY or missing log must not pass as "the file
+      // was excluded" — it is the LENGTH assertion that has to be able to
+      // fail, not merely the absence check below.
+      expect(logged.length).toBeGreaterThan(70);
+      expect(logged).not.toContain(target);
+      expect(out).toContain(`::notice file=supabase/tests/${target}::`);
+      expect(out).toContain("not executed against shared TEST");
+      expect(out).toMatch(/\d+ excluded \(LANE-ONLY/);
+    } finally {
+      rmSync(logDir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("propagates the shipped net._lane_posts defect through a NON-excluded file, and never through the excluded one (calibration pair)", () => {
+    // Arm 1: proves the injection is real. Without this, arm 2's exit 0
+    // would prove nothing — a stub that simply never fires also exits 0.
+    const control = "test_retention_crons_safe.sql";
+    const armed = runGate({ STUB_FAIL_BASENAME: control });
+    expect(armed.code).not.toBe(0);
+    expect(armed.out).toContain(`::error file=supabase/tests/${control}::`);
+    expect(armed.out).toContain('relation "net._lane_posts" does not exist');
+
+    // Arm 2: the SAME injection aimed at the excluded file never reaches
+    // psql, because the file is never handed to it.
+    const excluded = "test_prod_prober_cadence.sql";
+    const spared = runGate({ STUB_FAIL_BASENAME: excluded });
+    expect(spared.code).toBe(0);
+    expect(spared.out).not.toContain('relation "net._lane_posts" does not exist');
+  }, 90_000);
+
+  it("keeps the excluded file inside the static accounting — declared totals still reach the step's own floors", () => {
+    const { code, out } = runGate();
+    expect(code).toBe(0);
+    // ⛔ Read out of SCRIPT, never restated as a literal here — the repo
+    // already holds four mirrors of these two integers.
+    const sentinelFloor = Number(/SENTINEL_FLOOR=(\d+)/.exec(SCRIPT)![1]);
+    const armsFloor = Number(/ARMS_FLOOR=(\d+)/.exec(SCRIPT)![1]);
+    const summary = /(\d+) of (\d+) completion sentinel\(s\) verified against THIS run, covering (\d+) declared arms/.exec(
+      out,
+    );
+    expect(summary, "closing summary line shape changed").not.toBeNull();
+    const [, verified, declared, arms] = summary!;
+    expect(Number(declared)).toBe(sentinelFloor);
+    expect(Number(arms)).toBe(armsFloor);
+    expect(Number(verified)).toBe(sentinelFloor - 1);
+    // Guard the guard: proves the excluded file's OWN sentinel was skipped
+    // this run — not merely that the totals still add up. A different file,
+    // test_sync_status_curated_sentence_survives.sql, shares the SAME "ALL 7
+    // ARMS EXECUTED" text, so this counts occurrences rather than asserting
+    // bare presence/absence, which could not tell the two apart.
+    const okCount = (out.match(/completion sentinel OK: ALL 7 ARMS EXECUTED/g) ?? []).length;
+    expect(okCount).toBe(1);
+    expect(out).toContain(
+      "completion sentinel DECLARED but not checked against a run — LANE-ONLY",
+    );
   }, 90_000);
 
   it("FAILS when a file prints a whole-file SKIP marker and exits 0, naming the file", () => {
