@@ -6179,6 +6179,10 @@ $$;
 ALTER FUNCTION "public"."latest_cron_success"("p_cron_name" "text") OWNER TO "postgres";
 
 
+COMMENT ON FUNCTION "public"."latest_cron_success"("p_cron_name" "text") IS 'ADMIN-ONLY point query: returns the most recent status=''ok'' completion for a given cron_name, or NULL. It has NO programmatic caller anywhere in this tree (measured 2026-09-18) and raises no alert of its own — its one reader is a human running docs/demos/pre-flight-checklist.md by hand. The AUTOMATED monitor for public.cron_runs is public.prod_prober_cadence_check(), which watches cron_name=prod_prober and posts an alert on its own schedule.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."ledger_refresh_parse_series_date"("p_text" "text") RETURNS "date"
     LANGUAGE "plpgsql" STABLE STRICT
     SET "search_path" TO 'public', 'pg_catalog'
@@ -6883,6 +6887,163 @@ ALTER FUNCTION "public"."prevent_profile_role_change"() OWNER TO "postgres";
 
 COMMENT ON FUNCTION "public"."prevent_profile_role_change"() IS 'Locks profiles.role after signup (2026-05-20). The signup form is now the only place a regular user picks their role. Admin support paths through service_role still work; the trigger no-ops when role is unchanged so stale UI payloads that re-send the same value do not break.';
 
+
+
+CREATE OR REPLACE FUNCTION "public"."prod_prober_cadence_check"() RETURNS bigint
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $_$
+DECLARE
+  -- ══════════════════════════════════════════════════════════════════════
+  -- c_contact_ceiling (D-04) — DERIVED, dated, and named rather than chosen.
+  -- ══════════════════════════════════════════════════════════════════════
+  -- SAMPLE: 273.4 hours ending 2026-09-18, measured TWICE independently with
+  -- identical figures. GitHub delivered 75 of 273 expected hourly ticks — a
+  -- 27% delivery rate. Median gap 3.28h, maximum gap 7.13h, two gaps exceeded
+  -- six hours.
+  --
+  -- CEILING = observed MAXIMUM gap + observed MEDIAN gap = 7.13h + 3.28h =
+  -- 10.41h, rounded UP to the whole minute: 10 hours 25 minutes.
+  --
+  -- WHY THIS RULE AND NOT ANOTHER, both halves: below the observed maximum the
+  -- alarm would fire on behaviour already measured as ordinary and would be
+  -- muted within a week; above maximum-plus-one-typical-interval, a total
+  -- stoppage would go unnamed for longer than any gap the sample contains.
+  --
+  -- ⛔ THIS NUMBER IS DECLARED ONCE, HERE. This repository carries a named,
+  -- recurring citation-drift defect class ([164.7-CITATION-DRIFT-01]) for a
+  -- number restated in prose that then drifts out of sync with the constant.
+  -- Every other reference to this ceiling anywhere in this tree is by the
+  -- SYMBOL `c_contact_ceiling`, never by restating "10h25m" or "10.41h".
+  c_contact_ceiling CONSTANT INTERVAL := '10 hours 25 minutes';
+
+  v_last        TIMESTAMPTZ;
+  v_stale       BOOLEAN;
+  v_gap_minutes BIGINT;
+
+  -- The Vault + system_settings + pg_net read, byte-identical in shape to
+  -- match_engine_cron_tick() — see that function for the full rationale behind
+  -- each guard.
+  v_key TEXT;
+  v_cnt INTEGER;
+  v_url TEXT;
+  v_req BIGINT;
+  c_url_allowed CONSTANT TEXT :=
+    '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
+BEGIN
+  -- 1. Read the contact. Narrowed by cron_name — never an unfiltered scan over
+  --    public.cron_runs.
+  SELECT max(completed_at) INTO v_last
+    FROM public.cron_runs
+   WHERE cron_name = 'prod_prober';
+
+  -- 2. Decide. ⛔ THE NULL LEG IS WRITTEN FIRST AND EXPLICITLY. An absent
+  --    contact row is the LOUDEST possible signal (the prober has never run,
+  --    or its rows were removed) — and a bare interval comparison against NULL
+  --    (`now() - NULL > c_contact_ceiling`) yields NULL, which every IF in
+  --    plpgsql treats as FALSE, i.e. reports healthy. That silent-healthy shape
+  --    is the exact defect class this whole phase exists to remove, so it is
+  --    refused at the one place it could enter.
+  IF v_last IS NULL THEN
+    v_stale := TRUE;
+  ELSE
+    v_stale := (now() - v_last > c_contact_ceiling);
+  END IF;
+
+  -- 3. A DURATION, not a value read from configuration — safe to record in the
+  --    observer's own row and in the alert body below.
+  v_gap_minutes := CASE
+                      WHEN v_last IS NULL THEN NULL
+                      ELSE floor(extract(epoch FROM (now() - v_last)) / 60)::BIGINT
+                    END;
+
+  -- 4. THE OBSERVER'S OWN ROW (D-06), unconditionally, BEFORE any outbound
+  --    call, so this function's own liveness is readable the same way the
+  --    prober's is. 24 rows/day, accepted and unpruned — the same growth
+  --    precedent the mt5_session_episode writer already established for this
+  --    table (analytics-service/services/mt5_session_episodes.py).
+  --    `error` and `metadata` never carry a URL, a key, or a system_settings
+  --    VALUE — only names and integers, per this repo's RAISE-message
+  --    discipline (T-161.1-10) applied to a written row instead of a RAISE.
+  INSERT INTO public.cron_runs (cron_name, started_at, completed_at, status, error, metadata)
+  VALUES (
+    'prod_prober_cadence_check',
+    now(),
+    now(),
+    CASE WHEN v_stale THEN 'error' ELSE 'ok' END,
+    CASE
+      WHEN v_stale THEN format('prod_prober contact gap exceeded the ceiling: %s minute(s) since last contact (never, if none)', COALESCE(v_gap_minutes::TEXT, 'never'))
+      ELSE NULL
+    END,
+    jsonb_build_object(
+      'gap_minutes', v_gap_minutes,
+      'ceiling', c_contact_ceiling::TEXT,
+      'contact_cron_name', 'prod_prober'
+    )
+  );
+
+  -- 5. Not stale: no alarm was raised on this tick. The gate's fresh arm reads
+  --    exactly this NULL.
+  IF NOT v_stale THEN
+    RETURN NULL;
+  END IF;
+
+  -- 6. Stale: resolve the key and the destination, in the SAME order and with
+  --    the SAME guards as match_engine_cron_tick().
+  SELECT count(*), max(decrypted_secret) INTO v_cnt, v_key
+    FROM vault.decrypted_secrets
+   WHERE name = 'analytics_service_key';
+  IF v_cnt > 1 THEN
+    RAISE EXCEPTION 'analytics_service_key is not unique in vault (% rows) — refusing to pick one', v_cnt;
+  END IF;
+  IF v_key IS NULL OR btrim(v_key) = '' THEN
+    RAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header';
+  END IF;
+
+  SELECT s.value INTO v_url
+    FROM public.system_settings s
+   WHERE s.key = 'analytics_service_url';
+  IF v_url IS NULL OR v_url = '' THEN
+    RAISE EXCEPTION 'analytics_service_url missing from system_settings — refusing to post to a null url';
+  END IF;
+
+  -- ⛔ LAYER (b) of the destination allow-list, re-tested inside this body even
+  -- though STEP 1b of 20260907120000 already refuses to STORE anything else —
+  -- this is what still refuses the POST when that constraint has been dropped.
+  -- The message deliberately does not echo the offending url (T-161.1-10):
+  -- RAISE text lands in cron.job_run_details, the Postgres log, and downstream
+  -- shippers, and this repo is public.
+  IF v_url !~ c_url_allowed THEN
+    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: an https host under .up.railway.app';
+  END IF;
+
+  -- ⛔ NOTHING BELOW IS WRAPPED IN AN EXCEPTION HANDLER THAT SWALLOWS. If
+  -- net.http_post is absent or errors, this function RAISES and the tick is
+  -- red. An alarm that catches its own delivery failure and returns normally
+  -- is an alarm that reports success for a message nobody received — this
+  -- phase's subject, one layer down. The honest cost: a raise here rolls back
+  -- the observer row written in step 4, so a tick that could not deliver
+  -- leaves NO row, and that absence is itself the next tick's evidence.
+  SELECT net.http_post(
+           url := v_url || '/api/prober-cadence-alert',
+           headers := jsonb_build_object(
+                        'Content-Type', 'application/json',
+                        'X-Service-Key', v_key
+                      ),
+           body := jsonb_build_object(
+                     'cron_name', 'prod_prober',
+                     'gap_minutes', v_gap_minutes,
+                     'ceiling', c_contact_ceiling::text,
+                     'detected_at', now()
+                   ),
+           timeout_milliseconds := 60000
+         ) INTO v_req;
+  RETURN v_req;
+END
+$_$;
+
+
+ALTER FUNCTION "public"."prod_prober_cadence_check"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."reclaim_stuck_compute_jobs"("p_older_than" interval DEFAULT '00:10:00'::interval) RETURNS integer
@@ -10256,7 +10417,7 @@ CREATE TABLE IF NOT EXISTS "public"."cron_runs" (
 ALTER TABLE "public"."cron_runs" OWNER TO "postgres";
 
 
-COMMENT ON TABLE "public"."cron_runs" IS 'Heartbeat rows written by cron jobs at start + completion. Monitored by latest_cron_success() for the 36h stale alert.';
+COMMENT ON TABLE "public"."cron_runs" IS 'Heartbeat/episode rows written by several independent producers, each under its own cron_name (measured 2026-09-18): the FastAPI match-engine cron, the prod-prober (cron_name=prod_prober), MT5 session episodes, the ledger refresh fan-out, and this table''s own observer. The AUTOMATED monitor is public.prod_prober_cadence_check(), which watches cron_name=prod_prober and posts an alert via net.http_post when the gap since the last contact crosses c_contact_ceiling (declared inside that function). public.latest_cron_success(p_cron_name) is an ADMIN-ONLY point query with no programmatic caller anywhere in this tree — used by hand from docs/demos/pre-flight-checklist.md — and it raises no alert of its own.';
 
 
 
@@ -14721,6 +14882,10 @@ GRANT ALL ON FUNCTION "public"."prevent_profile_privileged_change"() TO "service
 GRANT ALL ON FUNCTION "public"."prevent_profile_role_change"() TO "anon";
 GRANT ALL ON FUNCTION "public"."prevent_profile_role_change"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."prevent_profile_role_change"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."prod_prober_cadence_check"() FROM PUBLIC;
 
 
 

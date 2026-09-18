@@ -3715,9 +3715,19 @@ and any widening must say what it does to the approval-gate snapshot.
   runbook deliberately does not cover".
 
 
-### BASELINE-REGEN-164.1.1 — `baseline.sql` owes a regeneration once `prod_prober_cadence_check` applies (booked 2026-09-18)
+### BASELINE-REGEN-164.1.1 — CLOSED 2026-09-18, same day it was booked
 
-- [ ] **`[BASELINE-REGEN-164.1.1]` `scripts/baseline-content-drift-check.mjs` reports
+- [x] **`[BASELINE-REGEN-164.1.1]` CLOSED — `supabase/schema/baseline.sql` regenerated from PROD
+      after the apply (2026-09-18). Apply run `35347643879` on merge commit `eec8a659`, all six
+      jobs green including the founder-approved `Production` gate; the dump followed it, never
+      preceded it. MEASURED after: `compared 123 — MATCH 120, DRIFT 3, SNAPSHOT_MISSING 0`,
+      **findings 0, exit 0** (before: MATCH 119, SNAPSHOT_MISSING 1, findings 1). The
+      `NAME_SET_RATCHET` row was reported `ratchet-stale` and DELETED — the list shrank, which is
+      the only direction it moves. Secret scan: 0 across all five classes. Shape moved 122 → 123
+      function statements / 120 → 121 distinct names, exactly one. `[DRIFT-06]`'s trio is
+      untouched and was never expected to clear. Original entry below, kept as lineage.**
+
+- [ ] ~~**`[BASELINE-REGEN-164.1.1]` `scripts/baseline-content-drift-check.mjs` reports
       `SNAPSHOT_MISSING prod_prober_cadence_check/0` and will keep reporting it until
       `supabase/schema/baseline.sql` is regenerated from PROD after PR #815 applies.**
       ⭐ **This is the DOCUMENTED, EXPECTED state for a PR that adds a function-creating
@@ -3740,7 +3750,7 @@ and any widening must say what it does to the approval-gate snapshot.
       `scripts/dump-sql-functions.ts`, which carries the identical clearing condition.
       ⚠️ Same family as `[164.8-PUSH-RACE-VAC08]`: on a PR that ADDS a migration, gates carrying
       applied-ness probes are RED until merge, by construction, because apply-on-merge was chosen
-      over apply-on-PR.
+      over apply-on-PR.~~
       ⛔ **THIS IS ON THE CRITICAL PATH FOR THE DEPLOY, NOT JUST HYGIENE — and that is the half
       that is easy to miss.** `sql-gate-lint` is BLOCKING in the `frontend` aggregator (Phase
       164.3 / VAC-03, wired into BOTH `needs:` and the result loop), and `ci.yml:2205` states the
