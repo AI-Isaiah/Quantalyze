@@ -76,7 +76,36 @@ phase ships 5/6 by design and its VERIFICATION comes after 06.
 - **The Python route tests** (`test_prober_cadence_alert.py`, 348 lines) were each neutered
   individually and observed RED before being accepted.
 
+### Changed (CI gate accounting — the ratchets this phase moved)
+- **Four separate pinned counts moved because one gate file and one function were added**, each
+  edited with its reason rather than to make a red go away:
+  `ci.yml`'s derivation table gains `test_prod_prober_cadence.sql` (7 arms) with
+  `SENTINEL_FLOOR` 10 → 11 and `ARMS_FLOOR` 206 → 213; the exact-literal mirror of those two in
+  `drift-check-scripts.test.ts` moves with them; `COMPARED_FLOOR` 122 → 123 in
+  `baseline-content-drift-check.mjs`; and `lint-sql-gates.test.ts`'s corpus pin 73 → 74.
+  ⚠️ The `COMPARED_FLOOR` raise was checked NOT to suppress the gate's own finding — the run still
+  reports `compared 123 — MATCH 119, DRIFT 3, SNAPSHOT_MISSING 1`, `findings 1`.
+  ⚠️ `lint-sql-gates.test.ts`'s title said "72-file" while its assertion said 73; it was already one
+  stale before this phase (`[164.7-CITATION-DRIFT-01]`). Prose and assertion both now read 74.
+- **A test canary stopped being credential-shaped.** `test_prober_cadence_alert.py`'s
+  `_CANARY_SERVICE_KEY` was a wordless 32-char literal that gitleaks scored at entropy 5.0. The
+  assertion only needs a value that is unique and visible if it leaks, so it is now unmistakably
+  synthetic. The original remains in this branch's history and PRs scan at `fetch-depth: 0`, so
+  `.gitleaks.toml` also gains a block keyed on that LITERAL VALUE — measured in both directions:
+  the historical canary is suppressed, an unaffiliated key at the same path still fires.
+
 ### Notes
+- ⛔ **`sql-gate-lint` merges RED, and it gates the analytics-service deploy.**
+  `baseline-content-drift` reports `SNAPSHOT_MISSING prod_prober_cadence_check` until
+  `supabase/schema/baseline.sql` is regenerated from PROD after this applies — regenerating it
+  sooner would encode a state PROD has never been in. Because that job is blocking in the
+  `frontend` aggregator, and Railway skips the analytics-service deploy while main CI is red,
+  `POST /api/prober-cadence-alert` does not reach PROD until the regeneration lands. Booked as
+  `[BASELINE-REGEN-164.1.1]`; deliberately NOT pinned with a `CONTENT_DRIFT_ALLOWLIST` row, since
+  that list may only shrink and this gap closes by itself.
+- **`sql-tests` is red on this PR by design.** The new gate calls a function shared TEST does not
+  have until the merge applies it. This repo's gate convention is explicit that an applied-ness
+  gate RAISES and does not skip — a skip there is the vacuity this milestone exists to remove.
 - **Three residuals are booked, dated and deliberately UNROUTED** by founder decision:
   `[PROBER-ALERT-DELIVERY-UNVERIFIED-01]` (nothing automated confirms the alert's last hop
   actually arrives), `[PGCRON-LIVENESS-UNWATCHED-01]` (no arm watches pg_cron's own liveness for
