@@ -1199,7 +1199,7 @@ Plans:
 - [x] 164.1.1-02-PLAN.md — The five arms a green pair can hide: an ABSENT contact row read as healthy, a fresh row under another `cron_name` masking the prober's silence, the observer's own liveness row, the second destination layer, and a post built over a NULL key. `ARMS_FLOOR` re-measured. (wave 2)
 - [x] 164.1.1-03-PLAN.md — CHECKPOINT: is `SENTRY_DSN` set on the Railway analytics-service? The alarm's last hop is decided by measurement, not inference. Plus the calibrated criterion-4 pin. (wave 1, `autonomous: false`) — DONE 2026-09-18: `SENTRY_DSN` IS set (option `a-sentry-already-set`, founder-measured), criterion 4 pinned with an observed-RED calibration twin, `.github/workflows/prod-prober.yml` byte-unchanged. Commits `9a1b0a8b`/`3ce0d461`.
 - [x] 164.1.1-04-PLAN.md — The alarm's far end: one guarded `/api` route in analytics-service implementing the escalation the checkpoint recorded, with every load-bearing behaviour observed RED under a neuter. (wave 2)
-- [ ] 164.1.1-05-PLAN.md — `docs/runbooks/prod-prober-cadence-go-live.md` (blast radius, blocking pre-flight, the statement, the same-session manifest re-capture, rollback) and criterion 5's named residual. (wave 3)
+- [x] 164.1.1-05-PLAN.md — `docs/runbooks/prod-prober-cadence-go-live.md` (blast radius, blocking pre-flight, the statement, the same-session manifest re-capture, rollback) and criterion 5's named residual. (wave 3)
 - [ ] 164.1.1-06-PLAN.md — The live PROD session behind a decision checkpoint: register, re-capture the manifest in the same act, observe the first tick, record it auditably, close `[PROBER-CADENCE-UNDELIVERED-01]`. (wave 4, `autonomous: false`)
 
 ### Phase 164.2: CURATED-COPY — the curated failure sentence must reach the user (INSERTED)

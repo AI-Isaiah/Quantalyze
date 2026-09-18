@@ -172,9 +172,30 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-⭐ **RECONCILED 2026-09-18 (plan 04). THIS block is the current position and SUPERSEDES the
-plan-02 block immediately below, which is retained as lineage. This update ADDS plan 04's
+⭐ **RECONCILED 2026-09-18 (plan 05). THIS block is the current position and SUPERSEDES the
+plan-04 block immediately below, which is retained as lineage. This update ADDS plan 05's
 completion.**
+
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a
+scheduler that cannot silently drop it (INSERTED)) — EXECUTING
+Plan 05 DONE (`164.1.1-05-SUMMARY.md`, commits `7ae2fe98` (docs, the go-live runbook), `988463eb`
+(docs, `TODOS.md[PGCRON-LIVENESS-UNWATCHED-01]` + the plan-05 progress note) and `33144af6`
+(docs, the runbook's placeholder replaced so the residual is reachable from both surfaces) on
+branch `feat/164.1.1-probercadence`). Ships `docs/runbooks/prod-prober-cadence-go-live.md` —
+blast radius before the pre-flight, five blocking pre-flight checks, the exact
+`cron.schedule('prod_prober_cadence_check', '20 * * * *', …)` statement (never a migration), the
+manifest re-capture as step 2 of the SAME session, first-tick expectations, watching it (routed
+through plan 03's `a-sentry-already-set` checkpoint outcome), and a two-part rollback. Criterion
+5's turtle is named, measured and disposed: `TODOS.md[PGCRON-LIVENESS-UNWATCHED-01]` — ACCEPTED
+as a named residual (narrowness + the rejected fifth-prober-arm alternative), the manual
+`latest_cron_success()` reading marked manual and never coverage, left UNROUTED by design.
+`[PROBER-CADENCE-UNDELIVERED-01]` carries a dated progress note and its checkbox stays open —
+this plan wrote the runbook, it did not execute it; nothing touched PROD, a migration, or
+`scripts/prod-prober/cron-manifest.json`. Next: Plan 06 — the founder-run live session that
+executes this runbook and closes `[PROBER-CADENCE-UNDELIVERED-01]`.
+
+⭐ **RECONCILED 2026-09-18 (plan 04). THIS block was the current position from plan 04's close
+until the block above superseded it. This update ADDS plan 04's completion.**
 
 Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a
 scheduler that cannot silently drop it (INSERTED)) — EXECUTING
@@ -1076,6 +1097,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.5.1 P08 | ~35min | 3 tasks | 4 files |
 | Phase 164.1.1 P01 | 87 min | 3 tasks | 4 created, 8 modified |
 | Phase 164.1.1 P04 | ~55 min | 2 tasks | 3 modified |
+| Phase 164.1.1 P05 | ~50 min | 3 tasks | 1 created, 2 modified |
 
 ## Accumulated Context
 
@@ -1189,6 +1211,12 @@ Load-bearing sequencing (real dependencies, do not reorder):
      every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
      The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
      FIRST match is used as the append target, and they are historical archives. -->
+
+*(execution-time, Phase 164.1.1 PROBERCADENCE — plan 05, the go-live runbook and the disposed residual, 2026-09-18)*
+
+- **D-164.1.1-05-A — the runbook's criterion-5 residual reference was written as a placeholder in task 1 and filled in by a separate, third commit (task 3), rather than folded into task 1.** This repository has a measured incident (T-164.1.1-23) of a scope amendment touching one file while the refused claim went on standing in the others; making the two-surface reachability (`TODOS.md` + the runbook) its own verified, committed act is the mitigation itself, not ceremony.
+- **D-164.1.1-05-B — a fifth prober arm reading the observer's own recency was considered and explicitly rejected as the fix for criterion 5, not merely left undone.** The prober shares GitHub Actions' own unreliability (the 27% delivery rate this whole phase's premise rests on), so a GitHub-hosted watchdog cannot close a gap in a scheduler GitHub itself might have dropped the watchdog's own run for — the same reasoning `164.1.1-CONTEXT.md` (CTX-02) already applied to the prober's own contact-write design.
+- **D-164.1.1-05-C — no literal `db push` / `db reset` / `--project-ref` / `--db-url` substring appears anywhere in the runbook, including inside its own prohibition sentences.** The plan's automated `<verify>` greps for those exact substrings; a warning that quotes the forbidden command verbatim would defeat its own gate. Phrased instead as "this checkout's linked CLI performs no write anywhere in this runbook."
 
 *(execution-time, Phase 164.5.1 CRONREPOINT — plan 08, Wave B go-live runbook + P3-C repair, 2026-09-16)*
 
@@ -2192,8 +2220,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-18T09:50:23.496Z
-**Stopped At:** Completed 164.1.1-04-PLAN.md
+**Last Date:** 2026-09-18T10:06:01.000Z
+**Stopped At:** Completed 164.1.1-05-PLAN.md
 **Resume File:** None
 
 **Last Date:** 2026-09-18T07:35:00Z
