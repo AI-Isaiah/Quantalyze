@@ -6,10 +6,10 @@ current_phase: 164.1.1.1
 current_phase_name: LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only fixture (INSERTED)
 status: executing
 stopped_at: Completed 164.1.1.1-02-PLAN.md
-last_updated: "2026-09-18T18:30:31.000Z"
+last_updated: "2026-09-18T21:56:17.144Z"
 last_activity: 2026-09-18
-last_activity_desc: Phase 164.1.1 plan 06 executed — the founder-gated live PROD session registered the cadence observer as pg_cron jobid 41 (20 * * * *), the manifest was re-captured in the same session (15 -> 16) and the first tick at 18:20:00Z wrote status=ok with a measured gap_minutes=89 under the 10:25:00 ceiling; [PROBER-CADENCE-UNDELIVERED-01] closed and 164.1.1 verification moved to passed
-state_head: f84bf053e3e37bcbd9b877c309c5411fae7d36dd
+last_activity_desc: Phase 164.8.2 GATEHARDENING round-2/3 closeout shipped as PR #822 (v0.79.0.0) — the backup secret scan no longer stops at its first hit (a credential in ledger.csv left schema-before.sql, a dump of a live hosted database, unscanned yet still published to a 90-day world-readable artifact), artifact staging is default-DENY behind two verdict files, and the Which database am I on marker predicates are rc-bounded in BOTH copies after being fail-open; verification passed 6/6, security SECURED 24/24, code review 0 blockers
+state_head: 27577261391d7eca7a128f438c900fd509aae70b
 progress:
   total_phases: 45
   completed_phases: 20
@@ -475,7 +475,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Phase 164.1.1 shipped — PR #819
+Status: Phase 164.8.2 shipped — PR #822
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -491,7 +491,7 @@ Status: Phase 164.1.1 shipped — PR #819
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-18 — Phase 164.1.1 plan 06 PROD session executed; shipped as PR #819
+Last activity: 2026-09-18 — Phase 164.8.2 round-2/3 closeout shipped as PR #822 (v0.79.0.0)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
