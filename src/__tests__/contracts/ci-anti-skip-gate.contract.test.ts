@@ -687,4 +687,88 @@ describe("LANE-ONLY exclusion register — pinned as SITES, not a count", () => 
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  /**
+   * FORWARD — a marker cannot be pasted onto a gate it does not describe. The
+   * comment-stripping is load-bearing and measured:
+   * `test_prod_prober_cadence.sql` names `net._lane_posts` in a header comment
+   * (line ~127, "net._lane_posts stays EMPTY") as well as in fourteen real
+   * assertion-body positions. A check that counted the comment would be
+   * satisfied by prose alone — exactly the "a gate any comment satisfies"
+   * shape `lint-app-guc.mjs` already rejects once in this repo.
+   */
+  it("FORWARD — every marker's declared object appears in that file's own comment-stripped text", () => {
+    const derived = deriveLaneOnlySites(testsDir);
+    for (const { file, object } of derived) {
+      const raw = readFileSync(join(testsDir, file), "utf8");
+      const stripped = stripSqlLineComments(raw);
+      expect(
+        stripped.includes(object),
+        `${file}'s ${LANE_ONLY_ANCHOR} marker declares "${object}", but that string does not ` +
+          "appear anywhere in the file's own non-comment text. A marker pasted onto a gate that " +
+          "never queries the object it names would silence that gate for no reason connected to it.",
+      ).toBe(true);
+    }
+  });
+
+  /**
+   * REVERSE — a lane-only gate cannot land unmarked. The SET pin above notices
+   * a marker APPEARING; this notices a gate that queries a declared lane-only
+   * object and never grew a marker at all — a red that would be
+   * indistinguishable from an ordinary broken test, with nobody having decided
+   * the excluded class had grown.
+   */
+  it("REVERSE — every corpus file referencing a declared LANE-ONLY object carries a marker of its own", () => {
+    const derived = deriveLaneOnlySites(testsDir);
+    const declaredObjects = derived.map((d) => d.object);
+    const markedFiles = new Set(derived.map((d) => d.file));
+    const offenders: string[] = [];
+    for (const name of readdirSync(testsDir)) {
+      if (!name.startsWith("test_") || !name.endsWith(".sql")) continue;
+      if (markedFiles.has(name)) continue;
+      const raw = readFileSync(join(testsDir, name), "utf8");
+      const stripped = stripSqlLineComments(raw);
+      for (const obj of declaredObjects) {
+        if (stripped.includes(obj)) {
+          offenders.push(`${name} references "${obj}" but carries no ${LANE_ONLY_ANCHOR} marker`);
+        }
+      }
+    }
+    expect(
+      offenders,
+      "a corpus file references a declared LANE-ONLY object without declaring itself LANE-ONLY. " +
+        "Its red under sql-tests on shared TEST would be indistinguishable from an ordinary broken " +
+        "test — nobody decided this class had grown.",
+    ).toEqual([]);
+  });
+
+  /**
+   * The vault near-miss. `test_analytics_service_settings_and_vault_tick.sql`
+   * names `scripts/pg-lane/fixtures/32-fixture-vault-stand-in.sql` in its own
+   * RED-UNDER-SETUP apply list exactly as the prober file names fixture 34 —
+   * so "references any pg-lane fixture" is a detector that would sweep it in.
+   * It legitimately runs on BOTH sides (a stand-in TABLE on the lane, the real
+   * supabase_vault VIEW on shared TEST) and MEASURES the difference. This is
+   * the arm that fires if the detector is ever widened to fixture paths.
+   *
+   * NOT checked here, by decision rather than oversight: a cross-check that a
+   * marker's named FIXTURE also appears in the same file's RED-UNDER-SETUP
+   * apply list is DEFERRED by 164.1.1.1-CONTEXT.md; a fixture-path-based
+   * detector is FORBIDDEN by this guard.
+   */
+  it("keeps the vault near-miss OUT of the derived set", () => {
+    const vaultFile = "test_analytics_service_settings_and_vault_tick.sql";
+    expect(
+      readdirSync(testsDir).includes(vaultFile),
+      `${vaultFile} is missing from the corpus entirely — the "absent from the derived set" ` +
+        "assertion below would pass for the wrong reason if this file did not exist.",
+    ).toBe(true);
+    const derived = deriveLaneOnlySites(testsDir);
+    expect(
+      derived.map((d) => d.file),
+      `${vaultFile} legitimately runs on BOTH the lane and shared TEST and must never carry a ` +
+        `${LANE_ONLY_ANCHOR} marker — widening the detector to "references any pg-lane fixture" ` +
+        "would sweep it in and this assertion is what catches that.",
+    ).not.toContain(vaultFile);
+  });
 });
