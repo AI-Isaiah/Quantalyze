@@ -662,12 +662,91 @@ function deriveLaneOnlySites(dir: string): { file: string; object: string; fixtu
  * FORWARD check without the file ever querying the object.
  */
 function stripSqlComments(text: string): string {
-  const withoutBlocks = text.replace(/\/\*[\s\S]*?\*\//g, "");
-  return withoutBlocks
+  // ⛔ ORDER IS LOAD-BEARING: line comments FIRST, block comments second.
+  // MEASURED 2026-09-18 on the real corpus with the other order: this file's
+  // own prose routinely names globs like `supabase/tests/*.sql`, whose `s/*`
+  // is an incidental, unpaired `/*`. A non-greedy `/\*[\s\S]*?\*\//` then
+  // spans from that false open to the next incidental `*/` anywhere downstream
+  // (a cron literal like '*/15 * * * *' will do) and deletes everything
+  // between — 21,070 bytes of real assertion body out of
+  // test_ledger_refresh_fanout.sql and 16,065 out of
+  // test_ledger_refresh_composite_arm.sql, with the suite still at 27/27.
+  // That direction is the dangerous one: it SHRINKS what the REVERSE check can
+  // see, so a file querying a declared lane-only object without a marker stops
+  // being flagged — the excluded class growing unseen, which is the single
+  // failure this phase exists to prevent.
+  // Stripping `--` lines first removes the false opens before they can match.
+  const withoutLines = text
     .split("\n")
     .filter((l) => !l.trim().startsWith("--"))
     .join("\n");
+  return withoutLines.replace(/\/\*[\s\S]*?\*\//g, "");
 }
+
+describe("stripSqlComments does not eat the assertion body it is meant to expose", () => {
+  // REGRESSION PIN. Introduced 2026-09-18 after a review round's own fix
+  // created this defect: block comments were stripped BEFORE line comments, so
+  // an incidental `/*` inside `--` prose opened a match that ran to the next
+  // incidental `*/` and deleted the real SQL in between. It was invisible —
+  // the suite stayed at 27/27, because the one declared object did not happen
+  // to sit inside a swallowed span.
+  it("keeps real SQL that sits between two incidental, unrelated `/*`-shaped substrings", () => {
+    const file = [
+      "-- Scope note: this gate scans supabase/tests/*.sql and supabase/migrations/**",
+      "DO $$ BEGIN",
+      "  PERFORM 1 FROM net._lane_posts;",
+      "END $$;",
+      "-- Cadence note: the job runs on '*/15 * * * *' in the lane fixture.",
+    ].join("\n");
+
+    const stripped = stripSqlComments(file);
+
+    expect(
+      stripped,
+      "stripSqlComments deleted real, non-comment SQL that sat between two " +
+        "incidental `/*`/`*/`-shaped substrings inside `--` prose. Strip line " +
+        "comments FIRST: with the other order the REVERSE cross-check stops " +
+        "seeing files it must see, and an unmarked lane-only gate lands unflagged.",
+    ).toContain("net._lane_posts");
+    expect(stripped).toContain("DO $$ BEGIN");
+  });
+
+  it("removes a genuine block comment, so the hardening it was added for still holds", () => {
+    const file = ["SELECT 1;", "/* net._lane_posts mentioned only in prose */", "SELECT 2;"].join(
+      "\n",
+    );
+    const stripped = stripSqlComments(file);
+    expect(stripped).not.toContain("net._lane_posts");
+    expect(stripped).toContain("SELECT 1;");
+    expect(stripped).toContain("SELECT 2;");
+  });
+
+  it("never shrinks any real corpus file's body (the defect, measured where it happened)", () => {
+    const testsDir = join(ROOT, "supabase/tests");
+    const damaged: string[] = [];
+    for (const name of readdirSync(testsDir)) {
+      if (!name.startsWith("test_") || !name.endsWith(".sql")) continue;
+      const src = readFileSync(join(testsDir, name), "utf8");
+      const lineOnly = src
+        .split("\n")
+        .filter((l) => !l.trim().startsWith("--"))
+        .join("\n");
+      // Whatever stripSqlComments removes beyond the `--` lines must be a
+      // GENUINE block comment. In this corpus there are none, so any loss at
+      // all is over-stripping. If a real block comment is ever added, this
+      // expectation is the right place to record that decision explicitly.
+      const lost = lineOnly.length - stripSqlComments(src).length;
+      if (lost > 0) damaged.push(`${name} (-${lost} bytes)`);
+    }
+    expect(
+      damaged,
+      "stripSqlComments removed text beyond the `--` lines in these corpus files. " +
+        "Either block-comment stripping is over-matching again (check the ordering), " +
+        "or a genuine block comment was added and this pin needs an explicit decision.",
+    ).toEqual([]);
+  });
+});
+
 
 describe("LANE-ONLY exclusion register — pinned as SITES, not a count", () => {
   const testsDir = join(ROOT, "supabase/tests");
