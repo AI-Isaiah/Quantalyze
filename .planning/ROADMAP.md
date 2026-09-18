@@ -1161,7 +1161,7 @@ Plans:
 
 **Requirements**: TODOS entry `[PROBER-CADENCE-UNDELIVERED-01]` — this phase is its named owner.
 **Depends on:** Phase 164.1 (the prober it observes), Phase 164.7 (the settled Vault-backed `cron.job` mechanism any new PROD cron row must consume rather than invent a second answer to)
-**Plans:** 1/6 plans executed
+**Plans:** 2/6 plans executed
 
 ⛔ **Criterion 4 is ALREADY MET** by commit `126517a8`, which corrected the workflow header at its own
 site. Plan 03 pins it with a calibrated test and does NOT re-edit it — re-deriving the figures would
@@ -1186,7 +1186,7 @@ Plans:
 
 - [x] 164.1.1-01-PLAN.md — TRACER: one prober run's contact reaches a PROD-side ceiling verdict end to end. The forward migration creating `public.prod_prober_cadence_check()` with the derived ceiling and the corrected table comment, the prober's unconditional contact write, a lane `net` stand-in so the alarm's post is OBSERVED rather than inferred, the matched pair (stale ⇒ posts / fresh ⇒ silent), and both mutation floors moved from a measured run. (wave 1)
 - [ ] 164.1.1-02-PLAN.md — The five arms a green pair can hide: an ABSENT contact row read as healthy, a fresh row under another `cron_name` masking the prober's silence, the observer's own liveness row, the second destination layer, and a post built over a NULL key. `ARMS_FLOOR` re-measured. (wave 2)
-- [ ] 164.1.1-03-PLAN.md — CHECKPOINT: is `SENTRY_DSN` set on the Railway analytics-service? The alarm's last hop is decided by measurement, not inference. Plus the calibrated criterion-4 pin. (wave 1, `autonomous: false`)
+- [x] 164.1.1-03-PLAN.md — CHECKPOINT: is `SENTRY_DSN` set on the Railway analytics-service? The alarm's last hop is decided by measurement, not inference. Plus the calibrated criterion-4 pin. (wave 1, `autonomous: false`) — DONE 2026-09-18: `SENTRY_DSN` IS set (option `a-sentry-already-set`, founder-measured), criterion 4 pinned with an observed-RED calibration twin, `.github/workflows/prod-prober.yml` byte-unchanged. Commits `9a1b0a8b`/`3ce0d461`.
 - [ ] 164.1.1-04-PLAN.md — The alarm's far end: one guarded `/api` route in analytics-service implementing the escalation the checkpoint recorded, with every load-bearing behaviour observed RED under a neuter. (wave 2)
 - [ ] 164.1.1-05-PLAN.md — `docs/runbooks/prod-prober-cadence-go-live.md` (blast radius, blocking pre-flight, the statement, the same-session manifest re-capture, rollback) and criterion 5's named residual. (wave 3)
 - [ ] 164.1.1-06-PLAN.md — The live PROD session behind a decision checkpoint: register, re-capture the manifest in the same act, observe the first tick, record it auditably, close `[PROBER-CADENCE-UNDELIVERED-01]`. (wave 4, `autonomous: false`)

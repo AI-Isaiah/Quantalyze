@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.1.1
 current_phase_name: PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it (INSERTED)
 status: executing
-stopped_at: Phase 164.1 complete, ready to plan Phase 159
-last_updated: "2026-09-18T05:26:32.128Z"
+stopped_at: Completed 164.1.1-03-PLAN.md (checkpoint answered + criterion 4 pinned)
+last_updated: "2026-09-18T07:35:00.000Z"
 last_activity: 2026-09-18
-last_activity_desc: Phase 164.1.1 execution started
-state_head: 5c01dfd97bed7aaabe3db5cf8ae15a0a81aeadbd
+last_activity_desc: Phase 164.1.1 plan 03 executed — checkpoint recorded, criterion 4 pinned and calibrated
+state_head: 3ce0d461
 progress:
   total_phases: 43
   completed_phases: 20
   total_plans: 201
-  completed_plans: 188
+  completed_plans: 189
   percent: 47
 ---
 
@@ -172,9 +172,28 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-⭐ **RECONCILED 2026-09-18. THIS block is the current position and SUPERSEDES everything
-below it in this section, including the 2026-09-09 block that reconciled the one before it.
-Nothing below is deleted — it is lineage.**
+⭐ **RECONCILED 2026-09-18 (plan 03). THIS block is the current position and SUPERSEDES the
+"Plan: 1 of 6 DONE" block immediately below (written after plan 01), which is retained as
+lineage. This update only ADDS plan 03's completion — it does not assert anything about plan
+02's status, which is tracked separately in its own PLAN/SUMMARY files.**
+
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a
+scheduler that cannot silently drop it (INSERTED)) — EXECUTING
+Plan 03 DONE (`164.1.1-03-SUMMARY.md`, commits `9a1b0a8b` (test, criterion-4 pin +
+calibration twin, `.github/workflows/prod-prober.yml` byte-unchanged) and `3ce0d461` (docs,
+plan close-out) on branch `feat/164.1.1-probercadence`). Plan 03's checkpoint (Task 1,
+`gate="blocking-human"`) was answered before this executor ran: `SENTRY_DSN` IS set on Railway
+→ analytics-service → production → Variables, option `a-sentry-already-set`, founder-measured
+2026-09-18 — presence only, no value recorded anywhere. Standing caveat: delivery still
+depends on a variable outside this repository, so a later unset would silently re-open the gap;
+neither this line nor any future plan may claim the alarm permanently reaches a human without
+that caveat attached. Plan 04 (the escalation route) is now unblocked to implement against
+this answer. Next: whichever of Plan 02 / Plan 04 the orchestrator dispatches next — see their
+own PLAN/SUMMARY files for current status.
+
+⭐ **RECONCILED 2026-09-18 (plan 01). THIS block was the current position from plan 01's close
+until the block above superseded it, including the 2026-09-09 block that reconciled the one
+before it. Nothing below is deleted — it is lineage.**
 
 Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it (INSERTED)) — EXECUTING
 Plan: 1 of 6 DONE (`164.1.1-01-SUMMARY.md`, commits `d1d6ca63`/`2e03771b`/`16e962ad` on branch
@@ -2128,6 +2147,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
+
+**Last Date:** 2026-09-18T07:35:00Z
+**Stopped At:** Completed 164.1.1-03-PLAN.md (Phase 164.1.1 PROBERCADENCE, plan 03 of 6, wave 1 — sequential on the main working tree, branch `feat/164.1.1-probercadence`). Task 1's checkpoint (`gate="blocking-human"`, decide the alarm's terminal channel) was already answered by the founder before this executor ran: `SENTRY_DSN` IS set on Railway → analytics-service → production → Variables, option `a-sentry-already-set`, measured 2026-09-18 — recorded as presence only, no value written anywhere, with the outside-this-repo delivery caveat carried forward explicitly. Task 2 pinned criterion 4 (already corrected in `126517a8`, verify-only): added one `describe` block to `src/__tests__/prod-prober-wiring.test.ts` slicing the `.github/workflows/prod-prober.yml` schedule region by named anchor and asserting it states the measured delivery rate (27%), median gap (3.28h), max gap (7.13h), a date and a Phase 164.1.1 reference, with a calibration twin stripping those figures from a scratch copy and asserting each is reported missing BY NAME — manually neutered the predicate, observed the calibration test go RED with the exact expected diff, then restored and confirmed byte-identical via `cmp`. `.github/workflows/prod-prober.yml` stays byte-unchanged (`git diff` — 0 lines). Two commits (`9a1b0a8b` test, `3ce0d461` docs), NOT pushed. Full suite `npx vitest run src/__tests__/prod-prober-wiring.test.ts` → 102/102 green. Next: whichever of plan 02 / plan 04 the orchestrator dispatches — plan 04 is now unblocked to implement the Sentry escalation route against this checkpoint's answer.
+**Resume File:** None
 
 **Last Date:** 2026-09-18T06:33:31Z
 **Stopped At:** Completed 164.1.1-01-PLAN.md (Phase 164.1.1 PROBERCADENCE, plan 01 of 6, wave 1 — the phase's tracer, sequential on the main working tree, isolation `none`, branch `feat/164.1.1-probercadence`). Shipped the forward migration `supabase/migrations/20260918120000_prod_prober_cadence.sql` (`public.prod_prober_cadence_check()`, SECURITY DEFINER, pinned search_path, service-role-only EXECUTE, a measured-and-dated 10h25m ceiling constant, an absent-contact-row-is-stale guard, an unconditional self-observability row, and a stale-only `net.http_post` reusing `match_engine_cron_tick()`'s destination and Vault key — zero `cron.schedule(...)`), the prober's own unconditional contact write (`recordProberContact`, gated `arms === ARMS` so isolated self-test scenarios and a credential-blocked-all-4-arms run are both unaffected), a lane-only `net.http_post` recording stand-in (fixture 34), and a two-arm matched-pair SQL gate (`test_prod_prober_cadence.sql`, arms G1/S1 — renamed from the plan's bare G/S after `sectionOfIdentity()`'s digit-suffix rule left a bare SETUP raise un-twinned) proven RED on a disposable pg-lane. Both mutation floors moved from a measured full-corpus run (`FILES_FLOOR` 46→47, `ARMS_FLOOR` 395→397) with every sibling pin (`gate-family-meta.test.ts`, `mutation-runner-floors.test.ts`, `mutation-annotation-parser.test.ts`, a new dated `ci.yml` leg-count entry — 491 legs, ~975s local macOS, 20-minute ceiling still clear but flagged as closer than the prior reading) moved in the same Task 3 commit. Three commits (`d1d6ca63`, `2e03771b`, `16e962ad`), NOT pushed. Full plan-level verification green: `dump-sql-functions --self-test/--check`, `prod-prober --self-test` 83/83, full-corpus `mutation-runner` `✅ No defects` (`files 47/74`, `arms 397/397/0`, `biting 397`), `lint-sql-gates --self-test` + full corpus (0 findings), all four sibling vitest files 310/310, zero lines changed in any migration older than this plan's own, and nothing ran `supabase db push`/`db reset`/`--project-ref`/`--db-url`. Next: plan 02 (the observer's own error-row self-observability arm).
