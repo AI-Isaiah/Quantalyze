@@ -1,5 +1,97 @@
 # Changelog
 
+## [0.77.51.0] - 2026-09-18 — the prober's own detection latency becomes something PROD measures
+
+Phase 164.1.1, plans 01-05. Plan 06 (the live `cron.schedule(...)` registration) is deliberately
+NOT in this release: it is a live PROD op that cannot run until this migration has applied, so the
+phase ships 5/6 by design and its VERIFICATION comes after 06.
+
+### Added
+- **`public.prod_prober_cadence_check()`** — a PROD-side observer that reads the prober's own
+  contact rows and reports how long ago the prober last checked in. SECURITY DEFINER with
+  `search_path` pinned to `public, pg_catalog`, and a contact ceiling declared as a named constant
+  with its derivation written beside it rather than as a bare literal. Shipped in forward migration
+  `20260918120000_prod_prober_cadence.sql` with **nothing scheduled** — the migration creates the
+  function and registers no cron job, per the repo convention that `cron.schedule(...)` is a live
+  op and never belongs inside a migration.
+- **The prober writes its own contact row** (`scripts/prod-prober/run.mjs`), unconditionally and
+  outside the arm loop — so a prober that runs and fails every arm is still distinguishable from a
+  prober that never ran at all. That distinction is the whole point of the observer.
+- **`POST /api/prober-cadence-alert`** (`analytics-service/routers/cron.py`) — the last hop. Accepts
+  the observer's alert, logs the measurement, and escalates to Sentry at most once per window.
+- **A go-live runbook** (`docs/runbooks/prod-prober-cadence-go-live.md`, linked from the runbook
+  index): blast radius first, a blocking pre-flight, the statement to run, the manifest updated in
+  the same act, and a rollback.
+- **A security register** (`164.1.1-SECURITY.md`) — 35 threats, 28 closed, 7 deferred, 0 open at
+  ASVS L1 with `block_on: high`. The 7 deferred are Plan 06's threat model and are recorded as
+  deferred precisely because Plan 06 has not executed: counting them closed would have claimed
+  audit coverage over code that has never run.
+
+### Security
+- **Removed a `GRANT EXECUTE ... TO service_role`** on the new SECURITY DEFINER function
+  (`b409adbf`). This reproduced `[164.7-WR02-SERVICE-ROLE-EXECUTE]`, a defect already confirmed on
+  PROD, in brand-new code. Found by `rls-policy-auditor` and `migration-reviewer` — two of the three
+  required migration reviewers, and the finding came from the two that had not yet been run when
+  the ship was first attempted. The function now REVOKEs from `PUBLIC, anon, authenticated,
+  service_role` and grants to nobody; its verification block uses `aclexplode` to assert the
+  grantee set equals the owner exactly, rather than asserting the absence of three named roles.
+  That strengthened check was OBSERVED refusing the apply (exit 3) with the grant present and
+  passing (exit 0) without it.
+
+### Changed
+- **`ARMS_FLOOR` 397 → 402** in `scripts/mutation-runner/run.mjs`, measured off two real
+  full-corpus lane runs, with every sibling pin moved in lockstep. `FILES_FLOOR` and
+  `WAIVED_CEILING` are unchanged; read all three by symbol, never from this line.
+- **`NAME_SET_RATCHET` is no longer empty.** `scripts/dump-sql-functions.ts` gains one
+  `snapshot-only` row for the new function, because `supabase/schema/baseline.sql` is a dated PROD
+  dump that predates this migration. The list's own comment says adding a row records that you
+  looked away, so this is named rather than quiet: the row clears on the next baseline regeneration
+  taken after the migration has applied, and carries that clearing condition in the row itself.
+- **The new route is quarantined from the limiter coverage gate** with its reason written out
+  (`test_limiter_route_coverage.py`): it is a cron surface behind the shared service key, and the
+  comment states plainly that anything holding that key can call it — not just the observer's own
+  outbound request.
+- **The alert log line and Sentry message now carry `detected_at`**, so the measurement is legible
+  from the alert itself instead of requiring a second lookup.
+
+### Fixed
+- **A docstring and a runbook implied the existing `cron-obs` prober arm watched this new alarm's
+  delivery.** It does not — `cron-obs` is hardcoded to one job name and is the only automated reader
+  of the HTTP response table. Corrected in both places rather than in one.
+- **The Sentry escalation window was keyed globally**, so two different cron jobs alerting in the
+  same window would have silenced each other. Now keyed by `cron_name`. Verified by neutering the
+  dict keying and observing 1 failed / 11 passed, then restoring byte-identical — the fixer's own
+  claim that this was "verified by construction" was an assertion, not a measurement.
+- **A quarantine comment overclaimed** what the route's guard covers; softened to what is actually
+  enforced.
+
+### Tests
+- **A new SQL gate** (`supabase/tests/test_prod_prober_cadence.sql`, 647 lines) as a matched
+  RED-then-GREEN pair, plus a `pg_net` stand-in fixture so the gate runs on the throwaway lane
+  rather than against any shared database.
+- **Five arms a green pair can hide**: an absent contact row, a foreign `cron_name`, the observer's
+  own row counting itself, a second destination layer, and a null key.
+- **Criterion 4's already-corrected header is now pinned**, so the correction cannot silently
+  regress.
+- **The Python route tests** (`test_prober_cadence_alert.py`, 348 lines) were each neutered
+  individually and observed RED before being accepted.
+
+### Notes
+- **Three residuals are booked, dated and deliberately UNROUTED** by founder decision:
+  `[PROBER-ALERT-DELIVERY-UNVERIFIED-01]` (nothing automated confirms the alert's last hop
+  actually arrives), `[PGCRON-LIVENESS-UNWATCHED-01]` (no arm watches pg_cron's own liveness for
+  this job), and `[VAULTTICK-MANIFEST-COUNT-STALE-01]` (an applied migration cites a census that has
+  since moved). Unrouted means named and visible, not scheduled — none is claimed to be fixed.
+- **`[REDUNDER-SUBSET-SPLIT]` finally has an owner**: new Phase 164.4.2 SUBSETSPLIT, thirteen days
+  after it was booked. `sql-mutation`'s 20-minute `timeout-minutes` is a declared ceiling and this
+  phase added arms twice more; the answer is the subset split, never a third timeout value.
+- **The `ci.yml` floor readings are dated run records, not restated constants** — corrected in the
+  plans so no future phase renumbers them. They are appended to, never rewritten.
+- **This PR adds a migration**, so merging starts `apply-test` against shared TEST and then the
+  Production environment's human reviewer gate before PROD.
+- Phase planning artifacts (CONTEXT, RESEARCH, PATTERNS, six PLANs, five SUMMARYs, REVIEW,
+  SECURITY) and the STATE/ROADMAP updates for each completed plan are included.
+
 ## [0.77.50.0] - 2026-09-18 — a verification stops going stale because an unrelated backlog entry moved
 
 ### Fixed
