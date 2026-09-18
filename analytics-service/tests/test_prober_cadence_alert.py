@@ -204,6 +204,38 @@ def test_two_alerts_either_side_of_window_produce_two_escalations(
     )
 
 
+def test_two_alerts_for_different_cron_names_inside_window_both_escalate(
+    client, monkeypatch, caplog
+):
+    """WR-02: the escalation window is keyed by `cron_name`, not a single
+    shared timestamp. Pre-fix, this fails: the second call (a DIFFERENT,
+    unrelated cron) would be swallowed by the window the first cron_name
+    opened, silently downgrading its Sentry-paged signal to log-only.
+    """
+    spy = MagicMock()
+    monkeypatch.setattr(cron_mod, "sentry_sdk", spy)
+    clock = _FakeClock()
+    monkeypatch.setattr(cron_mod, "time", clock)
+    cron_mod._reset_prober_cadence_alert()
+
+    with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+        r1 = client.post(
+            "/api/prober-cadence-alert", json=_body(cron_name="prod_prober")
+        )
+        clock.advance(cron_mod._PROBER_CADENCE_ALERT_WINDOW_S - 1)
+        r2 = client.post(
+            "/api/prober-cadence-alert",
+            json=_body(cron_name="some_other_prober"),
+        )
+
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert len(_error_records(caplog)) == 2, "every accepted alert must log"
+    assert spy.capture_message.call_count == 2, (
+        "a different cron_name inside the same window must escalate "
+        "independently, not be suppressed by an unrelated cron's window"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Escalation-failure containment
 # ---------------------------------------------------------------------------

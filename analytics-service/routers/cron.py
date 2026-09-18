@@ -1153,13 +1153,17 @@ class ProberCadenceAlert(BaseModel):
 # service: an unbounded capture becomes a flood that gets muted, which is
 # indistinguishable from having no signal at all.
 _PROBER_CADENCE_ALERT_WINDOW_S = 3600.0
-_last_prober_cadence_alert_at: float | None = None
+# Keyed by `alert.cron_name` — NOT a single shared timestamp. There is only
+# one caller today (`prod_prober`), but `cron_name` is an unconstrained
+# string and a second cadence source reusing this route would otherwise have
+# an in-window escalation for cron A silently downgrade cron B's own
+# Sentry-paged signal to log-only (WR-02, 164.1.1 code review).
+_last_prober_cadence_alert_at: dict[str, float] = {}
 
 
 def _reset_prober_cadence_alert() -> None:
     """Test-only helper to clear the escalation window between cases."""
-    global _last_prober_cadence_alert_at
-    _last_prober_cadence_alert_at = None
+    _last_prober_cadence_alert_at.clear()
 
 
 def _escalate_prober_cadence_gap(alert: ProberCadenceAlert) -> None:
@@ -1180,7 +1184,6 @@ def _escalate_prober_cadence_gap(alert: ProberCadenceAlert) -> None:
     only a cron name, an integer (or null), an interval rendered as text and
     a timestamp, and nothing else may be echoed.
     """
-    global _last_prober_cadence_alert_at
     gap_display = "never" if alert.gap_minutes is None else str(alert.gap_minutes)
     logger.error(
         "prober_cadence_alert: cron_name=%s gap_minutes=%s ceiling=%s — "
@@ -1190,12 +1193,10 @@ def _escalate_prober_cadence_gap(alert: ProberCadenceAlert) -> None:
         alert.ceiling,
     )
     now = time.monotonic()
-    if (
-        _last_prober_cadence_alert_at is not None
-        and (now - _last_prober_cadence_alert_at) < _PROBER_CADENCE_ALERT_WINDOW_S
-    ):
+    last_at = _last_prober_cadence_alert_at.get(alert.cron_name)
+    if last_at is not None and (now - last_at) < _PROBER_CADENCE_ALERT_WINDOW_S:
         return
-    _last_prober_cadence_alert_at = now
+    _last_prober_cadence_alert_at[alert.cron_name] = now
     try:
         sentry_sdk.set_tag("prober_cadence_alert", alert.cron_name)
         sentry_sdk.capture_message(
