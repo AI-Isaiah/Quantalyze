@@ -1,5 +1,92 @@
 # Changelog
 
+## [0.79.0.0] - 2026-09-18 — the artifact stops publishing what it never scanned, and the production guard stops failing open
+
+A MINOR bump, not a patch. Two controls changed their externally observable
+behaviour: what the public restore artifact is allowed to contain, and whether an
+unevaluated production check can pass. Same class of change that took 164.1 from
+0.77 to 0.78.
+
+### Security
+
+- **The backup secret scan no longer stops at its first finding.** `scan_for_secrets`
+  called `exit 1` on a hit, which terminates the whole step — so a credential shape in
+  `ledger.csv` meant `schema-before.sql`, a schema dump of a live hosted database, was
+  **never scanned at all** and was still published to a 90-day world-readable artifact
+  on a PUBLIC repo, while the artifact's own `README.txt` told the reader both files had
+  been scanned. It now accumulates across both files and fails afterwards.
+- **`withhold()` checks that withholding happened.** `rm -f` is tested and re-checked with
+  `[ -e ]`: an unchecked `rm -f` under `set -e` aborts the step *before* the annotation
+  naming the file, leaving it on disk with nothing said and the `if: always()` staging
+  step publishing it anyway.
+- **The scan's floor pins identity, not arity.** `SECRET_SCAN_EXPECTED` is compared as a
+  SET against the basenames actually opened — a count would have been satisfied by
+  scanning one file twice while the other went unread.
+- **The `Which database am I on` marker predicates were FAIL-OPEN.** Written as bare
+  `if grep …`; grep exits >1 when it cannot evaluate, and a bare `if` reads that as "no
+  match" — so an **unevaluated PROD refusal passed**, on the one control standing between
+  CI and a `DROP SCHEMA` on production. Both predicates are now rc-bounded (>1 is a named
+  MEASURE_FAIL that aborts) and carry `-a`.
+- **The second copy of that guard was drifting.** The step is byte-copied into
+  `supabase-migrate.yml`; only one copy had been hardened. Re-synced — and the repo's own
+  byte-identity gate is what caught it, which is the gate working.
+
+### Changed
+
+- **Artifact staging is DEFAULT-DENY.** Six files are gated behind two verdict files
+  (`credential-scan.ok`, `backup-scan.ok`), each written only on its scan's all-clear
+  path. Previously the four script `.sql` files shipped unscanned on every abort between
+  `build_transaction` and the scan, and the two backup files were copied by name
+  unconditionally. This costs **no** reversal recipe: every denied path is one on which
+  the transaction never ran, so nothing is owed.
+- **The threshold registry covers two more floors.** `RUN_BLOCK_FLOOR` and `SEAM_FLOOR`
+  joined `THRESHOLD_BEARING_FILES`, and `findThresholdSites()`'s justification window
+  tightened from "the preceding 80 lines" to the adjacent comment block — the old window
+  was satisfied by an unrelated "MEASURED" 69 lines away, so a floor could read as
+  justified by prose about something else. The tightening reddened one genuinely bare
+  threshold, whose derivation was moved beside it in the same commit.
+
+### Fixed
+
+- The advisory `extra` ledger query failed completely silently while the grep one line
+  below it narrated its own unreadability. It now says whether it found nothing or could
+  not run.
+- The frontier-tip `grep` was unbounded, and its error direction **widened** the exemption
+  window: a grep that cannot read exited >1, read as "not on the missing list", and the
+  migration was treated as present. Now rc-bounded and failing safe.
+- Three message-accuracy defects, each a sentence that contradicted what the code did: two
+  staging denials that disagreed about whether the backup was staged on a path that denied
+  both; an unguarded verdict write whose silent failure made the operator read the
+  *opposite* diagnosis; and an unreadable file reported as a call "aimed twice at the same
+  file".
+
+### Tests
+
+- The `grep -a` rule's last dated exemption **expired as designed**: the site gained `-a`,
+  the ceiling arm went RED with `STALE EXEMPTION (matched 0 bare grep(s))`, and the entry
+  was deleted rather than waived. `BARE_GREP_EXEMPTIONS` is now empty and the rule is
+  unconditional workflow-wide instead of post-verify-scoped.
+- New executed arms lift the shipped shell out of the workflow and run it against seeded
+  fixtures, including the one that re-introduces `exit 1` inside the scan and asserts the
+  original defect reappears.
+
+### Notes
+
+- TODOS: `[164.8.2-REFUSAL-STILL-PUBLISHES]` and `[164.8.2-SENTINEL-GREP-NUL-BLIND]`
+  CLOSED; `[164.8.2-R3-META-WINDOW-UNFALSIFIED]` and `[164.8.2-R3-SCAN-COUNTER-RESIDUE]`
+  booked. Phase 164.8.4 GATERESIDUE updated via `/gsd-phase --edit` — its live scope drops
+  from five items to four.
+- **Known limit, recorded rather than fixed:** the tightened justification window has no
+  fixture that distinguishes it from the old one, so a future revert would be invisible.
+  It is booked, with the repro.
+- Phase 164.4.2 SUBSETSPLIT's roadmap entry gained a real Goal, replacing an
+  `[Urgent work - to be planned]` placeholder. `sql-mutation`'s `timeout-minutes` of 20 is
+  a declared CEILING that has already taken its one permitted raise, and the last five
+  green runs measured 9m13s-13m5s against it — roughly seven minutes of headroom on a
+  corpus that grows every phase. The crossing is arithmetic, not hypothetical.
+- No migration: `supabase/migrations/**` is untouched, so merging starts neither
+  `apply-test` nor the Production reviewer gate.
+
 ## [0.78.0.0] - 2026-09-18 — completion becomes a historical fact, and drift becomes a report
 
 A MINOR bump, not a patch: this changes how the project decides a phase is done.
