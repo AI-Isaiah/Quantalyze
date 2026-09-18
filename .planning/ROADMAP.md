@@ -1206,14 +1206,22 @@ Plans:
 
 ### Phase 164.1.1.1: LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only fixture, and the exclusion must be impossible to grow silently. MEASURED DEFECT shipped in PR #815 and RED ON MAIN (run 35347643700, merge eec8a659): supabase/tests/test_prod_prober_cadence.sql fails under sql-tests with ERROR relation net._lane_posts does not exist at :645. That table is the pg-net stand-in from scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql, whose own header says NEVER APPLIED TO TEST OR PROD — it exists only inside the throwaway pg-lane cluster. But sql-tests globs supabase/tests/test_*.sql unconditionally, so the gate passes on the lane (sql-mutation SUCCESS, mutation-covered there) and CANNOT pass on shared TEST, permanently. NOT hygiene: sql-tests is BLOCKING in the frontend aggregator and ci.yml:2205 records that Railway SKIPS the analytics-service deploy while main CI is red, so this red is what prevents POST /api/prober-cadence-alert (shipped in #815) from reaching production. SAFETY, and it forbids the lazy fix: shared TEST carries the REAL pg_net, so a gate that worked there would make genuine outbound HTTP from shared infrastructure every run — it must be EXCLUDED from that lane, never accommodated into it. LOCKED: do NOT weaken WR-03. sql-tests is built on A PRINTED SKIP IS NOT A PASS and fails the step on a whole-file RAISE NOTICE SKIP bail-out, so the fix must be a FILE-LEVEL EXCLUSION (never executed by this job, coverage asserted by sql-mutation instead), NOT an in-file skip, and that distinction must be argued in the artifact rather than assumed. SCOPE: (1) a machine-readable LANE-ONLY declaration in the gate file naming the fixture it requires; (2) the sql-tests loop honouring it and PRINTING every exclusion on every run, since a silent exclusion is the same defect class as a gate reporting PASS having measured nothing; (3) the excluded SET pinned as SITES NOT A COUNT per the B3 convention in drift-check-scripts.test.ts, re-derived from the corpus by a contract test so a one-for-one swap or a new exclusion cannot land unseen; (4) evidence the excluded file is still mutation-covered. Check whether any OTHER gate references a scripts/pg-lane/fixtures/** object — the vault stand-in vault.decrypted_secrets is the near-miss: it EXISTS on both sides (stand-in table on the lane, real view on TEST) so it is explicitly NOT this class and must not be swept in. (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** `sql-tests` executes only gates that CAN run against shared TEST. A gate that requires a
+pg-lane-only object declares so in its own text, is excluded by the JOB before `psql` is ever
+invoked — never by an in-file bail-out, which WR-03 exists to fail — and every exclusion is printed
+on every run. The excluded SET is pinned as SITES, not a count, and bound to the object the file's
+own assertion bodies query, so neither a new exclusion nor a one-for-one swap can land unseen.
+⛔ The floors do NOT move: the exclusion skips EXECUTION and the `"$out"`-derived checks only, and
+the whole static-analysis half of the anti-skip block keeps running for the excluded file.
+
+**Requirements**: PROBER-CADENCE-UNDELIVERED-01 (this red is what keeps `POST /api/prober-cadence-alert`, shipped in #815, off production — `sql-tests` blocks the `frontend` aggregator and Railway skips the analytics-service deploy while main CI is red)
 **Depends on:** Phase 164.1.1
-**Plans:** 0 plans
+**Plans:** 2 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.1.1.1 to break down)
+- [ ] 164.1.1.1-01-PLAN.md — the `-- LANE-ONLY:` marker, the ci.yml exclusion (computed and printed before the loop, execution and every `"$out"`-derived check skipped inside it, static accounting untouched), an honest summary line, and a stub-psql invocation log that measures non-execution rather than inferring it (wave 1)
+- [ ] 164.1.1.1-02-PLAN.md — the SITES-not-a-count register, the forward and reverse object cross-checks, the vault near-miss guard, and four calibrations including the count-unchanged swap (wave 2)
 
 ### Phase 164.2: CURATED-COPY — the curated failure sentence must reach the user (INSERTED)
 
