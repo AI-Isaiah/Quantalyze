@@ -3715,6 +3715,33 @@ and any widening must say what it does to the approval-gate snapshot.
   runbook deliberately does not cover".
 
 
+### BASELINE-REGEN-164.1.1 — `baseline.sql` owes a regeneration once `prod_prober_cadence_check` applies (booked 2026-09-18)
+
+- [ ] **`[BASELINE-REGEN-164.1.1]` `scripts/baseline-content-drift-check.mjs` reports
+      `SNAPSHOT_MISSING prod_prober_cadence_check/0` and will keep reporting it until
+      `supabase/schema/baseline.sql` is regenerated from PROD after PR #815 applies.**
+      ⭐ **This is the DOCUMENTED, EXPECTED state for a PR that adds a function-creating
+      migration, not a new defect.** The precedent is written into this file already, in the
+      `computation_error_source` entry: *"the baseline is a generated snapshot of APPLIED PROD
+      schema, and the migration has not merged, so regenerating it now would encode a
+      not-yet-true state."* Regenerating on the branch would assert that PROD runs a function
+      PROD has never seen.
+      **Measured at HEAD 2026-09-18:** `functions compared 123 — MATCH 119, DRIFT 3,
+      SNAPSHOT_MISSING 1`. The 3 DRIFT rows are `[DRIFT-06]`'s allowlisted trio and are
+      unrelated; the 1 SNAPSHOT_MISSING is this.
+      ⛔ **DO NOT clear this by adding a `CONTENT_DRIFT_ALLOWLIST` row.** The list may only
+      shrink, and this is not a PROD-vs-repo divergence to be pinned — it is a temporal gap that
+      closes by itself on the next regeneration. Adding a row would convert a self-closing gap
+      into a permanent exception.
+      **The act that clears it:** a baseline regeneration from PROD taken AFTER the apply, which
+      also moves the sha256 in `supabase/schema/BASELINE.md` — the same follow-up release shape as
+      `29f852f7` (v0.77.46.1, after the 164.5.1.1 apply) and `88f395cd` (v0.77.34.2, after the
+      164.8.6 apply). It also clears the `NAME_SET_RATCHET` row this phase added to
+      `scripts/dump-sql-functions.ts`, which carries the identical clearing condition.
+      ⚠️ Same family as `[164.8-PUSH-RACE-VAC08]`: on a PR that ADDS a migration, gates carrying
+      applied-ness probes are RED until merge, by construction, because apply-on-merge was chosen
+      over apply-on-PR.
+
 ### VAULTTICK-MANIFEST-COUNT-STALE-01 — an APPLIED migration's comment cites a census that has since moved (booked 2026-09-18)
 
 - [ ] **`[VAULTTICK-MANIFEST-COUNT-STALE-01]` `supabase/migrations/20260911120000_vault_tick_hardening.sql:352`

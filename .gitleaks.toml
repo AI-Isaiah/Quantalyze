@@ -296,3 +296,30 @@ condition = "AND"
 regexTarget = "match"
 paths = ['''(^|/)scripts/prod-prober/''']
 regexes = ['''FAKE-key-''']
+
+[[allowlists]]
+description = """
+Phase 164.1.1 prod-prober cadence alert: ONE historical canary literal.
+`analytics-service/tests/test_prober_cadence_alert.py` asserts the service key
+never reaches a log record or a Sentry escalation, so it needs a canary value
+that would be VISIBLE if it leaked. It was first written as a wordless 32-char
+string, which `generic-api-key` scores at entropy 5.0.
+
+The working-tree literal has since been replaced with an unmistakably synthetic
+one, so this block does NOT protect current code — the file is clean at HEAD.
+It exists because the original literal is in the branch's committed history and
+PRs are scanned with `fetch-depth: 0`, the same asymmetry the 164.8.5 block
+above records: no edit to the working tree can clear an already-committed site.
+Suppression has to be stated, not rewritten.
+
+⭐ Keyed on the LITERAL VALUE, not on the path. Any other high-entropy string in
+this file — including a real credential pasted in later — is still reported.
+MEASURED both directions 2026-09-18 with gitleaks 8.30.1: with this block the
+range scan over origin/main..HEAD reports 0 leaks; with an unaffiliated
+high-entropy value planted in the same file it still reports.
+⛔ Never widen this to `paths` alone.
+"""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)analytics-service/tests/test_prober_cadence_alert\.py$''']
+regexes = ['''X9vQ2mNb7RtL4kZp1YcW6HsD3Jf8Ug5A''']
