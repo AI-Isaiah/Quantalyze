@@ -3838,6 +3838,118 @@ class TestKeyCursorFallbackIsNeverClamped:
         )
 
 
+class TestEveryCronSyncedVenueStampsTheFetchErrorFlag:
+    """164.5.1.4 ROUND-2 WR-01: `fetch_degraded` was BLIND on Bybit.
+
+    ⛔ THE DEFECT, MEASURED AGAINST THE REAL `fetch_daily_pnl`. The flag
+    `daily_pnl_fetch_error` was stamped only by that function's OUTERMOST
+    handler. The Bybit branch wraps its whole body in an inner
+    `except Exception` that re-raises `RateLimitExceeded` and otherwise logs a
+    warning and falls through, so the outer handler never runs. One venue-level
+    `NetworkError` per venue:
+
+        okx      rows=0 daily_pnl_fetch_error=True
+        binance  rows=0 daily_pnl_fetch_error=True
+        bybit    rows=0 daily_pnl_fetch_error=False    <-- blind
+
+    ⛔ WHY IT IS DATA INTEGRITY AND NOT LOG FIDELITY. `_sync_single_key` reads
+    that flag as `fetch_degraded` and the per-strategy marker advance is
+    `((not trades) and not fetch_degraded) or ...`. On Bybit a 502 therefore
+    returned `[]` with `fetch_degraded` False, `not trades` True, and EVERY
+    held marker on that key advanced to now — discarding a hold of arbitrary
+    age, whose window is then fetched by no later tick. That is the exact
+    permanent loss this phase exists to close, arriving by another road, on a
+    venue `cron.py`'s own comments name as cron-synced.
+
+    ⚠️ THE EXISTING GATES CANNOT SEE THIS. Every other `fetch_degraded` arm in
+    this file stubs `get_and_clear_last_dq_flags` outright, so the flag's
+    PROVENANCE — whether the venue branch actually stamps it — is asserted by
+    none of them. This class therefore drives the REAL
+    `cron_mod.fetch_all_trades` (which is `services.exchange.fetch_daily_pnl`)
+    through `cron_mod`'s own module bindings, in the same order
+    `_sync_single_key` calls them, with nothing patched.
+    """
+
+    class _ExplodingExchange:
+        """A venue whose every private endpoint raises a transport error.
+
+        `__getattr__` covers the endpoint each branch happens to call —
+        `private_get_account_bills`, `fapiprivate_get_income`,
+        `private_get_v5_position_closed_pnl` — so the arm keeps measuring the
+        branch if an endpoint name changes, rather than silently exercising a
+        MagicMock that returns a truthy object and never enters the handler.
+        """
+
+        def __init__(self, exchange_id: str) -> None:
+            self.id = exchange_id
+
+        async def _boom(self, *args: Any, **kwargs: Any) -> Any:
+            import ccxt
+
+            raise ccxt.NetworkError("simulated venue 502")
+
+        def __getattr__(self, name: str) -> Any:
+            return self._boom
+
+    @pytest.mark.asyncio
+    async def test_a_venue_error_is_reported_as_degraded_on_every_venue(self):
+        readings: dict[str, tuple[int, bool]] = {}
+        for exchange_id in ("okx", "binance", "bybit"):
+            # The REAL pair, in `_sync_single_key`'s order: fetch, then drain
+            # the per-task ContextVar immediately after the await.
+            trades = await cron_mod.fetch_all_trades(
+                self._ExplodingExchange(exchange_id),
+                since_ms=1_700_000_000_000,
+            )
+            flags = cron_mod.get_and_clear_last_dq_flags()
+            readings[exchange_id] = (
+                len(trades),
+                bool(flags.get("daily_pnl_fetch_error")),
+            )
+
+        assert all(rows == 0 for rows, _ in readings.values()), (
+            "every branch must swallow-or-propagate its way to an EMPTY "
+            f"series here; if one returned rows the stub never bit. {readings!r}"
+        )
+        assert readings["bybit"][1] is True, (
+            "BYBIT: a venue error must stamp `daily_pnl_fetch_error`. Its "
+            "inner handler swallows everything but RateLimitExceeded, so the "
+            "outer handler that used to be the only stamping site never runs — "
+            "and an unstamped crash reads downstream as an IDLE tick, "
+            "advancing every held marker on the key and losing its outstanding "
+            f"window permanently. Readings: {readings!r}"
+        )
+        assert all(flagged for _, flagged in readings.values()), (
+            "and no venue may be the blind one — this arm is cross-venue "
+            "precisely because the defect was a single branch diverging from "
+            f"its siblings. Readings: {readings!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_crashed_bybit_fetch_does_not_read_as_an_idle_tick(self):
+        """THE CONSEQUENCE, spelled out in `_sync_single_key`'s own predicate.
+
+        `strategy_advances = ((not trades) and not fetch_degraded) or (stored
+        and enqueued)`. With no trades stored, the whole question is the first
+        disjunct: an empty-because-crashed fetch must NOT satisfy it, or every
+        held marker on the key advances past a window nothing has fetched.
+        """
+        trades = await cron_mod.fetch_all_trades(
+            self._ExplodingExchange("bybit"), since_ms=1_700_000_000_000
+        )
+        fetch_degraded = bool(
+            cron_mod.get_and_clear_last_dq_flags().get("daily_pnl_fetch_error")
+        )
+
+        assert not trades, "the stub must produce an empty series"
+        assert ((not trades) and not fetch_degraded) is False, (
+            "the IDLE disjunct must be FALSE for a crashed Bybit fetch. True "
+            "here means a held marker advances to now on the strength of a "
+            "502, and its outstanding window is fetched by no later tick — "
+            f"permanently. trades={trades!r} fetch_degraded={fetch_degraded!r}"
+        )
+
+
 class _ApiErrorLike(Exception):
     """Stand-in for supabase-py's `APIError`.
 
