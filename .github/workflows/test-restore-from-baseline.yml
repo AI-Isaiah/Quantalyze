@@ -902,13 +902,13 @@ jobs:
                 # TEST pooler host, its resolved IP, and the DB username /
                 # project-ref — went straight into a PUBLIC Actions log, against
                 # this mutex's own stated invariant ("never a DSN, host,
-                # username, or password, in any CI log line"). Redact the shapes
-                # psql actually emits:
-                #   connection to server at "<host>" (<ip>), port <n> failed
-                #   FATAL:  password authentication failed for user "<user>"
-                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                       -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                       -e 's#(for user )"[^"]*"#\1"***"#g' "${log}" >&2 || true
+                # username, or password, in any CI log line").
+                # [164.8.4-02] The expressions now live in the one shared
+                # scripts/redact-psql-stderr.sed (the UNION across every inline
+                # copy these two workflows used to carry separately); the
+                # reference is workspace-rooted for uniformity with the
+                # sibling python job's block in ci.yml, which requires it.
+                sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${log}" >&2 || true
                 break
               fi
               sleep 5
@@ -1007,10 +1007,11 @@ jobs:
             2>"${RUNNER_TEMP}/marker.err")" || rc=$?
           if [ "${rc}" -ne 0 ]; then
             # psql's connect/auth failures name the host, its IP and the DB user.
-            # Same three redactions as ci.yml's acquire step (158-REVIEW WR-08).
-            sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                   -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                   -e 's#(for user )"[^"]*"#\1"***"#g' "${RUNNER_TEMP}/marker.err" >&2
+            # [164.8.4-02] Redacted via the one shared
+            # scripts/redact-psql-stderr.sed (the UNION across every inline
+            # copy this workflow and ci.yml used to carry separately),
+            # referenced workspace-rooted.
+            sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${RUNNER_TEMP}/marker.err" >&2
             echo "::error::the database identity marker could not be read (psql exited ${rc}). Refusing to back up or restore a database this workflow cannot identify. current_database() is 'postgres' on BOTH projects and proves nothing."
             exit 1
           fi
@@ -1179,9 +1180,8 @@ jobs:
             # host name "<host>" to address`, which NONE of the three standard patterns
             # match, and the TEST pooler host survived into the output. The password is
             # stripped by the first expression (verified: 0 occurrences); the host was
-            # not. The gap is not local to this step — it is in the shared ci.yml
-            # pattern — and this fourth expression closes it HERE rather than shipping a
-            # known host leak on a public log.
+            # not. The gap is not local to this step — it was in the shared ci.yml
+            # pattern too.
             # ⛔ WHERE `[REDACT-HOSTNAME-01]` ACTUALLY LIVES, corrected 2026-09-10. This
             # comment said it was "booked as [REDACT-HOSTNAME-01]", and in this repo's
             # vocabulary "booked" means a `TODOS.md` entry naming a PHASE. MEASURED at
@@ -1190,12 +1190,13 @@ jobs:
             # `.planning/phases/164.8-testpreprod-.../164.8-05-PLAN.md` and as a
             # CHANGELOG sentence — neither of which has an owner, a date or a gate. Same
             # shape CLAUDE.md records for `FANOUT-GLOBAL-01`: do not send a planner
-            # looking for an entry that was never written. Fixing the SHARED pattern
-            # (ci.yml and this file's other psql sites) still wants a real entry.
-            sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                   -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                   -e 's#(could not translate host name )"[^"]*"#\1"***"#g' \
-                   -e 's#(for user )"[^"]*"#\1"***"#g' "${RUNNER_TEMP}/activity.err" >&2
+            # looking for an entry that was never written.
+            # [164.8.4-02] Redacted via the one shared
+            # scripts/redact-psql-stderr.sed (the UNION across every inline
+            # copy this workflow and ci.yml used to carry separately, including
+            # the host=/user= shapes this block was missing), referenced
+            # workspace-rooted.
+            sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${RUNNER_TEMP}/activity.err" >&2
             echo "::error::the activity gate could not be MEASURED (psql exited ${rc}). Refusing to restore. A gate that cannot read is not a gate that passed — this failure is deliberately NOT tolerated, because tolerating it would restore shared TEST on the strength of an unanswered question."
             exit 1
           fi
@@ -1709,11 +1710,11 @@ jobs:
           supabase db push --include-all --dry-run --db-url "${dsn}" >"${raw}" 2>&1 || rc=$?
           # The CLI names the host and the user in a connect failure. Redact before
           # anything reaches this public log.
-          sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                 -e 's#(host=)[^ "]*#\1***#g' \
-                 -e 's#(user=)[^ "]*#\1***#g' \
-                 -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                 -e 's#(for user )"[^"]*"#\1"***"#g' "${raw}" > "${out}"
+          # [164.8.4-02] Via the one shared scripts/redact-psql-stderr.sed
+          # (the UNION across every inline copy this workflow and ci.yml used
+          # to carry separately, including the DNS-resolution-failure shape
+          # this block was missing), referenced workspace-rooted.
+          sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${raw}" > "${out}"
           rm -f "${raw}"
           cat "${out}"
           # SPECIFIC BEFORE GENERAL. ErrMissingLocal exits non-zero, so this must be
@@ -1898,12 +1899,12 @@ jobs:
               if [ -f "${f}" ]; then
                 # Explicit, so a failed substitution takes the fail-closed path by
                 # DESIGN rather than by way of the trap's catch-all.
-                if sed -i -E \
-                  -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                  -e 's#(host=)[^ "]*#\1***#g' \
-                  -e 's#(user=)[^ "]*#\1***#g' \
-                  -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                  -e 's#(for user )"[^"]*"#\1"***"#g' "${f}"; then
+                # [164.8.4-02] Via the one shared scripts/redact-psql-stderr.sed
+                # (the UNION across every inline copy this workflow and ci.yml
+                # used to carry separately, including the DNS-resolution-failure
+                # shape this loop was missing), referenced workspace-rooted;
+                # -i preserved because this site edits ${f} in place.
+                if sed -i -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${f}"; then
                   redacted=$(( redacted + 1 ))
                 else
                   withhold_channels

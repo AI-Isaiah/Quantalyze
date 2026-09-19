@@ -263,30 +263,6 @@ function stepBody(text: string, name: string): string {
 }
 
 /**
- * The `-e '…'` expressions of the redaction step's sed program, in order.
- *
- * Sliced between `if sed -i -E` and the `; then` that closes the command, so an
- * unrelated `-e '…'` elsewhere in the step cannot pad the list. Returns [] when the
- * anchors are gone, and its one consumer asserts a non-empty exact length — an empty
- * program would make "the DSN was scrubbed" vacuously reportable.
- */
-function redactExpressions(text: string): string[] {
-  // ⛔ The step index is checked BEFORE it narrows anything (Phase 164.8.2 class
-  // sweep). `indexOf` returns -1 on an absent step and a negative index counts from
-  // the END, so the unguarded form silently made `body` the step's LAST CHARACTER —
-  // whereupon both anchors below are absent, this returns [], and the caller's
-  // "non-empty exact length" assertion is the only thing that would have noticed.
-  const at = text.indexOf("- name: Redact connection metadata");
-  if (at < 0) return [];
-  const body = text.slice(at);
-  const a = body.indexOf("if sed -i -E");
-  if (a < 0) return [];
-  const b = body.indexOf("; then", a);
-  if (b < 0) return [];
-  return [...body.slice(a, b).matchAll(/-e '([^']*)'/g)].map((m) => m[1]);
-}
-
-/**
  * Every shape that could turn a failure into a pass, reported BY NAME.
  *
  * ⚠️ THE LAST FOUR WERE ADDED IN PHASE 164.8.2 (WR-06) because the first five were
@@ -1212,29 +1188,30 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     });
 
     it("the step's OWN sed program scrubs a DSN — EXECUTED against a fixture log", () => {
-      // ⭐ EXECUTED, NOT GREPPED. The expressions are lifted OUT of the YAML and run,
-      // so a step that keeps the strings and guts the program is a RED here. Run as
-      // `sed -E` (no `-i`): the step's `sed -i -E` form is GNU-only — BSD sed reads
-      // the `-E` as `-i`'s backup-extension argument and never enables extended
-      // regexes — and this suite must measure the same thing on a developer's macOS
-      // as on the ubuntu runner. The workflow itself only ever runs on ubuntu.
-      const exprs = redactExpressions(WF);
+      // ⭐ EXECUTED, NOT GREPPED. [164.8.4-02] The step's substitution now runs the
+      // SHARED scripts/redact-psql-stderr.sed via `-f` (Task 1's promotion decision
+      // — the chained `-e` list this test used to lift out of the workflow text no
+      // longer exists there by design), so this test runs that shared file's own
+      // expressions instead. Run as `sed -E` (no `-i`): the step's `sed -i -E` form
+      // is GNU-only — BSD sed reads the `-E` as `-i`'s backup-extension argument and
+      // never enables extended regexes — and this suite must measure the same thing
+      // on a developer's macOS as on the ubuntu runner. The workflow itself only
+      // ever runs on ubuntu.
+      const exprs = redactionExpressions(REDACT_SED);
       expect(
         exprs.length,
-        'the redaction step\'s sed program no longer carries its five expressions (DSN credentials, host=, user=, `server at "…"`, `for user "…"`)',
-      ).toBe(5);
+        "the shared redaction definition no longer carries its six expressions (DSN credentials, host=, user=, DNS-resolution-failure, server-at, for-user)",
+      ).toBe(6);
 
       const scrub = (program: string[], input: string): string => {
         const dir = mkdtempSync(join(tmpdir(), "redact-"));
         const f = join(dir, "psql.err");
+        const progFile = join(dir, "prog.sed");
         writeFileSync(f, input);
-        const r = spawnSync(
-          "sed",
-          ["-E", ...program.flatMap((e) => ["-e", e]), f],
-          {
-            encoding: "utf8",
-          },
-        );
+        writeFileSync(progFile, `${program.join("\n")}\n`);
+        const r = spawnSync("sed", ["-E", "-f", progFile, f], {
+          encoding: "utf8",
+        });
         rmSync(dir, { recursive: true, force: true });
         if (r.status !== 0) throw new Error(`sed failed: ${r.stderr}`);
         return r.stdout ?? "";
@@ -1285,11 +1262,15 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // failure is deterministic on every platform rather than depending on which
       // sed the developer has.
       const script = extractRunScript(WF, REDACT);
+      // [164.8.4-02] The step's substitution is now `if sed -i -E -f
+      // "${GITHUB_WORKSPACE}/…"` — a single line, no continuation, since the
+      // chained -e list this twin used to force-fail via `-e` -> `-e` no
+      // longer exists.
       expect(
-        script.includes("if sed -i -E \\"),
-        "the redaction step's substitution is no longer the `if sed -i -E \\` form this twin forces to fail — re-anchor the mutation rather than deleting the twin",
+        script.includes("if sed -i -E -f "),
+        "the redaction step's substitution is no longer the `if sed -i -E -f` form this twin forces to fail — re-anchor the mutation rather than deleting the twin",
       ).toBe(true);
-      const forced = script.replace("if sed -i -E \\", "if false -i -E \\");
+      const forced = script.replace("if sed -i -E -f ", "if false -i -E -f ");
 
       const runnerTemp = mkdtempSync(join(tmpdir(), "redact-run-"));
       const outdir = join(runnerTemp, "test-backup");
@@ -1303,7 +1284,9 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       writeFileSync(scriptFile, forced);
       const r = spawnSync("bash", [scriptFile], {
         encoding: "utf8",
-        env: { ...process.env, RUNNER_TEMP: runnerTemp },
+        // [164.8.4-02] GITHUB_WORKSPACE: the substitution's -f operand is now
+        // workspace-rooted; real Actions runners always set this.
+        env: { ...process.env, RUNNER_TEMP: runnerTemp, GITHUB_WORKSPACE: ROOT },
       });
       const surviving = readdirSync(outdir).sort();
       rmSync(runnerTemp, { recursive: true, force: true });
@@ -4416,6 +4399,10 @@ describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
           PATH: `${bin}:${process.env.PATH ?? ""}`,
           RUNNER_TEMP: runnerTemp,
           TEST_DB_SESSION_URL: `${SCHEME}EXAMPLE_USER:EXAMPLE_PASSWORD@example.invalid:5432/postgres`,
+          // [164.8.4-02] The post-verify step's redaction now references the
+          // shared scripts/redact-psql-stderr.sed via ${GITHUB_WORKSPACE};
+          // real Actions runners always set this, so the fixture must too.
+          GITHUB_WORKSPACE: ROOT,
         },
       });
       rmSync(dir, { recursive: true, force: true });
@@ -4522,6 +4509,9 @@ describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
         ...process.env,
         RUNNER_TEMP: runnerTemp,
         TEST_DB_SESSION_URL: `${SCHEME}EXAMPLE_USER:EXAMPLE_PASSWORD@example.invalid:5432/postgres`,
+        // [164.8.4-02] Same reason as the sibling arm above: the post-verify
+        // step's redaction is now ${GITHUB_WORKSPACE}-rooted.
+        GITHUB_WORKSPACE: ROOT,
       },
     });
     rmSync(dir, { recursive: true, force: true });
@@ -4829,6 +4819,10 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
           // pre-push secret scanner on SHAPE, and bypassing that would disarm it for
           // real credentials on every later push.
           TEST_DB_SESSION_URL: `${SCHEME}EXAMPLE_USER:EXAMPLE_PASSWORD@example.invalid:5432/postgres`,
+          // [164.8.4-02] The activity gate's failure-branch redaction now
+          // references the shared scripts/redact-psql-stderr.sed via
+          // ${GITHUB_WORKSPACE}; real Actions runners always set this.
+          GITHUB_WORKSPACE: ROOT,
         },
       });
       rmSync(dir, { recursive: true, force: true });
