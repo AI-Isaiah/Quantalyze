@@ -1178,7 +1178,7 @@ export function classifyGateIdiom(text) {
  * MEASURED 2026-08-29: no file in `supabase/tests/` is structured-only, so this
  * `||` moved `filesAnnotated` by ZERO — it refuses nothing the corpus already
  * relies on. The count itself moves as Phase 164.4's batches land; the exact
- * pin lives in the parser test (`scanCorpus reports N of 71 files annotated`),
+ * pin lives in the parser test (`scanCorpus reports N of M files annotated`),
  * and the live floor is FILES_FLOOR in run.mjs. No integer is restated here.
  *
  * ⭐ 2026-09-02, phase 164.4: the UNANNOTATED remainder is classified too, by
@@ -1197,7 +1197,7 @@ export function classifyGateIdiom(text) {
  * the reading is now `files 41/71` with the other 30 printed as 27
  * `unreachable:` + 3 `lane-blocked:` + 0 `pending:`. No integer here is a
  * pin — the live ones are FILES_FLOOR in run.mjs and the parser test's
- * `scanCorpus reports N of 71 files annotated`.
+ * `scanCorpus reports N of M files annotated`.
  *
  * ⭐ 2026-09-03, plan 164.4-03: a FIFTH partition class, `laneBlockedFiles`.
  * The partition is `annotated + pending + unreachable + inert + lane-blocked
