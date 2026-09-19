@@ -263,30 +263,6 @@ function stepBody(text: string, name: string): string {
 }
 
 /**
- * The `-e '…'` expressions of the redaction step's sed program, in order.
- *
- * Sliced between `if sed -i -E` and the `; then` that closes the command, so an
- * unrelated `-e '…'` elsewhere in the step cannot pad the list. Returns [] when the
- * anchors are gone, and its one consumer asserts a non-empty exact length — an empty
- * program would make "the DSN was scrubbed" vacuously reportable.
- */
-function redactExpressions(text: string): string[] {
-  // ⛔ The step index is checked BEFORE it narrows anything (Phase 164.8.2 class
-  // sweep). `indexOf` returns -1 on an absent step and a negative index counts from
-  // the END, so the unguarded form silently made `body` the step's LAST CHARACTER —
-  // whereupon both anchors below are absent, this returns [], and the caller's
-  // "non-empty exact length" assertion is the only thing that would have noticed.
-  const at = text.indexOf("- name: Redact connection metadata");
-  if (at < 0) return [];
-  const body = text.slice(at);
-  const a = body.indexOf("if sed -i -E");
-  if (a < 0) return [];
-  const b = body.indexOf("; then", a);
-  if (b < 0) return [];
-  return [...body.slice(a, b).matchAll(/-e '([^']*)'/g)].map((m) => m[1]);
-}
-
-/**
  * Every shape that could turn a failure into a pass, reported BY NAME.
  *
  * ⚠️ THE LAST FOUR WERE ADDED IN PHASE 164.8.2 (WR-06) because the first five were
@@ -1212,29 +1188,30 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     });
 
     it("the step's OWN sed program scrubs a DSN — EXECUTED against a fixture log", () => {
-      // ⭐ EXECUTED, NOT GREPPED. The expressions are lifted OUT of the YAML and run,
-      // so a step that keeps the strings and guts the program is a RED here. Run as
-      // `sed -E` (no `-i`): the step's `sed -i -E` form is GNU-only — BSD sed reads
-      // the `-E` as `-i`'s backup-extension argument and never enables extended
-      // regexes — and this suite must measure the same thing on a developer's macOS
-      // as on the ubuntu runner. The workflow itself only ever runs on ubuntu.
-      const exprs = redactExpressions(WF);
+      // ⭐ EXECUTED, NOT GREPPED. [164.8.4-02] The step's substitution now runs the
+      // SHARED scripts/redact-psql-stderr.sed via `-f` (Task 1's promotion decision
+      // — the chained `-e` list this test used to lift out of the workflow text no
+      // longer exists there by design), so this test runs that shared file's own
+      // expressions instead. Run as `sed -E` (no `-i`): the step's `sed -i -E` form
+      // is GNU-only — BSD sed reads the `-E` as `-i`'s backup-extension argument and
+      // never enables extended regexes — and this suite must measure the same thing
+      // on a developer's macOS as on the ubuntu runner. The workflow itself only
+      // ever runs on ubuntu.
+      const exprs = redactionExpressions(REDACT_SED);
       expect(
         exprs.length,
-        'the redaction step\'s sed program no longer carries its five expressions (DSN credentials, host=, user=, `server at "…"`, `for user "…"`)',
-      ).toBe(5);
+        "the shared redaction definition no longer carries its six expressions (DSN credentials, host=, user=, DNS-resolution-failure, server-at, for-user)",
+      ).toBe(6);
 
       const scrub = (program: string[], input: string): string => {
         const dir = mkdtempSync(join(tmpdir(), "redact-"));
         const f = join(dir, "psql.err");
+        const progFile = join(dir, "prog.sed");
         writeFileSync(f, input);
-        const r = spawnSync(
-          "sed",
-          ["-E", ...program.flatMap((e) => ["-e", e]), f],
-          {
-            encoding: "utf8",
-          },
-        );
+        writeFileSync(progFile, `${program.join("\n")}\n`);
+        const r = spawnSync("sed", ["-E", "-f", progFile, f], {
+          encoding: "utf8",
+        });
         rmSync(dir, { recursive: true, force: true });
         if (r.status !== 0) throw new Error(`sed failed: ${r.stderr}`);
         return r.stdout ?? "";
@@ -1285,11 +1262,15 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // failure is deterministic on every platform rather than depending on which
       // sed the developer has.
       const script = extractRunScript(WF, REDACT);
+      // [164.8.4-02] The step's substitution is now `if sed -i -E -f
+      // "${GITHUB_WORKSPACE}/…"` — a single line, no continuation, since the
+      // chained -e list this twin used to force-fail via `-e` -> `-e` no
+      // longer exists.
       expect(
-        script.includes("if sed -i -E \\"),
-        "the redaction step's substitution is no longer the `if sed -i -E \\` form this twin forces to fail — re-anchor the mutation rather than deleting the twin",
+        script.includes("if sed -i -E -f "),
+        "the redaction step's substitution is no longer the `if sed -i -E -f` form this twin forces to fail — re-anchor the mutation rather than deleting the twin",
       ).toBe(true);
-      const forced = script.replace("if sed -i -E \\", "if false -i -E \\");
+      const forced = script.replace("if sed -i -E -f ", "if false -i -E -f ");
 
       const runnerTemp = mkdtempSync(join(tmpdir(), "redact-run-"));
       const outdir = join(runnerTemp, "test-backup");
@@ -1303,7 +1284,9 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       writeFileSync(scriptFile, forced);
       const r = spawnSync("bash", [scriptFile], {
         encoding: "utf8",
-        env: { ...process.env, RUNNER_TEMP: runnerTemp },
+        // [164.8.4-02] GITHUB_WORKSPACE: the substitution's -f operand is now
+        // workspace-rooted; real Actions runners always set this.
+        env: { ...process.env, RUNNER_TEMP: runnerTemp, GITHUB_WORKSPACE: ROOT },
       });
       const surviving = readdirSync(outdir).sort();
       rmSync(runnerTemp, { recursive: true, force: true });
@@ -4416,6 +4399,10 @@ describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
           PATH: `${bin}:${process.env.PATH ?? ""}`,
           RUNNER_TEMP: runnerTemp,
           TEST_DB_SESSION_URL: `${SCHEME}EXAMPLE_USER:EXAMPLE_PASSWORD@example.invalid:5432/postgres`,
+          // [164.8.4-02] The post-verify step's redaction now references the
+          // shared scripts/redact-psql-stderr.sed via ${GITHUB_WORKSPACE};
+          // real Actions runners always set this, so the fixture must too.
+          GITHUB_WORKSPACE: ROOT,
         },
       });
       rmSync(dir, { recursive: true, force: true });
@@ -4522,6 +4509,9 @@ describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
         ...process.env,
         RUNNER_TEMP: runnerTemp,
         TEST_DB_SESSION_URL: `${SCHEME}EXAMPLE_USER:EXAMPLE_PASSWORD@example.invalid:5432/postgres`,
+        // [164.8.4-02] Same reason as the sibling arm above: the post-verify
+        // step's redaction is now ${GITHUB_WORKSPACE}-rooted.
+        GITHUB_WORKSPACE: ROOT,
       },
     });
     rmSync(dir, { recursive: true, force: true });
@@ -4829,6 +4819,10 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
           // pre-push secret scanner on SHAPE, and bypassing that would disarm it for
           // real credentials on every later push.
           TEST_DB_SESSION_URL: `${SCHEME}EXAMPLE_USER:EXAMPLE_PASSWORD@example.invalid:5432/postgres`,
+          // [164.8.4-02] The activity gate's failure-branch redaction now
+          // references the shared scripts/redact-psql-stderr.sed via
+          // ${GITHUB_WORKSPACE}; real Actions runners always set this.
+          GITHUB_WORKSPACE: ROOT,
         },
       });
       rmSync(dir, { recursive: true, force: true });
@@ -6270,6 +6264,279 @@ describe("[164.8.4-01] every reference to the shared redaction definition is wor
       (s) => s.split(WORKSPACE_ROOTED_REF).join(""),
       allReferencesWorkspaceRooted,
       COMBINED_WORKFLOWS,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [164.8.4-02] The third leak shape (CONTEXT.md Area 1): a psql call whose
+// combined stdout+stderr is captured into a file and then `cat`'d to a
+// PUBLIC log, with nothing redacting the capture in between.
+// ---------------------------------------------------------------------------
+
+/**
+ * Strips whole-line `#`-comments — the same "first non-whitespace char is
+ * `#`" definition liveLines() already uses — returning TEXT rather than an
+ * array of lines, for regex scanning across a whole workflow file.
+ */
+function stripComments(text: string): string {
+  return liveLines(text).join("\n");
+}
+
+/**
+ * Joins a YAML block scalar's backslash-continued shell lines into one
+ * logical line each. `ci.yml`'s NOTICE-channel probe writes its psql
+ * invocation across three lines (`psql … \` / `-c "…" \` / `> "$out" 2>&1
+ * || …`); without joining, a same-line scan for "psql … captures $VAR" would
+ * miss that site while catching the per-file loop's single-line sibling —
+ * an inconsistency with no basis in the actual defect.
+ */
+function joinContinuations(text: string): string {
+  return text.replace(/\\\n[ \t]*/g, " ");
+}
+
+/**
+ * Pairs a psql-driven combined-output capture (`psql … > "$VAR" 2>&1`) with
+ * the NEXT echo of that SAME variable (`cat "$VAR"`) in comment-stripped,
+ * continuation-joined text. Scoped to `psql` specifically — not every
+ * `> "$VAR" 2>&1` / `cat "$VAR"` pair in the file — because this workflow
+ * also captures-then-`cat`s several unrelated Node.js script logs
+ * (REFDATA_SELFTEST_LOG, REFDATA_AUDIT_LOG, RUNNER_LOG, ANCHOR_LOG) that
+ * never touch shared TEST and carry no connection metadata; scanning those
+ * too would make the predicate false on the real file for a reason that has
+ * nothing to do with the defect this gate exists to close. A capture with no
+ * later echo of the same variable names nothing — there is nothing published
+ * for the ordering gate to check.
+ */
+interface CaptureEchoSite {
+  variable: string;
+  between: string;
+}
+function captureEchoSites(text: string): CaptureEchoSite[] {
+  const live = joinContinuations(stripComments(text));
+  const captureRe = /\bpsql\b[^\n]*> "\$([A-Za-z_][A-Za-z0-9_]*)" 2>&1/g;
+  const sites: CaptureEchoSite[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = captureRe.exec(live)) !== null) {
+    const variable = m[1];
+    const rest = live.slice(m.index + m[0].length);
+    const echoIdx = rest.indexOf(`cat "$${variable}"`);
+    if (echoIdx >= 0) {
+      sites.push({ variable, between: rest.slice(0, echoIdx) });
+    }
+  }
+  return sites;
+}
+
+/**
+ * TRUE only when the subject set is non-empty AND every capture-then-echo
+ * pair carries a reference to the shared redaction definition — naming the
+ * SAME variable — somewhere between the capture and the echo. An empty
+ * subject set is explicitly FALSE, never a vacuous pass (the repo's own
+ * anti-vacuity rule; a credential reaching a public log is data-integrity).
+ */
+function everyCaptureRedactedBeforeEcho(text: string): boolean {
+  const sites = captureEchoSites(text);
+  if (sites.length === 0) return false;
+  return sites.every((s) =>
+    new RegExp(`redact-psql-stderr\\.sed"\\s*"\\$${s.variable}"`).test(
+      s.between,
+    ),
+  );
+}
+
+describe("[164.8.4-02] every captured psql output is redacted before it is echoed", () => {
+  it("the subject set is non-empty — a gate over zero capture-then-echo pairs is not a gate", () => {
+    const sites = captureEchoSites(CI);
+    expect(
+      sites.length,
+      "no psql capture-then-echo pair was found in ci.yml — an empty subject set would make the ordering predicate vacuously satisfiable, which is worse than no gate at all",
+    ).toBeGreaterThan(0);
+  });
+
+  it("every capture is redacted before its echo, and a deleted redaction line is caught", () => {
+    calibrate(
+      'every psql capture-then-echo pair carries a reference to the shared scripts/redact-psql-stderr.sed, naming the SAME variable, between the capture and its `cat`',
+      (s) =>
+        s.replace(
+          'sed -i -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "$out"; then',
+          "true; then",
+        ),
+      everyCaptureRedactedBeforeEcho,
+      CI,
+    );
+  });
+
+  it('a NEW capture-then-echo site with nothing redacting it FAILS this gate — SC-1\'s own requirement', () => {
+    calibrate(
+      'a newly added `psql … > "$scratch164842" 2>&1` / `cat "$scratch164842"` pair with nothing redacting "$scratch164842" between them must flip this gate — a new unredacted echo site was found, and OTHER clean sites must not paper over it',
+      (s) =>
+        `${s}\n          psql "$OTHER_DSN" -X > "$scratch164842" 2>&1 || rc=$?\n          cat "$scratch164842"\n`,
+      everyCaptureRedactedBeforeEcho,
+      CI,
+    );
+  });
+
+  it("removing every psql capture-then-echo pair makes the predicate FALSE, not vacuously TRUE", () => {
+    calibrate(
+      "an empty capture-then-echo corpus must not read as a pass — deleting every psql invocation this gate scans for is not the same as redacting them",
+      (s) => s.replace(/\bpsql\b/g, "psqlX"),
+      everyCaptureRedactedBeforeEcho,
+      CI,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [164.8.4-02] Task 3 — the survivor gate (no hand-copied redaction
+// expression survives outside the shared definition) and the marker-
+// collision gate (the redaction cannot alter what the sql-tests job's
+// anti-skip mechanism reads). Both DERIVE their subjects from disk — the
+// shipped scripts/redact-psql-stderr.sed for the former,
+// supabase/tests/*.sql for the latter — so a seventh expression or a new
+// marker extends either gate with no test edit.
+// ---------------------------------------------------------------------------
+
+/**
+ * The MATCH-PATTERN half of a `s#PATTERN#REPLACEMENT#FLAGS` sed expression —
+ * the substring that would appear verbatim in a hand-copied `-e '…'` block.
+ * None of the six shipped expressions embed a literal `#` in either half;
+ * this throws (a MEASURE_FAIL, not a silent mis-derivation) the day that
+ * assumption breaks.
+ */
+function sedMatchPattern(expr: string): string {
+  const parts = expr.split("#");
+  if (parts.length !== 4) {
+    throw new Error(
+      `MEASURE_FAIL: "${expr}" does not split into exactly 4 '#'-delimited segments (s#PATTERN#REPLACEMENT#FLAGS) — a shipped expression now embeds a literal '#', and needle derivation can no longer assume simple splitting`,
+    );
+  }
+  return parts[1] as string;
+}
+
+/** One needle per shipped expression, derived fresh from disk every call. */
+function survivorNeedles(): string[] {
+  return redactionExpressions(REDACT_SED).map(sedMatchPattern);
+}
+
+/**
+ * TRUE only when the derived needle set is non-empty AND none of its
+ * needles appear in comment-stripped text — i.e. no hand-copied expression
+ * survives outside scripts/redact-psql-stderr.sed. Asserting how MANY
+ * needles there are, or how many blocks were converted, is the count-
+ * pinning overclaim SC-1 forbids by name; only the structural invariant is
+ * asserted.
+ */
+function noNeedleSurvivesOutsideSharedDefinition(text: string): boolean {
+  const needles = survivorNeedles();
+  if (needles.length === 0) return false;
+  const live = stripComments(text);
+  return needles.every((n) => !live.includes(n));
+}
+
+describe("[164.8.4-02] no hand-copied redaction expression survives outside the shared definition", () => {
+  it("the derived needle set is non-empty — a definition file gone missing or emptied cannot read as a clean pass", () => {
+    expect(
+      survivorNeedles().length,
+      `${REDACT_SED_PATH} parsed to zero expressions — either the file is empty/all-comment or redactionExpressions() no longer agrees with its own shape`,
+    ).toBeGreaterThan(0);
+  });
+
+  it("no hand-copied redaction expression survives outside the shared definition, in either workflow", () => {
+    expect(
+      noNeedleSurvivesOutsideSharedDefinition(CI),
+      `a pattern from ${REDACT_SED_PATH} was found verbatim in ci.yml outside a comment — a hand-copied inline redaction expression survived the sweep and belongs in ${REDACT_SED_PATH} instead`,
+    ).toBe(true);
+    expect(
+      noNeedleSurvivesOutsideSharedDefinition(WF),
+      `a pattern from ${REDACT_SED_PATH} was found verbatim in ${WF_PATH} outside a comment — a hand-copied inline redaction expression survived the sweep and belongs in ${REDACT_SED_PATH} instead`,
+    ).toBe(true);
+  });
+
+  it("re-inserting a derived expression into ci.yml flips the gate, naming the expression", () => {
+    const needle = survivorNeedles()[0] as string;
+    calibrate(
+      `re-inserting the DSN-userinfo pattern ("${needle}") as an inline \`-e\` block must flip this gate — it belongs only in ${REDACT_SED_PATH}`,
+      (s) => `${s}\n          sed -E -e 's#${needle}#\\1***@#g' "$x"\n`,
+      noNeedleSurvivesOutsideSharedDefinition,
+      CI,
+    );
+  });
+
+  it("re-inserting a derived expression into test-restore-from-baseline.yml flips the gate, naming the expression", () => {
+    const needle = survivorNeedles()[0] as string;
+    calibrate(
+      `re-inserting the DSN-userinfo pattern ("${needle}") as an inline \`-e\` block must flip this gate — it belongs only in ${REDACT_SED_PATH}`,
+      (s) => `${s}\n          sed -E -e 's#${needle}#\\1***@#g' "$x"\n`,
+      noNeedleSurvivesOutsideSharedDefinition,
+      WF,
+    );
+  });
+});
+
+const SUPABASE_TESTS_DIR = join(ROOT, "supabase", "tests");
+
+/**
+ * Every skip marker, partial-skip pattern and arms sentinel the `sql-tests`
+ * job's anti-skip mechanism greps for, extracted from `supabase/tests/*.sql`
+ * with the SAME expressions the workflow itself uses (mirrors Task 2's own
+ * `<verify>` extraction, so the TS gate and the shipped bash measurement
+ * agree on what "the corpus" is).
+ */
+function antiSkipMarkers(): string[] {
+  const files = readdirSync(SUPABASE_TESTS_DIR).filter((f) =>
+    f.endsWith(".sql"),
+  );
+  const out = new Set<string>();
+  for (const f of files) {
+    const body = readFileSync(join(SUPABASE_TESTS_DIR, f), "utf8");
+    const skipRe = /RAISE NOTICE 'SKIP: ([^'%]{0,60})/g;
+    let m: RegExpExecArray | null;
+    while ((m = skipRe.exec(body)) !== null) out.add(m[1] as string);
+    const partialRe =
+      /SKIP \([^)]*\)|SKIP Part [0-9]+|PASS WITH [0-9]+ SKIPS?|ALL [0-9]+ ARMS EXECUTED/g;
+    while ((m = partialRe.exec(body)) !== null) out.add(m[0]);
+  }
+  return [...out].sort();
+}
+
+const ANTI_SKIP_MARKERS_TEXT = antiSkipMarkers().join("\n");
+
+/**
+ * TRUE only when the corpus is non-empty AND running the shipped redaction
+ * definition over it (as one block, matching how the workflow redacts a
+ * whole captured file at once) returns it byte-identical.
+ */
+function markersSurviveRedaction(corpusText: string): boolean {
+  const markers = corpusText.split("\n").filter((l) => l.length > 0);
+  if (markers.length === 0) return false;
+  const withNL = corpusText.endsWith("\n") ? corpusText : `${corpusText}\n`;
+  return runRedaction(withNL) === withNL;
+}
+
+describe("[164.8.4-02] no anti-skip marker is altered by the shared redaction", () => {
+  it("no anti-skip marker is altered by the shared redaction, and an altered one is named", () => {
+    const markers = antiSkipMarkers();
+    expect(
+      markers.length,
+      "no skip marker, partial-skip pattern or arms sentinel was extracted from supabase/tests/*.sql — an empty corpus would make this check vacuously TRUE, which is worse than no gate",
+    ).toBeGreaterThan(0);
+
+    for (const mk of markers) {
+      const withNL = `${mk}\n`;
+      expect(
+        runRedaction(withNL),
+        `the shared redaction rewrites the anti-skip marker "${mk}" — the sql-tests job's own grep for this text would then match NOTHING (a silent-green outcome), because the redaction runs on the SAME captured file the anti-skip greps read afterward`,
+      ).toBe(withNL);
+    }
+
+    // ⛔ Synthetic placeholder only (db.example, this repo's own convention)
+    // — never a real host, role or connection string.
+    calibrate(
+      "every anti-skip marker survives the shared redaction byte-identical; a synthetic marker carrying a masked shape must flip this",
+      (s) => `${s}\nhost=db.example synthetic-marker-carrying-a-masked-shape\n`,
+      markersSurviveRedaction,
+      ANTI_SKIP_MARKERS_TEXT,
     );
   });
 });
