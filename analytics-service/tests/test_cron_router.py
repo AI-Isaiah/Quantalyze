@@ -209,6 +209,7 @@ def _make_mock_supabase_for_cron_sync(
     pa_data: list[dict] | None = None,
     rpc_data: int | None = 1,
     update_data: list[dict] | None = None,
+    sc_data: list[dict] | None = None,
 ) -> MagicMock:
     """Build a MagicMock supabase client wired for end-to-end cron_sync
     integration tests. Each table name dispatches to its own chain so
@@ -227,6 +228,22 @@ def _make_mock_supabase_for_cron_sync(
     - update_data: rows returned by api_keys UPDATE; defaults to one
       row so the deactivation-no-op detection path isn't accidentally
       tripped.
+    - sc_data: rows returned by the `strategy_sync_cursors` SELECT
+      (164.5.1.4), shaped `{"strategy_id": ..., "last_sync_at": ...}`.
+      Defaults to an empty list, which is the state the migration lands
+      in: no marker rows, every strategy falls back to its key's cursor.
+      ⚠️ Serving this table is LOAD-BEARING for any test that touches the
+      marker read, and the failure mode is SILENT. MEASURED: with no chain
+      for it, `.select(...).in_(...).execute()` returns a bare MagicMock
+      whose `.data` iterates EMPTY (MagicMock auto-configures `__iter__` to
+      `iter([])`), so `rows()` yields nothing, NOTHING raises, the fail-open
+      wrapper never fires, and no `strategy_cursor_lookup_error` appears in
+      the response. Every key just gets an empty mapping — the wiring is
+      permanently green and permanently unexercised at the same time, with
+      no signal anywhere that it was never tested.
+      The marker UPSERT on the same chain is captured, not absorbed: read
+      the payloads back off `mock_supabase.strategy_cursor_upserts`, which
+      this helper attaches to the returned mock.
     """
     if ps_data is None:
         ps_data = []
@@ -234,6 +251,8 @@ def _make_mock_supabase_for_cron_sync(
         pf_data = [{"id": r["portfolio_id"]} for r in ps_data]
     if pa_data is None:
         pa_data = []
+    if sc_data is None:
+        sc_data = []
     if update_data is None:
         update_data = [{"id": r.get("id", "key-1")} for r in keys_data]
 
@@ -270,7 +289,32 @@ def _make_mock_supabase_for_cron_sync(
     update_chain = MagicMock()
     update_chain.eq.return_value.execute.return_value = MagicMock(data=update_data)
 
+    # 164.5.1.4 — `strategy_sync_cursors`. The literal is repeated here rather
+    # than imported from `routers.cron` for the same reason `_SYNC_CURSOR_TABLE`
+    # further down this file states: the STRING is what reaches PostgREST, so a
+    # test that spelled it via the module constant would keep passing if the
+    # production table name were renamed underneath it.
+    strategy_cursor_upserts: list[Any] = []
+    sc_chain = MagicMock()
+    sc_chain.select.return_value.in_.return_value.execute.return_value = MagicMock(
+        data=sc_data
+    )
+
+    def _sc_upsert(payload: Any, *args: Any, **kwargs: Any):
+        # An explicit branch, not a bare mock: a bare mock accepts
+        # `.upsert(...).execute()` silently and captures NOTHING, so an
+        # implementation that never wrote a marker would be indistinguishable
+        # from one that did.
+        strategy_cursor_upserts.append(payload)
+        ups = MagicMock()
+        ups.execute.return_value = MagicMock(data=payload)
+        return ups
+
+    sc_chain.upsert.side_effect = _sc_upsert
+
     def _table(name: str):
+        if name == "strategy_sync_cursors":
+            return sc_chain
         if name == "api_keys":
             t = MagicMock()
             t.select.return_value.eq.return_value.execute.return_value = (
@@ -294,6 +338,9 @@ def _make_mock_supabase_for_cron_sync(
     else:
         rpc_chain.execute.return_value = MagicMock(data=rpc_data)
     mock_supabase.rpc.return_value = rpc_chain
+
+    # Captured `strategy_sync_cursors` upsert payloads, in call order.
+    mock_supabase.strategy_cursor_upserts = strategy_cursor_upserts
 
     return mock_supabase
 
@@ -1232,10 +1279,17 @@ class TestSyncTradesShapeDriftOnFanOutKeyIsReported:
 
     The drift branch now writes `strategy_errors[sid]`, which is the sole
     input the status classifier has for "something went wrong". That does not
-    save `strat-B`'s window — a shared per-key cursor cannot, and the
-    per-strategy cursor that would is booked as Phase 164.5.1.4 SYNCCURSOR —
-    but it turns a silent loss into a `partial` result naming the drifted
-    strategy.
+    save `strat-B`'s window — a shared per-key cursor cannot — but it turns a
+    silent loss into a `partial` result naming the drifted strategy.
+
+    ⭐ THE RESIDUAL LOSS IS CLOSED, AND IT WAS NOT CLOSED BY THIS CURSOR.
+    164.5.1.4 SYNCCURSOR (shipped). The key-level assertion at the foot of this
+    test still holds and still passes, because the key cursor's behaviour is
+    deliberately unchanged — holding it would starve the succeeding strategies.
+    What recovers strat-B's window is a separate mechanism in a separate table:
+    the per-strategy marker rows in `strategy_sync_cursors`. strat-B stored 0,
+    so its marker is held at the resume point this tick started from, and the
+    next tick's fetch window still covers the span it is owed.
     """
 
     @pytest.mark.asyncio
@@ -1312,8 +1366,11 @@ class TestSyncTradesShapeDriftOnFanOutKeyIsReported:
         # Cursor behaviour is DELIBERATELY unchanged by this fix: strat-A
         # stored 3, so `synced_count > 0` and `last_sync_at` still advances
         # past strat-B's unverified window. This assertion pins that the fix
-        # is purely additive observability, and documents the residual loss
-        # that only a per-strategy cursor (Phase 164.5.1.4 SYNCCURSOR) closes.
+        # is purely additive observability.
+        # 164.5.1.4 SYNCCURSOR (shipped) — the residual loss this used to point
+        # forward at is closed, and NOT by this cursor: strat-B's own marker row
+        # in `strategy_sync_cursors` is held, so the next tick's window still
+        # covers it. The key-level advance asserted here stays exactly as it is.
         update_payloads = [
             call.args[0]
             for call in mock_supabase.table.return_value.update.call_args_list
@@ -2797,6 +2854,24 @@ class TestC0198CursorOnlyAdvancesWhenStored:
         """Sanity-check the inverse: at least one strategy stored
         trades → cursor MUST advance, otherwise the next tick refetches
         the already-landed window for the successful strategies.
+
+        ⭐ THE ADVANCE IS STILL RIGHT, AND IT ALWAYS CARRIED A COST THIS
+        DOCSTRING USED TO LEAVE UNSAID. Holding the key cursor on any partial
+        failure would starve the SUCCEEDING strategies into permanent
+        re-fetch — the symmetric defect, and the reason C-0198 chose to
+        advance. But advancing moved the shared cursor past the FAILED
+        strategy's window too, and nothing on the cron path ever went back for
+        it: strat-B's trades were gone on the next tick.
+
+        That cost is now recovered, and NOT by this cursor — the key-level
+        behaviour this test pins is deliberately unchanged, which is why the
+        assertions below are untouched. It is recovered by a separate
+        mechanism in a separate table: the per-strategy marker rows in
+        `strategy_sync_cursors`, which hold the failed strategy's own resume
+        point so the next tick's fetch window still covers its outstanding
+        span. 164.5.1.4 SYNCCURSOR (shipped) — see
+        `TestSyncCursorPerStrategyResume` in this file for the gate that pins
+        the consequence.
         """
         mock_supabase = MagicMock()
 
@@ -3396,11 +3471,24 @@ class TestSyncCursorPerStrategyResume:
         failing_strategy_ids: set[str],
         fetch_mock: AsyncMock,
         trades: list[dict[str, Any]],
+        enqueue_failing_strategy_ids: set[str] | None = None,
+        rpc_calls: list[tuple[str, dict]] | None = None,
     ) -> tuple[dict[str, Any], list[dict], list[Any]]:
         """Run ONE `_sync_single_key` tick against a fully stubbed Supabase.
 
         Returns `(result, api_keys_update_payloads, cursor_upsert_payloads)`.
+
+        `failing_strategy_ids` fails the STORAGE RPC; `enqueue_failing_strategy_ids`
+        fails the RECOMPUTE-ENQUEUE RPC. They are separate parameters on purpose:
+        the advance condition has two conjuncts and each needs an injection point
+        of its own, or a gate that only ever fails storage would pass against an
+        implementation carrying the storage conjunct alone.
+
+        `rpc_calls`, when supplied, collects every `(name, args)` pair the tick
+        issued, so a caller can assert that a re-drive actually re-attempted the
+        RPC rather than inferring it from the fetch window alone.
         """
+        enqueue_failing = enqueue_failing_strategy_ids or set()
         mock_supabase = MagicMock()
 
         def _rpc(name: str, args: dict):
@@ -3409,6 +3497,8 @@ class TestSyncCursorPerStrategyResume:
             # being true the moment the recompute enqueue matters to the
             # outcome (it does here — a strategy only advances when its
             # enqueue also succeeded).
+            if rpc_calls is not None:
+                rpc_calls.append((name, dict(args)))
             chain = MagicMock()
             if name == "sync_trades":
                 if args.get("p_strategy_id") in failing_strategy_ids:
@@ -3416,7 +3506,12 @@ class TestSyncCursorPerStrategyResume:
                 else:
                     chain.execute.return_value = MagicMock(data=len(trades))
             elif name == "enqueue_compute_job":
-                chain.execute.return_value = MagicMock(data=None)
+                if args.get("p_strategy_id") in enqueue_failing:
+                    chain.execute.side_effect = RuntimeError(
+                        "compute_jobs unavailable"
+                    )
+                else:
+                    chain.execute.return_value = MagicMock(data=None)
             else:
                 raise AssertionError(f"unexpected RPC in this gate: {name!r}")
             return chain
@@ -3616,3 +3711,357 @@ class TestSyncCursorPerStrategyResume:
             f"{since_ms!r}. A 'pinned' window that is pinned no matter what "
             "measures nothing."
         )
+
+    @pytest.mark.asyncio
+    async def test_failed_recompute_enqueue_holds_that_strategys_marker(self):
+        """SUCCESS CRITERION 4, on its OWN failure axis.
+
+        ⭐ The injection here is NOT a storage failure. Both `sync_trades` RPCs
+        SUCCEED — strat-B's trades are on disk — and only its
+        `enqueue_compute_job` raises. That is a different defect from the one
+        the two tests above cover, and it is the whole reason this test exists:
+        a gate that only ever fails storage passes against the narrower, wrong
+        advance condition (`stored > 0` alone), which is exactly the
+        per-strategy mirror of the key-level formula a reader would reach for.
+
+        The consequence being pinned: strat-B's window was STORED but never
+        RECOMPUTED, so its dashboard analytics are frozen against trades that
+        exist. Holding its marker is what makes the next tick re-fetch that
+        window and re-attempt the enqueue. Without the hold nothing ever
+        re-drives it — the Phase-18 shape the enqueue loop's own comment in
+        `cron.py` describes.
+
+        Re-driving is safe in both directions and is deliberately not re-proven
+        here: `sync_trades` deletes scoped to the incoming payload's own
+        timestamp range before re-inserting, and `enqueue_compute_job` is
+        dedup-safe via the partial unique index
+        `compute_jobs_one_inflight_per_kind_strategy`.
+        """
+        t0_ms = cron_mod.parse_since_ms(self.T0)
+        assert t0_ms is not None, "T0 must parse — the whole gate is measured against it"
+
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+
+        # ---- Tick 1: both stores succeed; strat-B's recompute enqueue raises.
+        key_row_1 = _make_key_row(
+            strategy_ids=["strat-A", "strat-B"],
+            last_sync_at=self.T0,
+        )
+        result_1, key_updates_1, cursor_upserts_1 = await self._run_tick(
+            key_row=key_row_1,
+            failing_strategy_ids=set(),
+            enqueue_failing_strategy_ids={"strat-B"},
+            fetch_mock=fetch_mock,
+            trades=trades,
+        )
+
+        # Non-vacuity: the injection must have landed on the ENQUEUE axis and
+        # NOT on the storage axis. Without these the test could be measuring a
+        # silently storage-failed tick and claiming criterion 4 for it.
+        assert result_1["per_strategy_stored"] == {"strat-A": 1, "strat-B": 1}, (
+            "BOTH strategies must have STORED — this axis is an enqueue "
+            f"failure, not a storage failure; got {result_1['per_strategy_stored']!r}"
+        )
+        assert set(result_1.get("recompute_enqueue_errors") or {}) == {"strat-B"}, (
+            "strat-B's enqueue must be the ONLY recorded failure; got "
+            f"{result_1.get('recompute_enqueue_errors')!r}"
+        )
+        assert "strategy_errors" not in result_1, (
+            "a failed recompute enqueue is not a per-strategy STORAGE error — "
+            f"got {result_1.get('strategy_errors')!r}"
+        )
+
+        # The key-level status is `ok`, READ off the classifier rather than
+        # assumed: `strategy_errors` is empty and `should_advance_cursor` is
+        # True because both stores landed, so there is nothing to downgrade on.
+        # ⭐ That is the point of this axis — from the KEY's point of view this
+        # tick looks HEALTHY, and the only thing standing between strat-B and a
+        # frozen dashboard is its own marker being held.
+        assert result_1["status"] == "ok", (
+            "both stores landed and no strategy RPC raised, so the KEY status "
+            f"is `ok`; got {result_1['status']!r}"
+        )
+
+        cursors = self._cursor_map(cursor_upserts_1)
+        assert set(cursors) == {"strat-A", "strat-B"}, (
+            "every strategy in the fan-out gets a marker row, held or "
+            f"advancing; captured: {cursors!r}"
+        )
+        assert cursors["strat-A"] != self.T0, (
+            "strat-A stored AND enqueued, so its marker must advance past T0; "
+            f"got {cursors['strat-A']!r}"
+        )
+        assert cursors["strat-B"] == self.T0, (
+            "strat-B STORED but its recompute enqueue raised, so its marker "
+            "must stay PINNED at the resume point the tick started from — "
+            "advancing it strands the window whose recompute never fired; "
+            f"got {cursors['strat-B']!r}"
+        )
+
+        advanced = [p["last_sync_at"] for p in key_updates_1 if "last_sync_at" in p]
+        assert advanced, (
+            "the KEY cursor still advances — both stores landed, and C-0198's "
+            "choice is untouched by this phase"
+        )
+        key_cursor_after_tick_1 = advanced[-1]
+        assert cron_mod.parse_since_ms(key_cursor_after_tick_1) > t0_ms, (
+            "the key cursor must have moved PAST T0, otherwise tick 2's "
+            "assertion below could pass for the trivial reason that nothing moved"
+        )
+
+        # ---- Tick 2: inputs DERIVED from tick 1's own captured outputs.
+        key_row_2 = _make_key_row(
+            strategy_ids=["strat-A", "strat-B"],
+            last_sync_at=key_cursor_after_tick_1,
+            strategy_cursors=cursors,
+        )
+        rpc_calls_2: list[tuple[str, dict]] = []
+        await self._run_tick(
+            key_row=key_row_2,
+            failing_strategy_ids=set(),
+            fetch_mock=fetch_mock,
+            trades=trades,
+            rpc_calls=rpc_calls_2,
+        )
+
+        since_ms = fetch_mock.call_args.kwargs["since_ms"]
+        assert since_ms == t0_ms, (
+            "THE CONSEQUENCE: tick 2 must ask the venue for strat-B's "
+            f"un-recomputed window (since_ms={t0_ms}), not the advanced key "
+            f"cursor. Got since_ms={since_ms!r}. Delete the `sid not in "
+            "recompute_enqueue_errors` conjunct from the advance condition and "
+            "this is the assertion that fails."
+        )
+        assert (
+            "enqueue_compute_job",
+            {"p_strategy_id": "strat-B", "p_kind": "derive_broker_dailies"},
+        ) in rpc_calls_2, (
+            "and the recompute strat-B never got must actually be RE-ATTEMPTED "
+            f"on tick 2; issued RPCs were {rpc_calls_2!r}"
+        )
+
+
+class TestCronSyncDeliversStrategyCursorsToFanOut:
+    """164.5.1.4: the marker mapping must reach the fan-out through the REAL
+    `cron_sync` entry point, not only through a hand-built key row.
+
+    ⚠️ Until `_make_mock_supabase_for_cron_sync` served this table, every
+    `cron_sync` test in this file reached the marker SELECT through a bare
+    MagicMock whose `.data` iterates EMPTY, so every key got an empty mapping
+    with NOTHING raised and no error field in the response — the wiring plan 02
+    added was green and unexercised at the same time, with no signal that it
+    was untested. MEASURED by removing the helper's chain and re-running this
+    test: the mapping came back `{}` and `strategy_cursor_lookup_error` was
+    absent, so even the fail-open signal would not have caught it. That is the
+    vacuity class this repo ranks above ordinary correctness, and it is what
+    this test exists to close.
+    """
+
+    T0 = "2026-01-15T00:00:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_marker_mapping_reaches_the_fan_out_and_the_write_is_issued(self):
+        import copy
+        import sys as _sys
+        import routers.portfolio as portfolio_mod
+        _sys.modules["routers.portfolio"] = portfolio_mod
+
+        # One key, two ELIGIBLE strategies. A marker row is served for strat-A
+        # and none for strat-B — the asymmetry is the whole point.
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "binance",
+                    "last_sync_at": self.T0,
+                    "strategies": [
+                        {"id": "strat-A", "status": "published"},
+                        {"id": "strat-B", "status": "published"},
+                    ],
+                }
+            ],
+            ps_data=[],
+            sc_data=[{"strategy_id": "strat-A", "last_sync_at": self.T0}],
+        )
+
+        captured_key_rows: list[dict[str, Any]] = []
+        real_sync_key = cron_mod._sync_key_with_timeout
+
+        async def _spy(key_row: dict[str, Any], kek: bytes):
+            # Deep-copy at capture time: the row is a live dict and asserting
+            # on a reference would measure its final state, not the state the
+            # fan-out was handed.
+            captured_key_rows.append(copy.deepcopy(key_row))
+            return await real_sync_key(key_row, kek)
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "_sync_key_with_timeout", _spy):
+            response = await cron_mod.cron_sync()
+
+        # Non-vacuity: the fan-out must actually have run, and the fail-open
+        # branch must NOT have been taken. Either one would make every
+        # assertion below quantify over an empty mapping and pass for the
+        # wrong reason.
+        assert len(captured_key_rows) == 1, captured_key_rows
+        assert "strategy_cursor_lookup_error" not in response, (
+            "the marker SELECT fell into its fail-open branch, so the mapping "
+            "was empty for a reason that has nothing to do with the wiring: "
+            f"{response.get('strategy_cursor_lookup_error')!r}"
+        )
+
+        mapping = captured_key_rows[0]["strategy_cursors"]
+        assert mapping == {"strat-A": self.T0}, (
+            "the served marker must reach the fan-out with its value intact, "
+            "and the UNSERVED strategy must be ABSENT from the mapping rather "
+            "than present with a null — absence means 'fall back to the key "
+            "cursor' while a present null means 'refetch all history', and "
+            f"only absence keeps this change inert on arrival. Got {mapping!r}"
+        )
+        assert "strat-B" not in mapping, (
+            "membership, not a null value, is the read-path contract; "
+            f"got {mapping!r}"
+        )
+
+        # And the WRITE is issued through the same real entry point, batched.
+        upserts = mock_supabase.strategy_cursor_upserts
+        assert len(upserts) == 1, (
+            "exactly one batched marker upsert per key, not one per strategy; "
+            f"got {len(upserts)} call(s): {upserts!r}"
+        )
+        written = {row["strategy_id"] for row in upserts[0]}
+        assert written == {"strat-A", "strat-B"}, (
+            "every strategy in the fan-out gets a row, held or advancing; "
+            f"got {written!r}"
+        )
+
+
+class TestHeldStrategyMarkersAreNamedInTheEnvelope:
+    """164.5.1.4: a tick that HOLDS one or more strategies must say so.
+
+    The hold is correct and deliberate — it is what makes the outstanding
+    window re-drivable — but it is not free: `fetch_all_trades` runs ONCE per
+    key, so the key's window stays pinned at the earliest held resume point and
+    the range re-fetched grows every tick until the hold clears. That growth is
+    precedented (the `held` SyncStatus already documents and accepts the same
+    thing at key level) and the re-fetch is idempotent, so it is an efficiency
+    cost rather than a correctness one — and it is ACCEPTED, not deferred.
+
+    ⛔ What would make it a defect is being invisible, inferable only from the
+    ABSENCE of an advancing row. So it is named in the envelope and in a
+    warning. These two tests pin that it is named when it happens and, just as
+    importantly, NOT named when it does not.
+    """
+
+    T0 = TestSyncCursorPerStrategyResume.T0
+
+    # Reuses the two-tick class's `_run_tick` rather than a fourth dispatcher
+    # shape: it is the only stub in this file that can fail the storage RPC and
+    # the enqueue RPC independently, which is what these cases need.
+    # ⚠️ Re-wrapped in `staticmethod`: reading it off the other class yields the
+    # plain function, and a plain function bound as a class attribute would be
+    # called with `self` as a positional argument it does not accept.
+    _run_tick = staticmethod(TestSyncCursorPerStrategyResume._run_tick)
+
+    @pytest.mark.asyncio
+    async def test_held_strategies_are_named_in_the_envelope(self, caplog):
+        import logging
+
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+        key_row = _make_key_row(
+            strategy_ids=["strat-A", "strat-B"],
+            last_sync_at=self.T0,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result, _updates, _upserts = await self._run_tick(
+                key_row=key_row,
+                failing_strategy_ids={"strat-B"},
+                fetch_mock=fetch_mock,
+                trades=trades,
+            )
+
+        assert result["strategy_cursors_held"] == ["strat-B"], (
+            "the held strategy must be NAMED in the key's envelope — an "
+            "operator reading the summary should not have to infer the hold "
+            f"from the absence of a row. Got {result.get('strategy_cursors_held')!r}"
+        )
+        assert "strat-A" not in result["strategy_cursors_held"], (
+            "strat-A advanced; naming it would make the field useless"
+        )
+
+        # WHY (Rule 9): the log must state the CONSEQUENCE, not merely the
+        # fact. "strat-B was held" tells an operator nothing actionable; "the
+        # whole key's re-fetched range grows every tick until it clears" is the
+        # thing they need in order to decide whether to intervene.
+        held_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno >= logging.WARNING and "held the per-strategy" in r.getMessage()
+        ]
+        assert len(held_lines) == 1, (
+            "exactly ONE warning per key, not one per held strategy; got "
+            f"{held_lines!r}"
+        )
+        assert "strat-B" in held_lines[0], held_lines[0]
+        assert "grows every tick" in held_lines[0], (
+            "the line must state what the hold costs, or it is a fact without "
+            f"a consequence; got {held_lines[0]!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_tick_that_holds_nothing_adds_no_field(self, caplog):
+        import logging
+
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+        key_row = _make_key_row(
+            strategy_ids=["strat-A", "strat-B"],
+            last_sync_at=self.T0,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result, _updates, upserts = await self._run_tick(
+                key_row=key_row,
+                failing_strategy_ids=set(),
+                fetch_mock=fetch_mock,
+                trades=trades,
+            )
+
+        # Non-vacuity: this must be a tick that really DID advance both
+        # markers, not one where the marker block never ran at all — otherwise
+        # "no field" would be true for the wrong reason.
+        assert result["status"] == "ok", result
+        written = {row["strategy_id"] for payload in upserts for row in payload}
+        assert written == {"strat-A", "strat-B"}, written
+
+        assert "strategy_cursors_held" not in result, (
+            "a conditional field that is always present is not conditional: a "
+            "tick where every strategy advanced must add NO held key at all. "
+            f"Got {result.get('strategy_cursors_held')!r}"
+        )
+        assert not [
+            r for r in caplog.records if "held the per-strategy" in r.getMessage()
+        ], "nothing was held, so nothing may be logged as held"
