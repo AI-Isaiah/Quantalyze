@@ -1279,10 +1279,17 @@ class TestSyncTradesShapeDriftOnFanOutKeyIsReported:
 
     The drift branch now writes `strategy_errors[sid]`, which is the sole
     input the status classifier has for "something went wrong". That does not
-    save `strat-B`'s window — a shared per-key cursor cannot, and the
-    per-strategy cursor that would is booked as Phase 164.5.1.4 SYNCCURSOR —
-    but it turns a silent loss into a `partial` result naming the drifted
-    strategy.
+    save `strat-B`'s window — a shared per-key cursor cannot — but it turns a
+    silent loss into a `partial` result naming the drifted strategy.
+
+    ⭐ THE RESIDUAL LOSS IS CLOSED, AND IT WAS NOT CLOSED BY THIS CURSOR.
+    164.5.1.4 SYNCCURSOR (shipped). The key-level assertion at the foot of this
+    test still holds and still passes, because the key cursor's behaviour is
+    deliberately unchanged — holding it would starve the succeeding strategies.
+    What recovers strat-B's window is a separate mechanism in a separate table:
+    the per-strategy marker rows in `strategy_sync_cursors`. strat-B stored 0,
+    so its marker is held at the resume point this tick started from, and the
+    next tick's fetch window still covers the span it is owed.
     """
 
     @pytest.mark.asyncio
@@ -1359,8 +1366,11 @@ class TestSyncTradesShapeDriftOnFanOutKeyIsReported:
         # Cursor behaviour is DELIBERATELY unchanged by this fix: strat-A
         # stored 3, so `synced_count > 0` and `last_sync_at` still advances
         # past strat-B's unverified window. This assertion pins that the fix
-        # is purely additive observability, and documents the residual loss
-        # that only a per-strategy cursor (Phase 164.5.1.4 SYNCCURSOR) closes.
+        # is purely additive observability.
+        # 164.5.1.4 SYNCCURSOR (shipped) — the residual loss this used to point
+        # forward at is closed, and NOT by this cursor: strat-B's own marker row
+        # in `strategy_sync_cursors` is held, so the next tick's window still
+        # covers it. The key-level advance asserted here stays exactly as it is.
         update_payloads = [
             call.args[0]
             for call in mock_supabase.table.return_value.update.call_args_list
@@ -2844,6 +2854,24 @@ class TestC0198CursorOnlyAdvancesWhenStored:
         """Sanity-check the inverse: at least one strategy stored
         trades → cursor MUST advance, otherwise the next tick refetches
         the already-landed window for the successful strategies.
+
+        ⭐ THE ADVANCE IS STILL RIGHT, AND IT ALWAYS CARRIED A COST THIS
+        DOCSTRING USED TO LEAVE UNSAID. Holding the key cursor on any partial
+        failure would starve the SUCCEEDING strategies into permanent
+        re-fetch — the symmetric defect, and the reason C-0198 chose to
+        advance. But advancing moved the shared cursor past the FAILED
+        strategy's window too, and nothing on the cron path ever went back for
+        it: strat-B's trades were gone on the next tick.
+
+        That cost is now recovered, and NOT by this cursor — the key-level
+        behaviour this test pins is deliberately unchanged, which is why the
+        assertions below are untouched. It is recovered by a separate
+        mechanism in a separate table: the per-strategy marker rows in
+        `strategy_sync_cursors`, which hold the failed strategy's own resume
+        point so the next tick's fetch window still covers its outstanding
+        span. 164.5.1.4 SYNCCURSOR (shipped) — see
+        `TestSyncCursorPerStrategyResume` in this file for the gate that pins
+        the consequence.
         """
         mock_supabase = MagicMock()
 

@@ -687,11 +687,25 @@ async def _sync_single_key(
         # already persisted. Failures are logged to Sentry AND surfaced in
         # the result envelope below (`recompute_enqueue_errors`) so the
         # cron_sync summary alarm sees them rather than the failure living
-        # only in Sentry. NOTE: a failed enqueue is NOT re-driven by the next
-        # sync tick — `last_sync_at` has already advanced, so the next tick
-        # fetches no new trades for this strategy and recomputes nothing.
-        # Recovery then relies on the daily/portfolio recompute cascade or a
-        # user-triggered recompute.
+        # only in Sentry.
+        #
+        # 164.5.1.4 SYNCCURSOR (shipped) — A FAILED ENQUEUE *IS* RE-DRIVEN BY
+        # THE NEXT SYNC TICK ON THIS PATH NOW, and this note used to say the
+        # opposite. What used to be true: `last_sync_at` is per-KEY and had
+        # already advanced, so the next tick fetched no new trades for this
+        # strategy and recomputed nothing — recovery then depended on the
+        # daily/portfolio recompute cascade or a user-triggered recompute. That
+        # is the Phase-18 shape described above, where cron-synced strategies
+        # were never recomputed and their dashboard KPIs froze, and it is kept
+        # here because it is the REASON the protection below exists.
+        # What ships now: the per-strategy marker write at the foot of this
+        # function carries a `sid not in recompute_enqueue_errors` conjunct, so
+        # a strategy whose enqueue raised does NOT advance its own marker. Its
+        # resume point holds, `_resume_floor_ms` keeps the next tick's fetch
+        # window covering that span, and the enqueue is re-attempted. Both
+        # re-drives are safe: `sync_trades` deletes payload-window-scoped before
+        # re-inserting, and `enqueue_compute_job` is dedup-safe via the partial
+        # unique index named above.
         recompute_strategy_ids = [
             sid for sid, stored in per_strategy_stored.items() if stored > 0
         ]
