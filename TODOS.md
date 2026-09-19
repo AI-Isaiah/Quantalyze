@@ -3633,6 +3633,53 @@ immediately after this plan's Task 2 decision, carrying this measurement and the
 guards (widening starts no polling; the cursor defect is already closed) into its own goal and
 success criteria. Owner: that phase.
 
+**CLOSED — D-03 half, cursor-advance half — Phase 164.5.1.2 plan 03, 2026-09-19.**
+Per CONTEXT.md D-03, the cursor-advance defect is measured independent of the widening question
+above — it does not wait on `ALLOWED_STRATEGY_STATUSES` and is wrong even if that constant is
+left exactly as it is. Both sub-causes RESEARCH §2 traced (every linked strategy filtered out by
+the lifecycle status set; a key with zero linked strategies structurally) collapse into the same
+`strategy_ids=[]` path inside `_sync_single_key`. **Fix shipped in Phase 164.5.1.2 plan 02**:
+`should_advance_cursor` in `analytics-service/routers/cron.py::_sync_single_key` dropped the
+`bool(strategy_ids)` disjunct and now reads `(not trades) or synced_count > 0`, reusing the
+existing C-0198 `synced_count > 0` disjunct rather than inventing a new gate shape. Proven by a
+new third member of `TestC0198CursorOnlyAdvancesWhenStored` —
+`test_D03_empty_strategy_ids_with_trades_does_not_advance_cursor` — observed RED against
+unmodified `cron.py` (assertion failure: cursor advanced despite `strategy_ids=[]`) before the
+fix, then GREEN after, with both pre-existing class members still passing and the full
+`analytics-service` suite green (5880 passed, 89 skipped). Shipped in commits `d1157059` (RED
+test) and `ca432660` (GREEN fix).
+
+**TRIGGER, sharpened and distinct from the original entry's TRIGGER above:** this half reopens
+only if a THIRD, distinct cause of `strategy_ids=[]` is found beyond the two RESEARCH §2 already
+traced and collapsed into this fix; or if `should_advance_cursor`'s formula is touched again
+without rerunning the full `TestC0198CursorOnlyAdvancesWhenStored` class.
+
+**`FANOUT-COHORT-SYNC-CONSTANT-01` is now FULLY CLOSED** — both the widening-verdict half (Phase
+164.5.1.2 plan 01, above) and this D-03 cursor-advance half are present and distinct, per
+CONTEXT.md D-03's instruction that the two causes never share one closure.
+
+---
+
+**Advisory-lock comment finding (measured 2026-09-19, Phase 164.5.1.2 plan 03) — recorded,
+not fixed this phase.**
+`enqueue_poll_positions_for_all_strategies`'s header comment and its source migration both
+claim the multi-worker race is handled via a named advisory lock
+(`pg_try_advisory_lock('daily_position_polling')`).
+This is safe to call multiple times regardless; but measured at HEAD, that lock does not exist
+anywhere in `analytics-service/` — zero occurrences, confirmed by a repo-wide grep. The real
+concurrency guard is `_daily_enqueue_already_ran_today` (`analytics-service/main_worker.py`, a
+UTC-day check gating the daily tick) plus `enqueue_compute_job`'s own idempotent dedup (the
+partial unique index the same SQL comment already documents), and both work correctly
+regardless of whether the comment's advisory-lock claim is accurate.
+**Decision: DROP a same-phase migration fix.** The cost — a full three-reviewer +
+`apply-test` + human-gated PROD-apply pipeline for a comment-only change with zero functional
+effect — is disproportionate to the benefit, since the correction already lives in tracked,
+public `ROADMAP.md` / `RESEARCH.md` / `PATTERNS.md` text a future reader would find before
+relying on the stale comment.
+**TRIGGER (opportunistic, not a phase):** fix the comment the next time
+`enqueue_poll_positions_for_all_strategies`'s migration is genuinely touched for another reason
+— never as a standalone migration.
+
 ### VERIFICATION-STALE-OWED-01 — two phases verified code that has since moved, and their verdicts are honestly out of date (booked 2026-09-18)
 
 - [ ] **`[VERIFICATION-STALE-OWED-01]` Phases 164.8.3 and 164.6.3 read `stale`, and that is the
