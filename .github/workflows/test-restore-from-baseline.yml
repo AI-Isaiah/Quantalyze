@@ -1904,7 +1904,8 @@ jobs:
                 # used to carry separately, including the DNS-resolution-failure
                 # shape this loop was missing), referenced workspace-rooted;
                 # -i preserved because this site edits ${f} in place.
-                if sed -i -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${f}"; then
+                if { sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${f}" > "${f}.redacted" \
+                     && mv "${f}.redacted" "${f}"; }; then
                   redacted=$(( redacted + 1 ))
                 else
                   withhold_channels

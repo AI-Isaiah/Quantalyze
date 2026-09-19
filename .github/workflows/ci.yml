@@ -3404,7 +3404,8 @@ jobs:
           # only, never the content) — same capture-count-WITHHOLD idiom as
           # scripts/test-ledger-drift-check.sh's ledger_rows arm — and the
           # step fails closed rather than echo a file it cannot prove safe.
-          if ! sed -i -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "$out"; then
+          if ! { sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "$out" > "$out.redacted" \
+                 && mv "$out.redacted" "$out"; }; then
             probe_out_lines="$( { wc -l < "$out" 2>/dev/null || echo '?'; } | tr -d '[:space:]' )"
             echo "::error::redaction FAILED on $(basename "$out"). ${probe_out_lines} line(s) of captured output are WITHHELD — it can carry the TEST pooler host, its IP or the DB user, and this log is public."
             exit 1
@@ -3440,7 +3441,8 @@ jobs:
               # scripts/redact-psql-stderr.sed, in place, before it is
               # echoed — and fail closed, WITHHOLDING a line count only, if
               # the substitution itself fails.
-              if ! sed -i -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "$out"; then
+              if ! { sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "$out" > "$out.redacted" \
+                 && mv "$out.redacted" "$out"; }; then
                 loop_out_lines="$( { wc -l < "$out" 2>/dev/null || echo '?'; } | tr -d '[:space:]' )"
                 echo "::error file=$f::redaction FAILED on $(basename "$out"). ${loop_out_lines} line(s) of captured output are WITHHELD — it can carry the TEST pooler host, its IP or the DB user, and this log is public."
                 exit 1
