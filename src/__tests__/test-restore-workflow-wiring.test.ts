@@ -1436,10 +1436,54 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
      * the tokens verbatim lets the arm below assert that none of them contains `*`,
      * which is the actual rule.
      */
+    /**
+     * [164.8.4-05] Runs the real `scripts/derive-restore-channels.sh` over the
+     * two real producers, for `stagedChannelNames` to resolve the shipped
+     * `for c in ${derived_channels}; do` shape back into real names. Memoized:
+     * the script is deterministic source-text scanning and this suite does not
+     * mutate the repo's producer files mid-run.
+     */
+    let realDerivedChannelsCache: string[] | null = null;
+    function realDerivedChannels(): string[] {
+      if (realDerivedChannelsCache) return realDerivedChannelsCache;
+      const r = spawnSync(
+        "bash",
+        [
+          join(ROOT, "scripts/derive-restore-channels.sh"),
+          join(ROOT, "scripts/restore-test-from-baseline.sh"),
+          join(ROOT, ".github/workflows/test-restore-from-baseline.yml"),
+        ],
+        { encoding: "utf8" },
+      );
+      if (r.status !== 0) {
+        throw new Error(
+          `stagedChannelNames: scripts/derive-restore-channels.sh failed (exit ${r.status}) over the real producers — cannot resolve the dynamic channel loop.\n${r.stdout ?? ""}${r.stderr ?? ""}`,
+        );
+      }
+      realDerivedChannelsCache = (r.stdout ?? "")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      return realDerivedChannelsCache;
+    }
+
     function stagedChannelNames(text: string): string[] {
       const body = stepBody(text, STAGE);
       const m = body.match(/^\s*for c in ([^;\n]+); do$/m);
-      return m ? m[1].trim().split(/\s+/) : [];
+      if (!m) return [];
+      const tokens = m[1].trim().split(/\s+/);
+      // [164.8.4-05] The staging step's loop iterates a DERIVED set, not a
+      // hand-typed list — the ONE shape the shipped step carries is
+      // `for c in ${derived_channels}; do`. Resolve THAT shape back to the
+      // real names by running the real derivation, so every downstream
+      // predicate reasoning about "the current channel set" keeps working. Any
+      // OTHER token shape — a calibration fixture that renamed the variable,
+      // or one that re-introduced a literal list — is returned VERBATIM; that
+      // is what lets a calibration observe the parse break.
+      if (tokens.length === 1 && tokens[0] === "${derived_channels}") {
+        return realDerivedChannels();
+      }
+      return tokens;
     }
 
     /** What the workflow's OWN two lists say should be staged, given a seeded set. */
@@ -1490,6 +1534,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           ...process.env,
           RUNNER_TEMP: runnerTemp,
           REDACT_OUTCOME: redactOutcome,
+          // [164.8.4-05] The staging step now derives its channel set via
+          // scripts/derive-restore-channels.sh, referenced workspace-rooted
+          // (same convention as the redaction step's `-f`); a real Actions
+          // runner always sets this.
+          GITHUB_WORKSPACE: ROOT,
         },
       });
       const stageDir = join(runnerTemp, "test-backup-artifact");
@@ -1544,12 +1593,15 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // A channel this job gains tomorrow is OUT until it is named here and in the
       // step, which is the same default-out rule the content files have always had —
       // and, until this phase, the one thing the channels did not.
+      // [164.8.4-05] SORTED — scripts/derive-restore-channels.sh's own contract
+      // is "sorted and de-duplicated, one per line" (its own header comment),
+      // so the resolved real names come back alphabetical, not insertion order.
       const DECIDED_CHANNELS = [
         "census.err",
+        "dump.log",
         "ledger.err",
         "marker.err",
         "refdata.err",
-        "dump.log",
         "transaction.out",
       ];
       expect(
@@ -1560,14 +1612,18 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         stagedChannelNames(WF).some((n) => n.includes("*")),
         "the channel allowlist has been widened back to a glob — every future `.err`/`.log`/`.out` file is then IN by default, which is the defect review WR-01 measured by execution",
       ).toBe(false);
-      // CALIBRATION — the channel PARSE must break when a channel name changes, or
-      // the agreement above is between two constants.
+      // CALIBRATION — [164.8.4-05] the channel PARSE must break when the loop no
+      // longer carries the shipped `${derived_channels}` reference, or the
+      // agreement above is between two constants. The loop is now derived, not
+      // hand-typed, so the mutation renames the variable rather than a literal
+      // channel name — `stagedChannelNames` falls back to returning that
+      // unresolved token verbatim, which does not include "census.err".
       calibrate(
         "the channel allowlist is parsed out of the step, not restated",
         (s) =>
           s.replace(
-            "for c in census.err ledger.err",
-            "for c in census.ERR ledger.err",
+            "for c in ${derived_channels}; do",
+            "for c in ${wrong_channels_variable}; do",
           ),
         (t) => stagedChannelNames(t).includes("census.err"),
       );
@@ -1676,8 +1732,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // returns to the world-readable artifact with its CREATE POLICY line intact.
       // That is the reviewer's measurement, kept as a standing twin so the glob cannot
       // come back quietly.
+      // [164.8.4-05] Re-anchored on the DERIVED loop shape — the literal
+      // six-name `for c in …` line this anchor used to match no longer exists.
       const CHANNEL_LOOP_ANCHOR =
-        "    for c in census.err ledger.err marker.err refdata.err dump.log transaction.out; do\n" +
+        "    for c in ${derived_channels}; do\n" +
         '      if [ -f "${outdir}/${c}" ]; then\n' +
         '        cp -p "${outdir}/${c}" "${stage}/"\n' +
         "      fi\n" +
@@ -2409,7 +2467,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       writeFileSync(scriptFile, script);
       const r = spawnSync("bash", [scriptFile], {
         encoding: "utf8",
-        env: { ...process.env, RUNNER_TEMP: runnerTemp },
+        // [164.8.4-05] GITHUB_WORKSPACE: the channel derivation now runs
+        // unconditionally near the top of the step, before the outdir-exists
+        // check this fixture is exercising; a real Actions runner always sets
+        // this.
+        env: { ...process.env, RUNNER_TEMP: runnerTemp, GITHUB_WORKSPACE: ROOT },
       });
       const staged = readdirSync(
         join(runnerTemp, "test-backup-artifact"),
