@@ -8960,3 +8960,49 @@ its twin carried `|| fail`; a failed write aborted silently and the operator rea
 diagnosis. Now checked, with a message saying the scan CLEARED and the denial is not a finding.
 `[164.8.2-R3-UNREADABLE-FILE-MISREPORTED]` (WR-05) — an unreadable file was reported as a call
 "aimed twice at the same file"; unreadable is now its own tracked category with its own sentence.
+
+## Phase 164.8.4 (GATERESIDUE) — residuals (logged 2026-09-19)
+
+Two items the phase's two review rounds surfaced and deliberately did NOT fix. Both were
+re-measured at HEAD on the branch rather than carried over as dated claims.
+
+- [ ] **`[164.8.4-REDACT-NO-POSITIVE-SCAN]` the redaction is never CONFIRMED — `sed` exits 0
+      whether or not anything matched, and no positive post-substitution scan exists for the
+      `.err`/`.log`/`.out` channels (booked 2026-09-19; DESTINATION: needs a phase, see below).**
+      **DATA-INTEGRITY, and the highest-value item this phase leaves open.** The published `.sql`
+      path has a positive control — `refuse_credential_in_published_sql` asserts the *absence* of a
+      credential shape in the file that is about to be published, and refuses. The diagnostic
+      channels have no equivalent. Their only protection is that a `sed` script ran; a `sed` whose
+      expressions all missed exits 0 exactly like one that redacted everything.
+      **WHY IT IS NOT MERELY THEORETICAL.** This phase's own scope was mis-measured twice by
+      counting invocation SITES instead of CHANNELS, and the union `.sed` script was assembled by
+      hand from previously hand-copied inline blocks. A shape nobody enumerated — a psql or CLI
+      error naming a host in wording none of the six expressions match — redacts to itself, exits
+      0, and is staged and published to a 90-day world-readable artifact on a PUBLIC repo.
+      **FIX SHAPE:** a positive scan between redaction and staging, modelled on the `.sql` path's
+      refusal rather than invented fresh — assert the redacted text no longer carries a
+      credential-shaped token, and WITHHOLD on a hit. ⛔ Not a `sed` change and not a seventh
+      expression: adding expressions is what produced the current hand-maintained union.
+      ⛔ The scan must record a VERDICT, never a specimen — a control that logs what it found
+      publishes the very thing it exists to suppress.
+      ⚠️ **NEEDS A PHASE, not just this entry.** Per the standing rule that a data-integrity
+      deferral names its owning phase, this must be routed via `/gsd-phase --edit` (or a new
+      sibling) before 164.8.x is considered closed. It is recorded here so it cannot be lost in
+      the meantime; the destination is deliberately marked OPEN rather than left blank.
+
+- [ ] **`[164.8.4-LIVEDB-GUARD-LANE-GAP]` two vitest lanes never load the live-DB inheritance
+      guard, so neither would fail loud on inherited credentials (booked 2026-09-19).**
+      **MEASURED at HEAD, twice independently.** `src/test-setup.ts` carries the guard
+      (`assertLiveDbWasIntended`) and is reached through `setupFiles`. Of the four `vitest*.config.ts`
+      files in the repo — and they are the only four — `vitest.config.ts` and
+      `vitest.local-stack.config.ts` declare it; `vitest.redis.config.ts` and
+      `scripts/vitest.config.ts` declare no `setupFiles` at all and are standalone root configs.
+      A run through either of those two inherits live-DB credentials silently, which is the exact
+      class `[164.8.2-EVIDENCE-DOTENV-LEAK]` booked: a wrapper that injects `.env.local` turns
+      SKIPPED live-DB suites into real writes against SHARED TEST.
+      **FIX SHAPE:** wire the guard into both lanes. ⛔ Not by relaxing the guard, and ⛔ not by
+      touching the skip gates, which are correct. ⚠️ Confirm first whether either lane has a
+      legitimate reason to run against a live database; if one does, the guard's sentinel is the
+      mechanism for saying so explicitly, not a reason to leave it uncovered.
+      ⚠️ The phase's in-file scope comment states this gap. If the gap is closed, that comment
+      becomes false and must move with it.
