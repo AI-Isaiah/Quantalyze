@@ -1,5 +1,80 @@
 # Changelog
 
+## [0.80.1.0] - 2026-09-19 — MARKERGATE: the wrong-database refusal stops passing on a measurement it never took
+
+A CI failure on `main` at `b13ab2f1` turned out to be a fixture defect, and attacking it surfaced a
+real fail-OPEN hole in the guard that stands between a hand-run restore and `DROP SCHEMA public
+CASCADE` on the wrong database. **No migration, no schema change, and no `analytics-service`
+behaviour change** — merging this does not start `apply-test` and does not engage the Production
+human-reviewer gate.
+
+### Security
+- **`refuse_wrong_database()` in `scripts/restore-test-from-baseline.sh` carried the UNFIXED half of
+  F-R2-02.** Its PROD refusal was a bare `if printf … | grep -Eiq "$RESTORE_REFUSE_MARKER_RE"`, so an
+  UNDECIDED grep — exit > 1, which is what a rejected ERE returns — read as *"the marker does not
+  name prod"* and the function printed `which_database: OK — marker names TEST and not PROD`. The
+  caller then proceeds to the census and the drop. Both marker regexes are **env-overridable**, so a
+  caller-supplied ERE grep rejects is a reachable cause, not a hypothesis. Both predicates are now
+  `rc`-bounded with `-gt 1` and carry the repo-mandatory `-a`. ⛔ On a hand-run restore this function
+  is the ONLY guard — CLAUDE.md records that the developer CLI has no other.
+- **The parity claim was false.** The two workflows were hardened against F-R2-02 on 2026-09-09; the
+  script was not, while a workflow comment asserted *"the restore script repeats this check as its own
+  refusal 5"*. The EXPECT predicate was fail-CLOSED only by accident of its leading `!`; it is bounded
+  explicitly now rather than incidentally.
+
+### Fixed
+- **The red board was a FIXTURE defect, not a workflow defect.** `test-restore-workflow-wiring.test.ts`
+  stubbed `grep` with a script that never reads stdin. A real grep cannot report a verdict without
+  reading. Fed from a pipe under `set -o pipefail`, such a stub closes the read end while the writer
+  still has bytes queued: the writer dies of SIGPIPE, pipefail surfaces its `141` as the pipeline's
+  status, and the step's `-gt 1` bound reports `MEASURE_FAIL … (grep exited 141)` — naming a grep that
+  answered fine. Both stubs now drain stdin.
+- **The four workflow marker predicates move from `printf … | grep -aEiq` to a here-string**, in
+  `test-restore-from-baseline.yml` and `supabase-migrate.yml`. A here-string is written in full before
+  grep is exec'd, so there is no concurrent writer to signal and `rc` can only be grep's own status or
+  the shell's 126/127. Both steps re-verified byte-identical to each other.
+- **The marker-read failure branch could swallow its own diagnosis.** The `::error::` annotation now
+  precedes the redaction `sed`; under `set -e` a failing redaction aborted the step on the `sed` line
+  and the annotation never printed — losing the diagnosis in exactly the broken environment that
+  needed it. On a redaction failure psql's stderr is withheld entirely: it can name the host and the
+  DB user, and this log is public.
+
+### Changed
+- The `-a` justification comment in both workflows claimed *"the input is a pipe and cannot hold a
+  NUL"*. A pipe carries NULs perfectly well; the reason none can reach grep is that `${marker}` is a
+  **shell variable** and command substitution strips them. A reader who later swapped the variable for
+  a file read would have carried the wrong reasoning into a site where it no longer holds.
+- The `MEASURE_FAIL` wording now says `126/127 means grep could not be run at all`, so a
+  "could not run grep" status does not read as a grep exit code.
+- A stale `file:line` citation in the script became a symbol citation (`[164.7-CITATION-DRIFT-01]`).
+
+### Tests
+- `restore-test-from-baseline.test.ts` gains an **EXECUTED** arm and a **CALIBRATION** arm for the
+  F-R2-02 fix. The script is sourced with its `main "$@"` dispatch stripped, `refuse_wrong_database`
+  is called directly with a stubbed `psqlt` and a `grep` that returns 2 for the REFUSE invocation
+  only. The calibration restores the pre-fix bare `if` and asserts it **does** print the clean
+  verdict — so the arm is proven to bite rather than assumed to.
+- The pipe-detection calibration in `test-restore-workflow-wiring.test.ts` was re-anchored onto
+  **synthetic** text. It calibrated against the marker gate's own `printf … | grep`; with that gone and
+  the workflow's only other `| grep` inside a heredoc that `stripHeredocs` removes, it would have gone
+  **vacuous** — an empty `.some()` passing as a green scanner. A negative arm was added: the
+  here-string form must NOT classify as stdin-fed, which is what keeps these greps in scope for the
+  bare-grep `-a` rule.
+
+### Notes
+- ⚠️ **A first diagnosis that measurement contradicted, recorded rather than quietly dropped.** The
+  initial read was that this was a latent production defect able to block a deploy through
+  `apply-test`. It is not. `pipefail` returns the **rightmost** non-zero status, so a genuine
+  undecidable grep (exit 2) is never masked by 141; and a real grep must read its input before it can
+  answer, so the writer's single `write(2)` always lands. The SIGPIPE path needs a marker exceeding the
+  pipe buffer (~64 KiB), which a `COMMENT ON DATABASE` never is.
+- ⛔ The `-gt 1` bound was **not** relaxed to tolerate 141. Widening a safety bound to accommodate a
+  bug is how a bound stops meaning anything — and a genuine `grep` killed by a signal (an OOM kill on a
+  runner) also lands above 1 and must refuse. The fix earns the bound instead.
+- The seven local failures in `drift-check-scripts.test.ts` seen while preparing this are **not**
+  related: those scripts are byte-identical to `main`, their self-tests exit 0 (11/11 arms), and they
+  take ~5.5 s against vitest's 5000 ms `testTimeout` on this machine. They pass on CI.
+
 ## [0.80.0.0] - 2026-09-19 — FANOUTSIBLINGS: the sync cursor stops lying, a refused widening, and a stalled key that no longer reports itself healthy
 
 Phase 164.5.1.2 was a **decide-with-evidence** phase, not a feature phase: two of its three success
