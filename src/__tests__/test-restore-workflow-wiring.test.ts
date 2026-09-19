@@ -48,6 +48,11 @@ const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
 const WF = read(WF_PATH);
 const CI = read(CI_PATH);
 const SCRIPT = read(SCRIPT_PATH);
+// [164.8.4-01] The one shared psql-stderr redaction definition — the UNION of the six
+// expression shapes measured across the eight inline blocks it replaces. Read from disk,
+// never restated, so a seventh expression extends every gate below automatically.
+const REDACT_SED_PATH = "scripts/redact-psql-stderr.sed";
+const REDACT_SED = read(REDACT_SED_PATH);
 
 // ⛔ SPLIT ON PURPOSE, and it is NOT superstition. Both fixtures below are
 // synthetic — EXAMPLE_ placeholders at `example.invalid` — but a contiguous
@@ -6067,4 +6072,136 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
       `a scanned file hands a raw lookup index to a narrowing call. -1 does not throw: it counts from the END, so the pin degrades into comparing a one-character tail (or silently widening a prefix) and its failure mode is a PASS. Check the index and throw, as the per-file \`anchorIndex\` helpers do — and if the expression is a DELIBERATE degeneracy demonstration, route it through \`degenerateNarrow\` in ${DEGENERATE_HELPER}.`,
     ).toBe("");
   });
+});
+
+// =============================================================================
+// [164.8.4-01] The shared psql-stderr redaction definition — behavioural proof.
+// =============================================================================
+//
+// ⛔ THE DEFECT THIS CATCHES. Eight inline `sed -E` blocks, spread across two
+// workflow files, each redacted a different SUBSET of the six shapes psql and
+// the Supabase CLI print on a connect/auth/DNS failure against shared TEST. No
+// single block carried all six — the correction is ONE shared definition
+// (`scripts/redact-psql-stderr.sed`), read from disk here rather than
+// restated, so a seventh expression extends every gate below with no test
+// edit.
+
+/**
+ * Splits the shipped `.sed` text into its substitution lines — comments and
+ * blank lines dropped — so every gate below derives its needles from the
+ * SHIPPED file instead of a copy pasted into the test.
+ */
+function redactionExpressions(text: string): string[] {
+  return text
+    .split("\n")
+    .filter((line) => {
+      const trimmed = line.trimStart();
+      return trimmed.length > 0 && !trimmed.startsWith("#");
+    });
+}
+
+/**
+ * Runs the real `sed -E -f` over `input`, stream form (never in-place), so
+ * this is portable between the CI runner's GNU sed and a developer's BSD sed.
+ */
+function runRedaction(input: string): string {
+  const result = spawnSync("sed", ["-E", "-f", REDACT_SED_PATH], {
+    input,
+    encoding: "utf8",
+  });
+  expect(
+    result.status,
+    `sed -E -f ${REDACT_SED_PATH} exited ${result.status} (expected 0). stderr: ${result.stderr}`,
+  ).toBe(0);
+  return result.stdout;
+}
+
+describe("[164.8.4-01] the shared redaction definition masks every shape psql can print", () => {
+  // ⛔ SYNTHETIC PLACEHOLDERS ONLY, assembled at runtime from fragments so no
+  // whole connection-string literal appears in the source — same idiom as the
+  // `SCHEME` constant above. `db.example` is this repo's own established
+  // synthetic-host convention (`drift-check-scripts.test.ts`'s
+  // `writeStubLedger`); the IP is an RFC 5737 documentation address; the role
+  // and password are obviously-fake tokens.
+  const HOST = "db" + ".example";
+  const IP = "198.51.100" + ".7";
+  const ROLE = "fake" + "_role";
+  const PASSWORD = "EXAMPLE" + "_PASSWORD";
+  const PLAIN_SCHEME = `${"postgres"}${"://"}`;
+  // The DSN lines' own host segment (after the masked `@`) is DELIBERATELY a
+  // DIFFERENT placeholder from `HOST` above: none of the six expressions mask
+  // a DSN's post-`@` host (only the userinfo before it — matching every one
+  // of the eight original inline blocks, none of which touched it either), so
+  // asserting "the synthetic host never survives" must not be tripped by a
+  // token this union was never meant to mask. `example.invalid` matches this
+  // file's own existing DSN-fixture convention (see `SCHEME` usages above).
+  const DSN_HOST = "example" + ".invalid";
+
+  // One line per shape the shared definition must mask:
+  //   1. connect failure — quoted host + parenthesised address
+  //   2. DNS-resolution failure — quoted host
+  //   3. auth failure — quoted role
+  //   4. DSN userinfo — "postgresql://" spelling
+  //   5. DSN userinfo — "postgres://" spelling
+  //   6. key=value connection string — host and user
+  const REDACTION_FIXTURE = [
+    `psql: error: connection to server at "${HOST}" (${IP}), port 5432 failed`,
+    `could not translate host name "${HOST}" to address`,
+    `FATAL:  password authentication failed for user "${ROLE}"`,
+    `DSN=${SCHEME}${ROLE}:${PASSWORD}@${DSN_HOST}:5432/postgres`,
+    `DSN=${PLAIN_SCHEME}${ROLE}:${PASSWORD}@${DSN_HOST}:5432/postgres`,
+    `host=${HOST} user=${ROLE} sslmode=require`,
+  ].join("\n");
+
+  const REDACT_EXPRESSIONS = redactionExpressions(REDACT_SED);
+
+  it("MEASURE_FAIL guard: the shipped definition parses to at least one expression", () => {
+    // Not a count-pinning arm (SC-4 / Pitfall 2 forbid asserting a literal N) —
+    // this only guards against the parser silently returning an empty set,
+    // which would make every it.each below vacuously pass over zero cases.
+    expect(
+      REDACT_EXPRESSIONS.length,
+      `redactionExpressions(REDACT_SED) returned zero lines — either ${REDACT_SED_PATH} is empty/all-comment, or the comment-strip predicate is wrong. A gate with nothing to iterate over is not a gate.`,
+    ).toBeGreaterThan(0);
+  });
+
+  it("every synthetic host, IP, role and password is masked; the masked marker is present", () => {
+    const out = runRedaction(REDACTION_FIXTURE);
+    expect(out, "the synthetic host survived redaction").not.toContain(HOST);
+    expect(out, "the synthetic IP survived redaction").not.toContain(IP);
+    expect(out, "the synthetic role survived redaction").not.toContain(ROLE);
+    expect(out, "the synthetic password survived redaction").not.toContain(
+      PASSWORD,
+    );
+    expect(out, "no masked marker (***) appears anywhere in the output").toContain(
+      "***",
+    );
+  });
+
+  it.each(REDACT_EXPRESSIONS.map((expr, idx) => ({ expr, idx })))(
+    "expression $idx is load-bearing — removing it changes the redacted output ($expr)",
+    ({ idx }) => {
+      const fullOutput = runRedaction(REDACTION_FIXTURE);
+      const mutantLines = REDACT_EXPRESSIONS.filter((_, i) => i !== idx);
+      const tmpDir = mkdtempSync(join(tmpdir(), "redact-mutant-"));
+      try {
+        const mutantPath = join(tmpDir, "mutant.sed");
+        writeFileSync(mutantPath, mutantLines.join("\n") + "\n");
+        const mutantResult = spawnSync("sed", ["-E", "-f", mutantPath], {
+          input: REDACTION_FIXTURE,
+          encoding: "utf8",
+        });
+        expect(
+          mutantResult.status,
+          `mutant sed (expression ${idx} removed) exited ${mutantResult.status}. stderr: ${mutantResult.stderr}`,
+        ).toBe(0);
+        expect(
+          mutantResult.stdout,
+          `CALIBRATION expression ${idx} (${REDACT_EXPRESSIONS[idx]}): removing it left the redacted output UNCHANGED — this expression is dead and matches nothing the fixture exercises`,
+        ).not.toBe(fullOutput);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
 });
