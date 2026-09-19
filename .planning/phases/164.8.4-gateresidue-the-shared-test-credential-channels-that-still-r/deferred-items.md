@@ -6,6 +6,22 @@ NOT directly caused by the current task's own changes are logged here, not fixed
 ## 1. `supabase-migrate.yml`'s two ci.yml/test-restore-copied blocks were never
    re-synced after Plan 02's redaction consolidation
 
+⛔ **CLOSED 2026-09-19 (code-review fix round) — this entry is STALE and kept
+as lineage.** It claimed `supabase-migrate.yml` still carried an unconverted
+inline `sed -E -e …` redaction copy in both blocks. Commit `9d9add3c`
+("fix(164.8.4): close the redaction class repo-wide — supabase-migrate.yml and
+mutex-probe.yml") converted both blocks to `sed -E -f
+"${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed"` and closed the class
+repo-wide across all 4 workflows / 26 references. Re-measured at HEAD: `grep -n
+"sed -E" .github/workflows/supabase-migrate.yml` shows both call sites now
+reference `scripts/redact-psql-stderr.sed` via `-f`, workspace-rooted, with no
+inline `-e` substitution chains remaining; `npx vitest run
+src/__tests__/supabase-migrate-test-first.test.ts` is 33/33 passing (the 2
+failures this entry originally measured — the cross-file mutex-acquire and
+"Which database am I on" byte-identity comparisons — no longer reproduce).
+**Everything below this line is the ORIGINAL entry, preserved for lineage; do
+not act on its "suggested remedy" — it is already done.**
+
 **Found during:** Plan 05, Task 2's own verify loop — running the wider test suite
 (not just `test-restore-workflow-wiring.test.ts`) to check for collateral breakage
 from the Task 2 workflow edit.
