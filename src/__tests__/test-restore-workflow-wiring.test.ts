@@ -1262,15 +1262,27 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // failure is deterministic on every platform rather than depending on which
       // sed the developer has.
       const script = extractRunScript(WF, REDACT);
-      // [164.8.4-02] The step's substitution is now `if sed -i -E -f
-      // "${GITHUB_WORKSPACE}/…"` — a single line, no continuation, since the
-      // chained -e list this twin used to force-fail via `-e` -> `-e` no
-      // longer exists.
+      // [164.8.4] CR-01 re-anchor. Commit d04bb210 replaced the single-line
+      // `if sed -i -E -f "${GITHUB_WORKSPACE}/…" "${f}"; then` this twin used
+      // to force-fail with the PORTABLE two-line form below — BSD sed reads
+      // `-E` as `-i`'s backup-suffix argument and never enables extended
+      // regexes, so `-i` had to go; the substitution now streams to a temp
+      // file and `mv`s it over `${f}` instead of editing in place:
+      //   if { sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed"
+      //        "${f}" > "${f}.redacted" \
+      //        && mv "${f}.redacted" "${f}"; }; then
+      // Re-anchor on the first line of that construct (up to the trailing
+      // `\` continuation) rather than the retired `-i` form.
+      const ANCHOR =
+        'sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${f}" > "${f}.redacted"';
       expect(
-        script.includes("if sed -i -E -f "),
-        "the redaction step's substitution is no longer the `if sed -i -E -f` form this twin forces to fail — re-anchor the mutation rather than deleting the twin",
+        script.includes(ANCHOR),
+        "the redaction step's substitution is no longer the portable `sed -E -f … > \"${f}.redacted\"` form this twin forces to fail — re-anchor the mutation rather than deleting the twin",
       ).toBe(true);
-      const forced = script.replace("if sed -i -E -f ", "if false -i -E -f ");
+      const forced = script.replace(
+        ANCHOR,
+        ANCHOR.replace("sed -E -f", "false -E -f"),
+      );
 
       const runnerTemp = mkdtempSync(join(tmpdir(), "redact-run-"));
       const outdir = join(runnerTemp, "test-backup");
@@ -1301,10 +1313,24 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           `\`${c}\` SURVIVED a failed redaction and would be uploaded unredacted to a world-readable artifact`,
         ).toBe(false);
       }
+      // [164.8.4] The portable form redirects to `"${f}.redacted"` BEFORE the
+      // substitution runs — bash opens/truncates that file to set up the
+      // redirect whether or not the command it names ever succeeds, so
+      // forcing the FIRST channel's substitution to fail (`*.err` sorts
+      // before `*.log`/`*.out` in the step's own glob order, so `psql.err`
+      // is what fails here) leaves an empty `psql.err.redacted` residue that
+      // `withhold_channels()`'s `*.err *.log *.out` glob does not match (it
+      // ends in `.redacted`, not `.err`). That residue carries no connection
+      // metadata (it is empty) and is never published: the WR-05 describe
+      // block below pins that the staging step copies an ENUMERATED
+      // allowlist by exact name into a fresh directory, and
+      // `psql.err.redacted` is in neither allowlist — only this step's own
+      // ephemeral RUNNER_TEMP directory, asserted here, ever holds it.
+      const residual = `${channels[0]}.redacted`;
       expect(
         surviving,
-        "the fail-closed path destroyed the reversal recipe too — schema.sql and ledger.csv carry no connection metadata and are what makes the act reversible",
-      ).toEqual(keepers.slice().sort());
+        `the fail-closed path destroyed the reversal recipe too — schema.sql and ledger.csv carry no connection metadata and survive, alongside the harmless empty \`${residual}\` redirect residue (never staged, per the WR-05 enumerated allowlist below)`,
+      ).toEqual([...keepers, residual].sort());
       expect(`${r.stdout}${r.stderr}`).toContain("::error::");
       expect(`${r.stdout}${r.stderr}`).toContain("WITHHELD");
     });
@@ -6417,12 +6443,25 @@ describe("[164.8.4-02] every captured psql output is redacted before it is echoe
   });
 
   it("every capture is redacted before its echo, and a deleted redaction line is caught", () => {
+    // [164.8.4] CR-01 re-anchor. Commit d04bb210 replaced the single-line
+    // `if sed -i -E -f "${GITHUB_WORKSPACE}/…" "$out"; then` this mutator
+    // used to delete with the PORTABLE two-line form ci.yml now ships at
+    // both `$out` capture-then-echo sites (the NOTICE-channel probe and the
+    // per-file loop):
+    //   sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "$out" > "$out.redacted"
+    //        && mv "$out.redacted" "$out"; }; then
+    // `String.replace` with a string needle only touches the FIRST of the
+    // two identical occurrences, which is exactly what's wanted: deleting
+    // the redaction reference from ONE capture-then-echo pair's `between`
+    // text is enough to flip `everyCaptureRedactedBeforeEcho`'s `.every()`,
+    // while the second, untouched site keeps the predicate genuinely
+    // evidence-bearing rather than vacuous.
     calibrate(
       'every psql capture-then-echo pair carries a reference to the shared scripts/redact-psql-stderr.sed, naming the SAME variable, between the capture and its `cat`',
       (s) =>
         s.replace(
-          'sed -i -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "$out"; then',
-          "true; then",
+          'sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "$out" > "$out.redacted"',
+          'true > "$out.redacted"',
         ),
       everyCaptureRedactedBeforeEcho,
       CI,
