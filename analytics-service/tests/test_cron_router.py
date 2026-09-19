@@ -3957,6 +3957,100 @@ class TestCronSyncDeliversStrategyCursorsToFanOut:
         )
 
 
+    async def _run_cron_sync_with(self, sc_data):
+        """Run a real `cron_sync` over one key / two strategies, serving
+        `sc_data` as the marker SELECT result. Returns the response."""
+        import sys as _sys
+        import routers.portfolio as portfolio_mod
+        _sys.modules["routers.portfolio"] = portfolio_mod
+
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "binance",
+                    "last_sync_at": self.T0,
+                    "strategies": [
+                        {"id": "strat-A", "status": "published"},
+                        {"id": "strat-B", "status": "published"},
+                    ],
+                }
+            ],
+            ps_data=[],
+            sc_data=sc_data,
+        )
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ):
+            return await cron_mod.cron_sync()
+
+    _ZERO_MARKER_LOG = "per-strategy sync-cursor lookup returned 0"
+
+    async def test_zero_markers_returned_is_reported_even_though_nothing_raised(
+        self, caplog
+    ):
+        """⛔ A deny-all RLS denial answers 200 with an EMPTY list and raises
+        NOTHING, so the fail-open `except` branch never runs for it. An empty
+        mapping IS the absent-row semantics, so every strategy silently reverts
+        to the key-level cursor — which is byte for byte the stranding defect
+        this phase exists to remove, arriving with a green tick. Without this
+        line the reversion carries no operator signal at all: not an exception,
+        not `strategy_cursor_lookup_error`, nothing.
+        """
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            response = await self._run_cron_sync_with(sc_data=[])
+
+        assert "strategy_cursor_lookup_error" not in response, (
+            "this test must exercise the NO-EXCEPTION path — a raised lookup "
+            "error means it measured the fail-open branch instead, which is "
+            "already covered and is not the silent case: "
+            f"{response.get('strategy_cursor_lookup_error')!r}"
+        )
+        assert any(
+            self._ZERO_MARKER_LOG in r.message for r in caplog.records
+        ), (
+            "a zero-row marker lookup over a non-empty requested id list must "
+            "be reported. It is legitimate during rollout, which is why the "
+            "message reports the measurement rather than claiming a fault — "
+            "but a credential degraded from service_role to anon looks exactly "
+            "like this, and nothing else would surface it. Got "
+            + repr([r.message for r in caplog.records])
+        )
+
+    async def test_markers_returned_does_not_report_a_zero_lookup(self, caplog):
+        """The negative arm. Without it the assertion above would pass against
+        a line emitted unconditionally, which would measure nothing."""
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            await self._run_cron_sync_with(
+                sc_data=[{"strategy_id": "strat-A", "last_sync_at": self.T0}]
+            )
+
+        assert not any(
+            self._ZERO_MARKER_LOG in r.message for r in caplog.records
+        ), (
+            "markers WERE returned, so the zero-marker line must stay silent; "
+            "an unconditional emit would make the positive arm vacuous. Got "
+            + repr([r.message for r in caplog.records])
+        )
+
 class TestHeldStrategyMarkersAreNamedInTheEnvelope:
     """164.5.1.4: a tick that HOLDS one or more strategies must say so.
 

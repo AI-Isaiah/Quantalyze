@@ -845,20 +845,42 @@ async def _sync_single_key(
                     on_conflict="strategy_id",
                 ).execute()
             except Exception as cursor_exc:
-                # Degrades in the SAFE direction: the markers stay BEHIND, so
-                # the next tick over-fetches — and over-fetching is idempotent,
-                # because `sync_trades` deletes scoped to the incoming payload's
-                # own timestamp range before re-inserting. Never abort the tick
-                # and never discard the sync results already collected.
-                # logger.exception for the active traceback so the full stack
-                # reaches Sentry.
+                # Never abort the tick and never discard the sync results
+                # already collected. logger.exception for the active traceback
+                # so the full stack reaches Sentry.
+                #
+                # ⚠️ BE PRECISE ABOUT THE DIRECTION — it is NOT uniformly safe,
+                # and an earlier draft of this comment claimed it was.
+                #   * Strategy ALREADY HAS a marker row: the row stays BEHIND,
+                #     the next tick over-fetches, and over-fetching is
+                #     idempotent because `sync_trades` deletes scoped to the
+                #     incoming payload's own timestamp range before
+                #     re-inserting. Safe, as claimed.
+                #   * Strategy has NO row yet (first tick after rollout, or a
+                #     23503 from a concurrently-deleted sibling aborting this
+                #     whole multi-row upsert): the read path finds nothing,
+                #     falls back to `api_keys.last_sync_at` — which THIS tick's
+                #     epilogue may have just advanced past the failed window —
+                #     and UNDER-fetches. That is the per-key stranding this
+                #     phase exists to remove, re-entering through the error
+                #     path. It is no worse than the pre-phase behaviour, but it
+                #     is not a safe degradation either.
+                # The write stays batched rather than per-strategy: a
+                # per-strategy write (or a retry excluding the offending id)
+                # is the real fix and is larger than this phase. What is NOT
+                # acceptable is a comment asserting a safety property the code
+                # does not have, so the envelope field and the warning below
+                # carry the honest version.
                 strategy_cursor_write_error = (
                     f"{type(cursor_exc).__name__}: {cursor_exc}"
                 )
                 logger.exception(
                     "cron_sync: failed to persist per-strategy sync cursors for "
-                    "key %s (%d row(s)) — markers stay behind and the next tick "
-                    "will over-fetch, which is idempotent; sync results preserved",
+                    "key %s (%d row(s)) — strategies that already had a marker "
+                    "stay behind and re-fetch idempotently, but any strategy "
+                    "with NO marker row yet falls back to the key cursor and "
+                    "may UNDER-fetch its outstanding window; sync results "
+                    "preserved",
                     key_id,
                     len(strategy_cursor_rows),
                 )
@@ -1117,6 +1139,30 @@ async def cron_sync() -> dict[str, Any]:
             )
             strategy_cursor_lookup_error = f"{type(exc).__name__}: {exc}"
             _cursor_by_strategy = {}
+        else:
+            # ⛔ A ZERO-ROW RESULT DOES NOT RAISE, so the branch above never
+            # runs for it. If SUPABASE_SERVICE_KEY ever degrades to an anon or
+            # authenticated key, this table's deny-all policy answers 200 with
+            # an EMPTY list rather than an error — and an empty mapping IS the
+            # absent-row semantics, so every strategy silently reverts to the
+            # key-level cursor. That is byte for byte the stranding defect this
+            # phase exists to remove, arriving with a green tick and, without
+            # the line below, no operator signal whatsoever.
+            #
+            # ⚠️ Zero rows is NOT by itself a fault: it is also the correct
+            # reading during rollout, before any marker has been written. So
+            # this reports the MEASUREMENT (requested vs returned) and does not
+            # claim a diagnosis.
+            if not _cursor_by_strategy:
+                logger.warning(
+                    "cron_sync: per-strategy sync-cursor lookup returned 0 "
+                    "marker(s) for %d requested strategy id(s). Expected while "
+                    "the table is still filling; once it is in service this is "
+                    "also what a service-role credential degraded to anon or "
+                    "authenticated looks like, since deny-all RLS answers 200 "
+                    "with an empty list and raises nothing",
+                    len(_marker_strategy_ids),
+                )
 
     for row in keys:
         row["strategy_cursors"] = {
