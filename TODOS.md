@@ -3596,6 +3596,43 @@ and any widening must say what it does to the approval-gate snapshot.
 ⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
 (founder rule 2026-09-08).
 
+**CLOSED (widening-verdict half only) — Phase 164.5.1.2 plan 01, 2026-09-19.**
+⛔ This closes ONLY the widening-verdict half of this entry. Its D-03 cursor-advance half is
+explicitly NOT closed here — Plan 03 owns that half, sequenced after this plan and after Plan 02's
+shipped cursor fix, to avoid two plans racing to edit this same TODOS.md entry.
+
+The production read this entry itself requested (`164.5.1.2-PROD-SESSION.md` § S2/§ S3, marker
+read first, ⛔ PRODUCTION, 2026-09-19) measured: `private_strategies_with_key = 5`,
+`with_in_set_sibling = 0`, `without_in_set_sibling = 5`; `private_no_key = 1`, `private_with_key
+= 5`. The "maybe a sibling syncs the key anyway" hypothesis this entry handed to Phase 164.5.1.1
+is FALSIFIED, 5 of 5 — no `private` strategy's key is reached via an in-set sibling. **User-facing
+consequence:** five real, live, key-bearing production strategies have their trades never stored,
+because the only path that issues `sync_trades` filters them out by lifecycle status and no
+sibling row rescues them. The keyless strategy (1 of 6) is structurally unsyncable by any widening
+and is not counted against the constant's harm.
+
+**Verdict: `leave-book-future-phase`.** `ALLOWED_STRATEGY_STATUSES` SHOULD admit `private` —
+evidenced 5/5 — but the widening is NOT implemented by this plan: no edit to
+`analytics-service/routers/cron.py`, no migration. It is routed to a new phase because admitting
+`private` changes production sync behaviour for five live keys, and its blast radius (new RPC
+load, newly stored trades, `enqueue_compute_job` follow-ons, and the interaction with the D-03
+cursor advance) is work this plan set did not budget review for.
+
+Per D-02 (`FANOUT-COHORT-SIBLING-POLL-01`, closed above), polling itself stays unaffected either
+way — that refusal is unconditional and does not depend on this verdict. The harm this entry books
+is stated in terms of the `trades` table and the daily recompute re-entry, never as "starving the
+ledger refresh": `run_derive_broker_dailies_job` runs its own venue crawl and does not read
+`trades` at all, so that framing is false and must not reappear here.
+
+**TRIGGER, sharpened:** the destination phase below runs and either ships the widening or
+reaffirms `leave-narrow`/`leave-book-future-phase` against a fresher read; or any surface that
+reads `trades` (not `csv_daily_returns`) is asked to show data for a `private` strategy before
+that phase runs, which would make the gap user-visible sooner than planned.
+✅ **Destination: Phase 164.5.1.3 SYNCADMIT** — booked into the ROADMAP by the orchestrator
+immediately after this plan's Task 2 decision, carrying this measurement and the two inherited
+guards (widening starts no polling; the cursor defect is already closed) into its own goal and
+success criteria. Owner: that phase.
+
 ### VERIFICATION-STALE-OWED-01 — two phases verified code that has since moved, and their verdicts are honestly out of date (booked 2026-09-18)
 
 - [ ] **`[VERIFICATION-STALE-OWED-01]` Phases 164.8.3 and 164.6.3 read `stale`, and that is the
