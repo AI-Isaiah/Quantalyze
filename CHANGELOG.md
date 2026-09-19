@@ -94,18 +94,26 @@ schema, so the remedy is new state keyed on `strategy_id` alone.
 - **The mutation-runner ratchet absorbs the new gate:** `FILES_FLOOR` 47 → 48 and `ARMS_FLOOR`
   402 → 412. Both are **raises**, which is tightening. `WAIVED_CEILING` stays **0** — no waiver,
   exemption, allowlist or baseline line was added anywhere in this release.
-- **The new RLS gate skips honestly when its table has not been applied yet.**
-  `test_strategy_sync_cursors_rls.sql` probes a table that shared TEST does not carry until the
-  merge, because this repo applies migrations on merge rather than on PR. Without a guard it
-  hard-failed `sql-tests` — and with it the whole `frontend` aggregator — on precisely the PR
-  that introduces it. ⭐ **The skip is gated on the TABLE'S EXISTENCE and on nothing this file
-  audits.** Had it been keyed on RLS being enabled, the policy being present, or the REVOKE
-  holding, it would have converted the exact defect the gate exists to catch into a silent green.
-  Calibrated both directions on the pg-lane: table present → every arm runs and all assertions
-  report; table absent → one SKIP notice, exit 0. It costs no coverage — `sql-mutation` executes
-  all ten twins on the lane where the migration IS applied, so the arms stay mutation-checked
-  whatever shared TEST holds, and the behavioural pass resumes by itself once `apply-test` lands
-  the table. Booked upstream as `[164.8-PUSH-RACE-VAC08]` half (b), routed to Phase 164.9.
+- ⛔ **The new RLS gate HARD-FAILS when its table is absent, and that is deliberate.**
+  `test_strategy_sync_cursors_rls.sql` probes a table shared TEST does not carry until the
+  migration is applied there, so `sql-tests` is **RED on the PR that introduces it, by
+  construction** — [164.8-PUSH-RACE-VAC08] half (b). That red is ACCEPTED, not worked around.
+  ⚠️ **A skip was tried first and it was wrong.** The gate briefly shipped
+  `RAISE NOTICE 'SKIP: …'; RETURN;` on the absent table — the exact anti-pattern 161.1-REVIEW
+  WR-03 had already reviewed OUT of `test_ledger_refresh_{staleness,fanout,composite_arm}.sql`,
+  and `sql-tests` carries a dedicated arm that catches it: a whole-file skip *"exits 0 having
+  asserted nothing"* and is indistinguishable from a pass only because the exit code was the sole
+  thing read. It would have left this file silent on exactly the run where the new table first
+  reaches PROD. The arm caught it and the skip was reverted to a hard failure in the repo's house
+  form, naming both causes it cannot distinguish (migration not applied here vs. table dropped or
+  renamed after being applied) and forbidding the skip "fix" in its own message.
+  Calibrated both directions on the pg-lane: table present → every arm runs, exit 0; table absent
+  → `TEST FAILED (0)`, exit 3, no skip printed.
+  ⚠️ **Two in-repo sources disagree on whether anything applies migrations to shared TEST** —
+  CLAUDE.md's 164.8 currency section says `apply-test` does so on merge, while `ci.yml`'s anti-skip
+  diagnostic and the three `ledger_refresh` gates both state that no workflow does. That conflict
+  is recorded rather than resolved by guessing; the hard failure is the correct shape under BOTH
+  readings, which is why it was chosen.
 
 ### Security
 - Per-phase threat register: **23 threats, 21 mitigated, 2 accepted, 0 open** at the ship SHA.

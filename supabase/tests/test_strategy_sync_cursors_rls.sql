@@ -134,36 +134,28 @@ DECLARE
   err_state   TEXT;
   v_after     TIMESTAMPTZ;
 BEGIN
-  -- ----- APPLIED-NESS GUARD: skip ONLY on genuine test-DB lag -------------
-  -- ⛔ WHY THIS EXISTS, and it is NOT a weakening of the gate.
-  -- This repo applies migrations ON MERGE, not on PR (`supabase-migrate.yml`'s
-  -- `apply-test` runs on the merge push). So on the PR that ADDS a migration,
-  -- shared TEST does not yet carry its table and every gate with an
-  -- applied-ness probe is RED BY CONSTRUCTION. That coupling is booked as
-  -- [164.8-PUSH-RACE-VAC08] half (b) and routed to Phase 164.9; VAC-08 carries
-  -- a ledger-frontier exemption for ITS OWN verdict and for nothing else, so
-  -- this file needs its own guard or it reddens `sql-tests` — and with it the
-  -- whole `frontend` aggregator — on exactly the PR that introduces it.
+  -- ----- applied-ness gate: ABSENCE IS A FAILURE, NEVER A SKIP -----------
+  -- ⛔ THIS FILE BRIEFLY SHIPPED A `RAISE NOTICE 'SKIP:'; RETURN;` HERE AND
+  -- THAT WAS WRONG. It is the exact anti-pattern 161.1-REVIEW WR-03 had already
+  -- reviewed OUT of test_ledger_refresh_{staleness,fanout,composite_arm}.sql,
+  -- and `sql-tests` carries a dedicated arm that catches it: a whole-file skip
+  -- "exits 0 having asserted nothing" and is indistinguishable from a pass only
+  -- because the exit code was the sole thing read. Restoring the skip would make
+  -- this file silent on exactly the run where the new table first reaches PROD.
   --
-  -- ⭐ THE SKIP IS GATED ON THE TABLE'S EXISTENCE, NEVER ON ANYTHING THIS
-  -- FILE AUDITS. That distinction is the whole point, and this repo already
-  -- learned it once (see test_anon_execute_current_user_has_app_role.sql: gate
-  -- the skip on existence, not on the privilege being audited). If the table is
-  -- THERE, then RLS being off, the policy being missing, the REVOKE having been
-  -- undone or service_role having lost its GRANT are all REAL REGRESSIONS and
-  -- must hard-fail below — never skip green. A guard that tested, say,
-  -- `pg_policy` presence would silently convert the exact defect this gate
-  -- exists to catch into a passing run.
-  --
-  -- ⚠️ A SKIP HERE COSTS NO COVERAGE, because this is not where the arms are
-  -- proven. `sql-mutation` executes every RED-UNDER-M twin in this file on the
-  -- disposable pg-lane cluster, where the migration IS applied, so all ten arms
-  -- are mutation-checked on every run regardless of what shared TEST holds. The
-  -- shared-TEST execution is the additional behavioural pass, and it resumes by
-  -- itself the moment `apply-test` lands the table — no follow-up edit needed.
+  -- ⚠️ EXPECT THIS RED EXACTLY ONCE: on the PR that introduces migration
+  -- 20260919120000, because the TEST project does not carry the table until the
+  -- migration is applied there. That is [164.8-PUSH-RACE-VAC08] half (b) --
+  -- red-until-applied BY CONSTRUCTION -- and it is accepted, not worked around.
+  -- ⚠️ SOURCES DISAGREE ON WHETHER ANYTHING APPLIES TO TEST, so this message
+  -- names both causes rather than asserting one: CLAUDE.md's 164.8 currency
+  -- section says `supabase-migrate.yml`'s `apply-test` applies every migration
+  -- to shared TEST on merge, while ci.yml's own anti-skip diagnostic and the
+  -- three ledger_refresh gates both state that NO workflow applies to TEST.
+  -- ⛔ Do not resolve that by guessing -- the hard failure below is correct
+  -- under BOTH readings, which is why it is the right shape either way.
   IF to_regclass('public.strategy_sync_cursors') IS NULL THEN
-    RAISE NOTICE 'SKIP: strategy_sync_cursors not applied here yet (migration 20260919120000 applies on merge, not on PR) — the arms still execute under sql-mutation on the pg-lane';
-    RETURN;
+    RAISE EXCEPTION 'TEST FAILED (0): public.strategy_sync_cursors does not exist on this database, so NONE of the RLS arms ran. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) this database has not received migration 20260919120000 -- expect this exactly once, on the PR that introduces it, and it clears when the migration is applied here; (ii) the table was DROPPED or RENAMED after being applied, which would silently disable the per-STRATEGY sync cursor and return cron_sync to the per-KEY resume that strands failed strategies permanently. Do NOT "fix" this by restoring a RAISE NOTICE/RETURN skip: that made this file exit 0 having asserted nothing, and sql-tests fails the run on a printed skip for exactly that reason.';
   END IF;
 
   -- ----- SEED (service role / superuser context — bypasses RLS) ----------
