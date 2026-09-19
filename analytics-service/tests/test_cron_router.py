@@ -2783,8 +2783,18 @@ class TestC0198CursorOnlyAdvancesWhenStored:
              ), \
              patch.object(
                  cron_mod,
+                 # A NON-None balance is load-bearing for the assertion at the
+                 # bottom, not decoration. With `None`, `update_data` stays
+                 # empty, NO api_keys UPDATE is issued at all, and
+                 # `api_keys_update_payloads` is []. "last_sync_at is absent
+                 # from every payload" over an EMPTY list is VACUOUSLY TRUE —
+                 # it was non-vacuous only by accident, because the pre-fix
+                 # code happened to append a payload. Stubbing a balance means
+                 # an UPDATE is always issued, so the assertion has something
+                 # real to quantify over and still goes red if the gate
+                 # regresses.
                  "fetch_usdt_balance",
-                 AsyncMock(return_value=None),
+                 AsyncMock(return_value=4321.0),
              ), \
              patch.object(cron_mod, "parse_since_ms", return_value=None):
             key_row = _make_key_row(strategy_ids=[])
@@ -2795,11 +2805,20 @@ class TestC0198CursorOnlyAdvancesWhenStored:
         # advance, or those trades are gone on the next tick because
         # `parse_since_ms(last_sync_at)` would then point past them.
         assert result["per_strategy_stored"] == {}
-        assert all(
-            "last_sync_at" not in p for p in api_keys_update_payloads
-        ), (
+        # Non-vacuity guard: prove the payload list is non-empty BEFORE
+        # asserting what is missing from it. Balance stashing is independent
+        # of the cursor gate (the USDT fetch succeeded), so exactly one
+        # api_keys UPDATE must have been issued.
+        assert len(api_keys_update_payloads) == 1, (
+            "Expected exactly one api_keys UPDATE (the balance stash) so the "
+            "cursor assertion below is not quantifying over an empty list; "
+            f"got {api_keys_update_payloads!r}"
+        )
+        payload = api_keys_update_payloads[0]
+        assert payload.get("account_balance_usdt") == 4321.0, payload
+        assert "last_sync_at" not in payload, (
             "Expected no last_sync_at cursor advance when strategy_ids=[] "
-            f"despite fetched trades; got {api_keys_update_payloads!r}"
+            f"despite fetched trades; got {payload!r}"
         )
 
 
