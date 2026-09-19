@@ -1064,7 +1064,7 @@ const DOCS_ONLY_TOLERANT_JOBS = [
 const NEVER_TOLERANT_JOBS = ["frontend-lint"] as const;
 
 describe("lint-sql-gates: the CI invocation (mode identity)", () => {
-  it("exits 0 over the real 74-file corpus with the allowlist applied", () => {
+  it("exits 0 over the real 75-file corpus with the allowlist applied", () => {
     const res = runCli([]);
     // ⚠️ CURRENCY 2026-09-06 (phase 164.2 plan 07): 71 -> 72. The corpus gained
     // test_sync_status_curated_sentence_survives.sql. The number is pinned
@@ -1080,8 +1080,17 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // ⚠️ The TITLE of this test said "72-file" while this pin said 73 — it had
     // been one stale since before this phase ([164.7-CITATION-DRIFT-01], the
     // class this repo answers by correcting prose and assertion in the SAME
-    // edit). Both now read 74, which is what the linter prints.
-    expect(res.out).toMatch(/scanned 74 file/);
+    // edit).
+    // MOVED 2026-09-20 (Phase 164.5.1.4 SYNCCURSOR), 74 -> 75:
+    // supabase/tests/test_strategy_sync_cursors_rls.sql joined the corpus —
+    // the behavioural deny-all gate for the new per-STRATEGY marker table.
+    // ⛔ TITLE AND PIN MOVED IN THE SAME EDIT, per the note directly above.
+    // ⚠️ This pin is a THIRD census of the same corpus, and the phase that
+    // added the file moved the other two (FILES_FLOOR 47 -> 48 and ARMS_FLOOR
+    // 402 -> 412 in scripts/mutation-runner/run.mjs) while missing this one —
+    // caught only by CI. If you add a gate file, grep for every census that
+    // counts supabase/tests, not just the two floors.
+    expect(res.out).toMatch(/scanned 75 file/);
     expect(res.status, res.out).toBe(0);
   });
 

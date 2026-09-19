@@ -94,6 +94,18 @@ schema, so the remedy is new state keyed on `strategy_id` alone.
 - **The mutation-runner ratchet absorbs the new gate:** `FILES_FLOOR` 47 → 48 and `ARMS_FLOOR`
   402 → 412. Both are **raises**, which is tightening. `WAIVED_CEILING` stays **0** — no waiver,
   exemption, allowlist or baseline line was added anywhere in this release.
+- **The new RLS gate skips honestly when its table has not been applied yet.**
+  `test_strategy_sync_cursors_rls.sql` probes a table that shared TEST does not carry until the
+  merge, because this repo applies migrations on merge rather than on PR. Without a guard it
+  hard-failed `sql-tests` — and with it the whole `frontend` aggregator — on precisely the PR
+  that introduces it. ⭐ **The skip is gated on the TABLE'S EXISTENCE and on nothing this file
+  audits.** Had it been keyed on RLS being enabled, the policy being present, or the REVOKE
+  holding, it would have converted the exact defect the gate exists to catch into a silent green.
+  Calibrated both directions on the pg-lane: table present → every arm runs and all assertions
+  report; table absent → one SKIP notice, exit 0. It costs no coverage — `sql-mutation` executes
+  all ten twins on the lane where the migration IS applied, so the arms stay mutation-checked
+  whatever shared TEST holds, and the behavioural pass resumes by itself once `apply-test` lands
+  the table. Booked upstream as `[164.8-PUSH-RACE-VAC08]` half (b), routed to Phase 164.9.
 
 ### Security
 - Per-phase threat register: **23 threats, 21 mitigated, 2 accepted, 0 open** at the ship SHA.
@@ -163,6 +175,21 @@ schema, so the remedy is new state keyed on `strategy_id` alone.
   the keys the whole 164.5.1.x line exists to protect.
 - Out of scope by explicit decision, and named rather than absorbed: harmonising the two sync-cursor
   disciplines (`job_worker`'s fenced advance vs `cron.py`'s direct write).
+- ⚠️ **ONE NEW GATE FILE MOVES FOUR SEPARATE CENSUSES OF THE SAME CORPUS, and this release moved
+  two of them before CI found the other two.** They are `FILES_FLOOR` and `ARMS_FLOOR` in
+  `scripts/mutation-runner/run.mjs`, the corpus file count pinned in
+  `src/__tests__/lint-sql-gates.test.ts` (74 → 75, its TITLE and its assertion corrected in the
+  same edit per `[164.7-CITATION-DRIFT-01]`), and `KNOWN_THRESHOLD_SITES` in
+  `src/__tests__/gate-family-meta.test.ts`, which registers each threshold BY ITS VALUE so raising
+  a floor invalidates its registration. That last arm's own doc-comment describes this failure
+  exactly — *"a control that only covers the files someone remembered to list is the shape this
+  whole arm exists to refuse"* — and it is the arm that caught it. ⛔ When adding a gate file,
+  grep for every census that counts `supabase/tests`, not just the two floors.
+- ⛔ **Pre-existing drift OBSERVED AND DELIBERATELY NOT REPAIRED:** the `ARMS_FLOOR` provenance
+  narrative in `KNOWN_THRESHOLD_SITES` describes a move to 392 while the registered value read 402.
+  Re-deriving phase 164.8.6's run is not possible from here, so the entry now carries a warning not
+  to read that narrative as describing the current value, rather than a rewrite of lineage nobody
+  can verify.
 
 ## [0.80.1.0] - 2026-09-19 — MARKERGATE: the wrong-database refusal stops passing on a measurement it never took
 
