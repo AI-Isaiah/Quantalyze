@@ -218,9 +218,13 @@ jobs:
           # username / project-ref. Redact what psql actually prints:
           #   connection to server at "<host>" (<ip>), port <n> failed
           #   FATAL:  password authentication failed for user "<user>"
-          sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                 -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                 -e 's#(for user )"[^"]*"#\1"***"#g' psql-err.txt >&2 || true
+          # [164.8.4] The expressions now live in the one shared
+          # scripts/redact-psql-stderr.sed (the UNION across every inline copy
+          # this repo's workflows used to carry separately). This file kept a
+          # THREE-expression copy while the union carries six, so a DNS failure
+          # here printed the pooler host through a gap the other sites had
+          # already closed. Referenced workspace-rooted, as every site is.
+          sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" psql-err.txt >&2 || true
           if [ "${rc}" -ne 0 ]; then
             echo "::error::contender ${CONTENDER}: psql exited ${rc} — session-mode connect or advisory-lock acquire FAILED. This is the go/no-go signal for the advisory-lock backend."
             exit 1

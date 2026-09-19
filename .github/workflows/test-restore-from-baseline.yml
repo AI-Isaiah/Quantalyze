@@ -905,7 +905,7 @@ jobs:
                 # username, or password, in any CI log line").
                 # [164.8.4-02] The expressions now live in the one shared
                 # scripts/redact-psql-stderr.sed (the UNION across every inline
-                # copy these two workflows used to carry separately); the
+                # copy this repo's workflows used to carry separately); the
                 # reference is workspace-rooted for uniformity with the
                 # sibling python job's block in ci.yml, which requires it.
                 sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${log}" >&2 || true

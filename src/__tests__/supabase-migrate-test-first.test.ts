@@ -449,6 +449,14 @@ function runScript(
     // key and a `${RUNNER_TEMP}/...` path in the step resolve to the same file. Set
     // last: it is infrastructure, not a scenario knob.
     merged.RUNNER_TEMP = dir;
+    // [164.8.4] GITHUB_WORKSPACE, same category as RUNNER_TEMP above and set for
+    // the same reason: since this phase the marker and acquire steps reference the
+    // shared redaction as `sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed"`.
+    // Unset, that operand truncates, sed exits non-zero and `set -euo pipefail` kills
+    // the step BEFORE its own "could not be read" diagnosis — so the harness would be
+    // measuring a missing env var, not the refusal it exists to observe. A real
+    // Actions runner always sets it. Same fix as test-restore-workflow-wiring.test.ts.
+    merged.GITHUB_WORKSPACE = ROOT;
     const r = spawnSync("bash", [path], {
       cwd: dir,
       encoding: "utf8",

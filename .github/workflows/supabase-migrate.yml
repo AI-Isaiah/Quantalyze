@@ -614,13 +614,13 @@ jobs:
                 # TEST pooler host, its resolved IP, and the DB username /
                 # project-ref — went straight into a PUBLIC Actions log, against
                 # this mutex's own stated invariant ("never a DSN, host,
-                # username, or password, in any CI log line"). Redact the shapes
-                # psql actually emits:
-                #   connection to server at "<host>" (<ip>), port <n> failed
-                #   FATAL:  password authentication failed for user "<user>"
-                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                       -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                       -e 's#(for user )"[^"]*"#\1"***"#g' "${log}" >&2 || true
+                # username, or password, in any CI log line").
+                # [164.8.4-02] The expressions now live in the one shared
+                # scripts/redact-psql-stderr.sed (the UNION across every inline
+                # copy this repo's workflows used to carry separately); the
+                # reference is workspace-rooted for uniformity with the
+                # sibling python job's block in ci.yml, which requires it.
+                sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${log}" >&2 || true
                 break
               fi
               sleep 5
@@ -710,10 +710,11 @@ jobs:
             2>"${RUNNER_TEMP}/marker.err")" || rc=$?
           if [ "${rc}" -ne 0 ]; then
             # psql's connect/auth failures name the host, its IP and the DB user.
-            # Same three redactions as ci.yml's acquire step (158-REVIEW WR-08).
-            sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                   -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                   -e 's#(for user )"[^"]*"#\1"***"#g' "${RUNNER_TEMP}/marker.err" >&2
+            # [164.8.4-02] Redacted via the one shared
+            # scripts/redact-psql-stderr.sed (the UNION across every inline
+            # copy this workflow and ci.yml used to carry separately),
+            # referenced workspace-rooted.
+            sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${RUNNER_TEMP}/marker.err" >&2
             echo "::error::the database identity marker could not be read (psql exited ${rc}). Refusing to back up or restore a database this workflow cannot identify. current_database() is 'postgres' on BOTH projects and proves nothing."
             exit 1
           fi

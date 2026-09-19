@@ -3068,7 +3068,7 @@ jobs:
                 # username, or password, in any CI log line").
                 # [164.8.4-02] The expressions now live in the one shared
                 # scripts/redact-psql-stderr.sed (the UNION across every inline
-                # copy these two workflows used to carry separately); the
+                # copy this repo's workflows used to carry separately); the
                 # reference is workspace-rooted for uniformity with the
                 # sibling python job's block in ci.yml, which requires it.
                 sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${log}" >&2 || true
@@ -4329,16 +4329,12 @@ jobs:
                 # TEST pooler host, its resolved IP, and the DB username /
                 # project-ref — went straight into a PUBLIC Actions log, against
                 # this mutex's own stated invariant ("never a DSN, host,
-                # username, or password, in any CI log line"). Redact the shapes
-                # psql actually emits:
-                #   connection to server at "<host>" (<ip>), port <n> failed
-                #   FATAL:  password authentication failed for user "<user>"
-                # [164.8.4-01] The expressions now live in the one shared
+                # username, or password, in any CI log line").
+                # [164.8.4-02] The expressions now live in the one shared
                 # scripts/redact-psql-stderr.sed (the UNION across every inline
-                # copy this workflow and test-restore-from-baseline.yml used to
-                # carry separately); the reference is workspace-rooted via
-                # ${GITHUB_WORKSPACE} because this job's working-directory is
-                # analytics-service, not the repo root.
+                # copy this repo's workflows used to carry separately); the
+                # reference is workspace-rooted for uniformity with the
+                # sibling python job's block in ci.yml, which requires it.
                 sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${log}" >&2 || true
                 break
               fi
@@ -5084,7 +5080,7 @@ jobs:
                 # username, or password, in any CI log line").
                 # [164.8.4-02] The expressions now live in the one shared
                 # scripts/redact-psql-stderr.sed (the UNION across every inline
-                # copy these two workflows used to carry separately); the
+                # copy this repo's workflows used to carry separately); the
                 # reference is workspace-rooted for uniformity with the
                 # sibling python job's block in ci.yml, which requires it.
                 sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${log}" >&2 || true
