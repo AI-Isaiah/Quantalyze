@@ -3983,6 +3983,103 @@ class TestEveryCronSyncedVenueStampsTheFetchErrorFlag:
         )
 
 
+class TestPerRowFallbackIsNotConsumedByAMisclassification:
+    """164.5.1.4 ROUND-2 NEW-2 / WR-06: the CONSEQUENCE of the classifier, and
+    the ungated tail of the per-row fallback.
+
+    `_is_missing_cursor_table` is the branch condition on the batch-upsert
+    failure path: True skips the per-row retry entirely, on the sound reasoning
+    that a missing relation is not a row-scoped fault. So classifying a COLUMN
+    fault as a missing table does not merely mislabel a log line — it consumes
+    the recovery mechanism WR-06 added, and every strategy whose marker row the
+    batch dropped then falls back to the key cursor and UNDER-fetches its
+    outstanding window.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_column_fault_still_runs_the_per_row_retry(self):
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+        key_row = _make_key_row(strategy_ids=["strat-A", "strat-B"])
+
+        result, _, cursor_upserts = await TestSyncCursorPerStrategyResume._run_tick(
+            key_row=key_row,
+            failing_strategy_ids=set(),
+            fetch_mock=fetch_mock,
+            trades=trades,
+            cursor_batch_error=_ApiErrorLike(
+                code="PGRST204",
+                message=(
+                    "Could not find the 'held_at' column of "
+                    "'strategy_sync_cursors' in the schema cache"
+                ),
+            ),
+        )
+
+        per_row = [p for p in cursor_upserts if isinstance(p, dict)]
+        assert len(per_row) == 2, (
+            "a PGRST204 column fault is row-scoped and the fallback must run: "
+            "one upsert per strategy. Classifying it as a missing table skips "
+            "the retry, and each strategy with no row yet then falls back to "
+            f"the key cursor and UNDER-fetches. Captured: {cursor_upserts!r}"
+        )
+        assert "strategy_cursor_write_error" in result, (
+            "and the degraded tick is still reported — the batch DID fail. "
+            f"Envelope keys: {sorted(result)!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_rows_past_the_retry_limit_are_recorded_not_dropped(self):
+        """⛔ THE UNGATED TAIL. `_STRATEGY_CURSOR_ROW_RETRY_LIMIT`'s derivation
+        claims "rows past the limit are NOT silently dropped: each is recorded
+        in the envelope error field naming the limit, so the condition is
+        visible". MEASURED: deleting the `for row in skipped:` loop left all
+        arms passing, so that claim rested on nothing.
+
+        It matters because the un-retried rows are exactly the ones whose
+        markers are now stale: a strategy with no row yet falls back to the key
+        cursor that just advanced, and its outstanding window is fetched by no
+        tick. An operator who cannot see WHICH rows were skipped cannot tell
+        that from a healthy key.
+        """
+        limit = cron_mod._STRATEGY_CURSOR_ROW_RETRY_LIMIT
+        strategy_ids = [f"strat-{i:02d}" for i in range(limit + 2)]
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+
+        result, _, cursor_upserts = await TestSyncCursorPerStrategyResume._run_tick(
+            key_row=_make_key_row(strategy_ids=strategy_ids),
+            failing_strategy_ids=set(),
+            fetch_mock=fetch_mock,
+            trades=trades,
+            cursor_batch_error=RuntimeError("23503 foreign key violation"),
+        )
+
+        per_row = [p for p in cursor_upserts if isinstance(p, dict)]
+        assert len(per_row) == limit, (
+            "the fallback is BOUNDED — it runs inside KEY_SYNC_TIMEOUT on a "
+            "path that is already failing, and an unbounded serial retry would "
+            "turn a marker-write problem into a key-sync timeout. Got "
+            f"{len(per_row)} row upserts for a limit of {limit}"
+        )
+
+        reported = result.get("strategy_cursor_write_error", "")
+        assert "not retried" in reported and str(limit) in reported, (
+            "and every row past the limit must be RECORDED in the envelope "
+            "naming the limit, or the claim in the constant's derivation is "
+            f"false and those stale markers are invisible. Got {reported!r}"
+        )
+        for sid in strategy_ids[limit:]:
+            assert sid in reported, (
+                f"{sid} was never retried and never reported — silently "
+                f"dropped. Got {reported!r}"
+            )
+        assert strategy_ids[0] not in reported, (
+            "while a row that WAS retried and succeeded must not be listed as "
+            f"un-retried. Got {reported!r}"
+        )
+
+
 class TestClampReachesTheResponseEnvelope:
     """164.5.1.4 ROUND-2: the clamp is the ONLY loss in this phase that a
     caller could not see.
@@ -4343,6 +4440,107 @@ class TestRolloutWindowMissingMarkerTableIsWarnedOnce:
         )
         assert cron_mod._is_missing_cursor_table(exc) is True, (
             "PGRST205's schema-cache phrasing is the same condition as 42P01"
+        )
+
+    @pytest.mark.parametrize(
+        "label,exc",
+        [
+            (
+                "42703",
+                _ApiErrorLike(
+                    code="42703",
+                    message=(
+                        'column "held_at" of relation "strategy_sync_cursors" '
+                        "does not exist"
+                    ),
+                ),
+            ),
+            (
+                "PGRST204",
+                _ApiErrorLike(
+                    code="PGRST204",
+                    message=(
+                        "Could not find the 'held_at' column of "
+                        "'strategy_sync_cursors' in the schema cache"
+                    ),
+                ),
+            ),
+        ],
+    )
+    def test_a_column_fault_is_not_read_as_a_missing_table(self, label, exc):
+        """⛔ THE OVER-MATCH, AND WHY IT IS NOT LOG FIDELITY.
+
+        Both payloads satisfy probe 3's conjunct — the table name AND a "does
+        not exist" / "schema cache" phrase — while being about a COLUMN of a
+        table that plainly exists. MEASURED against the shipped predicate,
+        both classified as "the table is not there yet".
+
+        `_is_missing_cursor_table` is ALSO the branch condition deciding
+        whether WR-06's per-row fallback runs at all, so the misclassification
+        consumes the recovery mechanism on top of latching the log for the
+        process lifetime. And PGRST204 is the most common post-apply condition
+        there is — PostgREST's schema-cache reload is asynchronous — so the
+        operator is told the migration has not landed when it HAS and a column
+        is drifting.
+
+        A column fault is schema DRIFT: actionable, row-scoped, and exactly
+        what the traceback and the per-row retry exist for.
+        """
+        assert cron_mod._is_missing_cursor_table(exc) is False, (
+            f"{label} is a COLUMN fault on a table that EXISTS. Reading it as "
+            "'not migrated yet' latches the rollout-window warning for the "
+            "whole process AND skips the per-row fallback, so every marker row "
+            "the batch dropped falls back to the key cursor and UNDER-fetches"
+        )
+
+    def test_a_42p01_naming_another_relation_is_not_read_as_this_table(self):
+        """The code probe never looked at WHICH relation was missing. A 42P01
+        for a view or trigger this table depends on is a real fault about
+        something else, and reading it as "our table has not landed yet" hides
+        it behind a reassuring one-shot warning."""
+        exc = _ApiErrorLike(
+            code="42P01",
+            message='relation "strategies_archive" does not exist',
+        )
+        assert cron_mod._is_missing_cursor_table(exc) is False, (
+            "a 42P01 that positively names a DIFFERENT relation is about that "
+            "relation"
+        )
+
+    def test_a_bare_code_with_no_text_still_latches(self):
+        """⛔ THE NON-VACUITY COUNTERPART, and the reason the exclusions are
+        narrow. supabase-py does not always surface text; the code probes exist
+        precisely for that. Excluding on a relation name that is ABSENT would
+        re-open WR-03's traceback flood during the rollout window."""
+        assert cron_mod._is_missing_cursor_table(_ApiErrorLike(code="42P01")) is True, (
+            "a bare 42P01 with no message is still the rollout window"
+        )
+
+    def test_a_column_fault_keeps_its_traceback_rather_than_the_latch(self, caplog):
+        """The consequence at the LOG, measured through the real helper."""
+        cron_mod._missing_cursor_table_warned = False
+        exc = _ApiErrorLike(
+            code="PGRST204",
+            message=(
+                "Could not find the 'held_at' column of "
+                "'strategy_sync_cursors' in the schema cache"
+            ),
+        )
+
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            self._emit(exc)
+            self._emit(exc)
+
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(errors) == 2 and all(r.exc_info is not None for r in errors), (
+            "schema drift is a real fault: every occurrence keeps its "
+            "traceback. Got " + repr([(r.levelname, r.message) for r in caplog.records])
+        )
+        assert warnings == [], (
+            "and it must NOT be downgraded to the one-shot rollout-window "
+            "warning, which would hide it for the life of the process. Got "
+            + repr([r.message for r in warnings])
         )
 
 

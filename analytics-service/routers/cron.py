@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -335,14 +336,35 @@ def _is_missing_cursor_table(exc: BaseException) -> bool:
     classify a genuine permission denial or a constraint violation on this very
     table as "the table is missing" and downgrade a real, actionable fault to a
     one-shot warning — the exact failure this whole helper must not cause.
-    """
-    code = getattr(exc, "code", None)
-    if isinstance(code, str) and code.strip().upper() in (
-        _UNDEFINED_TABLE_SQLSTATE,
-        _UNDEFINED_TABLE_POSTGREST_CODE,
-    ):
-        return True
 
+    ⛔ TWO EXCLUSIONS RUN FIRST, AND THEY ARE NOT LOG FIDELITY. This predicate
+    is also the branch condition deciding whether WR-06's per-row fallback runs
+    AT ALL: a `True` here skips it, on the sound reasoning that a missing
+    relation is not a row-scoped fault. So a MIS-classification consumes the
+    recovery mechanism as well as latching the log, and every strategy whose
+    marker row the batch dropped then falls back to the key cursor and
+    UNDER-fetches its outstanding window.
+
+    Probed against the shipped predicate with 11 payloads. It rejects every
+    permission fault correctly (42501, RLS violation, 23505). Three over-matches
+    survived, all classified as "the table does not exist yet":
+
+      * `42703` — `column "x" of relation "strategy_sync_cursors" does not
+        exist`: the table name AND "does not exist", both present, both about a
+        COLUMN.
+      * `PGRST204` — "could not find the 'x' column of 'strategy_sync_cursors'
+        in the schema cache": the most common post-apply condition there is,
+        because PostgREST's schema-cache reload is asynchronous. The operator
+        was told the migration had not landed when it HAD and a column was
+        drifting.
+      * a `42P01` naming an UNRELATED relation (a view or trigger this table
+        depends on): the code probe never looked at which relation.
+
+    A COLUMN fault is a schema-DRIFT fault, which is actionable, row-scoped and
+    exactly what the per-row fallback and the traceback exist for. Excluding it
+    fails in the LOUD direction, which is the one this helper is allowed to
+    fail in.
+    """
     blob = " ".join(
         str(part)
         for part in (
@@ -352,6 +374,29 @@ def _is_missing_cursor_table(exc: BaseException) -> bool:
         )
         if part
     ).lower()
+
+    # EXCLUSION 1 — a COLUMN fault is never a missing table, whatever the code
+    # says. 42703 and PGRST204 both satisfy probe 3's conjunct while being
+    # about a column of a table that plainly EXISTS.
+    if "column" in blob:
+        return False
+
+    # EXCLUSION 2 — a message that positively names a DIFFERENT relation is
+    # about that relation. Deliberately narrow: it only bites when the text
+    # identifies the relation, so a bare code with no text (which is why the
+    # code probes exist at all) still latches the rollout-window warning and
+    # WR-03 is untouched.
+    named_relation = re.search(r'relation "([^"]+)" does not exist', blob)
+    if named_relation and named_relation.group(1) != _STRATEGY_SYNC_CURSOR_TABLE:
+        return False
+
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code.strip().upper() in (
+        _UNDEFINED_TABLE_SQLSTATE,
+        _UNDEFINED_TABLE_POSTGREST_CODE,
+    ):
+        return True
+
     if (
         _UNDEFINED_TABLE_SQLSTATE.lower() in blob
         or _UNDEFINED_TABLE_POSTGREST_CODE.lower() in blob
