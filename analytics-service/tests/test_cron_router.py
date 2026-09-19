@@ -3511,6 +3511,39 @@ class TestResumeFloorEmptyFanOutFallsBackToKeyCursor:
             "every 15-minute tick, forever, with no error surfaced anywhere"
         )
 
+    def test_the_no_eligible_branch_is_exempt_from_the_cap(self):
+        """⛔ THE EXEMPTION, PINNED ABSOLUTELY — not by agreement with a
+        sibling branch.
+
+        MEASURED: mutating this branch to ALSO clamp left the file green,
+        because every arm that reached it used a RECENT cursor, where the clamp
+        cannot bite. The branch parses the KEY cursor, which is pre-phase
+        behaviour with no cap at all; clamping it would silently drop history
+        on a key whose strategies are all archived or draft — and
+        `MAX_MARKER_LOOKBACK_MS`'s own derivation says the exemption is
+        deliberate.
+
+        Stated as an equality against `parse_since_ms`, so a mutant that
+        clamped BOTH no-marker branches (which an agreement-shaped assertion
+        cannot see, both sides moving together) reds here.
+        """
+        now_ms = 1_800_000_000_000
+        ancient = datetime.fromtimestamp(
+            (now_ms - 200 * 86_400_000) / 1000, tz=timezone.utc
+        ).isoformat()
+
+        floor = cron_mod._resume_floor_ms([], {}, ancient, now_ms=now_ms)
+
+        assert floor == cron_mod.parse_since_ms(ancient), (
+            "a key with no eligible strategy parses its OWN cursor and the cap "
+            "must not touch it, however old it is. Got "
+            f"{floor!r}, expected {cron_mod.parse_since_ms(ancient)!r}"
+        )
+        assert floor != now_ms - cron_mod.MAX_MARKER_LOOKBACK_MS, (
+            "and specifically it must not have been clamped to the cap — that "
+            "is the mutant this arm exists to kill"
+        )
+
 
 class TestUnclearableHoldCannotWedgeTheWholeKey:
     """164.5.1.4 WR-04: a hold that never clears must not grow the key's fetch
@@ -3948,6 +3981,218 @@ class TestEveryCronSyncedVenueStampsTheFetchErrorFlag:
             "502, and its outstanding window is fetched by no later tick — "
             f"permanently. trades={trades!r} fetch_degraded={fetch_degraded!r}"
         )
+
+
+class TestClampReachesTheResponseEnvelope:
+    """164.5.1.4 ROUND-2: the clamp is the ONLY loss in this phase that a
+    caller could not see.
+
+    ⛔ THE SHAPE OF THE DEFECT. Every other degradation here is structural —
+    `strategy_cursors_held`, `strategy_cursor_write_error`,
+    `strategy_cursor_lookup_error` all reach the response envelope, and the
+    WR-03 comment block makes a point of saying the envelope fields are NEVER
+    suppressed even when the LOG is quietened. The clamp, alone, produced a
+    `logger.warning` and nothing else. MEASURED before this change: `clamp` and
+    `CLAMP` appeared in `cron.py` only in comments, a docstring and that one
+    warning string, and never in `result`.
+
+    That is the worst possible place for that asymmetry. The clamp is the only
+    condition in this phase whose loss is PERMANENT and UNRECOVERABLE — "those
+    trades will be fetched by no tick", by the constant's own derivation —
+    while a held marker or a failed marker write are both recoverable next
+    tick. The tick returned success with a clean envelope, and the only
+    evidence was a log line nobody greps: the canonical silent-failure shape.
+
+    ⚠️ THESE ARMS RUN ON THE WALL CLOCK, deliberately and unavoidably.
+    `_sync_single_key` does not inject `now_ms` — production reads the wall
+    clock — so an end-to-end tick can only be aged RELATIVE to now. The unit
+    arms below inject a fixed clock; the envelope arms use an age (200 days) so
+    far past the cap that no plausible clock skew changes the verdict.
+    """
+
+    CAP_MS = 30 * 86_400_000
+
+    @staticmethod
+    def _ago(days: float) -> str:
+        return (
+            datetime.now(timezone.utc) - timedelta(days=days)
+        ).isoformat()
+
+    @pytest.mark.asyncio
+    async def test_a_clamped_window_is_reported_in_the_envelope(self):
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+
+        # strat-A is ABSENT from the mapping (key-cursor fallback, recent);
+        # strat-B holds a marker 200 days old. The floor is therefore
+        # MARKER-derived and past the cap, so the clamp must fire.
+        key_row = _make_key_row(
+            strategy_ids=["strat-A", "strat-B"],
+            last_sync_at=self._ago(0.01),
+            strategy_cursors={"strat-B": self._ago(200)},
+        )
+        result, _, _ = await TestSyncCursorPerStrategyResume._run_tick(
+            key_row=key_row,
+            failing_strategy_ids=set(),
+            fetch_mock=fetch_mock,
+            trades=trades,
+        )
+
+        assert "strategy_cursor_window_clamped" in result, (
+            "a tick that PERMANENTLY abandoned part of a strategy's window "
+            "must say so in its envelope. Without this the tick returns "
+            "success, every other field looks healthy, and the only evidence "
+            f"is a log line. Envelope keys: {sorted(result)!r}"
+        )
+        report = result["strategy_cursor_window_clamped"]
+        assert report["floor_strategy_id"] == "strat-B", (
+            "the report must name the strategy whose marker produced the "
+            f"clamped floor. Got {report!r}"
+        )
+        assert report["truncated_strategy_ids"] == ["strat-B"], (
+            "and every strategy that LOST span, which here is strat-B alone — "
+            "strat-A holds no marker and falls back to a recent key cursor. "
+            f"Got {report!r}"
+        )
+        assert report["cap_days"] == 30, (
+            f"the report carries the cap that bit, in days. Got {report!r}"
+        )
+        assert 195 <= report["floor_age_days"] <= 205, (
+            "and the age of the floor it clamped, so an operator can tell a "
+            f"just-crossed hold from an ancient one. Got {report!r}"
+        )
+
+        # The envelope must describe the window the venue was ACTUALLY asked
+        # for — a report that did not match the fetch would be worse than none.
+        since_ms = fetch_mock.call_args.kwargs["since_ms"]
+        assert abs(since_ms - report["oldest_allowed_ms"]) < 5_000, (
+            "the reported floor must BE the window the fetch used, not a "
+            f"separately-computed number. fetch={since_ms!r} report={report!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_tick_adds_no_clamp_key_at_all(self):
+        """The non-vacuity arm, in this file's established style: a
+        "conditional" field that is always present is not conditional, and an
+        always-empty report in every healthy tick's envelope is noise the
+        summary alarm would learn to ignore."""
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+
+        key_row = _make_key_row(
+            strategy_ids=["strat-A", "strat-B"],
+            last_sync_at=self._ago(0.01),
+            strategy_cursors={"strat-B": self._ago(1)},
+        )
+        result, _, _ = await TestSyncCursorPerStrategyResume._run_tick(
+            key_row=key_row,
+            failing_strategy_ids=set(),
+            fetch_mock=fetch_mock,
+            trades=trades,
+        )
+
+        assert "strategy_cursor_window_clamped" not in result, (
+            "a one-day-old hold is WELL inside the cap, nothing was abandoned, "
+            f"and the key must be absent entirely. Got {result!r}"
+        )
+
+    def test_the_report_and_the_warning_name_every_truncated_strategy(self):
+        """⛔ THE TRUNCATION IS PER-KEY, AND THE OLD WORDING SAID OTHERWISE.
+
+        One `fetch_all_trades` serves the whole key, so raising the floor to the
+        cap costs EVERY strategy holding a marker older than it — not only the
+        one that produced the floor. The previous warning said "that strategy's
+        trades", which under-states the loss and sends an operator to a single
+        row.
+        """
+        now_ms = 1_800_000_000_000
+
+        def _iso(ms: int) -> str:
+            return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+
+        report: dict[str, Any] = {}
+        with self._captured_warnings() as records:
+            floor = cron_mod._resume_floor_ms(
+                ["strat-A", "strat-B", "strat-C"],
+                {
+                    "strat-A": _iso(now_ms - 86_400_000),        # 1 day, safe
+                    "strat-B": _iso(now_ms - 200 * 86_400_000),  # the floor
+                    "strat-C": _iso(now_ms - 100 * 86_400_000),  # also truncated
+                },
+                _iso(now_ms - 60_000),
+                now_ms=now_ms,
+                clamp_report=report,
+            )
+
+        assert floor == now_ms - self.CAP_MS, f"the clamp must bite; got {floor!r}"
+        assert report["floor_strategy_id"] == "strat-B", repr(report)
+        assert report["truncated_strategy_ids"] == ["strat-B", "strat-C"], (
+            "BOTH strategies holding a marker past the cap lose their span — "
+            "the window is per-KEY. Naming only the floor-holder hides "
+            f"strat-C's loss entirely. Got {report!r}"
+        )
+
+        clamp_lines = [r.message for r in records if "CLAMPED" in r.message]
+        assert len(clamp_lines) == 1, repr([r.message for r in records])
+        assert "strat-C" in clamp_lines[0], (
+            "and the warning must name them too, or the log and the envelope "
+            f"disagree about who paid. Got {clamp_lines[0]!r}"
+        )
+        assert "strat-A" not in clamp_lines[0], (
+            "while a strategy INSIDE the cap lost nothing and must not be "
+            f"named. Got {clamp_lines[0]!r}"
+        )
+
+    def test_a_key_cursor_floor_writes_no_report(self):
+        """⛔ THE TIE TO THE PROVENANCE FIX. The report exists to describe a
+        real, permanent loss. A floor that came from the KEY cursor is never
+        clamped and loses nothing, so an entry here would be a false alarm
+        naming a strategy that holds no row — and an operator would follow it
+        into `strategy_sync_cursors` looking for a row that does not exist."""
+        now_ms = 1_800_000_000_000
+        ancient = datetime.fromtimestamp(
+            (now_ms - 200 * 86_400_000) / 1000, tz=timezone.utc
+        ).isoformat()
+
+        report: dict[str, Any] = {}
+        floor = cron_mod._resume_floor_ms(
+            ["strat-A"], {}, ancient, now_ms=now_ms, clamp_report=report
+        )
+
+        assert floor == cron_mod.parse_since_ms(ancient), f"got {floor!r}"
+        assert report == {}, (
+            "nothing was clamped and nothing was lost, so the report must stay "
+            f"EMPTY. Got {report!r}"
+        )
+
+    @staticmethod
+    def _captured_warnings():
+        """A caplog-free capture, so this arm works outside a fixture-bearing
+        signature and cannot be silenced by another handler's level."""
+        import contextlib
+        import logging
+
+        @contextlib.contextmanager
+        def _cm():
+            records: list[logging.LogRecord] = []
+
+            class _Sink(logging.Handler):
+                def emit(self, record: logging.LogRecord) -> None:
+                    record.message = record.getMessage()
+                    records.append(record)
+
+            sink = _Sink(level=logging.WARNING)
+            target = logging.getLogger("quantalyze.analytics")
+            previous_level = target.level
+            target.addHandler(sink)
+            target.setLevel(logging.WARNING)
+            try:
+                yield records
+            finally:
+                target.removeHandler(sink)
+                target.setLevel(previous_level)
+
+        return _cm()
 
 
 class _ApiErrorLike(Exception):
