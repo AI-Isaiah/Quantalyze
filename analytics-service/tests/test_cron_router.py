@@ -1032,8 +1032,19 @@ class TestSyncTradesShapeFallbackLogged:
     success count from the fetch size. That count flows into `synced_count`,
     so any shape drift made `synced_count > 0` unconditionally and advanced
     `last_sync_at` on evidence that nothing was stored — the C-0198 data-loss
-    class through a side door. The fallback is now 0 (cursor holds, next tick
-    retries); the loud ERROR is unchanged.
+    class through a side door. The fallback is now 0; the loud ERROR is
+    unchanged.
+
+    2026-09-19 (later): this test used to assert `status == "held"`, and that
+    assertion WAS the defect it should have caught. `held` is the benign
+    bucket for "no strategy on this key was eligible", and its documented
+    remedy — a strategy re-entering ALLOWED_STRATEGY_STATUSES — can never
+    clear a SQL shape change, so drift classified as `held` was drift nobody
+    would ever action. The drift branch now records `strategy_errors[sid]`,
+    the sole input the classifier has for "something went wrong", so a
+    single-strategy drift is `error`. Cursor behaviour is unchanged (`stored`
+    is still 0, so `synced_count` is still 0 here and the cursor still holds —
+    see TestSyncTradesShapeDriftHoldsTheCursor, which still passes).
     """
 
     @pytest.mark.asyncio
@@ -1077,9 +1088,12 @@ class TestSyncTradesShapeFallbackLogged:
 
         # Fallback fired in the SAFE direction: 0 stored, not len(trades)=2.
         assert result["per_strategy_stored"]["strat-A"] == 0
-        # Two trades fetched, none provably stored => cursor held, so this is
-        # a stalled tick, not a healthy one.
-        assert result["status"] == "held"
+        # Two trades fetched, nothing provably stored, and the SQL contract is
+        # broken: that is an `error`, not the benign `held` bucket this test
+        # used to pin.
+        assert result["status"] == "error", result
+        assert "ContractDrift" in result["strategy_errors"]["strat-A"], result
+        assert "ContractDrift" in result["error"], result
         assert any(
             "unexpected shape" in record.message
             and "strat-A" in record.message

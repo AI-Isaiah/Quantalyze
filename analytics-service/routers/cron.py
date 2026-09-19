@@ -429,7 +429,7 @@ async def _sync_single_key(
                     # Contract drift: sync_trades is declared to return the
                     # integer row count. A dict / list / None here means the
                     # SQL function changed shape, so we have NO evidence about
-                    # what landed.
+                    # what landed for THIS strategy.
                     #
                     # 2026-09-19: this fell back to `stored = len(trades)`,
                     # i.e. it FABRICATED a success count from the fetch size.
@@ -437,22 +437,51 @@ async def _sync_single_key(
                     # made `synced_count > 0` unconditionally and advanced
                     # `last_sync_at` on evidence that nothing was stored —
                     # reintroducing the exact C-0198 data-loss class through a
-                    # side door. Falling back to 0 is the safe direction: the
-                    # cursor HOLDS and the next tick retries the same window.
-                    # Replay is safe because sync_trades does a
-                    # payload-window-scoped DELETE of non-fill rows before
-                    # re-INSERTing, so refetching a window does not duplicate.
-                    # The loud logger.error is unchanged — the drift must still
-                    # surface; only the assumed count changed.
+                    # side door. Counting 0 is the honest direction, and replay
+                    # is safe because sync_trades does a payload-window-scoped
+                    # DELETE of non-fill rows before re-INSERTing, so
+                    # refetching a window does not duplicate.
+                    #
+                    # 2026-09-19 (later) — WHAT COUNTING 0 DOES *NOT* BUY, and
+                    # what this comment wrongly claimed it did. "The cursor
+                    # HOLDS and the next tick retries the same window" is true
+                    # ONLY when EVERY strategy on the key drifts.
+                    # `should_advance_cursor` keys off `synced_count`, which is
+                    # the SUM over the whole key, so on a multi-strategy key a
+                    # sibling storing successfully advances `last_sync_at` past
+                    # the drifted strategy's window and those trades are lost
+                    # on the next tick. One shared per-key cursor cannot
+                    # express "advance for A, hold for B"; the per-strategy
+                    # cursor that can is booked as Phase 164.5.1.4 SYNCCURSOR.
+                    #
+                    # What recording the drift in `strategy_errors` DOES buy is
+                    # that the drift stops being invisible. `strategy_errors`
+                    # is the only input the status classifier below has for
+                    # "something went wrong", so writing it here is what turns
+                    # a single-strategy drift into `error` — it was `held`, the
+                    # benign bucket whose documented remedy (a strategy
+                    # re-entering ALLOWED_STRATEGY_STATUSES) can never clear a
+                    # SQL shape change — and a fan-out drift into `partial`
+                    # naming the drifted strategy in the response body, where
+                    # before it was `ok` with nothing recorded at all. It
+                    # changes NO cursor behaviour: `stored` is still 0, so
+                    # `synced_count` is untouched.
                     logger.error(
                         "cron_sync: sync_trades returned unexpected shape "
-                        "for key %s strategy %s: %r — counting 0 stored so "
-                        "the cursor holds and the next tick retries",
+                        "for key %s strategy %s: %r — counting 0 stored for "
+                        "this strategy and reporting it under "
+                        "strategy_errors; note a sibling strategy on this key "
+                        "storing successfully still advances the shared cursor "
+                        "past this window",
                         key_id,
                         sid,
                         rpc_result.data,
                     )
                     stored = 0
+                    strategy_errors[sid] = (
+                        "ContractDrift: sync_trades returned "
+                        f"{type(rpc_result.data).__name__}"
+                    )
                 per_strategy_stored[sid] = stored
             # `trades_stored` reflects the primary strategy for back-compat;
             # `per_strategy_stored` carries the per-strategy breakdown.
@@ -587,11 +616,16 @@ async def _sync_single_key(
         # `partial` — calling it partial would mislead the operator
         # into thinking trades were stored when none were.
         #
-        # A tick that fetched real trades and stored NONE of them without
-        # any RPC raising is `held`, NOT `ok`: `should_advance_cursor` is
-        # False there, so `last_sync_at` was pinned and the same window will
-        # be refetched (and will keep growing) every tick until a strategy on
-        # this key becomes eligible again. That is the opposite of "there was
+        # A tick that fetched real trades and stored NONE of them with no
+        # per-strategy error recorded is `held`, NOT `ok`:
+        # `should_advance_cursor` is False there, so `last_sync_at` was pinned
+        # and the same window will be refetched (and will keep growing) every
+        # tick until a strategy on this key becomes eligible again. Contract
+        # drift is deliberately NOT one of those cases any more — it writes a
+        # `strategy_errors` entry, so it lands in `error`/`partial`, whose
+        # remedy is a human fixing the SQL function rather than `held`'s
+        # "wait for a strategy to become eligible again", which would never
+        # clear it. That is the opposite of "there was
         # nothing to do" — there WAS something to do and it was not done, so
         # it must not land in the `synced` bucket that alarms read as healthy.
         # `ok` is now only reached when the cursor actually advanced, i.e. a
