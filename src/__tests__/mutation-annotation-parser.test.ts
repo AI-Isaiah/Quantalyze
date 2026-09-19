@@ -900,8 +900,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // FILES_FLOOR/ARMS_FLOOR constants, never restated as a number here).
     // MEASURED over `scanCorpus` at this commit by replaying THIS derivation:
     // `armsSeen 411 stepsSeen 428`, `filesTotal 75`, `annotated 48`, waivers 0.
-    expect(armsSeen).toBe(411);
-    expect(stepsSeen).toBe(428);
+    expect(armsSeen).toBe(412);
+    expect(stepsSeen).toBe(429);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1739,7 +1739,7 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // block describes. Still RUN SEPARATELY from `stepsSeen` — this pin ranges
     // over waivers where that one does not (harmless only while waivers are 0;
     // they are, measured corpus-wide `waivers=0`).
-    expect(needles.length).toBe(428);
+    expect(needles.length).toBe(429);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

@@ -180,11 +180,38 @@ COMMENT ON POLICY strategy_sync_cursors_deny_all ON strategy_sync_cursors IS
 -- Defence in depth beneath the policy, matching M-0774 on compute_jobs. It
 -- survives a future migration that DISABLEs RLS or drops this policy without
 -- recreating it, and it is the only control reaching the RLS-EXEMPT verbs
--- (TRUNCATE, TRIGGER, REFERENCES). service_role is untouched — it reaches the
--- table by BYPASSRLS at the role level, not through this grant. Referential
--- actions run as the referencing table's owner, so ON DELETE CASCADE from
--- strategies still fires after this REVOKE.
+-- (TRUNCATE, TRIGGER, REFERENCES). Referential actions run as the referencing
+-- table's owner, so ON DELETE CASCADE from strategies still fires after it.
 REVOKE ALL ON TABLE strategy_sync_cursors FROM PUBLIC, anon, authenticated;
+
+-- ⛔ AND THE POSITIVE HALF, WHICH IS NOT OPTIONAL. An earlier draft of this file
+--    took the REVOKE alone and justified it with "service_role is untouched — it
+--    reaches the table by BYPASSRLS at the role level, not through this grant."
+--    THAT SENTENCE WAS FALSE, and it was the entire reason the GRANT below was
+--    omitted. `BYPASSRLS` is a ROW-level exemption; it confers NO object-level
+--    privilege. service_role reaches this table solely through Supabase's
+--    bootstrap `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES`,
+--    which is keyed to the GRANTOR ROLE AND SCHEMA and applies only to tables
+--    created by that role — something nothing in this file established or checked.
+--
+-- ⭐ THE PRECEDENT ALREADY ANSWERED THIS, and taking only its first half is the
+--    same "half a precedent" error this file's STEP 2 block accuses its own
+--    earlier draft of, repeated one layer down. M-0774 shipped the REVOKE in
+--    `20260516104201_compute_jobs_audit_2026_05_07_residual.sql`; the VERY NEXT
+--    compute_jobs migration, `20260516131500_compute_jobs_residual_apply.sql`,
+--    shipped the correction — `GRANT ALL ON TABLE compute_jobs TO service_role`
+--    plus a positive verifier, commented "Closes the loop on the M-0774 verifier
+--    which only asserts the negative and never the positive".
+--
+-- ⚠️ AND compute_jobs IS AN EXACT PRECEDENT OF THIS SHAPE, not a SECDEF-only
+--    table: MEASURED 2026-09-19, 102 direct `.table("compute_jobs")` call sites
+--    in `analytics-service`. A direct PostgREST write as service_role needs a
+--    real table privilege.
+--
+--    Without this GRANT, a drift in the bootstrap default-privileges posture
+--    makes every marker write 42501 into the writer's fail-open branch —
+--    permanently, and this table's whole purpose is that its writes land.
+GRANT ALL ON TABLE strategy_sync_cursors TO service_role;
 
 -- --------------------------------------------------------------------------
 -- STEP 3: self-verifying DO block — CATALOGS ONLY
@@ -207,6 +234,7 @@ DECLARE
   v_rls_enabled BOOLEAN;
   v_polcmd      "char";
   v_cols        TEXT;
+  v_priv        TEXT;
 BEGIN
   -- 1. the relation exists in schema public
   IF NOT EXISTS (
@@ -316,6 +344,35 @@ BEGIN
                           || 'updated_at:timestamp with time zone:NO' THEN
     RAISE EXCEPTION 'Phase 164.5.1.4 failed: strategy_sync_cursors columns are (%), expected exactly last_sync_at nullable timestamptz, strategy_id non-null uuid, updated_at non-null timestamptz. A NOT NULL last_sync_at makes the re-fetch-from-start state unrepresentable.', COALESCE(v_cols, '<no columns at all>');
   END IF;
+
+  -- 8. and service_role STILL HOLDS the privileges the writer needs. The REVOKE
+  --    above only asserts the NEGATIVE (anon/authenticated/PUBLIC hold nothing);
+  --    without this arm nothing checks that the role which actually writes the
+  --    markers can still reach the table, which is the failure that would make
+  --    this entire phase inert in production.
+  -- ⭐ `has_table_privilege` rather than the precedent's `count(*)` over
+  --    information_schema: it is catalog-only AND count-free, so this file's
+  --    `row_count_assertions = 0` property — the thing keeping it clear of
+  --    [164.8-DATA-DEPENDENT-MIGRATION-ESCAPE] — is preserved by construction
+  --    rather than by argument.
+  --
+  -- ⚠️ MEASURED 2026-09-19, AND READ THIS BEFORE CONCLUDING THIS ARM IS VACUOUS.
+  --    Deleting the GRANT above and applying WITHOUT fixture 07 reds this arm
+  --    ("service_role lacks SELECT"). Applying the SAME mutant WITH
+  --    `scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql` is
+  --    GREEN, because that fixture issues `GRANT ALL ON TABLES TO anon,
+  --    authenticated, service_role` itself and hands service_role the privilege
+  --    the deleted statement would have. That is not vacuity — it is the fixture
+  --    faithfully reproducing the bootstrap posture, which is the very posture
+  --    this GRANT exists to survive the ABSENCE of. ⛔ Do not "prove" this arm
+  --    toothless by mutating it under fixture 07.
+  FOREACH v_priv IN ARRAY ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE'] LOOP
+    IF NOT has_table_privilege(
+             'service_role', 'public.strategy_sync_cursors', v_priv
+           ) THEN
+      RAISE EXCEPTION 'Phase 164.5.1.4 failed: service_role lacks % on strategy_sync_cursors. BYPASSRLS is a ROW-level exemption and confers no object privilege, so without a table GRANT every marker write raises 42501 into the writer fail-open branch and the per-strategy cursor never persists.', v_priv;
+    END IF;
+  END LOOP;
 END $$;
 
 COMMIT;

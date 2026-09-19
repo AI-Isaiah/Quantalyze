@@ -2040,7 +2040,7 @@ export const FILES_FLOOR = 48;
 //                PRE-EDIT value) gives the same message naming 402 and FAILS;
 //                ARMS_FLOOR=411 PASSES. WAIVED_CEILING stays 0 (0 waivers,
 //                corpus-wide).
-export const ARMS_FLOOR = 411;
+export const ARMS_FLOOR = 412;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

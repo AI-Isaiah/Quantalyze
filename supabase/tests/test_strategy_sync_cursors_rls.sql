@@ -230,7 +230,7 @@ BEGIN
      AND (acl.grantee = 0 OR r.rolname IN ('anon', 'authenticated'));
   IF v_privs IS NOT NULL THEN
     RAISE EXCEPTION
-      'TEST FAILED (GRANT 1): the client roles hold table-level privileges "%" on strategy_sync_cursors, expected NONE. Migration 20260919120000 STEP 2 REVOKEs ALL from PUBLIC, anon and authenticated, and that REVOKE is the ONLY control reaching the RLS-EXEMPT verbs: no policy governs TRUNCATE, TRIGGER or REFERENCES, so one TRUNCATE from a client session would discard every strategy resume cursor at once with the deny-all policy watching. service_role is untouched by this assertion — it reaches the table by BYPASSRLS at the role level.', v_privs;
+      'TEST FAILED (GRANT 1): the client roles hold table-level privileges "%" on strategy_sync_cursors, expected NONE. Migration 20260919120000 STEP 2 REVOKEs ALL from PUBLIC, anon and authenticated, and that REVOKE is the ONLY control reaching the RLS-EXEMPT verbs: no policy governs TRUNCATE, TRIGGER or REFERENCES, so one TRUNCATE from a client session would discard every strategy resume cursor at once with the deny-all policy watching. service_role is untouched by this assertion: it is not in the revoked set, and it holds its own table GRANT from migration 20260919120000 STEP 2. (BYPASSRLS is a ROW-level exemption and confers no object privilege, so the GRANT is what lets the writer reach this table, not the role attribute.)', v_privs;
   END IF;
   RAISE NOTICE 'GRANT 1 OK: PUBLIC, anon and authenticated hold no table-level privilege on strategy_sync_cursors.';
 
@@ -464,6 +464,31 @@ BEGIN
   --    (their reads and their row counts are decided by USING) and no neuter is
   --    needed. The two halves of the qualifier are pinned independently.
   -- RED-UNDER-M: {"arm":"POLICY 4","apply":[{"kind":"edit","file":"supabase/migrations/20260919120000_strategy_sync_cursors.sql","find":"  USING (false)\n  WITH CHECK (false);","replace":"  USING (false)\n  WITH CHECK (true);","occurrences":1}]}
+  -- ⛔ POSITIVE CONTROL, AND THIS ARM IS LATENTLY VACUOUS WITHOUT IT. A refusal
+  --    by the GRANT layer and a refusal by `WITH CHECK (false)` are the SAME
+  --    SQLSTATE — 42501 — so the `err_state = '42501'` check below CANNOT tell
+  --    them apart. If the restoring GRANT above were ever narrowed (INSERT
+  --    dropped from it), POLICY 1/2/3 would keep passing and POLICY 4 would pass
+  --    on a grant-layer refusal while measuring nothing about the policy. That is
+  --    precisely the "a 42501 from the GRANT layer read as proof the POLICY
+  --    fired" defect this file's header block exists to prevent, and it would be
+  --    surviving in the ONE arm guarding the write half of the qualifier.
+  -- ⭐ Asserted by catalog rather than by matching SQLERRM text, which is
+  --    locale-dependent. This is the INSERT-side twin of POLICY 1/POLICY 2's
+  --    `raised` check.
+  --
+  -- RED-UNDER: narrow the restoring GRANT above so `authenticated` no longer
+  --            holds INSERT. POLICY 4's own INSERT probe then fails at the GRANT
+  --            layer with the SAME 42501 it expects from WITH CHECK, so without
+  --            this precondition the arm passes while measuring nothing.
+  -- RED-UNDER-M: {"arm":"POLICY 4 precondition","apply":[{"kind":"edit","file":"supabase/tests/test_strategy_sync_cursors_rls.sql","find":"  -- is nothing and no other session can observe the grant.\n  GRANT SELECT, INSERT, UPDATE, DELETE ON strategy_sync_cursors TO anon, authenticated;","replace":"  -- is nothing and no other session can observe the grant.\n  GRANT SELECT, UPDATE, DELETE ON strategy_sync_cursors TO anon, authenticated;","occurrences":1}]}
+  IF NOT has_table_privilege(
+           'authenticated', 'public.strategy_sync_cursors', 'INSERT'
+         ) THEN
+    RAISE EXCEPTION
+      'TEST FAILED (POLICY 4 precondition): authenticated does not hold INSERT on strategy_sync_cursors, so the probe below would be refused by the GRANT layer and its 42501 would say NOTHING about WITH CHECK. The restoring GRANT in the seeding context is what makes this arm measure the POLICY.';
+  END IF;
+
   raised := FALSE;
   BEGIN
     INSERT INTO strategy_sync_cursors (strategy_id, last_sync_at, updated_at)
