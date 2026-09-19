@@ -2005,41 +2005,47 @@ export const FILES_FLOOR = 48;
 //                value) gives `✅ No defects` and exit 0, with
 //                arms/biting/lane-invocations all reading 402. WAIVED_CEILING
 //                stays 0 (0 waivers, corpus-wide).
-// ⚠️ CURRENCY 2026-09-19 (Phase 164.5.1.4 SYNCCURSOR, review WR-05): 402 -> 411.
-//                NINE new arms, all in ONE NEW annotated gate,
-//                supabase/tests/test_strategy_sync_cursors_rls.sql — SEED 1 (the
-//                cursor row the other arms observe), GRANT 1 (the migration's
-//                REVOKE deleted), RLS 1 and RLS 2 (the only two `sql`-step arms:
-//                `DISABLE ROW LEVEL SECURITY` on the lane, and the deny-all
-//                policy re-created `FOR SELECT` instead of `FOR ALL`), POLICY
-//                1-4 (the SAME deny-all qualifier opened from four different
-//                observation points — `USING (false)` -> `USING (true)` for 1-3
-//                and `WITH CHECK (false)` -> `WITH CHECK (true)` for 4) and
-//                RESTORE 1 (the gate's own trailing REVOKE deleted).
+// ⚠️ CURRENCY 2026-09-19 (Phase 164.5.1.4 SYNCCURSOR, review WR-05 +
+//                round 2): 402 -> 412. TEN new arms, all in ONE NEW annotated
+//                gate, supabase/tests/test_strategy_sync_cursors_rls.sql --
+//                SEED 1 (the cursor row the other arms observe), GRANT 1 (the
+//                migration's REVOKE deleted), RLS 1 and RLS 2 (the only two
+//                `sql`-step arms: `DISABLE ROW LEVEL SECURITY` on the lane, and
+//                the deny-all policy re-created `FOR SELECT` instead of
+//                `FOR ALL`), POLICY 1-4 (the SAME deny-all qualifier opened from
+//                four different observation points -- `USING (false)` ->
+//                `USING (true)` for 1-3 and `WITH CHECK (false)` ->
+//                `WITH CHECK (true)` for 4), POLICY 4 PRECONDITION (the positive
+//                control proving POLICY 4 observes the POLICY and not a missing
+//                GRANT) and RESTORE 1 (the gate's own trailing REVOKE deleted).
 //                FILES_FLOOR DOES move with it, 47 -> 48, and the denominator
-//                74 -> 75 — see the block above. That is the difference from the
+//                74 -> 75 -- see the block above. That is the difference from the
 //                2026-09-18 plan-02 entry directly above, which added arms to a
 //                file already in the set.
-//                ⛔ SEPARATED ON THE FAST VITEST RE-DERIVATION, NOT on a
-//                full-corpus lane run, and that is a weaker reading than the
-//                entry above it. The nine arms were calibrated ON A LANE by the
-//                plan that added the file (`9/9 RED (identity ok)`, `biting: 9`,
-//                `lane-invocations: 9`, restore leg exit 0); this edit absorbs
-//                that measurement into the ratchet rather than re-taking it.
-//                MEASURED over `scanCorpus` at this commit: 411 twins, 0
-//                waivers, 428 non-`sql` apply steps and 428 needles — arms moved
-//                by nine while steps and needles moved by SEVEN, because two of
-//                the nine twins are `sql` steps carrying no `find`.
-//                SEPARATED in both directions on
-//                `src/__tests__/mutation-runner-floors.test.ts`'s fast
-//                re-derivation: ARMS_FLOOR=412 gives `The corpus declares 411
-//                twin(s) of which 0 are waivers, so a green run bites 411.
-//                ARMS_FLOOR is 412.` and FAILS (beside `expected 412 to be less
-//                than or equal to 411` from the paired ratchet arm);
-//                ARMS_FLOOR=402 (the stale-low direction, i.e. this constant's
-//                PRE-EDIT value) gives the same message naming 402 and FAILS;
-//                ARMS_FLOOR=411 PASSES. WAIVED_CEILING stays 0 (0 waivers,
-//                corpus-wide).
+//                ⛔ THIS ENTRY SHIPPED INVERTED AND THE CORRECTION IS THE POINT.
+//                It was written at 9 arms / 411 by `41e45047`, and `4919f892`
+//                then added the POLICY 4 precondition arm and bumped 411 -> 412
+//                WITHOUT touching this comment. The result asserted that
+//                ARMS_FLOOR=412 FAILS and 411 PASSES -- the exact inverse of the
+//                shipped constant -- so a reader trusting it would have LOWERED
+//                the floor to 411. Lowering a floor is the one move this repo's
+//                C6 rule forbids outright, and the prose beside the constant was
+//                pointing at it. `[164.7-CITATION-DRIFT-01]`, recurring inside
+//                the ratchet file itself.
+//                ⛔ SO: NO CENSUS IS RESTATED HERE ANY MORE. A twin count, an
+//                apply-step count and a needle count are RUN OUTPUTS that move
+//                whenever any gate changes, and a number written beside the
+//                constant it describes has now drifted from it twice. Re-derive
+//                instead -- `src/__tests__/mutation-runner-floors.test.ts` prints
+//                the corpus census on every run, and its failure text names the
+//                value to raise the floor TO. The constant below is the only
+//                authority in this file.
+//                ⚠️ SEPARATION was taken on that fast vitest re-derivation,
+//                NOT on a full-corpus lane run, which is a weaker reading than
+//                the entry above it. The arms were calibrated ON A LANE by the
+//                plan that added the file (restore leg exit 0); this edit
+//                absorbs that measurement into the ratchet rather than re-taking
+//                it. WAIVED_CEILING stays 0.
 export const ARMS_FLOOR = 412;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not

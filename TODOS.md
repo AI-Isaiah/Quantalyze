@@ -3746,7 +3746,9 @@ phase's plan SUMMARYs and its `164.5.1.4-CALIBRATION.md`:
 
 - **`strategy_sync_cursors`** — a new per-STRATEGY resume table: `strategy_id` as the WHOLE primary
   key, `ON DELETE CASCADE` to `strategies`, nullable `last_sync_at`, writer-set `updated_at`,
-  deny-all RLS plus `REVOKE ALL ... FROM PUBLIC, anon, authenticated`, and a 7-arm catalog-only
+  deny-all RLS plus `REVOKE ALL ... FROM PUBLIC, anon, authenticated`, a `GRANT ALL ... TO
+  service_role` (BYPASSRLS is a ROW-level exemption and confers no object-level privilege, so
+  without the GRANT the sole writer cannot reach the table at all), and an 8-arm catalog-only
   self-verify that runs on every apply.
 - **A MEMBERSHIP-based read.** `_strategy_resume_point` resolves a strategy's resume point by
   `strategy_id in strategy_cursors`, never by `.get()` — a lookup returning `None` collapses "no row,
@@ -3755,9 +3757,14 @@ phase's plan SUMMARYs and its `164.5.1.4-CALIBRATION.md`:
   `fetch_all_trades` call serves the whole key.
 - **A marker write for EVERY strategy in the fan-out, held or advancing**, placed as the LAST write
   in `_sync_single_key`. The advance condition is
-  `(not trades) or (stored > 0 and sid not in recompute_enqueue_errors)`. The second conjunct is what
-  stops a strategy whose trades stored but whose `derive_broker_dailies` enqueue raised from
-  advancing past the window whose recompute never fired.
+  `((not trades) and not fetch_degraded) or (stored > 0 and sid not in recompute_enqueue_errors)`.
+  The `recompute_enqueue_errors` conjunct stops a strategy whose trades stored but whose
+  `derive_broker_dailies` enqueue raised from advancing past the window whose recompute never fired.
+  ⚠️ The `not fetch_degraded` conjunct was added in round 2 (WR-01) and is equally load-bearing:
+  without it a CRASHED venue fetch returns no trades and therefore reads as an IDLE tick, which
+  clears a hold that should have been kept. It is calibrated — removing the single
+  `_record_dq_flag("daily_pnl_fetch_error", True)` stamp from Bybit's inner handler in
+  `services/exchange.py` reds two arms in `tests/test_cron_router.py`.
 - **Two calibrated gates, each neutered and observed RED before being trusted.**
   `TestSyncCursorPerStrategyResume` pins the `since_ms` the NEXT tick asks the venue for (neuter: the
   marker READ, with the WRITE left fully intact), and
@@ -3767,8 +3774,20 @@ phase's plan SUMMARYs and its `164.5.1.4-CALIBRATION.md`:
 - **The accepted cost is surfaced, not deferred:** `strategy_cursors_held` in the per-key envelope
   plus one warning per key naming the consequence — the fetch is per-KEY while the marker is
   per-STRATEGY, so a persistently-held strategy pins the whole key's window and the re-fetched range
-  grows every tick until the hold clears. The re-fetch is idempotent, so this is an efficiency cost
-  and not a loss.
+  grows every tick until the hold clears.
+  ⛔ **THIS BULLET USED TO END "the re-fetch is idempotent, so this is an efficiency cost and not a
+  loss", AND THAT UNDERSTATEMENT WAS ITSELF THE BUG** — `cron.py`'s own WR-04 block says so in those
+  words. The growth is UNBOUNDED, and `_sync_key_with_timeout` cancels the key at
+  `KEY_SYNC_TIMEOUT`, so an unclearing hold eventually stops EVERY strategy on the key: a
+  correctness loss with a WIDER blast radius than the defect this entry was opened for.
+  **The bound that fixes it is `MAX_MARKER_LOOKBACK_MS` (30 days)**, which clamps how far back a
+  marker-derived resume floor may pin the window. ⚠️ The clamp is a real LOSS, not a deferral —
+  trades older than the cap are fetched by no tick — and it is accepted deliberately over wedging
+  the key. Three things keep it narrow and visible: it applies ONLY to a marker-derived floor and
+  NEVER to the key-cursor fallback (so the migration's inert-on-arrival property survives and the
+  clamp cannot fire on a strategy that never held); the loss reaches the response envelope as
+  `strategy_cursor_window_clamped`, not only the log; and the warning states that a hold this old
+  needs a human. See Phase 164.5.1.4's SECURITY.md accepted-risk R-03.
 
 ⚠️ **WHAT IS NOT CLOSED, stated plainly: the migration has not applied to any database.** At closure
 it had reached only a disposable local PostgreSQL lane. Both new Supabase paths FAIL OPEN by design —
