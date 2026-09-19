@@ -207,6 +207,57 @@ ALLOWED_STRATEGY_STATUSES = {"draft", "pending_review", "published"}
 # the reason C-0198 chose to advance. This marker is purely ADDITIVE.
 _STRATEGY_SYNC_CURSOR_TABLE = "strategy_sync_cursors"
 
+# 164.5.1.4 SYNCCURSOR / WR-04 — THE OLDEST A HELD MARKER MAY PIN THE KEY'S
+# FETCH WINDOW AT.
+#
+# ⛔ THE REGRESSION THIS CLOSES, AND IT IS A REGRESSION IN BLAST RADIUS.
+# `fetch_all_trades` runs ONCE PER KEY, and `_resume_floor_ms` pins that one
+# window at the EARLIEST resume point across the key's strategies. So a single
+# strategy whose `sync_trades` (or whose recompute enqueue) keeps failing holds
+# its marker forever and the key's window grows by one tick interval every
+# tick, WITHOUT BOUND. `_sync_key_with_timeout` cancels at KEY_SYNC_TIMEOUT, and
+# once the growing fetch crosses it NO strategy on that key syncs, NEITHER
+# cursor advances, and the key is WEDGED — permanently, since the next tick
+# asks for an even larger window and fails sooner.
+#
+# Pre-phase, that same failure stranded ONE strategy and left the key healthy.
+# So the marker, unbounded, converts a per-strategy degradation into a
+# whole-key outage. That is strictly worse than what it replaced, which is the
+# one thing a purely-additive fix may not be.
+#
+# ⭐ THE DECISION (taken here, autonomously, and this is the reasoning).
+# Clamp the marker-driven lookback to a fixed maximum age. The choice is
+# between two losses and there is no third option:
+#
+#   * UNCAPPED — worst case: EVERY strategy on the key stops syncing, forever,
+#     and no cursor advances. Unbounded, and it takes down healthy siblings.
+#   * CAPPED   — worst case: the held strategy's outstanding window OLDER than
+#     the cap is abandoned. Bounded, confined to the one strategy that was
+#     already failing, and NO WORSE THAN PRE-PHASE, where that strategy was
+#     stranded in full.
+#
+# The capped worst case is a strict subset of the pre-phase worst case while
+# the uncapped one is a superset, so the cap is taken.
+#
+# ⚠️ THE ACCEPTED COST, STATED PLAINLY: a hold that never clears LOSES that
+# strategy's trades older than the cap. Not "re-fetches them later" — loses
+# them. That is tolerable only because a hold of this age is no longer a
+# transient failure; it is a bug that needs a human, and the clamp logs a
+# warning naming the strategy and the age every tick it bites so the human
+# hears about it. Thirty days is chosen to sit far above any plausible venue
+# or database outage (hours, not weeks) while staying well inside the fetch
+# volume one key can drain within KEY_SYNC_TIMEOUT.
+#
+# ⛔ NOT APPLIED to the full-history (`None`) resume point, deliberately. A
+# marker PRESENT WITH A NULL means "this strategy has no resume point at all,
+# re-fetch everything", which is the three-state contract the read path is
+# built on and the correct reading for a brand-new key. Clamping it would
+# silently convert "get everything" into "get the last 30 days" and lose the
+# older history it was asking for. Nor is it applied to the no-eligible-
+# strategies branch, which parses the KEY cursor and is pre-phase behaviour
+# this phase does not touch.
+MAX_MARKER_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000
+
 # 164.5.1.4 SYNCCURSOR / WR-03 — THE ROLLOUT WINDOW IS A KNOWN, EXPECTED,
 # INDEFINITE CONDITION, AND `logger.exception` IS THE WRONG VERB FOR ONE.
 #
@@ -355,6 +406,8 @@ def _resume_floor_ms(
     strategy_ids: list[str],
     strategy_cursors: dict[str, str | None],
     key_cursor: str | None,
+    *,
+    now_ms: int | None = None,
 ) -> int | None:
     """The single per-key fetch window: the EARLIEST resume point across the
     eligible strategies, in epoch milliseconds, or None for "start of history".
@@ -374,11 +427,24 @@ def _resume_floor_ms(
     ⚠️ `parse_since_ms` is called as the MODULE GLOBAL, by name. Existing tests
     intercept it with `patch.object(cron_mod, "parse_since_ms", ...)`; a local
     re-import or an alias would silently escape that patch.
+
+    ⛔ WR-04: the computed floor is CLAMPED to `MAX_MARKER_LOOKBACK_MS`. Without
+    it a permanently-held strategy grows this window every tick until the key
+    crosses `KEY_SYNC_TIMEOUT`, at which point EVERY strategy on the key stops
+    syncing — see the constant's own derivation for why a bounded loss confined
+    to the already-failing strategy is taken over an unbounded whole-key one.
+    `now_ms` is injectable so the clamp can be measured against a fixed clock;
+    production passes nothing and reads the wall clock.
     """
     if not strategy_ids:
         return parse_since_ms(key_cursor)
 
     floor: int | None = None
+    # Which strategy PRODUCED the floor, so a clamp warning can name it. The
+    # operator's next question after "the window was clamped" is always "by
+    # whom", and reconstructing that from the marker table after the fact is
+    # exactly the forensics this file surfaces error fields to avoid.
+    floor_sid: str | None = None
     for sid in strategy_ids:
         resume_point = _strategy_resume_point(sid, strategy_cursors, key_cursor)
         if resume_point is None:
@@ -391,6 +457,32 @@ def _resume_floor_ms(
             return None
         if floor is None or parsed < floor:
             floor = parsed
+            floor_sid = sid
+
+    # ⚠️ NO `if floor is None: return None` GUARD HERE, deliberately. An earlier
+    # draft had one and it was DEAD CODE: every path that would leave `floor`
+    # unset has already returned from inside the loop, and `strategy_ids` was
+    # checked non-empty above. MEASURED — mutating that guard's body produced no
+    # test failure at all, which is how it was found. The `is not None` below
+    # carries the type narrowing instead, on a branch that is genuinely live.
+    if now_ms is None:
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    oldest_allowed_ms = now_ms - MAX_MARKER_LOOKBACK_MS
+    if floor is not None and floor < oldest_allowed_ms:
+        logger.warning(
+            "cron_sync: per-strategy resume point held by strategy %s is "
+            "%.1f day(s) old and has been CLAMPED to the %.0f-day cap — the "
+            "key's fetch window was growing every tick toward KEY_SYNC_TIMEOUT "
+            "(%ds), which would have stopped EVERY strategy on this key. The "
+            "accepted cost is real and it is a LOSS, not a deferral: that "
+            "strategy's trades older than the cap will be fetched by no tick. "
+            "A hold this old is not transient — it needs a human",
+            floor_sid,
+            (now_ms - floor) / 86_400_000,
+            MAX_MARKER_LOOKBACK_MS / 86_400_000,
+            KEY_SYNC_TIMEOUT,
+        )
+        return oldest_allowed_ms
     return floor
 
 
@@ -968,15 +1060,28 @@ async def _sync_single_key(
         # once, so `_resume_floor_ms` takes the EARLIEST resume point across the
         # key's eligible strategies: one persistently-held strategy pins the
         # whole key's fetch window at its resume point, and the range re-fetched
-        # grows every tick until the hold clears. That growth is precedented —
-        # the `held` SyncStatus comment above already documents and accepts
-        # exactly the same growth at KEY level — and it is an efficiency cost on
-        # a re-fetch that is idempotent by construction (`sync_trades` deletes
-        # payload-window-scoped before re-inserting), not a correctness or
-        # user-facing loss. What WOULD be a defect is the degradation being
-        # invisible, inferable only from the ABSENCE of an advancing row. So it
-        # is surfaced: `strategy_cursors_held` in the envelope for the summary
-        # alarm, and one WARNING per key here.
+        # grows every tick until the hold clears. What WOULD be a defect is the
+        # degradation being invisible, inferable only from the ABSENCE of an
+        # advancing row. So it is surfaced: `strategy_cursors_held` in the
+        # envelope for the summary alarm, and one WARNING per key here.
+        #
+        # ⛔ WR-04 CORRECTION — THIS COMMENT USED TO UNDERSTATE THE COST AND THE
+        # UNDERSTATEMENT WAS THE BUG. It called the growth "an efficiency cost
+        # on a re-fetch that is idempotent, not a correctness or user-facing
+        # loss", and cited the key-level `held` growth as precedent. Both halves
+        # were wrong. The growth is UNBOUNDED, and `_sync_key_with_timeout`
+        # cancels the key at KEY_SYNC_TIMEOUT, so a hold that never clears
+        # eventually stops EVERY strategy on the key — a whole-key outage, which
+        # is a correctness loss and a strictly WIDER blast radius than the
+        # pre-phase behaviour where one strategy was stranded and the key stayed
+        # healthy. It is not precedented by the key-level `held` case either:
+        # that one clears as soon as any strategy becomes eligible again,
+        # whereas this one has no self-clearing condition at all.
+        #
+        # `MAX_MARKER_LOOKBACK_MS` bounds it. The residual accepted cost is
+        # therefore the honest one: a hold that never clears LOSES that
+        # strategy's trades older than the cap. The hold itself is still correct
+        # and still what makes a TRANSIENT failure re-drivable.
         #
         # ⛔ Deliberately NOT a new `SyncStatus` value. That vocabulary is a
         # registry the summary counters are DERIVED from, it describes the KEY's
@@ -989,8 +1094,11 @@ async def _sync_single_key(
                 "%d of %d strategy(ies) (%s) — their windows are re-drivable "
                 "next tick, and because the fetch is per-key the whole key's "
                 "window stays pinned at the earliest held resume point, so the "
-                "range re-fetched grows every tick until the hold clears "
-                "(accepted: the re-fetch is idempotent)",
+                "range re-fetched grows every tick until the hold clears. A "
+                "hold that NEVER clears would otherwise grow the window past "
+                "KEY_SYNC_TIMEOUT and wedge the WHOLE key; it is bounded by "
+                "MAX_MARKER_LOOKBACK_MS, at the cost of losing that strategy's "
+                "trades older than the cap",
                 key_id,
                 len(held_strategy_ids),
                 len(strategy_ids),

@@ -60,6 +60,7 @@ directly.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -3425,6 +3426,28 @@ class TestCronSyncPsDataDirGuardRemoved:
 # is renamed — the string is what reaches PostgREST.
 _SYNC_CURSOR_TABLE = "strategy_sync_cursors"
 
+# 164.5.1.4 WR-04 — the marker gates' time anchor: ONE TICK AGO, computed, not
+# a fixed calendar date.
+#
+# ⛔ WHY THIS STOPPED BEING A LITERAL. Every gate below uses this value to stand
+# in for "the resume point a held strategy was left at on the PREVIOUS tick",
+# which in production is fifteen minutes old. It was written as the literal
+# "2026-01-15T00:00:00+00:00", and a literal recedes: by the time WR-04 added
+# `MAX_MARKER_LOOKBACK_MS` the anchor had aged to 247.8 days, so the clamp fired
+# on every one of these gates and three of them went RED — not because the
+# behaviour they pin had changed, but because their stand-in for "one tick ago"
+# had silently drifted eight months into the past. MEASURED, from the clamp's
+# own warning: "resume point held by strategy strat-B is 247.8 day(s) old".
+#
+# A test whose meaning depends on the wall-clock date it happens to be RUN on
+# measures something slightly different every day. Anchoring to the same clock
+# the code reads keeps this value what it was always written to mean, and it
+# cannot rot again.
+#
+# ⚠️ One tick, not one second: the resume point must be strictly in the PAST or
+# the floor comparisons below stop being meaningful.
+_ONE_TICK_AGO = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+
 
 class TestResumeFloorEmptyFanOutFallsBackToKeyCursor:
     """164.5.1.4 IN-01: `_resume_floor_ms`'s no-eligible-strategies branch.
@@ -3444,7 +3467,7 @@ class TestResumeFloorEmptyFanOutFallsBackToKeyCursor:
     easy to leave unpinned: nothing about it is new, so no new test covered it.
     """
 
-    T0 = "2026-01-15T00:00:00+00:00"
+    T0 = _ONE_TICK_AGO
 
     def test_no_eligible_strategies_parses_the_key_cursor(self):
         t0_ms = cron_mod.parse_since_ms(self.T0)
@@ -3472,6 +3495,138 @@ class TestResumeFloorEmptyFanOutFallsBackToKeyCursor:
             "and it must NOT be None: None means 'start of history', so this "
             "key would re-fetch its entire trade history from the venue on "
             "every 15-minute tick, forever, with no error surfaced anywhere"
+        )
+
+
+class TestUnclearableHoldCannotWedgeTheWholeKey:
+    """164.5.1.4 WR-04: a hold that never clears must not grow the key's fetch
+    window without bound.
+
+    ⛔ THE REGRESSION, AND WHY IT IS ONE. `fetch_all_trades` runs ONCE PER KEY
+    and `_resume_floor_ms` pins that single window at the EARLIEST resume point
+    across the key's strategies. So one strategy whose `sync_trades` or
+    recompute enqueue keeps failing grows the window by a tick interval every
+    tick, forever. `_sync_key_with_timeout` cancels at `KEY_SYNC_TIMEOUT`, and
+    once the growing fetch crosses it NO strategy on the key syncs, NEITHER
+    cursor advances, and the key is wedged permanently — the next tick asks for
+    an even bigger window and fails sooner.
+
+    Pre-phase the same failure stranded ONE strategy and left the key healthy.
+    The marker, unbounded, turns a per-strategy degradation into a whole-key
+    outage: a strictly WIDER blast radius, which is the one thing a purely
+    additive fix may not produce.
+
+    ⚠️ WHAT THE CAP COSTS, AND IT IS A REAL LOSS. Clamping abandons the held
+    strategy's window older than the cap — those trades are fetched by no tick,
+    ever. It is taken because the alternative loss is unbounded AND takes down
+    healthy siblings, while this one is bounded and confined to the strategy
+    that was already failing, i.e. no worse than pre-phase.
+
+    `now_ms` is injected throughout so these arms measure the CLAMP and not the
+    date the suite happens to run on.
+    """
+
+    NOW_MS = 1_800_000_000_000
+
+    @staticmethod
+    def _iso(ms: int) -> str:
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+
+    def test_a_hold_older_than_the_cap_does_not_drive_the_window_past_it(
+        self, caplog
+    ):
+        cap_ms = cron_mod.MAX_MARKER_LOOKBACK_MS
+        # A hold three times older than the cap — the shape of a strategy that
+        # has been failing since long before anyone noticed.
+        held_ms = self.NOW_MS - 3 * cap_ms
+
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            floor = cron_mod._resume_floor_ms(
+                ["strat-A", "strat-B"],
+                {
+                    "strat-A": self._iso(self.NOW_MS - 60_000),
+                    "strat-B": self._iso(held_ms),
+                },
+                self._iso(self.NOW_MS - 60_000),
+                now_ms=self.NOW_MS,
+            )
+
+        assert floor is not None, (
+            "the clamp must return a BOUNDED floor, never None — None means "
+            "'start of history', which is the largest possible window and the "
+            "exact opposite of bounding it"
+        )
+        assert floor == self.NOW_MS - cap_ms, (
+            "a resume point older than the cap must be clamped TO the cap. Got "
+            f"{floor!r}, expected {self.NOW_MS - cap_ms!r}"
+        )
+        assert self.NOW_MS - floor <= cap_ms, (
+            "THE CONSEQUENCE: the window the venue is asked for is bounded, so "
+            "it cannot keep growing into KEY_SYNC_TIMEOUT and take every other "
+            f"strategy on this key down with it. Window was {self.NOW_MS - floor}ms"
+        )
+
+        clamp_lines = [
+            r.message for r in caplog.records if "CLAMPED" in r.message
+        ]
+        assert len(clamp_lines) == 1, (
+            "the clamp must announce itself exactly once — it is a silent data "
+            "loss otherwise. Got " + repr([r.message for r in caplog.records])
+        )
+        assert "strat-B" in clamp_lines[0], (
+            "and it must NAME the holding strategy; the operator's next "
+            f"question is always 'by whom'. Got {clamp_lines[0]!r}"
+        )
+        assert "strat-A" not in clamp_lines[0], (
+            "it must name the strategy that PRODUCED the floor, not the "
+            f"healthy sibling. Got {clamp_lines[0]!r}"
+        )
+
+    def test_a_hold_inside_the_cap_is_left_exactly_where_it_is(self, caplog):
+        """The non-vacuity arm. Without it, an implementation that clamped
+        UNCONDITIONALLY would satisfy the arm above while silently discarding
+        every ordinary hold — which is the entire mechanism this phase exists
+        to build, deleted."""
+        cap_ms = cron_mod.MAX_MARKER_LOOKBACK_MS
+        held_ms = self.NOW_MS - (cap_ms // 2)
+
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            floor = cron_mod._resume_floor_ms(
+                ["strat-B"],
+                {"strat-B": self._iso(held_ms)},
+                self._iso(self.NOW_MS - 60_000),
+                now_ms=self.NOW_MS,
+            )
+
+        assert floor == held_ms, (
+            "a hold WELL INSIDE the cap must be honoured exactly — clamping it "
+            "would throw away the outstanding window the marker exists to "
+            f"preserve. Got {floor!r}, expected {held_ms!r}"
+        )
+        assert not [r for r in caplog.records if "CLAMPED" in r.message], (
+            "and nothing was clamped, so the warning must stay silent; an "
+            "unconditional emit would make the positive arm vacuous"
+        )
+
+    def test_a_null_marker_still_means_all_history_and_is_never_clamped(self):
+        """⛔ THE CONTRACT EXCEPTION, PINNED.
+
+        A marker PRESENT WITH A NULL means "this strategy has no resume point
+        at all, re-fetch everything" — one of the three states the read path is
+        built on, and the correct reading for a brand-new key. Clamping it
+        would quietly convert "get everything" into "get the last N days" and
+        lose the older history it was explicitly asking for, breaking the
+        three-state contract through the back door of a bounds check.
+        """
+        floor = cron_mod._resume_floor_ms(
+            ["strat-B"],
+            {"strat-B": None},
+            self._iso(self.NOW_MS - 60_000),
+            now_ms=self.NOW_MS,
+        )
+        assert floor is None, (
+            "a present-with-null marker means START OF HISTORY and the cap "
+            f"must not touch it. Got {floor!r}"
         )
 
 
@@ -3646,7 +3801,7 @@ class TestSyncCursorPerStrategyResume:
     # A fixed instant with an explicit UTC offset. Everything is measured
     # relative to this: tick 1 starts from it, the failed strategy is held at
     # it, and tick 2 must come back to it.
-    T0 = "2026-01-15T00:00:00+00:00"
+    T0 = _ONE_TICK_AGO
 
     @staticmethod
     def _cursor_map(upsert_payloads: list[Any]) -> dict[str, Any]:
@@ -4360,7 +4515,7 @@ class TestCronSyncDeliversStrategyCursorsToFanOut:
     this test exists to close.
     """
 
-    T0 = "2026-01-15T00:00:00+00:00"
+    T0 = _ONE_TICK_AGO
 
     @pytest.mark.asyncio
     async def test_marker_mapping_reaches_the_fan_out_and_the_write_is_issued(self):
