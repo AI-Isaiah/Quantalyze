@@ -1,5 +1,116 @@
 # Changelog
 
+## [0.80.0.0] - 2026-09-19 — FANOUTSIBLINGS: the sync cursor stops lying, a refused widening, and a stalled key that no longer reports itself healthy
+
+Phase 164.5.1.2 was a **decide-with-evidence** phase, not a feature phase: two of its three success
+criteria are recorded verdicts, and one of those verdicts is a refusal. It carries **no migration and
+no schema change**, so merging it does not start `apply-test` and does not engage the Production
+human-reviewer gate — but it **does** change PROD runtime behaviour in `analytics-service`, and it
+adds a new key to the `cron_sync` response body.
+
+### Fixed
+- **The trade-sync cursor no longer advances over trades it never stored.** In
+  `analytics-service/routers/cron.py::_sync_single_key` the gate was
+  `any_trades_to_store = bool(trades) and bool(strategy_ids)`, which also fired when `strategy_ids`
+  was empty — no strategy on the key was currently eligible — even though real trades HAD been
+  fetched. The per-strategy RPC loop is itself gated on `if trades and strategy_ids:`, so it never
+  ran, `synced_count` was structurally 0, and the cursor advanced past those trades. The next tick
+  resumed after them and **skipped that window permanently**. Now `(not trades) or synced_count > 0`.
+- **A stalled key no longer reports itself as healthy.** A tick that fetched real trades, stored
+  none, and correctly held its cursor was classified `ok`, counted in the `synced` bucket, and logged
+  at INFO — indistinguishable from a genuinely idle tick, in the very summary an alarm reads. It now
+  has its own terminal status `held` with its own counter outside `synced`, membership in
+  `_NON_OK_STATUSES` so it survives `RESULTS_CAP` triage, and a WARNING-level per-key line.
+- **A contract-drift fallback stopped fabricating a success count, and stopped hiding the drift.**
+  When `sync_trades` returned a non-`int`, the code assumed `stored = len(trades)` — a count invented
+  from the fetch size — and that value decided the cursor, so any shape drift advanced `last_sync_at`
+  on evidence that nothing was stored. It now counts 0. It also **records the drift in the result
+  envelope** (`strategy_errors`), which is the only signal the status classifier reads: previously a
+  genuine SQL-contract violation was indistinguishable from `sync_trades` legitimately returning 0, so
+  it was filed under the benign `held` bucket on a single-strategy key and was **completely invisible
+  on a fan-out key** — `status: ok`, cursor advanced, the drifted strategy's window silently gone.
+  Single-strategy drift is now `error`; fan-out drift is `partial` and names the drifted strategy.
+  ⚠️ **What this does NOT do, stated plainly because the first attempt claimed otherwise:** "the cursor
+  holds and the next tick retries" is true only when EVERY strategy on the key drifts. `synced_count`
+  sums across the whole key, so a sibling's success still advances the shared cursor past the drifted
+  strategy's window. One per-key cursor cannot express "advance for A, hold for B" — that is the
+  root cause, and it is Phase 164.5.1.4 SYNCCURSOR's job, not this one's.
+- **A false concurrency claim in the ROADMAP.** The poll-positions fan-out's comment asserts the
+  multi-worker race is handled by `pg_try_advisory_lock('daily_position_polling')`. That lock is
+  never taken anywhere in `analytics-service/`; the real guard is `_daily_enqueue_already_ran_today`
+  plus `enqueue_compute_job`'s idempotent dedup. The ROADMAP's copy is corrected; the SQL comment
+  itself is a recorded DROP with an opportunistic trigger, not silence.
+
+### Why
+- **The poll-positions widening was REFUSED as inert, on production evidence.** The obvious "fix"
+  was to widen `enqueue_poll_positions_for_all_strategies`'s lifecycle conjunct. A production read
+  shows the five `pending_review` strategies **already pass** that conjunct and have still never
+  been polled — so the lifecycle set is not the binding constraint, and widening it alone would
+  change nothing observable while looking like a fix. The predicate is deliberately **unchanged**.
+  The binding constraint is one level upstream, and it earned its own phase rather than a guess.
+- **The two halves of the sync-constant question have different causes and were closed separately.**
+  The widening verdict and the cursor-advance defect never share a closure paragraph: the cursor was
+  wrong whether or not the constant is ever widened.
+
+### Added
+- `held` as a terminal `SyncStatus`, with the summary counters now **derived** from a
+  `SYNC_STATUS_SUMMARY_KEYS` registry instead of eight hand-written `sum(...)` lines, so a new status
+  cannot be added without a counter.
+- **Phase 164.5.1.3 SYNCADMIT** — the widening the production read actually earned, one level
+  upstream at the trade-sync constant.
+- **Phase 164.5.1.4 SYNCCURSOR** — booked from this phase's own review round: the resume cursor is
+  per-KEY while stores are per-STRATEGY, so a partial fan-out advances past the failed strategies'
+  window with nothing to re-drive it. Pre-existing and deliberate, but it goes LIVE on the five
+  private keys the moment SYNCADMIT widens the constant.
+
+### Tests
+- A calibrated RED→GREEN pair for the cursor defect
+  (`test_D03_empty_strategy_ids_with_trades_does_not_advance_cursor`), proven to fail when the gate
+  is reverted and to be the only member of its class that does.
+- That assertion was itself **vacuous-capable** — it quantified over a payload list that is empty on
+  the green path — and was hardened to assert exactly-one-payload before checking its contents.
+- `TestSyncStatusSummaryBucketCompleteness`, which bites in both directions: a status with no
+  registry entry fails, and a registered-but-uncounted status fails.
+- `TestSyncTradesShapeDriftHoldsTheCursor` pins the contract-drift fallback on a single-strategy key,
+  and `TestSyncTradesShapeDriftOnFanOutKeyIsReported` pins it on a TWO-strategy key — the topology
+  whose absence let the defect above survive the first fix. It deliberately asserts that the cursor
+  **still advances** there, pinning the residual loss as known rather than letting it read as closed.
+
+### Root cause
+- **A plan verify block was passing vacuously on BSD awk.** `\Q…\E` is unsupported there and fails
+  open rather than erroring, so the check reported success while measuring nothing. Replaced with a
+  portable form in both plans that used it.
+
+### Security
+- An absolute home path and the local username were redacted from a plan SUMMARY before it could
+  reach the public repo. Caught because `check-planning-hygiene` prints its count line and its OK
+  line separately — reading only the last line would have missed it.
+
+### Notes
+- Two residuals are booked and deliberately NOT fixed here:
+  `SYNC-HELD-CURSOR-REFETCH-COST-01` (a held cursor re-fetches a monotonically growing window — the
+  correct, lossless trade, but a real cost until SYNCADMIT lands) and
+  `SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01` (owner: Phase 164.5.1.4).
+- `FANOUT-COHORT-SIBLING-COMPOSITE-01` named this phase as its owner and was descoped before any
+  plan was written. It now carries an explicit standing decision — trigger-gated, **no owner phase
+  by design** — rather than a dangling pointer at a finished phase.
+- **The production read is recorded as a session artifact, not as a claim.** The database marker was
+  read FIRST and recorded before either statement (`current_database()` is identical on both projects
+  and proves nothing), the statements were read-only and returned counts only — never a strategy id,
+  never a key id — and what each possible answer would imply was **pre-registered before the read**,
+  so the result could not be rationalised afterwards. It also carries its own limit: the query cannot
+  distinguish a currently-shared key from a sync predating the status transition, because no column
+  records when that transition happened.
+- **The phase ships a falsifiability guard over its own artifacts.** Because its headline outcome is
+  a refusal, a later sentence claiming the poll-positions predicate had been widened or fixed would
+  quietly contradict it. A polarity-aware scan over every artifact the phase produced returns zero
+  unnegated such claims, and the guard was calibrated (0 → 1 → 2 → 0 against injected mutants) so a
+  clean result means it looked rather than that it could not see.
+- Planning artifacts for the phase — the discussion context that found the roadmap's stated
+  dependency does not bind the poll verdict, the research that established the two exclusions are
+  symmetric, the pattern map, and the three plans — are tracked under
+  `.planning/phases/164.5.1.2-.../`.
+
 ## [0.79.2.0] - 2026-09-19 — GATERESIDUE: one redaction definition, a derived channel allowlist, and a bootstrap guard against inherited live-DB credentials
 
 Phase 164.8.4 closes the deferral set Phase 164.8.2's four review rounds produced. Everything here
