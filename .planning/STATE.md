@@ -6,16 +6,16 @@ current_phase: 164.8.4
 current_phase_name: GATERESIDUE
 status: "Phase 164.8.4 shipped — PR #825, merged 69ff882e, v0.79.2.0"
 stopped_at: Completed 164.1.1.1-02-PLAN.md
-last_updated: "2026-09-19T11:28:14.015Z"
+last_updated: "2026-09-19T13:29:41.270Z"
 last_activity: 2026-09-19
 last_activity_desc: Phase 164.8.4 GATERESIDUE shipped as PR #825 (merged 69ff882e, v0.79.2.0) — the psql-stderr redaction becomes ONE shared definition with 0 inline copies repo-wide, the staged diagnostic-channel allowlist is DERIVED rather than hand-typed, the ledger drift check stops claiming a withhold it was not performing, and a fail-loud guard against inherited live-DB credentials lands in the vitest bootstrap. Root cause fixed: `sed -i -E -f` is BSD-incompatible, so CI was green over a locally broken suite. Verified 4/4, SECURED 24/24 (threats_open 0), two review rounds ending with zero actionable findings. Two residuals booked in TODOS.md and deliberately not fixed.
-state_head: 69ff882eb1fbd38251a6db51716874e4e795a94f
+state_head: ed1b7d92caf8435051aef95686491fccae208a65
 progress:
-  total_phases: 43
-  completed_phases: 27
-  total_plans: 208
-  completed_plans: 195
-  percent: 63
+  total_phases: 45
+  completed_phases: 28
+  total_plans: 211
+  completed_plans: 203
+  percent: 62
 ---
 
 ## ⭐ STATE lineage
@@ -949,7 +949,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [██████░░░░] 63%
+Progress: [██████░░░░] 62%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1261,6 +1261,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.1.1 inserted: PROBERCADENCE inserted after 164.1: the prober declares hourly and delivers 27% (75/273 over 273.4h), median gap 3.28h, max 7.13h — worse than the 6h window its own workflow comment rejects by name. Owner of TODOS [PROBER-CADENCE-UNDELIVERED-01].
 - Phase 164.4.2 inserted after Phase 164.4: Owner phase for TODOS [REDUNDER-SUBSET-SPLIT], unowned since 2026-09-05. sql-mutation timeout-minutes has taken its ONE allowed raise; 20 is a declared CEILING and the next escalation is a subset split, never a third value. Inserted 2026-09-18 while Phase 164.1.1 was mid-execution — the STATE current-phase pointer was deliberately NOT repointed.
 - Phase 164.1.1.1 inserted after Phase 164.1.1: LANEONLYGATES — sql-tests runs a pg-lane-only gate against shared TEST and is permanently red, blocking the analytics-service deploy (URGENT)
+- Phase 164.5.1.4 inserted after Phase 164.5.1: SYNCCURSOR - per-KEY cursor vs per-STRATEGY stores strands failed strategies' window (URGENT)
 
 ### Decisions
 

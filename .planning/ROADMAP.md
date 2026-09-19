@@ -1894,6 +1894,17 @@ Plans:
 - [x] 164.5.1-08-PLAN.md — wave 3 · criteria 1 and 4: repair P3-C (`completed_at` → `updated_at`, both copies plus the two later diagnostics — it aborts 42703 today), then write the `docs/runbooks/match-engine.md` go-live section with the D1/D2/D3 transcription, D2's window verbatim, and a DEFER branch
 - [x] 164.5.1-09-PLAN.md — wave 4 · **NOT autonomous** · criteria 2, 5 and 7's read-back: the D4 three-reviewer `checkpoint:decision`, the founder's live PROD session recording every OUTPUT, then ONE manifest re-capture and the backlog dispositions
 
+### Phase 164.5.1.4: SYNCCURSOR — the sync cursor is per-KEY while stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies trade window (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 164.5.1
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.5.1.4 to break down)
+
 ### Phase 164.5.1.3: SYNCADMIT — admit the owner-only status to the trade-sync constant, or prove it must not be: 5 of 5 private keys are never synced and their trades are never stored (INSERTED)
 
 **Goal:** Decide, on evidence, whether `ALLOWED_STRATEGY_STATUSES` must admit the owner-only (`private`) status — and if so, ship that widening with its blast radius traced. ⭐ **Phase 164.5.1.2 already did the measuring and REFUSED to ship the change inside its own budget**; this phase exists because admitting `private` alters production sync behaviour for five live keys, which is its own work and deserves its own reviewers.
@@ -1913,10 +1924,12 @@ Plans:
 ⚠️ **A limit recorded BEFORE the read and now load-bearing:** the read is forward-looking and cannot distinguish a currently-shared key from a sync predating the transition to `private`. The `ever synced = 2` in the 2026-09-17 table therefore has a pre-transition sync as its ONLY remaining explanation — consistent, but NOT measured, and unmeasurable without a `status_changed_at` column.
 
 ⛔ **WHAT THIS PHASE MUST NOT ASSUME — inherited from 164.5.1.2 and NOT to be re-derived:**
+
 - ⛔ **Widening this constant does NOT start polling anything.** A `private` strategy is excluded from `enqueue_poll_positions_for_all_strategies` by its OWN lifecycle conjunct AND by an `EXISTS` keyed on its own id. Phase 164.5.1.2 REFUSED that poll widening as inert and that refusal stands. Anyone proposing this phase will fix the missing position snapshots has misread it.
 - ✅ **The `last_sync_at` cursor defect is already CLOSED** (Phase 164.5.1.2, plan 02). It was data LOSS, not merely a stale timestamp: trades were fetched, no strategy was eligible, and the cursor advanced past them so the next tick skipped that window permanently. It was live on all five of these keys. ⛔ Do not re-fix it; DO check that admitting `private` interacts correctly with the shipped gate.
 
 **Success Criteria:**
+
 1. A recorded verdict: widen, or prove it must not be widened. ⭐ "Must not" is a valid outcome and is recorded as explicitly as a change.
 2. If widened: the blast radius is TRACED before the change ships — new `/cron-sync` RPC load, newly stored trades for five keys, `enqueue_compute_job` follow-ons, and the interaction with the shipped `should_advance_cursor` gate.
 3. A calibrated gate proving the new behaviour: neuter → observe RED → restore byte-identically verified with `cmp` → record the OBSERVED failure text. ⛔ Anti-vacuity BLOCKS here — this is user-facing and data-integrity.
