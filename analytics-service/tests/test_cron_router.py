@@ -3644,6 +3644,200 @@ class TestUnclearableHoldCannotWedgeTheWholeKey:
         )
 
 
+class TestKeyCursorFallbackIsNeverClamped:
+    """164.5.1.4 ROUND-2 BLOCKER: `MAX_MARKER_LOOKBACK_MS` may bound a HELD
+    MARKER and nothing else.
+
+    ⛔ THE DEFECT THIS PINS, AND IT SHIPPED. The clamp was written after the
+    loop in `_resume_floor_ms`, so it clamped whatever the loop produced —
+    including the value `_strategy_resume_point` falls back to for a strategy
+    ABSENT from the marker mapping, which is the KEY's own cursor. MEASURED
+    against the shipped function with a fixed clock, a key cursor 200 days old
+    and `strategy_cursors={}` — the exact state the migration lands in:
+
+      * eligible strategies present  -> CLAMPED to the cap, and the warning
+        named an innocent strategy as "holding" a resume point it never held
+      * no eligible strategies       -> returned unclamped
+
+    Two branches written to be the SAME pre-phase behaviour disagreed, and the
+    clamped one is the common one. That falsifies the migration's own "inert
+    the moment it lands" claim and both halves of the constant's derivation:
+    the loss was not confined to the strategy that was already failing, and the
+    capped worst case was not a strict subset of pre-phase — pre-phase this
+    path had NO cap at all.
+
+    ⭐ REACHABLE IN PRODUCTION WITH NOTHING FAILING ANYWHERE.
+    `reconnect_allocator_api_key` deliberately preserves `last_sync_at` across a
+    disconnect/reconnect, and the credential-failure `is_active=False` path
+    preserves it too. A key dormant for longer than the cap and then reconnected
+    used to catch up in full; under the unconditional clamp it silently dropped
+    everything older than the cap, on a healthy key, with no failing strategy in
+    sight.
+
+    ⛔ WHY THIS CLASS CARRIES ITS OWN EXPLICITLY-OLD ANCHOR, AND THE DECISION
+    BEHIND IT. `TestSyncCursorPerStrategyResume` already carried the
+    equivalent property — its INERT ON ARRIVAL assertion, "with no marker rows
+    `since_ms` is byte-identical to `parse_since_ms(key_cursor)`" — and that
+    assertion was TRUE RED against the shipped clamp:
+
+        AssertionError: INERT ON ARRIVAL: with no marker rows yet every
+        strategy is ABSENT from the mapping and must fall back to the key
+        cursor (since_ms=<t0>). Got since_ms=<t0 + ~218 days>.
+
+    It was read as a stale literal reporting nothing and silenced by moving the
+    anchor to `now - 15 min`. It was not stale: it was this defect, correctly
+    reported. Past that anchor move the property is only exercised for key
+    cursors YOUNGER than the cap, where the clamp cannot bite, so it stopped
+    being pinned at all.
+
+    The anchor move STANDS for that class — `T0` there means "the resume point
+    the previous tick left behind", which is fifteen minutes old in production,
+    and a two-tick loop whose markers are eight months old measures a state
+    that cannot occur. What was wrong was relying on a single `now`-relative
+    anchor to also pin an AGE-dependent branch, which it can never do. So the
+    age-dependent property gets its own explicitly-old, clock-injected anchor
+    here, where the age IS the subject, and neither gate can silence the other.
+    """
+
+    NOW_MS = 1_800_000_000_000
+    # Deliberately, explicitly OLD: far past the cap, and not `now`-relative.
+    # Nothing about this number may drift with the date the suite is run on.
+    DORMANT_KEY_CURSOR_MS = NOW_MS - 200 * 86_400_000
+
+    @staticmethod
+    def _iso(ms: int) -> str:
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+
+    def test_a_key_cursor_older_than_the_cap_is_returned_unclamped(self, caplog):
+        """The INERT ON ARRIVAL property, at an age where the clamp can bite."""
+        key_cursor = self._iso(self.DORMANT_KEY_CURSOR_MS)
+        expected = cron_mod.parse_since_ms(key_cursor)
+        assert expected is not None, (
+            "the key cursor must parse — otherwise the expectation below is "
+            "None and the defect this arm exists to kill would pass"
+        )
+        assert self.NOW_MS - expected > cron_mod.MAX_MARKER_LOOKBACK_MS, (
+            "the anchor must be OLDER than the cap or this arm measures "
+            "nothing: the clamp only bites past the cap"
+        )
+
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            floor = cron_mod._resume_floor_ms(
+                ["strat-A", "strat-B"],
+                {},  # the state the migration lands in: no marker rows at all
+                key_cursor,
+                now_ms=self.NOW_MS,
+            )
+
+        assert floor == expected, (
+            "INERT ON ARRIVAL: with NO marker rows every strategy is ABSENT "
+            "from the mapping and falls back to the KEY cursor, which the cap "
+            "must not touch — pre-phase this path had no cap at all, and a key "
+            "dormant past the cap (disconnect/reconnect and the "
+            "credential-failure deactivation both PRESERVE last_sync_at) used "
+            f"to catch up in full. Got {floor!r}, expected {expected!r}"
+        )
+        clamp_lines = [r.message for r in caplog.records if "CLAMPED" in r.message]
+        assert not clamp_lines, (
+            "and nothing may announce a clamp here: the warning names a "
+            "strategy as HOLDING the floor, and no strategy holds this one. "
+            f"Got {clamp_lines!r}"
+        )
+
+    def test_both_no_marker_branches_return_the_same_window(self):
+        """⛔ The two branches are the SAME pre-phase behaviour and must agree.
+
+        `_resume_floor_ms` parses the key cursor twice over: once in the
+        no-eligible-strategies short-circuit, once through
+        `_strategy_resume_point`'s absent-strategy fallback. The shipped clamp
+        applied to the second and not the first, so the same key cursor
+        produced two different windows depending on whether the key happened to
+        have an eligible strategy. This arm makes that divergence impossible to
+        reintroduce without a named failure.
+        """
+        key_cursor = self._iso(self.DORMANT_KEY_CURSOR_MS)
+
+        no_eligible = cron_mod._resume_floor_ms(
+            [], {}, key_cursor, now_ms=self.NOW_MS
+        )
+        eligible_but_unmarked = cron_mod._resume_floor_ms(
+            ["strat-A"], {}, key_cursor, now_ms=self.NOW_MS
+        )
+
+        assert no_eligible == eligible_but_unmarked, (
+            "with no marker rows, having an eligible strategy may not change "
+            "the window by so much as a millisecond — both readings are the "
+            f"key cursor. Got {eligible_but_unmarked!r} with an eligible "
+            f"strategy vs {no_eligible!r} without"
+        )
+
+    def test_a_held_marker_past_the_cap_is_still_clamped(self):
+        """The non-vacuity counterpart: the fix above narrows the clamp, it
+        does not delete it. One strategy ABSENT (key-cursor fallback, dormant)
+        and one PRESENT with an ancient marker — the marker is what produced
+        the floor, so the clamp must still bite."""
+        key_cursor = self._iso(self.NOW_MS - 60_000)
+        held_ms = self.NOW_MS - 3 * cron_mod.MAX_MARKER_LOOKBACK_MS
+
+        floor = cron_mod._resume_floor_ms(
+            ["strat-A", "strat-B"],
+            {"strat-B": self._iso(held_ms)},
+            key_cursor,
+            now_ms=self.NOW_MS,
+        )
+
+        assert floor == self.NOW_MS - cron_mod.MAX_MARKER_LOOKBACK_MS, (
+            "a MARKER-derived floor past the cap must still be clamped — "
+            "narrowing the clamp to marker provenance must not turn it off. "
+            f"Got {floor!r}"
+        )
+
+    def test_the_cap_is_thirty_days_and_that_magnitude_is_pinned(self):
+        """⛔ THE DIAL ITSELF, IN ABSOLUTE DAYS.
+
+        MEASURED: rebinding `MAX_MARKER_LOOKBACK_MS` from 30 days to ONE HOUR
+        left this file fully green — nothing reddened until the value fell
+        below about a minute. Every other arm expresses its expectation in
+        terms of the constant, so all of them follow the dial wherever it goes.
+        The dial decides how much of a held strategy's history is PERMANENTLY
+        ABANDONED (the constant's own derivation says so: a loss, not a
+        deferral), so a 720x cut of it may not pass unremarked.
+
+        Stated in days rather than as a multiple of the constant, deliberately:
+        that is the only way an arm can disagree with the constant at all.
+        """
+        assert cron_mod.MAX_MARKER_LOOKBACK_MS == 30 * 86_400_000, (
+            "the cap is THIRTY DAYS. Changing it changes how much history a "
+            "held strategy loses forever; the constant's derivation picks 30 "
+            "to sit far above any plausible venue or database outage (hours, "
+            "not weeks). If this is being changed deliberately, change the "
+            f"derivation with it. Got {cron_mod.MAX_MARKER_LOOKBACK_MS!r}ms"
+        )
+
+        # And the boundary it implies, measured in days rather than in cap
+        # multiples: a 29-day hold survives, a 31-day hold does not.
+        honoured_ms = self.NOW_MS - 29 * 86_400_000
+        assert cron_mod._resume_floor_ms(
+            ["strat-B"],
+            {"strat-B": self._iso(honoured_ms)},
+            self._iso(self.NOW_MS - 60_000),
+            now_ms=self.NOW_MS,
+        ) == honoured_ms, (
+            "a 29-day hold is INSIDE a 30-day cap and must be honoured "
+            "exactly; if this fails the cap has been cut below 29 days"
+        )
+        abandoned_ms = self.NOW_MS - 31 * 86_400_000
+        assert cron_mod._resume_floor_ms(
+            ["strat-B"],
+            {"strat-B": self._iso(abandoned_ms)},
+            self._iso(self.NOW_MS - 60_000),
+            now_ms=self.NOW_MS,
+        ) != abandoned_ms, (
+            "a 31-day hold is OUTSIDE a 30-day cap and must be clamped; if "
+            "this fails the cap has been raised past 31 days"
+        )
+
+
 class _ApiErrorLike(Exception):
     """Stand-in for supabase-py's `APIError`.
 
