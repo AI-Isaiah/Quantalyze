@@ -541,9 +541,11 @@ async def _sync_single_key(
                 )
             else:
                 logger.warning(
-                    "cron_sync: key %s held last_sync_at unchanged — %d trade(s) "
-                    "fetched but 0 stored (all per-strategy RPCs failed); next "
-                    "tick will retry the same window",
+                    "cron_sync: key %s held last_sync_at unchanged — %d "
+                    "trade(s) fetched but 0 stored across every eligible "
+                    "strategy on this key; each per-strategy RPC either "
+                    "raised, returned an unreadable shape, or legitimately "
+                    "stored 0 rows. Next tick will retry the same window",
                     key_id,
                     len(trades),
                 )
