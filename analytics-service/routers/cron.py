@@ -426,19 +426,33 @@ async def _sync_single_key(
                 if isinstance(rpc_result.data, int):
                     stored = rpc_result.data
                 else:
-                    # Contract drift: sync_trades is declared to return
-                    # the integer row count. A dict / list / None here
-                    # means the SQL function changed shape; fall back to
-                    # `len(trades)` but log loudly so the drift surfaces.
+                    # Contract drift: sync_trades is declared to return the
+                    # integer row count. A dict / list / None here means the
+                    # SQL function changed shape, so we have NO evidence about
+                    # what landed.
+                    #
+                    # 2026-09-19: this fell back to `stored = len(trades)`,
+                    # i.e. it FABRICATED a success count from the fetch size.
+                    # That number flows into `synced_count`, so any shape drift
+                    # made `synced_count > 0` unconditionally and advanced
+                    # `last_sync_at` on evidence that nothing was stored —
+                    # reintroducing the exact C-0198 data-loss class through a
+                    # side door. Falling back to 0 is the safe direction: the
+                    # cursor HOLDS and the next tick retries the same window.
+                    # Replay is safe because sync_trades does a
+                    # payload-window-scoped DELETE of non-fill rows before
+                    # re-INSERTing, so refetching a window does not duplicate.
+                    # The loud logger.error is unchanged — the drift must still
+                    # surface; only the assumed count changed.
                     logger.error(
                         "cron_sync: sync_trades returned unexpected shape "
-                        "for key %s strategy %s: %r — assuming %d stored",
+                        "for key %s strategy %s: %r — counting 0 stored so "
+                        "the cursor holds and the next tick retries",
                         key_id,
                         sid,
                         rpc_result.data,
-                        len(trades),
                     )
-                    stored = len(trades)
+                    stored = 0
                 per_strategy_stored[sid] = stored
             # `trades_stored` reflects the primary strategy for back-compat;
             # `per_strategy_stored` carries the per-strategy breakdown.
