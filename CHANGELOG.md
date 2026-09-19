@@ -33,6 +33,30 @@
   operator debugging a sentinel rejection or a retention abort sees less context. Diagnostics, not
   data integrity.
 
+### Removed
+- ⭐ **Phases 164.11 DEPLOYGATE and 164.10 BODYDRIFT removed from the roadmap via `/gsd-phase --remove`,
+  not merely narrated as cancelled.** Prose saying CANCELLED is invisible to the tooling: GSD decides
+  completion by `isPhaseComplete` reading `VERIFICATION.md` status == passed, so a cancelled phase
+  left in the roadmap with no VERIFICATION counts as incomplete FOREVER and blocks milestone closure —
+  the "a milestone could never close" defect this repo already documents.
+- ⛔ **The reasoning was moved BEFORE removal, not lost with the entries.** `phase.remove` deletes the
+  whole section (measured in a throwaway worktree first: 61 ROADMAP lines, six of them the Shape B and
+  census rationale). 164.11's reasoning now lives in `TODOS.md` as `[164.11-DEPLOYGATE-CANCELLED]`;
+  164.10's was already in `[DRIFT-06]` and the allowlist header, neither of which `phase.remove` touches.
+- ⚠️ **Verified in a throwaway git worktree before running for real: NO renumbering.**
+  `renamed_directories: []`, `renamed_files: []`, and phases 165–168 untouched. That was the live risk —
+  this repo has ~20 cross-references to phase numbers in TODOS, CHANGELOG, workflow comments and
+  VERIFICATION files, and a silent renumber would have broken every one.
+
+### Changed
+- `progress:` recomputed by the removal: `total_phases` 45 → 43, **`completed_phases` 20 → 27**,
+  percent 44 → 63. ⭐ The 20 was an under-report — the documented side effect where a STATE handler
+  recomputes the block from local disk and cannot see plans the `-pr` filter stripped from `main`.
+- ⚠️ **The STATE.md clobber fired again and was hand-corrected**, exactly as the repo's note predicts:
+  `last_activity_desc` truncated mid-sentence, `Plan: 8 of 8` corrupted to `8 of 6`, and two blank lines
+  injected into a wrapped prose line whose continuation begins with `+`. All three reverted; the
+  legitimate changes (progress block, `state_head`, `last_updated`, progress bar) kept.
+
 ### Tests
 - Allowlist tests 18/18; gate re-run clean (123 functions compared, 3 DRIFT, 0 findings). Row count,
   `snapshotHash`, `candidateHash`, `hunks` and `nargs` are untouched — the list still holds exactly

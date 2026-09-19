@@ -446,66 +446,6 @@ moves. The three residuals accepted rather than closed (`SHARE-RES-R4`, `SHARE-R
 
 **Research note:** the payload-builder seam is the one un-measured integration (extracting the build half of `fetchAndBuildPayload` touches the composite arm AND the single-key basis arm — MEDIUM confidence, wider than it looks). Budget a research pass at plan time; don't discover it. Token-leak channels: Sentry `beforeSend` scrub verified against a REAL captured event, `Referrer-Policy: no-referrer` per-route, generic metadata (link-unfurl dullness accepted explicitly — a private link SHOULD be dull in a chat preview). *(Planning update 2026-08-26: the seam measurement is now done — the composite/basis arms moved to `src/lib/factsheet/` in July, so the extraction in 164-01 is a one-function verbatim move per the founder's final D-06 ruling.)*
 
-### Phase 164.11: DEPLOYGATE — ⛔ CANCELLED 2026-09-19 (founder). NOT executed, NOT deferred, NOT re-homed.
-
-**Status:** CANCELLED. ⛔ **Do not re-plan this from the deployment census alone** — the census is real and
-the conclusion drawn from it was wrong. Read this entry first.
-
-**What it was going to do.** Make an unrelated red check incapable of withholding an analytics deploy,
-and make a withheld deploy loud. Six plans, ~130 KB of CONTEXT/RESEARCH/PATTERNS, eight success criteria.
-
-**The measurement that justified it, which is ACCURATE:** a 200-deployment census (window 2026-07-15 →
-2026-09-18) reads `REMOVED 150 · SKIPPED 46 · FAILED 2 · WAITING 1 · SUCCESS 1` — **46 skips, 23 carrying a
-real `analytics-service` tree change.** Railway waits on the WHOLE check-suite of a commit, so any red or
-INCOMPLETE suite withholds the deploy.
-
-⛔ **WHY THAT MEASUREMENT DOES NOT SUPPORT THE PHASE — two founder-supplied operating facts, 2026-09-19.**
-1. **Railway deploys the LATEST commit, not the skipped one.** Merges land several times a day, so a
-   skipped analytics change is carried to prod by the next green merge. **The skip costs LATENCY, not the
-   change.** ⭐ 46 skips is NOT 46 undelivered changes, and the phase's framing treated it as if it were.
-2. **A red `main` CI is fixed immediately**, bounding the window further.
-   ⇒ The whole defect is worth *minutes to hours of deploy latency*, self-healing, on a repo with no
-   paying clients. A six-plan phase against that is out of proportion.
-
-⭐ **AND THE REAL DEFECT WAS SOMETHING ELSE ENTIRELY, found while cancelling.** Of the last 15
-`analytics-deploy-verify.yml` runs, thirteen finished in under a minute and **two ran 60 and 80 minutes**.
-That workflow is schedule-triggered, so it attaches a check suite to `main` HEAD, and Railway waits on it.
-⛔ **Our own monitoring probe was the largest deploy-hold in the window — bigger than any unrelated red it
-existed to notice.** Its 4800 s convergence loop looped because prod had not converged, while prod could
-not converge because Railway held the deploy behind the suite that loop kept open. A circular wait.
-
-**WHAT SHIPPED INSTEAD — three changes, no phase, v0.79.1.0:**
-- `analytics-deploy-verify.yml`: the convergence loop DELETED, probe is single-pass, job TTL 90 → 10 min.
-  ⭐ The 6-hourly schedule was always the real retry; the inner loop was redundant with the cron wrapping it.
-  ⛔ **But NOT wholly redundant, and two reviewers caught the first draft getting this wrong.** The loop
-  also DEBOUNCED — it suppressed the alert while a deploy was legitimately in flight. Deleting it outright
-  made `stale=true` fire on the first miss, filing a P1 for a deploy that was still building, into an issue
-  nothing ever closes. An IN-FLIGHT DEBOUNCE (main HEAD younger than 900 s ⇒ warn, file nothing) replaces
-  it, implemented as COMMIT AGE rather than a sleep so it holds no check suite open. Both polarities are
-  calibrated (S6/S7), plus `continue-on-error` on the issue filer and `timeout 60` on the fetch, each
-  closing a path where the job could go RED and make Railway SKIP.
-- `analytics-deploy-tree-compare.contract.test.ts`: the two `SCRIPT.replace("+ 4800 ))", …)` arms removed —
-  with the literal gone they were VACUOUS (an absent needle returns the string unchanged, silently).
-- `docs/runbooks/mt5-go-live.md`: the blank gateway provenance line FILLED with the measured digest
-  (registry and live Railway pin agree byte-for-byte); `Stood up:` left as NOT ESTABLISHED, not invented.
-  ⭐ This closes the item routed in from Phase 164.6.2 plan 04's checkpoint (founder, 2026-09-14), so
-  cancelling this phase orphans nothing.
-
-⛔ **THE COUPLING SURVIVES, BY DECISION.** An unrelated red CAN still withhold an analytics deploy. That is
-now an ACCEPTED OPERATING COST, not an open defect. **Reopen only if** merge cadence drops far enough that
-a skipped analytics commit can sit unshipped for a long stretch — fact 1 above is the load-bearing one.
-
-⛔ **Shape B (auto-deploy off + repo-owned `serviceInstanceDeploy(commitSha:)`) is REJECTED, not deferred.**
-It was the only shape compliant with the constraint that Railway cannot narrow its own wait
-(`DeploymentTrigger.checkSuites` is a `Boolean` — introspected, a present type-system fact). It would have
-cost production writes, a second deploy path to own forever, and rested on an UNSETTLED question: whether an
-API-triggered deploy even bypasses `checkSuites`. If it does not, Shape B does not work at all. Do not
-revive it without answering that question first, on a throwaway service.
-
-**Depends on:** — (cancelled)
-**Plans:** 0 — all six plan files deleted unexecuted. Sunk planning cost was not an argument to continue.
-
-
 ### Phase 164.7: APPSETTINGS — every app.* GUC reader moves to a mechanism this platform actually grants, because ALTER DATABASE and ALTER ROLE both return 42501 here (INSERTED)
 
 **Goal:** Every `current_setting('app.…')` reader in `supabase/migrations/**` moves to a configuration mechanism this platform actually grants, and a machine stops the next one being written. ⛔ **MEASURED ON PROD 2026-09-05, not inferred from docs** — all three forms, in the Supabase SQL editor as `postgres`:
@@ -2425,42 +2365,6 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.9 to break down)
 
-### Phase 164.10: BODYDRIFT — ⛔ CLOSED 2026-09-19 (founder decision (c)). The drift is REAL, MEASURED, and DELIBERATELY LEFT.
-
-⭐ **DECISION (c) — LEAVE THE BODIES ALONE. This phase is CLOSED, not deferred and not cancelled for
-lack of interest: the question it existed to answer WAS answered, by measurement, and the answer is
-that no repair is warranted.**
-
-**What was measured (2026-09-19, read-only `pg_get_functiondef`, after the `COMMENT ON DATABASE`
-marker query confirmed PRODUCTION):** all three function bodies are **BEHAVIOURALLY IDENTICAL** to
-what the migration chain renders. Two differ in `RAISE` wording only; the third declares a local
-(`v_row_found`) that is **written and never read**, because the branch uses plpgsql's built-in
-`FOUND`. The cause is settled and has its commit — all three defining migrations arrived in ONE
-backfill, `eaaed7e0` (2026-05-15), which reconstructed functions that already existed in PROD and
-wrote them slightly richer than reality.
-
-**The three options, and why (c):**
-- **(a) re-base the migration text onto what PROD runs** — no PROD write, and it would delete the
-  three allowlist rows permanently. But those files are what the chain RENDERS, and `baseline.sql`
-  plus every drift gate compare against that render, so re-basing moves the subject they measure.
-  Real blast radius. ⭐ **This remains the route if it is ever wanted; the work is the scoping.**
-- **(b) write PROD to match the files** — ⛔ REJECTED. Measured, that migration would lengthen three
-  error strings and add a variable nothing reads. Production risk for zero behavioural gain.
-- **(c) ⭐ CHOSEN — leave it.** Nothing is broken, the guards behave identically, and the three
-  `CONTENT_DRIFT_ALLOWLIST` rows are now accurately described.
-
-⛔ **CONSEQUENCES, so nobody re-opens this by accident:** the three allowlist rows are EXPECTED to
-persist and are NOT pending work — `scripts/baseline-content-drift-check.mjs` says so at the head of
-the list. Do not delete them to green a gate. Do not write PROD to clear them. ⚠️ The one accepted
-cost: PROD's `RAISE` messages are LESS informative than the repo's, so an operator debugging a
-sentinel rejection or a retention abort sees less context — diagnostics, not data integrity.
-
-⚠️ **Re-open only if** these rows start costing attention again (they already cost one investigation,
-which is what prompted the measurement), in which case take (a).
-
-📜 **The original entry follows as lineage. Its "EXECUTABLE drift / Behaviour differs" claim is
-FALSIFIED — see the correction inside it.**
-
 ### 📜 Phase 164.10 (ORIGINAL ENTRY, superseded): BODYDRIFT — PROD runs an EARLIER revision of three function bodies than the migration chain renders (INSERTED)
 
 **Goal:** ⚠️ **RE-SCOPE THIS GOAL BEFORE PLANNING — see the 2026-09-19 measurement below; the premise is narrower than written.** Close `DRIFT-06`. Three PROD function bodies do not match what the migration chain renders, and the shared "the dump is stale" diagnosis was FALSIFIED for them by the 2026-09-07 regeneration: their `snapshotHash` values did not move by a single bit. They are `check_fan_in_ready/1` (5 hunks), `reject_sentinel_writes/0` (9 hunks) and `retention_delete_guard/0` (2 hunks), retained as the last three rows of `CONTENT_DRIFT_ALLOWLIST` in `scripts/baseline-content-drift-check.mjs`.
@@ -2521,8 +2425,6 @@ silence VAC-04 — the detector worked; what it found is benign, which is a diff
 **Plans:** 0 plans
 
 Plans:
-
-- [ ] TBD (run /gsd-plan-phase 164.10 to break down)
 
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
