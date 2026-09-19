@@ -344,9 +344,30 @@ check() {
 
   echo "Repo migrations: ${#repo_names[@]}"
 
+  # ⛔ [164.8.2-LEDGER-STDERR-PUBLIC-LOG] (Phase 164.8.4) — THIS SITE USED TO
+  # LEAVE STDERR BARE. `run_ledger_query missing … > "$missing_file"` redirected
+  # stdout only; a psql connect/auth/DNS failure streamed straight to the
+  # process's own stderr, which this job's log is PUBLIC — while the `|| fail`
+  # message beside it already claimed the output was withheld. It was not. The
+  # fix reuses the `ledger_rows` arm's capture-count-WITHHOLD idiom verbatim
+  # (see its comment block below): stderr captured to a per-run file, its line
+  # count computed with the braced-before-pipe fallback so an unreadable
+  # capture renders `?` rather than a blank, and only the count — never the
+  # content — reaches the failure message.
   local missing_file="${tmp}/missing.txt"
-  run_ledger_query missing "$names_csv" > "$missing_file" \
-    || fail "the ledger presence query failed (output withheld — it can carry connection detail)."
+  local missing_rc=0 missing_err_lines
+  local missing_err="${tmp}/missing.err"
+  set +e
+  run_ledger_query missing "$names_csv" > "$missing_file" 2>"$missing_err"
+  missing_rc=$?
+  set -e
+  # THE BRACES MATTER — see the ledger_rows arm's comment below; `wc … || echo
+  # '?'` must be grouped BEFORE the pipe, or `tr` succeeds on nothing and the
+  # fallback never fires.
+  missing_err_lines="$( { wc -l < "$missing_err" 2>/dev/null || echo '?'; } | tr -d '[:space:]' )"
+  if [ "$missing_rc" -ne 0 ]; then
+    fail "the ledger presence query failed (exited ${missing_rc}; ${missing_err_lines} line(s) of stderr captured and WITHHELD — it can carry connection detail)."
+  fi
 
   # ⛔ SP-M01. This read
   #     missing_count="$(grep -ac … || true)"; missing_count="${missing_count:-0}"
