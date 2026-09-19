@@ -8968,7 +8968,7 @@ re-measured at HEAD on the branch rather than carried over as dated claims.
 
 - [ ] **`[164.8.4-REDACT-NO-POSITIVE-SCAN]` the redaction is never CONFIRMED — `sed` exits 0
       whether or not anything matched, and no positive post-substitution scan exists for the
-      `.err`/`.log`/`.out` channels (booked 2026-09-19; ROUTED to Phase 164.8.7 REDACTCONFIRM).**
+      `.err`/`.log`/`.out` channels (booked 2026-09-19; STAYS IN TODOS by founder decision — see DISPOSITION).**
       **DATA-INTEGRITY, and the highest-value item this phase leaves open.** The published `.sql`
       path has a positive control — `refuse_credential_in_published_sql` asserts the *absence* of a
       credential shape in the file that is about to be published, and refuses. The diagnostic
@@ -8985,10 +8985,33 @@ re-measured at HEAD on the branch rather than carried over as dated claims.
       expression: adding expressions is what produced the current hand-maintained union.
       ⛔ The scan must record a VERDICT, never a specimen — a control that logs what it found
       publishes the very thing it exists to suppress.
-      ⭐ **OWNING PHASE: 164.8.7 REDACTCONFIRM**, inserted 2026-09-19 after the 164.8 parent
-      (164.8.5 PROBERPARSE and 164.8.6 VAULTTICKFIX were already taken, so the next free sibling
-      is .7). The phase entry carries the fix shape and the five success criteria; this entry is
-      the ledger record, not the spec.
+      ⭐ **DISPOSITION (founder, 2026-09-19): NO PHASE. This stays a TODO.** A phase was briefly
+      inserted as 164.8.7 REDACTCONFIRM and then REMOVED on the founder's call, once the blast
+      radius was stated plainly rather than assumed.
+      **THE SIZING THAT CHANGED THE DECISION — record it so nobody re-escalates this from the
+      severity word alone.** No user is affected by this defect: nothing on any end-user path
+      touches it, and there are no paying clients. What a miss actually exposes is what the
+      workflow's own refusal text names — the TEST pooler host, its IP and the DB user in a
+      connect/auth failure. That is RECONNAISSANCE value on SHARED TEST. It is **not** a password,
+      **not** PROD, and nothing breaks for anyone when it happens.
+      It also requires three things to coincide: a connect/auth failure, wording outside all six
+      redaction expressions, and someone hostile fetching the artifact.
+      ⚠️ **This is an explicit, recorded OVERRIDE of the standing rule that a data-integrity
+      deferral must name an owning phase.** The override is the founder's, it is deliberate, and
+      it is written here rather than left silent so the next reader does not "fix" the missing
+      phase reference by re-creating one.
+      **WHEN TO DO IT:** when it is the cheapest thing on the list, not next. The machinery
+      already exists — `refuse_credential_in_published_sql` does this for the four published
+      `.sql` files (class list, rc-bounded scan, MEASURE_FAIL on an unreadable file, prints the
+      class NAME and never the match, exemptions that must resolve or fail). The work is to
+      generalise its hardcoded file list to the derived channels and add calibration arms to the
+      existing harness. Roughly one phase of two plans when it comes up.
+      ⚠️ **What it buys, stated honestly:** a positive scan is still an ENUMERATED class list, not
+      an oracle. It swaps "did we phrase six rewrite patterns to match this error's wording?" for
+      "does anything credential-shaped survive?". Detection classes are broader than rewrite
+      patterns and both would have to miss together, so it is a real improvement — not a
+      guarantee. The honest driver is the ASYMMETRY: same artifact, same 90-day retention, same
+      PUBLIC repo, and `.sql` files get refused over while `.err` files do not.
 
 - [ ] **`[164.8.4-LIVEDB-GUARD-LANE-GAP]` two vitest lanes never load the live-DB inheritance
       guard, so neither would fail loud on inherited credentials (booked 2026-09-19).**

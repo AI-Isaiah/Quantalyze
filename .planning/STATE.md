@@ -6,16 +6,16 @@ current_phase: 164.8.4
 current_phase_name: GATERESIDUE
 status: executing
 stopped_at: Completed 164.1.1.1-02-PLAN.md
-last_updated: "2026-09-19T10:37:16.273Z"
+last_updated: "2026-09-19T07:16:06.606Z"
 last_activity: 2026-09-18
 last_activity_desc: Phases 164.11 DEPLOYGATE and 164.10 BODYDRIFT REMOVED via /gsd-phase --remove after both premises were falsified by measurement — 164.11 cancelled (Railway deploys the LATEST commit, so a skipped analytics change is carried by the next green merge; the skip costs latency, not the change) and 164.10 closed by founder decision (c) (all three PROD function bodies read behaviourally identical; the drift is RAISE wording and one written-but-never-read local, from the eaaed7e0 backfill). Reasoning preserved in TODOS.md, not lost with the entries. Shipped v0.79.1.0 (deploy verifier stops withholding the deploy it verifies) and v0.79.1.1 (allowlist stops asserting a difference that is not there).
-state_head: c8867a550ccc0d8dcefaa28d7200cf16a9f20b22
+state_head: 963042274ef8fe8071999fe501885b778e2651a5
 progress:
-  total_phases: 44
+  total_phases: 43
   completed_phases: 27
   total_plans: 208
-  completed_plans: 200
-  percent: 61
+  completed_plans: 195
+  percent: 63
 ---
 
 ## ⭐ STATE lineage
@@ -949,7 +949,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [██████░░░░] 61%
+Progress: [██████░░░░] 63%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1261,7 +1261,6 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.1.1 inserted: PROBERCADENCE inserted after 164.1: the prober declares hourly and delivers 27% (75/273 over 273.4h), median gap 3.28h, max 7.13h — worse than the 6h window its own workflow comment rejects by name. Owner of TODOS [PROBER-CADENCE-UNDELIVERED-01].
 - Phase 164.4.2 inserted after Phase 164.4: Owner phase for TODOS [REDUNDER-SUBSET-SPLIT], unowned since 2026-09-05. sql-mutation timeout-minutes has taken its ONE allowed raise; 20 is a declared CEILING and the next escalation is a subset split, never a third value. Inserted 2026-09-18 while Phase 164.1.1 was mid-execution — the STATE current-phase pointer was deliberately NOT repointed.
 - Phase 164.1.1.1 inserted after Phase 164.1.1: LANEONLYGATES — sql-tests runs a pg-lane-only gate against shared TEST and is permanently red, blocking the analytics-service deploy (URGENT)
-- Phase 164.8.7 inserted after Phase 164.8: REDACTCONFIRM - positive post-substitution scan for the diagnostic channels (URGENT)
 
 ### Decisions
 
