@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.8.4
 current_phase_name: GATERESIDUE
 status: "Phase 164.5.1.2 shipped — PR #827"
-stopped_at: Completed 164.1.1.1-02-PLAN.md
-last_updated: "2026-09-19T14:37:46.092Z"
+stopped_at: Completed 164.5.1.4-01-PLAN.md
+last_updated: "2026-09-19T18:12:51.639Z"
 last_activity: 2026-09-19
 last_activity_desc: Phase 164.5.1.2 FANOUTSIBLINGS shipped as PR #827 (v0.80.0.0) — a decide-with-evidence phase whose headline outcome is a REFUSAL: the poll-positions widening was refused as inert because production shows the five pending_review strategies already pass that conjunct and have still never been polled, so the predicate is deliberately unchanged. Shipped the D-03 data-integrity fix (the cursor no longer advances over trades it never stored), a new held status so a stalled key stops reporting itself healthy, and a contract-drift fallback that records the drift instead of fabricating a success count. Two review rounds; round 2 caught a HIGH that round 1's own fix introduced. Verified 5/5 at the ship SHA, SECURED 13/13 (threats_open 0). No migration. Booked 164.5.1.3 SYNCADMIT and 164.5.1.4 SYNCCURSOR plus three TODOS entries.
-state_head: f2019054b9ef33dd4ec8a05e6744d583b0b30898
+state_head: 08936f41a091104ccbad5ba7a3ea27b2e3f37b85
 progress:
   total_phases: 45
   completed_phases: 28
-  total_plans: 211
-  completed_plans: 203
+  total_plans: 215
+  completed_plans: 204
   percent: 62
 ---
 
@@ -1157,6 +1157,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.1.1 P04 | ~55 min | 2 tasks | 3 modified |
 | Phase 164.1.1 P05 | ~50 min | 3 tasks | 1 created, 2 modified |
 | Phase 164.1.1.1 P01 | ~50 min | 3 tasks | 1 created, 3 modified |
+| Phase 164.5.1.4 P01 | ~41 min | 2 tasks | 1 created |
 
 ## Accumulated Context
 
@@ -2283,6 +2284,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
+
+**Last Date:** 2026-09-19T18:12:51.639Z
+**Stopped At:** Completed 164.5.1.4-01-PLAN.md (Phase 164.5.1.4 SYNCCURSOR, plan 01 of 4, wave 1 — isolation `worktree`, branch `feat/164.5.1.4-synccursor`). Shipped `supabase/migrations/20260919120000_strategy_sync_cursors.sql`: a per-STRATEGY trade-sync resume table, PK `strategy_id` alone with an `ON DELETE CASCADE` FK to `strategies`, nullable `last_sync_at` (mirroring `api_keys.last_sync_at` in meaning, NOT a payload maximum) and `updated_at`. No api-key column in any form — that FK is mutable and `ON DELETE SET NULL`, so a composite key would strand the row on a re-point; and deliberately not a column on `strategies`, whose `strategies_read` policy is PUBLIC-read. RLS is `USING (false) WITH CHECK (false)` on the shipped `compute_jobs_deny_all` precedent rather than the `allocator_holdings_service_all` explicit-role form, taken on the table's posture (no owner tier, one service-role writer) and on ADR-0003's default RLS bypass; no `REVOKE` was added on top, because that would move the live control from the POLICY to the GRANT and make any later denial assertion vacuous. Self-verify is CATALOG-ONLY with 6 arms (relation, PK column set exactly `{strategy_id}`, cascading FK, RLS enabled, named policy, `polcmd = '*'`), so it cannot pass PROD and refuse shared TEST. PROVEN, not reviewed: the disposable pg-lane cluster applied the file as both `--apply` and `--gate`, so it executed TWICE and exited 0. MEASURED static arms over the comment-stripped file: `row_count_assertions=0 scheduled_job_calls=0 api_key_id_refs=0 raise_exception_arms=6 deny_all_policy=6 cascade=2`. Two recorded decisions in the SUMMARY: the RLS form (both precedents named), and NO dedicated `supabase/tests/*.sql` gate — MEASURED 7 `*_rls.sql` gates, all 7 owner-facing (`auth.uid()`), zero deny-all, and `compute_jobs_deny_all` named by zero of the 76 gate files; the migration's own every-apply self-verify stands in its place. The plan's text said "two" such gates; the measured count is 7 and the SUMMARY carries the correction. `FILES_FLOOR` 47, `ARMS_FLOOR` 402, `WAIVED_CEILING` 0 all UNMOVED; nothing was applied, merged or pushed to any database. `check:planning-hygiene` OK over 6670 tracked files (run with the main checkout's `tsx` by absolute path — `node_modules` is absent in a worktree, so the plain `npm run` would have been a false RED). Next: plans 02/03/04 (read path, criterion-4 axis, closure), then the three migration reviewers before any apply.
+**Resume File:** None
 
 **Last Date:** 2026-09-18T17:12:00.000Z
 **Stopped At:** Completed 164.1.1.1-01-PLAN.md (Phase 164.1.1.1 LANEONLYGATES, plan 01 of 2, wave 1 — sequential on the main working tree, isolation `none`, branch `chore/164.1.1.1-laneonlygates`). `supabase/tests/test_prod_prober_cadence.sql` gained one `-- LANE-ONLY: {json}` header line naming `net._lane_posts`, fixture 34, and `sql-mutation` as the owning job — no executable change. `ci.yml`'s "Run SQL self-tests" step reads that marker pre-execution via `lane_only_marker()`, censuses and prints every exclusion (`::notice::` per file) before the loop, and skips only the `psql` invocation plus the three `"$out"`-derived checks inside the loop for a marked file — the whole static-analysis half (sentinel declaration, roster-vs-count coherence, `n_arms` <= RAISE-EXCEPTION-sites) keeps running for every file including the excluded one, so `SENTINEL_FLOOR` (11), `ARMS_FLOOR` (213) and the per-file derivation table stay byte-unchanged (confirmed via `mutation-runner --parse-only` and a whitespace-blind `git diff -w`). The closing summary now reports executed/found, excluded count, and sentinels verified-this-run vs. declared, plus a fifth standing limit. `ci-anti-skip-gate.contract.test.ts` gained `STUB_INVOCATION_LOG`/`STUB_FAIL_BASENAME` and three new scenarios (a real stub-psql invocation log proving the file is never executed, a defect-injection calibration pair reproducing the shipped `relation "net._lane_posts" does not exist` failure, and a static-accounting scenario) plus one honest rename — 21/21 passing. All three new properties individually neutered, observed RED for the predicted reason, and restored byte-identically (`shasum -a 256` equal pre/post every cycle). Three commits (`1bd4e681` feat, `6c3fce03` test, `346e0850` docs), NOT pushed. Collateral check: the five named suites + contract test show only the pre-existing, box-local `Test timed out in 5000ms` in `lint-sql-gates.test.ts` (carved out by the plan's own `<fails_when>`); a full `npm test` surfaced two further pre-existing, out-of-scope failures (`check-planning-hygiene.test.ts`, `verify-plan-anchors.test.ts`, both against this phase's own PLAN.md content authored before this execution session) logged to `deferred-items.md` rather than fixed. Next: plan 02 — the cross-check pinning the excluded SET as sites (not a count) per threat-register item T-164.1.1.1-01.
