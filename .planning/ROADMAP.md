@@ -2427,13 +2427,49 @@ Plans:
 
 ### Phase 164.10: BODYDRIFT — PROD runs an EARLIER revision of three function bodies than the migration chain renders (INSERTED)
 
-**Goal:** Close `DRIFT-06`. Three PROD function bodies do not match what the migration chain renders, and the shared "the dump is stale" diagnosis was FALSIFIED for them by the 2026-09-07 regeneration: their `snapshotHash` values did not move by a single bit. They are `check_fan_in_ready/1` (5 hunks), `reject_sentinel_writes/0` (9 hunks) and `retention_delete_guard/0` (2 hunks), retained as the last three rows of `CONTENT_DRIFT_ALLOWLIST` in `scripts/baseline-content-drift-check.mjs`.
+**Goal:** ⚠️ **RE-SCOPE THIS GOAL BEFORE PLANNING — see the 2026-09-19 measurement below; the premise is narrower than written.** Close `DRIFT-06`. Three PROD function bodies do not match what the migration chain renders, and the shared "the dump is stale" diagnosis was FALSIFIED for them by the 2026-09-07 regeneration: their `snapshotHash` values did not move by a single bit. They are `check_fan_in_ready/1` (5 hunks), `reject_sentinel_writes/0` (9 hunks) and `retention_delete_guard/0` (2 hunks), retained as the last three rows of `CONTENT_DRIFT_ALLOWLIST` in `scripts/baseline-content-drift-check.mjs`.
 
 ⛔ **INSERTED 2026-09-08 by the same founder instruction as Phase 164.9.** `DRIFT-06` was booked in `TODOS.md` on 2026-09-07 and had no phase, no date and no gate for a full day while the milestone worked on its sibling `DRIFT-04`.
 
-⚠️ **THIS IS NOT COSMETIC, and the three differ in kind — plan them separately:**
+⛔ **MEASURED ON PROD 2026-09-19 — THE CAUSE IS SETTLED AND ONE BULLET BELOW IS WRONG. Read this
+before planning anything.** Queried via the Supabase MCP against the project whose
+`COMMENT ON DATABASE` marker reads `⛔ PRODUCTION — real customer data` (the marker query was run
+first; `current_database()` returned `postgres`, which proves nothing, exactly as CLAUDE.md warns).
+Read-only: `pg_get_functiondef` only, no write of any kind.
 
-- **`check_fan_in_ready` is EXECUTABLE drift.** The chain declares `v_row_found BOOLEAN` and SELECTs `true` into it to distinguish "no parent row" from "a parent row of NULLs". PROD has neither. Behaviour differs.
+⭐ **THE CAUSE IS #2, and `git log` names it.** All THREE defining migrations
+(`20260510180226`, `20260515113853`, `20260515114310`) entered the repository in a SINGLE commit,
+`eaaed7e0` (2026-05-15): *"backfill audit-2026-05-07 schema + rename migrations to timestamp
+convention"*. These files are a RECONSTRUCTION written after the functions already existed in PROD,
+not the source that created them — and the reconstruction was written slightly richer than what it
+described. That is why `retention_delete_guard`, with exactly one defining migration, can still
+differ: PROD is not "behind" it, it was never applied from it.
+
+⛔ **ALL THREE ARE BEHAVIOURALLY IDENTICAL. The heading below said "THIS IS NOT COSMETIC"; measurement
+says it IS cosmetic**, and the correction matters because the repair this phase contemplates WRITES
+PROD FUNCTION BODIES. Applying a migration to production to lengthen three error strings and add a
+variable that is never read is real risk for zero behavioural gain.
+
+| function | measured difference | behavioural? |
+|---|---|---|
+| `check_fan_in_ready` | repo declares `v_row_found`, assigns it, and **never reads it** | **NO** |
+| `reject_sentinel_writes` | `RAISE` wording only; same predicate, same `invalid_parameter_value` | **NO** |
+| `retention_delete_guard` | `RAISE` wording missing one clause; same `COUNT`, `> 100000`, `raise_exception`, `RETURN NULL` | **NO** |
+
+⚠️ **The ONE real cost, stated so it is not lost:** PROD's messages are LESS informative than the
+repo's, so an operator debugging a sentinel rejection or a retention abort sees less context. That is
+DIAGNOSTICS, not data integrity — fix-or-drop under the founder's 2026-09-15 scoping rule, never a
+blocking item.
+
+⭐ **RECOMMENDED RESOLUTION — reconcile in the REPO direction, not the PROD direction.** The files are
+already a reconstruction; making them match what actually ran costs nothing, needs no PROD write, and
+makes the chain truthful. Then record these three as MEASURED-BENIGN in VAC-04's allowlist with this
+measurement beside them. ⛔ Do NOT delete the allowlist rows (the fence below still stands) and do NOT
+silence VAC-04 — the detector worked; what it found is benign, which is a different thing.
+
+📜 **THE ORIGINAL THREE-WAY SPLIT, kept as lineage. The first bullet is FALSIFIED; the other two hold:**
+
+- ⛔ ~~**`check_fan_in_ready` is EXECUTABLE drift** — the chain declares `v_row_found BOOLEAN` and SELECTs `true` into it to distinguish "no parent row" from "a parent row of NULLs". PROD has neither. Behaviour differs.~~ **FALSIFIED 2026-09-19.** The chain does declare it and PROD does not — that half is true. But `v_row_found` is **written and never read**: the very next statement branches on `IF NOT FOUND`, plpgsql's BUILT-IN, not on `v_row_found`, and no later line references it. The "no parent row vs a parent row of NULLs" distinction is made by `FOUND` and by the separate `IF v_parent_ids IS NULL` guard, both of which PROD has, identically. It is a vestigial variable, not a behaviour. ⭐ A dead local is exactly the shape that reads as executable drift from a text diff and is not — which is the argument for measuring bodies rather than diffing them.
 - **`reject_sentinel_writes` is MESSAGE TEXT only.** The guard logic — which sentinel values are refused, on which three tables — is identical on both sides; PROD carries the shorter 2026-05-13 `RAISE` wording.
 - ⭐ **`retention_delete_guard` is the specimen that rules out the innocent explanation.** EXACTLY ONE migration in this repository defines it (`20260515113853_retention_crons_safe`), so there is no later revision for PROD to be behind — yet PROD's `RAISE` omits a clause that single defining migration contains. **A live catalogue cannot lag a migration it is the only definition of.**
 
