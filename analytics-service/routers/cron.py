@@ -258,6 +258,27 @@ _STRATEGY_SYNC_CURSOR_TABLE = "strategy_sync_cursors"
 # this phase does not touch.
 MAX_MARKER_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000
 
+# 164.5.1.4 SYNCCURSOR / WR-06 — how many rows the per-row marker-write fallback
+# will retry individually when the BATCHED upsert fails.
+#
+# The batch is one statement, so one bad row (a 23503 from a strategy deleted
+# mid-tick, say) discards the marker write for EVERY strategy on the key — and
+# any of those with no row yet then falls back to the key cursor and
+# UNDER-fetches. The fallback re-issues the rows one at a time so a single bad
+# row costs only itself.
+#
+# ⚠️ WHY IT IS BOUNDED AT ALL. The fallback runs inside the key's
+# `KEY_SYNC_TIMEOUT` budget, on a path that is ALREADY failing. A key with a
+# large fan-out could otherwise turn one batch failure into that many serial
+# round-trips and convert a marker-write problem into a key-sync timeout — the
+# same whole-key escalation WR-04 exists to prevent, arriving by a different
+# road. Rows past the limit are NOT silently dropped: each is recorded in the
+# envelope error field naming the limit, so the condition is visible.
+#
+# The realistic fan-out is one API key's linked strategies, typically one to
+# three, so this bound is not expected to bind in practice.
+_STRATEGY_CURSOR_ROW_RETRY_LIMIT = 25
+
 # 164.5.1.4 SYNCCURSOR / WR-03 — THE ROLLOUT WINDOW IS A KNOWN, EXPECTED,
 # INDEFINITE CONDITION, AND `logger.exception` IS THE WRONG VERB FOR ONE.
 #
@@ -1120,50 +1141,120 @@ async def _sync_single_key(
                 ).execute()
             except Exception as cursor_exc:
                 # Never abort the tick and never discard the sync results
-                # already collected. logger.exception for the active traceback
-                # so the full stack reaches Sentry.
+                # already collected.
                 #
-                # ⚠️ BE PRECISE ABOUT THE DIRECTION — it is NOT uniformly safe,
-                # and an earlier draft of this comment claimed it was.
+                # ⚠️ BE PRECISE ABOUT THE DIRECTION — a failed marker write is
+                # NOT uniformly safe, and an early draft of this comment claimed
+                # it was.
                 #   * Strategy ALREADY HAS a marker row: the row stays BEHIND,
                 #     the next tick over-fetches, and over-fetching is
                 #     idempotent because `sync_trades` deletes scoped to the
                 #     incoming payload's own timestamp range before
                 #     re-inserting. Safe, as claimed.
                 #   * Strategy has NO row yet (first tick after rollout, or a
-                #     23503 from a concurrently-deleted sibling aborting this
-                #     whole multi-row upsert): the read path finds nothing,
-                #     falls back to `api_keys.last_sync_at` — which THIS tick's
-                #     epilogue may have just advanced past the failed window —
-                #     and UNDER-fetches. That is the per-key stranding this
-                #     phase exists to remove, re-entering through the error
-                #     path. It is no worse than the pre-phase behaviour, but it
-                #     is not a safe degradation either.
-                # The write stays batched rather than per-strategy: a
-                # per-strategy write (or a retry excluding the offending id)
-                # is the real fix and is larger than this phase. What is NOT
-                # acceptable is a comment asserting a safety property the code
-                # does not have, so the envelope field and the warning below
-                # carry the honest version.
-                strategy_cursor_write_error = (
-                    f"{type(cursor_exc).__name__}: {cursor_exc}"
-                )
+                #     23503 from a concurrently-deleted sibling): the read path
+                #     finds nothing, falls back to `api_keys.last_sync_at` —
+                #     which THIS tick's epilogue may have just advanced past the
+                #     failed window — and UNDER-fetches. That is the per-key
+                #     stranding this phase exists to remove, re-entering through
+                #     the error path.
+                #
+                # ⛔ WR-06 — ONE BAD ROW MUST NOT VOID THE REST. A multi-row
+                # upsert is a single statement: a 23503 raised by ONE strategy
+                # deleted mid-tick discards the marker write for EVERY strategy
+                # on the key, and each of those with no row yet then UNDER-
+                # fetches per the second bullet. The blast radius of an
+                # unrelated sibling's deletion was the whole key.
+                #
+                # The previous note here said a per-strategy write "is larger
+                # than this phase". That was an overstatement: the fan-out is
+                # one API key's linked strategies — typically one to three — so
+                # the fallback is a short bounded loop, not an architecture.
+                batch_error = f"{type(cursor_exc).__name__}: {cursor_exc}"
                 # WR-03: `logger.exception` for a genuine fault, ONE latched
                 # `logger.warning` while the table simply has not been migrated
                 # yet — otherwise the rollout window emits one traceback PER KEY
                 # PER TICK for a condition nobody can act on. The envelope field
-                # above is populated either way.
+                # is populated either way.
                 _log_strategy_cursor_exc(
                     cursor_exc,
-                    "cron_sync: failed to persist per-strategy sync cursors for "
-                    "key %s (%d row(s)) — strategies that already had a marker "
-                    "stay behind and re-fetch idempotently, but any strategy "
-                    "with NO marker row yet falls back to the key cursor and "
-                    "may UNDER-fetch its outstanding window; sync results "
-                    "preserved",
+                    "cron_sync: batched per-strategy sync-cursor upsert failed "
+                    "for key %s (%d row(s)) — retrying row by row so one bad "
+                    "row cannot void the rest",
                     key_id,
                     len(strategy_cursor_rows),
                 )
+
+                if _is_missing_cursor_table(cursor_exc):
+                    # ⛔ NO PER-ROW RETRY FOR A MISSING RELATION, and this is
+                    # not an optimisation. A missing table is not a per-ROW
+                    # condition — every single retry would fail identically —
+                    # so retrying would multiply the rollout window's wasted
+                    # round-trips by the fan-out size on every key on every
+                    # tick, inside a budget bounded by KEY_SYNC_TIMEOUT. The
+                    # per-row loop exists for row-scoped faults; this is not
+                    # one.
+                    strategy_cursor_write_error = batch_error
+                else:
+                    per_row_errors: dict[str, str] = {}
+                    attempted = strategy_cursor_rows[
+                        :_STRATEGY_CURSOR_ROW_RETRY_LIMIT
+                    ]
+                    skipped = strategy_cursor_rows[
+                        _STRATEGY_CURSOR_ROW_RETRY_LIMIT:
+                    ]
+                    for row in attempted:
+                        try:
+                            supabase.table(_STRATEGY_SYNC_CURSOR_TABLE).upsert(
+                                row,
+                                on_conflict="strategy_id",
+                            ).execute()
+                        except Exception as row_exc:
+                            per_row_errors[row["strategy_id"]] = (
+                                f"{type(row_exc).__name__}: {row_exc}"
+                            )
+                            _log_strategy_cursor_exc(
+                                row_exc,
+                                "cron_sync: per-row sync-cursor upsert failed "
+                                "for key %s strategy %s — this strategy's "
+                                "resume point is stale; if it had no row yet it "
+                                "falls back to the key cursor and may "
+                                "UNDER-fetch its outstanding window",
+                                key_id,
+                                row["strategy_id"],
+                            )
+                    for row in skipped:
+                        per_row_errors[row["strategy_id"]] = (
+                            "not retried: per-row fallback limit "
+                            f"({_STRATEGY_CURSOR_ROW_RETRY_LIMIT}) reached"
+                        )
+
+                    # ⛔ THE FIELD IS POPULATED EVEN WHEN EVERY ROW RECOVERED.
+                    # A batch that failed and was rescued row by row is still a
+                    # degraded tick the summary alarm must be able to see —
+                    # reporting only the unrecovered rows would make a
+                    # persistent, worsening fault look like a healthy key right
+                    # up until it stopped being recoverable.
+                    recovered = len(
+                        [
+                            row
+                            for row in attempted
+                            if row["strategy_id"] not in per_row_errors
+                        ]
+                    )
+                    if per_row_errors:
+                        strategy_cursor_write_error = (
+                            f"batch upsert failed ({batch_error}); per-row "
+                            f"fallback recovered {recovered}/"
+                            f"{len(strategy_cursor_rows)} row(s), still "
+                            f"failing: {per_row_errors}"
+                        )
+                    else:
+                        strategy_cursor_write_error = (
+                            f"batch upsert failed ({batch_error}); per-row "
+                            f"fallback recovered all "
+                            f"{len(strategy_cursor_rows)} row(s)"
+                        )
 
         duration = time.monotonic() - start
         # `partial` means *some* strategies landed AND *some* failed.
