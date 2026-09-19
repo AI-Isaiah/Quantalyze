@@ -29,7 +29,9 @@ Phase-B specialist additions (post simplify pass):
     are stored AND `last_sync_at` is still bumped so the next tick
     doesn't refetch already-landed trades (silent-failure-hunter F4).
   * `sync_trades` returning an unexpected (non-int) shape logs an
-    error before falling back to `len(trades)` (silent-failure-hunter F5).
+    error and counts 0 stored, so the cursor HOLDS rather than advancing
+    on a fabricated success count (silent-failure-hunter F5; the
+    fabricated-count half fixed 2026-09-19).
   * `validate_key_permissions` raising (vs returning valid=False)
     yields status="error" with no key deactivation (test-analyzer F3).
   * In-flight `computing` row → `_guarded_recompute` skips the
@@ -1022,9 +1024,16 @@ class TestPartialStatusOnRpcFailure:
 class TestSyncTradesShapeFallbackLogged:
     """SF-F5: `sync_trades` is declared to return an integer count. If
     Postgres ever returns a dict/list/None (e.g. someone changed the
-    function signature), cron silently falls back to `len(trades)`. The
-    fallback is necessary to avoid crashing, but it MUST log loudly so
-    contract drift is visible in the next operator review.
+    function signature), cron must not crash — but it also has NO evidence
+    about what landed, so it MUST log loudly so contract drift is visible in
+    the next operator review.
+
+    2026-09-19: the fallback used to be `stored = len(trades)`, fabricating a
+    success count from the fetch size. That count flows into `synced_count`,
+    so any shape drift made `synced_count > 0` unconditionally and advanced
+    `last_sync_at` on evidence that nothing was stored — the C-0198 data-loss
+    class through a side door. The fallback is now 0 (cursor holds, next tick
+    retries); the loud ERROR is unchanged.
     """
 
     @pytest.mark.asyncio
@@ -1066,9 +1075,11 @@ class TestSyncTradesShapeFallbackLogged:
             with caplog.at_level("ERROR", logger="quantalyze.analytics"):
                 result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
 
-        assert result["status"] == "ok"
-        # Fallback fired: stored = len(trades).
-        assert result["per_strategy_stored"]["strat-A"] == 2
+        # Fallback fired in the SAFE direction: 0 stored, not len(trades)=2.
+        assert result["per_strategy_stored"]["strat-A"] == 0
+        # Two trades fetched, none provably stored => cursor held, so this is
+        # a stalled tick, not a healthy one.
+        assert result["status"] == "held"
         assert any(
             "unexpected shape" in record.message
             and "strat-A" in record.message
@@ -1077,6 +1088,98 @@ class TestSyncTradesShapeFallbackLogged:
         ), (
             "Expected ERROR log re: 'unexpected shape' for strat-A; got "
             + repr([r.message for r in caplog.records])
+        )
+
+
+class TestSyncTradesShapeDriftHoldsTheCursor:
+    """The contract-drift fallback decides the cursor, so its direction is a
+    data-integrity choice, not a cosmetic one.
+
+    With `stored = len(trades)` a shape drift in `sync_trades` made
+    `synced_count > 0` unconditionally, so `should_advance_cursor` was True
+    and `last_sync_at` moved past a window nothing is known to have stored.
+    The next tick's `parse_since_ms(last_sync_at)` then skips those trades
+    forever — the same silent loss C-0198 was raised to close, reached
+    through the fallback instead of through a failing RPC.
+
+    Replay is safe: `sync_trades` does a payload-window-scoped DELETE of
+    non-fill rows and then re-INSERTs, so refetching the same window does
+    not duplicate rows. Holding is therefore strictly the safe direction.
+    """
+
+    @pytest.mark.asyncio
+    async def test_non_int_rpc_return_does_not_advance_last_sync_at(self):
+        mock_supabase = MagicMock()
+
+        rpc_chain = MagicMock()
+        # Contract violation: sync_trades returns a dict instead of an int.
+        rpc_chain.execute.return_value = MagicMock(data={"inserted": 5})
+        mock_supabase.rpc.return_value = rpc_chain
+
+        api_keys_update_payloads: list[dict] = []
+
+        def _table(name: str):
+            chain = MagicMock()
+
+            def _update(payload: dict):
+                if name == "api_keys":
+                    api_keys_update_payloads.append(payload)
+                upd = MagicMock()
+                upd.eq.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "key-1"}]
+                )
+                upd.in_.return_value.execute.return_value = MagicMock(data=[])
+                return upd
+
+            chain.update.side_effect = _update
+            return chain
+
+        mock_supabase.table.side_effect = _table
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}, {"id": "t2"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 # A NON-None balance, so an api_keys UPDATE is genuinely
+                 # issued and the payload list below is non-empty. Asserting
+                 # "last_sync_at not in <every payload>" over an EMPTY list
+                 # would be vacuously true and could never fail.
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=1234.56),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            key_row = _make_key_row(strategy_ids=["strat-A"])
+            result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        assert result["per_strategy_stored"]["strat-A"] == 0, (
+            "A non-int sync_trades return is NO evidence of storage; counting "
+            f"len(trades) here advances the cursor. Got {result!r}"
+        )
+        assert len(api_keys_update_payloads) == 1, (
+            "Non-vacuity: the balance stash must produce exactly one api_keys "
+            f"UPDATE for the assertion below to quantify over; got "
+            f"{api_keys_update_payloads!r}"
+        )
+        payload = api_keys_update_payloads[0]
+        assert payload.get("account_balance_usdt") == 1234.56, payload
+        assert "last_sync_at" not in payload, (
+            "Expected the cursor to HOLD when sync_trades returned an "
+            f"unreadable shape, so the next tick retries the window; got "
+            f"{payload!r}"
         )
 
 
@@ -2451,7 +2554,14 @@ class TestC0197CronTriggersAnalyticsRecompute:
             key_row = _make_key_row(strategy_ids=["strat-A"])
             result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
 
-        assert result["status"] == "ok"
+        # 2026-09-19: this tick fetched a real trade and stored none of it,
+        # so the C-0198 gate holds `last_sync_at` — which makes it a STALLED
+        # key, not a healthy one. It asserted `status == "ok"` until the
+        # `held` bucket was introduced; that incidental expectation WAS the
+        # "stalled key reports itself healthy" defect, in the same class as
+        # the empty-`strategy_ids` path. The guard this test exists to pin
+        # (`stored > 0` gating the recompute enqueue) is unchanged below.
+        assert result["status"] == "held"
         assert result["per_strategy_stored"]["strat-A"] == 0
         enqueue_args = [
             args for (name, args) in rpc_calls if name == "enqueue_compute_job"
@@ -2673,8 +2783,18 @@ class TestC0198CursorOnlyAdvancesWhenStored:
              ), \
              patch.object(
                  cron_mod,
+                 # A NON-None balance is load-bearing for the assertion at the
+                 # bottom, not decoration. With `None`, `update_data` stays
+                 # empty, NO api_keys UPDATE is issued at all, and
+                 # `api_keys_update_payloads` is []. "last_sync_at is absent
+                 # from every payload" over an EMPTY list is VACUOUSLY TRUE —
+                 # it was non-vacuous only by accident, because the pre-fix
+                 # code happened to append a payload. Stubbing a balance means
+                 # an UPDATE is always issued, so the assertion has something
+                 # real to quantify over and still goes red if the gate
+                 # regresses.
                  "fetch_usdt_balance",
-                 AsyncMock(return_value=None),
+                 AsyncMock(return_value=4321.0),
              ), \
              patch.object(cron_mod, "parse_since_ms", return_value=None):
             key_row = _make_key_row(strategy_ids=[])
@@ -2685,12 +2805,257 @@ class TestC0198CursorOnlyAdvancesWhenStored:
         # advance, or those trades are gone on the next tick because
         # `parse_since_ms(last_sync_at)` would then point past them.
         assert result["per_strategy_stored"] == {}
-        assert all(
-            "last_sync_at" not in p for p in api_keys_update_payloads
-        ), (
-            "Expected no last_sync_at cursor advance when strategy_ids=[] "
-            f"despite fetched trades; got {api_keys_update_payloads!r}"
+        # Non-vacuity guard: prove the payload list is non-empty BEFORE
+        # asserting what is missing from it. Balance stashing is independent
+        # of the cursor gate (the USDT fetch succeeded), so exactly one
+        # api_keys UPDATE must have been issued.
+        assert len(api_keys_update_payloads) == 1, (
+            "Expected exactly one api_keys UPDATE (the balance stash) so the "
+            "cursor assertion below is not quantifying over an empty list; "
+            f"got {api_keys_update_payloads!r}"
         )
+        payload = api_keys_update_payloads[0]
+        assert payload.get("account_balance_usdt") == 4321.0, payload
+        assert "last_sync_at" not in payload, (
+            "Expected no last_sync_at cursor advance when strategy_ids=[] "
+            f"despite fetched trades; got {payload!r}"
+        )
+
+
+class TestHeldStatusBucketForStalledKeys:
+    """FANOUT-COHORT-SYNC-CONSTANT-01 / D-03 follow-up: a key that fetched
+    REAL trades, stored none of them, and therefore held `last_sync_at`
+    back used to report `status="ok"`.
+
+    That made a permanently stalled key indistinguishable from a healthy
+    one in the very summary the cron alarm reads: it landed in the `synced`
+    bucket and its per-key line logged at INFO. The state does NOT
+    self-resolve — it clears only when a strategy on that key re-enters
+    ALLOWED_STRATEGY_STATUSES — and because the cursor is pinned, `since_ms`
+    stays fixed and the `fetch_all_trades` window grows on every tick.
+
+    Post-fix the tick is `held`: its own terminal status, its own summary
+    bucket (never inside `synced`), and a WARNING per-key line.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stalled_key_reports_held_not_ok(self):
+        import sys as _sys
+        import routers.portfolio as portfolio_mod
+        _sys.modules["routers.portfolio"] = portfolio_mod
+
+        # One key whose only linked strategy is archived => `strategy_ids`
+        # is empty after the lifecycle filter, so the per-strategy RPC loop
+        # never runs and nothing can be stored.
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-held",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": [{"id": "strat-archived", "status": "archived"}],
+                }
+            ],
+            ps_data=[],
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}, {"id": "t2"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            response = await cron_mod.cron_sync()
+
+        # WHY (Rule 9): the point of the bucket is that an alarm reading
+        # `synced` cannot see this key as healthy. Asserting `held == 1`
+        # alone would still pass if the key were ALSO counted as synced.
+        assert response["held"] == 1, response
+        assert response["synced"] == 0, response
+        assert response["partial"] == 0
+        assert response["failed"] == 0
+        assert response["timed_out"] == 0
+        assert response["revoked"] == 0
+        assert response["transient"] == 0
+        assert response["deferred"] == 0
+        assert response["total_keys"] == 1
+
+        held_results = [r for r in response["results"] if r["status"] == "held"]
+        assert len(held_results) == 1, response["results"]
+        assert held_results[0]["key_id"] == "key-held"
+        # Real trades were fetched and none stored — that pairing is what
+        # makes the key stalled rather than idle.
+        assert held_results[0]["trades_fetched"] == 2
+        assert held_results[0]["per_strategy_stored"] == {}
+        # `held` must survive the RESULTS_CAP triage as a diagnostic status —
+        # a stalled key evicted from a capped body is unobservable.
+        assert "held" in cron_mod._NON_OK_STATUSES
+        assert "ok" not in cron_mod._NON_OK_STATUSES
+
+    @pytest.mark.asyncio
+    async def test_stalled_key_per_key_line_logs_at_warning(self, caplog):
+        import logging
+        import sys as _sys
+        import routers.portfolio as portfolio_mod
+        _sys.modules["routers.portfolio"] = portfolio_mod
+
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-held",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": [{"id": "strat-archived", "status": "archived"}],
+                }
+            ],
+            ps_data=[],
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}, {"id": "t2"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None), \
+             caplog.at_level(logging.INFO, logger="quantalyze.analytics"):
+            await cron_mod.cron_sync()
+
+        per_key_lines = [
+            rec
+            for rec in caplog.records
+            if rec.getMessage().startswith("cron_sync key_id=key-held ")
+        ]
+        # Non-vacuity: the line must exist before its level means anything.
+        assert len(per_key_lines) == 1, [r.getMessage() for r in caplog.records]
+        assert per_key_lines[0].levelno == logging.WARNING, (
+            "The stalled key's per-key summary line must log at WARNING; a "
+            f"held key logging at {per_key_lines[0].levelname} is invisible "
+            "in the same log stream an operator scans for trouble."
+        )
+        assert "status=held" in per_key_lines[0].getMessage()
+
+
+class TestSyncStatusSummaryBucketCompleteness:
+    """The cron summary exists so each terminal status is independently
+    alarmable. Before this gate the counters were eight hand-written
+    `sum(...)` lines, so adding a ninth `SyncStatus` member and forgetting
+    its counter produced a status that reached NO bucket — silently folded
+    into nothing, exactly the class CR-F1 (`transient_failure`/`partial`
+    counted by none of the buckets) already cost this router once.
+
+    Two arms, so the gate bites in both directions:
+      * a new `SyncStatus` with no registry entry fails arm 1;
+      * a registry entry whose counter never reaches the response body
+        fails arm 2.
+    """
+
+    def test_registry_covers_every_sync_status_member(self):
+        from typing import get_args
+
+        declared = set(get_args(cron_mod.SyncStatus))
+        registered = set(cron_mod.SYNC_STATUS_SUMMARY_KEYS)
+        assert declared == registered, (
+            "Every SyncStatus member needs a summary counter or the cron "
+            "alarm cannot see it. Unregistered: "
+            f"{sorted(declared - registered)}; stale registry entries: "
+            f"{sorted(registered - declared)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_every_registered_bucket_reaches_the_response_body(self):
+        import sys as _sys
+        import routers.portfolio as portfolio_mod
+        _sys.modules["routers.portfolio"] = portfolio_mod
+
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": [{"id": "strat-1", "status": "published"}],
+                }
+            ],
+            ps_data=[],
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            response = await cron_mod.cron_sync()
+
+        # Non-vacuity: the registry must be non-empty for `all(...)` to mean
+        # anything, and the tick must have actually produced a summary.
+        assert cron_mod.SYNC_STATUS_SUMMARY_KEYS, "registry is empty"
+        assert response["total_keys"] == 1, response
+        missing = [
+            bucket
+            for bucket in cron_mod.SYNC_STATUS_SUMMARY_KEYS.values()
+            if bucket not in response
+        ]
+        assert not missing, (
+            f"Registered status buckets absent from the cron_sync response "
+            f"body: {missing}. An alarm watching the body cannot count a "
+            "status it never receives."
+        )
+        # And every registered bucket is an int counter, not an echoed status
+        # string — a bucket present but unusable is the same defect.
+        for bucket in cron_mod.SYNC_STATUS_SUMMARY_KEYS.values():
+            assert isinstance(response[bucket], int), (bucket, response[bucket])
 
 
 def defaultdict_factory():
