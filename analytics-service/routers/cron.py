@@ -124,7 +124,49 @@ SyncStatus = Literal[
     # that only "syncs" deferred keys is not misread as an idle/failed tick, and
     # so recurring deferrals never masquerade as errors in the Sentry stream.
     "deferred",
+    # 2026-09-19 FANOUT-COHORT-SYNC-CONSTANT-01 / D-03 follow-up: real trades
+    # were fetched and NONE were stored, so `last_sync_at` was deliberately
+    # held back (see the cursor gate in `_sync_single_key`). No per-strategy
+    # RPC raised, so this is neither `error` nor `partial` — but it is NOT
+    # `ok` either: the key is stalled and does NOT self-resolve (it clears
+    # only when a strategy on that key re-enters ALLOWED_STRATEGY_STATUSES),
+    # and with the cursor pinned the `fetch_all_trades` window grows every
+    # tick. Given its own bucket so the summary alarm can see it instead of
+    # counting it as healthy.
+    "held",
 ]
+
+# Single registry mapping each `SyncStatus` to its counter key in the
+# cron_sync response body. The summary counters below are DERIVED from this
+# map, so a status that is registered here always reaches the response.
+# `tests/test_cron_router.py::TestSyncStatusSummaryBucketCompleteness` asserts
+# the registry covers every `get_args(SyncStatus)` member AND that every
+# registered counter key is present in the response — a new status therefore
+# cannot ship without an alarmable bucket.
+SYNC_STATUS_SUMMARY_KEYS: dict[str, str] = {
+    "ok": "synced",
+    "partial": "partial",
+    "error": "failed",
+    "timeout": "timed_out",
+    "key_revoked": "revoked",
+    "transient_failure": "transient",
+    "deferred": "deferred",
+    "held": "held",
+}
+
+# Statuses that are NOT healthy and must therefore win a slot when the
+# response `results` list is capped at RESULTS_CAP (see the triage in
+# cron_sync). `deferred` is deliberately absent: a benign non-ccxt deferral
+# is not diagnostic. `held` IS present — it names the key whose cursor is
+# pinned and whose fetch window is growing every tick.
+_NON_OK_STATUSES: set[str] = {
+    "error",
+    "timeout",
+    "key_revoked",
+    "transient_failure",
+    "partial",
+    "held",
+}
 
 # Outcome bucket for a per-portfolio recompute attempt. `in_flight` is
 # distinct from `ok` so the response payload doesn't conflate "I
@@ -384,19 +426,62 @@ async def _sync_single_key(
                 if isinstance(rpc_result.data, int):
                     stored = rpc_result.data
                 else:
-                    # Contract drift: sync_trades is declared to return
-                    # the integer row count. A dict / list / None here
-                    # means the SQL function changed shape; fall back to
-                    # `len(trades)` but log loudly so the drift surfaces.
+                    # Contract drift: sync_trades is declared to return the
+                    # integer row count. A dict / list / None here means the
+                    # SQL function changed shape, so we have NO evidence about
+                    # what landed for THIS strategy.
+                    #
+                    # 2026-09-19: this fell back to `stored = len(trades)`,
+                    # i.e. it FABRICATED a success count from the fetch size.
+                    # That number flows into `synced_count`, so any shape drift
+                    # made `synced_count > 0` unconditionally and advanced
+                    # `last_sync_at` on evidence that nothing was stored —
+                    # reintroducing the exact C-0198 data-loss class through a
+                    # side door. Counting 0 is the honest direction, and replay
+                    # is safe because sync_trades does a payload-window-scoped
+                    # DELETE of non-fill rows before re-INSERTing, so
+                    # refetching a window does not duplicate.
+                    #
+                    # 2026-09-19 (later) — WHAT COUNTING 0 DOES *NOT* BUY, and
+                    # what this comment wrongly claimed it did. "The cursor
+                    # HOLDS and the next tick retries the same window" is true
+                    # ONLY when EVERY strategy on the key drifts.
+                    # `should_advance_cursor` keys off `synced_count`, which is
+                    # the SUM over the whole key, so on a multi-strategy key a
+                    # sibling storing successfully advances `last_sync_at` past
+                    # the drifted strategy's window and those trades are lost
+                    # on the next tick. One shared per-key cursor cannot
+                    # express "advance for A, hold for B"; the per-strategy
+                    # cursor that can is booked as Phase 164.5.1.4 SYNCCURSOR.
+                    #
+                    # What recording the drift in `strategy_errors` DOES buy is
+                    # that the drift stops being invisible. `strategy_errors`
+                    # is the only input the status classifier below has for
+                    # "something went wrong", so writing it here is what turns
+                    # a single-strategy drift into `error` — it was `held`, the
+                    # benign bucket whose documented remedy (a strategy
+                    # re-entering ALLOWED_STRATEGY_STATUSES) can never clear a
+                    # SQL shape change — and a fan-out drift into `partial`
+                    # naming the drifted strategy in the response body, where
+                    # before it was `ok` with nothing recorded at all. It
+                    # changes NO cursor behaviour: `stored` is still 0, so
+                    # `synced_count` is untouched.
                     logger.error(
                         "cron_sync: sync_trades returned unexpected shape "
-                        "for key %s strategy %s: %r — assuming %d stored",
+                        "for key %s strategy %s: %r — counting 0 stored for "
+                        "this strategy and reporting it under "
+                        "strategy_errors; note a sibling strategy on this key "
+                        "storing successfully still advances the shared cursor "
+                        "past this window",
                         key_id,
                         sid,
                         rpc_result.data,
-                        len(trades),
                     )
-                    stored = len(trades)
+                    stored = 0
+                    strategy_errors[sid] = (
+                        "ContractDrift: sync_trades returned "
+                        f"{type(rpc_result.data).__name__}"
+                    )
                 per_strategy_stored[sid] = stored
             # `trades_stored` reflects the primary strategy for back-compat;
             # `per_strategy_stored` carries the per-strategy breakdown.
@@ -415,12 +500,27 @@ async def _sync_single_key(
         # already pointed past them. With this gate, a 100%-RPC-failure tick
         # leaves the cursor alone so the next tick retries the same window.
         #
+        # 2026-09-19 FANOUT-COHORT-SYNC-CONSTANT-01 / D-03 — the idle-tick
+        # test must be "no trades were fetched at all" (`not trades`), not
+        # "nothing to store" (`not (trades and strategy_ids)`). The latter
+        # also fired when `strategy_ids` was empty (no strategy on this key
+        # was currently eligible), even though real trades WERE fetched —
+        # the per-strategy RPC loop is itself gated on
+        # `if trades and strategy_ids:`, so it never ran and
+        # `per_strategy_stored` stayed `{}`, making `synced_count == 0`
+        # structurally, not because anything failed. That collapsed a
+        # genuinely idle tick with a tick that fetched real trades and
+        # stored none, wrongly advancing the cursor and losing those trades
+        # on the next tick. Dropping `bool(strategy_ids)` from the gate
+        # fixes this without inventing a new gate shape: `synced_count > 0`
+        # is the same disjunct C-0198 already established, and it is
+        # already structurally zero whenever `strategy_ids` is empty.
+        #
         # Balance updates are independent of the cursor gate — fetching the
         # USDT balance succeeded if we got here, and stashing it doesn't
         # affect trade replay semantics.
         synced_count = sum(per_strategy_stored.values())
-        any_trades_to_store = bool(trades) and bool(strategy_ids)
-        should_advance_cursor = (not any_trades_to_store) or synced_count > 0
+        should_advance_cursor = (not trades) or synced_count > 0
 
         update_data: dict[str, Any] = {}
         if should_advance_cursor:
@@ -430,13 +530,25 @@ async def _sync_single_key(
         if update_data:
             supabase.table("api_keys").update(update_data).eq("id", key_id).execute()
         if not should_advance_cursor:
-            logger.warning(
-                "cron_sync: key %s held last_sync_at unchanged — %d trade(s) "
-                "fetched but 0 stored (all per-strategy RPCs failed); next "
-                "tick will retry the same window",
-                key_id,
-                len(trades),
-            )
+            if not strategy_ids:
+                logger.warning(
+                    "cron_sync: key %s held last_sync_at unchanged — %d "
+                    "trade(s) fetched but no strategy on this key was "
+                    "currently eligible to receive them; next tick will "
+                    "retry the same window",
+                    key_id,
+                    len(trades),
+                )
+            else:
+                logger.warning(
+                    "cron_sync: key %s held last_sync_at unchanged — %d "
+                    "trade(s) fetched but 0 stored across every eligible "
+                    "strategy on this key; each per-strategy RPC either "
+                    "raised, returned an unreadable shape, or legitimately "
+                    "stored 0 rows. Next tick will retry the same window",
+                    key_id,
+                    len(trades),
+                )
 
         # audit-2026-05-07 C-0197 / 2026-06-01 root-cause fix — trigger an
         # analytics recompute for strategies that received new trades.
@@ -504,14 +616,29 @@ async def _sync_single_key(
         # `partial` means *some* strategies landed AND *some* failed.
         # If every per-strategy RPC raised, that's `error`, not
         # `partial` — calling it partial would mislead the operator
-        # into thinking trades were stored when none were. The
-        # "no strategies attempted" case (empty list or no trades) is
-        # `ok` because there was nothing to do.
+        # into thinking trades were stored when none were.
+        #
+        # A tick that fetched real trades and stored NONE of them with no
+        # per-strategy error recorded is `held`, NOT `ok`:
+        # `should_advance_cursor` is False there, so `last_sync_at` was pinned
+        # and the same window will be refetched (and will keep growing) every
+        # tick until a strategy on this key becomes eligible again. Contract
+        # drift is deliberately NOT one of those cases any more — it writes a
+        # `strategy_errors` entry, so it lands in `error`/`partial`, whose
+        # remedy is a human fixing the SQL function rather than `held`'s
+        # "wait for a strategy to become eligible again", which would never
+        # clear it. That is the opposite of "there was
+        # nothing to do" — there WAS something to do and it was not done, so
+        # it must not land in the `synced` bucket that alarms read as healthy.
+        # `ok` is now only reached when the cursor actually advanced, i.e. a
+        # genuinely idle tick (no trades fetched) or trades that landed.
         any_stored = any(n > 0 for n in per_strategy_stored.values())
         if strategy_errors and any_stored:
             status: SyncStatus = "partial"
         elif strategy_errors:
             status = "error"
+        elif not should_advance_cursor:
+            status = "held"
         else:
             status = "ok"
         result: dict[str, Any] = {
@@ -700,21 +827,33 @@ async def cron_sync() -> dict[str, Any]:
     # alarm conditions (which watch the response body) silently misclassify
     # a tick where every key hit a transient validation failure as
     # "0 synced, 0 failed = idle" instead of "everything failed transiently."
-    synced = sum(1 for r in all_results if r["status"] == "ok")
-    partial = sum(1 for r in all_results if r["status"] == "partial")
-    failed = sum(1 for r in all_results if r["status"] == "error")
-    timed_out = sum(1 for r in all_results if r["status"] == "timeout")
-    revoked = sum(1 for r in all_results if r["status"] == "key_revoked")
-    transient = sum(1 for r in all_results if r["status"] == "transient_failure")
-    # F1: benign non-ccxt deferrals (e.g. sfox pre-ingestion). Counted apart from
-    # `failed` so a book of only-deferred keys reads as "deferred", never "error".
-    deferred = sum(1 for r in all_results if r["status"] == "deferred")
+    # Counters are DERIVED from SYNC_STATUS_SUMMARY_KEYS rather than written
+    # out one `sum(...)` per status, so registering a new status is the only
+    # step needed for it to appear in the body — the previous hand-written
+    # block was exactly the shape where a new status silently gets no bucket.
+    # F1: benign non-ccxt deferrals (e.g. sfox pre-ingestion) are counted apart
+    # from `failed` so a book of only-deferred keys reads as "deferred", never
+    # "error"; `held` is likewise counted apart from `synced` so a permanently
+    # stalled key is never indistinguishable from a healthy one.
+    status_counts: dict[str, int] = {
+        summary_key: sum(1 for r in all_results if r["status"] == status)
+        for status, summary_key in SYNC_STATUS_SUMMARY_KEYS.items()
+    }
+    synced = status_counts["synced"]
+    partial = status_counts["partial"]
+    failed = status_counts["failed"]
+    timed_out = status_counts["timed_out"]
+    revoked = status_counts["revoked"]
+    transient = status_counts["transient"]
+    deferred = status_counts["deferred"]
+    held = status_counts["held"]
     total_trades = sum(r.get("trades_fetched", 0) for r in all_results)
     overall_duration = round(time.monotonic() - overall_start, 2)
 
     logger.info(
         "cron_sync complete: %d synced, %d partial, %d failed, %d timed out, "
-        "%d revoked, %d transient, %d deferred, %d total trades, %.1fs total duration",
+        "%d revoked, %d transient, %d deferred, %d held, %d total trades, "
+        "%.1fs total duration",
         synced,
         partial,
         failed,
@@ -722,6 +861,7 @@ async def cron_sync() -> dict[str, Any]:
         revoked,
         transient,
         deferred,
+        held,
         total_trades,
         overall_duration,
     )
@@ -1070,7 +1210,6 @@ async def cron_sync() -> dict[str, Any]:
     # incident produces an unbounded body — the exact scenario the
     # RECOMPUTE_FAILURE_CAP was introduced to prevent, but for a LARGER
     # payload. Prefer non-ok statuses so the body is maximally diagnostic.
-    _NON_OK_STATUSES = {"error", "timeout", "key_revoked", "transient_failure", "partial"}
     non_ok_results = [r for r in all_results if r.get("status") in _NON_OK_STATUSES]
     ok_results = [r for r in all_results if r.get("status") not in _NON_OK_STATUSES]
     if len(all_results) > RESULTS_CAP:
@@ -1082,13 +1221,7 @@ async def cron_sync() -> dict[str, Any]:
         results_truncated = False
 
     return {
-        "synced": synced,
-        "partial": partial,
-        "failed": failed,
-        "timed_out": timed_out,
-        "revoked": revoked,
-        "transient": transient,
-        "deferred": deferred,
+        **status_counts,
         "total_keys": len(keys),
         "total_trades": total_trades,
         "total_results": len(all_results),

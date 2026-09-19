@@ -3491,6 +3491,24 @@ after 164.5.1.1, with this measurement in its goal. Owner: that phase.
 ⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
 (founder rule 2026-09-08).
 
+⛔ **DESTINATION CORRECTION — 2026-09-19, at Phase 164.5.1.2's close.** The Destination line above
+is now STALE and this note supersedes it: **Phase 164.5.1.2 closed WITHOUT addressing this entry,
+deliberately and on the record.** The founder descoped the composite site at that phase's CONTEXT
+time (D-01, 2026-09-17) — `enqueue_ledger_composite_refresh` is NOT SCHEDULED, is called by
+nothing, and no user observes it — so 164.5.1.2's success criteria covered TWO sites by design, the
+single-key poll and the trade-sync constant, and never this third one. Nothing here was measured and
+left undone; it was ruled out of scope before any plan was written.
+
+⛔ **THIS ENTRY DELIBERATELY HAS NO OWNER PHASE, AND THAT IS THE DECISION — NOT AN OVERSIGHT.**
+Re-pointing it at a live phase would fabricate scheduled work for a fan-out nobody has scheduled and
+no user can see, which is the opposite of what the descope decided. It stays **TRIGGER-GATED**: the
+TRIGGER stated above is the sole thing that activates it, and any one of those three proposals pulls
+in the other two and pulls in D-01. ⭐ The founder rule that every deferral names an owner phase is
+answered here by an explicit standing decision rather than by a phase number — recorded so a future
+reader finds a reasoned "no owner, by design", not a dangling pointer at a finished phase.
+⚠️ Nothing about the 141-day composite factsheet changed; the CTX-10 prohibition above stands in
+full and is not weakened by this note.
+
 ### FANOUT-COHORT-SIBLING-POLL-01 — the April poll-positions fan-out carries the same literal, IS live, and is excluded twice over (booked 2026-09-17)
 
 **Measured 2026-09-17** by Phase 164.5.1.1 plan 03. `enqueue_poll_positions_for_all_strategies`
@@ -3528,6 +3546,23 @@ needs the measurement first.
 measurement and the two-conjunct coupling in its goal and its success criteria. Owner: that phase.
 ⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
 (founder rule 2026-09-08).
+
+**CLOSED — Phase 164.5.1.2 plan 01, 2026-09-19.**
+Verdict: the poll-positions lifecycle conjunct is refused as inert and is NOT widened, NOT fixed,
+and NOT addressed by this phase — it stands exactly as measured, unchanged.
+Evidence is the PROD measurement already recorded in `164.5.1.2-CONTEXT.md` D-02 and the ROADMAP's
+Phase 164.5.1.2 entry (2026-09-17, marker read first, ⛔ PRODUCTION): the five `pending_review`
+strategies already pass the lifecycle conjunct and have still never been polled — direct proof the
+lifecycle set is not the binding constraint, the opposite of what Phase 164.5.1.1 found for the
+ledger fan-out.
+The harm stays booked and is not resolved by this closure: no `private` strategy has ever had a
+position snapshot, none ever polled, while every `published` strategy is current to today.
+This is a refusal of the wrong fix, never a finding that nothing is wrong.
+**TRIGGER, restated:** anyone proposing to widen this conjunct, or `ALLOWED_STRATEGY_STATUSES` (the
+sync constant covered by `FANOUT-COHORT-SYNC-CONSTANT-01`), needs the measurement first — both
+measurements now exist and both point the same direction, so the poll-positions predicate is not
+widened by this closure, and the second conjunct (`EXISTS sync_trades in 30 days`) must be
+addressed in the same decision if this is ever revisited.
 
 ### FANOUT-COHORT-SYNC-CONSTANT-01 — the trade-sync constant never learned the owner-only status, and the cursor advances anyway (booked 2026-09-17)
 
@@ -3578,6 +3613,188 @@ phase. ⛔ It decides; it does not pre-commit to widening the set — the guard'
 and any widening must say what it does to the approval-gate snapshot.
 ⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
 (founder rule 2026-09-08).
+
+**CLOSED (widening-verdict half only) — Phase 164.5.1.2 plan 01, 2026-09-19.**
+⛔ This closes ONLY the widening-verdict half of this entry. Its D-03 cursor-advance half is
+explicitly NOT closed here — Plan 03 owns that half, sequenced after this plan and after Plan 02's
+shipped cursor fix, to avoid two plans racing to edit this same TODOS.md entry.
+
+The production read this entry itself requested (`164.5.1.2-PROD-SESSION.md` § S2/§ S3, marker
+read first, ⛔ PRODUCTION, 2026-09-19) measured: `private_strategies_with_key = 5`,
+`with_in_set_sibling = 0`, `without_in_set_sibling = 5`; `private_no_key = 1`, `private_with_key
+= 5`. The "maybe a sibling syncs the key anyway" hypothesis this entry handed to Phase 164.5.1.1
+is FALSIFIED, 5 of 5 — no `private` strategy's key is reached via an in-set sibling. **User-facing
+consequence:** five real, live, key-bearing production strategies have their trades never stored,
+because the only path that issues `sync_trades` filters them out by lifecycle status and no
+sibling row rescues them. The keyless strategy (1 of 6) is structurally unsyncable by any widening
+and is not counted against the constant's harm.
+
+**Verdict: `leave-book-future-phase`.** `ALLOWED_STRATEGY_STATUSES` SHOULD admit `private` —
+evidenced 5/5 — but the widening is NOT implemented by this plan: no edit to
+`analytics-service/routers/cron.py`, no migration. It is routed to a new phase because admitting
+`private` changes production sync behaviour for five live keys, and its blast radius (new RPC
+load, newly stored trades, `enqueue_compute_job` follow-ons, and the interaction with the D-03
+cursor advance) is work this plan set did not budget review for.
+
+Per D-02 (`FANOUT-COHORT-SIBLING-POLL-01`, closed above), polling itself stays unaffected either
+way — that refusal is unconditional and does not depend on this verdict. The harm this entry books
+is stated in terms of the `trades` table and the daily recompute re-entry, never as "starving the
+ledger refresh": `run_derive_broker_dailies_job` runs its own venue crawl and does not read
+`trades` at all, so that framing is false and must not reappear here.
+
+**TRIGGER, sharpened:** the destination phase below runs and either ships the widening or
+reaffirms `leave-narrow`/`leave-book-future-phase` against a fresher read; or any surface that
+reads `trades` (not `csv_daily_returns`) is asked to show data for a `private` strategy before
+that phase runs, which would make the gap user-visible sooner than planned.
+✅ **Destination: Phase 164.5.1.3 SYNCADMIT** — booked into the ROADMAP by the orchestrator
+immediately after this plan's Task 2 decision, carrying this measurement and the two inherited
+guards (widening starts no polling; the cursor defect is already closed) into its own goal and
+success criteria. Owner: that phase.
+
+**CLOSED — D-03 half, cursor-advance half — Phase 164.5.1.2 plan 03, 2026-09-19.**
+Per CONTEXT.md D-03, the cursor-advance defect is measured independent of the widening question
+above — it does not wait on `ALLOWED_STRATEGY_STATUSES` and is wrong even if that constant is
+left exactly as it is. Both sub-causes RESEARCH §2 traced (every linked strategy filtered out by
+the lifecycle status set; a key with zero linked strategies structurally) collapse into the same
+`strategy_ids=[]` path inside `_sync_single_key`. **Fix shipped in Phase 164.5.1.2 plan 02**:
+`should_advance_cursor` in `analytics-service/routers/cron.py::_sync_single_key` dropped the
+`bool(strategy_ids)` disjunct and now reads `(not trades) or synced_count > 0`, reusing the
+existing C-0198 `synced_count > 0` disjunct rather than inventing a new gate shape. Proven by a
+new third member of `TestC0198CursorOnlyAdvancesWhenStored` —
+`test_D03_empty_strategy_ids_with_trades_does_not_advance_cursor` — observed RED against
+unmodified `cron.py` (assertion failure: cursor advanced despite `strategy_ids=[]`) before the
+fix, then GREEN after, with both pre-existing class members still passing and the full
+`analytics-service` suite green (5880 passed, 89 skipped). Shipped in commits `d1157059` (RED
+test) and `ca432660` (GREEN fix).
+
+**TRIGGER, sharpened and distinct from the original entry's TRIGGER above:** this half reopens
+only if a THIRD, distinct cause of `strategy_ids=[]` is found beyond the two RESEARCH §2 already
+traced and collapsed into this fix; or if `should_advance_cursor`'s formula is touched again
+without rerunning the full `TestC0198CursorOnlyAdvancesWhenStored` class.
+
+**`FANOUT-COHORT-SYNC-CONSTANT-01` is now FULLY CLOSED** — both the widening-verdict half (Phase
+164.5.1.2 plan 01, above) and this D-03 cursor-advance half are present and distinct, per
+CONTEXT.md D-03's instruction that the two causes never share one closure.
+
+---
+
+**Advisory-lock comment finding (measured 2026-09-19, Phase 164.5.1.2 plan 03) — recorded,
+not fixed this phase.**
+`enqueue_poll_positions_for_all_strategies`'s header comment and its source migration both
+claim the multi-worker race is handled via a named advisory lock
+(`pg_try_advisory_lock('daily_position_polling')`).
+This is safe to call multiple times regardless; but measured at HEAD, that lock does not exist
+anywhere in `analytics-service/` — zero occurrences, confirmed by a repo-wide grep. The real
+concurrency guard is `_daily_enqueue_already_ran_today` (`analytics-service/main_worker.py`, a
+UTC-day check gating the daily tick) plus `enqueue_compute_job`'s own idempotent dedup (the
+partial unique index the same SQL comment already documents), and both work correctly
+regardless of whether the comment's advisory-lock claim is accurate.
+**Decision: DROP a same-phase migration fix.** The cost — a full three-reviewer +
+`apply-test` + human-gated PROD-apply pipeline for a comment-only change with zero functional
+effect — is disproportionate to the benefit, since the correction already lives in tracked,
+public `ROADMAP.md` / `RESEARCH.md` / `PATTERNS.md` text a future reader would find before
+relying on the stale comment.
+**TRIGGER (opportunistic, not a phase):** fix the comment the next time
+`enqueue_poll_positions_for_all_strategies`'s migration is genuinely touched for another reason
+— never as a standalone migration.
+
+### SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01 — the resume cursor is per-KEY but stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies (booked 2026-09-19)
+
+**MEASURED at `ed1b7d92`, by two independent reviewers during Phase 164.5.1.2's review round and
+confirmed by the orchestrator tracing the code.** `analytics-service/routers/cron.py::_sync_single_key`
+issues one `sync_trades` RPC **per strategy** in a fan-out loop, but resumes from a cursor held
+**per key** (`api_keys.last_sync_at`). The advance gate is
+`should_advance_cursor = (not trades) or synced_count > 0`, where
+`synced_count = sum(per_strategy_stored.values())` is aggregated ACROSS strategies.
+
+**The defect:** for a key backing N strategies where one RPC succeeds and the others raise,
+`synced_count > 0` holds, the cursor advances, and the strategies whose RPC raised **never see that
+window again** — the cursor is per-KEY, so nothing re-drives them. Permanent, per-strategy data loss.
+
+⚠️ **It is not log-silent, but the LOSS is.** Each failure hits `logger.exception`, lands in
+`strategy_errors`, and the key returns `status="partial"`. Nothing anywhere records *"strategy X is
+missing window [t0,t1)"*, and nothing retries it. An operator sees a handled error, not a permanent gap.
+**Reachable via:** advisory-lock contention or deadlock (`sync_trades` takes `pg_advisory_xact_lock`
+per strategy), statement timeout, PostgREST 5xx, an RLS or constraint error on one strategy only, or
+a network blip mid-fan-out.
+
+⭐ **PRE-EXISTING AND DELIBERATE — this is NOT a regression and must never be reported as one.** It is
+pinned by `test_C0198_partial_success_does_advance_last_sync_at`, whose docstring justifies the
+advance from the SUCCEEDING strategy's side and never names the cost to the failed one. Phase
+164.5.1.2 neither introduced nor widened it; that phase's D-03 fix is a different cause and stands.
+
+⛔ **NOT fixable by tweaking `should_advance_cursor`.** Holding the whole key's cursor on any partial
+failure would starve the SUCCEEDING strategies into permanent re-fetch — the symmetric defect, and
+exactly why C-0198 chose to advance. The remedy is a per-strategy resume marker. ⚠️ Migration `045`
+already added a `last_fetched_trade_timestamp` partial-success checkpoint that
+`parse_since_ms(preferred=...)` reads — establish whether that is the intended home before designing
+anything new.
+
+**TRIGGER — the condition that says this entry has come due:** Phase 164.5.1.3 SYNCADMIT admitting the
+owner-only status into `ALLOWED_STRATEGY_STATUSES`. Today the five `private` production keys carry
+`strategy_ids == []` every tick, so the fan-out loop never runs and this path is UNREACHABLE on them.
+The moment that constant widens, those keys begin fanning out to multiple strategies and this path
+goes LIVE on precisely the keys the whole 164.5.1.x line was opened to protect.
+✅ **Destination: Phase 164.5.1.4 SYNCCURSOR** — booked into the ROADMAP 2026-09-19 (`99314336`),
+derived as the next free sibling under 164.5.1, renumbering nothing. Owner: that phase.
+⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
+(founder rule 2026-09-08).
+
+### SYNC-DRIFT-PAYLOAD-LOGGED-VERBATIM-01 — the contract-drift log renders the unknown RPC return verbatim with `%r` (booked 2026-09-19)
+
+**Found by the Phase 164.5.1.2 security audit**, outside that phase's 13 registered threats, so it
+did not affect `threats_open` and did not block the ship. Recorded here rather than closed by silence.
+
+In `analytics-service/routers/cron.py::_sync_single_key`, the "unexpected shape" `logger.error` on
+the `sync_trades` contract-drift path renders the drifted return value with `%r`. ⚠️ **Phase
+164.5.1.2 edited that message TWICE without touching the payload argument** — the value is still
+logged verbatim.
+
+**Why it is LATENT and not live:** `sync_trades` is declared `RETURNS INTEGER` at the SQL level, so
+the drift branch is unreachable today, and the destination is an internal log (Railway / Sentry),
+NOT the public repo. A drift that returned a structured row set rather than an unexpected scalar
+would put that payload in the log. ⛔ This is why it is booked rather than dismissed: the branch
+exists precisely to handle shapes nobody enumerated.
+
+⛔ **NOT a one-line `%r` deletion, and that is the whole reason it needs a phase rather than a
+drive-by fix.** The `%r` is the only diagnostic an operator gets when drift actually fires; removing
+it outright trades an information-disclosure risk for a debuggability hole and would leave the next
+operator with a type name and nothing else. ⭐ The shape that satisfies both is BOUNDED rendering —
+the type name plus a length-capped, structure-aware excerpt — and choosing that cap is a design
+decision, not a patch. ⚠️ Note the operator-facing signal is ALREADY safe: the `strategy_errors`
+value this phase added is type-name-only (`ContractDrift: sync_trades returned <type>`), so the
+`%r` is redundant for classification and matters only for diagnosis.
+
+**TRIGGER — the condition that says this entry has come due:** anyone changes `sync_trades`'s
+declared return type away from `INTEGER`, or the drift branch is observed firing in production.
+Either makes the latent path live.
+✅ **Destination: Phase 164.5.1.4 SYNCCURSOR** — it reworks this exact drift-and-cursor path, so the
+bounded-rendering decision belongs with the work that is already reading these lines. Owner: that phase.
+⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
+(founder rule 2026-09-08).
+
+
+### SYNC-HELD-CURSOR-REFETCH-COST-01 — a held cursor re-fetches a monotonically growing window, and the five private keys hold theirs every tick (booked 2026-09-19)
+
+**A CONSEQUENCE OF PHASE 164.5.1.2's OWN FIX, recorded rather than discovered later.** That phase
+correctly stopped the cursor advancing over trades that were never stored. On a key whose
+`strategy_ids` is empty, the cursor is therefore held **every tick, indefinitely** — a state that does
+NOT self-resolve; it clears only if a strategy on that key re-enters `ALLOWED_STRATEGY_STATUSES`.
+
+⭐ **THIS IS THE CORRECT TRADE AND THE ENTRY IS NOT AN ARGUMENT TO REVERSE IT.** Nothing is stored, so
+nothing is lost — the held cursor is lossless, and loud beats quiet-and-lossy. What it costs is work:
+with `last_sync_at` pinned, `parse_since_ms` returns the same fixed `since_ms` forever, so
+`fetch_all_trades` re-fetches a window that grows monotonically every tick, raising per-key API and
+latency cost without bound until the per-key timeout begins to absorb it.
+
+**Scope, measured:** the five `private` production keys are in exactly this state today.
+**TRIGGER — the condition that says this entry has come due:** the per-key sync duration or the
+exchange API quota becomes a live operational concern before the widening lands; OR Phase 164.5.1.3
+ships, which ends the condition outright by making `strategy_ids` non-empty on those keys.
+✅ **Destination: Phase 164.5.1.3 SYNCADMIT** — already booked; this is the cost side of the same
+decision and raises that phase from a tidy-up to an operational necessity.
+⚠️ ⛔ Do NOT close this by reverting the D-03 gate or by re-widening anything: the poll-positions
+predicate was REFUSED as inert on production evidence and is deliberately unchanged.
 
 ### VERIFICATION-STALE-OWED-01 — two phases verified code that has since moved, and their verdicts are honestly out of date (booked 2026-09-18)
 

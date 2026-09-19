@@ -1894,6 +1894,56 @@ Plans:
 - [x] 164.5.1-08-PLAN.md — wave 3 · criteria 1 and 4: repair P3-C (`completed_at` → `updated_at`, both copies plus the two later diagnostics — it aborts 42703 today), then write the `docs/runbooks/match-engine.md` go-live section with the D1/D2/D3 transcription, D2's window verbatim, and a DEFER branch
 - [x] 164.5.1-09-PLAN.md — wave 4 · **NOT autonomous** · criteria 2, 5 and 7's read-back: the D4 three-reviewer `checkpoint:decision`, the founder's live PROD session recording every OUTPUT, then ONE manifest re-capture and the backlog dispositions
 
+### Phase 164.5.1.4: SYNCCURSOR — the sync cursor is per-KEY while stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies trade window (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 164.5.1
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.5.1.4 to break down)
+
+### Phase 164.5.1.3: SYNCADMIT — admit the owner-only status to the trade-sync constant, or prove it must not be: 5 of 5 private keys are never synced and their trades are never stored (INSERTED)
+
+**Goal:** Decide, on evidence, whether `ALLOWED_STRATEGY_STATUSES` must admit the owner-only (`private`) status — and if so, ship that widening with its blast radius traced. ⭐ **Phase 164.5.1.2 already did the measuring and REFUSED to ship the change inside its own budget**; this phase exists because admitting `private` alters production sync behaviour for five live keys, which is its own work and deserves its own reviewers.
+
+⭐ **THE MEASUREMENT, taken on PRODUCTION 2026-09-19 by the founder (marker read FIRST: `⛔ PRODUCTION`), recorded in `164.5.1.2-PROD-SESSION.md`:**
+
+| reading | value |
+|---|---|
+| `private` strategies, total | **6** (agrees with the independent 2026-09-17 table) |
+| …carrying an API key | **5** |
+| …carrying NO key | **1** |
+| keyed ones sharing that key with an in-set sibling | **0** |
+| keyed ones on a key with NO in-set sibling | **5 of 5** |
+
+⛔ **THE SIBLING HYPOTHESIS IS FALSIFIED.** The ROADMAP handed the question *"does an owner-only strategy share an `api_key` with a sibling whose status IS in the set?"* to Phase 164.5.1.1 plan 04, where it was never run. Phase 164.5.1.2 ran it: **not one does.** So the comforting reading — that trades still arrive via a sibling row and the gap is narrower than it looks — is dead. **Five real, live, key-bearing production strategies have their trades never stored.**
+⛔ **The one keyless strategy must NOT be counted against the harm** — it is unsyncable by ANY widening, and counting it overstates what this phase could deliver.
+⚠️ **A limit recorded BEFORE the read and now load-bearing:** the read is forward-looking and cannot distinguish a currently-shared key from a sync predating the transition to `private`. The `ever synced = 2` in the 2026-09-17 table therefore has a pre-transition sync as its ONLY remaining explanation — consistent, but NOT measured, and unmeasurable without a `status_changed_at` column.
+
+⛔ **WHAT THIS PHASE MUST NOT ASSUME — inherited from 164.5.1.2 and NOT to be re-derived:**
+
+- ⛔ **Widening this constant does NOT start polling anything.** A `private` strategy is excluded from `enqueue_poll_positions_for_all_strategies` by its OWN lifecycle conjunct AND by an `EXISTS` keyed on its own id. Phase 164.5.1.2 REFUSED that poll widening as inert and that refusal stands. Anyone proposing this phase will fix the missing position snapshots has misread it.
+- ✅ **The `last_sync_at` cursor defect is already CLOSED** (Phase 164.5.1.2, plan 02). It was data LOSS, not merely a stale timestamp: trades were fetched, no strategy was eligible, and the cursor advanced past them so the next tick skipped that window permanently. It was live on all five of these keys. ⛔ Do not re-fix it; DO check that admitting `private` interacts correctly with the shipped gate.
+
+**Success Criteria:**
+
+1. A recorded verdict: widen, or prove it must not be widened. ⭐ "Must not" is a valid outcome and is recorded as explicitly as a change.
+2. If widened: the blast radius is TRACED before the change ships — new `/cron-sync` RPC load, newly stored trades for five keys, `enqueue_compute_job` follow-ons, and the interaction with the shipped `should_advance_cursor` gate.
+3. A calibrated gate proving the new behaviour: neuter → observe RED → restore byte-identically verified with `cmp` → record the OBSERVED failure text. ⛔ Anti-vacuity BLOCKS here — this is user-facing and data-integrity.
+4. ⛔ Nothing widens a ceiling, relaxes a floor, or adds an exemption. Close by making a claim TRUE.
+5. ⚠️ The apply path is decided by WHAT CHANGES: a `cron.py`-only change ships via the ordinary CI path; any SQL takes 3 reviewers → `apply-test` → the PROD apply behind the `Production` human reviewer gate.
+
+**Requirements**: `TODOS.md` `FANOUT-COHORT-SYNC-CONSTANT-01` (widening half; routed here by Phase 164.5.1.2 on the founder's `leave-book-future-phase` decision, 2026-09-19).
+**Depends on:** Phase 164.5.1.2 FANOUTSIBLINGS — which supplied the production measurement above and deliberately left the change unshipped.
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.5.1.3 to break down)
+
 ### Phase 164.5.1.1: FANOUTCOHORT — the ledger-refresh fan-out admits the `private` status, so it stops enqueuing nothing for every strategy that exists (INSERTED)
 
 **Goal:** The ledger-refresh fan-out enqueues work for the strategies that actually exist in production. ⛔ **MEASURED on PROD 2026-09-17, on the FIRST tick after Phase 164.5.1 activated it** (cron `runid 11159`, jobid 40, `08:25:00.371Z`): the job ran, was **not** dormant (`ledger_refresh_enabled = true`, and **zero** `cron_runs` rows with `cron_name = 'ledger_refresh_fanout'` — that row is the dormant branch's own instrument, read from the INSERT literal in the function body), ran through to candidate selection and selected **ZERO** strategies. `compute_jobs` gained no `derive_broker_dailies` row and `ledger_refresh_staleness` stayed BYTE-IDENTICAL to the P4 BEFORE census: 6 strategies, `min 23 / avg 52.50 / max 141` days. ⚠️ `return_message: "1 row"` on that cron row is NOT "one job enqueued" — the function returns an INTEGER and `SELECT f()` always returns one row; `return_message` carries the ROW COUNT, never the return value.
@@ -1941,7 +1991,7 @@ Plans:
 
 - ⛔ **`enqueue_ledger_composite_refresh` — OUT OF SCOPE, founder decision 2026-09-17.** It was a third site here until the scope was cut back. It is **NOT SCHEDULED and not called by anything**, so no user observes it; D-01 already decided the composite deliberately and CTX-10 guards that decision with an automated polarity check. Re-litigating a settled decision about a dormant function is not what the deferral gate is for — only user-facing and data-integrity work earns a phase. ⚠️ Reopening it needs its own evidence and its own decision, never a side effect of this phase.
   📜 Original finding, kept as lineage: (`supabase/schema/functions/enqueue_ledger_composite_refresh.sql:266`) — NOT SCHEDULED, and not called by anything. Zero matching rows in the captured production cron manifest (`scripts/prod-prober/cron-manifest.json`, captured `2026-09-17T08:05:56Z` against the PROD marker), no caller in `analytics-service/` or `src/`, and `20260825140000_ledger_refresh_composite_arm.sql` applied it DORMANT in its own `RAISE NOTICE` (*"no schedule registered"*). **What a user observes today:** nothing this conjunct does is observable, because the function never runs — so widening it alone would change nothing at all. ⛔ **The 141-day composite factsheet is NOT fixed by Phase 164.5.1.1 and must never be reported as such (CTX-10).** It is excluded from the SINGLE-KEY fan-out by that function's `is_composite` conjunct (D-01, by name and by design) and from the composite fan-out by the absence of any schedule. Reversing D-01 is a separate decision with its own evidence, and this phase is where it is taken — or refused.
-- **`enqueue_poll_positions_for_all_strategies`** (`supabase/schema/functions/enqueue_poll_positions_for_all_strategies.sql:44`) — **LIVE, but not via pg_cron.** ⛔ Its absence from the cron manifest does NOT mean dormant, and reading the manifest alone gets this exactly backwards: the Railway worker's `daily_enqueue_tick` (`analytics-service/main_worker.py:1110-1121`) calls it once per UTC day under `pg_try_advisory_lock('daily_position_polling')`. **What a user observes today:** every production strategy carries the owner-only terminal status, so the daily loop's candidate set should be empty and no `poll_positions` job should be created for any of them — the SAME class of defect as the measured ledger one, on a different job kind. ⚠️ Stated as an INFERENCE from two measurements (the predicate, and that the loop runs), NOT as a production reading: counting `poll_positions` rows needs PROD and belongs to a session, not to a grep.
+- **`enqueue_poll_positions_for_all_strategies`** (`supabase/schema/functions/enqueue_poll_positions_for_all_strategies.sql:44`) — **LIVE, but not via pg_cron.** ⛔ Its absence from the cron manifest does NOT mean dormant, and reading the manifest alone gets this exactly backwards: the Railway worker's `daily_enqueue_tick` (`analytics-service/main_worker.py:1110-1121`) calls it once per UTC day. ⛔ **CORRECTED 2026-09-19: this entry previously said that call was made under `pg_try_advisory_lock('daily_position_polling')`. THAT LOCK DOES NOT EXIST.** Measured at HEAD: zero occurrences of the lock name anywhere in `analytics-service/`, and zero `pg_try_advisory_lock` / `advisory_lock` calls of ANY name in `main_worker.py`. The real guard is `_daily_enqueue_already_ran_today()`'s UTC-day check plus `enqueue_compute_job`'s idempotent dedup. ⚠️ The same false sentence is carried by the SQL comment in `enqueue_poll_positions_for_all_strategies` itself, which is the likely origin — a comment asserting a concurrency control that was never implemented is worse than no comment, because it invites someone to rely on it. Correcting that one costs a migration and is left to this phase to weigh. **What a user observes today:** every production strategy carries the owner-only terminal status, so the daily loop's candidate set should be empty and no `poll_positions` job should be created for any of them — the SAME class of defect as the measured ledger one, on a different job kind. ⚠️ Stated as an INFERENCE from two measurements (the predicate, and that the loop runs), NOT as a production reading: counting `poll_positions` rows needs PROD and belongs to a session, not to a grep.
   ⭐ **AND IT CARRIES A SECOND EXCLUSION THAT HIDES BEHIND THE FIRST.** The same `WHERE` also requires `EXISTS (a sync_trades job done in the last 30 days)`. `sync_trades` is issued only by `/cron-sync`, whose own `ALLOWED_STRATEGY_STATUSES` filter ALSO omits the owner-only status. An owner-only strategy therefore fails BOTH conjuncts, and **widening the lifecycle one ALONE would change nothing observable.** This is the measured reason this phase must decide rather than widen, and it is invisible to anyone who reads only the literal.
 - **`ALLOWED_STRATEGY_STATUSES`** (`analytics-service/routers/cron.py:148` = `{draft, pending_review, published}`) — ONE declaration, ONE reader (`:658`). A strategy failing the filter is dropped from `strategy_ids`, so `/cron-sync` issues it no `sync_trades` RPC, stores it no trades, and enqueues it no `derive_broker_dailies` re-entry from that path. ⚠️ **And the cursor still advances:** with every strategy on a key filtered out, `any_trades_to_store` is False, so `should_advance_cursor` is True and `last_sync_at` is bumped on a tick that stored nothing — the `last_sync_at` LIES class, on a new path.
 - ⛔ **A CORRECTION THIS PHASE MUST INHERIT, because the phase that produced the finding also disproved half of it.** `164.5.1.1-RESEARCH.md` frames the constant's gap as starving the ledger refresh of trade data. **That premise is FALSE, measured:** `run_derive_broker_dailies_job` (`analytics-service/services/job_worker.py:2624`) runs its OWN venue crawl (realized-PnL ledger + funding + equity) and, over its WHOLE body (`:2624-5956`, bounded to the next top-level statement — ⚠️ a partial line range is exactly the error that produced RESEARCH.md's wrong composite claim, and it was nearly repeated here), touches three tables through PostgREST — `strategy_analytics`, `csv_daily_returns`, `allocator_equity_derived` — and issues one RPC, `enqueue_compute_job`. **`trades` appears ZERO times.** The constant's gap costs the `trades` table and the daily recompute re-entry; it does **not** starve the ledger refresh. Do not re-derive the original framing from RESEARCH.md.
@@ -1972,11 +2022,13 @@ Plans:
 
 **Requirements**: `TODOS.md` entries `FANOUT-COHORT-SIBLING-COMPOSITE-01`, `FANOUT-COHORT-SIBLING-POLL-01`, `FANOUT-COHORT-SYNC-CONSTANT-01` — all three booked 2026-09-17 by Phase 164.5.1.1 plan 03 with their measurements.
 **Depends on:** Phase 164.5.1.1 FANOUTCOHORT — its plan 04 PROD session answers the shared-key question above, and its migration is the precedent any widening here re-bases on.
-**Plans:** 0 plans
+**Plans:** 3/3 plans executed
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.5.1.2 to break down)
+- [x] 164.5.1.2-01-PLAN.md — the one PROD sibling-key read, then close FANOUT-COHORT-SIBLING-POLL-01 and the widening-verdict half of FANOUT-COHORT-SYNC-CONSTANT-01
+- [x] 164.5.1.2-02-PLAN.md — fix the `last_sync_at` cursor-advance defect (D-03), calibrated RED→GREEN
+- [x] 164.5.1.2-03-PLAN.md — close D-03's half of FANOUT-COHORT-SYNC-CONSTANT-01, record the advisory-lock comment decision, and the phase-wide falsifiability guard
 
 ### Phase 164.5.2: BRIDGELOCK — the per-strategy advisory lock 161.1-D1 asked for, in its own phase as DEC-4 required (INSERTED)
 
