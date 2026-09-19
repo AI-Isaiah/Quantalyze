@@ -1,5 +1,169 @@
 # Changelog
 
+## [0.81.0.0] - 2026-09-20 — SYNCCURSOR: the trade-sync cursor stops being per-KEY while the stores are per-STRATEGY
+
+⚠️ **THIS RELEASE ADDS A MIGRATION** — `supabase/migrations/20260919120000_strategy_sync_cursors.sql`,
+one new table. Merging it DOES start `apply-test` against shared TEST and DOES engage the `Production`
+environment's human-reviewer gate. That is the opposite of the last several releases, which said so
+explicitly in the other direction.
+
+⛔ **AND IT IS INERT UNTIL THAT MIGRATION APPLIES TO PROD.** Both new Supabase paths fail OPEN by
+design: a marker read that fails treats every marker as absent, and a marker write that fails leaves
+markers behind. So while the table is missing, every strategy falls back to the key cursor — and
+**that fall-back state IS the defect this release fixes**. Merging is not deploying the fix.
+Phase 164.5.1.3 SYNCADMIT is unblocked by the PROD APPLY, not by this merge, and must not be
+deployed ahead of it.
+
+### Root cause
+
+`analytics-service/routers/cron.py::_sync_single_key` issues one `sync_trades` RPC **per strategy** in
+a fan-out loop, but resumed from a cursor held **per key** (`api_keys.last_sync_at`). On a key backing
+N strategies where one RPC succeeds and another raises, `synced_count > 0` holds, the key cursor
+advances, and the strategies whose RPC raised **never see that window again**. Permanent, per-strategy
+trade loss.
+
+⛔ **Pre-existing and deliberate — not a regression, and never to be reported as one.** It was pinned
+by `test_C0198_partial_success_does_advance_last_sync_at`, whose docstring justified the advance from
+the SUCCEEDING strategy's side and never named the cost to the failed one. Phase 164.5.1.2 neither
+introduced nor widened it; that phase's D-03 fix is a different cause and stands. The loss was also
+not log-silent — but nothing anywhere recorded *"strategy X is missing window [t0,t1)"*, and nothing
+retried it, so an operator saw a handled error rather than an unrecoverable gap.
+
+### Why not the obvious fix
+
+Tweaking `should_advance_cursor` to hold the whole key's cursor on any partial failure would starve
+the SUCCEEDING strategies into permanent re-fetch — the symmetric defect, and exactly why C-0198 chose
+to advance. Both candidate existing homes were measured and rejected: `api_keys.last_fetched_trade_timestamp`
+(migration 045) is per-KEY, the very granularity that causes this; `advance_sync_cursor` is per-KEY and
+fenced to a job — right mechanism, wrong axis. No per-strategy sync state existed anywhere in the
+schema, so the remedy is new state keyed on `strategy_id` alone.
+
+### Added
+- **`strategy_sync_cursors`** — a per-STRATEGY resume table. `strategy_id` is the WHOLE primary key,
+  `REFERENCES strategies(id) ON DELETE CASCADE`, nullable `last_sync_at`, writer-set `updated_at`.
+  `api_key_id` appears nowhere in it, deliberately: the strategy is the stable axis while the key a
+  strategy points at is mutable and nullable, so a composite key would strand the row on a re-point.
+  Carries `SET LOCAL lock_timeout = '3s'`, deny-all RLS (`USING (false) WITH CHECK (false)`),
+  `REVOKE ALL ... FROM PUBLIC, anon, authenticated`, `GRANT ALL ... TO service_role`, and an **8-arm
+  catalog-only self-verify** that runs on every apply.
+  - It is a NEW TABLE rather than a column on `strategies` **because `strategies_read` is a PUBLIC-read
+    policy** — a column there would publish internal sync state for every published strategy.
+  - The `GRANT` is not ceremony: `BYPASSRLS` is a ROW-level exemption and confers no object-level
+    privilege, so without it the sole writer cannot reach the table and the whole release is inert.
+  - The self-verify is catalog-only on purpose. Shared TEST holds PROD's catalogue and never its data,
+    so a data-reading `RAISE EXCEPTION` can pass PROD and REFUSE TEST — and a refused TEST apply BLOCKS
+    the PROD apply (`[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`). Arm 8 uses `has_table_privilege`
+    rather than a `count(*)` over `information_schema` so the file's `row_count_assertions = 0`
+    property holds by construction rather than by argument.
+- **A behavioural RLS gate**, `supabase/tests/test_strategy_sync_cursors_rls.sql` (10 mutation arms).
+  It hands the client-role GRANTs back inside its own transaction, so what refuses is the POLICY and
+  not a missing privilege — including a positive control proving exactly that.
+- **`strategy_cursor_window_clamped`** in the `cron_sync` response envelope, and `strategy_cursors_held`
+  naming the held set.
+
+### Fixed
+- **The per-strategy resume path, table to fetch window.** `_strategy_resume_point` resolves a
+  strategy's resume point by **membership** (`strategy_id in strategy_cursors`), never by `.get()`,
+  and `_resume_floor_ms` takes the EARLIEST resume point across a key's eligible strategies because
+  one `fetch_all_trades` call serves the whole key.
+  ⭐ **The membership rule is the whole fix.** A `.get()` returns the same `None` for *no row* and
+  *a row holding NULL*, collapsing "fall back to the key cursor" into "re-fetch from the start of
+  history". Under a `.get()`-shaped design the failed strategy is given no row, the key cursor
+  advances anyway (correctly — a sibling succeeded), the next tick finds no row and falls back to
+  that already-advanced cursor, and the strategy is stranded **exactly as before** — while every
+  "a row was written" assertion stays green. The fix would have shipped INERT and looked complete.
+- **A marker write for EVERY strategy in the fan-out, held or advancing**, placed as the last write in
+  `_sync_single_key`. Advance-only writing is the same inertness bug from the other side.
+- **The recompute-enqueue stranding path**, which was a second, distinct loss in the same block: a
+  failed `derive_broker_dailies` enqueue was terminal for that window because the shared cursor had
+  already moved. The advance condition is
+  `((not trades) and not fetch_degraded) or (stored > 0 and sid not in recompute_enqueue_errors)`,
+  computed AFTER both the storage and enqueue loops so it can see that map at all.
+- **`fetch_degraded` was blind on Bybit.** Its inner handler re-raised only `RateLimitExceeded` and
+  otherwise fell through, so the outer handler that stamps `daily_pnl_fetch_error` never ran and a
+  CRASHED venue fetch read as an IDLE tick — which clears a hold that should have been kept.
+  Measured across venues before the fix: okx `True`, binance `True`, bybit `False`.
+- **The missing-table classifier over-matched.** It read `42703` (undefined COLUMN), `PGRST204` and
+  unrelated `42P01`s as "the marker table is absent", and that misclassification **skipped the
+  per-row fallback entirely** rather than merely mislabelling an error.
+- **The rollout-window warning flood** is latched to one warning per key.
+- **Both cursor writes now share one tick instant**, so a key's marker rows cannot disagree about when
+  the tick happened.
+
+### Changed
+- **The mutation-runner ratchet absorbs the new gate:** `FILES_FLOOR` 47 → 48 and `ARMS_FLOOR`
+  402 → 412. Both are **raises**, which is tightening. `WAIVED_CEILING` stays **0** — no waiver,
+  exemption, allowlist or baseline line was added anywhere in this release.
+
+### Security
+- Per-phase threat register: **23 threats, 21 mitigated, 2 accepted, 0 open** at the ship SHA.
+- ⚠️ **Accepted risk R-03, stated plainly because it is a real loss.** `MAX_MARKER_LOOKBACK_MS`
+  (30 days) bounds how far back a marker-derived resume floor may pin a key's fetch window. Without
+  it an unclearing hold grows the window every tick until it exceeds `KEY_SYNC_TIMEOUT` and
+  `_sync_key_with_timeout` cancels the key — stopping EVERY strategy on it. The bound was taken over
+  the wedge, but **trades older than the cap are fetched by no tick**: a loss, not a deferral. Three
+  controls keep it narrow and visible — it applies ONLY to a marker-derived floor and never to the
+  key-cursor fallback (so inert-on-arrival survives and it cannot fire on a strategy that never held),
+  the loss reaches the response envelope rather than only the log, and the warning states that a hold
+  this old needs a human.
+
+### Tests
+- **A two-tick gate that pins the CONSEQUENCE, not the row.** It reads the `since_ms` the *next* tick
+  actually asks the venue for, and derives tick 2's inputs from tick 1's real outputs — so an inert
+  implementation cannot pass it. Calibrated by neutering the marker READ while leaving the WRITE fully
+  intact.
+- **Criterion 4 on its own failure axis**: an enqueue failure injected with BOTH storage RPCs
+  succeeding. Recorded either way — under that neuter the two-tick gate stayed GREEN, proving the two
+  gates measure different things rather than one riding on the other's coverage.
+- The shared `cron_sync` mock helper now SERVES the marker table, so the production wiring stopped
+  being green-and-unexercised behind its own fail-open branch.
+- Added arms pinning the no-eligible-strategies resume-floor branch, the key-cursor fallback never
+  being clamped, and inert-on-arrival re-pinned at an age where the clamp *can* bite.
+- `analytics-service` suite: **5928 passed, 89 skipped**, up from 5886 at the branch point.
+- ⛔ **All three `TestC0198CursorOnlyAdvancesWhenStored` members pass with their assertions unchanged**,
+  and `should_advance_cursor = (not trades) or synced_count > 0` is **byte-identical to `main`**. The
+  marker is purely additive. One docstring was corrected to state what is now recovered, because it
+  had justified the advance only from the successful strategy's side.
+
+### Notes
+- **Two full review rounds, and round 2 found round 1's fixes had NOT all held.** That is the point of
+  running it: the lookback clamp was hitting the key-cursor fallback and so broke the migration's own
+  inert-on-arrival claim; the clamp's loss reached only the log and never the response envelope — the
+  phase's last remaining silent permanent-loss path; and the classifier defect above. A fix round is
+  where regressions enter.
+- **A prose defect that was a live trap, not cosmetic.** `scripts/mutation-runner/run.mjs` shipped
+  `ARMS_FLOOR = 412` beneath a currency comment asserting "402 -> 411", "NINE new arms", and that
+  `ARMS_FLOOR=412` FAILS while 411 PASSES — the exact inverse of the shipped constant. A reader
+  trusting it would have LOWERED the floor, the one move the phase's own C6 criterion forbids. It was
+  written at 9/411 and a later commit added a tenth arm and bumped the constant without touching the
+  comment. Re-derived over the corpus: 412 twins / 48 annotated files / 0 waivers, with the new gate
+  carrying TEN arms. The entry now restates **no census at all** — it points at the vitest
+  re-derivation, whose own failure text already names the value to raise the floor to. Same remedy
+  applied to the parser test title earlier in the branch: stop restating a number beside the constant
+  it describes. `[164.7-CITATION-DRIFT-01]`.
+- `TODOS.md` entry `SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01` is **closed in code and explicitly NOT
+  closed in production**, keeping an OWNER, a TRIGGER and a PHASE in closure. Its TRIGGER names the
+  `Supabase Migrate` workflow run for the merge commit — never the presence of the file in the tree.
+  Its own stale migration-045 question is ANSWERED rather than left open, so the next reader does not
+  re-run a concluded search. It also no longer carries the sentence `cron.py` itself identifies as the
+  bug ("the re-fetch is idempotent, so this is an efficiency cost and not a loss") — that
+  understatement WAS the defect, and it now names the clamp instead.
+- **Verified 7/7 must-have criteria** with four independent mutants run in an isolated worktree,
+  including one attacking persist-on-hold directly (advance-only write ⇒ 5 arms red). Issued
+  `human_needed` for three documentation defects; all three were FIXED rather than accepted, and the
+  verification records each with the measurement that preceded the edit.
+- ⚠️ One gate lives in the consumer rather than the source: removing the Bybit `_record_dq_flag`
+  stamp survives `tests/test_exchange_harness.py` entirely and is caught only by
+  `tests/test_cron_router.py`. The behaviour is gated; an edit to `exchange.py` alone would not
+  obviously point a future reader at its gate.
+- Also on this branch: Phase **164.5.1.3 SYNCADMIT**'s discuss context and the founder's recorded queue
+  re-order putting 164.5.1.4 first — because SYNCADMIT widens `ALLOWED_STRATEGY_STATUSES`, and the
+  moment it does, the five `private` production keys (today `strategy_ids == []` every tick, so the
+  fan-out never runs) start fanning out to multiple strategies and this loss path goes live on exactly
+  the keys the whole 164.5.1.x line exists to protect.
+- Out of scope by explicit decision, and named rather than absorbed: harmonising the two sync-cursor
+  disciplines (`job_worker`'s fenced advance vs `cron.py`'s direct write).
+
 ## [0.80.1.0] - 2026-09-19 — MARKERGATE: the wrong-database refusal stops passing on a measurement it never took
 
 A CI failure on `main` at `b13ab2f1` turned out to be a fixture defect, and attacking it surfaced a
