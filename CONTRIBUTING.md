@@ -99,8 +99,12 @@ railway up                   # force a deploy
 The `/health` endpoint reports worker-tick liveness and the deployed `git_sha`,
 so "is prod running main HEAD?" is machine-checkable:
 `curl .../health | jq -r .git_sha`. The `analytics-deploy-verify` workflow
-checks it on a 6h schedule, with the staleness window sized for post-mutex CI
-queue depth (4800s — Phase 158).
+checks it on a 6h schedule. ⭐ CHANGED 2026-09-19: it READS ONCE and does not
+poll. A commit younger than 900 s is treated as still in flight and files
+nothing; the 6h schedule is the retry. 📜 It used to poll for 4800 s (Phase 158),
+sized for post-mutex CI queue depth — but that loop held the job's check suite
+open on main HEAD, and Railway waits on the whole suite, so the probe became a
+deploy-hold. ⛔ Do not reintroduce polling there.
 
 ## Invariants that break CI or prod
 

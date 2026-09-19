@@ -79,6 +79,14 @@ interface Scenario {
   treeProd: string;
   /** tree object at main HEAD */
   treeMain: string;
+  /**
+   * Age of the main HEAD commit in SECONDS, fed to the probe's in-flight
+   * debounce via a stubbed `git log -1 --format=%ct`.
+   * `undefined` makes the stub emit NOTHING, which is the real-world case where
+   * the timestamp cannot be read — the probe then skips the debounce and
+   * escalates, which is the fail-toward-alerting direction.
+   */
+  commitAgeSec?: number;
 }
 
 let seq = 0;
@@ -105,6 +113,9 @@ function runProbe(s: Scenario): { code: number | null; out: string; output: stri
     join(binDir, "git"),
     `#!/bin/bash
 if [ "$1" = "fetch" ]; then exit 0; fi
+if [ "$1" = "log" ]; then
+  ${s.commitAgeSec === undefined ? "exit 0" : `echo "$(( $(date +%s) - ${s.commitAgeSec} ))"; exit 0`}
+fi
 if [ "$1" = "rev-parse" ]; then
   case "$2" in
     ${s.deployed}*) [ -n "${s.treeProd}" ] && { echo "${s.treeProd}"; exit 0; }; exit 128 ;;
@@ -115,15 +126,28 @@ fi
 exit 0
 `,
   );
-  writeFileSync(join(binDir, "sleep"), "#!/bin/bash\nexit 0\n");
-  for (const f of ["curl", "git", "sleep"]) chmodSync(join(binDir, f), 0o755);
+  // ⛔ No `sleep` stub. The probe is single-pass since 2026-09-19, so nothing
+  // sleeps. Keeping a stub would be a control that LOOKS live and governs
+  // nothing — and it would actively hurt: if a poll loop were ever
+  // reintroduced, a stubbed `sleep` would let it spin at full speed and pass,
+  // whereas with no stub the test hangs to the vitest timeout and says so.
+  for (const f of ["curl", "git"]) chmodSync(join(binDir, f), 0o755);
 
-  // The 4800s convergence window is a TIMEOUT constant, not the subject under
-  // test; shortening it is what lets the loop terminate. Every branch the
-  // scenarios assert on is the workflow's own, unmodified.
-  const script = SCRIPT.replace("+ 4800 ))", "+ 1 ))")
-    .replace(/\$\{\{\s*vars\.ANALYTICS_HEALTH_URL[^}]*\}\}/g, "http://stub/health")
-    .replace(/\$\{\{\s*github\.sha\s*\}\}/g, s.mainSha);
+  // ⛔ The convergence loop was DELETED from the workflow on 2026-09-19, so the
+  // `+ 4800 ))` -> `+ 1 ))` substitution that used to sit here is gone with it.
+  // It is not merely unnecessary now, it would be VACUOUS: String.replace with an
+  // absent needle returns the string unchanged and reports nothing, so leaving it
+  // would have looked like a live shortening while doing nothing at all.
+  // The probe is single-pass; nothing needs shortening for it to terminate.
+  // ⛔ NO `${{ }}` SUBSTITUTION HERE, AND THAT IS THE POINT. Two `.replace()`
+  // calls used to sit on this line. MEASURED 2026-09-19: both needles match ZERO
+  // times, because `HEALTH_URL` and `MAIN_SHA` are declared in the step's `env:`
+  // block, which is OUTSIDE the `run: |` body `extractProbeScript` slices. They
+  // were vacuous no-ops — `String.replace` with an absent needle returns the
+  // string unchanged and reports nothing — dressed as live substitution.
+  // The values reach the script as real environment variables below, exactly as
+  // GitHub Actions delivers them, which is a truer harness than rewriting source.
+  const script = SCRIPT;
 
   const scriptPath = join(dir, "step.sh");
   writeFileSync(scriptPath, script);
@@ -154,13 +178,29 @@ const TREE = "e6d8e33f6e218285244905c7959a01810eee4335";
 const TREE_OTHER = "b2f9f92eb30f4d2c224216e8d9e31bc8d8494591";
 
 describe("[DEPLOYVERIFY-SHA-NOT-CODE] the convergence decision, EXECUTED", () => {
-  it("no unsubstituted GitHub expression reaches bash", () => {
-    // Without this, a `${{ ... }}` left in place is handed to bash as a literal
-    // and every scenario below asserts against the wrong input.
-    const script = SCRIPT.replace("+ 4800 ))", "+ 1 ))")
-      .replace(/\$\{\{\s*vars\.ANALYTICS_HEALTH_URL[^}]*\}\}/g, "x")
-      .replace(/\$\{\{\s*github\.sha\s*\}\}/g, "y");
-    expect(script, "an unsubstituted ${{ }} would silently invalidate every scenario").not.toContain("${{");
+  it("no unsubstituted GitHub expression reaches bash, and the env: seam is real", () => {
+    // ⛔ THIS TEST USED TO BE VACUOUS AND IS NOW CALIBRATED. It asserted
+    // `not.toContain("${{")` on a string that structurally can never contain one:
+    // `extractProbeScript` slices only the `run: |` body, while every `${{ }}` in
+    // this step lives in the `env:` block above it. The assertion could not fail
+    // for ANY change to the workflow, so it guarded nothing while claiming to
+    // guard "every scenario below".
+    // Two real properties instead:
+    // (1) the sliced script genuinely carries no `${{ }}` — still worth pinning,
+    //     because a future edit COULD inline an expression into the run body,
+    //     where bash would receive it as a literal and every scenario would
+    //     silently assert against the wrong input;
+    expect(SCRIPT, "a ${{ }} inlined into the run body would reach bash as a literal").not.toContain("${{");
+    // (2) the env: seam this harness depends on actually exists. runProbe supplies
+    //     HEALTH_URL and MAIN_SHA as environment variables; if the workflow ever
+    //     stopped declaring them that way, the scenarios would run against an
+    //     unset variable under `set -u` rather than the value under test.
+    const stepBlock = WORKFLOW_TEXT.slice(WORKFLOW_TEXT.indexOf(STEP_NAME));
+    const envBlock = stepBlock.slice(0, stepBlock.indexOf("run: |"));
+    for (const key of ["HEALTH_URL", "MAIN_SHA"]) {
+      expect(envBlock, `the probe step must declare ${key} in env: — runProbe supplies it that way`).toContain(`${key}:`);
+    }
+    expect(envBlock, "MAIN_SHA must still come from github.sha").toContain("github.sha");
   });
 
   it("S1 — identical SHA converges (the pre-existing behaviour, unchanged)", () => {
@@ -226,6 +266,44 @@ describe("[DEPLOYVERIFY-SHA-NOT-CODE] the convergence decision, EXECUTED", () =>
     // exactly as S4 insists for the unresolvable-tree case.
     expect(r.output, "an unreadable probe must still alert").toContain("stale=true");
     expect(r.output, "and must be distinguishable downstream").toContain("unreadable=true");
+  });
+
+  // ── The in-flight debounce, BOTH polarities ───────────────────────────────
+  // ⛔ THIS IS THE HALF THE LOOP REMOVAL WOULD OTHERWISE HAVE LOST. The deleted
+  // 4800 s convergence loop did TWO jobs: it retried (the 6-hourly schedule now
+  // does that) and it suppressed the alert while a deploy was legitimately still
+  // in flight. Only the first was replaced for free. Without S6 below, `stale=true`
+  // fires on the FIRST miss and a run started shortly after an analytics merge
+  // files a P1 for a deploy that is simply still building — and nothing in the
+  // workflow ever closes that issue, so it becomes the permanently-open muted
+  // thread this repo already blames for issue #751's nine mis-triaged comments.
+  // S7 is the calibration partner: it proves the debounce is a WINDOW and not a
+  // blanket mute, which is the way this control could fail silently.
+
+  it("S6 — a commit INSIDE the CI+build window is in-flight: warns, files NOTHING", () => {
+    const r = runProbe({
+      deployed: SHA_A, mainSha: SHA_B, treeProd: TREE_OTHER, treeMain: TREE,
+      commitAgeSec: 120,
+    });
+    expect(r.code).toBe(0);
+    expect(r.out, "it must say why it is holding off").toContain("INSIDE the ~15 min CI+build window");
+    expect(r.output, "an in-flight deploy must be marked as such").toContain("in_flight=true");
+
+    // ⛔ The load-bearing arm: the issue-filing step is gated on `stale=true`,
+    // so this assertion is the ONLY thing standing between a still-building
+    // deploy and a false P1 that no machine ever closes.
+    expect(r.output, "a deploy still in flight must NOT file a staleness issue").not.toContain("stale=true");
+  });
+
+  it("S7 — the SAME mismatch OUTSIDE the window escalates: the debounce is a window, not a mute", () => {
+    const r = runProbe({
+      deployed: SHA_A, mainSha: SHA_B, treeProd: TREE_OTHER, treeMain: TREE,
+      commitAgeSec: 4000,
+    });
+    expect(r.code).toBe(0);
+    expect(r.output, "a genuinely stale deploy must still alert").toContain("stale=true");
+    expect(r.output, "and must not be mislabelled as in-flight").not.toContain("in_flight=true");
+    expect(r.out, "the verdict must not claim a poll it never ran").toContain("single reading");
   });
 
   it("every path exits 0 — a red check on main HEAD makes Railway skip the deploy", () => {

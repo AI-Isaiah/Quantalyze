@@ -446,44 +446,65 @@ moves. The three residuals accepted rather than closed (`SHARE-RES-R4`, `SHARE-R
 
 **Research note:** the payload-builder seam is the one un-measured integration (extracting the build half of `fetchAndBuildPayload` touches the composite arm AND the single-key basis arm — MEDIUM confidence, wider than it looks). Budget a research pass at plan time; don't discover it. Token-leak channels: Sentry `beforeSend` scrub verified against a REAL captured event, `Referrer-Policy: no-referrer` per-route, generic metadata (link-unfurl dullness accepted explicitly — a private link SHOULD be dull in a chat preview). *(Planning update 2026-08-26: the seam measurement is now done — the composite/basis arms moved to `src/lib/factsheet/` in July, so the extraction in 164-01 is a one-function verbatim move per the founder's final D-06 ruling.)*
 
-### Phase 164.11: DEPLOYGATE — the analytics deploy stops being gated by check-suites that have nothing to do with the analytics service: a red check on main's head silently SKIPS the Railway deployment, measured five times in three days (INSERTED)
+### Phase 164.11: DEPLOYGATE — ⛔ CANCELLED 2026-09-19 (founder). NOT executed, NOT deferred, NOT re-homed.
 
-**Goal:** An analytics deploy is decided by the health of the ANALYTICS SERVICE, not by whatever else happens to be red on `main`'s head commit. Railway's "wait for CI" reads the WHOLE check-suite set on the commit, so any red check — a dependency advisory, a flaky shared-TEST connection, a scheduled workflow that attached hours later — turns the deployment into a silent `SKIPPED`. Make an unrelated red incapable of withholding an analytics deploy, and make a withheld deploy LOUD rather than silent.
+**Status:** CANCELLED. ⛔ **Do not re-plan this from the deployment census alone** — the census is real and
+the conclusion drawn from it was wrong. Read this entry first.
 
-⛔ **INSERTED 2026-09-13 out of the PR #795 land-and-deploy, where it was measured rather than reviewed.**
+**What it was going to do.** Make an unrelated red check incapable of withholding an analytics deploy,
+and make a withheld deploy loud. Six plans, ~130 KB of CONTEXT/RESEARCH/PATTERNS, eight success criteria.
 
-**MEASURED — five SKIPPED analytics deployments in three days** (`railway deployment list`, project `quantalyze-analytics`, env `production`):
+**The measurement that justified it, which is ACCURATE:** a 200-deployment census (window 2026-07-15 →
+2026-09-18) reads `REMOVED 150 · SKIPPED 46 · FAILED 2 · WAITING 1 · SUCCESS 1` — **46 skips, 23 carrying a
+real `analytics-service` tree change.** Railway waits on the WHOLE check-suite of a commit, so any red or
+INCOMPLETE suite withholds the deploy.
 
-```
-aa9accb8 | SKIPPED | 2026-09-13 16:47  ← the #795 merge
-b076139c | SKIPPED | 2026-09-13 13:42  ← the one #795 documents
-05b257f7 | SKIPPED | 2026-09-12 18:20
-ffeff9e2 | SKIPPED | 2026-09-12 10:49
-9ab3a83a | SKIPPED | 2026-09-11 18:14
-```
+⛔ **WHY THAT MEASUREMENT DOES NOT SUPPORT THE PHASE — two founder-supplied operating facts, 2026-09-19.**
+1. **Railway deploys the LATEST commit, not the skipped one.** Merges land several times a day, so a
+   skipped analytics change is carried to prod by the next green merge. **The skip costs LATENCY, not the
+   change.** ⭐ 46 skips is NOT 46 undelivered changes, and the phase's framing treated it as if it were.
+2. **A red `main` CI is fixed immediately**, bounding the window further.
+   ⇒ The whole defect is worth *minutes to hours of deploy latency*, self-healing, on a repo with no
+   paying clients. A six-plan phase against that is out of proportion.
 
-⭐ **The full mechanism, measured end to end on `aa9accb8`.** The merge pushed at 14:47:09Z and Railway created the deployment at 14:47:10Z, entering its CI wait. CI run `34763669052` concluded **failure** at 15:05:02Z, and the deployment went SKIPPED. The failure was NOT a code gate: `python` died on `tests/test_compute_jobs_fencing.py` with a PostgREST `504 Gateway Timeout` against shared TEST while `5449 passed, 71 skipped` and coverage held at 90.98%; `sql-tests` then SKIPPED on `needs: python`; the `frontend` aggregator went RED on that skip. **Two aggregators red, zero real jobs red, and a production deploy withheld.** A re-run made the suite green at 15:39:09Z — ~34 minutes AFTER Railway had already decided. ⛔ **A later green does not resurrect a skipped deployment**, which is the half that makes this silent.
+⭐ **AND THE REAL DEFECT WAS SOMETHING ELSE ENTIRELY, found while cancelling.** Of the last 15
+`analytics-deploy-verify.yml` runs, thirteen finished in under a minute and **two ran 60 and 80 minutes**.
+That workflow is schedule-triggered, so it attaches a check suite to `main` HEAD, and Railway waits on it.
+⛔ **Our own monitoring probe was the largest deploy-hold in the window — bigger than any unrelated red it
+existed to notice.** Its 4800 s convergence loop looped because prod had not converged, while prod could
+not converge because Railway held the deploy behind the suite that loop kept open. A circular wait.
 
-⚠️ **Why prod was not harmed this time, and why that is NOT a reason to downgrade it:** the `analytics-service/` tree hash was byte-identical at `e7fd2a04` and `e64b0811` (`e6d8e33f6e218285244905c7959a01810eee4335` both), so the running code was already correct and only `/health`'s `git_sha` label lagged. The next skip lands on a commit where the tree HAS moved, and then the deploy that silently did not happen is a real one.
+**WHAT SHIPPED INSTEAD — three changes, no phase, v0.79.1.0:**
+- `analytics-deploy-verify.yml`: the convergence loop DELETED, probe is single-pass, job TTL 90 → 10 min.
+  ⭐ The 6-hourly schedule was always the real retry; the inner loop was redundant with the cron wrapping it.
+  ⛔ **But NOT wholly redundant, and two reviewers caught the first draft getting this wrong.** The loop
+  also DEBOUNCED — it suppressed the alert while a deploy was legitimately in flight. Deleting it outright
+  made `stale=true` fire on the first miss, filing a P1 for a deploy that was still building, into an issue
+  nothing ever closes. An IN-FLIGHT DEBOUNCE (main HEAD younger than 900 s ⇒ warn, file nothing) replaces
+  it, implemented as COMMIT AGE rather than a sleep so it holds no check suite open. Both polarities are
+  calibrated (S6/S7), plus `continue-on-error` on the issue filer and `timeout 60` on the fetch, each
+  closing a path where the job could go RED and make Railway SKIP.
+- `analytics-deploy-tree-compare.contract.test.ts`: the two `SCRIPT.replace("+ 4800 ))", …)` arms removed —
+  with the literal gone they were VACUOUS (an absent needle returns the string unchanged, silently).
+- `docs/runbooks/mt5-go-live.md`: the blank gateway provenance line FILLED with the measured digest
+  (registry and live Railway pin agree byte-for-byte); `Stood up:` left as NOT ESTABLISHED, not invented.
+  ⭐ This closes the item routed in from Phase 164.6.2 plan 04's checkpoint (founder, 2026-09-14), so
+  cancelling this phase orphans nothing.
 
-**Success Criteria**:
+⛔ **THE COUPLING SURVIVES, BY DECISION.** An unrelated red CAN still withhold an analytics deploy. That is
+now an ACCEPTED OPERATING COST, not an open defect. **Reopen only if** merge cadence drops far enough that
+a skipped analytics commit can sit unshipped for a long stretch — fact 1 above is the load-bearing one.
 
-1. An analytics deploy is not withheld by a red check that does not gate the analytics service. Proven by DEMONSTRATION, not by config reading: force a red on an unrelated check on a commit whose `analytics-service/` tree has changed, and observe the deploy still reach prod (`/health` `git_sha` == that commit).
-2. ⛔ A withheld deploy is LOUD. Today a SKIPPED deployment produces no alert, no issue and no red check — it is discoverable only by running `railway deployment list` by hand, which is why five of them accumulated unnoticed. A skip must announce itself; ⛔ NOT closed by a dashboard someone could look at.
-3. The `git_sha`-vs-tree distinction PR #793 established is preserved and used, not re-litigated: a deploy is verified by comparing the analytics TREE, and a label-only lag is reported as such rather than as a failure or as a success.
-4. ⛔ The remedy must NOT be "turn off wait-for-CI". That wait exists so a broken build cannot deploy; removing it trades a silent skip for a silent bad deploy. Narrow WHAT is waited on, or make the analytics deploy depend on the checks that actually cover it.
-5. Every control this phase adds is proven able to fail — neutered, observed RED, restored from a **byte backup**; ⛔ never `git checkout --`.
-6. ⚠️ The two live causes that produced these skips are owned ELSEWHERE and must not be re-fixed here: the shared-TEST transport flakiness is Phase 164.9 (`[164.9-SHARED-TEST-TRANSPORT-FLAKE]`) and the five-day `npm-audit` red is Phase 165 (`[165-NIGHTLY-AUDIT-RED]`). This phase owns the COUPLING only. Closing it by fixing those two would leave the mechanism intact for the next unrelated red.
-7. ⭐ **ROUTED IN from Phase 164.6.2 plan 04's decision checkpoint (founder, 2026-09-14) — the gateway image is PINNED BY DIGEST.** `deploy/mt5-gateway/railway-gateway.md` prescribes pinning `gmag11/metatrader5_vnc:2.3@sha256:<digest>` at stand-up and the provenance line in `docs/runbooks/mt5-go-live.md` is still BLANK. ⛔ It lands HERE rather than in 164.6.2 because it is a DEPLOY-PATH property, not an MT5 behaviour: an unpinned tag means the container that comes back after a redeploy is not provably the one that went down. ⚠️ This does NOT widen this phase into MT5 behaviour — the gateway's login path stays 164.6.2's.
-8. ⛔ **A DOWNSTREAM CONSUMER THIS PHASE NOW OWNS, named so it is not discovered late: Phase 164.6.2's criterion 2 cannot close until a merge is OBSERVED to have DEPLOYED.** MEASURED 2026-09-14 (`164.6.2-MEASUREMENT.md`): the analytics service was running sha `5dead88a`, at which `analytics-service/services/mt5_relogin.py` does not exist, so the boot heal that phase built was absent from production while its own criterion asked for a production observation of it. ⭐ Combined with this phase's five measured SKIPPED deployments, **merging is NECESSARY BUT NOT SUFFICIENT** — a green merge with a silently skipped deploy leaves production unchanged. Whatever mechanism this phase ships to make a withheld deploy LOUD is exactly what makes that failure mode visible to 164.6.2's wave 5.
+⛔ **Shape B (auto-deploy off + repo-owned `serviceInstanceDeploy(commitSha:)`) is REJECTED, not deferred.**
+It was the only shape compliant with the constraint that Railway cannot narrow its own wait
+(`DeploymentTrigger.checkSuites` is a `Boolean` — introspected, a present type-system fact). It would have
+cost production writes, a second deploy path to own forever, and rested on an UNSETTLED question: whether an
+API-triggered deploy even bypasses `checkSuites`. If it does not, Shape B does not work at all. Do not
+revive it without answering that question first, on a throwaway service.
 
-**Requirements**: TBD (no v1.20 requirement IDs) + the five measured SKIPPED deployment ids above + CI run `34763669052`. ⚠️ Phase 158 (OPS-CI, "merge = deploy") is COMPLETE and owned this subject; this phase exists because the guarantee regressed, so read `158`'s artifacts before planning rather than re-deriving the deploy path.
-**Depends on:** Phase 164
-**Plans:** 0 plans
+**Depends on:** — (cancelled)
+**Plans:** 0 — all six plan files deleted unexecuted. Sunk planning cost was not an argument to continue.
 
-Plans:
-
-- [ ] TBD (run /gsd-plan-phase 164.11 to break down)
 
 ### Phase 164.7: APPSETTINGS — every app.* GUC reader moves to a mechanism this platform actually grants, because ALTER DATABASE and ALTER ROLE both return 42501 here (INSERTED)
 
