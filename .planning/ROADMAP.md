@@ -1666,11 +1666,18 @@ by MEASUREMENT, not by reading) stays as a METHOD for the surviving work.
 **Plans:** 5 plans
 
 Plans:
+**Wave 1**
 
 - [ ] 164.8.4-01-PLAN.md — the shared psql-stderr redaction definition (union of all six expressions), wired end-to-end at the one call site whose job runs with a non-root working-directory, with a per-expression falsifier (wave 1)
-- [ ] 164.8.4-02-PLAN.md — convert the remaining seven inline blocks, close the third leak shape (the two `sql-tests` capture-then-`cat` sites), and ship the survivor / capture-ordering / marker-collision gates (wave 2)
 - [ ] 164.8.4-03-PLAN.md — `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]`: capture, count and WITHHOLD the `missing`-direction ledger stderr, reusing the sibling arm's idiom verbatim (wave 1)
 - [ ] 164.8.4-04-PLAN.md — `[164.8.2-EVIDENCE-DOTENV-LEAK]`: a fail-loud repo-side `HAS_LIVE_DB` inheritance guard in the vitest bootstrap, skip gates untouched, plus the SC-2 skip-count parity measurement (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 164.8.4-02-PLAN.md — convert the remaining seven inline blocks, close the third leak shape (the two `sql-tests` capture-then-`cat` sites), and ship the survivor / capture-ordering / marker-collision gates (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 164.8.4-05-PLAN.md — `[164.8.2-CHANNEL-ALLOWLIST-STALE]`: derive the diagnostic-channel set from both producers' declared write targets and delete the hand-typed list (wave 3)
 
 ### Phase 164.8.3: PROBERAUTH — the prod-prober names MT5 `-6` as what it is (the terminal has no authorized account) instead of collapsing it into the catch-all `mt5-terminal-error` whose remedy sends the operator to an error table (INSERTED)
