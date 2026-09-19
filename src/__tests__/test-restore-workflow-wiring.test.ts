@@ -48,6 +48,11 @@ const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
 const WF = read(WF_PATH);
 const CI = read(CI_PATH);
 const SCRIPT = read(SCRIPT_PATH);
+// [164.8.4-01] The one shared psql-stderr redaction definition — the UNION of the six
+// expression shapes measured across the eight inline blocks it replaces. Read from disk,
+// never restated, so a seventh expression extends every gate below automatically.
+const REDACT_SED_PATH = "scripts/redact-psql-stderr.sed";
+const REDACT_SED = read(REDACT_SED_PATH);
 
 // ⛔ SPLIT ON PURPOSE, and it is NOT superstition. Both fixtures below are
 // synthetic — EXAMPLE_ placeholders at `example.invalid` — but a contiguous
@@ -255,30 +260,6 @@ function stepBody(text: string, name: string): string {
   // upload step and every key assertion below would have had nothing to look at).
   const m = `${text}\n  __end_of_file__:\n`.match(re);
   return m ? m[0] : "";
-}
-
-/**
- * The `-e '…'` expressions of the redaction step's sed program, in order.
- *
- * Sliced between `if sed -i -E` and the `; then` that closes the command, so an
- * unrelated `-e '…'` elsewhere in the step cannot pad the list. Returns [] when the
- * anchors are gone, and its one consumer asserts a non-empty exact length — an empty
- * program would make "the DSN was scrubbed" vacuously reportable.
- */
-function redactExpressions(text: string): string[] {
-  // ⛔ The step index is checked BEFORE it narrows anything (Phase 164.8.2 class
-  // sweep). `indexOf` returns -1 on an absent step and a negative index counts from
-  // the END, so the unguarded form silently made `body` the step's LAST CHARACTER —
-  // whereupon both anchors below are absent, this returns [], and the caller's
-  // "non-empty exact length" assertion is the only thing that would have noticed.
-  const at = text.indexOf("- name: Redact connection metadata");
-  if (at < 0) return [];
-  const body = text.slice(at);
-  const a = body.indexOf("if sed -i -E");
-  if (a < 0) return [];
-  const b = body.indexOf("; then", a);
-  if (b < 0) return [];
-  return [...body.slice(a, b).matchAll(/-e '([^']*)'/g)].map((m) => m[1]);
 }
 
 /**
@@ -1207,29 +1188,30 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     });
 
     it("the step's OWN sed program scrubs a DSN — EXECUTED against a fixture log", () => {
-      // ⭐ EXECUTED, NOT GREPPED. The expressions are lifted OUT of the YAML and run,
-      // so a step that keeps the strings and guts the program is a RED here. Run as
-      // `sed -E` (no `-i`): the step's `sed -i -E` form is GNU-only — BSD sed reads
-      // the `-E` as `-i`'s backup-extension argument and never enables extended
-      // regexes — and this suite must measure the same thing on a developer's macOS
-      // as on the ubuntu runner. The workflow itself only ever runs on ubuntu.
-      const exprs = redactExpressions(WF);
+      // ⭐ EXECUTED, NOT GREPPED. [164.8.4-02] The step's substitution now runs the
+      // SHARED scripts/redact-psql-stderr.sed via `-f` (Task 1's promotion decision
+      // — the chained `-e` list this test used to lift out of the workflow text no
+      // longer exists there by design), so this test runs that shared file's own
+      // expressions instead. Run as `sed -E` (no `-i`): the step's `sed -i -E` form
+      // is GNU-only — BSD sed reads the `-E` as `-i`'s backup-extension argument and
+      // never enables extended regexes — and this suite must measure the same thing
+      // on a developer's macOS as on the ubuntu runner. The workflow itself only
+      // ever runs on ubuntu.
+      const exprs = redactionExpressions(REDACT_SED);
       expect(
         exprs.length,
-        'the redaction step\'s sed program no longer carries its five expressions (DSN credentials, host=, user=, `server at "…"`, `for user "…"`)',
-      ).toBe(5);
+        "the shared redaction definition no longer carries its six expressions (DSN credentials, host=, user=, DNS-resolution-failure, server-at, for-user)",
+      ).toBe(6);
 
       const scrub = (program: string[], input: string): string => {
         const dir = mkdtempSync(join(tmpdir(), "redact-"));
         const f = join(dir, "psql.err");
+        const progFile = join(dir, "prog.sed");
         writeFileSync(f, input);
-        const r = spawnSync(
-          "sed",
-          ["-E", ...program.flatMap((e) => ["-e", e]), f],
-          {
-            encoding: "utf8",
-          },
-        );
+        writeFileSync(progFile, `${program.join("\n")}\n`);
+        const r = spawnSync("sed", ["-E", "-f", progFile, f], {
+          encoding: "utf8",
+        });
         rmSync(dir, { recursive: true, force: true });
         if (r.status !== 0) throw new Error(`sed failed: ${r.stderr}`);
         return r.stdout ?? "";
@@ -1280,11 +1262,27 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // failure is deterministic on every platform rather than depending on which
       // sed the developer has.
       const script = extractRunScript(WF, REDACT);
+      // [164.8.4] CR-01 re-anchor. Commit d04bb210 replaced the single-line
+      // `if sed -i -E -f "${GITHUB_WORKSPACE}/…" "${f}"; then` this twin used
+      // to force-fail with the PORTABLE two-line form below — BSD sed reads
+      // `-E` as `-i`'s backup-suffix argument and never enables extended
+      // regexes, so `-i` had to go; the substitution now streams to a temp
+      // file and `mv`s it over `${f}` instead of editing in place:
+      //   if { sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed"
+      //        "${f}" > "${f}.redacted" \
+      //        && mv "${f}.redacted" "${f}"; }; then
+      // Re-anchor on the first line of that construct (up to the trailing
+      // `\` continuation) rather than the retired `-i` form.
+      const ANCHOR =
+        'sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${f}" > "${f}.redacted"';
       expect(
-        script.includes("if sed -i -E \\"),
-        "the redaction step's substitution is no longer the `if sed -i -E \\` form this twin forces to fail — re-anchor the mutation rather than deleting the twin",
+        script.includes(ANCHOR),
+        "the redaction step's substitution is no longer the portable `sed -E -f … > \"${f}.redacted\"` form this twin forces to fail — re-anchor the mutation rather than deleting the twin",
       ).toBe(true);
-      const forced = script.replace("if sed -i -E \\", "if false -i -E \\");
+      const forced = script.replace(
+        ANCHOR,
+        ANCHOR.replace("sed -E -f", "false -E -f"),
+      );
 
       const runnerTemp = mkdtempSync(join(tmpdir(), "redact-run-"));
       const outdir = join(runnerTemp, "test-backup");
@@ -1298,7 +1296,9 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       writeFileSync(scriptFile, forced);
       const r = spawnSync("bash", [scriptFile], {
         encoding: "utf8",
-        env: { ...process.env, RUNNER_TEMP: runnerTemp },
+        // [164.8.4-02] GITHUB_WORKSPACE: the substitution's -f operand is now
+        // workspace-rooted; real Actions runners always set this.
+        env: { ...process.env, RUNNER_TEMP: runnerTemp, GITHUB_WORKSPACE: ROOT },
       });
       const surviving = readdirSync(outdir).sort();
       rmSync(runnerTemp, { recursive: true, force: true });
@@ -1313,10 +1313,24 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           `\`${c}\` SURVIVED a failed redaction and would be uploaded unredacted to a world-readable artifact`,
         ).toBe(false);
       }
+      // [164.8.4] The portable form redirects to `"${f}.redacted"` BEFORE the
+      // substitution runs — bash opens/truncates that file to set up the
+      // redirect whether or not the command it names ever succeeds, so
+      // forcing the FIRST channel's substitution to fail (`*.err` sorts
+      // before `*.log`/`*.out` in the step's own glob order, so `psql.err`
+      // is what fails here) leaves an empty `psql.err.redacted` residue that
+      // `withhold_channels()`'s `*.err *.log *.out` glob does not match (it
+      // ends in `.redacted`, not `.err`). That residue carries no connection
+      // metadata (it is empty) and is never published: the WR-05 describe
+      // block below pins that the staging step copies an ENUMERATED
+      // allowlist by exact name into a fresh directory, and
+      // `psql.err.redacted` is in neither allowlist — only this step's own
+      // ephemeral RUNNER_TEMP directory, asserted here, ever holds it.
+      const residual = `${channels[0]}.redacted`;
       expect(
         surviving,
-        "the fail-closed path destroyed the reversal recipe too — schema.sql and ledger.csv carry no connection metadata and are what makes the act reversible",
-      ).toEqual(keepers.slice().sort());
+        `the fail-closed path destroyed the reversal recipe too — schema.sql and ledger.csv carry no connection metadata and survive, alongside the harmless empty \`${residual}\` redirect residue (never staged, per the WR-05 enumerated allowlist below)`,
+      ).toEqual([...keepers, residual].sort());
       expect(`${r.stdout}${r.stderr}`).toContain("::error::");
       expect(`${r.stdout}${r.stderr}`).toContain("WITHHELD");
     });
@@ -1448,10 +1462,54 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
      * the tokens verbatim lets the arm below assert that none of them contains `*`,
      * which is the actual rule.
      */
+    /**
+     * [164.8.4-05] Runs the real `scripts/derive-restore-channels.sh` over the
+     * two real producers, for `stagedChannelNames` to resolve the shipped
+     * `for c in ${derived_channels}; do` shape back into real names. Memoized:
+     * the script is deterministic source-text scanning and this suite does not
+     * mutate the repo's producer files mid-run.
+     */
+    let realDerivedChannelsCache: string[] | null = null;
+    function realDerivedChannels(): string[] {
+      if (realDerivedChannelsCache) return realDerivedChannelsCache;
+      const r = spawnSync(
+        "bash",
+        [
+          join(ROOT, "scripts/derive-restore-channels.sh"),
+          join(ROOT, "scripts/restore-test-from-baseline.sh"),
+          join(ROOT, ".github/workflows/test-restore-from-baseline.yml"),
+        ],
+        { encoding: "utf8" },
+      );
+      if (r.status !== 0) {
+        throw new Error(
+          `stagedChannelNames: scripts/derive-restore-channels.sh failed (exit ${r.status}) over the real producers — cannot resolve the dynamic channel loop.\n${r.stdout ?? ""}${r.stderr ?? ""}`,
+        );
+      }
+      realDerivedChannelsCache = (r.stdout ?? "")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      return realDerivedChannelsCache;
+    }
+
     function stagedChannelNames(text: string): string[] {
       const body = stepBody(text, STAGE);
       const m = body.match(/^\s*for c in ([^;\n]+); do$/m);
-      return m ? m[1].trim().split(/\s+/) : [];
+      if (!m) return [];
+      const tokens = m[1].trim().split(/\s+/);
+      // [164.8.4-05] The staging step's loop iterates a DERIVED set, not a
+      // hand-typed list — the ONE shape the shipped step carries is
+      // `for c in ${derived_channels}; do`. Resolve THAT shape back to the
+      // real names by running the real derivation, so every downstream
+      // predicate reasoning about "the current channel set" keeps working. Any
+      // OTHER token shape — a calibration fixture that renamed the variable,
+      // or one that re-introduced a literal list — is returned VERBATIM; that
+      // is what lets a calibration observe the parse break.
+      if (tokens.length === 1 && tokens[0] === "${derived_channels}") {
+        return realDerivedChannels();
+      }
+      return tokens;
     }
 
     /** What the workflow's OWN two lists say should be staged, given a seeded set. */
@@ -1502,6 +1560,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           ...process.env,
           RUNNER_TEMP: runnerTemp,
           REDACT_OUTCOME: redactOutcome,
+          // [164.8.4-05] The staging step now derives its channel set via
+          // scripts/derive-restore-channels.sh, referenced workspace-rooted
+          // (same convention as the redaction step's `-f`); a real Actions
+          // runner always sets this.
+          GITHUB_WORKSPACE: ROOT,
         },
       });
       const stageDir = join(runnerTemp, "test-backup-artifact");
@@ -1556,12 +1619,15 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // A channel this job gains tomorrow is OUT until it is named here and in the
       // step, which is the same default-out rule the content files have always had —
       // and, until this phase, the one thing the channels did not.
+      // [164.8.4-05] SORTED — scripts/derive-restore-channels.sh's own contract
+      // is "sorted and de-duplicated, one per line" (its own header comment),
+      // so the resolved real names come back alphabetical, not insertion order.
       const DECIDED_CHANNELS = [
         "census.err",
+        "dump.log",
         "ledger.err",
         "marker.err",
         "refdata.err",
-        "dump.log",
         "transaction.out",
       ];
       expect(
@@ -1572,14 +1638,18 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         stagedChannelNames(WF).some((n) => n.includes("*")),
         "the channel allowlist has been widened back to a glob — every future `.err`/`.log`/`.out` file is then IN by default, which is the defect review WR-01 measured by execution",
       ).toBe(false);
-      // CALIBRATION — the channel PARSE must break when a channel name changes, or
-      // the agreement above is between two constants.
+      // CALIBRATION — [164.8.4-05] the channel PARSE must break when the loop no
+      // longer carries the shipped `${derived_channels}` reference, or the
+      // agreement above is between two constants. The loop is now derived, not
+      // hand-typed, so the mutation renames the variable rather than a literal
+      // channel name — `stagedChannelNames` falls back to returning that
+      // unresolved token verbatim, which does not include "census.err".
       calibrate(
         "the channel allowlist is parsed out of the step, not restated",
         (s) =>
           s.replace(
-            "for c in census.err ledger.err",
-            "for c in census.ERR ledger.err",
+            "for c in ${derived_channels}; do",
+            "for c in ${wrong_channels_variable}; do",
           ),
         (t) => stagedChannelNames(t).includes("census.err"),
       );
@@ -1688,8 +1758,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // returns to the world-readable artifact with its CREATE POLICY line intact.
       // That is the reviewer's measurement, kept as a standing twin so the glob cannot
       // come back quietly.
+      // [164.8.4-05] Re-anchored on the DERIVED loop shape — the literal
+      // six-name `for c in …` line this anchor used to match no longer exists.
       const CHANNEL_LOOP_ANCHOR =
-        "    for c in census.err ledger.err marker.err refdata.err dump.log transaction.out; do\n" +
+        "    for c in ${derived_channels}; do\n" +
         '      if [ -f "${outdir}/${c}" ]; then\n' +
         '        cp -p "${outdir}/${c}" "${stage}/"\n' +
         "      fi\n" +
@@ -2421,7 +2493,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       writeFileSync(scriptFile, script);
       const r = spawnSync("bash", [scriptFile], {
         encoding: "utf8",
-        env: { ...process.env, RUNNER_TEMP: runnerTemp },
+        // [164.8.4-05] GITHUB_WORKSPACE: the channel derivation now runs
+        // unconditionally near the top of the step, before the outdir-exists
+        // check this fixture is exercising; a real Actions runner always sets
+        // this.
+        env: { ...process.env, RUNNER_TEMP: runnerTemp, GITHUB_WORKSPACE: ROOT },
       });
       const staged = readdirSync(
         join(runnerTemp, "test-backup-artifact"),
@@ -4411,6 +4487,10 @@ describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
           PATH: `${bin}:${process.env.PATH ?? ""}`,
           RUNNER_TEMP: runnerTemp,
           TEST_DB_SESSION_URL: `${SCHEME}EXAMPLE_USER:EXAMPLE_PASSWORD@example.invalid:5432/postgres`,
+          // [164.8.4-02] The post-verify step's redaction now references the
+          // shared scripts/redact-psql-stderr.sed via ${GITHUB_WORKSPACE};
+          // real Actions runners always set this, so the fixture must too.
+          GITHUB_WORKSPACE: ROOT,
         },
       });
       rmSync(dir, { recursive: true, force: true });
@@ -4517,6 +4597,9 @@ describe("post-verify — the ErrMissingLocal diagnosis is reachable", () => {
         ...process.env,
         RUNNER_TEMP: runnerTemp,
         TEST_DB_SESSION_URL: `${SCHEME}EXAMPLE_USER:EXAMPLE_PASSWORD@example.invalid:5432/postgres`,
+        // [164.8.4-02] Same reason as the sibling arm above: the post-verify
+        // step's redaction is now ${GITHUB_WORKSPACE}-rooted.
+        GITHUB_WORKSPACE: ROOT,
       },
     });
     rmSync(dir, { recursive: true, force: true });
@@ -4824,6 +4907,10 @@ describe("the activity gate — measurably quiet, inside the held mutex", () => 
           // pre-push secret scanner on SHAPE, and bypassing that would disarm it for
           // real credentials on every later push.
           TEST_DB_SESSION_URL: `${SCHEME}EXAMPLE_USER:EXAMPLE_PASSWORD@example.invalid:5432/postgres`,
+          // [164.8.4-02] The activity gate's failure-branch redaction now
+          // references the shared scripts/redact-psql-stderr.sed via
+          // ${GITHUB_WORKSPACE}; real Actions runners always set this.
+          GITHUB_WORKSPACE: ROOT,
         },
       });
       rmSync(dir, { recursive: true, force: true });
@@ -6066,5 +6153,657 @@ describe("no lookup index reaches a narrowing call unchecked, anywhere in src/__
       found.join("\n"),
       `a scanned file hands a raw lookup index to a narrowing call. -1 does not throw: it counts from the END, so the pin degrades into comparing a one-character tail (or silently widening a prefix) and its failure mode is a PASS. Check the index and throw, as the per-file \`anchorIndex\` helpers do — and if the expression is a DELIBERATE degeneracy demonstration, route it through \`degenerateNarrow\` in ${DEGENERATE_HELPER}.`,
     ).toBe("");
+  });
+});
+
+// =============================================================================
+// [164.8.4-01] The shared psql-stderr redaction definition — behavioural proof.
+// =============================================================================
+//
+// ⛔ THE DEFECT THIS CATCHES. Eight inline `sed -E` blocks, spread across two
+// workflow files, each redacted a different SUBSET of the six shapes psql and
+// the Supabase CLI print on a connect/auth/DNS failure against shared TEST. No
+// single block carried all six — the correction is ONE shared definition
+// (`scripts/redact-psql-stderr.sed`), read from disk here rather than
+// restated, so a seventh expression extends every gate below with no test
+// edit.
+
+/**
+ * Splits the shipped `.sed` text into its substitution lines — comments and
+ * blank lines dropped — so every gate below derives its needles from the
+ * SHIPPED file instead of a copy pasted into the test.
+ */
+function redactionExpressions(text: string): string[] {
+  return text
+    .split("\n")
+    .filter((line) => {
+      const trimmed = line.trimStart();
+      return trimmed.length > 0 && !trimmed.startsWith("#");
+    });
+}
+
+/**
+ * Runs the real `sed -E -f` over `input`, stream form (never in-place), so
+ * this is portable between the CI runner's GNU sed and a developer's BSD sed.
+ */
+function runRedaction(input: string): string {
+  const result = spawnSync("sed", ["-E", "-f", REDACT_SED_PATH], {
+    input,
+    encoding: "utf8",
+  });
+  expect(
+    result.status,
+    `sed -E -f ${REDACT_SED_PATH} exited ${result.status} (expected 0). stderr: ${result.stderr}`,
+  ).toBe(0);
+  return result.stdout;
+}
+
+describe("[164.8.4-01] the shared redaction definition masks every shape psql can print", () => {
+  // ⛔ SYNTHETIC PLACEHOLDERS ONLY, assembled at runtime from fragments so no
+  // whole connection-string literal appears in the source — same idiom as the
+  // `SCHEME` constant above. `db.example` is this repo's own established
+  // synthetic-host convention (`drift-check-scripts.test.ts`'s
+  // `writeStubLedger`); the IP is an RFC 5737 documentation address; the role
+  // and password are obviously-fake tokens.
+  const HOST = "db" + ".example";
+  const IP = "198.51.100" + ".7";
+  const ROLE = "fake" + "_role";
+  const PASSWORD = "EXAMPLE" + "_PASSWORD";
+  const PLAIN_SCHEME = `${"postgres"}${"://"}`;
+  // The DSN lines' own host segment (after the masked `@`) is DELIBERATELY a
+  // DIFFERENT placeholder from `HOST` above: none of the six expressions mask
+  // a DSN's post-`@` host (only the userinfo before it — matching every one
+  // of the eight original inline blocks, none of which touched it either), so
+  // asserting "the synthetic host never survives" must not be tripped by a
+  // token this union was never meant to mask. `example.invalid` matches this
+  // file's own existing DSN-fixture convention (see `SCHEME` usages above).
+  const DSN_HOST = "example" + ".invalid";
+
+  // One line per shape the shared definition must mask:
+  //   1. connect failure — quoted host + parenthesised address
+  //   2. DNS-resolution failure — quoted host
+  //   3. auth failure — quoted role
+  //   4. DSN userinfo — "postgresql://" spelling
+  //   5. DSN userinfo — "postgres://" spelling
+  //   6. key=value connection string — host and user
+  const REDACTION_FIXTURE = [
+    `psql: error: connection to server at "${HOST}" (${IP}), port 5432 failed`,
+    `could not translate host name "${HOST}" to address`,
+    `FATAL:  password authentication failed for user "${ROLE}"`,
+    `DSN=${SCHEME}${ROLE}:${PASSWORD}@${DSN_HOST}:5432/postgres`,
+    `DSN=${PLAIN_SCHEME}${ROLE}:${PASSWORD}@${DSN_HOST}:5432/postgres`,
+    `host=${HOST} user=${ROLE} sslmode=require`,
+  ].join("\n");
+
+  const REDACT_EXPRESSIONS = redactionExpressions(REDACT_SED);
+
+  it("MEASURE_FAIL guard: the shipped definition parses to at least one expression", () => {
+    // Not a count-pinning arm (SC-4 / Pitfall 2 forbid asserting a literal N) —
+    // this only guards against the parser silently returning an empty set,
+    // which would make every it.each below vacuously pass over zero cases.
+    expect(
+      REDACT_EXPRESSIONS.length,
+      `redactionExpressions(REDACT_SED) returned zero lines — either ${REDACT_SED_PATH} is empty/all-comment, or the comment-strip predicate is wrong. A gate with nothing to iterate over is not a gate.`,
+    ).toBeGreaterThan(0);
+  });
+
+  it("every synthetic host, IP, role and password is masked; the masked marker is present", () => {
+    const out = runRedaction(REDACTION_FIXTURE);
+    expect(out, "the synthetic host survived redaction").not.toContain(HOST);
+    expect(out, "the synthetic IP survived redaction").not.toContain(IP);
+    expect(out, "the synthetic role survived redaction").not.toContain(ROLE);
+    expect(out, "the synthetic password survived redaction").not.toContain(
+      PASSWORD,
+    );
+    expect(out, "no masked marker (***) appears anywhere in the output").toContain(
+      "***",
+    );
+  });
+
+  it.each(REDACT_EXPRESSIONS.map((expr, idx) => ({ expr, idx })))(
+    "expression $idx is load-bearing — removing it changes the redacted output ($expr)",
+    ({ idx }) => {
+      const fullOutput = runRedaction(REDACTION_FIXTURE);
+      const mutantLines = REDACT_EXPRESSIONS.filter((_, i) => i !== idx);
+      const tmpDir = mkdtempSync(join(tmpdir(), "redact-mutant-"));
+      try {
+        const mutantPath = join(tmpDir, "mutant.sed");
+        writeFileSync(mutantPath, mutantLines.join("\n") + "\n");
+        const mutantResult = spawnSync("sed", ["-E", "-f", mutantPath], {
+          input: REDACTION_FIXTURE,
+          encoding: "utf8",
+        });
+        expect(
+          mutantResult.status,
+          `mutant sed (expression ${idx} removed) exited ${mutantResult.status}. stderr: ${mutantResult.stderr}`,
+        ).toBe(0);
+        expect(
+          mutantResult.stdout,
+          `CALIBRATION expression ${idx} (${REDACT_EXPRESSIONS[idx]}): removing it left the redacted output UNCHANGED — this expression is dead and matches nothing the fixture exercises`,
+        ).not.toBe(fullOutput);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+describe("[164.8.4-01] every reference to the shared redaction definition is workspace-rooted", () => {
+  // ⛔ THE MEASURED CAUSE this gate exists to hold: the `python` job declares
+  // `defaults: run: working-directory: analytics-service`, so a BARE relative
+  // `scripts/redact-psql-stderr.sed` reference would not resolve there — and
+  // the call site's own trailing `|| true` SWALLOWS that failure, so a
+  // relative reference does not error loudly, it redacts NOTHING.
+  const BASENAME = REDACT_SED_PATH.split("/").pop() as string;
+  const WORKSPACE_ROOTED_REF = `\${GITHUB_WORKSPACE}/scripts/${BASENAME}`;
+  // Both workflow files are scanned together — Plan 02 converts the remaining
+  // sites in test-restore-from-baseline.yml; this plan converts exactly one
+  // site in ci.yml. Combining them means the subject set already reflects the
+  // eventual full surface without this gate needing to change shape later.
+  const COMBINED_WORKFLOWS = `${CI}\n${WF}`;
+
+  function stripYamlComments(text: string): string {
+    return text
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+  }
+
+  /** Every LIVE line naming the shared definition's basename. */
+  function referenceLines(text: string): string[] {
+    return stripYamlComments(text)
+      .split("\n")
+      .filter((line) => line.includes(BASENAME));
+  }
+
+  /**
+   * TRUE only when the subject set is non-empty AND every reference in it
+   * carries the workspace variable and the `scripts/` segment immediately
+   * before the basename. An empty subject set is explicitly FALSE, never a
+   * vacuous pass — the repo's own anti-vacuity rule, and this gate is squarely
+   * inside it: a credential reaching a public log is data-integrity.
+   */
+  function allReferencesWorkspaceRooted(text: string): boolean {
+    const lines = referenceLines(text);
+    if (lines.length === 0) return false;
+    return lines.every((line) => line.includes(WORKSPACE_ROOTED_REF));
+  }
+
+  it("the subject set is non-empty — a gate over zero references is not a gate", () => {
+    const lines = referenceLines(COMBINED_WORKFLOWS);
+    expect(
+      lines.length,
+      `no live reference to ${BASENAME} was found in ${CI_PATH} or ${WF_PATH} — an empty subject set would make "every reference is workspace-rooted" vacuously TRUE, which is worse than no gate: it would report success while checking nothing`,
+    ).toBeGreaterThan(0);
+  });
+
+  it("every live reference is workspace-rooted, and a bare relative path is caught", () => {
+    calibrate(
+      `every reference to ${BASENAME} carries \${GITHUB_WORKSPACE}/scripts/ — the python job's working-directory is analytics-service, not the repo root, and a bare relative reference would not resolve there; the call site's trailing "|| true" would then swallow that failure silently instead of erroring loudly, so the redaction would do nothing`,
+      (s) => s.split(WORKSPACE_ROOTED_REF).join(`scripts/${BASENAME}`),
+      allReferencesWorkspaceRooted,
+      COMBINED_WORKFLOWS,
+    );
+  });
+
+  it("removing every reference makes the predicate FALSE, not vacuously TRUE", () => {
+    calibrate(
+      `removing every ${BASENAME} reference must not read as a pass — an empty subject set is a gate that checks nothing, not a gate that is satisfied`,
+      (s) => s.split(WORKSPACE_ROOTED_REF).join(""),
+      allReferencesWorkspaceRooted,
+      COMBINED_WORKFLOWS,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [164.8.4-02] The third leak shape (CONTEXT.md Area 1): a psql call whose
+// combined stdout+stderr is captured into a file and then `cat`'d to a
+// PUBLIC log, with nothing redacting the capture in between.
+// ---------------------------------------------------------------------------
+
+/**
+ * Strips whole-line `#`-comments — the same "first non-whitespace char is
+ * `#`" definition liveLines() already uses — returning TEXT rather than an
+ * array of lines, for regex scanning across a whole workflow file.
+ */
+function stripComments(text: string): string {
+  return liveLines(text).join("\n");
+}
+
+/**
+ * Joins a YAML block scalar's backslash-continued shell lines into one
+ * logical line each. `ci.yml`'s NOTICE-channel probe writes its psql
+ * invocation across three lines (`psql … \` / `-c "…" \` / `> "$out" 2>&1
+ * || …`); without joining, a same-line scan for "psql … captures $VAR" would
+ * miss that site while catching the per-file loop's single-line sibling —
+ * an inconsistency with no basis in the actual defect.
+ */
+function joinContinuations(text: string): string {
+  return text.replace(/\\\n[ \t]*/g, " ");
+}
+
+/**
+ * Pairs a psql-driven combined-output capture (`psql … > "$VAR" 2>&1`) with
+ * the NEXT echo of that SAME variable (`cat "$VAR"`) in comment-stripped,
+ * continuation-joined text. Scoped to `psql` specifically — not every
+ * `> "$VAR" 2>&1` / `cat "$VAR"` pair in the file — because this workflow
+ * also captures-then-`cat`s several unrelated Node.js script logs
+ * (REFDATA_SELFTEST_LOG, REFDATA_AUDIT_LOG, RUNNER_LOG, ANCHOR_LOG) that
+ * never touch shared TEST and carry no connection metadata; scanning those
+ * too would make the predicate false on the real file for a reason that has
+ * nothing to do with the defect this gate exists to close. A capture with no
+ * later echo of the same variable names nothing — there is nothing published
+ * for the ordering gate to check.
+ */
+interface CaptureEchoSite {
+  variable: string;
+  between: string;
+}
+function captureEchoSites(text: string): CaptureEchoSite[] {
+  const live = joinContinuations(stripComments(text));
+  const captureRe = /\bpsql\b[^\n]*> "\$([A-Za-z_][A-Za-z0-9_]*)" 2>&1/g;
+  const sites: CaptureEchoSite[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = captureRe.exec(live)) !== null) {
+    const variable = m[1];
+    const rest = live.slice(m.index + m[0].length);
+    const echoIdx = rest.indexOf(`cat "$${variable}"`);
+    if (echoIdx >= 0) {
+      sites.push({ variable, between: rest.slice(0, echoIdx) });
+    }
+  }
+  return sites;
+}
+
+/**
+ * TRUE only when the subject set is non-empty AND every capture-then-echo
+ * pair carries a reference to the shared redaction definition — naming the
+ * SAME variable — somewhere between the capture and the echo. An empty
+ * subject set is explicitly FALSE, never a vacuous pass (the repo's own
+ * anti-vacuity rule; a credential reaching a public log is data-integrity).
+ */
+function everyCaptureRedactedBeforeEcho(text: string): boolean {
+  const sites = captureEchoSites(text);
+  if (sites.length === 0) return false;
+  return sites.every((s) =>
+    new RegExp(`redact-psql-stderr\\.sed"\\s*"\\$${s.variable}"`).test(
+      s.between,
+    ),
+  );
+}
+
+describe("[164.8.4-02] every captured psql output is redacted before it is echoed", () => {
+  it("the subject set is non-empty — a gate over zero capture-then-echo pairs is not a gate", () => {
+    const sites = captureEchoSites(CI);
+    expect(
+      sites.length,
+      "no psql capture-then-echo pair was found in ci.yml — an empty subject set would make the ordering predicate vacuously satisfiable, which is worse than no gate at all",
+    ).toBeGreaterThan(0);
+  });
+
+  it("every capture is redacted before its echo, and a deleted redaction line is caught", () => {
+    // [164.8.4] CR-01 re-anchor. Commit d04bb210 replaced the single-line
+    // `if sed -i -E -f "${GITHUB_WORKSPACE}/…" "$out"; then` this mutator
+    // used to delete with the PORTABLE two-line form ci.yml now ships at
+    // both `$out` capture-then-echo sites (the NOTICE-channel probe and the
+    // per-file loop):
+    //   sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "$out" > "$out.redacted"
+    //        && mv "$out.redacted" "$out"; }; then
+    // `String.replace` with a string needle only touches the FIRST of the
+    // two identical occurrences, which is exactly what's wanted: deleting
+    // the redaction reference from ONE capture-then-echo pair's `between`
+    // text is enough to flip `everyCaptureRedactedBeforeEcho`'s `.every()`,
+    // while the second, untouched site keeps the predicate genuinely
+    // evidence-bearing rather than vacuous.
+    calibrate(
+      'every psql capture-then-echo pair carries a reference to the shared scripts/redact-psql-stderr.sed, naming the SAME variable, between the capture and its `cat`',
+      (s) =>
+        s.replace(
+          'sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "$out" > "$out.redacted"',
+          'true > "$out.redacted"',
+        ),
+      everyCaptureRedactedBeforeEcho,
+      CI,
+    );
+  });
+
+  it('a NEW capture-then-echo site with nothing redacting it FAILS this gate — SC-1\'s own requirement', () => {
+    calibrate(
+      'a newly added `psql … > "$scratch164842" 2>&1` / `cat "$scratch164842"` pair with nothing redacting "$scratch164842" between them must flip this gate — a new unredacted echo site was found, and OTHER clean sites must not paper over it',
+      (s) =>
+        `${s}\n          psql "$OTHER_DSN" -X > "$scratch164842" 2>&1 || rc=$?\n          cat "$scratch164842"\n`,
+      everyCaptureRedactedBeforeEcho,
+      CI,
+    );
+  });
+
+  it("removing every psql capture-then-echo pair makes the predicate FALSE, not vacuously TRUE", () => {
+    calibrate(
+      "an empty capture-then-echo corpus must not read as a pass — deleting every psql invocation this gate scans for is not the same as redacting them",
+      (s) => s.replace(/\bpsql\b/g, "psqlX"),
+      everyCaptureRedactedBeforeEcho,
+      CI,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [164.8.4-02] Task 3 — the survivor gate (no hand-copied redaction
+// expression survives outside the shared definition) and the marker-
+// collision gate (the redaction cannot alter what the sql-tests job's
+// anti-skip mechanism reads). Both DERIVE their subjects from disk — the
+// shipped scripts/redact-psql-stderr.sed for the former,
+// supabase/tests/*.sql for the latter — so a seventh expression or a new
+// marker extends either gate with no test edit.
+// ---------------------------------------------------------------------------
+
+/**
+ * The MATCH-PATTERN half of a `s#PATTERN#REPLACEMENT#FLAGS` sed expression —
+ * the substring that would appear verbatim in a hand-copied `-e '…'` block.
+ * None of the six shipped expressions embed a literal `#` in either half;
+ * this throws (a MEASURE_FAIL, not a silent mis-derivation) the day that
+ * assumption breaks.
+ */
+function sedMatchPattern(expr: string): string {
+  const parts = expr.split("#");
+  if (parts.length !== 4) {
+    throw new Error(
+      `MEASURE_FAIL: "${expr}" does not split into exactly 4 '#'-delimited segments (s#PATTERN#REPLACEMENT#FLAGS) — a shipped expression now embeds a literal '#', and needle derivation can no longer assume simple splitting`,
+    );
+  }
+  return parts[1] as string;
+}
+
+/** One needle per shipped expression, derived fresh from disk every call. */
+function survivorNeedles(): string[] {
+  return redactionExpressions(REDACT_SED).map(sedMatchPattern);
+}
+
+/**
+ * TRUE only when the derived needle set is non-empty AND none of its
+ * needles appear in comment-stripped text — i.e. no hand-copied expression
+ * survives outside scripts/redact-psql-stderr.sed. Asserting how MANY
+ * needles there are, or how many blocks were converted, is the count-
+ * pinning overclaim SC-1 forbids by name; only the structural invariant is
+ * asserted.
+ */
+function noNeedleSurvivesOutsideSharedDefinition(text: string): boolean {
+  const needles = survivorNeedles();
+  if (needles.length === 0) return false;
+  const live = stripComments(text);
+  return needles.every((n) => !live.includes(n));
+}
+
+describe("[164.8.4-02] no hand-copied redaction expression survives outside the shared definition", () => {
+  it("the derived needle set is non-empty — a definition file gone missing or emptied cannot read as a clean pass", () => {
+    expect(
+      survivorNeedles().length,
+      `${REDACT_SED_PATH} parsed to zero expressions — either the file is empty/all-comment or redactionExpressions() no longer agrees with its own shape`,
+    ).toBeGreaterThan(0);
+  });
+
+  it("no hand-copied redaction expression survives outside the shared definition, in either workflow", () => {
+    expect(
+      noNeedleSurvivesOutsideSharedDefinition(CI),
+      `a pattern from ${REDACT_SED_PATH} was found verbatim in ci.yml outside a comment — a hand-copied inline redaction expression survived the sweep and belongs in ${REDACT_SED_PATH} instead`,
+    ).toBe(true);
+    expect(
+      noNeedleSurvivesOutsideSharedDefinition(WF),
+      `a pattern from ${REDACT_SED_PATH} was found verbatim in ${WF_PATH} outside a comment — a hand-copied inline redaction expression survived the sweep and belongs in ${REDACT_SED_PATH} instead`,
+    ).toBe(true);
+  });
+
+  it("re-inserting a derived expression into ci.yml flips the gate, naming the expression", () => {
+    const needle = survivorNeedles()[0] as string;
+    calibrate(
+      `re-inserting the DSN-userinfo pattern ("${needle}") as an inline \`-e\` block must flip this gate — it belongs only in ${REDACT_SED_PATH}`,
+      (s) => `${s}\n          sed -E -e 's#${needle}#\\1***@#g' "$x"\n`,
+      noNeedleSurvivesOutsideSharedDefinition,
+      CI,
+    );
+  });
+
+  it("re-inserting a derived expression into test-restore-from-baseline.yml flips the gate, naming the expression", () => {
+    const needle = survivorNeedles()[0] as string;
+    calibrate(
+      `re-inserting the DSN-userinfo pattern ("${needle}") as an inline \`-e\` block must flip this gate — it belongs only in ${REDACT_SED_PATH}`,
+      (s) => `${s}\n          sed -E -e 's#${needle}#\\1***@#g' "$x"\n`,
+      noNeedleSurvivesOutsideSharedDefinition,
+      WF,
+    );
+  });
+});
+
+const SUPABASE_TESTS_DIR = join(ROOT, "supabase", "tests");
+
+/**
+ * Every skip marker, partial-skip pattern and arms sentinel the `sql-tests`
+ * job's anti-skip mechanism greps for, extracted from `supabase/tests/*.sql`
+ * with the SAME expressions the workflow itself uses (mirrors Task 2's own
+ * `<verify>` extraction, so the TS gate and the shipped bash measurement
+ * agree on what "the corpus" is).
+ */
+function antiSkipMarkers(): string[] {
+  const files = readdirSync(SUPABASE_TESTS_DIR).filter((f) =>
+    f.endsWith(".sql"),
+  );
+  const out = new Set<string>();
+  for (const f of files) {
+    const body = readFileSync(join(SUPABASE_TESTS_DIR, f), "utf8");
+    const skipRe = /RAISE NOTICE 'SKIP: ([^'%]{0,60})/g;
+    let m: RegExpExecArray | null;
+    while ((m = skipRe.exec(body)) !== null) out.add(m[1] as string);
+    const partialRe =
+      /SKIP \([^)]*\)|SKIP Part [0-9]+|PASS WITH [0-9]+ SKIPS?|ALL [0-9]+ ARMS EXECUTED/g;
+    while ((m = partialRe.exec(body)) !== null) out.add(m[0]);
+  }
+  return [...out].sort();
+}
+
+const ANTI_SKIP_MARKERS_TEXT = antiSkipMarkers().join("\n");
+
+/**
+ * TRUE only when the corpus is non-empty AND running the shipped redaction
+ * definition over it (as one block, matching how the workflow redacts a
+ * whole captured file at once) returns it byte-identical.
+ */
+function markersSurviveRedaction(corpusText: string): boolean {
+  const markers = corpusText.split("\n").filter((l) => l.length > 0);
+  if (markers.length === 0) return false;
+  const withNL = corpusText.endsWith("\n") ? corpusText : `${corpusText}\n`;
+  return runRedaction(withNL) === withNL;
+}
+
+describe("[164.8.4-02] no anti-skip marker is altered by the shared redaction", () => {
+  it("no anti-skip marker is altered by the shared redaction, and an altered one is named", () => {
+    const markers = antiSkipMarkers();
+    expect(
+      markers.length,
+      "no skip marker, partial-skip pattern or arms sentinel was extracted from supabase/tests/*.sql — an empty corpus would make this check vacuously TRUE, which is worse than no gate",
+    ).toBeGreaterThan(0);
+
+    for (const mk of markers) {
+      const withNL = `${mk}\n`;
+      expect(
+        runRedaction(withNL),
+        `the shared redaction rewrites the anti-skip marker "${mk}" — the sql-tests job's own grep for this text would then match NOTHING (a silent-green outcome), because the redaction runs on the SAME captured file the anti-skip greps read afterward`,
+      ).toBe(withNL);
+    }
+
+    // ⛔ Synthetic placeholder only (db.example, this repo's own convention)
+    // — never a real host, role or connection string.
+    calibrate(
+      "every anti-skip marker survives the shared redaction byte-identical; a synthetic marker carrying a masked shape must flip this",
+      (s) => `${s}\nhost=db.example synthetic-marker-carrying-a-masked-shape\n`,
+      markersSurviveRedaction,
+      ANTI_SKIP_MARKERS_TEXT,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [164.8.4-05] — SC-3 / [164.8.2-CHANNEL-ALLOWLIST-STALE]. A pure
+// text-and-process suite driving scripts/derive-restore-channels.sh directly
+// (no live workflow run) — the same discipline the WR-05 describe block above
+// already uses for staging-step properties.
+// ---------------------------------------------------------------------------
+describe("[164.8.4-05] the staged channel set is DERIVED from the producers, not hand-typed", () => {
+  const DERIVE_SCRIPT = join(ROOT, "scripts/derive-restore-channels.sh");
+  const REAL_PRODUCER_1 = join(ROOT, "scripts/restore-test-from-baseline.sh");
+  const REAL_PRODUCER_2 = join(
+    ROOT,
+    ".github/workflows/test-restore-from-baseline.yml",
+  );
+  const STAGE_STEP =
+    "Stage the public artifact (enumerated allowlist; default-out)";
+  /** The six real channel names, for the "no literal name survives" scan below.
+   * ⛔ NOT used to assert the derived SET — arm 1 compares against an
+   * independent regeneration instead, never a list typed into this file. */
+  const KNOWN_REAL_CHANNEL_NAMES = [
+    "census.err",
+    "ledger.err",
+    "marker.err",
+    "refdata.err",
+    "dump.log",
+    "transaction.out",
+  ];
+
+  /** Runs the real derivation script and returns its sorted, de-duplicated
+   * stdout lines. */
+  function deriveChannels(
+    p1: string,
+    p2: string,
+  ): { status: number | null; lines: string[]; output: string } {
+    const r = spawnSync("bash", [DERIVE_SCRIPT, p1, p2], { encoding: "utf8" });
+    const lines = (r.stdout ?? "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    return { status: r.status, lines, output: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  }
+
+  /**
+   * An INDEPENDENT regeneration of the derivation over ONE producer's source
+   * text, written separately from scripts/derive-restore-channels.sh (its own
+   * regex, its own script). Arm 1 below compares the SHIPPED script's output
+   * against the UNION of this function over both real producers — measuring
+   * agreement between two implementations, never the shipped script agreeing
+   * with itself.
+   */
+  function independentlyDerivedChannels(producerPath: string): string[] {
+    const text = readFileSync(producerPath, "utf8");
+    const re = /\b(RESTORE_OUT_DIR|outdir)\}?\/[A-Za-z0-9_.-]+\.(err|log|out)/g;
+    const names = new Set<string>();
+    for (const m of text.matchAll(re)) {
+      names.add(m[0].replace(/^.*\//, ""));
+    }
+    return [...names];
+  }
+
+  it("arm 1 — the shipped derivation AGREES with an independent regeneration over the two real producers", () => {
+    const shipped = deriveChannels(REAL_PRODUCER_1, REAL_PRODUCER_2);
+    expect(
+      shipped.status,
+      `the shipped derivation failed over the two real producers.\n${shipped.output}`,
+    ).toBe(0);
+    // Non-empty FIRST — a broken scan on both sides could otherwise agree
+    // vacuously at zero, which is not evidence of anything.
+    expect(
+      shipped.lines.length,
+      `the shipped derivation over the two real producers returned NOTHING — the assertion below would agree vacuously with an equally-broken independent scan.\n${shipped.output}`,
+    ).toBeGreaterThan(0);
+    const independent = [
+      ...new Set([
+        ...independentlyDerivedChannels(REAL_PRODUCER_1),
+        ...independentlyDerivedChannels(REAL_PRODUCER_2),
+      ]),
+    ];
+    expect(
+      independent.length,
+      "this test's OWN independent regeneration found nothing over the two real producers — re-check ITS regex before trusting any agreement with the shipped script",
+    ).toBeGreaterThan(0);
+    expect([...shipped.lines].sort()).toEqual([...independent].sort());
+  });
+
+  it("arm 2 — a NEW declared channel arrives with NOTHING else edited; an undeclared file on disk still does not", () => {
+    const tmpd = mkdtempSync(join(tmpdir(), "derive-channels-calibrate-"));
+    try {
+      // SC-3's own calibration: copy one real producer, append ONE line
+      // declaring a NEW synthetic diagnostic write target, and re-derive. No
+      // workflow edit, no list edit anywhere — only the producer's own
+      // declared write targets changed.
+      const scratchProducer = join(tmpd, "scratch-producer-one.sh");
+      const original = readFileSync(REAL_PRODUCER_1, "utf8");
+      const NEW_CHANNEL = "zzz-164-8-4-05-new-channel.err";
+      writeFileSync(
+        scratchProducer,
+        `${original}\necho "x" > "\${RESTORE_OUT_DIR}/${NEW_CHANNEL}"\n`,
+      );
+
+      const before = deriveChannels(REAL_PRODUCER_1, REAL_PRODUCER_2);
+      const after = deriveChannels(scratchProducer, REAL_PRODUCER_2);
+      expect(before.status, before.output).toBe(0);
+      expect(
+        after.status,
+        `the derivation over the scratch producer (one new declared target, nothing else edited) failed.\n${after.output}`,
+      ).toBe(0);
+      expect(
+        after.lines.includes(NEW_CHANNEL),
+        `the scratch producer declares ONE new diagnostic write target (${NEW_CHANNEL}) and NOTHING else was edited — no workflow change, no list change, only the producer's own declared write targets — yet the derivation did not pick it up.\n${after.output}`,
+      ).toBe(true);
+      expect(
+        after.lines.filter((l) => l !== NEW_CHANNEL).sort(),
+        "adding one new declared channel changed more than just that one channel in the derived set",
+      ).toEqual([...before.lines].sort());
+
+      // Second half of the SAME calibration, required by the plan (neither
+      // arm alone is evidence): a file present in a scratch RUNTIME output
+      // directory, declared by NEITHER producer, must still be ABSENT from
+      // the derivation. This is what keeps the CLOSED
+      // [164.8.2-REFUSAL-STILL-PUBLISHES] glob defect closed — the derivation
+      // reads declared SOURCE, never a runtime directory.
+      const scratchOutdir = join(tmpd, "outdir");
+      mkdirSync(scratchOutdir);
+      const UNDECLARED = "zzz-164-8-4-05-undeclared-on-disk.err";
+      writeFileSync(
+        join(scratchOutdir, UNDECLARED),
+        "present on disk, declared by neither producer\n",
+      );
+      expect(
+        after.lines.includes(UNDECLARED),
+        "a file present on disk but declared by NEITHER producer appeared in the derived set — the derivation has regressed into a runtime glob, which is the CLOSED [164.8.2-REFUSAL-STILL-PUBLISHES] defect",
+      ).toBe(false);
+    } finally {
+      rmSync(tmpd, { recursive: true, force: true });
+    }
+  });
+
+  it("arm 3 — the staging step's loop consumes the derivation and holds no literal channel name", () => {
+    const script = extractRunScript(WF, STAGE_STEP);
+    expect(
+      script.includes("scripts/derive-restore-channels.sh"),
+      "the staging step no longer references scripts/derive-restore-channels.sh",
+    ).toBe(true);
+    for (const name of KNOWN_REAL_CHANNEL_NAMES) {
+      expect(
+        script.includes(name),
+        `the staging step's script body carries the literal channel name "${name}" outside the derivation — a hand-maintained list has crept back in`,
+      ).toBe(false);
+    }
+    // CALIBRATION — the predicate must flip when a literal name list is
+    // re-introduced into the loop, or the scan above is not evidence.
+    calibrate(
+      "the staging step's loop holds no literal diagnostic channel name",
+      (s) =>
+        s.replace(
+          "for c in ${derived_channels}; do",
+          "for c in census.err ledger.err marker.err refdata.err dump.log transaction.out; do",
+        ),
+      (t) =>
+        !KNOWN_REAL_CHANNEL_NAMES.some((name) =>
+          extractRunScript(t, STAGE_STEP).includes(name),
+        ),
+    );
   });
 });

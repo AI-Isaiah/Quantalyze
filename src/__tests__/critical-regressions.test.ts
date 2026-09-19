@@ -1979,4 +1979,45 @@ describe("Critical regression guards", () => {
       });
     });
   });
+
+  describe("[164.8.4] GSD execution-semantics config invariants", () => {
+    // ⛔ `workflow.use_worktrees` governs EXECUTION SEMANTICS, not taste: with it
+    // false every wave collapses to sequential regardless of the plan graph, so
+    // the parallelism a planner derived is discarded silently — no error, no
+    // warning, just a slower run that still looks correct.
+    //
+    // MEASURED with `git log -G` (`-S` misses a value-only flip): it has been
+    // turned off THREE times by commits that had nothing to do with worktrees or
+    // isolation — 2026-07-28, 2026-08-10, and 2026-09-17 in PR #807 ("the ledger
+    // fan-out admits 'private'"). Each time it was restored by hand, once the
+    // throughput loss was noticed days later.
+    //
+    // This is the mechanism that convention lacked. A drive-by flip now reds a PR
+    // instead of costing a week of wall-clock. It lives in THIS repo on purpose:
+    // the gsd-core degrade patch that would otherwise cover it is overwritten by
+    // `/gsd-update`, so an upstream fix does not survive here.
+    it("workflow.use_worktrees stays true — a drive-by flip is a red PR, not a silent throughput loss", () => {
+      const cfg = JSON.parse(readText(".planning/config.json"));
+      expect(
+        cfg.workflow,
+        ".planning/config.json has no `workflow` block — this guard cannot read the flag it exists to pin.",
+      ).toBeTruthy();
+      expect(
+        cfg.workflow.use_worktrees,
+        "`workflow.use_worktrees` is not true in .planning/config.json. Every GSD wave now runs SEQUENTIALLY " +
+          "no matter what its plan graph says, and nothing else reports that. If this was deliberate, change " +
+          "this assertion in the same commit and say why; if you did not mean to touch it, restore it to true " +
+          "(this flag has been flipped by unrelated PRs three times — see the comment above).",
+      ).toBe(true);
+    });
+
+    it("the flag is a real boolean, so a stringified 'false' cannot pass as truthy", () => {
+      const cfg = JSON.parse(readText(".planning/config.json"));
+      expect(
+        typeof cfg.workflow.use_worktrees,
+        "`workflow.use_worktrees` must be a JSON boolean. A string — even \"false\" — is TRUTHY in JS, so a " +
+          "quoted value would satisfy a naive check while disabling worktrees at the same time.",
+      ).toBe("boolean");
+    });
+  });
 });

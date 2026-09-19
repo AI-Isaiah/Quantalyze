@@ -902,13 +902,13 @@ jobs:
                 # TEST pooler host, its resolved IP, and the DB username /
                 # project-ref — went straight into a PUBLIC Actions log, against
                 # this mutex's own stated invariant ("never a DSN, host,
-                # username, or password, in any CI log line"). Redact the shapes
-                # psql actually emits:
-                #   connection to server at "<host>" (<ip>), port <n> failed
-                #   FATAL:  password authentication failed for user "<user>"
-                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                       -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                       -e 's#(for user )"[^"]*"#\1"***"#g' "${log}" >&2 || true
+                # username, or password, in any CI log line").
+                # [164.8.4-02] The expressions now live in the one shared
+                # scripts/redact-psql-stderr.sed (the UNION across every inline
+                # copy this repo's workflows used to carry separately); the
+                # reference is workspace-rooted for uniformity with the
+                # sibling python job's block in ci.yml, which requires it.
+                sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${log}" >&2 || true
                 break
               fi
               sleep 5
@@ -1007,10 +1007,11 @@ jobs:
             2>"${RUNNER_TEMP}/marker.err")" || rc=$?
           if [ "${rc}" -ne 0 ]; then
             # psql's connect/auth failures name the host, its IP and the DB user.
-            # Same three redactions as ci.yml's acquire step (158-REVIEW WR-08).
-            sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                   -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                   -e 's#(for user )"[^"]*"#\1"***"#g' "${RUNNER_TEMP}/marker.err" >&2
+            # [164.8.4-02] Redacted via the one shared
+            # scripts/redact-psql-stderr.sed (the UNION across every inline
+            # copy this workflow and ci.yml used to carry separately),
+            # referenced workspace-rooted.
+            sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${RUNNER_TEMP}/marker.err" >&2
             echo "::error::the database identity marker could not be read (psql exited ${rc}). Refusing to back up or restore a database this workflow cannot identify. current_database() is 'postgres' on BOTH projects and proves nothing."
             exit 1
           fi
@@ -1179,9 +1180,8 @@ jobs:
             # host name "<host>" to address`, which NONE of the three standard patterns
             # match, and the TEST pooler host survived into the output. The password is
             # stripped by the first expression (verified: 0 occurrences); the host was
-            # not. The gap is not local to this step — it is in the shared ci.yml
-            # pattern — and this fourth expression closes it HERE rather than shipping a
-            # known host leak on a public log.
+            # not. The gap is not local to this step — it was in the shared ci.yml
+            # pattern too.
             # ⛔ WHERE `[REDACT-HOSTNAME-01]` ACTUALLY LIVES, corrected 2026-09-10. This
             # comment said it was "booked as [REDACT-HOSTNAME-01]", and in this repo's
             # vocabulary "booked" means a `TODOS.md` entry naming a PHASE. MEASURED at
@@ -1190,12 +1190,13 @@ jobs:
             # `.planning/phases/164.8-testpreprod-.../164.8-05-PLAN.md` and as a
             # CHANGELOG sentence — neither of which has an owner, a date or a gate. Same
             # shape CLAUDE.md records for `FANOUT-GLOBAL-01`: do not send a planner
-            # looking for an entry that was never written. Fixing the SHARED pattern
-            # (ci.yml and this file's other psql sites) still wants a real entry.
-            sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                   -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                   -e 's#(could not translate host name )"[^"]*"#\1"***"#g' \
-                   -e 's#(for user )"[^"]*"#\1"***"#g' "${RUNNER_TEMP}/activity.err" >&2
+            # looking for an entry that was never written.
+            # [164.8.4-02] Redacted via the one shared
+            # scripts/redact-psql-stderr.sed (the UNION across every inline
+            # copy this workflow and ci.yml used to carry separately, including
+            # the host=/user= shapes this block was missing), referenced
+            # workspace-rooted.
+            sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${RUNNER_TEMP}/activity.err" >&2
             echo "::error::the activity gate could not be MEASURED (psql exited ${rc}). Refusing to restore. A gate that cannot read is not a gate that passed — this failure is deliberately NOT tolerated, because tolerating it would restore shared TEST on the strength of an unanswered question."
             exit 1
           fi
@@ -1709,11 +1710,11 @@ jobs:
           supabase db push --include-all --dry-run --db-url "${dsn}" >"${raw}" 2>&1 || rc=$?
           # The CLI names the host and the user in a connect failure. Redact before
           # anything reaches this public log.
-          sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                 -e 's#(host=)[^ "]*#\1***#g' \
-                 -e 's#(user=)[^ "]*#\1***#g' \
-                 -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                 -e 's#(for user )"[^"]*"#\1"***"#g' "${raw}" > "${out}"
+          # [164.8.4-02] Via the one shared scripts/redact-psql-stderr.sed
+          # (the UNION across every inline copy this workflow and ci.yml used
+          # to carry separately, including the DNS-resolution-failure shape
+          # this block was missing), referenced workspace-rooted.
+          sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${raw}" > "${out}"
           rm -f "${raw}"
           cat "${out}"
           # SPECIFIC BEFORE GENERAL. ErrMissingLocal exits non-zero, so this must be
@@ -1898,12 +1899,13 @@ jobs:
               if [ -f "${f}" ]; then
                 # Explicit, so a failed substitution takes the fail-closed path by
                 # DESIGN rather than by way of the trap's catch-all.
-                if sed -i -E \
-                  -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                  -e 's#(host=)[^ "]*#\1***#g' \
-                  -e 's#(user=)[^ "]*#\1***#g' \
-                  -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                  -e 's#(for user )"[^"]*"#\1"***"#g' "${f}"; then
+                # [164.8.4-02] Via the one shared scripts/redact-psql-stderr.sed
+                # (the UNION across every inline copy this workflow and ci.yml
+                # used to carry separately, including the DNS-resolution-failure
+                # shape this loop was missing), referenced workspace-rooted;
+                # -i preserved because this site edits ${f} in place.
+                if { sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${f}" > "${f}.redacted" \
+                     && mv "${f}.redacted" "${f}"; }; then
                   redacted=$(( redacted + 1 ))
                 else
                   withhold_channels
@@ -1925,10 +1927,16 @@ jobs:
       # `CREATE POLICY p ON t USING (owner=current_user)` — nobody's decision, a file
       # this job does not write — was copied into the world-readable artifact. The
       # channels are now enumerated by name too, so the sentence above is TRUE of the
-      # whole step rather than of one loop in it. The six names were regenerated from
-      # the writers, not carried from the finding:
-      #   grep -oE 'RESTORE_OUT_DIR}?/[A-Za-z0-9_.-]+\.(err|log|out)' scripts/restore-test-from-baseline.sh
-      #   grep -oE 'outdir}?/[A-Za-z0-9_.-]+\.(err|log|out)'          .github/workflows/test-restore-from-baseline.yml
+      # whole step rather than of one loop in it. ⛔ [164.8.4-05] The names used to be
+      # a hand-typed list, regenerated from the writers by re-running two greps by
+      # hand whenever someone remembered to. That agreed with the writers TODAY by
+      # coincidence of two lists holding the same names, not by construction — exactly
+      # the state a hand-kept list passes through on its way to disagreeing. The names
+      # are now DERIVED at run start, computed below via
+      # scripts/derive-restore-channels.sh, which scans both producers' own source
+      # text for their declared write targets and unions the result. A channel either
+      # producer gains tomorrow reaches the artifact with no list edited anywhere;
+      # nothing here is restated as a fallback or a sanity check.
       # ⛔ Do not restore the glob to save six words. A whole-class admission is exactly
       # the shape this step replaced, and it re-opened here one extension family at a
       # time — which is what the `*.sql` sentence further down already warned about.
@@ -1959,14 +1967,15 @@ jobs:
       #                      is the record of what was attempted.
       #   `census.sql`, `refdata.sql` — the queries the script ran, forward inputs a
       #                      post-mortem needs to reproduce a reading.
-      #   the six CHANNELS — `census.err`, `ledger.err`, `marker.err`, `refdata.err`,
-      #                      `dump.log`, `transaction.out`. Named individually since
-      #                      2026-09-10 (WR-01). They are the only files here that
-      #                      pass through the redaction step above, and a run's
-      #                      diagnosis is usually the whole reason to open this
-      #                      artifact. ⚠️ `marker.err` is the one to think twice about
-      #                      before widening this list: it is psql's stderr from the
-      #                      step that decides TEST from PROD, which is why it is
+      #   the DIAGNOSTIC CHANNELS — named individually since 2026-09-10 (WR-01), and
+      #                      since [164.8.4-05] DERIVED rather than hand-typed (see
+      #                      above); running scripts/derive-restore-channels.sh over
+      #                      the two producers is how to see the current set. They are
+      #                      the only files here that pass through the redaction step
+      #                      above, and a run's diagnosis is usually the whole reason
+      #                      to open this artifact. ⚠️ The channel carrying psql's
+      #                      stderr from the step that decides TEST from PROD is the
+      #                      one to think twice about before widening this set: it is
       #                      redacted rather than echoed.
       # WHAT LEAVES: `pre-census.txt`, `post-census.txt`, `pre-census.rollback-view.txt`
       # and `post-census.rollback-view.txt` — they restate that SAME DDL with
@@ -1996,6 +2005,28 @@ jobs:
           # (as opposed to being a legitimate non-success). Consumed at the very end of
           # the step so the staged manifest still prints first. See that guard's comment.
           wiring_fault=0
+          # [164.8.4-05] THE DIAGNOSTIC-CHANNEL SET, COMPUTED ONCE HERE, AT THE START OF
+          # THE STEP — from what the two producers' own source text declares they
+          # write, never a hand-typed list (see the block above this step) and never a
+          # runtime directory glob. A failed or empty derivation is a DENIAL in the same
+          # shape as an unreadable REDACT_OUTCOME below: no channel is staged, a named
+          # error is printed, and the deferred wiring-fault flag is set so the staged
+          # manifest still prints and the reversal recipe still uploads — an unreadable
+          # derivation costs this run its diagnostics, never its undo.
+          # `set +e` is a banned token in this job (see the comment at this
+          # workflow's `Assert the extractor self-test …` step); the same intent
+          # is spelled with the BOUNDED `cmd || rc=$?` idiom instead — `-e` stays
+          # ON for the whole step and only this one read, whose exit status is
+          # itself the measurement, carries its own capture.
+          derive_rc=0
+          derived_channels="$(bash "${GITHUB_WORKSPACE}/scripts/derive-restore-channels.sh" \
+            "${GITHUB_WORKSPACE}/scripts/restore-test-from-baseline.sh" \
+            "${GITHUB_WORKSPACE}/.github/workflows/test-restore-from-baseline.yml")" || derive_rc=$?
+          if [ "${derive_rc}" -ne 0 ] || [ -z "${derived_channels}" ]; then
+            echo "::error::MEASURE_FAIL: scripts/derive-restore-channels.sh could not derive the diagnostic-channel set (exit ${derive_rc}) from scripts/restore-test-from-baseline.sh and this workflow's own source — NO diagnostic channel is staged (default-DENY). This is a WIRING fault, not a failed redaction; the reversal recipe (ledger.csv, schema-before.sql and the four script .sql files) IS still staged."
+            derived_channels=""
+            wiring_fault=1
+          fi
           # This branch exists so a run that died BEFORE the backup step reddens on its
           # own cause rather than on `if-no-files-found: error`. The run is already red;
           # a second red from the upload would point at the artifact plumbing and send
@@ -2077,7 +2108,9 @@ jobs:
             # The diagnostic channels, BY NAME, under the same default-out rule as the
             # content files above. This loop was `for c in "${outdir}"/*.err
             # "${outdir}"/*.log "${outdir}"/*.out` until 2026-09-10; see the WR-01
-            # paragraph in the comment block above this step for what that cost.
+            # paragraph in the comment block above this step for what that cost. Since
+            # [164.8.4-05] the names iterated are `${derived_channels}`, computed once
+            # at the start of this step (see above) — never a literal list here.
             #
             # ⛔ AND ONLY IF THE REDACTION ACTUALLY SUCCEEDED (review WR-06). The step
             # above prints, on a removal it could not perform, "Do NOT publish this
@@ -2112,7 +2145,7 @@ jobs:
             # redaction verdict costs this run its diagnostics, never its undo. That is
             # the same discipline as a failed redaction, applied to a worse case.
             if [ "${REDACT_OUTCOME:-}" = "success" ]; then
-              for c in census.err ledger.err marker.err refdata.err dump.log transaction.out; do
+              for c in ${derived_channels}; do
                 if [ -f "${outdir}/${c}" ]; then
                   cp -p "${outdir}/${c}" "${stage}/"
                 fi

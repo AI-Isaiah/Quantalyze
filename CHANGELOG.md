@@ -1,5 +1,106 @@
 # Changelog
 
+## [0.79.2.0] - 2026-09-19 — GATERESIDUE: one redaction definition, a derived channel allowlist, and a bootstrap guard against inherited live-DB credentials
+
+Phase 164.8.4 closes the deferral set Phase 164.8.2's four review rounds produced. Everything here
+is CI and test infrastructure: **no migration, no PROD runtime change, no schema**. Merging this
+does not start `apply-test` and does not engage the Production human-reviewer gate.
+
+### Security
+- **One shared redaction definition.** `scripts/redact-psql-stderr.sed` replaces the hand-copied
+  inline `sed -E` blocks that each masked a different subset. **0 inline copies remain repo-wide**;
+  26 references across `ci.yml`, `test-restore-from-baseline.yml`, `supabase-migrate.yml` and
+  `mutex-probe.yml`, every one workspace-rooted. The booked scope claimed "four psql sites" from a
+  single-file reading; re-measuring at HEAD found 8 blocks over 6 expressions and **not one block
+  carried all six** — the `host=`, `user=` and DNS-hostname shapes were missing from most of them.
+- **A third leak shape nobody had booked.** Two `ci.yml` sites captured psql output with
+  `> "$out" 2>&1` and then `cat "$out"` unconditionally — connect/auth stderr echoed verbatim to a
+  world-readable log through no redaction at all. Found by sweeping the CLASS rather than the
+  booked ids, and now redacted before the echo.
+- **The staged channel allowlist is DERIVED, not hand-typed.** `scripts/derive-restore-channels.sh`
+  reads each producer's declared write targets and emits the sorted channel set; default-DENY on an
+  empty derivation, extension-restricted to `.err|.log|.out`, and the hand-maintained list is
+  deleted. A hand-typed list silently omits a channel added later; a derivation cannot.
+- **The ledger drift check stops contradicting itself.** In `scripts/test-ledger-drift-check.sh` the
+  `missing`-direction call site left stderr bare while its own `|| fail` message claimed the output
+  was withheld. It now captures, counts and genuinely WITHHOLDS, reusing the idiom its sibling arm
+  in the same file already used.
+- **A fail-loud guard against inherited live-DB credentials** in the vitest bootstrap
+  (`src/test-setup.ts`, `assertLiveDbWasIntended`), with the skip gates left untouched. It names
+  KEY NAMES only and never values, and carries no CI escape hatch — measured: no vitest job carries
+  both live-DB variables, so an escape hatch would only ever have been a way through.
+
+### Root cause
+- **`sed -i -E -f` is BSD-incompatible, and that is why CI was green over a broken local suite.**
+  BSD sed consumes `-E` as the `-i` backup suffix, runs in basic-regex mode and dies on
+  `\1 not defined in the RE`; GNU sed on the CI runner accepts the same line. The step failed
+  closed and aborted after "Discovering…", so 14 anti-skip assertions never ran locally while the
+  board stayed green. Replaced with a redirect + `mv` at every site.
+
+### Fixed
+- `workflow.use_worktrees` had been flipped to `false` by a drive-by change in an unrelated PR about
+  the ledger fan-out. With it false **every execution wave collapses to sequential** regardless of
+  what the plan's dependency graph says, so derived parallelism was being discarded silently.
+  Restored, and now pinned by a calibrated invariant rather than left to the next drive-by.
+- Two calibration twins in `test-restore-workflow-wiring.test.ts` still anchored on the retired
+  `sed -i -E` string and failed at HEAD once the portable form shipped. Re-anchored onto the shipped
+  form and both re-proved to BITE — the failure was the anti-vacuity design working, not noise.
+
+### Added
+- `scripts/redact-psql-stderr.sed`, `scripts/derive-restore-channels.sh`, and
+  `src/test-setup.live-db-guard.test.ts`.
+- A new blocking CI step: the channel derivation's `--self-check` now runs in `sql-gate-lint`.
+
+### Tests
+- **`derive-restore-channels.sh --self-check` was invoked by NOTHING** — a recurrence of the
+  `[CR-02]` defect recorded two steps above it in the same file, where `prod-body-drift-check.sh`
+  had the identical problem. Wired into `sql-gate-lint`, which sits in the `frontend` aggregator's
+  blocking `needs:` and its result loop, so a skip cannot pass as grey. Calibrated before wiring:
+  widening the extension restriction to admit `.sql` reds it with the offending synthetic name.
+- A calibrated invariant pinning `workflow.use_worktrees` (`false` → 1 failed; `"true"` → 2 failed).
+- Per-expression falsifier over the shared definition: an expression whose removal changes nothing
+  reds by name.
+- Full suite on an unshared box: **14892 passed, 0 failed, 280 skipped**. The five phase-owned
+  suites together: **898 passed**.
+
+### Changed
+- The live-DB guard ships at the **vitest bootstrap**, not at the wrapper the success criterion's
+  literal wording named. `gstack-evidence` has no repo-local copy and `/gstack-upgrade` overwrites
+  it, so a wrapper edit is un-reviewable, un-testable and erased by the next upgrade. Recorded as a
+  deviation in **both** the phase CONTEXT and the ROADMAP, per this repo's rule that a deviation
+  lives in both places.
+
+### Notes
+- Two residuals are booked in `TODOS.md` and deliberately NOT fixed.
+  `[164.8.4-REDACT-NO-POSITIVE-SCAN]`: `sed` exits 0 whether or not any expression matched, so the
+  redaction is never positively CONFIRMED — the published `.sql` path has that control and the
+  diagnostic channels do not. Sized before deferring: no user-facing impact, and what a miss
+  exposes is the TEST pooler host, its address and the DB role — reconnaissance on SHARED TEST, not
+  a password and not PROD. `[164.8.4-LIVEDB-GUARD-LANE-GAP]`: `vitest.redis.config.ts` and
+  `scripts/vitest.config.ts` declare no `setupFiles`, so neither lane runs the new guard.
+- **One review finding was implemented and then REJECTED.** A `|| true`-style tolerance at three
+  best-effort redaction sites: the only form that passes the workflows' `softeningOffenders` token
+  gate discards `sed`'s exit status invisibly to that gate, which is the defect the gate exists to
+  catch. Every affected site exits 1 unconditionally on the next line anyway, so only the operator's
+  message was ever at stake — and the untolerated form is the one that surfaces a missing or
+  malformed shared redaction script. Recorded with its reasoning rather than left looking unhandled.
+- A follow-up phase for the positive-scan residual was inserted as 164.8.7 REDACTCONFIRM and then
+  WITHDRAWN the same day, once the blast radius was measured rather than assumed. The item stays a
+  TODO by founder decision, with the sizing and an explicit override of the "a data-integrity
+  deferral names a phase" rule recorded in the entry itself, so the next reader does not re-create
+  the phase to satisfy a missing reference. ⚠️ Removing it also surfaced that the roadmap tooling
+  renumbers siblings on removal: it tried to move 164.9 into 164.8, colliding with the existing
+  164.8. Reverted; only the intended phase was removed.
+- Two review rounds. Round 1: 1 critical (fixed), 1 warning (fixed), 2 info. Round 2
+  (`gsd-code-reviewer` and `silent-failure-hunter` in parallel): **zero actionable findings**.
+  Verification passed 4/4 against the four live success criteria.
+- One assertion was widened — `toEqual(keepers)` → `toEqual([...keepers, residual])` — and it is
+  **not** a relaxation: it stays an exact-set equality, and the added empty `.redacted` file the
+  `>` redirect leaves behind is unpublishable four independent ways (the withhold glob and the
+  derivation are both extension-restricted; the staging loop runs only on a `success` redaction
+  outcome; and an unreadable outcome is a fail-closed MEASURE_FAIL). Two reviewers and the verifier
+  each re-derived that separately.
+
 ## [0.79.1.1] - 2026-09-19 — the body-drift allowlist stops asserting a difference that is not there
 
 ### Fixed

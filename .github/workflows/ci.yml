@@ -1224,6 +1224,20 @@ jobs:
       - name: DRIFT-05 gate (b) self-test - all eight arms fire with stub commands, no credential
         run: bash scripts/prod-body-drift-check.sh --self-test
 
+      # [164.8.4] WR-01 - A RECURRENCE OF THE [CR-02] DEFECT DIRECTLY ABOVE.
+      # `derive-restore-channels.sh --self-check` was invoked by NOTHING. It is
+      # the only control proving the channel derivation stays default-DENY: that
+      # a diagnostic target is derived AND that a non-diagnostic extension is
+      # excluded. The restore workflow stages what this script derives, so a
+      # derivation that silently widened would publish a file nobody reviewed.
+      # Hermetic - synthetic targets only, no credential - so like its sibling
+      # above it runs on every PR rather than only when the restore runs.
+      # Calibrated 2026-09-19 before wiring: widening the extension restriction
+      # to admit .sql reds it with the offending synthetic name; restored and
+      # confirmed byte-identical with cmp.
+      - name: Restore channel derivation self-check - default-DENY holds, non-diagnostic extensions excluded
+        run: bash scripts/derive-restore-channels.sh --self-check
+
       # ── Phase 164.8.1: the reference-data allowlist audit ─────────────────
       # A FOURTH SIBLING in this job, and — like the app-GUC gate and the
       # baseline content-drift gate before it — NOT an eighth rule of
@@ -3065,13 +3079,13 @@ jobs:
                 # TEST pooler host, its resolved IP, and the DB username /
                 # project-ref — went straight into a PUBLIC Actions log, against
                 # this mutex's own stated invariant ("never a DSN, host,
-                # username, or password, in any CI log line"). Redact the shapes
-                # psql actually emits:
-                #   connection to server at "<host>" (<ip>), port <n> failed
-                #   FATAL:  password authentication failed for user "<user>"
-                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                       -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                       -e 's#(for user )"[^"]*"#\1"***"#g' "${log}" >&2 || true
+                # username, or password, in any CI log line").
+                # [164.8.4-02] The expressions now live in the one shared
+                # scripts/redact-psql-stderr.sed (the UNION across every inline
+                # copy this repo's workflows used to carry separately); the
+                # reference is workspace-rooted for uniformity with the
+                # sibling python job's block in ci.yml, which requires it.
+                sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${log}" >&2 || true
                 break
               fi
               sleep 5
@@ -3394,6 +3408,22 @@ jobs:
           psql "$TEST_SUPABASE_DB_URL" -X -v ON_ERROR_STOP=1 \
             -c "DO \$\$ BEGIN RAISE NOTICE 'ANTISKIP-NOTICE-CHANNEL-OK'; END \$\$;" \
             > "$out" 2>&1 || probe_status=$?
+          # [164.8.4-02] Third leak shape (CONTEXT.md Area 1): this captured
+          # output is echoed to a PUBLIC log below via `cat`, and until now
+          # that echo ran with no redaction between the capture and the
+          # `cat` — psql's connect/auth stderr went straight through.
+          # Redact in place, via the shared scripts/redact-psql-stderr.sed,
+          # immediately after the exit-status capture and before the echo.
+          # On a failed substitution the content is WITHHELD (a line COUNT
+          # only, never the content) — same capture-count-WITHHOLD idiom as
+          # scripts/test-ledger-drift-check.sh's ledger_rows arm — and the
+          # step fails closed rather than echo a file it cannot prove safe.
+          if ! { sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "$out" > "$out.redacted" \
+                 && mv "$out.redacted" "$out"; }; then
+            probe_out_lines="$( { wc -l < "$out" 2>/dev/null || echo '?'; } | tr -d '[:space:]' )"
+            echo "::error::redaction FAILED on $(basename "$out"). ${probe_out_lines} line(s) of captured output are WITHHELD — it can carry the TEST pooler host, its IP or the DB user, and this log is public."
+            exit 1
+          fi
           cat "$out"
           if [ "$probe_status" -ne 0 ]; then
             echo "::error::the NOTICE-channel probe could not run against the test database (psql exited ${probe_status}). Every skip check below reads server NOTICEs, so this step cannot report a meaningful pass without it."
@@ -3420,6 +3450,17 @@ jobs:
               # ~/.psqlrc on a self-hosted runner could otherwise set
               # client_min_messages or ECHO and change what this loop reads.
               psql "$TEST_SUPABASE_DB_URL" -X -v ON_ERROR_STOP=1 -f "$f" > "$out" 2>&1 || status=$?
+              # [164.8.4-02] Same third-leak-shape fix as the NOTICE-channel
+              # probe above: redact "$out" via the shared
+              # scripts/redact-psql-stderr.sed, in place, before it is
+              # echoed — and fail closed, WITHHOLDING a line count only, if
+              # the substitution itself fails.
+              if ! { sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "$out" > "$out.redacted" \
+                 && mv "$out.redacted" "$out"; }; then
+                loop_out_lines="$( { wc -l < "$out" 2>/dev/null || echo '?'; } | tr -d '[:space:]' )"
+                echo "::error file=$f::redaction FAILED on $(basename "$out"). ${loop_out_lines} line(s) of captured output are WITHHELD — it can carry the TEST pooler host, its IP or the DB user, and this log is public."
+                exit 1
+              fi
               cat "$out"
               if [ "$status" -ne 0 ]; then
                 echo "::error file=$f::psql exited $status — a RAISE EXCEPTION assertion failed, or the connection did. The captured output above is the whole story for this file."
@@ -4162,11 +4203,14 @@ jobs:
       # from contending. Keep byte-identical with Makefile `test:`.
       #
       # Phase 158 / OPS-01 — the shared-test-db mutex, byte-identical to the step
-      # in `sql-tests` and `e2e-seeded` (see the long note on `sql-tests` for the
-      # mechanism and the ⛔ constraints). Placed immediately before `pytest`, the
-      # first DB-touching step of this job. This job's `defaults.run.
-      # working-directory: analytics-service` applies here and is harmless — the
-      # step reads no repo file.
+      # in `sql-tests` and `e2e-seeded` up to the redaction call (see the long
+      # note on `sql-tests` for the mechanism and the ⛔ constraints). Placed
+      # immediately before `pytest`, the first DB-touching step of this job.
+      # [164.8.4-01] This job's `defaults.run.working-directory:
+      # analytics-service` is NOT harmless for the redaction reference below —
+      # a bare relative `scripts/…` path would not resolve from
+      # analytics-service, so that reference is workspace-rooted via
+      # ${GITHUB_WORKSPACE}.
       - name: Acquire shared-test-db mutex
         env:
           TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
@@ -4301,13 +4345,13 @@ jobs:
                 # TEST pooler host, its resolved IP, and the DB username /
                 # project-ref — went straight into a PUBLIC Actions log, against
                 # this mutex's own stated invariant ("never a DSN, host,
-                # username, or password, in any CI log line"). Redact the shapes
-                # psql actually emits:
-                #   connection to server at "<host>" (<ip>), port <n> failed
-                #   FATAL:  password authentication failed for user "<user>"
-                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                       -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                       -e 's#(for user )"[^"]*"#\1"***"#g' "${log}" >&2 || true
+                # username, or password, in any CI log line").
+                # [164.8.4-02] The expressions now live in the one shared
+                # scripts/redact-psql-stderr.sed (the UNION across every inline
+                # copy this repo's workflows used to carry separately); the
+                # reference is workspace-rooted for uniformity with the
+                # sibling python job's block in ci.yml, which requires it.
+                sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${log}" >&2 || true
                 break
               fi
               sleep 5
@@ -5049,13 +5093,13 @@ jobs:
                 # TEST pooler host, its resolved IP, and the DB username /
                 # project-ref — went straight into a PUBLIC Actions log, against
                 # this mutex's own stated invariant ("never a DSN, host,
-                # username, or password, in any CI log line"). Redact the shapes
-                # psql actually emits:
-                #   connection to server at "<host>" (<ip>), port <n> failed
-                #   FATAL:  password authentication failed for user "<user>"
-                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                       -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                       -e 's#(for user )"[^"]*"#\1"***"#g' "${log}" >&2 || true
+                # username, or password, in any CI log line").
+                # [164.8.4-02] The expressions now live in the one shared
+                # scripts/redact-psql-stderr.sed (the UNION across every inline
+                # copy this repo's workflows used to carry separately); the
+                # reference is workspace-rooted for uniformity with the
+                # sibling python job's block in ci.yml, which requires it.
+                sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${log}" >&2 || true
                 break
               fi
               sleep 5

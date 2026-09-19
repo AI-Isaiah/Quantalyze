@@ -774,10 +774,6 @@ export const DIAGNOSTIC_FIRST_ALLOWLIST: ReadonlyArray<{ key: string; reason: st
     reason: "PRECONDITION — `psql` absent from PATH",
   },
   {
-    key: "scripts/test-ledger-drift-check.sh :: fail-call :: the ledger presence query failed (output withhel",
-    reason: "REDACTED — psql's output can carry connection detail; withheld by design. Exit code not captured (follow-up)",
-  },
-  {
     key: "scripts/test-ledger-drift-check.sh :: fail-call :: BODY_CHECK_FUNCTIONS is empty or whitespace-only",
     reason: "EMPTY-BY-COND — the list was measured empty/whitespace by the branch; there is nothing to interpolate",
   },

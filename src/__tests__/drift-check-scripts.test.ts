@@ -2438,6 +2438,8 @@ function writeStubLedger(
   ledgerRowsRc = 0,
   /** Non-zero => the ADVISORY `extra` direction FAILS, with stderr, like a real psql would. */
   extraRc = 0,
+  /** Non-zero => the `missing` direction FAILS, with stderr, like a real psql would. */
+  missingRc = 0,
 ): string {
   const p = join(dir, "stub-ledger.sh");
   writeFileSync(
@@ -2454,8 +2456,12 @@ function writeStubLedger(
       'elif [ "$1" = "shape" ]; then',
       '  echo "rows_total=stub"',
       'elif [ "$1" = "missing" ]; then',
-      "  true",
-      ...missing.map((m) => `  echo "${m}"`),
+      ...(missingRc !== 0
+        ? [
+            '  echo "psql: error: connection to server at \\"db.example\\" failed" >&2',
+            `  exit ${missingRc}`,
+          ]
+        : ["  true", ...missing.map((m) => `  echo "${m}"`)]),
       "else",
       ...(extraRc !== 0
         ? [
@@ -2483,6 +2489,8 @@ function scaffoldLedgerCase(
     ledgerRowsRc?: number;
     /** Non-zero => the ADVISORY `extra` query itself fails (F-R2-04). */
     extraRc?: number;
+    /** Non-zero => the `missing` query itself fails (164.8.2-LEDGER-STDERR-PUBLIC-LOG). */
+    missingRc?: number;
   },
 ): Record<string, string> {
   mkdirSync(join(dir, "snapshot"), { recursive: true });
@@ -2517,6 +2525,7 @@ function scaffoldLedgerCase(
       opts.ledgerRows === undefined ? DEFAULT_STUB_LEDGER_ROWS : opts.ledgerRows,
       opts.ledgerRowsRc ?? 0,
       opts.extraRc ?? 0,
+      opts.missingRc ?? 0,
     )}`,
     BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
     MIGRATIONS_DIR: join(dir, "migrations"),
@@ -2851,6 +2860,74 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
           expect(out).not.toContain("MEASURE_FAIL");
           expect(out).toContain("ledger and body checks clean");
         });
+      });
+    });
+  });
+
+  // ── 164.8.4-03 / 164.8.2-LEDGER-STDERR-PUBLIC-LOG ─────────────────────────
+  // The `missing`-direction call site redirected stdout and left stderr BARE
+  // — no redirect at all — so a psql connect/auth/DNS failure streamed the
+  // shared-TEST pooler host and DB user straight into a world-readable
+  // Actions log, while the site's own `|| fail` message already claimed the
+  // output was withheld. The fix reuses the `ledger_rows` arm's
+  // capture-count-WITHHOLD idiom verbatim: stderr captured to a per-run
+  // file, its line count computed with the braced-before-pipe fallback so an
+  // unreadable capture renders `?` rather than a blank, and only the count —
+  // never the content — reaches the failure message.
+  describe("[164.8.4-03 / 164.8.2-LEDGER-STDERR-PUBLIC-LOG] the `missing`-direction query withholds its stderr like `ledger_rows` does", () => {
+    it("RED: a missing-direction query that FAILS is named — its stderr is counted, never echoed", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: [], missingRc: 3 });
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(status, out).toBe(1);
+        expect(out, "the failing query's exit status is not reported").toContain("exited 3");
+        expect(out, "the diagnosis must say the content was withheld").toContain("WITHHELD");
+        expect(
+          out,
+          "the diagnosis rendered a BLANK where its count belongs — the operator is handed a sentence with a hole in it (D-12/SC-7)",
+        ).not.toContain("; line(s) of stderr captured and WITHHELD");
+        // Public-log redaction: the injected stderr marker must not leak.
+        expect(out, "the withheld stderr leaked into a PUBLIC job log").not.toContain(
+          "connection to server",
+        );
+      });
+    });
+
+    it("⭐ the count in that failure message is TOTAL — an uncountable stderr renders `?`, never a blank", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: [], missingRc: 3 });
+        const control = run(LEDGER_GATE, env);
+        expect(control.status, control.out).toBe(1);
+        expect(
+          control.out,
+          "the control did not print a countable stderr, so breaking `wc` below proves nothing",
+        ).toContain("1 line(s) of stderr captured");
+
+        const PATH = withPathShim(dir, "wc", [
+          // Only the single-argument `wc -l` the diagnosis uses; everything
+          // else delegates to the real binary.
+          'if [ "$#" -eq 1 ] && [ "$1" = "-l" ]; then exit 7; fi',
+        ]);
+        const { status, out } = run(LEDGER_GATE, { ...env, PATH });
+        expect(status, out).toBe(1);
+        // CALIBRATION: the shim APPLIED — the control's real count is gone.
+        expect(out, "the `wc` shim did not bite; the count is still the real one").not.toContain(
+          "1 line(s) of stderr captured",
+        );
+        expect(
+          out,
+          "an uncountable stderr must still SAY something — `?` is the count that could not be taken",
+        ).toContain("? line(s) of stderr captured");
+      });
+    });
+
+    it("CONTROL: a clean missing-direction query stays on the existing pass/drift path, unchanged", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: [] });
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(status, out).toBe(0);
+        expect(out).not.toContain("WITHHELD");
+        expect(out).toContain("ledger and body checks clean");
       });
     });
   });
@@ -4777,7 +4854,7 @@ describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()
       site: "sed 's/^/::error::  /' || true",
       why: "the shape DIAGNOSTIC re-emitted on the absurdity floor's own failure path. The `exit 1` is on the next line and does not depend on it; a shape probe that cannot run must not convert a decided RED into a shell error that hides the verdict.",
     },
-    // ── `set +e` — 10 sites, every one the SP-M01 BOUND, not a softening ───
+    // ── `set +e` — 11 sites, every one the SP-M01 BOUND, not a softening ───
     {
       token: "set +e",
       site: `missing_count="$(grep -ac '[^[:space:]]' "$missing_file")"`,
@@ -4828,8 +4905,14 @@ describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()
       site: 'grep -aqFx -e "$nm" "$missing_file"',
       why: "F-R2-05. Bounds the frontier-TIP presence test. Unbounded, rc >= 2 read as 'present', which RAISES the tip, widens the exemption window and removes findings — the softening direction.",
     },
-    // ── `2>/dev/null` — FOUR sites: three psql channels that can name a host, ─
-    // ── and one `wc` whose suppression is what keeps a DIAGNOSIS from blanking ─
+    {
+      token: "set +e",
+      site: 'run_ledger_query missing "$names_csv" > "$missing_file" 2>"$missing_err"',
+      why: "164.8.2-LEDGER-STDERR-PUBLIC-LOG (Phase 164.8.4). Bounds the missing-direction QUERY itself, mirroring F-R2-04's ledger_rows/extra bound: an unbounded failure here used to exit the whole script under `set -euo pipefail` with stderr already bare — now the rc is captured and narrated, never left to trip errexit silently.",
+    },
+    // ── `2>/dev/null` — FIVE sites: three psql channels that can name a host, ─
+    // ── and two `wc` calls whose suppression is what keeps a DIAGNOSIS from ──
+    // ── blanking ──────────────────────────────────────────────────────────────
     {
       token: "2>/dev/null",
       site: "2>/dev/null | sed 's/^/::error::  /' || true",
@@ -4849,6 +4932,11 @@ describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()
       token: "2>/dev/null",
       site: '> "$extra_file" 2>/dev/null',
       why: "the ADVISORY extra-ledger direction. Its rc is captured into `extra_q_rc` on the next line and narrated (F-R2-04), so the suppressed channel is redaction — psql's stderr can carry a DSN, host or username and this job's log is PUBLIC — and never evidence.",
+    },
+    {
+      token: "2>/dev/null",
+      site: `wc -l < "$missing_err" 2>/dev/null || echo '?'`,
+      why: "164.8.2-LEDGER-STDERR-PUBLIC-LOG (Phase 164.8.4). Same shape as G2's ledger_rows_err site: this `wc` counts the stderr the missing-direction failure message reports, and an unreadable capture file must render `?`, never a blank, inside the diagnosis (D-12/SC-7).",
     },
     // ── `>/dev/null 2>&1` — TWO sites, both `command -v … || fail` ────────────
     {

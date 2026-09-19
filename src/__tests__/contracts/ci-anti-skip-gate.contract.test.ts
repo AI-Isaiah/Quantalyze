@@ -136,6 +136,14 @@ function runGate(env: Record<string, string> = {}, cwd: string = ROOT) {
       PATH: `${bindir}:${process.env.PATH ?? ""}`,
       TEST_SUPABASE_DB_URL: "postgresql://stub",
       RUNNER_TEMP: runnerTemp,
+      // [164.8.4] Same category as RUNNER_TEMP: since this phase the step redacts
+      // psql's captured output through `sed -E -f
+      // "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed"` before echoing it.
+      // Unset, that operand truncates, sed exits non-zero, and `set -euo pipefail`
+      // kills the step right after "Discovering …" — so every assertion below would
+      // measure a missing env var instead of the skip behaviour it exists to pin.
+      // A real Actions runner always sets it.
+      GITHUB_WORKSPACE: ROOT,
       ...env,
     },
   });

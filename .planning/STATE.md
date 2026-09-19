@@ -2,18 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.1.1.1
-current_phase_name: LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only fixture (INSERTED)
+current_phase: 164.8.4
+current_phase_name: GATERESIDUE
 status: executing
 stopped_at: Completed 164.1.1.1-02-PLAN.md
-last_updated: "2026-09-19T06:11:26.129Z"
+last_updated: "2026-09-19T07:16:06.606Z"
 last_activity: 2026-09-18
 last_activity_desc: Phases 164.11 DEPLOYGATE and 164.10 BODYDRIFT REMOVED via /gsd-phase --remove after both premises were falsified by measurement — 164.11 cancelled (Railway deploys the LATEST commit, so a skipped analytics change is carried by the next green merge; the skip costs latency, not the change) and 164.10 closed by founder decision (c) (all three PROD function bodies read behaviourally identical; the drift is RAISE wording and one written-but-never-read local, from the eaaed7e0 backfill). Reasoning preserved in TODOS.md, not lost with the entries. Shipped v0.79.1.0 (deploy verifier stops withholding the deploy it verifies) and v0.79.1.1 (allowlist stops asserting a difference that is not there).
-state_head: 2fd536a1d3d5da7a8354c79ab90db00a1abbee8b
+state_head: 963042274ef8fe8071999fe501885b778e2651a5
 progress:
   total_phases: 43
   completed_phases: 27
-  total_plans: 203
+  total_plans: 208
   completed_plans: 195
   percent: 63
 ---
@@ -179,7 +179,7 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.1.1.1 (LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only
+Phase: 164.8.4 (GATERESIDUE) — READY TO EXECUTE
 fixture) — EXECUTING (2/2 plans done, verification not yet run)
 Plan: 2 of 2 DONE (`164.1.1.1-02-SUMMARY.md`, commits `0d9d2408` (test, `LANE_ONLY_SITES`
 register pinned as SITES-not-a-count, re-derived from the corpus with a named failure mode on a

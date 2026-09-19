@@ -1636,6 +1636,18 @@ by MEASUREMENT, not by reading) stays as a METHOD for the surviving work.
 
 1. Every psql site in `test-ledger-drift-check.sh`, `test-restore-from-baseline.yml` and their shared redaction is swept in ONE pass, with a test that FAILS on a new unredirected site — not a fix to the three known ones.
 2. The `gstack-evidence` credential inheritance is closed at the wrapper, with the skip gates untouched, and proven by a run whose skip counts match a plain `npx vitest run` at the same commit.
+   ⭐ **DEVIATION, RECORDED 2026-09-19 — shipped at the BOOTSTRAP, not at the wrapper.** The literal
+   wording above is not what landed, and the reasoning lives in `164.8.4-CONTEXT.md`; it is repeated
+   here because this repo requires a deviation to be recorded in BOTH places, and a criterion whose
+   text disagrees with what shipped is how a future reader concludes the phase missed.
+   **WHY:** `gstack-evidence` has NO repo-local copy — it exists only under the global skills
+   directory and `/gstack-upgrade` overwrites it, so a wrapper edit is un-reviewable, un-testable
+   and erased by the next upgrade. The guard instead sits in the vitest bootstrap
+   (`src/test-setup.ts`, `assertLiveDbWasIntended`), which is repo-owned, covered by tests and
+   survives an upgrade. The skip gates were left untouched as the criterion requires, and the
+   skip-count parity proof was taken as written. ⚠️ The guard is loaded by `vitest.config.ts` and
+   `vitest.local-stack.config.ts` only; the two lanes it does not cover are booked in TODOS.md as
+   `[164.8.4-LIVEDB-GUARD-LANE-GAP]`.
 3. The refuse-vs-withhold tradeoff is DECIDED by the founder and the decision is recorded with its cost on both sides — not silently patched either way.
 4. The channel allowlist is DERIVED, and a calibration proves a newly written channel reaches the artifact without anyone editing a list.
 5. A source-comment anchor gate exists, fails loud on a dead anchor, and its message names the symbol-over-line-number preference.
@@ -1663,11 +1675,22 @@ by MEASUREMENT, not by reading) stays as a METHOD for the surviving work.
 
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS entries `[164.7-MARKER-GREP-VACUOUS]`, `[164.7-PLAN03-EVIDENCE-01]` (plan 03's lane evidence is not re-derivable from the artifacts it left — a provenance gap, not a contradicted claim), `[164.7-CITATION-DRIFT-01]` (⭐ close it by CONVENTION — cite by SYMBOL, not by line — not by re-numbering prose that will drift again), `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]`, `[164.8.2-REDACT-HOSTNAME-01]`, `[164.8.2-EVIDENCE-DOTENV-LEAK]`, `[164.8.2-REFUSAL-STILL-PUBLISHES]`, `[164.8.2-CHANNEL-ALLOWLIST-STALE]`, `[164.8.2-SENTINEL-GREP-NUL-BLIND]`, `[164.6-SOURCE-ANCHOR-ROT]`, `[164.8.2-GATE-RESIDUE]`, `[WINDOWS-LEDGER-DRIFT]` and `[164.8.3-CAPTURE-MANIFEST-ERREXIT]` — read each before planning, do not re-derive.
 **Depends on:** Phase 164.8.2 (this is its residue). ⚠️ **Cross-phase coupling, deliberate:** `[164.8.2-VAC08-FATAL-ON-TRANSIENT]` is NOT owned here — it stays with Phase 164.9's `[164.8-PUSH-RACE-VAC08]` because they share one root (two jobs contending for advisory key `61616158` on shared TEST) and splitting them would produce exactly the sequential-ratchet-patched-in-one-place hazard this repo has already paid for once.
-**Plans:** 0 plans
+**Plans:** 5 plans
 
 Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 164.8.4 to break down)
+- [ ] 164.8.4-01-PLAN.md — the shared psql-stderr redaction definition (union of all six expressions), wired end-to-end at the one call site whose job runs with a non-root working-directory, with a per-expression falsifier (wave 1)
+- [ ] 164.8.4-03-PLAN.md — `[164.8.2-LEDGER-STDERR-PUBLIC-LOG]`: capture, count and WITHHOLD the `missing`-direction ledger stderr, reusing the sibling arm's idiom verbatim (wave 1)
+- [ ] 164.8.4-04-PLAN.md — `[164.8.2-EVIDENCE-DOTENV-LEAK]`: a fail-loud repo-side `HAS_LIVE_DB` inheritance guard in the vitest bootstrap, skip gates untouched, plus the SC-2 skip-count parity measurement (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 164.8.4-02-PLAN.md — convert the remaining seven inline blocks, close the third leak shape (the two `sql-tests` capture-then-`cat` sites), and ship the survivor / capture-ordering / marker-collision gates (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 164.8.4-05-PLAN.md — `[164.8.2-CHANNEL-ALLOWLIST-STALE]`: derive the diagnostic-channel set from both producers' declared write targets and delete the hand-typed list (wave 3)
 
 ### Phase 164.8.3: PROBERAUTH — the prod-prober names MT5 `-6` as what it is (the terminal has no authorized account) instead of collapsing it into the catch-all `mt5-terminal-error` whose remedy sends the operator to an error table (INSERTED)
 
