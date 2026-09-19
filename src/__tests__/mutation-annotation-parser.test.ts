@@ -900,7 +900,29 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // FILES_FLOOR/ARMS_FLOOR constants, never restated as a number here).
     // MEASURED over `scanCorpus` at this commit by replaying THIS derivation:
     // `armsSeen 411 stepsSeen 428`, `filesTotal 75`, `annotated 48`, waivers 0.
-    expect(armsSeen).toBe(412);
+    // ⚠️ CURRENCY 2026-09-20 (Phase 164.5.1.4 SYNCCURSOR, round 3): arms
+    // 412 -> 413 and file steps 429 -> 429 — THE TWO DERIVATIONS DID NOT MOVE
+    // TOGETHER, and that is the whole content of this entry. The one new arm is
+    // "0", the applied-ness gate in the already-annotated
+    // supabase/tests/test_strategy_sync_cursors_rls.sql, added when the file's
+    // `RAISE NOTICE 'SKIP:'; RETURN;` was reverted to the house hard failure
+    // (sql-tests fails a run on a printed whole-file skip) and the revert left a
+    // new SECTION with no twin. Its twin is a `sql` step —
+    // `DROP TABLE public.strategy_sync_cursors` on the live lane — and NOT a
+    // migration edit, because 20260919120000 self-verifies the relation it
+    // creates, so a renamed CREATE aborts the apply and no arm could be the
+    // first failure. This walk SKIPS `sql` steps, so `armsSeen` moved by one
+    // and `stepsSeen` by zero. The file was already annotated, so FILES_FLOOR
+    // stays 48 and the denominator stays 75.
+    // ⛔ BOOKKEEPING GAP IN THE ENTRY ABOVE, recorded rather than quietly fixed:
+    // the 2026-09-19 note records armsSeen 402 -> 411 / stepsSeen 421 -> 428
+    // while the pins it sat on read 412 / 429. The un-narrated +1/+1 was round
+    // 2's POLICY 4 PRECONDITION arm (an `edit` twin) in the same gate, narrated
+    // beside ARMS_FLOOR in scripts/mutation-runner/run.mjs and nowhere else.
+    // This entry takes 412 -> 413 and 429 -> 429, from 412 / 429.
+    // MEASURED over `scanCorpus` at this commit by replaying THIS derivation:
+    // `armsSeen 413 stepsSeen 429`, `filesTotal 75`, `annotated 48`, waivers 0.
+    expect(armsSeen).toBe(413);
     expect(stepsSeen).toBe(429);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
@@ -1739,6 +1761,17 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // block describes. Still RUN SEPARATELY from `stepsSeen` — this pin ranges
     // over waivers where that one does not (harmless only while waivers are 0;
     // they are, measured corpus-wide `waivers=0`).
+    // ⚠️ CURRENCY 2026-09-20 (Phase 164.5.1.4 SYNCCURSOR, round 3): needles
+    // 429 -> 429, UNMOVED, while `armsSeen` above moved 412 -> 413. The one new
+    // arm ("0", the applied-ness gate in
+    // test_strategy_sync_cursors_rls.sql) carries a single `sql` step
+    // (`DROP TABLE public.strategy_sync_cursors`), which has neither a `find`
+    // nor an `anchor`, so it contributes no needle at all — the same divergence
+    // the 2026-09-19 entry above records for that file's RLS 1 / RLS 2. ⛔ An
+    // UNMOVED pin is still a MEASURED one: RUN SEPARATELY from `armsSeen` and
+    // `stepsSeen` at this commit, `needles.length` came back 429. Recorded
+    // because "it did not move" is the claim most easily asserted without
+    // measuring.
     expect(needles.length).toBe(429);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });

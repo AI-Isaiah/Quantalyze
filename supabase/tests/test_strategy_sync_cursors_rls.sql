@@ -154,6 +154,14 @@ BEGIN
   -- three ledger_refresh gates both state that NO workflow applies to TEST.
   -- ⛔ Do not resolve that by guessing -- the hard failure below is correct
   -- under BOTH readings, which is why it is the right shape either way.
+  -- RED-UNDER: DROP the table on the live lane after the migration has applied
+  --            — cause (ii) of this arm's own message. It is a `sql` step and
+  --            NOT a migration edit because the migration carries its own 8-arm
+  --            self-verify (arm 1 asserts the relation exists), so renaming the
+  --            CREATE would abort the migration itself and the gate would never
+  --            run — no arm could then be the first failure. Same reasoning the
+  --            ledger_refresh gates record for their own arm 0.
+  -- RED-UNDER-M: {"arm":"0","apply":[{"kind":"sql","stmt":"DROP TABLE public.strategy_sync_cursors"}]}
   IF to_regclass('public.strategy_sync_cursors') IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (0): public.strategy_sync_cursors does not exist on this database, so NONE of the RLS arms ran. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) this database has not received migration 20260919120000 -- expect this exactly once, on the PR that introduces it, and it clears when the migration is applied here; (ii) the table was DROPPED or RENAMED after being applied, which would silently disable the per-STRATEGY sync cursor and return cron_sync to the per-KEY resume that strands failed strategies permanently. Do NOT "fix" this by restoring a RAISE NOTICE/RETURN skip: that made this file exit 0 having asserted nothing, and sql-tests fails the run on a printed skip for exactly that reason.';
   END IF;

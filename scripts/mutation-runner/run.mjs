@@ -2046,7 +2046,18 @@ export const FILES_FLOOR = 48;
 //                plan that added the file (restore leg exit 0); this edit
 //                absorbs that measurement into the ratchet rather than re-taking
 //                it. WAIVED_CEILING stays 0.
-export const ARMS_FLOOR = 412;
+// ⚠️ CURRENCY 2026-09-20 (same phase, round 3): 412 -> 413. ONE further arm in
+//                the same gate file: arm "0", the applied-ness gate. The gate
+//                briefly shipped a `RAISE NOTICE 'SKIP:'; RETURN;` there, CI's
+//                anti-skip arm refused it, and the revert to the house form
+//                (RAISE EXCEPTION on the absent object) created a new SECTION
+//                that mutation-annotation-parser.test.ts correctly flagged as
+//                carrying no twin — an assertion never proven able to fail.
+//                The twin is a `sql` DROP step, not a migration edit, because
+//                the migration's own self-verify would abort on a renamed
+//                CREATE and the gate would never run. Re-derived over the
+//                corpus: 413 twins across 48 annotated files of 75, 0 waivers.
+export const ARMS_FLOOR = 413;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
