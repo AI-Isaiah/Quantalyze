@@ -2,6 +2,96 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { afterAll, afterEach, beforeEach, vi } from "vitest";
+import { HAS_LIVE_DB } from "@/lib/test-helpers/live-db";
+
+// [164.8.4-04 / 164.8.2-EVIDENCE-DOTENV-LEAK] — the credential-inheritance
+// fail-loud guard MUST be the first module-scope statement after the import
+// block, before every other module-scope statement below (the
+// AsyncLocalStorage global install, the approval-gate mock, the share-token
+// fixture, and the INHERITED_ENV capture). Nothing else in this bootstrap
+// should get to run on an environment that was inherited by accident.
+//
+// THE LEAK: `gstack-evidence` (a global tool wrapper, `~/.claude/skills/
+// gstack/bin/gstack-evidence`, no repo-local copy) carries `#!/usr/bin/env
+// bun`, and bun auto-loads `.env.local` into any child process it spawns —
+// including a `vitest` invocation the operator never asked to run against a
+// live database. `HAS_LIVE_DB` (`src/lib/test-helpers/live-db.ts`) is
+// `Boolean(NEXT_PUBLIC_SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)`; once both
+// are present by accident, sixteen `it.skipIf(!HAS_LIVE_DB)` suites stop
+// skipping and perform real INSERTs against shared TEST — a database other
+// people's CI also uses.
+//
+// WHY THE FIX LIVES HERE, NOT IN THE WRAPPER: the wrapper has no repo-local
+// copy and `/gstack-upgrade` overwrites it on every run — the same
+// non-durability class this repo already records for `/gsd-update`
+// overwriting global GSD workflow files (CLAUDE.md, "GSD orchestration
+// rules"). A fix at that path is wiped by the next upgrade. Upstream has
+// since added a `childEnv()` scrubber that deletes bun-injected dotenv keys
+// and reports key names only, but it documents two fail-open holes in its
+// own comments (bun expands `${VAR}` inside dotenv values while the reader
+// compares raw file text; multi-line values are not parsed) — this repo does
+// not depend on that scrubber closing the leak completely, and does not edit
+// the global tool.
+//
+// WHY THE SKIP GATES ARE UNTOUCHED: `it.skipIf(!HAS_LIVE_DB)` is correct —
+// the defect is that `HAS_LIVE_DB` became `true` by accident, not that the
+// gate reads it wrong. `live-db.ts`'s three exports and its 49 consuming
+// call sites are read-only to this plan; the boolean is IMPORTED here, never
+// recomputed, so this file stays the one definition of "we have live-DB
+// credentials".
+//
+// WHY A SENTINEL, NOT PROVENANCE DETECTION: `process.env` carries no
+// provenance metadata, so a guard running inside the already-spawned child
+// process cannot distinguish "auto-loaded from a dotenv file" from
+// "genuinely exported by the operator" — there is no signal left to read
+// that would tell them apart. The workable shape is an explicit
+// intentional-invocation sentinel the operator sets by hand, not a detector.
+// A dotenv file could plausibly define the two commonly-present Supabase
+// variables by accident; it will not also define this one.
+//
+// WHY NO `CI` ESCAPE HATCH: measured 2026-09-19 against `.github/
+// workflows/ci.yml` — no job that invokes vitest (`frontend-test`,
+// `frontend-coverage`, `frontend-seam-redis`, `frontend-local-stack`) sets
+// both `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` near its
+// vitest step; the jobs that DO set both (`frontend-build`, `e2e`,
+// `lighthouse-mobile` with placeholder values; `e2e-seeded`'s demo-data seed
+// step, and its own Playwright run — none of them vitest) never reach this
+// bootstrap. A `CI` escape hatch would therefore be inert today and an
+// unearned exemption tomorrow if a future job started setting the pair. To
+// regenerate: `grep -n "vitest run" .github/workflows/ci.yml` for which jobs
+// invoke vitest, then `grep -n "NEXT_PUBLIC_SUPABASE_URL\|SUPABASE_SERVICE_
+// ROLE_KEY" .github/workflows/ci.yml` for which jobs set the pair, and
+// confirm the two sets are still disjoint near their vitest invocations.
+const VITEST_LIVE_DB_INTENDED_VALUE = "1";
+
+const LIVE_DB_INHERITANCE_REMEDY =
+  "vitest bootstrap: both NEXT_PUBLIC_SUPABASE_URL and " +
+  "SUPABASE_SERVICE_ROLE_KEY are set, and VITEST_LIVE_DB_INTENDED is not " +
+  `set to "${VITEST_LIVE_DB_INTENDED_VALUE}". This turns skipped live-DB ` +
+  "suites (it.skipIf(!HAS_LIVE_DB)) into real writes against a SHARED test " +
+  "database other people's CI also uses. If this run was NOT meant to " +
+  `touch a live database: unset NEXT_PUBLIC_SUPABASE_URL and ` +
+  "SUPABASE_SERVICE_ROLE_KEY — they were most likely inherited from a " +
+  ".env file a wrapper (e.g. a bun-shebang tool) auto-loaded into this " +
+  `process. If this run WAS meant to touch a live database: set ` +
+  `VITEST_LIVE_DB_INTENDED=${VITEST_LIVE_DB_INTENDED_VALUE} explicitly and ` +
+  "re-run.";
+
+/**
+ * The guard's decision, factored out as a pure function so it is drivable
+ * from a test without mutating the real process environment mid-suite. The
+ * module-scope call site below is the only side-effecting caller.
+ */
+export function assertLiveDbWasIntended(
+  hasLiveDb: boolean,
+  env: NodeJS.ProcessEnv,
+): void {
+  if (hasLiveDb && env.VITEST_LIVE_DB_INTENDED !== VITEST_LIVE_DB_INTENDED_VALUE) {
+    throw new Error(LIVE_DB_INHERITANCE_REMEDY);
+  }
+}
+
+assertLiveDbWasIntended(HAS_LIVE_DB, process.env);
 
 // Phase 140 — `next/dist/server/app-render/async-local-storage.js` reads
 // `globalThis.AsyncLocalStorage` EXACTLY ONCE, into a module-scope
