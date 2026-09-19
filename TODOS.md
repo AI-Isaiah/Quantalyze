@@ -3628,8 +3628,10 @@ ledger refresh": `run_derive_broker_dailies_job` runs its own venue crawl and do
 reaffirms `leave-narrow`/`leave-book-future-phase` against a fresher read; or any surface that
 reads `trades` (not `csv_daily_returns`) is asked to show data for a `private` strategy before
 that phase runs, which would make the gap user-visible sooner than planned.
-✅ **Destination: a new phase**, to be inserted into the ROADMAP immediately after this plan hands
-back, numbered by the orchestrator via `/gsd-phase` (not by this executor). Owner: that phase.
+✅ **Destination: Phase 164.5.1.3 SYNCADMIT** — booked into the ROADMAP by the orchestrator
+immediately after this plan's Task 2 decision, carrying this measurement and the two inherited
+guards (widening starts no polling; the cursor defect is already closed) into its own goal and
+success criteria. Owner: that phase.
 
 ### VERIFICATION-STALE-OWED-01 — two phases verified code that has since moved, and their verdicts are honestly out of date (booked 2026-09-18)
 
