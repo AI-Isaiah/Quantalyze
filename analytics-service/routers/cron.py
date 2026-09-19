@@ -248,6 +248,15 @@ _STRATEGY_SYNC_CURSOR_TABLE = "strategy_sync_cursors"
 # or database outage (hours, not weeks) while staying well inside the fetch
 # volume one key can drain within KEY_SYNC_TIMEOUT.
 #
+# ⛔ APPLIED ONLY TO A FLOOR THAT CAME FROM A MARKER. `_resume_floor_ms` falls
+# back to the KEY cursor for any strategy ABSENT from the marker mapping, and
+# that value is not a held resume point — it is pre-phase behaviour, which had
+# no cap at all. Clamping it would abandon history no strategy was ever holding
+# and would falsify both halves of the derivation above: the loss would NOT be
+# confined to the strategy that was already failing, and the capped worst case
+# would NOT be a strict subset of the pre-phase one. The read path tracks the
+# provenance explicitly; see `_resume_floor_ms`.
+#
 # ⛔ NOT APPLIED to the full-history (`None`) resume point, deliberately. A
 # marker PRESENT WITH A NULL means "this strategy has no resume point at all,
 # re-fetch everything", which is the three-state contract the read path is
@@ -449,13 +458,30 @@ def _resume_floor_ms(
     intercept it with `patch.object(cron_mod, "parse_since_ms", ...)`; a local
     re-import or an alias would silently escape that patch.
 
-    ⛔ WR-04: the computed floor is CLAMPED to `MAX_MARKER_LOOKBACK_MS`. Without
-    it a permanently-held strategy grows this window every tick until the key
-    crosses `KEY_SYNC_TIMEOUT`, at which point EVERY strategy on the key stops
-    syncing — see the constant's own derivation for why a bounded loss confined
-    to the already-failing strategy is taken over an unbounded whole-key one.
-    `now_ms` is injectable so the clamp can be measured against a fixed clock;
-    production passes nothing and reads the wall clock.
+    ⛔ WR-04: a MARKER-DERIVED floor is CLAMPED to `MAX_MARKER_LOOKBACK_MS`.
+    Without it a permanently-held strategy grows this window every tick until
+    the key crosses `KEY_SYNC_TIMEOUT`, at which point EVERY strategy on the key
+    stops syncing — see the constant's own derivation for why a bounded loss
+    confined to the already-failing strategy is taken over an unbounded
+    whole-key one. `now_ms` is injectable so the clamp can be measured against a
+    fixed clock; production passes nothing and reads the wall clock.
+
+    ⛔ "MARKER-DERIVED" IS THE WHOLE OF IT, AND IT WAS NOT ALWAYS. The clamp
+    was first written after the loop, unconditionally, so it clamped whatever
+    the loop produced — INCLUDING the key-cursor value `_strategy_resume_point`
+    falls back to for a strategy with no marker row, i.e. a strategy that has
+    never held anything. MEASURED against that shape (fixed `now`, a key cursor
+    200 days old, `strategy_cursors={}` — the exact state the migration lands
+    in): the window was clamped to the cap and the warning named an innocent
+    strategy as "holding" it, while the no-eligible-strategies branch two lines
+    above returned the same key cursor UNCLAMPED. Two branches written to be
+    identical pre-phase behaviour disagreed, and the clamped one was the common
+    one. It is reachable in production with nothing failing anywhere:
+    `reconnect_allocator_api_key` preserves `last_sync_at` across a
+    disconnect/reconnect and the credential-failure `is_active=False` path
+    preserves it too, so a key dormant for longer than the cap used to catch up
+    in full and would have silently dropped everything older than it. The
+    provenance flag is therefore load-bearing, not bookkeeping.
     """
     if not strategy_ids:
         return parse_since_ms(key_cursor)
@@ -466,6 +492,16 @@ def _resume_floor_ms(
     # whom", and reconstructing that from the marker table after the fact is
     # exactly the forensics this file surfaces error fields to avoid.
     floor_sid: str | None = None
+    # ⛔ WHERE THE FLOOR CAME FROM, AND THE CLAMP BELOW TURNS ON IT.
+    # `_strategy_resume_point` returns either the strategy's OWN marker value
+    # or, for a strategy ABSENT from the mapping, the KEY's cursor. Those are
+    # different facts and only the first one may be clamped — see the clamp
+    # itself for the derivation. Recorded with the SAME membership rule the
+    # resolver uses (`sid in strategy_cursors`, never a `.get()`), so the two
+    # readings cannot drift apart: a present-with-NULL marker has already
+    # returned from inside this loop, so membership here means "this strategy
+    # holds a marker timestamp".
+    floor_from_marker = False
     for sid in strategy_ids:
         resume_point = _strategy_resume_point(sid, strategy_cursors, key_cursor)
         if resume_point is None:
@@ -479,6 +515,7 @@ def _resume_floor_ms(
         if floor is None or parsed < floor:
             floor = parsed
             floor_sid = sid
+            floor_from_marker = sid in strategy_cursors
 
     # ⚠️ NO `if floor is None: return None` GUARD HERE, deliberately. An earlier
     # draft had one and it was DEAD CODE: every path that would leave `floor`
@@ -486,6 +523,19 @@ def _resume_floor_ms(
     # checked non-empty above. MEASURED — mutating that guard's body produced no
     # test failure at all, which is how it was found. The `is not None` below
     # carries the type narrowing instead, on a branch that is genuinely live.
+    if not floor_from_marker:
+        # ⛔ THE FLOOR CAME FROM THE KEY CURSOR, SO IT IS RETURNED UNTOUCHED.
+        # Every strategy here is ABSENT from the mapping, which is the state
+        # the migration lands in and the state its "inert on arrival" claim is
+        # about: pre-phase this path parsed the key cursor and had NO cap at
+        # all. Clamping it would silently drop history no marker ever held —
+        # reachable with nothing failing anywhere, because
+        # `reconnect_allocator_api_key` and the credential-failure
+        # deactivation both PRESERVE `last_sync_at`, so a key disconnected or
+        # deactivated for longer than the cap and then reconnected used to
+        # catch up in full. It would also name an innocent strategy in the
+        # warning as "holding" a resume point it never held.
+        return floor
     if now_ms is None:
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     oldest_allowed_ms = now_ms - MAX_MARKER_LOOKBACK_MS
