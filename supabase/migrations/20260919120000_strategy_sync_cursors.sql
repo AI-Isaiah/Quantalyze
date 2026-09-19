@@ -67,7 +67,7 @@
 
 BEGIN;
 
-SET lock_timeout = '3s';
+SET LOCAL lock_timeout = '3s';
 
 -- --------------------------------------------------------------------------
 -- STEP 1: the container
@@ -82,6 +82,22 @@ SET lock_timeout = '3s';
 --     upsert), which sets the column in its own payload; installing a trigger
 --     for a single-writer table buys nothing and adds a second thing to keep
 --     correct. (`compute_jobs` has one because its rows mutate via many paths.)
+-- ⭐ `IF NOT EXISTS` is KEPT, and arm 7 of the self-verify is what makes that
+--    safe. This clause silently declines over a pre-existing table of a
+--    DIFFERENT SHAPE, and shared TEST has unguarded writers (the developer CLI
+--    and the browser SQL editor), so that state is reachable. The two variants
+--    are NOT equally dangerous, and the difference was MEASURED on the lane:
+--    * MISSING column — already loud without any arm. The `COMMENT ON COLUMN
+--      ... .last_sync_at` statement below raises 42703 before the DO block runs.
+--    * PRESENT column, WRONG TYPE OR WRONG NULLABILITY — the genuinely silent
+--      one. The COMMENT succeeds, arms 1-6 all pass, and the migration commits
+--      green. `last_sync_at TIMESTAMPTZ NOT NULL` is the worst case: it makes
+--      state (2) unrepresentable, the consumer's upsert then raises 23502, its
+--      fail-open branch swallows it, and the marker silently stays behind —
+--      indistinguishable from the over-fetch that branch is designed to produce.
+--    Arm 7 pins the exact column set, types and nullability and closes that
+--    second variant. The clause is kept rather than dropped because this file is
+--    deliberately RE-RUNNABLE and its own verify command applies it twice.
 CREATE TABLE IF NOT EXISTS strategy_sync_cursors (
   strategy_id  UUID PRIMARY KEY REFERENCES strategies(id) ON DELETE CASCADE,
   last_sync_at TIMESTAMPTZ,
@@ -122,11 +138,34 @@ COMMENT ON COLUMN strategy_sync_cursors.updated_at IS
 --   form would also admit any non-bypassing connection presenting that role
 --   claim. Narrower wins for a table with zero user-facing consumers.
 --
--- ⛔ Deliberately NO `REVOKE` for anon/authenticated on top of this policy. With
---    a REVOKE in place the policy is no longer the live control, and any later
---    assertion that a non-service caller is denied would start passing for the
---    GRANT reason rather than the POLICY reason — the vacuity trap both existing
---    `supabase/tests/*_rls.sql` gates independently warn about.
+-- ⭐ A `REVOKE` IS taken below. An earlier draft of this file argued against one,
+--    and that argument is WITHDRAWN because it misread both the precedent and
+--    the gates it cited:
+--    * `compute_jobs_deny_all` is cited above as this table's model, and the
+--      model AS IT STANDS TODAY carries the REVOKE — M-0774 in
+--      `20260516104201_compute_jobs_audit_2026_05_07_residual.sql` added
+--      `REVOKE ALL ON TABLE compute_jobs FROM PUBLIC, anon, authenticated;`
+--      precisely so a later `DROP POLICY` cannot re-expose the table. Citing the
+--      2026-04 form while omitting the 2026-05 hardening is half a precedent.
+--    * The vacuity those `*_rls.sql` gates warn about is READING A 42501 RAISED
+--      BY THE GRANT LAYER AS PROOF THE DENY POLICY FIRED. The repo's own remedy
+--      is a two-arm gate: `scripts/pg-lane/fixtures/07-fixture-supabase-default-
+--      privileges.sql` restores the bootstrap grants inside the lane so the
+--      policy arms stay falsifiable, and the grant layer gets its own separately
+--      named arm. Neither gate says "do not ship the REVOKE".
+--    Without it this table arrives carrying Supabase's bootstrap
+--    `GRANT ALL ON TABLES TO anon, authenticated` (fixture 07 reproduces it
+--    verbatim), leaving the policy as the SOLE layer.
+--
+-- ⛔ Deliberately NO `FORCE ROW LEVEL SECURITY`, and this is a DECISION, not an
+--    omission. M-0773 took FORCE on `compute_jobs` to close the table-owner
+--    bypass. The inverse cost is recorded in
+--    `20260911130000_ledger_fanout_grantees_and_dormancy.sql`: FORCE is the
+--    clause under which a SECURITY DEFINER reader degrades CLOSED AND SILENT.
+--    This table has ZERO SECURITY DEFINER readers and zero owner-facing tiers,
+--    so FORCE buys nothing here and carries a silent-failure mode.
+--    ⭐ TRIGGER TO REVISIT: take FORCE the moment either an owner-facing policy
+--    tier or a SECURITY DEFINER reader is added to this table.
 ALTER TABLE strategy_sync_cursors ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS strategy_sync_cursors_deny_all ON strategy_sync_cursors;
@@ -137,6 +176,15 @@ CREATE POLICY strategy_sync_cursors_deny_all ON strategy_sync_cursors
 
 COMMENT ON POLICY strategy_sync_cursors_deny_all ON strategy_sync_cursors IS
   'Service role only. Non service callers get zero rows and can write none. This table has NO owner facing tier, so the narrower USING (false) form is used rather than an explicit auth.role() arm; service_role bypasses RLS by default per ADR 0003. See phase 164.5.1.4.';
+
+-- Defence in depth beneath the policy, matching M-0774 on compute_jobs. It
+-- survives a future migration that DISABLEs RLS or drops this policy without
+-- recreating it, and it is the only control reaching the RLS-EXEMPT verbs
+-- (TRUNCATE, TRIGGER, REFERENCES). service_role is untouched — it reaches the
+-- table by BYPASSRLS at the role level, not through this grant. Referential
+-- actions run as the referencing table's owner, so ON DELETE CASCADE from
+-- strategies still fires after this REVOKE.
+REVOKE ALL ON TABLE strategy_sync_cursors FROM PUBLIC, anon, authenticated;
 
 -- --------------------------------------------------------------------------
 -- STEP 3: self-verifying DO block — CATALOGS ONLY
@@ -158,6 +206,7 @@ DECLARE
   v_pk_cols     TEXT;
   v_rls_enabled BOOLEAN;
   v_polcmd      "char";
+  v_cols        TEXT;
 BEGIN
   -- 1. the relation exists in schema public
   IF NOT EXISTS (
@@ -189,6 +238,13 @@ BEGIN
        AND c.contype = 'f'
        AND c.confrelid = 'public.strategies'::regclass
        AND c.confdeltype = 'c'
+       -- ⭐ and it is on strategy_id SPECIFICALLY. Without this conjunct the arm
+       --    admits a cascading FK on some OTHER column while strategy_id itself
+       --    carries none — the orphaning its own error message rules out.
+       AND c.conkey = ARRAY[(
+             SELECT a.attnum FROM pg_attribute a
+              WHERE a.attrelid = c.conrelid AND a.attname = 'strategy_id'
+           )]::smallint[]
   ) THEN
     RAISE EXCEPTION 'Phase 164.5.1.4 failed: strategy_sync_cursors has no ON DELETE CASCADE foreign key to strategies, so deleting a strategy would orphan its cursor row';
   END IF;
@@ -223,13 +279,42 @@ BEGIN
   -- ⛔ Deliberately NOT asserted: that `pg_get_expr(polqual, polrelid)` renders
   --    as the string 'false'. It does render exactly that way (MEASURED on the
   --    lane, alongside polwithcheck), but the assertion would buy nothing — the
-  --    qualifier cannot drift without this very file's CREATE POLICY statement
-  --    being edited, which arm 5 already catches — while pinning a DEPARSED
-  --    TEXT rendering that a future PostgreSQL major could legitimately change.
-  --    The failure mode of that arm is "blocks the PROD apply", so the trade is
-  --    plainly bad. The measurement is recorded; the assertion is not taken.
+  --    qualifier could legitimately render differently across a PostgreSQL
+  --    major, and the failure mode of such an arm is "blocks the PROD apply".
+  --    The measurement is recorded; the assertion is not taken.
+  --
+  -- ⚠️ BE HONEST ABOUT WHAT THAT LEAVES UNCOVERED. An earlier draft justified the
+  --    omission by claiming "the qualifier cannot drift without this file's
+  --    CREATE POLICY being edited, which arm 5 already catches". That is FALSE:
+  --    arm 5 matches on `polname` ALONE. Editing `USING (false)` to
+  --    `USING (true)` in this file leaves the name and the command scope
+  --    untouched, so arms 5 and 6 both pass and the migration commits green over
+  --    a policy granting every row to every caller. Arms 5 and 6 pin the
+  --    policy's NAME and its COMMAND SCOPE. Its QUALIFIER is pinned by nothing
+  --    here — the REVOKE in STEP 2 is what keeps a qualifier regression from
+  --    being a live exposure.
   IF v_polcmd IS DISTINCT FROM '*' THEN
     RAISE EXCEPTION 'Phase 164.5.1.4 failed: policy strategy_sync_cursors_deny_all has polcmd %, expected * (FOR ALL). A deny policy scoped to one command leaves the others ungoverned.', v_polcmd;
+  END IF;
+
+  -- 7. the payload columns exist with the right types AND the right nullability
+  --    ⭐ `last_sync_at` being NULLABLE is the load-bearing half: it is what makes
+  --    state (2) of the three-state contract — row present, value NULL, meaning
+  --    "re-fetch from the start of history" — REPRESENTABLE at all. Against a
+  --    NOT NULL column the consumer's upsert raises 23502, its fail-open branch
+  --    swallows it, and the marker silently stays behind. 43 migrations in this
+  --    repo already assert against information_schema.columns; still catalog
+  --    only, so `row_count_assertions` stays 0.
+  SELECT string_agg(c.column_name || ':' || c.data_type || ':' || c.is_nullable,
+                    ',' ORDER BY c.column_name)
+    INTO v_cols
+    FROM information_schema.columns c
+   WHERE c.table_schema = 'public'
+     AND c.table_name = 'strategy_sync_cursors';
+  IF v_cols IS DISTINCT FROM 'last_sync_at:timestamp with time zone:YES,'
+                          || 'strategy_id:uuid:NO,'
+                          || 'updated_at:timestamp with time zone:NO' THEN
+    RAISE EXCEPTION 'Phase 164.5.1.4 failed: strategy_sync_cursors columns are (%), expected exactly last_sync_at nullable timestamptz, strategy_id non-null uuid, updated_at non-null timestamptz. A NOT NULL last_sync_at makes the re-fetch-from-start state unrepresentable.', COALESCE(v_cols, '<no columns at all>');
   END IF;
 END $$;
 
