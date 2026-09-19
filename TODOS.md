@@ -8968,7 +8968,7 @@ re-measured at HEAD on the branch rather than carried over as dated claims.
 
 - [ ] **`[164.8.4-REDACT-NO-POSITIVE-SCAN]` the redaction is never CONFIRMED — `sed` exits 0
       whether or not anything matched, and no positive post-substitution scan exists for the
-      `.err`/`.log`/`.out` channels (booked 2026-09-19; DESTINATION: needs a phase, see below).**
+      `.err`/`.log`/`.out` channels (booked 2026-09-19; ROUTED to Phase 164.8.7 REDACTCONFIRM).**
       **DATA-INTEGRITY, and the highest-value item this phase leaves open.** The published `.sql`
       path has a positive control — `refuse_credential_in_published_sql` asserts the *absence* of a
       credential shape in the file that is about to be published, and refuses. The diagnostic
@@ -8985,10 +8985,10 @@ re-measured at HEAD on the branch rather than carried over as dated claims.
       expression: adding expressions is what produced the current hand-maintained union.
       ⛔ The scan must record a VERDICT, never a specimen — a control that logs what it found
       publishes the very thing it exists to suppress.
-      ⚠️ **NEEDS A PHASE, not just this entry.** Per the standing rule that a data-integrity
-      deferral names its owning phase, this must be routed via `/gsd-phase --edit` (or a new
-      sibling) before 164.8.x is considered closed. It is recorded here so it cannot be lost in
-      the meantime; the destination is deliberately marked OPEN rather than left blank.
+      ⭐ **OWNING PHASE: 164.8.7 REDACTCONFIRM**, inserted 2026-09-19 after the 164.8 parent
+      (164.8.5 PROBERPARSE and 164.8.6 VAULTTICKFIX were already taken, so the next free sibling
+      is .7). The phase entry carries the fix shape and the five success criteria; this entry is
+      the ledger record, not the spec.
 
 - [ ] **`[164.8.4-LIVEDB-GUARD-LANE-GAP]` two vitest lanes never load the live-DB inheritance
       guard, so neither would fail loud on inherited credentials (booked 2026-09-19).**
