@@ -1916,7 +1916,7 @@ Plans:
 
 ⛔ **OUT of scope, by CONTEXT decision:** harmonising the two sync-cursor disciplines (`job_worker`'s fenced advance vs `cron.py`'s direct write) — named deliberately and NOT absorbed; admitting `private` to `ALLOWED_STRATEGY_STATUSES` (that is 164.5.1.3, blocked on this); `enqueue_ledger_composite_refresh`.
 **Depends on:** Phase 164.5.1
-**Plans:** 4/4 plans executed
+**Plans:** 4/4 plans complete
 
 Plans:
 
