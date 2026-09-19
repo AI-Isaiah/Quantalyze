@@ -207,12 +207,13 @@ each other; change one and you must re-derive the others.
 | Job TTL — `apply-test` (`supabase-migrate.yml:357`) | `90` min | Same derivation as the row above, copied rather than re-derived, so the acquire-cap arithmetic holds for this holder too (added 2026-09-09, Phase 164.8) |
 | Job TTL — `restore` (`test-restore-from-baseline.yml:216`) | `90` min | Same derivation, same reason (added 2026-09-09, Phase 164.8) |
 
-⛔ **"The three numbers" is now FIVE TTLs against ONE acquire cap.** Raising the acquire
+⛔ **"The three numbers" is FIVE TTLs against ONE acquire cap.** Raising the acquire
 wait cap no longer moves three job timeouts — it moves **five**, in three files
-(`ci.yml`, `supabase-migrate.yml`, `test-restore-from-baseline.yml`), plus the
-`analytics-deploy-verify.yml` convergence window below. Nothing at runtime checks that
-they agree; the coupling is maintained by hand and by this table. Re-derive all of them
-together or none of them.
+(`ci.yml`, `supabase-migrate.yml`, `test-restore-from-baseline.yml`). Nothing at runtime
+checks that they agree; the coupling is maintained by hand and by this table. Re-derive
+all of them together or none of them.
+⭐ **CHANGED 2026-09-19 — `analytics-deploy-verify.yml` LEFT THIS COUPLING and is no
+longer a sixth number.** Its convergence window was deleted; see the block below.
 
 Each CI run takes the lock three times — `python` (~7 min of pytest under the
 lock), `e2e-seeded` (~8-9 min, spanning `npm run build` *and* the Playwright
@@ -220,16 +221,30 @@ batch), and `sql-tests` — so ~20 min of lock-time per run. The phase's success
 criterion is that **three simultaneous runs serialize and all succeed**, which
 is what the 3600 s cap is sized from.
 
-⛔ **A fourth number depends on these three, in another file.**
-`analytics-deploy-verify.yml`'s convergence window (`4800` s) is the tolerance
-before that probe declares the Railway deploy skipped and files a P1
-`analytics-deploy-stale` issue. Railway waits on the whole check-suite, so the
-window must exceed the worst-case *legitimate* CI latency derived from the table
-above — ~2 min setup + the 3600 s acquire cap + ~12 min of lock-held work ≈ 74
-min — plus Railway's ~3 min build ≈ 77 min. **If you change the acquire cap,
-change that window too**, or ordinary cross-run contention starts filing P1s for
-deploys that are simply still coming (158-REVIEW WR-04: the cap moved 2700 →
-3600 s while the window stayed at 1800 s).
+⭐ **THE FOURTH NUMBER WAS DELETED 2026-09-19. Do not re-derive it — do not
+change anything in `analytics-deploy-verify.yml` when you move the acquire cap.**
+
+📜 **What used to be here, and why it is gone.** That workflow carried a `4800` s
+convergence window, derived from this table as the tolerance before it declares a
+Railway deploy skipped and files a P1 `analytics-deploy-stale` issue: ~2 min setup
++ the 3600 s acquire cap + ~12 min of lock-held work ≈ 74 min, plus Railway's ~3 min
+build ≈ 77 min. The derivation was sound and the instruction to keep it in step with
+the cap was correct on its own terms.
+
+⛔ **The derivation was answering the wrong question.** Railway waits on the whole
+check-suite of a commit, and an INCOMPLETE suite withholds a deploy exactly like a red
+one. So a probe that polls for up to 80 minutes IS a check suite held open on `main`
+HEAD for up to 80 minutes — the probe became the deploy-hold it existed to detect.
+MEASURED over the 15 runs to 2026-09-19: thirteen finished in under a minute, two ran
+60m and 80m, and those two were the largest deploy-holds in the window.
+
+⭐ **What replaces it, and why it does NOT depend on this table.** The probe now reads
+ONCE and suppresses the alert only for a commit younger than **900 s**, measured from
+the commit timestamp rather than by waiting. That number is sized from CI conclusion +
+Railway build (≈ 8-11 min observed), NOT from the acquire cap — because the probe no
+longer waits for anything, cross-run lock contention cannot make it alarm early. The
+6-hourly schedule is the retry. **This is a deliberate DECOUPLING: a future change to
+the acquire cap must not propagate there.**
 
 A waiter that exhausts the cap fails its job. Because `sql-tests` is now
 blocking the `frontend` aggregator, that means a red required check — and on a

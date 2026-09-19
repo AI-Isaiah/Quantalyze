@@ -1,5 +1,96 @@
 # Changelog
 
+## [0.79.1.0] - 2026-09-19 — the deploy verifier stops withholding the deploy it verifies
+
+### Root cause
+`analytics-deploy-verify.yml` is schedule-triggered, so every run attaches a check suite to `main`
+HEAD, and Railway holds a deployment in `WAITING` until every suite on that commit *finishes* — an
+INCOMPLETE suite withholds a deploy exactly as effectively as a red one. The step carried a
+4800-second (80-minute) convergence loop, so the probe looped because prod had not converged while
+prod could not converge because Railway was holding the deploy behind the suite that loop kept open.
+A circular wait, previously measured at merge `f10b0e23`.
+
+**Measured over the last 15 runs: thirteen finished in under a minute; two ran 60m and 80m.** Those
+two were the largest deploy-holds in the window — self-inflicted, and larger than any unrelated red
+check this workflow exists to notice.
+
+### Fixed
+- The convergence loop is DELETED. The probe is single-pass and the 6-hourly schedule is the retry.
+- ⭐ **An IN-FLIGHT DEBOUNCE replaces the half of the loop that was NOT redundant, and this is the
+  correction that matters.** The first draft deleted the loop outright on the argument that "the
+  schedule is the retry, so nothing is lost". Two independent reviewers showed that was wrong: the
+  loop did TWO jobs — it RETRIED, and it SUPPRESSED the alert while a deploy was legitimately still
+  in flight. Only the first is replaced for free by the cron. Without the second, `stale=true` fired
+  on the FIRST miss, so a run started shortly after an analytics merge would file a P1 for a deploy
+  that was simply still building — and nothing in this workflow ever closes that issue, so it would
+  have become exactly the permanently-open muted thread the file already blames for issue #751's
+  nine mis-triaged comments. ⛔ The draft's own comment claimed the single reading reported "without
+  alarming" while the code alarmed; that contradiction was the defect.
+  Implemented as COMMIT AGE (main HEAD younger than 900 s ⇒ warn, file nothing), deliberately NOT as
+  a sleep — a sleep would put the job back on the critical path as a suite Railway waits on, which
+  is the whole defect being fixed. It holds nothing.
+- The issue-filing step gains `continue-on-error: true`. It is the only step that can throw, and a
+  rate-limited or 5xx Issues API call would fail it — turning the check on `main` HEAD RED, which
+  makes Railway SKIP the deploy this probe verifies. That is the 2026-06-21 incident re-entered
+  through the alerting path. The `::warning::` is emitted independently and survives the outage.
+- The `git fetch` gains `timeout 60` and keeps its stderr. It was the only unbounded network call;
+  a hang would consume the TTL, GitHub would kill the job, the check would go RED and Railway would
+  SKIP — the one outcome this design forbids.
+- Three operator-facing strings and the P1 issue body no longer assert a "convergence window" or
+  "every attempt" that no longer exist, and the issue body's LEADING known cause — the circular wait
+  on this workflow's own polling check — is demoted to 📜 historical, because this change makes it
+  structurally impossible. Triaging against an absent cause is the #751 failure this file documents.
+- A third verdict distinguishes "deployed SHA known, tree unresolvable" from a confident stale
+  verdict. A transient fetch failure previously produced a P1 asserting prod ran the wrong code.
+- Job `timeout-minutes` 90 → 10. The 90 existed only so the job outlived its own 80-minute window.
+  The ceiling now matters in the other direction and the header says so: a long TTL on this job is
+  itself a deploy-hold.
+
+### Tests
+- Two calibrated scenarios pin BOTH polarities of the debounce: S6 (a commit inside the window is
+  in-flight — warns, files nothing) and S7 (the same mismatch outside the window still escalates, so
+  the debounce is a WINDOW and not a blanket mute). Each was neutered, observed RED on its own named
+  arm, and the workflow restored byte-identically, verified with `cmp`.
+- ⛔ **A pre-existing VACUOUS test is now calibrated.** `no unsubstituted GitHub expression reaches
+  bash` asserted `not.toContain("${{")` on a string that structurally could never contain one:
+  `extractProbeScript` slices only the `run: |` body, while every `${{ }}` in that step lives in the
+  `env:` block above it. Measured: both substitution needles matched ZERO times, so the test could
+  not fail for any change to the workflow while claiming to guard "every scenario below". It now
+  also pins the `env:` seam the harness depends on, calibrated by renaming `HEALTH_URL` and
+  observing the named failure.
+- The dead `sleep` stub is removed. With no stub, a reintroduced poll loop hangs to the vitest
+  timeout and says so, instead of spinning at full speed and passing silently.
+
+### Removed
+- Both `SCRIPT.replace("+ 4800 ))", "+ 1 ))")` arms in
+  `src/__tests__/contracts/analytics-deploy-tree-compare.contract.test.ts`. With the literal gone from
+  the workflow these were VACUOUS rather than merely redundant: `String.replace` with an absent needle
+  returns the string unchanged and reports nothing, so each would have read as a live shortening while
+  doing nothing at all.
+
+### Added
+- `docs/runbooks/mt5-go-live.md`: the image-digest provenance line, blank since stand-up, is filled
+  with `gmag11/metatrader5_vnc:2.3@sha256:2fdff449cf70…`. Both halves were measured and AGREE — the
+  registry resolution of the `:2.3` tag and the live Railway service instance's own `image` ref.
+  ⛔ `Stood up:` is recorded as NOT ESTABLISHED rather than invented: the deployment on record carries
+  a redeploy reason, so it is not the stand-up event, and the verification date is a different fact.
+  This closes the item routed in from Phase 164.6.2 plan 04's checkpoint (founder, 2026-09-14).
+
+### Notes
+- **Phase 164.11 DEPLOYGATE is CANCELLED, not executed and not deferred.** Six plans and ~130 KB of
+  planning artifacts were deleted unexecuted; sunk planning cost was not treated as an argument to
+  continue. The phase's own measurement is accurate — a 200-deployment census reads 46 SKIPPED, 23
+  carrying a real `analytics-service` tree change — but the conclusion drawn from it was wrong:
+  Railway deploys the LATEST commit, not the skipped one, so with merges landing several times a day
+  a skipped analytics change is carried to prod by the next green merge. **The skip costs latency,
+  not the change.** 46 skips is not 46 undelivered changes.
+- ⛔ **The coupling SURVIVES by decision.** An unrelated red can still withhold an analytics deploy;
+  that is now an accepted operating cost rather than an open defect. Reopens only if merge cadence
+  drops far enough that a skipped commit can sit unshipped.
+- ⛔ Shape B (auto-deploy off plus a repo-owned `serviceInstanceDeploy(commitSha:)`) is REJECTED, not
+  deferred. It rested on an unsettled question — whether an API-triggered deploy even bypasses
+  `checkSuites` — and if it does not, it does not work at all. See the ROADMAP entry before reviving it.
+
 ## [0.79.0.0] - 2026-09-18 — the artifact stops publishing what it never scanned, and the production guard stops failing open
 
 A MINOR bump, not a patch. Two controls changed their externally observable

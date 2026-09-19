@@ -9,10 +9,14 @@ name: Analytics deploy verify (prod SHA vs main HEAD)
 #
 # This probe compares the deployed commit (exposed in /health by #9a, the
 # `git_sha` field from RAILWAY_GIT_COMMIT_SHA) against main HEAD. A fresh
-# merge legitimately lags (CI ~5-8m + Railway build ~3m), so it retries over
-# a convergence window and, on a PERSISTENT mismatch — which means the deploy
-# was skipped (or the worker is stuck on old code) — files a dedup'd GitHub
-# issue (mirrors nightly.yml / cassette-refresh.yml) AND emits a warning.
+# merge legitimately lags (CI ~5-8m + Railway build ~3m). ⭐ CHANGED 2026-09-19:
+# this probe READS ONCE and does NOT poll. The lag is absorbed by an IN-FLIGHT
+# DEBOUNCE (main HEAD younger than 900 s ⇒ warn only, never file), and the
+# 6-hourly schedule is the retry. On a mismatch OUTSIDE that window it files a
+# dedup'd GitHub issue (mirrors nightly.yml / cassette-refresh.yml) AND emits a
+# warning. 📜 It used to poll for up to 4800 s; that loop held this job's check
+# suite open on main HEAD, and Railway waits on the whole suite — so the probe
+# became the deploy-hold it existed to detect. Do not reintroduce polling here.
 #
 # CRITICAL: this job exits 0 even when prod is stale. It MUST NOT fail the
 # check. A red check on a (HEAD) commit makes Railway's "wait for CI" treat the
@@ -35,8 +39,11 @@ name: Analytics deploy verify (prod SHA vs main HEAD)
 # which is what the tree comparison below exists to tolerate), so an interleaved
 # non-analytics merge advances prod past the analytics commit this run checks →
 # false alarm. On schedule/dispatch, github.sha IS current main HEAD, which is
-# exactly what prod converges to. After an analytics merge, dispatch this
-# manually for an immediate check; otherwise the 6h schedule bounds detection.
+# exactly what prod converges to. ⚠️ Dispatching this immediately after an
+# analytics merge will report NOT-YET-CONVERGED and deliberately file nothing —
+# the commit is inside the in-flight debounce window. That is correct, not a
+# fault. Wait ~15 min for a dispatch to be meaningful; the 6h schedule bounds
+# detection regardless.
 
 on:
   schedule:
@@ -56,15 +63,20 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    # 158-REVIEW WR-04 (iter 3): must EXCEED the convergence window below
-    # (4800 s = 80 min) or the job would be killed mid-poll and never reach the
-    # issue-filing step — the loud signal would be lost exactly when it matters.
+    # ⭐ LOWERED 90 -> 10 on 2026-09-19, when the convergence loop was deleted.
+    # 📜 It used to have to EXCEED the 4800 s (80 min) convergence window, or the
+    # job would be killed mid-poll and never reach the issue-filing step. There
+    # is no window any more: the probe is single-pass and the 6-hourly schedule
+    # is the retry, so the job finishes in seconds. ⛔ The ceiling matters in the
+    # OTHER direction now — this job attaches a check suite to `main` HEAD and
+    # Railway waits on the whole suite, so a long TTL here is itself a deploy-hold.
+    # Keep it low; do not raise it back to cover a retry loop.
     # It must also be EXPLICIT: this workflow shares the watcher's invariant
     # (every path exits 0 so a check on main HEAD is never red, or Railway skips
     # the deploy this probe verifies), and GitHub's 360-minute default left a
     # hung Issues API call able to redden main HEAD six hours later — the same
     # route WR-03 closed on main-ci-cancelled-watcher.yml.
-    timeout-minutes: 90
+    timeout-minutes: 10
     steps:
       # ⚠️ This job DOES need the repo now: the convergence check resolves the
       # `analytics-service` tree object at both the deployed SHA and main HEAD,
@@ -93,100 +105,100 @@ jobs:
             echo "::warning::github.sha (MAIN_SHA) is empty — cannot verify the deploy this run."
             exit 0
           fi
-          # Convergence window: tolerate a deploy-in-progress (CI + Railway
-          # build) before declaring the deploy skipped.
-          # 158-REVIEW WR-10: the serializer is the Postgres session advisory
-          # lock (key 61616158), NOT the deleted `shared-test-db` concurrency
-          # group. See docs/runbooks/shared-test-db-mutex.md.
+          # ⛔ THE CONVERGENCE LOOP WAS DELETED 2026-09-19. It is single-pass now,
+          # and the 6-hourly schedule IS the retry.
           #
-          # 158-REVIEW WR-04 (iter 3): ⛔ this number is DERIVED from the mutex
-          # numbers in docs/runbooks/shared-test-db-mutex.md section 2 — re-derive it
-          # whenever the acquire cap changes. The old 1800 s (~30 min) predated
-          # CR-04, which re-sized the acquire cap 2700 -> 3600 s and the job TTL
-          # 60 -> 90 min on the explicit grounds that concurrent runs each hold
-          # the lock ~20 min and that this is a NORMAL condition in this repo.
-          # Railway waits on the whole check-suite, so the worst-case LEGITIMATE
-          # latency is the runbook's own TTL arithmetic — ~2 min setup + up to
-          # the 3600 s (60 min) acquire cap + ~12 min of lock-held work ≈ 74 min
-          # — plus Railway's ~3 min build ≈ 77 min. Against a 30-minute
-          # tolerance, a 6-hourly cron firing shortly after a merge that queued
-          # behind two other runs files a P1 `analytics-deploy-stale` issue for a
-          # deploy that is simply still coming. 4800 s (80 min) covers that worst
-          # case with headroom; detection latency is bounded by the 6 h schedule
-          # regardless, so widening the window costs nothing but a false alarm.
-          deadline=$(( $(date +%s) + 4800 ))
+          # The loop existed only to tolerate a deploy still in flight, so that a
+          # cron firing shortly after a merge would not file a P1 for a deploy
+          # that was simply still coming. But it bought that at the cost of
+          # holding THIS job — and therefore this check suite on `main` HEAD —
+          # open for up to 80 minutes, and Railway waits on the whole suite.
+          # That is the circular wait the block below documents at f10b0e23:
+          # the probe looped because prod had not converged, while prod could
+          # not converge because Railway was holding the deploy behind the
+          # suite this very job kept open.
+          #
+          # ⭐ MEASURED over the 15 runs to 2026-09-19: thirteen finished in
+          # under a minute; two ran 60m and 80m. Those two are the only long
+          # deploy-holds in the window — self-inflicted, and larger than any
+          # unrelated red check this workflow was built to notice.
+          #
+          # The false-alarm argument the window rested on is answered for free
+          # by the schedule: a deploy in flight has landed by the next tick 6 h
+          # later, and the old comment already conceded that "detection latency
+          # is bounded by the 6 h schedule regardless". A single reading that
+          # reports non-convergence without alarming costs nothing, and the run
+          # is over in seconds, so the suite closes and Railway proceeds.
           deployed=""
-          while [ "$(date +%s)" -lt "$deadline" ]; do
-            body="$(curl -s --max-time 15 "$HEALTH_URL" || true)"
-            deployed="$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read() or "{}").get("git_sha") or "")' 2>/dev/null || echo "")"
-            # Match if either SHA is a prefix of the other (full vs short).
-            match=0
-            if [ -n "$deployed" ] && [ "$deployed" != "unknown" ]; then
-              case "$MAIN_SHA" in "$deployed"*) match=1 ;; esac
-              case "$deployed" in "$MAIN_SHA"*) match=1 ;; esac
-            fi
-            if [ "$match" = "1" ]; then
-              echo "OK: prod analytics is on main HEAD ($deployed)"
-              exit 0
-            fi
-            # ⭐ SHA drift is not CODE drift, and this probe DEADLOCKS on the
-            # difference. MEASURED 2026-09-13 with the Railway API, after a
-            # first reading got the mechanism wrong: merge f10b0e23 changed two
-            # `.planning/` files and nothing else, and the `analytics-service`
-            # TREE OBJECT is byte-identical across it and 0b9f0699 (e6d8e33f).
-            # ⛔ Railway did NOT decline the deploy — it QUEUED one
-            # (b076139c, created at the merge instant) and left it WAITING on
-            # the check-suite. That suite contains THIS workflow's `verify`
-            # check, which was looping because prod had not converged, while
-            # prod could not converge because Railway was holding the deploy
-            # behind the suite. A circular wait — and a DIFFERENT shape from
-            # the 2026-06-21 incident in the header above: that one is a RED
-            # check making Railway SKIP; this one is an INCOMPLETE check making
-            # Railway WAIT. ⭐ CORRECTED 2026-09-13 (same day, after the fix
-            # landed) — the claim "it self-clears when the window expires" was
-            # NEVER OBSERVED and is wrong about how the one measured instance
-            # actually ended. What the check-suite API shows for f10b0e23:
-            # every suite was complete by 11:57:43 EXCEPT this workflow's own
-            # (94130538971, 11:52:59 -> 13:13:29), so from 11:57:43 to 12:57:44
-            # the ONLY thing Railway was waiting on was `verify` — the circular
-            # wait, confirmed, for ~60 minutes. Then scheduled workflows
-            # attached three more suites, and 94138387603 (npm-audit) concluded
-            # FAILURE at 13:04:40. The deployment flipped to SKIPPED at
-            # 13:04:44.531 — 4.5s later, with `verify` still running.
-            # ⛔ So the wait did not time out; it ended in the RED-check SKIP of
-            # the 2026-06-21 header incident, and prod NEVER RECEIVED f10b0e23.
-            # The two shapes are not alternatives — the WAIT ran into the SKIP.
-            # ⚠️ Two lessons, both paid for: a scheduled workflow attaches a NEW
-            # check-suite to main's head commit long after the push, so the set
-            # Railway waits on GROWS over time; and any red suite decides the
-            # outcome even while other suites still run.
-            # ⛔ The class is NOT new: issue #751 has been open since
-            # 2026-09-07 with nine comments, and its ORIGINAL pair (prod
-            # 05994f1d vs main 45218594) carries the same signature — tree
-            # IDENTICAL (b2f9f92e) on both. Every comment since has been
-            # triaged against a cause that was never present.
-            # A P1 alert that is structurally unable to be true trains its
-            # readers to scroll past it, and the next genuinely skipped deploy
-            # lands in that same muted thread.
-            # ⚠️ FAILS TOWARD ALERTING, deliberately: if the deployed commit
-            # cannot be fetched, `tree_prod` is empty and we fall through to
-            # the stale path. A probe that converges when it cannot tell is the
-            # dead-alarm version of the bug this block fixes.
-            tree_prod=""
-            if [ -n "$deployed" ] && [ "$deployed" != "unknown" ]; then
-              git fetch --depth=1 origin "$deployed" >/dev/null 2>&1 || true
-              tree_prod="$(git rev-parse "${deployed}^{commit}:analytics-service" 2>/dev/null || echo "")"
-            fi
-            tree_main="$(git rev-parse "${MAIN_SHA}^{commit}:analytics-service" 2>/dev/null || echo "")"
-            if [ -n "$tree_prod" ] && [ -n "$tree_main" ] && [ "$tree_prod" = "$tree_main" ]; then
-              echo "OK: prod analytics tree matches main HEAD — SHA differs, code identical (tree $tree_prod; prod $deployed vs main $MAIN_SHA)"
-              exit 0
-            fi
-            echo "prod git_sha='$deployed' vs main HEAD='$MAIN_SHA' — not converged; retrying in 60s"
-            sleep 60
-          done
-          echo "deployed_sha=$deployed" >> "$GITHUB_OUTPUT"
-          echo "stale=true" >> "$GITHUB_OUTPUT"
+          body="$(curl -s --max-time 15 "$HEALTH_URL" || true)"
+          deployed="$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read() or "{}").get("git_sha") or "")' 2>/dev/null || echo "")"
+          # Match if either SHA is a prefix of the other (full vs short).
+          match=0
+          if [ -n "$deployed" ] && [ "$deployed" != "unknown" ]; then
+            case "$MAIN_SHA" in "$deployed"*) match=1 ;; esac
+            case "$deployed" in "$MAIN_SHA"*) match=1 ;; esac
+          fi
+          if [ "$match" = "1" ]; then
+            echo "OK: prod analytics is on main HEAD ($deployed)"
+            exit 0
+          fi
+          # ⭐ SHA drift is not CODE drift, and this probe DEADLOCKS on the
+          # difference. MEASURED 2026-09-13 with the Railway API, after a
+          # first reading got the mechanism wrong: merge f10b0e23 changed two
+          # `.planning/` files and nothing else, and the `analytics-service`
+          # TREE OBJECT is byte-identical across it and 0b9f0699 (e6d8e33f).
+          # ⛔ Railway did NOT decline the deploy — it QUEUED one
+          # (b076139c, created at the merge instant) and left it WAITING on
+          # the check-suite. That suite contains THIS workflow's `verify`
+          # check, which was looping because prod had not converged, while
+          # prod could not converge because Railway was holding the deploy
+          # behind the suite. A circular wait — and a DIFFERENT shape from
+          # the 2026-06-21 incident in the header above: that one is a RED
+          # check making Railway SKIP; this one is an INCOMPLETE check making
+          # Railway WAIT. ⭐ CORRECTED 2026-09-13 (same day, after the fix
+          # landed) — the claim "it self-clears when the window expires" was
+          # NEVER OBSERVED and is wrong about how the one measured instance
+          # actually ended. What the check-suite API shows for f10b0e23:
+          # every suite was complete by 11:57:43 EXCEPT this workflow's own
+          # (94130538971, 11:52:59 -> 13:13:29), so from 11:57:43 to 12:57:44
+          # the ONLY thing Railway was waiting on was `verify` — the circular
+          # wait, confirmed, for ~60 minutes. Then scheduled workflows
+          # attached three more suites, and 94138387603 (npm-audit) concluded
+          # FAILURE at 13:04:40. The deployment flipped to SKIPPED at
+          # 13:04:44.531 — 4.5s later, with `verify` still running.
+          # ⛔ So the wait did not time out; it ended in the RED-check SKIP of
+          # the 2026-06-21 header incident, and prod NEVER RECEIVED f10b0e23.
+          # The two shapes are not alternatives — the WAIT ran into the SKIP.
+          # ⚠️ Two lessons, both paid for: a scheduled workflow attaches a NEW
+          # check-suite to main's head commit long after the push, so the set
+          # Railway waits on GROWS over time; and any red suite decides the
+          # outcome even while other suites still run.
+          # ⛔ The class is NOT new: issue #751 has been open since
+          # 2026-09-07 with nine comments, and its ORIGINAL pair (prod
+          # 05994f1d vs main 45218594) carries the same signature — tree
+          # IDENTICAL (b2f9f92e) on both. Every comment since has been
+          # triaged against a cause that was never present.
+          # A P1 alert that is structurally unable to be true trains its
+          # readers to scroll past it, and the next genuinely skipped deploy
+          # lands in that same muted thread.
+          # ⚠️ FAILS TOWARD ALERTING, deliberately: if the deployed commit
+          # cannot be fetched, `tree_prod` is empty and we fall through to
+          # the stale path. A probe that converges when it cannot tell is the
+          # dead-alarm version of the bug this block fixes.
+          tree_prod=""
+          if [ -n "$deployed" ] && [ "$deployed" != "unknown" ]; then
+            # ⛔ `timeout` is load-bearing: this is the only unbounded network call in the
+              # job. A hung fetch consumes the whole timeout-minutes, GitHub kills the
+              # job, the check goes RED and Railway SKIPs — the one outcome this design
+              # forbids. stderr is kept (no 2>/dev/null) so the reason reaches the log.
+              timeout 60 git fetch --depth=1 origin "$deployed" >/dev/null || true
+            tree_prod="$(git rev-parse "${deployed}^{commit}:analytics-service" 2>/dev/null || echo "")"
+          fi
+          tree_main="$(git rev-parse "${MAIN_SHA}^{commit}:analytics-service" 2>/dev/null || echo "")"
+          if [ -n "$tree_prod" ] && [ -n "$tree_main" ] && [ "$tree_prod" = "$tree_main" ]; then
+            echo "OK: prod analytics tree matches main HEAD — SHA differs, code identical (tree $tree_prod; prod $deployed vs main $MAIN_SHA)"
+            exit 0
+          fi
           # Do NOT exit non-zero (see the header): a failed check on this commit
           # makes Railway skip the deploy this probe verifies. Alert via the
           # dedup'd issue (next step) + this warning; keep the check green.
@@ -203,16 +215,52 @@ jobs:
           # ⭐ This repo's rule: a verdict must not assert a measurement it never
           # took. The two faults get two messages; `stale=true` still fires for
           # BOTH so alerting never weakens (fail toward alerting, as S4 does).
+          # ⭐ IN-FLIGHT DEBOUNCE — added 2026-09-19 with the loop removal, and it is
+          # the HALF THAT WOULD OTHERWISE HAVE BEEN LOST. The deleted convergence
+          # loop was doing TWO jobs, not one: it RETRIED (the 6-hourly schedule
+          # replaces that) and it SUPPRESSED the alert while a deploy was
+          # legitimately still in flight (nothing replaces that for free).
+          # ⛔ Without this block, `stale=true` fires on the FIRST miss, so a run
+          # started shortly after an analytics merge files a P1 for a deploy that
+          # is simply still building — and NOTHING in this workflow ever closes
+          # that issue, so it becomes the permanently-open muted thread this file
+          # already blames for issue #751's nine mis-triaged comments.
+          # ⭐ Implemented as COMMIT AGE, deliberately NOT as a sleep: a sleep would
+          # put this job back on the critical path as a check suite Railway waits
+          # on, which is the entire defect the loop removal exists to fix. Reading
+          # the commit timestamp costs nothing and holds nothing.
+          # Window: CI conclusion + Railway build ≈ 8-11 min observed; 900 s covers
+          # it with headroom and is two orders of magnitude below the old 4800 s.
+          now_ts="$(date +%s)"
+          head_ts="$(git log -1 --format=%ct "$MAIN_SHA" 2>/dev/null || echo "")"
+          if [ -n "$head_ts" ] && [ "$(( now_ts - head_ts ))" -lt 900 ]; then
+            echo "::warning::prod analytics has not yet converged to main HEAD ('$MAIN_SHA'), but that commit is $(( (now_ts - head_ts) / 60 )) min old — INSIDE the ~15 min CI+build window. ⛔ NOT filing a staleness issue: this is indistinguishable from a deploy still in flight. The next scheduled run will escalate if it is still unconverged."
+            echo "in_flight=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "deployed_sha=$deployed" >> "$GITHUB_OUTPUT"
+          echo "stale=true" >> "$GITHUB_OUTPUT"
           if [ -z "$deployed" ] || [ "$deployed" = "unknown" ]; then
             echo "unreadable=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::NO READING obtained from prod /health ('$HEALTH_URL') within the convergence window — git_sha was absent, empty or 'unknown' on every attempt. ⛔ This is NOT a stale-deploy verdict: the deployed commit is UNKNOWN, not known-wrong. Check the service is up and /health answers with a git_sha before concluding anything about which code is live."
+            echo "::warning::NO READING obtained from prod /health ('$HEALTH_URL') on this run's SINGLE reading — git_sha was absent, empty or 'unknown'. ⛔ This is NOT a stale-deploy verdict: the deployed commit is UNKNOWN, not known-wrong. ⚠️ Single reading, not a poll: this probe reads once and the 6-hourly schedule is the retry. Check the service is up and /health answers with a git_sha before concluding anything about which code is live."
+          elif [ -z "$tree_prod" ]; then
+            echo "::warning::prod analytics reports git_sha '$deployed', but its 'analytics-service' TREE could not be resolved (the fetch or rev-parse failed) — so this run could NOT compare code. ⛔ This is NOT a confident stale verdict: it is an unresolvable measurement. Check network/repo access from the runner before concluding prod is running the wrong code."
           else
-            echo "::warning::prod analytics git_sha ('$deployed') != main HEAD ('$MAIN_SHA') after the convergence window. Likely a skipped/stuck Railway deploy — see the auto-filed 'analytics-deploy-stale' issue. Recover: 'railway redeploy' / 'railway up' the analytics service."
+            echo "::warning::prod analytics git_sha ('$deployed') != main HEAD ('$MAIN_SHA') on this run's single reading, and that commit is older than the ~15 min CI+build window. Likely a skipped/stuck Railway deploy — see the auto-filed 'analytics-deploy-stale' issue. Recover: 'railway redeploy' / 'railway up' the analytics service."
           fi
           exit 0
 
       - name: Open or update GitHub issue on persistent staleness
         if: steps.probe.outputs.stale == 'true'
+        # ⛔ continue-on-error is LOAD-BEARING, not defensive tidiness. This step
+        # is the ONLY one in the job that can throw: a rate-limited or 5xx Issues
+        # API call makes it fail, which turns the check on `main` HEAD RED, which
+        # makes Railway SKIP the deploy this probe exists to verify — the exact
+        # 2026-06-21 incident in the header, re-entered through the alerting path.
+        # ⭐ Alerting does not depend on this step succeeding: the `::warning::`
+        # above is emitted independently and survives an Issues API outage.
+        continue-on-error: true
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           RUN_ID: ${{ github.run_id }}
@@ -243,7 +291,7 @@ jobs:
               return;
             }
             const body = [
-              "The prod analytics service is running STALE code: its deployed commit does not match main HEAD after the convergence window.",
+              "The prod analytics service is running STALE code: its deployed commit does not match main HEAD on this run's single reading, taken after the commit had aged past the ~15 min CI+build debounce window. ⚠️ This probe reads ONCE per run (the 6h schedule is the retry) — do not read this as a repeated poll.",
               "",
               detail,
               "",
@@ -252,7 +300,8 @@ jobs:
               "⛔ TRIAGE THE DEPLOYMENT STATE FIRST, not the check-suite. This line used to read `Most likely the Railway deploy was SKIPPED because the main CI check-suite was not green`, and that confident prior sent NINE comments on issue #751 hunting a red suite that was green every time. Run `railway` list-deployments for the analytics service and read the deployment for this SHA: SKIPPED, WAITING and absent are three different faults with three different fixes.",
               "",
               "Known causes, current as of 2026-09-13 — the first two are the ones actually observed in this repo:",
-              "- **The deployment is `WAITING`, not skipped, and it is waiting on THIS workflow.** Railway holds a deploy until the commit's check-suite completes, and that suite contains this workflow's own `verify` check — which loops while prod has not converged, while prod cannot converge because Railway is holding the deploy. A CIRCULAR WAIT. ⚠️ DISTINCT from the 2026-06-21 incident in this workflow's header: that one is a RED check making Railway SKIP; this is an INCOMPLETE check making Railway WAIT. MEASURED ONCE (f10b0e23, 2026-09-13): Railway waited 82 minutes, ~60 of them on `verify` as the only outstanding suite — then a scheduled `npm-audit` suite went RED at 13:04:40 and the deployment flipped to SKIPPED 4.5s later, while `verify` was still running. ⛔ So do NOT assume a WAITING deploy will free itself: the one observed instance ended as a SKIP and prod never got that commit. ⚠️ Scheduled workflows keep attaching NEW check-suites to main HEAD hours after the push, so the set being waited on grows. Confirm the deployment status before doing anything else.",
+              "- **The deploy may simply still be IN FLIGHT.** Check the Railway deployment state for this commit FIRST, before anything else. ⭐ CHECK THIS FIRST even though the debounce should have suppressed it — a slow CI or a long build can outlast the 900 s window.",
+              "- 📜 HISTORICAL (pre-2026-09-19), listed so old issue threads still parse: the deployment used to be able to sit `WAITING` on THIS workflow's own `verify` check, because that check polled for up to 4800 s while Railway held the deploy behind the commit's check-suite — a circular wait. ⛔ That mechanism NO LONGER EXISTS: the poll was deleted and this job now finishes in seconds with `timeout-minutes: 10`. If you are triaging against it, you are chasing a cause that cannot be present.",
               "- **The deployed SHA is older but the CODE is identical** — a merge that touched no `analytics-service/` path. Since v0.77.41.0 this is detected by comparing the `analytics-service` tree object and should no longer reach this issue; if you are reading it here anyway, the tree comparison itself has regressed and THAT is the bug.",
               "- A **red** `python` / `sql-tests` / `e2e-seeded` job from the shared-test-db **advisory lock** (key 61616158): either the acquire step hit its wait cap (deep cross-run queue OR a wedged holder — the step prints a `pg_locks` census naming both), or the job blew its `timeout-minutes`. Runbook sections 2-3.",
               "- A **cancelled** main-branch run, which `main-ci-cancelled-watcher.yml` files as a separate `main-ci-cancelled` issue. Check for one.",

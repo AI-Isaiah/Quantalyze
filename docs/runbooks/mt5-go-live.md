@@ -78,12 +78,23 @@ Deploy the gateway per the chosen `deploy/mt5-gateway/` template (Railway
 `CUSTOM_USER`/`PASSWORD` (the gateway VNC secret — host secret store, NEVER git) and
 `mt5server_port=8001`. Mount `/config` on the persistent volume.
 
-**Record the image digest in the provenance line below at stand-up:**
+**Image digest provenance — FILLED 2026-09-19 (was blank since stand-up):**
 
 ```
-Provenance: gmag11/metatrader5_vnc:2.3@sha256:__________________________________  (fill at stand-up)
-Stood up:   ____-__-__  on host: [ Railway dual-stack | VPS+Tailscale | Fly ]
+Provenance: gmag11/metatrader5_vnc:2.3@sha256:2fdff449cf70b74c242319828b6859592ab52dfb05690d9a989c75107dabf4c1
+Pin verified: 2026-09-19  on host: Railway  (service mt5-gateway)
+Stood up:   NOT ESTABLISHED — see note below
 ```
+
+⭐ **Both halves were measured, and they AGREE.** `docker buildx imagetools inspect
+gmag11/metatrader5_vnc:2.3` resolves to that digest, and the live Railway service instance
+carries the identical `image` ref including the `@sha256:` suffix. The pin is real, not aspirational.
+
+⛔ **`Stood up:` is deliberately NOT a date, and must not be quietly filled with one.** Nothing
+measured establishes it: the deployment on record for this service carries a REDEPLOY reason, so it
+is not the stand-up event. The verification date above is a different fact and is labelled as one.
+Substituting it would turn an unknown into a false record — leave this as NOT ESTABLISHED until
+someone has evidence of the actual stand-up.
 
 Get the `sha256` with `docker buildx imagetools inspect gmag11/metatrader5_vnc:2.3` and
 pin the service to that digest.
