@@ -4162,11 +4162,14 @@ jobs:
       # from contending. Keep byte-identical with Makefile `test:`.
       #
       # Phase 158 / OPS-01 — the shared-test-db mutex, byte-identical to the step
-      # in `sql-tests` and `e2e-seeded` (see the long note on `sql-tests` for the
-      # mechanism and the ⛔ constraints). Placed immediately before `pytest`, the
-      # first DB-touching step of this job. This job's `defaults.run.
-      # working-directory: analytics-service` applies here and is harmless — the
-      # step reads no repo file.
+      # in `sql-tests` and `e2e-seeded` up to the redaction call (see the long
+      # note on `sql-tests` for the mechanism and the ⛔ constraints). Placed
+      # immediately before `pytest`, the first DB-touching step of this job.
+      # [164.8.4-01] This job's `defaults.run.working-directory:
+      # analytics-service` is NOT harmless for the redaction reference below —
+      # a bare relative `scripts/…` path would not resolve from
+      # analytics-service, so that reference is workspace-rooted via
+      # ${GITHUB_WORKSPACE}.
       - name: Acquire shared-test-db mutex
         env:
           TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
@@ -4305,9 +4308,13 @@ jobs:
                 # psql actually emits:
                 #   connection to server at "<host>" (<ip>), port <n> failed
                 #   FATAL:  password authentication failed for user "<user>"
-                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
-                       -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
-                       -e 's#(for user )"[^"]*"#\1"***"#g' "${log}" >&2 || true
+                # [164.8.4-01] The expressions now live in the one shared
+                # scripts/redact-psql-stderr.sed (the UNION across every inline
+                # copy this workflow and test-restore-from-baseline.yml used to
+                # carry separately); the reference is workspace-rooted via
+                # ${GITHUB_WORKSPACE} because this job's working-directory is
+                # analytics-service, not the repo root.
+                sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${log}" >&2 || true
                 break
               fi
               sleep 5
