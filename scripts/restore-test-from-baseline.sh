@@ -811,8 +811,9 @@ refuse_wrong_database() {
   # identity refusals judge — and a non-empty stderr line DEFEATS the NULL check
   # below, which is precisely the branch CLAUDE.md calls "the marker was lost".
   # The calling workflow already does it this way
-  # (.github/workflows/test-restore-from-baseline.yml:655-657, stderr to its own
-  # file); this is that shape. The stderr text is NOT printed: it can name the
+  # (.github/workflows/test-restore-from-baseline.yml, step `Which database am I
+  # on` — cited by SYMBOL: the line range this comment used to name had already
+  # drifted, which is [164.7-CITATION-DRIFT-01]); this is that shape. The stderr text is NOT printed: it can name the
   # host, its IP and the DB user, and this log is public.
   marker=$(psqlt -c "SELECT shobj_description(oid, 'pg_database') AS which_database
   FROM pg_database WHERE datname = current_database();" 2>"$RESTORE_OUT_DIR/marker.err") || rc=$?
@@ -823,10 +824,36 @@ refuse_wrong_database() {
   if [ -z "$marker" ]; then
     fail "the database identity marker is NULL. Re-set the COMMENT ON DATABASE marker before writing — CLAUDE.md § Which database am I on? A NULL marker means the marker was lost, not that this is TEST."
   fi
-  if ! printf '%s' "$marker" | grep -Eiq "$RESTORE_EXPECT_MARKER_RE"; then
+  # ⛔ BOTH PREDICATES ARE rc-BOUNDED, AND THE SECOND ONE IS WHY (F-R2-02). That
+  # finding was fixed in supabase-migrate.yml and test-restore-from-baseline.yml on
+  # 2026-09-09 and LEFT STANDING HERE until 2026-09-19, while the workflow comment
+  # said "the restore script repeats this check as its own refusal 5" — implying a
+  # parity that did not exist. `grep` exits 0 on a match, 1 on no match and >1 when
+  # it COULD NOT DECIDE. Both regexes are ENV-OVERRIDABLE (see the defaults above),
+  # so a caller-supplied ERE that grep rejects is a REACHABLE exit 2, not a
+  # hypothesis. Written as a bare `if grep …`, an undecided PROD check was
+  # indistinguishable, in the branch taken, from "the marker does not name prod" —
+  # so this function printed its clean verdict and the caller went on to the census
+  # and `DROP SCHEMA public CASCADE`. The EXPECT check was fail-CLOSED only by
+  # accident of its leading `!`; it is bounded explicitly now. ⛔ On a hand-run
+  # restore this function is the ONLY guard: the developer CLI has no other.
+  # `-a` is mandatory repo-wide and was missing here. A HERE-STRING, not a pipe:
+  # under `set -o pipefail` a reader exiting before it drains kills the writer, and
+  # pipefail surfaces the writer's SIGPIPE (141) as the pipeline's status.
+  rc=0
+  grep -aEiq "$RESTORE_EXPECT_MARKER_RE" <<<"$marker" || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    fail "MEASURE_FAIL: the TEST-marker predicate could not be evaluated (grep exited ${rc}; 126/127 means grep could not be run at all). RESTORE_EXPECT_MARKER_RE may be an ERE grep rejects. An identity check that did not run is not an identity check that passed."
+  fi
+  if [ "$rc" -ne 0 ]; then
     fail "the database identity marker does not name TEST (it must match RESTORE_EXPECT_MARKER_RE, case-insensitively). Refusing. The marker text is withheld: this log is public."
   fi
-  if printf '%s' "$marker" | grep -Eiq "$RESTORE_REFUSE_MARKER_RE"; then
+  rc=0
+  grep -aEiq "$RESTORE_REFUSE_MARKER_RE" <<<"$marker" || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    fail "MEASURE_FAIL: the PROD-refusal predicate could not be evaluated (grep exited ${rc}; 126/127 means grep could not be run at all). RESTORE_REFUSE_MARKER_RE may be an ERE grep rejects. This is the refusal that stands between this script and a DROP SCHEMA on production, and it FAILS CLOSED: an unevaluated refusal is treated as a refusal."
+  fi
+  if [ "$rc" -eq 0 ]; then
     fail "the database identity marker matches RESTORE_REFUSE_MARKER_RE — it names PRODUCTION. Refusing, loudly. The marker text is withheld: this log is public."
   fi
   note "which_database: OK — marker names TEST and not PROD"

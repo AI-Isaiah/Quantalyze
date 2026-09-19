@@ -1011,8 +1011,15 @@ jobs:
             # scripts/redact-psql-stderr.sed (the UNION across every inline
             # copy this workflow and ci.yml used to carry separately),
             # referenced workspace-rooted.
-            sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${RUNNER_TEMP}/marker.err" >&2
+            # The ANNOTATION GOES FIRST. Under `set -e` a failing redaction -- the shared
+            # .sed unresolvable, marker.err unreadable -- aborted the step on the `sed`
+            # line and this `::error::` never printed, losing the diagnosis in exactly
+            # the broken environment that needed it. On a redaction failure psql's
+            # stderr is withheld ENTIRELY: it can name the host and the DB user, and
+            # this log is public.
             echo "::error::the database identity marker could not be read (psql exited ${rc}). Refusing to back up or restore a database this workflow cannot identify. current_database() is 'postgres' on BOTH projects and proves nothing."
+            sed -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "${RUNNER_TEMP}/marker.err" >&2 \
+              || echo "::error::psql's stderr could not be redacted and is therefore withheld entirely." >&2
             exit 1
           fi
           marker="$(printf '%s' "${marker}" | tr -d '\r')"
@@ -1032,13 +1039,23 @@ jobs:
           # this reason; this step — the one standing between this workflow and a
           # DROP SCHEMA on the wrong database — did not, until now. An unreadable answer
           # is never a clean one.
-          # `-a` is mandatory repo-wide even here, where the input is a pipe and cannot
-          # hold a NUL: the rule is not conditional on the reader's argument about why
-          # this site is safe, which is how the ancestry probe's bare grep shipped.
+          # `-a` is mandatory repo-wide. It is INERT here, but not for the reason this
+          # comment used to give: `${marker}` is a shell VARIABLE and command
+          # substitution strips NULs, so no NUL can reach grep. It is kept anyway --
+          # the rule is not conditional on the reader's argument about why this site
+          # is safe, which is how the ancestry probe's bare grep shipped.
+          # A HERE-STRING, not a pipe, and that is load-bearing. Until 2026-09-19 this
+          # read `printf '%s' "${marker}" | grep -aEiq ...`. Under `set -o pipefail` a
+          # reader that exits before draining kills the writer with SIGPIPE, and
+          # pipefail surfaces the writer's 141 as the pipeline's status -- which the
+          # `-gt 1` bound below then reports as "could not decide", naming a grep that
+          # was healthy. A here-string is written in full before grep is exec'd, so
+          # there is no concurrent writer to signal and `rc` can only be grep's own
+          # status (or the shell's 126/127 for "could not run grep at all").
           rc=0
-          printf '%s' "${marker}" | grep -aEiq '(^|[^[:alnum:]_])test([^[:alnum:]_]|$)' || rc=$?
+          grep -aEiq '(^|[^[:alnum:]_])test([^[:alnum:]_]|$)' <<<"${marker}" || rc=$?
           if [ "${rc}" -gt 1 ]; then
-            echo "::error::MEASURE_FAIL: the TEST-marker predicate could not be evaluated (grep exited ${rc}). An identity check that did not run is not an identity check that passed. Refusing before any read of this database."
+            echo "::error::MEASURE_FAIL: the TEST-marker predicate could not be evaluated (grep exited ${rc}; 126/127 means grep could not be run at all). An identity check that did not run is not an identity check that passed. Refusing before any read of this database."
             exit 1
           fi
           if [ "${rc}" -ne 0 ]; then
@@ -1046,9 +1063,9 @@ jobs:
             exit 1
           fi
           rc=0
-          printf '%s' "${marker}" | grep -aEiq 'prod' || rc=$?
+          grep -aEiq 'prod' <<<"${marker}" || rc=$?
           if [ "${rc}" -gt 1 ]; then
-            echo "::error::MEASURE_FAIL: the PROD-refusal predicate could not be evaluated (grep exited ${rc}). This is the refusal that stands between this workflow and a DROP SCHEMA on production, and it FAILS CLOSED: an unevaluated refusal is treated as a refusal. The marker text is withheld: this log is public."
+            echo "::error::MEASURE_FAIL: the PROD-refusal predicate could not be evaluated (grep exited ${rc}; 126/127 means grep could not be run at all). This is the refusal that stands between this workflow and a DROP SCHEMA on production, and it FAILS CLOSED: an unevaluated refusal is treated as a refusal. The marker text is withheld: this log is public."
             exit 1
           fi
           if [ "${rc}" -eq 0 ]; then

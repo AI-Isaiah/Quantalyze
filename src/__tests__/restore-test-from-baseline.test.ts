@@ -2456,3 +2456,124 @@ describe("restore-test-from-baseline.test.ts — splitClassEntry fails loud rath
     expect("dsn".slice(-1 + 1)).toBe("dsn");
   });
 });
+
+describe("restore-test-from-baseline.sh — F-R2-02: the marker predicates are rc-BOUNDED", () => {
+  // ⛔ WHY THIS ARM IS EXECUTED AND NOT A GREP. What F-R2-02 names is a BRANCH TAKEN,
+  // not a string: a bare `if printf … | grep -Eiq "$RESTORE_REFUSE_MARKER_RE"` reads an
+  // UNDECIDED grep (exit > 1) as "the marker does not name prod" and falls through to
+  // the clean verdict. A static pin on the bounded text would stay green against a
+  // bound that fires on the wrong comparison, so the script is SOURCED (the WR-01
+  // technique — the final `main "$@"` dispatch removed, leaving definitions only) and
+  // `refuse_wrong_database` is called directly. No cluster, no database, no DSN.
+  //
+  // ⚠️ THE UNDECIDABILITY IS INJECTED THE WAY IT ACTUALLY ARRIVES. Both regexes are
+  // ENV-OVERRIDABLE, so a caller-supplied ERE that grep rejects is the reachable
+  // cause — reproduced here with a `grep` shell function that returns 2 for the
+  // invocation carrying the REFUSE pattern and delegates every other one to
+  // `command grep`, which is the real shape (one predicate undecided while the other
+  // answers). Measured 2026-09-19: on the PRE-FIX bytes this arm reaches
+  // `which_database: OK — marker names TEST and not PROD`, which is the defect.
+  const MARKER = "quantalyze shared test database";
+
+  const HARNESS = [
+    'source "$COPY"',
+    'RESTORE_OUT_DIR="$OUTDIR"',
+    "psqlt() { printf '%s\\n' \"$MARKER\"; }",
+    "grep() {",
+    '  for a in "$@"; do',
+    '    case "$a" in "$BREAK_ON") return 2 ;; esac',
+    "  done",
+    '  command grep "$@"',
+    "}",
+    "refuse_wrong_database",
+    "",
+  ].join("\n");
+
+  /** The bounded PROD refusal, verbatim — the bytes this arm exists to defend. */
+  const BOUNDED_REFUSE =
+    '  rc=0\n  grep -aEiq "$RESTORE_REFUSE_MARKER_RE" <<<"$marker" || rc=$?\n' +
+    '  if [ "$rc" -gt 1 ]; then\n' +
+    '    fail "MEASURE_FAIL: the PROD-refusal predicate could not be evaluated (grep exited ${rc}; 126/127 means grep could not be run at all). RESTORE_REFUSE_MARKER_RE may be an ERE grep rejects. This is the refusal that stands between this script and a DROP SCHEMA on production, and it FAILS CLOSED: an unevaluated refusal is treated as a refusal."\n' +
+    "  fi\n" +
+    '  if [ "$rc" -eq 0 ]; then\n';
+  /** What the site was before 2026-09-19 — the shape the calibration restores. */
+  const BARE_REFUSE =
+    '  if printf \'%s\' "$marker" | grep -Eiq "$RESTORE_REFUSE_MARKER_RE"; then\n';
+
+  function runRefuse(
+    scriptText: string,
+    breakOn: string,
+  ): { status: number; out: string } {
+    const dir = mkdtempSync(join(tmpdir(), "restore-fr202-"));
+    try {
+      const stripped = scriptText.replace(/\nmain "\$@"\n?$/, "\n");
+      expect(
+        stripped,
+        'the script no longer ends with its `main "$@"` dispatch — sourcing the copy would RUN the real thing',
+      ).not.toBe(scriptText);
+      const copy = join(dir, "copy.sh");
+      writeFileSync(copy, stripped);
+      writeFileSync(join(dir, "harness.sh"), HARNESS);
+      mkdirSync(join(dir, "out"));
+      const r = spawnSync("bash", [join(dir, "harness.sh")], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          COPY: copy,
+          OUTDIR: join(dir, "out"),
+          MARKER,
+          BREAK_ON: breakOn,
+          RESTORE_DB_URL: "stub-never-used",
+        },
+      });
+      return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("EXECUTED — an UNDECIDABLE prod refusal REFUSES, and never prints the clean verdict", () => {
+    expect(
+      SRC.split(BOUNDED_REFUSE).length - 1,
+      "the bounded PROD refusal is not in the script exactly once — the calibration below would neuter nothing",
+    ).toBe(1);
+
+    // A healthy grep on a TEST marker still passes: the arm below is not reported by
+    // a fixture that refuses anyway.
+    const ok = runRefuse(SRC, "--never-matches-any-argument");
+    expect(ok.status, `a TEST marker was refused.\n${ok.out}`).toBe(0);
+    expect(ok.out).toContain("OK — marker names TEST and not PROD");
+
+    // The finding itself: the PROD refusal cannot be evaluated.
+    const undecided = runRefuse(SRC, "prod");
+    expect(
+      undecided.status,
+      `an UNEVALUATED PROD refusal let the script through. The caller then takes a census of, and DROP SCHEMA public CASCADE on, a database whose identity was never established.\n${undecided.out}`,
+    ).toBe(1);
+    expect(undecided.out).toContain(
+      "PROD-refusal predicate could not be evaluated",
+    );
+    expect(
+      undecided.out.includes("OK — marker names TEST and not PROD"),
+      "the script printed its clean verdict over a measurement it never took",
+    ).toBe(false);
+  });
+
+  it("CALIBRATION — the PRE-FIX bare `if` lets the same input through, so this arm bites", () => {
+    const preFix = SRC.replace(BOUNDED_REFUSE, BARE_REFUSE);
+    expect(
+      preFix,
+      "CALIBRATION: the bounded refusal could not be replaced, so the arm above is not evidence",
+    ).not.toBe(SRC);
+
+    const undecided = runRefuse(preFix, "prod");
+    expect(
+      undecided.out,
+      "CALIBRATION: the PRE-FIX bytes did NOT print the clean verdict on an undecided PROD refusal — this arm is measuring something other than F-R2-02",
+    ).toContain("OK — marker names TEST and not PROD");
+    expect(
+      undecided.status,
+      "CALIBRATION: the PRE-FIX bytes refused anyway — the defect this arm defends against was not reproduced",
+    ).toBe(0);
+  });
+});

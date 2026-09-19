@@ -3060,10 +3060,21 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       };
 
       /** Undecidable on the PROD pattern only; the TEST pattern still answers. */
+      // ⛔ `cat >/dev/null` FIRST, and it is not decoration. A real `grep` cannot
+      // report a verdict without reading its input. A stub that exits WITHOUT
+      // draining models something grep cannot do, and when the step feeds it from a
+      // pipe under `set -o pipefail` it closes the read end while the writer still
+      // has bytes queued: the writer dies of SIGPIPE, pipefail surfaces its 141 as
+      // the pipeline's status, and the step's `-gt 1` bound reports MEASURE_FAIL over
+      // a grep that answered fine. Measured 2026-09-19: that is what reddened
+      // `frontend-test (2)` on main at b13ab2f1 — a fixture defect, not a workflow
+      // defect. The step itself now uses a here-string, so the pipe is gone on both
+      // sides; the stub is corrected anyway, because a fixture that misrepresents its
+      // subject stops testing the subject.
       const GREP_BREAKS_ON_PROD =
-        '#!/bin/bash\nfor a in "$@"; do case "$a" in *prod*) exit 2 ;; esac; done\nexit 0\n';
+        '#!/bin/bash\ncat >/dev/null\nfor a in "$@"; do case "$a" in *prod*) exit 2 ;; esac; done\nexit 0\n';
       /** Undecidable on everything. */
-      const GREP_ALWAYS_BROKEN = "#!/bin/bash\nexit 2\n";
+      const GREP_ALWAYS_BROKEN = "#!/bin/bash\ncat >/dev/null\nexit 2\n";
 
       // Baselines, so the arms below are not reported by a fixture that refuses anyway.
       const ok = runMarker("quantalyze shared test database", null);
@@ -5434,12 +5445,27 @@ describe("WR-04 — the `-a` rule is workflow-wide, not post-verify-wide", () =>
       bareGreps(WF).some((l) => l.includes("MUTEX-ACQUIRED")),
       "the byte-copied mutex step was scanned — its bare grep is ci.yml's text, pinned byte-identical above, so flagging it here would make two requirements contradict",
     ).toBe(false);
+    //     ⚠️ SYNTHETIC SUBJECTS since 2026-09-19, and deliberately so. This arm used
+    //     to calibrate pipe-detection against the marker gate's own
+    //     `printf … | grep -aEiq 'prod'`. That gate is a HERE-STRING now, and the
+    //     workflow's only remaining `| grep` sits inside the backup README heredoc,
+    //     which `stripHeredocs` removes — so there is no live piped grep left to
+    //     calibrate against and the old form would have gone VACUOUS the moment its
+    //     subject was edited away, passing an empty `.some()` as a green scanner.
+    //     A synthetic line cannot be taken away by an edit somewhere else.
     expect(
-      grepInvocations(WF).some(
-        (g) => g.stdin && g.line.includes("grep -aEiq 'prod'"),
+      grepInvocations(`printf '%s' "\${x}" | grep -aEiq 'prod'`).some(
+        (g) => g.stdin,
       ),
-      "the marker gate's piped grep was not classified as stdin-fed — the scanner's pipe detection is not doing what its comment says",
+      "a piped grep was not classified as stdin-fed — the scanner's pipe detection is not doing what its comment says",
     ).toBe(true);
+    //     The NEGATIVE half, and it is the one that now carries weight: the here-string
+    //     form must NOT be read as stdin-fed, because that is what keeps the marker
+    //     greps inside `bareGreps`' scope where the `-a` rule is enforced.
+    expect(
+      grepInvocations(`grep -aEiq 'prod' <<<"\${x}"`).some((g) => g.stdin),
+      "a here-string grep was classified as stdin-fed — it has no pipe, so it must stay IN scope for the bare-grep rule",
+    ).toBe(false);
     expect(
       grepInvocations(WF).some(
         (g) => g.line.includes("ANCESTRY-PROBE-SENTINEL") && !g.stdin,
