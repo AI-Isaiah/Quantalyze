@@ -3740,6 +3740,40 @@ derived as the next free sibling under 164.5.1, renumbering nothing. Owner: that
 ⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
 (founder rule 2026-09-08).
 
+### SYNC-DRIFT-PAYLOAD-LOGGED-VERBATIM-01 — the contract-drift log renders the unknown RPC return verbatim with `%r` (booked 2026-09-19)
+
+**Found by the Phase 164.5.1.2 security audit**, outside that phase's 13 registered threats, so it
+did not affect `threats_open` and did not block the ship. Recorded here rather than closed by silence.
+
+In `analytics-service/routers/cron.py::_sync_single_key`, the "unexpected shape" `logger.error` on
+the `sync_trades` contract-drift path renders the drifted return value with `%r`. ⚠️ **Phase
+164.5.1.2 edited that message TWICE without touching the payload argument** — the value is still
+logged verbatim.
+
+**Why it is LATENT and not live:** `sync_trades` is declared `RETURNS INTEGER` at the SQL level, so
+the drift branch is unreachable today, and the destination is an internal log (Railway / Sentry),
+NOT the public repo. A drift that returned a structured row set rather than an unexpected scalar
+would put that payload in the log. ⛔ This is why it is booked rather than dismissed: the branch
+exists precisely to handle shapes nobody enumerated.
+
+⛔ **NOT a one-line `%r` deletion, and that is the whole reason it needs a phase rather than a
+drive-by fix.** The `%r` is the only diagnostic an operator gets when drift actually fires; removing
+it outright trades an information-disclosure risk for a debuggability hole and would leave the next
+operator with a type name and nothing else. ⭐ The shape that satisfies both is BOUNDED rendering —
+the type name plus a length-capped, structure-aware excerpt — and choosing that cap is a design
+decision, not a patch. ⚠️ Note the operator-facing signal is ALREADY safe: the `strategy_errors`
+value this phase added is type-name-only (`ContractDrift: sync_trades returned <type>`), so the
+`%r` is redundant for classification and matters only for diagnosis.
+
+**TRIGGER — the condition that says this entry has come due:** anyone changes `sync_trades`'s
+declared return type away from `INTEGER`, or the drift branch is observed firing in production.
+Either makes the latent path live.
+✅ **Destination: Phase 164.5.1.4 SYNCCURSOR** — it reworks this exact drift-and-cursor path, so the
+bounded-rendering decision belongs with the work that is already reading these lines. Owner: that phase.
+⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
+(founder rule 2026-09-08).
+
+
 ### SYNC-HELD-CURSOR-REFETCH-COST-01 — a held cursor re-fetches a monotonically growing window, and the five private keys hold theirs every tick (booked 2026-09-19)
 
 **A CONSEQUENCE OF PHASE 164.5.1.2's OWN FIX, recorded rather than discovered later.** That phase
