@@ -1436,10 +1436,54 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
      * the tokens verbatim lets the arm below assert that none of them contains `*`,
      * which is the actual rule.
      */
+    /**
+     * [164.8.4-05] Runs the real `scripts/derive-restore-channels.sh` over the
+     * two real producers, for `stagedChannelNames` to resolve the shipped
+     * `for c in ${derived_channels}; do` shape back into real names. Memoized:
+     * the script is deterministic source-text scanning and this suite does not
+     * mutate the repo's producer files mid-run.
+     */
+    let realDerivedChannelsCache: string[] | null = null;
+    function realDerivedChannels(): string[] {
+      if (realDerivedChannelsCache) return realDerivedChannelsCache;
+      const r = spawnSync(
+        "bash",
+        [
+          join(ROOT, "scripts/derive-restore-channels.sh"),
+          join(ROOT, "scripts/restore-test-from-baseline.sh"),
+          join(ROOT, ".github/workflows/test-restore-from-baseline.yml"),
+        ],
+        { encoding: "utf8" },
+      );
+      if (r.status !== 0) {
+        throw new Error(
+          `stagedChannelNames: scripts/derive-restore-channels.sh failed (exit ${r.status}) over the real producers — cannot resolve the dynamic channel loop.\n${r.stdout ?? ""}${r.stderr ?? ""}`,
+        );
+      }
+      realDerivedChannelsCache = (r.stdout ?? "")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      return realDerivedChannelsCache;
+    }
+
     function stagedChannelNames(text: string): string[] {
       const body = stepBody(text, STAGE);
       const m = body.match(/^\s*for c in ([^;\n]+); do$/m);
-      return m ? m[1].trim().split(/\s+/) : [];
+      if (!m) return [];
+      const tokens = m[1].trim().split(/\s+/);
+      // [164.8.4-05] The staging step's loop iterates a DERIVED set, not a
+      // hand-typed list — the ONE shape the shipped step carries is
+      // `for c in ${derived_channels}; do`. Resolve THAT shape back to the
+      // real names by running the real derivation, so every downstream
+      // predicate reasoning about "the current channel set" keeps working. Any
+      // OTHER token shape — a calibration fixture that renamed the variable,
+      // or one that re-introduced a literal list — is returned VERBATIM; that
+      // is what lets a calibration observe the parse break.
+      if (tokens.length === 1 && tokens[0] === "${derived_channels}") {
+        return realDerivedChannels();
+      }
+      return tokens;
     }
 
     /** What the workflow's OWN two lists say should be staged, given a seeded set. */
@@ -1490,6 +1534,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           ...process.env,
           RUNNER_TEMP: runnerTemp,
           REDACT_OUTCOME: redactOutcome,
+          // [164.8.4-05] The staging step now derives its channel set via
+          // scripts/derive-restore-channels.sh, referenced workspace-rooted
+          // (same convention as the redaction step's `-f`); a real Actions
+          // runner always sets this.
+          GITHUB_WORKSPACE: ROOT,
         },
       });
       const stageDir = join(runnerTemp, "test-backup-artifact");
@@ -1544,12 +1593,15 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // A channel this job gains tomorrow is OUT until it is named here and in the
       // step, which is the same default-out rule the content files have always had —
       // and, until this phase, the one thing the channels did not.
+      // [164.8.4-05] SORTED — scripts/derive-restore-channels.sh's own contract
+      // is "sorted and de-duplicated, one per line" (its own header comment),
+      // so the resolved real names come back alphabetical, not insertion order.
       const DECIDED_CHANNELS = [
         "census.err",
+        "dump.log",
         "ledger.err",
         "marker.err",
         "refdata.err",
-        "dump.log",
         "transaction.out",
       ];
       expect(
@@ -1560,14 +1612,18 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         stagedChannelNames(WF).some((n) => n.includes("*")),
         "the channel allowlist has been widened back to a glob — every future `.err`/`.log`/`.out` file is then IN by default, which is the defect review WR-01 measured by execution",
       ).toBe(false);
-      // CALIBRATION — the channel PARSE must break when a channel name changes, or
-      // the agreement above is between two constants.
+      // CALIBRATION — [164.8.4-05] the channel PARSE must break when the loop no
+      // longer carries the shipped `${derived_channels}` reference, or the
+      // agreement above is between two constants. The loop is now derived, not
+      // hand-typed, so the mutation renames the variable rather than a literal
+      // channel name — `stagedChannelNames` falls back to returning that
+      // unresolved token verbatim, which does not include "census.err".
       calibrate(
         "the channel allowlist is parsed out of the step, not restated",
         (s) =>
           s.replace(
-            "for c in census.err ledger.err",
-            "for c in census.ERR ledger.err",
+            "for c in ${derived_channels}; do",
+            "for c in ${wrong_channels_variable}; do",
           ),
         (t) => stagedChannelNames(t).includes("census.err"),
       );
@@ -1676,8 +1732,10 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       // returns to the world-readable artifact with its CREATE POLICY line intact.
       // That is the reviewer's measurement, kept as a standing twin so the glob cannot
       // come back quietly.
+      // [164.8.4-05] Re-anchored on the DERIVED loop shape — the literal
+      // six-name `for c in …` line this anchor used to match no longer exists.
       const CHANNEL_LOOP_ANCHOR =
-        "    for c in census.err ledger.err marker.err refdata.err dump.log transaction.out; do\n" +
+        "    for c in ${derived_channels}; do\n" +
         '      if [ -f "${outdir}/${c}" ]; then\n' +
         '        cp -p "${outdir}/${c}" "${stage}/"\n' +
         "      fi\n" +
@@ -2409,7 +2467,11 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       writeFileSync(scriptFile, script);
       const r = spawnSync("bash", [scriptFile], {
         encoding: "utf8",
-        env: { ...process.env, RUNNER_TEMP: runnerTemp },
+        // [164.8.4-05] GITHUB_WORKSPACE: the channel derivation now runs
+        // unconditionally near the top of the step, before the outdir-exists
+        // check this fixture is exercising; a real Actions runner always sets
+        // this.
+        env: { ...process.env, RUNNER_TEMP: runnerTemp, GITHUB_WORKSPACE: ROOT },
       });
       const staged = readdirSync(
         join(runnerTemp, "test-backup-artifact"),
@@ -6537,6 +6599,172 @@ describe("[164.8.4-02] no anti-skip marker is altered by the shared redaction", 
       (s) => `${s}\nhost=db.example synthetic-marker-carrying-a-masked-shape\n`,
       markersSurviveRedaction,
       ANTI_SKIP_MARKERS_TEXT,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [164.8.4-05] — SC-3 / [164.8.2-CHANNEL-ALLOWLIST-STALE]. A pure
+// text-and-process suite driving scripts/derive-restore-channels.sh directly
+// (no live workflow run) — the same discipline the WR-05 describe block above
+// already uses for staging-step properties.
+// ---------------------------------------------------------------------------
+describe("[164.8.4-05] the staged channel set is DERIVED from the producers, not hand-typed", () => {
+  const DERIVE_SCRIPT = join(ROOT, "scripts/derive-restore-channels.sh");
+  const REAL_PRODUCER_1 = join(ROOT, "scripts/restore-test-from-baseline.sh");
+  const REAL_PRODUCER_2 = join(
+    ROOT,
+    ".github/workflows/test-restore-from-baseline.yml",
+  );
+  const STAGE_STEP =
+    "Stage the public artifact (enumerated allowlist; default-out)";
+  /** The six real channel names, for the "no literal name survives" scan below.
+   * ⛔ NOT used to assert the derived SET — arm 1 compares against an
+   * independent regeneration instead, never a list typed into this file. */
+  const KNOWN_REAL_CHANNEL_NAMES = [
+    "census.err",
+    "ledger.err",
+    "marker.err",
+    "refdata.err",
+    "dump.log",
+    "transaction.out",
+  ];
+
+  /** Runs the real derivation script and returns its sorted, de-duplicated
+   * stdout lines. */
+  function deriveChannels(
+    p1: string,
+    p2: string,
+  ): { status: number | null; lines: string[]; output: string } {
+    const r = spawnSync("bash", [DERIVE_SCRIPT, p1, p2], { encoding: "utf8" });
+    const lines = (r.stdout ?? "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    return { status: r.status, lines, output: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  }
+
+  /**
+   * An INDEPENDENT regeneration of the derivation over ONE producer's source
+   * text, written separately from scripts/derive-restore-channels.sh (its own
+   * regex, its own script). Arm 1 below compares the SHIPPED script's output
+   * against the UNION of this function over both real producers — measuring
+   * agreement between two implementations, never the shipped script agreeing
+   * with itself.
+   */
+  function independentlyDerivedChannels(producerPath: string): string[] {
+    const text = readFileSync(producerPath, "utf8");
+    const re = /\b(RESTORE_OUT_DIR|outdir)\}?\/[A-Za-z0-9_.-]+\.(err|log|out)/g;
+    const names = new Set<string>();
+    for (const m of text.matchAll(re)) {
+      names.add(m[0].replace(/^.*\//, ""));
+    }
+    return [...names];
+  }
+
+  it("arm 1 — the shipped derivation AGREES with an independent regeneration over the two real producers", () => {
+    const shipped = deriveChannels(REAL_PRODUCER_1, REAL_PRODUCER_2);
+    expect(
+      shipped.status,
+      `the shipped derivation failed over the two real producers.\n${shipped.output}`,
+    ).toBe(0);
+    // Non-empty FIRST — a broken scan on both sides could otherwise agree
+    // vacuously at zero, which is not evidence of anything.
+    expect(
+      shipped.lines.length,
+      `the shipped derivation over the two real producers returned NOTHING — the assertion below would agree vacuously with an equally-broken independent scan.\n${shipped.output}`,
+    ).toBeGreaterThan(0);
+    const independent = [
+      ...new Set([
+        ...independentlyDerivedChannels(REAL_PRODUCER_1),
+        ...independentlyDerivedChannels(REAL_PRODUCER_2),
+      ]),
+    ];
+    expect(
+      independent.length,
+      "this test's OWN independent regeneration found nothing over the two real producers — re-check ITS regex before trusting any agreement with the shipped script",
+    ).toBeGreaterThan(0);
+    expect([...shipped.lines].sort()).toEqual([...independent].sort());
+  });
+
+  it("arm 2 — a NEW declared channel arrives with NOTHING else edited; an undeclared file on disk still does not", () => {
+    const tmpd = mkdtempSync(join(tmpdir(), "derive-channels-calibrate-"));
+    try {
+      // SC-3's own calibration: copy one real producer, append ONE line
+      // declaring a NEW synthetic diagnostic write target, and re-derive. No
+      // workflow edit, no list edit anywhere — only the producer's own
+      // declared write targets changed.
+      const scratchProducer = join(tmpd, "scratch-producer-one.sh");
+      const original = readFileSync(REAL_PRODUCER_1, "utf8");
+      const NEW_CHANNEL = "zzz-164-8-4-05-new-channel.err";
+      writeFileSync(
+        scratchProducer,
+        `${original}\necho "x" > "\${RESTORE_OUT_DIR}/${NEW_CHANNEL}"\n`,
+      );
+
+      const before = deriveChannels(REAL_PRODUCER_1, REAL_PRODUCER_2);
+      const after = deriveChannels(scratchProducer, REAL_PRODUCER_2);
+      expect(before.status, before.output).toBe(0);
+      expect(
+        after.status,
+        `the derivation over the scratch producer (one new declared target, nothing else edited) failed.\n${after.output}`,
+      ).toBe(0);
+      expect(
+        after.lines.includes(NEW_CHANNEL),
+        `the scratch producer declares ONE new diagnostic write target (${NEW_CHANNEL}) and NOTHING else was edited — no workflow change, no list change, only the producer's own declared write targets — yet the derivation did not pick it up.\n${after.output}`,
+      ).toBe(true);
+      expect(
+        after.lines.filter((l) => l !== NEW_CHANNEL).sort(),
+        "adding one new declared channel changed more than just that one channel in the derived set",
+      ).toEqual([...before.lines].sort());
+
+      // Second half of the SAME calibration, required by the plan (neither
+      // arm alone is evidence): a file present in a scratch RUNTIME output
+      // directory, declared by NEITHER producer, must still be ABSENT from
+      // the derivation. This is what keeps the CLOSED
+      // [164.8.2-REFUSAL-STILL-PUBLISHES] glob defect closed — the derivation
+      // reads declared SOURCE, never a runtime directory.
+      const scratchOutdir = join(tmpd, "outdir");
+      mkdirSync(scratchOutdir);
+      const UNDECLARED = "zzz-164-8-4-05-undeclared-on-disk.err";
+      writeFileSync(
+        join(scratchOutdir, UNDECLARED),
+        "present on disk, declared by neither producer\n",
+      );
+      expect(
+        after.lines.includes(UNDECLARED),
+        "a file present on disk but declared by NEITHER producer appeared in the derived set — the derivation has regressed into a runtime glob, which is the CLOSED [164.8.2-REFUSAL-STILL-PUBLISHES] defect",
+      ).toBe(false);
+    } finally {
+      rmSync(tmpd, { recursive: true, force: true });
+    }
+  });
+
+  it("arm 3 — the staging step's loop consumes the derivation and holds no literal channel name", () => {
+    const script = extractRunScript(WF, STAGE_STEP);
+    expect(
+      script.includes("scripts/derive-restore-channels.sh"),
+      "the staging step no longer references scripts/derive-restore-channels.sh",
+    ).toBe(true);
+    for (const name of KNOWN_REAL_CHANNEL_NAMES) {
+      expect(
+        script.includes(name),
+        `the staging step's script body carries the literal channel name "${name}" outside the derivation — a hand-maintained list has crept back in`,
+      ).toBe(false);
+    }
+    // CALIBRATION — the predicate must flip when a literal name list is
+    // re-introduced into the loop, or the scan above is not evidence.
+    calibrate(
+      "the staging step's loop holds no literal diagnostic channel name",
+      (s) =>
+        s.replace(
+          "for c in ${derived_channels}; do",
+          "for c in census.err ledger.err marker.err refdata.err dump.log transaction.out; do",
+        ),
+      (t) =>
+        !KNOWN_REAL_CHANNEL_NAMES.some((name) =>
+          extractRunScript(t, STAGE_STEP).includes(name),
+        ),
     );
   });
 });
