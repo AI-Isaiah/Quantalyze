@@ -3529,6 +3529,23 @@ measurement and the two-conjunct coupling in its goal and its success criteria. 
 ⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
 (founder rule 2026-09-08).
 
+**CLOSED — Phase 164.5.1.2 plan 01, 2026-09-19.**
+Verdict: the poll-positions lifecycle conjunct is refused as inert and is NOT widened, NOT fixed,
+and NOT addressed by this phase — it stands exactly as measured, unchanged.
+Evidence is the PROD measurement already recorded in `164.5.1.2-CONTEXT.md` D-02 and the ROADMAP's
+Phase 164.5.1.2 entry (2026-09-17, marker read first, ⛔ PRODUCTION): the five `pending_review`
+strategies already pass the lifecycle conjunct and have still never been polled — direct proof the
+lifecycle set is not the binding constraint, the opposite of what Phase 164.5.1.1 found for the
+ledger fan-out.
+The harm stays booked and is not resolved by this closure: no `private` strategy has ever had a
+position snapshot, none ever polled, while every `published` strategy is current to today.
+This is a refusal of the wrong fix, never a finding that nothing is wrong.
+**TRIGGER, restated:** anyone proposing to widen this conjunct, or `ALLOWED_STRATEGY_STATUSES` (the
+sync constant covered by `FANOUT-COHORT-SYNC-CONSTANT-01`), needs the measurement first — both
+measurements now exist and both point the same direction, so the poll-positions predicate is not
+widened by this closure, and the second conjunct (`EXISTS sync_trades in 30 days`) must be
+addressed in the same decision if this is ever revisited.
+
 ### FANOUT-COHORT-SYNC-CONSTANT-01 — the trade-sync constant never learned the owner-only status, and the cursor advances anyway (booked 2026-09-17)
 
 **Measured 2026-09-17** by Phase 164.5.1.1 plan 03, which MEASURED this constant and deliberately did
