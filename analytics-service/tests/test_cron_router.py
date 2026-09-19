@@ -1197,6 +1197,112 @@ class TestSyncTradesShapeDriftHoldsTheCursor:
         )
 
 
+class TestSyncTradesShapeDriftOnFanOutKeyIsReported:
+    """The two drift tests above BOTH use a single-strategy key, and that is
+    why the fan-out hole survived: with one strategy, `synced_count` is 0 for
+    the whole key, the cursor holds, and the drift looks contained.
+
+    On a MULTI-strategy key it is not contained. Measured at `fbc558f9` with
+    `strat-A` returning int 3 and `strat-B` returning a dict: `status` was
+    `ok`, `strategy_errors` was absent from the body, and `last_sync_at`
+    ADVANCED on strat-A's success — past a window `strat-B` is not known to
+    have stored. `strat-B`'s trades are gone on the next tick and NOTHING in
+    the response body said so.
+
+    The drift branch now writes `strategy_errors[sid]`, which is the sole
+    input the status classifier has for "something went wrong". That does not
+    save `strat-B`'s window — a shared per-key cursor cannot, and the
+    per-strategy cursor that would is booked as Phase 164.5.1.4 SYNCCURSOR —
+    but it turns a silent loss into a `partial` result naming the drifted
+    strategy.
+    """
+
+    @pytest.mark.asyncio
+    async def test_drift_on_one_of_two_strategies_is_reported_not_silent(self):
+        mock_supabase = MagicMock()
+
+        def _rpc(name: str, args: dict):
+            chain = MagicMock()
+            if args.get("p_strategy_id") == "strat-B":
+                # Contract drift: a dict where an int row count is declared.
+                chain.execute.return_value = MagicMock(data={"inserted": 2})
+            else:
+                chain.execute.return_value = MagicMock(data=3)
+            return chain
+
+        mock_supabase.rpc.side_effect = _rpc
+
+        update_chain = MagicMock()
+        update_chain.eq.return_value.execute.return_value = MagicMock(
+            data=[{"id": "key-1"}]
+        )
+        mock_supabase.table.return_value.update.return_value = update_chain
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}, {"id": "t2"}, {"id": "t3"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            key_row = _make_key_row(strategy_ids=["strat-A", "strat-B"])
+            result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        # Non-vacuity: both strategies must have been attempted, or the
+        # assertions below would be quantifying over a one-strategy tick —
+        # exactly the shape that hid this defect.
+        assert set(result["per_strategy_stored"]) == {"strat-A", "strat-B"}, result
+        assert result["per_strategy_stored"] == {"strat-A": 3, "strat-B": 0}, result
+
+        # The drift reaches the response envelope, naming the drifted
+        # strategy and ONLY it.
+        assert "strategy_errors" in result, (
+            "Contract drift on a fan-out key produced no strategy_errors, so "
+            f"the classifier cannot see it at all; got {result!r}"
+        )
+        assert set(result["strategy_errors"]) == {"strat-B"}, result["strategy_errors"]
+        assert "ContractDrift" in result["strategy_errors"]["strat-B"], (
+            result["strategy_errors"]["strat-B"]
+        )
+
+        # Some stored + some failed == `partial`. Not `ok` (which alarms read
+        # as healthy) and not `error` (which would claim nothing landed).
+        assert result["status"] == "partial", result
+        assert "error" not in result, (
+            "A top-level `error` claims the whole key failed; strat-A's 3 "
+            f"trades did land. Got {result!r}"
+        )
+
+        # Cursor behaviour is DELIBERATELY unchanged by this fix: strat-A
+        # stored 3, so `synced_count > 0` and `last_sync_at` still advances
+        # past strat-B's unverified window. This assertion pins that the fix
+        # is purely additive observability, and documents the residual loss
+        # that only a per-strategy cursor (Phase 164.5.1.4 SYNCCURSOR) closes.
+        update_payloads = [
+            call.args[0]
+            for call in mock_supabase.table.return_value.update.call_args_list
+        ]
+        assert any("last_sync_at" in p for p in update_payloads), (
+            "The shared per-key cursor still advances on strat-A's success; "
+            f"got {update_payloads!r}"
+        )
+
+
 class TestSyncTradesPayloadIsJsonbArrayNotScalar:
     """REGRESSION (Postgres 22023): cron's inline persist must hand the
     sync_trades RPC a JSON *array* (list[dict]) for `p_trades`, NOT a
