@@ -6,16 +6,16 @@ current_phase: 164.1.1.1
 current_phase_name: LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only fixture (INSERTED)
 status: executing
 stopped_at: Completed 164.1.1.1-02-PLAN.md
-last_updated: "2026-09-18T21:56:17.144Z"
+last_updated: "2026-09-19T06:11:26.129Z"
 last_activity: 2026-09-18
-last_activity_desc: Phase 164.8.2 GATEHARDENING round-2/3 closeout shipped as PR #822 (v0.79.0.0) — the backup secret scan no longer stops at its first hit (a credential in ledger.csv left schema-before.sql, a dump of a live hosted database, unscanned yet still published to a 90-day world-readable artifact), artifact staging is default-DENY behind two verdict files, and the Which database am I on marker predicates are rc-bounded in BOTH copies after being fail-open; verification passed 6/6, security SECURED 24/24, code review 0 blockers
-state_head: 27577261391d7eca7a128f438c900fd509aae70b
+last_activity_desc: Phases 164.11 DEPLOYGATE and 164.10 BODYDRIFT REMOVED via /gsd-phase --remove after both premises were falsified by measurement — 164.11 cancelled (Railway deploys the LATEST commit, so a skipped analytics change is carried by the next green merge; the skip costs latency, not the change) and 164.10 closed by founder decision (c) (all three PROD function bodies read behaviourally identical; the drift is RAISE wording and one written-but-never-read local, from the eaaed7e0 backfill). Reasoning preserved in TODOS.md, not lost with the entries. Shipped v0.79.1.0 (deploy verifier stops withholding the deploy it verifies) and v0.79.1.1 (allowlist stops asserting a difference that is not there).
+state_head: 2fd536a1d3d5da7a8354c79ab90db00a1abbee8b
 progress:
-  total_phases: 45
-  completed_phases: 20
-  total_plans: 201
-  completed_plans: 193
-  percent: 44
+  total_phases: 43
+  completed_phases: 27
+  total_plans: 203
+  completed_plans: 195
+  percent: 63
 ---
 
 ## ⭐ STATE lineage
@@ -949,7 +949,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [████░░░░░░] 44%
+Progress: [██████░░░░] 63%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 

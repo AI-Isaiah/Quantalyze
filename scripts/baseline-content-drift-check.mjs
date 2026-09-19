@@ -197,6 +197,32 @@ export const FINDING_KINDS = [
  * for `SNAPSHOT_ONLY`. Any other null is `allowlist-malformed`.
  *
  * ⛔ THIS LIST MAY ONLY SHRINK.
+ *
+ * ⭐ FOUNDER DECISION 2026-09-19 — ALL THREE ROWS ARE RETAINED DELIBERATELY AND
+ * ARE NOT PENDING WORK. Read this before opening an investigation into them.
+ *
+ * All three were measured against PRODUCTION on 2026-09-19 (read-only
+ * `pg_get_functiondef`, after the `COMMENT ON DATABASE` marker query confirmed
+ * PROD) and every one is BEHAVIOURALLY IDENTICAL to what the chain renders. The
+ * divergence is `RAISE` wording in two rows and a written-but-never-read local
+ * in the third. The cause is settled: all three defining migrations arrived in
+ * ONE backfill commit, `eaaed7e0` (2026-05-15), which reconstructed functions
+ * that already existed in PROD and wrote them slightly richer than reality.
+ *
+ * Three options were weighed and (c) was chosen:
+ *   (a) re-base the migration text onto what PROD runs — no PROD write, but
+ *       these files are what the chain RENDERS and this gate and baseline.sql
+ *       compare against that render, so it moves the subject they measure;
+ *   (b) write PROD to match the files — REJECTED: that migration would lengthen
+ *       three error strings and add a variable nothing reads;
+ *   (c) ⭐ CHOSEN — leave the bodies alone and keep these rows, accurately
+ *       described. Nothing is broken; the guards behave identically.
+ *
+ * ⛔ So these rows are EXPECTED to persist. Their `clearedBy` text describes what
+ * WOULD clear them, not an outstanding task. Do not delete them to green a gate,
+ * do not write PROD to clear them, and do not re-open Phase 164.10 — it was
+ * CLOSED by this decision. Reconsider only if these rows start costing attention
+ * again, in which case (a) is the route and its blast radius is the work.
  */
 export const CONTENT_DRIFT_ALLOWLIST = [
   {
@@ -212,19 +238,39 @@ export const CONTENT_DRIFT_ALLOWLIST = [
       "supabase/schema/baseline.sql CANNOT deliver, because the regeneration of 2026-09-07 was " +
       "taken and this row's snapshotHash did not move by a single bit. Clearing it needs the " +
       "20260510180226 body to actually reach the live catalogue, or the repo's migration text to " +
-      "be re-based onto what PROD really runs. Both are founder-gated acts on PROD.",
+      "be re-based onto what PROD really runs. " +
+      "⛔ CORRECTED 2026-09-19: only the SECOND is a founder-gated act on PROD, and it is NOT " +
+      "warranted — see the reason field. Re-basing the repo text onto what PROD runs is a " +
+      "repo-side edit with NO production write, and it is the cheaper of the two by a wide " +
+      "margin. ⚠️ It is still not free: these migration files are what the chain RENDERS, and " +
+      "baseline.sql and the drift gates compare against that render, so re-basing moves the " +
+      "subject every one of them measures. Scope that blast radius before doing it.",
     reason:
       "⚠️ RE-MEASURED 2026-09-07 against a FRESHLY REGENERATED PROD dump, and the row's original " +
       "diagnosis was WRONG. It read 'the committed dump was taken from PROD on 2026-08-29; the " +
       "chain has since been re-rendered from migrations that redefine this body' — i.e. the dump " +
       "is stale. It is not. The new dump's normalized body hashes to the SAME snapshotHash as the " +
       "old one, so PROD never moved; only two migrations ever define this function " +
-      "(20260411144407, then 20260510180226) and PROD is running the EARLIER of the two. The " +
-      "difference is executable, not cosmetic: the chain declares `v_row_found BOOLEAN` and " +
-      "SELECTs `true` into it to distinguish 'no parent row' from 'a parent row of NULLs'; PROD " +
-      "has neither. So this is a PROD-vs-REPO divergence of the DRIFT-04 family — either " +
-      "20260510180226 never reached PROD, or its file was retro-edited after it did — and a " +
-      "read-only dump cannot tell those two apart. Tracked as DRIFT-06 in TODOS.md.",
+      "(20260411144407, then 20260510180226) and PROD is running the EARLIER of the two. " +
+      "⛔ CORRECTED 2026-09-19 — THIS ROW SAID 'the difference is executable, not cosmetic' AND " +
+      "THAT WAS FALSE. Measured by reading PROD directly (pg_get_functiondef, read-only, after " +
+      "the COMMENT ON DATABASE marker query confirmed PRODUCTION), not from a dump and not from " +
+      "dates. The chain DOES declare `v_row_found BOOLEAN` and PROD does NOT — that half is " +
+      "true, and it is where the 'executable' reading came from. But `v_row_found` is WRITTEN " +
+      "AND NEVER READ: the very next statement branches on `IF NOT FOUND`, plpgsql's BUILT-IN, " +
+      "and no later line in the body references the variable. The 'no parent row' vs 'a parent " +
+      "row of NULLs' distinction is carried by FOUND plus the separate `IF v_parent_ids IS NULL` " +
+      "guard, BOTH of which PROD has, identically. Every remaining branch — the array_length " +
+      "leaf case, the unready COUNT, the RAISE NOTICE and its wording — matches. ⭐ So the body " +
+      "is BEHAVIOURALLY IDENTICAL and the drift is cosmetic, exactly like the other two rows in " +
+      "this list. A dead local is precisely the shape that reads as executable drift in a text " +
+      "diff and is not one, which is the argument for measuring bodies over diffing them. " +
+      "⭐ The retro-edit branch is CONFIRMED and has its commit: all three defining migrations " +
+      "for this list entered the repo in ONE commit, eaaed7e0 (2026-05-15), 'backfill " +
+      "audit-2026-05-07 schema + rename migrations to timestamp convention'. These files are a " +
+      "RECONSTRUCTION written after the functions already existed in PROD, written slightly " +
+      "richer than what they described. ⛔ DO NOT WRITE PROD TO CLEAR THIS ROW: measured, that " +
+      "migration would add a variable nothing reads. Tracked as DRIFT-06 in TODOS.md.",
   },
   {
     function: "reject_sentinel_writes",

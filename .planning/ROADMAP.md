@@ -446,66 +446,6 @@ moves. The three residuals accepted rather than closed (`SHARE-RES-R4`, `SHARE-R
 
 **Research note:** the payload-builder seam is the one un-measured integration (extracting the build half of `fetchAndBuildPayload` touches the composite arm AND the single-key basis arm — MEDIUM confidence, wider than it looks). Budget a research pass at plan time; don't discover it. Token-leak channels: Sentry `beforeSend` scrub verified against a REAL captured event, `Referrer-Policy: no-referrer` per-route, generic metadata (link-unfurl dullness accepted explicitly — a private link SHOULD be dull in a chat preview). *(Planning update 2026-08-26: the seam measurement is now done — the composite/basis arms moved to `src/lib/factsheet/` in July, so the extraction in 164-01 is a one-function verbatim move per the founder's final D-06 ruling.)*
 
-### Phase 164.11: DEPLOYGATE — ⛔ CANCELLED 2026-09-19 (founder). NOT executed, NOT deferred, NOT re-homed.
-
-**Status:** CANCELLED. ⛔ **Do not re-plan this from the deployment census alone** — the census is real and
-the conclusion drawn from it was wrong. Read this entry first.
-
-**What it was going to do.** Make an unrelated red check incapable of withholding an analytics deploy,
-and make a withheld deploy loud. Six plans, ~130 KB of CONTEXT/RESEARCH/PATTERNS, eight success criteria.
-
-**The measurement that justified it, which is ACCURATE:** a 200-deployment census (window 2026-07-15 →
-2026-09-18) reads `REMOVED 150 · SKIPPED 46 · FAILED 2 · WAITING 1 · SUCCESS 1` — **46 skips, 23 carrying a
-real `analytics-service` tree change.** Railway waits on the WHOLE check-suite of a commit, so any red or
-INCOMPLETE suite withholds the deploy.
-
-⛔ **WHY THAT MEASUREMENT DOES NOT SUPPORT THE PHASE — two founder-supplied operating facts, 2026-09-19.**
-1. **Railway deploys the LATEST commit, not the skipped one.** Merges land several times a day, so a
-   skipped analytics change is carried to prod by the next green merge. **The skip costs LATENCY, not the
-   change.** ⭐ 46 skips is NOT 46 undelivered changes, and the phase's framing treated it as if it were.
-2. **A red `main` CI is fixed immediately**, bounding the window further.
-   ⇒ The whole defect is worth *minutes to hours of deploy latency*, self-healing, on a repo with no
-   paying clients. A six-plan phase against that is out of proportion.
-
-⭐ **AND THE REAL DEFECT WAS SOMETHING ELSE ENTIRELY, found while cancelling.** Of the last 15
-`analytics-deploy-verify.yml` runs, thirteen finished in under a minute and **two ran 60 and 80 minutes**.
-That workflow is schedule-triggered, so it attaches a check suite to `main` HEAD, and Railway waits on it.
-⛔ **Our own monitoring probe was the largest deploy-hold in the window — bigger than any unrelated red it
-existed to notice.** Its 4800 s convergence loop looped because prod had not converged, while prod could
-not converge because Railway held the deploy behind the suite that loop kept open. A circular wait.
-
-**WHAT SHIPPED INSTEAD — three changes, no phase, v0.79.1.0:**
-- `analytics-deploy-verify.yml`: the convergence loop DELETED, probe is single-pass, job TTL 90 → 10 min.
-  ⭐ The 6-hourly schedule was always the real retry; the inner loop was redundant with the cron wrapping it.
-  ⛔ **But NOT wholly redundant, and two reviewers caught the first draft getting this wrong.** The loop
-  also DEBOUNCED — it suppressed the alert while a deploy was legitimately in flight. Deleting it outright
-  made `stale=true` fire on the first miss, filing a P1 for a deploy that was still building, into an issue
-  nothing ever closes. An IN-FLIGHT DEBOUNCE (main HEAD younger than 900 s ⇒ warn, file nothing) replaces
-  it, implemented as COMMIT AGE rather than a sleep so it holds no check suite open. Both polarities are
-  calibrated (S6/S7), plus `continue-on-error` on the issue filer and `timeout 60` on the fetch, each
-  closing a path where the job could go RED and make Railway SKIP.
-- `analytics-deploy-tree-compare.contract.test.ts`: the two `SCRIPT.replace("+ 4800 ))", …)` arms removed —
-  with the literal gone they were VACUOUS (an absent needle returns the string unchanged, silently).
-- `docs/runbooks/mt5-go-live.md`: the blank gateway provenance line FILLED with the measured digest
-  (registry and live Railway pin agree byte-for-byte); `Stood up:` left as NOT ESTABLISHED, not invented.
-  ⭐ This closes the item routed in from Phase 164.6.2 plan 04's checkpoint (founder, 2026-09-14), so
-  cancelling this phase orphans nothing.
-
-⛔ **THE COUPLING SURVIVES, BY DECISION.** An unrelated red CAN still withhold an analytics deploy. That is
-now an ACCEPTED OPERATING COST, not an open defect. **Reopen only if** merge cadence drops far enough that
-a skipped analytics commit can sit unshipped for a long stretch — fact 1 above is the load-bearing one.
-
-⛔ **Shape B (auto-deploy off + repo-owned `serviceInstanceDeploy(commitSha:)`) is REJECTED, not deferred.**
-It was the only shape compliant with the constraint that Railway cannot narrow its own wait
-(`DeploymentTrigger.checkSuites` is a `Boolean` — introspected, a present type-system fact). It would have
-cost production writes, a second deploy path to own forever, and rested on an UNSETTLED question: whether an
-API-triggered deploy even bypasses `checkSuites`. If it does not, Shape B does not work at all. Do not
-revive it without answering that question first, on a throwaway service.
-
-**Depends on:** — (cancelled)
-**Plans:** 0 — all six plan files deleted unexecuted. Sunk planning cost was not an argument to continue.
-
-
 ### Phase 164.7: APPSETTINGS — every app.* GUC reader moves to a mechanism this platform actually grants, because ALTER DATABASE and ALTER ROLE both return 42501 here (INSERTED)
 
 **Goal:** Every `current_setting('app.…')` reader in `supabase/migrations/**` moves to a configuration mechanism this platform actually grants, and a machine stops the next one being written. ⛔ **MEASURED ON PROD 2026-09-05, not inferred from docs** — all three forms, in the Supabase SQL editor as `postgres`:
@@ -2425,15 +2365,51 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.9 to break down)
 
-### Phase 164.10: BODYDRIFT — PROD runs an EARLIER revision of three function bodies than the migration chain renders (INSERTED)
+### 📜 Phase 164.10 (ORIGINAL ENTRY, superseded): BODYDRIFT — PROD runs an EARLIER revision of three function bodies than the migration chain renders (INSERTED)
 
-**Goal:** Close `DRIFT-06`. Three PROD function bodies do not match what the migration chain renders, and the shared "the dump is stale" diagnosis was FALSIFIED for them by the 2026-09-07 regeneration: their `snapshotHash` values did not move by a single bit. They are `check_fan_in_ready/1` (5 hunks), `reject_sentinel_writes/0` (9 hunks) and `retention_delete_guard/0` (2 hunks), retained as the last three rows of `CONTENT_DRIFT_ALLOWLIST` in `scripts/baseline-content-drift-check.mjs`.
+**Goal:** ⚠️ **RE-SCOPE THIS GOAL BEFORE PLANNING — see the 2026-09-19 measurement below; the premise is narrower than written.** Close `DRIFT-06`. Three PROD function bodies do not match what the migration chain renders, and the shared "the dump is stale" diagnosis was FALSIFIED for them by the 2026-09-07 regeneration: their `snapshotHash` values did not move by a single bit. They are `check_fan_in_ready/1` (5 hunks), `reject_sentinel_writes/0` (9 hunks) and `retention_delete_guard/0` (2 hunks), retained as the last three rows of `CONTENT_DRIFT_ALLOWLIST` in `scripts/baseline-content-drift-check.mjs`.
 
 ⛔ **INSERTED 2026-09-08 by the same founder instruction as Phase 164.9.** `DRIFT-06` was booked in `TODOS.md` on 2026-09-07 and had no phase, no date and no gate for a full day while the milestone worked on its sibling `DRIFT-04`.
 
-⚠️ **THIS IS NOT COSMETIC, and the three differ in kind — plan them separately:**
+⛔ **MEASURED ON PROD 2026-09-19 — THE CAUSE IS SETTLED AND ONE BULLET BELOW IS WRONG. Read this
+before planning anything.** Queried via the Supabase MCP against the project whose
+`COMMENT ON DATABASE` marker reads `⛔ PRODUCTION — real customer data` (the marker query was run
+first; `current_database()` returned `postgres`, which proves nothing, exactly as CLAUDE.md warns).
+Read-only: `pg_get_functiondef` only, no write of any kind.
 
-- **`check_fan_in_ready` is EXECUTABLE drift.** The chain declares `v_row_found BOOLEAN` and SELECTs `true` into it to distinguish "no parent row" from "a parent row of NULLs". PROD has neither. Behaviour differs.
+⭐ **THE CAUSE IS #2, and `git log` names it.** All THREE defining migrations
+(`20260510180226`, `20260515113853`, `20260515114310`) entered the repository in a SINGLE commit,
+`eaaed7e0` (2026-05-15): *"backfill audit-2026-05-07 schema + rename migrations to timestamp
+convention"*. These files are a RECONSTRUCTION written after the functions already existed in PROD,
+not the source that created them — and the reconstruction was written slightly richer than what it
+described. That is why `retention_delete_guard`, with exactly one defining migration, can still
+differ: PROD is not "behind" it, it was never applied from it.
+
+⛔ **ALL THREE ARE BEHAVIOURALLY IDENTICAL. The heading below said "THIS IS NOT COSMETIC"; measurement
+says it IS cosmetic**, and the correction matters because the repair this phase contemplates WRITES
+PROD FUNCTION BODIES. Applying a migration to production to lengthen three error strings and add a
+variable that is never read is real risk for zero behavioural gain.
+
+| function | measured difference | behavioural? |
+|---|---|---|
+| `check_fan_in_ready` | repo declares `v_row_found`, assigns it, and **never reads it** | **NO** |
+| `reject_sentinel_writes` | `RAISE` wording only; same predicate, same `invalid_parameter_value` | **NO** |
+| `retention_delete_guard` | `RAISE` wording missing one clause; same `COUNT`, `> 100000`, `raise_exception`, `RETURN NULL` | **NO** |
+
+⚠️ **The ONE real cost, stated so it is not lost:** PROD's messages are LESS informative than the
+repo's, so an operator debugging a sentinel rejection or a retention abort sees less context. That is
+DIAGNOSTICS, not data integrity — fix-or-drop under the founder's 2026-09-15 scoping rule, never a
+blocking item.
+
+⭐ **RECOMMENDED RESOLUTION — reconcile in the REPO direction, not the PROD direction.** The files are
+already a reconstruction; making them match what actually ran costs nothing, needs no PROD write, and
+makes the chain truthful. Then record these three as MEASURED-BENIGN in VAC-04's allowlist with this
+measurement beside them. ⛔ Do NOT delete the allowlist rows (the fence below still stands) and do NOT
+silence VAC-04 — the detector worked; what it found is benign, which is a different thing.
+
+📜 **THE ORIGINAL THREE-WAY SPLIT, kept as lineage. The first bullet is FALSIFIED; the other two hold:**
+
+- ⛔ ~~**`check_fan_in_ready` is EXECUTABLE drift** — the chain declares `v_row_found BOOLEAN` and SELECTs `true` into it to distinguish "no parent row" from "a parent row of NULLs". PROD has neither. Behaviour differs.~~ **FALSIFIED 2026-09-19.** The chain does declare it and PROD does not — that half is true. But `v_row_found` is **written and never read**: the very next statement branches on `IF NOT FOUND`, plpgsql's BUILT-IN, not on `v_row_found`, and no later line references it. The "no parent row vs a parent row of NULLs" distinction is made by `FOUND` and by the separate `IF v_parent_ids IS NULL` guard, both of which PROD has, identically. It is a vestigial variable, not a behaviour. ⭐ A dead local is exactly the shape that reads as executable drift from a text diff and is not — which is the argument for measuring bodies rather than diffing them.
 - **`reject_sentinel_writes` is MESSAGE TEXT only.** The guard logic — which sentinel values are refused, on which three tables — is identical on both sides; PROD carries the shorter 2026-05-13 `RAISE` wording.
 - ⭐ **`retention_delete_guard` is the specimen that rules out the innocent explanation.** EXACTLY ONE migration in this repository defines it (`20260515113853_retention_crons_safe`), so there is no later revision for PROD to be behind — yet PROD's `RAISE` omits a clause that single defining migration contains. **A live catalogue cannot lag a migration it is the only definition of.**
 
@@ -2449,8 +2425,6 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
-
-- [ ] TBD (run /gsd-plan-phase 164.10 to break down)
 
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 

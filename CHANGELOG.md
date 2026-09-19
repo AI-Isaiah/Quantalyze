@@ -1,5 +1,67 @@
 # Changelog
 
+## [0.79.1.1] - 2026-09-19 — the body-drift allowlist stops asserting a difference that is not there
+
+### Fixed
+- `scripts/baseline-content-drift-check.mjs` — the `check_fan_in_ready` allowlist row asserted, in
+  code, *"The difference is executable, not cosmetic: the chain declares `v_row_found BOOLEAN` …
+  PROD has neither."* Reading PRODUCTION directly falsifies it. `v_row_found` is **written and never
+  read**: the next statement branches on `IF NOT FOUND`, plpgsql's built-in, and nothing references
+  the variable afterwards. The "no parent row" vs "a parent row of NULLs" distinction is carried by
+  `FOUND` plus the separate `IF v_parent_ids IS NULL` guard, both present in PROD. Every remaining
+  branch matches, so the body is **behaviourally identical**.
+- The same row's `clearedBy` framed clearing it as needing *"the 20260510180226 body to actually
+  reach the live catalogue"*, calling both routes "founder-gated acts on PROD". Only one touches
+  PROD, and it is not warranted — measured, that migration would lengthen three error strings and
+  add a variable nothing reads.
+
+### Notes
+- ⭐ **Measured on PRODUCTION 2026-09-19**, read-only (`pg_get_functiondef`), after the
+  `COMMENT ON DATABASE` marker query confirmed the database; `current_database()` returned
+  `postgres`, which proves nothing. Every prior reading in `[DRIFT-06]` was reasoning from dates and
+  said so — this is the first actual read.
+- The retro-edit diagnosis from 2026-09-08 is CONFIRMED and now has its commit: all three defining
+  migrations entered the repo in `eaaed7e0` (2026-05-15), *"backfill audit-2026-05-07 schema"* — a
+  RECONSTRUCTION written after the functions already existed in PROD, and written richer than them.
+- ⛔ **Phase 164.10 BODYDRIFT is CLOSED by founder decision (c): leave the bodies alone.** The three
+  `CONTENT_DRIFT_ALLOWLIST` rows are retained deliberately and are **not pending work**; the list
+  header now says so. Rejected: writing PROD to match the files (production risk, zero behavioural
+  gain). Available but not taken: re-basing the migration text onto what PROD runs — no PROD write,
+  but those files are what the chain RENDERS and the drift gates compare against that render, so it
+  moves the subject they measure.
+- ⚠️ The one accepted cost: PROD's `RAISE` messages are LESS informative than the repo's, so an
+  operator debugging a sentinel rejection or a retention abort sees less context. Diagnostics, not
+  data integrity.
+
+### Removed
+- ⭐ **Phases 164.11 DEPLOYGATE and 164.10 BODYDRIFT removed from the roadmap via `/gsd-phase --remove`,
+  not merely narrated as cancelled.** Prose saying CANCELLED is invisible to the tooling: GSD decides
+  completion by `isPhaseComplete` reading `VERIFICATION.md` status == passed, so a cancelled phase
+  left in the roadmap with no VERIFICATION counts as incomplete FOREVER and blocks milestone closure —
+  the "a milestone could never close" defect this repo already documents.
+- ⛔ **The reasoning was moved BEFORE removal, not lost with the entries.** `phase.remove` deletes the
+  whole section (measured in a throwaway worktree first: 61 ROADMAP lines, six of them the Shape B and
+  census rationale). 164.11's reasoning now lives in `TODOS.md` as `[164.11-DEPLOYGATE-CANCELLED]`;
+  164.10's was already in `[DRIFT-06]` and the allowlist header, neither of which `phase.remove` touches.
+- ⚠️ **Verified in a throwaway git worktree before running for real: NO renumbering.**
+  `renamed_directories: []`, `renamed_files: []`, and phases 165–168 untouched. That was the live risk —
+  this repo has ~20 cross-references to phase numbers in TODOS, CHANGELOG, workflow comments and
+  VERIFICATION files, and a silent renumber would have broken every one.
+
+### Changed
+- `progress:` recomputed by the removal: `total_phases` 45 → 43, **`completed_phases` 20 → 27**,
+  percent 44 → 63. ⭐ The 20 was an under-report — the documented side effect where a STATE handler
+  recomputes the block from local disk and cannot see plans the `-pr` filter stripped from `main`.
+- ⚠️ **The STATE.md clobber fired again and was hand-corrected**, exactly as the repo's note predicts:
+  `last_activity_desc` truncated mid-sentence, `Plan: 8 of 8` corrupted to `8 of 6`, and two blank lines
+  injected into a wrapped prose line whose continuation begins with `+`. All three reverted; the
+  legitimate changes (progress block, `state_head`, `last_updated`, progress bar) kept.
+
+### Tests
+- Allowlist tests 18/18; gate re-run clean (123 functions compared, 3 DRIFT, 0 findings). Row count,
+  `snapshotHash`, `candidateHash`, `hunks` and `nargs` are untouched — the list still holds exactly
+  three rows and may only shrink.
+
 ## [0.79.1.0] - 2026-09-19 — the deploy verifier stops withholding the deploy it verifies
 
 ### Root cause
