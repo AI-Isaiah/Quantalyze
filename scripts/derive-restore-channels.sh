@@ -49,6 +49,14 @@ fail() {
 # staged. Both names are scanned against BOTH producer arguments (rather than
 # assigning one name per argument), so the derivation is order-independent
 # and keeps working if a producer's write targets move between the two names.
+# [164.8.4] IN-02 — THE BASENAME MUST BE A LITERAL. A producer writing
+# "${outdir}/${dynamic_name}.err" is NOT matched, so that channel is never
+# derived and therefore never staged. This fails in the SAFE direction (a
+# channel that cannot be derived stays unpublished, which is what default-DENY
+# means here) and is recorded rather than fixed. ⛔ A future producer needing a
+# dynamically-named diagnostic channel must NOT answer this by relaxing the
+# pattern toward a glob — that re-opens the publish-by-default defect this
+# derivation replaced. Give the channel a literal name instead.
 WRITE_TARGET_RE='\b(RESTORE_OUT_DIR|outdir)\}?/[A-Za-z0-9_.-]+\.(err|log|out)'
 
 # Scans one producer's source text for its declared write targets and prints

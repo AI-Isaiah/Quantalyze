@@ -1224,6 +1224,20 @@ jobs:
       - name: DRIFT-05 gate (b) self-test - all eight arms fire with stub commands, no credential
         run: bash scripts/prod-body-drift-check.sh --self-test
 
+      # [164.8.4] WR-01 - A RECURRENCE OF THE [CR-02] DEFECT DIRECTLY ABOVE.
+      # `derive-restore-channels.sh --self-check` was invoked by NOTHING. It is
+      # the only control proving the channel derivation stays default-DENY: that
+      # a diagnostic target is derived AND that a non-diagnostic extension is
+      # excluded. The restore workflow stages what this script derives, so a
+      # derivation that silently widened would publish a file nobody reviewed.
+      # Hermetic - synthetic targets only, no credential - so like its sibling
+      # above it runs on every PR rather than only when the restore runs.
+      # Calibrated 2026-09-19 before wiring: widening the extension restriction
+      # to admit .sql reds it with the offending synthetic name; restored and
+      # confirmed byte-identical with cmp.
+      - name: Restore channel derivation self-check - default-DENY holds, non-diagnostic extensions excluded
+        run: bash scripts/derive-restore-channels.sh --self-check
+
       # ── Phase 164.8.1: the reference-data allowlist audit ─────────────────
       # A FOURTH SIBLING in this job, and — like the app-GUC gate and the
       # baseline content-drift gate before it — NOT an eighth rule of
