@@ -6267,3 +6267,122 @@ describe("[164.8.4-01] every reference to the shared redaction definition is wor
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// [164.8.4-02] The third leak shape (CONTEXT.md Area 1): a psql call whose
+// combined stdout+stderr is captured into a file and then `cat`'d to a
+// PUBLIC log, with nothing redacting the capture in between.
+// ---------------------------------------------------------------------------
+
+/**
+ * Strips whole-line `#`-comments — the same "first non-whitespace char is
+ * `#`" definition liveLines() already uses — returning TEXT rather than an
+ * array of lines, for regex scanning across a whole workflow file.
+ */
+function stripComments(text: string): string {
+  return liveLines(text).join("\n");
+}
+
+/**
+ * Joins a YAML block scalar's backslash-continued shell lines into one
+ * logical line each. `ci.yml`'s NOTICE-channel probe writes its psql
+ * invocation across three lines (`psql … \` / `-c "…" \` / `> "$out" 2>&1
+ * || …`); without joining, a same-line scan for "psql … captures $VAR" would
+ * miss that site while catching the per-file loop's single-line sibling —
+ * an inconsistency with no basis in the actual defect.
+ */
+function joinContinuations(text: string): string {
+  return text.replace(/\\\n[ \t]*/g, " ");
+}
+
+/**
+ * Pairs a psql-driven combined-output capture (`psql … > "$VAR" 2>&1`) with
+ * the NEXT echo of that SAME variable (`cat "$VAR"`) in comment-stripped,
+ * continuation-joined text. Scoped to `psql` specifically — not every
+ * `> "$VAR" 2>&1` / `cat "$VAR"` pair in the file — because this workflow
+ * also captures-then-`cat`s several unrelated Node.js script logs
+ * (REFDATA_SELFTEST_LOG, REFDATA_AUDIT_LOG, RUNNER_LOG, ANCHOR_LOG) that
+ * never touch shared TEST and carry no connection metadata; scanning those
+ * too would make the predicate false on the real file for a reason that has
+ * nothing to do with the defect this gate exists to close. A capture with no
+ * later echo of the same variable names nothing — there is nothing published
+ * for the ordering gate to check.
+ */
+interface CaptureEchoSite {
+  variable: string;
+  between: string;
+}
+function captureEchoSites(text: string): CaptureEchoSite[] {
+  const live = joinContinuations(stripComments(text));
+  const captureRe = /\bpsql\b[^\n]*> "\$([A-Za-z_][A-Za-z0-9_]*)" 2>&1/g;
+  const sites: CaptureEchoSite[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = captureRe.exec(live)) !== null) {
+    const variable = m[1];
+    const rest = live.slice(m.index + m[0].length);
+    const echoIdx = rest.indexOf(`cat "$${variable}"`);
+    if (echoIdx >= 0) {
+      sites.push({ variable, between: rest.slice(0, echoIdx) });
+    }
+  }
+  return sites;
+}
+
+/**
+ * TRUE only when the subject set is non-empty AND every capture-then-echo
+ * pair carries a reference to the shared redaction definition — naming the
+ * SAME variable — somewhere between the capture and the echo. An empty
+ * subject set is explicitly FALSE, never a vacuous pass (the repo's own
+ * anti-vacuity rule; a credential reaching a public log is data-integrity).
+ */
+function everyCaptureRedactedBeforeEcho(text: string): boolean {
+  const sites = captureEchoSites(text);
+  if (sites.length === 0) return false;
+  return sites.every((s) =>
+    new RegExp(`redact-psql-stderr\\.sed"\\s*"\\$${s.variable}"`).test(
+      s.between,
+    ),
+  );
+}
+
+describe("[164.8.4-02] every captured psql output is redacted before it is echoed", () => {
+  it("the subject set is non-empty — a gate over zero capture-then-echo pairs is not a gate", () => {
+    const sites = captureEchoSites(CI);
+    expect(
+      sites.length,
+      "no psql capture-then-echo pair was found in ci.yml — an empty subject set would make the ordering predicate vacuously satisfiable, which is worse than no gate at all",
+    ).toBeGreaterThan(0);
+  });
+
+  it("every capture is redacted before its echo, and a deleted redaction line is caught", () => {
+    calibrate(
+      'every psql capture-then-echo pair carries a reference to the shared scripts/redact-psql-stderr.sed, naming the SAME variable, between the capture and its `cat`',
+      (s) =>
+        s.replace(
+          'sed -i -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "$out"; then',
+          "true; then",
+        ),
+      everyCaptureRedactedBeforeEcho,
+      CI,
+    );
+  });
+
+  it('a NEW capture-then-echo site with nothing redacting it FAILS this gate — SC-1\'s own requirement', () => {
+    calibrate(
+      'a newly added `psql … > "$scratch164842" 2>&1` / `cat "$scratch164842"` pair with nothing redacting "$scratch164842" between them must flip this gate — a new unredacted echo site was found, and OTHER clean sites must not paper over it',
+      (s) =>
+        `${s}\n          psql "$OTHER_DSN" -X > "$scratch164842" 2>&1 || rc=$?\n          cat "$scratch164842"\n`,
+      everyCaptureRedactedBeforeEcho,
+      CI,
+    );
+  });
+
+  it("removing every psql capture-then-echo pair makes the predicate FALSE, not vacuously TRUE", () => {
+    calibrate(
+      "an empty capture-then-echo corpus must not read as a pass — deleting every psql invocation this gate scans for is not the same as redacting them",
+      (s) => s.replace(/\bpsql\b/g, "psqlX"),
+      everyCaptureRedactedBeforeEcho,
+      CI,
+    );
+  });
+});

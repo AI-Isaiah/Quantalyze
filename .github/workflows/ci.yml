@@ -3394,6 +3394,21 @@ jobs:
           psql "$TEST_SUPABASE_DB_URL" -X -v ON_ERROR_STOP=1 \
             -c "DO \$\$ BEGIN RAISE NOTICE 'ANTISKIP-NOTICE-CHANNEL-OK'; END \$\$;" \
             > "$out" 2>&1 || probe_status=$?
+          # [164.8.4-02] Third leak shape (CONTEXT.md Area 1): this captured
+          # output is echoed to a PUBLIC log below via `cat`, and until now
+          # that echo ran with no redaction between the capture and the
+          # `cat` — psql's connect/auth stderr went straight through.
+          # Redact in place, via the shared scripts/redact-psql-stderr.sed,
+          # immediately after the exit-status capture and before the echo.
+          # On a failed substitution the content is WITHHELD (a line COUNT
+          # only, never the content) — same capture-count-WITHHOLD idiom as
+          # scripts/test-ledger-drift-check.sh's ledger_rows arm — and the
+          # step fails closed rather than echo a file it cannot prove safe.
+          if ! sed -i -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "$out"; then
+            probe_out_lines="$( { wc -l < "$out" 2>/dev/null || echo '?'; } | tr -d '[:space:]' )"
+            echo "::error::redaction FAILED on $(basename "$out"). ${probe_out_lines} line(s) of captured output are WITHHELD — it can carry the TEST pooler host, its IP or the DB user, and this log is public."
+            exit 1
+          fi
           cat "$out"
           if [ "$probe_status" -ne 0 ]; then
             echo "::error::the NOTICE-channel probe could not run against the test database (psql exited ${probe_status}). Every skip check below reads server NOTICEs, so this step cannot report a meaningful pass without it."
@@ -3420,6 +3435,16 @@ jobs:
               # ~/.psqlrc on a self-hosted runner could otherwise set
               # client_min_messages or ECHO and change what this loop reads.
               psql "$TEST_SUPABASE_DB_URL" -X -v ON_ERROR_STOP=1 -f "$f" > "$out" 2>&1 || status=$?
+              # [164.8.4-02] Same third-leak-shape fix as the NOTICE-channel
+              # probe above: redact "$out" via the shared
+              # scripts/redact-psql-stderr.sed, in place, before it is
+              # echoed — and fail closed, WITHHOLDING a line count only, if
+              # the substitution itself fails.
+              if ! sed -i -E -f "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed" "$out"; then
+                loop_out_lines="$( { wc -l < "$out" 2>/dev/null || echo '?'; } | tr -d '[:space:]' )"
+                echo "::error file=$f::redaction FAILED on $(basename "$out"). ${loop_out_lines} line(s) of captured output are WITHHELD — it can carry the TEST pooler host, its IP or the DB user, and this log is public."
+                exit 1
+              fi
               cat "$out"
               if [ "$status" -ne 0 ]; then
                 echo "::error file=$f::psql exited $status — a RAISE EXCEPTION assertion failed, or the connection did. The captured output above is the whole story for this file."
