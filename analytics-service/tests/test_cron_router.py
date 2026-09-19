@@ -3475,6 +3475,157 @@ class TestResumeFloorEmptyFanOutFallsBackToKeyCursor:
         )
 
 
+class _ApiErrorLike(Exception):
+    """Stand-in for supabase-py's `APIError`.
+
+    Carries `.code` and `.message` the way PostgREST errors do, because
+    `_is_missing_cursor_table` probes both those attributes AND `str(exc)`.
+    A bare `Exception` would only ever exercise the text probe and would leave
+    the `.code` branch — the one a real 42P01 actually takes — unmeasured.
+    """
+
+    def __init__(self, *, code: str | None = None, message: str = "", details: str = ""):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details
+
+    def __str__(self) -> str:
+        return self.message
+
+
+class TestRolloutWindowMissingMarkerTableIsWarnedOnce:
+    """164.5.1.4 WR-03: the missing-table condition is LATCHED to one warning;
+    every other exception keeps its `logger.exception` traceback.
+
+    ⭐ THE WINDOW IS STRUCTURAL, NOT HYPOTHETICAL. The service deploys on CI
+    green while the migration apply waits behind the production reviewer gate,
+    so there is an interval — minutes or days, nobody controls which — where
+    this code is live and `strategy_sync_cursors` does not exist. At one tick
+    per 15 minutes, with one lookup exception plus one upsert exception PER KEY,
+    that is an unbounded stream of full tracebacks into Sentry for a condition
+    that is expected and not actionable.
+
+    ⛔ WHAT THIS MUST NOT BECOME. Quietening the LOG is the whole change;
+    quietening the FACT is not. The envelope error fields stay populated on
+    every affected tick, and any exception that is not a missing relation keeps
+    its traceback — including a permission denial ON THIS VERY TABLE, which is
+    what a service-role credential degrading to anon looks like and is the
+    single most important thing here not to downgrade.
+    """
+
+    @staticmethod
+    def _emit(exc: BaseException) -> None:
+        """Call the logger helper from inside a real `except` block.
+
+        ⚠️ Load-bearing: `logger.exception` reads `sys.exc_info()`, not its
+        argument. Calling the helper outside an active `except` would log
+        `exc_info=None` and the traceback assertion below would measure nothing.
+        """
+        try:
+            raise exc
+        except Exception as caught:
+            cron_mod._log_strategy_cursor_exc(
+                caught, "cron_sync: marker write failed for key %s", "key-1"
+            )
+
+    def test_missing_table_is_warned_exactly_once_per_process(self, caplog):
+        cron_mod._missing_cursor_table_warned = False
+        exc = _ApiErrorLike(
+            code="42P01",
+            message='relation "strategy_sync_cursors" does not exist',
+        )
+
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            self._emit(exc)
+            self._emit(exc)
+            self._emit(exc)
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+
+        assert len(warnings) == 1, (
+            "THREE ticks hit the missing table and exactly ONE line may be "
+            "emitted — the latch is the fix. Got "
+            + repr([r.message for r in warnings])
+        )
+        assert errors == [], (
+            "a known, expected, indefinite condition must not reach "
+            "`logger.exception`; each of those is a fresh Sentry error event "
+            "for something nobody can act on. Got "
+            + repr([r.message for r in errors])
+        )
+        assert "ROLLOUT WINDOW" in warnings[0].message, (
+            "the one line must NAME the window, or the operator reading it has "
+            f"no way to tell it from a real fault: {warnings[0].message!r}"
+        )
+
+    def test_a_real_fault_keeps_its_traceback_on_every_occurrence(self, caplog):
+        """The negative arm, and the one that matters most.
+
+        Without it the latch above would pass against a helper that swallowed
+        EVERYTHING — which would silence the genuine marker-write failures this
+        phase's whole error-surfacing design depends on.
+        """
+        cron_mod._missing_cursor_table_warned = False
+
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            self._emit(RuntimeError("deadlock detected"))
+            self._emit(RuntimeError("deadlock detected"))
+
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+
+        assert len(errors) == 2, (
+            "a non-missing-table exception is NOT latched — every occurrence "
+            "is a real fault and must be reported. Got "
+            + repr([(r.levelname, r.message) for r in caplog.records])
+        )
+        assert all(r.exc_info is not None for r in errors), (
+            "and each must carry its ACTIVE traceback, or the stack never "
+            "reaches Sentry and the report is unusable"
+        )
+        assert warnings == [], (
+            "a genuine fault must never be downgraded to the rollout-window "
+            "warning. Got " + repr([r.message for r in warnings])
+        )
+
+    def test_permission_denied_on_this_table_is_not_read_as_missing(self):
+        """⛔ THE CONJUNCTIVE PROBE, PINNED.
+
+        `_is_missing_cursor_table`'s text probe requires the table name AND a
+        "does not exist" / "schema cache" phrase. Drop the second half and this
+        42501 — which is exactly what a service-role credential degraded to
+        anon produces against this table's deny-all RLS — gets classified as
+        "not migrated yet", latched to a single warning, and then goes
+        UNREPORTED for the entire life of the process. That is a silent
+        credential failure, which is strictly worse than the noise WR-03 set
+        out to remove.
+        """
+        exc = _ApiErrorLike(
+            code="42501",
+            message="permission denied for table strategy_sync_cursors",
+        )
+        assert cron_mod._is_missing_cursor_table(exc) is False, (
+            "a permission denial naming the table is a REAL fault, not a "
+            "missing relation"
+        )
+
+    def test_postgrest_schema_cache_wording_without_a_code_is_recognised(self):
+        """supabase-py does not always surface a typed `.code`. PostgREST's own
+        schema-cache wording must still be recognised, or the latch silently
+        fails open to the traceback flood it exists to prevent."""
+        exc = _ApiErrorLike(
+            message=(
+                "Could not find the table 'public.strategy_sync_cursors' in "
+                "the schema cache"
+            ),
+        )
+        assert cron_mod._is_missing_cursor_table(exc) is True, (
+            "PGRST205's schema-cache phrasing is the same condition as 42P01"
+        )
+
+
 class TestSyncCursorPerStrategyResume:
     """164.5.1.4: a partial fan-out must leave the FAILED strategy's trade
     window re-drivable on the NEXT tick.

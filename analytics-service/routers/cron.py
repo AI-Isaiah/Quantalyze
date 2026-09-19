@@ -207,6 +207,113 @@ ALLOWED_STRATEGY_STATUSES = {"draft", "pending_review", "published"}
 # the reason C-0198 chose to advance. This marker is purely ADDITIVE.
 _STRATEGY_SYNC_CURSOR_TABLE = "strategy_sync_cursors"
 
+# 164.5.1.4 SYNCCURSOR / WR-03 — THE ROLLOUT WINDOW IS A KNOWN, EXPECTED,
+# INDEFINITE CONDITION, AND `logger.exception` IS THE WRONG VERB FOR ONE.
+#
+# Railway deploys this service on main CI going green. The PROD migration apply
+# sits behind the `Production` environment's HUMAN reviewer gate. Between those
+# two events — minutes or days, nobody controls which — the code below is live
+# and `strategy_sync_cursors` DOES NOT EXIST. Every 15-minute tick then emits
+# one `logger.exception` for the lookup plus one per key for the upsert, each
+# with a full traceback, each landing in Sentry as a new error event.
+#
+# ⛔ FAIL-OPEN IS AND STAYS CORRECT — the tick degrades to the key-level cursor,
+# which is exactly pre-phase behaviour. What is wrong is the NOISE: a Sentry
+# feed drowned in a condition that is neither a surprise nor actionable trains
+# the operator to ignore the very channel the REAL failures arrive on. So a
+# missing relation is latched to ONE `logger.warning` per process naming the
+# window; every other exception keeps its `logger.exception` and its traceback.
+#
+# ⛔ THE ENVELOPE FIELD IS NOT SUPPRESSED. `strategy_cursor_write_error` /
+# `strategy_cursor_lookup_error` are still populated on EVERY affected tick, so
+# the summary alarm sees the condition for as long as it lasts even though the
+# log line is emitted once. Quietening the log is not the same as hiding the
+# fact, and only the first is intended here.
+_UNDEFINED_TABLE_SQLSTATE = "42P01"
+# PostgREST answers a relation missing from its schema cache with its own
+# PGRST205 rather than the raw SQLSTATE, so both spellings are ONE condition.
+_UNDEFINED_TABLE_POSTGREST_CODE = "PGRST205"
+
+# Module-level latch for the one-shot warning above. Rebound (not mutated) so a
+# test can reset it with a plain assignment on the module.
+_missing_cursor_table_warned = False
+
+
+def _is_missing_cursor_table(exc: BaseException) -> bool:
+    """True when `exc` says `strategy_sync_cursors` is not in the database.
+
+    Three probes, widest-to-narrowest, because supabase-py surfaces PostgREST
+    errors inconsistently across versions — sometimes a typed `APIError` with
+    `.code`, sometimes a dict-ish payload whose text is all that survives:
+
+      1. a `.code` attribute equal to the SQLSTATE or the PostgREST code;
+      2. either code appearing anywhere in the error's text;
+      3. the TABLE NAME beside a "does not exist" / "schema cache" phrase.
+
+    ⚠️ Probe 3 is deliberately conjunctive. Matching the table name ALONE would
+    classify a genuine permission denial or a constraint violation on this very
+    table as "the table is missing" and downgrade a real, actionable fault to a
+    one-shot warning — the exact failure this whole helper must not cause.
+    """
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code.strip().upper() in (
+        _UNDEFINED_TABLE_SQLSTATE,
+        _UNDEFINED_TABLE_POSTGREST_CODE,
+    ):
+        return True
+
+    blob = " ".join(
+        str(part)
+        for part in (
+            getattr(exc, "message", None),
+            getattr(exc, "details", None),
+            str(exc),
+        )
+        if part
+    ).lower()
+    if (
+        _UNDEFINED_TABLE_SQLSTATE.lower() in blob
+        or _UNDEFINED_TABLE_POSTGREST_CODE.lower() in blob
+    ):
+        return True
+    return _STRATEGY_SYNC_CURSOR_TABLE in blob and (
+        "does not exist" in blob or "schema cache" in blob
+    )
+
+
+def _log_strategy_cursor_exc(exc: BaseException, msg: str, *args: Any) -> None:
+    """Log a marker-table failure at the severity the CONDITION deserves.
+
+    Missing relation -> ONE `logger.warning` per process, naming the rollout
+    window. Anything else -> `logger.exception` with `msg % args`, unchanged.
+
+    ⚠️ MUST BE CALLED FROM INSIDE AN `except` BLOCK. `logger.exception` reads
+    the ACTIVE exception from `sys.exc_info()`, not from the `exc` argument, so
+    calling this anywhere else would log a traceback of None (or, worse, of an
+    unrelated exception still being handled further up the stack).
+    """
+    global _missing_cursor_table_warned
+
+    if _is_missing_cursor_table(exc):
+        if _missing_cursor_table_warned:
+            return
+        _missing_cursor_table_warned = True
+        logger.warning(
+            "cron_sync: table %s is not present in the database yet (%s) — "
+            "this is the ROLLOUT WINDOW: the service deploys on CI green while "
+            "the migration apply waits behind the production reviewer gate, so "
+            "until the apply lands every tick falls back to the key-level "
+            "cursor (pre-phase behaviour, no data loss). Logged ONCE per "
+            "process; the per-tick envelope still carries the error field "
+            "every time. If this outlives the migration apply it is a REAL "
+            "fault and the envelope field is where to see it",
+            _STRATEGY_SYNC_CURSOR_TABLE,
+            type(exc).__name__,
+        )
+        return
+
+    logger.exception(msg, *args)
+
 
 def _strategy_resume_point(
     strategy_id: str,
@@ -933,7 +1040,13 @@ async def _sync_single_key(
                 strategy_cursor_write_error = (
                     f"{type(cursor_exc).__name__}: {cursor_exc}"
                 )
-                logger.exception(
+                # WR-03: `logger.exception` for a genuine fault, ONE latched
+                # `logger.warning` while the table simply has not been migrated
+                # yet — otherwise the rollout window emits one traceback PER KEY
+                # PER TICK for a condition nobody can act on. The envelope field
+                # above is populated either way.
+                _log_strategy_cursor_exc(
+                    cursor_exc,
                     "cron_sync: failed to persist per-strategy sync cursors for "
                     "key %s (%d row(s)) — strategies that already had a marker "
                     "stay behind and re-fetch idempotently, but any strategy "
@@ -1189,7 +1302,11 @@ async def cron_sync() -> dict[str, Any]:
             # degrades to today's key-cursor-only behaviour rather than to a
             # wrong window. The error is recorded in the response body instead
             # of being raised.
-            logger.exception(
+            # WR-03: `logger.exception` for a genuine fault, ONE latched
+            # `logger.warning` while the table simply has not been migrated
+            # yet. The error field below is populated either way.
+            _log_strategy_cursor_exc(
+                exc,
                 "cron_sync: per-strategy sync-cursor lookup failed (%s) over "
                 "%d strategy id(s) — every key falls back to its key-level "
                 "cursor for this tick",
