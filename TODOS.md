@@ -3491,6 +3491,24 @@ after 164.5.1.1, with this measurement in its goal. Owner: that phase.
 ⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
 (founder rule 2026-09-08).
 
+⛔ **DESTINATION CORRECTION — 2026-09-19, at Phase 164.5.1.2's close.** The Destination line above
+is now STALE and this note supersedes it: **Phase 164.5.1.2 closed WITHOUT addressing this entry,
+deliberately and on the record.** The founder descoped the composite site at that phase's CONTEXT
+time (D-01, 2026-09-17) — `enqueue_ledger_composite_refresh` is NOT SCHEDULED, is called by
+nothing, and no user observes it — so 164.5.1.2's success criteria covered TWO sites by design, the
+single-key poll and the trade-sync constant, and never this third one. Nothing here was measured and
+left undone; it was ruled out of scope before any plan was written.
+
+⛔ **THIS ENTRY DELIBERATELY HAS NO OWNER PHASE, AND THAT IS THE DECISION — NOT AN OVERSIGHT.**
+Re-pointing it at a live phase would fabricate scheduled work for a fan-out nobody has scheduled and
+no user can see, which is the opposite of what the descope decided. It stays **TRIGGER-GATED**: the
+TRIGGER stated above is the sole thing that activates it, and any one of those three proposals pulls
+in the other two and pulls in D-01. ⭐ The founder rule that every deferral names an owner phase is
+answered here by an explicit standing decision rather than by a phase number — recorded so a future
+reader finds a reasoned "no owner, by design", not a dangling pointer at a finished phase.
+⚠️ Nothing about the 141-day composite factsheet changed; the CTX-10 prohibition above stands in
+full and is not weakened by this note.
+
 ### FANOUT-COHORT-SIBLING-POLL-01 — the April poll-positions fan-out carries the same literal, IS live, and is excluded twice over (booked 2026-09-17)
 
 **Measured 2026-09-17** by Phase 164.5.1.1 plan 03. `enqueue_poll_positions_for_all_strategies`
@@ -3679,6 +3697,70 @@ relying on the stale comment.
 **TRIGGER (opportunistic, not a phase):** fix the comment the next time
 `enqueue_poll_positions_for_all_strategies`'s migration is genuinely touched for another reason
 — never as a standalone migration.
+
+### SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01 — the resume cursor is per-KEY but stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies (booked 2026-09-19)
+
+**MEASURED at `ed1b7d92`, by two independent reviewers during Phase 164.5.1.2's review round and
+confirmed by the orchestrator tracing the code.** `analytics-service/routers/cron.py::_sync_single_key`
+issues one `sync_trades` RPC **per strategy** in a fan-out loop, but resumes from a cursor held
+**per key** (`api_keys.last_sync_at`). The advance gate is
+`should_advance_cursor = (not trades) or synced_count > 0`, where
+`synced_count = sum(per_strategy_stored.values())` is aggregated ACROSS strategies.
+
+**The defect:** for a key backing N strategies where one RPC succeeds and the others raise,
+`synced_count > 0` holds, the cursor advances, and the strategies whose RPC raised **never see that
+window again** — the cursor is per-KEY, so nothing re-drives them. Permanent, per-strategy data loss.
+
+⚠️ **It is not log-silent, but the LOSS is.** Each failure hits `logger.exception`, lands in
+`strategy_errors`, and the key returns `status="partial"`. Nothing anywhere records *"strategy X is
+missing window [t0,t1)"*, and nothing retries it. An operator sees a handled error, not a permanent gap.
+**Reachable via:** advisory-lock contention or deadlock (`sync_trades` takes `pg_advisory_xact_lock`
+per strategy), statement timeout, PostgREST 5xx, an RLS or constraint error on one strategy only, or
+a network blip mid-fan-out.
+
+⭐ **PRE-EXISTING AND DELIBERATE — this is NOT a regression and must never be reported as one.** It is
+pinned by `test_C0198_partial_success_does_advance_last_sync_at`, whose docstring justifies the
+advance from the SUCCEEDING strategy's side and never names the cost to the failed one. Phase
+164.5.1.2 neither introduced nor widened it; that phase's D-03 fix is a different cause and stands.
+
+⛔ **NOT fixable by tweaking `should_advance_cursor`.** Holding the whole key's cursor on any partial
+failure would starve the SUCCEEDING strategies into permanent re-fetch — the symmetric defect, and
+exactly why C-0198 chose to advance. The remedy is a per-strategy resume marker. ⚠️ Migration `045`
+already added a `last_fetched_trade_timestamp` partial-success checkpoint that
+`parse_since_ms(preferred=...)` reads — establish whether that is the intended home before designing
+anything new.
+
+**TRIGGER — the condition that says this entry has come due:** Phase 164.5.1.3 SYNCADMIT admitting the
+owner-only status into `ALLOWED_STRATEGY_STATUSES`. Today the five `private` production keys carry
+`strategy_ids == []` every tick, so the fan-out loop never runs and this path is UNREACHABLE on them.
+The moment that constant widens, those keys begin fanning out to multiple strategies and this path
+goes LIVE on precisely the keys the whole 164.5.1.x line was opened to protect.
+✅ **Destination: Phase 164.5.1.4 SYNCCURSOR** — booked into the ROADMAP 2026-09-19 (`99314336`),
+derived as the next free sibling under 164.5.1, renumbering nothing. Owner: that phase.
+⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
+(founder rule 2026-09-08).
+
+### SYNC-HELD-CURSOR-REFETCH-COST-01 — a held cursor re-fetches a monotonically growing window, and the five private keys hold theirs every tick (booked 2026-09-19)
+
+**A CONSEQUENCE OF PHASE 164.5.1.2's OWN FIX, recorded rather than discovered later.** That phase
+correctly stopped the cursor advancing over trades that were never stored. On a key whose
+`strategy_ids` is empty, the cursor is therefore held **every tick, indefinitely** — a state that does
+NOT self-resolve; it clears only if a strategy on that key re-enters `ALLOWED_STRATEGY_STATUSES`.
+
+⭐ **THIS IS THE CORRECT TRADE AND THE ENTRY IS NOT AN ARGUMENT TO REVERSE IT.** Nothing is stored, so
+nothing is lost — the held cursor is lossless, and loud beats quiet-and-lossy. What it costs is work:
+with `last_sync_at` pinned, `parse_since_ms` returns the same fixed `since_ms` forever, so
+`fetch_all_trades` re-fetches a window that grows monotonically every tick, raising per-key API and
+latency cost without bound until the per-key timeout begins to absorb it.
+
+**Scope, measured:** the five `private` production keys are in exactly this state today.
+**TRIGGER — the condition that says this entry has come due:** the per-key sync duration or the
+exchange API quota becomes a live operational concern before the widening lands; OR Phase 164.5.1.3
+ships, which ends the condition outright by making `strategy_ids` non-empty on those keys.
+✅ **Destination: Phase 164.5.1.3 SYNCADMIT** — already booked; this is the cost side of the same
+decision and raises that phase from a tidy-up to an operational necessity.
+⚠️ ⛔ Do NOT close this by reverting the D-03 gate or by re-widening anything: the poll-positions
+predicate was REFUSED as inert on production evidence and is deliberately unchanged.
 
 ### VERIFICATION-STALE-OWED-01 — two phases verified code that has since moved, and their verdicts are honestly out of date (booked 2026-09-18)
 
