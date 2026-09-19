@@ -6602,3 +6602,169 @@ describe("[164.8.4-02] no anti-skip marker is altered by the shared redaction", 
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// [164.8.4-05] — SC-3 / [164.8.2-CHANNEL-ALLOWLIST-STALE]. A pure
+// text-and-process suite driving scripts/derive-restore-channels.sh directly
+// (no live workflow run) — the same discipline the WR-05 describe block above
+// already uses for staging-step properties.
+// ---------------------------------------------------------------------------
+describe("[164.8.4-05] the staged channel set is DERIVED from the producers, not hand-typed", () => {
+  const DERIVE_SCRIPT = join(ROOT, "scripts/derive-restore-channels.sh");
+  const REAL_PRODUCER_1 = join(ROOT, "scripts/restore-test-from-baseline.sh");
+  const REAL_PRODUCER_2 = join(
+    ROOT,
+    ".github/workflows/test-restore-from-baseline.yml",
+  );
+  const STAGE_STEP =
+    "Stage the public artifact (enumerated allowlist; default-out)";
+  /** The six real channel names, for the "no literal name survives" scan below.
+   * ⛔ NOT used to assert the derived SET — arm 1 compares against an
+   * independent regeneration instead, never a list typed into this file. */
+  const KNOWN_REAL_CHANNEL_NAMES = [
+    "census.err",
+    "ledger.err",
+    "marker.err",
+    "refdata.err",
+    "dump.log",
+    "transaction.out",
+  ];
+
+  /** Runs the real derivation script and returns its sorted, de-duplicated
+   * stdout lines. */
+  function deriveChannels(
+    p1: string,
+    p2: string,
+  ): { status: number | null; lines: string[]; output: string } {
+    const r = spawnSync("bash", [DERIVE_SCRIPT, p1, p2], { encoding: "utf8" });
+    const lines = (r.stdout ?? "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    return { status: r.status, lines, output: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  }
+
+  /**
+   * An INDEPENDENT regeneration of the derivation over ONE producer's source
+   * text, written separately from scripts/derive-restore-channels.sh (its own
+   * regex, its own script). Arm 1 below compares the SHIPPED script's output
+   * against the UNION of this function over both real producers — measuring
+   * agreement between two implementations, never the shipped script agreeing
+   * with itself.
+   */
+  function independentlyDerivedChannels(producerPath: string): string[] {
+    const text = readFileSync(producerPath, "utf8");
+    const re = /\b(RESTORE_OUT_DIR|outdir)\}?\/[A-Za-z0-9_.-]+\.(err|log|out)/g;
+    const names = new Set<string>();
+    for (const m of text.matchAll(re)) {
+      names.add(m[0].replace(/^.*\//, ""));
+    }
+    return [...names];
+  }
+
+  it("arm 1 — the shipped derivation AGREES with an independent regeneration over the two real producers", () => {
+    const shipped = deriveChannels(REAL_PRODUCER_1, REAL_PRODUCER_2);
+    expect(
+      shipped.status,
+      `the shipped derivation failed over the two real producers.\n${shipped.output}`,
+    ).toBe(0);
+    // Non-empty FIRST — a broken scan on both sides could otherwise agree
+    // vacuously at zero, which is not evidence of anything.
+    expect(
+      shipped.lines.length,
+      `the shipped derivation over the two real producers returned NOTHING — the assertion below would agree vacuously with an equally-broken independent scan.\n${shipped.output}`,
+    ).toBeGreaterThan(0);
+    const independent = [
+      ...new Set([
+        ...independentlyDerivedChannels(REAL_PRODUCER_1),
+        ...independentlyDerivedChannels(REAL_PRODUCER_2),
+      ]),
+    ];
+    expect(
+      independent.length,
+      "this test's OWN independent regeneration found nothing over the two real producers — re-check ITS regex before trusting any agreement with the shipped script",
+    ).toBeGreaterThan(0);
+    expect([...shipped.lines].sort()).toEqual([...independent].sort());
+  });
+
+  it("arm 2 — a NEW declared channel arrives with NOTHING else edited; an undeclared file on disk still does not", () => {
+    const tmpd = mkdtempSync(join(tmpdir(), "derive-channels-calibrate-"));
+    try {
+      // SC-3's own calibration: copy one real producer, append ONE line
+      // declaring a NEW synthetic diagnostic write target, and re-derive. No
+      // workflow edit, no list edit anywhere — only the producer's own
+      // declared write targets changed.
+      const scratchProducer = join(tmpd, "scratch-producer-one.sh");
+      const original = readFileSync(REAL_PRODUCER_1, "utf8");
+      const NEW_CHANNEL = "zzz-164-8-4-05-new-channel.err";
+      writeFileSync(
+        scratchProducer,
+        `${original}\necho "x" > "\${RESTORE_OUT_DIR}/${NEW_CHANNEL}"\n`,
+      );
+
+      const before = deriveChannels(REAL_PRODUCER_1, REAL_PRODUCER_2);
+      const after = deriveChannels(scratchProducer, REAL_PRODUCER_2);
+      expect(before.status, before.output).toBe(0);
+      expect(
+        after.status,
+        `the derivation over the scratch producer (one new declared target, nothing else edited) failed.\n${after.output}`,
+      ).toBe(0);
+      expect(
+        after.lines.includes(NEW_CHANNEL),
+        `the scratch producer declares ONE new diagnostic write target (${NEW_CHANNEL}) and NOTHING else was edited — no workflow change, no list change, only the producer's own declared write targets — yet the derivation did not pick it up.\n${after.output}`,
+      ).toBe(true);
+      expect(
+        after.lines.filter((l) => l !== NEW_CHANNEL).sort(),
+        "adding one new declared channel changed more than just that one channel in the derived set",
+      ).toEqual([...before.lines].sort());
+
+      // Second half of the SAME calibration, required by the plan (neither
+      // arm alone is evidence): a file present in a scratch RUNTIME output
+      // directory, declared by NEITHER producer, must still be ABSENT from
+      // the derivation. This is what keeps the CLOSED
+      // [164.8.2-REFUSAL-STILL-PUBLISHES] glob defect closed — the derivation
+      // reads declared SOURCE, never a runtime directory.
+      const scratchOutdir = join(tmpd, "outdir");
+      mkdirSync(scratchOutdir);
+      const UNDECLARED = "zzz-164-8-4-05-undeclared-on-disk.err";
+      writeFileSync(
+        join(scratchOutdir, UNDECLARED),
+        "present on disk, declared by neither producer\n",
+      );
+      expect(
+        after.lines.includes(UNDECLARED),
+        "a file present on disk but declared by NEITHER producer appeared in the derived set — the derivation has regressed into a runtime glob, which is the CLOSED [164.8.2-REFUSAL-STILL-PUBLISHES] defect",
+      ).toBe(false);
+    } finally {
+      rmSync(tmpd, { recursive: true, force: true });
+    }
+  });
+
+  it("arm 3 — the staging step's loop consumes the derivation and holds no literal channel name", () => {
+    const script = extractRunScript(WF, STAGE_STEP);
+    expect(
+      script.includes("scripts/derive-restore-channels.sh"),
+      "the staging step no longer references scripts/derive-restore-channels.sh",
+    ).toBe(true);
+    for (const name of KNOWN_REAL_CHANNEL_NAMES) {
+      expect(
+        script.includes(name),
+        `the staging step's script body carries the literal channel name "${name}" outside the derivation — a hand-maintained list has crept back in`,
+      ).toBe(false);
+    }
+    // CALIBRATION — the predicate must flip when a literal name list is
+    // re-introduced into the loop, or the scan above is not evidence.
+    calibrate(
+      "the staging step's loop holds no literal diagnostic channel name",
+      (s) =>
+        s.replace(
+          "for c in ${derived_channels}; do",
+          "for c in census.err ledger.err marker.err refdata.err dump.log transaction.out; do",
+        ),
+      (t) =>
+        !KNOWN_REAL_CHANNEL_NAMES.some((name) =>
+          extractRunScript(t, STAGE_STEP).includes(name),
+        ),
+    );
+  });
+});
