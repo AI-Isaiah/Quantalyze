@@ -124,7 +124,49 @@ SyncStatus = Literal[
     # that only "syncs" deferred keys is not misread as an idle/failed tick, and
     # so recurring deferrals never masquerade as errors in the Sentry stream.
     "deferred",
+    # 2026-09-19 FANOUT-COHORT-SYNC-CONSTANT-01 / D-03 follow-up: real trades
+    # were fetched and NONE were stored, so `last_sync_at` was deliberately
+    # held back (see the cursor gate in `_sync_single_key`). No per-strategy
+    # RPC raised, so this is neither `error` nor `partial` — but it is NOT
+    # `ok` either: the key is stalled and does NOT self-resolve (it clears
+    # only when a strategy on that key re-enters ALLOWED_STRATEGY_STATUSES),
+    # and with the cursor pinned the `fetch_all_trades` window grows every
+    # tick. Given its own bucket so the summary alarm can see it instead of
+    # counting it as healthy.
+    "held",
 ]
+
+# Single registry mapping each `SyncStatus` to its counter key in the
+# cron_sync response body. The summary counters below are DERIVED from this
+# map, so a status that is registered here always reaches the response.
+# `tests/test_cron_router.py::TestSyncStatusSummaryBucketCompleteness` asserts
+# the registry covers every `get_args(SyncStatus)` member AND that every
+# registered counter key is present in the response — a new status therefore
+# cannot ship without an alarmable bucket.
+SYNC_STATUS_SUMMARY_KEYS: dict[str, str] = {
+    "ok": "synced",
+    "partial": "partial",
+    "error": "failed",
+    "timeout": "timed_out",
+    "key_revoked": "revoked",
+    "transient_failure": "transient",
+    "deferred": "deferred",
+    "held": "held",
+}
+
+# Statuses that are NOT healthy and must therefore win a slot when the
+# response `results` list is capped at RESULTS_CAP (see the triage in
+# cron_sync). `deferred` is deliberately absent: a benign non-ccxt deferral
+# is not diagnostic. `held` IS present — it names the key whose cursor is
+# pinned and whose fetch window is growing every tick.
+_NON_OK_STATUSES: set[str] = {
+    "error",
+    "timeout",
+    "key_revoked",
+    "transient_failure",
+    "partial",
+    "held",
+}
 
 # Outcome bucket for a per-portfolio recompute attempt. `in_flight` is
 # distinct from `ok` so the response payload doesn't conflate "I
@@ -529,14 +571,24 @@ async def _sync_single_key(
         # `partial` means *some* strategies landed AND *some* failed.
         # If every per-strategy RPC raised, that's `error`, not
         # `partial` — calling it partial would mislead the operator
-        # into thinking trades were stored when none were. The
-        # "no strategies attempted" case (empty list or no trades) is
-        # `ok` because there was nothing to do.
+        # into thinking trades were stored when none were.
+        #
+        # A tick that fetched real trades and stored NONE of them without
+        # any RPC raising is `held`, NOT `ok`: `should_advance_cursor` is
+        # False there, so `last_sync_at` was pinned and the same window will
+        # be refetched (and will keep growing) every tick until a strategy on
+        # this key becomes eligible again. That is the opposite of "there was
+        # nothing to do" — there WAS something to do and it was not done, so
+        # it must not land in the `synced` bucket that alarms read as healthy.
+        # `ok` is now only reached when the cursor actually advanced, i.e. a
+        # genuinely idle tick (no trades fetched) or trades that landed.
         any_stored = any(n > 0 for n in per_strategy_stored.values())
         if strategy_errors and any_stored:
             status: SyncStatus = "partial"
         elif strategy_errors:
             status = "error"
+        elif not should_advance_cursor:
+            status = "held"
         else:
             status = "ok"
         result: dict[str, Any] = {
@@ -725,21 +777,33 @@ async def cron_sync() -> dict[str, Any]:
     # alarm conditions (which watch the response body) silently misclassify
     # a tick where every key hit a transient validation failure as
     # "0 synced, 0 failed = idle" instead of "everything failed transiently."
-    synced = sum(1 for r in all_results if r["status"] == "ok")
-    partial = sum(1 for r in all_results if r["status"] == "partial")
-    failed = sum(1 for r in all_results if r["status"] == "error")
-    timed_out = sum(1 for r in all_results if r["status"] == "timeout")
-    revoked = sum(1 for r in all_results if r["status"] == "key_revoked")
-    transient = sum(1 for r in all_results if r["status"] == "transient_failure")
-    # F1: benign non-ccxt deferrals (e.g. sfox pre-ingestion). Counted apart from
-    # `failed` so a book of only-deferred keys reads as "deferred", never "error".
-    deferred = sum(1 for r in all_results if r["status"] == "deferred")
+    # Counters are DERIVED from SYNC_STATUS_SUMMARY_KEYS rather than written
+    # out one `sum(...)` per status, so registering a new status is the only
+    # step needed for it to appear in the body — the previous hand-written
+    # block was exactly the shape where a new status silently gets no bucket.
+    # F1: benign non-ccxt deferrals (e.g. sfox pre-ingestion) are counted apart
+    # from `failed` so a book of only-deferred keys reads as "deferred", never
+    # "error"; `held` is likewise counted apart from `synced` so a permanently
+    # stalled key is never indistinguishable from a healthy one.
+    status_counts: dict[str, int] = {
+        summary_key: sum(1 for r in all_results if r["status"] == status)
+        for status, summary_key in SYNC_STATUS_SUMMARY_KEYS.items()
+    }
+    synced = status_counts["synced"]
+    partial = status_counts["partial"]
+    failed = status_counts["failed"]
+    timed_out = status_counts["timed_out"]
+    revoked = status_counts["revoked"]
+    transient = status_counts["transient"]
+    deferred = status_counts["deferred"]
+    held = status_counts["held"]
     total_trades = sum(r.get("trades_fetched", 0) for r in all_results)
     overall_duration = round(time.monotonic() - overall_start, 2)
 
     logger.info(
         "cron_sync complete: %d synced, %d partial, %d failed, %d timed out, "
-        "%d revoked, %d transient, %d deferred, %d total trades, %.1fs total duration",
+        "%d revoked, %d transient, %d deferred, %d held, %d total trades, "
+        "%.1fs total duration",
         synced,
         partial,
         failed,
@@ -747,6 +811,7 @@ async def cron_sync() -> dict[str, Any]:
         revoked,
         transient,
         deferred,
+        held,
         total_trades,
         overall_duration,
     )
@@ -1095,7 +1160,6 @@ async def cron_sync() -> dict[str, Any]:
     # incident produces an unbounded body — the exact scenario the
     # RECOMPUTE_FAILURE_CAP was introduced to prevent, but for a LARGER
     # payload. Prefer non-ok statuses so the body is maximally diagnostic.
-    _NON_OK_STATUSES = {"error", "timeout", "key_revoked", "transient_failure", "partial"}
     non_ok_results = [r for r in all_results if r.get("status") in _NON_OK_STATUSES]
     ok_results = [r for r in all_results if r.get("status") not in _NON_OK_STATUSES]
     if len(all_results) > RESULTS_CAP:
@@ -1107,13 +1171,7 @@ async def cron_sync() -> dict[str, Any]:
         results_truncated = False
 
     return {
-        "synced": synced,
-        "partial": partial,
-        "failed": failed,
-        "timed_out": timed_out,
-        "revoked": revoked,
-        "transient": transient,
-        "deferred": deferred,
+        **status_counts,
         "total_keys": len(keys),
         "total_trades": total_trades,
         "total_results": len(all_results),
