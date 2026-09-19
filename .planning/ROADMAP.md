@@ -1636,6 +1636,18 @@ by MEASUREMENT, not by reading) stays as a METHOD for the surviving work.
 
 1. Every psql site in `test-ledger-drift-check.sh`, `test-restore-from-baseline.yml` and their shared redaction is swept in ONE pass, with a test that FAILS on a new unredirected site — not a fix to the three known ones.
 2. The `gstack-evidence` credential inheritance is closed at the wrapper, with the skip gates untouched, and proven by a run whose skip counts match a plain `npx vitest run` at the same commit.
+   ⭐ **DEVIATION, RECORDED 2026-09-19 — shipped at the BOOTSTRAP, not at the wrapper.** The literal
+   wording above is not what landed, and the reasoning lives in `164.8.4-CONTEXT.md`; it is repeated
+   here because this repo requires a deviation to be recorded in BOTH places, and a criterion whose
+   text disagrees with what shipped is how a future reader concludes the phase missed.
+   **WHY:** `gstack-evidence` has NO repo-local copy — it exists only under the global skills
+   directory and `/gstack-upgrade` overwrites it, so a wrapper edit is un-reviewable, un-testable
+   and erased by the next upgrade. The guard instead sits in the vitest bootstrap
+   (`src/test-setup.ts`, `assertLiveDbWasIntended`), which is repo-owned, covered by tests and
+   survives an upgrade. The skip gates were left untouched as the criterion requires, and the
+   skip-count parity proof was taken as written. ⚠️ The guard is loaded by `vitest.config.ts` and
+   `vitest.local-stack.config.ts` only; the two lanes it does not cover are booked in TODOS.md as
+   `[164.8.4-LIVEDB-GUARD-LANE-GAP]`.
 3. The refuse-vs-withhold tradeoff is DECIDED by the founder and the decision is recorded with its cost on both sides — not silently patched either way.
 4. The channel allowlist is DERIVED, and a calibration proves a newly written channel reaches the artifact without anyone editing a list.
 5. A source-comment anchor gate exists, fails loud on a dead anchor, and its message names the symbol-over-line-number preference.
