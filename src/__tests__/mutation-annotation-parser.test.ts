@@ -886,8 +886,22 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // (identity ok), biting 7/7 — and corroborated by two clean-tree
     // full-corpus lane runs: `arms: 402/402/0`, `biting: 402`,
     // `lane-invocations: 402` (the two independent tallies AGREE), exit 0.
-    expect(armsSeen).toBe(402);
-    expect(stepsSeen).toBe(421);
+    // ⚠️ CURRENCY 2026-09-19 (Phase 164.5.1.4 SYNCCURSOR, review WR-05): arms
+    // 402 -> 411 and file steps 421 -> 428. NINE new arms in ONE NEW annotated
+    // gate, supabase/tests/test_strategy_sync_cursors_rls.sql — the behavioural
+    // RLS gate over public.strategy_sync_cursors. ⛔ ARMS AND STEPS DID NOT MOVE
+    // BY THE SAME AMOUNT HERE, unlike both 2026-09-18 entries above: of the nine
+    // twins SEVEN are `edit` steps and TWO are `sql` steps, and this walk skips
+    // `sql`, so arms moved by nine and steps by seven. That asymmetry is the
+    // normal case (see the 2026-09-11 entry, which moved by eight and five) —
+    // the lockstep the two entries above record was a coincidence of their
+    // shape. This is a NEW FILE, so FILES_FLOOR moves too (see the MEASURED
+    // reading recorded beside scripts/mutation-runner/run.mjs's own
+    // FILES_FLOOR/ARMS_FLOOR constants, never restated as a number here).
+    // MEASURED over `scanCorpus` at this commit by replaying THIS derivation:
+    // `armsSeen 411 stepsSeen 428`, `filesTotal 75`, `annotated 48`, waivers 0.
+    expect(armsSeen).toBe(411);
+    expect(stepsSeen).toBe(428);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1714,7 +1728,18 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // `find` needle, so this derivation moved by five as well — again a
     // coincidence of this plan's shape (five arms, all edit-kind, one needle
     // each), not a rule. Keep running it separately.
-    expect(needles.length).toBe(421);
+    // ⚠️ CURRENCY 2026-09-19 (Phase 164.5.1.4 SYNCCURSOR, review WR-05): needles
+    // 421 -> 428. The SAME seven edit-kind twins that moved `stepsSeen` (SEED 1,
+    // GRANT 1, POLICY 1-4 and RESTORE 1 in the NEW gate
+    // test_strategy_sync_cursors_rls.sql) each carry exactly one `find` needle,
+    // so this derivation moved by seven as well. ⛔ It did NOT move by the same
+    // amount as `armsSeen`, which moved by nine: that file's other two twins
+    // (RLS 1, RLS 2) are `sql` steps carrying no `find` and no `anchor`, which
+    // is precisely the divergence the 2026-09-03 plan-04 note at the top of this
+    // block describes. Still RUN SEPARATELY from `stepsSeen` — this pin ranges
+    // over waivers where that one does not (harmless only while waivers are 0;
+    // they are, measured corpus-wide `waivers=0`).
+    expect(needles.length).toBe(428);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2255,7 +2280,12 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // `files 47/74`. The one added is supabase/tests/test_prod_prober_cadence.sql,
     // a NEW file (unlike most prior moves, which added arms to an existing
     // one) — the denominator moves with it, 73 -> 74.
-    expect(corpus.filesTotal).toBe(74);
+    // ⚠️ CURRENCY 2026-09-19 (Phase 164.5.1.4 SYNCCURSOR, review WR-05): MEASURED
+    // `files 48/75`. The one added is supabase/tests/test_strategy_sync_cursors_rls.sql,
+    // a NEW file (the behavioural RLS gate over public.strategy_sync_cursors, 9
+    // arms) — so, as with the 2026-09-18 entry above, the denominator moves with
+    // it, 74 -> 75.
+    expect(corpus.filesTotal).toBe(75);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2286,7 +2316,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // pg-lane gained scripts/pg-lane/fixtures/32-fixture-vault-stand-in.sql to
     // give it a provable RAISE path on a cluster with no supabase_vault. The
     // 164.2 paragraph above stays as the dated record of the 45-file corpus.
-    expect(corpus.filesAnnotated).toBe(47);
+    expect(corpus.filesAnnotated).toBe(48);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2337,6 +2367,15 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_strategy_keys_publish_integrity.sql",
       "test_strategy_keys_rls.sql",
       "test_strategy_shares_rls.sql",
+      // ⚠️ CURRENCY 2026-09-19 (phase 164.5.1.4 SYNCCURSOR, review WR-05): the
+      // FORTY-EIGHTH annotated file, and — like the 164.2 and 164.1.1 entries
+      // below/above — one this phase ADDS rather than backfills, so the
+      // denominator moves with it (74 -> 75). Nine sections, nine twins, all
+      // nine biting on the gate's own calibration run (`9/9 RED (identity ok)`,
+      // `biting: 9`, `lane-invocations: 9`, restore leg exit 0). Seven of the
+      // twins are `edit` steps and two are `sql`, which is why `armsSeen` and
+      // `stepsSeen` above moved by nine and seven and not by the same amount.
+      "test_strategy_sync_cursors_rls.sql",
       "test_strategy_verifications_wizard_session_tenant_scope.sql",
       // ⚠️ CURRENCY 2026-09-06 (phase 164.2 plan 07): the FORTY-FIFTH annotated
       // file, and the first one this family ADDS rather than backfills — the
@@ -2710,7 +2749,12 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // lane-blocked 0 = 74. One ADDED gate file
     // (supabase/tests/test_prod_prober_cadence.sql), not a backfill — both
     // halves move together again.
-    expect(corpus.filesTotal).toBe(74);
+    // ⚠️ CURRENCY 2026-09-19 (Phase 164.5.1.4 SYNCCURSOR, review WR-05), read off
+    // `--parse-only`: annotated 48 + pending 0 + unreachable 27 + inert 0 +
+    // lane-blocked 0 = 75. One ADDED gate file
+    // (supabase/tests/test_strategy_sync_cursors_rls.sql), not a backfill — both
+    // halves move together again, and neither may be bumped alone.
+    expect(corpus.filesTotal).toBe(75);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -2719,7 +2763,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // above (the selftest fixture PAIR, which must still classify exactly
     // `lane-blocked-gate.sql` and NOT its comment-only sibling), and the
     // set-for-set PARTITION check below is the second independent guard.
-    expect(corpus.annotatedFiles).toHaveLength(47);
+    expect(corpus.annotatedFiles).toHaveLength(48);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {
