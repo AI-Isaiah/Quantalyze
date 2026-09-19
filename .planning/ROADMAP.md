@@ -1972,11 +1972,13 @@ Plans:
 
 **Requirements**: `TODOS.md` entries `FANOUT-COHORT-SIBLING-COMPOSITE-01`, `FANOUT-COHORT-SIBLING-POLL-01`, `FANOUT-COHORT-SYNC-CONSTANT-01` — all three booked 2026-09-17 by Phase 164.5.1.1 plan 03 with their measurements.
 **Depends on:** Phase 164.5.1.1 FANOUTCOHORT — its plan 04 PROD session answers the shared-key question above, and its migration is the precedent any widening here re-bases on.
-**Plans:** 0 plans
+**Plans:** 3 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.5.1.2 to break down)
+- [ ] 164.5.1.2-01-PLAN.md — the one PROD sibling-key read, then close FANOUT-COHORT-SIBLING-POLL-01 and the widening-verdict half of FANOUT-COHORT-SYNC-CONSTANT-01
+- [ ] 164.5.1.2-02-PLAN.md — fix the `last_sync_at` cursor-advance defect (D-03), calibrated RED→GREEN
+- [ ] 164.5.1.2-03-PLAN.md — close D-03's half of FANOUT-COHORT-SYNC-CONSTANT-01, record the advisory-lock comment decision, and the phase-wide falsifiability guard
 
 ### Phase 164.5.2: BRIDGELOCK — the per-strategy advisory lock 161.1-D1 asked for, in its own phase as DEC-4 required (INSERTED)
 
