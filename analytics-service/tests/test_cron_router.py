@@ -3396,11 +3396,24 @@ class TestSyncCursorPerStrategyResume:
         failing_strategy_ids: set[str],
         fetch_mock: AsyncMock,
         trades: list[dict[str, Any]],
+        enqueue_failing_strategy_ids: set[str] | None = None,
+        rpc_calls: list[tuple[str, dict]] | None = None,
     ) -> tuple[dict[str, Any], list[dict], list[Any]]:
         """Run ONE `_sync_single_key` tick against a fully stubbed Supabase.
 
         Returns `(result, api_keys_update_payloads, cursor_upsert_payloads)`.
+
+        `failing_strategy_ids` fails the STORAGE RPC; `enqueue_failing_strategy_ids`
+        fails the RECOMPUTE-ENQUEUE RPC. They are separate parameters on purpose:
+        the advance condition has two conjuncts and each needs an injection point
+        of its own, or a gate that only ever fails storage would pass against an
+        implementation carrying the storage conjunct alone.
+
+        `rpc_calls`, when supplied, collects every `(name, args)` pair the tick
+        issued, so a caller can assert that a re-drive actually re-attempted the
+        RPC rather than inferring it from the fetch window alone.
         """
+        enqueue_failing = enqueue_failing_strategy_ids or set()
         mock_supabase = MagicMock()
 
         def _rpc(name: str, args: dict):
@@ -3409,6 +3422,8 @@ class TestSyncCursorPerStrategyResume:
             # being true the moment the recompute enqueue matters to the
             # outcome (it does here — a strategy only advances when its
             # enqueue also succeeded).
+            if rpc_calls is not None:
+                rpc_calls.append((name, dict(args)))
             chain = MagicMock()
             if name == "sync_trades":
                 if args.get("p_strategy_id") in failing_strategy_ids:
@@ -3416,7 +3431,12 @@ class TestSyncCursorPerStrategyResume:
                 else:
                     chain.execute.return_value = MagicMock(data=len(trades))
             elif name == "enqueue_compute_job":
-                chain.execute.return_value = MagicMock(data=None)
+                if args.get("p_strategy_id") in enqueue_failing:
+                    chain.execute.side_effect = RuntimeError(
+                        "compute_jobs unavailable"
+                    )
+                else:
+                    chain.execute.return_value = MagicMock(data=None)
             else:
                 raise AssertionError(f"unexpected RPC in this gate: {name!r}")
             return chain
@@ -3615,4 +3635,133 @@ class TestSyncCursorPerStrategyResume:
             f"fetch window must move forward past T0 ({t0_ms}); got "
             f"{since_ms!r}. A 'pinned' window that is pinned no matter what "
             "measures nothing."
+        )
+
+    @pytest.mark.asyncio
+    async def test_failed_recompute_enqueue_holds_that_strategys_marker(self):
+        """SUCCESS CRITERION 4, on its OWN failure axis.
+
+        ⭐ The injection here is NOT a storage failure. Both `sync_trades` RPCs
+        SUCCEED — strat-B's trades are on disk — and only its
+        `enqueue_compute_job` raises. That is a different defect from the one
+        the two tests above cover, and it is the whole reason this test exists:
+        a gate that only ever fails storage passes against the narrower, wrong
+        advance condition (`stored > 0` alone), which is exactly the
+        per-strategy mirror of the key-level formula a reader would reach for.
+
+        The consequence being pinned: strat-B's window was STORED but never
+        RECOMPUTED, so its dashboard analytics are frozen against trades that
+        exist. Holding its marker is what makes the next tick re-fetch that
+        window and re-attempt the enqueue. Without the hold nothing ever
+        re-drives it — the Phase-18 shape the enqueue loop's own comment in
+        `cron.py` describes.
+
+        Re-driving is safe in both directions and is deliberately not re-proven
+        here: `sync_trades` deletes scoped to the incoming payload's own
+        timestamp range before re-inserting, and `enqueue_compute_job` is
+        dedup-safe via the partial unique index
+        `compute_jobs_one_inflight_per_kind_strategy`.
+        """
+        t0_ms = cron_mod.parse_since_ms(self.T0)
+        assert t0_ms is not None, "T0 must parse — the whole gate is measured against it"
+
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+
+        # ---- Tick 1: both stores succeed; strat-B's recompute enqueue raises.
+        key_row_1 = _make_key_row(
+            strategy_ids=["strat-A", "strat-B"],
+            last_sync_at=self.T0,
+        )
+        result_1, key_updates_1, cursor_upserts_1 = await self._run_tick(
+            key_row=key_row_1,
+            failing_strategy_ids=set(),
+            enqueue_failing_strategy_ids={"strat-B"},
+            fetch_mock=fetch_mock,
+            trades=trades,
+        )
+
+        # Non-vacuity: the injection must have landed on the ENQUEUE axis and
+        # NOT on the storage axis. Without these the test could be measuring a
+        # silently storage-failed tick and claiming criterion 4 for it.
+        assert result_1["per_strategy_stored"] == {"strat-A": 1, "strat-B": 1}, (
+            "BOTH strategies must have STORED — this axis is an enqueue "
+            f"failure, not a storage failure; got {result_1['per_strategy_stored']!r}"
+        )
+        assert set(result_1.get("recompute_enqueue_errors") or {}) == {"strat-B"}, (
+            "strat-B's enqueue must be the ONLY recorded failure; got "
+            f"{result_1.get('recompute_enqueue_errors')!r}"
+        )
+        assert "strategy_errors" not in result_1, (
+            "a failed recompute enqueue is not a per-strategy STORAGE error — "
+            f"got {result_1.get('strategy_errors')!r}"
+        )
+
+        # The key-level status is `ok`, READ off the classifier rather than
+        # assumed: `strategy_errors` is empty and `should_advance_cursor` is
+        # True because both stores landed, so there is nothing to downgrade on.
+        # ⭐ That is the point of this axis — from the KEY's point of view this
+        # tick looks HEALTHY, and the only thing standing between strat-B and a
+        # frozen dashboard is its own marker being held.
+        assert result_1["status"] == "ok", (
+            "both stores landed and no strategy RPC raised, so the KEY status "
+            f"is `ok`; got {result_1['status']!r}"
+        )
+
+        cursors = self._cursor_map(cursor_upserts_1)
+        assert set(cursors) == {"strat-A", "strat-B"}, (
+            "every strategy in the fan-out gets a marker row, held or "
+            f"advancing; captured: {cursors!r}"
+        )
+        assert cursors["strat-A"] != self.T0, (
+            "strat-A stored AND enqueued, so its marker must advance past T0; "
+            f"got {cursors['strat-A']!r}"
+        )
+        assert cursors["strat-B"] == self.T0, (
+            "strat-B STORED but its recompute enqueue raised, so its marker "
+            "must stay PINNED at the resume point the tick started from — "
+            "advancing it strands the window whose recompute never fired; "
+            f"got {cursors['strat-B']!r}"
+        )
+
+        advanced = [p["last_sync_at"] for p in key_updates_1 if "last_sync_at" in p]
+        assert advanced, (
+            "the KEY cursor still advances — both stores landed, and C-0198's "
+            "choice is untouched by this phase"
+        )
+        key_cursor_after_tick_1 = advanced[-1]
+        assert cron_mod.parse_since_ms(key_cursor_after_tick_1) > t0_ms, (
+            "the key cursor must have moved PAST T0, otherwise tick 2's "
+            "assertion below could pass for the trivial reason that nothing moved"
+        )
+
+        # ---- Tick 2: inputs DERIVED from tick 1's own captured outputs.
+        key_row_2 = _make_key_row(
+            strategy_ids=["strat-A", "strat-B"],
+            last_sync_at=key_cursor_after_tick_1,
+            strategy_cursors=cursors,
+        )
+        rpc_calls_2: list[tuple[str, dict]] = []
+        await self._run_tick(
+            key_row=key_row_2,
+            failing_strategy_ids=set(),
+            fetch_mock=fetch_mock,
+            trades=trades,
+            rpc_calls=rpc_calls_2,
+        )
+
+        since_ms = fetch_mock.call_args.kwargs["since_ms"]
+        assert since_ms == t0_ms, (
+            "THE CONSEQUENCE: tick 2 must ask the venue for strat-B's "
+            f"un-recomputed window (since_ms={t0_ms}), not the advanced key "
+            f"cursor. Got since_ms={since_ms!r}. Delete the `sid not in "
+            "recompute_enqueue_errors` conjunct from the advance condition and "
+            "this is the assertion that fails."
+        )
+        assert (
+            "enqueue_compute_job",
+            {"p_strategy_id": "strat-B", "p_kind": "derive_broker_dailies"},
+        ) in rpc_calls_2, (
+            "and the recompute strat-B never got must actually be RE-ATTEMPTED "
+            f"on tick 2; issued RPCs were {rpc_calls_2!r}"
         )
