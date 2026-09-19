@@ -2425,7 +2425,43 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.9 to break down)
 
-### Phase 164.10: BODYDRIFT — PROD runs an EARLIER revision of three function bodies than the migration chain renders (INSERTED)
+### Phase 164.10: BODYDRIFT — ⛔ CLOSED 2026-09-19 (founder decision (c)). The drift is REAL, MEASURED, and DELIBERATELY LEFT.
+
+⭐ **DECISION (c) — LEAVE THE BODIES ALONE. This phase is CLOSED, not deferred and not cancelled for
+lack of interest: the question it existed to answer WAS answered, by measurement, and the answer is
+that no repair is warranted.**
+
+**What was measured (2026-09-19, read-only `pg_get_functiondef`, after the `COMMENT ON DATABASE`
+marker query confirmed PRODUCTION):** all three function bodies are **BEHAVIOURALLY IDENTICAL** to
+what the migration chain renders. Two differ in `RAISE` wording only; the third declares a local
+(`v_row_found`) that is **written and never read**, because the branch uses plpgsql's built-in
+`FOUND`. The cause is settled and has its commit — all three defining migrations arrived in ONE
+backfill, `eaaed7e0` (2026-05-15), which reconstructed functions that already existed in PROD and
+wrote them slightly richer than reality.
+
+**The three options, and why (c):**
+- **(a) re-base the migration text onto what PROD runs** — no PROD write, and it would delete the
+  three allowlist rows permanently. But those files are what the chain RENDERS, and `baseline.sql`
+  plus every drift gate compare against that render, so re-basing moves the subject they measure.
+  Real blast radius. ⭐ **This remains the route if it is ever wanted; the work is the scoping.**
+- **(b) write PROD to match the files** — ⛔ REJECTED. Measured, that migration would lengthen three
+  error strings and add a variable nothing reads. Production risk for zero behavioural gain.
+- **(c) ⭐ CHOSEN — leave it.** Nothing is broken, the guards behave identically, and the three
+  `CONTENT_DRIFT_ALLOWLIST` rows are now accurately described.
+
+⛔ **CONSEQUENCES, so nobody re-opens this by accident:** the three allowlist rows are EXPECTED to
+persist and are NOT pending work — `scripts/baseline-content-drift-check.mjs` says so at the head of
+the list. Do not delete them to green a gate. Do not write PROD to clear them. ⚠️ The one accepted
+cost: PROD's `RAISE` messages are LESS informative than the repo's, so an operator debugging a
+sentinel rejection or a retention abort sees less context — diagnostics, not data integrity.
+
+⚠️ **Re-open only if** these rows start costing attention again (they already cost one investigation,
+which is what prompted the measurement), in which case take (a).
+
+📜 **The original entry follows as lineage. Its "EXECUTABLE drift / Behaviour differs" claim is
+FALSIFIED — see the correction inside it.**
+
+### 📜 Phase 164.10 (ORIGINAL ENTRY, superseded): BODYDRIFT — PROD runs an EARLIER revision of three function bodies than the migration chain renders (INSERTED)
 
 **Goal:** ⚠️ **RE-SCOPE THIS GOAL BEFORE PLANNING — see the 2026-09-19 measurement below; the premise is narrower than written.** Close `DRIFT-06`. Three PROD function bodies do not match what the migration chain renders, and the shared "the dump is stale" diagnosis was FALSIFIED for them by the 2026-09-07 regeneration: their `snapshotHash` values did not move by a single bit. They are `check_fan_in_ready/1` (5 hunks), `reject_sentinel_writes/0` (9 hunks) and `retention_delete_guard/0` (2 hunks), retained as the last three rows of `CONTENT_DRIFT_ALLOWLIST` in `scripts/baseline-content-drift-check.mjs`.
 

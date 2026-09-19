@@ -197,6 +197,32 @@ export const FINDING_KINDS = [
  * for `SNAPSHOT_ONLY`. Any other null is `allowlist-malformed`.
  *
  * ⛔ THIS LIST MAY ONLY SHRINK.
+ *
+ * ⭐ FOUNDER DECISION 2026-09-19 — ALL THREE ROWS ARE RETAINED DELIBERATELY AND
+ * ARE NOT PENDING WORK. Read this before opening an investigation into them.
+ *
+ * All three were measured against PRODUCTION on 2026-09-19 (read-only
+ * `pg_get_functiondef`, after the `COMMENT ON DATABASE` marker query confirmed
+ * PROD) and every one is BEHAVIOURALLY IDENTICAL to what the chain renders. The
+ * divergence is `RAISE` wording in two rows and a written-but-never-read local
+ * in the third. The cause is settled: all three defining migrations arrived in
+ * ONE backfill commit, `eaaed7e0` (2026-05-15), which reconstructed functions
+ * that already existed in PROD and wrote them slightly richer than reality.
+ *
+ * Three options were weighed and (c) was chosen:
+ *   (a) re-base the migration text onto what PROD runs — no PROD write, but
+ *       these files are what the chain RENDERS and this gate and baseline.sql
+ *       compare against that render, so it moves the subject they measure;
+ *   (b) write PROD to match the files — REJECTED: that migration would lengthen
+ *       three error strings and add a variable nothing reads;
+ *   (c) ⭐ CHOSEN — leave the bodies alone and keep these rows, accurately
+ *       described. Nothing is broken; the guards behave identically.
+ *
+ * ⛔ So these rows are EXPECTED to persist. Their `clearedBy` text describes what
+ * WOULD clear them, not an outstanding task. Do not delete them to green a gate,
+ * do not write PROD to clear them, and do not re-open Phase 164.10 — it was
+ * CLOSED by this decision. Reconsider only if these rows start costing attention
+ * again, in which case (a) is the route and its blast radius is the work.
  */
 export const CONTENT_DRIFT_ALLOWLIST = [
   {
