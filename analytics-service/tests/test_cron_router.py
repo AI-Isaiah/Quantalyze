@@ -3473,6 +3473,7 @@ class TestSyncCursorPerStrategyResume:
         trades: list[dict[str, Any]],
         enqueue_failing_strategy_ids: set[str] | None = None,
         rpc_calls: list[tuple[str, dict]] | None = None,
+        dq_flags: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict], list[Any]]:
         """Run ONE `_sync_single_key` tick against a fully stubbed Supabase.
 
@@ -3487,6 +3488,13 @@ class TestSyncCursorPerStrategyResume:
         `rpc_calls`, when supplied, collects every `(name, args)` pair the tick
         issued, so a caller can assert that a re-drive actually re-attempted the
         RPC rather than inferring it from the fetch window alone.
+
+        `dq_flags` stands in for the data-quality buffer that
+        `services.exchange.fetch_daily_pnl` stamps and the router drains right
+        after the fetch. It is a SEPARATE injection point from `trades` on
+        purpose: the whole point of the flag is that a crashed fetch and an
+        idle one both surface as an EMPTY `trades`, so a gate that could only
+        vary `trades` could never tell the two apart.
         """
         enqueue_failing = enqueue_failing_strategy_ids or set()
         mock_supabase = MagicMock()
@@ -3565,6 +3573,11 @@ class TestSyncCursorPerStrategyResume:
              patch.object(cron_mod, "fetch_all_trades", fetch_mock), \
              patch.object(
                  cron_mod,
+                 "get_and_clear_last_dq_flags",
+                 lambda: dict(dq_flags or {}),
+             ), \
+             patch.object(
+                 cron_mod,
                  "fetch_usdt_balance",
                  AsyncMock(return_value=None),
              ):
@@ -3600,6 +3613,30 @@ class TestSyncCursorPerStrategyResume:
         assert result_1["status"] == "partial", (
             "one strategy stored and one raised — that is `partial`; "
             f"got {result_1['status']!r}"
+        )
+
+        # ⛔ TICK 1'S WINDOW, AND IT IS NOT A FORMALITY — it is the only
+        #    assertion in this class that can tell MEMBERSHIP from `.get()`.
+        #    Tick 1 runs with NO marker rows at all, which is the state the
+        #    migration lands in and the state its "INERT on arrival, today's
+        #    behaviour byte for byte" claim is about. With membership every
+        #    strategy is ABSENT and falls back to the key cursor (T0). With
+        #    `.get()`, absent and present-with-NULL both yield None,
+        #    `_resume_floor_ms` short-circuits, and `since_ms` becomes None —
+        #    a FULL-HISTORY refetch for every active key on the first tick
+        #    after deploy, silent and green.
+        #    ⚠️ `call_args` is the LAST call, so every tick-2 assertion below
+        #    is blind to this: by tick 2 both strategies are PRESENT in the
+        #    mapping and the two readings agree. MEASURED before this arm
+        #    existed: the `.get()` mutant survived the whole file at 56 passed.
+        first_since_ms = fetch_mock.call_args_list[0].kwargs["since_ms"]
+        assert first_since_ms == t0_ms, (
+            "INERT ON ARRIVAL: with no marker rows yet every strategy is "
+            "ABSENT from the mapping and must fall back to the key cursor "
+            f"(since_ms={t0_ms}). Got since_ms={first_since_ms!r}. A None here "
+            "means absent was collapsed into present-with-NULL — a full "
+            "re-fetch of all history for every key on the first tick after "
+            "this ships."
         )
 
         cursors = self._cursor_map(cursor_upserts_1)
@@ -3650,6 +3687,210 @@ class TestSyncCursorPerStrategyResume:
             f"outstanding window (since_ms={t0_ms}), not the advanced key "
             f"cursor. Got since_ms={since_ms!r}. A marker that is written but "
             "never read produces exactly this failure."
+        )
+
+    @pytest.mark.asyncio
+    async def test_crashed_fetch_does_not_clear_an_existing_hold(self):
+        """⛔ CR-01. A hold must survive an IDLE-LOOKING tick whose fetch
+        actually CRASHED.
+
+        `services.exchange.fetch_daily_pnl`'s OUTERMOST `except Exception`
+        logs, stamps `daily_pnl_fetch_error` and then RETURNS the
+        partially-built list, which is usually EMPTY. So `trades == []` means
+        either "the venue had nothing" or "the venue call crashed", and the
+        router has to read the flag to tell them apart.
+
+        THE LOSS IF IT DOES NOT: tick 1 holds strat-B at T0. Tick 2 pins the
+        window at T0 (correct), the venue call crashes, `trades == []`, a bare
+        `not trades` reads that as an idle tick, and strat-B's marker advances
+        to now — discarding a hold of ARBITRARY AGE. Its outstanding window is
+        then fetched by no later tick, ever. That is the same permanent
+        per-strategy loss this phase exists to close, re-entered through the
+        advance rule the phase itself added.
+        """
+        t0_ms = cron_mod.parse_since_ms(self.T0)
+        assert t0_ms is not None
+
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+
+        # ---- Tick 1: strat-B's storage RPC raises, so it is HELD at T0.
+        _r1, key_updates_1, cursor_upserts_1 = await self._run_tick(
+            key_row=_make_key_row(
+                strategy_ids=["strat-A", "strat-B"], last_sync_at=self.T0
+            ),
+            failing_strategy_ids={"strat-B"},
+            fetch_mock=fetch_mock,
+            trades=trades,
+        )
+        cursors_1 = self._cursor_map(cursor_upserts_1)
+        assert cursors_1["strat-B"] == self.T0, (
+            "precondition for this test: tick 1 must actually HOLD strat-B. "
+            f"got {cursors_1['strat-B']!r}"
+        )
+        key_cursor_after_1 = [
+            p["last_sync_at"] for p in key_updates_1 if "last_sync_at" in p
+        ][-1]
+
+        # ---- Tick 2: nothing fails, but the FETCH CRASHED — empty list plus
+        #      the flag. Every strategy stores 0 rows because there is nothing
+        #      to store, so only the idle disjunct can decide the outcome.
+        empty_fetch = AsyncMock(return_value=[])
+        _r2, _k2, cursor_upserts_2 = await self._run_tick(
+            key_row=_make_key_row(
+                strategy_ids=["strat-A", "strat-B"],
+                last_sync_at=key_cursor_after_1,
+                strategy_cursors=cursors_1,
+            ),
+            failing_strategy_ids=set(),
+            fetch_mock=empty_fetch,
+            trades=[],
+            dq_flags={"daily_pnl_fetch_error": True},
+        )
+        cursors_2 = self._cursor_map(cursor_upserts_2)
+        assert cursors_2["strat-B"] == self.T0, (
+            "THE HOLD MUST SURVIVE A CRASHED FETCH. strat-B was held at T0 and "
+            "tick 2's fetch raised inside fetch_daily_pnl, which swallows the "
+            "exception and returns an EMPTY list with daily_pnl_fetch_error "
+            "set. Advancing here discards a hold of arbitrary age and strands "
+            f"strat-B's outstanding window permanently. got {cursors_2['strat-B']!r}"
+        )
+
+        # ---- Tick 3: and the window it asks for is still strat-B's.
+        await self._run_tick(
+            key_row=_make_key_row(
+                strategy_ids=["strat-A", "strat-B"],
+                last_sync_at=key_cursor_after_1,
+                strategy_cursors=cursors_2,
+            ),
+            failing_strategy_ids=set(),
+            fetch_mock=fetch_mock,
+            trades=trades,
+        )
+        since_ms = fetch_mock.call_args.kwargs["since_ms"]
+        assert since_ms == t0_ms, (
+            "THE CONSEQUENCE: after a crashed idle tick the next real tick "
+            f"must still ask for strat-B's outstanding window (since_ms={t0_ms}); "
+            f"got {since_ms!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_genuinely_idle_tick_does_clear_the_hold(self):
+        """The control for the arm above, and it is what stops that arm from
+        passing against a marker that simply never advances. IDENTICAL tick 2,
+        except the fetch returned empty WITHOUT crashing — no flag. The hold
+        must then clear, because there is genuinely nothing outstanding.
+        """
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+        _r1, key_updates_1, cursor_upserts_1 = await self._run_tick(
+            key_row=_make_key_row(
+                strategy_ids=["strat-A", "strat-B"], last_sync_at=self.T0
+            ),
+            failing_strategy_ids={"strat-B"},
+            fetch_mock=fetch_mock,
+            trades=trades,
+        )
+        cursors_1 = self._cursor_map(cursor_upserts_1)
+        assert cursors_1["strat-B"] == self.T0
+        key_cursor_after_1 = [
+            p["last_sync_at"] for p in key_updates_1 if "last_sync_at" in p
+        ][-1]
+
+        _r2, _k2, cursor_upserts_2 = await self._run_tick(
+            key_row=_make_key_row(
+                strategy_ids=["strat-A", "strat-B"],
+                last_sync_at=key_cursor_after_1,
+                strategy_cursors=cursors_1,
+            ),
+            failing_strategy_ids=set(),
+            fetch_mock=AsyncMock(return_value=[]),
+            trades=[],
+            dq_flags=None,
+        )
+        cursors_2 = self._cursor_map(cursor_upserts_2)
+        assert cursors_2["strat-B"] != self.T0, (
+            "a CLEAN empty fetch is genuine evidence that nothing is "
+            "outstanding, so the hold must clear. If this ever fails, the fix "
+            "for the crashed-fetch case has over-reached into holding forever "
+            f"on every idle tick. got {cursors_2['strat-B']!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_null_marker_means_refetch_all_history_not_fall_back(self):
+        """⛔ CR-02. STATE (2) of the three-state contract — row PRESENT with a
+        NULL value, meaning "re-fetch from the start of history".
+
+        This is the state the migration spends a whole self-verify arm keeping
+        REPRESENTABLE (arm 7's `is_nullable` assertion) and that
+        `_strategy_resume_point`'s docstring warns about by name. Without this
+        arm nothing anywhere constructs it, so the canonical wrong resolver —
+
+            resolved = strategy_cursors.get(sid)
+            return resolved if resolved is not None else key_cursor
+
+        — passes the entire module green, because states (1) and (3) are the
+        only ones exercised and both implementations agree on those.
+
+        Production reachability: a key whose `last_sync_at` is NULL (the
+        first-ever sync — the largest payload and so the likeliest tick to hit
+        a deadlock) with a multi-strategy fan-out and one failing RPC. The
+        hold-write resolves to None and stores NULL. Under the wrong resolver
+        the next tick falls back to the key cursor that just advanced, and the
+        strategy's ENTIRE history is stranded.
+        """
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+
+        # ---- Tick 1 from a key that has NEVER synced.
+        _r1, key_updates_1, cursor_upserts_1 = await self._run_tick(
+            key_row=_make_key_row(
+                strategy_ids=["strat-A", "strat-B"], last_sync_at=None
+            ),
+            failing_strategy_ids={"strat-B"},
+            fetch_mock=fetch_mock,
+            trades=trades,
+        )
+        cursors_1 = self._cursor_map(cursor_upserts_1)
+        assert "strat-B" in cursors_1, (
+            "persist-on-hold: strat-B must still get a ROW. Absence would make "
+            f"this test measure state (1) instead of state (2). got {cursors_1!r}"
+        )
+        assert cursors_1["strat-B"] is None, (
+            "STATE (2) MUST BE WRITTEN, NOT SKIPPED: the key had never synced, "
+            "so strat-B's pre-tick resume point IS None and the marker must "
+            "record it as a present NULL — 'refetch from the start of "
+            f"history'. got {cursors_1['strat-B']!r}"
+        )
+
+        key_cursor_after_1 = [
+            p["last_sync_at"] for p in key_updates_1 if "last_sync_at" in p
+        ][-1]
+        assert key_cursor_after_1 is not None, (
+            "the KEY cursor must have advanced off NULL, otherwise tick 2 "
+            "below could pass for the trivial reason that nothing moved"
+        )
+
+        # ---- Tick 2: the key cursor is now a real timestamp, but strat-B's
+        #      marker is a present NULL and must dominate the floor.
+        await self._run_tick(
+            key_row=_make_key_row(
+                strategy_ids=["strat-A", "strat-B"],
+                last_sync_at=key_cursor_after_1,
+                strategy_cursors=cursors_1,
+            ),
+            failing_strategy_ids=set(),
+            fetch_mock=fetch_mock,
+            trades=trades,
+        )
+        since_ms = fetch_mock.call_args.kwargs["since_ms"]
+        assert since_ms is None, (
+            "ABSENT and PRESENT-WITH-NULL ARE DIFFERENT STATES. A present NULL "
+            "means refetch ALL history, so the window must be unbounded "
+            "(since_ms=None) even though the key cursor advanced. Got "
+            f"since_ms={since_ms!r} — that is the key cursor, which means the "
+            "resolver fell back instead of honouring the stored NULL, and "
+            "strat-B's entire history is stranded."
         )
 
     @pytest.mark.asyncio

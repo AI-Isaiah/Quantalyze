@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from services.db import get_supabase, rows
 from services.encryption import decrypt_credentials, get_kek
-from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions, EXCHANGE_CLASSES
+from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions, get_and_clear_last_dq_flags, EXCHANGE_CLASSES
 
 router = APIRouter(prefix="/api", tags=["cron"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -495,6 +495,21 @@ async def _sync_single_key(
                 strategy_ids, strategy_cursors, key_cursor_at_tick_start
             )
             trades = await fetch_all_trades(exchange, since_ms=since_ms)
+            # ⛔ DRAIN THE DQ FLAGS IMMEDIATELY AFTER THE AWAIT — the buffer is
+            #    a per-task ContextVar and a later call on the same task would
+            #    otherwise read stale flags. `services/job_worker.py` drains at
+            #    the same point; the cron path never did, which is the defect
+            #    below.
+            #
+            # ⭐ WHY THIS IS READ AT ALL. `fetch_daily_pnl`'s OUTERMOST
+            #    `except Exception` logs, stamps `daily_pnl_fetch_error` and
+            #    then RETURNS the partially-built list — frequently EMPTY. So
+            #    an empty `trades` conflates "the venue has nothing in this
+            #    window" with "the venue call crashed". That function's own
+            #    comment says the flag exists precisely so a caller can tell
+            #    those apart; until now this caller never looked.
+            fetch_dq_flags = get_and_clear_last_dq_flags()
+            fetch_degraded = bool(fetch_dq_flags.get("daily_pnl_fetch_error"))
             account_balance = await fetch_usdt_balance(exchange)
         finally:
             await aclose_exchange(exchange)
@@ -772,7 +787,29 @@ async def _sync_single_key(
         strategy_cursor_rows: list[dict[str, Any]] = []
         held_strategy_ids: list[str] = []
         for sid in strategy_ids:
-            strategy_advances = (not trades) or (
+            # ⛔ THE IDLE DISJUNCT IS EVIDENCE-BASED, AND IT MUST STAY THAT WAY.
+            #    `not trades` is only proof that nothing is outstanding when the
+            #    fetch actually SUCCEEDED and returned nothing. When
+            #    `fetch_daily_pnl` swallows an exception it returns an empty
+            #    list with `daily_pnl_fetch_error` set, and a bare `not trades`
+            #    would then read a crashed fetch as an idle tick.
+            #
+            #    THE CONSEQUENCE IF THIS CONJUNCT IS DROPPED, and it is the
+            #    exact loss this phase exists to close, re-entered through the
+            #    new advance rule: tick 1 holds strat-B at T0 because its
+            #    `sync_trades` raised. Tick 2 correctly pins the window at T0,
+            #    the venue call crashes, `trades == []`, `not trades` is True,
+            #    and strat-B's marker ADVANCES to now — discarding a hold of
+            #    arbitrary age. Its `[T0, now)` window is then fetched by no
+            #    later tick, permanently.
+            #
+            # ⚠️ The KEY-level `should_advance_cursor` deliberately keeps the
+            #    bare `(not trades)` form and is byte-identical to main. That
+            #    is not an inconsistency: the key cursor advancing is C-0198's
+            #    accepted behaviour, and the whole point of the marker is to
+            #    SURVIVE that advance. A marker that clears itself on the same
+            #    evidence would be no marker at all.
+            strategy_advances = ((not trades) and not fetch_degraded) or (
                 per_strategy_stored.get(sid, 0) > 0
                 and sid not in recompute_enqueue_errors
             )
