@@ -415,12 +415,27 @@ async def _sync_single_key(
         # already pointed past them. With this gate, a 100%-RPC-failure tick
         # leaves the cursor alone so the next tick retries the same window.
         #
+        # 2026-09-19 FANOUT-COHORT-SYNC-CONSTANT-01 / D-03 — the idle-tick
+        # test must be "no trades were fetched at all" (`not trades`), not
+        # "nothing to store" (`not (trades and strategy_ids)`). The latter
+        # also fired when `strategy_ids` was empty (no strategy on this key
+        # was currently eligible), even though real trades WERE fetched —
+        # the per-strategy RPC loop is itself gated on
+        # `if trades and strategy_ids:`, so it never ran and
+        # `per_strategy_stored` stayed `{}`, making `synced_count == 0`
+        # structurally, not because anything failed. That collapsed a
+        # genuinely idle tick with a tick that fetched real trades and
+        # stored none, wrongly advancing the cursor and losing those trades
+        # on the next tick. Dropping `bool(strategy_ids)` from the gate
+        # fixes this without inventing a new gate shape: `synced_count > 0`
+        # is the same disjunct C-0198 already established, and it is
+        # already structurally zero whenever `strategy_ids` is empty.
+        #
         # Balance updates are independent of the cursor gate — fetching the
         # USDT balance succeeded if we got here, and stashing it doesn't
         # affect trade replay semantics.
         synced_count = sum(per_strategy_stored.values())
-        any_trades_to_store = bool(trades) and bool(strategy_ids)
-        should_advance_cursor = (not any_trades_to_store) or synced_count > 0
+        should_advance_cursor = (not trades) or synced_count > 0
 
         update_data: dict[str, Any] = {}
         if should_advance_cursor:
@@ -430,13 +445,23 @@ async def _sync_single_key(
         if update_data:
             supabase.table("api_keys").update(update_data).eq("id", key_id).execute()
         if not should_advance_cursor:
-            logger.warning(
-                "cron_sync: key %s held last_sync_at unchanged — %d trade(s) "
-                "fetched but 0 stored (all per-strategy RPCs failed); next "
-                "tick will retry the same window",
-                key_id,
-                len(trades),
-            )
+            if not strategy_ids:
+                logger.warning(
+                    "cron_sync: key %s held last_sync_at unchanged — %d "
+                    "trade(s) fetched but no strategy on this key was "
+                    "currently eligible to receive them; next tick will "
+                    "retry the same window",
+                    key_id,
+                    len(trades),
+                )
+            else:
+                logger.warning(
+                    "cron_sync: key %s held last_sync_at unchanged — %d trade(s) "
+                    "fetched but 0 stored (all per-strategy RPCs failed); next "
+                    "tick will retry the same window",
+                    key_id,
+                    len(trades),
+                )
 
         # audit-2026-05-07 C-0197 / 2026-06-01 root-cause fix — trigger an
         # analytics recompute for strategies that received new trades.
