@@ -3426,6 +3426,55 @@ class TestCronSyncPsDataDirGuardRemoved:
 _SYNC_CURSOR_TABLE = "strategy_sync_cursors"
 
 
+class TestResumeFloorEmptyFanOutFallsBackToKeyCursor:
+    """164.5.1.4 IN-01: `_resume_floor_ms`'s no-eligible-strategies branch.
+
+    ⛔ WHY THIS ARM EXISTS. MEASURED: mutating
+    `if not strategy_ids: return parse_since_ms(key_cursor)` to `return None`
+    left the whole suite GREEN. The branch is reached by every key whose
+    strategies are all archived, draft-only, or otherwise outside
+    `ALLOWED_STRATEGY_STATUSES` — not an exotic state — and `None` means "start
+    of history" to `fetch_all_trades`. So the regression is a key that
+    re-fetches its ENTIRE trade history from the venue every 15 minutes,
+    forever, with nothing anywhere reporting it: no exception, no error field,
+    no status change. It is also precisely the direction `KEY_SYNC_TIMEOUT`
+    turns into a whole-key outage.
+
+    The branch is pre-phase behaviour preserved, which is exactly why it was
+    easy to leave unpinned: nothing about it is new, so no new test covered it.
+    """
+
+    T0 = "2026-01-15T00:00:00+00:00"
+
+    def test_no_eligible_strategies_parses_the_key_cursor(self):
+        t0_ms = cron_mod.parse_since_ms(self.T0)
+        assert t0_ms is not None, (
+            "T0 must parse — otherwise the expected value below is None and "
+            "the mutant this arm exists to kill would pass"
+        )
+
+        # A NON-EMPTY marker mapping, holding a strategy that is NOT in the
+        # (empty) eligible list. This is the realistic shape — markers outlive
+        # a strategy's eligibility — and it makes the assertion measure the
+        # branch rather than an incidentally-empty mapping.
+        floor = cron_mod._resume_floor_ms(
+            [],
+            {"strat-archived": "2020-01-01T00:00:00+00:00"},
+            self.T0,
+        )
+
+        assert floor == t0_ms, (
+            "a key with no eligible strategy must fall back to parsing its OWN "
+            "cursor, preserving pre-phase behaviour exactly. Got "
+            f"{floor!r}, expected {t0_ms!r}"
+        )
+        assert floor is not None, (
+            "and it must NOT be None: None means 'start of history', so this "
+            "key would re-fetch its entire trade history from the venue on "
+            "every 15-minute tick, forever, with no error surfaced anywhere"
+        )
+
+
 class TestSyncCursorPerStrategyResume:
     """164.5.1.4: a partial fan-out must leave the FAILED strategy's trade
     window re-drivable on the NEXT tick.
