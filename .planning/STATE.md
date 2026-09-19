@@ -4,12 +4,12 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.8.4
 current_phase_name: GATERESIDUE
-status: executing
+status: "Phase 164.8.4 shipped — PR #825, merged 69ff882e, v0.79.2.0"
 stopped_at: Completed 164.1.1.1-02-PLAN.md
-last_updated: "2026-09-19T07:16:06.606Z"
-last_activity: 2026-09-18
-last_activity_desc: Phases 164.11 DEPLOYGATE and 164.10 BODYDRIFT REMOVED via /gsd-phase --remove after both premises were falsified by measurement — 164.11 cancelled (Railway deploys the LATEST commit, so a skipped analytics change is carried by the next green merge; the skip costs latency, not the change) and 164.10 closed by founder decision (c) (all three PROD function bodies read behaviourally identical; the drift is RAISE wording and one written-but-never-read local, from the eaaed7e0 backfill). Reasoning preserved in TODOS.md, not lost with the entries. Shipped v0.79.1.0 (deploy verifier stops withholding the deploy it verifies) and v0.79.1.1 (allowlist stops asserting a difference that is not there).
-state_head: 963042274ef8fe8071999fe501885b778e2651a5
+last_updated: "2026-09-19T11:28:14.015Z"
+last_activity: 2026-09-19
+last_activity_desc: Phase 164.8.4 GATERESIDUE shipped as PR #825 (merged 69ff882e, v0.79.2.0) — the psql-stderr redaction becomes ONE shared definition with 0 inline copies repo-wide, the staged diagnostic-channel allowlist is DERIVED rather than hand-typed, the ledger drift check stops claiming a withhold it was not performing, and a fail-loud guard against inherited live-DB credentials lands in the vitest bootstrap. Root cause fixed: `sed -i -E -f` is BSD-incompatible, so CI was green over a locally broken suite. Verified 4/4, SECURED 24/24 (threats_open 0), two review rounds ending with zero actionable findings. Two residuals booked in TODOS.md and deliberately not fixed.
+state_head: 69ff882eb1fbd38251a6db51716874e4e795a94f
 progress:
   total_phases: 43
   completed_phases: 27
@@ -475,7 +475,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Phase 164.8.2 shipped — PR #822
+Status: Phase 164.8.4 shipped — PR #825, merged 69ff882e, v0.79.2.0
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -491,7 +491,7 @@ Status: Phase 164.8.2 shipped — PR #822
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-18 — Phase 164.8.2 round-2/3 closeout shipped as PR #822 (v0.79.0.0)
+Last activity: 2026-09-19 — Phase 164.8.4 GATERESIDUE shipped as PR #825 (v0.79.2.0), merged 69ff882e with 27 checks green and main CI confirmed running on the merge SHA
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
