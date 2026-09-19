@@ -209,6 +209,7 @@ def _make_mock_supabase_for_cron_sync(
     pa_data: list[dict] | None = None,
     rpc_data: int | None = 1,
     update_data: list[dict] | None = None,
+    sc_data: list[dict] | None = None,
 ) -> MagicMock:
     """Build a MagicMock supabase client wired for end-to-end cron_sync
     integration tests. Each table name dispatches to its own chain so
@@ -227,6 +228,22 @@ def _make_mock_supabase_for_cron_sync(
     - update_data: rows returned by api_keys UPDATE; defaults to one
       row so the deactivation-no-op detection path isn't accidentally
       tripped.
+    - sc_data: rows returned by the `strategy_sync_cursors` SELECT
+      (164.5.1.4), shaped `{"strategy_id": ..., "last_sync_at": ...}`.
+      Defaults to an empty list, which is the state the migration lands
+      in: no marker rows, every strategy falls back to its key's cursor.
+      ⚠️ Serving this table is LOAD-BEARING for any test that touches the
+      marker read, and the failure mode is SILENT. MEASURED: with no chain
+      for it, `.select(...).in_(...).execute()` returns a bare MagicMock
+      whose `.data` iterates EMPTY (MagicMock auto-configures `__iter__` to
+      `iter([])`), so `rows()` yields nothing, NOTHING raises, the fail-open
+      wrapper never fires, and no `strategy_cursor_lookup_error` appears in
+      the response. Every key just gets an empty mapping — the wiring is
+      permanently green and permanently unexercised at the same time, with
+      no signal anywhere that it was never tested.
+      The marker UPSERT on the same chain is captured, not absorbed: read
+      the payloads back off `mock_supabase.strategy_cursor_upserts`, which
+      this helper attaches to the returned mock.
     """
     if ps_data is None:
         ps_data = []
@@ -234,6 +251,8 @@ def _make_mock_supabase_for_cron_sync(
         pf_data = [{"id": r["portfolio_id"]} for r in ps_data]
     if pa_data is None:
         pa_data = []
+    if sc_data is None:
+        sc_data = []
     if update_data is None:
         update_data = [{"id": r.get("id", "key-1")} for r in keys_data]
 
@@ -270,7 +289,32 @@ def _make_mock_supabase_for_cron_sync(
     update_chain = MagicMock()
     update_chain.eq.return_value.execute.return_value = MagicMock(data=update_data)
 
+    # 164.5.1.4 — `strategy_sync_cursors`. The literal is repeated here rather
+    # than imported from `routers.cron` for the same reason `_SYNC_CURSOR_TABLE`
+    # further down this file states: the STRING is what reaches PostgREST, so a
+    # test that spelled it via the module constant would keep passing if the
+    # production table name were renamed underneath it.
+    strategy_cursor_upserts: list[Any] = []
+    sc_chain = MagicMock()
+    sc_chain.select.return_value.in_.return_value.execute.return_value = MagicMock(
+        data=sc_data
+    )
+
+    def _sc_upsert(payload: Any, *args: Any, **kwargs: Any):
+        # An explicit branch, not a bare mock: a bare mock accepts
+        # `.upsert(...).execute()` silently and captures NOTHING, so an
+        # implementation that never wrote a marker would be indistinguishable
+        # from one that did.
+        strategy_cursor_upserts.append(payload)
+        ups = MagicMock()
+        ups.execute.return_value = MagicMock(data=payload)
+        return ups
+
+    sc_chain.upsert.side_effect = _sc_upsert
+
     def _table(name: str):
+        if name == "strategy_sync_cursors":
+            return sc_chain
         if name == "api_keys":
             t = MagicMock()
             t.select.return_value.eq.return_value.execute.return_value = (
@@ -294,6 +338,9 @@ def _make_mock_supabase_for_cron_sync(
     else:
         rpc_chain.execute.return_value = MagicMock(data=rpc_data)
     mock_supabase.rpc.return_value = rpc_chain
+
+    # Captured `strategy_sync_cursors` upsert payloads, in call order.
+    mock_supabase.strategy_cursor_upserts = strategy_cursor_upserts
 
     return mock_supabase
 
@@ -3765,3 +3812,228 @@ class TestSyncCursorPerStrategyResume:
             "and the recompute strat-B never got must actually be RE-ATTEMPTED "
             f"on tick 2; issued RPCs were {rpc_calls_2!r}"
         )
+
+
+class TestCronSyncDeliversStrategyCursorsToFanOut:
+    """164.5.1.4: the marker mapping must reach the fan-out through the REAL
+    `cron_sync` entry point, not only through a hand-built key row.
+
+    ⚠️ Until `_make_mock_supabase_for_cron_sync` served this table, every
+    `cron_sync` test in this file reached the marker SELECT through a bare
+    MagicMock whose `.data` iterates EMPTY, so every key got an empty mapping
+    with NOTHING raised and no error field in the response — the wiring plan 02
+    added was green and unexercised at the same time, with no signal that it
+    was untested. MEASURED by removing the helper's chain and re-running this
+    test: the mapping came back `{}` and `strategy_cursor_lookup_error` was
+    absent, so even the fail-open signal would not have caught it. That is the
+    vacuity class this repo ranks above ordinary correctness, and it is what
+    this test exists to close.
+    """
+
+    T0 = "2026-01-15T00:00:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_marker_mapping_reaches_the_fan_out_and_the_write_is_issued(self):
+        import copy
+        import sys as _sys
+        import routers.portfolio as portfolio_mod
+        _sys.modules["routers.portfolio"] = portfolio_mod
+
+        # One key, two ELIGIBLE strategies. A marker row is served for strat-A
+        # and none for strat-B — the asymmetry is the whole point.
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "binance",
+                    "last_sync_at": self.T0,
+                    "strategies": [
+                        {"id": "strat-A", "status": "published"},
+                        {"id": "strat-B", "status": "published"},
+                    ],
+                }
+            ],
+            ps_data=[],
+            sc_data=[{"strategy_id": "strat-A", "last_sync_at": self.T0}],
+        )
+
+        captured_key_rows: list[dict[str, Any]] = []
+        real_sync_key = cron_mod._sync_key_with_timeout
+
+        async def _spy(key_row: dict[str, Any], kek: bytes):
+            # Deep-copy at capture time: the row is a live dict and asserting
+            # on a reference would measure its final state, not the state the
+            # fan-out was handed.
+            captured_key_rows.append(copy.deepcopy(key_row))
+            return await real_sync_key(key_row, kek)
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "_sync_key_with_timeout", _spy):
+            response = await cron_mod.cron_sync()
+
+        # Non-vacuity: the fan-out must actually have run, and the fail-open
+        # branch must NOT have been taken. Either one would make every
+        # assertion below quantify over an empty mapping and pass for the
+        # wrong reason.
+        assert len(captured_key_rows) == 1, captured_key_rows
+        assert "strategy_cursor_lookup_error" not in response, (
+            "the marker SELECT fell into its fail-open branch, so the mapping "
+            "was empty for a reason that has nothing to do with the wiring: "
+            f"{response.get('strategy_cursor_lookup_error')!r}"
+        )
+
+        mapping = captured_key_rows[0]["strategy_cursors"]
+        assert mapping == {"strat-A": self.T0}, (
+            "the served marker must reach the fan-out with its value intact, "
+            "and the UNSERVED strategy must be ABSENT from the mapping rather "
+            "than present with a null — absence means 'fall back to the key "
+            "cursor' while a present null means 'refetch all history', and "
+            f"only absence keeps this change inert on arrival. Got {mapping!r}"
+        )
+        assert "strat-B" not in mapping, (
+            "membership, not a null value, is the read-path contract; "
+            f"got {mapping!r}"
+        )
+
+        # And the WRITE is issued through the same real entry point, batched.
+        upserts = mock_supabase.strategy_cursor_upserts
+        assert len(upserts) == 1, (
+            "exactly one batched marker upsert per key, not one per strategy; "
+            f"got {len(upserts)} call(s): {upserts!r}"
+        )
+        written = {row["strategy_id"] for row in upserts[0]}
+        assert written == {"strat-A", "strat-B"}, (
+            "every strategy in the fan-out gets a row, held or advancing; "
+            f"got {written!r}"
+        )
+
+
+class TestHeldStrategyMarkersAreNamedInTheEnvelope:
+    """164.5.1.4: a tick that HOLDS one or more strategies must say so.
+
+    The hold is correct and deliberate — it is what makes the outstanding
+    window re-drivable — but it is not free: `fetch_all_trades` runs ONCE per
+    key, so the key's window stays pinned at the earliest held resume point and
+    the range re-fetched grows every tick until the hold clears. That growth is
+    precedented (the `held` SyncStatus already documents and accepts the same
+    thing at key level) and the re-fetch is idempotent, so it is an efficiency
+    cost rather than a correctness one — and it is ACCEPTED, not deferred.
+
+    ⛔ What would make it a defect is being invisible, inferable only from the
+    ABSENCE of an advancing row. So it is named in the envelope and in a
+    warning. These two tests pin that it is named when it happens and, just as
+    importantly, NOT named when it does not.
+    """
+
+    T0 = TestSyncCursorPerStrategyResume.T0
+
+    # Reuses the two-tick class's `_run_tick` rather than a fourth dispatcher
+    # shape: it is the only stub in this file that can fail the storage RPC and
+    # the enqueue RPC independently, which is what these cases need.
+    # ⚠️ Re-wrapped in `staticmethod`: reading it off the other class yields the
+    # plain function, and a plain function bound as a class attribute would be
+    # called with `self` as a positional argument it does not accept.
+    _run_tick = staticmethod(TestSyncCursorPerStrategyResume._run_tick)
+
+    @pytest.mark.asyncio
+    async def test_held_strategies_are_named_in_the_envelope(self, caplog):
+        import logging
+
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+        key_row = _make_key_row(
+            strategy_ids=["strat-A", "strat-B"],
+            last_sync_at=self.T0,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result, _updates, _upserts = await self._run_tick(
+                key_row=key_row,
+                failing_strategy_ids={"strat-B"},
+                fetch_mock=fetch_mock,
+                trades=trades,
+            )
+
+        assert result["strategy_cursors_held"] == ["strat-B"], (
+            "the held strategy must be NAMED in the key's envelope — an "
+            "operator reading the summary should not have to infer the hold "
+            f"from the absence of a row. Got {result.get('strategy_cursors_held')!r}"
+        )
+        assert "strat-A" not in result["strategy_cursors_held"], (
+            "strat-A advanced; naming it would make the field useless"
+        )
+
+        # WHY (Rule 9): the log must state the CONSEQUENCE, not merely the
+        # fact. "strat-B was held" tells an operator nothing actionable; "the
+        # whole key's re-fetched range grows every tick until it clears" is the
+        # thing they need in order to decide whether to intervene.
+        held_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno >= logging.WARNING and "held the per-strategy" in r.getMessage()
+        ]
+        assert len(held_lines) == 1, (
+            "exactly ONE warning per key, not one per held strategy; got "
+            f"{held_lines!r}"
+        )
+        assert "strat-B" in held_lines[0], held_lines[0]
+        assert "grows every tick" in held_lines[0], (
+            "the line must state what the hold costs, or it is a fact without "
+            f"a consequence; got {held_lines[0]!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_tick_that_holds_nothing_adds_no_field(self, caplog):
+        import logging
+
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+        key_row = _make_key_row(
+            strategy_ids=["strat-A", "strat-B"],
+            last_sync_at=self.T0,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result, _updates, upserts = await self._run_tick(
+                key_row=key_row,
+                failing_strategy_ids=set(),
+                fetch_mock=fetch_mock,
+                trades=trades,
+            )
+
+        # Non-vacuity: this must be a tick that really DID advance both
+        # markers, not one where the marker block never ran at all — otherwise
+        # "no field" would be true for the wrong reason.
+        assert result["status"] == "ok", result
+        written = {row["strategy_id"] for payload in upserts for row in payload}
+        assert written == {"strat-A", "strat-B"}, written
+
+        assert "strategy_cursors_held" not in result, (
+            "a conditional field that is always present is not conditional: a "
+            "tick where every strategy advanced must add NO held key at all. "
+            f"Got {result.get('strategy_cursors_held')!r}"
+        )
+        assert not [
+            r for r in caplog.records if "held the per-strategy" in r.getMessage()
+        ], "nothing was held, so nothing may be logged as held"

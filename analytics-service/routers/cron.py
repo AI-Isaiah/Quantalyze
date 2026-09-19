@@ -756,11 +756,14 @@ async def _sync_single_key(
         # single tick writes are mutually comparable.
         marker_now = datetime.now(timezone.utc).isoformat()
         strategy_cursor_rows: list[dict[str, Any]] = []
+        held_strategy_ids: list[str] = []
         for sid in strategy_ids:
             strategy_advances = (not trades) or (
                 per_strategy_stored.get(sid, 0) > 0
                 and sid not in recompute_enqueue_errors
             )
+            if not strategy_advances:
+                held_strategy_ids.append(sid)
             strategy_cursor_rows.append(
                 {
                     "strategy_id": sid,
@@ -775,6 +778,43 @@ async def _sync_single_key(
                     # writer sets `updated_at` in its own payload.
                     "updated_at": marker_now,
                 }
+            )
+
+        # 164.5.1.4 SYNCCURSOR — NAME the held strategies and what holding them
+        # costs, once per key.
+        #
+        # ⭐ THIS IS AN ACCEPTED TRADEOFF MADE VISIBLE, NOT A DEFECT LEFT OPEN.
+        # The marker is per-STRATEGY but `fetch_all_trades` is per-KEY and runs
+        # once, so `_resume_floor_ms` takes the EARLIEST resume point across the
+        # key's eligible strategies: one persistently-held strategy pins the
+        # whole key's fetch window at its resume point, and the range re-fetched
+        # grows every tick until the hold clears. That growth is precedented —
+        # the `held` SyncStatus comment above already documents and accepts
+        # exactly the same growth at KEY level — and it is an efficiency cost on
+        # a re-fetch that is idempotent by construction (`sync_trades` deletes
+        # payload-window-scoped before re-inserting), not a correctness or
+        # user-facing loss. What WOULD be a defect is the degradation being
+        # invisible, inferable only from the ABSENCE of an advancing row. So it
+        # is surfaced: `strategy_cursors_held` in the envelope for the summary
+        # alarm, and one WARNING per key here.
+        #
+        # ⛔ Deliberately NOT a new `SyncStatus` value. That vocabulary is a
+        # registry the summary counters are DERIVED from, it describes the KEY's
+        # outcome, and this is orthogonal to it: a key whose trades all landed
+        # while one strategy's recompute enqueue failed is correctly `ok`, and a
+        # key with a genuine storage failure is correctly `partial`.
+        if held_strategy_ids:
+            logger.warning(
+                "cron_sync: key %s held the per-strategy resume point for "
+                "%d of %d strategy(ies) (%s) — their windows are re-drivable "
+                "next tick, and because the fetch is per-key the whole key's "
+                "window stays pinned at the earliest held resume point, so the "
+                "range re-fetched grows every tick until the hold clears "
+                "(accepted: the re-fetch is idempotent)",
+                key_id,
+                len(held_strategy_ids),
+                len(strategy_ids),
+                ", ".join(held_strategy_ids),
             )
 
         strategy_cursor_write_error: str | None = None
@@ -872,6 +912,13 @@ async def _sync_single_key(
         # which reflects trade PERSISTENCE: the trades did land.
         if strategy_cursor_write_error:
             result["strategy_cursor_write_error"] = strategy_cursor_write_error
+        # 164.5.1.4 SYNCCURSOR — the held set, CONDITIONALLY, in the same style
+        # as `recompute_enqueue_errors` above. A tick that holds nothing adds no
+        # key at all: a "conditional" field that is always present is not
+        # conditional, and an always-empty list in every healthy tick's envelope
+        # is noise the summary alarm would learn to ignore.
+        if held_strategy_ids:
+            result["strategy_cursors_held"] = held_strategy_ids
         return result
 
     except Exception as e:
