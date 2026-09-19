@@ -6386,3 +6386,157 @@ describe("[164.8.4-02] every captured psql output is redacted before it is echoe
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// [164.8.4-02] Task 3 — the survivor gate (no hand-copied redaction
+// expression survives outside the shared definition) and the marker-
+// collision gate (the redaction cannot alter what the sql-tests job's
+// anti-skip mechanism reads). Both DERIVE their subjects from disk — the
+// shipped scripts/redact-psql-stderr.sed for the former,
+// supabase/tests/*.sql for the latter — so a seventh expression or a new
+// marker extends either gate with no test edit.
+// ---------------------------------------------------------------------------
+
+/**
+ * The MATCH-PATTERN half of a `s#PATTERN#REPLACEMENT#FLAGS` sed expression —
+ * the substring that would appear verbatim in a hand-copied `-e '…'` block.
+ * None of the six shipped expressions embed a literal `#` in either half;
+ * this throws (a MEASURE_FAIL, not a silent mis-derivation) the day that
+ * assumption breaks.
+ */
+function sedMatchPattern(expr: string): string {
+  const parts = expr.split("#");
+  if (parts.length !== 4) {
+    throw new Error(
+      `MEASURE_FAIL: "${expr}" does not split into exactly 4 '#'-delimited segments (s#PATTERN#REPLACEMENT#FLAGS) — a shipped expression now embeds a literal '#', and needle derivation can no longer assume simple splitting`,
+    );
+  }
+  return parts[1] as string;
+}
+
+/** One needle per shipped expression, derived fresh from disk every call. */
+function survivorNeedles(): string[] {
+  return redactionExpressions(REDACT_SED).map(sedMatchPattern);
+}
+
+/**
+ * TRUE only when the derived needle set is non-empty AND none of its
+ * needles appear in comment-stripped text — i.e. no hand-copied expression
+ * survives outside scripts/redact-psql-stderr.sed. Asserting how MANY
+ * needles there are, or how many blocks were converted, is the count-
+ * pinning overclaim SC-1 forbids by name; only the structural invariant is
+ * asserted.
+ */
+function noNeedleSurvivesOutsideSharedDefinition(text: string): boolean {
+  const needles = survivorNeedles();
+  if (needles.length === 0) return false;
+  const live = stripComments(text);
+  return needles.every((n) => !live.includes(n));
+}
+
+describe("[164.8.4-02] no hand-copied redaction expression survives outside the shared definition", () => {
+  it("the derived needle set is non-empty — a definition file gone missing or emptied cannot read as a clean pass", () => {
+    expect(
+      survivorNeedles().length,
+      `${REDACT_SED_PATH} parsed to zero expressions — either the file is empty/all-comment or redactionExpressions() no longer agrees with its own shape`,
+    ).toBeGreaterThan(0);
+  });
+
+  it("no hand-copied redaction expression survives outside the shared definition, in either workflow", () => {
+    expect(
+      noNeedleSurvivesOutsideSharedDefinition(CI),
+      `a pattern from ${REDACT_SED_PATH} was found verbatim in ci.yml outside a comment — a hand-copied inline redaction expression survived the sweep and belongs in ${REDACT_SED_PATH} instead`,
+    ).toBe(true);
+    expect(
+      noNeedleSurvivesOutsideSharedDefinition(WF),
+      `a pattern from ${REDACT_SED_PATH} was found verbatim in ${WF_PATH} outside a comment — a hand-copied inline redaction expression survived the sweep and belongs in ${REDACT_SED_PATH} instead`,
+    ).toBe(true);
+  });
+
+  it("re-inserting a derived expression into ci.yml flips the gate, naming the expression", () => {
+    const needle = survivorNeedles()[0] as string;
+    calibrate(
+      `re-inserting the DSN-userinfo pattern ("${needle}") as an inline \`-e\` block must flip this gate — it belongs only in ${REDACT_SED_PATH}`,
+      (s) => `${s}\n          sed -E -e 's#${needle}#\\1***@#g' "$x"\n`,
+      noNeedleSurvivesOutsideSharedDefinition,
+      CI,
+    );
+  });
+
+  it("re-inserting a derived expression into test-restore-from-baseline.yml flips the gate, naming the expression", () => {
+    const needle = survivorNeedles()[0] as string;
+    calibrate(
+      `re-inserting the DSN-userinfo pattern ("${needle}") as an inline \`-e\` block must flip this gate — it belongs only in ${REDACT_SED_PATH}`,
+      (s) => `${s}\n          sed -E -e 's#${needle}#\\1***@#g' "$x"\n`,
+      noNeedleSurvivesOutsideSharedDefinition,
+      WF,
+    );
+  });
+});
+
+const SUPABASE_TESTS_DIR = join(ROOT, "supabase", "tests");
+
+/**
+ * Every skip marker, partial-skip pattern and arms sentinel the `sql-tests`
+ * job's anti-skip mechanism greps for, extracted from `supabase/tests/*.sql`
+ * with the SAME expressions the workflow itself uses (mirrors Task 2's own
+ * `<verify>` extraction, so the TS gate and the shipped bash measurement
+ * agree on what "the corpus" is).
+ */
+function antiSkipMarkers(): string[] {
+  const files = readdirSync(SUPABASE_TESTS_DIR).filter((f) =>
+    f.endsWith(".sql"),
+  );
+  const out = new Set<string>();
+  for (const f of files) {
+    const body = readFileSync(join(SUPABASE_TESTS_DIR, f), "utf8");
+    const skipRe = /RAISE NOTICE 'SKIP: ([^'%]{0,60})/g;
+    let m: RegExpExecArray | null;
+    while ((m = skipRe.exec(body)) !== null) out.add(m[1] as string);
+    const partialRe =
+      /SKIP \([^)]*\)|SKIP Part [0-9]+|PASS WITH [0-9]+ SKIPS?|ALL [0-9]+ ARMS EXECUTED/g;
+    while ((m = partialRe.exec(body)) !== null) out.add(m[0]);
+  }
+  return [...out].sort();
+}
+
+const ANTI_SKIP_MARKERS_TEXT = antiSkipMarkers().join("\n");
+
+/**
+ * TRUE only when the corpus is non-empty AND running the shipped redaction
+ * definition over it (as one block, matching how the workflow redacts a
+ * whole captured file at once) returns it byte-identical.
+ */
+function markersSurviveRedaction(corpusText: string): boolean {
+  const markers = corpusText.split("\n").filter((l) => l.length > 0);
+  if (markers.length === 0) return false;
+  const withNL = corpusText.endsWith("\n") ? corpusText : `${corpusText}\n`;
+  return runRedaction(withNL) === withNL;
+}
+
+describe("[164.8.4-02] no anti-skip marker is altered by the shared redaction", () => {
+  it("no anti-skip marker is altered by the shared redaction, and an altered one is named", () => {
+    const markers = antiSkipMarkers();
+    expect(
+      markers.length,
+      "no skip marker, partial-skip pattern or arms sentinel was extracted from supabase/tests/*.sql — an empty corpus would make this check vacuously TRUE, which is worse than no gate",
+    ).toBeGreaterThan(0);
+
+    for (const mk of markers) {
+      const withNL = `${mk}\n`;
+      expect(
+        runRedaction(withNL),
+        `the shared redaction rewrites the anti-skip marker "${mk}" — the sql-tests job's own grep for this text would then match NOTHING (a silent-green outcome), because the redaction runs on the SAME captured file the anti-skip greps read afterward`,
+      ).toBe(withNL);
+    }
+
+    // ⛔ Synthetic placeholder only (db.example, this repo's own convention)
+    // — never a real host, role or connection string.
+    calibrate(
+      "every anti-skip marker survives the shared redaction byte-identical; a synthetic marker carrying a masked shape must flip this",
+      (s) => `${s}\nhost=db.example synthetic-marker-carrying-a-masked-shape\n`,
+      markersSurviveRedaction,
+      ANTI_SKIP_MARKERS_TEXT,
+    );
+  });
+});
