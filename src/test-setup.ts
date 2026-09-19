@@ -84,7 +84,7 @@ const LIVE_DB_INHERITANCE_REMEDY =
  */
 export function assertLiveDbWasIntended(
   hasLiveDb: boolean,
-  env: NodeJS.ProcessEnv,
+  env: Record<string, string | undefined>,
 ): void {
   if (hasLiveDb && env.VITEST_LIVE_DB_INTENDED !== VITEST_LIVE_DB_INTENDED_VALUE) {
     throw new Error(LIVE_DB_INHERITANCE_REMEDY);
