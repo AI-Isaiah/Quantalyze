@@ -6205,3 +6205,71 @@ describe("[164.8.4-01] the shared redaction definition masks every shape psql ca
     },
   );
 });
+
+describe("[164.8.4-01] every reference to the shared redaction definition is workspace-rooted", () => {
+  // ⛔ THE MEASURED CAUSE this gate exists to hold: the `python` job declares
+  // `defaults: run: working-directory: analytics-service`, so a BARE relative
+  // `scripts/redact-psql-stderr.sed` reference would not resolve there — and
+  // the call site's own trailing `|| true` SWALLOWS that failure, so a
+  // relative reference does not error loudly, it redacts NOTHING.
+  const BASENAME = REDACT_SED_PATH.split("/").pop() as string;
+  const WORKSPACE_ROOTED_REF = `\${GITHUB_WORKSPACE}/scripts/${BASENAME}`;
+  // Both workflow files are scanned together — Plan 02 converts the remaining
+  // sites in test-restore-from-baseline.yml; this plan converts exactly one
+  // site in ci.yml. Combining them means the subject set already reflects the
+  // eventual full surface without this gate needing to change shape later.
+  const COMBINED_WORKFLOWS = `${CI}\n${WF}`;
+
+  function stripYamlComments(text: string): string {
+    return text
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+  }
+
+  /** Every LIVE line naming the shared definition's basename. */
+  function referenceLines(text: string): string[] {
+    return stripYamlComments(text)
+      .split("\n")
+      .filter((line) => line.includes(BASENAME));
+  }
+
+  /**
+   * TRUE only when the subject set is non-empty AND every reference in it
+   * carries the workspace variable and the `scripts/` segment immediately
+   * before the basename. An empty subject set is explicitly FALSE, never a
+   * vacuous pass — the repo's own anti-vacuity rule, and this gate is squarely
+   * inside it: a credential reaching a public log is data-integrity.
+   */
+  function allReferencesWorkspaceRooted(text: string): boolean {
+    const lines = referenceLines(text);
+    if (lines.length === 0) return false;
+    return lines.every((line) => line.includes(WORKSPACE_ROOTED_REF));
+  }
+
+  it("the subject set is non-empty — a gate over zero references is not a gate", () => {
+    const lines = referenceLines(COMBINED_WORKFLOWS);
+    expect(
+      lines.length,
+      `no live reference to ${BASENAME} was found in ${CI_PATH} or ${WF_PATH} — an empty subject set would make "every reference is workspace-rooted" vacuously TRUE, which is worse than no gate: it would report success while checking nothing`,
+    ).toBeGreaterThan(0);
+  });
+
+  it("every live reference is workspace-rooted, and a bare relative path is caught", () => {
+    calibrate(
+      `every reference to ${BASENAME} carries \${GITHUB_WORKSPACE}/scripts/ — the python job's working-directory is analytics-service, not the repo root, and a bare relative reference would not resolve there; the call site's trailing "|| true" would then swallow that failure silently instead of erroring loudly, so the redaction would do nothing`,
+      (s) => s.split(WORKSPACE_ROOTED_REF).join(`scripts/${BASENAME}`),
+      allReferencesWorkspaceRooted,
+      COMBINED_WORKFLOWS,
+    );
+  });
+
+  it("removing every reference makes the predicate FALSE, not vacuously TRUE", () => {
+    calibrate(
+      `removing every ${BASENAME} reference must not read as a pass — an empty subject set is a gate that checks nothing, not a gate that is satisfied`,
+      (s) => s.split(WORKSPACE_ROOTED_REF).join(""),
+      allReferencesWorkspaceRooted,
+      COMBINED_WORKFLOWS,
+    );
+  });
+});
