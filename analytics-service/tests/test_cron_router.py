@@ -2613,6 +2613,85 @@ class TestC0198CursorOnlyAdvancesWhenStored:
             f"strategy stored; got {api_keys_update_payloads!r}"
         )
 
+    @pytest.mark.asyncio
+    async def test_D03_empty_strategy_ids_with_trades_does_not_advance_cursor(self):
+        """FANOUT-COHORT-SYNC-CONSTANT-01 / D-03: when a key has NO eligible
+        linked strategies at all (`strategy_ids=[]`), the per-strategy RPC
+        loop is gated on `if trades and strategy_ids:` and never runs — so
+        `per_strategy_stored` stays `{}` and no RPC is ever attempted. This
+        is narrower than the two tests above, which cover an RPC that WAS
+        attempted and failed. Pre-fix, `any_trades_to_store = bool(trades)
+        and bool(strategy_ids)` is False purely because `strategy_ids` is
+        empty (even though real trades were fetched), so
+        `should_advance_cursor` is wrongly True and the cursor lies about
+        having synced this window.
+        """
+        mock_supabase = MagicMock()
+
+        # No strategy is eligible on this key, so the per-strategy RPC loop
+        # never runs. Deliberately do NOT stub mock_supabase.rpc — if the
+        # fix (or a future regression) ever calls it on this path, the bare
+        # MagicMock's return shape is not a valid RPC response and the test
+        # would fail loudly rather than silently accepting a call that
+        # should not happen.
+
+        api_keys_update_payloads: list[dict] = []
+
+        def _table(name: str):
+            chain = MagicMock()
+
+            def _update(payload: dict):
+                if name == "api_keys":
+                    api_keys_update_payloads.append(payload)
+                upd = MagicMock()
+                upd.eq.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "key-1"}]
+                )
+                upd.in_.return_value.execute.return_value = MagicMock(data=[])
+                return upd
+
+            chain.update.side_effect = _update
+            return chain
+
+        mock_supabase.table.side_effect = _table
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}, {"id": "t2"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            key_row = _make_key_row(strategy_ids=[])
+            result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        # No RPC was ever attempted (no strategy was eligible), so nothing
+        # was stored — but real trades WERE fetched. The cursor must not
+        # advance, or those trades are gone on the next tick because
+        # `parse_since_ms(last_sync_at)` would then point past them.
+        assert result["per_strategy_stored"] == {}
+        assert all(
+            "last_sync_at" not in p for p in api_keys_update_payloads
+        ), (
+            "Expected no last_sync_at cursor advance when strategy_ids=[] "
+            f"despite fetched trades; got {api_keys_update_payloads!r}"
+        )
+
 
 def defaultdict_factory():
     """Local helper to avoid importing collections.defaultdict at module
