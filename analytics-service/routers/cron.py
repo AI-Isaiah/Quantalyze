@@ -647,9 +647,29 @@ async def _sync_single_key(
         synced_count = sum(per_strategy_stored.values())
         should_advance_cursor = (not trades) or synced_count > 0
 
+        # 164.5.1.4 SYNCCURSOR / WR-01 — ONE instant for BOTH cursor writes.
+        #
+        # ⛔ THE SAMPLING POINT IS THE FIX, NOT A TIDY-UP. Until this line the
+        # key cursor was stamped here and the per-strategy marker was stamped
+        # AFTER the recompute-enqueue loop below, so the marker was later than
+        # the key cursor by the wall-clock duration of N `enqueue_compute_job`
+        # round-trips. Pre-phase that skew did not exist because there was only
+        # one cursor; once markers exist they DOMINATE the resume floor
+        # (`_resume_floor_ms` reads them in preference to the key cursor), so
+        # the next tick would resume LATER than main would have, and anything
+        # the venue booked inside that gap would be fetched by no tick, ever.
+        # The gap is small but it is a permanent LOSS, not a re-fetch, which is
+        # the direction this file refuses everywhere else.
+        #
+        # Sampling before the `api_keys` UPDATE keeps that write semantically
+        # what it always was — the same instant, taken microseconds earlier —
+        # while giving the marker write at the foot of this function an instant
+        # that cannot drift past it.
+        tick_now = datetime.now(timezone.utc).isoformat()
+
         update_data: dict[str, Any] = {}
         if should_advance_cursor:
-            update_data["last_sync_at"] = datetime.now(timezone.utc).isoformat()
+            update_data["last_sync_at"] = tick_now
         if account_balance is not None:
             update_data["account_balance_usdt"] = account_balance
         if update_data:
@@ -782,8 +802,10 @@ async def _sync_single_key(
         # drift.
         #
         # One instant for every advancing strategy in a tick, so the markers a
-        # single tick writes are mutually comparable.
-        marker_now = datetime.now(timezone.utc).isoformat()
+        # single tick writes are mutually comparable — and it is the SAME
+        # instant the key cursor above was stamped with (WR-01), so a marker can
+        # never resume later than the key cursor it is meant to survive.
+        marker_now = tick_now
         strategy_cursor_rows: list[dict[str, Any]] = []
         held_strategy_ids: list[str] = []
         for sid in strategy_ids:

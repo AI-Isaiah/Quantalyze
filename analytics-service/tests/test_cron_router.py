@@ -4082,6 +4082,67 @@ class TestSyncCursorPerStrategyResume:
             f"on tick 2; issued RPCs were {rpc_calls_2!r}"
         )
 
+    @pytest.mark.asyncio
+    async def test_marker_and_key_cursor_share_one_instant(self):
+        """164.5.1.4 WR-01: the per-strategy marker must be stamped with the
+        SAME instant as the key cursor, never a later one.
+
+        ⛔ WHY AN EQUALITY AND NOT A TOLERANCE. The two writes used to call
+        `datetime.now` separately with the whole recompute-enqueue loop between
+        them, so the marker landed LATER than the key cursor by the wall-clock
+        duration of N `enqueue_compute_job` round-trips. Markers DOMINATE the
+        resume floor once they exist, so the next tick resumed later than the
+        pre-phase key cursor would have, and whatever the venue booked inside
+        that gap was fetched by no tick, ever. A tolerance would pin the SIZE
+        of the skew; what this phase decided is that there is NO skew, because
+        both writes read one variable. The equality IS that decision.
+
+        Restore a second `datetime.now(timezone.utc).isoformat()` at the marker
+        write and this is the assertion that fails.
+        """
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+        key_row = _make_key_row(
+            strategy_ids=["strat-A"],
+            last_sync_at=self.T0,
+            strategy_cursors={},
+        )
+
+        result, key_updates, cursor_upserts = await self._run_tick(
+            key_row=key_row,
+            failing_strategy_ids=set(),
+            fetch_mock=fetch_mock,
+            trades=trades,
+        )
+
+        # Non-vacuity: BOTH writes must actually have happened and the strategy
+        # must actually have ADVANCED. A HELD strategy writes its PRE-TICK
+        # resume point into `last_sync_at` instead, so the equality below would
+        # be comparing the wrong pair and could pass for the wrong reason.
+        assert result["status"] == "ok", result
+        assert len(key_updates) == 1, key_updates
+        assert "last_sync_at" in key_updates[0], (
+            "the key cursor must have ADVANCED for this comparison to mean "
+            f"anything; got {key_updates[0]!r}"
+        )
+        assert len(cursor_upserts) == 1, cursor_upserts
+        marker_rows = cursor_upserts[0]
+        assert len(marker_rows) == 1, marker_rows
+        marker = marker_rows[0]
+        assert marker["strategy_id"] == "strat-A", marker
+
+        key_instant = key_updates[0]["last_sync_at"]
+        assert marker["last_sync_at"] == key_instant, (
+            "an ADVANCING strategy's marker must carry the key cursor's own "
+            "instant. A later one resumes the next tick past whatever the "
+            "venue booked in between, and that window is then fetched by no "
+            f"tick at all. key={key_instant!r} marker={marker['last_sync_at']!r}"
+        )
+        assert marker["updated_at"] == key_instant, (
+            "`updated_at` is stamped from the same tick instant too; "
+            f"key={key_instant!r} updated_at={marker['updated_at']!r}"
+        )
+
 
 class TestCronSyncDeliversStrategyCursorsToFanOut:
     """164.5.1.4: the marker mapping must reach the fan-out through the REAL
