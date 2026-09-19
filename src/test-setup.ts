@@ -62,6 +62,18 @@ import { HAS_LIVE_DB } from "@/lib/test-helpers/live-db";
 // invoke vitest, then `grep -n "NEXT_PUBLIC_SUPABASE_URL\|SUPABASE_SERVICE_
 // ROLE_KEY" .github/workflows/ci.yml` for which jobs set the pair, and
 // confirm the two sets are still disjoint near their vitest invocations.
+// [164.8.4] GUARD SCOPE, MEASURED — this guard runs only in vitest configs
+// that list this file in `setupFiles`, which is NOT every config in the
+// repo. Measured 2026-09-19 by grepping `setupFiles` across all four
+// `vitest*.config.ts` / `scripts/vitest.config.ts` files: `vitest.config.ts`
+// (the main sharded suite) and `vitest.local-stack.config.ts` (the
+// VAC-07 local-stack lane) both set `setupFiles: ["src/test-setup.ts"]` and
+// so ARE covered. `vitest.redis.config.ts` (the seam-breaker real-Redis
+// lane) and `scripts/vitest.config.ts` (the `scripts/**` CLI-helper suite)
+// declare no `setupFiles` at all and are standalone root configs — neither
+// extends nor merges `vitest.config.ts` — so this guard does NOT run for
+// either. Re-grep `setupFiles` in those files before trusting this note; it
+// is a scope statement, not a gate.
 const VITEST_LIVE_DB_INTENDED_VALUE = "1";
 
 const LIVE_DB_INHERITANCE_REMEDY =
