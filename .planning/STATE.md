@@ -4,9 +4,9 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.5.1.4
 current_phase_name: SYNCCURSOR
-status: "Phase 164.5.1.4 verified + secured — awaiting ship"
-stopped_at: 164.5.1.4 complete — VERIFICATION passed (7/7), SECURITY threats_open 0; next is /gsd-ship
-last_updated: "2026-09-20T00:15:00.000Z"
+status: "Phase 164.5.1.4 shipped — PR #829 (v0.81.0.0)"
+stopped_at: PR #829 open — next is /land-and-deploy (merge starts apply-test, then the PROD apply behind the Production human reviewer gate)
+last_updated: "2026-09-20T00:30:00.000Z"
 last_activity: 2026-09-20
 last_activity_desc: Phase 164.5.1.4 SYNCCURSOR closed permanent per-strategy trade loss — _sync_single_key stored per STRATEGY but resumed per KEY, so a partial fan-out stranded the failed strategies' windows forever. Ships a new strategy_sync_cursors table (migration 20260919120000), a membership-based read floor that tells an ABSENT row from a NULL one, and a persist-on-hold write giving every fan-out strategy a row. should_advance_cursor stays BYTE-IDENTICAL. Two full review rounds; round 2 found round 1 fixes had NOT all held — the lookback clamp was hitting the key-cursor fallback, its loss never reached the response envelope, and the missing-table classifier over-matched and skipped the per-row fallback. Verified 7/7 (four independent mutants, incl. one proving persist-on-hold load-bearing); SECURED 23 threats, 0 open, with the clamp recorded as accepted risk R-03. Floors RAISED 47->48 and 402->412 (tightening). ⛔ NOT live until the migration APPLIES to PROD — both new Supabase paths fail open, so a deployed service without the table runs in exactly the fall-back mode that IS the defect. 164.5.1.3 SYNCADMIT is unblocked by that apply, not by this merge.
 state_head: 4d71155c8c2e33c581986eb3de85599ae7accb48
