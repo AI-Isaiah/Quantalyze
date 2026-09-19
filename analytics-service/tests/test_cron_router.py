@@ -3091,9 +3091,10 @@ class TestHeldStatusBucketForStalledKeys:
 
 class TestSyncStatusSummaryBucketCompleteness:
     """The cron summary exists so each terminal status is independently
-    alarmable. Before this gate the counters were eight hand-written
-    `sum(...)` lines, so adding a ninth `SyncStatus` member and forgetting
-    its counter produced a status that reached NO bucket — silently folded
+    alarmable. Before this gate the counters were seven hand-written
+    `sum(...)` lines (`synced`, `partial`, `failed`, `timed_out`, `revoked`,
+    `transient`, `deferred`), so adding an eighth `SyncStatus` member and
+    forgetting its counter produced a status that reached NO bucket — silently folded
     into nothing, exactly the class CR-F1 (`transient_failure`/`partial`
     counted by none of the buckets) already cost this router once.
 
