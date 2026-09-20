@@ -323,3 +323,56 @@ targetRules = ["generic-api-key"]
 condition = "AND"
 paths = ['''(^|/)analytics-service/tests/test_prober_cadence_alert\.py$''']
 regexes = ['''X9vQ2mNb7RtL4kZp1YcW6HsD3Jf8Ug5A''']
+
+[[allowlists]]
+description = """
+Phase 164.5.3 (MT5CREDS) rotate-secret fixtures: entropy false-positives only,
+NOT a blanket path exemption.
+
+The credential-update route and its dialog are tested by asserting that a
+synthetic password is NEVER echoed — into a response body, a log line, or an
+error envelope. To be falsifiable those fixtures must stay SECRET-SHAPED: an
+assertion that a short, low-entropy token is absent proves very little, and
+the dialog's probe in particular is deliberately long so that an accidental
+substring match would be unmistakable. Being secret-shaped is the point, and
+it is exactly what trips `generic-api-key`.
+
+⛔ The `regexes` list is the load-bearing key, exactly as in the two
+scripts/prod-prober/ blocks above. `paths` alone would make these two files
+invisible to EVERY rule — including a genuinely leaked credential pasted into
+one of them later — which is the failure mode 158-REVIEW CR-03 removed for
+.planning/. Keep both keys, and keep the regexes anchored to the three known
+literals rather than to a general shape.
+
+⚠️ Range scans are why this is config rather than a source edit. gitleaks walks
+every commit in the PR range, so rewriting the literals at HEAD would not clear
+a finding already baked into an earlier commit on the branch.
+
+The three literals, all synthetic and all named SYNTHETIC_* at their use sites:
+one rotated-secret fixture, one leak-probe fixture, and the dialog's
+network-failure probe.
+
+⭐ CALIBRATED 2026-09-20, measured and not assumed. A probe SHAPED like a real
+finding (a *_SECRET assignment with a high-entropy value) but matching none of
+the regexes below was appended to route.test.ts:
+
+  original config -> 4 findings (the 3 fixtures + the probe)  <- the probe APPLIES
+  this config     -> 1 finding  (the probe ALONE)             <- fixtures exempt,
+                                                                 probe still caught
+
+Then restored byte-identical under cmp. ⚠️ The FIRST probe attempted was inert —
+generic-api-key never matched it, so the file read 3/3 either way and would have
+"proven" whatever was wanted. A calibration that does not APPLY reads as a pass;
+check that it fires before trusting what it says.
+"""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''(^|/)src/app/api/keys/\[id\]/rotate-secret/route\.test\.ts$''',
+  '''(^|/)src/components/strategy/UpdateMt5SecretDialog\.test\.tsx$''',
+]
+regexes = [
+  '''synthetic-rotated-secret-''',
+  '''synthetic-leaky-secret-''',
+  '''sYnTh3tic-N3tw0rk-F41lure-Pr0be-''',
+]
