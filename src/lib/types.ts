@@ -1220,6 +1220,13 @@ export interface ApiKey {
   // AllocatorExchangeManager — schema must include it to avoid silent
   // row-drops.
   disconnected_at: string | null;
+  // Migration 20260920120000 (Phase 164.5.3 / MT5CREDS), exposing the
+  // column added by migration 20260812083206 (Phase 154/WIZCONT-02). The
+  // non-secret account identity the credential in this row was connected
+  // with — MT5-only today (NULL for every ccxt venue). "What the server
+  // passed", never "what the venue confirmed" — see the column's own
+  // COMMENT. Rendered on both key cards for exchange === "mt5" only.
+  venue_account_id: string | null;
 }
 
 /**
@@ -1254,6 +1261,7 @@ export const ApiKeyRowSchema = z
     sync_error: z.string().nullable(),
     last_429_at: _isoTimestampNullable,
     disconnected_at: _isoTimestampNullable,
+    venue_account_id: z.string().nullable(),
   })
   .strict() satisfies z.ZodType<ApiKey>;
 

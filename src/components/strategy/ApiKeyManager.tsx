@@ -496,6 +496,11 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
                   {key.exchange.charAt(0).toUpperCase() + key.exchange.slice(1)}
                   {key.last_sync_at && ` · Last synced ${new Date(key.last_sync_at).toLocaleDateString()}`}
                 </p>
+                {key.exchange === "mt5" && (
+                  <p className="text-xs text-text-muted font-metric mt-0.5">
+                    MT5 account {key.venue_account_id ?? "—"}
+                  </p>
+                )}
               </div>
             </div>
             <div className="flex items-center gap-2">

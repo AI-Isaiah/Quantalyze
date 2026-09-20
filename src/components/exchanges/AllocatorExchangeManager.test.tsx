@@ -169,6 +169,7 @@ function makeKey(overrides: Partial<Record<string, unknown>> = {}) {
     created_at: "2026-04-01T00:00:00Z",
     sync_error: null,
     last_429_at: null as string | null,
+    venue_account_id: null as string | null,
     ...overrides,
   };
 }
@@ -244,6 +245,58 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
     expect(mt5Tag).toHaveStyle({ color: "#0F172A", backgroundColor: "#F1F5F9" });
     // Existing venue is byte-unchanged.
     expect(screen.getByText("BNB")).toBeInTheDocument();
+  });
+
+  // Phase 164.5.3 (MT5CREDS) — venue_account_id (migration 20260920120000)
+  // renders in the active-keys section so a founder can tell which MT5
+  // account a key belongs to. Synthetic placeholder id per the phase's
+  // non-negotiable (never a real-looking MT5 login/account number).
+  it("renders the MT5 account identifier in .font-metric, un-separated, for an active mt5 row with a value", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-active",
+            exchange: "mt5",
+            label: "My MT5",
+            venue_account_id: "synth1234",
+          }),
+        ]}
+      />,
+    );
+    const identifier = screen.getByText("MT5 account synth1234");
+    expect(identifier).toBeInTheDocument();
+    expect(identifier).toHaveClass("font-metric");
+    expect(identifier.textContent).not.toMatch(/,/);
+  });
+
+  it("renders an em-dash for an active mt5 row with a NULL venue_account_id (never 0, never blank)", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-active-null",
+            exchange: "mt5",
+            label: "My MT5",
+            venue_account_id: null,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("MT5 account —")).toBeInTheDocument();
+    expect(screen.queryByText("MT5 account 0")).not.toBeInTheDocument();
+  });
+
+  it("renders NO account-identifier line for an active non-MT5 row", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[makeKey({ id: "key-bnb-active", exchange: "binance" })]}
+      />,
+    );
+    expect(screen.queryByText(/MT5 account/)).not.toBeInTheDocument();
   });
 
   it("clicking Sync now POSTs to /api/allocator/holdings/sync with { api_key_id }", async () => {
@@ -1101,6 +1154,69 @@ describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect
     expect(
       screen.queryByRole("heading", { name: /Disconnected/i }),
     ).not.toBeInTheDocument();
+  });
+
+  // Phase 164.5.3 (MT5CREDS) — venue_account_id (migration 20260920120000)
+  // renders in the DISCONNECTED section too, same idiom as active — D-06
+  // requires the card to identify the account regardless of connection
+  // state. Synthetic placeholder id per the phase's non-negotiable.
+  it("renders the MT5 account identifier in .font-metric, un-separated, for a disconnected mt5 row with a value", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-disc",
+            exchange: "mt5",
+            label: "My MT5",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+            venue_account_id: "synth5678",
+          }),
+        ]}
+      />,
+    );
+    const identifier = screen.getByText("MT5 account synth5678");
+    expect(identifier).toBeInTheDocument();
+    expect(identifier).toHaveClass("font-metric");
+    expect(identifier.textContent).not.toMatch(/,/);
+  });
+
+  it("renders an em-dash for a disconnected mt5 row with a NULL venue_account_id (never 0, never blank)", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-disc-null",
+            exchange: "mt5",
+            label: "My MT5",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+            venue_account_id: null,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("MT5 account —")).toBeInTheDocument();
+    expect(screen.queryByText("MT5 account 0")).not.toBeInTheDocument();
+  });
+
+  it("renders NO account-identifier line for a disconnected non-MT5 row", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-bnb-disc",
+            exchange: "binance",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.queryByText(/MT5 account/)).not.toBeInTheDocument();
   });
 });
 
