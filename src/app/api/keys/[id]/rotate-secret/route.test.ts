@@ -559,6 +559,40 @@ describe("PATCH /api/keys/[id]/rotate-secret — write-outcome honesty", () => {
   });
 });
 
+describe("PATCH /api/keys/[id]/rotate-secret — MEDIUM: the body-parse catch never leaks a secret fragment", () => {
+  it("a malformed body carrying a synthetic secret does not reach console.error, even as a fragment", async () => {
+    // Mirrors the review's own measured repro shape and RE-VERIFIED it on
+    // node v25.8.1 before writing this test:
+    //   JSON.parse('[{"new_secret":"synthetic-leaky-secret-QZ9X4K"},]')
+    //   throws `Unexpected token ']', ...""},]" is not valid JSON` — a
+    // FRAGMENT of the secret's tail, and the FULL raw body is measurably NOT
+    // a substring of that message (so a `scrubSeamError(err, [rawBody])`
+    // fix — the naive reading of the review's first suggested remedy — would
+    // NOT have caught this; only dropping the message entirely does).
+    const SYNTHETIC_LEAKY_SECRET = "synthetic-leaky-secret-QZ9X4K";
+    const malformed = `[{"new_secret":"${SYNTHETIC_LEAKY_SECRET}"},]`;
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await PATCH(makeReq(malformed), makeCtx());
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({
+      code: "DASHBOARD_REQUEST_INVALID",
+      error: "invalid json",
+    });
+
+    const logged = consoleErr.mock.calls
+      .map((args) => args.map((a) => String(a)).join(" "))
+      .join("\n");
+    expect(logged).toContain("body parse failed");
+    // The error's TYPE — the fix's entire replacement for the message — is
+    // still logged, so this pins "no leak", not "no diagnosis at all".
+    expect(logged).toContain("SyntaxError");
+    expect(logged).not.toContain(SYNTHETIC_LEAKY_SECRET);
+    expect(logged).not.toContain(SYNTHETIC_LEAKY_SECRET.slice(-6));
+    consoleErr.mockRestore();
+  });
+});
+
 describe("PATCH /api/keys/[id]/rotate-secret — source pins", () => {
   const SOURCE = readFileSync(
     join(process.cwd(), "src/app/api/keys/[id]/rotate-secret/route.ts"),

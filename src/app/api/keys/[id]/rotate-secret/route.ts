@@ -162,12 +162,29 @@ export async function PATCH(
   try {
     body = (await req.json()) as RotateSecretBody;
   } catch (err) {
-    // SEAMCORE-06 / SC6 — this file imports `resilientFetch`, so every
-    // console.* call in it is a seam log site: any caught value must route
-    // through `scrubSeamError`, never a hand-extracted `.message`.
+    // MEDIUM (164.5.3 review) — `scrubSeamError` redacts EXACT-VALUE secret
+    // matches; it CANNOT help here. A `JSON.parse` `SyntaxError` embeds an
+    // ARBITRARY WINDOW of the raw body chosen by V8 — a FRAGMENT, not the
+    // full body, and not (yet) the known `new_secret` value, since parsing is
+    // what failed. Measured on node v25.8.1:
+    // `JSON.parse('[{"new_secret":"…QZ9X4K"},]')` throws `Unexpected token
+    // ']', ...""},]" is not valid JSON` — a fragment of the secret — and the
+    // FULL raw body is NOT itself a substring of that message, so
+    // `scrubSeamString`'s exact-match check (`out.includes(candidate.value)`)
+    // would never fire on it even if handed the raw body as a per-request
+    // secret (confirmed: a request already 400s here with the JSON body
+    // never reaching a scrubbable form). The safe answer for THIS one catch
+    // site is to log the error's TYPE only — computed into its own binding
+    // BEFORE the console call so neither the bare `err` identifier nor its
+    // `.message`/`.name`/`.stack` text ever reaches a log sink (`.constructor`
+    // is not one of `seam-log-coverage.test.ts`'s TEXT_CARRYING_PROPERTIES,
+    // and correctly so — a class name carries no part of the parsed body).
+    // The type is the entire actionable diagnostic value a malformed-JSON 400
+    // needs anyway; the client already learns "invalid json" from the body.
+    const bodyParseFailureKind = err instanceof Error ? err.constructor.name : typeof err;
     console.error(
       "[api/keys/[id]/rotate-secret] body parse failed:",
-      scrubSeamError(err),
+      bodyParseFailureKind,
       { userId: user.id },
     );
     return NextResponse.json(
