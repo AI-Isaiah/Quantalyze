@@ -103,11 +103,29 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
   const [perms, setPerms] = useState<Permissions | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * 164.5.4-D3 / A-02 — the route's LAST refusal code, retained for ONE
+   * purpose: deciding whether the "Re-check" control below is an honest offer.
+   *
+   * ⚠️ It is never rendered, and that is a constraint rather than an accident.
+   * The 164.2-01 / 161-ERRPREFIX ruling of 2026-08-26 splits the two audiences
+   * — the user reads the route's curated prose, the machine code goes to the
+   * console and the Sentry breadcrumb. Retaining the code for an AFFORDANCE
+   * decision adds a third consumer of the same fact without moving it into the
+   * render, so that ruling is preserved exactly as it stands.
+   */
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const mountedRef = useRef(true);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    // Invalidated with `error` and `perms` below, for the same reason and in
+    // the same breath: a verdict from the PREVIOUS attempt must never decide
+    // anything about this one. Without this line a single undecryptable answer
+    // would kill the control permanently, including on a key that has since
+    // been reconnected.
+    setErrorCode(null);
     // 140.3-07 / SEAMUX-09 / B-26 member 2 — invalidate BEFORE the refetch.
     // Identical shape to `PortfolioOptimizer`'s `setSuggestions(null)`, itself
     // copied from `WeightOptimizerSection.tsx`'s `setResult(null)`: ONE pattern
@@ -165,6 +183,12 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
         // the point, would put it back inside a sentence — the exact shape
         // this change exists to end.
         if (typeof err.code === "string" && err.code.length > 0) {
+          // Retained HERE — in the one branch that has already established the
+          // code is a non-empty string — so the affordance gate below and the
+          // two observability sinks beside it all read the SAME fact under the
+          // same guard. `mountedRef` for the same reason every other state
+          // write in this component takes it.
+          if (mountedRef.current) setErrorCode(err.code);
           console.error(
             "[KeyPermissionBadge] probe refused with code:",
             err.code,
@@ -250,10 +274,42 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
         <h3 className="font-display text-base text-text-primary">
           Detected key scopes
         </h3>
+        {/*
+          164.5.4-D3 / A-02 — THE CONTROL IS AN OFFER, AND AN OFFER IS A CLAIM.
+          A pressable "Re-check" says pressing it can change the answer. For
+          ONE code in this route's vocabulary that is false and permanently so:
+          `KEY_UNDECRYPTABLE` means the STORED CIPHERTEXT cannot be read, and
+          no number of re-checks reads it — only reconnecting the key does. The
+          route's own sentence beside this button already says exactly that
+          ("Reconnect the key — retrying will not help."), so until this gate
+          existed the sentence and the button contradicted each other on one
+          screen. That is the same 162-09 / HONEST-02 class this component was
+          already fixed for once, in the chips.
+
+          WHERE THAT JUDGEMENT IS RECORDED: the roster in
+          `src/lib/probe-vocabulary.invariant.test.ts` answers the question
+          "does trying again clear THIS fault, unaided?" for every code this
+          route emits, and `KEY_UNDECRYPTABLE` is its only `retryClearsIt:
+          false` member. That file also holds the law binding every such member
+          to this expression, so a seventh code answered the same way cannot
+          ship a live control by omission.
+
+          ⛔ THE LITERAL IS HARDCODED ON PURPOSE. The roster is a TEST module
+          and importing production behaviour out of one would be worse than
+          this duplication; the route emits the same literal the same way. And
+          the gate is DELIBERATELY NARROW — keyed on this one code, never on
+          "an error occurred". Disabling the control for `CIRCUIT_OPEN` or
+          `PROBE_RATE_LIMITED` would withhold the retry during exactly the
+          outages a retry is the correct remedy for.
+
+          DISABLED, NOT REMOVED: the founder still sees the control and the
+          sentence explaining why it is dead. A vanished button explains
+          nothing.
+        */}
         <button
           type="button"
           onClick={load}
-          disabled={loading}
+          disabled={loading || errorCode === "KEY_UNDECRYPTABLE"}
           className="text-fixed-12 text-text-muted underline-offset-4 hover:text-text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50"
           data-testid="key-permission-recheck"
         >
