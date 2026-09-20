@@ -47,11 +47,13 @@ Regression gates — WHY each case matters (Rule 9):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import pathlib
 import sys
 import threading
 import time
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -396,11 +398,19 @@ def test_ipc_transport_codes_are_transient_never_wrong_server(code, detail):
 
     Both codes mean the gateway's terminal bridge is unreachable — -10004 because
     it was never attached, -10005 because it stopped answering. Both texts contain
-    "ipc", which ``_WRONG_SERVER_TOKENS`` matches, so without the code-gate they
-    classify as ``wrong_server`` — the PERMANENT arm. That is not a cosmetic
-    mislabel: the wizard then shows "We could not find that broker server." and
-    the caller stops retrying, so a VALID key is rejected for good because OUR
-    infrastructure blipped.
+    "ipc", which the pre-164.5.4 wrong-server table matched as a bare token, so
+    without the code-gate they classified as ``wrong_server`` — the PERMANENT arm.
+    That is not a cosmetic mislabel: the wizard then shows "We could not find that
+    broker server." and the caller stops retrying, so a VALID key is rejected for
+    good because OUR infrastructure blipped. THAT is why the code-gate runs first,
+    and it is what this case pins.
+
+    ⚠️ 164.5.4: ``_WRONG_SERVER_PHRASES`` is anchored on the broker-server lookup
+    and carries no "ipc" member, so the TEXT alone would now degrade to
+    ``transient`` by the refusal rule. ⛔ The hazard is NARROWER, not gone, and
+    this gate does not weaken: a transport verdict must never depend on
+    broker-supplied text, which any future phrase could start matching. The
+    code-gate stays FIRST and keeps its own arm.
 
     -10005 was the live case (2026-08-12): a wedged gateway terminal returned
     ``(-10005, 'IPC timeout')`` and the founder's byte-for-byte CORRECT broker
@@ -411,6 +421,203 @@ def test_ipc_transport_codes_are_transient_never_wrong_server(code, detail):
     from services.mt5_validation import classify_mt5_login_error
 
     assert classify_mt5_login_error(Mt5ClientError(code, detail)) == "transient"
+
+
+# --------------------------------------------------------------------------- #
+# 164.5.4 / D-02 — THE REFUSAL RULE, THE FAIL-CLOSED PRECEDENCE AND THE WRAPPER
+#
+# WHY these matter (Rule 9). Of the three classes the seam can return, TWO —
+# `auth` and `wrong_server` — become a PERMANENT, USER-ATTRIBUTED verdict at every
+# call site (HTTP 400 / a `failed` analytics stamp). Only `transient` carries no
+# blame. So the question "what does the classifier do with a message it does not
+# recognise?" is not a taste question: the wrong answer sends the founder to
+# change a credential that was fine while the real cause goes uninvestigated.
+#
+# Same oracle discipline as the blocks above: every expected verdict is a LITERAL
+# typed here, never read out of services.mt5_validation.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [
+        # The ROADMAP's own observed rejection. Matched BOTH "invalid" and
+        # "account" in the pre-164.5.4 bare-token table, so it could never reach
+        # the default arm — a working key stamped permanently auth-failed.
+        (0, "Invalid account"),
+        # An unattended-login TIMEOUT: ours, and a retry clears it. Matched the
+        # bare token "login".
+        (10001, "unattended login timed out"),
+        # OUR bridge dying. Matched the bare token "terminal" and came back as
+        # "your broker server is wrong" — the 2026-08-12 wedged-gateway incident
+        # reached by a second route the -10004/-10005 code-gate cannot cover.
+        (5, "terminal pipe broke"),
+        # A message that resembles nothing in either table. The refusal rule must
+        # hold for the OPEN set, not only for the three regressions above — an
+        # unmeasured broker string is the normal case, not the exception.
+        (0, "kabelverbindung gestoert (0x8007274d)"),
+    ],
+)
+def test_an_unrecognised_login_rejection_refuses_rather_than_blaming(code, detail):
+    """⭐ D-02 THE REFUSAL RULE — an unrecognised or ambiguous login rejection
+    degrades to ``transient`` and can NEVER produce a user-attributed permanent
+    stamp.
+
+    The classifier reads BROKER-SUPPLIED free text and turns it into an
+    accusation. There is no authoritative MT5 error-text table to match against
+    (Pitfall 5), so the honest posture is to refuse to guess: a missed message
+    costs one retry, while a wrong guess permanently blames a credential that
+    works. Every string below returned a PERMANENT class before this rule landed.
+    """
+    from services.mt5_validation import classify_mt5_login_error
+
+    verdict = classify_mt5_login_error(Mt5ClientError(code, detail))
+    # pre-fix returned "auth" for the first two rows and "wrong_server" for the
+    # third; the fourth was already transient and pins the OPEN set.
+    assert verdict == "transient", (
+        f"{detail!r} classified {verdict!r} — a PERMANENT, user-blamed verdict on "
+        "a message the classifier does not actually recognise"
+    )
+
+
+def test_a_message_matching_both_tables_is_wrong_server_not_auth():
+    """⭐ D-02 THE FAIL-CLOSED PRECEDENCE, held by an EXECUTING test rather than by
+    the comment that used to carry it.
+
+    Both permanent classes blame the user, but they blame different things. A
+    server/bridge signal beating an auth signal is the whole reason the ordering
+    exists: telling someone their broker server string is wrong is recoverable
+    reading, while telling them their password is wrong sends them to rotate a
+    working credential. A comment cannot hold an ordering — reorder the two `if`s
+    and a comment stays green.
+    """
+    from services.mt5_validation import (
+        _AUTH_PHRASES,
+        _WRONG_SERVER_PHRASES,
+        classify_mt5_login_error,
+    )
+
+    detail = "trade server not found; invalid account or password"
+    # ⛔ ANTI-VACUITY: prove the message really does match BOTH tables. If a phrase
+    # is later reworded, this pin must go RED rather than quietly testing a
+    # single-table message and "passing".
+    assert any(p in detail for p in _WRONG_SERVER_PHRASES), (
+        "the precedence pin no longer matches the wrong-server table — it is "
+        "measuring nothing"
+    )
+    assert any(p in detail for p in _AUTH_PHRASES), (
+        "the precedence pin no longer matches the auth table — it is measuring "
+        "nothing"
+    )
+
+    assert classify_mt5_login_error(Mt5ClientError(0, detail)) == "wrong_server"
+
+
+def test_the_error_wrapper_itself_matches_no_phrase_in_either_table():
+    """⭐ The WRAPPER neutrality pin. ``Mt5ClientError`` renders as
+    ``MT5 client error (code=N): <detail>`` and the classifier lowercases THAT
+    whole string, so the envelope's own words are matched on every call.
+
+    With an EMPTY detail the subject IS the envelope and nothing else. If a future
+    phrase is ever chosen that collides with it — "client error", say — then EVERY
+    MT5 error classifies the same way regardless of what the broker said, and the
+    classifier silently stops classifying. Nothing else in the suite would catch
+    that: every other case supplies a detail that dominates the verdict.
+    """
+    from services.mt5_validation import classify_mt5_login_error
+
+    err = Mt5ClientError(0, "")
+    assert "mt5 client error" in str(err).lower(), (
+        "the wrapper no longer renders the envelope this pin is about"
+    )
+    assert classify_mt5_login_error(err) == "transient"
+
+
+# --------------------------------------------------------------------------- #
+# 164.5.4 — THE LIVE-SPIKE HAND-OFF
+#
+# The phrase tables are [ASSUMED]: no authoritative MT5 error-text table exists,
+# so the only way to retire an [ASSUMED] marker is a MEASURED (code, text) pair
+# from a real login rejection. ⛔ The spike is FOUNDER-ONLY — no agent enters,
+# reads, decrypts, logs or echoes a credential — so this phase ships the
+# TRANSPORT and blocks on nothing. Partial sets land; each pair retires one
+# marker independently.
+# --------------------------------------------------------------------------- #
+
+_LIVE_SPIKE_FIXTURE = (
+    pathlib.Path(__file__).parent / "fixtures" / "mt5_login_rejection_observations.json"
+)
+
+_LIVE_SPIKE_PROTOCOL_CLAUSES = (
+    "founder_enters_credentials_no_agent_ever_does",
+    "capture_code_and_text_from_login_rejections_only",
+    "never_an_account_identifier",
+    "never_a_broker_server_name",
+    "never_a_password",
+    "accounts_are_synthetic_labels_substituted_before_writing",
+    "partial_sets_land_each_pair_retires_one_assumed_marker",
+    "nothing_in_this_phase_blocks_on_it",
+)
+
+
+def _load_live_spike_fixture() -> list[dict[str, Any]]:
+    """The fixture is a JSON array whose FIRST element is the `_protocol` header
+    (JSON carries no comments) and whose remaining elements are observations."""
+    with _LIVE_SPIKE_FIXTURE.open(encoding="utf-8") as fh:
+        return cast("list[dict[str, Any]]", json.load(fh))
+
+
+def _live_spike_observations() -> list[dict[str, Any]]:
+    try:
+        entries = _load_live_spike_fixture()
+    except (OSError, ValueError):
+        # A missing/broken fixture is the META-TEST's finding, not a collection
+        # error that would take the whole module down with it.
+        return []
+    return [e for e in entries if "_protocol" not in e]
+
+
+def test_the_live_spike_fixture_exists_and_carries_its_capture_protocol():
+    """⛔ UNCONDITIONAL, and that is the whole point.
+
+    The parametrize below collects ZERO cases today, because zero pairs have been
+    measured. A zero-case parametrize "passes" by collecting nothing — so the
+    fixture could be deleted, emptied or stripped of its protocol header and the
+    suite would stay green while the hand-off silently ceased to exist. This case
+    is what makes the fixture a real artifact rather than a file nobody checks.
+
+    It asserts the CONTRACT, not the contents: the file parses, the header is
+    present, and every safety clause the founder must honour while capturing is
+    still written down beside the data it governs.
+    """
+    assert _LIVE_SPIKE_FIXTURE.is_file(), (
+        f"the live-spike hand-off fixture is missing: {_LIVE_SPIKE_FIXTURE.name}"
+    )
+    entries = _load_live_spike_fixture()
+    assert isinstance(entries, list) and entries, "the fixture must carry its header"
+    header = entries[0]
+    assert "_protocol" in header, "the first element must be the _protocol header"
+    clauses = header["_protocol"]
+    for clause in _LIVE_SPIKE_PROTOCOL_CLAUSES:
+        assert clause in clauses, (
+            f"the capture protocol lost its {clause!r} clause — the repo is PUBLIC "
+            "and this fixture is tracked source"
+        )
+
+
+@pytest.mark.parametrize(
+    "observation",
+    _live_spike_observations(),
+    ids=lambda o: str(o.get("account", "?")),
+)
+def test_each_measured_login_rejection_classifies_as_recorded(observation):
+    """Each MEASURED (code, text) pair must classify to the verdict recorded
+    beside it. Zero cases today; one pair appended here retires one [ASSUMED]
+    marker without any other change to this file."""
+    from services.mt5_validation import classify_mt5_login_error
+
+    err = Mt5ClientError(int(observation["code"]), str(observation["text"]))
+    assert classify_mt5_login_error(err) == observation["expected"]
 
 
 # --------------------------------------------------------------------------- #
@@ -588,11 +795,18 @@ async def test_a_conclusive_terminal_verdict_is_not_pre_empted_by_an_erroring_pr
     default-ON *"Disable automatic trading through the external Python API"* — the
     setting that MAKES ``trade_allowed`` false — the probe is refused, and its
     error takes an ENTIRELY DIFFERENT route out. ``classify_mt5_login_error``'s
-    ``_WRONG_SERVER_TOKENS`` contain "terminal", so the refusal below classifies
-    ``wrong_server`` and the user is told **their broker server is wrong** — a
-    400 accusation against the user, for a checkbox in OUR gateway terminal, which
-    silently replaces the 500 that would have paged the operator who can actually
-    fix it.
+    wrong-server table carried the bare word "terminal", so the refusal below
+    classified ``wrong_server`` and the user was told **their broker server is
+    wrong** — a 400 accusation against the user, for a checkbox in OUR gateway
+    terminal, which silently replaced the 500 that would have paged the operator
+    who can actually fix it.
+
+    ⚠️ 164.5.4 narrowed that: ``_WRONG_SERVER_PHRASES`` is anchored on the
+    broker-server lookup, so this particular refusal text now degrades to
+    ``transient`` by the refusal rule instead of becoming an accusation. ⛔ NOT a
+    reason to let the probe run. The refusal still has to be classified by
+    SOMETHING, the phrase tables are [ASSUMED] pending the live spike, and the only
+    reliable way not to mis-read a message is not to provoke it.
 
     ⚠️ THE ERRORING PROBE IS THE POINT. A version of this test whose ``order_check``
     SUCCEEDS never reaches the bug: a successful probe returns a retcode the
@@ -612,7 +826,10 @@ async def test_a_conclusive_terminal_verdict_is_not_pre_empted_by_an_erroring_pr
         account=_INVESTOR_ACCOUNT,
         # What a terminal with the Python-API option ON answers: None from
         # order_check, then last_error() -> a "Terminal:" message. Note the text
-        # contains "terminal", which is a _WRONG_SERVER_TOKENS member.
+        # contains "terminal", which WAS a bare member of the wrong-server table
+        # until 164.5.4 — the substring that turned OUR checkbox into the user's
+        # broker server. It matches no anchored phrase now and would degrade to
+        # `transient`; the probe must still not run (see the docstring).
         order_check_raises=Mt5ClientError(
             -8, "Terminal: AutoTrading disabled by the client terminal"
         ),
@@ -1317,9 +1534,16 @@ async def test_terminal_transport_failure_at_materialization_still_refuses(
     The correct outcome is the one D-31 exists to produce: no terminal signal ->
     "undetermined" -> refusal. Never a read_only success built on two account
     negatives we cannot attribute, and never an accusation against the user's
-    broker server — ``classify_mt5_login_error``'s ``_WRONG_SERVER_TOKENS`` carry
-    "terminal", "ipc" and "connect", so OUR gateway's transport fault must never be
-    allowed to reach it.
+    broker server — ``classify_mt5_login_error``'s wrong-server table carried
+    "terminal", "ipc" and "connect" as BARE WORDS, so any transport fault of ours
+    that reached it came back as the user's broker server being wrong.
+
+    ⚠️ 164.5.4 replaced those with anchored phrases (``_WRONG_SERVER_PHRASES``) and
+    added the refusal rule, so a transport fault that DID reach the classifier
+    would now degrade to ``transient``. ⛔ NARROWER, not gone: `transient` is still
+    the wrong verdict for a fault that no retry can clear, and the refusal rule
+    governs only messages the tables do not recognise. OUR gateway's transport
+    fault must still never be allowed to reach the classifier at all.
     """
     router = exchange_router
     calls = []
