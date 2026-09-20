@@ -2101,12 +2101,19 @@ Plans:
 **Plans:** 6 plans
 
 Plans:
+**Wave 1**
 
 - [ ] 164.5.4-01-PLAN.md — defect (2): the login classifier refuses to guess — anchored phrases replace the over-matching token tables, an executable fail-CLOSED precedence pin, the four production-copy gates re-pointed at the classifier itself, and the live-spike hand-off landed as an empty synthetic fixture (wave 1)
 - [ ] 164.5.4-02-PLAN.md — defect (3), rotate-secret route: mint the `WizardErrorCode`, add the `VENUE_WIRE_CODE_TO_VERDICT` row that routes to it, retire the exemption entry, roster it for the dialog, move both `EXPECTED_TABLE_SIZE` pins with their reasoning re-run (wave 1)
 - [ ] 164.5.4-03-PLAN.md — defect (3), permissions route: gate `KeyPermissionBadge`'s re-check control on the route's own error code, and bind the dead `retryClearsIt` roster judgement to that gate (wave 1)
 - [ ] 164.5.4-05-PLAN.md — defect (1), A-01 resolved: one shared MT5 deal fold plus a NAV-LEVELS sibling of `combine_mt5_deal_ledger` built on `nav_twr.reconstruct_nav` (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 164.5.4-04-PLAN.md — defect (1): extract the MT5 deal-ledger read into the leaf module `services/mt5_read.py` so the backfill job and its derive sibling share ONE fetch (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 164.5.4-06-PLAN.md — defect (1), TRACER: the `venue == "mt5"` branch in `run_reconstruct_allocator_history_job`, end to end — kill-switch, shared read, levels conversion, row contract, shared persist (wave 3)
 
 ⚠️ **Two open questions were RESOLVED at plan time on measured evidence, not left to execution.**
