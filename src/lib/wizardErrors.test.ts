@@ -2032,8 +2032,18 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * changes what this guard scans. The baseline was re-measured at HEAD before
    * it moved — 90 is what 162-05 left and nothing between it and this plan
    * minted a member.
+   *
+   * ⚠️ 92 → 93 (164.5.3-02). ONE entry — `KEY_VENUE_ALREADY_CONNECTED`, the
+   * `keys/validate-and-encrypt` persist-INSERT arm's venue-identity 23505
+   * branch (see the union member's own docblock for why it mints). THIS
+   * guard's reasoning was re-run over the new entry BEFORE the number moved:
+   * its `actions` are `["request_call", "expand_log"]`, neither of which is a
+   * member of `DESTRUCTIVE_ACTIONS`, so it sits OUTSIDE the scanned population
+   * and the destructive class below is still four members. The baseline was
+   * re-measured at HEAD before it moved — 92 is what 164.2-04 left and
+   * nothing between it and this plan minted a member.
    */
-  const EXPECTED_TABLE_SIZE = 92;
+  const EXPECTED_TABLE_SIZE = 93;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2530,8 +2540,17 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    *     obvious sentence names the column. It does not: the index name and the
    *     column triple live in the entry's comment, and the cause says "the
    *     wizard session this browser is still carrying" instead.
+   *
+   * ⚠️ 92 → 93 (164.5.3-02), for `KEY_VENUE_ALREADY_CONNECTED`. THIS guard is
+   * the banned-claims honesty scan, and its reasoning was re-run over the new
+   * entry before the number moved: the entry claims "Your new key was not
+   * saved", which is knowable rather than hoped for — the 23505 is caught on
+   * the `.insert().select().single()` call itself, so the row this request
+   * tried to write was never created. It names no internal field, claims no
+   * notification, asserts nothing about a fetch stage, and does not say "data
+   * is unchanged" — it carries none of the four FORBIDDEN fragments.
    */
-  const EXPECTED_TABLE_SIZE = 92;
+  const EXPECTED_TABLE_SIZE = 93;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
