@@ -1,5 +1,76 @@
 # Changelog
 
+## [0.82.1.0] - 2026-09-20 — MT5CREDS part 1 of 2: the GRANT, shipped alone on purpose
+
+⭐ **This release ships ONE migration and NOTHING that reads it.** No `constants.ts`, no
+`types.ts`, no component, no route. That is the entire point of it, and the reason it is a release
+of its own rather than half of a bigger one.
+
+⚠️ **It DOES ship a migration**, so merging starts `apply-test` on shared TEST and then PROD's
+`apply` behind the `Production` environment's HUMAN reviewer gate. ⛔ **Do not merge part 2 until
+this one is applied and confirmed GREEN on PROD.**
+
+### Added
+
+- `supabase/migrations/20260920120000_api_keys_venue_account_id_grant.sql` — extends the
+  SEC-005 allowlist with `GRANT SELECT (venue_account_id) ON api_keys TO authenticated`. This is
+  the FOURTH instance of a thrice-repeated idiom, not a new mechanism: migration `20260410225608`
+  (027 / SEC-005) revokes `SELECT ON api_keys` at table level and grants an allowlist back, and
+  migrations 066 (`sync_error`), 068 (`last_429_at`) and 075 (`disconnected_at`) each added exactly
+  one column to it.
+- `scripts/pg-lane/fixtures/35-fixture-api-keys-venue-account-id.sql` — the throwaway-cluster
+  fixture the migration's gate runs against.
+
+### Why
+
+**The split is the release.** Phase 164.5.3 was built as one branch and would have merged as one
+PR. Measured at ship time on 2026-09-20, that would have produced an outage as the DEFAULT
+outcome, not as an edge case:
+
+- `vercel.json` declares no `ignoreCommand` and no build gate, so the Vercel promotion begins on
+  the push to `main` and completes in minutes.
+- PROD's migration `apply` carries `environment: Production` — a HUMAN reviewer gate, i.e. an
+  approval window measured in however long someone takes to click it.
+- So the frontend reliably wins that race.
+
+And losing it is not cosmetic. `venue_account_id` joins `API_KEY_USER_COLUMNS_ARR`, the projection
+behind four live call sites — `queries.ts::getUserApiKeys`, `::getStrategylessActiveKeys`,
+`ApiKeyManager::loadKeys`, and `AllocatorExchangeManager`'s client refetch. A projection outside
+the allowlist answers PostgREST 42501, and `getUserApiKeys` does not degrade on that error, it
+THROWS, so the page error boundary fires. **The allocations and exchanges pages would hard-error
+for EVERY allocator — every venue, not just MT5 — for the whole approval window.**
+
+Splitting removes the race rather than documenting it.
+
+### Notes
+
+- ⭐ **The existing drift gate CONFIRMS this ordering rather than merely tolerating it.**
+  `src/lib/sec-005-live-probe.test.ts`'s "API_KEY_USER_COLUMNS matches the live GRANT — no drift"
+  arm projects the roster and fails when a rostered column is not granted — roster ⊆ GRANT,
+  one-way. A GRANT ahead of the roster, which is exactly this release, passes. A roster ahead of
+  the GRANT — the reverse order — is the thing that arm exists to catch.
+- The migration's own header carries the full hazard analysis, the four affected call sites, and
+  now a record of which remedy was chosen, because the header asked for that to be written down.
+- ⛔ The REVOKE on `api_key_encrypted`, `api_secret_encrypted`, `dek_encrypted` and `nonce` was
+  NOT widened. Verified: no encrypted column appears in any GRANT in this migration.
+
+### Security
+
+- The migration carries its own ANTI-LEAK assertion that `anon` must NOT hold the new privilege —
+  it re-verifies 027's REVOKE still holds rather than assuming it.
+- Its self-verify is **catalog-only** (`information_schema`, `has_column_privilege`): three
+  `RAISE EXCEPTION`s and zero data-reading queries. That matters because shared TEST holds PROD's
+  catalogue and never its data, so a data-reading assertion can apply cleanly to PROD and REFUSE
+  on TEST — and a refused TEST apply blocks the PROD apply
+  (`[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`).
+- Proven on a throwaway pg-lane cluster, not merely asserted: exit 0, `authenticated` can SELECT
+  the column, `anon` cannot.
+
+### Tests
+
+- No test file changes. The gates that cover this migration already exist; the pg-lane fixture is
+  the only new artifact and it is consumed by an existing lane.
+
 ## [0.82.0.0] - 2026-09-20 — SYNCADMIT: five live keys stop being invisible to the trade sync
 
 ⭐ **This release has NO migration.** Merging it starts NO `apply-test`, touches shared TEST not at
