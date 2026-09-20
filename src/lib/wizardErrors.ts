@@ -5364,6 +5364,37 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       "KEY_AUTH_FAILED",
       "KEY_MT5_MASTER_PASSWORD",
       "KEY_MT5_WRONG_SERVER",
+      // 164.5.3 review / CR-03 — this route's OWN rate limit
+      // (`userActionLimiter`, keyed `keys-rotate-secret:<uid>`), now carrying
+      // a `code` on its 429 body (route.ts's `rateLimitDenyJson` call) instead
+      // of rendering the false "we cannot tell whether your last action took
+      // effect" UNKNOWN envelope for a cap we imposed ourselves.
+      "RATE_LIMITED",
+      // 164.5.3 review / WR-01 — route.ts now carries the seam's `seamCode`
+      // forward, so these three `VENUE_WIRE_CODE_TO_VERDICT` verdicts (already
+      // rows in that table) can actually be REACHED from this route instead of
+      // falling to the terminal UNKNOWN:
+      //   KEY_RATE_LIMIT — wire RATE_LIMITED, Python's OWN per-key
+      //     secret-rotation throttle (`_consume_rate_limit` in
+      //     internal.py::rotate_key_secret) — distinct from the `RATE_LIMITED`
+      //     row above, which is THIS route's Next-side limiter. Two
+      //     vocabularies, two meanings, same duality this table's own
+      //     docblock already records for the wire code.
+      //   SEAM_INTERNAL_FAULT — wire MT5_GATEWAY_UNCONFIGURED, an operator
+      //     misconfiguration (unset/malformed MT5_GATEWAY_HOST/PORT), never
+      //     the caller's fault.
+      "KEY_RATE_LIMIT",
+      "SEAM_INTERNAL_FAULT",
+      // KEK_UNAVAILABLE (wire) already resolves to `SEAM_MISCONFIGURED`
+      // (rostered above for the persist-arm-unavailable posture), so the
+      // classifier now reaching it via `seamCode` needs no new roster row.
+      //
+      // ⚠️ NOT rostered: `KEY_UNDECRYPTABLE`. It has no row in
+      // `VENUE_WIRE_CODE_TO_VERDICT`, route.ts never puts it on the wire as a
+      // literal (so the dialog-envelope law's ARRIVAL check cannot see it
+      // either), and minting a member for it is out of this fix's scope — see
+      // route.ts's own WR-01 comment for the reachability gap this leaves
+      // open, flagged for follow-up rather than silently closed.
     ]),
   ],
 ]);

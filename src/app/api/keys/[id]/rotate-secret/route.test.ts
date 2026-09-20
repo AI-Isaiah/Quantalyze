@@ -62,6 +62,7 @@ interface ReadQuery {
 const {
   READ_STATE,
   ADMIN_STATE,
+  USER_SCOPED_UPDATE_CALLS,
   mockResilientFetch,
   auditEvents,
   rateLimitResult,
@@ -85,10 +86,30 @@ const {
       data: Array<Record<string, unknown>> | null;
       error: { code?: string; message: string } | null;
     },
+    /**
+     * WR-02 (164.5.3 review) — a per-call SEQUENCE, consumed one shift per
+     * admin UPDATE. Empty by default, in which case `.result` above answers
+     * EVERY call identically (unchanged pre-existing behaviour). A test that
+     * wants the retry attempt to answer DIFFERENTLY from the first (e.g.
+     * collide once, then succeed) pushes both outcomes here.
+     */
+    resultQueue: [] as Array<{
+      data: Array<Record<string, unknown>> | null;
+      error: { code?: string; message: string } | null;
+    }>,
     updates: [] as UpdateQuery[],
     /** When set, `createAdminClient()` THROWS this. */
     factoryError: null as Error | null,
   },
+  /**
+   * MEDIUM (164.5.3 review) — the "source pins" vacuous-test replacement.
+   * `@/lib/supabase/server`'s mock now exposes an `update` the pre-existing
+   * mock never had, so the ONLY way to prove "the persist write used the
+   * ADMIN client, never the user-scoped one" is to make the user-scoped path
+   * OBSERVABLE and assert it stayed empty — not `SOURCE.toContain(…)` against
+   * a string that survives in a comment.
+   */
+  USER_SCOPED_UPDATE_CALLS: [] as Array<Record<string, unknown>>,
   mockResilientFetch: vi.fn(),
   auditEvents: [] as Array<{ action: string; entity_type: string; entity_id: string }>,
   rateLimitResult: { success: true as boolean, retryAfter: 0 },
@@ -119,6 +140,30 @@ vi.mock("@/lib/supabase/server", () => {
     };
     return builder;
   }
+  // MEDIUM (164.5.3 review) — a user-scoped `.update()` DID NOT EXIST on this
+  // mock before. `api_keys` UPDATE is fully REVOKEd from `authenticated`
+  // (D-07), so this arm exists ONLY to make that fact assertable: it records
+  // the attempt to `USER_SCOPED_UPDATE_CALLS` and answers a 42501-shaped
+  // error, mirroring what the REAL client would return — never a silent
+  // success a route bug could hide behind.
+  interface UpdateBuilder extends PromiseLike<{ data: null; error: unknown }> {
+    eq(column: string, value: unknown): UpdateBuilder;
+  }
+  function makeUpdateBuilder(payload: Record<string, unknown>): UpdateBuilder {
+    const builder: UpdateBuilder = {
+      eq() {
+        return builder;
+      },
+      then(onfulfilled, onrejected) {
+        USER_SCOPED_UPDATE_CALLS.push({ ...payload });
+        return Promise.resolve({
+          data: null,
+          error: { code: "42501", message: "permission denied for table api_keys" },
+        }).then(onfulfilled, onrejected);
+      },
+    };
+    return builder;
+  }
   return {
     createClient: async () => ({
       auth: {
@@ -126,6 +171,7 @@ vi.mock("@/lib/supabase/server", () => {
       },
       from: (_table: string) => ({
         select: (columns: string) => makeBuilder(columns),
+        update: (payload: Record<string, unknown>) => makeUpdateBuilder(payload),
       }),
     }),
   };
@@ -154,7 +200,11 @@ vi.mock("@/lib/supabase/admin", () => {
           filters: [...filters],
           columns,
         });
-        return Promise.resolve(ADMIN_STATE.result).then(onfulfilled, onrejected);
+        const outcome =
+          ADMIN_STATE.resultQueue.length > 0
+            ? ADMIN_STATE.resultQueue.shift()!
+            : ADMIN_STATE.result;
+        return Promise.resolve(outcome).then(onfulfilled, onrejected);
       },
     };
     return builder;
@@ -266,8 +316,10 @@ beforeEach(() => {
   READ_STATE.error = null;
   READ_STATE.queries = [];
   ADMIN_STATE.result = { data: [{ id: KEY_ID }], error: null };
+  ADMIN_STATE.resultQueue = [];
   ADMIN_STATE.updates = [];
   ADMIN_STATE.factoryError = null;
+  USER_SCOPED_UPDATE_CALLS.length = 0;
   mockResilientFetch.mockReset();
   mockResilientFetch.mockResolvedValue(seamResponse(true, 200, SEAM_SUCCESS_BODY));
   auditEvents.length = 0;
@@ -369,6 +421,17 @@ describe("PATCH /api/keys/[id]/rotate-secret — ownership + venue gate (never a
     expect(res.headers.get("retry-after")).toBe("30");
     expect(mockResilientFetch).not.toHaveBeenCalled();
   });
+
+  it("CR-03: the 429 body carries code:RATE_LIMITED, not a bare {error} the dialog cannot classify", async () => {
+    rateLimitResult.success = false;
+    rateLimitResult.retryAfter = 30;
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(429);
+    await expect(res.json()).resolves.toEqual({
+      code: "RATE_LIMITED",
+      error: "Too many requests",
+    });
+  });
 });
 
 describe("PATCH /api/keys/[id]/rotate-secret — the happy path end-to-end", () => {
@@ -393,10 +456,16 @@ describe("PATCH /api/keys/[id]/rotate-secret — the happy path end-to-end", () 
       nonce: SEAM_SUCCESS_BODY.nonce,
       kek_version: SEAM_SUCCESS_BODY.kek_version,
       sync_error: null,
-      disconnected_at: null,
+      // CR-01: the third field `reconnect_allocator_api_key` clears — restores
+      // fan-out eligibility, not just visibility.
+      sync_status: "idle",
+      // WR-03: disconnected_at is NEVER touched — every writer of it at HEAD
+      // is the user-initiated Disconnect button, so clearing it here would
+      // silently reconnect a deliberately parked key.
       // Pre-read venue_account_id was NULL — backfilled from the seam response.
       venue_account_id: SYNTHETIC_LOGIN,
     });
+    expect(USER_SCOPED_UPDATE_CALLS).toHaveLength(0);
   });
 
   it("does NOT overwrite an existing venue_account_id", async () => {
@@ -468,7 +537,73 @@ describe("PATCH /api/keys/[id]/rotate-secret — validation failure renders thro
   });
 });
 
-describe("PATCH /api/keys/[id]/rotate-secret — D-05: clear the failure state ONLY on a validated success", () => {
+describe("PATCH /api/keys/[id]/rotate-secret — WR-01: the seam's machine code reaches the classifier", () => {
+  it("a Python-side RATE_LIMITED (the per-key rotation throttle, distinct from this route's own limiter) answers KEY_RATE_LIMIT at 503", async () => {
+    mockResilientFetch.mockResolvedValue(
+      seamResponse(false, 429, {
+        detail: {
+          code: "RATE_LIMITED",
+          detail: "Too many secret-rotation attempts for this key. Try again in a moment.",
+          retryable: true,
+          retry_after: 60,
+        },
+      }),
+    );
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(503);
+    const envelope = (await res.json()) as Record<string, unknown>;
+    expect(envelope.code).toBe("KEY_RATE_LIMIT");
+    expect(ADMIN_STATE.updates).toHaveLength(0);
+  });
+
+  it("KEK_UNAVAILABLE answers SEAM_MISCONFIGURED at 500, not the terminal UNKNOWN", async () => {
+    mockResilientFetch.mockResolvedValue(
+      seamResponse(false, 500, {
+        detail: {
+          code: "KEK_UNAVAILABLE",
+          detail: "Credential encryption is not configured. This needs an operator, not a retry.",
+          retryable: false,
+          dependency: "kek",
+        },
+      }),
+    );
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(500);
+    const envelope = (await res.json()) as Record<string, unknown>;
+    expect(envelope.code).toBe("SEAM_MISCONFIGURED");
+  });
+
+  it("MT5_GATEWAY_UNCONFIGURED answers SEAM_INTERNAL_FAULT at 500, not the terminal UNKNOWN", async () => {
+    mockResilientFetch.mockResolvedValue(
+      seamResponse(false, 500, {
+        detail: {
+          code: "MT5_GATEWAY_UNCONFIGURED",
+          detail: "The MetaTrader gateway is not configured. This needs an operator, not a retry.",
+          retryable: false,
+          dependency: "mt5-gateway",
+        },
+      }),
+    );
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(500);
+    const envelope = (await res.json()) as Record<string, unknown>;
+    expect(envelope.code).toBe("SEAM_INTERNAL_FAULT");
+  });
+
+  it("a body with no code (the flat AUTH_FAILED_DETAIL shape) still falls through to the substring cascade unharmed", async () => {
+    mockResilientFetch.mockResolvedValue(
+      seamResponse(false, 400, {
+        detail: "Authentication failed. Check your API key and secret.",
+      }),
+    );
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(400);
+    const envelope = (await res.json()) as Record<string, unknown>;
+    expect(envelope.code).toBe("KEY_AUTH_FAILED");
+  });
+});
+
+describe("PATCH /api/keys/[id]/rotate-secret — D-05 / CR-01: clear the failure state ONLY on a validated success", () => {
   it("a FAILED validation never invokes the admin UPDATE — the DB-level status fields are untouched by construction", async () => {
     mockResilientFetch.mockResolvedValue(
       seamResponse(false, 400, { detail: "Authentication failed. Check your API key and secret." }),
@@ -476,41 +611,98 @@ describe("PATCH /api/keys/[id]/rotate-secret — D-05: clear the failure state O
     const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
     expect(res.status).toBe(400);
     // The strongest available proof that nothing was cleared: this route
-    // never issues a write on the failure path, so sync_error/disconnected_at
+    // never issues a write on the failure path, so sync_error/sync_status
     // cannot have moved regardless of what they held before this request.
     expect(ADMIN_STATE.updates).toHaveLength(0);
   });
 
-  it("a SUCCESSFUL validation clears sync_error/disconnected_at in the SAME statement as the ciphertext write", async () => {
+  it("a SUCCESSFUL validation clears sync_error AND restores sync_status='idle' in the SAME statement as the ciphertext write (CR-01)", async () => {
     await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
     expect(ADMIN_STATE.updates).toHaveLength(1);
     expect(ADMIN_STATE.updates[0].payload).toMatchObject({
       sync_error: null,
-      disconnected_at: null,
+      sync_status: "idle",
       api_key_encrypted: SEAM_SUCCESS_BODY.api_key_encrypted,
     });
+    // WR-03: disconnected_at is never part of the payload at all — asserted
+    // as an absence, not merely an unmatched-object omission (toMatchObject
+    // above would pass even if the key were present with a different value).
+    // The route does not even SELECT this column (see the ownership read
+    // above), so it has no way to reconnect a row it never inspected — the
+    // strongest available proof that a deliberately-disconnected row cannot
+    // be silently reconnected by a password fix.
+    expect(ADMIN_STATE.updates[0].payload).not.toHaveProperty("disconnected_at");
   });
 });
 
-describe("PATCH /api/keys/[id]/rotate-secret — the venue-identity 23505 backstop (Pitfall 1)", () => {
-  it("answers a distinct 409 KEY_VENUE_ALREADY_CONNECTED, never the generic write-indeterminate arm", async () => {
-    ADMIN_STATE.result = {
-      data: null,
-      error: {
-        code: "23505",
-        message:
-          'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
-      },
-    };
+describe("PATCH /api/keys/[id]/rotate-secret — the venue-identity 23505 backstop (Pitfall 1 / WR-02)", () => {
+  const VENUE_IDENTITY_23505 = {
+    data: null,
+    error: {
+      code: "23505",
+      message:
+        'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+    },
+  };
+
+  it("answers a distinct 409 KEY_VENUE_ALREADY_CONNECTED when the RETRY also collides, never the generic write-indeterminate arm", async () => {
+    // Static `.result` (not a queue) answers BOTH the initial attempt and the
+    // retry identically — the second collision case WR-02's fix documents.
+    ADMIN_STATE.result = VENUE_IDENTITY_23505;
     const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
     expect(res.status).toBe(409);
     await expect(res.json()).resolves.toEqual({
       code: "KEY_VENUE_ALREADY_CONNECTED",
       error: "You already have a connected key for this account.",
     });
+    // Both the backfill attempt and the no-backfill retry were tried.
+    expect(ADMIN_STATE.updates).toHaveLength(2);
+    expect(ADMIN_STATE.updates[0].payload).toHaveProperty("venue_account_id", SYNTHETIC_LOGIN);
+    expect(ADMIN_STATE.updates[1].payload).not.toHaveProperty("venue_account_id");
   });
 
-  it("a DIFFERENT 23505 (unrelated constraint) falls through to the generic write-indeterminate 500", async () => {
+  it("WR-02: retries WITHOUT venue_account_id on a first-attempt collision, and the password fix + status clear still land", async () => {
+    ADMIN_STATE.resultQueue = [
+      VENUE_IDENTITY_23505,
+      { data: [{ id: KEY_ID }], error: null },
+    ];
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ ok: true });
+
+    expect(ADMIN_STATE.updates).toHaveLength(2);
+    // Attempt 1: the backfill, which collided.
+    expect(ADMIN_STATE.updates[0].payload).toMatchObject({
+      venue_account_id: SYNTHETIC_LOGIN,
+      sync_error: null,
+      sync_status: "idle",
+    });
+    // Attempt 2 (the retry): SAME ciphertext + status clear, no
+    // venue_account_id — the correction was not discarded by the collision.
+    expect(ADMIN_STATE.updates[1].payload).not.toHaveProperty("venue_account_id");
+    expect(ADMIN_STATE.updates[1].payload).toMatchObject({
+      api_key_encrypted: SEAM_SUCCESS_BODY.api_key_encrypted,
+      sync_error: null,
+      sync_status: "idle",
+    });
+  });
+
+  it("does NOT retry when the row already had a venue_account_id (nothing to drop)", async () => {
+    READ_STATE.row = {
+      id: KEY_ID,
+      user_id: OWNER.id,
+      exchange: "mt5",
+      venue_account_id: "already-set-acct",
+    };
+    ADMIN_STATE.result = VENUE_IDENTITY_23505;
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(409);
+    // A single attempt — retrying an identical payload could only reproduce
+    // the same collision, so the route does not waste a round trip on it.
+    expect(ADMIN_STATE.updates).toHaveLength(1);
+  });
+
+  it("a DIFFERENT 23505 (unrelated constraint) falls through to the generic write-indeterminate 500, no retry", async () => {
     ADMIN_STATE.result = {
       data: null,
       error: {
@@ -524,6 +716,7 @@ describe("PATCH /api/keys/[id]/rotate-secret — the venue-identity 23505 backst
       code: "DASHBOARD_WRITE_INDETERMINATE",
       error: "internal error",
     });
+    expect(ADMIN_STATE.updates).toHaveLength(1);
   });
 });
 
@@ -611,8 +804,20 @@ describe("PATCH /api/keys/[id]/rotate-secret — source pins", () => {
     expect(SOURCE).not.toMatch(/lower\.includes\(/);
   });
 
-  it("uses the admin client for the persist write, never the user-scoped client", () => {
-    expect(SOURCE).toContain("createAdminClient()");
+  it("uses the admin client for the persist write, never the user-scoped client (BEHAVIOURAL)", async () => {
+    // MEDIUM (164.5.3 review) — `SOURCE.toContain("createAdminClient()")`
+    // passes against a COMMENT mentioning that string; swapping the persist
+    // call to the user-scoped `createClient()` would leave this test green.
+    // Drive the real handler instead: the mock harness distinguishes
+    // ADMIN_STATE (this file's admin builder) from USER_SCOPED_UPDATE_CALLS
+    // (a NEW capability on the user-scoped mock, added for this fix, that
+    // did not exist before — the persist write had no user-scoped `.update`
+    // to even call by accident until now). Assert the write landed on the
+    // former and never touched the latter.
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(200);
+    expect(ADMIN_STATE.updates.length).toBeGreaterThan(0);
+    expect(USER_SCOPED_UPDATE_CALLS).toHaveLength(0);
   });
 
   it("stamps NO_STORE_HEADERS on every response arm", () => {

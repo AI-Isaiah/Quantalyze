@@ -7,7 +7,7 @@ import { isUuid } from "@/lib/utils";
 import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { SeamBodyReadError } from "@/lib/seam-errors";
-import { seamHumanMessage } from "@/lib/seam-discriminator";
+import { seamHumanMessage, seamErrorCode } from "@/lib/seam-discriminator";
 import { classifyKeyValidationError } from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
 import { RotateSecretResponseSchema } from "@/lib/analytics-schemas";
@@ -87,32 +87,41 @@ import type { z } from "zod";
  *      live-credential probe `validate-key-serialized` already refuses to
  *      retry, for the identical reason (D-07 in `resilient-fetch.ts`).
  *   9. On a non-ok seam response: extract the human message the same way
- *      `keys/[id]/permissions/route.ts`'s `seamHumanMessage` does, throw a
- *      constructed `Error` carrying it, and classify it in the catch below via
+ *      `keys/[id]/permissions/route.ts`'s `seamHumanMessage` does, ALSO carry
+ *      the machine `seamCode` (164.5.3 review / WR-01) as an own property on
+ *      the thrown `Error`, and classify it in the catch below via
  *      `classifyKeyValidationError` — the SAME classifier
  *      `create-with-key`/`validate-and-encrypt`/`composite/add-key` already
  *      use. Because the Python endpoint lets `_validate_mt5_key`'s own
- *      exceptions propagate UNCHANGED, this requires ZERO new
- *      `WizardErrorCode` entries: the classifier's existing substring cascade
- *      already recognises `AUTH_FAILED_DETAIL` / `MT5_MASTER_PASSWORD_DETAIL`
- *      / `MT5_WRONG_SERVER_DETAIL`. NOTHING is persisted on this branch
+ *      exceptions propagate UNCHANGED, the MT5-specific failures require ZERO
+ *      new `WizardErrorCode` entries: the classifier's existing substring
+ *      cascade already recognises `AUTH_FAILED_DETAIL` /
+ *      `MT5_MASTER_PASSWORD_DETAIL` / `MT5_WRONG_SERVER_DETAIL`. The
+ *      service-error-shaped failures (`RATE_LIMITED`, `KEK_UNAVAILABLE`,
+ *      `MT5_GATEWAY_UNCONFIGURED`) route through the carried `seamCode` into
+ *      the classifier's existing `VENUE_WIRE_CODE_TO_VERDICT` rows instead of
+ *      falling to the terminal UNKNOWN. NOTHING is persisted on this branch
  *      (D-04's "a failed validation mutates nothing").
  *  10. On success: `createAdminClient()` (D-07 — `api_keys` UPDATE is fully
  *      REVOKEd from `authenticated`, so a user-scoped `.update()` would
  *      42501; the admin write is ownership-scoped by the SAME explicit
  *      `.eq("user_id", ...)` filter a user-scoped client would have relied on
  *      RLS for). The UPDATE payload carries the four ciphertext columns,
- *      `sync_error: null`, `disconnected_at: null` (D-05 — cleared ONLY here,
+ *      `sync_error: null`, `sync_status: "idle"` (CR-01 — cleared ONLY here,
  *      in the SAME statement as the validated write, never on submission
- *      alone), and — ONLY when the pre-read row's `venue_account_id` was
- *      NULL — the login the seam response asserts. A `23505` naming
- *      `VENUE_IDENTITY_CONSTRAINT` (Pitfall 1 — the venue-identity backfill
- *      collides with a DIFFERENT live row for the same account) answers a
- *      distinct 409 `KEY_VENUE_ALREADY_CONNECTED`, matching Plan 02's
- *      identical arm on the create path (same code, same copy — one
- *      vocabulary for one condition). Zero updated rows (the row vanished
- *      between the read and the write) or a genuine transport/DB fault both
- *      answer `DASHBOARD_WRITE_INDETERMINATE` at 500 — reusing
+ *      alone; see the persist arm's own comment for why `is_active` and
+ *      `disconnected_at` are deliberately NOT touched), and — ONLY when the
+ *      pre-read row's `venue_account_id` was NULL — the login the seam
+ *      response asserts. A `23505` naming `VENUE_IDENTITY_CONSTRAINT`
+ *      (Pitfall 1 — the venue-identity backfill collides with a DIFFERENT
+ *      live row for the same account) retries WITHOUT the backfill once
+ *      (WR-02 — the password fix and status clear must not be discarded for a
+ *      collision on an OPTIONAL field), then answers a distinct 409
+ *      `KEY_VENUE_ALREADY_CONNECTED` only if that retry also collides,
+ *      matching Plan 02's identical arm on the create path (same code, same
+ *      copy — one vocabulary for one condition). Zero updated rows (the row
+ *      vanished between the read and the write) or a genuine transport/DB
+ *      fault both answer `DASHBOARD_WRITE_INDETERMINATE` at 500 — reusing
  *      `strategies/[id]/name/route.ts`'s own code and sentence for "an UPDATE
  *      was sent and this arm cannot verify whether it landed" — never a
  *      silent 200.
@@ -245,7 +254,21 @@ export async function PATCH(
 
   const rl = await checkLimit(userActionLimiter, `keys-rotate-secret:${user.id}`);
   if (!rl.success) {
-    return rateLimitDenyJson(rl, { headers: NO_STORE_HEADERS });
+    // CR-03 (164.5.3 review) — `rateLimitDenyJson`'s bare fallback body carries
+    // NO `code`. `UpdateMt5SecretDialog` reads `body?.code`, gets `undefined`,
+    // and renders the UNKNOWN envelope — "we cannot tell you whether your last
+    // action took effect", with a Retry — both false for a cap we imposed
+    // ourselves, and the Retry re-trips the same bucket. Supply both bodies so
+    // the dialog can recognise its own route's throttle, mirroring
+    // `strategies/create-with-key/route.ts`'s identical arm.
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { code: "RATE_LIMITED", error: "Too many requests" },
+      misconfiguredBody: {
+        code: "SEAM_MISCONFIGURED",
+        error: "Rate limiter unavailable",
+      },
+    });
   }
 
   const correlationId = await getCorrelationId();
@@ -276,7 +299,33 @@ export async function PATCH(
         if (readErr instanceof SeamBodyReadError) throw readErr;
         return {};
       });
-      throw new Error(seamHumanMessage(errBody) ?? `Upstream ${res.status}`);
+      // WR-01 (164.5.3 review) — carry the seam's own machine code forward.
+      // Before this, the thrown Error carried ONLY the human sentence, so
+      // `classifyKeyValidationError`'s machine-code branch (`seamCode`, read
+      // BEFORE the substring cascade) always saw `undefined` and every
+      // non-MT5-specific Python failure — RATE_LIMITED, KEK_UNAVAILABLE,
+      // MT5_GATEWAY_UNCONFIGURED — fell through to the terminal UNKNOWN/500.
+      // `seamCode` is read as a plain, typeof-guarded OWN property (never
+      // `instanceof`) — the same shape `AnalyticsUpstreamError` sets — so this
+      // survives every wholesale seam mock in the suite identically.
+      //
+      // ⚠️ RESIDUAL, not closed by this fix: `KEY_UNDECRYPTABLE` has NO row in
+      // `VENUE_WIRE_CODE_TO_VERDICT` (its own comment there ties the omission
+      // to "that route never calls this function" — a premise this route now
+      // breaks, since it emits the SAME code via the SAME decrypt failure and
+      // DOES call `classifyKeyValidationError`). Closing it needs either a new
+      // `WizardErrorCode` member or a dedicated pre-classifier arm mirroring
+      // `keys/[id]/permissions/route.ts`'s own — both out of this fix's file
+      // scope (wizardErrors.ts is restricted to the rotate-secret roster row
+      // here). Flagged for follow-up rather than silently left unfixed.
+      const seamCode = seamErrorCode(errBody);
+      const upstreamFailure = new Error(
+        seamHumanMessage(errBody) ?? `Upstream ${res.status}`,
+      );
+      if (seamCode !== null) {
+        (upstreamFailure as Error & { seamCode?: string }).seamCode = seamCode;
+      }
+      throw upstreamFailure;
     }
 
     const result = RotateSecretResponseSchema.safeParse(await res.json());
@@ -326,36 +375,96 @@ export async function PATCH(
     );
   }
 
-  const { data: updatedRows, error: updateErr } = await admin
-    .from("api_keys")
-    .update({
-      api_key_encrypted: parsed.api_key_encrypted,
-      api_secret_encrypted: parsed.api_secret_encrypted,
-      passphrase_encrypted: parsed.passphrase_encrypted,
-      dek_encrypted: parsed.dek_encrypted,
-      nonce: parsed.nonce,
-      kek_version: parsed.kek_version,
-      // D-05 — cleared ONLY here, in the SAME statement as the validated
-      // ciphertext write. Never on submission alone.
-      sync_error: null,
-      disconnected_at: null,
-      // Backfill ONLY when the pre-read row had no identifier yet — never
-      // overwrite an existing value with whatever this request's login
-      // happens to be (it is, by construction, the same login: D-03 forbids
-      // changing it, and the Python seam validates against the row's OWN
-      // stored login).
-      ...(keyRow.venue_account_id === null
-        ? { venue_account_id: parsed.venue_account_id }
-        : {}),
-    })
-    .eq("id", id)
-    .eq("user_id", user.id)
-    .eq("exchange", "mt5")
-    .select("id");
+  // CR-01 (164.5.3 review) — D-07's own precedent, `reconnect_allocator_api_key`
+  // (20260422101911), clears THREE fields on a validated success, not two:
+  // `disconnected_at`, `sync_error`, AND `sync_status = 'idle'` — "so the next
+  // tick picks the key up fresh". This route used to copy only the first two.
+  // The allocator worker's failure arm writes `sync_status` to `'revoked'` or
+  // `'error'` (`_map_exception_to_sync_status`) and NEVER writes it back; both
+  // ledger-refresh enqueuers carry `sync_status IS DISTINCT FROM 'revoked'` as
+  // an eligibility predicate, so a `'revoked'` key stayed excluded from the
+  // automated fan-out FOREVER even after its password was corrected — the
+  // card cleared `sync_error` and looked healthy while the key never synced
+  // again. `sync_status: "idle"` is written unconditionally alongside the
+  // clear below so the two facts ("the credential is right" / "the key is
+  // eligible again") cannot separate.
+  //
+  // ⛔ NOT restoring `is_active`, and NOT clearing `disconnected_at` (WR-03) —
+  // both DELIBERATE, decided from the code rather than assumed:
+  //
+  //   `is_active` — `cron.py`'s ONLY writer of `is_active: false` is
+  //   `cron_sync`'s credential-failure branch, reached through
+  //   `_sync_single_key`. That function takes the non-ccxt "deferred" branch —
+  //   its own comment: "the key STAYS active" — for `exchange='mt5'` BEFORE
+  //   ever calling `validate_key_permissions` (`EXCHANGE_CLASSES` =
+  //   {binance, okx, bybit, deribit}; mt5 is absent). `is_active` is therefore
+  //   never false for an MT5 row on any measured code path, so restoring it
+  //   here would be speculative code for a state that cannot occur.
+  //
+  //   `disconnected_at` — grepped `analytics-service/**`: the ONLY writer is
+  //   the `disconnect_allocator_api_key` RPC, called exclusively from
+  //   `AllocatorExchangeManager`'s user-initiated Disconnect button. No worker
+  //   or cron path ever sets it. D-05's "lift a SOFT disconnected_at" premise
+  //   — an auto-disconnect this route should undo — does not hold at HEAD:
+  //   every `disconnected_at` is a deliberate user action, so clearing it here
+  //   unconditionally would silently reconnect a key the founder parked on
+  //   purpose (WR-03). A founder who wants BOTH the password fixed and the key
+  //   reconnected uses the separate Reconnect affordance, which already clears
+  //   all three fields together.
+  const attemptPersist = (includeVenueAccountId: boolean) =>
+    admin
+      .from("api_keys")
+      .update({
+        api_key_encrypted: parsed.api_key_encrypted,
+        api_secret_encrypted: parsed.api_secret_encrypted,
+        passphrase_encrypted: parsed.passphrase_encrypted,
+        dek_encrypted: parsed.dek_encrypted,
+        nonce: parsed.nonce,
+        kek_version: parsed.kek_version,
+        sync_error: null,
+        sync_status: "idle",
+        // Backfill ONLY when the pre-read row had no identifier yet — never
+        // overwrite an existing value with whatever this request's login
+        // happens to be (it is, by construction, the same login: D-03 forbids
+        // changing it, and the Python seam validates against the row's OWN
+        // stored login).
+        ...(includeVenueAccountId ? { venue_account_id: parsed.venue_account_id } : {}),
+      })
+      .eq("id", id)
+      .eq("user_id", user.id)
+      .eq("exchange", "mt5")
+      .select("id");
+
+  const shouldBackfillVenueAccountId = keyRow.venue_account_id === null;
+  let { data: updatedRows, error: updateErr } = await attemptPersist(
+    shouldBackfillVenueAccountId,
+  );
+
+  // WR-02 (164.5.3 review) — a venue-identity 23505 used to discard the WHOLE
+  // correction: the broker probe had already succeeded and fresh ciphertext
+  // already existed, but the route threw it away (including the sync_error /
+  // sync_status clear) and told the founder to "use the key you already have
+  // connected" — advice that does not address "the key I am trying to repair
+  // IS the one that is broken." Two legacy MT5 rows sharing one account (both
+  // `venue_account_id IS NULL` today) reach this on the backfill alone, with
+  // no forged input required. Re-issue the SAME statement WITHOUT
+  // `venue_account_id` on that one condition — the password fix and the
+  // status clear still land; the identifier stays `—` for this row exactly as
+  // it already was, no worse than before this request. Only a SECOND
+  // collision (or any other error) reaches the 409/500 arms below.
+  if (
+    shouldBackfillVenueAccountId &&
+    updateErr &&
+    updateErr.code === "23505" &&
+    pgConstraintName(updateErr) === VENUE_IDENTITY_CONSTRAINT
+  ) {
+    ({ data: updatedRows, error: updateErr } = await attemptPersist(false));
+  }
 
   if (updateErr) {
     // Pitfall 1 — the venue-identity backfill collides with a DIFFERENT live
-    // row for the same account. Distinct, honest 409 — never the generic
+    // row for the same account, and the retry above either did not apply or
+    // collided again. Distinct, honest 409 — never the generic
     // write-indeterminate 500. Same code and copy as Plan 02's identical arm
     // on the create path: one vocabulary for one condition.
     if (
