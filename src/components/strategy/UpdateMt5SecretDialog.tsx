@@ -13,6 +13,7 @@ import {
   type DashboardDialogRoute,
 } from "@/lib/wizardErrors";
 import { newCorrelationId } from "@/lib/correlation-id-client";
+import { scrubSeamError } from "@/lib/seam-redaction";
 
 /**
  * 161-10 / WIZERR-07 — THE ROUTE THIS DIALOG WRITES THROUGH, named once.
@@ -133,7 +134,25 @@ export function UpdateMt5SecretDialog({
       setSubmitting(false);
       onUpdated();
       onClose();
-    } catch {
+    } catch (err) {
+      // The network-failure arm: the request never reached the server (CSP
+      // violation, CORS failure, DNS error, an aborted fetch), so there is no
+      // status to classify and the UNKNOWN envelope below is the honest
+      // answer (dialog-envelope.invariant.test.ts's "transport failure"
+      // disposition). Logging it is what keeps that answer diagnosable —
+      // without this the correlation id is the only thing left behind, and no
+      // server log will ever match one for a request that never arrived.
+      //
+      // ⛔ CREDENTIAL PATH: `newSecret` is in the request body this fetch was
+      // sending, so a thrown error that stringifies the request (or a
+      // wrapper around it) can carry it. Route through the same
+      // `scrubSeamError` leaf `rotate-secret/route.ts` uses for its own
+      // catches, passing `newSecret` as the per-request secret — never log
+      // `err` bare.
+      console.error(
+        "[UpdateMt5SecretDialog] rotate-secret request failed:",
+        scrubSeamError(err, [newSecret]),
+      );
       setEnvelope(buildEnvelope("UNKNOWN", correlationId));
       setSubmitting(false);
     }

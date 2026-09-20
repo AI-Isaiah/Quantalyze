@@ -215,6 +215,75 @@ describe("UpdateMt5SecretDialog", () => {
     ).toBeDisabled();
   });
 
+  it("a rejected fetch (network failure) renders UNKNOWN, calls neither callback, and never logs the password", async () => {
+    const onUpdated = vi.fn();
+    const onClose = vi.fn();
+    // A per-request secret with a distinctive, synthetic shape — never a
+    // real credential (repo is public). Long enough that an accidental
+    // substring match would be unmistakable in the assertion below.
+    const SYNTHETIC_PASSWORD = "sYnTh3tic-N3tw0rk-F41lure-Pr0be-99887766";
+    // The rejection embeds the secret in its OWN message — modelling the
+    // documented risk this fix defends against (undici/V8 inlining a window
+    // of the outgoing request into a thrown error's text), not a generic
+    // "Failed to fetch". Without this the rejection carries nothing the
+    // redaction could ever strip, and assertion (c) below would pass
+    // whether or not the redaction call ran at all.
+    const fetchMock = vi.fn().mockRejectedValue(
+      new TypeError(
+        `Failed to fetch: request body {"new_secret":"${SYNTHETIC_PASSWORD}"}`,
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+
+    render(
+      <UpdateMt5SecretDialog
+        open
+        apiKeyId="key-1"
+        onClose={onClose}
+        onUpdated={onUpdated}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("New password"), {
+      target: { value: SYNTHETIC_PASSWORD },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Update password/i }));
+    });
+
+    // (a) the UNKNOWN envelope renders.
+    await waitFor(() => {
+      expect(screen.getByTestId("error-envelope")).toBeInTheDocument();
+      expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+        "data-error-code",
+        "UNKNOWN",
+      );
+    });
+
+    // (b) neither callback fires — nothing was persisted on this arm.
+    expect(onUpdated).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    // (c) THE ASSERTION THAT MATTERS: the synthetic password never appears
+    // anywhere in the captured console output. Would fail loudly if the
+    // scrubSeamError(err, [newSecret]) redaction were removed and the raw
+    // caught value (or the request body it can carry) were logged instead.
+    const allConsoleErrorText = consoleErrorSpy.mock.calls
+      .flat()
+      .map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg)))
+      .join("\n");
+    expect(allConsoleErrorText).not.toContain(SYNTHETIC_PASSWORD);
+    // The redaction DID run — a log line was produced, it just doesn't carry
+    // the secret. Without this, a no-op console mock would pass (a) trivially.
+    expect(consoleErrorSpy).toHaveBeenCalled();
+
+    consoleErrorSpy.mockRestore();
+  });
+
   it("re-pointing the dialog at a different apiKeyId clears a prior typed secret and error", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ error: "boom" }), {
