@@ -18,6 +18,15 @@ import { WIZARD_ERROR_COPY, recogniseSeamErrorCode } from "@/lib/wizardErrors";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
+// 164.5.3-02 / Pitfall 1 — the ONE reader of "which constraint did Postgres
+// actually refuse on", shared with `composite/add-key/route.ts` and
+// `create-with-key/route.ts` so the three copies cannot drift. Parses
+// `error.message` only (Postgres catalog names), never `error.details`,
+// which can carry the offending login value — see that leaf's own rationale.
+import {
+  pgConstraintName,
+  VENUE_IDENTITY_CONSTRAINT,
+} from "@/lib/api/pgConstraintName";
 import { withAuth } from "@/lib/api/withAuth";
 // 160-02 / RANK-03 — the service-role writer for the persist arm. Same factory
 // the sibling connect routes use (the `createAdminClient` import in
@@ -736,6 +745,23 @@ async function legacyValidateAndEncryptHandler(args: {
     // The provenance columns are still assigned explicitly and still win — the
     // spread below is safe precisely because `encryptedColumns` is a local this
     // route constructed, not an upstream response object.
+    // 164.5.3-02 — `venue_account_id` (Phase 154 / WIZCONT-02) was populated
+    // ONLY by the wizard's `create_wizard_strategy` RPC before this plan, so
+    // every MT5 key connected through THIS route's "Add Key" persist arm
+    // (ApiKeyManager.tsx / AllocatorExchangeManager.tsx, both POST here with
+    // `persist: true`) stayed permanently NULL — unidentifiable on the card.
+    // `exchangeNormalized` two lines up is this route's one existing
+    // MT5-branch condition, already validated by `validateKey` above; reusing
+    // it (rather than re-deriving a fresh check) keeps that condition the
+    // single source of truth for "is this an MT5 row". Mirrors
+    // `create-with-key/route.ts`'s `const venueAccountId = isMt5 ?
+    // api_key.trim() : null;` verbatim, including the bare `.trim()` — the
+    // login already passed the three-credential non-blank gate above, so no
+    // further normalization belongs here (the SQL-side `NULLIF(btrim(...),
+    // '')` lives in the RPC path, for a different reason).
+    const isMt5 = exchangeNormalized === "mt5";
+    const venueAccountId = isMt5 ? api_key.trim() : null;
+
     type EncryptedColumns = z.infer<typeof EncryptKeyResponseSchema>;
     const encryptedColumns: { [K in keyof EncryptedColumns]: EncryptedColumns[K] } = {
       api_key_encrypted: encrypted.api_key_encrypted,
@@ -755,11 +781,47 @@ async function legacyValidateAndEncryptHandler(args: {
         exchange: exchangeNormalized,
         attested_venue: exchangeNormalized,
         label: labelOrDefault,
+        // 164.5.3-02 — see the `venueAccountId` derivation above. `null` for
+        // every non-MT5 row, byte-unchanged from before this plan.
+        venue_account_id: venueAccountId,
       })
       .select("id")
       .single();
 
     if (insertError || typeof inserted?.id !== "string") {
+      // 164.5.3-02 / Pitfall 1 — the venue-identity unique index
+      // (`api_keys_user_exchange_venue_account_uniq`, migration
+      // 20260812083206) becomes reachable on THIS path for the first time now
+      // that the derivation above stamps `venue_account_id` here: before this
+      // plan the column was always NULL on this route's INSERT, so the
+      // partial index (which only fires when `venue_account_id IS NOT NULL`)
+      // could never trip. A 23505 naming it means the founder already has a
+      // live MT5 key connected for this exact login — an honest, distinct
+      // fact, not the generic "couldn't be saved" the fallback below answers
+      // for every other insert failure. Mirrors `composite/add-key/route.ts`'s
+      // own "discriminate by constraint name, fall through for everything
+      // else" shape, adapted to this direct-INSERT route.
+      //
+      // ⛔ ABOVE the generic fallback, deliberately — every other 23505
+      // (including one on a null/unparseable constraint) falls through
+      // unchanged.
+      if (
+        insertError?.code === "23505" &&
+        pgConstraintName(insertError) === VENUE_IDENTITY_CONSTRAINT
+      ) {
+        console.error(
+          "[keys/validate-and-encrypt] persist INSERT failed — venue-identity collision:",
+          scrubSeamError(insertError, [api_key, api_secret, passphrase]),
+        );
+        return NextResponse.json(
+          {
+            code: "KEY_VENUE_ALREADY_CONNECTED",
+            error: "You already have a connected key for this account.",
+          },
+          { status: 409, headers: NO_STORE_HEADERS },
+        );
+      }
+
       // Rule 12 / Pitfall 3: the fault is surfaced, and the raw PostgREST
       // message — which can echo SQLSTATE text and the offending values back —
       // is scrubbed at BOTH sinks and NEVER placed in the response body. The
