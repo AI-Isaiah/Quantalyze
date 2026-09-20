@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.5.4
-current_phase_name: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently
-status: executing
-stopped_at: "Phase 164.5.4 MT5RECON-GAP planned — 6 plans across 3 waves. Plan-checker PASSED (round 2: 0 blockers, 0 warnings). Ready to execute wave 1 (plans 01, 02, 03, 05 — file-disjoint)."
-last_updated: "2026-09-20T17:40:19.147Z"
+current_phase: 164.9
+current_phase_name: TESTISOLATION — a run’s assertions against the shared TEST project
+status: planning
+stopped_at: "Phase 164.5.4 MT5RECON-GAP COMPLETE — verification passed 15/15, security 32 threats / 0 open, two review rounds. Next per the founder’s ordering: 164.9 TESTISOLATION (needs a plan). ⚠️ phase.complete advanced this to Phase 159, which is already complete (159-VERIFICATION.md status: passed) — corrected by hand."
+last_updated: "2026-09-20T21:49:59.910Z"
 last_activity: 2026-09-20
-last_activity_desc: Phase 164.5.4 execution started
-state_head: 6a6cecdc95024d6850c5b6d4bc26341b62e3f820
+last_activity_desc: "Phase 164.5.4 complete; state pointed at 164.9 per the founder ordering"
+state_head: 42a035ca338d5c815f8e53fd7a8c77b97224c8f8
 progress:
   total_phases: 45
-  completed_phases: 31
+  completed_phases: 32
   total_plans: 227
-  completed_plans: 214
-  percent: 69
+  completed_plans: 220
+  percent: 27
 ---
 
 ## ⭐ STATE lineage
@@ -179,8 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.5.4 (MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently) — EXECUTING
-Plan: 1 of 6
+Phase: 159 — RANK — Public-ranking integrity
+Plan: Not started
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
       so a future handler cannot match them again; their continuation prose follows unbroken.
@@ -482,7 +482,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 164.5.4
+Status: Ready to plan
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -498,7 +498,7 @@ Status: Executing Phase 164.5.4
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-20 — Phase 164.5.4 execution started
+Last activity: 2026-09-20 — Phase 164.5.4 complete, transitioned to Phase 159
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -956,7 +956,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███████░░░] 69%
+Progress: [███░░░░░░░] 27%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -2295,7 +2295,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-09-20T03:35:00.000Z
-**Stopped At:** Completed 164.5.1.3-01-PLAN.md (Phase 164.5.1.3 SYNCADMIT, plan 01 of 1, wave 1 — isolation `worktree`, branch `feat/164.5.1.3-syncadmit`). `ALLOWED_STRATEGY_STATUSES` in `analytics-service/routers/cron.py` now admits `"private"` alongside `draft`/`pending_review`/`published`, ending the five-key trade drop measured on PROD 2026-09-19 (RED test commit `1d5266bc`, GREEN implementation commit `15f02f32`). Task 2 added `TestHeldStatusBucketForStalledKeys::test_private_only_key_no_longer_held_once_admitted` (a private-only key moves out of `held` into a full `ok` bucket vector), a new `TestPrivateAdmissionComposesWithSyncCursor` class proving a failed `private` strategy's marker holds (`strategy_cursors_held == ["s-private"]`) while the key cursor still advances — `SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01` does not reopen — and a new `TestPrivateAdmissionOrderingGate` class, a permanent mechanical gate asserting 164.5.1.4's marker symbols exist whenever `private` is admitted, calibrated via `monkeypatch.delattr` to prove it can actually fail (commit `f5895565`). Every new/extended gate calibrated: neutered by hand-removing `"private"` from a `cp` byte backup, observed RED with the predicted failure shapes (list-membership diff for Task 1; `held`/`synced` reversal and a `partial`→`ok` status flip for Task 2, because `s-private` is filtered out of `strategy_ids` before it ever reaches the RPC/marker logic), restored via `cp`/`cmp` (byte-identical both times), reconfirmed GREEN. Task 3 ran the LIVE `gh run` re-check this plan's ship-precondition requires (never trusted from a document): run `35478916418` (headSha `60b8ed1b`, confirmed as the 164.5.1.4 merge commit touching `cron.py`) shows `apply-test` succeeded against shared TEST but the PROD-apply gate job (`plan`) is still `status: waiting`, `conclusion: ""` — identical to the planning-time reading. `TODOS.md` `SYNC-HELD-CURSOR-REFETCH-COST-01` was RE-SCOPED (not closed) with that live reading, a named trigger (PR merge + PROD-apply success + a post-deploy PROD read) and owner (a `checkpoint:human-action` PROD read); `FANOUT-COHORT-SYNC-CONSTANT-01` got an addendum recording the implementation landed. The general unbounded-refetch-window defect (unrelated to the five measured keys) was explicitly DROPPED, not routed to a phase — it cannot be fixed without touching `should_advance_cursor` or the key-cursor fallback (both forbidden this phase), has no known live instance, and is not itself data-integrity/user-facing (commit `c8a61577`). MEASURED: full `analytics-service` suite 5932 passed / 89 skipped (baseline 5928/89, delta +4 new test methods); `mypy --strict --follow-imports=silent services/ routers/ models/` clean (95 source files); `check:planning-hygiene` OK over 6681 tracked files. Four task commits `1d5266bc`/`15f02f32`/`f5895565`/`c8a61577`, NOT pushed. ⛔ **THIS PHASE'S CHANGE IS NOT YET SAFE TO MERGE** — 164.5.1.4's PROD-apply job had not reported `success` as of this live re-check; re-verify live again before merging, do not trust this note past its own re-verification. `roadmap.update-plan-progress` was NOT run via the handler (hand-edited instead, mirroring 164.5.1.4's own convention, to avoid the documented handler clobber risk): `**Plans:** 1 plan` → `1/1 plans complete`, checkbox `[ ]` → `[x]` on the 164.5.1.3-01-PLAN.md line, with a note that it is code-complete but unmerged. `state.advance-plan` was tried first per the try-gsd-tools-first rule; it refused on the same ambiguous multi-entry Current Position section 164.5.1.4's own session recorded, and wrote nothing (diff confirmed clean) — `current_phase` and `completed_plans`/`completed_phases` deliberately left untouched rather than hand-resolving an ambiguity this plan did not create. One row appended to Performance Metrics (`Phase 164.5.1.3 P01 | ~20 min | 3 tasks | 3 modified`). Next: the three-reviewer/ship handoff decides when to merge, gated on 164.5.1.4's PROD-apply job reporting success; then a post-deploy PROD read closes `SYNC-HELD-CURSOR-REFETCH-COST-01`.
+**Stopped At:** Phase 164.5.4 complete, ready to plan Phase 159
 **Resume File:** None
 
 **Last Date:** 2026-09-19T20:05:00.000Z
