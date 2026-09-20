@@ -23,9 +23,14 @@ its own hand-written ``_read_terminal`` / ``_probe`` closure, and all THREE fixe
   * **A1** the terminal short-circuit. Without it ``order_check`` still ran on an
     already-``"undetermined"`` verdict, and the refusal that the *"Disable
     automatic trading through the external Python API"* option produces was read
-    through ``_WRONG_SERVER_TOKENS`` (which carry "terminal") as *the user's
-    broker server is wrong* — an accusation against the user for a checkbox in
-    OUR gateway.
+    through the wrong-server table — which then carried the bare word
+    "terminal" — as *the user's broker server is wrong*, an accusation against
+    the user for a checkbox in OUR gateway. ⚠️ 164.5.4 replaced those bare tokens
+    with anchored phrases (``_WRONG_SERVER_PHRASES``) and added the refusal rule,
+    so an unrecognised refusal degrades to ``"transient"`` instead of being
+    guessed at. The short-circuit is still the fix this file is about: not running
+    a probe that cannot improve the verdict is correct whatever the classifier
+    would have made of its refusal.
   * **A2** the broad arm around netref materialization. Without it a raw
     transport raise escaped the refusal entirely, and with it the exception TEXT
     would have been logged — ``mt5linux`` f-string-interpolates the password into
@@ -357,10 +362,16 @@ def test_run_probe_short_circuits_order_check_on_an_undetermined_terminal():
     Under MetaQuotes' default-ON *"Disable automatic trading through the external
     Python API"* the terminal refuses the probe, and that refusal's
     `Mt5ClientError` leaves by a different door: `classify_mt5_login_error`'s
-    `_WRONG_SERVER_TOKENS` carry "terminal", so it came out as a 400 telling the
-    user their BROKER SERVER is wrong — an accusation against the user for a
-    checkbox in OUR gateway. Once the seam already answers "undetermined",
+    wrong-server table carried the bare word "terminal", so it came out as a 400
+    telling the user their BROKER SERVER is wrong — an accusation against the user
+    for a checkbox in OUR gateway. Once the seam already answers "undetermined",
     `order_check` cannot improve the verdict and must not run.
+
+    ⚠️ 164.5.4 narrowed the second half of that hazard: `_WRONG_SERVER_PHRASES` is
+    anchored on the broker-server lookup and an unrecognised refusal degrades to
+    `"transient"` by the refusal rule. ⛔ NARROWER, not gone — the probe still
+    produces a refusal we would then have to classify, and the only reliable way
+    not to mis-classify it is not to provoke it. The short-circuit stays.
 
     The POST login bracket still runs: the terminal read we classify on must
     belong to OUR account, exactly as a probe result would have had to.
@@ -392,28 +403,41 @@ def test_every_builder_emittable_constant_is_curated_and_credential_free(curated
     builder can emit.
 
     The operator-fault copy is a curated constant rendered to a human, so it must
-    name no credential and must carry no token from the live classification
-    tables — a message containing "terminal" or "server" is one
-    `classify_mt5_login_error` call away from being re-read as "the user's broker
-    server is wrong", which is the very accusation A1 removed.
+    name no credential and must come back BLAME-FREE from the live classifier — a
+    message the classifier RECOGNISES is one call away from being re-read as "the
+    user's broker server is wrong", which is the very accusation A1 removed.
 
     ⭐ Parametrized over the FAMILY, not over a hand-listed pair: 161-02 turned one
     constant into three, and a fence that scans only the one it was written for
-    would have gone on passing while two unchecked sentences shipped. The tokens
-    are read from the LIVE tables, so a token added to `mt5_validation` reds here.
+    would have gone on passing while two unchecked sentences shipped. The verdict
+    is taken from the LIVE seam, so a phrase added to `mt5_validation` reds here.
+
+    ⭐ 164.5.4 — the assertion moved from substring-absence over the live tables to
+    the classifier itself. The old loop had teeth only while the members were
+    short common words ("terminal", "server"); the anchored-phrase rewrite would
+    have left it TRIVIALLY GREEN WHILE MEASURING NOTHING. Running the seam and
+    demanding `"transient"` is the property the docstring always named, it is
+    strictly stronger, and it survives the next reshape of the tables.
     """
-    from services.mt5_validation import _AUTH_TOKENS, _WRONG_SERVER_TOKENS
+    from services.mt5_client import Mt5ClientError
+    from services.mt5_validation import (
+        _AUTH_PHRASES,
+        _WRONG_SERVER_PHRASES,
+        classify_mt5_login_error,
+    )
 
     text = curated.lower()
-    # ANTI-VACUITY, both directions. `"" in anything` is True in Python exactly as
-    # `"x".includes("")` is in JS (161-01's Deviation 2), so a BLANKED constant
-    # would satisfy every `not in` below while asserting nothing, and a BLANKED
-    # token would match everything. Both are guarded before the sweep runs.
+    # ANTI-VACUITY, both directions. A BLANKED constant classifies "transient" for
+    # free (it matches no phrase), and EMPTY tables would make every message
+    # classify "transient" whatever it said. Both are guarded before the verdict
+    # is taken.
     assert len(text) > 40, "the curated constant is too short to be the real copy"
-    assert _WRONG_SERVER_TOKENS and _AUTH_TOKENS, "empty token table proves nothing"
-    for token in (*_WRONG_SERVER_TOKENS, *_AUTH_TOKENS):
-        assert token, "a blank token is a substring of everything"
-        assert token not in text, f"curated copy carries the classify token {token!r}"
+    assert _WRONG_SERVER_PHRASES and _AUTH_PHRASES, "empty phrase table proves nothing"
+    # Code 0 so `_IPC_TRANSPORT_CODES` cannot answer for the text.
+    verdict = classify_mt5_login_error(Mt5ClientError(0, curated))
+    assert verdict == "transient", (
+        f"curated copy classifies {verdict!r} — a PERMANENT user-blaming verdict"
+    )
     for word in ("password", "investor", "master", "secret"):
         assert word not in text, f"curated copy names the credential word {word!r}"
 
@@ -674,8 +698,11 @@ def test_order_check_short_circuit_on_both_paths(exchange_module, monkeypatch):
     seam already answers "undetermined" from the terminal signal alone. Running
     ``order_check`` after that cannot improve the verdict and can DESTROY it: the
     refusal it produces is an ``Mt5ClientError`` that leaves by a different door,
-    and ``_WRONG_SERVER_TOKENS`` carry "terminal", so it came back as a 400 telling
-    the user their BROKER SERVER is wrong.
+    and the wrong-server table carried the bare word "terminal", so it came back
+    as a 400 telling the user their BROKER SERVER is wrong. ⚠️ 164.5.4's anchored
+    ``_WRONG_SERVER_PHRASES`` plus the refusal rule make that particular
+    mis-read unreachable; the hazard is NARROWER, not gone, so the call count
+    below stays the oracle.
 
     ⚠️ THE CALL COUNT IS THE ORACLE, not the response. Both paths refused before
     this fix too — they just refused for a fabricated reason on the way. Asserting

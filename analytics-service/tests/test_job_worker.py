@@ -181,38 +181,54 @@ class TestClassifyException:
     def test_mt5_gateway_misconfigured_message_carries_no_classify_vocabulary(
         self,
     ) -> None:
-        """The NEGATIVE half, asserted against the LIVE token tables rather than a
-        hand-copied list — so a token added to ``mt5_validation`` reds here.
+        """The NEGATIVE half, asserted by RUNNING ``classify_mt5_login_error`` over
+        every emittable message — so a phrase added to ``mt5_validation`` reds here.
 
-        A message containing "terminal" or "server" is one
-        ``classify_mt5_login_error`` call away from being re-read as *the user's
-        broker server is wrong*, which is the exact accusation the 153.6 A1 fix
-        removed; and the pre-fix copy literally named investor and master
-        passwords to the user.
+        A message the classifier recognises is one call away from being re-read as
+        *the user's broker server is wrong*, which is the exact accusation the
+        153.6 A1 fix removed; and the pre-fix copy literally named investor and
+        master passwords to the user.
 
         ⭐ 161-02: swept over EVERY message this arm can now return, not just the
         default one. A sweep that scans only the constant it was written for would
         have kept passing while two unchecked sentences shipped through the same
         sink.
+
+        ⭐ 164.5.4 — THE ASSERTION MOVED FROM SUBSTRING-ABSENCE TO THE CLASSIFIER
+        ITSELF, and that is the point. This gate used to iterate the live tables
+        and assert no member appeared in the copy. That worked only while the
+        members were short common words; the anchored-phrase rewrite would have
+        made it TRIVIALLY GREEN WHILE MEASURING NOTHING — a test created unable to
+        fail, by the very fix it was guarding. The property the docstring always
+        wanted is asserted directly instead: feed the copy through the real seam
+        and demand ``"transient"``, the only blame-free class. That is strictly
+        stronger than absence, and it cannot go vacuous when the table changes
+        shape again.
         """
-        from services.mt5_validation import _AUTH_TOKENS, _WRONG_SERVER_TOKENS
+        from services.mt5_client import Mt5ClientError
+        from services.mt5_validation import (
+            _AUTH_PHRASES,
+            _WRONG_SERVER_PHRASES,
+            classify_mt5_login_error,
+        )
 
         # The default (no-argument) raise, plus every curated arm the sink admits.
         _, default_msg = classify_exception(Mt5GatewayMisconfigured())
         emittable = (default_msg, *MT5_GATEWAY_MISCONFIGURED_DETAILS)
-        # ...and the tables must be non-empty, or the sweep proves nothing.
-        assert _WRONG_SERVER_TOKENS and _AUTH_TOKENS
+        # ...and the tables must be non-empty, or a "transient" verdict is just the
+        # classifier having nothing to match on rather than the copy being safe.
+        assert _WRONG_SERVER_PHRASES and _AUTH_PHRASES
 
         for msg in emittable:
             low = msg.lower()
-            # Anti-vacuity: an empty message satisfies every "not in" below.
+            # Anti-vacuity: an empty message classifies transient for free.
             assert len(low) > 40, "the curated message is too short to be real copy"
-            for token in (*_WRONG_SERVER_TOKENS, *_AUTH_TOKENS):
-                assert token, "a blank token is a substring of everything"
-                assert token not in low, (
-                    f"the operator copy carries the classify token {token!r}; if it "
-                    f"is ever re-classified it degrades to a user-blaming verdict"
-                )
+            # Code 0 so the `_IPC_TRANSPORT_CODES` gate cannot answer for the text.
+            verdict = classify_mt5_login_error(Mt5ClientError(0, msg))
+            assert verdict == "transient", (
+                f"the operator copy classifies {verdict!r}; if it is ever "
+                f"re-classified it degrades to a PERMANENT user-blaming verdict"
+            )
             for word in ("password", "investor", "master", "secret"):
                 assert word not in low, (
                     f"the operator copy names the credential {word!r}"
