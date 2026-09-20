@@ -162,6 +162,59 @@ def test_rotate_secret_happy_path_returns_ciphertext_and_login_never_passwords(c
     mock_decrypt.assert_called_once()
 
 
+def test_rotate_secret_trims_the_returned_identifier_but_not_the_encrypted_login(client):
+    """WR-04: the returned ``venue_account_id`` is TRIMMED; the ciphertext is not.
+
+    The happy path above cannot see this distinction — ``_SYNTH_LOGIN`` carries no
+    surrounding whitespace, so ``(login or "").strip() or None`` is indistinguishable
+    from a bare ``login`` there and the ``.strip()`` is uncalibrated. This arm feeds a
+    padded login and pins BOTH halves, so it fails in either direction:
+
+    * drop the ``.strip()`` and the first assertion fails — a padded identifier reaches
+      the key card, where it is rendered to the founder;
+    * "helpfully" trim before ``encrypt_credentials`` and the second fails — the stored
+      credential would stop matching the login the broker was validated against, which
+      is the one thing this endpoint must never change.
+    """
+    padded_login = f"  {_SYNTH_LOGIN}\t"
+    encrypted_fields = {
+        "api_key_encrypted": "ciphertext-blob",
+        "api_secret_encrypted": None,
+        "passphrase_encrypted": None,
+        "dek_encrypted": "ciphertext-dek",
+        "nonce": None,
+        "kek_version": 1,
+    }
+    with patch("routers.internal.get_supabase", return_value=_supabase_with_row(_mt5_row())), \
+         patch("routers.internal.get_kek", return_value=b"kek"), \
+         patch(
+             "routers.internal.decrypt_credentials",
+             return_value=(padded_login, _SYNTH_OLD_PASSWORD, _SYNTH_BROKER_SERVER),
+         ), \
+         patch(
+             "routers.internal._validate_mt5_key",
+             new=AsyncMock(return_value={"valid": True, "read_only": True}),
+         ) as mock_validate, \
+         patch(
+             "routers.internal.encrypt_credentials", return_value=dict(encrypted_fields)
+         ) as mock_encrypt:
+        res = client.post(
+            "/internal/keys/key-mt5/rotate-secret",
+            headers=_headers(),
+            json={"new_secret": _SYNTH_NEW_PASSWORD},
+        )
+
+    assert res.status_code == 200, res.text
+    assert res.json()["venue_account_id"] == _SYNTH_LOGIN
+
+    mock_encrypt.assert_called_once_with(
+        padded_login, _SYNTH_NEW_PASSWORD, _SYNTH_BROKER_SERVER, b"kek"
+    )
+    mock_validate.assert_awaited_once_with(
+        padded_login, _SYNTH_NEW_PASSWORD, _SYNTH_BROKER_SERVER
+    )
+
+
 # ---------------------------------------------------------------------------
 # 164.5.3 fix-python (review finding 1): optional, backward-compatible owner
 # scoping. `test_rotate_secret_happy_path_...` above already proves the
