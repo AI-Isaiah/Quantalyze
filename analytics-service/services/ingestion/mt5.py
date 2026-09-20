@@ -358,11 +358,20 @@ class Mt5Adapter:
                         # Terminal unreadable or detached — our bridge blipping,
                         # which clears on retry. Take the adapter's TRANSIENT
                         # disposition: propagate (never valid, never auth-failed,
-                        # never read-only). The message deliberately avoids the
-                        # classify_mt5_login_error token table's "terminal"/
-                        # "connect"/"ipc"/"server" words so that if it is ever
-                        # classified it degrades to transient, never to a
+                        # never read-only). The message deliberately matches no
+                        # phrase in classify_mt5_login_error's tables, so that when
+                        # it IS classified it degrades to transient, never to a
                         # user-blaming wrong_server.
+                        #
+                        # ⚠️ 164.5.4: that used to mean avoiding the bare words
+                        # "terminal"/"connect"/"ipc"/"server", which the tables
+                        # carried as members. They are ANCHORED PHRASES now
+                        # (_WRONG_SERVER_PHRASES / _AUTH_PHRASES) and an
+                        # unrecognised message degrades to transient by the refusal
+                        # rule. ⛔ NARROWER, not gone — the tables are [ASSUMED] and
+                        # gain members as the live spike measures pairs, so keep
+                        # this text free of anything that names a broker-server
+                        # lookup or a credential rejection.
                         logger.warning(
                             "mt5.validate: capability undetermined (gateway trade-"
                             "permission signal unavailable) — refusing rather than "

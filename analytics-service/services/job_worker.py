@@ -4271,14 +4271,26 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     # IPC pipe (EVIDENCE §A2 / C-1) — i.e. it would do to them
                     # exactly what this phase exists to stop.
                     #
-                    # ⛔ THE MESSAGE IS CLASSIFIER-TOKEN-FREE (D-42). It lands in
-                    # `compute_jobs.error_message`, and `_WRONG_SERVER_TOKENS` /
-                    # `_AUTH_TOKENS` (`services/mt5_validation.py`) are
-                    # SUBSTRING-matched — "terminal", "session", "connect",
-                    # "login" and "account" are all members, so the words an
-                    # author reaches for first are exactly the ones that would
-                    # re-run the `routers/exchange.py:678-684` incident. The
-                    # class name lives in the log line only; a log is never
+                    # ⛔ THE MESSAGE MUST CLASSIFY BLAME-FREE (D-42). It lands in
+                    # `compute_jobs.error_message`, which is re-classifiable, and
+                    # `_WRONG_SERVER_PHRASES` / `_AUTH_PHRASES`
+                    # (`services/mt5_validation.py`) are SUBSTRING-matched. Until
+                    # 164.5.4 they held BARE WORDS — "terminal", "session",
+                    # "connect", "login" and "account" were all members — so the
+                    # words an author reaches for first were exactly the ones that
+                    # would re-run the `routers/exchange.py:678-684` incident.
+                    #
+                    # ⚠️ Those tables are anchored phrases now and an unrecognised
+                    # message degrades to `transient` by the refusal rule. ⛔ The
+                    # hazard is NARROWER, NOT GONE: the tables are [ASSUMED] and
+                    # GAIN members as the live spike measures pairs, so text
+                    # written today can start matching later. Do not let
+                    # classifier-matchable text into this field on the grounds
+                    # that today's phrase set happens to miss it — the gate in
+                    # `tests/test_mt5_derive_branch.py` runs the real classifier
+                    # over this exact message and demands "transient".
+                    #
+                    # The class name lives in the log line only; a log is never
                     # classified.
                     logger.warning(
                         "derive_broker_dailies: mt5 read was refused by the "

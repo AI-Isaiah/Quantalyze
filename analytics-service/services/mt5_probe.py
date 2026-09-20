@@ -83,11 +83,17 @@ logger = logging.getLogger("quantalyze.analytics")
 #: ``tests/test_mt5_validate_parity.py::test_every_builder_emittable_constant_is_curated_and_credential_free``:
 #:
 #:   1. it names NO credential — no "password", "investor", "master", "secret";
-#:   2. it carries NO token from ``mt5_validation._WRONG_SERVER_TOKENS`` or
-#:      ``_AUTH_TOKENS``. A message containing "terminal" or "server" is one
-#:      ``classify_mt5_login_error`` call away from being re-read as "the user's
-#:      broker server is wrong" — the exact accusation A1 exists to remove, and
-#:      the reason the pre-153.6 worker copy's ``RuntimeError`` text was unsafe.
+#:   2. it classifies ``"transient"`` through ``mt5_validation``'s
+#:      ``classify_mt5_login_error`` — i.e. it matches NO phrase in
+#:      ``_WRONG_SERVER_PHRASES`` or ``_AUTH_PHRASES``. A message the classifier
+#:      RECOGNISES is one call away from being re-read as "the user's broker
+#:      server is wrong" — the exact accusation A1 exists to remove, and the
+#:      reason the pre-153.6 worker copy's ``RuntimeError`` text was unsafe.
+#:      ⚠️ 164.5.4: those tables held BARE WORDS until this phase, so "terminal"
+#:      or "server" anywhere in the copy was enough. They are anchored phrases
+#:      now and an unrecognised message degrades to ``transient`` by the refusal
+#:      rule — NARROWER, not gone, and the gate asserts the verdict rather than
+#:      word-absence so it cannot go vacuous when the table changes shape.
 MT5_GATEWAY_MISCONFIGURED_DETAIL: Final[str] = (
     "MT5 gateway refuses automated trading (the 'Disable automatic trading "
     "through the external Python API' option is in force), so read-only "
@@ -277,9 +283,13 @@ def read_terminal(client: Mt5Client, *, log_prefix: str) -> dict[str, Any] | Non
 
     An UNREADABLE terminal must yield NO signal (-> ``"undetermined"`` ->
     refusal), and it must NOT flow into the ``classify_mt5_login_error`` arms the
-    callers own: that table's "terminal"/"ipc"/"connect" tokens would classify OUR
-    gateway's condition as the user's wrong broker server and blame their
-    credentials for it. Caught here, logged secret-free.
+    callers own: that table's bare "terminal"/"ipc"/"connect" tokens classified
+    OUR gateway's condition as the user's wrong broker server and blamed their
+    credentials for it. ⚠️ 164.5.4 anchored the phrases and added the refusal rule,
+    so such text now degrades to ``transient`` — NARROWER, not gone: ``transient``
+    is still the wrong verdict for a condition no retry clears, and the
+    ``[ASSUMED]`` tables gain members as the live spike measures pairs. Caught
+    here, logged secret-free.
 
     ⭐ THE GUARDED REGION IS THIS ``try``, AND IT MUST SPAN THE WHOLE READ —
     INCLUDING MATERIALIZATION. ``Mt5Client.terminal_info`` converts a transport
@@ -386,10 +396,18 @@ def run_probe(
     # separate default-ON "Disable automatic trading through the external Python
     # API" checkbox (`Api`) — the probe is refused, and its
     # Mt5ClientError leaves by a different door. classify_mt5_login_error's
-    # _WRONG_SERVER_TOKENS carry "terminal", so that refusal came out as a 400
-    # telling the user their BROKER SERVER is wrong: an accusation against the
-    # user for a checkbox in OUR gateway, silently replacing the operator-facing
-    # 500 that would have named the real remedy.
+    # wrong-server table carried the bare word "terminal", so that refusal came
+    # out as a 400 telling the user their BROKER SERVER is wrong: an accusation
+    # against the user for a checkbox in OUR gateway, silently replacing the
+    # operator-facing 500 that would have named the real remedy.
+    #
+    # ⚠️ 164.5.4 replaced those bare tokens with anchored phrases
+    # (_WRONG_SERVER_PHRASES) and added the refusal rule, so that particular
+    # mis-read is unreachable today. ⛔ NARROWER, NOT GONE — do not read this as
+    # permission to let the probe run. A refused probe still produces a message
+    # somebody has to classify, the phrase tables are [ASSUMED] and GAIN members
+    # as the live spike measures pairs, and the only reliable way not to mis-read
+    # a broker string is not to provoke one. The short-circuit stays.
     #
     # ⛔ This NARROWS what can pre-empt the refusal; it never widens what can be
     # classified read_only. Branch 5 reaches "undetermined" for EVERY probe value,

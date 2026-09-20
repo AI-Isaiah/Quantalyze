@@ -386,6 +386,14 @@ class _Mt5PostReadVerificationError(Exception):
     reads it as ``auth``/``wrong_server``) even though the economic read of the
     CORRECT account succeeded — a credential verdict for a mere verification gap.
 
+    ⚠️ 164.5.4 narrowed HOW OFTEN that mis-read can happen, not WHETHER it matters.
+    The classifier's tables were bare words, so almost any transport text matched;
+    they are anchored phrases now and an unrecognised message degrades to
+    ``transient`` by the refusal rule. ⛔ That is emphatically NOT a reason to route
+    this through the shared arm: the tables are ``[ASSUMED]`` and gain members as
+    the live spike measures pairs, and the type-level separation below is a
+    structural guarantee where a phrase set is only a bet.
+
     Deliberately a PLAIN ``Exception``, NOT an ``Mt5ClientError`` subclass, so the
     classify/stamp arm is structurally UNABLE to absorb it: it routes instead to a
     dedicated TRANSIENT (re-queue), no-stamp branch. It carries only the already-

@@ -989,8 +989,16 @@ def test_an_abandoned_session_refusal_propagates_out_of_validate_unchanged(
     # ⭐ Type IDENTITY, not `isinstance` of some wrapper: the whole point of the
     # adapter's transient disposition is that the caller sees the ORIGINAL
     # exception. A re-raise as `Mt5ClientError` would let
-    # `classify_mt5_login_error` reach it, and its `_WRONG_SERVER_TOKENS` would
-    # blame the user's broker server for our own abandoned thread.
+    # `classify_mt5_login_error` reach it, and its wrong-server table — bare words
+    # until 164.5.4, `_WRONG_SERVER_PHRASES` since — would blame the user's broker
+    # server for our own abandoned thread.
+    #
+    # ⚠️ The anchored-phrase rewrite makes today's fence message classify
+    # `transient`, so the mis-read is not reachable with the text as it stands.
+    # ⛔ The hazard is NARROWER, NOT GONE, and the type guarantee is still what
+    # this case pins: the phrase tables are [ASSUMED] and gain members as the live
+    # spike measures pairs, so a message that is safe today can start matching
+    # later. A type that the classify arm cannot absorb holds regardless of text.
     assert type(excinfo.value) is Mt5SessionAbandoned
     assert excinfo.value.stage == "account_info"
     assert not isinstance(excinfo.value, Mt5ClientError)

@@ -862,9 +862,15 @@ async def test_mt5_unreadable_terminal_is_transient_never_readonly(exchange_rout
     """An UNREADABLE terminal yields no capability signal, so the two account
     negatives prove nothing — refuse. This is our bridge blipping and it clears
     on retry, so it takes the TRANSIENT arm, NOT the operator arm, and NOT the
-    wrong-server arm: classify_mt5_login_error's "ipc"/"terminal"/"connect"
-    tokens would have blamed the user's broker server for our gateway's
-    condition, which is why the terminal read is caught at its own call site."""
+    wrong-server arm: classify_mt5_login_error's wrong-server table carried
+    "ipc"/"terminal"/"connect" as BARE WORDS and would have blamed the user's
+    broker server for our gateway's condition, which is why the terminal read is
+    caught at its own call site.
+
+    ⚠️ 164.5.4 anchored those phrases and added the refusal rule, so such text
+    degrades to `transient` at the classifier too. ⛔ NARROWER, not gone: the
+    catch-at-the-call-site is what this case pins and it must stay, because the
+    [ASSUMED] tables gain members as the live spike measures pairs."""
     router = exchange_router
     # terminal=None -> terminal_info() raises Mt5ClientError(-10004).
     client = _make_client(

@@ -670,15 +670,25 @@ class Mt5SessionAbandoned(Exception):
     carefully avoided.
 
     ⛔ THE MESSAGE IS FIXED AND CARRIES NO STAGE (D-42). The classifier matches by
-    SUBSTRING against ``_WRONG_SERVER_TOKENS`` / ``_AUTH_TOKENS``
-    (``services/mt5_validation.py:66-83``), and the fenced stage names are
-    themselves members of those tables — ``terminal_info`` and ``connect`` contain
-    ``terminal``/``connect``, ``login`` and ``account_info`` contain
-    ``login``/``account``. Interpolating the stage would therefore re-run the
-    documented ``routers/exchange.py:678-684`` incident, where an operator-side
-    refusal became a 400 telling the user their BROKER SERVER was wrong. The stage
-    is kept as an ATTRIBUTE (``self.stage``) for the callers that route on it, and
-    it is safe in the fence's WARNING log — a log line is never classified.
+    SUBSTRING against ``_WRONG_SERVER_PHRASES`` / ``_AUTH_PHRASES``
+    (``services/mt5_validation.py``, cited by symbol). Until 164.5.4 those tables
+    held BARE WORDS and the fenced stage names were literally members —
+    ``terminal_info`` and ``connect`` contain ``terminal``/``connect``, ``login``
+    and ``account_info`` contain ``login``/``account`` — so interpolating the
+    stage would have re-run the documented ``routers/exchange.py:678-684``
+    incident, where an operator-side refusal became a 400 telling the user their
+    BROKER SERVER was wrong.
+
+    ⚠️ 164.5.4 made those tables ANCHORED PHRASES and added the refusal rule, so an
+    unrecognised message degrades to ``transient``. The hazard is NARROWER, not
+    gone, and the message stays fixed: the tables are ``[ASSUMED]`` pending the
+    live spike and will GAIN members as pairs are measured, so a message built
+    from free text could start matching at any time. Keeping the stage out is a
+    structural guarantee; relying on today's phrase set is a bet.
+
+    The stage is kept as an ATTRIBUTE (``self.stage``) for the callers that route
+    on it, and it is safe in the fence's WARNING log — a log line is never
+    classified.
 
     ⛔ It carries no host, port, terminal key, credential or generation number: the
     abandoned lease is OUR infrastructure and nothing about it may reach a
