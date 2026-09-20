@@ -1958,11 +1958,11 @@ Plans:
 
 **Requirements**: `TODOS.md` `FANOUT-COHORT-SYNC-CONSTANT-01` (widening half; routed here by Phase 164.5.1.2 on the founder's `leave-book-future-phase` decision, 2026-09-19).
 **Depends on:** Phase 164.5.1.2 FANOUTSIBLINGS — which supplied the production measurement above and deliberately left the change unshipped.
-**Plans:** 0 plans
+**Plans:** 1 plan
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.5.1.3 to break down)
+- [ ] 164.5.1.3-01-PLAN.md — widen `ALLOWED_STRATEGY_STATUSES` to admit `private` (RED→GREEN, calibrated), prove it composes with 164.5.1.4's SYNCCURSOR marker without reopening `SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01`, add the mechanical ordering gate, and close/re-scope the TODOS ledger against a live PROD-apply re-check.
 
 ### Phase 164.5.1.1: FANOUTCOHORT — the ledger-refresh fan-out admits the `private` status, so it stops enqueuing nothing for every strategy that exists (INSERTED)
 
