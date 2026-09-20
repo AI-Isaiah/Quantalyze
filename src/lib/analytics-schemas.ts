@@ -65,6 +65,18 @@ export const EncryptKeyResponseSchema = z.object({
   kek_version: z.coerce.number().int().positive(),
 });
 
+// --- /internal/keys/{id}/rotate-secret ---
+// Phase 164.5.3 / MT5CREDS D-04 — the credential-rotation seam's success body.
+// The Python endpoint decrypts the stored row, re-validates the NEW secret
+// against the live broker, and re-encrypts on success: its response is
+// EncryptKeyResponseSchema's six ciphertext fields plus the ONE non-secret
+// field the caller needs to backfill `api_keys.venue_account_id` when it was
+// previously NULL — the login the seam just re-confirmed. Never a secret:
+// `venue_account_id` is the broker LOGIN, not the password.
+export const RotateSecretResponseSchema = EncryptKeyResponseSchema.extend({
+  venue_account_id: z.string(),
+});
+
 // --- /api/portfolio-analytics ---
 export const PortfolioAnalyticsResponseSchema = z.object({
   status: z.string(),

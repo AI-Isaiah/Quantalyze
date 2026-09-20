@@ -99,22 +99,28 @@
  *
  * ── (c) THE GRAIN EXCLUSIONS ──────────────────────────────────────────────────
  *
- * `keys-permissions`, `process-key-enqueue`, `process-key-sync` and
- * `process-key-unified-dormant` are `SeamBudgetKey`s but are DELIBERATELY absent
- * from the analytics maps: they are ROUTE budgets, not analytics-seam-function
- * verdicts. The process-key seam is audited at `flow_type` grain (above), and
- * `keys-permissions` is protected by its `SEAM_BUDGETS` row staying `retries: 0`
- * (pinned in plan 04). Listing them here would be auditing the same seam twice at
- * two grains — the exclusion is by design, not an oversight.
+ * `keys-permissions`, `process-key-enqueue`, `process-key-sync`,
+ * `process-key-unified-dormant` and `keys-rotate-secret` are `SeamBudgetKey`s but
+ * are DELIBERATELY absent from the analytics maps: they are ROUTE budgets, not
+ * analytics-seam-function verdicts. The process-key seam is audited at
+ * `flow_type` grain (above), `keys-permissions` is protected by its
+ * `SEAM_BUDGETS` row staying `retries: 0` (pinned in plan 04), and
+ * `keys-rotate-secret` (Phase 164.5.3 / D-04) is protected the identical way —
+ * its `SEAM_BUDGETS` row stays `retries: 0` for the same non-idempotent
+ * live-credential-probe reason `validate-key-serialized` already states. Listing
+ * them here would be auditing the same seam twice at two grains — the exclusion
+ * is by design, not an oversight.
  *
  * 141.1 / D-11 — THIS EXCLUSION LIST IS NOW ENFORCED, not merely described.
- * `seam-retry-registry.test.ts` types the same four keys as `RouteBudgetKey` and
+ * `seam-retry-registry.test.ts` types the same five keys as `RouteBudgetKey` and
  * subtracts them from `SeamBudgetKey` before asserting analytics coverage, so a
- * FIFTEENTH budget key must be classified as an analytics wrapper (→ a verdict
+ * SIXTEENTH budget key must be classified as an analytics wrapper (→ a verdict
  * here) or as a route budget (→ that list) before `npm run typecheck` passes.
  * Doing neither is no longer a silent exclusion. Edit the two together.
  * ⚠️ The fourteenth was `validate-key-serialized` (Phase 153.4 / D-26) and the
- * fence DID refuse the repo until its NO verdict was written — the mechanism is
+ * fifteenth was `keys-rotate-secret` (Phase 164.5.3 / D-04) — the fence DID
+ * refuse the repo (a bare `tsc --noEmit` TS2322) until this docblock and the
+ * `RouteBudgetKey` list below were both edited, which is the mechanism
  * exercised, not merely described.
  */
 

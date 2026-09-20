@@ -198,6 +198,11 @@ AuditAction = Literal[
     # test_action_literal_matches_ts_union stays green.
     "strategy.csv_finalize",
     "api_key.revoke",
+    # --- Phase 164.5.3 / MT5CREDS D-04+D-05: the owner corrected an MT5
+    # key's stored password in place (TS-only call site -- the rotate-secret
+    # route is a Next.js write). Kept here so the TS<->Python AuditAction
+    # parity test test_action_literal_matches_ts_union stays green.
+    "api_key.rotate_secret",
     "trades.upload",
     "admin.partner_import",
     # --- /review follow-up (T4-C1 + T4-M6) ----------------------------------
