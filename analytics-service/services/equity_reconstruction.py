@@ -2210,8 +2210,11 @@ def _mt5_telemetry() -> dict[str, Any]:
     }
 
 
-def _mt5_rows_from_levels(nav: "pd.Series") -> list[dict[str, Any]]:
-    """Turn an MT5 NAV-LEVEL series into ``allocator_equity_snapshots`` rows.
+def _mt5_rows_from_levels(
+    nav: "pd.Series", start_date: date, end_date: date,
+) -> list[dict[str, Any]]:
+    """Turn an MT5 NAV-LEVEL series into ``allocator_equity_snapshots`` rows,
+    CLIPPED to ``[start_date, end_date]`` and DENSE across interior quiet days.
 
     ⛔ ``value_usd`` is an ABSOLUTE DOLLAR BALANCE. ``nav`` MUST come from
     ``broker_dailies.reconstruct_mt5_nav_levels`` — the LEVELS sibling — never
@@ -2219,21 +2222,81 @@ def _mt5_rows_from_levels(nav: "pd.Series") -> list[dict[str, Any]]:
     Writing daily percentage changes into this dollar-balance column is a silent
     money bug with no exception and no red test, on a number a founder publishes.
 
+    THE CLIP IS NOT OPTIONAL. ``persist_equity_snapshots`` does a SINGLE ATOMIC
+    upsert and sizes it on the backfill window in its own docstring — *"730 rows
+    × ~150B is ≈110KB — well within PostgREST payload limits"*. Splitting it was
+    rejected there because a mid-run failure would leave the caller's "any rows
+    exist ⇒ reconstruction completed" idempotency short-circuit permanently true
+    over a truncated history. ``history_deals_get`` is a FULL-HISTORY fetch, so an
+    MT5 ledger walks straight through that assumption unless it is clipped to the
+    SAME ``[start_date, end_date]`` the ccxt path uses.
+
+    THE CALENDAR IS MADE DENSE BY FORWARD-FILL. The level index arrives SPARSE by
+    design — the union of trading-PnL days and external-flow days — and a realized
+    balance is CONSTANT BETWEEN LEDGER EVENTS BY DEFINITION. That is the repo's
+    own statement of the semantics, at ``services/native_nav.py::_reindex_ffill``:
+    *"this is NOT a price fill; marks are never filled."* It holds exactly here
+    because the reconstruction is realized-basis — no day in the series carries
+    floating uPnL. ⛔ NEVER ``gap_fill_daily_returns``: a 0.0 fill is the right
+    answer for a RETURN and would write a **$0 equity day** for a LEVEL.
+
+    ⛔ AND THE PART OF ``_reindex_ffill`` THAT DOES **NOT** TRANSFER — read this
+    before "aligning" the two. ``_reindex_ffill`` uses ``0.0`` for days before its
+    first index day ("it did not exist yet"), which is right for a per-currency
+    BUCKET and catastrophic for a persisted ``value_usd``: the dashboard reads a
+    stored 0 as a REAL BALANCE OF ZERO, not as absence. So days inside the window
+    but BEFORE the account's first ledger event get **NO ROW AT ALL**. An account
+    that had not started yet has no equity to report, and saying nothing is the
+    only honest way to say that.
+
     The row shape is the ccxt builder's, measured from it and from both persist
     functions:
 
     * ``source`` is CHECK-constrained to
       ``'exchange_primary' | 'coingecko_fallback' | 'mixed'``. MT5's deal ledger
       IS the venue's own primary record, so ``'exchange_primary'`` is the only
-      honest member.
+      honest member — and it is also what makes ``persist_equity_snapshots``'
+      WR-05 rule attach the (NULL) per-venue depth rather than skip it.
     * ``breakdown`` is nullable JSONB and NULL here: MT5 is single-currency with
       no per-symbol decomposition. ⛔ Do not fabricate a single-key breakdown.
+      VERIFIED against every reader before relying on it — the Python
+      ``reconstruct_symbol_returns`` (``snap.get("breakdown") or {}``), the
+      TypeScript ``holding-compare-adapter`` (``s.breakdown?.[symbol]`` with a
+      null guard), and migration 073's ``extract_symbol_value_at``
+      (``NULLIF((breakdown ->> p_symbol)::NUMERIC, 0)``, NULL-propagating, and
+      every caller ``IS NULL``-guards it).
     * ``pre_terminus_balance_unknown`` is False — see ``_mt5_telemetry``.
     """
     rows: list[dict[str, Any]] = []
-    for day, value in nav.items():
+    if nav.empty:
+        # A deposit-only account has NO track record. Returning zero rows routes
+        # to the job's EXISTING no-data disposition rather than fabricating a flat
+        # curve out of pure capital flows.
+        return rows
+
+    # Normalise to midnight so a level stamped mid-day still reindexes onto its
+    # own calendar day rather than falling into an empty daily bucket.
+    levels = pd.Series(
+        nav.to_numpy(dtype=float),
+        index=pd.DatetimeIndex(nav.index).normalize(),
+    ).sort_index()
+
+    # Densify from the FIRST ledger day (never earlier — see above) to at least
+    # the window's end, so the post-event quiet days carry the settled balance
+    # forward too, then clip. Building the dense range first and clipping second
+    # is what lets a ledger that STARTED before the window still contribute a
+    # carried balance on `start_date` instead of losing its history entirely.
+    dense_end = max(levels.index.max(), pd.Timestamp(end_date))
+    dense = levels.reindex(
+        pd.date_range(levels.index.min(), dense_end, freq="D")
+    ).ffill()
+
+    for day, value in dense.items():
+        as_date = pd.Timestamp(day).date()
+        if as_date < start_date or as_date > end_date:
+            continue
         rows.append({
-            "asof": pd.Timestamp(day).date().isoformat(),
+            "asof": as_date.isoformat(),
             "value_usd": round(float(value), 2),
             "breakdown": None,
             "source": "exchange_primary",
@@ -2247,6 +2310,8 @@ async def _mt5_fetch_window(
     *,
     allocator_id: str,
     api_key_id: str,
+    start_date: date,
+    end_date: date,
 ) -> DispatchResult | tuple[list[dict[str, Any]], bool, dict[str, Any]]:
     """The MT5 half of the backfill fetch: read the deal ledger, reconstruct the
     per-day dollar levels, and return the ccxt path's own
@@ -2509,7 +2574,11 @@ async def _mt5_fetch_window(
         )
         return _fail("nav_structural", "permanent")
 
-    return _mt5_rows_from_levels(nav), False, _mt5_telemetry()
+    return (
+        _mt5_rows_from_levels(nav, start_date, end_date),
+        False,
+        _mt5_telemetry(),
+    )
 
 
 async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> DispatchResult:
@@ -2587,6 +2656,11 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                     ctx.exchange,
                     allocator_id=allocator_id,
                     api_key_id=api_key_id,
+                    # The SAME window the ccxt path uses, computed from
+                    # BACKFILL_CAP_DAYS — the single atomic upsert downstream is
+                    # sized on it, and an MT5 ledger is full history.
+                    start_date=start_date,
+                    end_date=end_date,
                 )
                 if isinstance(_mt5_outcome, DispatchResult):
                     # A failure arm already emitted its `reconstruct_failed`
