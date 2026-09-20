@@ -190,7 +190,23 @@ CREDENTIAL_REJECTION_CODES = {
 # Lifecycle statuses that may receive cron-synced trades. Syncing into an
 # archived or deleted strategy can overwrite its submission snapshot and flip
 # its approval-gate verdict between Submit and Approve.
-ALLOWED_STRATEGY_STATUSES = {"draft", "pending_review", "published"}
+#
+# 164.5.1.3 SYNCADMIT (Area 2 verdict) — `private` is the owner-only TERMINAL
+# status the contribution wizard finalizes to by design
+# (`src/app/api/strategies/finalize-wizard/route.ts`), admitted here because
+# it is terminal: an omitted `private` strategy stays dark forever, not for a
+# transitional window. `rejected` and `archived` stay excluded on purpose
+# (Area 1). Mirroring the ledger fan-out migration's admit set
+# (`published`, `pending_review`, `private` — 20260917120000) is explicitly
+# NOT the goal here. The two constants are meant to diverge, and after this
+# change they differ by exactly one value: `draft`. The ledger fan-out
+# excludes it for a ledger-specific reason — a draft strategy has no
+# factsheet to refresh, so every job enqueued for one is worker time spent on
+# nothing — and that reason does not transfer to trade sync, where a draft
+# strategy's trades still need storing. That migration's own checks 9 and 10
+# refuse a re-base that mirrors THIS set into the ledger; this comment is the
+# other half of the same fence.
+ALLOWED_STRATEGY_STATUSES = {"draft", "pending_review", "published", "private"}
 
 # 164.5.1.4 SYNCCURSOR — the per-STRATEGY trade-sync resume marker.
 #

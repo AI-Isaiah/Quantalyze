@@ -638,7 +638,9 @@ class TestStrategyLifecycleFilter:
         """Behavioural: drive `cron_sync` end-to-end with a single key
         whose embedded strategies span every lifecycle status. Assert
         the resulting `sync_trades` RPC fan-out only fires for the
-        three live statuses — the rest are silently dropped.
+        live statuses — the rest are silently dropped. Also proves the
+        Area 2 verdict (164.5.1.3 SYNCADMIT): the owner-only terminal
+        `private` status is admitted alongside the other three.
 
         Replaces the prior local-replay test that re-implemented the
         filter inline (a refactor that dropped the cron.py filter would
@@ -652,6 +654,7 @@ class TestStrategyLifecycleFilter:
             {"id": "s-pub", "status": "published"},
             {"id": "s-draft", "status": "draft"},
             {"id": "s-review", "status": "pending_review"},
+            {"id": "s-private", "status": "private"},
             {"id": "s-archived", "status": "archived"},
             {"id": "s-suspended", "status": "suspended"},
             {"id": "s-deleted", "status": "deleted"},
@@ -699,10 +702,10 @@ class TestStrategyLifecycleFilter:
             for call in mock_supabase.rpc.call_args_list
             if call.args and call.args[0] == "sync_trades"
         )
-        assert rpc_strategy_ids == ["s-draft", "s-pub", "s-review"]
+        assert rpc_strategy_ids == ["s-draft", "s-private", "s-pub", "s-review"]
         # Result payload mirrors the filter
         result_strategy_ids = sorted(response["results"][0]["strategy_ids"])
-        assert result_strategy_ids == ["s-draft", "s-pub", "s-review"]
+        assert result_strategy_ids == ["s-draft", "s-private", "s-pub", "s-review"]
 
     @pytest.mark.asyncio
     async def test_strategy_missing_status_field_is_dropped(self):
@@ -3198,6 +3201,214 @@ class TestHeldStatusBucketForStalledKeys:
             "in the same log stream an operator scans for trouble."
         )
         assert "status=held" in per_key_lines[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_private_only_key_no_longer_held_once_admitted(self):
+        """164.5.1.3 SYNCADMIT: a key whose only linked strategy is `private`
+        used to land in `held` every tick (Area 2/3 — 5 of 5 measured live
+        keys, PROD, 2026-09-19), because `private` was absent from
+        `ALLOWED_STRATEGY_STATUSES` and the strategy was therefore filtered
+        out before it ever reached `sync_trades`. Same fixture shape as
+        `test_stalled_key_reports_held_not_ok`, `private` instead of
+        `archived`, and `sync_trades` succeeds — the key must now report a
+        successful sync, not a stall.
+        """
+        import sys as _sys
+        import routers.portfolio as portfolio_mod
+        _sys.modules["routers.portfolio"] = portfolio_mod
+
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-private-only",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": [{"id": "strat-private", "status": "private"}],
+                }
+            ],
+            ps_data=[],
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            response = await cron_mod.cron_sync()
+
+        # Rule 9: the full bucket vector, not one counter — a fix that moved
+        # this key into `synced` while ALSO leaving it counted in `held`
+        # would still pass a `held == 0` assertion taken alone.
+        assert response["held"] == 0, response
+        assert response["synced"] == 1, response
+        assert response["partial"] == 0
+        assert response["failed"] == 0
+        assert response["timed_out"] == 0
+        assert response["revoked"] == 0
+        assert response["transient"] == 0
+        assert response["deferred"] == 0
+        assert response["total_keys"] == 1
+        assert response["results"][0]["status"] == "ok", response["results"]
+
+
+class TestPrivateAdmissionComposesWithSyncCursor:
+    """164.5.1.3 SYNCADMIT: admitting `private` must NOT reopen
+    `SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01`. On a mixed-success key, the
+    failed `private` strategy's per-strategy marker must hold (surfaced in
+    `strategy_cursors_held`) while the key cursor still advances — exactly
+    the pre-phase behaviour `TestC0198CursorOnlyAdvancesWhenStored` already
+    pins for any other status. This is the composition proof that the
+    widening rides on top of 164.5.1.4's already-shipped protection rather
+    than reopening the defect that protection exists to close.
+    """
+
+    @pytest.mark.asyncio
+    async def test_mixed_key_private_failure_holds_marker_while_key_advances(
+        self,
+    ):
+        import sys as _sys
+        import routers.portfolio as portfolio_mod
+        _sys.modules["routers.portfolio"] = portfolio_mod
+
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-mixed",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": [
+                        {"id": "s-pub", "status": "published"},
+                        {"id": "s-private", "status": "private"},
+                    ],
+                }
+            ],
+            ps_data=[],
+        )
+
+        # Replace the helper's single shared `rpc_data` scalar — it cannot
+        # differentiate per strategy. `sync_trades` succeeds for s-pub and
+        # raises for s-private; `enqueue_compute_job` always succeeds.
+        def _rpc(name: str, args: dict):
+            chain = MagicMock()
+            if name == "sync_trades" and args.get("p_strategy_id") == "s-private":
+                chain.execute.side_effect = RuntimeError("sync_trades failed for s-private")
+            elif name == "sync_trades":
+                chain.execute.return_value = MagicMock(data=3)
+            else:
+                chain.execute.return_value = MagicMock(data=None)
+            return chain
+
+        mock_supabase.rpc.side_effect = _rpc
+
+        # Capture api_keys UPDATE payloads without disturbing the helper's
+        # existing `table()` dispatch — mirrors `_wire_allocator_holdings_used`'s
+        # own wrap-the-existing-side_effect idiom further up this file.
+        api_keys_update_payloads: list[dict] = []
+        existing_table_side_effect = mock_supabase.table.side_effect
+
+        def _capture_table(name: str):
+            t = existing_table_side_effect(name)
+            if name == "api_keys":
+                original_update = t.update
+
+                def _update(payload, *a, **kw):
+                    api_keys_update_payloads.append(payload)
+                    return original_update(payload, *a, **kw)
+
+                t.update = _update
+            return t
+
+        mock_supabase.table.side_effect = _capture_table
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            response = await cron_mod.cron_sync()
+
+        assert response["results"][0]["status"] == "partial", response["results"]
+        # The key cursor still advances — SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01's
+        # own precedent that a partial-success key still bumps last_sync_at,
+        # unchanged, correct, pre-phase behaviour.
+        assert any("last_sync_at" in p for p in api_keys_update_payloads), (
+            f"Expected the key cursor to advance despite s-private's failure; "
+            f"got {api_keys_update_payloads!r}"
+        )
+        assert response["results"][0]["strategy_cursors_held"] == ["s-private"], (
+            "the failed private strategy's marker must hold while the "
+            f"succeeding strategy's does not; got {response['results'][0]!r}"
+        )
+
+
+class TestPrivateAdmissionOrderingGate:
+    """164.5.1.3 SYNCADMIT / CONTEXT.md Area 4: a permanent, MECHANICAL gate.
+    `private` must never be admitted into `ALLOWED_STRATEGY_STATUSES` while
+    164.5.1.4 SYNCCURSOR's per-strategy resume marker machinery is absent — a
+    comment or a TODOS line is not a gate; a future editor flipping the
+    constant (or reverting the marker machinery) must make something go RED.
+    """
+
+    @staticmethod
+    def _assert_ordering_invariant() -> None:
+        if "private" in cron_mod.ALLOWED_STRATEGY_STATUSES:
+            assert hasattr(cron_mod, "_STRATEGY_SYNC_CURSOR_TABLE")
+            assert hasattr(cron_mod, "_strategy_resume_point")
+            assert hasattr(cron_mod, "_resume_floor_ms")
+
+    def test_synccursor_marker_present_while_private_admitted(self):
+        """This currently passes trivially, which is why the sibling test
+        below exists: proof the gate CAN fail, not just that it currently
+        holds."""
+        self._assert_ordering_invariant()
+
+    def test_ordering_gate_fails_if_marker_symbols_removed(self, monkeypatch):
+        """Remove ONE of the three marker symbols at runtime (private stays
+        admitted — do not touch ALLOWED_STRATEGY_STATUSES for this
+        calibration) and prove the guarded assertion raises. `monkeypatch`
+        auto-restores the module at teardown — no file edit, no cp/cmp
+        needed, since nothing on disk changes.
+        """
+        assert "private" in cron_mod.ALLOWED_STRATEGY_STATUSES
+        monkeypatch.delattr(cron_mod, "_resume_floor_ms")
+        with pytest.raises(AssertionError):
+            self._assert_ordering_invariant()
 
 
 class TestSyncStatusSummaryBucketCompleteness:
