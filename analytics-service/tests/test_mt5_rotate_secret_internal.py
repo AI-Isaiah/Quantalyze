@@ -26,16 +26,24 @@ Regression gates (Rule 9 — WHY each case matters):
     attempted — proven with a not-called assertion on the decrypt mock, not
     just a status-code check, which is what actually pins D-04's ordering
     claim rather than an implementation detail that happens to match it today.
+  - Task 2 (failure paths): `_validate_mt5_key`'s three MT5 failure details
+    propagate UNCAUGHT with encrypt_credentials never called, and a
+    KEK/decrypt failure never even reaches `_validate_mt5_key`. This is the
+    non-vacuous proof that D-04's "validate BEFORE persisting, and a failed
+    validation persists NOTHING" holds at every step of the chain, not just
+    at the final encrypt call.
 """
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from routers.internal import router, _reset_rate_limit
+from services.exchange import AUTH_FAILED_DETAIL
+from services.closed_sets import MT5_MASTER_PASSWORD_DETAIL, MT5_WRONG_SERVER_DETAIL
 
 # Synthetic placeholders only — never a real MT5 login, password or broker
 # server. See the phase's non-negotiable rule (CONTEXT.md) and the module
@@ -183,3 +191,90 @@ def test_rotate_secret_non_mt5_exchange_returns_422_before_any_decrypt(client):
 
     assert res.status_code == 422, res.text
     mock_decrypt.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Task 2: failure paths — nothing persists on any of them
+# ---------------------------------------------------------------------------
+
+
+def _rotate_with_validate_raising(client, exc: Exception):
+    with patch("routers.internal.get_supabase", return_value=_supabase_with_row(_mt5_row())), \
+         patch("routers.internal.get_kek", return_value=b"kek"), \
+         patch(
+             "routers.internal.decrypt_credentials",
+             return_value=(_SYNTH_LOGIN, _SYNTH_OLD_PASSWORD, _SYNTH_BROKER_SERVER),
+         ), \
+         patch("routers.internal._validate_mt5_key", new=AsyncMock(side_effect=exc)), \
+         patch("routers.internal.encrypt_credentials") as mock_encrypt:
+        res = client.post(
+            "/internal/keys/key-mt5/rotate-secret",
+            headers=_headers(),
+            json={"new_secret": _SYNTH_NEW_PASSWORD},
+        )
+    return res, mock_encrypt
+
+
+def test_rotate_secret_auth_failed_propagates_and_never_encrypts(client):
+    res, mock_encrypt = _rotate_with_validate_raising(
+        client, HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
+    )
+
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"] == AUTH_FAILED_DETAIL
+    mock_encrypt.assert_not_called()
+
+
+def test_rotate_secret_master_password_propagates_and_never_encrypts(client):
+    res, mock_encrypt = _rotate_with_validate_raising(
+        client, HTTPException(status_code=400, detail=MT5_MASTER_PASSWORD_DETAIL)
+    )
+
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"] == MT5_MASTER_PASSWORD_DETAIL
+    mock_encrypt.assert_not_called()
+
+
+def test_rotate_secret_wrong_server_propagates_and_never_encrypts(client):
+    res, mock_encrypt = _rotate_with_validate_raising(
+        client, HTTPException(status_code=400, detail=MT5_WRONG_SERVER_DETAIL)
+    )
+
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"] == MT5_WRONG_SERVER_DETAIL
+    mock_encrypt.assert_not_called()
+
+
+def test_rotate_secret_kek_unavailable_never_reaches_validate(client):
+    with patch("routers.internal.get_supabase", return_value=_supabase_with_row(_mt5_row())), \
+         patch("routers.internal.get_kek", side_effect=RuntimeError("KEK missing")), \
+         patch("routers.internal.decrypt_credentials") as mock_decrypt, \
+         patch("routers.internal._validate_mt5_key", new=AsyncMock()) as mock_validate:
+        res = client.post(
+            "/internal/keys/key-mt5/rotate-secret",
+            headers=_headers(),
+            json={"new_secret": _SYNTH_NEW_PASSWORD},
+        )
+
+    assert res.status_code == 500, res.text
+    assert res.json()["detail"]["code"] == "KEK_UNAVAILABLE"
+    mock_decrypt.assert_not_called()
+    mock_validate.assert_not_awaited()
+
+
+def test_rotate_secret_undecryptable_never_reaches_validate(client):
+    with patch("routers.internal.get_supabase", return_value=_supabase_with_row(_mt5_row())), \
+         patch("routers.internal.get_kek", return_value=b"kek"), \
+         patch(
+             "routers.internal.decrypt_credentials", side_effect=Exception("bad blob")
+         ), \
+         patch("routers.internal._validate_mt5_key", new=AsyncMock()) as mock_validate:
+        res = client.post(
+            "/internal/keys/key-mt5/rotate-secret",
+            headers=_headers(),
+            json={"new_secret": _SYNTH_NEW_PASSWORD},
+        )
+
+    assert res.status_code == 500, res.text
+    assert res.json()["detail"]["code"] == "KEY_UNDECRYPTABLE"
+    mock_validate.assert_not_awaited()
