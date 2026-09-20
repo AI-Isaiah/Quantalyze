@@ -1,5 +1,144 @@
 # Changelog
 
+## [0.83.0.0] - 2026-09-20 — MT5CREDS part 2 of 2: a wrong MT5 password stops costing you the key
+
+⭐ **What you can now do.** Tell which MT5 account a key card belongs to, and fix a wrong password
+**without deleting the key**. Until today the only repair was Delete + Add Key, which destroys the
+row and its entire sync history along with the typo.
+
+⚠️ **This release ships NO migration.** Its migration went out separately as `0.82.1.0` / PR #831
+and must already be applied and green on PROD before this one lands — see *Why it shipped in two
+parts* below. Merging THIS release starts no `apply-test` and engages no `Production` gate.
+
+### Added
+
+- **`PATCH /api/keys/[id]/rotate-secret`** — owner-scoped, MT5-only, password-only. It decrypts the
+  stored credential, re-validates the new password against the live broker on the **unchanged**
+  login and server, and re-encrypts only on a structural success. The row, its id and its sync
+  history all survive. ⛔ It refuses to change the login: a different login is a different account,
+  which is what Delete + Add is actually for.
+- **`POST /internal/keys/{key_id}/rotate-secret`** — the Python seam behind it, reusing the same
+  broker probe every other credential-validation path already uses.
+- **The MT5 account identifier on the key card**, on both `ApiKeyManager` and
+  `AllocatorExchangeManager`, active and disconnected sections, with an em-dash where the value is
+  absent.
+- **`UpdateMt5SecretDialog`** — the update-password affordance, wired into both managers.
+- `KEY_VENUE_ALREADY_CONNECTED` as a real `WizardErrorCode`, so reconnecting an MT5 account you
+  already have answers an honest 409 instead of a generic "couldn't be saved" 500.
+
+### Changed
+
+- `validate-and-encrypt`'s persist arm now stamps the trimmed MT5 login at INSERT, closing the
+  NULL-population gap the wizard-only RPC left on the "Add Key" path — so identifiers appear on
+  newly added keys rather than only on ones that happen to predate the gap.
+- `venue_account_id` joins `API_KEY_USER_COLUMNS_ARR`, the `ApiKey` interface and
+  `ApiKeyRowSchema`, in three-way agreement. The field is deliberately **non-optional**, so a
+  dropped column is a compile error rather than a silent `undefined`.
+
+### Why it shipped in two parts
+
+The phase was built as one branch and would have merged as one PR. Measured at ship time, that
+made an outage the **default outcome** rather than a tail risk: `vercel.json` declares no
+`ignoreCommand` and no build gate, so the Vercel promotion starts on the push to `main` and
+finishes in minutes, while PROD's migration `apply` waits behind the `Production` environment's
+HUMAN reviewer gate. The frontend wins that race unless someone is standing at the keyboard.
+
+And losing it was never MT5-only. `venue_account_id` joins the projection behind
+`queries.ts::getUserApiKeys`, `::getStrategylessActiveKeys`, `ApiKeyManager::loadKeys` and
+`AllocatorExchangeManager`'s refetch. A projection outside the SEC-005 allowlist answers PostgREST
+42501, and `getUserApiKeys` does not degrade on that — it THROWS, so the page error boundary fires.
+**The allocations and exchanges pages would have hard-errored for every allocator, every venue, for
+the whole approval window.**
+
+Splitting removes the race instead of documenting it. ⭐ And the ordering is confirmed by a gate
+that already existed rather than by prose: `sec-005-live-probe`'s GRANT arm projects the roster and
+fails when a rostered column is **not** granted — roster ⊆ GRANT, one-way. A GRANT ahead of the
+roster passes; a roster ahead of the GRANT is exactly what it catches.
+
+### Fixed
+
+- ⭐ **The best fix in the release, and it was invisible.** The persist UPDATE cleared `sync_error`
+  but not `sync_status`, while fan-out eligibility is gated on
+  `is_active && sync_status !== "revoked" && disconnected_at == null`. A founder would have fixed
+  their password, seen a healthy-looking card with the error cleared — **and the key would never
+  have synced again.** Now `sync_status: "idle"` is written in the same statement as the ciphertext.
+- The route no longer clears `disconnected_at`. That column has exactly one writer, the disconnect
+  RPC, and clearing it here would have asserted something this route cannot know.
+- A `JSON.parse` failure on the request body no longer logs the parser's message. Measured on node
+  v25.8.1, V8 embeds roughly a ten-character window of the input in the `SyntaxError` — enough to
+  leak a fragment of a password. It now logs the error's constructor name only.
+- The network-failure arm routes through `scrubSeamError` instead of logging bare.
+- `rotate_key_secret`'s owner filter was **inert**: an optional `user_id` whose only caller never
+  sent it, so it narrowed nothing. The route now sends it, and pins on both sides fail if it is
+  dropped.
+- The decrypt's bare `except Exception` is narrowed to `(InvalidToken, JSONDecodeError, KeyError)`
+  with `exc_info=True`, so an unrelated bug propagates honestly instead of being relabelled as a
+  decrypt failure.
+- The `API_KEY_USER_COLUMNS` drift probe ran as `service_role`, which holds table-level SELECT and
+  therefore **structurally could not detect a missing `authenticated` column GRANT** — the exact
+  property its own name claimed. It now probes as an authenticated user, so it can fail on the
+  drift it exists to catch.
+- A guard comment that named the wrong roster, and a 23505 arm that read only the error message —
+  never the detail field, which can carry the caller's own login.
+
+### Root cause
+
+⭐ **A fix round is where regressions enter, and this phase demonstrated it.** The round-1 fix round
+introduced `MT5_VALIDATE_INVARIANT_VIOLATION` in the Python seam with no TypeScript disposition. A
+new code path is outside every existing gate **by default**, so the suite stayed green except for
+one cross-language arrival gate that happened to cover it. That is why a round 2 ran at all —
+`gsd-code-reviewer` and `silent-failure-hunter` re-reviewed the fix round's own diff in parallel,
+and both returned clean at threshold.
+
+### Security
+
+- 17 threats registered, all 17 closed. ⭐ Including a correction recorded rather than quietly
+  applied: the cross-pipeline deploy ordering was first rated `medium` / human-enforced. It is
+  `high`, and it is now closed **structurally** by the split rather than by a human remembering.
+  The migration's own header had this right before the audit did.
+- The admin-client UPDATE carries `.eq("id")`, `.eq("user_id")` and `.eq("exchange", "mt5")` —
+  RLS does not apply to a service-role client, so that filter is the only tenant boundary on the
+  write, and ownership is separately pre-verified by a user-scoped read.
+- The seam response carries ciphertext and the non-secret login and nothing else; neither password
+  nor broker server appears.
+- One honest 404 for both wrong-owner and unknown-id, so a probing caller learns nothing about
+  which case they hit.
+- ⛔ The REVOKE on `api_key_encrypted`, `api_secret_encrypted`, `dek_encrypted` and `nonce` was not
+  widened to get a display value out — that is the precise failure the SEC-005 allowlist design
+  exists to prevent.
+
+### Tests
+
+- `+3` test files and a calibrated arm for the identifier trim. `.strip()` had **no gate on it**:
+  the synthetic login carries no surrounding whitespace, so the trim was indistinguishable from a
+  bare login. The new arm pins both halves — the returned identifier is trimmed, and the ciphertext
+  is still built from the **untrimmed** login, because trimming before encryption would stop the
+  stored credential matching the login the broker was validated against.
+- ⭐ Anti-vacuity was **observed, not asserted**: the trim was neutered, the neuter confirmed
+  applied by grep, exactly one test went red with the expected message, and the file restored
+  byte-identically under `cmp`.
+- Five hand-typed censuses moved for the new route, column and wire codes. A post-merge run left
+  **54 failures across 10 files** while all four executors had reported PASSED — the census trap
+  reading green, caught by re-running the gates rather than trusting the claims.
+
+### Notes
+
+- ⚠️ **Verification is `human_needed` with 9/9 must-haves and ZERO code gaps.** Two items remain
+  and neither is a code defect: DESIGN.md visual QA, and a live end-to-end broker flow, which no
+  agent may drive because it forbids holding a credential. They are recorded in `164.5.3-UAT.md` as
+  post-deploy QA. ⛔ The phase is not "complete" until those pass.
+- A third UAT item — ship-time deploy sequencing — was **removed, not waived**: it was a land-time
+  action filed as a test, it made the UAT unsatisfiable by construction, and the split dissolved
+  the risk it guarded.
+- **Routed onward, deliberately open:** `KEY_UNDECRYPTABLE` still falls through to `UNKNOWN`, so
+  Python knows the remedy ("it must be reconnected") while the founder is offered a Retry that can
+  never work. ⭐ It became routable precisely because of this release — the exemption's own stated
+  reason was *"that route never calls this function"*, and the new rotate-secret route falsifies
+  it. Booked to **Phase 164.5.4 MT5RECON-GAP**, documented at both the throw site and the roster.
+- ⚠️ `venue_account_id` is a caller-supplied value stored **without validation** — what the server
+  passed, never what the venue confirmed. The card's copy says only that it is the login the key is
+  connected with, and does not imply otherwise.
+
 ## [0.82.1.0] - 2026-09-20 — MT5CREDS part 1 of 2: the GRANT, shipped alone on purpose
 
 ⭐ **This release ships ONE migration and NOTHING that reads it.** No `constants.ts`, no
