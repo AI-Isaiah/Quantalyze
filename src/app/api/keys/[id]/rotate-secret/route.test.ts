@@ -445,6 +445,88 @@ describe("PATCH /api/keys/[id]/rotate-secret — seam registration (D-04)", () =
   });
 });
 
+describe("PATCH /api/keys/[id]/rotate-secret — validation failure renders through ErrorEnvelope (D-04)", () => {
+  it("an MT5_MASTER_PASSWORD seam failure answers the ErrorEnvelope contract at 400, persist step never reached", async () => {
+    mockResilientFetch.mockResolvedValue(
+      seamResponse(false, 400, {
+        detail: "MT5 master password detected — an investor login is required.",
+      }),
+    );
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(400);
+    const envelope = (await res.json()) as Record<string, unknown>;
+    expect(envelope).toMatchObject({
+      ok: false,
+      code: "KEY_MT5_MASTER_PASSWORD",
+      correlation_id: expect.any(String),
+    });
+    expect(typeof envelope.human_message).toBe("string");
+    expect((envelope.human_message as string).length).toBeGreaterThan(0);
+    expect(Array.isArray(envelope.debug_context)).toBe(true);
+    // D-04: nothing is persisted on a failed validation.
+    expect(ADMIN_STATE.updates).toHaveLength(0);
+  });
+});
+
+describe("PATCH /api/keys/[id]/rotate-secret — D-05: clear the failure state ONLY on a validated success", () => {
+  it("a FAILED validation never invokes the admin UPDATE — the DB-level status fields are untouched by construction", async () => {
+    mockResilientFetch.mockResolvedValue(
+      seamResponse(false, 400, { detail: "Authentication failed. Check your API key and secret." }),
+    );
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(400);
+    // The strongest available proof that nothing was cleared: this route
+    // never issues a write on the failure path, so sync_error/disconnected_at
+    // cannot have moved regardless of what they held before this request.
+    expect(ADMIN_STATE.updates).toHaveLength(0);
+  });
+
+  it("a SUCCESSFUL validation clears sync_error/disconnected_at in the SAME statement as the ciphertext write", async () => {
+    await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(ADMIN_STATE.updates).toHaveLength(1);
+    expect(ADMIN_STATE.updates[0].payload).toMatchObject({
+      sync_error: null,
+      disconnected_at: null,
+      api_key_encrypted: SEAM_SUCCESS_BODY.api_key_encrypted,
+    });
+  });
+});
+
+describe("PATCH /api/keys/[id]/rotate-secret — the venue-identity 23505 backstop (Pitfall 1)", () => {
+  it("answers a distinct 409 KEY_VENUE_ALREADY_CONNECTED, never the generic write-indeterminate arm", async () => {
+    ADMIN_STATE.result = {
+      data: null,
+      error: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+      },
+    };
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toEqual({
+      code: "KEY_VENUE_ALREADY_CONNECTED",
+      error: "You already have a connected key for this account.",
+    });
+  });
+
+  it("a DIFFERENT 23505 (unrelated constraint) falls through to the generic write-indeterminate 500", async () => {
+    ADMIN_STATE.result = {
+      data: null,
+      error: {
+        code: "23505",
+        message: 'duplicate key value violates unique constraint "some_other_constraint"',
+      },
+    };
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(500);
+    await expect(res.json()).resolves.toEqual({
+      code: "DASHBOARD_WRITE_INDETERMINATE",
+      error: "internal error",
+    });
+  });
+});
+
 describe("PATCH /api/keys/[id]/rotate-secret — write-outcome honesty", () => {
   it("zero updated rows after a validated seam success answers DASHBOARD_WRITE_INDETERMINATE, never a silent 200", async () => {
     ADMIN_STATE.result = { data: [], error: null };

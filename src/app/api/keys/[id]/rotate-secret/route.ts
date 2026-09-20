@@ -11,6 +11,7 @@ import { seamHumanMessage } from "@/lib/seam-discriminator";
 import { classifyKeyValidationError } from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
 import { RotateSecretResponseSchema } from "@/lib/analytics-schemas";
+import { pgConstraintName, VENUE_IDENTITY_CONSTRAINT } from "@/lib/api/pgConstraintName";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { logAuditEvent } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
@@ -336,6 +337,22 @@ export async function PATCH(
     .select("id");
 
   if (updateErr) {
+    // Pitfall 1 — the venue-identity backfill collides with a DIFFERENT live
+    // row for the same account. Distinct, honest 409 — never the generic
+    // write-indeterminate 500. Same code and copy as Plan 02's identical arm
+    // on the create path: one vocabulary for one condition.
+    if (
+      updateErr.code === "23505" &&
+      pgConstraintName(updateErr) === VENUE_IDENTITY_CONSTRAINT
+    ) {
+      return NextResponse.json(
+        {
+          code: "KEY_VENUE_ALREADY_CONNECTED",
+          error: "You already have a connected key for this account.",
+        },
+        { status: 409, headers: NO_STORE_HEADERS },
+      );
+    }
     console.error(
       "[api/keys/[id]/rotate-secret] persist UPDATE failed:",
       scrubSeamError(updateErr),
