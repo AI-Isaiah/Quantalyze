@@ -462,6 +462,26 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // table (we mint it; no service puts it on the wire), so this roster is the
     // only thing standing for it.
     "SEAM_INTERNAL_FAULT",
+    // 164.5.4-02 / D-03 — admitted HERE IN THE SAME COMMIT the shared
+    // classifier starts returning it. `VENUE_WIRE_CODE_TO_VERDICT` now answers
+    // for the wire code a decrypt failure raises with
+    // `KEY_MUST_BE_RECONNECTED`; omit this line and the membership check
+    // rejects the honest code, the step renders `UNKNOWN` — whose copy IS
+    // recoverable — and the user gets a Retry control for a fault the service
+    // marked `retryable=False`. That is the same trap the three notes above
+    // record, and `[153.7 review W-153.7-1]` in
+    // `wizardErrors.invariant.test.ts` reds BY NAME when this row is missing
+    // (observed, not assumed: it named this member before the row was added).
+    //
+    // ⚠️ WHETHER THIS ROUTE'S OWN SEAM CAN RAISE THAT WIRE CODE IS NOT WHAT
+    // THIS ROSTER TURNS ON, and saying so here stops the next reader deleting
+    // the line after measuring that it cannot. The set's contract is "every
+    // verdict `classifyKeyValidationError` can RETURN", because the membership
+    // check runs on whatever the classifier hands back — same one-directional
+    // reasoning `DASHBOARD_WRITE_FAILED` is kept on in the dashboard rosters:
+    // admitting a code the route does not currently emit costs nothing;
+    // omitting one it does emit renders UNKNOWN.
+    "KEY_MUST_BE_RECONNECTED",
   ]);
 
 /**

@@ -100,7 +100,14 @@ import type { z } from "zod";
  *      service-error-shaped failures (`RATE_LIMITED`, `KEK_UNAVAILABLE`,
  *      `MT5_GATEWAY_UNCONFIGURED`) route through the carried `seamCode` into
  *      the classifier's existing `VENUE_WIRE_CODE_TO_VERDICT` rows instead of
- *      falling to the terminal UNKNOWN. NOTHING is persisted on this branch
+ *      falling to the terminal UNKNOWN. ⭐ 164.5.4-02 / D-03 added the FOURTH
+ *      of that family and the only one that needed a new member:
+ *      `KEY_UNDECRYPTABLE` — the stored row this endpoint must decrypt before
+ *      it can re-secret anything — now routes to `KEY_MUST_BE_RECONNECTED`,
+ *      whose envelope is NOT recoverable, so the founder reads the reconnect
+ *      remedy instead of a Retry that re-reads the same unreadable copy. See
+ *      the seam-failure throw site's own block for why the ROW and the MINT
+ *      were both required. NOTHING is persisted on this branch
  *      (D-04's "a failed validation mutates nothing").
  *  10. On success: `createAdminClient()` (D-07 — `api_keys` UPDATE is fully
  *      REVOKEd from `authenticated`, so a user-scoped `.update()` would
@@ -320,15 +327,40 @@ export async function PATCH(
       // `instanceof`) — the same shape `AnalyticsUpstreamError` sets — so this
       // survives every wholesale seam mock in the suite identically.
       //
-      // ⚠️ RESIDUAL, not closed by this fix: `KEY_UNDECRYPTABLE` has NO row in
-      // `VENUE_WIRE_CODE_TO_VERDICT` (its own comment there ties the omission
-      // to "that route never calls this function" — a premise this route now
-      // breaks, since it emits the SAME code via the SAME decrypt failure and
-      // DOES call `classifyKeyValidationError`). Closing it needs either a new
-      // `WizardErrorCode` member or a dedicated pre-classifier arm mirroring
-      // `keys/[id]/permissions/route.ts`'s own — both out of this fix's file
-      // scope (wizardErrors.ts is restricted to the rotate-secret roster row
-      // here). Flagged for follow-up rather than silently left unfixed.
+      // ✅ 164.5.4-02 / D-03 — THE `KEY_UNDECRYPTABLE` RESIDUAL THIS BLOCK USED
+      // TO FLAG IS CLOSED, and what shipped is recorded here rather than only
+      // in the table, because the next reader arriving from that phase's
+      // CONTEXT.md will find a superseded bullet forbidding half of it.
+      //
+      // WHAT THE FOUNDER USED TO GET. `rotate_key_secret` raises wire
+      // `KEY_UNDECRYPTABLE` — 500, `retryable=False`, "This stored key could
+      // not be decrypted. It must be reconnected." — when `decrypt_credentials`
+      // fails on the row it was asked to re-secret. The code had no verdict row
+      // and the cascade has no decrypt branch, so it fell to the terminal
+      // UNKNOWN: "we could not classify this failure", beside a Retry control
+      // that could never work.
+      //
+      // WHAT SHIPPED, and it is BOTH halves together:
+      //   · a new `WizardErrorCode` member, `KEY_MUST_BE_RECONNECTED`, whose
+      //     `actions` carry neither member of `RECOVERABLE_ACTIONS`, so
+      //     `buildEnvelope` derives `recoverable: false` and no Retry renders;
+      //   · a `VENUE_WIRE_CODE_TO_VERDICT` row mapping the wire code onto it.
+      //
+      // ⭐ THE MINT ALONE WOULD NOT HAVE CLOSED THIS ROUTE, which is the part
+      // worth writing down: `classifyKeyValidationError` resolves that table
+      // BEFORE its substring cascade, and the cascade has no decrypt/reconnect
+      // branch at all, so a member with no row is unreachable and this route
+      // still lands on UNKNOWN. The row is the ROUTING MECHANISM. What the
+      // phase's own decision text rejected was a row pointing at an EXISTING
+      // DISHONEST member — `KEY_PROBE_FAILED` (recoverable, same useless Retry)
+      // or `SEAM_MISCONFIGURED` (an operator cannot fix one row's ciphertext) —
+      // never a row pointing at the newly minted honest one. ⛔ Do not re-open
+      // this from that superseded bullet; its A-05 amendment is the record.
+      //
+      // ⛔ AND DELIBERATELY NOT A PRE-CLASSIFIER ARM HERE, mirroring
+      // `keys/[id]/permissions/route.ts`'s own. That was the rejected option:
+      // it duplicates the fix once per route, and adding it on TOP of the row
+      // would give this route two answers for one fault.
       const seamCode = seamErrorCode(errBody);
       const upstreamFailure = new Error(
         seamHumanMessage(errBody) ?? `Upstream ${res.status}`,

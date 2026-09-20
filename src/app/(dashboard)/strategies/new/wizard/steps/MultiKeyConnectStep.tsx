@@ -376,6 +376,16 @@ const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // `WIZARD_ERROR_COPY`, and it is deliberately NOT recoverable — the three
     // wire codes behind it are `retryable=False` at their emitters.
     "SEAM_INTERNAL_FAULT",
+    // 164.5.4-02 / D-03 — the same addition as `KNOWN_CREATE_WITH_KEY_CODES`
+    // (full reasoning there), taken together because both rosters are checked
+    // against the SAME `classifyKeyValidationError` population and
+    // `[153.7 review W-153.7-1]` reds on both by name. The two rosters stay
+    // SEPARATE per the docblock above; they agree here because the shared
+    // classifier genuinely returns this code at both catch arms. Copy verified
+    // present in `WIZARD_ERROR_COPY`, and it is deliberately NOT recoverable —
+    // the wire code behind it is `retryable=False` at its emitter and a Retry
+    // would re-read the identical stored bytes.
+    "KEY_MUST_BE_RECONNECTED",
   ]);
 
 /**

@@ -631,6 +631,80 @@ describe("PATCH /api/keys/[id]/rotate-secret — WR-01: the seam's machine code 
     const envelope = (await res.json()) as Record<string, unknown>;
     expect(envelope.code).toBe("KEY_AUTH_FAILED");
   });
+
+  /**
+   * ⭐ 164.5.4-02 / D-03 — THE DECRYPT FAILURE, END TO END, ON THE ENVELOPE THE
+   * BROWSER ACTUALLY RECEIVES.
+   *
+   * This is deliberately NOT a second copy of the unit cases in
+   * `src/lib/wizardErrors.test.ts`. Those pin the TABLE (the verdict row and
+   * the derived `recoverable`); this one pins the WIRING — that this route
+   * extracts the machine code from the real seam body shape, attaches it to
+   * the thrown Error, and renders the result through `buildEnvelope`. The two
+   * can be true separately and the founder still sees the wrong card, which is
+   * exactly the state this phase found: the table half was missing while the
+   * wiring half had shipped at 164.5.3.
+   *
+   * ⛔ OBSERVED RED UNDER A NEUTER OF ITS OWN SUBJECT: with the `seamCode`
+   * assignment removed from the throw site, this case falls to the pre-164.5.3
+   * `UNKNOWN` terminal. Restored byte-identically from a `cp` backup verified
+   * with `cmp` — never `git checkout --`.
+   */
+  it("D-03: a KEY_UNDECRYPTABLE seam failure renders the reconnect remedy with NO Retry, and persists nothing", async () => {
+    mockResilientFetch.mockResolvedValue(
+      // The real emitter's shape and its byte-identical `detail` sentence:
+      // `rotate_key_secret` (analytics-service/routers/internal.py) raising
+      // when `decrypt_credentials` fails on the stored row.
+      seamResponse(false, 500, {
+        detail: {
+          code: "KEY_UNDECRYPTABLE",
+          detail:
+            "This stored key could not be decrypted. It must be reconnected.",
+          retryable: false,
+          dependency: "kek",
+        },
+      }),
+    );
+
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(500);
+
+    const envelope = (await res.json()) as Record<string, unknown>;
+    expect(envelope.code).toBe("KEY_MUST_BE_RECONNECTED");
+    expect(
+      envelope.code,
+      "the decrypt failure reached the browser as the terminal that admits " +
+        "knowing nothing, for a fault the service had classified precisely",
+    ).not.toBe("UNKNOWN");
+
+    // ⭐ THE FOUNDER-VISIBLE HALF. `recoverable` is what `ErrorEnvelope` reads
+    // to decide whether a Retry control renders at all, so this — not the copy
+    // — is the assertion that a retry is no longer on offer.
+    expect(
+      envelope.recoverable,
+      "a Retry was rendered against a stored copy that will read identically " +
+        "on every attempt: this endpoint decrypts the stored row on every " +
+        "call, before it touches the password the founder just typed",
+    ).toBe(false);
+
+    // And the copy names the action that CAN succeed.
+    const prose = [
+      envelope.human_message as string,
+      envelope.cause as string,
+      ...((envelope.debug_context as string[]) ?? []),
+    ]
+      .join(" ")
+      .toLowerCase();
+    expect(prose).toContain("connect this account again");
+    expect(
+      prose,
+      "the card tells the founder to try again while offering no control to " +
+        "do it with — the two halves of this fix have to agree",
+    ).not.toMatch(/try again/);
+
+    // D-04: a failed validation mutates nothing.
+    expect(ADMIN_STATE.updates).toHaveLength(0);
+  });
 });
 
 describe("PATCH /api/keys/[id]/rotate-secret — D-05 / CR-01: clear the failure state ONLY on a validated success", () => {
