@@ -6,15 +6,15 @@ current_phase: 164.5.3
 current_phase_name: MT5CREDS — show the MT5 account number on the key card and add a credential-update path
 status: executing
 stopped_at: "Executing 164.5.3 MT5CREDS wave 1 (plans 01-04 in parallel worktrees). ⚠️ This phase SHIPS A MIGRATION, so landing it will engage the Production human reviewer gate."
-last_updated: "2026-09-20T07:54:24.817Z"
+last_updated: "2026-09-20T13:47:30.775Z"
 last_activity: 2026-09-20
 last_activity_desc: Phase 164.5.3 execution started
-state_head: d9fd89618053d70749f2f6e7eb2020bce8b92cfc
+state_head: 436988df5d2dc0f3bf99eba4109f61550bb18fe4
 progress:
   total_phases: 45
   completed_phases: 31
   total_plans: 221
-  completed_plans: 211
+  completed_plans: 213
   percent: 69
 ---
 
@@ -1269,6 +1269,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.4.2 inserted after Phase 164.4: Owner phase for TODOS [REDUNDER-SUBSET-SPLIT], unowned since 2026-09-05. sql-mutation timeout-minutes has taken its ONE allowed raise; 20 is a declared CEILING and the next escalation is a subset split, never a third value. Inserted 2026-09-18 while Phase 164.1.1 was mid-execution — the STATE current-phase pointer was deliberately NOT repointed.
 - Phase 164.1.1.1 inserted after Phase 164.1.1: LANEONLYGATES — sql-tests runs a pg-lane-only gate against shared TEST and is permanently red, blocking the analytics-service deploy (URGENT)
 - Phase 164.5.1.4 inserted after Phase 164.5.1: SYNCCURSOR - per-KEY cursor vs per-STRATEGY stores strands failed strategies' window (URGENT)
+- Phase 164.5.4 edited: added defect (3) KEY_UNDECRYPTABLE routed from 164.5.3; corrected the stale independent-of-164.5.3 clause
 
 ### Decisions
 
